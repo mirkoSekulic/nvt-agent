@@ -13,7 +13,7 @@ export MISE_DATA_DIR="${MISE_DATA_DIR}"
 export PATH="${PATH}"
 EOF
 
-nvt-install-tools /workspace/.nvt-agent/tools.yaml
+nvt-install-tools "${NVT_TOOLS_FILE:-/nvt-agent/tools.yaml}"
 
 if [ -x /workspace/.nvt-agent/install-tools.sh ]; then
   /workspace/.nvt-agent/install-tools.sh
