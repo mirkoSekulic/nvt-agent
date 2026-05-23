@@ -1,0 +1,10 @@
+runtime:
+  command: {{AGENT_TYPE}}
+
+tools:
+  apt: []
+  mise: []
+  additional_paths: []
+  shell: []
+
+plugins: []

@@ -5,6 +5,23 @@ usage() {
   echo "usage: $0 --name <name> [--type codex|claude]" >&2
 }
 
+render_template() {
+  local template="$1"
+  local target="$2"
+  python3 - "$template" "$target" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+template = Path(sys.argv[1])
+target = Path(sys.argv[2])
+content = template.read_text(encoding="utf-8")
+for key, value in os.environ.items():
+    content = content.replace("{{" + key + "}}", value)
+target.write_text(content, encoding="utf-8")
+PY
+}
+
 name=""
 agent_type="codex"
 
@@ -54,6 +71,7 @@ esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
+templates_dir="$repo_root/templates"
 
 "$script_dir/validate-agent-name.sh" "$name"
 
@@ -67,37 +85,22 @@ codex_config_dir="${HOME}/.codex"
 mkdir -p "$workspace_dir" "$claude_config_dir"
 
 if [ ! -f "$env_file" ]; then
-  cat > "$env_file" <<EOF
-AGENT_NAME=$name
-AGENT_HOST=$name.agent.localhost
-
-AGENT_ENV_FILE=$env_file
-WORKSPACE_DIR=$workspace_dir
-NVT_WORKSPACE=$workspace_dir
-AGENT_CONFIG_FILE=$agent_config_file
-NVT_AGENT_CONFIG_FILE=/nvt-agent/agent.yaml
-
-CODEX_CONFIG_DIR=$codex_config_dir
-CLAUDE_CONFIG_DIR=$claude_config_dir
-EOF
+  AGENT_NAME="$name" \
+    AGENT_HOST="$name.agent.localhost" \
+    AGENT_ENV_FILE="$env_file" \
+    WORKSPACE_DIR="$workspace_dir" \
+    NVT_WORKSPACE="$workspace_dir" \
+    AGENT_CONFIG_FILE="$agent_config_file" \
+    CODEX_CONFIG_DIR="$codex_config_dir" \
+    CLAUDE_CONFIG_DIR="$claude_config_dir" \
+    render_template "$templates_dir/env" "$env_file"
   echo "created $env_file"
 else
   echo "exists  $env_file"
 fi
 
 if [ ! -f "$agent_config_file" ]; then
-  cat > "$agent_config_file" <<EOF
-runtime:
-  command: $agent_type
-
-tools:
-  apt: []
-  mise: []
-  additional_paths: []
-  shell: []
-
-plugins: []
-EOF
+  AGENT_TYPE="$agent_type" render_template "$templates_dir/agent.yaml" "$agent_config_file"
   echo "created $agent_config_file"
 else
   echo "exists  $agent_config_file"
