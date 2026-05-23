@@ -35,6 +35,16 @@ non-zero on failure.
 
 ```yaml
 plugins:
+  - name: git-credentials
+    source: builtin
+    when: before_agent
+    config:
+      credentials:
+        - match: https://github.com/example/
+          type: token_env
+          token_env: GIT_TOKEN
+          username: x-access-token
+
   - name: checkout-repos
     source: builtin
     when: before_agent
@@ -42,6 +52,61 @@ plugins:
     config:
       repos:
         - url: https://github.com/example/public-repo.git
+```
+
+`git-credentials` is optional. Use it before `checkout-repos` when private repos
+need credentials. It configures Git once; later `git clone`, `git fetch`, and
+`git push` use Git's normal credential helper flow.
+
+Credential `match` values are URL prefixes. They can target a server, an
+org/user, or one repo:
+
+```yaml
+credentials:
+  - match: https://github.com/
+    type: token_env
+    token_env: GENERAL_GITHUB_TOKEN
+    username: x-access-token
+  - match: https://github.com/acme/
+    type: github_app
+    app_id_env: GITHUB_APP_ID
+    installation_id_env: GITHUB_APP_INSTALLATION_ID
+    private_key_b64_env: GITHUB_APP_PRIVATE_KEY_B64
+  - match: https://github.com/acme/frontend.git
+    type: token_env
+    token_env: FRONTEND_TOKEN
+    username: x-access-token
+```
+
+The most specific matching rule wins.
+
+Supported credential types:
+
+```yaml
+credentials:
+  - match: https://github.com/acme/
+    type: token_env
+    token_env: ACME_PAT
+    username: x-access-token
+
+  - match: https://github.com/acme/
+    type: github_app
+    app_id_env: GITHUB_APP_ID
+    installation_id_env: GITHUB_APP_INSTALLATION_ID
+    private_key_b64_env: GITHUB_APP_PRIVATE_KEY_B64
+
+  - match: https://git.company.com/team/
+    type: headers
+    headers:
+      - header_env: COMPANY_GIT_AUTH_HEADER
+      - header_env: COMPANY_GIT_API_KEY_HEADER
+```
+
+For `headers`, each `header_env` contains one full HTTP header line:
+
+```env
+COMPANY_GIT_AUTH_HEADER=Authorization: Bearer abc123
+COMPANY_GIT_API_KEY_HEADER=X-Api-Key: xyz789
 ```
 
 ## Custom Example

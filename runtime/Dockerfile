@@ -38,6 +38,8 @@ RUN chmod +x \
   /usr/local/bin/start-code-server \
   /usr/local/bin/start-agent-session \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \
+  /usr/local/lib/nvt-agent/plugins/git-credentials/run.py \
+  /usr/local/lib/nvt-agent/plugins/git-credentials/git-credential-nvt.py \
   && mkdir -p /workspace /root/.nvt-agent
 
 WORKDIR /workspace
