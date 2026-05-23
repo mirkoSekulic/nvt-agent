@@ -1,0 +1,25 @@
+services:
+  agent:
+    image: nvt-agent-runtime:latest
+    env_file:
+      - ${AGENT_ENV_FILE}
+    working_dir: ${NVT_WORKSPACE}
+    networks:
+      - agents-proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=agents-proxy
+      - traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
+      - traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
+    volumes:
+      - ${WORKSPACE_DIR}:${NVT_WORKSPACE}
+      - ${TOOLS_FILE}:${NVT_TOOLS_FILE}:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agent-home:/root
+
+volumes:
+  agent-home:
+
+networks:
+  agents-proxy:
+    external: true
