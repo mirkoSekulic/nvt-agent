@@ -39,6 +39,54 @@ def load_tools(path):
     return tools
 
 
+def expand_path(value):
+    home = os.environ.get("HOME", "")
+    if value == "~":
+        return home
+    if value.startswith("~/"):
+        return str(Path(home) / value[2:])
+    return value.replace("${HOME}", home).replace("$HOME", home)
+
+
+def prepend_path(path):
+    current = os.environ.get("PATH", "")
+    parts = [part for part in current.split(":") if part]
+    if path in parts:
+        return
+    os.environ["PATH"] = ":".join([path, *parts])
+
+
+def persist_env_var(name, value):
+    env_path = Path.home() / ".nvt-agent" / "env"
+    lines = []
+    if env_path.is_file():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    prefix = f"export {name}="
+    replacement = f'export {name}="{value}"'
+    replaced = False
+    updated = []
+    for line in lines:
+        if line.startswith(prefix):
+            if not replaced:
+                updated.append(replacement)
+                replaced = True
+            continue
+        updated.append(line)
+
+    if not replaced:
+        updated.append(replacement)
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+
+
+def apply_additional_paths(paths):
+    for path in reversed(paths):
+        prepend_path(expand_path(path))
+    persist_env_var("PATH", os.environ["PATH"])
+
+
 def install_apt(packages):
     if not packages:
         return
@@ -82,6 +130,7 @@ def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/workspace/.nvt-agent/tools.yaml")
     tools = load_tools(config_path)
 
+    apply_additional_paths(as_string_list(tools.get("additional_paths"), "additional_paths"))
     install_apt(as_string_list(tools.get("apt"), "apt"))
     install_mise(as_string_list(tools.get("mise"), "mise"))
     run_shell(as_string_list(tools.get("shell"), "shell"))
