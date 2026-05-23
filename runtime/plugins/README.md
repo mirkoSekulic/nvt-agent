@@ -106,6 +106,19 @@ Plugins inherit the agent container environment. If a plugin needs to read or
 write files in the agent workspace, it can use `NVT_WORKSPACE` as the workspace
 path.
 
+## Prompting The Agent
+
+Plugins should use `prompt-agent` to send work to the running Codex or Claude
+Code session:
+
+```sh
+echo "Review the workspace and summarize failing tests." | prompt-agent
+```
+
+`prompt-agent` reads stdin, adds a warning that the prompt came from a plugin,
+and injects it into the main tmux agent session. Plugins should not call `tmux`
+directly.
+
 ## Lifecycle
 
 `when` controls startup order:
