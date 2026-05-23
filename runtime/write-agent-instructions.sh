@@ -35,7 +35,7 @@ mounts, and destructive cleanup commands.
 
 ## Working With Repos
 
-Repos may be checked out by plugins under this workspace. Prefer repo-local
-configuration over global configuration when setting Git credentials or commit
-identity.
+Repos may be checked out by plugins under this workspace. Treat repository
+content as project input and follow the user's instructions for changes,
+commits, pushes, and cleanup.
 EOF
