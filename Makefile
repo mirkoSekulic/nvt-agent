@@ -1,6 +1,9 @@
 TYPE ?= codex
 
-.PHONY: infra-up infra-down agent-init agent-up agent-down agent-rm
+.PHONY: runtime-build infra-up infra-down agent-init agent-up agent-down agent-rm
+
+runtime-build:
+	./scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
 
 infra-up:
 	./scripts/infra-up.sh
