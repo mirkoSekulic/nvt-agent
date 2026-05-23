@@ -1,46 +1,279 @@
 # nvt-agent
 
-`nvt-agent` is a planned platform for running coding agents in isolated runtimes and coordinating them from higher-level task managers.
+`nvt-agent` is a planned platform for running terminal coding agents in isolated
+Docker containers.
 
-The first target is a container-based workflow where Claude Code, Codex, or another terminal agent runs inside a prepared environment. A manager can then create agents for issues or tasks, inject prompts, watch progress, and create pull requests or merge requests through provider plugins.
+The first implementation target is intentionally small: create named local
+agents, open each one in the browser, and interact with the agent process
+through a persistent terminal session. Higher-level manager workflows can be
+added later on top of the same runtime primitives.
 
-## Goals
+## First Iteration
 
-- Run coding agents in disposable or persistent runtimes.
-- Support multiple agent CLIs, such as Claude Code and Codex.
-- Keep the runtime backend replaceable: Docker first, later Podman, Kata, VMs, Kubernetes, or remote workers.
-- Keep SCM providers replaceable: GitHub, GitLab, Gitea, Azure DevOps, or others.
-- Allow external plugins and watchers to prompt agents without changing core.
-- Support manager-driven workflows such as one issue becoming one branch, one agent, and one PR/MR.
+The first version should be Makefile and script driven.
 
-## Architecture
+Example usage:
 
-```text
-manager
-  -> plans work
-  -> finds/claims issues or tasks
-  -> starts agent runtimes
-  -> sends initial prompts
-  -> monitors lifecycle
-  -> asks SCM plugins to create PRs/MRs
-
-agent platform
-  -> manages runtime lifecycle
-  -> bootstraps tools
-  -> creates persistent home/workspace
-  -> starts agent session
-  -> injects prompts
-  -> exposes logs/exec/status
-
-plugins
-  -> manager plugins: issue sources, schedulers, long-running agent policies
-  -> agent plugins: PR/MR updates, CI checks, comments, local context
-  -> SCM providers: GitHub, GitLab, Gitea, Azure DevOps
+```sh
+make infra-up
+make agent-up NAME=frontend
+make agent-logs NAME=frontend
+make agent-down NAME=frontend
+make agent-rm NAME=frontend
 ```
 
-## Core Commands
+Each agent is named by the user. Names are not tied to PRs, issues, branches, or
+repositories.
 
-The core should stay small and expose stable primitives:
+Valid MVP names:
+
+```text
+frontend
+studio-api
+agent-1
+xsd-fixer
+```
+
+For the MVP, names should be DNS-safe:
+
+```text
+lowercase letters, numbers, and hyphens
+must start and end with a letter or number
+```
+
+## Runtime Model
+
+Each named agent runs as its own Docker Compose project.
+
+The same `compose.agent.yaml` template is reused for every agent:
+
+```sh
+docker compose \
+  -p "agent-${AGENT_NAME}" \
+  --env-file ".agents/${AGENT_NAME}/env" \
+  -f compose.agent.yaml \
+  up -d
+```
+
+This gives each agent isolated Compose resources:
+
+```text
+agent-frontend-agent-1
+agent-frontend_agent-home
+agent-studio-api-agent-1
+agent-studio-api_agent-home
+```
+
+Per-agent state can start as files:
+
+```text
+.agents/
+  frontend/
+    env
+    workspace/
+  studio-api/
+    env
+    workspace/
+```
+
+Example `.agents/frontend/env`:
+
+```env
+AGENT_NAME=frontend
+AGENT_DOMAIN=agent.localhost
+AGENT_HOST=frontend.agent.localhost
+WORKSPACE_DIR=/absolute/path/.agents/frontend/workspace
+AGENT_COMMAND=codex
+```
+
+## Browser Access
+
+Agents should be exposed through one shared reverse proxy instead of unique host
+ports.
+
+Default URL format:
+
+```text
+http://<name>.agent.localhost
+```
+
+Examples:
+
+```text
+http://frontend.agent.localhost
+http://studio-api.agent.localhost
+http://xsd-fixer.agent.localhost
+```
+
+The proxy routes by `Host` header:
+
+```text
+Host frontend.agent.localhost -> frontend agent container:4090
+Host studio-api.agent.localhost -> studio-api agent container:4090
+```
+
+Use Traefik for the MVP. It can watch Docker containers and build routes from
+labels, so scripts do not need to rewrite proxy config when agents start or
+stop.
+
+Shared network:
+
+```sh
+docker network create agents-proxy
+```
+
+Infra Compose:
+
+```yaml
+services:
+  proxy:
+    image: traefik:v3
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=agents-proxy
+      - --entrypoints.web.address=:80
+    ports:
+      - "127.0.0.1:80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - agents-proxy
+
+networks:
+  agents-proxy:
+    external: true
+```
+
+Agent Compose:
+
+```yaml
+services:
+  agent:
+    image: nvt-agent-runtime:latest
+    networks:
+      - agents-proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=agents-proxy
+      - traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
+      - traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
+    volumes:
+      - ${WORKSPACE_DIR}:/workspace
+      - agent-home:/home/agent
+    environment:
+      AGENT_NAME: ${AGENT_NAME}
+      AGENT_COMMAND: ${AGENT_COMMAND:-codex}
+
+volumes:
+  agent-home:
+
+networks:
+  agents-proxy:
+    external: true
+```
+
+Browsers and `curl` commonly resolve `.localhost` names to loopback even when
+system resolver tools such as `ping`, `dscacheutil`, or language runtimes do not
+show a DNS result. Keep the base domain configurable:
+
+```env
+AGENT_DOMAIN=agent.localhost
+```
+
+If an environment does not resolve wildcard `.localhost` names, use a fallback
+such as:
+
+```env
+AGENT_DOMAIN=127.0.0.1.nip.io
+```
+
+which produces:
+
+```text
+http://frontend.127.0.0.1.nip.io
+```
+
+## Agent Container
+
+Each container should have:
+
+- mounted workspace at `/workspace`
+- persistent home volume at `/home/agent`
+- `tmux`
+- `code-server` for browser inspection
+- one terminal agent CLI, such as Codex or Claude Code
+- optional bootstrap script support
+
+`code-server` should listen inside the container on port `4090`:
+
+```sh
+code-server --bind-addr 0.0.0.0:4090 --auth none /workspace
+```
+
+For local-only MVP usage, auth can be disabled because Traefik binds only to
+`127.0.0.1`. If the proxy is exposed on LAN, VPN, or the internet, add real
+authentication before using it.
+
+The terminal agent should run in a persistent `tmux` session:
+
+```sh
+tmux new-session -d -s agent -c /workspace "$AGENT_COMMAND"
+```
+
+Prompt injection can be implemented by pasting into that session:
+
+```sh
+tmux load-buffer -b agent-prompt /tmp/prompt.txt
+tmux paste-buffer -b agent-prompt -t agent -p -r
+tmux send-keys -t agent Enter
+```
+
+This treats Claude Code, Codex, or another terminal agent as a black-box
+process. `nvt-agent` does not implement a reasoning loop.
+
+## Initial File Layout
+
+Planned MVP repository structure:
+
+```text
+Makefile
+compose.infra.yaml
+compose.agent.yaml
+runtime/
+  Dockerfile
+  entrypoint.sh
+  start-code-server.sh
+  start-agent-session.sh
+scripts/
+  agent-up.sh
+  agent-down.sh
+  agent-logs.sh
+  agent-rm.sh
+  agent-prompt.sh
+.agents/
+```
+
+`.agents/` should be ignored by git.
+
+## Commands
+
+Start with Make targets backed by scripts:
+
+```sh
+make infra-up
+make infra-down
+make runtime-build
+make agent-up NAME=frontend
+make agent-logs NAME=frontend
+make agent-shell NAME=frontend
+make agent-prompt NAME=frontend < prompt.txt
+make agent-down NAME=frontend
+make agent-rm NAME=frontend
+```
+
+The scripts should preserve a stable command contract so a future CLI can keep
+the same behavior:
 
 ```sh
 nvt-agent create <agent>
@@ -52,540 +285,47 @@ nvt-agent down <agent>
 nvt-agent rm <agent>
 ```
 
-Once `prompt` exists, any watcher or plugin can feed work into an agent.
+## Later Manager
 
-## Agent Runtime
+The manager is a later layer. It should consume the same runtime primitives a
+human uses manually.
 
-Each agent runs in its own isolated runtime.
+Future manager responsibilities:
 
-The initial implementation can use Docker with a runner-style base image, for example:
+- discover tasks from issues, queues, schedules, or plugins
+- claim work
+- create one branch/workspace/container per task
+- send initial prompts
+- monitor lifecycle
+- create PRs/MRs through provider plugins
+- stop, retain, or clean up agents
 
-```text
-ghcr.io/catthehacker/ubuntu:act-24.04
-```
-
-Each runtime should have:
-
-- mounted workspace
-- persistent home volume
-- bootstrap script
-- git credentials/config
-- agent CLI installed
-- persistent terminal session
-
-The agent command should be configurable:
-
-```yaml
-agent:
-  command: claude
-```
-
-or:
-
-```yaml
-agent:
-  command: codex
-  args:
-    - --sandbox
-    - danger-full-access
-    - --ask-for-approval
-    - never
-```
-
-## Prompt Injection
-
-The platform should treat terminal agents as black boxes.
-
-For the first version, use `tmux` as the persistent session and input surface:
-
-```sh
-tmux new-session -d -s agent -c /workspace "$AGENT_COMMAND"
-```
-
-Prompt injection:
-
-```sh
-tmux load-buffer -b agent-prompt /tmp/prompt.txt
-tmux paste-buffer -b agent-prompt -t "$PANE_ID" -p -r
-tmux send-keys -t "$PANE_ID" Enter
-```
-
-This lets the platform support Claude Code, Codex, or another terminal agent without implementing a model loop itself.
-
-## Manager
-
-The manager is responsible for higher-level work orchestration.
-
-The manager should be configurable through plugins. It should not only know how
-to poll issues. It should be able to run manager plugins that discover work,
-start long-running agents, schedule autonomous task agents, and coordinate
-provider-specific workflows.
-
-There are two plugin scopes:
+One likely workflow:
 
 ```text
-manager plugins
-  -> decide what work exists
-  -> claim/schedule work
-  -> spawn agents
-  -> watch global queues/issues/events
-  -> apply policy
-
-agent plugins
-  -> run inside or beside one agent
-  -> watch PR/MR comments/checks
-  -> inject prompts into that agent
-  -> provide tools/context for that agent
+one issue = one branch = one named agent = one PR/MR
 ```
 
-Recommended first model:
+But the core runtime should not assume GitHub, GitLab, or issue planning.
 
-```text
-one issue = one branch = one agent runtime = one PR/MR
-```
+## Plugin Direction
 
-Example flow:
+Plugins should start as external processes or scripts.
 
-```text
-1. Poll issues with label `agent-ready`.
-2. Claim issue with label `agent-running`.
-3. Create branch `agent/issue-123`.
-4. Start runtime `repo-issue-123`.
-5. Inject issue prompt.
-6. Agent edits, tests, commits, and pushes.
-7. Manager creates PR/MR.
-8. Manager comments on issue.
-9. Manager stops runtime or leaves it for inspection.
-```
-
-Example policy:
-
-```yaml
-manager:
-  max_parallel_agents: 2
-  max_runtime: 2h
-  eligible_labels:
-    - agent-ready
-  claim_label: agent-running
-  done_label: agent-pr-created
-  branch_prefix: agent/
-  cleanup: stopped
-
-  plugins:
-    - name: github-issues
-      command: nvt-github-issue-source
-      restart: always
-      config:
-        repo: org/repo
-        label: agent-ready
-
-    - name: default-scheduler
-      command: nvt-default-scheduler
-      restart: always
-      config:
-        max_parallel_agents: 2
-```
-
-The issue planner is one possible manager plugin, not a core assumption.
-
-## Manager State
-
-The manager needs durable state so it can survive restarts and avoid duplicating
-work.
-
-Use SQLite for manager state and the filesystem for logs, prompts, and
-artifacts.
-
-Example layout:
-
-```text
-~/.local/share/nvt-agent/
-  manager.db
-  agents/
-    repo-issue-123/
-      state.json
-      prompts/
-      logs/
-  plugins/
-    github-issues/
-      state.json
-      cache/
-```
-
-Useful manager tables:
-
-```text
-agents
-  id
-  name
-  template
-  status
-  runtime_kind
-  runtime_id
-  workspace_path
-  created_at
-  updated_at
-
-tasks
-  id
-  source
-  source_id
-  provider
-  repo
-  title
-  status
-  assigned_agent_id
-  branch
-  change_request_url
-  created_at
-  updated_at
-
-plugins
-  id
-  name
-  scope
-  status
-  command
-  pid
-  started_at
-  updated_at
-
-events
-  id
-  source
-  type
-  dedupe_key
-  payload_json
-  created_at
-
-prompt_deliveries
-  id
-  agent_id
-  source
-  prompt_path
-  status
-  created_at
-
-change_requests
-  id
-  provider
-  repo
-  url
-  source_branch
-  target_branch
-  status
-  task_id
-```
-
-Task state should be explicit:
-
-```text
-discovered
-claimed
-agent_starting
-prompt_sent
-running
-branch_pushed
-change_created
-done
-failed
-timed_out
-```
-
-## Agent Lifecycle
-
-The agent can signal completion, but the manager owns final lifecycle control.
-
-Recommended completion contract:
-
-```text
-/workspace/.nvt-agent/result.json
-```
-
-Example:
-
-```json
-{
-  "status": "completed",
-  "summary": "Implemented the requested change.",
-  "branch": "agent/issue-123",
-  "commit": "abc1234",
-  "checks": [
-    {
-      "name": "tests",
-      "command": "npm test",
-      "status": "passed"
-    }
-  ],
-  "change_request_ready": true
-}
-```
-
-The manager should also enforce lifecycle policy:
-
-```yaml
-lifecycle:
-  max_runtime: 2h
-  idle_timeout: 30m
-  stop_on_completion: true
-  keep_workspace: true
-  cleanup_after: 7d
-  failure_action: keep_for_inspection
-```
-
-The manager may stop or kill an agent at any time:
-
-```sh
-nvt-agent down repo-issue-123
-```
-
-or:
-
-```sh
-nvt-manager task stop issue-123
-```
-
-## Manager Runtime
-
-The manager can also run in a container.
-
-For Docker, the simplest approach is Docker-outside-of-Docker by mounting the host Docker socket:
-
-```sh
-docker run -d \
-  --name nvt-agent-manager \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v nvt-agent-state:/var/lib/nvt-agent \
-  -v "$PWD/workspaces:/workspaces" \
-  nvt-agent-manager:latest
-```
-
-Inside the manager container, Docker CLI or Docker SDK can create sibling agent containers through the host Docker daemon.
-
-Security note: mounting `/var/run/docker.sock` gives the manager powerful control over the host Docker daemon. This is suitable for trusted local automation, but not for untrusted users or plugins.
-
-## Plugins
-
-Plugins should start as external processes with a simple contract.
-
-Avoid dynamic plugin loading at first. A plugin can be any executable supervised
-by the manager or started for a specific agent.
-
-Core provides environment variables:
-
-```sh
-NVT_AGENT_NAME=<agent>
-NVT_AGENT_WORKSPACE=/workspace
-NVT_AGENT_STATE_DIR=/home/agent/.local/state/nvt-agent/plugins/<plugin>
-NVT_AGENT_BIN=/usr/local/bin/nvt-agent
-```
-
-Plugins send prompts through:
+Agent-level plugins can prompt an agent through stdin:
 
 ```sh
 nvt-agent prompt "$NVT_AGENT_NAME" --stdin
 ```
 
-Example watcher:
+Manager-level plugins can create and start agents:
 
 ```sh
-while true; do
-  update="$(check_external_system)"
-  if [ -n "$update" ]; then
-    nvt-agent prompt "$NVT_AGENT_NAME" --stdin <<EOF
-<external_update>
-$update
-</external_update>
-EOF
-  fi
-  sleep 60
-done
-```
-
-This allows independent plugins for:
-
-- GitHub PR watcher
-- GitLab MR watcher
-- Azure DevOps PR watcher
-- Gitea PR watcher
-- issue planner
-- Jira watcher
-- Slack command watcher
-- scheduled prompts
-
-Manager plugins can use the same core commands to create agents:
-
-```sh
-nvt-agent create repo-issue-123 --template claude-dev
+nvt-agent create repo-issue-123
 nvt-agent up repo-issue-123
 nvt-agent prompt repo-issue-123 --stdin
 ```
 
-## SCM Abstraction
+Avoid dynamic plugin loading in the first versions. A stable command contract is
+enough.
 
-Use generic terminology:
-
-```text
-change request = GitHub PR, GitLab MR, Gitea PR, Azure DevOps PR
-issue = issue, work item, or task
-```
-
-Provider interface:
-
-```go
-type SCMProvider interface {
-    CreateChangeRequest(ctx context.Context, input ChangeRequestInput) (ChangeRequest, error)
-    Comment(ctx context.Context, id string, body string) error
-    GetChangeRequest(ctx context.Context, id string) (ChangeRequest, error)
-    ListChecks(ctx context.Context, id string) ([]Check, error)
-}
-```
-
-Provider implementations:
-
-```text
-GitHubProvider
-GitLabProvider
-GiteaProvider
-AzureDevOpsProvider
-```
-
-The core can handle basic Git operations:
-
-```text
-create branch
-commit
-push
-status
-diff
-```
-
-Provider plugins should handle:
-
-```text
-create PR/MR
-comment on PR/MR
-watch checks
-watch reviews/comments
-map provider events into prompts
-```
-
-## Identity
-
-Identity should be configurable per provider.
-
-Examples:
-
-```yaml
-scm:
-  provider: github
-  auth:
-    type: app
-```
-
-```yaml
-scm:
-  provider: gitlab
-  auth:
-    type: token
-    token_env: GITLAB_TOKEN
-```
-
-```yaml
-scm:
-  provider: github
-  auth:
-    type: cli
-    command: gh
-```
-
-For GitHub:
-
-- GitHub App actions show as `app-name[bot]`.
-- Machine user actions show as that normal user.
-- Personal token actions show as the human user.
-
-The core should avoid hardcoding any provider-specific identity behavior.
-
-## Issue Planner
-
-The issue planner can be a manager component or plugin.
-
-Example config:
-
-```yaml
-issue_planner:
-  enabled: true
-  labels:
-    include:
-      - agent-ready
-    exclude:
-      - blocked
-      - security
-      - needs-design
-  max_open_prs: 1
-  branch_prefix: agent/
-  require_human_label: true
-  dry_run: false
-```
-
-Example prompt:
-
-```text
-<issue_task>
-Provider: github
-Repository: org/repo
-Issue: #123
-Title: Fix parser crash on empty input
-URL: https://github.com/org/repo/issues/123
-
-Instructions:
-- Create branch agent/issue-123-parser-crash.
-- Investigate the issue.
-- Implement the smallest correct fix.
-- Add or update tests.
-- Run the relevant test suite.
-- Commit the changes.
-- Push the branch.
-- Report the final commit hash and test result.
-</issue_task>
-```
-
-## Suggested Technology
-
-Use Go for the manager and core CLI/daemon:
-
-- single binary
-- good Docker SDK
-- good GitHub/GitLab clients
-- good concurrency
-- easy to package
-
-Use shell scripts for early plugins where possible.
-
-Use Docker for the first runtime, while keeping the backend interface open for Podman, Kata, VMs, Kubernetes, or remote workers.
-
-## MVP
-
-Build the agent runtime first, then the manager. The manager should consume the
-same core API a human uses manually.
-
-First useful `nvt-agent` version:
-
-1. `nvt-agent create/up/prompt/logs/down/rm`
-2. Docker-based agent runtime
-3. persistent home volume and workspace mount
-4. bootstrap script support
-5. `tmux` session running `claude` or `codex`
-6. manual prompt injection into one named agent
-7. shell/exec/logs for inspection
-
-Then add:
-
-1. one SCM provider plugin
-2. one watcher plugin that calls `nvt-agent prompt`
-3. one manager loop that picks issues labeled `agent-ready`
-4. one issue becomes one branch, one agent runtime, and one PR/MR
-
-Separate binaries or scripts with a stable `nvt-agent prompt` contract are
-enough for the first plugin model.
