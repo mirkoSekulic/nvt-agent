@@ -13,7 +13,7 @@ for env_file in "$agents_dir"/*/env; do
   [ -f "$env_file" ] || continue
   found=1
 
-  unset AGENT_NAME AGENT_HOST AGENT_COMMAND
+  unset AGENT_NAME AGENT_HOST
   set -a
   source "$env_file"
   set +a
@@ -38,7 +38,7 @@ for env_file in "$agents_dir"/*/env; do
   printf "%-24s %-10s %-8s http://%s:%s\n" \
     "$name" \
     "$status" \
-    "${AGENT_COMMAND:-codex}" \
+    "-" \
     "${AGENT_HOST:-$name.agent.localhost}" \
     "$proxy_port"
 done

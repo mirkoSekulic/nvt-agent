@@ -21,10 +21,18 @@ def as_string_list(value, field):
     return value
 
 
+def optional_string(value, field):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SystemExit(f"{field} must be a string")
+    return value
+
+
 def load_tools(path):
     if not path.is_file():
         print(f"nvt-install-tools: no tools config at {path}", flush=True)
-        return {}
+        return {}, {}
 
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
@@ -32,11 +40,15 @@ def load_tools(path):
     if not isinstance(data, dict):
         raise SystemExit("tools config must be a YAML object")
 
+    runtime = data.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise SystemExit("runtime must be a YAML object")
+
     tools = data.get("tools", data)
     if not isinstance(tools, dict):
         raise SystemExit("tools must be a YAML object")
 
-    return tools
+    return runtime, tools
 
 
 def expand_path(value):
@@ -127,9 +139,12 @@ def run_shell(scripts):
 
 
 def main():
-    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/workspace/.nvt-agent/tools.yaml")
-    tools = load_tools(config_path)
+    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
+    runtime, tools = load_tools(config_path)
 
+    command = optional_string(runtime.get("command"), "runtime.command")
+    if command:
+        persist_env_var("AGENT_COMMAND", command)
     apply_additional_paths(as_string_list(tools.get("additional_paths"), "additional_paths"))
     install_apt(as_string_list(tools.get("apt"), "apt"))
     install_mise(as_string_list(tools.get("mise"), "mise"))

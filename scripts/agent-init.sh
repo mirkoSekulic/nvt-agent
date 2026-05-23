@@ -59,7 +59,7 @@ repo_root="$(cd "$script_dir/.." && pwd -P)"
 
 agent_dir="$repo_root/.agents/$name"
 env_file="$agent_dir/env"
-tools_file="$agent_dir/tools.yaml"
+agent_config_file="$agent_dir/agent.yaml"
 workspace_dir="$agent_dir/workspace"
 claude_config_dir="$agent_dir/auth/claude"
 codex_config_dir="${HOME}/.codex"
@@ -69,15 +69,13 @@ mkdir -p "$workspace_dir" "$claude_config_dir"
 if [ ! -f "$env_file" ]; then
   cat > "$env_file" <<EOF
 AGENT_NAME=$name
-AGENT_DOMAIN=agent.localhost
 AGENT_HOST=$name.agent.localhost
-AGENT_COMMAND=$agent_type
 
 AGENT_ENV_FILE=$env_file
 WORKSPACE_DIR=$workspace_dir
 NVT_WORKSPACE=$workspace_dir
-TOOLS_FILE=$tools_file
-NVT_TOOLS_FILE=/nvt-agent/tools.yaml
+AGENT_CONFIG_FILE=$agent_config_file
+NVT_AGENT_CONFIG_FILE=/nvt-agent/agent.yaml
 
 CODEX_CONFIG_DIR=$codex_config_dir
 CLAUDE_CONFIG_DIR=$claude_config_dir
@@ -87,16 +85,22 @@ else
   echo "exists  $env_file"
 fi
 
-if [ ! -f "$tools_file" ]; then
-  cat > "$tools_file" <<'EOF'
+if [ ! -f "$agent_config_file" ]; then
+  cat > "$agent_config_file" <<EOF
+runtime:
+  command: $agent_type
+
 tools:
   apt: []
   mise: []
+  additional_paths: []
   shell: []
+
+plugins: []
 EOF
-  echo "created $tools_file"
+  echo "created $agent_config_file"
 else
-  echo "exists  $tools_file"
+  echo "exists  $agent_config_file"
 fi
 
 echo "workspace $workspace_dir"
