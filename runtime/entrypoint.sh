@@ -19,10 +19,10 @@ if [ -x /workspace/.nvt-agent/install-tools.sh ]; then
   /workspace/.nvt-agent/install-tools.sh
 fi
 
-nvt-run-plugins before_agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
+run-plugins before_agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 
 nvt-start-code-server
 nvt-start-agent-session
-nvt-run-plugins after_agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}" &
+run-plugins after_agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}" &
 
 tail -f /dev/null

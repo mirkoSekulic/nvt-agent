@@ -12,7 +12,7 @@ BUILTIN_PLUGIN_DIR = Path("/usr/local/lib/nvt-agent/plugins")
 
 
 def fail(message):
-    raise SystemExit(f"nvt-run-plugins: {message}")
+    raise SystemExit(f"run-plugins: {message}")
 
 
 def load_yaml(path):
@@ -135,7 +135,7 @@ def run_once_with_retries(plugin):
             if attempt > retries:
                 raise
             print(
-                f"nvt-run-plugins: plugin failed with exit {error.returncode}; retrying in {delay}s",
+                f"run-plugins: plugin failed with exit {error.returncode}; retrying in {delay}s",
                 flush=True,
             )
             time.sleep(delay)
@@ -156,13 +156,13 @@ def run_with_lifecycle(plugin):
             if restart != "on-failure":
                 raise
 
-        print(f"nvt-run-plugins: restarting plugin in {delay}s", flush=True)
+        print(f"run-plugins: restarting plugin in {delay}s", flush=True)
         time.sleep(delay)
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in {"before_agent", "after_agent"}:
-        fail("usage: nvt-run-plugins before_agent|after_agent [agent.yaml]")
+        fail("usage: run-plugins before_agent|after_agent [agent.yaml]")
 
     when = sys.argv[1]
     config_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/nvt-agent/agent.yaml")
