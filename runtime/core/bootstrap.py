@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,7 @@ def optional_string(value, field):
 def load_bootstrap_config(path):
     if not path.is_file():
         print(f"bootstrap: no agent config at {path}", flush=True)
-        return {}, {}
+        return {}, {}, {}
 
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
@@ -48,7 +49,13 @@ def load_bootstrap_config(path):
     if not isinstance(tools, dict):
         raise SystemExit("tools must be a YAML object")
 
-    return runtime, tools
+    code_server = data.get("code-server", {})
+    if code_server is None:
+        code_server = {}
+    if not isinstance(code_server, dict):
+        raise SystemExit("code-server must be a YAML object")
+
+    return runtime, tools, code_server
 
 
 def expand_path(value):
@@ -138,13 +145,56 @@ def run_shell(scripts):
             path.unlink(missing_ok=True)
 
 
+def workspace():
+    return Path(os.environ.get("NVT_WORKSPACE", "/workspace"))
+
+
+def resolve_workspace_path(path):
+    value = expand_path(path)
+    target = Path(value)
+    if target.is_absolute():
+        return target
+    return workspace() / target
+
+
+def install_code_server_extensions(extensions):
+    for extension in extensions:
+        run(["code-server", "--install-extension", extension])
+
+
+def copy_code_server_settings(settings_file):
+    if settings_file:
+        source = resolve_workspace_path(settings_file)
+    else:
+        source = workspace() / ".nvt-agent" / "code-server" / "settings.json"
+
+    if not source.is_file():
+        return
+
+    target = Path.home() / ".local" / "share" / "code-server" / "User" / "settings.json"
+    if target.exists():
+        print(f"bootstrap: code-server settings already exist, skipping {target}", flush=True)
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    print(f"bootstrap: copied code-server settings from {source}", flush=True)
+
+
+def setup_code_server(config):
+    install_code_server_extensions(as_string_list(config.get("extensions"), "code-server.extensions"))
+    settings_file = optional_string(config.get("settings-file"), "code-server.settings-file")
+    copy_code_server_settings(settings_file)
+
+
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
-    runtime, tools = load_bootstrap_config(config_path)
+    runtime, tools, code_server = load_bootstrap_config(config_path)
 
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         persist_env_var("AGENT_COMMAND", command)
+    setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_apt(as_string_list(tools.get("apt"), "apt"))
     install_mise(as_string_list(tools.get("mise"), "mise"))

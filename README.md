@@ -219,6 +219,37 @@ tools:
       echo "custom bootstrap"
 ```
 
+## Code Server
+
+`agent.yaml` can install code-server extensions during bootstrap:
+
+```yaml
+code-server:
+  extensions:
+    - redhat.vscode-yaml
+```
+
+Default settings can be provided at:
+
+```text
+<workspace>/.nvt-agent/code-server/settings.json
+```
+
+Bootstrap copies that file to code-server's user settings only if the target
+does not already exist:
+
+```text
+/root/.local/share/code-server/User/settings.json
+```
+
+This gives new agents defaults without overwriting settings changed later in
+the browser. To use a different default settings file, set:
+
+```yaml
+code-server:
+  settings-file: .config/code-server/default-settings.json
+```
+
 ## Plugins
 
 Plugins are container-side processes configured in `agent.yaml`.
