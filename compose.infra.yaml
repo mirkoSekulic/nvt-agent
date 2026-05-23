@@ -1,0 +1,18 @@
+services:
+  proxy:
+    image: traefik:v3
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=agents-proxy
+      - --entrypoints.web.address=:80
+    ports:
+      - "127.0.0.1:${NVT_PROXY_PORT:-4090}:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - agents-proxy
+
+networks:
+  agents-proxy:
+    external: true
