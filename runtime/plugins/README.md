@@ -21,15 +21,30 @@ command: /usr/local/lib/nvt-agent/plugins/<name>/run.py
 ```
 
 The runner reads `plugins:` from `agent.yaml`, writes each plugin's `config:`
-section to a runtime file, and runs the plugin command with:
+section to a runtime file, writes minimal plugin lifecycle state, and runs the
+plugin command with:
 
 ```text
-NVT_PLUGIN_CONFIG=/root/.nvt-agent/plugins/<name>/config.yaml
 NVT_PLUGIN_NAME=<name>
+NVT_PLUGIN_CONFIG=/root/.nvt-agent/plugins/<name>/config.yaml
 ```
 
 `NVT_PLUGIN_CONFIG` is the main contract. Plugins should read that file and exit
 non-zero on failure.
+
+Runtime state is written under `NVT_STATE_DIR`, which defaults to
+`/root/.nvt-agent`:
+
+```text
+$NVT_STATE_DIR/plugins/<name>/
+  config.yaml
+  state.json
+```
+
+Plugins should not write `state.json` directly. The process plugin runner owns
+that file and updates fields such as `status`, `ready`, `pid`,
+`last_exit_code`, and `last_error`. Plugin stdout/stderr stays in the container
+logs.
 
 ## Builtin Example
 
@@ -159,6 +174,8 @@ plugins:
     command: /custom-plugins/custom-plugin
     when: after-agent
     restart: always
+    health:
+      readiness: true
     config:
       poll-seconds: 30
 ```
@@ -199,3 +216,48 @@ directly.
 
 `retries` controls immediate retry attempts for a failed run.
 `restart-delay-seconds` controls the delay before retries or restarts.
+
+## Health
+
+The image includes a readiness-style `health` command:
+
+```sh
+health
+health --json
+```
+
+Docker uses it through the image `HEALTHCHECK`. In Docker Compose this marks the
+container `healthy` or `unhealthy`; it does not restart the container by itself.
+The same command can later be used by a Kubernetes `readinessProbe`.
+
+By default, plugins do not affect readiness. Add `health.readiness: true` when a
+plugin should block agent readiness:
+
+```yaml
+plugins:
+  - name: custom-plugin
+    source: custom
+    command: /custom-plugins/custom-plugin
+    when: after-agent
+    restart: always
+    health:
+      readiness: true
+```
+
+Without `health.command`, readiness is based on lifecycle state:
+
+- `restart: never`: ready after exit `0`
+- `restart: on-failure`: ready while running or after exit `0`
+- `restart: always`: ready while running
+
+For deeper readiness checks, provide a command:
+
+```yaml
+health:
+  readiness: true
+  command: /custom-plugins/custom-plugin --ready
+```
+
+When `health.command` is present, the command decides readiness. Exit `0` means
+ready, and any non-zero exit means not ready. For process plugins, the plugin
+state file must still exist so the runtime knows the plugin was launched.

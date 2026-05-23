@@ -33,4 +33,8 @@ plugins: []
 #     command: /custom-plugins/custom-plugin
 #     when: after-agent
 #     restart: always
+#     health:
+#       readiness: true
+#       # Optional. If omitted, readiness is based on plugin lifecycle state.
+#       # command: /custom-plugins/custom-plugin --ready
 #     config: {}

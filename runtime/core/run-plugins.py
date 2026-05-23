@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 import os
+import json
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 
 BUILTIN_PLUGIN_DIR = Path("/usr/local/lib/nvt-agent/plugins")
+
+
+def state_dir():
+    return Path(os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
 
 
 def fail(message):
@@ -61,6 +67,71 @@ def object_value(value, field):
     return value
 
 
+def bool_value(value, field, default=False):
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        fail(f"{field} must be a boolean")
+    return value
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def plugin_source(plugin):
+    return string_value(plugin.get("source"), "plugin.source") or "builtin"
+
+
+def plugin_health(plugin):
+    health = object_value(plugin.get("health"), "plugin.health")
+    return {
+        "readiness": bool_value(health.get("readiness"), "plugin.health.readiness"),
+        "command": string_value(health.get("command"), "plugin.health.command"),
+    }
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(value, file, indent=2)
+        file.write("\n")
+    temporary.replace(path)
+
+
+def plugin_state_path(name):
+    return state_dir() / "plugins" / name / "state.json"
+
+
+def write_plugin_state(name, state):
+    write_json(plugin_state_path(name), state)
+
+
+def initial_plugin_state(plugin, when, restart):
+    name = string_value(plugin.get("name"), "plugin.name", required=True)
+    health = plugin_health(plugin)
+    return {
+        "name": name,
+        "source": plugin_source(plugin),
+        "when": when,
+        "restart": restart,
+        "health": {
+            "readiness": health["readiness"],
+            "command": health["command"],
+        },
+        "status": "pending",
+        "ready": False,
+        "pid": None,
+        "attempt": 0,
+        "started_at": None,
+        "finished_at": None,
+        "last_success_at": None,
+        "last_exit_code": None,
+        "last_error": None,
+    }
+
+
 def default_when(plugin_name):
     if plugin_name == "checkout-repos":
         return "before-agent"
@@ -84,7 +155,7 @@ def builtin_command(name):
 
 
 def plugin_command(plugin):
-    source = string_value(plugin.get("source"), "plugin.source") or "builtin"
+    source = plugin_source(plugin)
     name = string_value(plugin.get("name"), "plugin.name", required=True)
 
     override = string_value(plugin.get("command"), "plugin.command")
@@ -103,7 +174,7 @@ def write_plugin_config(name, config):
     if not isinstance(config, dict):
         fail("plugin.config must be a YAML object")
 
-    config_dir = Path.home() / ".nvt-agent" / "plugins" / name
+    config_dir = state_dir() / "plugins" / name
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     with config_path.open("w", encoding="utf-8") as file:
@@ -111,7 +182,7 @@ def write_plugin_config(name, config):
     return config_path
 
 
-def run_plugin(plugin):
+def run_plugin(plugin, state, attempt):
     name = string_value(plugin.get("name"), "plugin.name", required=True)
     command = plugin_command(plugin)
     config_path = write_plugin_config(name, object_value(plugin.get("config"), "plugin.config"))
@@ -120,43 +191,112 @@ def run_plugin(plugin):
     env["NVT_PLUGIN_NAME"] = name
     env["NVT_PLUGIN_CONFIG"] = str(config_path)
 
-    subprocess.run(command, shell=True, check=True, env=env)
+    print(f"run-plugins: {name} attempt {attempt} started", flush=True)
+    process = subprocess.Popen(command, shell=True, env=env)
+    state.update(
+        {
+            "status": "running",
+            "ready": state["restart"] in {"always", "on-failure"},
+            "pid": process.pid,
+            "attempt": attempt,
+            "started_at": utc_now(),
+            "finished_at": None,
+            "last_exit_code": None,
+            "last_error": None,
+        }
+    )
+    write_plugin_state(name, state)
+
+    exit_code = process.wait()
+    finished_at = utc_now()
+    if exit_code == 0:
+        state.update(
+            {
+                "status": "succeeded",
+                "ready": True,
+                "pid": None,
+                "finished_at": finished_at,
+                "last_success_at": finished_at,
+                "last_exit_code": exit_code,
+                "last_error": None,
+            }
+        )
+        write_plugin_state(name, state)
+        print(f"run-plugins: {name} attempt {attempt} exited with code 0", flush=True)
+        return
+
+    state.update(
+        {
+            "status": "failed",
+            "ready": False,
+            "pid": None,
+            "finished_at": finished_at,
+            "last_exit_code": exit_code,
+            "last_error": f"plugin exited with code {exit_code}",
+        }
+    )
+    write_plugin_state(name, state)
+    print(f"run-plugins: {name} attempt {attempt} exited with code {exit_code}", flush=True)
+    raise subprocess.CalledProcessError(exit_code, command)
 
 
-def run_once_with_retries(plugin):
+def run_once_with_retries(plugin, state):
+    name = string_value(plugin.get("name"), "plugin.name", required=True)
     retries = int_value(plugin.get("retries"), "plugin.retries", 0)
     delay = int_value(plugin.get("restart-delay-seconds"), "plugin.restart-delay-seconds", 5)
 
     for attempt in range(1, retries + 2):
         try:
-            run_plugin(plugin)
+            run_plugin(plugin, state, attempt)
             return
         except subprocess.CalledProcessError as error:
             if attempt > retries:
                 raise
+            state.update(
+                {
+                    "status": "restarting",
+                    "ready": False,
+                    "pid": None,
+                    "last_error": f"plugin exited with code {error.returncode}",
+                }
+            )
+            write_plugin_state(name, state)
             print(
-                f"run-plugins: plugin failed with exit {error.returncode}; retrying in {delay}s",
+                f"run-plugins: {name} failed with exit {error.returncode}; retrying in {delay}s",
                 flush=True,
             )
             time.sleep(delay)
 
 
 def run_with_lifecycle(plugin):
+    name = string_value(plugin.get("name"), "plugin.name", required=True)
+    when = plugin_when(plugin)
     restart = string_value(plugin.get("restart"), "plugin.restart") or "never"
     delay = int_value(plugin.get("restart-delay-seconds"), "plugin.restart-delay-seconds", 5)
     if restart not in {"never", "on-failure", "always"}:
         fail("plugin.restart must be never, on-failure, or always")
 
+    state = initial_plugin_state(plugin, when, restart)
+    write_plugin_state(name, state)
+
     while True:
         try:
-            run_once_with_retries(plugin)
+            run_once_with_retries(plugin, state)
             if restart != "always":
                 return
         except subprocess.CalledProcessError:
             if restart != "on-failure":
                 raise
 
-        print(f"run-plugins: restarting plugin in {delay}s", flush=True)
+        state.update(
+            {
+                "status": "restarting",
+                "ready": False,
+                "pid": None,
+            }
+        )
+        write_plugin_state(name, state)
+        print(f"run-plugins: restarting {name} in {delay}s", flush=True)
         time.sleep(delay)
 
 
