@@ -29,16 +29,16 @@ def optional_string(value, field):
     return value
 
 
-def load_tools(path):
+def load_bootstrap_config(path):
     if not path.is_file():
-        print(f"nvt-install-tools: no tools config at {path}", flush=True)
+        print(f"bootstrap: no agent config at {path}", flush=True)
         return {}, {}
 
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
 
     if not isinstance(data, dict):
-        raise SystemExit("tools config must be a YAML object")
+        raise SystemExit("agent config must be a YAML object")
 
     runtime = data.get("runtime", {})
     if not isinstance(runtime, dict):
@@ -122,7 +122,7 @@ def run_shell(scripts):
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
-            prefix=f"nvt-tools-{index}-",
+            prefix=f"nvt-bootstrap-{index}-",
             suffix=".sh",
             delete=False,
         ) as file:
@@ -140,7 +140,7 @@ def run_shell(scripts):
 
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
-    runtime, tools = load_tools(config_path)
+    runtime, tools = load_bootstrap_config(config_path)
 
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:

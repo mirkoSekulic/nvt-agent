@@ -13,16 +13,16 @@ export MISE_DATA_DIR="${MISE_DATA_DIR}"
 export PATH="${PATH}"
 EOF
 
-nvt-install-tools "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
+bootstrap "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 
-if [ -x /workspace/.nvt-agent/install-tools.sh ]; then
-  /workspace/.nvt-agent/install-tools.sh
+if [ -x /workspace/.nvt-agent/bootstrap.sh ]; then
+  /workspace/.nvt-agent/bootstrap.sh
 fi
 
 run-plugins before_agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 
-nvt-start-code-server
-nvt-start-agent-session
+start-code-server
+start-agent-session
 run-plugins after_agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}" &
 
 tail -f /dev/null

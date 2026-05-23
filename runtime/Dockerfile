@@ -20,21 +20,21 @@ RUN curl -fsSL https://code-server.dev/install.sh \
 
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
-COPY runtime/entrypoint.sh /usr/local/bin/nvt-agent-entrypoint
-COPY runtime/install-tools.py /usr/local/bin/nvt-install-tools
+COPY runtime/entrypoint.sh /usr/local/bin/entrypoint
+COPY runtime/bootstrap.py /usr/local/bin/bootstrap
 COPY runtime/run-plugins.py /usr/local/bin/run-plugins
-COPY runtime/start-code-server.sh /usr/local/bin/nvt-start-code-server
-COPY runtime/start-agent-session.sh /usr/local/bin/nvt-start-agent-session
+COPY runtime/start-code-server.sh /usr/local/bin/start-code-server
+COPY runtime/start-agent-session.sh /usr/local/bin/start-agent-session
 COPY runtime/plugins /usr/local/lib/nvt-agent/plugins
 
 RUN chmod +x \
-  /usr/local/bin/nvt-agent-entrypoint \
-  /usr/local/bin/nvt-install-tools \
+  /usr/local/bin/entrypoint \
+  /usr/local/bin/bootstrap \
   /usr/local/bin/run-plugins \
-  /usr/local/bin/nvt-start-code-server \
-  /usr/local/bin/nvt-start-agent-session \
+  /usr/local/bin/start-code-server \
+  /usr/local/bin/start-agent-session \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \
   && mkdir -p /workspace /root/.nvt-agent
 
 WORKDIR /workspace
-ENTRYPOINT ["/usr/local/bin/nvt-agent-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/entrypoint"]
