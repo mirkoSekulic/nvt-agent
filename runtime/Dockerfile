@@ -20,13 +20,13 @@ RUN curl -fsSL https://code-server.dev/install.sh \
 
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
-COPY runtime/entrypoint.sh /usr/local/bin/entrypoint
-COPY runtime/bootstrap.py /usr/local/bin/bootstrap
-COPY runtime/run-plugins.py /usr/local/bin/run-plugins
-COPY runtime/prompt-agent.sh /usr/local/bin/prompt-agent
-COPY runtime/write-agent-instructions.sh /usr/local/bin/write-agent-instructions
-COPY runtime/start-code-server.sh /usr/local/bin/start-code-server
-COPY runtime/start-agent-session.sh /usr/local/bin/start-agent-session
+COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint
+COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
+COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
+COPY runtime/core/prompt-agent.sh /usr/local/bin/prompt-agent
+COPY runtime/core/write-agent-instructions.sh /usr/local/bin/write-agent-instructions
+COPY runtime/core/start-code-server.sh /usr/local/bin/start-code-server
+COPY runtime/core/start-agent-session.sh /usr/local/bin/start-agent-session
 COPY runtime/plugins /usr/local/lib/nvt-agent/plugins
 
 RUN chmod +x \
