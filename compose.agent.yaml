@@ -13,6 +13,7 @@ services:
       - traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
     volumes:
       - ${WORKSPACE_DIR}:${NVT_WORKSPACE}
+      - ${CUSTOM_PLUGINS_DIR}:/custom-plugins
       - ${AGENT_CONFIG_FILE}:${NVT_AGENT_CONFIG_FILE}:ro
       - ${CODEX_CONFIG_DIR}:/root/.codex:ro
       - ${CLAUDE_CONFIG_DIR}:/root/.claude

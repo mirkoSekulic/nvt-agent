@@ -73,16 +73,17 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 templates_dir="$repo_root/templates"
 
-"$script_dir/validate-agent-name.sh" "$name"
+bash "$script_dir/validate-agent-name.sh" "$name"
 
 agent_dir="$repo_root/.agents/$name"
 env_file="$agent_dir/env"
 agent_config_file="$agent_dir/agent.yaml"
 workspace_dir="$agent_dir/workspace"
+custom_plugins_dir="$agent_dir/custom-plugins"
 claude_config_dir="$agent_dir/auth/claude"
 codex_config_dir="${HOME}/.codex"
 
-mkdir -p "$workspace_dir" "$claude_config_dir"
+mkdir -p "$workspace_dir" "$custom_plugins_dir" "$claude_config_dir"
 
 if [ ! -f "$env_file" ]; then
   AGENT_NAME="$name" \
@@ -90,6 +91,7 @@ if [ ! -f "$env_file" ]; then
     AGENT_ENV_FILE="$env_file" \
     WORKSPACE_DIR="$workspace_dir" \
     NVT_WORKSPACE="$workspace_dir" \
+    CUSTOM_PLUGINS_DIR="$custom_plugins_dir" \
     AGENT_CONFIG_FILE="$agent_config_file" \
     CODEX_CONFIG_DIR="$codex_config_dir" \
     CLAUDE_CONFIG_DIR="$claude_config_dir" \
