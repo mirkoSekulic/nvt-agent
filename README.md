@@ -1,331 +1,324 @@
 # nvt-agent
 
-`nvt-agent` is a planned platform for running terminal coding agents in isolated
-Docker containers.
+`nvt-agent` runs named coding agents in local Docker containers. Each agent gets
+its own workspace, browser-accessible code-server, persistent root home volume,
+and terminal agent session.
 
-The first implementation target is intentionally small: create named local
-agents, open each one in the browser, and interact with the agent process
-through a persistent terminal session. Higher-level manager workflows can be
-added later on top of the same runtime primitives.
+The current implementation is intentionally script and Makefile driven. A
+manager/CLI can be added later on top of the same runtime pieces.
 
-## First Iteration
+## Quick Start
 
-The first version should be Makefile and script driven.
+Build the runtime image from `runtime/Dockerfile`:
 
-Example usage:
+```sh
+make runtime-build
+```
+
+Start the shared proxy:
 
 ```sh
 make infra-up
-make agent-up NAME=frontend
-make agent-logs NAME=frontend
-make agent-down NAME=frontend
-make agent-rm NAME=frontend
 ```
 
-Each agent is named by the user. Names are not tied to PRs, issues, branches, or
-repositories.
-
-Valid MVP names:
-
-```text
-frontend
-studio-api
-agent-1
-xsd-fixer
-```
-
-For the MVP, names should be DNS-safe:
-
-```text
-lowercase letters, numbers, and hyphens
-must start and end with a letter or number
-```
-
-## Runtime Model
-
-Each named agent runs as its own Docker Compose project.
-
-The same `compose.agent.yaml` template is reused for every agent:
+Create an agent config:
 
 ```sh
-docker compose \
-  -p "agent-${AGENT_NAME}" \
-  --env-file ".agents/${AGENT_NAME}/env" \
-  -f compose.agent.yaml \
-  up -d
+make agent-init NAME=frontend
 ```
 
-This gives each agent isolated Compose resources:
+This creates:
 
 ```text
-agent-frontend-agent-1
-agent-frontend_agent-home
-agent-studio-api-agent-1
-agent-studio-api_agent-home
+.agents/frontend/env
+.agents/frontend/agent.yaml
+.agents/frontend/workspace/
+.agents/frontend/custom-plugins/
+.agents/frontend/auth/claude/
 ```
 
-Per-agent state can start as files:
+Edit the generated agent config before starting it:
+
+```sh
+$EDITOR .agents/frontend/agent.yaml
+```
+
+Start the agent:
+
+```sh
+make agent-up NAME=frontend
+```
+
+Open it in the browser:
 
 ```text
-.agents/
-  frontend/
-    env
-    workspace/
-  studio-api/
-    env
-    workspace/
+http://frontend.agent.localhost:4090
 ```
 
-Example `.agents/frontend/env`:
+Useful commands:
 
-```env
-AGENT_NAME=frontend
-AGENT_DOMAIN=agent.localhost
-AGENT_HOST=frontend.agent.localhost
-WORKSPACE_DIR=/absolute/path/.agents/frontend/workspace
-AGENT_COMMAND=codex
+```sh
+make agent-ps
+make agent-logs NAME=frontend
+make agent-shell NAME=frontend
+make agent-down NAME=frontend
+make agent-rm NAME=frontend FORCE=1
 ```
 
-## Browser Access
+Use `TYPE=claude` during init to generate a Claude command instead of Codex:
 
-Agents should be exposed through one shared reverse proxy instead of unique host
-ports.
+```sh
+make agent-init NAME=research TYPE=claude
+```
+
+## Supported Agent CLIs
+
+Agents currently support both Codex and Claude Code.
+
+Codex is the default:
+
+```sh
+make agent-init NAME=frontend
+```
+
+which generates:
+
+```yaml
+runtime:
+  command: codex
+```
+
+Claude Code can be selected at init time:
+
+```sh
+make agent-init NAME=research TYPE=claude
+```
+
+Codex auth is mounted from the host `~/.codex` read-only. Claude Code auth is
+stored per agent under `.agents/<name>/auth/claude` and mounted into the
+container at `/root/.claude`.
+
+## Browser URLs And Proxy
+
+Agents are routed through one shared Traefik proxy.
 
 Default URL format:
 
 ```text
-http://<name>.agent.localhost
+http://<name>.agent.localhost:4090
 ```
 
 Examples:
 
 ```text
-http://frontend.agent.localhost
-http://studio-api.agent.localhost
-http://xsd-fixer.agent.localhost
+http://frontend.agent.localhost:4090
+http://studio-api.agent.localhost:4090
 ```
 
-The proxy routes by `Host` header:
+The proxy listens on the host at `127.0.0.1:${NVT_PROXY_PORT:-4090}` and forwards
+matching hostnames to code-server inside each agent container on port `4090`.
 
-```text
-Host frontend.agent.localhost -> frontend agent container:4090
-Host studio-api.agent.localhost -> studio-api agent container:4090
-```
-
-Use Traefik for the MVP. It can watch Docker containers and build routes from
-labels, so scripts do not need to rewrite proxy config when agents start or
-stop.
-
-Shared network:
-
-```sh
-docker network create agents-proxy
-```
-
-Infra Compose:
+The route is created from Docker labels in `compose.agent.yaml`:
 
 ```yaml
-services:
-  proxy:
-    image: traefik:v3
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=agents-proxy
-      - --entrypoints.web.address=:80
-    ports:
-      - "127.0.0.1:80:80"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - agents-proxy
-
-networks:
-  agents-proxy:
-    external: true
+traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
+traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
 ```
 
-Agent Compose:
+The default proxy port can be changed when starting infra:
+
+```sh
+NVT_PROXY_PORT=4910 make infra-up
+```
+
+Then agent URLs use that port:
+
+```text
+http://frontend.agent.localhost:4910
+```
+
+## Agent Layout
+
+`agent-init` creates per-agent files under `.agents/<name>/`:
+
+```text
+.agents/frontend/
+  env
+  agent.yaml
+  workspace/
+  custom-plugins/
+  auth/
+    claude/
+```
+
+`.agents/` is ignored by git.
+
+Useful paths:
+
+```text
+.agents/<name>/agent.yaml            agent runtime, tools, and plugins config
+.agents/<name>/env                   Compose env file for host paths and mounts
+.agents/<name>/workspace/            persisted workspace for repos/files
+.agents/<name>/custom-plugins/       host directory for custom plugin binaries/scripts
+.agents/<name>/auth/claude/          per-agent Claude Code auth/config
+```
+
+The generated env file contains the host paths used by Compose:
+
+```env
+AGENT_NAME=frontend
+AGENT_HOST=frontend.agent.localhost
+
+WORKSPACE_DIR=/absolute/path/.agents/frontend/workspace
+NVT_WORKSPACE=/absolute/path/.agents/frontend/workspace
+CUSTOM_PLUGINS_DIR=/absolute/path/.agents/frontend/custom-plugins
+AGENT_CONFIG_FILE=/absolute/path/.agents/frontend/agent.yaml
+NVT_AGENT_CONFIG_FILE=/nvt-agent/agent.yaml
+
+CODEX_CONFIG_DIR=/Users/you/.codex
+CLAUDE_CONFIG_DIR=/absolute/path/.agents/frontend/auth/claude
+```
+
+The workspace is bind-mounted at the same absolute path inside the container.
+This is deliberate: agents have Docker socket access, and host Docker bind mounts
+need host-visible paths.
+
+## Agent Config
+
+Each agent is configured with `.agents/<name>/agent.yaml`.
+
+Minimal generated config:
 
 ```yaml
-services:
-  agent:
-    image: nvt-agent-runtime:latest
-    networks:
-      - agents-proxy
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=agents-proxy
-      - traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
-      - traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
-    volumes:
-      - ${WORKSPACE_DIR}:/workspace
-      - agent-home:/home/agent
-    environment:
-      AGENT_NAME: ${AGENT_NAME}
-      AGENT_COMMAND: ${AGENT_COMMAND:-codex}
+runtime:
+  command: codex
 
-volumes:
-  agent-home:
+tools:
+  apt: []
+  mise: []
+  additional_paths: []
+  shell: []
 
-networks:
-  agents-proxy:
-    external: true
+plugins: []
 ```
 
-Browsers and `curl` commonly resolve `.localhost` names to loopback even when
-system resolver tools such as `ping`, `dscacheutil`, or language runtimes do not
-show a DNS result. Keep the base domain configurable:
+Tool bootstrap runs before plugins and before the agent session starts.
+
+Example:
+
+```yaml
+tools:
+  apt:
+    - jq
+  mise:
+    - go@latest
+  additional_paths:
+    - ~/.local/bin
+  shell:
+    - |
+      echo "custom bootstrap"
+```
+
+## Plugins
+
+Plugins are container-side processes configured in `agent.yaml`.
+
+Builtin plugins are baked into the runtime image under `runtime/plugins/`.
+Custom plugins are mounted per agent from:
+
+```text
+.agents/<name>/custom-plugins/
+```
+
+to:
+
+```text
+/custom-plugins
+```
+
+Builtin checkout example:
+
+```yaml
+plugins:
+  - name: checkout-repos
+    source: builtin
+    when: before_agent
+    restart: never
+    config:
+      repos:
+        - url: https://github.com/example/public-repo.git
+        - url: https://github.com/example/other-public-repo.git
+          path: vendor/other-public-repo
+```
+
+Custom plugin example:
+
+Put an executable on the host:
+
+```text
+.agents/frontend/custom-plugins/custom-plugin
+```
+
+Then reference it from `.agents/frontend/agent.yaml`:
+
+```yaml
+plugins:
+  - name: custom-plugin
+    source: custom
+    command: /custom-plugins/custom-plugin
+    when: after_agent
+    restart: always
+    config:
+      poll_seconds: 30
+```
+
+Custom plugin commands can be scripts or binaries in any language available in
+the container.
+
+To keep custom plugins somewhere else on the host, edit:
+
+```text
+.agents/<name>/env
+```
+
+and change:
 
 ```env
-AGENT_DOMAIN=agent.localhost
+CUSTOM_PLUGINS_DIR=/path/to/custom-plugins
 ```
 
-If an environment does not resolve wildcard `.localhost` names, use a fallback
-such as:
+See [runtime/plugins/README.md](runtime/plugins/README.md) for the plugin
+contract and authoring details.
 
-```env
-AGENT_DOMAIN=127.0.0.1.nip.io
-```
+## Runtime
 
-which produces:
+The runtime image is built from `runtime/Dockerfile` on top of:
 
 ```text
-http://frontend.127.0.0.1.nip.io
+ghcr.io/catthehacker/ubuntu:act-24.04
 ```
 
-## Agent Container
+The image includes:
 
-Each container should have:
+- code-server on port `4090`
+- tmux
+- Codex CLI
+- Claude Code CLI
+- mise
+- Python YAML support for runtime scripts
 
-- mounted workspace at `/workspace`
-- persistent home volume at `/home/agent`
-- `tmux`
-- `code-server` for browser inspection
-- one terminal agent CLI, such as Codex or Claude Code
-- optional bootstrap script support
-
-`code-server` should listen inside the container on port `4090`:
-
-```sh
-code-server --bind-addr 0.0.0.0:4090 --auth none /workspace
-```
-
-For local-only MVP usage, auth can be disabled because Traefik binds only to
-`127.0.0.1`. If the proxy is exposed on LAN, VPN, or the internet, add real
-authentication before using it.
-
-The terminal agent should run in a persistent `tmux` session:
-
-```sh
-tmux new-session -d -s agent -c /workspace "$AGENT_COMMAND"
-```
-
-Prompt injection can be implemented by pasting into that session:
-
-```sh
-tmux load-buffer -b agent-prompt /tmp/prompt.txt
-tmux paste-buffer -b agent-prompt -t agent -p -r
-tmux send-keys -t agent Enter
-```
-
-This treats Claude Code, Codex, or another terminal agent as a black-box
-process. `nvt-agent` does not implement a reasoning loop.
-
-## Initial File Layout
-
-Planned MVP repository structure:
+Container startup order:
 
 ```text
-Makefile
-compose.infra.yaml
-compose.agent.yaml
-runtime/
-  Dockerfile
-  entrypoint.sh
-  start-code-server.sh
-  start-agent-session.sh
-scripts/
-  agent-up.sh
-  agent-down.sh
-  agent-logs.sh
-  agent-rm.sh
-  agent-prompt.sh
-.agents/
+1. bootstrap tools from agent.yaml
+2. run before_agent plugins
+3. start code-server
+4. start the terminal agent in tmux
+5. run after_agent plugins in the background
 ```
 
-`.agents/` should be ignored by git.
+Codex auth is mounted from the host `~/.codex` read-only. Claude auth is stored
+per agent under `.agents/<name>/auth/claude` and mounted to `/root/.claude`.
 
-## Commands
-
-Start with Make targets backed by scripts:
-
-```sh
-make infra-up
-make infra-down
-make runtime-build
-make agent-up NAME=frontend
-make agent-logs NAME=frontend
-make agent-shell NAME=frontend
-make agent-prompt NAME=frontend < prompt.txt
-make agent-down NAME=frontend
-make agent-rm NAME=frontend
-```
-
-The scripts should preserve a stable command contract so a future CLI can keep
-the same behavior:
-
-```sh
-nvt-agent create <agent>
-nvt-agent up <agent>
-nvt-agent prompt <agent> --stdin
-nvt-agent exec <agent> -- <command>
-nvt-agent logs <agent>
-nvt-agent down <agent>
-nvt-agent rm <agent>
-```
-
-## Later Manager
-
-The manager is a later layer. It should consume the same runtime primitives a
-human uses manually.
-
-Future manager responsibilities:
-
-- discover tasks from issues, queues, schedules, or plugins
-- claim work
-- create one branch/workspace/container per task
-- send initial prompts
-- monitor lifecycle
-- create PRs/MRs through provider plugins
-- stop, retain, or clean up agents
-
-One likely workflow:
-
-```text
-one issue = one branch = one named agent = one PR/MR
-```
-
-But the core runtime should not assume GitHub, GitLab, or issue planning.
-
-## Plugin Direction
-
-Plugins should start as external processes or scripts.
-
-Agent-level plugins can prompt an agent through stdin:
-
-```sh
-nvt-agent prompt "$NVT_AGENT_NAME" --stdin
-```
-
-Manager-level plugins can create and start agents:
-
-```sh
-nvt-agent create repo-issue-123
-nvt-agent up repo-issue-123
-nvt-agent prompt repo-issue-123 --stdin
-```
-
-Avoid dynamic plugin loading in the first versions. A stable command contract is
-enough.
-
+The agent root home is a named Docker volume, so installed state under `/root`
+can survive `agent-down`. Use `agent-rm` to remove the agent Compose volume.
