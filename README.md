@@ -137,6 +137,58 @@ Then agent URLs use that port:
 http://frontend.agent.localhost:4910
 ```
 
+## Lifecycle Cleanup
+
+Stop one agent:
+
+```sh
+make agent-down NAME=frontend
+```
+
+Stop all agents and infra, keeping agent files, volumes, and the proxy network:
+
+```sh
+make down-all
+```
+
+Remove one agent, including local `.agents/<name>` files and its Docker volume:
+
+```sh
+make agent-rm NAME=frontend
+```
+
+Remove all agents, including local files and Docker volumes:
+
+```sh
+make agent-rm-all
+```
+
+Remove only the shared proxy network:
+
+```sh
+make infra-network-rm
+```
+
+Clean stops all agents and infra, then removes the shared proxy network. It keeps
+agent files and volumes:
+
+```sh
+make clean
+```
+
+Nuke removes all agents, agent files, Docker volumes, infra, and the shared
+proxy network:
+
+```sh
+make nuke
+```
+
+Use `FORCE=1` to skip confirmation for destructive remove commands:
+
+```sh
+make nuke FORCE=1
+```
+
 ## Agent Layout
 
 `agent-init` creates per-agent files under `.agents/<name>/`:

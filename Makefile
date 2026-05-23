@@ -1,6 +1,6 @@
 TYPE ?= codex
 
-.PHONY: runtime-build infra-up infra-down agent-init agent-up agent-logs agent-shell agent-ps agent-down agent-rm
+.PHONY: runtime-build infra-up infra-down infra-network-rm agent-init agent-up agent-logs agent-shell agent-ps agent-down agent-down-all agent-rm agent-rm-all down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -10,6 +10,9 @@ infra-up:
 
 infra-down:
 	bash scripts/infra-down.sh
+
+infra-network-rm:
+	bash scripts/infra-network-rm.sh
 
 agent-init:
 	@test -n "$(NAME)" || (echo "usage: make agent-init NAME=<name> [TYPE=codex|claude]"; exit 1)
@@ -34,6 +37,21 @@ agent-down:
 	@test -n "$(NAME)" || (echo "usage: make agent-down NAME=<name>"; exit 1)
 	bash scripts/agent-down.sh --name "$(NAME)"
 
+agent-down-all:
+	bash scripts/agent-down-all.sh
+
 agent-rm:
 	@test -n "$(NAME)" || (echo "usage: make agent-rm NAME=<name> [FORCE=1]"; exit 1)
 	bash scripts/agent-rm.sh --name "$(NAME)" $(if $(FORCE),--force)
+
+agent-rm-all:
+	bash scripts/agent-rm-all.sh $(if $(FORCE),--force)
+
+down-all:
+	bash scripts/down-all.sh
+
+clean:
+	bash scripts/clean.sh
+
+nuke:
+	bash scripts/nuke.sh $(if $(FORCE),--force)
