@@ -1,6 +1,6 @@
 TYPE ?= codex
 
-.PHONY: runtime-build infra-up infra-down agent-init agent-up agent-logs agent-shell agent-down agent-rm
+.PHONY: runtime-build infra-up infra-down agent-init agent-up agent-logs agent-shell agent-ps agent-down agent-rm
 
 runtime-build:
 	./scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -26,6 +26,9 @@ agent-logs:
 agent-shell:
 	@test -n "$(NAME)" || (echo "usage: make agent-shell NAME=<name>"; exit 1)
 	./scripts/agent-shell.sh --name "$(NAME)"
+
+agent-ps:
+	./scripts/agent-ps.sh
 
 agent-down:
 	@test -n "$(NAME)" || (echo "usage: make agent-down NAME=<name>"; exit 1)
