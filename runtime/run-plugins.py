@@ -63,15 +63,15 @@ def object_value(value, field):
 
 def default_when(plugin_name):
     if plugin_name == "checkout-repos":
-        return "before_agent"
-    return "after_agent"
+        return "before-agent"
+    return "after-agent"
 
 
 def plugin_when(plugin):
     name = string_value(plugin.get("name"), "plugin.name", required=True)
     when = string_value(plugin.get("when"), "plugin.when") or default_when(name)
-    if when not in {"before_agent", "after_agent"}:
-        fail("plugin.when must be before_agent or after_agent")
+    if when not in {"before-agent", "after-agent"}:
+        fail("plugin.when must be before-agent or after-agent")
     return when
 
 
@@ -125,7 +125,7 @@ def run_plugin(plugin):
 
 def run_once_with_retries(plugin):
     retries = int_value(plugin.get("retries"), "plugin.retries", 0)
-    delay = int_value(plugin.get("restart_delay_seconds"), "plugin.restart_delay_seconds", 5)
+    delay = int_value(plugin.get("restart-delay-seconds"), "plugin.restart-delay-seconds", 5)
 
     for attempt in range(1, retries + 2):
         try:
@@ -143,7 +143,7 @@ def run_once_with_retries(plugin):
 
 def run_with_lifecycle(plugin):
     restart = string_value(plugin.get("restart"), "plugin.restart") or "never"
-    delay = int_value(plugin.get("restart_delay_seconds"), "plugin.restart_delay_seconds", 5)
+    delay = int_value(plugin.get("restart-delay-seconds"), "plugin.restart-delay-seconds", 5)
     if restart not in {"never", "on-failure", "always"}:
         fail("plugin.restart must be never, on-failure, or always")
 
@@ -161,8 +161,8 @@ def run_with_lifecycle(plugin):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in {"before_agent", "after_agent"}:
-        fail("usage: run-plugins before_agent|after_agent [agent.yaml]")
+    if len(sys.argv) < 2 or sys.argv[1] not in {"before-agent", "after-agent"}:
+        fail("usage: run-plugins before-agent|after-agent [agent.yaml]")
 
     when = sys.argv[1]
     config_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/nvt-agent/agent.yaml")

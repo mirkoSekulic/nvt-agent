@@ -37,17 +37,17 @@ non-zero on failure.
 plugins:
   - name: git-credentials
     source: builtin
-    when: before_agent
+    when: before-agent
     config:
       credentials:
         - match: https://github.com/example/
-          type: token_env
-          token_env: GIT_TOKEN
+          type: token-env
+          token-env: GIT_TOKEN
           username: x-access-token
 
   - name: checkout-repos
     source: builtin
-    when: before_agent
+    when: before-agent
     restart: never
     config:
       repos:
@@ -64,17 +64,17 @@ org/user, or one repo:
 ```yaml
 credentials:
   - match: https://github.com/
-    type: token_env
-    token_env: GENERAL_GITHUB_TOKEN
+    type: token-env
+    token-env: GENERAL_GITHUB_TOKEN
     username: x-access-token
   - match: https://github.com/acme/
-    type: github_app
-    app_id_env: GITHUB_APP_ID
-    installation_id_env: GITHUB_APP_INSTALLATION_ID
-    private_key_b64_env: GITHUB_APP_PRIVATE_KEY_B64
+    type: github-app
+    app-id-env: GITHUB_APP_ID
+    installation-id-env: GITHUB_APP_INSTALLATION_ID
+    private-key-b64-env: GITHUB_APP_PRIVATE_KEY_B64
   - match: https://github.com/acme/frontend.git
-    type: token_env
-    token_env: FRONTEND_TOKEN
+    type: token-env
+    token-env: FRONTEND_TOKEN
     username: x-access-token
 ```
 
@@ -85,24 +85,24 @@ Supported credential types:
 ```yaml
 credentials:
   - match: https://github.com/acme/
-    type: token_env
-    token_env: ACME_PAT
+    type: token-env
+    token-env: ACME_PAT
     username: x-access-token
 
   - match: https://github.com/acme/
-    type: github_app
-    app_id_env: GITHUB_APP_ID
-    installation_id_env: GITHUB_APP_INSTALLATION_ID
-    private_key_b64_env: GITHUB_APP_PRIVATE_KEY_B64
+    type: github-app
+    app-id-env: GITHUB_APP_ID
+    installation-id-env: GITHUB_APP_INSTALLATION_ID
+    private-key-b64-env: GITHUB_APP_PRIVATE_KEY_B64
 
   - match: https://git.company.com/team/
     type: headers
     headers:
-      - header_env: COMPANY_GIT_AUTH_HEADER
-      - header_env: COMPANY_GIT_API_KEY_HEADER
+      - header-env: COMPANY_GIT_AUTH_HEADER
+      - header-env: COMPANY_GIT_API_KEY_HEADER
 ```
 
-For `headers`, each `header_env` contains one full HTTP header line:
+For `headers`, each `header-env` contains one full HTTP header line:
 
 ```env
 COMPANY_GIT_AUTH_HEADER=Authorization: Bearer abc123
@@ -157,10 +157,10 @@ plugins:
   - name: custom-plugin
     source: custom
     command: /custom-plugins/custom-plugin
-    when: after_agent
+    when: after-agent
     restart: always
     config:
-      poll_seconds: 30
+      poll-seconds: 30
 ```
 
 The command can be any executable script or binary, written in any language
@@ -188,8 +188,8 @@ directly.
 
 `when` controls startup order:
 
-- `before_agent`: run before code-server and the main agent session start
-- `after_agent`: run after the main agent session starts
+- `before-agent`: run before code-server and the main agent session start
+- `after-agent`: run after the main agent session starts
 
 `restart` controls process restart behavior:
 
@@ -198,4 +198,4 @@ directly.
 - `always`: restart after every exit
 
 `retries` controls immediate retry attempts for a failed run.
-`restart_delay_seconds` controls the delay before retries or restarts.
+`restart-delay-seconds` controls the delay before retries or restarts.

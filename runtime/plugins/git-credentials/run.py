@@ -52,7 +52,7 @@ def load_config():
 def validate_header(header, field):
     if not isinstance(header, dict):
         fail(f"{field} must be a YAML object")
-    string_value(header.get("header_env"), f"{field}.header_env", required=True)
+    string_value(header.get("header-env"), f"{field}.header-env", required=True)
 
 
 def validate_rule(rule, index):
@@ -62,17 +62,17 @@ def validate_rule(rule, index):
     string_value(rule.get("match"), f"credentials[{index}].match", required=True)
     kind = string_value(rule.get("type"), f"credentials[{index}].type", required=True)
 
-    if kind == "token_env":
-        string_value(rule.get("token_env"), f"credentials[{index}].token_env", required=True)
+    if kind == "token-env":
+        string_value(rule.get("token-env"), f"credentials[{index}].token-env", required=True)
         return
 
-    if kind == "github_app":
-        if not rule.get("app_id") and not rule.get("app_id_env"):
-            fail(f"credentials[{index}] requires app_id or app_id_env")
-        if not rule.get("installation_id") and not rule.get("installation_id_env"):
-            fail(f"credentials[{index}] requires installation_id or installation_id_env")
-        if not rule.get("private_key_env") and not rule.get("private_key_b64_env"):
-            fail(f"credentials[{index}] requires private_key_env or private_key_b64_env")
+    if kind == "github-app":
+        if not rule.get("app-id") and not rule.get("app-id-env"):
+            fail(f"credentials[{index}] requires app-id or app-id-env")
+        if not rule.get("installation-id") and not rule.get("installation-id-env"):
+            fail(f"credentials[{index}] requires installation-id or installation-id-env")
+        if not rule.get("private-key-env") and not rule.get("private-key-b64-env"):
+            fail(f"credentials[{index}] requires private-key-env or private-key-b64-env")
         return
 
     if kind == "headers":
@@ -105,7 +105,7 @@ def configure_headers(credentials):
         match = string_value(rule.get("match"), "credentials.match", required=True)
         subprocess.run(["git", "config", "--global", "--unset-all", f"http.{match}.extraHeader"], check=False)
         for header in rule.get("headers", []):
-            header_env = string_value(header.get("header_env"), "headers.header_env", required=True)
+            header_env = string_value(header.get("header-env"), "headers.header-env", required=True)
             value = os.environ.get(header_env)
             if value is None:
                 fail(f"environment variable {header_env} is not set")

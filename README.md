@@ -196,7 +196,7 @@ runtime:
 tools:
   apt: []
   mise: []
-  additional_paths: []
+  additional-paths: []
   shell: []
 
 plugins: []
@@ -212,7 +212,7 @@ tools:
     - jq
   mise:
     - go@latest
-  additional_paths:
+  additional-paths:
     - ~/.local/bin
   shell:
     - |
@@ -242,7 +242,7 @@ Builtin checkout example:
 plugins:
   - name: checkout-repos
     source: builtin
-    when: before_agent
+    when: before-agent
     restart: never
     config:
       repos:
@@ -266,10 +266,10 @@ plugins:
   - name: custom-plugin
     source: custom
     command: /custom-plugins/custom-plugin
-    when: after_agent
+    when: after-agent
     restart: always
     config:
-      poll_seconds: 30
+      poll-seconds: 30
 ```
 
 Custom plugin commands can be scripts or binaries in any language available in
@@ -311,10 +311,10 @@ Container startup order:
 
 ```text
 1. bootstrap tools from agent.yaml
-2. run before_agent plugins
+2. run before-agent plugins
 3. start code-server
 4. start the terminal agent in tmux
-5. run after_agent plugins in the background
+5. run after-agent plugins in the background
 ```
 
 Codex auth is mounted from the host `~/.codex` read-only. Claude auth is stored

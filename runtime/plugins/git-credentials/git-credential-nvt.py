@@ -83,9 +83,9 @@ def env_value(name):
 
 def token_env_credentials(rule):
     username = rule.get("username") or "x-access-token"
-    token_env = rule.get("token_env")
+    token_env = rule.get("token-env")
     if not isinstance(token_env, str):
-        fail("token_env credential requires token_env")
+        fail("token-env credential requires token-env")
     return username, env_value(token_env)
 
 
@@ -94,10 +94,10 @@ def b64url(data):
 
 
 def private_key(rule):
-    private_key_env = rule.get("private_key_env")
-    private_key_b64_env = rule.get("private_key_b64_env")
+    private_key_env = rule.get("private-key-env")
+    private_key_b64_env = rule.get("private-key-b64-env")
     if private_key_env and private_key_b64_env:
-        fail("github_app credential cannot set both private_key_env and private_key_b64_env")
+        fail("github-app credential cannot set both private-key-env and private-key-b64-env")
     if isinstance(private_key_env, str):
         return env_value(private_key_env)
     if isinstance(private_key_b64_env, str):
@@ -105,22 +105,22 @@ def private_key(rule):
             return base64.b64decode(env_value(private_key_b64_env)).decode("utf-8")
         except Exception as error:
             fail(f"could not decode {private_key_b64_env}: {error}")
-    fail("github_app credential requires private_key_env or private_key_b64_env")
+    fail("github-app credential requires private-key-env or private-key-b64-env")
 
 
 def github_app_value(rule, key):
     value = rule.get(key)
     if isinstance(value, str):
         return value
-    env_key = f"{key}_env"
+    env_key = f"{key}-env"
     env_name = rule.get(env_key)
     if isinstance(env_name, str):
         return env_value(env_name)
-    fail(f"github_app credential requires {key} or {env_key}")
+    fail(f"github-app credential requires {key} or {env_key}")
 
 
 def github_app_jwt(rule):
-    app_id = github_app_value(rule, "app_id")
+    app_id = github_app_value(rule, "app-id")
     now = int(time.time())
     header = {"alg": "RS256", "typ": "JWT"}
     payload = {
@@ -177,9 +177,9 @@ def parse_time(value):
 
 def github_app_cache_key(rule):
     return "|".join([
-        rule.get("api_url") or "https://api.github.com",
-        github_app_value(rule, "app_id"),
-        github_app_value(rule, "installation_id"),
+        rule.get("api-url") or "https://api.github.com",
+        github_app_value(rule, "app-id"),
+        github_app_value(rule, "installation-id"),
     ])
 
 
@@ -190,8 +190,8 @@ def github_app_credentials(rule):
     if cached.get("token") and parse_time(cached.get("expires_at")) > time.time() + 300:
         return "x-access-token", cached["token"]
 
-    installation_id = github_app_value(rule, "installation_id")
-    api_url = rule.get("api_url") or "https://api.github.com"
+    installation_id = github_app_value(rule, "installation-id")
+    api_url = rule.get("api-url") or "https://api.github.com"
     url = f"{api_url.rstrip('/')}/app/installations/{installation_id}/access_tokens"
     request = Request(
         url,
@@ -220,9 +220,9 @@ def github_app_credentials(rule):
 
 def credentials_for_rule(rule):
     kind = rule.get("type")
-    if kind == "token_env":
+    if kind == "token-env":
         return token_env_credentials(rule)
-    if kind == "github_app":
+    if kind == "github-app":
         return github_app_credentials(rule)
     if kind == "headers":
         return None

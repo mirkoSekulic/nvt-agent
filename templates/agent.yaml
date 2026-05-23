@@ -4,7 +4,7 @@ runtime:
 tools:
   apt: []
   mise: []
-  additional_paths: []
+  additional-paths: []
   shell: []
 
 plugins: []
@@ -12,16 +12,16 @@ plugins: []
 # plugins:
 #   - name: git-credentials
 #     source: builtin
-#     when: before_agent
+#     when: before-agent
 #     config:
 #       credentials:
 #         - match: https://github.com/example/
-#           type: token_env
-#           token_env: GIT_TOKEN
+#           type: token-env
+#           token-env: GIT_TOKEN
 #           username: x-access-token
 #   - name: checkout-repos
 #     source: builtin
-#     when: before_agent
+#     when: before-agent
 #     restart: never
 #     config:
 #       repos:
@@ -31,6 +31,6 @@ plugins: []
 #   - name: custom-plugin
 #     source: custom
 #     command: /custom-plugins/custom-plugin
-#     when: after_agent
+#     when: after-agent
 #     restart: always
 #     config: {}

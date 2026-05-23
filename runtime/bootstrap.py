@@ -145,7 +145,7 @@ def main():
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         persist_env_var("AGENT_COMMAND", command)
-    apply_additional_paths(as_string_list(tools.get("additional_paths"), "additional_paths"))
+    apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_apt(as_string_list(tools.get("apt"), "apt"))
     install_mise(as_string_list(tools.get("mise"), "mise"))
     run_shell(as_string_list(tools.get("shell"), "shell"))
