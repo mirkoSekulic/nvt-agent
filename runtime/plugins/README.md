@@ -67,11 +67,27 @@ plugins:
     config:
       repos:
         - url: https://github.com/example/public-repo.git
+        - url: https://github.com/agent-user/forked-repo.git
+          path: forked-repo
+          upstream: https://github.com/original-org/forked-repo.git
 ```
 
 `git-credentials` is optional. Use it before `checkout-repos` when private repos
 need credentials. It configures Git once; later `git clone`, `git fetch`, and
 `git push` use Git's normal credential helper flow.
+
+`checkout-repos` supports fork workflows with optional `upstream`. If provided
+on a newly cloned repo, it adds the original repository as the `upstream`
+remote:
+
+```yaml
+repos:
+  - url: https://github.com/agent-user/project.git
+    path: project
+    upstream: https://github.com/org/project.git
+```
+
+Existing repositories are skipped and left untouched, including remotes.
 
 Credential `match` values are URL prefixes. They can target a server, an
 org/user, or one repo:

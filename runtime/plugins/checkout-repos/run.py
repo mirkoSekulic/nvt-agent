@@ -69,6 +69,7 @@ def checkout_repo(repo):
         fail("repos entries must be YAML objects")
 
     url = string_value(repo.get("url"), "repo.url", required=True)
+    upstream = string_value(repo.get("upstream"), "repo.upstream")
 
     target = workspace_path(repo)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +81,8 @@ def checkout_repo(repo):
         return
 
     run(["git", "clone", url, str(target)])
+    if upstream:
+        run(["git", "-C", str(target), "remote", "add", "upstream", upstream])
 
 
 def main():

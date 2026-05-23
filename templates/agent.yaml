@@ -28,6 +28,7 @@ plugins: []
 #         - url: https://github.com/example/public-repo.git
 #         - url: https://github.com/example/other-public-repo.git
 #           path: vendor/other-public-repo
+#           upstream: https://github.com/original-org/other-public-repo.git
 #   - name: custom-plugin
 #     source: custom
 #     command: /custom-plugins/custom-plugin

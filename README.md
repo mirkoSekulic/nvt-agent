@@ -249,6 +249,7 @@ plugins:
         - url: https://github.com/example/public-repo.git
         - url: https://github.com/example/other-public-repo.git
           path: vendor/other-public-repo
+          upstream: https://github.com/original-org/other-public-repo.git
 ```
 
 Custom plugin example:
