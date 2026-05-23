@@ -7,9 +7,13 @@ ENV CODE_SERVER_PORT=4090
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
+    python3-yaml \
     ripgrep \
     tmux \
   && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://mise.run \
+  | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 
 RUN curl -fsSL https://code-server.dev/install.sh \
   | sh -s -- --method=standalone --prefix=/usr/local
@@ -17,11 +21,13 @@ RUN curl -fsSL https://code-server.dev/install.sh \
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
 COPY runtime/entrypoint.sh /usr/local/bin/nvt-agent-entrypoint
+COPY runtime/install-tools.py /usr/local/bin/nvt-install-tools
 COPY runtime/start-code-server.sh /usr/local/bin/nvt-start-code-server
 COPY runtime/start-agent-session.sh /usr/local/bin/nvt-start-agent-session
 
 RUN chmod +x \
   /usr/local/bin/nvt-agent-entrypoint \
+  /usr/local/bin/nvt-install-tools \
   /usr/local/bin/nvt-start-code-server \
   /usr/local/bin/nvt-start-agent-session \
   && mkdir -p /workspace /root/.nvt-agent
