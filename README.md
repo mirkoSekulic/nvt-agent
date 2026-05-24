@@ -7,6 +7,36 @@ and terminal agent session.
 The current implementation is intentionally script and Makefile driven. A
 manager/CLI can be added later on top of the same runtime pieces.
 
+## Architecture
+
+`nvt-agent` is split into small runtime pieces:
+
+```text
+host scripts / future manager   create, start, stop, inspect agents
+runtime core                    bootstrap tools, start services, launch plugins
+agentd                          container-local session and event API
+plugins                         executable automation units
+```
+
+The long-term direction is to replace the Make/scripts host layer with a
+manager/CLI that owns lifecycle, state, locks, reconciliation, and eventually
+Compose or Kubernetes resource generation. The container runtime pieces should
+not depend on Make; they should keep working when started by Docker Compose,
+another CLI, or a future controller.
+
+`agentd` is intentionally narrower than a manager. It runs inside each agent
+container and owns only interaction with the running agent session:
+
+- prompt queue
+- single writer into the tmux session
+- external prompt warning
+- append-only event log
+- `agentdctl` client commands
+- reactive plugin support through event-log subscription
+
+`agentd` is not a security boundary and does not own secrets, egress policy,
+Docker, Compose, Kubernetes, bootstrap, or plugin supervision.
+
 ## Quick Start
 
 Build the runtime image from `runtime/Dockerfile`:
@@ -375,6 +405,26 @@ CUSTOM_PLUGINS_DIR=/path/to/custom-plugins
 See [runtime/plugins/README.md](runtime/plugins/README.md) for the plugin
 contract and authoring details.
 
+Plugins can talk to the running Codex or Claude Code session through `agentd`.
+For simple prompts, use the compatibility wrapper:
+
+```sh
+echo "Review failing tests and fix them." | prompt-agent
+```
+
+For the full container-local API, use `agentdctl`:
+
+```sh
+agentdctl prompt --source plugin:my-plugin "Review failing tests"
+agentdctl publish plugin.my-plugin.ready --source plugin:my-plugin --payload '{"ok":true}'
+agentdctl signal done --message "Finished the current task"
+agentdctl subscribe --filter plugin.my-plugin.
+```
+
+`agentdctl subscribe` tails `$NVT_STATE_DIR/agentd/events.jsonl`. By default it
+uses `--since end`, so restarted plugins only receive future events. Use
+`--since beginning` only when the reaction is idempotent.
+
 Run diagnostics inside an agent:
 
 ```sh
@@ -437,9 +487,10 @@ Container startup order:
 ```text
 1. bootstrap tools from agent.yaml
 2. run before-agent plugins
-3. start code-server
-4. start the terminal agent in tmux
-5. run after-agent plugins in the background
+3. start agentd
+4. start code-server
+5. start the terminal agent in tmux
+6. run after-agent plugins in the background
 ```
 
 Codex auth is mounted from the host `~/.codex` read-only. Claude auth is stored
@@ -447,3 +498,25 @@ per agent under `.agents/<name>/auth/claude` and mounted to `/root/.claude`.
 
 The agent root home is a named Docker volume, so installed state under `/root`
 can survive `agent-down`. Use `agent-rm` to remove the agent Compose volume.
+
+## agentd Long-Term Direction
+
+The `agentd` protocol is documented under [protocol/](protocol/). Its behavior
+is covered by a black-box Go conformance suite in [tests/agentd/](tests/agentd/),
+so the implementation can be rewritten later without changing plugins.
+
+Current scope:
+
+- JSONL over a Unix socket at `/run/nvt-agent/agentd.sock`
+- `health`, `status`, `prompt`, and `event.publish`
+- `agentdctl subscribe` implemented as client-side log tailing
+- advisory `plugin.agent.signal.*` events
+
+Deferred work:
+
+- session readiness / turn detection
+- verified `session.*` events
+- durable subscribe cursors and log rotation
+- bounded prompt queue and queue overflow policy
+- stronger agentd supervision
+- optional Go rewrite behind the same protocol
