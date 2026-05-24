@@ -202,7 +202,7 @@ func TestToolOnlyPluginRunPluginsSkipsCleanly(t *testing.T) {
 	config := f.writeAgentConfig(exportConfig("tool-only", "tool-only", toolCommand))
 
 	f.runExport(config, true)
-	f.runRunPlugins(config, "before-agent", true)
+	f.runRunPlugins(config, "after-agent", true)
 
 	statePath := filepath.Join(f.state, "plugins", "tool-only", "state.json")
 	var state map[string]any
