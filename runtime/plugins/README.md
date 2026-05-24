@@ -257,6 +257,18 @@ echo "Review the workspace and summarize failing tests." | prompt-agent
 the main tmux agent session as the single session writer. Plugins should not
 call `tmux` directly.
 
+Reactive plugins can subscribe to the event log:
+
+```sh
+agentdctl subscribe --filter plugin.test-runner.failed | while read -r event; do
+  printf '%s\n' "$event" | prompt-agent
+done
+```
+
+`agentdctl subscribe` defaults to `--since end`, so restarted plugins only see
+future events. Use `--since beginning` only for idempotent reactions, because it
+replays historical events.
+
 ## Lifecycle
 
 `when` controls startup order:

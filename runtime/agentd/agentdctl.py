@@ -4,10 +4,20 @@ import json
 import os
 import socket
 import sys
+import time
+from pathlib import Path
 
 
 def socket_path():
     return os.environ.get("NVT_AGENTD_SOCKET", "/run/nvt-agent/agentd.sock")
+
+
+def state_dir():
+    return Path(os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
+
+
+def events_path():
+    return state_dir() / "agentd" / "events.jsonl"
 
 
 def request(payload):
@@ -39,6 +49,81 @@ def read_message(args):
     return sys.stdin.read()
 
 
+def load_payload(value):
+    if value.startswith("@"):
+        with open(value[1:], "r", encoding="utf-8") as file:
+            return json.load(file)
+    return json.loads(value)
+
+
+def effective_event_name(event):
+    if event.get("event") == "plugin.event":
+        value = event.get("plugin_event")
+        if isinstance(value, str):
+            return value
+    value = event.get("event")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def event_matches(event, filters):
+    if not filters:
+        return True
+    name = effective_event_name(event)
+    return any(name.startswith(prefix) for prefix in filters)
+
+
+def subscribe(args):
+    path = events_path()
+    position = None
+
+    try:
+        while True:
+            if position is None:
+                try:
+                    file = path.open("r", encoding="utf-8")
+                except FileNotFoundError:
+                    time.sleep(0.05)
+                    continue
+                with file:
+                    if args.since == "end":
+                        file.seek(0, os.SEEK_END)
+                    while True:
+                        line = file.readline()
+                        if not line:
+                            position = file.tell()
+                            break
+                        emit_event_line(line, args.filter)
+                continue
+
+            try:
+                with path.open("r", encoding="utf-8") as file:
+                    file.seek(position)
+                    while True:
+                        line = file.readline()
+                        if not line:
+                            position = file.tell()
+                            break
+                        emit_event_line(line, args.filter)
+            except FileNotFoundError:
+                position = None
+
+            time.sleep(0.05)
+    except (KeyboardInterrupt, BrokenPipeError):
+        return 0
+
+
+def emit_event_line(line, filters):
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(event, dict) or not event_matches(event, filters):
+        return
+    print(json.dumps(event, separators=(",", ":")), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="agentdctl")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -52,6 +137,16 @@ def main():
     publish.add_argument("event")
     publish.add_argument("--source", required=True)
     publish.add_argument("--payload", default="{}")
+
+    signal_parser = subparsers.add_parser("signal")
+    signal_parser.add_argument("name")
+    signal_parser.add_argument("--source", default="agent")
+    signal_parser.add_argument("--message")
+    signal_parser.add_argument("--payload", default="{}")
+
+    subscribe_parser = subparsers.add_parser("subscribe")
+    subscribe_parser.add_argument("--since", choices=["end", "beginning"], default="end")
+    subscribe_parser.add_argument("--filter", action="append", default=[])
 
     subparsers.add_parser("status")
     subparsers.add_parser("health")
@@ -67,17 +162,29 @@ def main():
         })
 
     if args.command == "publish":
-        if args.payload.startswith("@"):
-            with open(args.payload[1:], "r", encoding="utf-8") as file:
-                payload = json.load(file)
-        else:
-            payload = json.loads(args.payload)
+        payload = load_payload(args.payload)
         return request({
             "type": "event.publish",
             "source": args.source,
             "event": args.event,
             "payload": payload,
         })
+
+    if args.command == "signal":
+        if not args.name.strip():
+            parser.error("signal name must not be empty")
+        payload = load_payload(args.payload)
+        if args.message is not None:
+            payload["message"] = args.message
+        return request({
+            "type": "event.publish",
+            "source": args.source,
+            "event": f"plugin.agent.signal.{args.name}",
+            "payload": payload,
+        })
+
+    if args.command == "subscribe":
+        return subscribe(args)
 
     if args.command == "status":
         return request({"type": "status"})

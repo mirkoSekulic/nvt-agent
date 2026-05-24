@@ -270,6 +270,146 @@ func TestAgentdctlAndPromptAgentClients(t *testing.T) {
 	})
 }
 
+func TestSubscribeDefaultSinceEndSeesFutureEventsOnly(t *testing.T) {
+	f := startFixture(t, true)
+	oldEvent := "plugin.subscribe.old-" + uniqueID()
+	f.publishPluginEvent(oldEvent, map[string]any{"old": true})
+
+	subscriber := startSubscriber(t, f, "--filter", "plugin.subscribe.")
+	assertNoLine(t, subscriber, 250*time.Millisecond)
+
+	futureEvent := "plugin.subscribe.future-" + uniqueID()
+	f.publishPluginEvent(futureEvent, map[string]any{"future": true})
+	event := readSubscriberEvent(t, subscriber, time.Second)
+	if event["plugin_event"] != futureEvent {
+		t.Fatalf("expected future event %q, got %#v", futureEvent, event)
+	}
+}
+
+func TestSubscribeBeginningReplaysHistoryAndMultipleFilters(t *testing.T) {
+	f := startFixture(t, true)
+	testEvent := "plugin.tests.failed-" + uniqueID()
+	githubEvent := "plugin.github.comment-" + uniqueID()
+	otherEvent := "plugin.other.ignored-" + uniqueID()
+	f.publishPluginEvent(testEvent, map[string]any{"kind": "tests"})
+	f.publishPluginEvent(githubEvent, map[string]any{"kind": "github"})
+	f.publishPluginEvent(otherEvent, map[string]any{"kind": "other"})
+
+	subscriber := startSubscriber(t, f,
+		"--since", "beginning",
+		"--filter", "plugin.tests.",
+		"--filter", "plugin.github.",
+	)
+
+	seen := map[string]bool{}
+	waitFor(t, time.Second, func() bool {
+		for {
+			select {
+			case line := <-subscriber.lines:
+				event := decodeJSON(t, []byte(line))
+				if pluginEvent, ok := event["plugin_event"].(string); ok {
+					seen[pluginEvent] = true
+					if pluginEvent == otherEvent {
+						t.Fatalf("subscriber received excluded event %#v", event)
+					}
+				}
+			default:
+				return seen[testEvent] && seen[githubEvent]
+			}
+		}
+	})
+}
+
+func TestSubscribeToleratesMissingEventLog(t *testing.T) {
+	root := repoRoot(t)
+	temp, err := os.MkdirTemp("", "nvt-agentd-subscribe-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(temp) })
+
+	state := filepath.Join(temp, "state")
+	subscriber := startRawSubscriber(t, agentdctlBin(root), []string{"NVT_STATE_DIR=" + state}, "subscribe", "--since", "beginning", "--filter", "plugin.missing.")
+	eventPath := filepath.Join(state, "agentd", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(eventPath), 0o755); err != nil {
+		t.Fatalf("create event log dir: %v", err)
+	}
+	expected := "plugin.missing.created-" + uniqueID()
+	appendEventLine(t, eventPath, map[string]any{
+		"id":           "evt_" + uniqueID(),
+		"event":        "plugin.event",
+		"created_at":   "2026-05-24T00:00:00Z",
+		"source":       "plugin:missing",
+		"plugin_event": expected,
+		"payload":      map[string]any{"ok": true},
+	})
+
+	event := readSubscriberEvent(t, subscriber, time.Second)
+	if event["plugin_event"] != expected {
+		t.Fatalf("expected missing-log event %q, got %#v", expected, event)
+	}
+}
+
+func TestSubscribeDuringConcurrentPublishEmitsValidJSONL(t *testing.T) {
+	f := startFixture(t, true)
+	subscriber := startSubscriber(t, f, "--since", "beginning", "--filter", "plugin.stream.")
+	const count = 20
+
+	for i := 0; i < count; i++ {
+		f.publishPluginEvent(fmt.Sprintf("plugin.stream.event-%d-%s", i, uniqueID()), map[string]any{
+			"index": i,
+			"data":  strings.Repeat("x", 12000),
+		})
+	}
+
+	received := 0
+	waitFor(t, time.Second, func() bool {
+		for {
+			select {
+			case line := <-subscriber.lines:
+				event := decodeJSON(t, []byte(line))
+				if _, ok := event["id"].(string); !ok {
+					t.Fatalf("subscriber event missing id: %#v", event)
+				}
+				received++
+			default:
+				return received >= count
+			}
+		}
+	})
+}
+
+func TestSignalPublishesAdvisoryAgentSignal(t *testing.T) {
+	f := startFixture(t, true)
+	output, err := commandWithEnv(t, agentdctlBin(f.root), append(f.env(), "NVT_AGENTD_SOCKET="+f.socket),
+		"signal", "done", "--message", "finished",
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("agentdctl signal failed: %v\n%s", err, output)
+	}
+	assertOK(t, decodeJSON(t, output))
+
+	waitFor(t, time.Second, func() bool {
+		for _, event := range readEvents(t, f.eventsPath()) {
+			if event["plugin_event"] == "plugin.agent.signal.done" {
+				payload, ok := event["payload"].(map[string]any)
+				if !ok {
+					t.Fatalf("signal payload is not object: %#v", event)
+				}
+				return payload["message"] == "finished"
+			}
+		}
+		return false
+	})
+
+	output, err = commandWithEnv(t, agentdctlBin(f.root), append(f.env(), "NVT_AGENTD_SOCKET="+f.socket),
+		"signal", "",
+	).CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected empty signal name to fail, got output %s", output)
+	}
+}
+
 func startFixture(t *testing.T, startTmux bool) *fixture {
 	t.Helper()
 	root := repoRoot(t)
@@ -307,6 +447,16 @@ func startFixture(t *testing.T, startTmux bool) *fixture {
 		return err == nil && response["ok"] == true
 	})
 	return f
+}
+
+func (f *fixture) publishPluginEvent(event string, payload map[string]any) {
+	f.t.Helper()
+	assertOK(f.t, f.request(map[string]any{
+		"type":    "event.publish",
+		"source":  "plugin:test",
+		"event":   event,
+		"payload": payload,
+	}))
 }
 
 func (f *fixture) env() []string {
@@ -446,6 +596,86 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+type subscriber struct {
+	cmd   *exec.Cmd
+	lines chan string
+}
+
+func startSubscriber(t *testing.T, f *fixture, args ...string) *subscriber {
+	t.Helper()
+	return startRawSubscriber(t, agentdctlBin(f.root), append(f.env(), "NVT_STATE_DIR="+f.state), append([]string{"subscribe"}, args...)...)
+}
+
+func startRawSubscriber(t *testing.T, command string, env []string, args ...string) *subscriber {
+	t.Helper()
+	cmd := commandWithEnv(t, command, env, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("create subscriber stdout pipe: %v", err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start subscriber: %v", err)
+	}
+
+	sub := &subscriber{
+		cmd:   cmd,
+		lines: make(chan string, 100),
+	}
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			sub.lines <- scanner.Text()
+		}
+		close(sub.lines)
+	}()
+	t.Cleanup(func() { stopSubscriber(sub) })
+	return sub
+}
+
+func stopSubscriber(sub *subscriber) {
+	if sub == nil || sub.cmd == nil || sub.cmd.Process == nil {
+		return
+	}
+	_ = sub.cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan error, 1)
+	go func() { done <- sub.cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		_ = sub.cmd.Process.Kill()
+		<-done
+	}
+	sub.cmd = nil
+}
+
+func readSubscriberEvent(t *testing.T, sub *subscriber, timeout time.Duration) map[string]any {
+	t.Helper()
+	select {
+	case line, ok := <-sub.lines:
+		if !ok {
+			t.Fatal("subscriber exited before emitting an event")
+		}
+		return decodeJSON(t, []byte(line))
+	case <-time.After(timeout):
+		t.Fatalf("subscriber did not emit an event within %s", timeout)
+	}
+	return nil
+}
+
+func assertNoLine(t *testing.T, sub *subscriber, timeout time.Duration) {
+	t.Helper()
+	select {
+	case line, ok := <-sub.lines:
+		if ok {
+			t.Fatalf("expected no subscriber output, got %s", line)
+		}
+		t.Fatal("subscriber exited unexpectedly")
+	case <-time.After(timeout):
+	}
+}
+
 func startTmuxCat(t *testing.T, session string) {
 	t.Helper()
 	cmd := exec.Command("tmux", "new-session", "-d", "-s", session, "cat")
@@ -485,6 +715,22 @@ func readEvents(t *testing.T, path string) []map[string]any {
 		t.Fatalf("scan events: %v", err)
 	}
 	return events
+}
+
+func appendEventLine(t *testing.T, path string, event map[string]any) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open event log for append: %v", err)
+	}
+	defer file.Close()
+	line, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	if _, err := file.Write(append(line, '\n')); err != nil {
+		t.Fatalf("append event: %v", err)
+	}
 }
 
 func countEvents(t *testing.T, path string, eventName string) int {

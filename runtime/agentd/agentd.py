@@ -42,6 +42,7 @@ class Agentd:
         }
         line = json.dumps(record, separators=(",", ":")) + "\n"
         with self.log_lock, self.event_log.open("a", encoding="utf-8") as file:
+            # agentdctl subscribe tails this file and relies on whole-line appends.
             file.write(line)
         return record
 
