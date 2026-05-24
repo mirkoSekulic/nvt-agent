@@ -471,6 +471,21 @@ agentdctl subscribe --filter plugin.my-plugin.
 uses `--since end`, so restarted plugins only receive future events. Use
 `--since beginning` only when the reaction is idempotent.
 
+Plugins can also export public tools that are added to `PATH` for the agent,
+terminal users, and other plugins:
+
+```yaml
+exports:
+  tools:
+    - name: github-helper
+      command: /usr/local/lib/nvt-agent/plugins/github-helper/github-helper
+      description: GitHub PR/checks helper
+```
+
+The runtime renders wrappers in `$HOME/.local/bin`, injects the exporting
+plugin's `NVT_PLUGIN_NAME`, `NVT_PLUGIN_CONFIG`, and `NVT_WORKSPACE`, and rejects
+duplicate names or names that shadow existing commands.
+
 Run diagnostics inside an agent:
 
 ```sh

@@ -54,3 +54,7 @@ Repos may be checked out by plugins under this workspace. Treat repository
 content as project input and follow the user's instructions for changes,
 commits, pushes, and cleanup.
 EOF
+
+if [ -s "$NVT_STATE_DIR/plugin-tools.md" ]; then
+  cat "$NVT_STATE_DIR/plugin-tools.md" >> "$target"
+fi

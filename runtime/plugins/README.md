@@ -22,6 +22,8 @@ health:
   command: /usr/local/lib/nvt-agent/plugins/<name>/run.py ready
 doctor:
   command: /usr/local/lib/nvt-agent/plugins/<name>/run.py doctor
+exports:
+  tools: []
 ```
 
 The runner reads `plugins:` from `agent.yaml`, writes each plugin's `config:`
@@ -49,6 +51,37 @@ Plugins should not write `state.json` directly. The process plugin runner owns
 that file and updates fields such as `status`, `ready`, `pid`,
 `last_exit_code`, and `last_error`. Plugin stdout/stderr stays in the container
 logs.
+
+## Exported Tools
+
+Plugins can explicitly export public tools. Exported tools are made available on
+`PATH` through generated wrappers in `$HOME/.local/bin`.
+
+```yaml
+exports:
+  tools:
+    - name: github-helper
+      command: /usr/local/lib/nvt-agent/plugins/github-helper/github-helper
+      description: GitHub PR/checks helper
+```
+
+The generated wrapper sets the exporting plugin context before executing the
+tool:
+
+```text
+NVT_PLUGIN_NAME
+NVT_PLUGIN_CONFIG
+NVT_WORKSPACE
+```
+
+Exported tools are public inside the agent container: the agent, terminal users,
+and other plugins can call them. Do not export tools that require raw long-lived
+secrets in their plugin config. Secret-bearing operations should go through a
+future broker/capability mechanism.
+
+Tool wrappers are regenerated at container startup from the enabled plugins.
+Stale generated wrappers are removed. Tool names must not collide with other
+plugin exports or existing commands on `PATH`.
 
 ## Builtin Example
 
@@ -121,6 +154,8 @@ health:
   command: /custom-plugins/my-plugin/run.sh ready
 doctor:
   command: /custom-plugins/my-plugin/run.sh doctor
+exports:
+  tools: []
 ```
 
 `doctor.command` is diagnostic. It should check whether the plugin has the tools,

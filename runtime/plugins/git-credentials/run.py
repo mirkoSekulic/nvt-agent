@@ -10,7 +10,7 @@ import yaml
 
 CONFIG_DIR = Path.home() / ".nvt-agent" / "git-credentials"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
-HELPER = "/usr/local/lib/nvt-agent/plugins/git-credentials/git-credential-nvt.py"
+HELPER = "git-credential-nvt"
 
 
 def fail(message):
@@ -195,11 +195,9 @@ def main():
 def doctor():
     if shutil.which("git") is None:
         fail("git not found on PATH")
-    helper = Path(HELPER)
-    if not helper.is_file():
-        fail(f"{HELPER} is missing")
-    if not os.access(helper, os.X_OK):
-        fail(f"{HELPER} is not executable")
+    helper = shutil.which(HELPER)
+    if not helper:
+        fail(f"{HELPER} is not on PATH")
 
     config = load_config()
     credentials = list_value(config.get("credentials"), "credentials")

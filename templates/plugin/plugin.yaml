@@ -3,3 +3,5 @@ health:
   command: {{PLUGIN_COMMAND}} ready
 doctor:
   command: {{PLUGIN_COMMAND}} doctor
+exports:
+  tools: []

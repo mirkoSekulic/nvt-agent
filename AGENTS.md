@@ -9,6 +9,8 @@ Repository-local guidance for nvt-agent work.
 - When changing `runtime/agentd`, `protocol/`, or `runtime/core/prompt-agent.sh`, run the conformance suite from `tests/agentd`.
 - Plugin events are advisory and must use `plugin.<name>.*`; core/session event names are reserved.
 - Prefer executable plugins with simple config contracts over core-specific integrations.
+- Plugin `exports.tools` are the explicit public command API for a plugin. Exported tools are added to `PATH`; do not add plugin-specific helper logic to core.
+- Exported tools run in the untrusted agent container. Do not put raw long-lived secrets in exported tool config; secret-bearing work should go through a future broker/capability mechanism.
 - Keep runtime and plugin contracts container-native and Kubernetes-friendly. Avoid making plugin behavior depend on Docker Compose, host paths, or Docker socket access unless the feature is explicitly local-only.
 - Treat the long-term manager direction as Kubernetes-native: a future operator should reconcile Agent custom resources into Pods/PVCs/Services/routes/status. Local Docker Compose is a development backend.
 - Keep isolation runtime-selectable. Future Kubernetes support should allow hardened pod runtimes through `RuntimeClass`, such as Kata Containers or other microVM-backed pod runtimes.

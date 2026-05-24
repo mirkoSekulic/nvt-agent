@@ -17,6 +17,7 @@ export PATH="${PATH}"
 EOF
 
 bootstrap "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
+export-plugin-tools "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 write-agent-instructions
 
 if [ -x /workspace/.nvt-agent/bootstrap.sh ]; then

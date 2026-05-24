@@ -24,6 +24,7 @@ RUN npm install -g @openai/codex @anthropic-ai/claude-code
 COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint
 COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
 COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
+COPY runtime/core/export-plugin-tools.py /usr/local/bin/export-plugin-tools
 COPY runtime/core/health.py /usr/local/bin/health
 COPY runtime/core/doctor.py /usr/local/bin/doctor
 COPY runtime/core/prompt-agent.sh /usr/local/bin/prompt-agent
@@ -38,6 +39,7 @@ RUN chmod +x \
   /usr/local/bin/entrypoint \
   /usr/local/bin/bootstrap \
   /usr/local/bin/run-plugins \
+  /usr/local/bin/export-plugin-tools \
   /usr/local/bin/health \
   /usr/local/bin/doctor \
   /usr/local/bin/prompt-agent \

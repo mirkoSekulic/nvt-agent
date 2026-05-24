@@ -151,7 +151,10 @@ def builtin_command(name):
     command = string_value(manifest.get("command"), f"builtin plugin {name} command")
     if command:
         return command
-    return str(BUILTIN_PLUGIN_DIR / name / "run.py")
+    run_py = BUILTIN_PLUGIN_DIR / name / "run.py"
+    if run_py.is_file():
+        return str(run_py)
+    return None
 
 
 def plugin_command(plugin):
@@ -165,7 +168,7 @@ def plugin_command(plugin):
     if source == "builtin":
         return builtin_command(name)
     if source == "custom":
-        fail("custom plugins require plugin.command")
+        return None
 
     fail(f"unsupported plugin.source: {source}")
 
@@ -185,6 +188,23 @@ def write_plugin_config(name, config):
 def run_plugin(plugin, state, attempt):
     name = string_value(plugin.get("name"), "plugin.name", required=True)
     command = plugin_command(plugin)
+    if not command:
+        state.update(
+            {
+                "status": "skipped",
+                "ready": True,
+                "pid": None,
+                "attempt": attempt,
+                "started_at": None,
+                "finished_at": utc_now(),
+                "last_success_at": utc_now(),
+                "last_exit_code": None,
+                "last_error": None,
+            }
+        )
+        write_plugin_state(name, state)
+        print(f"run-plugins: {name} has no lifecycle command, skipping", flush=True)
+        return
     config_path = write_plugin_config(name, object_value(plugin.get("config"), "plugin.config"))
 
     env = os.environ.copy()
