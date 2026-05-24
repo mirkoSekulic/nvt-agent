@@ -10,7 +10,8 @@ import yaml
 
 CONFIG_DIR = Path.home() / ".nvt-agent" / "git-credentials"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
-HELPER = "git-credential-nvt"
+HELPER_BINARY = "git-credential-nvt"
+HELPER_CONFIG = "nvt"
 
 
 def fail(message):
@@ -155,7 +156,7 @@ def write_helper_config(credentials):
 
 
 def configure_git_helper():
-    run(["git", "config", "--global", "credential.helper", HELPER])
+    run(["git", "config", "--global", "credential.helper", HELPER_CONFIG])
     run(["git", "config", "--global", "credential.useHttpPath", "true"])
 
 
@@ -195,9 +196,9 @@ def main():
 def doctor():
     if shutil.which("git") is None:
         fail("git not found on PATH")
-    helper = shutil.which(HELPER)
+    helper = shutil.which(HELPER_BINARY)
     if not helper:
-        fail(f"{HELPER} is not on PATH")
+        fail(f"{HELPER_BINARY} is not on PATH")
 
     config = load_config()
     credentials = list_value(config.get("credentials"), "credentials")
