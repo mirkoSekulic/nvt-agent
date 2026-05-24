@@ -28,6 +28,7 @@ class Agentd:
         self.last_error = None
         self.worker = threading.Thread(target=self.prompt_worker, daemon=True)
         self.server_socket = None
+        self.log_lock = threading.Lock()
         self.event_log = self.state_dir / "agentd" / "events.jsonl"
         self.event_log.parent.mkdir(parents=True, exist_ok=True)
 
@@ -38,9 +39,9 @@ class Agentd:
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             **fields,
         }
-        with self.event_log.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, separators=(",", ":")))
-            file.write("\n")
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        with self.log_lock, self.event_log.open("a", encoding="utf-8") as file:
+            file.write(line)
         return record
 
     def start(self):
@@ -136,6 +137,8 @@ class Agentd:
         payload = request.get("payload", {})
         if any(event.startswith(prefix) for prefix in RESERVED_EVENT_PREFIXES):
             raise ValueError(f"event uses reserved prefix: {event}")
+        if not event.startswith("plugin."):
+            raise ValueError("plugin events must use the plugin.<plugin-name>.<event-name> namespace")
         if not isinstance(payload, dict):
             raise ValueError("payload must be a JSON object")
         record = self.log_event("plugin.event", source=source, plugin_event=event, payload=payload)
@@ -231,4 +234,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
