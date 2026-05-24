@@ -10,5 +10,6 @@ Repository-local guidance for nvt-agent work.
 - Plugin events are advisory and must use `plugin.<name>.*`; core/session event names are reserved.
 - Prefer executable plugins with simple config contracts over core-specific integrations.
 - Keep runtime and plugin contracts container-native and Kubernetes-friendly. Avoid making plugin behavior depend on Docker Compose, host paths, or Docker socket access unless the feature is explicitly local-only.
+- Treat the long-term manager direction as Kubernetes-native: a future operator should reconcile Agent custom resources into Pods/PVCs/Services/routes/status. Local Docker Compose is a development backend.
+- Keep runtime plugins and future operator extensions conceptually separate. Runtime plugins implement agent behavior; operator extensions influence scheduling, placement, provisioning, routing, and policy.
 - Keep generated agent workspace guidance in `runtime/core/write-agent-instructions.sh` aligned with runtime behavior.
-

@@ -19,10 +19,14 @@ plugins                         executable automation units
 ```
 
 The long-term direction is to replace the Make/scripts host layer with a
-manager/CLI that owns lifecycle, state, locks, reconciliation, and eventually
-Compose or Kubernetes resource generation. The container runtime pieces should
-not depend on Make; they should keep working when started by Docker Compose,
-another CLI, or a future controller.
+manager. The preferred manager direction is Kubernetes-native: an operator
+reconciles agent custom resources into Pods, PVCs, Services, Ingress/Gateway
+routes, Secrets, and status conditions. Local Docker Compose should remain a
+development backend, not the center of the architecture.
+
+The container runtime pieces should not depend on Make or Docker Compose; they
+should keep working when started by Docker Compose, another CLI, or a future
+Kubernetes controller.
 
 `agentd` is intentionally narrower than a manager. It runs inside each agent
 container and owns only interaction with the running agent session:
@@ -36,6 +40,42 @@ container and owns only interaction with the running agent session:
 
 `agentd` is not a security boundary and does not own secrets, egress policy,
 Docker, Compose, Kubernetes, bootstrap, or plugin supervision.
+
+## Kubernetes-Native Direction
+
+The intended mature shape is:
+
+```text
+Agent CRD        desired state for one agent
+Operator         reconciliation, lifecycle, scheduling, status
+Agent Pod        runtime container, optional sidecars/init containers
+agentd           pod-local session and event API
+Plugins          runtime processes, init containers, or sidecars
+Workspace        PVC-backed mounted workspace
+Secrets          Kubernetes Secrets or external secret providers
+Routing          Ingress, Gateway API, or Traefik
+Status           Kubernetes conditions, events, and logs
+```
+
+This keeps nvt-agent aligned with GitOps workflows: desired agents can live in
+git, and Flux/Argo CD can apply them while the operator reconciles actual
+runtime state. Kubernetes tools such as `kubectl`, `k9s`, logs, events, and RBAC
+become the first operational UI instead of building a custom web UI first.
+
+The operator should also be extensible. Core scheduling policy can start as
+declarative fields and profiles, while custom scheduling/provisioning decisions
+can later be delegated to external extension services. Runtime plugins and
+operator extensions are separate concerns:
+
+```text
+runtime plugins      behavior inside or beside an agent Pod
+operator extensions  scheduling, placement, provisioning, routing policy
+```
+
+The immediate constraint is to keep runtime and plugin contracts
+container-native: config, env, files, workspace mounts, and `agentd` APIs should
+not assume Docker Compose-specific behavior unless a feature is explicitly
+local-only.
 
 ## Quick Start
 
