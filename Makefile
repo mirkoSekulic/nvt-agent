@@ -1,6 +1,7 @@
 TYPE ?= codex
+DIR ?= runtime/plugins
 
-.PHONY: runtime-build infra-up infra-down infra-network-rm agent-init agent-up agent-logs agent-shell agent-ps agent-down agent-down-all agent-rm agent-rm-all down-all clean nuke
+.PHONY: runtime-build infra-up infra-down infra-network-rm agent-init agent-up agent-logs agent-shell agent-ps agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -46,6 +47,10 @@ agent-rm:
 
 agent-rm-all:
 	bash scripts/agent-rm-all.sh $(if $(FORCE),--force)
+
+plugin-init:
+	@test -n "$(NAME)" || (echo "usage: make plugin-init NAME=<name> [DIR=runtime/plugins]"; exit 1)
+	bash scripts/plugin-init.sh --name "$(NAME)" --dir "$(DIR)"
 
 down-all:
 	bash scripts/down-all.sh

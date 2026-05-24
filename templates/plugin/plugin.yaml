@@ -1,0 +1,5 @@
+command: {{PLUGIN_COMMAND}}
+health:
+  readiness: false
+doctor:
+  command: {{PLUGIN_COMMAND}} doctor

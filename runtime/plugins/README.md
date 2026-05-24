@@ -14,10 +14,14 @@ runtime/plugins/<name>/
   run.py
 ```
 
-`plugin.yaml` defines the default command:
+`plugin.yaml` defines builtin plugin defaults:
 
 ```yaml
 command: /usr/local/lib/nvt-agent/plugins/<name>/run.py
+health:
+  readiness: false
+doctor:
+  command: /usr/local/lib/nvt-agent/plugins/<name>/run.py doctor
 ```
 
 The runner reads `plugins:` from `agent.yaml`, writes each plugin's `config:`
@@ -88,6 +92,39 @@ repos:
 ```
 
 Existing repositories are skipped and left untouched, including remotes.
+
+## Scaffolding
+
+Generate a plugin folder from templates:
+
+```sh
+make plugin-init NAME=my-plugin
+```
+
+By default this creates a builtin plugin under:
+
+```text
+runtime/plugins/my-plugin/
+```
+
+To create a custom plugin for one agent:
+
+```sh
+make plugin-init NAME=my-plugin DIR=.agents/frontend/custom-plugins
+```
+
+The generated `plugin.yaml` includes common plugin metadata:
+
+```yaml
+command: /custom-plugins/my-plugin/run.sh
+health:
+  readiness: false
+doctor:
+  command: /custom-plugins/my-plugin/run.sh doctor
+```
+
+`doctor.command` is diagnostic. It should check whether the plugin has the tools,
+configuration, and credentials it needs. It is separate from readiness.
 
 Credential `match` values are URL prefixes. They can target a server, an
 org/user, or one repo:

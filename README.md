@@ -374,6 +374,30 @@ CUSTOM_PLUGINS_DIR=/path/to/custom-plugins
 See [runtime/plugins/README.md](runtime/plugins/README.md) for the plugin
 contract and authoring details.
 
+Scaffold a builtin plugin:
+
+```sh
+make plugin-init NAME=my-plugin
+```
+
+Scaffold a custom plugin under an agent:
+
+```sh
+make plugin-init NAME=my-plugin DIR=.agents/frontend/custom-plugins
+```
+
+The scaffold includes `plugin.yaml`, `run.sh`, and a plugin README. The manifest
+includes placeholders for process readiness and the future plugin diagnostic
+command:
+
+```yaml
+command: /custom-plugins/my-plugin/run.sh
+health:
+  readiness: false
+doctor:
+  command: /custom-plugins/my-plugin/run.sh doctor
+```
+
 ## Runtime
 
 The runtime image is built from `runtime/Dockerfile` on top of:
