@@ -19,7 +19,7 @@ runtime/plugins/<name>/
 ```yaml
 command: /usr/local/lib/nvt-agent/plugins/<name>/run.py
 health:
-  readiness: false
+  command: /usr/local/lib/nvt-agent/plugins/<name>/run.py ready
 doctor:
   command: /usr/local/lib/nvt-agent/plugins/<name>/run.py doctor
 ```
@@ -118,13 +118,15 @@ The generated `plugin.yaml` includes common plugin metadata:
 ```yaml
 command: /custom-plugins/my-plugin/run.sh
 health:
-  readiness: false
+  command: /custom-plugins/my-plugin/run.sh ready
 doctor:
   command: /custom-plugins/my-plugin/run.sh doctor
 ```
 
 `doctor.command` is diagnostic. It should check whether the plugin has the tools,
 configuration, and credentials it needs. It is separate from readiness.
+Whether a plugin blocks agent readiness is configured per agent in `agent.yaml`
+with `health.readiness: true`.
 
 Credential `match` values are URL prefixes. They can target a server, an
 org/user, or one repo:

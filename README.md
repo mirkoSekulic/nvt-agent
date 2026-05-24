@@ -387,13 +387,12 @@ make plugin-init NAME=my-plugin DIR=.agents/frontend/custom-plugins
 ```
 
 The scaffold includes `plugin.yaml`, `run.sh`, and a plugin README. The manifest
-includes placeholders for process readiness and the future plugin diagnostic
-command:
+describes plugin commands; agent readiness policy stays in `agent.yaml`:
 
 ```yaml
 command: /custom-plugins/my-plugin/run.sh
 health:
-  readiness: false
+  command: /custom-plugins/my-plugin/run.sh ready
 doctor:
   command: /custom-plugins/my-plugin/run.sh doctor
 ```
