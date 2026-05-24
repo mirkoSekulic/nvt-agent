@@ -26,6 +26,9 @@ type fixture struct {
 	cmd     *exec.Cmd
 }
 
+// These tests intentionally avoid t.Parallel because agentd talks to the
+// default tmux server. Each test gets a unique session, but the server is shared.
+
 func TestHealthAndStatus(t *testing.T) {
 	f := startFixture(t, true)
 
@@ -454,7 +457,7 @@ func startTmuxCat(t *testing.T, session string) {
 
 func capturePane(t *testing.T, session string) string {
 	t.Helper()
-	output, err := exec.Command("tmux", "capture-pane", "-pt", session).CombinedOutput()
+	output, err := exec.Command("tmux", "capture-pane", "-p", "-S", "-", "-t", session).CombinedOutput()
 	if err != nil {
 		t.Fatalf("capture tmux pane: %v\n%s", err, output)
 	}
