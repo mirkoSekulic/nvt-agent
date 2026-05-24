@@ -7,6 +7,7 @@ on:
       - "runtime/core/prompt-agent.sh"
       - "protocol/**"
       - "tests/agentd/**"
+      - "tests/runtime/**"
       - ".github/workflows/agentd.yml"
   pull_request:
     paths:
@@ -14,6 +15,7 @@ on:
       - "runtime/core/prompt-agent.sh"
       - "protocol/**"
       - "tests/agentd/**"
+      - "tests/runtime/**"
       - ".github/workflows/agentd.yml"
 
 jobs:
@@ -23,11 +25,11 @@ jobs:
       TERM: screen
     steps:
       - uses: actions/checkout@v4
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install runtime test dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux python3-yaml
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
@@ -38,3 +40,13 @@ jobs:
           AGENTDCTL_BIN: python3 ${{ github.workspace }}/runtime/agentd/agentdctl.py
           PROMPT_AGENT_BIN: bash ${{ github.workspace }}/runtime/core/prompt-agent.sh
         run: go test -v ./...
+      - name: Run runtime conformance suite
+        working-directory: tests/runtime
+        env:
+          EXPORT_PLUGIN_TOOLS_BIN: python3 ${{ github.workspace }}/runtime/core/export-plugin-tools.py
+          RUN_PLUGINS_BIN: python3 ${{ github.workspace }}/runtime/core/run-plugins.py
+        run: go test -v ./...
+      - name: Build runtime image
+        run: docker build -t nvt-agent:test -f runtime/Dockerfile .
+      - name: Run git credentials smoke
+        run: bash tests/runtime/git_credentials_smoke.sh nvt-agent:test
