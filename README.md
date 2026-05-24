@@ -61,6 +61,7 @@ Useful commands:
 make agent-ps
 make agent-logs NAME=frontend
 make agent-shell NAME=frontend
+make agent-doctor NAME=frontend
 make agent-down NAME=frontend
 make agent-rm NAME=frontend FORCE=1
 ```
@@ -373,6 +374,23 @@ CUSTOM_PLUGINS_DIR=/path/to/custom-plugins
 
 See [runtime/plugins/README.md](runtime/plugins/README.md) for the plugin
 contract and authoring details.
+
+Run diagnostics inside an agent:
+
+```sh
+make agent-doctor NAME=frontend
+make agent-doctor NAME=frontend PLUGIN=my-plugin
+```
+
+Inside the container, `doctor` supports:
+
+```sh
+doctor
+doctor --core
+doctor --plugins
+doctor --plugin my-plugin
+doctor --json
+```
 
 Scaffold a builtin plugin:
 

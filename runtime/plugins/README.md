@@ -316,3 +316,19 @@ health:
 When `health.command` is present, the command decides readiness. Exit `0` means
 ready, and any non-zero exit means not ready. For process plugins, the plugin
 state file must still exist so the runtime knows the plugin was launched.
+
+## Doctor
+
+`doctor` is diagnostic. It is separate from readiness.
+
+```sh
+doctor
+doctor --core
+doctor --plugins
+doctor --plugin custom-plugin
+doctor --json
+```
+
+The core doctor command checks runtime basics and generically discovers plugin
+doctor commands from `agent.yaml` and builtin `plugin.yaml` files. Plugin-specific
+checks belong inside each plugin's `doctor.command`.

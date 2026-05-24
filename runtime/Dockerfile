@@ -25,6 +25,7 @@ COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint
 COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
 COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
 COPY runtime/core/health.py /usr/local/bin/health
+COPY runtime/core/doctor.py /usr/local/bin/doctor
 COPY runtime/core/prompt-agent.sh /usr/local/bin/prompt-agent
 COPY runtime/core/write-agent-instructions.sh /usr/local/bin/write-agent-instructions
 COPY runtime/core/start-code-server.sh /usr/local/bin/start-code-server
@@ -36,6 +37,7 @@ RUN chmod +x \
   /usr/local/bin/bootstrap \
   /usr/local/bin/run-plugins \
   /usr/local/bin/health \
+  /usr/local/bin/doctor \
   /usr/local/bin/prompt-agent \
   /usr/local/bin/write-agent-instructions \
   /usr/local/bin/start-code-server \
