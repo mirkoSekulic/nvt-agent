@@ -252,9 +252,10 @@ Code session:
 echo "Review the workspace and summarize failing tests." | prompt-agent
 ```
 
-`prompt-agent` reads stdin, adds a warning that the prompt came from a plugin,
-and injects it into the main tmux agent session. Plugins should not call `tmux`
-directly.
+`prompt-agent` is a compatibility wrapper around `agentdctl prompt`.
+`agentd` queues the prompt, adds an external-input warning, and injects it into
+the main tmux agent session as the single session writer. Plugins should not
+call `tmux` directly.
 
 ## Lifecycle
 

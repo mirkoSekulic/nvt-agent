@@ -25,6 +25,7 @@ fi
 
 run-plugins before-agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 
+agentd &
 start-code-server
 start-agent-session
 run-plugins after-agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}" &

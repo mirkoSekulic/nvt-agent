@@ -75,6 +75,20 @@ def tcp_ready(host, port):
         return False
 
 
+def agentd_ready():
+    socket_path = os.environ.get("NVT_AGENTD_SOCKET", "/run/nvt-agent/agentd.sock")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.25)
+            client.connect(socket_path)
+            client.sendall(b'{"type":"health"}\n')
+            response = client.recv(4096)
+        data = json.loads(response.decode("utf-8"))
+        return bool(data.get("ok"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+
 def run_plugin_health_command(name, command):
     config_path = state_dir() / "plugins" / name / "config.yaml"
     env = os.environ.copy()
@@ -146,6 +160,10 @@ def build_result(config_path):
         "code-server": {
             "ready": tcp_ready("127.0.0.1", code_server_port),
             "port": code_server_port,
+        },
+        "agentd": {
+            "ready": agentd_ready(),
+            "socket": os.environ.get("NVT_AGENTD_SOCKET", "/run/nvt-agent/agentd.sock"),
         },
     }
 

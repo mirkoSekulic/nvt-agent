@@ -30,6 +30,8 @@ COPY runtime/core/prompt-agent.sh /usr/local/bin/prompt-agent
 COPY runtime/core/write-agent-instructions.sh /usr/local/bin/write-agent-instructions
 COPY runtime/core/start-code-server.sh /usr/local/bin/start-code-server
 COPY runtime/core/start-agent-session.sh /usr/local/bin/start-agent-session
+COPY runtime/agentd/agentd.py /usr/local/bin/agentd
+COPY runtime/agentd/agentdctl.py /usr/local/bin/agentdctl
 COPY runtime/plugins /usr/local/lib/nvt-agent/plugins
 
 RUN chmod +x \
@@ -42,6 +44,8 @@ RUN chmod +x \
   /usr/local/bin/write-agent-instructions \
   /usr/local/bin/start-code-server \
   /usr/local/bin/start-agent-session \
+  /usr/local/bin/agentd \
+  /usr/local/bin/agentdctl \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/git-credential-nvt.py \
