@@ -77,6 +77,12 @@ container-native: config, env, files, workspace mounts, and `agentd` APIs should
 not assume Docker Compose-specific behavior unless a feature is explicitly
 local-only.
 
+Isolation should be runtime-selectable. Local development can use normal
+containers, while the Kubernetes operator should support hardened pod runtimes
+through `RuntimeClass`, such as Kata Containers or other microVM-backed pod
+runtimes. KubeVirt can be considered for full VM-style agents when needed. This
+keeps nvt-agent container-native while leaving a path to stronger isolation.
+
 ## Quick Start
 
 Build the runtime image from `runtime/Dockerfile`:
