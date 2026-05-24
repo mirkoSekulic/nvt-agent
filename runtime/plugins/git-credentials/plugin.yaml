@@ -1,1 +1,3 @@
 command: /usr/local/lib/nvt-agent/plugins/git-credentials/run.py
+doctor:
+  command: /usr/local/lib/nvt-agent/plugins/git-credentials/run.py doctor

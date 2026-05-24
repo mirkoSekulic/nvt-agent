@@ -1,1 +1,3 @@
 command: /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py
+doctor:
+  command: /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py doctor

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -86,6 +88,65 @@ def validate_rule(rule, index):
     fail(f"unsupported credentials[{index}].type: {kind}")
 
 
+def env_is_set(name, field):
+    if not isinstance(name, str) or not name:
+        fail(f"{field} must be a non-empty string")
+    if os.environ.get(name) is None:
+        fail(f"environment variable {name} is not set")
+
+
+def validate_int_or_env(rule, index, key):
+    value = rule.get(key)
+    env_key = f"{key}-env"
+    env_name = rule.get(env_key)
+    if value and env_name:
+        fail(f"credentials[{index}] cannot set both {key} and {env_key}")
+    if value:
+        if not isinstance(value, int) and not (isinstance(value, str) and value.strip().isdigit()):
+            fail(f"credentials[{index}].{key} must be an integer or numeric string")
+        return
+    env_is_set(env_name, f"credentials[{index}].{env_key}")
+
+
+def doctor_rule(rule, index):
+    validate_rule(rule, index)
+    kind = rule.get("type")
+    match = string_value(rule.get("match"), f"credentials[{index}].match", required=True)
+    if not match.startswith(("http://", "https://")):
+        fail(f"credentials[{index}].match must start with http:// or https://")
+
+    if kind == "token-env":
+        env_is_set(rule.get("token-env"), f"credentials[{index}].token-env")
+        username = rule.get("username")
+        if username is not None:
+            string_value(username, f"credentials[{index}].username")
+        return
+
+    if kind == "github-app":
+        if shutil.which("openssl") is None:
+            fail("openssl not found on PATH")
+        validate_int_or_env(rule, index, "app-id")
+        validate_int_or_env(rule, index, "installation-id")
+        private_key_env = rule.get("private-key-env")
+        private_key_b64_env = rule.get("private-key-b64-env")
+        if private_key_env and private_key_b64_env:
+            fail(f"credentials[{index}] cannot set both private-key-env and private-key-b64-env")
+        env_is_set(private_key_env or private_key_b64_env, f"credentials[{index}].private-key-env")
+        api_url = rule.get("api-url")
+        if api_url is not None and not string_value(api_url, f"credentials[{index}].api-url").startswith("https://"):
+            fail(f"credentials[{index}].api-url must start with https://")
+        return
+
+    if kind == "headers":
+        for header_index, header in enumerate(list_value(rule.get("headers"), f"credentials[{index}].headers")):
+            header_env = string_value(
+                header.get("header-env"),
+                f"credentials[{index}].headers[{header_index}].header-env",
+                required=True,
+            )
+            env_is_set(header_env, f"credentials[{index}].headers[{header_index}].header-env")
+
+
 def write_helper_config(credentials):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with CONFIG_FILE.open("w", encoding="utf-8") as file:
@@ -113,6 +174,10 @@ def configure_headers(credentials):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        doctor()
+        return
+
     config = load_config()
     credentials = list_value(config.get("credentials"), "credentials")
     if not credentials:
@@ -125,6 +190,27 @@ def main():
     write_helper_config(credentials)
     configure_git_helper()
     configure_headers(credentials)
+
+
+def doctor():
+    if shutil.which("git") is None:
+        fail("git not found on PATH")
+    helper = Path(HELPER)
+    if not helper.is_file():
+        fail(f"{HELPER} is missing")
+    if not os.access(helper, os.X_OK):
+        fail(f"{HELPER} is not executable")
+
+    config = load_config()
+    credentials = list_value(config.get("credentials"), "credentials")
+    if not credentials:
+        print("git-credentials: no credentials configured")
+        return
+
+    for index, rule in enumerate(credentials):
+        doctor_rule(rule, index)
+
+    print(f"git-credentials: {len(credentials)} credential rule(s) look valid")
 
 
 if __name__ == "__main__":

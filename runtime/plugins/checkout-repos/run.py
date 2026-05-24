@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -85,7 +87,66 @@ def checkout_repo(repo):
         run(["git", "-C", str(target), "remote", "add", "upstream", upstream])
 
 
-def main():
+def doctor_repo(repo, index):
+    if not isinstance(repo, dict):
+        fail(f"repos[{index}] must be a YAML object")
+
+    url = string_value(repo.get("url"), f"repos[{index}].url", required=True)
+    upstream = string_value(repo.get("upstream"), f"repos[{index}].upstream")
+    target = workspace_path(repo)
+
+    if target.exists():
+        if not (target / ".git").is_dir():
+            fail(f"{target} already exists and is not a Git repository")
+        if upstream:
+            result = subprocess.run(
+                ["git", "-C", str(target), "remote", "get-url", "upstream"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            current = result.stdout.strip()
+            if result.returncode == 0 and current != upstream:
+                print(
+                    "checkout-repos: warning: "
+                    f"{target} already has upstream {current}; configured upstream is {upstream}. "
+                    "Existing repositories are skipped.",
+                    flush=True,
+                )
+        return
+
+    parent = target.parent
+    existing_parent = parent
+    while not existing_parent.exists() and existing_parent != existing_parent.parent:
+        existing_parent = existing_parent.parent
+
+    if not existing_parent.exists():
+        fail(f"{parent} has no existing parent directory")
+    if not os.access(existing_parent, os.W_OK):
+        fail(f"{existing_parent} is not writable")
+
+    if not url.strip():
+        fail(f"repos[{index}].url must not be empty")
+
+
+def doctor():
+    if shutil.which("git") is None:
+        fail("git not found on PATH")
+
+    config = load_config()
+    repos = list_value(config.get("repos"), "repos")
+    if not repos:
+        print("checkout-repos: no repos configured")
+        return
+
+    for index, repo in enumerate(repos):
+        doctor_repo(repo, index)
+
+    print(f"checkout-repos: {len(repos)} repo configuration(s) look valid")
+
+
+def run_plugin():
     config = load_config()
     repos = list_value(config.get("repos"), "repos")
     if not repos:
@@ -94,6 +155,13 @@ def main():
 
     for repo in repos:
         checkout_repo(repo)
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        doctor()
+        return
+    run_plugin()
 
 
 if __name__ == "__main__":
