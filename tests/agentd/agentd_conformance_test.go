@@ -472,13 +472,13 @@ func (f *fixture) stop() {
 	if f.cmd == nil || f.cmd.Process == nil {
 		return
 	}
-	_ = f.cmd.Process.Signal(syscall.SIGTERM)
+	signalProcessGroup(f.cmd, syscall.SIGTERM)
 	done := make(chan error, 1)
 	go func() { done <- f.cmd.Wait() }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		_ = f.cmd.Process.Kill()
+		signalProcessGroup(f.cmd, syscall.SIGKILL)
 		<-done
 	}
 	f.cmd = nil
@@ -589,7 +589,17 @@ func commandWithEnv(t *testing.T, command string, env []string, args ...string) 
 	}
 	cmd := exec.Command("sh", "-c", fullCommand)
 	cmd.Env = append(os.Environ(), env...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
+}
+
+func signalProcessGroup(cmd *exec.Cmd, signal syscall.Signal) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, signal); err != nil {
+		_ = cmd.Process.Signal(signal)
+	}
 }
 
 func shellQuote(value string) string {
@@ -638,13 +648,13 @@ func stopSubscriber(sub *subscriber) {
 	if sub == nil || sub.cmd == nil || sub.cmd.Process == nil {
 		return
 	}
-	_ = sub.cmd.Process.Signal(syscall.SIGTERM)
+	signalProcessGroup(sub.cmd, syscall.SIGTERM)
 	done := make(chan error, 1)
 	go func() { done <- sub.cmd.Wait() }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		_ = sub.cmd.Process.Kill()
+		signalProcessGroup(sub.cmd, syscall.SIGKILL)
 		<-done
 	}
 	sub.cmd = nil
