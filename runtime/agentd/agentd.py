@@ -29,6 +29,7 @@ class Agentd:
         self.worker = threading.Thread(target=self.prompt_worker, daemon=True)
         self.server_socket = None
         self.log_lock = threading.Lock()
+        self.stopped = False
         self.event_log = self.state_dir / "agentd" / "events.jsonl"
         self.event_log.parent.mkdir(parents=True, exist_ok=True)
 
@@ -69,6 +70,9 @@ class Agentd:
             threading.Thread(target=self.handle_connection, args=(connection,), daemon=True).start()
 
     def stop(self):
+        if self.stopped:
+            return
+        self.stopped = True
         self.stop_event.set()
         if self.server_socket is not None:
             self.server_socket.close()
@@ -226,6 +230,7 @@ def main():
 
     def handle_signal(_signum, _frame):
         agentd.stop()
+        raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
