@@ -26,13 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install runtime test dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux python3-yaml
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+      - name: Install Python runtime dependencies
+        run: python3 -m pip install PyYAML
       - name: Run agentd conformance suite
         working-directory: tests/agentd
         env:
