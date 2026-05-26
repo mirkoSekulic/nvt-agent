@@ -9,6 +9,7 @@ ENV CODE_SERVER_PORT=4090
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     python3-yaml \
+    gh \
     ripgrep \
     tmux \
   && rm -rf /var/lib/apt/lists/*
@@ -51,8 +52,8 @@ RUN chmod +x \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/git-credential-nvt.py \
-  /usr/local/lib/nvt-agent/plugins/github-app-auth/github-app-auth.py \
-  /usr/local/lib/nvt-agent/plugins/github-app-auth/gh-app.py \
+  /usr/local/lib/nvt-agent/plugins/git-host-credentials/git-host-credential.py \
+  /usr/local/lib/nvt-agent/plugins/git-host-credentials/gh-auth.py \
   && mkdir -p /workspace /root/.nvt-agent
 
 WORKDIR /workspace

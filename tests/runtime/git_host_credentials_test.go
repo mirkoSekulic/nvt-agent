@@ -7,12 +7,14 @@ import (
 	"testing"
 )
 
-func TestGithubAppAuthResolveDoctorAndGhAppStatus(t *testing.T) {
+func TestGitHostCredentialResolveDoctorAndGhAuthStatus(t *testing.T) {
 	f := newFixture(t)
-	config := f.writePluginConfig("github-app-auth.yaml", `
+	f.writeBin("gh", "#!/usr/bin/env bash\necho gh stub\n")
+	config := f.writePluginConfig("git-host-credentials.yaml", `
 default-provider: fork-app
 providers:
   - name: fork-app
+    type: github-app
     app-id-env: TEST_GITHUB_APP_ID
     installation-id-env: TEST_GITHUB_INSTALLATION_ID
     private-key-base64-env: TEST_GITHUB_PRIVATE_KEY_BASE64
@@ -26,29 +28,34 @@ providers:
 		"TEST_GITHUB_PRIVATE_KEY_BASE64=ZmFrZS1wcml2YXRlLWtleQ==",
 	}
 
-	resolved := f.runWithEnv(githubAppAuthBin(f.root), true, env, "resolve", "--repo", "github.com/my-user/project")
+	resolved := f.runWithEnv(gitHostCredentialBin(f.root), true, env, "resolve", "--target", "github.com/my-user/project")
 	if strings.TrimSpace(resolved) != "fork-app" {
 		t.Fatalf("unexpected provider resolution: %q", resolved)
 	}
 
-	f.runWithEnv(githubAppAuthBin(f.root), true, env, "doctor", "--provider", "fork-app")
+	providerType := f.runWithEnv(gitHostCredentialBin(f.root), true, env, "type", "--provider", "fork-app")
+	if strings.TrimSpace(providerType) != "github-app" {
+		t.Fatalf("unexpected provider type: %q", providerType)
+	}
 
-	status := f.runWithEnv(ghAppBin(f.root), true, env, "auth", "status")
-	if !strings.Contains(status, "gh-app provider: fork-app") ||
+	f.runWithEnv(gitHostCredentialBin(f.root), true, env, "doctor", "--provider", "fork-app")
+
+	status := f.runWithEnv(ghAuthBin(f.root), true, env, "auth", "status")
+	if !strings.Contains(status, "gh-auth provider: fork-app") ||
 		!strings.Contains(status, "installation id: 67890") {
-		t.Fatalf("unexpected gh-app auth status:\n%s", status)
+		t.Fatalf("unexpected gh-auth auth status:\n%s", status)
 	}
 }
 
-func TestGitCredentialsDelegatesToGithubAppAuth(t *testing.T) {
+func TestGitCredentialsDelegatesToGitHostCredential(t *testing.T) {
 	f := newFixture(t)
-	f.writeBin("github-app-auth", `#!/usr/bin/env bash
+	f.writeBin("git-host-credential", `#!/usr/bin/env bash
 set -euo pipefail
 if [ "$1" = "token" ] && [ "$2" = "--provider" ] && [ "$3" = "fork-app" ]; then
   echo delegated-token
   exit 0
 fi
-echo "unexpected github-app-auth args: $*" >&2
+echo "unexpected git-host-credential args: $*" >&2
 exit 1
 `)
 
@@ -59,7 +66,6 @@ exit 1
 	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
 credentials:
   - match: https://github.com/my-user/
-    type: github-app-auth
     provider: fork-app
     username: x-access-token
 `), 0o600); err != nil {

@@ -9,16 +9,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import yaml
 
 
-CACHE_FILE = Path.home() / ".nvt-agent" / "github-app-auth" / "cache.json"
+CACHE_FILE = Path.home() / ".nvt-agent" / "git-host-credentials" / "cache.json"
 
 
 def fail(message):
-    raise SystemExit(f"github-app-auth: {message}")
+    raise SystemExit(f"git-host-credential: {message}")
 
 
 def env_value(name):
@@ -74,8 +75,8 @@ def providers(config):
         if name in seen:
             fail(f"duplicate provider name: {name}")
         seen.add(name)
-        kind = string_value(provider.get("type"), f"providers[{index}].type") or "github-app"
-        if kind != "github-app":
+        kind = string_value(provider.get("type"), f"providers[{index}].type", required=True)
+        if kind not in {"github-app", "token-env", "headers"}:
             fail(f"unsupported providers[{index}].type: {kind}")
         output.append(provider)
     return output
@@ -103,6 +104,11 @@ def provider_value(provider, key):
     if isinstance(env_name, str):
         return env_value(env_name)
     fail(f"provider {provider_name(provider)} requires {key} or {env_key}")
+
+
+def token_env(provider):
+    token_env_name = string_value(provider.get("token-env"), f"provider {provider_name(provider)} token-env", required=True)
+    return env_value(token_env_name)
 
 
 def private_key(provider):
@@ -226,6 +232,7 @@ def write_cache(cache):
     with temporary.open("w", encoding="utf-8") as file:
         json.dump(cache, file)
         file.write("\n")
+    temporary.chmod(0o600)
     temporary.replace(CACHE_FILE)
     CACHE_FILE.chmod(0o600)
 
@@ -256,8 +263,14 @@ def installation_token(provider):
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urlopen(request, timeout=30) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        fail(f"GitHub installation token request failed: {error.code} {error.reason}: {body}")
+    except URLError as error:
+        fail(f"GitHub installation token request failed: {error.reason}")
     token = data.get("token")
     if not isinstance(token, str) or not token:
         fail("GitHub App installation token response did not include token")
@@ -269,11 +282,42 @@ def installation_token(provider):
     return token
 
 
+def token(provider):
+    kind = provider.get("type")
+    if kind == "github-app":
+        return installation_token(provider)
+    if kind == "token-env":
+        return token_env(provider)
+    fail(f"provider {provider_name(provider)} does not provide token credentials")
+
+
+def headers(provider):
+    if provider.get("type") != "headers":
+        fail(f"provider {provider_name(provider)} does not provide header credentials")
+    output = []
+    for index, header in enumerate(list_value(provider.get("headers"), f"provider {provider_name(provider)} headers")):
+        if not isinstance(header, dict):
+            fail(f"provider {provider_name(provider)} headers[{index}] must be a YAML object")
+        header_env = string_value(header.get("header-env"), f"provider {provider_name(provider)} headers[{index}].header-env", required=True)
+        output.append(env_value(header_env))
+    if not output:
+        fail(f"provider {provider_name(provider)} headers must not be empty")
+    return output
+
+
 def validate_provider(provider):
-    if shutil.which("openssl") is None:
-        fail("openssl not found on PATH")
-    provider_value(provider, "app-id")
-    provider_value(provider, "installation-id")
-    private_key(provider)
-    api_url(provider)
+    kind = provider.get("type")
+    if kind == "github-app":
+        if shutil.which("openssl") is None:
+            fail("openssl not found on PATH")
+        provider_value(provider, "app-id")
+        provider_value(provider, "installation-id")
+        private_key(provider)
+        api_url(provider)
+    elif kind == "token-env":
+        token_env(provider)
+    elif kind == "headers":
+        headers(provider)
+    else:
+        fail(f"unsupported provider {provider_name(provider)} type: {kind}")
     list_value(provider.get("match"), f"provider {provider_name(provider)} match")

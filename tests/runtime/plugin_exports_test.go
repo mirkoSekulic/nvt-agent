@@ -402,12 +402,12 @@ func runPluginsBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "runtime", "core", "run-plugins.py"))
 }
 
-func githubAppAuthBin(root string) string {
-	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-app-auth", "github-app-auth.py"))
+func gitHostCredentialBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "git-host-credentials", "git-host-credential.py"))
 }
 
-func ghAppBin(root string) string {
-	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-app-auth", "gh-app.py"))
+func ghAuthBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "git-host-credentials", "gh-auth.py"))
 }
 
 func gitCredentialNvtBin(root string) string {

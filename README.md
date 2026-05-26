@@ -64,10 +64,11 @@ broker policy      checks agent, plugin, repo, host, method, and purpose
 GitHub/API         receives only approved broker-mediated requests or tokens
 ```
 
-`github-app-auth` currently supports in-container GitHub App credentials as a
-local/dev fallback. That keeps the runtime usable before the manager exists, but
-the intended operator mode is to move GitHub App private keys and other plugin
-secrets into broker-managed Kubernetes Secrets or external secret providers.
+`git-host-credentials` currently supports in-container Git host credentials as
+a local/dev fallback, including GitHub App private keys. That keeps the runtime
+usable before the manager exists, but the intended operator mode is to move
+GitHub App private keys and other plugin secrets into broker-managed Kubernetes
+Secrets or external secret providers.
 
 ## Kubernetes-Native Direction
 

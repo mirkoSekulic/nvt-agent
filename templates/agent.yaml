@@ -15,12 +15,13 @@ code-server:
 plugins: []
 # Example:
 # plugins:
-#   - name: github-app-auth
+#   - name: git-host-credentials
 #     source: builtin
 #     config:
 #       default-provider: fork-app
 #       providers:
 #         - name: fork-app
+#           type: github-app
 #           app-id-env: GITHUB_APP_ID
 #           installation-id-env: GITHUB_APP_INSTALLATION_ID
 #           private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
@@ -32,7 +33,6 @@ plugins: []
 #     config:
 #       credentials:
 #         - match: https://github.com/example/
-#           type: github-app-auth
 #           provider: fork-app
 #           username: x-access-token
 #   - name: checkout-repos

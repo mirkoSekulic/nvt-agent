@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-import base64
-import json
 import os
 import subprocess
 import sys
-import tempfile
-import time
-from datetime import datetime, timezone
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 import yaml
 
 
 CONFIG_FILE = Path.home() / ".nvt-agent" / "git-credentials" / "config.yaml"
-CACHE_FILE = Path.home() / ".nvt-agent" / "git-credentials" / "cache.json"
 
 
 def fail(message):
@@ -22,8 +15,8 @@ def fail(message):
     sys.exit(1)
 
 
-def output(command, **kwargs):
-    result = subprocess.run(command, check=True, stdout=subprocess.PIPE, **kwargs)
+def output(command):
+    result = subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True)
     return result.stdout
 
 
@@ -67,6 +60,7 @@ def matching_rule(url, credentials):
         rule for rule in credentials
         if isinstance(rule, dict)
         and isinstance(rule.get("match"), str)
+        and isinstance(rule.get("provider"), str)
         and url.startswith(rule["match"])
     ]
     if not matches:
@@ -74,175 +68,22 @@ def matching_rule(url, credentials):
     return max(matches, key=lambda rule: len(rule["match"]))
 
 
-def env_value(name):
-    value = os.environ.get(name)
-    if value is None:
-        fail(f"environment variable {name} is not set")
-    return value
-
-
-def token_env_credentials(rule):
-    username = rule.get("username") or "x-access-token"
-    token_env = rule.get("token-env")
-    if not isinstance(token_env, str):
-        fail("token-env credential requires token-env")
-    return username, env_value(token_env)
-
-
-def b64url(data):
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def private_key(rule):
-    private_key_env = rule.get("private-key-env")
-    private_key_b64_env = rule.get("private-key-b64-env")
-    if private_key_env and private_key_b64_env:
-        fail("github-app credential cannot set both private-key-env and private-key-b64-env")
-    if isinstance(private_key_env, str):
-        return env_value(private_key_env)
-    if isinstance(private_key_b64_env, str):
-        try:
-            return base64.b64decode(env_value(private_key_b64_env)).decode("utf-8")
-        except Exception as error:
-            fail(f"could not decode {private_key_b64_env}: {error}")
-    fail("github-app credential requires private-key-env or private-key-b64-env")
-
-
-def github_app_value(rule, key):
-    value = rule.get(key)
-    if isinstance(value, str):
-        return value
-    env_key = f"{key}-env"
-    env_name = rule.get(env_key)
-    if isinstance(env_name, str):
-        return env_value(env_name)
-    fail(f"github-app credential requires {key} or {env_key}")
-
-
-def github_app_jwt(rule):
-    app_id = github_app_value(rule, "app-id")
-    now = int(time.time())
-    header = {"alg": "RS256", "typ": "JWT"}
-    payload = {
-        "iat": now - 60,
-        "exp": now + 9 * 60,
-        "iss": app_id,
-    }
-    signing_input = ".".join([
-        b64url(json.dumps(header, separators=(",", ":")).encode("utf-8")),
-        b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
-    ])
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as key_file:
-        key_file.write(private_key(rule))
-        key_path = Path(key_file.name)
-
-    try:
-        signature = output(
-            ["openssl", "dgst", "-sha256", "-sign", str(key_path)],
-            input=signing_input.encode("utf-8"),
-        )
-    finally:
-        key_path.unlink(missing_ok=True)
-
-    return f"{signing_input}.{b64url(signature)}"
-
-
-def read_cache():
-    try:
-        with CACHE_FILE.open("r", encoding="utf-8") as file:
-            return json.load(file)
-    except Exception:
-        return {}
-
-
-def write_cache(cache):
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CACHE_FILE.with_suffix(f".{os.getpid()}.tmp")
-    with tmp.open("w", encoding="utf-8") as file:
-        json.dump(cache, file)
-        file.write("\n")
-    tmp.replace(CACHE_FILE)
-    CACHE_FILE.chmod(0o600)
-
-
-def parse_time(value):
-    if not isinstance(value, str):
-        return 0
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return 0
-
-
-def github_app_cache_key(rule):
-    return "|".join([
-        rule.get("api-url") or "https://api.github.com",
-        github_app_value(rule, "app-id"),
-        github_app_value(rule, "installation-id"),
-    ])
-
-
-def github_app_credentials(rule):
-    cache_key = github_app_cache_key(rule)
-    cache = read_cache()
-    cached = cache.get(cache_key, {})
-    if cached.get("token") and parse_time(cached.get("expires_at")) > time.time() + 300:
-        return "x-access-token", cached["token"]
-
-    installation_id = github_app_value(rule, "installation-id")
-    api_url = rule.get("api-url") or "https://api.github.com"
-    url = f"{api_url.rstrip('/')}/app/installations/{installation_id}/access_tokens"
-    request = Request(
-        url,
-        method="POST",
-        data=b"{}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {github_app_jwt(rule)}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    with urlopen(request, timeout=30) as response:
-        data = json.loads(response.read().decode("utf-8"))
-
-    token = data.get("token")
-    if not isinstance(token, str) or not token:
-        fail("GitHub App installation token response did not include token")
-
-    cache[cache_key] = {
-        "token": token,
-        "expires_at": data.get("expires_at") or datetime.now(timezone.utc).isoformat(),
-    }
-    write_cache(cache)
-    return "x-access-token", token
-
-
-def github_app_auth_credentials(rule):
+def provider_credentials(rule):
     provider = rule.get("provider")
     if not isinstance(provider, str) or not provider:
-        fail("github-app-auth credential requires provider")
+        fail("credential rule requires provider")
     username = rule.get("username") or "x-access-token"
+    if not isinstance(username, str):
+        fail("credential rule username must be a string")
     try:
-        token = output(["github-app-auth", "token", "--provider", provider], text=True).strip()
+        token = output(["git-host-credential", "token", "--provider", provider]).strip()
+    except FileNotFoundError:
+        fail("git-host-credential is not on PATH")
     except subprocess.CalledProcessError as error:
-        fail(f"github-app-auth token failed with exit {error.returncode}")
+        fail(f"git-host-credential token failed with exit {error.returncode}")
     if not token:
-        fail("github-app-auth returned an empty token")
+        fail("git-host-credential returned an empty token")
     return username, token
-
-
-def credentials_for_rule(rule):
-    kind = rule.get("type")
-    if kind == "token-env":
-        return token_env_credentials(rule)
-    if kind == "github-app":
-        return github_app_credentials(rule)
-    if kind == "github-app-auth":
-        return github_app_auth_credentials(rule)
-    if kind == "headers":
-        return None
-    fail(f"unsupported credential type: {kind}")
 
 
 def main():
@@ -258,11 +99,7 @@ def main():
     if rule is None:
         return
 
-    credentials = credentials_for_rule(rule)
-    if credentials is None:
-        return
-
-    username, password = credentials
+    username, password = provider_credentials(rule)
     print(f"username={username}")
     print(f"password={password}")
     print()

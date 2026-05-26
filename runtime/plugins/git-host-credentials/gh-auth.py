@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 import os
+import shutil
 import subprocess
 import sys
 
-from github_app_auth import installation_token, load_config, normalize_repo, resolve_provider
+from git_host_credentials import load_config, normalize_repo, resolve_provider, token
 
 
 def fail(message):
-    raise SystemExit(f"gh-app: {message}")
+    raise SystemExit(f"gh-auth: {message}")
 
 
 def split_args(argv):
@@ -53,25 +54,30 @@ def repo_from_args(args):
 def main():
     provider_name, gh_args = split_args(sys.argv[1:])
     if not gh_args or gh_args in (["-h"], ["--help"]):
-        print("usage: gh-app [--provider NAME] <gh args...>")
+        print("usage: gh-auth [--provider NAME] <gh args...>")
         return
+
+    if shutil.which("gh") is None:
+        fail("gh not found on PATH")
 
     config = load_config()
     repo = repo_from_args(gh_args)
     provider = resolve_provider(config, provider_name, repo)
 
     if gh_args == ["auth", "status"]:
-        print(f"gh-app provider: {provider['name']}")
+        print(f"gh-auth provider: {provider['name']}")
+        print(f"provider type: {provider.get('type')}")
         if repo:
             print(f"matched repo: {repo}")
-        installation_id = provider.get("installation-id")
-        if not installation_id and isinstance(provider.get("installation-id-env"), str):
-            installation_id = os.environ.get(provider["installation-id-env"], "")
-        print(f"installation id: {installation_id}")
+        if provider.get("type") == "github-app":
+            installation_id = provider.get("installation-id")
+            if not installation_id and isinstance(provider.get("installation-id-env"), str):
+                installation_id = os.environ.get(provider["installation-id-env"], "")
+            print(f"installation id: {installation_id}")
         return
 
     env = os.environ.copy()
-    env["GH_TOKEN"] = installation_token(provider)
+    env["GH_TOKEN"] = token(provider)
     env.pop("GITHUB_TOKEN", None)
     os.execvpe("gh", ["gh", *gh_args], env)
 

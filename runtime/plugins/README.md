@@ -87,12 +87,13 @@ plugin exports or existing commands on `PATH`.
 
 ```yaml
 plugins:
-  - name: github-app-auth
+  - name: git-host-credentials
     source: builtin
     config:
       default-provider: fork-app
       providers:
         - name: fork-app
+          type: github-app
           app-id-env: GITHUB_APP_ID
           installation-id-env: GITHUB_APP_INSTALLATION_ID
           private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
@@ -105,7 +106,6 @@ plugins:
     config:
       credentials:
         - match: https://github.com/example/
-          type: github-app-auth
           provider: fork-app
           username: x-access-token
 
@@ -123,30 +123,32 @@ plugins:
 
 `git-credentials` is optional. Use it before `checkout-repos` when private repos
 need credentials. It configures Git once; later `git clone`, `git fetch`, and
-`git push` use Git's normal credential helper flow.
+`git push` use Git's normal credential helper flow. Token providers use
+`git-credential-nvt`; header providers configure Git `http.<url>.extraHeader`
+entries directly.
 
-`github-app-auth` is a tool-only plugin. It generates short-lived GitHub App
-installation tokens and exports two tools:
+`git-host-credentials` is a tool-only plugin. It resolves named credential
+providers for Git hosting services and exports two tools:
 
 ```sh
-github-app-auth token --provider fork-app
-github-app-auth doctor --provider fork-app
-gh-app pr view 123 --repo example/project
+git-host-credential token --provider fork-app
+git-host-credential headers --provider company-headers
+git-host-credential doctor --provider fork-app
+gh-auth pr view 123 --repo example/project
 ```
 
-`gh-app` runs `gh` with a per-command GitHub App token through `GH_TOKEN`. It
+`gh-auth` runs `gh` with a per-command token through `GH_TOKEN`. It
 does not call `gh auth login` and does not persist credentials in the GitHub CLI
 config. If `--provider` is omitted, it resolves a provider from `--repo`, the
 current git remote, or `default-provider`.
 
-Security note: `github-app-auth` currently supports local/dev operation where
-the GitHub App private key is provided to the agent container through env or
-mounted files. That private key can mint installation tokens for the app
-installation, so it should be scoped to the smallest possible set of repos and
-permissions. This is not the production boundary for autonomous agents. The
-intended operator mode is for a broker sidecar/service to hold the private key,
-enforce capability policy, and let `github-app-auth` act as a broker client
-rather than a key holder.
+Security note: `git-host-credentials` currently supports local/dev operation
+where raw provider secrets, including GitHub App private keys, are provided to
+the agent container through env or mounted files. Those secrets should be scoped
+to the smallest possible set of repos and permissions. This is not the
+production boundary for autonomous agents. The intended operator mode is for a
+broker sidecar/service to hold raw secrets, enforce capability policy, and let
+`git-host-credentials` act as a broker client rather than a key holder.
 
 `checkout-repos` supports fork workflows with optional `upstream`. If provided
 on a newly cloned repo, it adds the original repository as the `upstream`
@@ -204,54 +206,55 @@ org/user, or one repo:
 ```yaml
 credentials:
   - match: https://github.com/
-    type: token-env
-    token-env: GENERAL_GITHUB_TOKEN
+    provider: general-github-token
     username: x-access-token
   - match: https://github.com/acme/
-    type: github-app-auth
     provider: fork-app
     username: x-access-token
-  - match: https://github.com/legacy-app/
-    type: github-app
-    app-id-env: GITHUB_APP_ID
-    installation-id-env: GITHUB_APP_INSTALLATION_ID
-    private-key-b64-env: GITHUB_APP_PRIVATE_KEY_B64
   - match: https://github.com/acme/frontend.git
-    type: token-env
-    token-env: FRONTEND_TOKEN
+    provider: frontend-token
     username: x-access-token
 ```
 
 The most specific matching rule wins.
 
-Supported credential types:
+Credential rules point at providers from `git-host-credentials`:
 
 ```yaml
+plugins:
+  - name: git-host-credentials
+    source: builtin
+    config:
+      providers:
+        - name: acme-token
+          type: token-env
+          token-env: ACME_PAT
+          match:
+            - github.com/acme/*
+        - name: fork-app
+          type: github-app
+          app-id-env: GITHUB_APP_ID
+          installation-id-env: GITHUB_APP_INSTALLATION_ID
+          private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
+          match:
+            - github.com/acme/*
+        - name: company-headers
+          type: headers
+          headers:
+            - header-env: COMPANY_GIT_AUTH_HEADER
+            - header-env: COMPANY_GIT_API_KEY_HEADER
+
 credentials:
   - match: https://github.com/acme/
-    type: token-env
-    token-env: ACME_PAT
+    provider: acme-token
     username: x-access-token
 
   - match: https://github.com/acme/
-    type: github-app-auth
     provider: fork-app
     username: x-access-token
-
-  - match: https://github.com/legacy-app/
-    type: github-app
-    app-id-env: GITHUB_APP_ID
-    installation-id-env: GITHUB_APP_INSTALLATION_ID
-    private-key-b64-env: GITHUB_APP_PRIVATE_KEY_B64
-
-  - match: https://git.company.com/team/
-    type: headers
-    headers:
-      - header-env: COMPANY_GIT_AUTH_HEADER
-      - header-env: COMPANY_GIT_API_KEY_HEADER
 ```
 
-For `headers`, each `header-env` contains one full HTTP header line:
+For provider `headers`, each `header-env` contains one full HTTP header line:
 
 ```env
 COMPANY_GIT_AUTH_HEADER=Authorization: Bearer abc123
