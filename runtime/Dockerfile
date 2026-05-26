@@ -51,6 +51,8 @@ RUN chmod +x \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/run.py \
   /usr/local/lib/nvt-agent/plugins/git-credentials/git-credential-nvt.py \
+  /usr/local/lib/nvt-agent/plugins/github-app-auth/github-app-auth.py \
+  /usr/local/lib/nvt-agent/plugins/github-app-auth/gh-app.py \
   && mkdir -p /workspace /root/.nvt-agent
 
 WORKDIR /workspace

@@ -277,10 +277,28 @@ func (f *fixture) writeTool(name, content string) string {
 	return path
 }
 
+func (f *fixture) writeBin(name, content string) string {
+	f.t.Helper()
+	path := filepath.Join(f.bin, name)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	return path
+}
+
 func (f *fixture) writeAgentConfig(content string) string {
 	f.t.Helper()
 	path := filepath.Join(f.home, "agent.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	return path
+}
+
+func (f *fixture) writePluginConfig(name, content string) string {
+	f.t.Helper()
+	path := filepath.Join(f.home, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		f.t.Fatal(err)
 	}
 	return path
@@ -303,7 +321,26 @@ func (f *fixture) runCommand(command string, wantOK bool, args ...string) string
 
 func (f *fixture) run(command string, wantOK bool, args ...string) string {
 	f.t.Helper()
+	return f.runWithEnv(command, wantOK, nil, args...)
+}
+
+func (f *fixture) runWithEnv(command string, wantOK bool, extraEnv []string, args ...string) string {
+	f.t.Helper()
+	cmd := commandWithEnv(command, append(f.env(), extraEnv...), args...)
+	output, err := cmd.CombinedOutput()
+	if wantOK && err != nil {
+		f.t.Fatalf("command failed: %s %v\n%s", command, args, output)
+	}
+	if !wantOK && err == nil {
+		f.t.Fatalf("command unexpectedly succeeded: %s %v\n%s", command, args, output)
+	}
+	return string(output)
+}
+
+func (f *fixture) runWithInput(command, input string, wantOK bool, args ...string) string {
+	f.t.Helper()
 	cmd := commandWithEnv(command, f.env(), args...)
+	cmd.Stdin = strings.NewReader(input)
 	output, err := cmd.CombinedOutput()
 	if wantOK && err != nil {
 		f.t.Fatalf("command failed: %s %v\n%s", command, args, output)
@@ -363,6 +400,18 @@ func runPluginsBin(root string) string {
 		return value
 	}
 	return "python3 " + shellQuote(filepath.Join(root, "runtime", "core", "run-plugins.py"))
+}
+
+func githubAppAuthBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-app-auth", "github-app-auth.py"))
+}
+
+func ghAppBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-app-auth", "gh-app.py"))
+}
+
+func gitCredentialNvtBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "git-credentials", "git-credential-nvt.py"))
 }
 
 func commandWithEnv(command string, env []string, args ...string) *exec.Cmd {

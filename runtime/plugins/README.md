@@ -87,14 +87,26 @@ plugin exports or existing commands on `PATH`.
 
 ```yaml
 plugins:
+  - name: github-app-auth
+    source: builtin
+    config:
+      default-provider: fork-app
+      providers:
+        - name: fork-app
+          app-id-env: GITHUB_APP_ID
+          installation-id-env: GITHUB_APP_INSTALLATION_ID
+          private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
+          match:
+            - github.com/example/*
+
   - name: git-credentials
     source: builtin
     when: before-agent
     config:
       credentials:
         - match: https://github.com/example/
-          type: token-env
-          token-env: GIT_TOKEN
+          type: github-app-auth
+          provider: fork-app
           username: x-access-token
 
   - name: checkout-repos
@@ -112,6 +124,20 @@ plugins:
 `git-credentials` is optional. Use it before `checkout-repos` when private repos
 need credentials. It configures Git once; later `git clone`, `git fetch`, and
 `git push` use Git's normal credential helper flow.
+
+`github-app-auth` is a tool-only plugin. It generates short-lived GitHub App
+installation tokens and exports two tools:
+
+```sh
+github-app-auth token --provider fork-app
+github-app-auth doctor --provider fork-app
+gh-app pr view 123 --repo example/project
+```
+
+`gh-app` runs `gh` with a per-command GitHub App token through `GH_TOKEN`. It
+does not call `gh auth login` and does not persist credentials in the GitHub CLI
+config. If `--provider` is omitted, it resolves a provider from `--repo`, the
+current git remote, or `default-provider`.
 
 `checkout-repos` supports fork workflows with optional `upstream`. If provided
 on a newly cloned repo, it adds the original repository as the `upstream`
@@ -173,6 +199,10 @@ credentials:
     token-env: GENERAL_GITHUB_TOKEN
     username: x-access-token
   - match: https://github.com/acme/
+    type: github-app-auth
+    provider: fork-app
+    username: x-access-token
+  - match: https://github.com/legacy-app/
     type: github-app
     app-id-env: GITHUB_APP_ID
     installation-id-env: GITHUB_APP_INSTALLATION_ID
@@ -195,6 +225,11 @@ credentials:
     username: x-access-token
 
   - match: https://github.com/acme/
+    type: github-app-auth
+    provider: fork-app
+    username: x-access-token
+
+  - match: https://github.com/legacy-app/
     type: github-app
     app-id-env: GITHUB_APP_ID
     installation-id-env: GITHUB_APP_INSTALLATION_ID

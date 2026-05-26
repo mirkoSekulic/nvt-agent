@@ -4,7 +4,8 @@ on:
   push:
     paths:
       - "runtime/agentd/**"
-      - "runtime/core/prompt-agent.sh"
+      - "runtime/core/**"
+      - "runtime/plugins/**"
       - "protocol/**"
       - "tests/agentd/**"
       - "tests/runtime/**"
@@ -12,7 +13,8 @@ on:
   pull_request:
     paths:
       - "runtime/agentd/**"
-      - "runtime/core/prompt-agent.sh"
+      - "runtime/core/**"
+      - "runtime/plugins/**"
       - "protocol/**"
       - "tests/agentd/**"
       - "tests/runtime/**"

@@ -218,12 +218,28 @@ def github_app_credentials(rule):
     return "x-access-token", token
 
 
+def github_app_auth_credentials(rule):
+    provider = rule.get("provider")
+    if not isinstance(provider, str) or not provider:
+        fail("github-app-auth credential requires provider")
+    username = rule.get("username") or "x-access-token"
+    try:
+        token = output(["github-app-auth", "token", "--provider", provider], text=True).strip()
+    except subprocess.CalledProcessError as error:
+        fail(f"github-app-auth token failed with exit {error.returncode}")
+    if not token:
+        fail("github-app-auth returned an empty token")
+    return username, token
+
+
 def credentials_for_rule(rule):
     kind = rule.get("type")
     if kind == "token-env":
         return token_env_credentials(rule)
     if kind == "github-app":
         return github_app_credentials(rule)
+    if kind == "github-app-auth":
+        return github_app_auth_credentials(rule)
     if kind == "headers":
         return None
     fail(f"unsupported credential type: {kind}")

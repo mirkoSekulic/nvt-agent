@@ -78,6 +78,10 @@ def validate_rule(rule, index):
             fail(f"credentials[{index}] requires private-key-env or private-key-b64-env")
         return
 
+    if kind == "github-app-auth":
+        string_value(rule.get("provider"), f"credentials[{index}].provider", required=True)
+        return
+
     if kind == "headers":
         headers = list_value(rule.get("headers"), f"credentials[{index}].headers")
         if not headers:
@@ -136,6 +140,16 @@ def doctor_rule(rule, index):
         api_url = rule.get("api-url")
         if api_url is not None and not string_value(api_url, f"credentials[{index}].api-url").startswith("https://"):
             fail(f"credentials[{index}].api-url must start with https://")
+        return
+
+    if kind == "github-app-auth":
+        if shutil.which("github-app-auth") is None:
+            fail("github-app-auth is not on PATH")
+        provider = string_value(rule.get("provider"), f"credentials[{index}].provider", required=True)
+        username = rule.get("username")
+        if username is not None:
+            string_value(username, f"credentials[{index}].username")
+        subprocess.run(["github-app-auth", "doctor", "--provider", provider], check=True)
         return
 
     if kind == "headers":
