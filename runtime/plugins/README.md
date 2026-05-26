@@ -139,6 +139,15 @@ does not call `gh auth login` and does not persist credentials in the GitHub CLI
 config. If `--provider` is omitted, it resolves a provider from `--repo`, the
 current git remote, or `default-provider`.
 
+Security note: `github-app-auth` currently supports local/dev operation where
+the GitHub App private key is provided to the agent container through env or
+mounted files. That private key can mint installation tokens for the app
+installation, so it should be scoped to the smallest possible set of repos and
+permissions. This is not the production boundary for autonomous agents. The
+intended operator mode is for a broker sidecar/service to hold the private key,
+enforce capability policy, and let `github-app-auth` act as a broker client
+rather than a key holder.
+
 `checkout-repos` supports fork workflows with optional `upstream`. If provided
 on a newly cloned repo, it adds the original repository as the `upstream`
 remote:

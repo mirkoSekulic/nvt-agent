@@ -41,6 +41,34 @@ container and owns only interaction with the running agent session:
 `agentd` is not a security boundary and does not own secrets, egress policy,
 Docker, Compose, Kubernetes, bootstrap, or plugin supervision.
 
+## Secret Direction
+
+Local Docker agents currently run in a development trust mode. Plugins may read
+environment variables or mounted files when configured to do so. That is useful
+for local iteration, but it is not the production security model for autonomous
+agents: a prompt-injected agent can ask the shell to print files, environment
+variables, or plugin configs that are visible inside the container.
+
+The production direction is an operator-managed capability broker. Agents and
+plugins should request named capabilities, not raw secrets. The future
+Kubernetes operator should mount real secrets only into a broker sidecar or
+service, validate which agents/plugins may use each capability, and keep the
+agent container itself secret-free.
+
+Example direction:
+
+```text
+agent/plugin       requests capability github-fork-push
+broker             holds GitHub App private key or API secret
+broker policy      checks agent, plugin, repo, host, method, and purpose
+GitHub/API         receives only approved broker-mediated requests or tokens
+```
+
+`github-app-auth` currently supports in-container GitHub App credentials as a
+local/dev fallback. That keeps the runtime usable before the manager exists, but
+the intended operator mode is to move GitHub App private keys and other plugin
+secrets into broker-managed Kubernetes Secrets or external secret providers.
+
 ## Kubernetes-Native Direction
 
 The intended mature shape is:

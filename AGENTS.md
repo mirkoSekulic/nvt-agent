@@ -5,6 +5,7 @@ Repository-local guidance for nvt-agent work.
 - Keep runtime contracts small, explicit, and implementation-swappable.
 - `agentd` owns only session I/O, prompt queueing, and event logging. Do not add bootstrap, plugin supervision, host lifecycle, secrets, or egress policy to `agentd`.
 - `agentd` is not a security boundary. Secrets belong in future host/broker mechanisms, not in `agentd`.
+- Treat in-container plugin secrets as local/dev mode only. The production direction is an operator-managed capability broker where real secrets are mounted only into broker sidecars/services, not into agent containers.
 - Preserve the JSONL `agentd` protocol documented under `protocol/`.
 - When changing `runtime/agentd`, `protocol/`, or `runtime/core/prompt-agent.sh`, run the conformance suite from `tests/agentd`.
 - Plugin events are advisory and must use `plugin.<name>.*`; core/session event names are reserved.
