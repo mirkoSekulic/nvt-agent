@@ -28,19 +28,33 @@ from github_watcher_lib import (
 
 
 def fetch_comments(watch):
-    return github_request(
-        f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
-        watch["provider"],
-        {"per_page": 100, "sort": "updated", "direction": "asc"},
-    )
+    comments = []
+    page = 1
+    while True:
+        items = github_request(
+            f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
+            watch["provider"],
+            {"per_page": 100, "page": page, "sort": "updated", "direction": "asc"},
+        )
+        comments.extend(items)
+        if len(items) < 100:
+            return comments
+        page += 1
 
 
 def fetch_reviews(watch):
-    return github_request(
-        f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
-        watch["provider"],
-        {"per_page": 100},
-    )
+    reviews = []
+    page = 1
+    while True:
+        items = github_request(
+            f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
+            watch["provider"],
+            {"per_page": 100, "page": page},
+        )
+        reviews.extend(items)
+        if len(items) < 100:
+            return reviews
+        page += 1
 
 
 def fetch_pull(watch):
@@ -85,6 +99,7 @@ def process_comments(watch, seen):
     key = f"{watch['repo']}#{watch['number']}:comments"
     watermark = seen.get(key)
     max_seen = watermark or 0
+    seen.setdefault(key, max_seen)
 
     for comment in fetch_comments(watch):
         timestamp = parse_time(comment.get("updated_at") or comment.get("created_at"))
@@ -108,8 +123,6 @@ def process_comments(watch, seen):
         if watermark is not None:
             publish_and_prompt(watch, "plugin.github.pr.comment", payload, config["prompt"], config["prompt"]["enabled"])
         update_watermark(seen, key, timestamp)
-    if watermark is None:
-        seen[key] = max_seen
 
 
 def process_reviews(watch, seen):
@@ -119,6 +132,7 @@ def process_reviews(watch, seen):
     key = f"{watch['repo']}#{watch['number']}:reviews"
     watermark = seen.get(key)
     max_seen = watermark or 0
+    seen.setdefault(key, max_seen)
 
     for review in fetch_reviews(watch):
         timestamp = parse_time(review.get("submitted_at") or review.get("updated_at"))
@@ -142,8 +156,6 @@ def process_reviews(watch, seen):
         if watermark is not None:
             publish_and_prompt(watch, "plugin.github.pr.review", payload, config["prompt"], config["prompt"]["enabled"])
         update_watermark(seen, key, timestamp)
-    if watermark is None:
-        seen[key] = max_seen
 
 
 def process_checks(watch, seen):
