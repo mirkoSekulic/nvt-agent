@@ -45,11 +45,17 @@ plugins:
     config:
       default-provider: fork-app
       poll-seconds: 60
+      broker:
+        enabled: true
+        provider: fork-app
 
       prs:
         - repo: my-user/my-repo
           number: 123
           provider: fork-app # optional, falls back to default-provider
+          broker:
+            enabled: true
+            provider: fork-app # optional, falls back to top-level broker provider or watch provider
           labels:
             - frontend
             - high-priority
@@ -93,6 +99,11 @@ comments, reviews, and checks.
 
 `labels` are metadata carried into published events and prompt text. They do not
 filter GitHub labels in v1.
+
+When `broker.enabled` is true, read-only GitHub API calls are executed through
+`brokerctl http request`. The watcher does not receive the GitHub App private
+key or installation token for those API reads. Direct mode remains available as
+a local/dev fallback.
 
 ## Dynamic Registration
 

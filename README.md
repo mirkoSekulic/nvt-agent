@@ -15,6 +15,7 @@ manager/CLI can be added later on top of the same runtime pieces.
 host scripts / future manager   create, start, stop, inspect agents
 runtime core                    bootstrap tools, start services, launch plugins
 agentd                          container-local session and event API
+brokerd                         trusted authority API for secrets/capabilities
 plugins                         executable automation units
 ```
 
@@ -40,6 +41,12 @@ container and owns only interaction with the running agent session:
 
 `agentd` is not a security boundary and does not own secrets, egress policy,
 Docker, Compose, Kubernetes, bootstrap, or plugin supervision.
+
+`brokerd` is the trusted-side counterpart to `agentd`. It runs outside the
+agent container and owns brokered credentials, broker-executed API requests, and
+audit logs. The agent image contains only `brokerctl`, a thin client. Local
+broker mode is the first step toward the production operator model where root
+secrets stay outside Kata-backed agent Pods.
 
 ## Secret Direction
 
@@ -69,6 +76,10 @@ a local/dev fallback, including GitHub App private keys. That keeps the runtime
 usable before the manager exists, but the intended operator mode is to move
 GitHub App private keys and other plugin secrets into broker-managed Kubernetes
 Secrets or external secret providers.
+
+Broker mode starts that split locally: GitHub App private keys live in the
+broker service, while agents use `brokerctl` or broker-backed
+`git-host-credential` providers.
 
 ## Kubernetes-Native Direction
 

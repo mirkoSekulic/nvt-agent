@@ -182,7 +182,7 @@ spec.loader.exec_module(watcher)
 
 calls = []
 
-def fake_request(path, provider, query):
+def fake_request(path, provider, query, broker=None, paginate=False):
     calls.append((path, query["page"]))
     if path.endswith("/comments"):
         return [{}] * 100 if query["page"] == 1 else [{"id": "last-comment"}]
@@ -209,4 +209,48 @@ if calls != [
 `, quoteYAML(f.root))
 
 	f.runCommand("python3", true, "-c", script)
+}
+
+func TestGithubWatcherCanFetchCommentsThroughBroker(t *testing.T) {
+	f := newFixture(t)
+	logPath := filepath.Join(f.home, "brokerctl.log")
+	f.writeBin("brokerctl", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" > %s
+printf '%%s\n' '{"ok":true,"status":200,"headers":{},"body":"[{\"id\":1,\"updated_at\":\"2026-05-26T10:00:00Z\"}]"}'
+`, quoteYAML(logPath)))
+	script := fmt.Sprintf(`
+import importlib.util
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "run.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_run", module_path)
+watcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(watcher)
+
+watch = {
+    "repo": "my-user/my-repo",
+    "number": 123,
+    "provider": "direct-provider",
+    "broker": {"enabled": True, "provider": "broker-provider"},
+}
+comments = watcher.fetch_comments(watch)
+if len(comments) != 1 or comments[0]["id"] != 1:
+    raise SystemExit(f"unexpected comments: {comments}")
+`, quoteYAML(f.root))
+
+	f.runCommand("python3", true, "-c", script)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(data)
+	if !strings.Contains(args, "--provider broker-provider") ||
+		!strings.Contains(args, "--paginate") ||
+		!strings.Contains(args, "https://api.github.com/repos/my-user/my-repo/issues/123/comments") {
+		t.Fatalf("unexpected brokerctl args:\n%s", args)
+	}
 }

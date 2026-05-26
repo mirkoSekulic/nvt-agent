@@ -6,7 +6,7 @@ from git_host_credentials import headers, load_config, providers, resolve_provid
 
 def command_token(args):
     provider = resolve_provider(load_config(), args.provider, args.target)
-    print(token(provider))
+    print(token(provider, args.target))
 
 
 def command_headers(args):

@@ -65,6 +65,36 @@ providers:
 	}
 }
 
+func TestGitHostCredentialBrokerProviderDelegatesToBrokerctl(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "token" ] &&
+   [ "$2" = "--provider" ] && [ "$3" = "fork-app" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ] &&
+   [ "$6" = "--raw" ]; then
+  echo broker-token
+  exit 0
+fi
+echo "unexpected brokerctl args: $*" >&2
+exit 1
+`)
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: fork-app-broker
+    type: broker
+    broker-provider: fork-app
+    match:
+      - github.com/my-user/*
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	output := f.runWithEnv(gitHostCredentialBin(f.root), true, env, "token", "--target", "github.com/my-user/project")
+	if strings.TrimSpace(output) != "broker-token" {
+		t.Fatalf("unexpected broker token: %q", output)
+	}
+}
+
 func TestGitCredentialsDelegatesToGitHostCredential(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("git-host-credential", `#!/usr/bin/env bash

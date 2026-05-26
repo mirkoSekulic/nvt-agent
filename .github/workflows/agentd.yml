@@ -6,8 +6,10 @@ on:
       - "runtime/agentd/**"
       - "runtime/core/**"
       - "runtime/plugins/**"
+      - "broker/**"
       - "protocol/**"
       - "tests/agentd/**"
+      - "tests/broker/**"
       - "tests/runtime/**"
       - ".github/workflows/agentd.yml"
   pull_request:
@@ -15,8 +17,10 @@ on:
       - "runtime/agentd/**"
       - "runtime/core/**"
       - "runtime/plugins/**"
+      - "broker/**"
       - "protocol/**"
       - "tests/agentd/**"
+      - "tests/broker/**"
       - "tests/runtime/**"
       - ".github/workflows/agentd.yml"
 
@@ -50,7 +54,12 @@ jobs:
           EXPORT_PLUGIN_TOOLS_BIN: python3 ${{ github.workspace }}/runtime/core/export-plugin-tools.py
           RUN_PLUGINS_BIN: python3 ${{ github.workspace }}/runtime/core/run-plugins.py
         run: go test -v ./...
+      - name: Run broker conformance suite
+        working-directory: tests/broker
+        run: go test -v ./...
       - name: Build runtime image
         run: docker build -t nvt-agent:test -f runtime/Dockerfile .
+      - name: Build broker image
+        run: docker build -t nvt-broker:test -f broker/Dockerfile .
       - name: Run git credentials smoke
         run: bash tests/runtime/git_credentials_smoke.sh nvt-agent:test

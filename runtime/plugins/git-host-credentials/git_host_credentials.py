@@ -77,7 +77,7 @@ def providers(config):
             fail(f"duplicate provider name: {name}")
         seen.add(name)
         kind = string_value(provider.get("type"), f"providers[{index}].type", required=True)
-        if kind not in {"github-app", "token-env", "headers"}:
+        if kind not in {"github-app", "token-env", "headers", "broker"}:
             fail(f"unsupported providers[{index}].type: {kind}")
         output.append(provider)
     return output
@@ -284,12 +284,30 @@ def installation_token(provider):
     return token
 
 
-def token(provider):
+def broker_token(provider, target):
+    broker_provider = string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+    if not target:
+        fail(f"provider {provider_name(provider)} broker token requires --target")
+    command = ["brokerctl", "token", "--provider", broker_provider, "--target", target, "--raw"]
+    purpose = string_value(provider.get("purpose"), f"provider {provider_name(provider)} purpose")
+    if purpose:
+        command.extend(["--purpose", purpose])
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        fail(f"broker token request failed: {stderr or stdout}")
+    return result.stdout.strip()
+
+
+def token(provider, target=None):
     kind = provider.get("type")
     if kind == "github-app":
         return installation_token(provider)
     if kind == "token-env":
         return token_env(provider)
+    if kind == "broker":
+        return broker_token(provider, target)
     fail(f"provider {provider_name(provider)} does not provide token credentials")
 
 
@@ -318,6 +336,10 @@ def validate_provider(provider):
         api_url(provider)
     elif kind == "token-env":
         token_env(provider)
+    elif kind == "broker":
+        if shutil.which("brokerctl") is None:
+            fail("brokerctl not found on PATH")
+        string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
     elif kind == "headers":
         headers(provider)
     else:

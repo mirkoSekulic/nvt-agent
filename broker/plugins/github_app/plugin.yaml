@@ -1,0 +1,6 @@
+name: github-app
+type: broker-provider
+
+capabilities:
+  - http.request
+  - token

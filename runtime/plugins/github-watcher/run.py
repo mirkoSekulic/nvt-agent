@@ -28,6 +28,14 @@ from github_watcher_lib import (
 
 
 def fetch_comments(watch):
+    if watch.get("broker", {}).get("enabled"):
+        return github_request(
+            f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
+            watch["provider"],
+            {"per_page": 100, "sort": "updated", "direction": "asc"},
+            watch.get("broker"),
+            paginate=True,
+        )
     comments = []
     page = 1
     while True:
@@ -35,6 +43,7 @@ def fetch_comments(watch):
             f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
             watch["provider"],
             {"per_page": 100, "page": page, "sort": "updated", "direction": "asc"},
+            watch.get("broker"),
         )
         comments.extend(items)
         if len(items) < 100:
@@ -43,6 +52,14 @@ def fetch_comments(watch):
 
 
 def fetch_reviews(watch):
+    if watch.get("broker", {}).get("enabled"):
+        return github_request(
+            f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
+            watch["provider"],
+            {"per_page": 100},
+            watch.get("broker"),
+            paginate=True,
+        )
     reviews = []
     page = 1
     while True:
@@ -50,6 +67,7 @@ def fetch_reviews(watch):
             f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
             watch["provider"],
             {"per_page": 100, "page": page},
+            watch.get("broker"),
         )
         reviews.extend(items)
         if len(items) < 100:
@@ -58,7 +76,7 @@ def fetch_reviews(watch):
 
 
 def fetch_pull(watch):
-    return github_request(f"/repos/{watch['repo']}/pulls/{watch['number']}", watch["provider"])
+    return github_request(f"/repos/{watch['repo']}/pulls/{watch['number']}", watch["provider"], broker=watch.get("broker"))
 
 
 def fetch_check_runs(watch, sha):
@@ -66,6 +84,7 @@ def fetch_check_runs(watch, sha):
         f"/repos/{watch['repo']}/commits/{sha}/check-runs",
         watch["provider"],
         {"per_page": 100},
+        watch.get("broker"),
     ).get("check_runs", [])
 
 

@@ -198,10 +198,21 @@ def normalize_watch(raw, defaults, source):
         "comments": normalize_discussion_config(comments, f"{source}.comments", True),
         "reviews": normalize_discussion_config(reviews, f"{source}.reviews", True),
         "checks": normalize_checks_config(checks, f"{source}.checks"),
+        "broker": normalize_broker_config(raw.get("broker"), defaults.get("broker"), f"{source}.broker"),
     }
     if not normalized["provider"]:
         fail(f"{source}.provider is required unless default-provider is configured")
     return normalized
+
+
+def normalize_broker_config(raw, default, field):
+    config = object_value(default, "broker")
+    override = object_value(raw, field)
+    merged = {**config, **override}
+    return {
+        "enabled": bool_value(merged.get("enabled"), f"{field}.enabled", False),
+        "provider": string_value(merged.get("provider"), f"{field}.provider"),
+    }
 
 
 def normalize_discussion_config(config, field, default_enabled):
@@ -247,12 +258,18 @@ def normalize_checks_config(config, field):
 
 
 def static_watches(config):
-    defaults = {"default-provider": string_value(config.get("default-provider"), "default-provider")}
+    defaults = {
+        "default-provider": string_value(config.get("default-provider"), "default-provider"),
+        "broker": object_value(config.get("broker"), "broker"),
+    }
     return [normalize_watch(raw, defaults, f"prs[{index}]") for index, raw in enumerate(list_value(config.get("prs"), "prs"))]
 
 
 def dynamic_watches(config):
-    defaults = {"default-provider": string_value(config.get("default-provider"), "default-provider")}
+    defaults = {
+        "default-provider": string_value(config.get("default-provider"), "default-provider"),
+        "broker": object_value(config.get("broker"), "broker"),
+    }
     data = read_json(registry_path(), {"prs": []})
     return [normalize_watch(raw, defaults, f"registry.prs[{index}]") for index, raw in enumerate(data.get("prs", []))]
 
@@ -279,7 +296,46 @@ def token_for_provider(provider):
     return token
 
 
-def github_request(path, provider, query=None):
+def broker_request(path, provider, query=None, paginate=False, broker=None):
+    broker = broker or {}
+    broker_provider = broker.get("provider") or provider
+    query_string = f"?{urlencode(query)}" if query else ""
+    command = [
+        "brokerctl",
+        "http",
+        "request",
+        "--provider",
+        broker_provider,
+        "--method",
+        "GET",
+        "--url",
+        f"https://api.github.com{path}{query_string}",
+        "--header",
+        "Accept:application/vnd.github+json",
+    ]
+    if paginate:
+        command.append("--paginate")
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        fail(f"broker request failed: {result.stderr.strip() or result.stdout.strip()}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"broker response was not valid JSON: {error}")
+    if not payload.get("ok"):
+        fail(f"broker request failed: {payload.get('error') or payload}")
+    status = payload.get("status")
+    if not isinstance(status, int) or status < 200 or status >= 300:
+        fail(f"GitHub API request failed through broker: status={status} body={payload.get('body', '')}")
+    try:
+        return json.loads(payload.get("body") or "null")
+    except json.JSONDecodeError as error:
+        fail(f"GitHub API broker response body was not valid JSON: {error}")
+
+
+def github_request(path, provider, query=None, broker=None, paginate=False):
+    if broker and broker.get("enabled"):
+        return broker_request(path, provider, query, paginate, broker)
     query_string = f"?{urlencode(query)}" if query else ""
     request = Request(
         f"https://api.github.com{path}{query_string}",
