@@ -418,6 +418,10 @@ func gitCredentialsRunBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "git-credentials", "run.py"))
 }
 
+func githubWatchBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-watcher", "github-watch.py"))
+}
+
 func commandWithEnv(command string, env []string, args ...string) *exec.Cmd {
 	fullCommand := command
 	for _, arg := range args {

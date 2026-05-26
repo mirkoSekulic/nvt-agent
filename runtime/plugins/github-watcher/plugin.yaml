@@ -1,0 +1,8 @@
+command: /usr/local/lib/nvt-agent/plugins/github-watcher/run.py
+doctor:
+  command: /usr/local/lib/nvt-agent/plugins/github-watcher/run.py doctor
+exports:
+  tools:
+    - name: github-watch
+      command: /usr/local/lib/nvt-agent/plugins/github-watcher/github-watch.py
+      description: Register GitHub pull requests for github-watcher

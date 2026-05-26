@@ -163,6 +163,12 @@ repos:
 
 Existing repositories are skipped and left untouched, including remotes.
 
+`github-watcher` watches GitHub PR comments, reviews, and aggregate check
+transitions. Static PRs are configured in `agent.yaml`; dynamic PRs can be added
+with the exported `github-watch register` command and are persisted under the
+plugin state directory so they survive container restart. See
+`runtime/plugins/github-watcher/README.md` for the full schema.
+
 ## Scaffolding
 
 Generate a plugin folder from templates:
