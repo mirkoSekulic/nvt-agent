@@ -236,7 +236,7 @@ class GithubAppProvider:
         parts = [unquote(part) for part in path.split("/") if part]
         if len(parts) < 3 or parts[0] != "repos":
             raise ProviderError("path-not-allowed")
-        if any(part in {".", ".."} for part in parts):
+        if any(part in {".", ".."} or "/" in part or "\\" in part for part in parts):
             raise ProviderError("path-not-allowed")
         owner = parts[1]
         repo = parts[2]
@@ -288,10 +288,10 @@ class GithubAppProvider:
 
     def _single_request(self, url, method, token, headers, cap):
         request_headers = {
+            **self._filtered_headers(headers),
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": "2022-11-28",
-            **self._filtered_headers(headers),
         }
         request = Request(url, method=method, headers=request_headers)
         try:

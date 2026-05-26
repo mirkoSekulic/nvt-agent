@@ -311,6 +311,11 @@ func TestHTTPDenyValidationFailures(t *testing.T) {
 			want: "repo-not-allowed",
 		},
 		{
+			name: "encoded-slash",
+			args: []string{"http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL + "/repos/my-user/foo%2f..%2f..%2fother-user%2fsecret/pulls/123"},
+			want: "path-not-allowed",
+		},
+		{
 			name: "method",
 			args: []string{"http", "request", "--provider", "fork-app", "--method", "POST", "--url", f.fake.server.URL + "/repos/my-user/my-repo/pulls/123"},
 			want: "method-not-allowed",
