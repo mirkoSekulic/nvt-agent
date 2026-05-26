@@ -10,6 +10,7 @@ import yaml
 
 CONFIG_DIR = Path.home() / ".nvt-agent" / "git-credentials"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
+MANAGED_HEADERS_FILE = CONFIG_DIR / "managed-headers.yaml"
 HELPER_BINARY = "git-credential-nvt"
 HELPER_CONFIG = "nvt"
 
@@ -108,18 +109,42 @@ def write_helper_config(credentials):
     CONFIG_FILE.chmod(0o600)
 
 
+def read_managed_header_keys():
+    if not MANAGED_HEADERS_FILE.is_file():
+        return []
+    with MANAGED_HEADERS_FILE.open("r", encoding="utf-8") as file:
+        data = yaml.safe_load(file) or {}
+    keys = data.get("keys", []) if isinstance(data, dict) else []
+    return [key for key in keys if isinstance(key, str)]
+
+
+def write_managed_header_keys(keys):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with MANAGED_HEADERS_FILE.open("w", encoding="utf-8") as file:
+        yaml.safe_dump({"keys": sorted(set(keys))}, file, sort_keys=False)
+    MANAGED_HEADERS_FILE.chmod(0o600)
+
+
 def configure_git_helper():
     run(["git", "config", "--global", "credential.helper", HELPER_CONFIG])
     run(["git", "config", "--global", "credential.useHttpPath", "true"])
 
 
+def clear_managed_headers():
+    for key in read_managed_header_keys():
+        subprocess.run(["git", "config", "--global", "--unset-all", key], check=False)
+
+
 def configure_headers(credentials):
+    clear_managed_headers()
+    managed_keys = []
     for rule in credentials:
         match = rule["match"]
         key = f"http.{match}.extraHeader"
-        subprocess.run(["git", "config", "--global", "--unset-all", key], check=False)
         for header in provider_headers(rule):
             run(["git", "config", "--global", "--add", key, header])
+        managed_keys.append(key)
+    write_managed_header_keys(managed_keys)
 
 
 def main():
@@ -130,6 +155,8 @@ def main():
     config = load_config()
     credentials = list_value(config.get("credentials"), "credentials")
     if not credentials:
+        write_helper_config([])
+        configure_headers([])
         print("git-credentials: no credentials configured", flush=True)
         return
 
@@ -146,8 +173,7 @@ def main():
             token_credentials.append(rule)
 
     write_helper_config(token_credentials)
-    if header_credentials:
-        configure_headers(header_credentials)
+    configure_headers(header_credentials)
     if token_credentials:
         configure_git_helper()
 

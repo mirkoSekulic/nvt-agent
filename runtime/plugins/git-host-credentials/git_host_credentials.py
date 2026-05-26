@@ -8,6 +8,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from re import fullmatch
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -130,8 +131,9 @@ def normalize_repo(value):
     if not value:
         return None
     repo = value.strip()
-    if repo.startswith("git@github.com:"):
-        repo = "github.com/" + repo.removeprefix("git@github.com:").removesuffix(".git")
+    scp_like = fullmatch(r"[^/@:]+@([^:]+):(.+)", repo)
+    if scp_like:
+        repo = f"{scp_like.group(1)}/{scp_like.group(2)}"
     elif "://" in repo:
         parsed = urlparse(repo)
         repo = f"{parsed.netloc}{parsed.path}".strip("/")

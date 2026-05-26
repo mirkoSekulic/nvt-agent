@@ -414,6 +414,10 @@ func gitCredentialNvtBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "git-credentials", "git-credential-nvt.py"))
 }
 
+func gitCredentialsRunBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "git-credentials", "run.py"))
+}
+
 func commandWithEnv(command string, env []string, args ...string) *exec.Cmd {
 	fullCommand := command
 	for _, arg := range args {
