@@ -50,7 +50,7 @@ def load_config(path=None):
     return data
 
 
-def provider_entries(config):
+def provider_entries(config, supported_plugins=None):
     entries = list_value(config.get("providers"), "providers")
     seen = set()
     output = []
@@ -62,7 +62,7 @@ def provider_entries(config):
             fail(f"duplicate provider name: {name}")
         seen.add(name)
         plugin = string_value(entry.get("plugin"), f"providers[{index}].plugin", required=True)
-        if plugin not in {"github-app", "token", "headers"}:
+        if supported_plugins is not None and plugin not in supported_plugins:
             fail(f"unsupported providers[{index}].plugin: {plugin}")
         output.append(entry)
     return output

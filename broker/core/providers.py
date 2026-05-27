@@ -13,7 +13,7 @@ PROVIDERS = {
 
 def load_providers(config):
     output = {}
-    for entry in provider_entries(config):
+    for entry in provider_entries(config, PROVIDERS):
         provider = PROVIDERS[entry["plugin"]](entry)
         output[provider.name] = provider
     return output

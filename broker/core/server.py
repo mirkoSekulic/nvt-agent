@@ -44,7 +44,7 @@ class Broker:
             operation="http.request",
             method=method,
             url=url,
-            target=f"github.com/{repo}",
+            target=github_target_from_repo(repo),
             allowed=True,
             status=result["status"],
             response_size=len(result["body"].encode("utf-8")),
@@ -65,7 +65,7 @@ class Broker:
             agent=agent["id"],
             provider=provider_name,
             operation="token",
-            target=f"github.com/{repo}",
+            target=github_target_from_repo(repo),
             purpose=purpose,
             allowed=True,
         )
@@ -84,7 +84,7 @@ class Broker:
             agent=agent["id"],
             provider=provider_name,
             operation="identity",
-            target=f"github.com/{repo}",
+            target=github_target_from_repo(repo),
             allowed=True,
         )
         return {"ok": True, **identity}
@@ -102,7 +102,7 @@ class Broker:
             agent=agent["id"],
             provider=provider_name,
             operation="headers",
-            target=f"github.com/{repo}",
+            target=github_target_from_repo(repo),
             allowed=True,
         )
         return {"ok": True, "headers": headers}
@@ -145,6 +145,10 @@ def github_repo_from_target(target):
     if value.count("/") == 1:
         return value
     raise ProviderError("target-invalid")
+
+
+def github_target_from_repo(repo):
+    return f"github.com/{repo}"
 
 
 def make_handler(broker):
