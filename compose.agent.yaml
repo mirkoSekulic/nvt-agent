@@ -43,6 +43,7 @@ services:
       - traefik.enable=true
       - traefik.docker.network=agents-proxy
       - traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
+      - traefik.http.routers.${AGENT_NAME}.entrypoints=web
       - traefik.http.routers.${AGENT_NAME}.service=${AGENT_NAME}
       - traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
 

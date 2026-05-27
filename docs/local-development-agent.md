@@ -348,6 +348,31 @@ GitHub token minting fails:
 - Run `make agent-down NAME=$AGENT && make agent-up NAME=$AGENT`.
 - Confirm `DOCKER_HOST=tcp://127.0.0.1:2375` is set inside the agent.
 
+Docker API exposure check:
+
+- Inside the agent, confirm dockerd listens only on localhost. If `ss` is
+  installed, run `ss -ltn | grep 2375` and expect `127.0.0.1:2375`, not
+  `0.0.0.0:2375`.
+- If `ss` is unavailable, inspect `/proc/net/tcp`:
+
+  ```sh
+  python3 - <<'PY'
+  from pathlib import Path
+  for line in Path("/proc/net/tcp").read_text().splitlines()[1:]:
+      parts = line.split()
+      addr, port = parts[1].split(":")
+      if port.upper() == "0947":
+          ip = ".".join(str(int(addr[i:i+2], 16)) for i in (6, 4, 2, 0))
+          print(f"{ip}:2375 state={parts[3]}")
+  PY
+  ```
+
+  Expected output:
+
+  ```text
+  127.0.0.1:2375 state=0A
+  ```
+
 ## Cleanup
 
 Stop the agent:

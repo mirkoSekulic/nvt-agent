@@ -139,6 +139,7 @@ expose:
 		"network_mode: service:docker",
 		"traefik.enable: \"true\"",
 		"traefik.http.routers.nvt-dev.rule: Host(`nvt-dev.agent.localhost`)",
+		"traefik.http.routers.nvt-dev.entrypoints: web",
 		"traefik.http.routers.nvt-dev.service: nvt-dev",
 		"traefik.http.services.nvt-dev.loadbalancer.server.port: \"4090\"",
 		"traefik.http.routers.nvt-dev-app.rule: Host(`app.nvt-dev.agent.localhost`)",
