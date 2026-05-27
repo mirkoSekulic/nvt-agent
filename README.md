@@ -279,7 +279,8 @@ http://api.<name>.agent.localhost:4090
 Route names must be unique DNS labels. `targetPort` is the port inside the
 agent container. v1 supports HTTP services in the main agent container only;
 `source: docker` / DinD-sidecar forwarding is intentionally rejected until that
-path is implemented.
+path is implemented. The host-side renderer supports the block YAML shape shown
+above; keep `expose.http` in that form rather than flow-style inline YAML.
 
 For one-off local access without editing `agent.yaml`, run a temporary forward:
 

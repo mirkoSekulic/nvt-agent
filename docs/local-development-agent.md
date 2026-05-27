@@ -245,6 +245,10 @@ named route:
 http://app.nvt-dev.agent.localhost:4090
 ```
 
+`expose.http` is local-development routing for HTTP services listening inside
+the main agent container. Keep it in block YAML form as shown; DinD container
+ports are not routed.
+
 For temporary access to another port without editing `agent.yaml`:
 
 ```sh
