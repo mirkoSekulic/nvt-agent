@@ -156,6 +156,12 @@ class GithubAppProvider:
         except ValueError:
             return 0
 
+    def normalize_target(self, target):
+        return github_repo_from_target(target)
+
+    def target_from_repo(self, repo):
+        return f"github.com/{repo}"
+
     def _cache_key(self, repo):
         permission_key = ",".join(f"{key}:{self.permissions[key]}" for key in sorted(self.permissions))
         return "|".join([self.name, repo, permission_key])
@@ -388,3 +394,17 @@ class GithubAppProvider:
                 body = json.dumps(items, separators=(",", ":"))
                 return {"status": 200, "headers": {**first_headers, **final_headers}, "body": body}, self._repo_from_path(parsed.path)
         raise ProviderError("pagination-page-cap-exceeded", status=502)
+
+
+def github_repo_from_target(target):
+    value = target.strip().removesuffix(".git").strip("/")
+    if value.startswith("https://") or value.startswith("http://"):
+        parsed = urlparse(value)
+        value = f"{parsed.hostname or ''}{parsed.path}".strip("/").removesuffix(".git")
+    if value.startswith("github.com/"):
+        parts = value.split("/")
+        if len(parts) >= 3:
+            return f"{parts[1]}/{parts[2]}"
+    if value.count("/") == 1:
+        return value
+    raise ProviderError("target-invalid")

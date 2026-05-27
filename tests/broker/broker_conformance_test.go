@@ -235,6 +235,15 @@ providers:
     allow:
       repositories:
         - my-user/my-repo
+  - name: altinn-headers
+    plugin: headers
+    config:
+      target-mode: literal
+      headers:
+        - header-env: TEST_ALTINN_API_KEY_HEADER
+    allow:
+      repositories:
+        - altinn.studio/repos/digdir/oed
 `, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
@@ -255,6 +264,7 @@ func (f *brokerFixture) start() {
 		"TEST_PAT_TOKEN=pat-secret",
 		"TEST_AUTH_HEADER=Authorization: Bearer header-secret",
 		"TEST_EXTRA_HEADER=X-Api-Key: extra-secret",
+		"TEST_ALTINN_API_KEY_HEADER=X-API-Key: altinn-secret",
 	)
 	cmd.Stdout = &f.stdout
 	cmd.Stderr = &f.stderr
@@ -629,6 +639,36 @@ func TestStaticHeadersProviderRequiresAgentGrant(t *testing.T) {
 	}
 }
 
+func TestStaticHeadersLiteralTargetModeSupportsSelfHostedGit(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"altinn-headers": {"altinn.studio/repos/digdir/oed"},
+			},
+		},
+	})
+	for _, target := range []string{
+		"https://altinn.studio/repos/digdir/oed.git",
+		"git@altinn.studio:repos/digdir/oed.git",
+		"altinn.studio/repos/digdir/oed",
+	} {
+		payload, _, status := f.brokerctl("headers", "--provider", "altinn-headers", "--target", target)
+		if status != 0 || payload["ok"] != true {
+			t.Fatalf("literal target %s failed: status=%d payload=%#v", target, status, payload)
+		}
+		headers := payload["headers"].([]any)
+		if len(headers) != 1 || headers[0] != "X-API-Key: altinn-secret" {
+			t.Fatalf("unexpected literal target headers: %#v", headers)
+		}
+	}
+	payload, _, status := f.brokerctl("headers", "--provider", "altinn-headers", "--target", "https://altinn.studio/repos/digdir/other.git")
+	if status == 0 || payload["error"] != "repo-not-allowed" {
+		t.Fatalf("expected literal target denial, status=%d payload=%#v", status, payload)
+	}
+}
+
 func TestUnsupportedStaticProviderOperationsFailCleanly(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeAgents(map[string]agentGrant{
@@ -718,13 +758,22 @@ func TestAuditRecordsAllowedAndDenied(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
 	f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/not/allowed/pulls/123")
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"altinn-headers": {"altinn.studio/repos/digdir/oed"},
+			},
+		},
+	})
+	f.brokerctl("headers", "--provider", "altinn-headers", "--target", "https://altinn.studio/repos/digdir/oed.git")
 
 	file, err := os.Open(f.audit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	var allowed, denied bool
+	var allowed, denied, literal bool
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		var event map[string]any
@@ -737,9 +786,12 @@ func TestAuditRecordsAllowedAndDenied(t *testing.T) {
 		if event["agent"] == "frontend" && event["allowed"] == false && event["reason"] == "repo-not-allowed" {
 			denied = true
 		}
+		if event["agent"] == "frontend" && event["allowed"] == true && event["target"] == "altinn.studio/repos/digdir/oed" {
+			literal = true
+		}
 	}
-	if !allowed || !denied {
-		t.Fatalf("expected allowed and denied audit entries, allowed=%v denied=%v", allowed, denied)
+	if !allowed || !denied || !literal {
+		t.Fatalf("expected allowed, denied, and literal audit entries, allowed=%v denied=%v literal=%v", allowed, denied, literal)
 	}
 }
 

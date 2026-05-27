@@ -284,7 +284,6 @@ plugins:
         - name: company-headers
           type: headers
           headers:
-            - header-env: COMPANY_GIT_AUTH_HEADER
             - header-env: COMPANY_GIT_API_KEY_HEADER
 
 credentials:
@@ -304,8 +303,7 @@ credentials:
 For provider `headers`, each `header-env` contains one full HTTP header line:
 
 ```env
-COMPANY_GIT_AUTH_HEADER=Authorization: Bearer abc123
-COMPANY_GIT_API_KEY_HEADER=X-Api-Key: xyz789
+COMPANY_GIT_API_KEY_HEADER=X-API-Key: xyz789
 ```
 
 ## Custom Example

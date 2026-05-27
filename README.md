@@ -431,11 +431,12 @@ providers:
   - name: company-headers
     plugin: headers
     config:
+      target-mode: literal
       headers:
-        - header-env: COMPANY_GIT_AUTH_HEADER
+        - header-env: COMPANY_GIT_API_KEY_HEADER
     allow:
       repositories:
-        - my-user/frontend
+        - altinn.studio/repos/digdir/oed
 ```
 
 These are compatibility providers. They keep raw secret env vars out of the

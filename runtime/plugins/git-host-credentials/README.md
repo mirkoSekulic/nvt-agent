@@ -30,7 +30,7 @@ plugins:
         - name: company-headers
           type: headers
           headers:
-            - header-env: COMPANY_GIT_AUTH_HEADER
+            - header-env: COMPANY_GIT_API_KEY_HEADER
 
         - name: brokered-fork-app
           type: broker
@@ -43,7 +43,7 @@ plugins:
           broker-provider: company-headers
           credential-kind: headers
           match:
-            - github.com/my-user/project
+            - altinn.studio/repos/digdir/oed
 ```
 
 `match` entries are glob patterns matched against normalized repo targets such
@@ -58,7 +58,7 @@ git-host-credential type --provider fork-app
 git-host-credential token --provider fork-app
 git-host-credential token --provider brokered-fork-app --target github.com/my-user/project
 git-host-credential identity --provider brokered-fork-app --target github.com/my-user/project
-git-host-credential headers --provider brokered-company-headers --target github.com/my-user/project
+git-host-credential headers --provider brokered-company-headers --target altinn.studio/repos/digdir/oed
 git-host-credential doctor --provider fork-app
 ```
 
@@ -76,7 +76,9 @@ credential-kind: headers
 ```
 
 Broker-backed header providers need a concrete repo target so the broker can
-apply agent grants. Prefer repo-level `match` entries for them.
+apply agent grants. Prefer repo-level `match` entries for them. For self-hosted
+Git, configure the broker provider with `target-mode: literal` and match the
+full host/path repository id, for example `altinn.studio/repos/digdir/oed`.
 
 `gh-auth` runs GitHub CLI commands with a provider token through `GH_TOKEN`
 without calling `gh auth login` or writing GitHub CLI auth state:

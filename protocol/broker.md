@@ -134,7 +134,7 @@ Requires `Authorization: Bearer ...`.
 Response:
 
 ```json
-{"ok":true,"headers":["Authorization: Bearer ...","X-Api-Key: ..."]}
+{"ok":true,"headers":["X-API-Key: ..."]}
 ```
 
 Header mode is not zero-trust for Git. The returned headers are written into
@@ -200,10 +200,19 @@ intersections deny.
 ## Static Token And Header Providers
 
 Static providers use the same `allow.repositories` ceiling and authenticated
-agent grant intersection as GitHub App providers. V1 keeps repository scope in
-GitHub-style `owner/repo` form for all broker providers. Host-prefixed targets
-such as `github.com/owner/repo` are accepted at the endpoint boundary and
-normalized to `owner/repo`.
+agent grant intersection as GitHub App providers. By default they use the same
+GitHub target mode as `github-app`: host-prefixed targets such as
+`github.com/owner/repo` are accepted at the endpoint boundary and normalized to
+`owner/repo`.
+
+For self-hosted Git providers, set `config.target-mode: literal`. Literal mode
+normalizes URL, SSH, and plain targets to their full host/path repository id:
+
+```text
+https://altinn.studio/repos/digdir/oed.git -> altinn.studio/repos/digdir/oed
+git@altinn.studio:repos/digdir/oed.git     -> altinn.studio/repos/digdir/oed
+altinn.studio/repos/digdir/oed             -> altinn.studio/repos/digdir/oed
+```
 
 Static token provider:
 
@@ -225,11 +234,12 @@ providers:
   - name: company-headers
     plugin: headers
     config:
+      target-mode: literal
       headers:
-        - header-env: COMPANY_AUTH_HEADER
+        - header-env: COMPANY_GIT_API_KEY_HEADER
     allow:
       repositories:
-        - my-user/my-repo
+        - altinn.studio/repos/digdir/oed
 ```
 
 These providers are compatibility providers. They remove raw secret env vars

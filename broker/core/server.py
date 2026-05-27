@@ -44,7 +44,7 @@ class Broker:
             operation="http.request",
             method=method,
             url=url,
-            target=github_target_from_repo(repo),
+            target=provider.target_from_repo(repo),
             allowed=True,
             status=result["status"],
             response_size=len(result["body"].encode("utf-8")),
@@ -56,8 +56,8 @@ class Broker:
         provider_name = string_field(payload, "provider")
         target = string_field(payload, "target")
         purpose = payload.get("purpose")
-        repo = github_repo_from_target(target)
         provider = self.provider(provider_name)
+        repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         token, expires_at = provider.token_for_repo(repo, effective_repositories)
         self.audit.write(
@@ -65,7 +65,7 @@ class Broker:
             agent=agent["id"],
             provider=provider_name,
             operation="token",
-            target=github_target_from_repo(repo),
+            target=provider.target_from_repo(repo),
             purpose=purpose,
             allowed=True,
         )
@@ -75,8 +75,8 @@ class Broker:
         agent = self.agents.authenticate(authorization)
         provider_name = string_field(payload, "provider")
         target = string_field(payload, "target")
-        repo = github_repo_from_target(target)
         provider = self.provider(provider_name)
+        repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         identity = provider.identity_for_repo(repo, effective_repositories)
         self.audit.write(
@@ -84,7 +84,7 @@ class Broker:
             agent=agent["id"],
             provider=provider_name,
             operation="identity",
-            target=github_target_from_repo(repo),
+            target=provider.target_from_repo(repo),
             allowed=True,
         )
         return {"ok": True, **identity}
@@ -93,8 +93,8 @@ class Broker:
         agent = self.agents.authenticate(authorization)
         provider_name = string_field(payload, "provider")
         target = string_field(payload, "target")
-        repo = github_repo_from_target(target)
         provider = self.provider(provider_name)
+        repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         headers = provider.headers_for_repo(repo, effective_repositories)
         self.audit.write(
@@ -102,7 +102,7 @@ class Broker:
             agent=agent["id"],
             provider=provider_name,
             operation="headers",
-            target=github_target_from_repo(repo),
+            target=provider.target_from_repo(repo),
             allowed=True,
         )
         return {"ok": True, "headers": headers}
@@ -129,26 +129,6 @@ def string_field(payload, key):
     if not isinstance(value, str) or not value:
         raise ProviderError(f"{key}-required")
     return value
-
-
-def github_repo_from_target(target):
-    value = target.strip().removesuffix(".git").strip("/")
-    if value.startswith("https://") or value.startswith("http://"):
-        from urllib.parse import urlparse
-
-        parsed = urlparse(value)
-        value = f"{parsed.hostname or ''}{parsed.path}".strip("/").removesuffix(".git")
-    if value.startswith("github.com/"):
-        parts = value.split("/")
-        if len(parts) >= 3:
-            return f"{parts[1]}/{parts[2]}"
-    if value.count("/") == 1:
-        return value
-    raise ProviderError("target-invalid")
-
-
-def github_target_from_repo(repo):
-    return f"github.com/{repo}"
 
 
 def make_handler(broker):

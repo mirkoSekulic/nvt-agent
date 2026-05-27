@@ -2,6 +2,7 @@ import fnmatch
 
 from broker.core.config import env_value, fail, list_value, string_value
 from broker.plugins.github_app.provider import ProviderError
+from broker.plugins.static_target import normalize_target, target_mode
 
 
 class StaticTokenProvider:
@@ -14,6 +15,7 @@ class StaticTokenProvider:
         self.allow = entry.get("allow") or {}
         if not isinstance(self.allow, dict):
             fail(f"provider {self.name} allow must be a YAML object")
+        self.target_mode = target_mode(self.config, self.name)
         self.allowed_repositories = self._allowed_strings("repositories")
         self.token = self._token()
 
@@ -50,6 +52,14 @@ class StaticTokenProvider:
     def token_for_repo(self, repo, effective_repositories):
         self._ensure_repo_allowed(repo, effective_repositories)
         return self.token, None
+
+    def normalize_target(self, target):
+        return normalize_target(target, self.target_mode)
+
+    def target_from_repo(self, repo):
+        if self.target_mode == "github":
+            return f"github.com/{repo}"
+        return repo
 
     def headers_for_repo(self, repo, effective_repositories):
         raise ProviderError("headers-not-supported", f"provider {self.name} does not support headers")
