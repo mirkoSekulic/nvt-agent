@@ -28,6 +28,15 @@ Docker Compose and Kubernetes must override this with an internal-only service
 interface. V1 has no strong caller authentication, so reachability is the
 boundary.
 
+Local multi-agent Compose mode uses bearer-token agent identity. Agents send:
+
+```text
+Authorization: Bearer <NVT_BROKER_TOKEN>
+```
+
+The broker stores only `sha256:<hash>` values in its live-reloaded agents
+config. `/health` is token-free; capability endpoints require a valid token.
+
 ## Endpoints
 
 ### GET /health
@@ -57,6 +66,8 @@ Request:
   "paginate": false
 }
 ```
+
+Requires `Authorization: Bearer ...`.
 
 Response:
 
@@ -89,6 +100,8 @@ Request:
 }
 ```
 
+Requires `Authorization: Bearer ...`.
+
 Response:
 
 ```json
@@ -116,6 +129,11 @@ The configured upstream is the only allowed host. Production uses
 upstream. Internal/metadata/localhost blocking applies to anything that is not
 the configured upstream.
 
+Provider `allow.repositories` is a ceiling. In local multi-agent mode, broker
+core intersects that ceiling with the authenticated agent grant and passes the
+effective repository scope into the provider per request. Empty grants and empty
+intersections deny.
+
 ## Headers
 
 Allowed caller request headers:
@@ -140,8 +158,8 @@ exceeded.
 ## Audit
 
 Every broker request appends one JSONL audit entry with request id, provider,
-operation, target, allow/deny result, denial reason, upstream status, and
-response size when available.
+operation, authenticated agent id when available, target, allow/deny result,
+denial reason, upstream status, and response size when available.
 
 ## Stability
 

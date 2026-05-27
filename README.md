@@ -81,6 +81,11 @@ Broker mode starts that split locally: GitHub App private keys live in the
 broker service, while agents use `brokerctl` or broker-backed
 `git-host-credential` providers.
 
+Local shared-broker mode uses per-agent bearer tokens and grants stored under
+`.broker/agents.yaml`. The token identifies an agent to the broker; grants
+narrow each provider's repository ceiling. This is a local development identity
+model, not production workload identity.
+
 ## Kubernetes-Native Direction
 
 The intended mature shape is:

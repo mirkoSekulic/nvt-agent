@@ -72,6 +72,8 @@ esac
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 templates_dir="$repo_root/templates"
+broker_dir="$repo_root/.broker"
+broker_agents_file="$broker_dir/agents.yaml"
 
 bash "$script_dir/validate-agent-name.sh" "$name"
 
@@ -83,7 +85,34 @@ custom_plugins_dir="$agent_dir/custom-plugins"
 claude_config_dir="$agent_dir/auth/claude"
 codex_config_dir="${HOME}/.codex"
 
-mkdir -p "$workspace_dir" "$custom_plugins_dir" "$claude_config_dir"
+mkdir -p "$workspace_dir" "$custom_plugins_dir" "$claude_config_dir" "$broker_dir"
+
+if [ ! -f "$broker_dir/broker.yaml" ]; then
+  cp "$templates_dir/broker.yaml" "$broker_dir/broker.yaml"
+  echo "created $broker_dir/broker.yaml"
+fi
+
+if [ ! -f "$broker_agents_file" ]; then
+  cp "$templates_dir/broker-agents.yaml" "$broker_agents_file"
+  echo "created $broker_agents_file"
+fi
+
+if [ ! -f "$broker_dir/env" ]; then
+  cp "$templates_dir/broker-env" "$broker_dir/env"
+  echo "created $broker_dir/env"
+fi
+
+broker_token=""
+if [ -f "$env_file" ]; then
+  broker_token="$(grep -E '^NVT_BROKER_TOKEN=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+fi
+if [ -z "$broker_token" ]; then
+  broker_token="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+)"
+fi
 
 if [ ! -f "$env_file" ]; then
   AGENT_NAME="$name" \
@@ -93,13 +122,33 @@ if [ ! -f "$env_file" ]; then
     NVT_WORKSPACE="$workspace_dir" \
     CUSTOM_PLUGINS_DIR="$custom_plugins_dir" \
     AGENT_CONFIG_FILE="$agent_config_file" \
+    NVT_BROKER_TOKEN="$broker_token" \
     CODEX_CONFIG_DIR="$codex_config_dir" \
     CLAUDE_CONFIG_DIR="$claude_config_dir" \
     render_template "$templates_dir/env" "$env_file"
   echo "created $env_file"
 else
+  if ! grep -q '^NVT_BROKER_URL=' "$env_file"; then
+    {
+      printf '\n'
+      printf 'NVT_BROKER_URL=http://broker:7347\n'
+    } >>"$env_file"
+    echo "updated $env_file"
+  fi
+  if ! grep -q '^NVT_BROKER_TOKEN=' "$env_file"; then
+    {
+      printf 'NVT_BROKER_TOKEN=%s\n' "$broker_token"
+    } >>"$env_file"
+    echo "updated $env_file"
+  fi
   echo "exists  $env_file"
 fi
+
+python3 "$script_dir/broker-agents.py" \
+  --agents-file "$broker_agents_file" \
+  register \
+  --name "$name" \
+  --token "$broker_token"
 
 if [ ! -f "$agent_config_file" ]; then
   AGENT_TYPE="$agent_type" render_template "$templates_dir/agent.yaml" "$agent_config_file"

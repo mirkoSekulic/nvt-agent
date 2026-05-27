@@ -1,0 +1,22 @@
+# Broker provider config. Root secrets are read from .broker/env by env var.
+#
+# Example:
+# providers:
+#   - name: github-fork-app
+#     plugin: github-app
+#     config:
+#       app-id-env: GITHUB_APP_ID
+#       installation-id-env: GITHUB_APP_INSTALLATION_ID
+#       private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
+#       api-url: https://api.github.com
+#     allow:
+#       repositories:
+#         - my-user/*
+#       permissions:
+#         contents: read
+#         pull_requests: read
+#         checks: read
+#       methods:
+#         - GET
+
+providers: []

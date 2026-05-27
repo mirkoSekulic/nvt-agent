@@ -1,10 +1,13 @@
 TYPE ?= codex
 DIR ?= runtime/plugins
 
-.PHONY: runtime-build infra-up infra-down infra-network-rm agent-init agent-up agent-logs agent-shell agent-doctor agent-ps agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build infra-up infra-down infra-network-rm agent-init agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
+
+broker-build:
+	bash scripts/broker-build.sh
 
 infra-up:
 	bash scripts/infra-up.sh
@@ -18,6 +21,12 @@ infra-network-rm:
 agent-init:
 	@test -n "$(NAME)" || (echo "usage: make agent-init NAME=<name> [TYPE=codex|claude]"; exit 1)
 	bash scripts/agent-init.sh --name "$(NAME)" --type "$(TYPE)"
+
+agent-grant:
+	@test -n "$(NAME)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
+	@test -n "$(PROVIDER)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
+	@test -n "$(REPO)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
+	bash scripts/agent-grant.sh --name "$(NAME)" --provider "$(PROVIDER)" --repo "$(REPO)"
 
 agent-up:
 	@test -n "$(NAME)" || (echo "usage: make agent-up NAME=<name>"; exit 1)

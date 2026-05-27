@@ -1,3 +1,4 @@
 .agents/
+.broker/
 __pycache__/
 *.pyc

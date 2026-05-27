@@ -14,7 +14,14 @@ def broker_url():
 def request_json(path, payload=None, method="POST"):
     url = broker_url() + path
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    request = Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if path != "/health":
+        token = os.environ.get("NVT_BROKER_TOKEN", "").strip()
+        if not token:
+            print("brokerctl: NVT_BROKER_TOKEN is not set", file=sys.stderr)
+            raise SystemExit(2)
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(url, data=data, method=method, headers=headers)
     try:
         with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8")), response.status

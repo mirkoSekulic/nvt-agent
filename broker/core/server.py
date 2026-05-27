@@ -3,6 +3,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from broker.core.audit import AuditLog
+from broker.core.agents import AgentRegistry
 from broker.core.config import BrokerConfigError, load_config
 from broker.core.providers import load_providers
 from broker.plugins.github_app.provider import ProviderError
@@ -16,6 +17,7 @@ class Broker:
         self.config = load_config(config_path)
         self.providers = load_providers(self.config)
         self.audit = AuditLog(audit_path)
+        self.agents = AgentRegistry()
 
     def provider(self, name):
         provider = self.providers.get(name)
@@ -23,7 +25,8 @@ class Broker:
             raise ProviderError("provider-not-found")
         return provider
 
-    def http_request(self, request_id, payload):
+    def http_request(self, request_id, payload, authorization):
+        agent = self.agents.authenticate(authorization)
         provider_name = string_field(payload, "provider")
         method = string_field(payload, "method").upper()
         url = string_field(payload, "url")
@@ -32,9 +35,11 @@ class Broker:
             raise ProviderError("headers-invalid")
         paginate = bool(payload.get("paginate", False))
         provider = self.provider(provider_name)
-        result, repo = provider.http_request(method, url, headers, paginate)
+        effective_repositories = self.agents.effective_repositories(agent, provider_name)
+        result, repo = provider.http_request(method, url, headers, paginate, effective_repositories)
         self.audit.write(
             request_id=request_id,
+            agent=agent["id"],
             provider=provider_name,
             operation="http.request",
             method=method,
@@ -46,15 +51,18 @@ class Broker:
         )
         return {"ok": True, **result}
 
-    def token(self, request_id, payload):
+    def token(self, request_id, payload, authorization):
+        agent = self.agents.authenticate(authorization)
         provider_name = string_field(payload, "provider")
         target = string_field(payload, "target")
         purpose = payload.get("purpose")
         repo = github_repo_from_target(target)
         provider = self.provider(provider_name)
-        token, expires_at = provider.token_for_repo(repo)
+        effective_repositories = self.agents.effective_repositories(agent, provider_name)
+        token, expires_at = provider.token_for_repo(repo, effective_repositories)
         self.audit.write(
             request_id=request_id,
+            agent=agent["id"],
             provider=provider_name,
             operation="token",
             target=f"github.com/{repo}",
@@ -63,9 +71,15 @@ class Broker:
         )
         return {"ok": True, "token": token, "expires_at": expires_at}
 
-    def denied(self, request_id, payload, reason, message=None):
+    def denied(self, request_id, payload, reason, message=None, authorization=None):
+        agent_id = None
+        try:
+            agent_id = self.agents.authenticate(authorization)["id"] if authorization else None
+        except ProviderError:
+            agent_id = None
         self.audit.write(
             request_id=request_id,
+            agent=agent_id,
             provider=payload.get("provider") if isinstance(payload, dict) else None,
             operation=payload.get("type") if isinstance(payload, dict) else None,
             allowed=False,
@@ -116,18 +130,18 @@ def make_handler(broker):
             try:
                 payload = self.read_payload()
                 if self.path == "/v1/http/request":
-                    response = broker.http_request(request_id, payload)
+                    response = broker.http_request(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 if self.path == "/v1/token":
-                    response = broker.token(request_id, payload)
+                    response = broker.token(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 self.write_json(404, {"ok": False, "error": "not-found"})
             except ProviderError as error:
-                self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message))
+                self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization")))
             except Exception as error:
-                self.write_json(500, broker.denied(request_id, payload, "internal-error", str(error)))
+                self.write_json(500, broker.denied(request_id, payload, "internal-error", str(error), self.headers.get("authorization")))
 
         def read_payload(self):
             length = int(self.headers.get("content-length") or "0")

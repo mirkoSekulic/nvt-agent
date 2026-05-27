@@ -166,8 +166,8 @@ class GithubAppProvider:
                 self.key_locks[key] = lock
             return lock
 
-    def token_for_repo(self, repo):
-        self._ensure_repo_allowed(repo)
+    def token_for_repo(self, repo, effective_repositories=None):
+        self._ensure_repo_allowed(repo, effective_repositories)
         key = self._cache_key(repo)
         with self._key_lock(key):
             cached = self.cache.get(key, {})
@@ -218,7 +218,7 @@ class GithubAppProvider:
             return 80
         return None
 
-    def _validate_url(self, url, method):
+    def _validate_url(self, url, method, effective_repositories=None):
         parsed = urlparse(url)
         if parsed.username or parsed.password:
             raise ProviderError("url-userinfo-not-allowed")
@@ -229,7 +229,7 @@ class GithubAppProvider:
         if method.upper() not in self.allowed_methods:
             raise ProviderError("method-not-allowed")
         repo = self._repo_from_path(parsed.path)
-        self._ensure_repo_allowed(repo)
+        self._ensure_repo_allowed(repo, effective_repositories)
         return parsed, repo
 
     def _repo_from_path(self, path):
@@ -244,10 +244,16 @@ class GithubAppProvider:
             raise ProviderError("path-not-allowed")
         return f"{owner}/{repo}"
 
-    def _ensure_repo_allowed(self, repo):
+    def _ensure_repo_allowed(self, repo, effective_repositories=None):
         if not self.allowed_repositories:
             raise ProviderError("repo-not-allowed", "provider has no allowed repositories")
-        for pattern in self.allowed_repositories:
+        if not any(fnmatch.fnmatchcase(repo, pattern) for pattern in self.allowed_repositories):
+            raise ProviderError("repo-not-allowed")
+        if effective_repositories is None:
+            return
+        if not effective_repositories:
+            raise ProviderError("repo-not-allowed")
+        for pattern in effective_repositories:
             if fnmatch.fnmatchcase(repo, pattern):
                 return
         raise ProviderError("repo-not-allowed")
@@ -278,10 +284,10 @@ class GithubAppProvider:
         query.extend([("per_page", str(self.per_page)), ("page", str(page))])
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urlencode(query), ""))
 
-    def http_request(self, method, url, headers=None, paginate=False):
+    def http_request(self, method, url, headers=None, paginate=False, effective_repositories=None):
         method = method.upper()
-        parsed, repo = self._validate_url(url, method)
-        token, _expires_at = self.token_for_repo(repo)
+        parsed, repo = self._validate_url(url, method, effective_repositories)
+        token, _expires_at = self.token_for_repo(repo, effective_repositories)
         if paginate:
             return self._paginated_request(parsed, token, headers)
         return self._single_request(url, method, token, headers, self.max_response_bytes), repo

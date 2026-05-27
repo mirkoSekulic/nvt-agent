@@ -10,10 +10,25 @@ The agent image contains only `brokerctl`.
 
 ```sh
 export NVT_BROKER_CONFIG=/path/to/broker.yaml
+export NVT_BROKER_AGENTS_CONFIG=/path/to/agents.yaml
 export NVT_BROKER_AUDIT_LOG=/tmp/nvt-broker-audit.jsonl
 export NVT_BROKER_BIND=127.0.0.1:7347
 python3 broker/brokerd.py
 ```
+
+Example agents config:
+
+```yaml
+agents:
+  - id: frontend
+    token-sha256: sha256:<hash>
+    grants:
+      - provider: fork-app
+        repositories:
+          - my-user/my-repo
+```
+
+`agents.yaml` is live-reloaded. Provider config is loaded at startup.
 
 Example config:
 
@@ -55,3 +70,5 @@ brokerctl token \
 
 `http request` keeps the derived GitHub token inside the broker. `token` is a
 compatibility mode for tools that need a token, mainly Git credential helpers.
+
+Non-health commands require `NVT_BROKER_TOKEN`.

@@ -1,4 +1,21 @@
 services:
+  broker:
+    image: nvt-broker:latest
+    env_file:
+      - .broker/env
+    environment:
+      NVT_BROKER_CONFIG: /config/broker.yaml
+      NVT_BROKER_AGENTS_CONFIG: /config/agents.yaml
+      NVT_BROKER_AUDIT_LOG: /state/audit.jsonl
+      NVT_BROKER_BIND: 0.0.0.0:7347
+    volumes:
+      - ./.broker/broker.yaml:/config/broker.yaml:ro
+      - ./.broker/agents.yaml:/config/agents.yaml:ro
+      - ./.broker:/state
+    networks:
+      - agents-proxy
+    restart: unless-stopped
+
   proxy:
     image: traefik:v3
     command:

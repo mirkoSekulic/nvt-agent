@@ -3,6 +3,7 @@ package broker_test
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -116,10 +117,12 @@ type brokerFixture struct {
 	bind   string
 	url    string
 	audit  string
+	agents string
 	broker *exec.Cmd
 	fake   *fakeGitHub
 	keyPEM string
 	config string
+	token  string
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 }
@@ -137,10 +140,20 @@ func newBrokerFixture(t *testing.T) *brokerFixture {
 		bind:   fmt.Sprintf("127.0.0.1:%d", port),
 		url:    fmt.Sprintf("http://127.0.0.1:%d", port),
 		audit:  filepath.Join(home, "audit.jsonl"),
+		agents: filepath.Join(home, "agents.yaml"),
 		fake:   fake,
 		keyPEM: keyPEM,
+		token:  "frontend-token",
 	}
 	f.config = f.writeConfig([]string{"my-user/my-repo", "my-user/other-repo"}, "", 0, 0)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"fork-app": {"my-user/my-repo", "my-user/other-repo"},
+			},
+		},
+	})
 	f.start()
 	t.Cleanup(f.stop)
 	return f
@@ -195,6 +208,7 @@ func (f *brokerFixture) start() {
 	cmd := exec.Command("python3", filepath.Join(f.root, "broker", "brokerd.py"))
 	cmd.Env = append(os.Environ(),
 		"NVT_BROKER_CONFIG="+f.config,
+		"NVT_BROKER_AGENTS_CONFIG="+f.agents,
 		"NVT_BROKER_BIND="+f.bind,
 		"NVT_BROKER_AUDIT_LOG="+f.audit,
 		"TEST_PRIVATE_KEY_B64="+base64.StdEncoding.EncodeToString([]byte(f.keyPEM)),
@@ -223,10 +237,63 @@ func (f *brokerFixture) stop() {
 	_ = f.broker.Wait()
 }
 
+type agentGrant struct {
+	Token  string
+	Grants map[string][]string
+}
+
+func (f *brokerFixture) writeAgents(agents map[string]agentGrant) {
+	f.t.Helper()
+	var builder strings.Builder
+	builder.WriteString("agents:\n")
+	for id, agent := range agents {
+		builder.WriteString("  - id: ")
+		builder.WriteString(id)
+		builder.WriteString("\n")
+		builder.WriteString("    token-sha256: sha256:")
+		hash := sha256.Sum256([]byte(agent.Token))
+		builder.WriteString(fmt.Sprintf("%x", hash[:]))
+		builder.WriteString("\n")
+		builder.WriteString("    grants:\n")
+		for provider, repos := range agent.Grants {
+			builder.WriteString("      - provider: ")
+			builder.WriteString(provider)
+			builder.WriteString("\n")
+			builder.WriteString("        repositories:\n")
+			for _, repo := range repos {
+				builder.WriteString("          - ")
+				builder.WriteString(repo)
+				builder.WriteString("\n")
+			}
+		}
+		if len(agent.Grants) == 0 {
+			builder.WriteString("      []\n")
+		}
+	}
+	if len(agents) == 0 {
+		builder.WriteString("  []\n")
+	}
+	tmp := f.agents + ".tmp"
+	if err := os.WriteFile(tmp, []byte(builder.String()), 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.Rename(tmp, f.agents); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 func (f *brokerFixture) brokerctl(args ...string) (map[string]any, string, int) {
+	return f.brokerctlWithToken(f.token, args...)
+}
+
+func (f *brokerFixture) brokerctlWithToken(token string, args ...string) (map[string]any, string, int) {
 	f.t.Helper()
 	cmd := exec.Command("python3", append([]string{filepath.Join(f.root, "runtime", "core", "brokerctl.py")}, args...)...)
-	cmd.Env = append(os.Environ(), "NVT_BROKER_URL="+f.url)
+	env := append(os.Environ(), "NVT_BROKER_URL="+f.url, "NVT_BROKER_TOKEN=")
+	if token != "" {
+		env = append(env, "NVT_BROKER_TOKEN="+token)
+	}
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	status := 0
 	if err != nil {
@@ -237,8 +304,9 @@ func (f *brokerFixture) brokerctl(args ...string) (map[string]any, string, int) 
 		}
 	}
 	var payload map[string]any
-	if len(bytes.TrimSpace(output)) > 0 {
-		if decodeErr := json.Unmarshal(bytes.TrimSpace(output), &payload); decodeErr != nil {
+	trimmed := bytes.TrimSpace(output)
+	if len(trimmed) > 0 && bytes.HasPrefix(trimmed, []byte("{")) {
+		if decodeErr := json.Unmarshal(trimmed, &payload); decodeErr != nil {
 			f.t.Fatalf("decode brokerctl output %q: %v", output, decodeErr)
 		}
 	}
@@ -247,9 +315,25 @@ func (f *brokerFixture) brokerctl(args ...string) (map[string]any, string, int) 
 
 func TestHealth(t *testing.T) {
 	f := newBrokerFixture(t)
-	payload, _, status := f.brokerctl("health")
+	payload, _, status := f.brokerctlWithToken("", "health")
 	if status != 0 || payload["ok"] != true {
 		t.Fatalf("health failed status=%d payload=%#v stderr=%s", status, payload, f.stderr.String())
+	}
+}
+
+func TestBrokerctlRequiresTokenForCapabilityCalls(t *testing.T) {
+	f := newBrokerFixture(t)
+	_, output, status := f.brokerctlWithToken("", "http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
+	if status != 2 || !strings.Contains(output, "NVT_BROKER_TOKEN is not set") {
+		t.Fatalf("expected local missing-token error, status=%d output=%q", status, output)
+	}
+}
+
+func TestBrokerRejectsInvalidToken(t *testing.T) {
+	f := newBrokerFixture(t)
+	payload, _, status := f.brokerctlWithToken("wrong-token", "http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
+	if status == 0 || payload["error"] != "unauthorized" {
+		t.Fatalf("expected unauthorized, status=%d payload=%#v", status, payload)
 	}
 }
 
@@ -331,6 +415,46 @@ func TestHTTPDenyValidationFailures(t *testing.T) {
 	}
 }
 
+func TestAgentGrantsNarrowProviderCeiling(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"fork-app": {"my-user/my-repo"},
+			},
+		},
+	})
+	payload, _, status := f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/other-repo/pulls/1")
+	if status == 0 || payload["error"] != "repo-not-allowed" {
+		t.Fatalf("expected grant repo denial, status=%d payload=%#v", status, payload)
+	}
+}
+
+func TestEmptyAndMismatchedGrantsDeny(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {Token: f.token, Grants: map[string][]string{}},
+	})
+	payload, _, status := f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
+	if status == 0 || payload["error"] != "provider-not-granted" {
+		t.Fatalf("expected provider-not-granted for empty grants, status=%d payload=%#v", status, payload)
+	}
+
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"fork-app": {"other-user/*"},
+			},
+		},
+	})
+	payload, _, status = f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
+	if status == 0 || payload["error"] != "repo-not-allowed" {
+		t.Fatalf("expected empty-intersection denial, status=%d payload=%#v", status, payload)
+	}
+}
+
 func TestRedirectDoesNotLeakAuth(t *testing.T) {
 	f := newBrokerFixture(t)
 	payload, _, status := f.brokerctl(
@@ -391,6 +515,61 @@ func TestTokenCacheReuseAndSeparation(t *testing.T) {
 	}
 }
 
+func TestTokenCacheIsAgentIndependent(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: "frontend-token",
+			Grants: map[string][]string{
+				"fork-app": {"my-user/my-repo"},
+			},
+		},
+		"backend": {
+			Token: "backend-token",
+			Grants: map[string][]string{
+				"fork-app": {"my-user/my-repo"},
+			},
+		},
+	})
+	for _, token := range []string{"frontend-token", "backend-token"} {
+		payload, _, status := f.brokerctlWithToken(token, "token", "--provider", "fork-app", "--target", "github.com/my-user/my-repo")
+		if status != 0 || payload["ok"] != true {
+			t.Fatalf("token failed for %s: status=%d payload=%#v", token, status, payload)
+		}
+	}
+	if count := f.fake.tokenRequestCount(); count != 1 {
+		t.Fatalf("expected shared repo cache across agents, got %d token mints", count)
+	}
+}
+
+func TestAgentsConfigReloadKeepsLastGoodOnFailure(t *testing.T) {
+	f := newBrokerFixture(t)
+	payload, _, status := f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("baseline request failed: status=%d payload=%#v", status, payload)
+	}
+	if err := os.WriteFile(f.agents, []byte("agents: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, _, status = f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("last-good agents config was not preserved: status=%d payload=%#v", status, payload)
+	}
+
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"fork-app": {"my-user/other-repo"},
+			},
+		},
+	})
+	payload, _, status = f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
+	if status == 0 || payload["error"] != "repo-not-allowed" {
+		t.Fatalf("updated agents config was not reloaded: status=%d payload=%#v", status, payload)
+	}
+}
+
 func TestAuditRecordsAllowedAndDenied(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
@@ -408,10 +587,10 @@ func TestAuditRecordsAllowedAndDenied(t *testing.T) {
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			t.Fatal(err)
 		}
-		if event["allowed"] == true {
+		if event["agent"] == "frontend" && event["allowed"] == true {
 			allowed = true
 		}
-		if event["allowed"] == false && event["reason"] == "repo-not-allowed" {
+		if event["agent"] == "frontend" && event["allowed"] == false && event["reason"] == "repo-not-allowed" {
 			denied = true
 		}
 	}
