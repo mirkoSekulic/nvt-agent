@@ -37,7 +37,7 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 
-"$script_dir/validate-agent-name.sh" "$name"
+bash "$script_dir/validate-agent-name.sh" "$name"
 
 env_file="$repo_root/.agents/$name/env"
 

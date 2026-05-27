@@ -39,8 +39,8 @@ if [ "$force" -ne 1 ]; then
   esac
 fi
 
-"$script_dir/agent-rm-all.sh" --force
-"$script_dir/infra-down.sh"
-"$script_dir/infra-network-rm.sh"
+bash "$script_dir/agent-rm-all.sh" --force
+bash "$script_dir/infra-down.sh"
+bash "$script_dir/infra-network-rm.sh"
 
 echo "nuked all agents, infra, and proxy network"

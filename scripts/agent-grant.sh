@@ -43,7 +43,7 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 
-"$script_dir/validate-agent-name.sh" "$name"
+bash "$script_dir/validate-agent-name.sh" "$name"
 
 agents_file="$repo_root/.broker/agents.yaml"
 if [ ! -f "$agents_file" ]; then

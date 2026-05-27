@@ -34,7 +34,7 @@ for agent_dir in "$agents_dir"/*; do
   [ -d "$agent_dir" ] || continue
   [ -f "$agent_dir/env" ] || continue
   name="$(basename "$agent_dir")"
-  "$script_dir/validate-agent-name.sh" "$name"
+  bash "$script_dir/validate-agent-name.sh" "$name"
   agent_names+=("$name")
 done
 
@@ -56,5 +56,5 @@ if [ "$force" -ne 1 ]; then
 fi
 
 for name in "${agent_names[@]}"; do
-  "$script_dir/agent-rm.sh" --name "$name" --force
+  bash "$script_dir/agent-rm.sh" --name "$name" --force
 done

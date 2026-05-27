@@ -19,7 +19,7 @@ for env_file in "$agents_dir"/*/env; do
   set +a
 
   name="${AGENT_NAME:-$(basename "$(dirname "$env_file")")}"
-  "$script_dir/validate-agent-name.sh" "$name"
+  bash "$script_dir/validate-agent-name.sh" "$name"
 
   container_id="$(
     docker compose \
