@@ -359,6 +359,36 @@ def broker_identity(provider, target):
     return {"name": name, "email": email}
 
 
+def broker_headers(provider, target):
+    broker_provider = string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+    if not target:
+        fail(f"provider {provider_name(provider)} broker headers require --target")
+    command = ["brokerctl", "headers", "--provider", broker_provider, "--target", target, "--raw"]
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        fail(f"broker headers request failed: {stderr or stdout}")
+    output = [line for line in result.stdout.splitlines() if line.strip()]
+    if not output:
+        fail("broker headers response did not include headers")
+    return output
+
+
+def credential_kind(provider):
+    kind = provider.get("type")
+    if kind == "broker":
+        value = string_value(provider.get("credential-kind"), f"provider {provider_name(provider)} credential-kind") or "token"
+        if value not in {"token", "headers"}:
+            fail(f"provider {provider_name(provider)} credential-kind must be token or headers")
+        return value
+    if kind == "headers":
+        return "headers"
+    if kind in {"github-app", "token-env"}:
+        return "token"
+    fail(f"provider {provider_name(provider)} does not provide Git credentials")
+
+
 def token(provider, target=None):
     kind = provider.get("type")
     if kind == "github-app":
@@ -379,7 +409,9 @@ def identity(provider, target=None):
     fail(f"provider {provider_name(provider)} does not support commit identity; use identity.mode=explicit")
 
 
-def headers(provider):
+def headers(provider, target=None):
+    if provider.get("type") == "broker":
+        return broker_headers(provider, target)
     if provider.get("type") != "headers":
         fail(f"provider {provider_name(provider)} does not provide header credentials")
     output = []
@@ -408,6 +440,7 @@ def validate_provider(provider):
         if shutil.which("brokerctl") is None:
             fail("brokerctl not found on PATH")
         string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+        credential_kind(provider)
     elif kind == "headers":
         headers(provider)
     else:

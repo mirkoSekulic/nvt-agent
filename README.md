@@ -416,6 +416,33 @@ GITHUB_APP_INSTALLATION_ID=987654
 GITHUB_APP_PRIVATE_KEY_BASE64=...
 ```
 
+Static PAT and header providers can also live in the broker:
+
+```yaml
+providers:
+  - name: github-pat
+    plugin: token
+    config:
+      token-env: GITHUB_PAT
+    allow:
+      repositories:
+        - my-user/frontend
+
+  - name: company-headers
+    plugin: headers
+    config:
+      headers:
+        - header-env: COMPANY_GIT_AUTH_HEADER
+    allow:
+      repositories:
+        - my-user/frontend
+```
+
+These are compatibility providers. They keep raw secret env vars out of the
+agent container and put grants/audit in the broker, but Git token/header flows
+still return credentials to the agent. GitHub App remains the stronger Git path
+because broker-minted installation tokens are short-lived and repo-scoped.
+
 `agent-init` registers each agent with an empty grant set by default. Grant a
 specific repo before the agent uses brokered credentials:
 

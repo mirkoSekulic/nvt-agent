@@ -149,6 +149,12 @@ identity:
 `checkout-repos` invokes `git-credentials configure-repo <repo>` after clone as
 a best-effort identity setup step.
 
+Broker-backed static PAT/header providers remove raw secret env vars from the
+agent, but Git compatibility flows still expose returned tokens or headers to
+the agent. Treat them as compatibility providers. GitHub App broker providers
+are stronger for Git because they return short-lived repo-scoped installation
+tokens.
+
 `git-host-credentials` is a tool-only plugin. It resolves named credential
 providers for Git hosting services and exports two tools:
 
@@ -156,6 +162,7 @@ providers for Git hosting services and exports two tools:
 git-host-credential token --provider fork-app
 git-host-credential identity --provider fork-app --target github.com/example/project
 git-host-credential headers --provider company-headers
+git-host-credential credential-kind --provider company-headers
 git-host-credential doctor --provider fork-app
 gh-auth pr view 123 --repo example/project
 ```

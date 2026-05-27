@@ -2,7 +2,7 @@
 import argparse
 import json
 
-from git_host_credentials import headers, identity, load_config, providers, resolve_provider, token, validate_provider
+from git_host_credentials import credential_kind, headers, identity, load_config, providers, resolve_provider, token, validate_provider
 
 
 def command_token(args):
@@ -12,7 +12,7 @@ def command_token(args):
 
 def command_headers(args):
     provider = resolve_provider(load_config(), args.provider, args.target)
-    for header in headers(provider):
+    for header in headers(provider, args.target):
         print(header)
 
 
@@ -29,6 +29,11 @@ def command_resolve(args):
 def command_type(args):
     provider = resolve_provider(load_config(), args.provider, args.target)
     print(provider["type"])
+
+
+def command_credential_kind(args):
+    provider = resolve_provider(load_config(), args.provider, args.target)
+    print(credential_kind(provider))
 
 
 def command_doctor(args):
@@ -69,6 +74,11 @@ def main():
     type_parser.add_argument("--provider")
     type_parser.add_argument("--target")
     type_parser.set_defaults(func=command_type)
+
+    credential_kind_parser = subparsers.add_parser("credential-kind")
+    credential_kind_parser.add_argument("--provider")
+    credential_kind_parser.add_argument("--target")
+    credential_kind_parser.set_defaults(func=command_credential_kind)
 
     doctor = subparsers.add_parser("doctor")
     doctor.add_argument("--provider")

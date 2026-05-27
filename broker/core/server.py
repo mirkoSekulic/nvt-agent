@@ -89,6 +89,24 @@ class Broker:
         )
         return {"ok": True, **identity}
 
+    def headers(self, request_id, payload, authorization):
+        agent = self.agents.authenticate(authorization)
+        provider_name = string_field(payload, "provider")
+        target = string_field(payload, "target")
+        repo = github_repo_from_target(target)
+        provider = self.provider(provider_name)
+        effective_repositories = self.agents.effective_repositories(agent, provider_name)
+        headers = provider.headers_for_repo(repo, effective_repositories)
+        self.audit.write(
+            request_id=request_id,
+            agent=agent["id"],
+            provider=provider_name,
+            operation="headers",
+            target=f"github.com/{repo}",
+            allowed=True,
+        )
+        return {"ok": True, "headers": headers}
+
     def denied(self, request_id, payload, reason, message=None, authorization=None):
         agent_id = None
         try:
@@ -157,6 +175,10 @@ def make_handler(broker):
                     return
                 if self.path == "/v1/identity":
                     response = broker.identity(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
+                if self.path == "/v1/headers":
+                    response = broker.headers(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 self.write_json(404, {"ok": False, "error": "not-found"})

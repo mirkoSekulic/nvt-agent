@@ -66,6 +66,18 @@ identity:
 `mode: explicit` works with every provider type. If `identity` is omitted, this
 plugin does not configure commit identity.
 
+For broker-backed PAT or header providers, use explicit identity:
+
+```yaml
+identity:
+  mode: explicit
+  name: "Automation Bot"
+  email: "automation@example.com"
+```
+
+`identity.mode: provider` is intended for providers that can report a real
+commit identity, currently broker-backed GitHub App providers.
+
 ## Runtime Behavior
 
 At startup this plugin writes:
@@ -92,6 +104,10 @@ git -C <repo> config user.email ...
 ```
 
 It does not set global `user.name` or `user.email`.
+
+Broker-backed header providers configure `http.<url>.extraHeader` the same way
+local header providers do. The header secret is therefore present in Git config;
+this is a compatibility path, not a zero-trust path.
 
 ## Relationship To checkout-repos
 

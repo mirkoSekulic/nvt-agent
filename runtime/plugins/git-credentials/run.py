@@ -107,6 +107,16 @@ def provider_type(rule):
         fail(f"git-host-credential type failed with exit {error.returncode}")
 
 
+def provider_credential_kind(rule):
+    provider = string_value(rule.get("provider"), "provider", required=True)
+    try:
+        return output(["git-host-credential", "credential-kind", "--provider", provider]).strip()
+    except FileNotFoundError:
+        fail("git-host-credential is not on PATH")
+    except subprocess.CalledProcessError as error:
+        fail(f"git-host-credential credential-kind failed with exit {error.returncode}")
+
+
 def check_identity_provider(rule, index=None):
     identity = rule.get("identity")
     if not isinstance(identity, dict) or identity.get("mode") != "provider":
@@ -121,7 +131,7 @@ def check_identity_provider(rule, index=None):
 def provider_headers(rule):
     provider = string_value(rule.get("provider"), "provider", required=True)
     try:
-        headers = output(["git-host-credential", "headers", "--provider", provider]).splitlines()
+        headers = output(["git-host-credential", "headers", "--provider", provider, "--target", target_from_url(rule["match"])]).splitlines()
     except FileNotFoundError:
         fail("git-host-credential is not on PATH")
     except subprocess.CalledProcessError as error:
@@ -287,7 +297,7 @@ def main():
     token_credentials = []
     header_credentials = []
     for rule in credentials:
-        kind = provider_type(rule)
+        kind = provider_credential_kind(rule)
         if kind == "headers":
             header_credentials.append(rule)
         else:

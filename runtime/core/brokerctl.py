@@ -84,6 +84,17 @@ def command_identity(args):
     return 0 if response.get("ok") else 1
 
 
+def command_headers(args):
+    payload = {"provider": args.provider, "target": args.target}
+    response, _status = request_json("/v1/headers", payload)
+    if args.raw and response.get("ok"):
+        for header in response["headers"]:
+            print(header)
+    else:
+        print_json(response)
+    return 0 if response.get("ok") else 1
+
+
 def main():
     parser = argparse.ArgumentParser(prog="brokerctl")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -112,6 +123,12 @@ def main():
     identity.add_argument("--provider", required=True)
     identity.add_argument("--target", required=True)
     identity.set_defaults(func=command_identity)
+
+    headers = subparsers.add_parser("headers")
+    headers.add_argument("--provider", required=True)
+    headers.add_argument("--target", required=True)
+    headers.add_argument("--raw", action="store_true")
+    headers.set_defaults(func=command_headers)
 
     args = parser.parse_args()
     raise SystemExit(args.func(args))

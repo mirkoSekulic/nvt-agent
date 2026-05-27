@@ -37,6 +37,13 @@ plugins:
           broker-provider: fork-app
           match:
             - github.com/my-user/*
+
+        - name: brokered-company-headers
+          type: broker
+          broker-provider: company-headers
+          credential-kind: headers
+          match:
+            - github.com/my-user/project
 ```
 
 `match` entries are glob patterns matched against normalized repo targets such
@@ -51,13 +58,25 @@ git-host-credential type --provider fork-app
 git-host-credential token --provider fork-app
 git-host-credential token --provider brokered-fork-app --target github.com/my-user/project
 git-host-credential identity --provider brokered-fork-app --target github.com/my-user/project
-git-host-credential headers --provider company-headers
+git-host-credential headers --provider brokered-company-headers --target github.com/my-user/project
 git-host-credential doctor --provider fork-app
 ```
 
-`type: broker` delegates token minting and provider commit identity lookup to
-`brokerctl`. It is intended for broker mode, where the GitHub App private key
-lives in the broker service instead of the agent container.
+`type: broker` delegates token/header retrieval and provider commit identity
+lookup to `brokerctl`. It is intended for broker mode, where raw provider
+secrets live in the broker service instead of the agent container.
+
+Broker providers default to token credentials. Use `credential-kind: headers`
+when the broker provider exposes static headers:
+
+```yaml
+type: broker
+broker-provider: company-headers
+credential-kind: headers
+```
+
+Broker-backed header providers need a concrete repo target so the broker can
+apply agent grants. Prefer repo-level `match` entries for them.
 
 `gh-auth` runs GitHub CLI commands with a provider token through `GH_TOKEN`
 without calling `gh auth login` or writing GitHub CLI auth state:
@@ -72,10 +91,15 @@ When `--provider` is omitted, `gh-auth` resolves from `--repo`, the current
 
 ## Security
 
-This plugin currently supports local/dev mode where raw secrets are available
-inside the agent container. GitHub App private keys are especially sensitive:
-they can mint installation tokens for every repository in the installation.
+Prefer `type: broker` for secret-bearing providers. Local `token-env` and
+`headers` providers keep raw secrets in the agent container and should be
+treated as local/dev fallback.
 
 Production operator mode should move raw secrets into a broker sidecar/service.
 In that model this plugin becomes a broker client and exported tools receive
 only scoped, short-lived credentials or broker-mediated responses.
+
+Broker-backed static PAT/header providers are still compatibility paths for
+Git. Token mode returns a token to the agent, and header mode writes headers into
+Git config. GitHub App providers are stronger because broker-minted Git tokens
+are short-lived and repo-scoped.

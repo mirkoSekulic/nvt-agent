@@ -219,6 +219,22 @@ providers:
         pull_requests: read
         checks: read
       methods:%s
+  - name: pat-provider
+    plugin: token
+    config:
+      token-env: TEST_PAT_TOKEN
+    allow:
+      repositories:
+        - my-user/my-repo
+  - name: header-provider
+    plugin: headers
+    config:
+      headers:
+        - header-env: TEST_AUTH_HEADER
+        - header-env: TEST_EXTRA_HEADER
+    allow:
+      repositories:
+        - my-user/my-repo
 `, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
@@ -236,6 +252,9 @@ func (f *brokerFixture) start() {
 		"NVT_BROKER_BIND="+f.bind,
 		"NVT_BROKER_AUDIT_LOG="+f.audit,
 		"TEST_PRIVATE_KEY_B64="+base64.StdEncoding.EncodeToString([]byte(f.keyPEM)),
+		"TEST_PAT_TOKEN=pat-secret",
+		"TEST_AUTH_HEADER=Authorization: Bearer header-secret",
+		"TEST_EXTRA_HEADER=X-Api-Key: extra-secret",
 	)
 	cmd.Stdout = &f.stdout
 	cmd.Stderr = &f.stderr
@@ -563,6 +582,71 @@ func TestTokenCacheIsAgentIndependent(t *testing.T) {
 	}
 	if count := f.fake.tokenRequestCount(); count != 1 {
 		t.Fatalf("expected shared repo cache across agents, got %d token mints", count)
+	}
+}
+
+func TestStaticTokenProviderRequiresAgentGrant(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"pat-provider": {"my-user/my-repo"},
+			},
+		},
+	})
+	payload, _, status := f.brokerctl("token", "--provider", "pat-provider", "--target", "github.com/my-user/my-repo")
+	if status != 0 || payload["ok"] != true || payload["token"] != "pat-secret" {
+		t.Fatalf("static token failed: status=%d payload=%#v", status, payload)
+	}
+	payload, _, status = f.brokerctl("token", "--provider", "pat-provider", "--target", "github.com/my-user/other-repo")
+	if status == 0 || payload["error"] != "repo-not-allowed" {
+		t.Fatalf("expected repo denial, status=%d payload=%#v", status, payload)
+	}
+}
+
+func TestStaticHeadersProviderRequiresAgentGrant(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"header-provider": {"my-user/my-repo"},
+			},
+		},
+	})
+	payload, _, status := f.brokerctl("headers", "--provider", "header-provider", "--target", "github.com/my-user/my-repo")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("static headers failed: status=%d payload=%#v", status, payload)
+	}
+	headers := payload["headers"].([]any)
+	if len(headers) != 2 || headers[0] != "Authorization: Bearer header-secret" || headers[1] != "X-Api-Key: extra-secret" {
+		t.Fatalf("unexpected headers: %#v", headers)
+	}
+	payload, _, status = f.brokerctl("headers", "--provider", "header-provider", "--target", "github.com/my-user/other-repo")
+	if status == 0 || payload["error"] != "repo-not-allowed" {
+		t.Fatalf("expected repo denial, status=%d payload=%#v", status, payload)
+	}
+}
+
+func TestUnsupportedStaticProviderOperationsFailCleanly(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"pat-provider":    {"my-user/my-repo"},
+				"header-provider": {"my-user/my-repo"},
+			},
+		},
+	})
+	payload, _, status := f.brokerctl("headers", "--provider", "pat-provider", "--target", "github.com/my-user/my-repo")
+	if status == 0 || payload["error"] != "headers-not-supported" {
+		t.Fatalf("expected headers-not-supported, status=%d payload=%#v", status, payload)
+	}
+	payload, _, status = f.brokerctl("token", "--provider", "header-provider", "--target", "github.com/my-user/my-repo")
+	if status == 0 || payload["error"] != "token-not-supported" {
+		t.Fatalf("expected token-not-supported, status=%d payload=%#v", status, payload)
 	}
 }
 

@@ -76,9 +76,16 @@ brokerctl token \
 brokerctl identity \
   --provider fork-app \
   --target github.com/my-user/my-repo
+
+brokerctl headers \
+  --provider company-headers \
+  --target github.com/my-user/my-repo \
+  --raw
 ```
 
 `http request` keeps the derived GitHub token inside the broker. `token` is a
 compatibility mode for tools that need a token, mainly Git credential helpers.
 `identity` returns provider commit identity metadata after the same agent grant
 check; GitHub App providers return the App bot name and noreply email.
+`headers` is a compatibility mode for static Git headers. Returned headers are
+visible to the agent and may be written into Git config.

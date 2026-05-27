@@ -110,7 +110,37 @@ Response:
 ```
 
 Token mode is not full zero-trust because the agent receives a derived token.
-The root secret still stays in the broker.
+For GitHub App providers this derived token is short-lived and repo-scoped. For
+static token providers, the agent receives the static token itself; this is a
+compatibility path, not a zero-trust path. The root secret still stays out of
+agent env/config.
+
+### POST /v1/headers
+
+Compatibility endpoint for tools that require static HTTP headers, mainly Git
+`http.<url>.extraHeader` configuration.
+
+Request:
+
+```json
+{
+  "provider": "company-headers",
+  "target": "github.com/my-user/my-repo"
+}
+```
+
+Requires `Authorization: Bearer ...`.
+
+Response:
+
+```json
+{"ok":true,"headers":["Authorization: Bearer ...","X-Api-Key: ..."]}
+```
+
+Header mode is not zero-trust for Git. The returned headers are written into
+the agent's Git config by `git-credentials`, so the agent can read them. The
+benefit over in-agent env secrets is central broker grants, audit, and keeping
+the original secret env vars out of the agent container.
 
 ### POST /v1/identity
 
@@ -166,6 +196,45 @@ Provider `allow.repositories` is a ceiling. In local multi-agent mode, broker
 core intersects that ceiling with the authenticated agent grant and passes the
 effective repository scope into the provider per request. Empty grants and empty
 intersections deny.
+
+## Static Token And Header Providers
+
+Static providers use the same `allow.repositories` ceiling and authenticated
+agent grant intersection as GitHub App providers. V1 keeps repository scope in
+GitHub-style `owner/repo` form for all broker providers. Host-prefixed targets
+such as `github.com/owner/repo` are accepted at the endpoint boundary and
+normalized to `owner/repo`.
+
+Static token provider:
+
+```yaml
+providers:
+  - name: github-pat
+    plugin: token
+    config:
+      token-env: GITHUB_PAT
+    allow:
+      repositories:
+        - my-user/my-repo
+```
+
+Static headers provider:
+
+```yaml
+providers:
+  - name: company-headers
+    plugin: headers
+    config:
+      headers:
+        - header-env: COMPANY_AUTH_HEADER
+    allow:
+      repositories:
+        - my-user/my-repo
+```
+
+These providers are compatibility providers. They remove raw secret env vars
+from the agent container, but token/header capability calls still return
+credentials to the agent.
 
 ## Headers
 

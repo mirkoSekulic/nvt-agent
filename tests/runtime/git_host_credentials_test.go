@@ -126,6 +126,43 @@ providers:
 	}
 }
 
+func TestGitHostCredentialBrokerProviderDelegatesHeadersToBrokerctl(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "headers" ] &&
+   [ "$2" = "--provider" ] && [ "$3" = "company-headers" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ] &&
+   [ "$6" = "--raw" ]; then
+  echo "Authorization: Bearer broker-header"
+  echo "X-Api-Key: broker-extra"
+  exit 0
+fi
+echo "unexpected brokerctl args: $*" >&2
+exit 1
+`)
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: company-headers
+    type: broker
+    broker-provider: company-headers
+    credential-kind: headers
+    match:
+      - github.com/my-user/*
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	kind := strings.TrimSpace(f.runWithEnv(gitHostCredentialBin(f.root), true, env, "credential-kind", "--provider", "company-headers"))
+	if kind != "headers" {
+		t.Fatalf("unexpected credential kind: %q", kind)
+	}
+	output := f.runWithEnv(gitHostCredentialBin(f.root), true, env, "headers", "--target", "github.com/my-user/project")
+	if !strings.Contains(output, "Authorization: Bearer broker-header") ||
+		!strings.Contains(output, "X-Api-Key: broker-extra") {
+		t.Fatalf("unexpected broker headers:\n%s", output)
+	}
+}
+
 func TestGitCredentialsDelegatesToGitHostCredential(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("git-host-credential", `#!/usr/bin/env bash
@@ -156,6 +193,54 @@ credentials:
 	if !strings.Contains(output, "username=x-access-token") ||
 		!strings.Contains(output, "password=delegated-token") {
 		t.Fatalf("unexpected credential output:\n%s", output)
+	}
+}
+
+func TestGitCredentialsConfiguresBrokerHeaders(t *testing.T) {
+	f := newFixture(t)
+	logPath := filepath.Join(f.home, "git.log")
+	f.writeBin("git", `#!/usr/bin/env bash
+set -euo pipefail
+printf "%s\n" "$*" >> "$GIT_LOG"
+`)
+	f.writeBin("git-host-credential", `#!/usr/bin/env bash
+set -euo pipefail
+case "$1:$3" in
+  credential-kind:company-headers)
+    echo headers
+    ;;
+  headers:company-headers)
+    if [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ]; then
+      echo "Authorization: Bearer broker-header"
+      exit 0
+    fi
+    echo "unexpected target args: $*" >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected git-host-credential args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+	config := f.writePluginConfig("git-credentials.yaml", `
+credentials:
+  - match: https://github.com/my-user/project
+    provider: company-headers
+    identity:
+      mode: explicit
+      name: Header Bot
+      email: header@example.com
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config, "GIT_LOG=" + logPath}
+
+	f.runWithEnv(gitCredentialsRunBin(f.root), true, env)
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "config --global --add http.https://github.com/my-user/project.extraHeader Authorization: Bearer broker-header") {
+		t.Fatalf("expected broker header config, got:\n%s", logData)
 	}
 }
 
@@ -355,7 +440,7 @@ printf "%s\n" "$*" >> "$GIT_LOG"
 	f.writeBin("git-host-credential", `#!/usr/bin/env bash
 set -euo pipefail
 case "$1:$3" in
-  type:company-headers)
+  credential-kind:company-headers)
     echo headers
     ;;
   headers:company-headers)
