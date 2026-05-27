@@ -1,5 +1,6 @@
 import hashlib
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -35,6 +36,7 @@ class AgentRegistry:
                 candidate = self._load_candidate()
             except Exception as error:
                 self.last_error = str(error)
+                print(f"broker agents config reload failed: {self.last_error}", file=sys.stderr)
                 return
             self.agents_by_hash = candidate
             self.mtime_ns = stat.st_mtime_ns
