@@ -429,6 +429,10 @@ func githubWatchBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-watcher", "github-watch.py"))
 }
 
+func renderAgentExposeBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "scripts", "render-agent-expose.py"))
+}
+
 func commandWithEnv(command string, env []string, args ...string) *exec.Cmd {
 	fullCommand := command
 	for _, arg := range args {

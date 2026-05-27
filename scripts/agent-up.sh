@@ -46,6 +46,18 @@ if [ ! -f "$env_file" ]; then
   exit 1
 fi
 
+set -a
+source "$env_file"
+set +a
+
+expose_compose_file="$repo_root/.agents/$name/compose.expose.yaml"
+
+python3 "$script_dir/render-agent-expose.py" \
+  --agent-config "$AGENT_CONFIG_FILE" \
+  --agent-name "$AGENT_NAME" \
+  --agent-host "$AGENT_HOST" \
+  --output "$expose_compose_file"
+
 if ! docker network inspect agents-proxy >/dev/null 2>&1; then
   docker network create agents-proxy >/dev/null
 fi
@@ -54,11 +66,14 @@ docker compose \
   -p "agent-$name" \
   --env-file "$env_file" \
   -f "$repo_root/compose.agent.yaml" \
+  -f "$expose_compose_file" \
   up -d
-
-set -a
-source "$env_file"
-set +a
 
 echo "agent $name is up"
 echo "url http://${AGENT_HOST}:${NVT_PROXY_PORT:-4090}"
+python3 "$script_dir/render-agent-expose.py" \
+  --agent-config "$AGENT_CONFIG_FILE" \
+  --agent-name "$AGENT_NAME" \
+  --agent-host "$AGENT_HOST" \
+  --output "$expose_compose_file" \
+  --print-urls

@@ -1,7 +1,7 @@
 TYPE ?= codex
 DIR ?= runtime/plugins
 
-.PHONY: runtime-build broker-build infra-up infra-down infra-network-rm agent-init agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build infra-up infra-down infra-network-rm agent-init agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -39,6 +39,11 @@ agent-logs:
 agent-shell:
 	@test -n "$(NAME)" || (echo "usage: make agent-shell NAME=<name>"; exit 1)
 	bash scripts/agent-shell.sh --name "$(NAME)"
+
+agent-forward forward:
+	@test -n "$(NAME)" || (echo "usage: make forward NAME=<name> PORT=<remote-port> [LOCAL=<local-port>]"; exit 1)
+	@test -n "$(PORT)" || (echo "usage: make forward NAME=<name> PORT=<remote-port> [LOCAL=<local-port>]"; exit 1)
+	bash scripts/agent-forward.sh --name "$(NAME)" --port "$(PORT)" $(if $(LOCAL),--local "$(LOCAL)")
 
 agent-doctor:
 	@test -n "$(NAME)" || (echo "usage: make agent-doctor NAME=<name> [PLUGIN=<plugin>]"; exit 1)

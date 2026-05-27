@@ -170,6 +170,11 @@ tools:
 code-server:
   extensions: []
 
+expose:
+  http:
+    - name: app
+      targetPort: 3000
+
 plugins:
   - name: git-host-credentials
     source: builtin
@@ -231,6 +236,20 @@ Open code-server:
 
 ```text
 http://nvt-dev.agent.localhost:4090
+```
+
+If you start an HTTP dev server inside the agent on port `3000`, open the
+named route:
+
+```text
+http://app.nvt-dev.agent.localhost:4090
+```
+
+For temporary access to another port without editing `agent.yaml`:
+
+```sh
+make forward NAME=$AGENT PORT=5173
+make forward NAME=$AGENT PORT=5173 LOCAL=9000
 ```
 
 Open a shell:

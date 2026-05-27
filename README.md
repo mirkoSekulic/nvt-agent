@@ -256,6 +256,41 @@ traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
 traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
 ```
 
+Agents can also expose local HTTP services running inside the agent container.
+Configure named routes in `.agents/<name>/agent.yaml`:
+
+```yaml
+expose:
+  http:
+    - name: app
+      targetPort: 3000
+    - name: api
+      targetPort: 8080
+```
+
+After `make agent-up NAME=<name>`, those services are reachable through the
+same proxy port:
+
+```text
+http://app.<name>.agent.localhost:4090
+http://api.<name>.agent.localhost:4090
+```
+
+Route names must be unique DNS labels. `targetPort` is the port inside the
+agent container. v1 supports HTTP services in the main agent container only;
+`source: docker` / DinD-sidecar forwarding is intentionally rejected until that
+path is implemented.
+
+For one-off local access without editing `agent.yaml`, run a temporary forward:
+
+```sh
+make forward NAME=frontend PORT=3000
+make forward NAME=frontend PORT=3000 LOCAL=9000
+```
+
+This starts a foreground `alpine/socat` helper on the `agents-proxy` network.
+The first run may pull the image. Stop the forward with Ctrl-C.
+
 The default proxy port can be changed when starting infra:
 
 ```sh

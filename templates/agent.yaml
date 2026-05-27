@@ -12,6 +12,15 @@ code-server:
   # Optional. If omitted, bootstrap uses .nvt-agent/code-server/settings.json when present.
   # settings-file: .nvt-agent/code-server/settings.json
 
+expose:
+  http: []
+  # Local development only. Routes HTTP services running inside the agent
+  # container through the shared proxy.
+  # Example:
+  # http:
+  #   - name: app
+  #     targetPort: 3000
+
 plugins: []
 # Example:
 # plugins:
