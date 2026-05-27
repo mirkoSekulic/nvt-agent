@@ -130,13 +130,15 @@ keeps nvt-agent container-native while leaving a path to stronger isolation.
 
 ## Quick Start
 
-Build the runtime image from `runtime/Dockerfile`:
+Build the runtime and broker images:
 
 ```sh
 make runtime-build
+make broker-build
 ```
 
-Start the shared proxy:
+Start shared local infra. This starts the Traefik proxy and the shared broker
+service, and creates `.broker/` files from templates if they do not exist:
 
 ```sh
 make infra-up
@@ -163,6 +165,10 @@ Edit the generated agent config before starting it:
 ```sh
 $EDITOR .agents/frontend/agent.yaml
 ```
+
+If the agent needs brokered access to private GitHub resources, configure the
+local broker and grant the agent a repo before starting it. See
+[Local Broker](#local-broker).
 
 Start the agent:
 
@@ -349,6 +355,9 @@ CUSTOM_PLUGINS_DIR=/absolute/path/.agents/frontend/custom-plugins
 AGENT_CONFIG_FILE=/absolute/path/.agents/frontend/agent.yaml
 NVT_AGENT_CONFIG_FILE=/nvt-agent/agent.yaml
 
+NVT_BROKER_URL=http://broker:7347
+NVT_BROKER_TOKEN=<per-agent random token>
+
 CODEX_CONFIG_DIR=/Users/you/.codex
 CLAUDE_CONFIG_DIR=/absolute/path/.agents/frontend/auth/claude
 ```
@@ -356,6 +365,76 @@ CLAUDE_CONFIG_DIR=/absolute/path/.agents/frontend/auth/claude
 The workspace is bind-mounted at the same absolute path inside the container.
 This is deliberate: agents have Docker socket access, and host Docker bind mounts
 need host-visible paths.
+
+## Local Broker
+
+The local broker keeps root secrets outside agent containers while still letting
+agents use approved GitHub App capabilities. `make infra-up` starts the broker
+from the local `nvt-broker:latest` image, so run `make broker-build` before
+starting infra.
+
+Broker files live under `.broker/`, which is ignored by git:
+
+```text
+.broker/broker.yaml      provider definitions and repository ceilings
+.broker/agents.yaml      per-agent token hashes and grants
+.broker/env              broker-only secret environment variables
+.broker/audit.jsonl      broker audit log
+```
+
+Configure a provider in `.broker/broker.yaml`:
+
+```yaml
+providers:
+  - name: github-fork-app
+    plugin: github-app
+    config:
+      app-id-env: GITHUB_APP_ID
+      installation-id-env: GITHUB_APP_INSTALLATION_ID
+      private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
+      api-url: https://api.github.com
+    allow:
+      repositories:
+        - my-user/*
+      permissions:
+        contents: read
+        pull_requests: read
+        checks: read
+      methods:
+        - GET
+```
+
+Put the real secret values in `.broker/env`:
+
+```env
+GITHUB_APP_ID=123456
+GITHUB_APP_INSTALLATION_ID=987654
+GITHUB_APP_PRIVATE_KEY_BASE64=...
+```
+
+`agent-init` registers each agent with an empty grant set by default. Grant a
+specific repo before the agent uses brokered credentials:
+
+```sh
+make agent-init NAME=frontend
+make agent-grant NAME=frontend PROVIDER=github-fork-app REPO=my-user/frontend
+```
+
+The broker enforces the intersection of the provider ceiling and the agent
+grant. For example, if the provider allows `my-user/*` but `frontend` is granted
+only `my-user/frontend`, that agent cannot use the provider for
+`my-user/backend`.
+
+Inside the agent container, broker clients use:
+
+```env
+NVT_BROKER_URL=http://broker:7347
+NVT_BROKER_TOKEN=<per-agent token>
+```
+
+This local token is a development identity mechanism. Production Kubernetes
+mode should replace it with workload identity such as ServiceAccount or SPIFFE,
+with root secrets mounted only into broker-managed components.
 
 ## Agent Config
 
@@ -592,11 +671,13 @@ Container startup order:
 
 ```text
 1. bootstrap tools from agent.yaml
-2. run before-agent plugins
-3. start agentd
-4. start code-server
-5. start the terminal agent in tmux
-6. run after-agent plugins in the background
+2. export enabled plugin tools into PATH
+3. write generated agent instructions
+4. run before-agent plugins
+5. start agentd
+6. start code-server
+7. start the terminal agent in tmux
+8. run after-agent plugins in the background
 ```
 
 Codex auth is mounted from the host `~/.codex` read-only. Claude auth is stored

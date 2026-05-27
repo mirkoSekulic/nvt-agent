@@ -54,8 +54,14 @@ providers:
 
 ## Client
 
+`brokerctl health` does not require a token. Other commands require
+`NVT_BROKER_TOKEN` and are normally run from inside an initialized agent
+container.
+
 ```sh
 brokerctl health
+
+export NVT_BROKER_TOKEN=<agent-token>
 
 brokerctl http request \
   --provider fork-app \
@@ -70,5 +76,3 @@ brokerctl token \
 
 `http request` keeps the derived GitHub token inside the broker. `token` is a
 compatibility mode for tools that need a token, mainly Git credential helpers.
-
-Non-health commands require `NVT_BROKER_TOKEN`.

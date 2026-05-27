@@ -3,8 +3,10 @@
 `github-watcher` watches GitHub pull requests and turns selected PR activity
 into `agentd` events and optional prompts.
 
-It is a long-running `after-agent` plugin. It polls GitHub directly through the
-REST API and gets tokens from `git-host-credentials`:
+It is a long-running `after-agent` plugin. In broker mode it reads GitHub through
+`brokerctl http request`, so the watcher does not receive a GitHub token for API
+reads. Direct mode remains available as a local/dev fallback and gets tokens from
+`git-host-credentials`:
 
 ```sh
 git-host-credential token --provider <provider>
@@ -225,8 +227,14 @@ This is cheaper and easier to maintain than listing every trusted username.
 
 ## Security
 
-This plugin currently receives GitHub API access through in-container provider
-tokens from `git-host-credentials`. That is local/dev behavior. The production
-operator direction is for GitHub credentials and egress to be broker-mediated so
-the autonomous agent container does not hold raw GitHub App private keys or
-long-lived tokens.
+In direct mode, this plugin receives GitHub API access through in-container
+provider tokens from `git-host-credentials`. That is local/dev behavior.
+
+In broker mode, read-only GitHub API calls go through `brokerctl http request`.
+That keeps the GitHub App private key and derived API token inside the broker
+for those reads. Token mode may still be used by Git credential helpers for
+operations that require a token, such as Git push.
+
+The production operator direction is for GitHub credentials and egress to be
+broker-mediated so the autonomous agent container does not hold raw GitHub App
+private keys or long-lived tokens.

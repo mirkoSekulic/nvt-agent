@@ -15,13 +15,18 @@ session.
 Plugins should publish namespaced events:
 
 ```text
-plugin.<plugin-name>.<event-name>
+plugin.<domain>.<event-name>
 ```
+
+The domain is a stable event namespace, not necessarily the executable plugin
+name. The event `source` field carries the producer identity.
 
 Examples:
 
 ```text
-plugin.github-pr-watcher.comment-added
+plugin.github.pr.comment
+plugin.github.pr.review
+plugin.github.pr.checks
 plugin.test-runner.failed
 plugin.checkout-repos.completed
 plugin.agent.signal.done

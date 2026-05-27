@@ -76,8 +76,8 @@ NVT_WORKSPACE
 
 Exported tools are public inside the agent container: the agent, terminal users,
 and other plugins can call them. Do not export tools that require raw long-lived
-secrets in their plugin config. Secret-bearing operations should go through a
-future broker/capability mechanism.
+secrets in their plugin config. Secret-bearing operations should go through
+`brokerctl` or broker-backed providers where possible.
 
 Tool wrappers are regenerated at container startup from the enabled plugins.
 Stale generated wrappers are removed. Tool names must not collide with other

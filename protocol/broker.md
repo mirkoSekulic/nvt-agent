@@ -25,8 +25,9 @@ Default local bind:
 ```
 
 Docker Compose and Kubernetes must override this with an internal-only service
-interface. V1 has no strong caller authentication, so reachability is the
-boundary.
+interface. V1 local mode has bearer-token agent identity for broker grants, but
+not production-grade workload identity. Reachability still matters: do not
+publish the broker to untrusted networks.
 
 Local multi-agent Compose mode uses bearer-token agent identity. Agents send:
 
