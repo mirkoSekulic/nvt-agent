@@ -42,11 +42,15 @@ destructive commands unless the user has explicitly authorized them.
 Plugin events are advisory. Verified session-state events are not implemented
 yet.
 
-## Host Access
+## Docker
 
-This container may have access to the host Docker socket. Docker commands can
-affect the host machine. Be careful with containers, images, volumes, bind
-mounts, and destructive cleanup commands.
+Docker commands use this agent's own Docker daemon sidecar through
+\`DOCKER_HOST=tcp://docker:2375\`. The host Docker socket is not mounted.
+Containers, images, networks, and volumes created by \`docker\` are scoped to
+this agent's sidecar daemon.
+
+The workspace is mounted into both the agent container and the Docker sidecar at
+the same path, so Compose bind mounts from under \`$workspace\` should work.
 
 ## Working With Repos
 

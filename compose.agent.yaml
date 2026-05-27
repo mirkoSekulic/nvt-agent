@@ -3,9 +3,14 @@ services:
     image: nvt-agent-runtime:latest
     env_file:
       - ${AGENT_ENV_FILE}
+    environment:
+      DOCKER_HOST: tcp://docker:2375
     working_dir: ${NVT_WORKSPACE}
+    depends_on:
+      - docker
     networks:
       - agents-proxy
+      - agent-internal
     labels:
       - traefik.enable=true
       - traefik.docker.network=agents-proxy
@@ -17,12 +22,24 @@ services:
       - ${AGENT_CONFIG_FILE}:${NVT_AGENT_CONFIG_FILE}:ro
       - ${CODEX_CONFIG_DIR}:/root/.codex
       - ${CLAUDE_CONFIG_DIR}:/root/.claude
-      - /var/run/docker.sock:/var/run/docker.sock
       - agent-home:/root
+
+  docker:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - docker-data:/var/lib/docker
+      - ${WORKSPACE_DIR}:${NVT_WORKSPACE}
+    networks:
+      - agent-internal
 
 volumes:
   agent-home:
+  docker-data:
 
 networks:
   agents-proxy:
     external: true
+  agent-internal:

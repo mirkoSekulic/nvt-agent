@@ -69,6 +69,16 @@ def command_exists(command):
     return shutil.which(command) is not None
 
 
+def run_check(command, timeout=10):
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
 def directory_writable(path):
     path.mkdir(parents=True, exist_ok=True)
     probe = path / f".nvt-doctor-{os.getpid()}"
@@ -96,7 +106,7 @@ def core_checks():
         except OSError as error:
             checks.append(fail(name, f"{path} is not writable: {error}"))
 
-    for binary in ["code-server", "tmux", "git"]:
+    for binary in ["code-server", "tmux", "git", "docker"]:
         found = shutil.which(binary)
         if found:
             checks.append(ok(f"core.{binary}", found))
@@ -113,11 +123,19 @@ def core_checks():
         else:
             checks.append(fail("core.agent-command", f"{binary} not found on PATH"))
 
-    docker_socket = Path("/var/run/docker.sock")
-    if docker_socket.exists():
-        checks.append(ok("core.docker-socket", str(docker_socket)))
+    docker_host = os.environ.get("DOCKER_HOST")
+    if docker_host:
+        try:
+            result = run_check(["docker", "info", "--format", "{{.ServerVersion}}"])
+            if result.returncode == 0:
+                checks.append(ok("core.docker-daemon", f"{docker_host} server {result.stdout.strip()}"))
+            else:
+                output = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
+                checks.append(fail("core.docker-daemon", output or "per-agent Docker daemon is not reachable"))
+        except (OSError, subprocess.TimeoutExpired) as error:
+            checks.append(fail("core.docker-daemon", f"per-agent Docker daemon is not reachable: {error}"))
     else:
-        checks.append(warn("core.docker-socket", f"{docker_socket} is not mounted"))
+        checks.append(warn("core.docker-daemon", "DOCKER_HOST is not set"))
 
     return checks
 

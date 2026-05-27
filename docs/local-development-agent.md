@@ -244,6 +244,8 @@ Inside `make agent-shell`:
 
 ```sh
 brokerctl health
+docker info
+docker compose version
 git-host-credential token --provider github-main --target github.com/mirkosekulic/nvt-agent | wc -c
 cd "$NVT_WORKSPACE/nvt-agent"
 git fetch
@@ -314,6 +316,12 @@ GitHub token minting fails:
 
 - Rebuild and restart the runtime image.
 - Use `make agent-shell NAME=$AGENT` for an env-loaded shell.
+
+`docker info` cannot reach Docker:
+
+- Confirm the agent was recreated after the DinD change.
+- Run `make agent-down NAME=$AGENT && make agent-up NAME=$AGENT`.
+- Confirm `DOCKER_HOST=tcp://docker:2375` is set inside the agent.
 
 ## Cleanup
 

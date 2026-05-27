@@ -15,6 +15,9 @@ RUN apt-get update \
     tmux \
   && rm -rf /var/lib/apt/lists/*
 
+RUN docker --version \
+  && docker compose version
+
 RUN curl -fsSL https://mise.run \
   | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 

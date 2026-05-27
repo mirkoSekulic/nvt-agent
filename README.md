@@ -224,9 +224,10 @@ Claude Code can be selected at init time:
 make agent-init NAME=research TYPE=claude
 ```
 
-Codex auth is mounted from the host `~/.codex` read-only. Claude Code auth is
-stored per agent under `.agents/<name>/auth/claude` and mounted into the
-container at `/root/.claude`.
+Codex auth/config is seeded from host `~/.codex` into
+`.agents/<name>/auth/codex` and mounted into the container at `/root/.codex`.
+Claude Code auth is stored per agent under `.agents/<name>/auth/claude` and
+mounted into the container at `/root/.claude`.
 
 ## Browser URLs And Proxy
 
@@ -342,6 +343,7 @@ Useful paths:
 .agents/<name>/env                   Compose env file for host paths and mounts
 .agents/<name>/workspace/            persisted workspace for repos/files
 .agents/<name>/custom-plugins/       host directory for custom plugin binaries/scripts
+.agents/<name>/auth/codex/           per-agent Codex auth/config seeded from host
 .agents/<name>/auth/claude/          per-agent Claude Code auth/config
 ```
 
@@ -360,13 +362,13 @@ NVT_AGENT_CONFIG_FILE=/nvt-agent/agent.yaml
 NVT_BROKER_URL=http://broker:7347
 NVT_BROKER_TOKEN=<per-agent random token>
 
-CODEX_CONFIG_DIR=/Users/you/.codex
+CODEX_CONFIG_DIR=/absolute/path/.agents/frontend/auth/codex
 CLAUDE_CONFIG_DIR=/absolute/path/.agents/frontend/auth/claude
 ```
 
 The workspace is bind-mounted at the same absolute path inside the container.
-This is deliberate: agents have Docker socket access, and host Docker bind mounts
-need host-visible paths.
+This is also mounted into the per-agent Docker sidecar at the same path, so
+Docker Compose bind mounts from the workspace resolve correctly.
 
 ## Local Broker
 
@@ -667,6 +669,7 @@ The image includes:
 
 - code-server on port `4090`
 - tmux
+- Docker CLI and Compose plugin
 - Codex CLI
 - Claude Code CLI
 - mise
@@ -685,8 +688,15 @@ Container startup order:
 8. run after-agent plugins in the background
 ```
 
-Codex auth is mounted from the host `~/.codex` read-only. Claude auth is stored
-per agent under `.agents/<name>/auth/claude` and mounted to `/root/.claude`.
+Codex auth/config is seeded from host `~/.codex` into
+`.agents/<name>/auth/codex` and mounted to `/root/.codex` read-write so Codex
+can store runtime state. Claude auth is stored per agent under
+`.agents/<name>/auth/claude` and mounted to `/root/.claude`.
+
+Each agent also gets its own Docker daemon sidecar. The agent talks to it with
+`DOCKER_HOST=tcp://docker:2375`; the host Docker socket is intentionally not
+mounted. This lets multiple agents run the same Docker Compose project without
+sharing Docker images, containers, networks, or volumes.
 
 The agent root home is a named Docker volume, so installed state under `/root`
 can survive `agent-down`. Use `agent-rm` to remove the agent Compose volume.
