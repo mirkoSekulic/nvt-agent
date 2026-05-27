@@ -89,3 +89,7 @@ compatibility mode for tools that need a token, mainly Git credential helpers.
 check; GitHub App providers return the App bot name and noreply email.
 `headers` is a compatibility mode for static Git headers. Returned headers are
 visible to the agent and may be written into Git config.
+
+Grant repository patterns must match the provider target mode: GitHub-mode
+providers use `owner/repo`, while literal-mode providers use the full
+`host/path/repo` form.
