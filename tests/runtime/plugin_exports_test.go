@@ -319,6 +319,13 @@ func (f *fixture) runCommand(command string, wantOK bool, args ...string) string
 	return f.run(command, wantOK, args...)
 }
 
+func (f *fixture) initRepo(name string) string {
+	f.t.Helper()
+	path := filepath.Join(f.workspace, name)
+	f.runCommand("git", true, "init", path)
+	return path
+}
+
 func (f *fixture) run(command string, wantOK bool, args ...string) string {
 	f.t.Helper()
 	return f.runWithEnv(command, wantOK, nil, args...)

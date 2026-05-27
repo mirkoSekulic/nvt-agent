@@ -72,7 +72,13 @@ brokerctl token \
   --provider fork-app \
   --target github.com/my-user/my-repo \
   --purpose git-push
+
+brokerctl identity \
+  --provider fork-app \
+  --target github.com/my-user/my-repo
 ```
 
 `http request` keeps the derived GitHub token inside the broker. `token` is a
 compatibility mode for tools that need a token, mainly Git credential helpers.
+`identity` returns provider commit identity metadata after the same agent grant
+check; GitHub App providers return the App bot name and noreply email.

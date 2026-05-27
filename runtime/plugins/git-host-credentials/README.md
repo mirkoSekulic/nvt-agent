@@ -50,13 +50,14 @@ git-host-credential resolve --target github.com/my-user/project
 git-host-credential type --provider fork-app
 git-host-credential token --provider fork-app
 git-host-credential token --provider brokered-fork-app --target github.com/my-user/project
+git-host-credential identity --provider brokered-fork-app --target github.com/my-user/project
 git-host-credential headers --provider company-headers
 git-host-credential doctor --provider fork-app
 ```
 
-`type: broker` delegates token minting to `brokerctl`. It is intended for
-broker mode, where the GitHub App private key lives in the broker service
-instead of the agent container.
+`type: broker` delegates token minting and provider commit identity lookup to
+`brokerctl`. It is intended for broker mode, where the GitHub App private key
+lives in the broker service instead of the agent container.
 
 `gh-auth` runs GitHub CLI commands with a provider token through `GH_TOKEN`
 without calling `gh auth login` or writing GitHub CLI auth state:

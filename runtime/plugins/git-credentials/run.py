@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import shutil
 import subprocess
@@ -69,6 +70,22 @@ def validate_rule(rule, index):
     username = rule.get("username")
     if username is not None:
         string_value(username, f"credentials[{index}].username")
+    validate_identity(rule.get("identity"), index)
+
+
+def validate_identity(identity, index):
+    if identity is None:
+        return
+    if not isinstance(identity, dict):
+        fail(f"credentials[{index}].identity must be a YAML object")
+    mode = string_value(identity.get("mode"), f"credentials[{index}].identity.mode", required=True)
+    if mode == "explicit":
+        string_value(identity.get("name"), f"credentials[{index}].identity.name", required=True)
+        string_value(identity.get("email"), f"credentials[{index}].identity.email", required=True)
+        return
+    if mode == "provider":
+        return
+    fail(f"credentials[{index}].identity.mode must be explicit or provider")
 
 
 def doctor_rule(rule, index):
@@ -77,6 +94,7 @@ def doctor_rule(rule, index):
         fail("git-host-credential is not on PATH")
     provider = string_value(rule.get("provider"), f"credentials[{index}].provider", required=True)
     subprocess.run(["git-host-credential", "doctor", "--provider", provider], check=True)
+    check_identity_provider(rule, index)
 
 
 def provider_type(rule):
@@ -87,6 +105,17 @@ def provider_type(rule):
         fail("git-host-credential is not on PATH")
     except subprocess.CalledProcessError as error:
         fail(f"git-host-credential type failed with exit {error.returncode}")
+
+
+def check_identity_provider(rule, index=None):
+    identity = rule.get("identity")
+    if not isinstance(identity, dict) or identity.get("mode") != "provider":
+        return
+    kind = provider_type(rule)
+    if kind not in {"github-app", "broker"}:
+        provider = string_value(rule.get("provider"), "provider", required=True)
+        prefix = f"credentials[{index}]." if index is not None else ""
+        fail(f"{prefix}identity.mode=provider requested, but provider {provider} does not support commit identity; use identity.mode=explicit")
 
 
 def provider_headers(rule):
@@ -100,6 +129,87 @@ def provider_headers(rule):
     if not headers:
         fail(f"provider {provider} returned no headers")
     return headers
+
+
+def identity_for_rule(rule, target):
+    identity = rule.get("identity")
+    if identity is None:
+        return None
+    mode = identity.get("mode")
+    if mode == "explicit":
+        return {"name": identity["name"], "email": identity["email"]}
+    if mode == "provider":
+        provider = string_value(rule.get("provider"), "provider", required=True)
+        try:
+            output_text = output(["git-host-credential", "identity", "--provider", provider, "--target", target])
+        except FileNotFoundError:
+            fail("git-host-credential is not on PATH")
+        except subprocess.CalledProcessError as error:
+            fail(f"git-host-credential identity failed with exit {error.returncode}")
+        try:
+            value = json.loads(output_text)
+        except json.JSONDecodeError as error:
+            fail(f"git-host-credential identity returned invalid JSON: {error}")
+        name = value.get("name")
+        email = value.get("email")
+        if not isinstance(name, str) or not name or not isinstance(email, str) or not email:
+            fail("git-host-credential identity response did not include name and email")
+        return {"name": name, "email": email}
+    fail("identity.mode must be explicit or provider")
+
+
+def repo_remote(repo_path):
+    try:
+        return output(["git", "-C", str(repo_path), "remote", "get-url", "origin"]).strip()
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def target_from_url(url):
+    value = url.strip().removesuffix(".git").strip("/")
+    if value.startswith(("https://", "http://")):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(value)
+        return f"{parsed.hostname or ''}{parsed.path}".strip("/").removesuffix(".git")
+    if "@" in value and ":" in value and "://" not in value:
+        _user_host, path = value.split(":", 1)
+        host = _user_host.rsplit("@", 1)[-1]
+        return f"{host}/{path}".strip("/").removesuffix(".git")
+    return value
+
+
+def matching_rule(url, credentials):
+    matches = [
+        rule for rule in credentials
+        if isinstance(rule, dict)
+        and isinstance(rule.get("match"), str)
+        and isinstance(rule.get("provider"), str)
+        and url.startswith(rule["match"])
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda rule: len(rule["match"]))
+
+
+def configure_repo(path):
+    repo_path = Path(path)
+    if not (repo_path / ".git").exists():
+        fail(f"{repo_path} is not a Git repository")
+    credentials = list_value(load_config().get("credentials"), "credentials")
+    remote = repo_remote(repo_path)
+    if not remote:
+        return False
+    rule = matching_rule(remote, credentials)
+    if rule is None:
+        return False
+    identity = identity_for_rule(rule, target_from_url(remote))
+    if identity is None:
+        return False
+    run(["git", "-C", str(repo_path), "config", "user.name", identity["name"]])
+    run(["git", "-C", str(repo_path), "config", "user.email", identity["email"]])
+    print(f"git-credentials: configured commit identity for {repo_path}", flush=True)
+    return True
 
 
 def write_helper_config(credentials):
@@ -151,6 +261,11 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "doctor":
         doctor()
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "configure-repo":
+        if len(sys.argv) != 3:
+            fail("configure-repo requires a repository path")
+        configure_repo(sys.argv[2])
+        return
 
     config = load_config()
     credentials = list_value(config.get("credentials"), "credentials")
@@ -162,6 +277,7 @@ def main():
 
     for index, rule in enumerate(credentials):
         validate_rule(rule, index)
+        check_identity_provider(rule, index)
 
     token_credentials = []
     header_credentials = []

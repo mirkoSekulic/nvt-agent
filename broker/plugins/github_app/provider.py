@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, unquote
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse, unquote
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from broker.core.config import env_value, fail, list_value, string_value
@@ -57,6 +57,8 @@ class GithubAppProvider:
         self.per_page = self._int_config("per-page", DEFAULT_PER_PAGE)
         self.cache = {}
         self.cache_lock = threading.Lock()
+        self.identity_cache = None
+        self.identity_lock = threading.Lock()
         self.key_locks = {}
         self.opener = build_opener(NoRedirect)
 
@@ -208,6 +210,48 @@ class GithubAppProvider:
             raise ProviderError("token-mint-failed", "GitHub token response did not include token", 502)
         expires_at = payload.get("expires_at") or datetime.now(timezone.utc).isoformat()
         return token, expires_at
+
+    def _github_json(self, path, token):
+        request = Request(
+            f"{self.api_url}{path}",
+            method="GET",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with self.opener.open(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            text = error.read().decode("utf-8", errors="replace")
+            raise ProviderError("identity-lookup-failed", f"GitHub identity request failed: {error.code} {error.reason}: {text}", 502)
+        except URLError as error:
+            raise ProviderError("identity-lookup-failed", f"GitHub identity request failed: {error.reason}", 502)
+
+    def _load_identity(self):
+        jwt = self._jwt()
+        app = self._github_json("/app", jwt)
+        slug = app.get("slug")
+        if not isinstance(slug, str) or not slug:
+            raise ProviderError("identity-lookup-failed", "GitHub App response did not include slug", 502)
+        bot_login = f"{slug}[bot]"
+        user = self._github_json(f"/users/{quote(bot_login, safe='')}", jwt)
+        bot_id = user.get("id")
+        if not isinstance(bot_id, int):
+            raise ProviderError("identity-lookup-failed", "GitHub bot user response did not include numeric id", 502)
+        return {
+            "name": bot_login,
+            "email": f"{bot_id}+{bot_login}@users.noreply.github.com",
+        }
+
+    def identity_for_repo(self, repo, effective_repositories):
+        self._ensure_repo_allowed(repo, effective_repositories)
+        with self.identity_lock:
+            if self.identity_cache is None:
+                self.identity_cache = self._load_identity()
+            return dict(self.identity_cache)
 
     def _effective_port(self, parsed):
         if parsed.port:

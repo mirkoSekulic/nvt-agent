@@ -35,12 +35,36 @@ plugins:
       credentials:
         - match: https://github.com/my-user/
           provider: fork-app
-          username: x-access-token
+          identity:
+            mode: provider
 ```
 
 `match` values are URL prefixes. The most specific matching rule wins.
 
-`username` is optional and defaults to `x-access-token`.
+`username` is optional and defaults to `x-access-token`. It is only the Git
+credential username returned to Git's HTTPS credential flow; it is not commit
+authorship.
+
+Commit identity is configured separately:
+
+```yaml
+identity:
+  mode: provider
+```
+
+`mode: provider` asks the credential provider for commit identity. Broker-backed
+GitHub App providers return the App bot identity, using the bot user id in the
+noreply email.
+
+```yaml
+identity:
+  mode: explicit
+  name: "Mirko Sekulic"
+  email: "123456+mirkoSekulic@users.noreply.github.com"
+```
+
+`mode: explicit` works with every provider type. If `identity` is omitted, this
+plugin does not configure commit identity.
 
 ## Runtime Behavior
 
@@ -59,6 +83,15 @@ git config --global credential.useHttpPath true
 
 Git resolves helper name `nvt` to the exported `git-credential-nvt` command on
 `PATH`.
+
+When identity is configured, the plugin writes repo-local Git config only:
+
+```sh
+git -C <repo> config user.name ...
+git -C <repo> config user.email ...
+```
+
+It does not set global `user.name` or `user.email`.
 
 ## Relationship To checkout-repos
 
@@ -85,9 +118,22 @@ plugins:
         - url: https://github.com/my-user/private-repo.git
 ```
 
+After cloning, `checkout-repos` calls:
+
+```sh
+git-credentials configure-repo <repo>
+```
+
+This command reads the repo's `origin` URL, matches it against
+`credentials[].match`, and applies repo-local commit identity when configured.
+When called by `checkout-repos`, failures are logged as warnings and checkout
+continues. For repos cloned manually later, run `git-credentials configure-repo
+.` yourself.
+
 ## Doctor
 
 The plugin doctor checks that Git, `git-credential-nvt`, and
 `git-host-credential` are on `PATH`, validates credential rules, and asks
 `git-host-credential doctor --provider <name>` to validate each referenced
-provider.
+provider. `identity.mode=provider` is accepted only for providers that support
+commit identity; token/header providers should use `identity.mode=explicit`.

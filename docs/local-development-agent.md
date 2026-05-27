@@ -189,7 +189,8 @@ plugins:
       credentials:
         - match: https://github.com/mirkosekulic/nvt-agent
           provider: github-main
-          username: x-access-token
+          identity:
+            mode: provider
 
   - name: checkout-repos
     source: builtin
@@ -215,9 +216,9 @@ plugins:
 Keep the `broker-provider` value aligned with `.broker/broker.yaml`. Keep the
 `provider` values aligned with the local `git-host-credentials` provider name.
 
-`username: x-access-token` is the standard GitHub token username. GitHub ignores
-the username and authenticates with the token returned by the broker-backed
-credential helper.
+Git auth username defaults to `x-access-token` internally. `identity.mode:
+provider` asks the broker-backed GitHub App provider for the App bot commit
+identity and writes repo-local `user.name` / `user.email` after checkout.
 
 ## 6. Start The Agent
 

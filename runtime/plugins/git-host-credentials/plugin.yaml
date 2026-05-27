@@ -5,7 +5,7 @@ exports:
   tools:
     - name: git-host-credential
       command: /usr/local/lib/nvt-agent/plugins/git-host-credentials/git-host-credential.py
-      description: Resolve Git host credential providers and print tokens or headers
+      description: Resolve Git host credential providers and print tokens, headers, or commit identity
     - name: gh-auth
       command: /usr/local/lib/nvt-agent/plugins/git-host-credentials/gh-auth.py
       description: Run gh with a Git host credential provider token

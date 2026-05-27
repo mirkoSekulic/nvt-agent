@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from re import fullmatch
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -284,6 +284,42 @@ def installation_token(provider):
     return token
 
 
+def github_json(provider, path):
+    request = Request(
+        f"{api_url(provider)}{path}",
+        method="GET",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {github_app_jwt(provider)}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        fail(f"GitHub identity request failed: {error.code} {error.reason}: {body}")
+    except URLError as error:
+        fail(f"GitHub identity request failed: {error.reason}")
+
+
+def github_app_identity(provider):
+    app = github_json(provider, "/app")
+    slug = app.get("slug")
+    if not isinstance(slug, str) or not slug:
+        fail(f"provider {provider_name(provider)} GitHub App response did not include slug")
+    bot_login = f"{slug}[bot]"
+    user = github_json(provider, f"/users/{quote(bot_login, safe='')}")
+    bot_id = user.get("id")
+    if not isinstance(bot_id, int):
+        fail(f"provider {provider_name(provider)} GitHub bot user response did not include numeric id")
+    return {
+        "name": bot_login,
+        "email": f"{bot_id}+{bot_login}@users.noreply.github.com",
+    }
+
+
 def broker_token(provider, target):
     broker_provider = string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
     if not target:
@@ -300,6 +336,29 @@ def broker_token(provider, target):
     return result.stdout.strip()
 
 
+def broker_identity(provider, target):
+    broker_provider = string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+    if not target:
+        fail(f"provider {provider_name(provider)} broker identity requires --target")
+    command = ["brokerctl", "identity", "--provider", broker_provider, "--target", target]
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        fail(f"broker identity request failed: {stderr or stdout}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"broker identity returned invalid JSON: {error}")
+    if not payload.get("ok"):
+        fail(f"broker identity request failed: {payload.get('message') or payload.get('error') or 'unknown error'}")
+    name = payload.get("name")
+    email = payload.get("email")
+    if not isinstance(name, str) or not name or not isinstance(email, str) or not email:
+        fail("broker identity response did not include name and email")
+    return {"name": name, "email": email}
+
+
 def token(provider, target=None):
     kind = provider.get("type")
     if kind == "github-app":
@@ -309,6 +368,15 @@ def token(provider, target=None):
     if kind == "broker":
         return broker_token(provider, target)
     fail(f"provider {provider_name(provider)} does not provide token credentials")
+
+
+def identity(provider, target=None):
+    kind = provider.get("type")
+    if kind == "github-app":
+        return github_app_identity(provider)
+    if kind == "broker":
+        return broker_identity(provider, target)
+    fail(f"provider {provider_name(provider)} does not support commit identity; use identity.mode=explicit")
 
 
 def headers(provider):

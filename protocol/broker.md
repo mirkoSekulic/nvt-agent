@@ -112,6 +112,38 @@ Response:
 Token mode is not full zero-trust because the agent receives a derived token.
 The root secret still stays in the broker.
 
+### POST /v1/identity
+
+Returns commit identity metadata for a broker provider after applying the same
+agent grant check as token/http requests.
+
+Request:
+
+```json
+{
+  "provider": "fork-app",
+  "target": "github.com/my-user/my-repo"
+}
+```
+
+Requires `Authorization: Bearer ...`.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "name": "my-agent-app[bot]",
+  "email": "123456789+my-agent-app[bot]@users.noreply.github.com"
+}
+```
+
+For GitHub App providers, the broker fetches app metadata with the App JWT,
+then fetches the bot user account. The email prefix is the bot user's numeric
+id, not the App id and not the installation id. The target is used for
+authorization; the identity itself is provider/app-level and cached by the
+provider process.
+
 ## GitHub App Provider Rules
 
 The GitHub App provider validates before injecting auth:

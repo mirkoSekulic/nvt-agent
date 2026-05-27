@@ -25,13 +25,17 @@ type fakeGitHub struct {
 	mu            sync.Mutex
 	tokenRequests []map[string]any
 	apiRequests   []*http.Request
+	appRequests   int
+	userRequests  int
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
 	fake := &fakeGitHub{}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/app", fake.handleApp)
 	mux.HandleFunc("/app/installations/42/access_tokens", fake.handleToken)
+	mux.HandleFunc("/users/local-agent[bot]", fake.handleUser)
 	mux.HandleFunc("/repos/my-user/my-repo/pulls/123", fake.handleAPI)
 	mux.HandleFunc("/repos/my-user/my-repo/issues/123/comments", fake.handleComments)
 	mux.HandleFunc("/repos/my-user/my-repo/redirect", fake.handleRedirect)
@@ -39,6 +43,20 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	fake.server = httptest.NewServer(mux)
 	t.Cleanup(fake.server.Close)
 	return fake
+}
+
+func (f *fakeGitHub) handleApp(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.appRequests++
+	f.mu.Unlock()
+	writeJSON(w, map[string]any{"id": 123, "slug": "local-agent"})
+}
+
+func (f *fakeGitHub) handleUser(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.userRequests++
+	f.mu.Unlock()
+	writeJSON(w, map[string]any{"id": 987654321, "login": "local-agent[bot]"})
 }
 
 func (f *fakeGitHub) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +117,12 @@ func (f *fakeGitHub) tokenRequestCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.tokenRequests)
+}
+
+func (f *fakeGitHub) identityRequestCounts() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.appRequests, f.userRequests
 }
 
 func (f *fakeGitHub) lastAPIRequest() *http.Request {
@@ -539,6 +563,42 @@ func TestTokenCacheIsAgentIndependent(t *testing.T) {
 	}
 	if count := f.fake.tokenRequestCount(); count != 1 {
 		t.Fatalf("expected shared repo cache across agents, got %d token mints", count)
+	}
+}
+
+func TestIdentityReturnsGitHubAppBotIdentityAndCachesMetadata(t *testing.T) {
+	f := newBrokerFixture(t)
+	for i := 0; i < 2; i++ {
+		payload, _, status := f.brokerctl("identity", "--provider", "fork-app", "--target", "github.com/my-user/my-repo")
+		if status != 0 || payload["ok"] != true {
+			t.Fatalf("identity failed: status=%d payload=%#v", status, payload)
+		}
+		if payload["name"] != "local-agent[bot]" {
+			t.Fatalf("expected bot name, got %#v", payload["name"])
+		}
+		if payload["email"] != "987654321+local-agent[bot]@users.noreply.github.com" {
+			t.Fatalf("expected bot user id in email, got %#v", payload["email"])
+		}
+	}
+	appRequests, userRequests := f.fake.identityRequestCounts()
+	if appRequests != 1 || userRequests != 1 {
+		t.Fatalf("expected identity metadata cache, app=%d user=%d", appRequests, userRequests)
+	}
+}
+
+func TestIdentityDeniedOutsideAgentGrant(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"fork-app": {"my-user/my-repo"},
+			},
+		},
+	})
+	payload, _, status := f.brokerctl("identity", "--provider", "fork-app", "--target", "github.com/my-user/other-repo")
+	if status == 0 || payload["error"] != "repo-not-allowed" {
+		t.Fatalf("expected identity repo denial, status=%d payload=%#v", status, payload)
 	}
 }
 

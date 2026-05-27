@@ -34,7 +34,8 @@ plugins: []
 #       credentials:
 #         - match: https://github.com/example/
 #           provider: fork-app
-#           username: x-access-token
+#           identity:
+#             mode: provider
 #   - name: checkout-repos
 #     source: builtin
 #     when: before-agent

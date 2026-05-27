@@ -3,6 +3,9 @@ doctor:
   command: /usr/local/lib/nvt-agent/plugins/git-credentials/run.py doctor
 exports:
   tools:
+    - name: git-credentials
+      command: /usr/local/lib/nvt-agent/plugins/git-credentials/run.py
+      description: Configure Git credential helper and repo-local commit identity
     - name: git-credential-nvt
       command: /usr/local/lib/nvt-agent/plugins/git-credentials/git-credential-nvt.py
       description: Git credential helper for configured repository credentials

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import json
 
-from git_host_credentials import headers, load_config, providers, resolve_provider, token, validate_provider
+from git_host_credentials import headers, identity, load_config, providers, resolve_provider, token, validate_provider
 
 
 def command_token(args):
@@ -13,6 +14,11 @@ def command_headers(args):
     provider = resolve_provider(load_config(), args.provider, args.target)
     for header in headers(provider):
         print(header)
+
+
+def command_identity(args):
+    provider = resolve_provider(load_config(), args.provider, args.target)
+    print(json.dumps(identity(provider, args.target), separators=(",", ":")))
 
 
 def command_resolve(args):
@@ -48,6 +54,11 @@ def main():
     headers_parser.add_argument("--provider")
     headers_parser.add_argument("--target")
     headers_parser.set_defaults(func=command_headers)
+
+    identity_parser = subparsers.add_parser("identity")
+    identity_parser.add_argument("--provider")
+    identity_parser.add_argument("--target")
+    identity_parser.set_defaults(func=command_identity)
 
     resolve = subparsers.add_parser("resolve")
     resolve.add_argument("--provider")

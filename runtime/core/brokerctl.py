@@ -77,6 +77,13 @@ def command_token(args):
     return 0 if response.get("ok") else 1
 
 
+def command_identity(args):
+    payload = {"provider": args.provider, "target": args.target}
+    response, _status = request_json("/v1/identity", payload)
+    print_json(response)
+    return 0 if response.get("ok") else 1
+
+
 def main():
     parser = argparse.ArgumentParser(prog="brokerctl")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -100,6 +107,11 @@ def main():
     token.add_argument("--purpose")
     token.add_argument("--raw", action="store_true")
     token.set_defaults(func=command_token)
+
+    identity = subparsers.add_parser("identity")
+    identity.add_argument("--provider", required=True)
+    identity.add_argument("--target", required=True)
+    identity.set_defaults(func=command_identity)
 
     args = parser.parse_args()
     raise SystemExit(args.func(args))

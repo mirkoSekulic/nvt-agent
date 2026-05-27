@@ -107,7 +107,8 @@ plugins:
       credentials:
         - match: https://github.com/example/
           provider: fork-app
-          username: x-access-token
+          identity:
+            mode: provider
 
   - name: checkout-repos
     source: builtin
@@ -127,11 +128,33 @@ need credentials. It configures Git once; later `git clone`, `git fetch`, and
 `git-credential-nvt`; header providers configure Git `http.<url>.extraHeader`
 entries directly.
 
+Commit identity is separate from Git auth username. `git-credentials` can set
+repo-local `user.name` and `user.email` either explicitly or from a provider:
+
+```yaml
+identity:
+  mode: provider
+```
+
+Provider identity is currently intended for broker-backed GitHub App providers.
+For token/header providers, use:
+
+```yaml
+identity:
+  mode: explicit
+  name: "Automation Bot"
+  email: "automation@example.com"
+```
+
+`checkout-repos` invokes `git-credentials configure-repo <repo>` after clone as
+a best-effort identity setup step.
+
 `git-host-credentials` is a tool-only plugin. It resolves named credential
 providers for Git hosting services and exports two tools:
 
 ```sh
 git-host-credential token --provider fork-app
+git-host-credential identity --provider fork-app --target github.com/example/project
 git-host-credential headers --provider company-headers
 git-host-credential doctor --provider fork-app
 gh-auth pr view 123 --repo example/project
@@ -213,13 +236,20 @@ org/user, or one repo:
 credentials:
   - match: https://github.com/
     provider: general-github-token
-    username: x-access-token
+    identity:
+      mode: explicit
+      name: General Automation
+      email: automation@example.com
   - match: https://github.com/acme/
     provider: fork-app
-    username: x-access-token
+    identity:
+      mode: provider
   - match: https://github.com/acme/frontend.git
     provider: frontend-token
-    username: x-access-token
+    identity:
+      mode: explicit
+      name: Frontend Automation
+      email: frontend-automation@example.com
 ```
 
 The most specific matching rule wins.
@@ -253,11 +283,15 @@ plugins:
 credentials:
   - match: https://github.com/acme/
     provider: acme-token
-    username: x-access-token
+    identity:
+      mode: explicit
+      name: Acme Automation
+      email: automation@example.com
 
   - match: https://github.com/acme/
     provider: fork-app
-    username: x-access-token
+    identity:
+      mode: provider
 ```
 
 For provider `headers`, each `header-env` contains one full HTTP header line:

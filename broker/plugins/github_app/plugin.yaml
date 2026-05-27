@@ -2,5 +2,6 @@ name: github-app
 type: broker-provider
 
 capabilities:
+  - identity
   - http.request
   - token

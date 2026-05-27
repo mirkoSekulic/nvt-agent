@@ -18,6 +18,13 @@ def run(command):
     subprocess.run(command, check=True)
 
 
+def run_best_effort(command):
+    print("+", " ".join(command), flush=True)
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        print(f"checkout-repos: warning: {' '.join(command)} failed with exit {result.returncode}", flush=True)
+
+
 def string_value(value, field, required=False):
     if value is None:
         if required:
@@ -80,11 +87,19 @@ def checkout_repo(repo):
         if not (target / ".git").is_dir():
             fail(f"{target} already exists and is not a Git repository")
         print(f"checkout-repos: exists, skipping {target}", flush=True)
+        configure_repo_identity(target)
         return
 
     run(["git", "clone", url, str(target)])
     if upstream:
         run(["git", "-C", str(target), "remote", "add", "upstream", upstream])
+    configure_repo_identity(target)
+
+
+def configure_repo_identity(target):
+    if shutil.which("git-credentials") is None:
+        return
+    run_best_effort(["git-credentials", "configure-repo", str(target)])
 
 
 def doctor_repo(repo, index):

@@ -1,6 +1,7 @@
 package runtime_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,36 @@ providers:
 	}
 }
 
+func TestGitHostCredentialBrokerProviderDelegatesIdentityToBrokerctl(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "identity" ] &&
+   [ "$2" = "--provider" ] && [ "$3" = "fork-app" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ]; then
+  echo '{"ok":true,"name":"local-agent[bot]","email":"987654321+local-agent[bot]@users.noreply.github.com"}'
+  exit 0
+fi
+echo "unexpected brokerctl args: $*" >&2
+exit 1
+`)
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: fork-app-broker
+    type: broker
+    broker-provider: fork-app
+    match:
+      - github.com/my-user/*
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	output := f.runWithEnv(gitHostCredentialBin(f.root), true, env, "identity", "--target", "github.com/my-user/project")
+	if !strings.Contains(output, `"name":"local-agent[bot]"`) ||
+		!strings.Contains(output, `"email":"987654321+local-agent[bot]@users.noreply.github.com"`) {
+		t.Fatalf("unexpected broker identity: %q", output)
+	}
+}
+
 func TestGitCredentialsDelegatesToGitHostCredential(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("git-host-credential", `#!/usr/bin/env bash
@@ -116,7 +147,6 @@ exit 1
 credentials:
   - match: https://github.com/my-user/
     provider: fork-app
-    username: x-access-token
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +156,151 @@ credentials:
 	if !strings.Contains(output, "username=x-access-token") ||
 		!strings.Contains(output, "password=delegated-token") {
 		t.Fatalf("unexpected credential output:\n%s", output)
+	}
+}
+
+func TestGitCredentialsConfigureRepoExplicitIdentity(t *testing.T) {
+	f := newFixture(t)
+	repo := f.initRepo("project")
+	f.runCommand("git", true, "-C", repo, "remote", "add", "origin", "https://github.com/my-user/project.git")
+	config := f.writePluginConfig("git-credentials.yaml", `
+credentials:
+  - match: https://github.com/my-user/
+    provider: fork-app
+    identity:
+      mode: explicit
+      name: Explicit Bot
+      email: explicit@example.com
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	f.runWithEnv(gitCredentialsRunBin(f.root), true, env, "configure-repo", repo)
+
+	name := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.name"))
+	email := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.email"))
+	if name != "Explicit Bot" || email != "explicit@example.com" {
+		t.Fatalf("unexpected identity name=%q email=%q", name, email)
+	}
+}
+
+func TestGitCredentialsConfigureRepoProviderIdentity(t *testing.T) {
+	f := newFixture(t)
+	repo := f.initRepo("project")
+	f.runCommand("git", true, "-C", repo, "remote", "add", "origin", "https://github.com/my-user/project.git")
+	f.writeBin("git-host-credential", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "identity" ] && [ "$2" = "--provider" ] && [ "$3" = "fork-app" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ]; then
+  echo '{"name":"local-agent[bot]","email":"987654321+local-agent[bot]@users.noreply.github.com"}'
+  exit 0
+fi
+echo "unexpected git-host-credential args: $*" >&2
+exit 1
+`)
+	config := f.writePluginConfig("git-credentials.yaml", `
+credentials:
+  - match: https://github.com/my-user/
+    provider: fork-app
+    identity:
+      mode: provider
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	f.runWithEnv(gitCredentialsRunBin(f.root), true, env, "configure-repo", repo)
+
+	name := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.name"))
+	email := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.email"))
+	if name != "local-agent[bot]" || email != "987654321+local-agent[bot]@users.noreply.github.com" {
+		t.Fatalf("unexpected identity name=%q email=%q", name, email)
+	}
+}
+
+func TestGitCredentialsProviderIdentityFailsForUnsupportedProvider(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("git-host-credential", `#!/usr/bin/env bash
+set -euo pipefail
+case "$1:$3" in
+  type:personal-token)
+    echo token-env
+    ;;
+  doctor:personal-token)
+    exit 0
+    ;;
+  *)
+    echo "unexpected git-host-credential args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+	config := f.writePluginConfig("git-credentials.yaml", `
+credentials:
+  - match: https://github.com/my-user/
+    provider: personal-token
+    identity:
+      mode: provider
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	output := f.runWithEnv(gitCredentialsRunBin(f.root), false, env)
+	if !strings.Contains(output, "does not support commit identity") ||
+		!strings.Contains(output, "identity.mode=explicit") {
+		t.Fatalf("unexpected failure:\n%s", output)
+	}
+}
+
+func TestGitCredentialsNoMatchingIdentityLeavesRepoLocalUnset(t *testing.T) {
+	f := newFixture(t)
+	repo := f.initRepo("project")
+	f.runCommand("git", true, "-C", repo, "remote", "add", "origin", "https://github.com/other/project.git")
+	config := f.writePluginConfig("git-credentials.yaml", `
+credentials:
+  - match: https://github.com/my-user/
+    provider: fork-app
+    identity:
+      mode: explicit
+      name: Explicit Bot
+      email: explicit@example.com
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	f.runWithEnv(gitCredentialsRunBin(f.root), true, env, "configure-repo", repo)
+	f.runCommand("git", false, "-C", repo, "config", "--local", "--get", "user.name")
+	f.runCommand("git", false, "-C", repo, "config", "--local", "--get", "user.email")
+}
+
+func TestCheckoutReposInvokesGitCredentialsConfigureRepoBestEffort(t *testing.T) {
+	f := newFixture(t)
+	source := filepath.Join(f.home, "source")
+	f.runCommand("git", true, "init", source)
+	f.runCommand("git", true, "-C", source, "config", "user.name", "Source")
+	f.runCommand("git", true, "-C", source, "config", "user.email", "source@example.com")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.runCommand("git", true, "-C", source, "add", "README.md")
+	f.runCommand("git", true, "-C", source, "commit", "-m", "initial")
+
+	logPath := filepath.Join(f.home, "identity.log")
+	f.writeBin("git-credentials", `#!/usr/bin/env bash
+set -euo pipefail
+printf "%s\n" "$*" >> "$IDENTITY_LOG"
+exit 7
+`)
+	config := f.writePluginConfig("checkout-repos.yaml", fmt.Sprintf(`
+repos:
+  - url: %s
+    path: cloned
+`, quoteYAML(source)))
+	env := []string{"NVT_PLUGIN_CONFIG=" + config, "IDENTITY_LOG=" + logPath}
+
+	f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "plugins", "checkout-repos", "run.py")), true, env)
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "configure-repo "+filepath.Join(f.workspace, "cloned")) {
+		t.Fatalf("expected checkout to invoke configure-repo, got:\n%s", logData)
 	}
 }
 
