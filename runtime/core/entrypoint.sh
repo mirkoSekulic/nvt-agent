@@ -16,6 +16,12 @@ export MISE_DATA_DIR="${MISE_DATA_DIR}"
 export PATH="${PATH}"
 EOF
 
+profile_snippet='[ -f "$HOME/.nvt-agent/env" ] && source "$HOME/.nvt-agent/env"'
+touch "$HOME/.bashrc"
+if ! grep -Fqx "$profile_snippet" "$HOME/.bashrc"; then
+  printf '\n%s\n' "$profile_snippet" >> "$HOME/.bashrc"
+fi
+
 bootstrap "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 export-plugin-tools "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 write-agent-instructions
