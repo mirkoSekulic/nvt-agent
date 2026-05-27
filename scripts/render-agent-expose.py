@@ -165,7 +165,7 @@ def write_compose_override(path, routes, labels):
         f"      NVT_EXPOSED_HTTP_ROUTES_JSON: {yaml_quote(routes_json)}",
     ]
     if labels:
-        lines.append("    labels:")
+        lines.extend(["  docker:", "    labels:"])
         for key, value in labels.items():
             lines.append(f"      {key}: {yaml_quote(value)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

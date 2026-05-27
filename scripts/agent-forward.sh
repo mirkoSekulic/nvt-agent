@@ -86,7 +86,7 @@ container_id="$(docker compose \
   -p "agent-$name" \
   --env-file "$env_file" \
   -f "$repo_root/compose.agent.yaml" \
-  ps -q agent)"
+  ps -q docker)"
 if [ -z "$container_id" ]; then
   echo "agent $name is not running" >&2
   exit 1
@@ -95,7 +95,7 @@ fi
 agents_proxy_id="$(docker network inspect -f '{{.ID}}' agents-proxy)"
 agent_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if eq .NetworkID "'"$agents_proxy_id"'"}}{{.IPAddress}}{{end}}{{end}}' "$container_id")"
 if [ -z "$agent_ip" ]; then
-  echo "agent $name is not attached to agents-proxy" >&2
+  echo "agent $name docker service is not attached to agents-proxy" >&2
   exit 1
 fi
 

@@ -4,18 +4,12 @@ services:
     env_file:
       - ${AGENT_ENV_FILE}
     environment:
-      DOCKER_HOST: tcp://docker:2375
+      DOCKER_HOST: tcp://127.0.0.1:2375
     working_dir: ${NVT_WORKSPACE}
     depends_on:
-      - docker
-    networks:
-      - agents-proxy
-      - agent-internal
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=agents-proxy
-      - traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
-      - traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
+      docker:
+        condition: service_healthy
+    network_mode: service:docker
     volumes:
       - ${WORKSPACE_DIR}:${NVT_WORKSPACE}
       - ${CUSTOM_PLUGINS_DIR}:/custom-plugins
@@ -29,11 +23,25 @@ services:
     privileged: true
     environment:
       DOCKER_TLS_CERTDIR: ""
+    command:
+      - --host=unix:///var/run/docker.sock
+      - --host=tcp://127.0.0.1:2375
+    healthcheck:
+      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
     volumes:
       - docker-data:/var/lib/docker
       - ${WORKSPACE_DIR}:${NVT_WORKSPACE}
     networks:
+      - agents-proxy
       - agent-internal
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=agents-proxy
+      - traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
+      - traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
 
 volumes:
   agent-home:

@@ -14,8 +14,9 @@ code-server:
 
 expose:
   http: []
-  # Local development only. Routes HTTP services running inside the agent
-  # container through the shared proxy.
+  # Local development only. Routes HTTP services running on shared local agent
+  # ports through the shared proxy. This includes direct agent processes and
+  # inner Docker Compose services that publish the target port.
   # Example:
   # http:
   #   - name: app

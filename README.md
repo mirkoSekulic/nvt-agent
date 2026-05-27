@@ -247,7 +247,8 @@ http://studio-api.agent.localhost:4090
 ```
 
 The proxy listens on the host at `127.0.0.1:${NVT_PROXY_PORT:-4090}` and forwards
-matching hostnames to code-server inside each agent container on port `4090`.
+matching hostnames to code-server inside each agent's shared local network
+namespace on port `4090`.
 
 The route is created from Docker labels in `compose.agent.yaml`:
 
@@ -256,7 +257,8 @@ traefik.http.routers.${AGENT_NAME}.rule=Host(`${AGENT_HOST}`)
 traefik.http.services.${AGENT_NAME}.loadbalancer.server.port=4090
 ```
 
-Agents can also expose local HTTP services running inside the agent container.
+Agents can also expose local HTTP services running inside the agent's shared
+local network namespace.
 Configure named routes in `.agents/<name>/agent.yaml`:
 
 ```yaml
@@ -276,11 +278,12 @@ http://app.<name>.agent.localhost:4090
 http://api.<name>.agent.localhost:4090
 ```
 
-Route names must be unique DNS labels. `targetPort` is the port inside the
-agent container. v1 supports HTTP services in the main agent container only;
-`source: docker` / DinD-sidecar forwarding is intentionally rejected until that
-path is implemented. The host-side renderer supports the block YAML shape shown
-above; keep `expose.http` in that form rather than flow-style inline YAML.
+Route names must be unique DNS labels. `targetPort` is a port in the agent's
+shared local namespace. It can be served by a direct agent process, or by an
+inner Docker/Compose service that publishes that port. Ports `4090`
+(code-server) and `2375` (Docker API) are reserved. The host-side renderer
+supports the block YAML shape shown above; keep `expose.http` in that form
+rather than flow-style inline YAML.
 
 For one-off local access without editing `agent.yaml`, run a temporary forward:
 
@@ -758,9 +761,12 @@ can store runtime state. Claude auth is stored per agent under
 `.agents/<name>/auth/claude` and mounted to `/root/.claude`.
 
 Each agent also gets its own Docker daemon sidecar. The agent talks to it with
-`DOCKER_HOST=tcp://docker:2375`; the host Docker socket is intentionally not
-mounted. This lets multiple agents run the same Docker Compose project without
-sharing Docker images, containers, networks, or volumes.
+`DOCKER_HOST=tcp://127.0.0.1:2375`; the host Docker socket is intentionally not
+mounted. The agent and sidecar share one local network namespace, matching the
+Kubernetes Pod model more closely: direct agent processes and ports published by
+inner Docker Compose projects bind in the same namespace. This lets multiple
+agents run the same Docker Compose project without sharing Docker images,
+containers, networks, or volumes.
 
 The agent root home is a named Docker volume, so installed state under `/root`
 can survive `agent-down`. Use `agent-rm` to remove the agent Compose volume.

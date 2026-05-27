@@ -245,9 +245,10 @@ named route:
 http://app.nvt-dev.agent.localhost:4090
 ```
 
-`expose.http` is local-development routing for HTTP services listening inside
-the main agent container. Keep it in block YAML form as shown; DinD container
-ports are not routed.
+`expose.http` is local-development routing for HTTP services listening on ports
+in the agent's shared local network namespace. That includes direct agent
+processes and inner Docker Compose services that publish a port. Keep it in
+block YAML form as shown. Ports `4090` and `2375` are reserved.
 
 For temporary access to another port without editing `agent.yaml`:
 
@@ -345,7 +346,7 @@ GitHub token minting fails:
 
 - Confirm the agent was recreated after the DinD change.
 - Run `make agent-down NAME=$AGENT && make agent-up NAME=$AGENT`.
-- Confirm `DOCKER_HOST=tcp://docker:2375` is set inside the agent.
+- Confirm `DOCKER_HOST=tcp://127.0.0.1:2375` is set inside the agent.
 
 ## Cleanup
 

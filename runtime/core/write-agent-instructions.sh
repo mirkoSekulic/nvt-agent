@@ -45,12 +45,17 @@ yet.
 ## Docker
 
 Docker commands use this agent's own Docker daemon sidecar through
-\`DOCKER_HOST=tcp://docker:2375\`. The host Docker socket is not mounted.
+\`DOCKER_HOST=tcp://127.0.0.1:2375\`. The host Docker socket is not mounted.
 Containers, images, networks, and volumes created by \`docker\` are scoped to
 this agent's sidecar daemon.
 
-The workspace is mounted into both the agent container and the Docker sidecar at
-the same path, so Compose bind mounts from under \`$workspace\` should work.
+The agent container and Docker sidecar share one local network namespace.
+Processes started directly in the agent and ports published by inner
+\`docker compose\` projects bind in that same namespace. Ports \`4090\`
+(code-server) and \`2375\` (Docker API) are reserved.
+
+The workspace is mounted into both containers at the same path, so Compose bind
+mounts from under \`$workspace\` should work.
 
 ## Working With Repos
 
@@ -89,7 +94,7 @@ if isinstance(routes, list) and routes:
         port = route.get("targetPort")
         if not isinstance(name, str) or not isinstance(port, int):
             continue
-        lines.append(f"- `{name}`: `http://{name}.{agent_host}:{proxy_port}` -> container port `{port}`")
+        lines.append(f"- `{name}`: `http://{name}.{agent_host}:{proxy_port}` -> shared local port `{port}`")
     lines.append("")
     with target.open("a", encoding="utf-8") as file:
         file.write("\n".join(lines))

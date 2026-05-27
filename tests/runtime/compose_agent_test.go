@@ -17,21 +17,27 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 	compose := string(data)
 
 	required := []string{
-		"DOCKER_HOST: tcp://docker:2375",
+		"DOCKER_HOST: tcp://127.0.0.1:2375",
+		"network_mode: service:docker",
+		"condition: service_healthy",
 		"docker:",
 		"image: docker:27-dind",
 		"privileged: true",
 		"DOCKER_TLS_CERTDIR: \"\"",
+		"--host=tcp://127.0.0.1:2375",
+		"docker info >/dev/null 2>&1",
 		"docker-data:/var/lib/docker",
 		"${WORKSPACE_DIR}:${NVT_WORKSPACE}",
+		"agents-proxy",
 		"agent-internal",
+		"traefik.docker.network=agents-proxy",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(compose, fragment) {
 			t.Fatalf("compose.agent.yaml missing %q\n%s", fragment, compose)
 		}
 	}
-	if strings.Contains(compose, "/var/run/docker.sock") {
+	if strings.Contains(compose, "/var/run/docker.sock:") {
 		t.Fatalf("compose.agent.yaml must not mount the host Docker socket")
 	}
 }
@@ -62,6 +68,7 @@ expose:
 	rendered := string(data)
 	required := []string{
 		"NVT_EXPOSED_HTTP_ROUTES_JSON:",
+		"  docker:",
 		`{"name":"app","targetPort":3000,"source":"agent"}`,
 		"traefik.http.routers.nvt-dev-app.rule: 'Host(`app.nvt-dev.agent.localhost`)'",
 		"traefik.http.services.nvt-dev-app.loadbalancer.server.port: '3000'",
@@ -114,7 +121,18 @@ expose:
 		t.Fatalf("docker compose config failed: %v\n%s", err, mergedBytes)
 	}
 	merged := string(mergedBytes)
+	dockerStart := strings.Index(merged, "\n  docker:\n")
+	if dockerStart == -1 {
+		t.Fatalf("merged compose output missing docker service\n%s", merged)
+	}
+	dockerRest := merged[dockerStart:]
+	dockerEnd := strings.Index(dockerRest, "\nnetworks:")
+	if dockerEnd == -1 {
+		t.Fatalf("merged compose output missing top-level networks\n%s", merged)
+	}
+	dockerService := dockerRest[:dockerEnd]
 	required := []string{
+		"network_mode: service:docker",
 		"traefik.enable: \"true\"",
 		"traefik.http.routers.nvt-dev.rule: Host(`nvt-dev.agent.localhost`)",
 		"traefik.http.services.nvt-dev.loadbalancer.server.port: \"4090\"",
@@ -124,6 +142,11 @@ expose:
 	for _, fragment := range required {
 		if !strings.Contains(merged, fragment) {
 			t.Fatalf("merged compose output missing %q\n%s", fragment, merged)
+		}
+	}
+	for _, fragment := range required[1:] {
+		if !strings.Contains(dockerService, fragment) {
+			t.Fatalf("docker service missing %q\n%s", fragment, dockerService)
 		}
 	}
 }
@@ -238,8 +261,8 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 	instructions := string(data)
 	required := []string{
 		"## Exposed Local HTTP Services",
-		"`app`: `http://app.nvt-dev.agent.localhost:4090` -> container port `3000`",
-		"`api`: `http://api.nvt-dev.agent.localhost:4090` -> container port `8080`",
+		"`app`: `http://app.nvt-dev.agent.localhost:4090` -> shared local port `3000`",
+		"`api`: `http://api.nvt-dev.agent.localhost:4090` -> shared local port `8080`",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(instructions, fragment) {
