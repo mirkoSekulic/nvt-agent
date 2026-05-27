@@ -168,7 +168,9 @@ $EDITOR .agents/frontend/agent.yaml
 
 If the agent needs brokered access to private GitHub resources, configure the
 local broker and grant the agent a repo before starting it. See
-[Local Broker](#local-broker).
+[Local Broker](#local-broker). For a complete broker-backed setup for
+developing this repo with a local agent, see
+[Local Development Agent From Scratch](docs/local-development-agent.md).
 
 Start the agent:
 
@@ -435,6 +437,9 @@ NVT_BROKER_TOKEN=<per-agent token>
 This local token is a development identity mechanism. Production Kubernetes
 mode should replace it with workload identity such as ServiceAccount or SPIFFE,
 with root secrets mounted only into broker-managed components.
+
+For an end-to-end local setup guide, see
+[Local Development Agent From Scratch](docs/local-development-agent.md).
 
 ## Agent Config
 
