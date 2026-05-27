@@ -44,6 +44,17 @@ def request_url(values):
     return url
 
 
+def request_target(values):
+    host = values.get("host")
+    path = values.get("path", "")
+    if not host:
+        return ""
+    target = host
+    if path:
+        target += "/" + path.lstrip("/")
+    return target.strip("/").removesuffix(".git")
+
+
 def load_config():
     if not CONFIG_FILE.is_file():
         return []
@@ -68,7 +79,7 @@ def matching_rule(url, credentials):
     return max(matches, key=lambda rule: len(rule["match"]))
 
 
-def provider_credentials(rule):
+def provider_credentials(rule, target):
     provider = rule.get("provider")
     if not isinstance(provider, str) or not provider:
         fail("credential rule requires provider")
@@ -76,7 +87,10 @@ def provider_credentials(rule):
     if not isinstance(username, str):
         fail("credential rule username must be a string")
     try:
-        token = output(["git-host-credential", "token", "--provider", provider]).strip()
+        command = ["git-host-credential", "token", "--provider", provider]
+        if target:
+            command.extend(["--target", target])
+        token = output(command).strip()
     except FileNotFoundError:
         fail("git-host-credential is not on PATH")
     except subprocess.CalledProcessError as error:
@@ -91,7 +105,8 @@ def main():
     if operation != "get":
         return
 
-    url = request_url(read_request())
+    request = read_request()
+    url = request_url(request)
     if not url:
         return
 
@@ -99,7 +114,7 @@ def main():
     if rule is None:
         return
 
-    username, password = provider_credentials(rule)
+    username, password = provider_credentials(rule, request_target(request))
     print(f"username={username}")
     print(f"password={password}")
     print()

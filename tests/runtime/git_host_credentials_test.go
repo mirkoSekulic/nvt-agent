@@ -99,7 +99,8 @@ func TestGitCredentialsDelegatesToGitHostCredential(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("git-host-credential", `#!/usr/bin/env bash
 set -euo pipefail
-if [ "$1" = "token" ] && [ "$2" = "--provider" ] && [ "$3" = "fork-app" ]; then
+if [ "$1" = "token" ] && [ "$2" = "--provider" ] && [ "$3" = "fork-app" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ]; then
   echo delegated-token
   exit 0
 fi
