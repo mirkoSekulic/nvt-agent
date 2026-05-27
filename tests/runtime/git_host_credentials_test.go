@@ -268,6 +268,47 @@ credentials:
 	f.runCommand("git", false, "-C", repo, "config", "--local", "--get", "user.email")
 }
 
+func TestGitCredentialsMatchRequiresBoundary(t *testing.T) {
+	f := newFixture(t)
+	repo := f.initRepo("nvt-agent-2")
+	f.runCommand("git", true, "-C", repo, "remote", "add", "origin", "https://github.com/mirkoSekulic/nvt-agent-2.git")
+	config := f.writePluginConfig("git-credentials.yaml", `
+credentials:
+  - match: https://github.com/mirkoSekulic/nvt-agent
+    provider: fork-app
+    identity:
+      mode: explicit
+      name: NVT Bot
+      email: nvt@example.com
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	f.runWithEnv(gitCredentialsRunBin(f.root), true, env, "configure-repo", repo)
+	f.runCommand("git", false, "-C", repo, "config", "--local", "--get", "user.name")
+}
+
+func TestGitCredentialHelperMatchRequiresBoundary(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("git-host-credential", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
+	configDir := filepath.Join(f.home, ".nvt-agent", "git-credentials")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+credentials:
+  - match: https://github.com/mirkoSekulic/nvt-agent
+    provider: fork-app
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	input := "protocol=https\nhost=github.com\npath=mirkoSekulic/nvt-agent-2.git\n\n"
+	output := f.runWithInput(gitCredentialNvtBin(f.root), input, true, "get")
+	if strings.TrimSpace(output) != "" {
+		t.Fatalf("expected no helper output for sibling repo, got:\n%s", output)
+	}
+}
+
 func TestCheckoutReposInvokesGitCredentialsConfigureRepoBestEffort(t *testing.T) {
 	f := newFixture(t)
 	source := filepath.Join(f.home, "source")

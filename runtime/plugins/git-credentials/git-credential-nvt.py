@@ -72,11 +72,16 @@ def matching_rule(url, credentials):
         if isinstance(rule, dict)
         and isinstance(rule.get("match"), str)
         and isinstance(rule.get("provider"), str)
-        and url.startswith(rule["match"])
+        and url_matches(url, rule["match"])
     ]
     if not matches:
         return None
     return max(matches, key=lambda rule: len(rule["match"]))
+
+
+def url_matches(url, match):
+    prefix = match.rstrip("/")
+    return url == prefix or url.startswith(prefix + "/") or url.startswith(prefix + ".git")
 
 
 def provider_credentials(rule, target):
