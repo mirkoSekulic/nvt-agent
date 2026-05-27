@@ -214,6 +214,10 @@ git@altinn.studio:repos/digdir/oed.git     -> altinn.studio/repos/digdir/oed
 altinn.studio/repos/digdir/oed             -> altinn.studio/repos/digdir/oed
 ```
 
+Grant patterns must use the provider's target mode. GitHub mode grants use
+`owner/repo` patterns. Literal mode grants use full `host/path/repo` patterns,
+for example `altinn.studio/repos/digdir/oed`.
+
 Static token provider:
 
 ```yaml

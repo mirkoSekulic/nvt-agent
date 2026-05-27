@@ -1,13 +1,13 @@
 from urllib.parse import urlparse
 
-from broker.core.config import string_value
+from broker.core.config import fail, string_value
 from broker.plugins.github_app.provider import ProviderError, github_repo_from_target
 
 
 def target_mode(config, provider_name):
     mode = string_value(config.get("target-mode"), f"provider {provider_name} config.target-mode") or "github"
     if mode not in {"github", "literal"}:
-        raise ProviderError("target-mode-invalid", "target-mode must be github or literal")
+        fail(f"provider {provider_name} config.target-mode must be github or literal")
     return mode
 
 

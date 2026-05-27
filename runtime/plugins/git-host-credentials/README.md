@@ -79,6 +79,7 @@ Broker-backed header providers need a concrete repo target so the broker can
 apply agent grants. Prefer repo-level `match` entries for them. For self-hosted
 Git, configure the broker provider with `target-mode: literal` and match the
 full host/path repository id, for example `altinn.studio/repos/digdir/oed`.
+The corresponding broker grant must use that same full host/path form.
 
 `gh-auth` runs GitHub CLI commands with a provider token through `GH_TOKEN`
 without calling `gh auth login` or writing GitHub CLI auth state:
