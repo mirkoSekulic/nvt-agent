@@ -83,9 +83,15 @@ agent_config_file="$agent_dir/agent.yaml"
 workspace_dir="$agent_dir/workspace"
 custom_plugins_dir="$agent_dir/custom-plugins"
 claude_config_dir="$agent_dir/auth/claude"
-codex_config_dir="${HOME}/.codex"
+codex_config_dir="$agent_dir/auth/codex"
+host_codex_config_dir="${HOME}/.codex"
 
-mkdir -p "$workspace_dir" "$custom_plugins_dir" "$claude_config_dir" "$broker_dir"
+mkdir -p "$workspace_dir" "$custom_plugins_dir" "$claude_config_dir" "$codex_config_dir" "$broker_dir"
+
+if [ -d "$host_codex_config_dir" ] && [ -z "$(find "$codex_config_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  cp -R "$host_codex_config_dir"/. "$codex_config_dir"/
+  echo "seeded $codex_config_dir from $host_codex_config_dir"
+fi
 
 if [ ! -f "$broker_dir/broker.yaml" ]; then
   cp "$templates_dir/broker.yaml" "$broker_dir/broker.yaml"
@@ -128,6 +134,25 @@ if [ ! -f "$env_file" ]; then
     render_template "$templates_dir/env" "$env_file"
   echo "created $env_file"
 else
+  if grep -q '^CODEX_CONFIG_DIR=' "$env_file"; then
+    python3 - "$env_file" "$codex_config_dir" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+codex_config_dir = sys.argv[2]
+lines = path.read_text(encoding="utf-8").splitlines()
+updated = [
+    f"CODEX_CONFIG_DIR={codex_config_dir}" if line.startswith("CODEX_CONFIG_DIR=") else line
+    for line in lines
+]
+path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+PY
+  else
+    {
+      printf 'CODEX_CONFIG_DIR=%s\n' "$codex_config_dir"
+    } >>"$env_file"
+  fi
   if ! grep -q '^NVT_BROKER_URL=' "$env_file"; then
     {
       printf '\n'
