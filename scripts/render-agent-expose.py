@@ -148,6 +148,7 @@ def compose_override(agent_name, agent_host, routes):
         host = f"{route['name']}{host_suffix}"
         labels[f"traefik.http.routers.{rid}.rule"] = f"Host(`{host}`)"
         labels[f"traefik.http.routers.{rid}.entrypoints"] = "web"
+        labels[f"traefik.http.routers.{rid}.service"] = rid
         labels[f"traefik.http.services.{rid}.loadbalancer.server.port"] = str(route["targetPort"])
     return labels
 

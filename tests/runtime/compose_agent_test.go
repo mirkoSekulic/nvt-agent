@@ -24,7 +24,9 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"image: docker:27-dind",
 		"privileged: true",
 		"DOCKER_TLS_CERTDIR: \"\"",
+		"- dockerd",
 		"--host=tcp://127.0.0.1:2375",
+		"--tls=false",
 		"docker info >/dev/null 2>&1",
 		"docker-data:/var/lib/docker",
 		"${WORKSPACE_DIR}:${NVT_WORKSPACE}",
@@ -71,8 +73,10 @@ expose:
 		"  docker:",
 		`{"name":"app","targetPort":3000,"source":"agent"}`,
 		"traefik.http.routers.nvt-dev-app.rule: 'Host(`app.nvt-dev.agent.localhost`)'",
+		"traefik.http.routers.nvt-dev-app.service: 'nvt-dev-app'",
 		"traefik.http.services.nvt-dev-app.loadbalancer.server.port: '3000'",
 		"traefik.http.routers.nvt-dev-api.rule: 'Host(`api.nvt-dev.agent.localhost`)'",
+		"traefik.http.routers.nvt-dev-api.service: 'nvt-dev-api'",
 		"traefik.http.services.nvt-dev-api.loadbalancer.server.port: '8080'",
 	}
 	for _, fragment := range required {
@@ -135,8 +139,10 @@ expose:
 		"network_mode: service:docker",
 		"traefik.enable: \"true\"",
 		"traefik.http.routers.nvt-dev.rule: Host(`nvt-dev.agent.localhost`)",
+		"traefik.http.routers.nvt-dev.service: nvt-dev",
 		"traefik.http.services.nvt-dev.loadbalancer.server.port: \"4090\"",
 		"traefik.http.routers.nvt-dev-app.rule: Host(`app.nvt-dev.agent.localhost`)",
+		"traefik.http.routers.nvt-dev-app.service: nvt-dev-app",
 		"traefik.http.services.nvt-dev-app.loadbalancer.server.port: \"3000\"",
 	}
 	for _, fragment := range required {
