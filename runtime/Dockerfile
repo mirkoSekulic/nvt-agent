@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV NVT_WORKSPACE=/workspace
 ENV NVT_STATE_DIR=/root/.nvt-agent
 ENV CODE_SERVER_PORT=4090
+ENV PATH=/root/.local/bin:/root/bin:/root/.local/share/mise/shims:$PATH
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
