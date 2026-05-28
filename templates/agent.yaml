@@ -10,8 +10,9 @@ tools:
 
 code-server:
   extensions: []
-  # Optional. If omitted, bootstrap uses .nvt-agent/code-server/settings.json when present.
-  # settings-file: .nvt-agent/code-server/settings.json
+  settings:
+    overwrite: false
+    values: {}
 
 expose:
   http: []
