@@ -429,6 +429,10 @@ func githubWatchBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-watcher", "github-watch.py"))
 }
 
+func githubWatcherRunBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "github-watcher", "run.py"))
+}
+
 func renderAgentExposeBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "scripts", "render-agent-expose.py"))
 }

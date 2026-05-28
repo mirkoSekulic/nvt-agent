@@ -24,6 +24,7 @@ from github_watcher_lib import (
     string_value,
     update_watermark,
     utc_now,
+    WatchError,
     write_json,
 )
 
@@ -267,6 +268,8 @@ def run_once(config):
     for watch in all_watches(config):
         try:
             process_watch(watch, seen)
+        except WatchError as error:
+            print(f"github-watcher: {watch['repo']}#{watch['number']} failed: {error}", file=sys.stderr, flush=True)
         except SystemExit:
             raise
         except Exception as error:

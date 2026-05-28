@@ -22,6 +22,10 @@ def fail(message):
     raise SystemExit(f"github-watcher: {message}")
 
 
+class WatchError(Exception):
+    pass
+
+
 def utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -316,15 +320,22 @@ def all_watches(config):
 
 
 def token_for_provider(provider, target):
-    result = subprocess.run(
-        ["git-host-credential", "token", "--provider", provider, "--target", target],
-        check=True,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git-host-credential", "token", "--provider", provider, "--target", target],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise WatchError(f"git-host-credential not found: {error}") from error
+    except subprocess.CalledProcessError as error:
+        output = (error.stderr or error.stdout or "").strip()
+        raise WatchError(f"git-host-credential failed: {output}") from error
     token = result.stdout.strip()
     if not token:
-        fail(f"provider {provider} returned an empty token")
+        raise WatchError(f"provider {provider} returned an empty token")
     return token
 
 
@@ -347,22 +358,25 @@ def broker_request(path, provider, query=None, paginate=False, broker=None):
     ]
     if paginate:
         command.append("--paginate")
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as error:
+        raise WatchError(f"brokerctl not found: {error}") from error
     if result.returncode != 0:
-        fail(f"broker request failed: {result.stderr.strip() or result.stdout.strip()}")
+        raise WatchError(f"broker request failed: {result.stderr.strip() or result.stdout.strip()}")
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as error:
-        fail(f"broker response was not valid JSON: {error}")
+        raise WatchError(f"broker response was not valid JSON: {error}") from error
     if not payload.get("ok"):
-        fail(f"broker request failed: {payload.get('error') or payload}")
+        raise WatchError(f"broker request failed: {payload.get('error') or payload}")
     status = payload.get("status")
     if not isinstance(status, int) or status < 200 or status >= 300:
-        fail(f"GitHub API request failed through broker: status={status} body={payload.get('body', '')}")
+        raise WatchError(f"GitHub API request failed through broker: status={status} body={payload.get('body', '')}")
     try:
         return json.loads(payload.get("body") or "null")
     except json.JSONDecodeError as error:
-        fail(f"GitHub API broker response body was not valid JSON: {error}")
+        raise WatchError(f"GitHub API broker response body was not valid JSON: {error}") from error
 
 
 def github_request(path, provider, query=None, broker=None, paginate=False):
@@ -384,9 +398,11 @@ def github_request(path, provider, query=None, broker=None, paginate=False):
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
-        fail(f"GitHub API request failed: {error.code} {error.reason}: {body}")
+        raise WatchError(f"GitHub API request failed: {error.code} {error.reason}: {body}") from error
     except URLError as error:
-        fail(f"GitHub API request failed: {error.reason}")
+        raise WatchError(f"GitHub API request failed: {error.reason}") from error
+    except json.JSONDecodeError as error:
+        raise WatchError(f"GitHub API response was not valid JSON: {error}") from error
 
 
 def github_target_from_path(path):
