@@ -150,6 +150,14 @@ Create an agent config:
 make agent-init NAME=frontend
 ```
 
+`agent-init` defaults to `AUTONOMY=trusted-local`, so generated agents include
+explicit approval-bypass flags for the selected terminal agent CLI. Use
+`AUTONOMY=interactive` if you want the CLI to ask for approvals normally:
+
+```sh
+make agent-init NAME=frontend AUTONOMY=interactive
+```
+
 This creates:
 
 ```text
@@ -216,6 +224,11 @@ which generates:
 ```yaml
 runtime:
   command: codex
+  args:
+    - --sandbox
+    - danger-full-access
+    - --ask-for-approval
+    - never
 ```
 
 Claude Code can be selected at init time:
@@ -223,6 +236,18 @@ Claude Code can be selected at init time:
 ```sh
 make agent-init NAME=research TYPE=claude
 ```
+
+which generates:
+
+```yaml
+runtime:
+  command: claude
+  args:
+    - --dangerously-skip-permissions
+```
+
+The runtime itself is generic: it runs `runtime.command` with `runtime.args`.
+For another terminal agent, set those fields directly in `agent.yaml`.
 
 Codex auth/config is seeded from host `~/.codex` into
 `.agents/<name>/auth/codex` and mounted into the container at `/root/.codex`.

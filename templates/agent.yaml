@@ -1,5 +1,6 @@
 runtime:
   command: {{AGENT_TYPE}}
+  args: {{AGENT_ARGS}}
 
 tools:
   apt: []

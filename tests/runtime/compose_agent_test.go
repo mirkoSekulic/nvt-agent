@@ -277,3 +277,93 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentInitRendersAutonomyArgs(t *testing.T) {
+	root := repoRoot(t)
+	tests := []struct {
+		name     string
+		typ      string
+		autonomy string
+		want     []string
+	}{
+		{
+			name:     "codex-trusted-local",
+			typ:      "codex",
+			autonomy: "trusted-local",
+			want: []string{
+				"command: codex",
+				"- --sandbox",
+				"- danger-full-access",
+				"- --ask-for-approval",
+				"- never",
+			},
+		},
+		{
+			name:     "claude-trusted-local",
+			typ:      "claude",
+			autonomy: "trusted-local",
+			want: []string{
+				"command: claude",
+				"- --dangerously-skip-permissions",
+			},
+		},
+		{
+			name:     "codex-interactive",
+			typ:      "codex",
+			autonomy: "interactive",
+			want: []string{
+				"command: codex",
+				"args: []",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+			cmd := commandWithEnv(command, nil,
+				"--name", tt.name,
+				"--type", tt.typ,
+				"--autonomy", tt.autonomy,
+			)
+			cmd.Dir = root
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("agent-init failed: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(filepath.Join(root, ".agents", tt.name, "agent.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = os.RemoveAll(filepath.Join(root, ".agents", tt.name))
+			})
+			config := string(data)
+			for _, fragment := range tt.want {
+				if !strings.Contains(config, fragment) {
+					t.Fatalf("agent.yaml missing %q\n%s", fragment, config)
+				}
+			}
+		})
+	}
+}
+
+func TestAgentInitRejectsInvalidAutonomy(t *testing.T) {
+	root := repoRoot(t)
+	home := t.TempDir()
+	command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	cmd := commandWithEnv(command, nil,
+		"--name", "bad-autonomy",
+		"--type", "codex",
+		"--autonomy", "unsafe",
+	)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("agent-init unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "autonomy must be trusted-local or interactive") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+}

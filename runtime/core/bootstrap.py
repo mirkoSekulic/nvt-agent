@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import shutil
 import subprocess
@@ -27,6 +28,14 @@ def optional_string(value, field):
         return None
     if not isinstance(value, str):
         raise SystemExit(f"{field} must be a string")
+    return value
+
+
+def optional_string_list(value, field):
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"{field} must be a list of strings")
     return value
 
 
@@ -98,6 +107,12 @@ def persist_env_var(name, value):
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+
+
+def persist_agent_command(command, args):
+    target = Path.home() / ".nvt-agent" / "agent-command.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"command": command, "args": args}, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 def apply_additional_paths(paths):
@@ -194,6 +209,8 @@ def main():
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         persist_env_var("AGENT_COMMAND", command)
+        args = optional_string_list(runtime.get("args"), "runtime.args")
+        persist_agent_command(command, args)
     setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_apt(as_string_list(tools.get("apt"), "apt"))

@@ -159,6 +159,11 @@ A broker-backed configuration for developing this repo:
 ```yaml
 runtime:
   command: codex
+  args:
+    - --sandbox
+    - danger-full-access
+    - --ask-for-approval
+    - never
 
 tools:
   apt:

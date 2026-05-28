@@ -1,4 +1,5 @@
 TYPE ?= codex
+AUTONOMY ?= trusted-local
 DIR ?= runtime/plugins
 
 .PHONY: runtime-build broker-build infra-up infra-down infra-network-rm agent-init agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
@@ -19,8 +20,8 @@ infra-network-rm:
 	bash scripts/infra-network-rm.sh
 
 agent-init:
-	@test -n "$(NAME)" || (echo "usage: make agent-init NAME=<name> [TYPE=codex|claude]"; exit 1)
-	bash scripts/agent-init.sh --name "$(NAME)" --type "$(TYPE)"
+	@test -n "$(NAME)" || (echo "usage: make agent-init NAME=<name> [TYPE=codex|claude] [AUTONOMY=trusted-local|interactive]"; exit 1)
+	bash scripts/agent-init.sh --name "$(NAME)" --type "$(TYPE)" --autonomy "$(AUTONOMY)"
 
 agent-grant:
 	@test -n "$(NAME)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)

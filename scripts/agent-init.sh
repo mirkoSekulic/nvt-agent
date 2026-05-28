@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --name <name> [--type codex|claude]" >&2
+  echo "usage: $0 --name <name> [--type codex|claude] [--autonomy trusted-local|interactive]" >&2
 }
 
 render_template() {
@@ -24,6 +24,7 @@ PY
 
 name=""
 agent_type="codex"
+autonomy="trusted-local"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -41,6 +42,14 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       agent_type="$2"
+      shift 2
+      ;;
+    --autonomy)
+      if [ "$#" -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      autonomy="$2"
       shift 2
       ;;
     -h|--help)
@@ -68,6 +77,37 @@ case "$agent_type" in
     exit 1
     ;;
 esac
+
+case "$autonomy" in
+  trusted-local|interactive) ;;
+  *)
+    echo "invalid autonomy: $autonomy" >&2
+    echo "autonomy must be trusted-local or interactive" >&2
+    exit 1
+    ;;
+esac
+
+runtime_args="$(python3 - "$agent_type" "$autonomy" <<'PY'
+import sys
+
+agent_type, autonomy = sys.argv[1], sys.argv[2]
+args = []
+if autonomy == "trusted-local":
+    if agent_type == "codex":
+        args = ["--sandbox", "danger-full-access", "--ask-for-approval", "never"]
+    elif agent_type == "claude":
+        args = ["--dangerously-skip-permissions"]
+    else:
+        raise SystemExit(f"unsupported agent type: {agent_type}")
+
+if not args:
+    print("[]")
+else:
+    print()
+    for arg in args:
+        print(f"    - {arg}")
+PY
+)"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
@@ -176,7 +216,7 @@ python3 "$script_dir/broker-agents.py" \
   --token "$broker_token"
 
 if [ ! -f "$agent_config_file" ]; then
-  AGENT_TYPE="$agent_type" render_template "$templates_dir/agent.yaml" "$agent_config_file"
+  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" render_template "$templates_dir/agent.yaml" "$agent_config_file"
   echo "created $agent_config_file"
 else
   echo "exists  $agent_config_file"
