@@ -532,6 +532,123 @@ if len(comments) != 1 or comments[0]["id"] != 1:
 	}
 }
 
+func TestGithubWatcherBrokerHTTPFailureDoesNotTerminateOnce(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", `
+default-provider: direct-provider
+broker:
+  enabled: true
+  provider: broker-provider
+prs:
+  - repo: my-user/failing
+    number: 123
+    comments:
+      enabled: true
+    reviews:
+      enabled: false
+    checks:
+      enabled: false
+    closed:
+      enabled: false
+`)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' '{"ok":true,"status":404,"headers":{},"body":"{\"message\":\"Not Found\"}"}'
+`)
+
+	output := f.runWithEnv(githubWatcherRunBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "once")
+	if !strings.Contains(output, "github-watcher: my-user/failing#123 failed: GitHub API request failed through broker: status=404") {
+		t.Fatalf("watch failure was not logged:\n%s", output)
+	}
+}
+
+func TestGithubWatcherContinuesAfterFailedWatch(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", `
+default-provider: direct-provider
+broker:
+  enabled: true
+  provider: broker-provider
+prs:
+  - repo: my-user/failing
+    number: 123
+    comments:
+      enabled: true
+    reviews:
+      enabled: false
+    checks:
+      enabled: false
+    closed:
+      enabled: false
+  - repo: my-user/passing
+    number: 456
+    comments:
+      enabled: true
+    reviews:
+      enabled: false
+    checks:
+      enabled: false
+    closed:
+      enabled: false
+`)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *my-user/failing*)
+    printf '%s\n' '{"ok":true,"status":404,"headers":{},"body":"{\"message\":\"Not Found\"}"}'
+    ;;
+  *my-user/passing*)
+    printf '%s\n' '{"ok":true,"status":200,"headers":{},"body":"[{\"id\":1,\"updated_at\":\"2026-05-28T10:00:00Z\",\"created_at\":\"2026-05-28T10:00:00Z\",\"author_association\":\"COLLABORATOR\",\"user\":{\"login\":\"reviewer\"},\"body\":\"existing comment\"}]"}'
+    ;;
+  *)
+    echo "unexpected brokerctl args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+
+	output := f.runWithEnv(githubWatcherRunBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "once")
+	if !strings.Contains(output, "github-watcher: my-user/failing#123 failed: GitHub API request failed through broker: status=404") {
+		t.Fatalf("failed watch was not logged:\n%s", output)
+	}
+
+	var seen map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "seen.json"), &seen)
+	if seen["my-user/passing#456:comments"] == nil {
+		t.Fatalf("second watch did not update seen state: %#v", seen)
+	}
+}
+
+func TestGithubWatcherMalformedBrokerJSONDoesNotTerminateOnce(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", `
+default-provider: direct-provider
+broker:
+  enabled: true
+  provider: broker-provider
+prs:
+  - repo: my-user/failing
+    number: 123
+    comments:
+      enabled: true
+    reviews:
+      enabled: false
+    checks:
+      enabled: false
+    closed:
+      enabled: false
+`)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+printf 'not json\n'
+`)
+
+	output := f.runWithEnv(githubWatcherRunBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "once")
+	if !strings.Contains(output, "github-watcher: my-user/failing#123 failed: broker response was not valid JSON") {
+		t.Fatalf("malformed broker response was not logged:\n%s", output)
+	}
+}
+
 func writeGithubWatcherRegistry(t *testing.T, f *fixture, prsJSON string) {
 	t.Helper()
 	dir := filepath.Join(f.state, "plugins", "github-watcher")

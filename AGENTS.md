@@ -8,6 +8,7 @@ Repository-local guidance for nvt-agent work.
 - Treat in-container plugin secrets as local/dev mode only. The production direction is an operator-managed capability broker where real secrets are mounted only into broker sidecars/services, not into agent containers.
 - Preserve the JSONL `agentd` protocol documented under `protocol/`.
 - When changing `runtime/agentd`, `protocol/`, or `runtime/core/prompt-agent.sh`, run the conformance suite from `tests/agentd`. When changing `broker/` or `protocol/broker.md`, run `tests/broker`. When changing runtime plugins or core plugin tooling, run `tests/runtime`.
+- When creating a pull request, include a non-empty description that summarizes the change and lists the tests or checks run. Do not rely on `--fill` if it would leave the PR body empty.
 - Plugin events are advisory and must use `plugin.<domain>.*`; core/session event names are reserved. Use the `source` field for the producer identity.
 - Prefer executable plugins with simple config contracts over core-specific integrations.
 - Plugin `exports.tools` are the explicit public command API for a plugin. Exported tools are added to `PATH`; do not add plugin-specific helper logic to core.
