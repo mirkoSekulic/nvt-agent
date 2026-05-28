@@ -318,6 +318,7 @@ func TestWriteAgentInstructionsIncludesGitHubPRWorkflowWhenToolsAreAvailable(t *
 		"gh-auth pr create --repo OWNER/REPO --fill",
 		"github-watch register --repo OWNER/REPO --number PR_NUMBER --label work",
 		"After a PR is registered, wait for prompts instead of manually polling.",
+		"always post a PR comment summarizing what changed or why no change",
 		"gh-auth pr comment PR_NUMBER --repo OWNER/REPO --body-file -",
 	}
 	for _, fragment := range required {

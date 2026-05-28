@@ -136,8 +136,9 @@ Use `github-watch list` to check watches and `github-watch remove --repo
 OWNER/REPO --number PR_NUMBER` after the PR is merged or closed.
 
 After a PR is registered, wait for prompts instead of manually polling. When a
-prompt or PR activity requires a response, handle the request and post a PR
-comment with `gh-auth`:
+prompt or PR activity asks for action, handle the request, push any needed
+changes, and always post a PR comment summarizing what changed or why no change
+was needed:
 
 ```sh
 gh-auth pr comment PR_NUMBER --repo OWNER/REPO --body-file - <<'COMMENT'
