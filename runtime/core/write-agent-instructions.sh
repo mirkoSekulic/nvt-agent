@@ -3,6 +3,7 @@ set -euo pipefail
 
 workspace="${NVT_WORKSPACE:-/workspace}"
 target="$workspace/AGENTS.md"
+local_instructions="${NVT_AGENT_LOCAL_INSTRUCTIONS:-$workspace/AGENTS.local.md}"
 
 mkdir -p "$workspace"
 
@@ -11,9 +12,14 @@ cat > "$target" <<EOF
 
 This workspace is running inside an nvt-agent container.
 
+This file is generated at container startup. For workspace-specific guidance,
+edit \`AGENTS.local.md\` in this workspace; if present, it is appended below.
+
 ## Runtime Context
 
 - The workspace path is \`$workspace\`.
+- Local override instructions are read from \`$local_instructions\` when the
+  file exists.
 - The main terminal agent runs in tmux session \`${AGENT_SESSION:-agent}\`.
 - code-server runs inside the container on port \`${CODE_SERVER_PORT:-4090}\`.
 - Custom plugins are mounted at \`/custom-plugins\`.
@@ -144,4 +150,12 @@ COMMENT
 Use `--body-file -` or a temp file for multi-line comments; do not put `\n`
 escapes inside ordinary quoted shell strings.
 EOF
+fi
+
+if [ -s "$local_instructions" ]; then
+  {
+    printf '\n## Local Workspace Instructions\n\n'
+    cat "$local_instructions"
+    printf '\n'
+  } >> "$target"
 fi

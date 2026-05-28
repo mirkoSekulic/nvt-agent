@@ -122,6 +122,7 @@ agent_dir="$repo_root/.agents/$name"
 env_file="$agent_dir/env"
 agent_config_file="$agent_dir/agent.yaml"
 workspace_dir="$agent_dir/workspace"
+local_instructions_file="$workspace_dir/AGENTS.local.md"
 custom_plugins_dir="$agent_dir/custom-plugins"
 claude_config_dir="$agent_dir/auth/claude"
 codex_config_dir="$agent_dir/auth/codex"
@@ -221,6 +222,13 @@ if [ ! -f "$agent_config_file" ]; then
   echo "created $agent_config_file"
 else
   echo "exists  $agent_config_file"
+fi
+
+if [ ! -f "$local_instructions_file" ]; then
+  cp "$templates_dir/AGENTS.local.md" "$local_instructions_file"
+  echo "created $local_instructions_file"
+else
+  echo "exists  $local_instructions_file"
 fi
 
 echo "workspace $workspace_dir"

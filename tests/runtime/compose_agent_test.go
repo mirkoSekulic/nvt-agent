@@ -327,6 +327,34 @@ func TestWriteAgentInstructionsIncludesGitHubPRWorkflowWhenToolsAreAvailable(t *
 	}
 }
 
+func TestWriteAgentInstructionsAppendsLocalWorkspaceInstructions(t *testing.T) {
+	f := newFixture(t)
+	script := filepath.Join(f.root, "runtime", "core", "write-agent-instructions.sh")
+	localInstructions := filepath.Join(f.workspace, "AGENTS.local.md")
+	if err := os.WriteFile(localInstructions, []byte("Prefer focused PRs for this workspace.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f.runWithEnv("bash "+shellQuote(script), true, nil)
+
+	data, err := os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructions := string(data)
+	required := []string{
+		"This file is generated at container startup.",
+		"Local override instructions are read from `" + localInstructions + "`",
+		"## Local Workspace Instructions",
+		"Prefer focused PRs for this workspace.",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(instructions, fragment) {
+			t.Fatalf("AGENTS.md missing %q\n%s", fragment, instructions)
+		}
+	}
+}
+
 func TestAgentCaptureDefaultsAndPrintMode(t *testing.T) {
 	root := repoRoot(t)
 	work := t.TempDir()
@@ -659,6 +687,13 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
+			agentDir := filepath.Join(root, ".agents", tt.name)
+			if err := os.RemoveAll(agentDir); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = os.RemoveAll(agentDir)
+			})
 			command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
 			cmd := commandWithEnv(command, nil,
 				"--name", tt.name,
@@ -670,18 +705,22 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("agent-init failed: %v\n%s", err, output)
 			}
-			data, err := os.ReadFile(filepath.Join(root, ".agents", tt.name, "agent.yaml"))
+			data, err := os.ReadFile(filepath.Join(agentDir, "agent.yaml"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() {
-				_ = os.RemoveAll(filepath.Join(root, ".agents", tt.name))
-			})
+			localInstructions, err := os.ReadFile(filepath.Join(agentDir, "workspace", "AGENTS.local.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			config := string(data)
 			for _, fragment := range tt.want {
 				if !strings.Contains(config, fragment) {
 					t.Fatalf("agent.yaml missing %q\n%s", fragment, config)
 				}
+			}
+			if !strings.Contains(string(localInstructions), "Add workspace-specific agent guidance here.") {
+				t.Fatalf("unexpected AGENTS.local.md:\n%s", localInstructions)
 			}
 		})
 	}

@@ -399,6 +399,7 @@ make nuke FORCE=1
   env
   agent.yaml
   workspace/
+    AGENTS.local.md
   custom-plugins/
   auth/
     claude/
@@ -412,10 +413,16 @@ Useful paths:
 .agents/<name>/agent.yaml            agent runtime, tools, and plugins config
 .agents/<name>/env                   Compose env file for host paths and mounts
 .agents/<name>/workspace/            persisted workspace for repos/files
+.agents/<name>/workspace/AGENTS.local.md
+                                      local agent guidance appended to generated AGENTS.md
 .agents/<name>/custom-plugins/       host directory for custom plugin binaries/scripts
 .agents/<name>/auth/codex/           per-agent Codex auth/config seeded from host
 .agents/<name>/auth/claude/          per-agent Claude Code auth/config
 ```
+
+The runtime generates `.agents/<name>/workspace/AGENTS.md` at container startup.
+Edit `AGENTS.local.md` for workspace-specific guidance; `agent-init` creates it
+once and later runs do not overwrite it.
 
 The generated env file contains the host paths used by Compose:
 
