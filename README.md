@@ -552,7 +552,7 @@ runtime:
   command: codex
 
 tools:
-  apt: []
+  packages: []
   mise: []
   additional-paths: []
   shell: []
@@ -566,7 +566,7 @@ Example:
 
 ```yaml
 tools:
-  apt:
+  packages:
     - jq
   mise:
     - go@latest

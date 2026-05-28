@@ -128,11 +128,25 @@ def apply_additional_paths(paths):
     persist_env_var("PATH", os.environ["PATH"])
 
 
-def install_apt(packages):
+def install_packages(packages):
     if not packages:
         return
     run(["apt-get", "update"])
     run(["apt-get", "install", "-y", "--no-install-recommends", *packages])
+
+
+def configured_packages(tools):
+    packages = tools.get("packages")
+    apt_packages = tools.get("apt")
+
+    if packages is not None and apt_packages is not None:
+        raise SystemExit("use tools.packages instead of tools.apt, not both")
+    if packages is not None:
+        return as_string_list(packages, "packages")
+    if apt_packages is not None:
+        print("bootstrap: tools.apt is deprecated; use tools.packages", flush=True)
+        return as_string_list(apt_packages, "apt")
+    return []
 
 
 def install_mise(packages):
@@ -223,7 +237,7 @@ def main():
         persist_agent_command(command, args)
     setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
-    install_apt(as_string_list(tools.get("apt"), "apt"))
+    install_packages(configured_packages(tools))
     install_mise(as_string_list(tools.get("mise"), "mise"))
     run_shell(as_string_list(tools.get("shell"), "shell"))
 

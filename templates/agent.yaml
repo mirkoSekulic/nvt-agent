@@ -3,7 +3,7 @@ runtime:
   args: {{AGENT_ARGS}}
 
 tools:
-  apt: []
+  packages: []
   mise: []
   additional-paths: []
   shell: []

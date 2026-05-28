@@ -172,7 +172,7 @@ runtime:
     - never
 
 tools:
-  apt:
+  packages:
     - jq
   mise: []
   additional-paths: []
