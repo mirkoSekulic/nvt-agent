@@ -278,6 +278,46 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 	}
 }
 
+func TestBootstrapCreatesDefaultTmuxConfig(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+`)
+
+	f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), true, nil, config)
+
+	data, err := os.ReadFile(filepath.Join(f.home, ".tmux.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "set -g mouse on\n" {
+		t.Fatalf("unexpected tmux config: %q", data)
+	}
+}
+
+func TestBootstrapPreservesExistingTmuxConfig(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+`)
+	tmuxConfig := filepath.Join(f.home, ".tmux.conf")
+	if err := os.WriteFile(tmuxConfig, []byte("set -g status off\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), true, nil, config)
+
+	data, err := os.ReadFile(tmuxConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "set -g status off\n" {
+		t.Fatalf("bootstrap overwrote existing tmux config: %q", data)
+	}
+}
+
 func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 	root := repoRoot(t)
 	tests := []struct {

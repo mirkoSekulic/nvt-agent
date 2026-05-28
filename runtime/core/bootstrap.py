@@ -115,6 +115,13 @@ def persist_agent_command(command, args):
     target.write_text(json.dumps({"command": command, "args": args}, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
+def setup_tmux_config():
+    target = Path.home() / ".tmux.conf"
+    if target.exists():
+        return
+    target.write_text("set -g mouse on\n", encoding="utf-8")
+
+
 def apply_additional_paths(paths):
     for path in reversed(paths):
         prepend_path(expand_path(path))
@@ -206,6 +213,7 @@ def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
     runtime, tools, code_server = load_bootstrap_config(config_path)
 
+    setup_tmux_config()
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         # Kept for older helper scripts and diagnostics; start-agent-session uses
