@@ -154,6 +154,12 @@ Edit `.agents/$AGENT/agent.yaml`:
 $EDITOR ".agents/$AGENT/agent.yaml"
 ```
 
+New agents default to `AUTONOMY=trusted-local`, which writes explicit
+auto-approval flags into `runtime.args`. That trusts the local agent environment:
+the workspace mount, agent container, broker-granted capabilities, and
+per-agent Docker daemon. Use `AUTONOMY=interactive` during `agent-init` if you
+want the terminal agent CLI to ask for approvals normally.
+
 A broker-backed configuration for developing this repo:
 
 ```yaml

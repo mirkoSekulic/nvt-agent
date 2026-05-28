@@ -208,6 +208,8 @@ def main():
 
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:
+        # Kept for older helper scripts and diagnostics; start-agent-session uses
+        # agent-command.json so runtime.args are passed without shell parsing.
         persist_env_var("AGENT_COMMAND", command)
         args = optional_string_list(runtime.get("args"), "runtime.args")
         persist_agent_command(command, args)

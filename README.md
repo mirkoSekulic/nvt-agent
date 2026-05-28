@@ -158,6 +158,12 @@ explicit approval-bypass flags for the selected terminal agent CLI. Use
 make agent-init NAME=frontend AUTONOMY=interactive
 ```
 
+`trusted-local` trusts the local agent environment: the workspace mount, the
+agent container, broker-granted capabilities, and the per-agent Docker daemon.
+It does not grant direct access to the rest of the host filesystem, but it is
+still powerful because the agent can run commands, start containers, and mutate
+checked-out repos.
+
 This creates:
 
 ```text

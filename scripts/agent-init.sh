@@ -88,6 +88,7 @@ case "$autonomy" in
 esac
 
 runtime_args="$(python3 - "$agent_type" "$autonomy" <<'PY'
+import json
 import sys
 
 agent_type, autonomy = sys.argv[1], sys.argv[2]
@@ -105,7 +106,7 @@ if not args:
 else:
     print()
     for arg in args:
-        print(f"    - {arg}")
+        print(f"    - {json.dumps(arg)}")
 PY
 )"
 
@@ -223,3 +224,8 @@ else
 fi
 
 echo "workspace $workspace_dir"
+if [ "$autonomy" = "trusted-local" ]; then
+  echo "autonomy trusted-local (type=$agent_type): auto-approval flags enabled"
+else
+  echo "autonomy interactive (type=$agent_type): agent CLI approval prompts preserved"
+fi

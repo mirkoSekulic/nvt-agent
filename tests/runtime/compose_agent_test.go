@@ -292,10 +292,10 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 			autonomy: "trusted-local",
 			want: []string{
 				"command: codex",
-				"- --sandbox",
-				"- danger-full-access",
-				"- --ask-for-approval",
-				"- never",
+				`- "--sandbox"`,
+				`- "danger-full-access"`,
+				`- "--ask-for-approval"`,
+				`- "never"`,
 			},
 		},
 		{
@@ -304,7 +304,7 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 			autonomy: "trusted-local",
 			want: []string{
 				"command: claude",
-				"- --dangerously-skip-permissions",
+				`- "--dangerously-skip-permissions"`,
 			},
 		},
 		{
