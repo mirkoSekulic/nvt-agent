@@ -16,6 +16,7 @@ from github_watcher_lib import (
     prompt_agent,
     publish_event,
     read_json,
+    remove_dynamic_watch,
     render_template,
     seen_path,
     should_accept_author,
@@ -177,11 +178,12 @@ def process_reviews(watch, seen):
         update_watermark(seen, key, timestamp)
 
 
-def process_checks(watch, seen):
+def process_checks(watch, seen, pull=None):
     config = watch["checks"]
     if not config["enabled"]:
         return
-    pull = fetch_pull(watch)
+    if pull is None:
+        pull = fetch_pull(watch)
     sha = ((pull.get("head") or {}).get("sha") or "").strip()
     if not sha:
         return
@@ -213,10 +215,51 @@ def process_checks(watch, seen):
     publish_and_prompt(watch, "plugin.github.pr.checks", payload, config["prompt"], prompt_enabled)
 
 
+def process_closed(watch, seen, pull):
+    config = watch.get("closed") or {"enabled": True, "remove": False, "publish": True, "prompt": False}
+    if not config["enabled"] or pull.get("state") != "closed":
+        return False
+
+    terminal = "merged" if bool_value(pull.get("merged"), "pull.merged", False) else "closed"
+    key = f"{watch['repo']}#{watch['number']}:closed"
+    previous = seen.get(key)
+    seen[key] = terminal
+    if previous == terminal:
+        if watch.get("_source") == "dynamic" and config["remove"]:
+            remove_dynamic_watch(watch["repo"], watch["number"])
+        return True
+
+    payload = event_payload(
+        watch,
+        f"closed:{terminal}",
+        terminal,
+        state="closed",
+        merged=(terminal == "merged"),
+        html_url=pull.get("html_url") or f"https://github.com/{watch['repo']}/pull/{watch['number']}",
+        closed_at=pull.get("closed_at", ""),
+        merged_at=pull.get("merged_at", ""),
+    )
+    if config["publish"]:
+        publish_event(f"plugin.github.pr.{terminal}", payload)
+    if config["prompt"]:
+        values = {key: value for key, value in payload.items() if isinstance(value, (str, int))}
+        values["labels"] = ", ".join(watch.get("labels", [])) or "-"
+        prompt_agent(render_template(config.get("template"), values))
+    if watch.get("_source") == "dynamic" and config["remove"]:
+        remove_dynamic_watch(watch["repo"], watch["number"])
+    return True
+
+
 def process_watch(watch, seen):
     process_comments(watch, seen)
     process_reviews(watch, seen)
-    process_checks(watch, seen)
+    pull = None
+    closed_config = watch.get("closed") or {"enabled": True}
+    if closed_config["enabled"] or watch["checks"]["enabled"]:
+        pull = fetch_pull(watch)
+    if pull is not None and process_closed(watch, seen, pull):
+        return
+    process_checks(watch, seen, pull)
 
 
 def run_once(config):

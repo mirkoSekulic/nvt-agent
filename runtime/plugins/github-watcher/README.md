@@ -94,6 +94,12 @@ plugins:
               failed: true
               passed: false
               # template optional
+
+          closed:
+            enabled: true
+            remove: false # static watches are never removed from agent.yaml
+            publish: true
+            prompt: false
 ```
 
 Templates are optional. If omitted, the plugin uses built-in default prompts for
@@ -148,6 +154,11 @@ Dynamic registrations use the same defaults as static config:
 - comments and reviews prompt by default for dynamic registrations
 - failed check transitions prompt by default
 - passed check transitions do not prompt by default
+- close handling is enabled by default
+- merged PRs publish `plugin.github.pr.merged` by default
+- closed unmerged PRs publish `plugin.github.pr.closed` by default
+- dynamic registrations remove themselves from `registry.json` after merge or close by default
+- close prompts are disabled by default
 
 Useful flags:
 
@@ -157,6 +168,9 @@ github-watch register --repo my-user/my-repo --number 123 --no-reviews
 github-watch register --repo my-user/my-repo --number 123 --no-checks
 github-watch register --repo my-user/my-repo --number 123 --no-prompt-comments
 github-watch register --repo my-user/my-repo --number 123 --prompt-passed-checks
+github-watch register --repo my-user/my-repo --number 123 --no-remove-on-close
+github-watch register --repo my-user/my-repo --number 123 --prompt-on-close
+github-watch register --repo my-user/my-repo --number 123 --no-publish-on-close
 ```
 
 ## Events
@@ -167,6 +181,8 @@ The plugin publishes:
 plugin.github.pr.comment
 plugin.github.pr.review
 plugin.github.pr.checks
+plugin.github.pr.merged
+plugin.github.pr.closed
 ```
 
 Payloads include enough context for downstream plugins to react without calling
@@ -197,6 +213,11 @@ transitions are published.
 
 Deleted comments are ignored. Edited comments use `updated_at`, so edits newer
 than the current watermark can produce a comment event.
+
+Terminal PR state is tracked separately as `<repo>#<number>:closed`, with the
+seen value set to `merged` or `closed`. This prevents repeated terminal events
+when a closed static watch remains configured or a dynamic watch is explicitly
+kept with `--no-remove-on-close`.
 
 ## Checks
 

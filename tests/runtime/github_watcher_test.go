@@ -48,6 +48,59 @@ default-provider: fork-app
 	}
 }
 
+func TestGithubWatchRegisterPersistsCloseDefaultsAndFlags(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	f.runWithEnv(
+		githubWatchBin(f.root),
+		true,
+		env,
+		"register",
+		"--repo", "my-user/my-repo",
+		"--number", "123",
+	)
+
+	registryPath := filepath.Join(f.state, "plugins", "github-watcher", "registry.json")
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, registryPath, &registry)
+	closed, ok := registry["prs"][0]["closed"].(map[string]any)
+	if !ok {
+		t.Fatalf("registration missing closed config: %#v", registry["prs"][0])
+	}
+	if closed["enabled"] != true || closed["remove"] != true || closed["publish"] != true || closed["prompt"] != false {
+		t.Fatalf("unexpected close defaults: %#v", closed)
+	}
+
+	f.runWithEnv(
+		githubWatchBin(f.root),
+		true,
+		env,
+		"register",
+		"--repo", "my-user/my-repo",
+		"--number", "456",
+		"--no-remove-on-close",
+		"--prompt-on-close",
+		"--no-publish-on-close",
+	)
+
+	decodeJSONFile(t, registryPath, &registry)
+	var flagged map[string]any
+	for _, pr := range registry["prs"] {
+		if pr["number"].(float64) == 456 {
+			flagged = pr
+		}
+	}
+	if flagged == nil {
+		t.Fatalf("flagged registration missing: %#v", registry)
+	}
+	closed = flagged["closed"].(map[string]any)
+	if closed["enabled"] != true || closed["remove"] != false || closed["publish"] != false || closed["prompt"] != true {
+		t.Fatalf("unexpected close flags: %#v", closed)
+	}
+}
+
 func TestGithubWatchRegisterInheritsBrokerConfig(t *testing.T) {
 	f := newFixture(t)
 	config := f.writePluginConfig("github-watcher.yaml", `
@@ -103,6 +156,118 @@ func TestGithubWatchRegisterReplacesExistingRegistration(t *testing.T) {
 	labels := registry.PRs[0]["labels"].([]any)
 	if len(labels) != 1 || labels[0] != "second" {
 		t.Fatalf("expected second label after replacement, got %s", data)
+	}
+}
+
+func TestGithubWatcherDynamicMergedPRPublishesAndRemovesRegistration(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
+	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/my-repo","number":123,"provider":"fork-app","closed":{"enabled":true,"remove":true,"publish":true,"prompt":false}}]`)
+
+	output := runGithubWatcherCloseScript(t, f, config, map[string]string{
+		"state":       "closed",
+		"merged":      "true",
+		"source":      "dynamic",
+		"seen":        "{}",
+		"run_once":    "true",
+		"expectEvent": "plugin.github.pr.merged",
+	})
+	if !strings.Contains(output, `"published": [["plugin.github.pr.merged"`) {
+		t.Fatalf("merged event was not published:\n%s", output)
+	}
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
+	if len(registry["prs"]) != 0 {
+		t.Fatalf("dynamic registration was not removed: %#v", registry)
+	}
+}
+
+func TestGithubWatcherDynamicClosedUnmergedPRPublishesAndRemovesRegistration(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
+	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/my-repo","number":123,"provider":"fork-app","closed":{"enabled":true,"remove":true,"publish":true,"prompt":false}}]`)
+
+	output := runGithubWatcherCloseScript(t, f, config, map[string]string{
+		"state":       "closed",
+		"merged":      "false",
+		"source":      "dynamic",
+		"seen":        "{}",
+		"run_once":    "true",
+		"expectEvent": "plugin.github.pr.closed",
+	})
+	if !strings.Contains(output, `"published": [["plugin.github.pr.closed"`) {
+		t.Fatalf("closed event was not published:\n%s", output)
+	}
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
+	if len(registry["prs"]) != 0 {
+		t.Fatalf("dynamic registration was not removed: %#v", registry)
+	}
+}
+
+func TestGithubWatcherNoRemoveOnCloseKeepsDynamicRegistration(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
+	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/my-repo","number":123,"provider":"fork-app","closed":{"enabled":true,"remove":false,"publish":true,"prompt":false}}]`)
+
+	runGithubWatcherCloseScript(t, f, config, map[string]string{
+		"state":       "closed",
+		"merged":      "true",
+		"source":      "dynamic",
+		"seen":        "{}",
+		"run_once":    "true",
+		"expectEvent": "plugin.github.pr.merged",
+	})
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
+	if len(registry["prs"]) != 1 {
+		t.Fatalf("dynamic registration should have been kept: %#v", registry)
+	}
+}
+
+func TestGithubWatcherStaticClosedWatchPublishesButIsNotRemoved(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", `
+default-provider: fork-app
+prs:
+  - repo: my-user/my-repo
+    number: 123
+    provider: fork-app
+`)
+
+	output := runGithubWatcherCloseScript(t, f, config, map[string]string{
+		"state":       "closed",
+		"merged":      "false",
+		"source":      "static",
+		"seen":        "{}",
+		"run_once":    "true",
+		"expectEvent": "plugin.github.pr.closed",
+	})
+	if !strings.Contains(output, `"published": [["plugin.github.pr.closed"`) {
+		t.Fatalf("static closed event was not published:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(f.state, "plugins", "github-watcher", "registry.json")); err == nil {
+		t.Fatalf("static close should not create or mutate dynamic registry")
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestGithubWatcherAlreadySeenTerminalStateDoesNotRepublish(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
+	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/my-repo","number":123,"provider":"fork-app","closed":{"enabled":true,"remove":false,"publish":true,"prompt":false}}]`)
+
+	output := runGithubWatcherCloseScript(t, f, config, map[string]string{
+		"state":       "closed",
+		"merged":      "true",
+		"source":      "dynamic",
+		"seen":        `{"my-user/my-repo#123:closed":"merged"}`,
+		"run_once":    "true",
+		"expectEvent": "",
+	})
+	if !strings.Contains(output, `"published": []`) {
+		t.Fatalf("already-seen terminal state republished:\n%s", output)
 	}
 }
 
@@ -338,4 +503,88 @@ if len(comments) != 1 or comments[0]["id"] != 1:
 		!strings.Contains(args, "https://api.github.com/repos/my-user/my-repo/issues/123/comments") {
 		t.Fatalf("unexpected brokerctl args:\n%s", args)
 	}
+}
+
+func writeGithubWatcherRegistry(t *testing.T, f *fixture, prsJSON string) {
+	t.Helper()
+	dir := filepath.Join(f.state, "plugins", "github-watcher")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "registry.json"), []byte(`{"prs":`+prsJSON+`}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runGithubWatcherCloseScript(t *testing.T, f *fixture, config string, opts map[string]string) string {
+	t.Helper()
+	merged := "False"
+	if opts["merged"] == "true" {
+		merged = "True"
+	}
+	runOnce := "False"
+	if opts["run_once"] == "true" {
+		runOnce = "True"
+	}
+	script := fmt.Sprintf(`
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "run.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_run", module_path)
+watcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(watcher)
+
+published = []
+prompted = []
+watcher.fetch_comments = lambda _watch: []
+watcher.fetch_reviews = lambda _watch: []
+watcher.fetch_check_runs = lambda _watch, _sha: []
+watcher.fetch_pull = lambda _watch: {
+    "state": %s,
+    "merged": %s,
+    "head": {"sha": "abc"},
+    "html_url": "https://github.com/my-user/my-repo/pull/123",
+    "closed_at": "2026-05-28T10:00:00Z",
+    "merged_at": "2026-05-28T10:00:00Z" if %s else None,
+}
+watcher.publish_event = lambda event, payload: published.append((event, payload))
+watcher.prompt_agent = lambda message: prompted.append(message)
+seen = json.loads(%s)
+
+if %s:
+    watcher.write_json(watcher.seen_path(), seen)
+    watcher.run_once(watcher.load_config())
+    seen = watcher.read_json(watcher.seen_path(), {})
+else:
+    watch = {
+        "repo": "my-user/my-repo",
+        "number": 123,
+        "provider": "fork-app",
+        "labels": [],
+        "publish": {"enabled": True},
+        "comments": {"enabled": False, "author-associations": [], "prompt": {"enabled": False, "template": None}},
+        "reviews": {"enabled": False, "author-associations": [], "prompt": {"enabled": False, "template": None}},
+        "checks": {"enabled": False, "publish-failed-transition": True, "publish-passed-transition": False, "prompt": {"failed": False, "passed": False, "template": None}},
+        "closed": {"enabled": True, "remove": True, "publish": True, "prompt": False, "template": None},
+        "_source": %s,
+    }
+    watcher.process_watch(watch, seen)
+
+expected = %s
+if expected:
+    if [event for event, _payload in published] != [expected]:
+        raise SystemExit(f"unexpected events: {published}")
+elif published:
+    raise SystemExit(f"unexpected events: {published}")
+
+print(json.dumps({"published": published, "prompted": prompted, "seen": seen}, sort_keys=True))
+`, quoteYAML(f.root), quoteYAML(opts["state"]), merged, merged, quoteYAML(opts["seen"]), runOnce, quoteYAML(opts["source"]), quoteYAML(opts["expectEvent"]))
+
+	return f.runWithEnv("python3", true, []string{"NVT_PLUGIN_CONFIG=" + config}, "-c", script)
 }

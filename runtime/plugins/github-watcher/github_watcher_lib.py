@@ -188,6 +188,7 @@ def normalize_watch(raw, defaults, source):
     comments = object_value(raw.get("comments"), f"{source}.comments")
     reviews = object_value(raw.get("reviews"), f"{source}.reviews")
     checks = object_value(raw.get("checks"), f"{source}.checks")
+    closed = object_value(raw.get("closed"), f"{source}.closed")
 
     normalized = {
         "repo": repo,
@@ -198,6 +199,7 @@ def normalize_watch(raw, defaults, source):
         "comments": normalize_discussion_config(comments, f"{source}.comments", True),
         "reviews": normalize_discussion_config(reviews, f"{source}.reviews", True),
         "checks": normalize_checks_config(checks, f"{source}.checks"),
+        "closed": normalize_closed_config(closed, defaults.get("closed"), f"{source}.closed"),
         "broker": normalize_broker_config(raw.get("broker"), defaults.get("broker"), f"{source}.broker"),
     }
     if not normalized["provider"]:
@@ -257,21 +259,51 @@ def normalize_checks_config(config, field):
     }
 
 
+def normalize_closed_config(config, default, field):
+    merged = {
+        "enabled": True,
+        "remove": False,
+        "publish": True,
+        "prompt": False,
+    }
+    merged.update(object_value(default, "closed"))
+    merged.update(config)
+    return {
+        "enabled": bool_value(merged.get("enabled"), f"{field}.enabled", True),
+        "remove": bool_value(merged.get("remove"), f"{field}.remove", False),
+        "publish": bool_value(merged.get("publish"), f"{field}.publish", True),
+        "prompt": bool_value(merged.get("prompt"), f"{field}.prompt", False),
+        "template": string_value(merged.get("template"), f"{field}.template"),
+    }
+
+
 def static_watches(config):
     defaults = {
         "default-provider": string_value(config.get("default-provider"), "default-provider"),
         "broker": object_value(config.get("broker"), "broker"),
+        "closed": {"enabled": True, "remove": False, "publish": True, "prompt": False},
     }
-    return [normalize_watch(raw, defaults, f"prs[{index}]") for index, raw in enumerate(list_value(config.get("prs"), "prs"))]
+    watches = []
+    for index, raw in enumerate(list_value(config.get("prs"), "prs")):
+        watch = normalize_watch(raw, defaults, f"prs[{index}]")
+        watch["_source"] = "static"
+        watches.append(watch)
+    return watches
 
 
 def dynamic_watches(config):
     defaults = {
         "default-provider": string_value(config.get("default-provider"), "default-provider"),
         "broker": object_value(config.get("broker"), "broker"),
+        "closed": {"enabled": True, "remove": True, "publish": True, "prompt": False},
     }
     data = read_json(registry_path(), {"prs": []})
-    return [normalize_watch(raw, defaults, f"registry.prs[{index}]") for index, raw in enumerate(data.get("prs", []))]
+    watches = []
+    for index, raw in enumerate(data.get("prs", [])):
+        watch = normalize_watch(raw, defaults, f"registry.prs[{index}]")
+        watch["_source"] = "dynamic"
+        watches.append(watch)
+    return watches
 
 
 def all_watches(config):
@@ -408,6 +440,8 @@ def default_template(values):
         return "New PR comment.\n\nRepo: {{ repo }}\nPR: #{{ number }}\nAuthor: {{ author }}\nLabels: {{ labels }}\n\n{{ body }}\n"
     if event == "review":
         return "PR review received.\n\nRepo: {{ repo }}\nPR: #{{ number }}\nReviewer: {{ author }}\nState: {{ state }}\nLabels: {{ labels }}\n\n{{ body }}\n"
+    if event in {"merged", "closed"}:
+        return "PR {{ event }}.\n\nRepo: {{ repo }}\nPR: #{{ number }}\nState: {{ state }}\nLabels: {{ labels }}\n\n{{ url }}\n"
     return "PR checks update.\n\nRepo: {{ repo }}\nPR: #{{ number }}\nStatus: {{ status }}\nLabels: {{ labels }}\n\n{{ summary }}\n"
 
 
@@ -432,3 +466,26 @@ def update_watermark(seen, key, timestamp):
     current = seen.get(key, 0)
     if timestamp > current:
         seen[key] = timestamp
+
+
+def remove_dynamic_watch(repo, number):
+    removed = False
+    with FileLock(lock_path()):
+        data = read_json(registry_path(), {"prs": []})
+        prs = []
+        for raw in data.get("prs", []):
+            watch = normalize_watch(
+                raw,
+                {
+                    "default-provider": raw.get("provider"),
+                    "closed": {"enabled": True, "remove": True, "publish": True, "prompt": False},
+                },
+                "registry",
+            )
+            if watch["repo"] == repo and watch["number"] == number:
+                removed = True
+                continue
+            prs.append(raw)
+        if removed:
+            write_json(registry_path(), {"prs": prs})
+    return removed
