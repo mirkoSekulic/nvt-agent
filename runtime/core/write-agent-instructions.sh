@@ -132,8 +132,10 @@ Create a PR with `gh-auth pr create --repo OWNER/REPO --fill`, then register it:
 github-watch register --repo OWNER/REPO --number PR_NUMBER --label work
 ```
 
-Use `github-watch list` to check watches and `github-watch remove --repo
-OWNER/REPO --number PR_NUMBER` after the PR is merged or closed.
+Registered dynamic watches auto-remove after the PR is merged or closed by
+default. Use `github-watch list` to check watches and `github-watch remove
+--repo OWNER/REPO --number PR_NUMBER` only for manual cleanup or static/kept
+watches.
 
 After a PR is registered, wait for prompts instead of manually polling. When a
 prompt or PR activity asks for action, handle the request, push any needed

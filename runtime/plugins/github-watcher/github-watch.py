@@ -44,6 +44,9 @@ def config_from_args(args):
         prompt_comments = ask_bool("Prompt on comments?", args.prompt_comments)
         prompt_reviews = ask_bool("Prompt on reviews?", args.prompt_reviews)
         prompt_failed_checks = ask_bool("Prompt on failed checks?", args.prompt_failed_checks)
+        remove_on_close = ask_bool("Remove when PR is merged or closed?", args.remove_on_close)
+        publish_on_close = ask_bool("Publish when PR is merged or closed?", args.publish_on_close)
+        prompt_on_close = ask_bool("Prompt when PR is merged or closed?", args.prompt_on_close)
     else:
         repo = args.repo
         number = args.number
@@ -55,6 +58,9 @@ def config_from_args(args):
         prompt_comments = args.prompt_comments
         prompt_reviews = args.prompt_reviews
         prompt_failed_checks = args.prompt_failed_checks
+        remove_on_close = args.remove_on_close
+        publish_on_close = args.publish_on_close
+        prompt_on_close = args.prompt_on_close
 
     raw = {
         "repo": repo,
@@ -82,10 +88,17 @@ def config_from_args(args):
                 "passed": args.prompt_passed_checks,
             },
         },
+        "closed": {
+            "enabled": True,
+            "remove": remove_on_close,
+            "publish": publish_on_close,
+            "prompt": prompt_on_close,
+        },
     }
     defaults = {
         "default-provider": default_provider,
         "broker": config.get("broker"),
+        "closed": {"enabled": True, "remove": True, "publish": True, "prompt": False},
     }
     normalized = normalize_watch(raw, defaults, "register")
     return normalized
@@ -158,6 +171,9 @@ def main():
     register.add_argument("--prompt-passed-checks", action=argparse.BooleanOptionalAction, default=False)
     register.add_argument("--publish-failed-checks", action=argparse.BooleanOptionalAction, default=True)
     register.add_argument("--publish-passed-checks", action=argparse.BooleanOptionalAction, default=False)
+    register.add_argument("--remove-on-close", action=argparse.BooleanOptionalAction, default=True)
+    register.add_argument("--prompt-on-close", action=argparse.BooleanOptionalAction, default=False)
+    register.add_argument("--publish-on-close", action=argparse.BooleanOptionalAction, default=True)
     register.set_defaults(func=command_register)
 
     list_parser = subparsers.add_parser("list")
