@@ -3,6 +3,7 @@ set -euo pipefail
 
 workspace="${NVT_WORKSPACE:-/workspace}"
 target="$workspace/AGENTS.md"
+local_instructions="${NVT_AGENT_LOCAL_INSTRUCTIONS:-$workspace/AGENTS.local.md}"
 
 mkdir -p "$workspace"
 
@@ -11,9 +12,14 @@ cat > "$target" <<EOF
 
 This workspace is running inside an nvt-agent container.
 
+This file is generated at container startup. For workspace-specific guidance,
+edit \`AGENTS.local.md\` in this workspace; if present, it is appended below.
+
 ## Runtime Context
 
 - The workspace path is \`$workspace\`.
+- Local override instructions are read from \`$local_instructions\` when the
+  file exists.
 - The main terminal agent runs in tmux session \`${AGENT_SESSION:-agent}\`.
 - code-server runs inside the container on port \`${CODE_SERVER_PORT:-4090}\`.
 - Custom plugins are mounted at \`/custom-plugins\`.
@@ -110,4 +116,47 @@ fi
 
 if [ -s "$NVT_STATE_DIR/plugin-tools.md" ]; then
   cat "$NVT_STATE_DIR/plugin-tools.md" >> "$target"
+fi
+
+if command -v gh-auth >/dev/null 2>&1 && command -v github-watch >/dev/null 2>&1; then
+  cat >> "$target" <<'EOF'
+
+## GitHub PR Workflow
+
+Use `gh-auth` for GitHub CLI operations. It injects the configured provider
+token for the target repository, so do not run `gh auth login`.
+
+Create a PR with `gh-auth pr create --repo OWNER/REPO --fill`, then register it:
+
+```sh
+github-watch register --repo OWNER/REPO --number PR_NUMBER --label work
+```
+
+Use `github-watch list` to check watches and `github-watch remove --repo
+OWNER/REPO --number PR_NUMBER` after the PR is merged or closed.
+
+After a PR is registered, wait for prompts instead of manually polling. When a
+prompt or PR activity asks for action, handle the request, push any needed
+changes, and always post a PR comment summarizing what changed or why no change
+was needed:
+
+```sh
+gh-auth pr comment PR_NUMBER --repo OWNER/REPO --body-file - <<'COMMENT'
+Summary.
+
+Details.
+COMMENT
+```
+
+Use `--body-file -` or a temp file for multi-line comments; do not put `\n`
+escapes inside ordinary quoted shell strings.
+EOF
+fi
+
+if [ -s "$local_instructions" ]; then
+  {
+    printf '\n## Local Workspace Instructions\n\n'
+    cat "$local_instructions"
+    printf '\n'
+  } >> "$target"
 fi
