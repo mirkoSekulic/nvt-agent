@@ -29,7 +29,8 @@ def ask_bool(prompt, default):
 
 
 def config_from_args(args):
-    default_provider = load_config().get("default-provider")
+    config = load_config()
+    default_provider = config.get("default-provider")
     if args.interactive:
         repo = ask("Repository owner/name", args.repo)
         number = int(ask("PR number", str(args.number or "")))
@@ -82,7 +83,10 @@ def config_from_args(args):
             },
         },
     }
-    defaults = {"default-provider": default_provider}
+    defaults = {
+        "default-provider": default_provider,
+        "broker": config.get("broker"),
+    }
     normalized = normalize_watch(raw, defaults, "register")
     return normalized
 

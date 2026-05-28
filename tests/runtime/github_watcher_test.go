@@ -48,6 +48,37 @@ default-provider: fork-app
 	}
 }
 
+func TestGithubWatchRegisterInheritsBrokerConfig(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", `
+default-provider: fork-app
+broker:
+  enabled: true
+  provider: broker-fork-app
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	f.runWithEnv(
+		githubWatchBin(f.root),
+		true,
+		env,
+		"register",
+		"--repo", "my-user/my-repo",
+		"--number", "123",
+	)
+
+	registryPath := filepath.Join(f.state, "plugins", "github-watcher", "registry.json")
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, registryPath, &registry)
+	broker, ok := registry["prs"][0]["broker"].(map[string]any)
+	if !ok {
+		t.Fatalf("registration missing broker config: %#v", registry["prs"][0])
+	}
+	if broker["enabled"] != true || broker["provider"] != "broker-fork-app" {
+		t.Fatalf("registration did not inherit broker config: %#v", broker)
+	}
+}
+
 func TestGithubWatchRegisterReplacesExistingRegistration(t *testing.T) {
 	f := newFixture(t)
 	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
@@ -164,6 +195,60 @@ if published or prompted:
 `, quoteYAML(f.root))
 
 	f.runCommand("python3", true, "-c", script)
+}
+
+func TestGithubWatcherDirectRequestsPassTargetToCredentialProvider(t *testing.T) {
+	f := newFixture(t)
+	logPath := filepath.Join(f.home, "git-host-credential.log")
+	f.writeBin("git-host-credential", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" > %s
+printf 'test-token\n'
+`, quoteYAML(logPath)))
+	script := fmt.Sprintf(`
+import importlib.util
+import io
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
+
+class Response:
+    def __enter__(self):
+        return self
+    def __exit__(self, *_args):
+        return False
+    def read(self):
+        return b'{"ok": true}'
+
+requests = []
+def fake_urlopen(request, timeout=30):
+    requests.append((request.full_url, request.headers.get("Authorization")))
+    return Response()
+
+lib.urlopen = fake_urlopen
+payload = lib.github_request("/repos/my-user/my-repo/issues/123/comments", "fork-app")
+if payload != {"ok": True}:
+    raise SystemExit(f"unexpected payload: {payload}")
+if requests != [("https://api.github.com/repos/my-user/my-repo/issues/123/comments", "Bearer test-token")]:
+    raise SystemExit(f"unexpected request: {requests}")
+`, quoteYAML(f.root))
+
+	f.runWithEnv("python3", true, nil, "-c", script)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(data)
+	if !strings.Contains(args, "token --provider fork-app --target github.com/my-user/my-repo") {
+		t.Fatalf("git-host-credential was not called with target:\n%s", args)
+	}
 }
 
 func TestGithubWatcherPaginatesCommentsAndReviews(t *testing.T) {

@@ -283,9 +283,9 @@ def all_watches(config):
     return list(watches.values())
 
 
-def token_for_provider(provider):
+def token_for_provider(provider, target):
     result = subprocess.run(
-        ["git-host-credential", "token", "--provider", provider],
+        ["git-host-credential", "token", "--provider", provider, "--target", target],
         check=True,
         stdout=subprocess.PIPE,
         text=True,
@@ -336,12 +336,13 @@ def broker_request(path, provider, query=None, paginate=False, broker=None):
 def github_request(path, provider, query=None, broker=None, paginate=False):
     if broker and broker.get("enabled"):
         return broker_request(path, provider, query, paginate, broker)
+    target = github_target_from_path(path)
     query_string = f"?{urlencode(query)}" if query else ""
     request = Request(
         f"https://api.github.com{path}{query_string}",
         headers={
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token_for_provider(provider)}",
+            "Authorization": f"Bearer {token_for_provider(provider, target)}",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "nvt-agent-github-watcher",
         },
@@ -354,6 +355,13 @@ def github_request(path, provider, query=None, broker=None, paginate=False):
         fail(f"GitHub API request failed: {error.code} {error.reason}: {body}")
     except URLError as error:
         fail(f"GitHub API request failed: {error.reason}")
+
+
+def github_target_from_path(path):
+    parts = path.split("/")
+    if len(parts) < 4 or parts[1] != "repos" or not parts[2] or not parts[3]:
+        fail(f"cannot resolve GitHub target from path: {path}")
+    return f"github.com/{parts[2]}/{parts[3]}"
 
 
 def agentdctl(args, input_text=None):
