@@ -32,6 +32,7 @@ COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
 COPY runtime/core/export-plugin-tools.py /usr/local/bin/export-plugin-tools
 COPY runtime/core/health.py /usr/local/bin/health
 COPY runtime/core/doctor.py /usr/local/bin/doctor
+COPY runtime/core/agent-capture.sh /usr/local/bin/agent-capture
 COPY runtime/core/prompt-agent.sh /usr/local/bin/prompt-agent
 COPY runtime/core/brokerctl.py /usr/local/bin/brokerctl
 COPY runtime/core/write-agent-instructions.sh /usr/local/bin/write-agent-instructions
@@ -49,6 +50,7 @@ RUN chmod +x \
   /usr/local/bin/export-plugin-tools \
   /usr/local/bin/health \
   /usr/local/bin/doctor \
+  /usr/local/bin/agent-capture \
   /usr/local/bin/prompt-agent \
   /usr/local/bin/brokerctl \
   /usr/local/bin/write-agent-instructions \

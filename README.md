@@ -687,6 +687,16 @@ For simple prompts, use the compatibility wrapper:
 echo "Review failing tests and fix them." | prompt-agent
 ```
 
+To save recent terminal-agent output from tmux, use:
+
+```sh
+agent-capture --lines 200 --out logs.txt
+```
+
+With no flags, `agent-capture` writes the last 100 lines from session
+`${AGENT_SESSION:-agent}` to `agent-capture.txt` in the current directory. Use
+`--print` to write the capture to stdout instead.
+
 For the full container-local API, use `agentdctl`:
 
 ```sh

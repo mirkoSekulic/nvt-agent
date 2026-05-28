@@ -44,6 +44,24 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 	}
 }
 
+func TestRuntimeDockerfileInstallsAgentCapture(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "runtime", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(data)
+	required := []string{
+		"COPY runtime/core/agent-capture.sh /usr/local/bin/agent-capture",
+		"/usr/local/bin/agent-capture",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(dockerfile, fragment) {
+			t.Fatalf("runtime Dockerfile missing %q\n%s", fragment, dockerfile)
+		}
+	}
+}
+
 func TestRenderAgentExposeGeneratesTraefikLabels(t *testing.T) {
 	f := newFixture(t)
 	config := f.writeAgentConfig(`
@@ -267,6 +285,8 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 	}
 	instructions := string(data)
 	required := []string{
+		"## Runtime Tools",
+		"agent-capture --lines 200 --out agent-capture.txt",
 		"## Exposed Local HTTP Services",
 		"`app`: `http://app.nvt-dev.agent.localhost:4090` -> shared local port `3000`",
 		"`api`: `http://api.nvt-dev.agent.localhost:4090` -> shared local port `8080`",
@@ -274,6 +294,65 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 	for _, fragment := range required {
 		if !strings.Contains(instructions, fragment) {
 			t.Fatalf("AGENTS.md missing %q\n%s", fragment, instructions)
+		}
+	}
+}
+
+func TestAgentCaptureDefaultsAndPrintMode(t *testing.T) {
+	root := repoRoot(t)
+	work := t.TempDir()
+	bin := t.TempDir()
+	argsFile := filepath.Join(work, "tmux.args")
+	fakeTmux := filepath.Join(bin, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte(`#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TMUX_ARGS_FILE"
+printf 'captured output\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := "bash " + shellQuote(filepath.Join(root, "runtime", "core", "agent-capture.sh"))
+	env := []string{
+		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TMUX_ARGS_FILE=" + argsFile,
+		"AGENT_SESSION=custom-agent",
+	}
+
+	cmd := commandWithEnv(script, env)
+	cmd.Dir = work
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("agent-capture default failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(filepath.Join(work, "agent-capture.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "captured output\n" {
+		t.Fatalf("unexpected capture file: %q", data)
+	}
+
+	cmd = commandWithEnv(script, env, "--lines", "7", "--session", "pane-1", "--print")
+	cmd.Dir = work
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("agent-capture print failed: %v\n%s", err, output)
+	}
+	if string(output) != "captured output\n" {
+		t.Fatalf("unexpected print output: %q", output)
+	}
+
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(argsData)
+	for _, fragment := range []string{
+		"capture-pane -p -S -100 -t custom-agent",
+		"capture-pane -p -S -7 -t pane-1",
+	} {
+		if !strings.Contains(args, fragment) {
+			t.Fatalf("tmux args missing %q\n%s", fragment, args)
 		}
 	}
 }

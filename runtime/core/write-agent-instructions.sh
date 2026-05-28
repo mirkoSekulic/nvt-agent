@@ -42,6 +42,13 @@ destructive commands unless the user has explicitly authorized them.
 Plugin events are advisory. Verified session-state events are not implemented
 yet.
 
+## Runtime Tools
+
+Use \`agent-capture --lines 200 --out agent-capture.txt\` to save recent tmux
+session output to a file in the current directory. With no flags it captures
+the last 100 lines from session \`${AGENT_SESSION:-agent}\` to
+\`agent-capture.txt\`.
+
 ## Docker
 
 Docker commands use this agent's own Docker daemon sidecar through
