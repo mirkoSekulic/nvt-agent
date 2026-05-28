@@ -111,3 +111,37 @@ fi
 if [ -s "$NVT_STATE_DIR/plugin-tools.md" ]; then
   cat "$NVT_STATE_DIR/plugin-tools.md" >> "$target"
 fi
+
+if command -v gh-auth >/dev/null 2>&1 && command -v github-watch >/dev/null 2>&1; then
+  cat >> "$target" <<'EOF'
+
+## GitHub PR Workflow
+
+Use `gh-auth` for GitHub CLI operations. It injects the configured provider
+token for the target repository, so do not run `gh auth login`.
+
+Create a PR with `gh-auth pr create --repo OWNER/REPO --fill`, then register it:
+
+```sh
+github-watch register --repo OWNER/REPO --number PR_NUMBER --label work
+```
+
+Use `github-watch list` to check watches and `github-watch remove --repo
+OWNER/REPO --number PR_NUMBER` after the PR is merged or closed.
+
+After a PR is registered, wait for prompts instead of manually polling. When a
+prompt or PR activity requires a response, handle the request and post a PR
+comment with `gh-auth`:
+
+```sh
+gh-auth pr comment PR_NUMBER --repo OWNER/REPO --body-file - <<'COMMENT'
+Summary.
+
+Details.
+COMMENT
+```
+
+Use `--body-file -` or a temp file for multi-line comments; do not put `\n`
+escapes inside ordinary quoted shell strings.
+EOF
+fi

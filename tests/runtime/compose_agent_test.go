@@ -299,6 +299,34 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 	}
 }
 
+func TestWriteAgentInstructionsIncludesGitHubPRWorkflowWhenToolsAreAvailable(t *testing.T) {
+	f := newFixture(t)
+	script := filepath.Join(f.root, "runtime", "core", "write-agent-instructions.sh")
+	f.writeBin("gh-auth", "#!/usr/bin/env bash\nexit 0\n")
+	f.writeBin("github-watch", "#!/usr/bin/env bash\nexit 0\n")
+
+	f.runWithEnv("bash "+shellQuote(script), true, nil)
+
+	data, err := os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructions := string(data)
+	required := []string{
+		"## GitHub PR Workflow",
+		"Use `gh-auth` for GitHub CLI operations.",
+		"gh-auth pr create --repo OWNER/REPO --fill",
+		"github-watch register --repo OWNER/REPO --number PR_NUMBER --label work",
+		"After a PR is registered, wait for prompts instead of manually polling.",
+		"gh-auth pr comment PR_NUMBER --repo OWNER/REPO --body-file -",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(instructions, fragment) {
+			t.Fatalf("AGENTS.md missing %q\n%s", fragment, instructions)
+		}
+	}
+}
+
 func TestAgentCaptureDefaultsAndPrintMode(t *testing.T) {
 	root := repoRoot(t)
 	work := t.TempDir()

@@ -77,7 +77,7 @@ def main():
         return
 
     env = os.environ.copy()
-    env["GH_TOKEN"] = token(provider)
+    env["GH_TOKEN"] = token(provider, repo)
     env.pop("GITHUB_TOKEN", None)
     os.execvpe("gh", ["gh", *gh_args], env)
 

@@ -96,6 +96,44 @@ providers:
 	}
 }
 
+func TestGhAuthPassesRepoTargetToBrokerTokenProvider(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "token" ] &&
+   [ "$2" = "--provider" ] && [ "$3" = "fork-app" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ] &&
+   [ "$6" = "--raw" ]; then
+  echo broker-token
+  exit 0
+fi
+echo "unexpected brokerctl args: $*" >&2
+exit 1
+`)
+	f.writeBin("gh", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "${GH_TOKEN:-}" != "broker-token" ]; then
+  echo "unexpected GH_TOKEN" >&2
+  exit 1
+fi
+printf '%s\n' "$*"
+`)
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: fork-app-broker
+    type: broker
+    broker-provider: fork-app
+    match:
+      - github.com/my-user/*
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	output := f.runWithEnv(ghAuthBin(f.root), true, env, "pr", "view", "--repo", "my-user/project")
+	if strings.TrimSpace(output) != "pr view --repo my-user/project" {
+		t.Fatalf("unexpected gh args: %q", output)
+	}
+}
+
 func TestGitHostCredentialBrokerProviderDelegatesIdentityToBrokerctl(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("brokerctl", `#!/usr/bin/env bash
