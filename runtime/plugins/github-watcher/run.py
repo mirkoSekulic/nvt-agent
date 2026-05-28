@@ -236,8 +236,8 @@ def process_closed(watch, seen, pull):
         state="closed",
         merged=(terminal == "merged"),
         html_url=pull.get("html_url") or f"https://github.com/{watch['repo']}/pull/{watch['number']}",
-        closed_at=pull.get("closed_at", ""),
-        merged_at=pull.get("merged_at", ""),
+        closed_at=pull.get("closed_at") or "",
+        merged_at=pull.get("merged_at") or "",
     )
     if config["publish"]:
         publish_event(f"plugin.github.pr.{terminal}", payload)
@@ -251,14 +251,14 @@ def process_closed(watch, seen, pull):
 
 
 def process_watch(watch, seen):
-    process_comments(watch, seen)
-    process_reviews(watch, seen)
     pull = None
     closed_config = watch.get("closed") or {"enabled": True}
     if closed_config["enabled"] or watch["checks"]["enabled"]:
         pull = fetch_pull(watch)
     if pull is not None and process_closed(watch, seen, pull):
         return
+    process_comments(watch, seen)
+    process_reviews(watch, seen)
     process_checks(watch, seen, pull)
 
 

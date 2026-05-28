@@ -198,10 +198,37 @@ func TestGithubWatcherDynamicClosedUnmergedPRPublishesAndRemovesRegistration(t *
 	if !strings.Contains(output, `"published": [["plugin.github.pr.closed"`) {
 		t.Fatalf("closed event was not published:\n%s", output)
 	}
+	if !strings.Contains(output, `"merged_at": ""`) {
+		t.Fatalf("closed event did not normalize null merged_at:\n%s", output)
+	}
 	var registry map[string][]map[string]any
 	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
 	if len(registry["prs"]) != 0 {
 		t.Fatalf("dynamic registration was not removed: %#v", registry)
+	}
+}
+
+func TestGithubWatcherClosedDynamicPRRemovesWhenCommentFetchFails(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
+	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/my-repo","number":123,"provider":"fork-app","closed":{"enabled":true,"remove":true,"publish":true,"prompt":false}}]`)
+
+	output := runGithubWatcherCloseScript(t, f, config, map[string]string{
+		"state":         "closed",
+		"merged":        "true",
+		"source":        "dynamic",
+		"seen":          "{}",
+		"run_once":      "true",
+		"fail_comments": "true",
+		"expectEvent":   "plugin.github.pr.merged",
+	})
+	if !strings.Contains(output, `"published": [["plugin.github.pr.merged"`) {
+		t.Fatalf("merged event was not published:\n%s", output)
+	}
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
+	if len(registry["prs"]) != 0 {
+		t.Fatalf("dynamic registration was not removed after closed PR despite comment fetch failure: %#v", registry)
 	}
 }
 
@@ -526,6 +553,10 @@ func runGithubWatcherCloseScript(t *testing.T, f *fixture, config string, opts m
 	if opts["run_once"] == "true" {
 		runOnce = "True"
 	}
+	failComments := "False"
+	if opts["fail_comments"] == "true" {
+		failComments = "True"
+	}
 	script := fmt.Sprintf(`
 import importlib.util
 import json
@@ -542,7 +573,13 @@ spec.loader.exec_module(watcher)
 
 published = []
 prompted = []
-watcher.fetch_comments = lambda _watch: []
+
+def fake_fetch_comments(_watch):
+    if %s:
+        raise RuntimeError("comments failed")
+    return []
+
+watcher.fetch_comments = fake_fetch_comments
 watcher.fetch_reviews = lambda _watch: []
 watcher.fetch_check_runs = lambda _watch, _sha: []
 watcher.fetch_pull = lambda _watch: {
@@ -584,7 +621,7 @@ elif published:
     raise SystemExit(f"unexpected events: {published}")
 
 print(json.dumps({"published": published, "prompted": prompted, "seen": seen}, sort_keys=True))
-`, quoteYAML(f.root), quoteYAML(opts["state"]), merged, merged, quoteYAML(opts["seen"]), runOnce, quoteYAML(opts["source"]), quoteYAML(opts["expectEvent"]))
+`, quoteYAML(f.root), failComments, quoteYAML(opts["state"]), merged, merged, quoteYAML(opts["seen"]), runOnce, quoteYAML(opts["source"]), quoteYAML(opts["expectEvent"]))
 
 	return f.runWithEnv("python3", true, []string{"NVT_PLUGIN_CONFIG=" + config}, "-c", script)
 }
