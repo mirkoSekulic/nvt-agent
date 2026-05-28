@@ -433,14 +433,55 @@ func renderAgentExposeBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "scripts", "render-agent-expose.py"))
 }
 
+func bootstrapBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "core", "bootstrap.py"))
+}
+
+func codeServerSettingsPath(f *fixture) string {
+	return filepath.Join(f.home, ".local", "share", "code-server", "User", "settings.json")
+}
+
+func readCodeServerSettings(t *testing.T, f *fixture) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(codeServerSettingsPath(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("invalid settings JSON: %v\n%s", err, data)
+	}
+	return settings
+}
+
 func commandWithEnv(command string, env []string, args ...string) *exec.Cmd {
 	fullCommand := command
 	for _, arg := range args {
 		fullCommand += " " + shellQuote(arg)
 	}
 	cmd := exec.Command("sh", "-c", fullCommand)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = mergedEnv(env)
 	return cmd
+}
+
+func mergedEnv(overrides []string) []string {
+	values := map[string]string{}
+	order := []string{}
+	for _, entry := range append(os.Environ(), overrides...) {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, exists := values[name]; !exists {
+			order = append(order, name)
+		}
+		values[name] = entry
+	}
+	merged := make([]string, 0, len(order))
+	for _, name := range order {
+		merged = append(merged, values[name])
+	}
+	return merged
 }
 
 func shellQuote(value string) string {

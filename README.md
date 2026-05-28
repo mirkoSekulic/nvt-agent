@@ -587,21 +587,31 @@ code-server:
     - redhat.vscode-yaml
 ```
 
-Default settings can be provided at:
+Default settings can be provided inline:
 
-```text
-<workspace>/.nvt-agent/code-server/settings.json
+```yaml
+code-server:
+  extensions:
+    - redhat.vscode-yaml
+  settings:
+    overwrite: false
+    values:
+      workbench.colorTheme: "Default Dark Modern"
+      workbench.startupEditor: "none"
+      editor.minimap.enabled: false
+      security.workspace.trust.enabled: false
 ```
 
-Bootstrap copies that file to code-server's user settings only if the target
-does not already exist:
+Bootstrap writes `settings.values` as JSON to code-server's user settings:
 
 ```text
 /root/.local/share/code-server/User/settings.json
 ```
 
-This gives new agents defaults without overwriting settings changed later in
-the browser. To use a different default settings file, set:
+With `overwrite: false`, existing browser-edited settings are preserved. With
+`overwrite: true`, the inline settings replace the existing file.
+
+The older file-based form still works for existing agents, but is deprecated:
 
 ```yaml
 code-server:

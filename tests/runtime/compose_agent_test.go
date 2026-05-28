@@ -113,7 +113,7 @@ expose:
       targetPort: 3000
 `)
 	envFile := filepath.Join(f.home, "agent.env")
-	if err := os.WriteFile(envFile, []byte(strings.Join([]string{
+	composeEnv := []string{
 		"AGENT_NAME=nvt-dev",
 		"AGENT_HOST=nvt-dev.agent.localhost",
 		"AGENT_ENV_FILE=" + envFile,
@@ -124,7 +124,8 @@ expose:
 		"NVT_AGENT_CONFIG_FILE=/nvt-agent/agent.yaml",
 		"CODEX_CONFIG_DIR=" + filepath.Join(f.home, "codex"),
 		"CLAUDE_CONFIG_DIR=" + filepath.Join(f.home, "claude"),
-	}, "\n")+"\n"), 0o600); err != nil {
+	}
+	if err := os.WriteFile(envFile, []byte(strings.Join(composeEnv, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,7 +138,7 @@ expose:
 	)
 
 	cmd := exec.Command("docker", "compose", "--env-file", envFile, "-f", filepath.Join(f.root, "compose.agent.yaml"), "-f", output, "config")
-	cmd.Env = os.Environ()
+	cmd.Env = mergedEnv(composeEnv)
 	mergedBytes, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker compose config failed: %v\n%s", err, mergedBytes)
@@ -394,6 +395,196 @@ runtime:
 	}
 	if string(data) != "set -g status off\n" {
 		t.Fatalf("bootstrap overwrote existing tmux config: %q", data)
+	}
+}
+
+func TestBootstrapWritesInlineCodeServerSettingsWhenTargetMissing(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+code-server:
+  settings:
+    overwrite: false
+    values:
+      workbench.colorTheme: "Default Dark Modern"
+      editor.minimap.enabled: false
+      editor.tabSize: 2
+      nested:
+        enabled: true
+      list:
+        - one
+        - 2
+      nullable: null
+`)
+
+	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	settings := readCodeServerSettings(t, f)
+	if settings["workbench.colorTheme"] != "Default Dark Modern" {
+		t.Fatalf("unexpected color theme: %#v", settings)
+	}
+	if settings["editor.minimap.enabled"] != false {
+		t.Fatalf("expected boolean value to be preserved: %#v", settings)
+	}
+	if settings["editor.tabSize"] != float64(2) {
+		t.Fatalf("expected numeric value to be preserved: %#v", settings)
+	}
+	if settings["nullable"] != nil {
+		t.Fatalf("expected null value to be preserved: %#v", settings)
+	}
+	nested, ok := settings["nested"].(map[string]any)
+	if !ok || nested["enabled"] != true {
+		t.Fatalf("expected object value to be preserved: %#v", settings)
+	}
+	list, ok := settings["list"].([]any)
+	if !ok || len(list) != 2 || list[0] != "one" || list[1] != float64(2) {
+		t.Fatalf("expected array value to be preserved: %#v", settings)
+	}
+}
+
+func TestBootstrapPreservesExistingInlineCodeServerSettingsWhenOverwriteFalse(t *testing.T) {
+	f := newFixture(t)
+	target := codeServerSettingsPath(f)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"existing":true}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := f.writeAgentConfig(`
+code-server:
+  settings:
+    overwrite: false
+    values:
+      existing: false
+      next: true
+`)
+
+	output := f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	if !strings.Contains(output, "bootstrap: code-server settings already exist, skipping") {
+		t.Fatalf("expected skip message, got:\n%s", output)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"existing":true}`+"\n" {
+		t.Fatalf("bootstrap overwrote existing settings: %q", data)
+	}
+}
+
+func TestBootstrapReplacesExistingInlineCodeServerSettingsWhenOverwriteTrue(t *testing.T) {
+	f := newFixture(t)
+	target := codeServerSettingsPath(f)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"existing":true}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := f.writeAgentConfig(`
+code-server:
+  settings:
+    overwrite: true
+    values:
+      existing: false
+      next: true
+`)
+
+	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	settings := readCodeServerSettings(t, f)
+	if settings["existing"] != false || settings["next"] != true {
+		t.Fatalf("unexpected replaced settings: %#v", settings)
+	}
+}
+
+func TestBootstrapLegacyCodeServerSettingsFileStillWorksAndWarns(t *testing.T) {
+	f := newFixture(t)
+	legacy := filepath.Join(f.workspace, ".nvt-agent", "code-server", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"legacy":true}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := f.writeAgentConfig(`
+code-server:
+  settings-file: .nvt-agent/code-server/settings.json
+`)
+
+	output := f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	if !strings.Contains(output, "bootstrap: code-server.settings-file is deprecated; use code-server.settings.values") {
+		t.Fatalf("expected deprecation warning, got:\n%s", output)
+	}
+	settings := readCodeServerSettings(t, f)
+	if settings["legacy"] != true {
+		t.Fatalf("legacy settings were not copied: %#v", settings)
+	}
+}
+
+func TestBootstrapRejectsLegacyAndInlineCodeServerSettingsTogether(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+code-server:
+  settings-file: .nvt-agent/code-server/settings.json
+  settings:
+    values:
+      workbench.startupEditor: none
+`)
+
+	output := f.runWithEnv(bootstrapBin(f.root), false, nil, config)
+
+	if !strings.Contains(output, "code-server.settings-file is deprecated; use code-server.settings.values, not both") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+}
+
+func TestBootstrapRejectsInvalidCodeServerSettingsShape(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "settings-not-object",
+			body: `
+code-server:
+  settings: []
+`,
+			want: "code-server.settings must be a YAML object",
+		},
+		{
+			name: "values-not-object",
+			body: `
+code-server:
+  settings:
+    values: []
+`,
+			want: "code-server.settings.values must be a YAML object",
+		},
+		{
+			name: "overwrite-not-boolean",
+			body: `
+code-server:
+  settings:
+    overwrite: yes please
+    values: {}
+`,
+			want: "code-server.settings.overwrite must be a boolean",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			config := f.writeAgentConfig(tt.body)
+			output := f.runWithEnv(bootstrapBin(f.root), false, nil, config)
+			if !strings.Contains(output, tt.want) {
+				t.Fatalf("expected %q, got:\n%s", tt.want, output)
+			}
+		})
 	}
 }
 

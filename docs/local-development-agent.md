@@ -179,7 +179,15 @@ tools:
   shell: []
 
 code-server:
-  extensions: []
+  extensions:
+    - redhat.vscode-yaml
+  settings:
+    overwrite: false
+    values:
+      workbench.colorTheme: "Default Dark Modern"
+      workbench.startupEditor: "none"
+      editor.minimap.enabled: false
+      security.workspace.trust.enabled: false
 
 expose:
   http:

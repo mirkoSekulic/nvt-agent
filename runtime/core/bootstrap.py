@@ -31,6 +31,14 @@ def optional_string(value, field):
     return value
 
 
+def optional_bool(value, field, default=False):
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise SystemExit(f"{field} must be a boolean")
+    return value
+
+
 def optional_string_list(value, field):
     if value is None:
         return []
@@ -198,16 +206,16 @@ def install_code_server_extensions(extensions):
         run(["code-server", "--install-extension", extension])
 
 
-def copy_code_server_settings(settings_file):
-    if settings_file:
-        source = resolve_workspace_path(settings_file)
-    else:
-        source = workspace() / ".nvt-agent" / "code-server" / "settings.json"
+def code_server_settings_target():
+    return Path.home() / ".local" / "share" / "code-server" / "User" / "settings.json"
 
+
+def copy_code_server_settings(settings_file):
+    source = resolve_workspace_path(settings_file)
     if not source.is_file():
         return
 
-    target = Path.home() / ".local" / "share" / "code-server" / "User" / "settings.json"
+    target = code_server_settings_target()
     if target.exists():
         print(f"bootstrap: code-server settings already exist, skipping {target}", flush=True)
         return
@@ -217,10 +225,57 @@ def copy_code_server_settings(settings_file):
     print(f"bootstrap: copied code-server settings from {source}", flush=True)
 
 
+def write_code_server_settings(values, overwrite):
+    target = code_server_settings_target()
+    if target.exists() and not overwrite:
+        print(f"bootstrap: code-server settings already exist, skipping {target}", flush=True)
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"bootstrap: wrote code-server settings to {target}", flush=True)
+
+
+def apply_code_server_settings(config):
+    settings_file = optional_string(config.get("settings-file"), "code-server.settings-file")
+    settings = config.get("settings")
+
+    if settings is None:
+        if settings_file:
+            print(
+                "bootstrap: code-server.settings-file is deprecated; use code-server.settings.values",
+                flush=True,
+            )
+            copy_code_server_settings(settings_file)
+        return
+
+    if not isinstance(settings, dict):
+        raise SystemExit("code-server.settings must be a YAML object")
+
+    has_values = "values" in settings
+    if settings_file and has_values:
+        raise SystemExit("code-server.settings-file is deprecated; use code-server.settings.values, not both")
+
+    if not has_values:
+        if settings_file:
+            print(
+                "bootstrap: code-server.settings-file is deprecated; use code-server.settings.values",
+                flush=True,
+            )
+            copy_code_server_settings(settings_file)
+        return
+
+    values = settings.get("values")
+    if not isinstance(values, dict):
+        raise SystemExit("code-server.settings.values must be a YAML object")
+
+    overwrite = optional_bool(settings.get("overwrite"), "code-server.settings.overwrite", False)
+    write_code_server_settings(values, overwrite)
+
+
 def setup_code_server(config):
     install_code_server_extensions(as_string_list(config.get("extensions"), "code-server.extensions"))
-    settings_file = optional_string(config.get("settings-file"), "code-server.settings-file")
-    copy_code_server_settings(settings_file)
+    apply_code_server_settings(config)
 
 
 def main():
