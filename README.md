@@ -29,6 +29,54 @@ The container runtime pieces should not depend on Make or Docker Compose; they
 should keep working when started by Docker Compose, another CLI, or a future
 Kubernetes controller.
 
+Current local runtime connections:
+
+```text
+Host
+----
+make/scripts
+  |
+  | docker compose
+  v
+Shared infra network: agents-proxy
++--------------------+             +----------------------+
+| Traefik proxy      |             | brokerd              |
+| :4090 host -> :80  |             | :7347 internal only  |
++---------+----------+             +----------+-----------+
+          |                                   ^
+          | Host(`name.agent.localhost`)      |
+          v                                   | brokerctl HTTP
++---------------------------------------------+-------------+
+| Agent docker sidecar / shared net namespace               |
+|                                                           |
+|  +-------------------+        +-------------------------+ |
+|  | agent container   |        | docker:dind sidecar     | |
+|  |                   |        | DOCKER_HOST :2375       | |
+|  | code-server :4090 |<-------+ same net namespace      | |
+|  | tmux agent session|                                  | |
+|  | agentd            |                                  | |
+|  | /run/...sock      |                                  | |
+|  | events.jsonl      |                                  | |
+|  +----+---------+----+                                  | |
+|       ^         ^                                       | |
+|       |         | agentdctl / prompt-agent              | |
+|       |         |                                       | |
+|       |     +---+----------------+                      | |
+|       |     | runtime plugins    |                      | |
+|       |     | before/after/tools |                      | |
+|       |     +---------+----------+                      | |
+|       |               | broker-backed credentials        | |
+|       |               v                                  | |
+|       |          brokerctl ------------------------------+-+
+|       |
+|       + agentd writes prompts/events to tmux + event log
++-----------------------------------------------------------+
+
+External APIs
+-------------
+brokerd -> GitHub/API using broker-held secrets, grants, and audit log
+```
+
 `agentd` is intentionally narrower than a manager. It runs inside each agent
 container and owns only interaction with the running agent session:
 
