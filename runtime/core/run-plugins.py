@@ -3,6 +3,7 @@ import os
 import json
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -320,6 +321,16 @@ def run_with_lifecycle(plugin):
         time.sleep(delay)
 
 
+def run_lifecycle_thread_target(plugin, failures, failures_lock):
+    name = string_value(plugin.get("name"), "plugin.name", required=True)
+    try:
+        run_with_lifecycle(plugin)
+    except Exception as error:
+        with failures_lock:
+            failures.append((name, error))
+        print(f"run-plugins: {name} lifecycle stopped: {error}", flush=True)
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in {"before-agent", "after-agent"}:
         fail("usage: run-plugins before-agent|after-agent [agent.yaml]")
@@ -327,11 +338,39 @@ def main():
     when = sys.argv[1]
     config_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/nvt-agent/agent.yaml")
 
+    if when == "before-agent":
+        for plugin in load_plugins(config_path):
+            if not isinstance(plugin, dict):
+                fail("plugins entries must be YAML objects")
+            if plugin_when(plugin) == when:
+                run_with_lifecycle(plugin)
+        return
+
+    plugins_to_run = []
     for plugin in load_plugins(config_path):
         if not isinstance(plugin, dict):
             fail("plugins entries must be YAML objects")
         if plugin_when(plugin) == when:
-            run_with_lifecycle(plugin)
+            plugins_to_run.append(plugin)
+
+    failures = []
+    failures_lock = threading.Lock()
+    threads = []
+    for plugin in plugins_to_run:
+        name = string_value(plugin.get("name"), "plugin.name", required=True)
+        thread = threading.Thread(
+            target=run_lifecycle_thread_target,
+            args=(plugin, failures, failures_lock),
+            name=f"plugin-{name}",
+        )
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
+    if failures:
+        fail(f"{len(failures)} after-agent plugin lifecycle failed")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fixture struct {
@@ -212,6 +214,120 @@ func TestToolOnlyPluginRunPluginsSkipsCleanly(t *testing.T) {
 	}
 }
 
+func TestAfterAgentPluginsStartConcurrently(t *testing.T) {
+	f := newFixture(t)
+	firstStarted := filepath.Join(f.home, "first-after-started")
+	secondStarted := filepath.Join(f.home, "second-after-started")
+	releaseFirst := filepath.Join(f.home, "release-first-after")
+	t.Cleanup(func() { _ = os.WriteFile(releaseFirst, []byte("ok\n"), 0o644) })
+	firstCommand := f.writeTool("first-after-impl", markerScript(firstStarted, releaseFirst))
+	secondCommand := f.writeTool("second-after-impl", markerScript(secondStarted, ""))
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: first-after
+    source: custom
+    when: after-agent
+    command: %s
+  - name: second-after
+    source: custom
+    when: after-agent
+    command: %s
+`, quoteYAML(firstCommand), quoteYAML(secondCommand)))
+
+	cmd, output := f.startRunPlugins(config, "after-agent", 5*time.Second)
+	waitForFile(t, secondStarted, 2*time.Second)
+	if _, err := os.Stat(firstStarted); err != nil {
+		t.Fatalf("expected first after-agent plugin to start: %v", err)
+	}
+	if err := os.WriteFile(releaseFirst, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("run-plugins after-agent failed: %v\n%s", err, output.String())
+	}
+
+	for _, name := range []string{"first-after", "second-after"} {
+		var state map[string]any
+		decodeJSONFile(t, filepath.Join(f.state, "plugins", name, "state.json"), &state)
+		if state["status"] != "succeeded" || state["ready"] != true {
+			t.Fatalf("expected succeeded ready state for %s, got %#v", name, state)
+		}
+	}
+}
+
+func TestAfterAgentPluginFailureDoesNotStopOtherPlugins(t *testing.T) {
+	f := newFixture(t)
+	failingStarted := filepath.Join(f.home, "failing-after-started")
+	succeedingStarted := filepath.Join(f.home, "succeeding-after-started")
+	failingCommand := f.writeTool("failing-after-impl", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+touch %s
+exit 7
+`, shellQuote(failingStarted)))
+	succeedingCommand := f.writeTool("succeeding-after-impl", markerScript(succeedingStarted, ""))
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: failing-after
+    source: custom
+    when: after-agent
+    command: %s
+  - name: succeeding-after
+    source: custom
+    when: after-agent
+    command: %s
+`, quoteYAML(failingCommand), quoteYAML(succeedingCommand)))
+
+	output := f.runRunPlugins(config, "after-agent", false)
+	if !strings.Contains(output, "1 after-agent plugin lifecycle failed") {
+		t.Fatalf("expected after-agent supervisor failure, got:\n%s", output)
+	}
+	waitForFile(t, failingStarted, time.Second)
+	waitForFile(t, succeedingStarted, time.Second)
+
+	var failingState map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "failing-after", "state.json"), &failingState)
+	if failingState["status"] != "failed" || failingState["last_exit_code"] != float64(7) {
+		t.Fatalf("expected failing-after failed state, got %#v", failingState)
+	}
+	var succeedingState map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "succeeding-after", "state.json"), &succeedingState)
+	if succeedingState["status"] != "succeeded" || succeedingState["ready"] != true {
+		t.Fatalf("expected succeeding-after succeeded state, got %#v", succeedingState)
+	}
+}
+
+func TestBeforeAgentPluginsRemainSequential(t *testing.T) {
+	f := newFixture(t)
+	firstStarted := filepath.Join(f.home, "first-before-started")
+	secondStarted := filepath.Join(f.home, "second-before-started")
+	releaseFirst := filepath.Join(f.home, "release-first-before")
+	t.Cleanup(func() { _ = os.WriteFile(releaseFirst, []byte("ok\n"), 0o644) })
+	firstCommand := f.writeTool("first-before-impl", markerScript(firstStarted, releaseFirst))
+	secondCommand := f.writeTool("second-before-impl", markerScript(secondStarted, ""))
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: first-before
+    source: custom
+    when: before-agent
+    command: %s
+  - name: second-before
+    source: custom
+    when: before-agent
+    command: %s
+`, quoteYAML(firstCommand), quoteYAML(secondCommand)))
+
+	cmd, output := f.startRunPlugins(config, "before-agent", 5*time.Second)
+	waitForFile(t, firstStarted, 2*time.Second)
+	assertFileDoesNotAppear(t, secondStarted, 200*time.Millisecond)
+	if err := os.WriteFile(releaseFirst, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("run-plugins before-agent failed: %v\n%s", err, output.String())
+	}
+	waitForFile(t, secondStarted, time.Second)
+}
+
 func TestExportArtifactsDescribeTools(t *testing.T) {
 	f := newFixture(t)
 	toolCommand := f.writeTool("artifact-impl", "#!/usr/bin/env bash\necho artifact\n")
@@ -312,6 +428,22 @@ func (f *fixture) runExport(config string, wantOK bool) string {
 func (f *fixture) runRunPlugins(config, when string, wantOK bool) string {
 	f.t.Helper()
 	return f.run(runPluginsBin(f.root), wantOK, when, config)
+}
+
+func (f *fixture) startRunPlugins(config, when string, timeout time.Duration) (*exec.Cmd, *bytes.Buffer) {
+	f.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	f.t.Cleanup(cancel)
+	fullCommand := runPluginsBin(f.root) + " " + shellQuote(when) + " " + shellQuote(config)
+	cmd := exec.CommandContext(ctx, "sh", "-c", fullCommand)
+	output := &bytes.Buffer{}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	cmd.Env = mergedEnv(f.env())
+	if err := cmd.Start(); err != nil {
+		f.t.Fatalf("start run-plugins: %v\n%s", err, output.String())
+	}
+	return cmd, output
 }
 
 func (f *fixture) runCommand(command string, wantOK bool, args ...string) string {
@@ -498,6 +630,41 @@ func quoteYAML(value string) string {
 		panic(err)
 	}
 	return string(data)
+}
+
+func markerScript(marker, release string) string {
+	script := fmt.Sprintf("#!/usr/bin/env bash\nset -euo pipefail\ntouch %s\n", shellQuote(marker))
+	if release != "" {
+		script += fmt.Sprintf("while [ ! -f %s ]; do sleep 0.02; done\n", shellQuote(release))
+	}
+	return script
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
+}
+
+func assertFileDoesNotAppear(t *testing.T, path string, duration time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			t.Fatalf("file appeared before expected: %s", path)
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func decodeJSON(t *testing.T, data []byte, out any) {
