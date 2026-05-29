@@ -1,0 +1,104 @@
+apiVersion: nvt.dev/v1alpha1
+kind: AgentRun
+metadata:
+  name: nvt-dev
+spec:
+  runtime:
+    type: codex
+    autonomy: trusted-local
+
+  image: nvt-agent-runtime:latest
+  runtimeClassName: kata-vm-isolation
+
+  workspace:
+    mode: Ephemeral
+
+  broker:
+    grants:
+      - provider: github-main-app
+        repositories:
+          - mirkoSekulic/nvt-agent
+
+  agent:
+    config:
+      tools:
+        packages:
+          - jq
+        mise:
+          - go@latest
+
+      code-server:
+        extensions:
+          - redhat.vscode-yaml
+        settings:
+          overwrite: true
+          values:
+            workbench.colorTheme: "Default Dark Modern"
+            workbench.startupEditor: "none"
+
+      expose:
+        http:
+          - name: app
+            targetPort: 3000
+
+      plugins:
+        - name: git-host-credentials
+          source: builtin
+          config:
+            default-provider: github-main
+            providers:
+              - name: github-main
+                type: broker
+                broker-provider: github-main-app
+                match:
+                  - github.com/mirkoSekulic/nvt-agent
+
+        - name: git-credentials
+          source: builtin
+          when: before-agent
+          config:
+            credentials:
+              - match: https://github.com/mirkoSekulic/nvt-agent
+                provider: github-main
+                username: x-access-token
+                identity:
+                  mode: provider
+
+        - name: checkout-repos
+          source: builtin
+          when: before-agent
+          restart: never
+          config:
+            repos:
+              - url: https://github.com/mirkoSekulic/nvt-agent.git
+                path: nvt-agent
+
+        - name: event-webhook
+          source: builtin
+          when: after-agent
+          restart: always
+          config:
+            url: http://nvt-operator.nvt-system.svc.cluster.local/v1/agentruns/nvt-dev/events
+            since: beginning
+            filters:
+              - plugin.github.pr.merged
+              - plugin.github.pr.closed
+              - plugin.agent.signal.done
+            auth:
+              type: bearer-env
+              env: NVT_OPERATOR_CALLBACK_TOKEN
+            delivery:
+              dedupe: true
+              max-delivered-ids: 1000
+
+  lifecycle:
+    completeOn:
+      - plugin.github.pr.merged
+      - plugin.github.pr.closed
+      - plugin.agent.signal.done
+    failOn: []
+
+  ttl:
+    activeDeadlineSeconds: 14400
+    completedTTLSeconds: 300
+    failedTTLSeconds: 3600
