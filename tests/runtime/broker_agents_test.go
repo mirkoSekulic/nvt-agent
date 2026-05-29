@@ -12,7 +12,7 @@ import (
 func TestBrokerAgentsRegisterAndGrantAreIdempotent(t *testing.T) {
 	f := newFixture(t)
 	agentsFile := filepath.Join(f.home, "agents.yaml")
-	if err := os.WriteFile(agentsFile, []byte(`{"agents":[]}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(agentsFile, []byte("agents: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -27,13 +27,26 @@ func TestBrokerAgentsRegisterAndGrantAreIdempotent(t *testing.T) {
 	}
 	expectedHash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("frontend-token")))
 	text := string(data)
-	if strings.Count(text, `"id": "frontend"`) != 1 {
+	if strings.HasPrefix(strings.TrimSpace(text), "{") {
+		t.Fatalf("expected YAML block-style output, got JSON object formatting:\n%s", text)
+	}
+	if strings.Count(text, "id: frontend") != 1 {
 		t.Fatalf("expected one frontend entry:\n%s", text)
 	}
-	if !strings.Contains(text, `"token-sha256": "`+expectedHash+`"`) {
+	if !strings.Contains(text, "token-sha256: "+expectedHash) {
 		t.Fatalf("expected token hash %s:\n%s", expectedHash, text)
 	}
-	if strings.Count(text, `"my-user/frontend"`) != 1 {
+	if strings.Count(text, "- my-user/frontend") != 1 {
 		t.Fatalf("expected idempotent repo grant:\n%s", text)
 	}
+	f.runCommand("python3", true, "-c", `
+import sys
+import yaml
+
+with open(sys.argv[1], "r", encoding="utf-8") as file:
+    data = yaml.safe_load(file)
+
+assert isinstance(data, dict)
+assert isinstance(data.get("agents"), list)
+`, agentsFile)
 }

@@ -2,19 +2,22 @@
 import argparse
 import fcntl
 import hashlib
-import json
 import os
 from pathlib import Path
+
+import yaml
 
 
 def load(path):
     try:
         with path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
+            data = yaml.safe_load(file)
     except FileNotFoundError:
         data = {"agents": []}
+    except yaml.YAMLError as exc:
+        raise SystemExit(f"{path} must be valid YAML: {exc}")
     if not isinstance(data, dict) or not isinstance(data.get("agents"), list):
-        raise SystemExit(f"{path} must be JSON/YAML with an agents list")
+        raise SystemExit(f"{path} must be YAML with an agents list")
     return data
 
 
@@ -22,8 +25,7 @@ def write_atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2, sort_keys=True)
-        file.write("\n")
+        yaml.safe_dump(data, file, sort_keys=False)
     tmp.replace(path)
 
 
