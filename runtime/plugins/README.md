@@ -199,6 +199,11 @@ with the exported `github-watch register` command and are persisted under the
 plugin state directory so they survive container restart. See
 `runtime/plugins/github-watcher/README.md` for the full schema.
 
+`event-webhook` subscribes to `agentd` events and forwards matching event
+envelopes to a configured HTTP endpoint. It is generic and does not interpret
+event payloads. See `runtime/plugins/event-webhook/README.md` for configuration
+and delivery options.
+
 ## Scaffolding
 
 Generate a plugin folder from templates:
