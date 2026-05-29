@@ -59,6 +59,10 @@ def add_grant(data, name, provider, repo):
     raise SystemExit(f"agent {name} is not registered; run agent-init first")
 
 
+def unregister_agent(data, name):
+    data["agents"] = [agent for agent in data["agents"] if not (isinstance(agent, dict) and agent.get("id") == name)]
+
+
 def with_lock(path, func):
     lock_path = path.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,12 +87,17 @@ def main():
     grant.add_argument("--provider", required=True)
     grant.add_argument("--repo", required=True)
 
+    unregister = subparsers.add_parser("unregister")
+    unregister.add_argument("--name", required=True)
+
     args = parser.parse_args()
     path = Path(args.agents_file)
     if args.command == "register":
         with_lock(path, lambda data: update_agent(data, args.name, args.token))
     elif args.command == "grant":
         with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo))
+    elif args.command == "unregister":
+        with_lock(path, lambda data: unregister_agent(data, args.name))
 
 
 if __name__ == "__main__":

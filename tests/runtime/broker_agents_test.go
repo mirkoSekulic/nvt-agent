@@ -17,9 +17,12 @@ func TestBrokerAgentsRegisterAndGrantAreIdempotent(t *testing.T) {
 	}
 
 	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "register", "--name", "frontend", "--token", "frontend-token")
+	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "register", "--name", "unused", "--token", "unused-token")
 	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "register", "--name", "frontend", "--token", "frontend-token")
 	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "grant", "--name", "frontend", "--provider", "github-fork-app", "--repo", "my-user/frontend")
 	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "grant", "--name", "frontend", "--provider", "github-fork-app", "--repo", "my-user/frontend")
+	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "unregister", "--name", "unused")
+	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "unregister", "--name", "unused")
 
 	data, err := os.ReadFile(agentsFile)
 	if err != nil {
@@ -32,6 +35,9 @@ func TestBrokerAgentsRegisterAndGrantAreIdempotent(t *testing.T) {
 	}
 	if strings.Count(text, "id: frontend") != 1 {
 		t.Fatalf("expected one frontend entry:\n%s", text)
+	}
+	if strings.Contains(text, "id: unused") {
+		t.Fatalf("expected unused agent to be removed:\n%s", text)
 	}
 	if !strings.Contains(text, "token-sha256: "+expectedHash) {
 		t.Fatalf("expected token hash %s:\n%s", expectedHash, text)
