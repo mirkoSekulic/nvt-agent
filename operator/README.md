@@ -17,6 +17,8 @@ some future extension.
 ## Files
 
 - `config/crd/bases/nvt.dev_agentruns.yaml`: v1alpha1 CRD manifest
+- `config/broker/broker.yaml`: local/kind broker Deployment, Service, and
+  ConfigMaps for POC clusters
 - `examples/agentrun-basic.yaml`: example disposable agent run
 - `docs/agentrun.md`: API and intended v1 behavior notes
 - `cmd/manager`: controller-runtime manager entrypoint
@@ -46,3 +48,44 @@ logic. Runtime plugins remain configured through the embedded agent config under
 Future scheduler extensions may create `AgentRun` resources, but those
 extensions are separate from `AgentRun` itself and separate from runtime
 plugins.
+
+## Broker POC Manifests
+
+`config/broker/broker.yaml` installs a service-internal broker for local/kind
+POCs:
+
+```sh
+cat > nvt-broker-env.env <<'EOF'
+GITHUB_APP_ID=<app-id>
+GITHUB_APP_INSTALLATION_ID=<installation-id>
+GITHUB_APP_PRIVATE_KEY_BASE64=<base64-private-key>
+EOF
+chmod 600 nvt-broker-env.env
+kubectl create secret generic nvt-broker-env --from-env-file=nvt-broker-env.env
+
+kubectl apply -f config/broker/broker.yaml
+```
+
+The Secret and local env file are intentionally not committed. Avoid putting the
+private key directly in shell command arguments. The manifest expects these keys
+when the example GitHub App provider is enabled in `nvt-broker-config`:
+
+```text
+GITHUB_APP_ID
+GITHUB_APP_INSTALLATION_ID
+GITHUB_APP_PRIVATE_KEY_BASE64
+```
+
+Broker providers are static in `broker.yaml`. Dynamic agent identities and
+grants live in `agents.yaml`; for the POC, `agents.yaml` is the
+`nvt-broker-agents` ConfigMap mounted into the broker, matching the local
+`.broker/agents.yaml` model.
+
+Kubernetes projected ConfigMap updates are eventually reflected in mounted
+files, and the broker already live-reloads its agents policy file locally. The
+kind POC should verify this mounted ConfigMap live-reload path before the
+operator starts writing broker agent policy.
+
+AgentRun Pods already receive `NVT_BROKER_URL=http://nvt-broker:7347`. The
+operator does not update the broker agents ConfigMap yet; hashing AgentRun
+broker tokens into `agents.yaml` is the next slice.
