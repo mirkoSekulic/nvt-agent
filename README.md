@@ -212,6 +212,18 @@ It does not grant direct access to the rest of the host filesystem, but it is
 still powerful because the agent can run commands, start containers, and mutate
 checked-out repos.
 
+Copy an initialized agent definition to a new local agent, with a fresh broker
+token and copied broker grants:
+
+```sh
+make agent-copy FROM=frontend TO=frontend-2
+```
+
+Use `make agent-cp FROM=frontend TO=frontend-2` as the short alias. To create
+the new agent without copying broker grants, pass `COPY_GRANTS=0`. To also copy
+the source workspace contents and per-agent auth files, pass `COPY_WORKSPACE=1`.
+Use `COPY_AUTH=0` with `COPY_WORKSPACE=1` to leave auth behind.
+
 This creates:
 
 ```text
@@ -253,6 +265,7 @@ make agent-ps
 make agent-logs NAME=frontend
 make agent-shell NAME=frontend
 make agent-doctor NAME=frontend
+make agent-copy FROM=frontend TO=frontend-2
 make agent-down NAME=frontend
 make agent-rm NAME=frontend FORCE=1
 ```
@@ -575,6 +588,19 @@ specific repo before the agent uses brokered credentials:
 ```sh
 make agent-init NAME=frontend
 make agent-grant NAME=frontend PROVIDER=github-fork-app REPO=my-user/frontend
+```
+
+Use `agent-copy` to create an equivalent parallel agent. It copies
+`.agents/<FROM>/agent.yaml`, copies `workspace/AGENTS.local.md` when present,
+creates fresh env/auth/workspace/plugin directories, writes a new broker token,
+and copies the broker grants by default. Workspace contents are copied only
+when requested; auth is included with workspace copies unless disabled:
+
+```sh
+make agent-copy FROM=frontend TO=frontend-2
+make agent-copy FROM=frontend TO=frontend-3 COPY_GRANTS=0
+make agent-copy FROM=frontend TO=frontend-4 COPY_WORKSPACE=1
+make agent-copy FROM=frontend TO=frontend-5 COPY_WORKSPACE=1 COPY_AUTH=0
 ```
 
 The broker enforces the intersection of the provider ceiling and the agent

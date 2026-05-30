@@ -130,6 +130,18 @@ This creates `.agents/$AGENT/env`, `.agents/$AGENT/agent.yaml`, workspace,
 auth, and custom plugin directories. It also creates a per-agent broker token
 and registers only the token hash in `.broker/agents.yaml` with no grants.
 
+To create a parallel local agent from an existing initialized one, copy the
+agent definition and broker grants while generating a fresh broker token:
+
+```sh
+make agent-copy FROM=$AGENT TO=nvt-dev-copy
+```
+
+`make agent-cp` is the same command. Pass `COPY_GRANTS=0` to create the new
+agent without copying broker grants. Pass `COPY_WORKSPACE=1` to copy workspace
+contents and per-agent auth files. Add `COPY_AUTH=0` if you want the workspace
+copy without auth.
+
 Grant the agent access to the repository:
 
 ```sh

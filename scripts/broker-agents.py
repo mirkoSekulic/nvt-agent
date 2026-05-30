@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import fcntl
 import hashlib
 import os
 from pathlib import Path
 
 import yaml
+
+
+class NoAliasDumper(yaml.SafeDumper):
+    def ignore_aliases(self, data):
+        return True
 
 
 def load(path):
@@ -25,7 +31,7 @@ def write_atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as file:
-        yaml.safe_dump(data, file, sort_keys=False)
+        yaml.dump(data, file, Dumper=NoAliasDumper, sort_keys=False)
     tmp.replace(path)
 
 
@@ -39,6 +45,20 @@ def update_agent(data, name, token):
     current = next((agent for agent in data["agents"] if isinstance(agent, dict) and agent.get("id") == name), None)
     grants = current.get("grants", []) if isinstance(current, dict) and isinstance(current.get("grants"), list) else []
     agents.append({"id": name, "token-sha256": wanted_hash, "grants": grants})
+    data["agents"] = sorted(agents, key=lambda agent: agent["id"])
+
+
+def copy_register_agent(data, from_name, to_name, token, copy_grants):
+    wanted_hash = token_hash(token)
+    source = next((agent for agent in data["agents"] if isinstance(agent, dict) and agent.get("id") == from_name), None)
+    if source is None:
+        raise SystemExit(f"agent {from_name} is not registered; run agent-init first")
+    if copy_grants:
+        grants = source.get("grants", [])
+    else:
+        grants = []
+    agents = [agent for agent in data["agents"] if isinstance(agent, dict) and agent.get("id") != to_name]
+    agents.append({"id": to_name, "token-sha256": wanted_hash, "grants": copy.deepcopy(grants)})
     data["agents"] = sorted(agents, key=lambda agent: agent["id"])
 
 
@@ -82,6 +102,12 @@ def main():
     register.add_argument("--name", required=True)
     register.add_argument("--token", required=True)
 
+    copy_register = subparsers.add_parser("copy-register")
+    copy_register.add_argument("--from-name", required=True)
+    copy_register.add_argument("--name", required=True)
+    copy_register.add_argument("--token", required=True)
+    copy_register.add_argument("--copy-grants", action=argparse.BooleanOptionalAction, default=True)
+
     grant = subparsers.add_parser("grant")
     grant.add_argument("--name", required=True)
     grant.add_argument("--provider", required=True)
@@ -94,6 +120,8 @@ def main():
     path = Path(args.agents_file)
     if args.command == "register":
         with_lock(path, lambda data: update_agent(data, args.name, args.token))
+    elif args.command == "copy-register":
+        with_lock(path, lambda data: copy_register_agent(data, args.from_name, args.name, args.token, args.copy_grants))
     elif args.command == "grant":
         with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo))
     elif args.command == "unregister":

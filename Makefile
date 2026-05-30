@@ -2,7 +2,7 @@ TYPE ?= codex
 AUTONOMY ?= trusted-local
 DIR ?= runtime/plugins
 
-.PHONY: runtime-build broker-build infra-up infra-down infra-network-rm agent-init agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -22,6 +22,11 @@ infra-network-rm:
 agent-init:
 	@test -n "$(NAME)" || (echo "usage: make agent-init NAME=<name> [TYPE=codex|claude] [AUTONOMY=trusted-local|interactive]"; exit 1)
 	bash scripts/agent-init.sh --name "$(NAME)" --type "$(TYPE)" --autonomy "$(AUTONOMY)"
+
+agent-copy agent-cp:
+	@test -n "$(FROM)" || (echo "usage: make $@ FROM=<source> TO=<target> [COPY_GRANTS=0] [COPY_WORKSPACE=1] [COPY_AUTH=1] [FORCE=1]"; exit 1)
+	@test -n "$(TO)" || (echo "usage: make $@ FROM=<source> TO=<target> [COPY_GRANTS=0] [COPY_WORKSPACE=1] [COPY_AUTH=1] [FORCE=1]"; exit 1)
+	bash scripts/agent-copy.sh --from "$(FROM)" --to "$(TO)" $(if $(FORCE),--force) $(if $(filter 0 false no,$(COPY_GRANTS)),--no-copy-grants) $(if $(filter 1 true yes,$(COPY_WORKSPACE)),--copy-workspace) $(if $(filter 1 true yes,$(COPY_AUTH)),--copy-auth) $(if $(filter 0 false no,$(COPY_AUTH)),--no-copy-auth)
 
 agent-grant:
 	@test -n "$(NAME)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
