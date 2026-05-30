@@ -26,7 +26,7 @@ agent-init:
 agent-copy agent-cp:
 	@test -n "$(FROM)" || (echo "usage: make $@ FROM=<source> TO=<target> [COPY_GRANTS=0] [COPY_WORKSPACE=1] [COPY_AUTH=1] [FORCE=1]"; exit 1)
 	@test -n "$(TO)" || (echo "usage: make $@ FROM=<source> TO=<target> [COPY_GRANTS=0] [COPY_WORKSPACE=1] [COPY_AUTH=1] [FORCE=1]"; exit 1)
-	bash scripts/agent-copy.sh --from "$(FROM)" --to "$(TO)" $(if $(FORCE),--force) $(if $(filter 0 false no,$(COPY_GRANTS)),--no-copy-grants) $(if $(filter 1 true yes,$(COPY_WORKSPACE)),--copy-workspace) $(if $(filter 1 true yes,$(COPY_AUTH)),--copy-auth)
+	bash scripts/agent-copy.sh --from "$(FROM)" --to "$(TO)" $(if $(FORCE),--force) $(if $(filter 0 false no,$(COPY_GRANTS)),--no-copy-grants) $(if $(filter 1 true yes,$(COPY_WORKSPACE)),--copy-workspace) $(if $(filter 1 true yes,$(COPY_AUTH)),--copy-auth) $(if $(filter 0 false no,$(COPY_AUTH)),--no-copy-auth)
 
 agent-grant:
 	@test -n "$(NAME)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)

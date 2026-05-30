@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --from <name> --to <name> [--force] [--no-copy-grants] [--copy-workspace] [--copy-auth]" >&2
+  echo "usage: $0 --from <name> --to <name> [--force] [--no-copy-grants] [--copy-workspace] [--copy-auth|--no-copy-auth]" >&2
 }
 
 render_template() {
@@ -28,6 +28,7 @@ force=0
 copy_grants=1
 copy_workspace=0
 copy_auth=0
+copy_auth_explicit=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -61,6 +62,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --copy-auth)
       copy_auth=1
+      copy_auth_explicit=1
+      shift
+      ;;
+    --no-copy-auth)
+      copy_auth=0
+      copy_auth_explicit=1
       shift
       ;;
     -h|--help)
@@ -78,6 +85,10 @@ done
 if [ -z "$from_name" ] || [ -z "$to_name" ]; then
   usage
   exit 1
+fi
+
+if [ "$copy_workspace" -eq 1 ] && [ "$copy_auth_explicit" -eq 0 ]; then
+  copy_auth=1
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

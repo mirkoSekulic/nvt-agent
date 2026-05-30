@@ -105,7 +105,7 @@ func TestAgentCopyCanCopyWorkspaceAndAuth(t *testing.T) {
 	mustWriteFile(t, filepath.Join(srcDir, "auth", "claude", "auth.json"), "claude auth\n")
 	mustWriteFile(t, filepath.Join(srcDir, "custom-plugins", "plugin-state"), "plugin state\n")
 
-	runInRoot(t, f, root, true, "make", "agent-copy", "FROM="+src, "TO="+dst, "COPY_WORKSPACE=1", "COPY_AUTH=1")
+	runInRoot(t, f, root, true, "make", "agent-copy", "FROM="+src, "TO="+dst, "COPY_WORKSPACE=1")
 
 	if got := mustReadFile(t, filepath.Join(dstDir, "workspace", "repo.txt")); got != "workspace state\n" {
 		t.Fatalf("unexpected copied workspace file: %q", got)
@@ -121,6 +121,36 @@ func TestAgentCopyCanCopyWorkspaceAndAuth(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dstDir, "custom-plugins", "plugin-state")); !os.IsNotExist(err) {
 		t.Fatalf("expected plugin state not to be copied by workspace/auth options")
+	}
+}
+
+func TestAgentCopyWorkspaceCanSkipAuth(t *testing.T) {
+	root := repoRoot(t)
+	src := fmt.Sprintf("copy-noauth-src-%d", os.Getpid())
+	dst := fmt.Sprintf("copy-noauth-dst-%d", os.Getpid())
+	cleanupAgentCopyTest(t, root, src, dst)
+
+	f := newFixture(t)
+	runInRoot(t, f, root, true, "make", "agent-init", "NAME="+src)
+
+	srcDir := filepath.Join(root, ".agents", src)
+	dstDir := filepath.Join(root, ".agents", dst)
+	mustWriteFile(t, filepath.Join(srcDir, "workspace", "repo.txt"), "workspace state\n")
+	mustWriteFile(t, filepath.Join(srcDir, "auth", "codex", "auth.json"), "codex auth\n")
+	mustWriteFile(t, filepath.Join(srcDir, "auth", "claude", "auth.json"), "claude auth\n")
+
+	runInRoot(t, f, root, true, "make", "agent-copy", "FROM="+src, "TO="+dst, "COPY_WORKSPACE=1", "COPY_AUTH=0")
+
+	if got := mustReadFile(t, filepath.Join(dstDir, "workspace", "repo.txt")); got != "workspace state\n" {
+		t.Fatalf("unexpected copied workspace file: %q", got)
+	}
+	for _, path := range []string{
+		filepath.Join(dstDir, "auth", "codex", "auth.json"),
+		filepath.Join(dstDir, "auth", "claude", "auth.json"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected auth not to be copied with COPY_AUTH=0: %s", path)
+		}
 	}
 }
 
