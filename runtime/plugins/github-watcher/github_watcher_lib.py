@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 
-DEFAULT_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"]
+DEFAULT_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]
 FAILURE_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
 PASSING_CONCLUSIONS = {"success", "skipped", "neutral"}
 

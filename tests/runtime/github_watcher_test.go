@@ -41,11 +41,62 @@ default-provider: fork-app
 	if len(labels) != 2 || labels[0] != "frontend" || labels[1] != "urgent" {
 		t.Fatalf("unexpected labels: %#v", pr["labels"])
 	}
+	for _, field := range []string{"comments", "reviews"} {
+		config, ok := pr[field].(map[string]any)
+		if !ok {
+			t.Fatalf("registration missing %s config: %#v", field, pr)
+		}
+		associations, _ := config["author-associations"].([]any)
+		if !containsAnyString(associations, "CONTRIBUTOR") {
+			t.Fatalf("expected CONTRIBUTOR in %s author associations, got %#v", field, associations)
+		}
+	}
 
 	output := f.runWithEnv(githubWatchBin(f.root), true, env, "list")
 	if !strings.Contains(output, "my-user/my-repo#123") || !strings.Contains(output, "labels=frontend,urgent") {
 		t.Fatalf("unexpected list output:\n%s", output)
 	}
+}
+
+func containsAnyString(values []any, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGithubWatcherDefaultAssociationsAcceptContributor(t *testing.T) {
+	f := newFixture(t)
+	script := fmt.Sprintf(`
+import importlib.util
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
+
+watch = lib.normalize_watch(
+    {"repo": "my-user/my-repo", "number": 123},
+    {"default-provider": "fork-app"},
+    "test",
+)
+for field in ("comments", "reviews"):
+    associations = watch[field]["author-associations"]
+    if "CONTRIBUTOR" not in associations:
+        raise SystemExit(f"CONTRIBUTOR missing from {field}: {associations}")
+    if not lib.should_accept_author({"author_association": "CONTRIBUTOR"}, associations):
+        raise SystemExit(f"CONTRIBUTOR was not accepted for {field}: {associations}")
+    if lib.should_accept_author({"author_association": "FIRST_TIME_CONTRIBUTOR"}, associations):
+        raise SystemExit(f"FIRST_TIME_CONTRIBUTOR should not be accepted for {field}: {associations}")
+`, quoteYAML(f.root))
+
+	f.runCommand("python3", true, "-c", script)
 }
 
 func TestGithubWatchRegisterPersistsCloseDefaultsAndFlags(t *testing.T) {
