@@ -55,16 +55,20 @@ plugins.
 POCs:
 
 ```sh
-kubectl create secret generic nvt-broker-env \
-  --from-literal=GITHUB_APP_ID='<app-id>' \
-  --from-literal=GITHUB_APP_INSTALLATION_ID='<installation-id>' \
-  --from-literal=GITHUB_APP_PRIVATE_KEY_BASE64='<base64-private-key>'
+cat > nvt-broker-env.env <<'EOF'
+GITHUB_APP_ID=<app-id>
+GITHUB_APP_INSTALLATION_ID=<installation-id>
+GITHUB_APP_PRIVATE_KEY_BASE64=<base64-private-key>
+EOF
+chmod 600 nvt-broker-env.env
+kubectl create secret generic nvt-broker-env --from-env-file=nvt-broker-env.env
 
 kubectl apply -f config/broker/broker.yaml
 ```
 
-The Secret is intentionally not committed. The manifest expects these keys when
-the example GitHub App provider is enabled in `nvt-broker-config`:
+The Secret and local env file are intentionally not committed. Avoid putting the
+private key directly in shell command arguments. The manifest expects these keys
+when the example GitHub App provider is enabled in `nvt-broker-config`:
 
 ```text
 GITHUB_APP_ID

@@ -81,28 +81,24 @@ spec:
                 name: nvt-broker-env
           volumeMounts:
             - name: broker-config
-              mountPath: /config/broker.yaml
-              subPath: broker.yaml
-              readOnly: true
-            - name: broker-agents
-              mountPath: /config/agents.yaml
-              subPath: agents.yaml
+              mountPath: /config
               readOnly: true
             - name: broker-state
               mountPath: /state
       volumes:
         - name: broker-config
-          configMap:
-            name: nvt-broker-config
-            items:
-              - key: broker.yaml
-                path: broker.yaml
-        - name: broker-agents
-          configMap:
-            name: nvt-broker-agents
-            items:
-              - key: agents.yaml
-                path: agents.yaml
+          projected:
+            sources:
+              - configMap:
+                  name: nvt-broker-config
+                  items:
+                    - key: broker.yaml
+                      path: broker.yaml
+              - configMap:
+                  name: nvt-broker-agents
+                  items:
+                    - key: agents.yaml
+                      path: agents.yaml
         - name: broker-state
           emptyDir: {}
 ---
