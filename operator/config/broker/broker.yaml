@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-broker-config
+  labels:
+    app.kubernetes.io/name: nvt-broker
+    app.kubernetes.io/component: broker
+data:
+  broker.yaml: |
+    # Static broker provider config. Provider root secrets are read from the
+    # nvt-broker-env Secret through the env var names below.
+    #
+    # Example GitHub App provider:
+    # providers:
+    #   - name: github-main-app
+    #     plugin: github-app
+    #     config:
+    #       app-id-env: GITHUB_APP_ID
+    #       installation-id-env: GITHUB_APP_INSTALLATION_ID
+    #       private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
+    #       api-url: https://api.github.com
+    #     allow:
+    #       repositories:
+    #         - mirkoSekulic/*
+    #       permissions:
+    #         contents: read
+    #         pull_requests: read
+    #         checks: read
+    #       methods:
+    #         - GET
+    providers: []
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-broker-agents
+  labels:
+    app.kubernetes.io/name: nvt-broker
+    app.kubernetes.io/component: broker
+data:
+  agents.yaml: |
+    agents: []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvt-broker
+  labels:
+    app.kubernetes.io/name: nvt-broker
+    app.kubernetes.io/component: broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvt-broker
+      app.kubernetes.io/component: broker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nvt-broker
+        app.kubernetes.io/component: broker
+    spec:
+      containers:
+        - name: broker
+          image: nvt-broker:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 7347
+          env:
+            - name: NVT_BROKER_BIND
+              value: 0.0.0.0:7347
+            - name: NVT_BROKER_CONFIG
+              value: /config/broker.yaml
+            - name: NVT_BROKER_AGENTS_CONFIG
+              value: /config/agents.yaml
+            - name: NVT_BROKER_AUDIT_LOG
+              value: /state/audit.jsonl
+          envFrom:
+            - secretRef:
+                name: nvt-broker-env
+          volumeMounts:
+            - name: broker-config
+              mountPath: /config/broker.yaml
+              subPath: broker.yaml
+              readOnly: true
+            - name: broker-agents
+              mountPath: /config/agents.yaml
+              subPath: agents.yaml
+              readOnly: true
+            - name: broker-state
+              mountPath: /state
+      volumes:
+        - name: broker-config
+          configMap:
+            name: nvt-broker-config
+            items:
+              - key: broker.yaml
+                path: broker.yaml
+        - name: broker-agents
+          configMap:
+            name: nvt-broker-agents
+            items:
+              - key: agents.yaml
+                path: agents.yaml
+        - name: broker-state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvt-broker
+  labels:
+    app.kubernetes.io/name: nvt-broker
+    app.kubernetes.io/component: broker
+spec:
+  selector:
+    app.kubernetes.io/name: nvt-broker
+    app.kubernetes.io/component: broker
+  ports:
+    - name: http
+      port: 7347
+      targetPort: 7347

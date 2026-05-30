@@ -208,3 +208,52 @@ The event-webhook runtime plugin can post callbacks to the operator. The
 operator can then match received event names against `spec.lifecycle.completeOn`
 and `spec.lifecycle.failOn` to update `status.phase`, set timestamps, and apply
 TTL cleanup behavior.
+
+## Broker POC Deployment
+
+`operator/config/broker/broker.yaml` provides local/kind POC manifests for the
+broker endpoint used by AgentRun Pods:
+
+```text
+http://nvt-broker:7347
+```
+
+The manifest creates:
+
+- `nvt-broker-config` ConfigMap with `broker.yaml`
+- `nvt-broker-agents` ConfigMap with initial `agents.yaml`
+- `nvt-broker` Deployment using `nvt-broker:latest`
+- `nvt-broker` ClusterIP Service on port `7347`
+
+Create broker root secrets separately before applying the manifest:
+
+```sh
+kubectl create secret generic nvt-broker-env \
+  --from-literal=GITHUB_APP_ID='<app-id>' \
+  --from-literal=GITHUB_APP_INSTALLATION_ID='<installation-id>' \
+  --from-literal=GITHUB_APP_PRIVATE_KEY_BASE64='<base64-private-key>'
+```
+
+No real Secret values are committed. Static broker providers live in
+`broker.yaml` and can reference these env var names:
+
+```text
+GITHUB_APP_ID
+GITHUB_APP_INSTALLATION_ID
+GITHUB_APP_PRIVATE_KEY_BASE64
+```
+
+Dynamic agent identities and grants live in `agents.yaml`. For this POC,
+`agents.yaml` is mounted from the `nvt-broker-agents` ConfigMap and starts as:
+
+```yaml
+agents: []
+```
+
+This mirrors the local `.broker/agents.yaml` model. Kubernetes projected
+ConfigMap updates are eventually reflected in mounted files, and the broker
+live-reloads its agents policy file; the kind POC should verify this path.
+
+The operator does not update `nvt-broker-agents` yet. Broker policy mutation,
+hashing AgentRun broker tokens into `agents.yaml`, callback HTTP endpoints,
+finalizers, TTL cleanup, and scheduler logic remain future work.
