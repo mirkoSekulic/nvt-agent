@@ -52,6 +52,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&nvtv1alpha1.AgentRun{}).
+		Owns(&corev1.ConfigMap{}).
 		Complete(r); err != nil {
 		return fmt.Errorf("build AgentRun controller: %w", err)
 	}
@@ -65,23 +66,20 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentR
 		return err
 	}
 
-	var existing corev1.ConfigMap
-	key := client.ObjectKeyFromObject(desired)
-	if err := r.Get(ctx, key, &existing); err != nil {
-		if errors.IsNotFound(err) {
-			if createErr := r.Create(ctx, desired); createErr != nil {
-				return fmt.Errorf("create AgentRun config ConfigMap: %w", createErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("get AgentRun config ConfigMap: %w", err)
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      desired.Name,
+			Namespace: desired.Namespace,
+		},
 	}
-
-	existing.Labels = desired.Labels
-	existing.OwnerReferences = desired.OwnerReferences
-	existing.Data = desired.Data
-	if err := r.Update(ctx, &existing); err != nil {
-		return fmt.Errorf("update AgentRun config ConfigMap: %w", err)
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
+		configMap.Labels = desired.Labels
+		configMap.OwnerReferences = desired.OwnerReferences
+		configMap.Data = desired.Data
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile AgentRun config ConfigMap: %w", err)
 	}
 
 	return nil

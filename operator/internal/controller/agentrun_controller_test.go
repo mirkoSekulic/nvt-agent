@@ -189,6 +189,19 @@ func TestReconcileUpdatesAgentConfigMapWhenConfigChanges(t *testing.T) {
 	}
 }
 
+func TestRenderAgentConfigYAMLRejectsMalformedConfig(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{"plugins": [`)}
+
+	_, err := RenderAgentConfigYAML(agentRun)
+	if err == nil {
+		t.Fatal("expected malformed config to fail")
+	}
+	if !strings.Contains(err.Error(), "render AgentRun agent config") {
+		t.Fatalf("expected render error context, got %v", err)
+	}
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
