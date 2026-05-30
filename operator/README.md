@@ -39,9 +39,10 @@ token Secrets into the agent container environment, and uses an ephemeral
 can run `docker info`.
 
 The controller syncs basic Pod-phase status only: it records `status.podName`,
-sets `Running` and `startedAt` when the Pod is running, and sets `Failed` when
-the Pod fails. Callback HTTP endpoints, lifecycle completion rules, scheduler
-logic, and TTL cleanup remain intentionally future work.
+sets `Running` and `startedAt` when the Pod is running, sets `Failed` when the
+Pod fails, and accepts cluster-internal lifecycle callbacks that can mark the
+run `Completed` or `Failed`. Scheduler logic, Pod deletion, and TTL cleanup
+remain intentionally future work.
 
 This directory does not include scheduler CRDs or GitHub-specific operator
 logic. Runtime plugins remain configured through the embedded agent config under
@@ -111,5 +112,37 @@ updates through this mounted file path.
 
 AgentRun Pods receive `NVT_BROKER_URL=http://nvt-broker:7347` and a
 per-run `NVT_BROKER_TOKEN`. Broker provider configuration remains static;
-callback endpoints, lifecycle completion, TTL cleanup, scheduler behavior, and
-a broker admin API remain future work.
+TTL cleanup, scheduler behavior, and a broker admin API remain future work.
+
+## AgentRun Callback Endpoint
+
+The manager exposes a cluster-internal callback HTTP listener on
+`--callback-bind-address` (default `:8082`). A Service for the operator should
+route to that port for POC clusters; no external Ingress is included.
+
+The event-webhook plugin should post lifecycle events to:
+
+```text
+POST /v1/agentruns/{namespace}/{name}/events
+```
+
+Requests must use:
+
+```text
+Authorization: Bearer <NVT_OPERATOR_CALLBACK_TOKEN>
+```
+
+The token is read from the same-namespace Secret
+`<agentrun-name>-callback-token` key `NVT_OPERATOR_CALLBACK_TOKEN` and compared
+without logging or echoing token material.
+
+For event-webhook payloads, the operator resolves the lifecycle event name from
+`event.plugin_event` when set, otherwise from `event.event`. Missing event names
+are rejected with `400`. Unknown events are accepted as no-ops with `202`.
+
+When the event name matches `spec.lifecycle.completeOn`, the operator sets
+`status.phase=Completed`, `status.finishedAt`, and
+`status.reason="Completed by lifecycle event <event-name>"`. Matching
+`spec.lifecycle.failOn` sets `Failed` with the equivalent failed reason. Existing
+terminal phases (`Completed`, `Failed`, `DeadlineExceeded`) are not overwritten,
+and Pod status sync also avoids downgrading terminal phases.

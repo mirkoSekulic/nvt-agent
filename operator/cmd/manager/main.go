@@ -4,12 +4,14 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -29,9 +31,11 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
+	var callbackAddr string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&callbackAddr, "callback-bind-address", ":8082", "The address the AgentRun callback endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -58,6 +62,10 @@ func main() {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}
+	if err = mgr.Add(callbackServer(callbackAddr, controller.NewAgentRunCallbackHandler(mgr.GetClient()))); err != nil {
+		ctrl.Log.Error(err, "unable to add AgentRun callback server")
+		os.Exit(1)
+	}
 
 	if err = mgr.AddHealthzCheck("healthz", func(_ *http.Request) error { return nil }); err != nil {
 		ctrl.Log.Error(err, "unable to set up health check")
@@ -72,5 +80,18 @@ func main() {
 	if err = mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+func callbackServer(addr string, handler http.Handler) manager.Runnable {
+	shutdownTimeout := 10 * time.Second
+	return &manager.Server{
+		Name: "agentrun-callbacks",
+		Server: &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+		},
+		ShutdownTimeout: &shutdownTimeout,
 	}
 }

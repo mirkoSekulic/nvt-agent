@@ -1009,6 +1009,34 @@ func TestReconcileSetsFailedWhenPodFails(t *testing.T) {
 	}
 }
 
+func TestSyncAgentRunStatusFromPodDoesNotDowngradeCompleted(t *testing.T) {
+	finishedAt := metav1.Now()
+	agentRun := testAgentRun()
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseCompleted
+	agentRun.Status.FinishedAt = &finishedAt
+	agentRun.Status.Reason = "Completed by lifecycle event plugin.agent.signal.done"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: AgentPodName(agentRun.Name)},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	changed := SyncAgentRunStatusFromPod(agentRun, pod)
+
+	if !changed {
+		t.Fatal("expected podName sync to be recorded")
+	}
+	if agentRun.Status.PodName != pod.Name {
+		t.Fatalf("expected podName %q, got %q", pod.Name, agentRun.Status.PodName)
+	}
+	if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseCompleted {
+		t.Fatalf("expected Completed phase to remain terminal, got %q", agentRun.Status.Phase)
+	}
+	if !agentRun.Status.FinishedAt.Equal(&finishedAt) ||
+		agentRun.Status.Reason != "Completed by lifecycle event plugin.agent.signal.done" {
+		t.Fatalf("terminal status details changed: %#v", agentRun.Status)
+	}
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
