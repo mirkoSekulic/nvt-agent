@@ -1,8 +1,7 @@
 # nvt Kubernetes Operator
 
-This directory contains the initial API contract for a future nvt Kubernetes
-operator. It is intentionally API and documentation only; no controller is
-implemented here yet.
+This directory contains the initial API contract and controller scaffold for the
+nvt Kubernetes operator.
 
 The first resource is `AgentRun`:
 
@@ -20,12 +19,20 @@ some future extension.
 - `config/crd/bases/nvt.dev_agentruns.yaml`: v1alpha1 CRD manifest
 - `examples/agentrun-basic.yaml`: example disposable agent run
 - `docs/agentrun.md`: API and intended v1 behavior notes
+- `cmd/manager`: controller-runtime manager entrypoint
+- `internal/controller`: AgentRun reconciler
 
 ## Scope
 
-This directory does not include scheduler CRDs, controller code, or
-GitHub-specific operator logic. Runtime plugins remain configured through the
-embedded agent config under `spec.agent.config`.
+The current controller initializes empty `status.phase` values to `Pending` and
+renders `spec.agent.config` into an owned ConfigMap named
+`<agentrun-name>-agent-config` with the `agent.yaml` key. Pod creation and
+mounting that ConfigMap at `/nvt-agent/agent.yaml` are intentionally not
+implemented yet.
+
+This directory does not include scheduler CRDs or GitHub-specific operator
+logic. Runtime plugins remain configured through the embedded agent config under
+`spec.agent.config`.
 
 Future scheduler extensions may create `AgentRun` resources, but those
 extensions are separate from `AgentRun` itself and separate from runtime

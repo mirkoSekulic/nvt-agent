@@ -90,7 +90,14 @@ are provider-specific and follow the existing broker behavior.
 
 ### `spec.agent.config`
 
-Embedded nvt agent configuration rendered by the future controller to:
+Embedded nvt agent configuration rendered by the controller into an owned
+ConfigMap:
+
+```text
+<agentrun-name>-agent-config
+```
+
+The ConfigMap stores the rendered YAML under:
 
 ```text
 /nvt-agent/agent.yaml
@@ -159,14 +166,17 @@ status:
 
 ## Intended v1 Controller Behavior
 
-When an `AgentRun` exists, the future controller should create one pod with the
-nvt agent runtime and a Docker-in-Docker sidecar.
+The current controller initializes empty `status.phase` values to `Pending` and
+renders `spec.agent.config` to a ConfigMap with the key `agent.yaml`.
+
+Next, the controller should create one pod with the nvt agent runtime and a
+Docker-in-Docker sidecar. That pod should mount the rendered ConfigMap at
+`/nvt-agent/agent.yaml`.
 
 For each run, the operator should create a broker token secret and an operator
 callback token secret. Static broker providers remain outside `AgentRun`; the
 run only requests dynamic grants against them.
 
-The controller should render `spec.agent.config` to `/nvt-agent/agent.yaml`.
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.
 
