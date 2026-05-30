@@ -88,6 +88,42 @@ func TestAgentCopyCanSkipGrantCopying(t *testing.T) {
 	}
 }
 
+func TestAgentCopyCanCopyWorkspaceAndAuth(t *testing.T) {
+	root := repoRoot(t)
+	src := fmt.Sprintf("copy-state-src-%d", os.Getpid())
+	dst := fmt.Sprintf("copy-state-dst-%d", os.Getpid())
+	cleanupAgentCopyTest(t, root, src, dst)
+
+	f := newFixture(t)
+	runInRoot(t, f, root, true, "make", "agent-init", "NAME="+src)
+
+	srcDir := filepath.Join(root, ".agents", src)
+	dstDir := filepath.Join(root, ".agents", dst)
+	mustWriteFile(t, filepath.Join(srcDir, "workspace", "repo.txt"), "workspace state\n")
+	mustWriteFile(t, filepath.Join(srcDir, "workspace", ".hidden"), "hidden workspace state\n")
+	mustWriteFile(t, filepath.Join(srcDir, "auth", "codex", "auth.json"), "codex auth\n")
+	mustWriteFile(t, filepath.Join(srcDir, "auth", "claude", "auth.json"), "claude auth\n")
+	mustWriteFile(t, filepath.Join(srcDir, "custom-plugins", "plugin-state"), "plugin state\n")
+
+	runInRoot(t, f, root, true, "make", "agent-copy", "FROM="+src, "TO="+dst, "COPY_WORKSPACE=1", "COPY_AUTH=1")
+
+	if got := mustReadFile(t, filepath.Join(dstDir, "workspace", "repo.txt")); got != "workspace state\n" {
+		t.Fatalf("unexpected copied workspace file: %q", got)
+	}
+	if got := mustReadFile(t, filepath.Join(dstDir, "workspace", ".hidden")); got != "hidden workspace state\n" {
+		t.Fatalf("unexpected copied hidden workspace file: %q", got)
+	}
+	if got := mustReadFile(t, filepath.Join(dstDir, "auth", "codex", "auth.json")); got != "codex auth\n" {
+		t.Fatalf("unexpected copied codex auth: %q", got)
+	}
+	if got := mustReadFile(t, filepath.Join(dstDir, "auth", "claude", "auth.json")); got != "claude auth\n" {
+		t.Fatalf("unexpected copied claude auth: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "custom-plugins", "plugin-state")); !os.IsNotExist(err) {
+		t.Fatalf("expected plugin state not to be copied by workspace/auth options")
+	}
+}
+
 func cleanupAgentCopyTest(t *testing.T, root string, names ...string) {
 	t.Helper()
 	for _, name := range names {

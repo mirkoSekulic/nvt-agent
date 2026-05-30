@@ -138,7 +138,8 @@ make agent-copy FROM=$AGENT TO=nvt-dev-copy
 ```
 
 `make agent-cp` is the same command. Pass `COPY_GRANTS=0` to create the new
-agent without copying broker grants.
+agent without copying broker grants. Pass `COPY_WORKSPACE=1` to copy workspace
+contents, and `COPY_AUTH=1` to copy per-agent auth files.
 
 Grant the agent access to the repository:
 

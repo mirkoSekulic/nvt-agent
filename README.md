@@ -220,7 +220,9 @@ make agent-copy FROM=frontend TO=frontend-2
 ```
 
 Use `make agent-cp FROM=frontend TO=frontend-2` as the short alias. To create
-the new agent without copying broker grants, pass `COPY_GRANTS=0`.
+the new agent without copying broker grants, pass `COPY_GRANTS=0`. To also copy
+the source workspace contents or per-agent auth files, pass `COPY_WORKSPACE=1`
+or `COPY_AUTH=1`.
 
 This creates:
 
@@ -591,11 +593,13 @@ make agent-grant NAME=frontend PROVIDER=github-fork-app REPO=my-user/frontend
 Use `agent-copy` to create an equivalent parallel agent. It copies
 `.agents/<FROM>/agent.yaml`, copies `workspace/AGENTS.local.md` when present,
 creates fresh env/auth/workspace/plugin directories, writes a new broker token,
-and copies the broker grants by default:
+and copies the broker grants by default. Workspace contents and auth files are
+copied only when requested:
 
 ```sh
 make agent-copy FROM=frontend TO=frontend-2
 make agent-copy FROM=frontend TO=frontend-3 COPY_GRANTS=0
+make agent-copy FROM=frontend TO=frontend-4 COPY_WORKSPACE=1 COPY_AUTH=1
 ```
 
 The broker enforces the intersection of the provider ceiling and the agent

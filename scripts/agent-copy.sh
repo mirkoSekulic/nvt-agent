@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --from <name> --to <name> [--force] [--no-copy-grants]" >&2
+  echo "usage: $0 --from <name> --to <name> [--force] [--no-copy-grants] [--copy-workspace] [--copy-auth]" >&2
 }
 
 render_template() {
@@ -26,6 +26,8 @@ from_name=""
 to_name=""
 force=0
 copy_grants=1
+copy_workspace=0
+copy_auth=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -51,6 +53,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-copy-grants)
       copy_grants=0
+      shift
+      ;;
+    --copy-workspace)
+      copy_workspace=1
+      shift
+      ;;
+    --copy-auth)
+      copy_auth=1
       shift
       ;;
     -h|--help)
@@ -87,6 +97,8 @@ fi
 from_dir="$repo_root/.agents/$from_name"
 to_dir="$repo_root/.agents/$to_name"
 from_config_file="$from_dir/agent.yaml"
+from_workspace_dir="$from_dir/workspace"
+from_auth_dir="$from_dir/auth"
 to_env_file="$to_dir/env"
 to_config_file="$to_dir/agent.yaml"
 to_workspace_dir="$to_dir/workspace"
@@ -149,9 +161,17 @@ cp "$from_config_file" "$to_config_file"
 echo "created $to_config_file"
 
 from_local_instructions_file="$from_dir/workspace/AGENTS.local.md"
-if [ -f "$from_local_instructions_file" ]; then
+if [ "$copy_workspace" -eq 1 ] && [ -d "$from_workspace_dir" ]; then
+  cp -R "$from_workspace_dir"/. "$to_workspace_dir"/
+  echo "copied $from_workspace_dir to $to_workspace_dir"
+elif [ -f "$from_local_instructions_file" ]; then
   cp "$from_local_instructions_file" "$to_local_instructions_file"
   echo "created $to_local_instructions_file"
+fi
+
+if [ "$copy_auth" -eq 1 ] && [ -d "$from_auth_dir" ]; then
+  cp -R "$from_auth_dir"/. "$to_dir/auth"/
+  echo "copied $from_auth_dir to $to_dir/auth"
 fi
 
 copy_grants_arg="--copy-grants"
