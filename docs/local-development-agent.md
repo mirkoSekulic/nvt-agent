@@ -328,6 +328,10 @@ github-watch list
 
 Dynamic registrations are stored under the agent state directory and survive
 container restart.
+By default they accept PR comments and reviews from `OWNER`, `MEMBER`,
+`COLLABORATOR`, and `CONTRIBUTOR`; include `CONTRIBUTOR` in static watcher
+config for fork, upstream, or organization PR workflows where GitHub reports
+maintainers that way.
 
 ## Troubleshooting
 

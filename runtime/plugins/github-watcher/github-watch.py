@@ -3,6 +3,7 @@ import argparse
 import sys
 
 from github_watcher_lib import (
+    DEFAULT_ASSOCIATIONS,
     FileLock,
     fail,
     load_config,
@@ -159,7 +160,7 @@ def main():
     register.add_argument("--number", "--pr", type=int)
     register.add_argument("--provider")
     register.add_argument("--label", action="append", default=[])
-    register.add_argument("--author-association", action="append", default=["OWNER", "MEMBER", "COLLABORATOR"])
+    register.add_argument("--author-association", action="append", default=DEFAULT_ASSOCIATIONS)
     register.add_argument("--interactive", action="store_true")
     register.add_argument("--publish", action=argparse.BooleanOptionalAction, default=True)
     register.add_argument("--comments", action=argparse.BooleanOptionalAction, default=True)

@@ -71,6 +71,7 @@ plugins:
               - OWNER
               - MEMBER
               - COLLABORATOR
+              - CONTRIBUTOR
             prompt:
               enabled: true
               # template optional
@@ -81,6 +82,7 @@ plugins:
               - OWNER
               - MEMBER
               - COLLABORATOR
+              - CONTRIBUTOR
             prompt:
               enabled: true
               # template optional
@@ -159,6 +161,7 @@ Dynamic registrations use the same defaults as static config:
 - closed unmerged PRs publish `plugin.github.pr.closed` by default
 - dynamic registrations remove themselves from `registry.json` after merge or close by default
 - close prompts are disabled by default
+- comment and review author associations default to `OWNER`, `MEMBER`, `COLLABORATOR`, and `CONTRIBUTOR`
 
 Useful flags:
 
@@ -171,6 +174,11 @@ github-watch register --repo my-user/my-repo --number 123 --prompt-passed-checks
 github-watch register --repo my-user/my-repo --number 123 --no-remove-on-close
 github-watch register --repo my-user/my-repo --number 123 --prompt-on-close
 github-watch register --repo my-user/my-repo --number 123 --no-publish-on-close
+github-watch register --repo my-user/my-repo --number 123 \
+  --author-association OWNER \
+  --author-association MEMBER \
+  --author-association COLLABORATOR \
+  --author-association CONTRIBUTOR
 ```
 
 ## Events
@@ -242,9 +250,12 @@ author-associations:
   - OWNER
   - MEMBER
   - COLLABORATOR
+  - CONTRIBUTOR
 ```
 
-This is cheaper and easier to maintain than listing every trusted username.
+`CONTRIBUTOR` is useful for fork, upstream, and organization PR workflows where
+GitHub may report maintainers or admins with that association. This is cheaper
+and easier to maintain than listing every trusted username.
 
 ## Security
 
