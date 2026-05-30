@@ -127,6 +127,10 @@ The operator should compare callback event names with `completeOn` and `failOn`.
 For plugin-published events, use the event's `plugin_event` name. For ordinary
 agent/runtime events, use the event's `event` name.
 
+Current controller behavior creates a stable per-run callback token Secret and
+wires it into the agent Pod as `NVT_OPERATOR_CALLBACK_TOKEN`. The callback HTTP
+endpoint and lifecycle event matching remain future work.
+
 ### `spec.ttl`
 
 Cleanup timing hints:
@@ -172,18 +176,29 @@ future lifecycle callback handling.
 
 The current controller initializes empty `status.phase` values to `Pending` and
 renders `spec.agent.config` to an owned ConfigMap with the key `agent.yaml`.
-It then creates one owned Pod named `<agentrun-name>-agent` with the configured
-agent image and a Docker-in-Docker native sidecar-style init container. That
-Pod mounts the rendered ConfigMap at `/nvt-agent/agent.yaml`, provides an
-ephemeral `emptyDir` workspace, sets `DOCKER_HOST=tcp://127.0.0.1:2375` for the
-agent container, and binds the DinD daemon to localhost inside the Pod network
-namespace. The agent container starts after the DinD startup probe can run
-`docker info`.
+It creates two stable owned opaque Secrets per run:
 
-This controller slice only creates the ConfigMap and Pod and syncs basic
-Pod-phase status. Broker token registration, operator callback token creation,
-lifecycle completion/failure handling, and TTL cleanup remain future work.
-Static broker providers remain outside `AgentRun`; the run only requests
+```text
+<agentrun-name>-broker-token    NVT_BROKER_TOKEN
+<agentrun-name>-callback-token  NVT_OPERATOR_CALLBACK_TOKEN
+```
+
+These tokens are generated once and reused across reconciles. Existing same-name
+Secrets that are not owned by the `AgentRun` are rejected.
+
+The controller then creates one owned Pod named `<agentrun-name>-agent` with the
+configured agent image and a Docker-in-Docker native sidecar-style init
+container. That Pod mounts the rendered ConfigMap at `/nvt-agent/agent.yaml`,
+provides an ephemeral `emptyDir` workspace, sets
+`DOCKER_HOST=tcp://127.0.0.1:2375` and `NVT_BROKER_URL=http://nvt-broker:7347`
+for the agent container, wires both token Secrets through `secretKeyRef`, and
+binds the DinD daemon to localhost inside the Pod network namespace. The agent
+container starts after the DinD startup probe can run `docker info`.
+
+This controller slice creates the ConfigMap, per-run token Secrets, and Pod,
+then syncs basic Pod-phase status. Broker policy registration, callback HTTP
+endpoints, lifecycle completion/failure handling, and TTL cleanup remain future
+work. Static broker providers remain outside `AgentRun`; the run only requests
 dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
