@@ -46,6 +46,14 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 }
 
 func (f *fakeGitHub) handleApp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if auth := r.Header.Get("Authorization"); !isBearerJWT(auth) {
+		http.Error(w, "missing app jwt", http.StatusUnauthorized)
+		return
+	}
 	f.mu.Lock()
 	f.appRequests++
 	f.mu.Unlock()
@@ -53,10 +61,23 @@ func (f *fakeGitHub) handleApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeGitHub) handleUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		http.Error(w, "bot user lookup must be unauthenticated", http.StatusUnauthorized)
+		return
+	}
 	f.mu.Lock()
 	f.userRequests++
 	f.mu.Unlock()
 	writeJSON(w, map[string]any{"id": 987654321, "login": "local-agent[bot]"})
+}
+
+func isBearerJWT(auth string) bool {
+	token, ok := strings.CutPrefix(auth, "Bearer ")
+	return ok && strings.Count(token, ".") == 2
 }
 
 func (f *fakeGitHub) handleToken(w http.ResponseWriter, r *http.Request) {

@@ -217,15 +217,17 @@ class GithubAppProvider:
         expires_at = payload.get("expires_at") or datetime.now(timezone.utc).isoformat()
         return token, expires_at
 
-    def _github_json(self, path, token):
+    def _github_json(self, path, token=None):
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         request = Request(
             f"{self.api_url}{path}",
             method="GET",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
         )
         try:
             with self.opener.open(request, timeout=30) as response:
@@ -243,7 +245,7 @@ class GithubAppProvider:
         if not isinstance(slug, str) or not slug:
             raise ProviderError("identity-lookup-failed", "GitHub App response did not include slug", 502)
         bot_login = f"{slug}[bot]"
-        user = self._github_json(f"/users/{quote(bot_login, safe='')}", jwt)
+        user = self._github_json(f"/users/{quote(bot_login, safe='')}")
         bot_id = user.get("id")
         if not isinstance(bot_id, int):
             raise ProviderError("identity-lookup-failed", "GitHub bot user response did not include numeric id", 502)
