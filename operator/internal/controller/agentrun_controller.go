@@ -19,6 +19,7 @@ import (
 const (
 	agentConfigKey       = "agent.yaml"
 	agentConfigMountPath = "/nvt-agent/agent.yaml"
+	agentConfigVolumeDir = "/nvt-agent"
 	workspaceMountPath   = "/workspace"
 )
 
@@ -118,6 +119,9 @@ func (r *AgentRunReconciler) reconcileAgentPod(ctx context.Context, agentRun *nv
 		}
 		return desired, nil
 	}
+	if !metav1.IsControlledBy(pod, agentRun) {
+		return nil, fmt.Errorf("AgentRun Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
+	}
 
 	return pod, nil
 }
@@ -156,6 +160,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		},
 		Spec: corev1.PodSpec{
 			RuntimeClassName: agentRun.Spec.RuntimeClassName,
+			RestartPolicy:    corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
 				{
 					Name:       "agent",
@@ -168,7 +173,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 					},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: workspaceMountPath},
-						{Name: "agent-config", MountPath: agentConfigMountPath, SubPath: agentConfigKey, ReadOnly: true},
+						{Name: "agent-config", MountPath: agentConfigVolumeDir, ReadOnly: true},
 					},
 				},
 				{

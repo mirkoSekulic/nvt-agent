@@ -46,7 +46,7 @@ runtime:
 
 ### `spec.image`
 
-Runtime image for the future controller-created pod.
+Runtime image for the controller-created agent pod.
 
 ```yaml
 image: nvt-agent-runtime:latest

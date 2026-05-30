@@ -140,6 +140,9 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != runtimeClassName {
 		t.Fatalf("expected runtimeClassName %q, got %#v", runtimeClassName, pod.Spec.RuntimeClassName)
 	}
+	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatalf("expected restartPolicy Never, got %q", pod.Spec.RestartPolicy)
+	}
 
 	agentContainer := requireContainer(t, pod, "agent")
 	if agentContainer.Image != agentRun.Spec.Image {
@@ -151,7 +154,10 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	if envValue(agentContainer, "DOCKER_HOST") != "tcp://127.0.0.1:2375" {
 		t.Fatalf("expected DOCKER_HOST tcp://127.0.0.1:2375, got %#v", agentContainer.Env)
 	}
-	assertVolumeMount(t, agentContainer, "agent-config", agentConfigMountPath, agentConfigKey, true)
+	if envValue(agentContainer, "NVT_AGENT_CONFIG_FILE") != agentConfigMountPath {
+		t.Fatalf("expected NVT_AGENT_CONFIG_FILE %q, got %#v", agentConfigMountPath, agentContainer.Env)
+	}
+	assertVolumeMount(t, agentContainer, "agent-config", agentConfigVolumeDir, "", true)
 	assertVolumeMount(t, agentContainer, "workspace", workspaceMountPath, "", false)
 
 	dindContainer := requireContainer(t, pod, "docker")
@@ -291,6 +297,32 @@ func TestReconcileDoesNotUpdateExistingAgentPodSpec(t *testing.T) {
 	agentContainer := requireContainer(t, pod, "agent")
 	if agentContainer.Image != "nvt-agent-runtime:test" {
 		t.Fatalf("expected existing Pod image to remain unchanged, got %q", agentContainer.Image)
+	}
+}
+
+func TestReconcileRejectsExistingUnownedAgentPod(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AgentPodName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+		},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, pod).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil {
+		t.Fatal("expected reconcile to reject an unowned same-name Pod")
+	}
+	if !strings.Contains(err.Error(), "exists but is not controlled by AgentRun") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
