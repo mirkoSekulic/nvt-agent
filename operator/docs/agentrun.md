@@ -145,7 +145,7 @@ pod.
 
 ## Status
 
-The CRD reserves these status fields for the future controller:
+The controller currently writes basic Pod-phase status:
 
 ```yaml
 status:
@@ -155,6 +155,10 @@ status:
   finishedAt: "2026-05-29T16:30:00Z"
   reason: Completed by lifecycle event plugin.agent.signal.done
 ```
+
+`podName` is set once the owned agent Pod exists. `startedAt` is set once when
+the Pod first reaches `Running`. `finishedAt` and `reason` are reserved for
+future lifecycle callback handling.
 
 `phase` is one of:
 
@@ -167,15 +171,18 @@ status:
 ## Intended v1 Controller Behavior
 
 The current controller initializes empty `status.phase` values to `Pending` and
-renders `spec.agent.config` to a ConfigMap with the key `agent.yaml`.
+renders `spec.agent.config` to an owned ConfigMap with the key `agent.yaml`.
+It then creates one owned Pod named `<agentrun-name>-agent` with the configured
+agent image and a Docker-in-Docker sidecar. That Pod mounts the rendered
+ConfigMap at `/nvt-agent/agent.yaml`, provides an ephemeral `emptyDir`
+workspace, sets `DOCKER_HOST=tcp://127.0.0.1:2375` for the agent container, and
+binds the DinD daemon to localhost inside the Pod network namespace.
 
-Next, the controller should create one pod with the nvt agent runtime and a
-Docker-in-Docker sidecar. That pod should mount the rendered ConfigMap at
-`/nvt-agent/agent.yaml`.
-
-For each run, the operator should create a broker token secret and an operator
-callback token secret. Static broker providers remain outside `AgentRun`; the
-run only requests dynamic grants against them.
+This controller slice only creates the ConfigMap and Pod and syncs basic
+Pod-phase status. Broker token registration, operator callback token creation,
+lifecycle completion/failure handling, and TTL cleanup remain future work.
+Static broker providers remain outside `AgentRun`; the run only requests
+dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.
