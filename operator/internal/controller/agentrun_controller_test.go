@@ -157,6 +157,11 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	if envValue(agentContainer, "NVT_AGENT_CONFIG_FILE") != agentConfigMountPath {
 		t.Fatalf("expected NVT_AGENT_CONFIG_FILE %q, got %#v", agentConfigMountPath, agentContainer.Env)
 	}
+	if envValue(agentContainer, "NVT_BROKER_URL") != brokerURL {
+		t.Fatalf("expected NVT_BROKER_URL %q, got %#v", brokerURL, agentContainer.Env)
+	}
+	assertSecretKeyEnv(t, agentContainer, brokerTokenKey, BrokerTokenSecretName(agentRun.Name), brokerTokenKey)
+	assertSecretKeyEnv(t, agentContainer, callbackTokenKey, CallbackTokenSecretName(agentRun.Name), callbackTokenKey)
 	assertVolumeMount(t, agentContainer, "agent-config", agentConfigVolumeDir, "", true)
 	assertVolumeMount(t, agentContainer, "workspace", workspaceMountPath, "", false)
 
@@ -197,6 +202,33 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 		configVolume.ConfigMap.Items[0].Path != agentConfigKey {
 		t.Fatalf("expected agent.yaml ConfigMap item, got %#v", configVolume.ConfigMap.Items)
 	}
+}
+
+func TestReconcileCreatesTokenSecrets(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	brokerSecret := getSecret(ctx, t, k8sClient, agentRun.Namespace, BrokerTokenSecretName(agentRun.Name))
+	assertTokenSecret(t, brokerSecret, agentRun, brokerTokenKey)
+	callbackSecret := getSecret(ctx, t, k8sClient, agentRun.Namespace, CallbackTokenSecretName(agentRun.Name))
+	assertTokenSecret(t, callbackSecret, agentRun, callbackTokenKey)
+
+	pod := getAgentPod(ctx, t, k8sClient, agentRun)
+	agentContainer := requireContainer(t, pod, "agent")
+	assertSecretKeyEnv(t, agentContainer, brokerTokenKey, brokerSecret.Name, brokerTokenKey)
+	assertSecretKeyEnv(t, agentContainer, callbackTokenKey, callbackSecret.Name, callbackTokenKey)
 }
 
 func TestReconcileCreatesOwnedAgentConfigMap(t *testing.T) {
@@ -331,6 +363,111 @@ func TestReconcileRejectsExistingUnownedAgentPod(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exists but is not controlled by AgentRun") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReconcileReusesExistingOwnedTokenSecrets(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("existing-broker-token"))
+	callbackSecret := mustDesiredTokenSecret(t, agentRun, scheme, CallbackTokenSecretName(agentRun.Name), callbackTokenKey, []byte("existing-callback-token"))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerSecret, callbackSecret).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	updatedBrokerSecret := getSecret(ctx, t, k8sClient, agentRun.Namespace, BrokerTokenSecretName(agentRun.Name))
+	if string(updatedBrokerSecret.Data[brokerTokenKey]) != "existing-broker-token" {
+		t.Fatalf("expected existing broker token to be reused, got %q", updatedBrokerSecret.Data[brokerTokenKey])
+	}
+	updatedCallbackSecret := getSecret(ctx, t, k8sClient, agentRun.Namespace, CallbackTokenSecretName(agentRun.Name))
+	if string(updatedCallbackSecret.Data[callbackTokenKey]) != "existing-callback-token" {
+		t.Fatalf("expected existing callback token to be reused, got %q", updatedCallbackSecret.Data[callbackTokenKey])
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile again: %v", err)
+	}
+	updatedBrokerSecret = getSecret(ctx, t, k8sClient, agentRun.Namespace, BrokerTokenSecretName(agentRun.Name))
+	if string(updatedBrokerSecret.Data[brokerTokenKey]) != "existing-broker-token" {
+		t.Fatalf("expected broker token not to rotate, got %q", updatedBrokerSecret.Data[brokerTokenKey])
+	}
+	updatedCallbackSecret = getSecret(ctx, t, k8sClient, agentRun.Namespace, CallbackTokenSecretName(agentRun.Name))
+	if string(updatedCallbackSecret.Data[callbackTokenKey]) != "existing-callback-token" {
+		t.Fatalf("expected callback token not to rotate, got %q", updatedCallbackSecret.Data[callbackTokenKey])
+	}
+}
+
+func TestReconcileRejectsExistingUnownedBrokerTokenSecret(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: BrokerTokenSecretName(agentRun.Name), Namespace: agentRun.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{brokerTokenKey: []byte("broker-token")},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, secret).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil {
+		t.Fatal("expected reconcile to reject unowned broker token Secret")
+	}
+	if !strings.Contains(err.Error(), "exists but is not controlled by AgentRun") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReconcileRejectsExistingUnownedCallbackTokenSecret(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("broker-token"))
+	callbackSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: CallbackTokenSecretName(agentRun.Name), Namespace: agentRun.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{callbackTokenKey: []byte("callback-token")},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerSecret, callbackSecret).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil {
+		t.Fatal("expected reconcile to reject unowned callback token Secret")
+	}
+	if !strings.Contains(err.Error(), "exists but is not controlled by AgentRun") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGenerateTokenUsesReaderEntropy(t *testing.T) {
+	token, err := GenerateToken(strings.NewReader(strings.Repeat("a", generatedTokenByteLength)))
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	if token == "" {
+		t.Fatal("expected non-empty token")
+	}
+	if len(token) < 40 {
+		t.Fatalf("expected token to encode at least 256 bits of entropy, got %d chars", len(token))
 	}
 }
 
@@ -522,6 +659,23 @@ func getAgentConfigMap(
 	return configMap
 }
 
+func getSecret(
+	ctx context.Context,
+	t *testing.T,
+	k8sClient client.Reader,
+	namespace string,
+	name string,
+) corev1.Secret {
+	t.Helper()
+
+	var secret corev1.Secret
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	if err := k8sClient.Get(ctx, key, &secret); err != nil {
+		t.Fatalf("get Secret %s/%s: %v", namespace, name, err)
+	}
+	return secret
+}
+
 func getAgentPod(
 	ctx context.Context,
 	t *testing.T,
@@ -536,6 +690,42 @@ func getAgentPod(
 		t.Fatalf("get Pod: %v", err)
 	}
 	return pod
+}
+
+func assertTokenSecret(t *testing.T, secret corev1.Secret, agentRun *nvtv1alpha1.AgentRun, tokenKey string) {
+	t.Helper()
+
+	assertOwnedByAgentRun(t, secret.GetOwnerReferences(), agentRun)
+	if secret.Type != corev1.SecretTypeOpaque {
+		t.Fatalf("expected Opaque Secret, got %q", secret.Type)
+	}
+	expectedLabels := agentRunLabels(agentRun.Name)
+	for key, value := range expectedLabels {
+		if secret.Labels[key] != value {
+			t.Fatalf("expected Secret label %s=%s, got %#v", key, value, secret.Labels)
+		}
+	}
+	token := secret.Data[tokenKey]
+	if len(token) < 40 {
+		t.Fatalf("expected non-empty high-entropy-looking token at %s, got length %d", tokenKey, len(token))
+	}
+}
+
+func mustDesiredTokenSecret(
+	t *testing.T,
+	agentRun *nvtv1alpha1.AgentRun,
+	scheme *runtime.Scheme,
+	name string,
+	key string,
+	token []byte,
+) *corev1.Secret {
+	t.Helper()
+
+	secret, err := DesiredTokenSecret(agentRun, scheme, name, key, token)
+	if err != nil {
+		t.Fatalf("desired token Secret: %v", err)
+	}
+	return secret
 }
 
 func assertOwnedByAgentRun(t *testing.T, owners []metav1.OwnerReference, agentRun *nvtv1alpha1.AgentRun) {
@@ -581,12 +771,39 @@ func requireInitContainer(t *testing.T, pod corev1.Pod, name string) corev1.Cont
 }
 
 func envValue(container corev1.Container, name string) string {
-	for _, env := range container.Env {
-		if env.Name == name {
-			return env.Value
+	env := findEnvVar(container, name)
+	if env == nil {
+		return ""
+	}
+	return env.Value
+}
+
+func findEnvVar(container corev1.Container, name string) *corev1.EnvVar {
+	for i := range container.Env {
+		if container.Env[i].Name == name {
+			return &container.Env[i]
 		}
 	}
-	return ""
+	return nil
+}
+
+func assertSecretKeyEnv(t *testing.T, container corev1.Container, envName, secretName, key string) {
+	t.Helper()
+
+	env := findEnvVar(container, envName)
+	if env == nil {
+		t.Fatalf("env %q not found in %#v", envName, container.Env)
+	}
+	if env.Value != "" {
+		t.Fatalf("expected env %q to use valueFrom, got literal value %q", envName, env.Value)
+	}
+	if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("expected env %q to use secretKeyRef, got %#v", envName, env.ValueFrom)
+	}
+	ref := env.ValueFrom.SecretKeyRef
+	if ref.Name != secretName || ref.Key != key {
+		t.Fatalf("expected env %q to reference %s/%s, got %#v", envName, secretName, key, ref)
+	}
 }
 
 func assertVolumeMount(t *testing.T, container corev1.Container, name, mountPath, subPath string, readOnly bool) {
