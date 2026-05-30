@@ -161,6 +161,35 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		Spec: corev1.PodSpec{
 			RuntimeClassName: agentRun.Spec.RuntimeClassName,
 			RestartPolicy:    corev1.RestartPolicyNever,
+			InitContainers: []corev1.Container{
+				{
+					Name:          "docker",
+					Image:         "docker:27-dind",
+					RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
+					Command:       []string{"dockerd"},
+					Args: []string{
+						"--host=unix:///var/run/docker.sock",
+						"--host=tcp://127.0.0.1:2375",
+						"--tls=false",
+					},
+					Env: []corev1.EnvVar{
+						{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+					},
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: ptrTo(true),
+					},
+					StartupProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
+						},
+						PeriodSeconds:    2,
+						FailureThreshold: 30,
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "workspace", MountPath: workspaceMountPath},
+					},
+				},
+			},
 			Containers: []corev1.Container{
 				{
 					Name:       "agent",
@@ -174,25 +203,6 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: workspaceMountPath},
 						{Name: "agent-config", MountPath: agentConfigVolumeDir, ReadOnly: true},
-					},
-				},
-				{
-					Name:    "docker",
-					Image:   "docker:27-dind",
-					Command: []string{"dockerd"},
-					Args: []string{
-						"--host=unix:///var/run/docker.sock",
-						"--host=tcp://127.0.0.1:2375",
-						"--tls=false",
-					},
-					Env: []corev1.EnvVar{
-						{Name: "DOCKER_TLS_CERTDIR", Value: ""},
-					},
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptrTo(true),
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace", MountPath: workspaceMountPath},
 					},
 				},
 			},

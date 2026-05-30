@@ -160,13 +160,21 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	assertVolumeMount(t, agentContainer, "agent-config", agentConfigVolumeDir, "", true)
 	assertVolumeMount(t, agentContainer, "workspace", workspaceMountPath, "", false)
 
-	dindContainer := requireContainer(t, pod, "docker")
+	dindContainer := requireInitContainer(t, pod, "docker")
 	if dindContainer.Image != "docker:27-dind" {
 		t.Fatalf("expected DinD image docker:27-dind, got %q", dindContainer.Image)
+	}
+	if dindContainer.RestartPolicy == nil || *dindContainer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("expected DinD init sidecar restartPolicy Always, got %#v", dindContainer.RestartPolicy)
 	}
 	if strings.Join(append(dindContainer.Command, dindContainer.Args...), " ") !=
 		"dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --tls=false" {
 		t.Fatalf("unexpected DinD command/args: command=%#v args=%#v", dindContainer.Command, dindContainer.Args)
+	}
+	if dindContainer.StartupProbe == nil ||
+		dindContainer.StartupProbe.Exec == nil ||
+		strings.Join(dindContainer.StartupProbe.Exec.Command, " ") != "docker info" {
+		t.Fatalf("expected DinD startupProbe to run docker info, got %#v", dindContainer.StartupProbe)
 	}
 	if dindContainer.SecurityContext == nil || dindContainer.SecurityContext.Privileged == nil || !*dindContainer.SecurityContext.Privileged {
 		t.Fatalf("expected privileged DinD sidecar, got %#v", dindContainer.SecurityContext)
@@ -557,6 +565,18 @@ func requireContainer(t *testing.T, pod corev1.Pod, name string) corev1.Containe
 		}
 	}
 	t.Fatalf("container %q not found in %#v", name, pod.Spec.Containers)
+	return corev1.Container{}
+}
+
+func requireInitContainer(t *testing.T, pod corev1.Pod, name string) corev1.Container {
+	t.Helper()
+
+	for _, container := range pod.Spec.InitContainers {
+		if container.Name == name {
+			return container
+		}
+	}
+	t.Fatalf("init container %q not found in %#v", name, pod.Spec.InitContainers)
 	return corev1.Container{}
 }
 

@@ -28,8 +28,10 @@ The current controller initializes empty `status.phase` values to `Pending`,
 renders `spec.agent.config` into an owned ConfigMap named
 `<agentrun-name>-agent-config` with the `agent.yaml` key, and creates one owned
 Pod named `<agentrun-name>-agent`. The Pod runs the configured agent image next
-to a Docker-in-Docker sidecar, mounts the rendered config at
-`/nvt-agent/agent.yaml`, and uses an ephemeral `emptyDir` workspace.
+to a native Kubernetes sidecar-style init container for Docker-in-Docker,
+mounts the rendered config at `/nvt-agent/agent.yaml`, and uses an ephemeral
+`emptyDir` workspace. The agent container starts after the DinD startup probe
+can run `docker info`.
 
 The controller syncs basic Pod-phase status only: it records `status.podName`,
 sets `Running` and `startedAt` when the Pod is running, and sets `Failed` when

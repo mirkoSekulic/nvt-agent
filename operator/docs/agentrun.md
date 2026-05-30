@@ -173,10 +173,12 @@ future lifecycle callback handling.
 The current controller initializes empty `status.phase` values to `Pending` and
 renders `spec.agent.config` to an owned ConfigMap with the key `agent.yaml`.
 It then creates one owned Pod named `<agentrun-name>-agent` with the configured
-agent image and a Docker-in-Docker sidecar. That Pod mounts the rendered
-ConfigMap at `/nvt-agent/agent.yaml`, provides an ephemeral `emptyDir`
-workspace, sets `DOCKER_HOST=tcp://127.0.0.1:2375` for the agent container, and
-binds the DinD daemon to localhost inside the Pod network namespace.
+agent image and a Docker-in-Docker native sidecar-style init container. That
+Pod mounts the rendered ConfigMap at `/nvt-agent/agent.yaml`, provides an
+ephemeral `emptyDir` workspace, sets `DOCKER_HOST=tcp://127.0.0.1:2375` for the
+agent container, and binds the DinD daemon to localhost inside the Pod network
+namespace. The agent container starts after the DinD startup probe can run
+`docker info`.
 
 This controller slice only creates the ConfigMap and Pod and syncs basic
 Pod-phase status. Broker token registration, operator callback token creation,
