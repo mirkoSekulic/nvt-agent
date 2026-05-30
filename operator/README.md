@@ -24,11 +24,19 @@ some future extension.
 
 ## Scope
 
-The current controller initializes empty `status.phase` values to `Pending` and
+The current controller initializes empty `status.phase` values to `Pending`,
 renders `spec.agent.config` into an owned ConfigMap named
-`<agentrun-name>-agent-config` with the `agent.yaml` key. Pod creation and
-mounting that ConfigMap at `/nvt-agent/agent.yaml` are intentionally not
-implemented yet.
+`<agentrun-name>-agent-config` with the `agent.yaml` key, and creates one owned
+Pod named `<agentrun-name>-agent`. The Pod runs the configured agent image next
+to a native Kubernetes sidecar-style init container for Docker-in-Docker,
+mounts the rendered config at `/nvt-agent/agent.yaml`, and uses an ephemeral
+`emptyDir` workspace. The agent container starts after the DinD startup probe
+can run `docker info`.
+
+The controller syncs basic Pod-phase status only: it records `status.podName`,
+sets `Running` and `startedAt` when the Pod is running, and sets `Failed` when
+the Pod fails. Broker token registration, operator callbacks, lifecycle
+completion rules, and TTL cleanup remain intentionally future work.
 
 This directory does not include scheduler CRDs or GitHub-specific operator
 logic. Runtime plugins remain configured through the embedded agent config under

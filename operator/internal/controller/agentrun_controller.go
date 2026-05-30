@@ -16,7 +16,12 @@ import (
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
 
-const agentConfigKey = "agent.yaml"
+const (
+	agentConfigKey       = "agent.yaml"
+	agentConfigMountPath = "/nvt-agent/agent.yaml"
+	agentConfigVolumeDir = "/nvt-agent"
+	workspaceMountPath   = "/workspace"
+)
 
 // AgentRunReconciler reconciles AgentRun resources.
 type AgentRunReconciler struct {
@@ -25,7 +30,7 @@ type AgentRunReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// Reconcile initializes empty AgentRun status and leaves all execution work to later controllers.
+// Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
 func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var agentRun nvtv1alpha1.AgentRun
 	if err := r.Get(ctx, req.NamespacedName, &agentRun); err != nil {
@@ -39,7 +44,16 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	if InitializeAgentRunStatus(&agentRun) {
+	pod, err := r.reconcileAgentPod(ctx, &agentRun)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	statusChanged := InitializeAgentRunStatus(&agentRun)
+	if SyncAgentRunStatusFromPod(&agentRun, pod) {
+		statusChanged = true
+	}
+	if statusChanged {
 		if err := r.Status().Update(ctx, &agentRun); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update AgentRun status: %w", err)
 		}
@@ -53,6 +67,7 @@ func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&nvtv1alpha1.AgentRun{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Pod{}).
 		Complete(r); err != nil {
 		return fmt.Errorf("build AgentRun controller: %w", err)
 	}
@@ -85,6 +100,32 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentR
 	return nil
 }
 
+func (r *AgentRunReconciler) reconcileAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (*corev1.Pod, error) {
+	desired, err := DesiredAgentPod(agentRun, r.Scheme)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pods are create-once for this slice because most spec fields are immutable.
+	// A future replacement policy can decide how to handle spec changes.
+	pod := &corev1.Pod{}
+	key := client.ObjectKeyFromObject(desired)
+	if err := r.Get(ctx, key, pod); err != nil {
+		if !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("get AgentRun Pod: %w", err)
+		}
+		if createErr := r.Create(ctx, desired); createErr != nil {
+			return nil, fmt.Errorf("create AgentRun Pod: %w", createErr)
+		}
+		return desired, nil
+	}
+	if !metav1.IsControlledBy(pod, agentRun) {
+		return nil, fmt.Errorf("AgentRun Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
+	}
+
+	return pod, nil
+}
+
 // DesiredAgentConfigMap renders the AgentRun agent config into its owned ConfigMap.
 func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.ConfigMap, error) {
 	rendered, err := RenderAgentConfigYAML(agentRun)
@@ -96,11 +137,7 @@ func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      AgentConfigMapName(agentRun.Name),
 			Namespace: agentRun.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      "nvt-agent",
-				"app.kubernetes.io/component": "agentrun",
-				"nvt.dev/agentrun":            agentRun.Name,
-			},
+			Labels:    agentRunLabels(agentRun.Name),
 		},
 		Data: map[string]string{
 			agentConfigKey: rendered,
@@ -113,9 +150,106 @@ func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 	return configMap, nil
 }
 
+// DesiredAgentPod returns the create-once Pod spec for an AgentRun.
+func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AgentPodName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    agentRunLabels(agentRun.Name),
+		},
+		Spec: corev1.PodSpec{
+			RuntimeClassName: agentRun.Spec.RuntimeClassName,
+			RestartPolicy:    corev1.RestartPolicyNever,
+			InitContainers: []corev1.Container{
+				{
+					Name:          "docker",
+					Image:         "docker:27-dind",
+					RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
+					Command:       []string{"dockerd"},
+					Args: []string{
+						"--host=unix:///var/run/docker.sock",
+						"--host=tcp://127.0.0.1:2375",
+						"--tls=false",
+					},
+					Env: []corev1.EnvVar{
+						{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+					},
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: ptrTo(true),
+					},
+					StartupProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
+						},
+						PeriodSeconds:    2,
+						FailureThreshold: 30,
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "workspace", MountPath: workspaceMountPath},
+					},
+				},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:       "agent",
+					Image:      agentRun.Spec.Image,
+					WorkingDir: workspaceMountPath,
+					Env: []corev1.EnvVar{
+						{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
+						{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
+						{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "workspace", MountPath: workspaceMountPath},
+						{Name: "agent-config", MountPath: agentConfigVolumeDir, ReadOnly: true},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: "workspace",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+				{
+					Name: "agent-config",
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: AgentConfigMapName(agentRun.Name)},
+							Items: []corev1.KeyToPath{
+								{Key: agentConfigKey, Path: agentConfigKey},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
+		return nil, fmt.Errorf("set AgentRun Pod owner: %w", err)
+	}
+
+	return pod, nil
+}
+
 // AgentConfigMapName returns the deterministic ConfigMap name for an AgentRun.
 func AgentConfigMapName(agentRunName string) string {
 	return agentRunName + "-agent-config"
+}
+
+// AgentPodName returns the deterministic Pod name for an AgentRun.
+func AgentPodName(agentRunName string) string {
+	return agentRunName + "-agent"
+}
+
+func agentRunLabels(agentRunName string) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":      "nvt-agent",
+		"app.kubernetes.io/component": "agentrun",
+		"nvt.dev/agentrun":            agentRunName,
+	}
 }
 
 // RenderAgentConfigYAML converts the preserved AgentRun agent config payload to YAML.
@@ -141,4 +275,41 @@ func InitializeAgentRunStatus(agentRun *nvtv1alpha1.AgentRun) bool {
 
 	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhasePending
 	return true
+}
+
+// SyncAgentRunStatusFromPod reflects the small Pod-phase status surface owned by this controller slice.
+func SyncAgentRunStatusFromPod(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+
+	changed := false
+	if agentRun.Status.PodName != pod.Name {
+		agentRun.Status.PodName = pod.Name
+		changed = true
+	}
+
+	switch pod.Status.Phase {
+	case corev1.PodRunning:
+		if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseRunning {
+			agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
+			changed = true
+		}
+		if agentRun.Status.StartedAt == nil {
+			now := metav1.Now()
+			agentRun.Status.StartedAt = &now
+			changed = true
+		}
+	case corev1.PodFailed:
+		if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed {
+			agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseFailed
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+func ptrTo[T any](value T) *T {
+	return &value
 }
