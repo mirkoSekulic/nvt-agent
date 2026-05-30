@@ -29,17 +29,19 @@ some future extension.
 The current controller initializes empty `status.phase` values to `Pending`,
 renders `spec.agent.config` into an owned ConfigMap named
 `<agentrun-name>-agent-config` with the `agent.yaml` key, creates stable
-per-run broker and callback token Secrets, and creates one owned Pod named
-`<agentrun-name>-agent`. The Pod runs the configured agent image next to a
-native Kubernetes sidecar-style init container for Docker-in-Docker, mounts the
-rendered config at `/nvt-agent/agent.yaml`, wires token Secrets into the agent
-container environment, and uses an ephemeral `emptyDir` workspace. The agent
-container starts after the DinD startup probe can run `docker info`.
+per-run broker and callback token Secrets, writes the AgentRun broker identity
+and requested grants into the shared `nvt-broker-agents` ConfigMap, and creates
+one owned Pod named `<agentrun-name>-agent`. The Pod runs the configured agent
+image next to a native Kubernetes sidecar-style init container for
+Docker-in-Docker, mounts the rendered config at `/nvt-agent/agent.yaml`, wires
+token Secrets into the agent container environment, and uses an ephemeral
+`emptyDir` workspace. The agent container starts after the DinD startup probe
+can run `docker info`.
 
 The controller syncs basic Pod-phase status only: it records `status.podName`,
 sets `Running` and `startedAt` when the Pod is running, and sets `Failed` when
-the Pod fails. Broker policy registration, callback HTTP endpoints, lifecycle
-completion rules, and TTL cleanup remain intentionally future work.
+the Pod fails. Callback HTTP endpoints, lifecycle completion rules, scheduler
+logic, and TTL cleanup remain intentionally future work.
 
 This directory does not include scheduler CRDs or GitHub-specific operator
 logic. Runtime plugins remain configured through the embedded agent config under
@@ -77,15 +79,37 @@ GITHUB_APP_PRIVATE_KEY_BASE64
 ```
 
 Broker providers are static in `broker.yaml`. Dynamic agent identities and
-grants live in `agents.yaml`; for the POC, `agents.yaml` is the
+grants live in `agents.yaml`; for the POC, `agents.yaml` is the shared
 `nvt-broker-agents` ConfigMap mounted into the broker, matching the local
-`.broker/agents.yaml` model.
+`.broker/agents.yaml` model. The controller assumes this ConfigMap is in the
+same namespace as the `AgentRun`, updates only the entry for that run, and does
+not set `AgentRun` ownership on the shared ConfigMap.
+
+For an `AgentRun` named `default/example`, the controller writes an entry shaped
+like:
+
+```yaml
+agents:
+  - id: default/example
+    token-sha256: sha256:<sha256-of-NVT_BROKER_TOKEN>
+    grants:
+      - provider: github-main-app
+        repositories:
+          - mirkoSekulic/nvt-agent
+```
+
+The raw broker token stays in the owned `<agentrun-name>-broker-token` Secret
+and is never written to the ConfigMap. The controller adds an `AgentRun`
+finalizer so deletion removes only that run's `agents.yaml` entry. If the broker
+ConfigMap has already been removed during deletion, cleanup fails open to avoid
+leaving local/kind POC runs stuck terminating.
 
 Kubernetes projected ConfigMap updates are eventually reflected in mounted
 files, and the broker already live-reloads its agents policy file locally. The
-kind POC should verify this mounted ConfigMap live-reload path before the
-operator starts writing broker agent policy.
+kind POC should verify that the broker observes operator-written ConfigMap
+updates through this mounted file path.
 
-AgentRun Pods already receive `NVT_BROKER_URL=http://nvt-broker:7347`. The
-operator does not update the broker agents ConfigMap yet; hashing AgentRun
-broker tokens into `agents.yaml` is the next slice.
+AgentRun Pods receive `NVT_BROKER_URL=http://nvt-broker:7347` and a
+per-run `NVT_BROKER_TOKEN`. Broker provider configuration remains static;
+callback endpoints, lifecycle completion, TTL cleanup, scheduler behavior, and
+a broker admin API remain future work.

@@ -3,18 +3,27 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -26,11 +35,29 @@ const (
 	agentConfigVolumeDir = "/nvt-agent"
 	workspaceMountPath   = "/workspace"
 
-	brokerURL                = "http://nvt-broker:7347"
-	brokerTokenKey           = "NVT_BROKER_TOKEN"
-	callbackTokenKey         = "NVT_OPERATOR_CALLBACK_TOKEN"
-	generatedTokenByteLength = 32
+	brokerURL                 = "http://nvt-broker:7347"
+	brokerAgentsConfigMapName = "nvt-broker-agents"
+	brokerAgentsConfigKey     = "agents.yaml"
+	brokerTokenKey            = "NVT_BROKER_TOKEN"
+	callbackTokenKey          = "NVT_OPERATOR_CALLBACK_TOKEN"
+	agentRunFinalizer         = "nvt.dev/agentrun-broker-policy"
+	generatedTokenByteLength  = 32
 )
+
+type brokerAgentsPolicy struct {
+	Agents []brokerAgentEntry `json:"agents"`
+}
+
+type brokerAgentEntry struct {
+	ID          string                  `json:"id"`
+	TokenSHA256 string                  `json:"token-sha256"`
+	Grants      []brokerAgentGrantEntry `json:"grants"`
+}
+
+type brokerAgentGrantEntry struct {
+	Provider     string   `json:"provider"`
+	Repositories []string `json:"repositories"`
+}
 
 // AgentRunReconciler reconciles AgentRun resources.
 type AgentRunReconciler struct {
@@ -49,6 +76,19 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("get AgentRun: %w", err)
 	}
 
+	if !agentRun.DeletionTimestamp.IsZero() {
+		if err := r.finalizeAgentRun(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if controllerutil.AddFinalizer(&agentRun, agentRunFinalizer) {
+		if err := r.Update(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add AgentRun finalizer: %w", err)
+		}
+	}
+
 	if err := r.reconcileAgentConfigMap(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -56,6 +96,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileCallbackTokenSecret(ctx, &agentRun); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileBrokerAgentsPolicy(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -84,8 +127,60 @@ func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Pod{}).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.agentRunsForBrokerAgentsConfigMap),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isBrokerAgentsConfigMap)),
+		).
 		Complete(r); err != nil {
 		return fmt.Errorf("build AgentRun controller: %w", err)
+	}
+
+	return nil
+}
+
+func (r *AgentRunReconciler) agentRunsForBrokerAgentsConfigMap(ctx context.Context, object client.Object) []reconcile.Request {
+	if !isBrokerAgentsConfigMap(object) {
+		return nil
+	}
+
+	var agentRuns nvtv1alpha1.AgentRunList
+	if err := r.List(ctx, &agentRuns, client.InNamespace(object.GetNamespace())); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "list AgentRuns for broker agents ConfigMap", "namespace", object.GetNamespace())
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(agentRuns.Items))
+	for _, agentRun := range agentRuns.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{Namespace: agentRun.Namespace, Name: agentRun.Name},
+		})
+	}
+	sort.Slice(requests, func(i, j int) bool {
+		if requests[i].Namespace != requests[j].Namespace {
+			return requests[i].Namespace < requests[j].Namespace
+		}
+		return requests[i].Name < requests[j].Name
+	})
+
+	return requests
+}
+
+func isBrokerAgentsConfigMap(object client.Object) bool {
+	return object.GetName() == brokerAgentsConfigMapName
+}
+
+func (r *AgentRunReconciler) finalizeAgentRun(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	if !controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
+		return nil
+	}
+
+	if err := r.removeBrokerAgentsPolicyEntry(ctx, agentRun); err != nil {
+		return err
+	}
+	controllerutil.RemoveFinalizer(agentRun, agentRunFinalizer)
+	if err := r.Update(ctx, agentRun); err != nil {
+		return fmt.Errorf("remove AgentRun finalizer: %w", err)
 	}
 
 	return nil
@@ -111,6 +206,99 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentR
 	})
 	if err != nil {
 		return fmt.Errorf("reconcile AgentRun config ConfigMap: %w", err)
+	}
+
+	return nil
+}
+
+func (r *AgentRunReconciler) reconcileBrokerAgentsPolicy(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	secret := &corev1.Secret{}
+	secretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		return fmt.Errorf("get AgentRun broker token Secret %s/%s for broker policy: %w", secretKey.Namespace, secretKey.Name, err)
+	}
+	token := secret.Data[brokerTokenKey]
+	if len(token) == 0 {
+		return fmt.Errorf("AgentRun broker token Secret %s/%s is missing %s", secret.Namespace, secret.Name, brokerTokenKey)
+	}
+
+	entry := brokerAgentEntry{
+		ID:          AgentRunBrokerID(agentRun.Namespace, agentRun.Name),
+		TokenSHA256: BrokerTokenHash(token),
+		Grants:      BrokerAgentGrants(agentRun.Spec.Broker),
+	}
+
+	if err := r.updateBrokerAgentsPolicy(ctx, agentRun.Namespace, func(policy brokerAgentsPolicy) (brokerAgentsPolicy, error) {
+		return UpsertBrokerAgent(policy, entry), nil
+	}); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("broker agents ConfigMap %s/%s is required before reconciling AgentRun broker policy: %w", agentRun.Namespace, brokerAgentsConfigMapName, err)
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (r *AgentRunReconciler) removeBrokerAgentsPolicyEntry(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	err := r.updateBrokerAgentsPolicy(ctx, agentRun.Namespace, func(policy brokerAgentsPolicy) (brokerAgentsPolicy, error) {
+		return RemoveBrokerAgent(policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name)), nil
+	})
+	if errors.IsNotFound(err) {
+		// Fail open on deletion so AgentRun cleanup is not blocked if broker
+		// infrastructure was removed first in a local/kind POC cluster.
+		return nil
+	}
+	return err
+}
+
+func (r *AgentRunReconciler) updateBrokerAgentsPolicy(
+	ctx context.Context,
+	namespace string,
+	mutate func(brokerAgentsPolicy) (brokerAgentsPolicy, error),
+) error {
+	key := client.ObjectKey{Namespace: namespace, Name: brokerAgentsConfigMapName}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		configMap := &corev1.ConfigMap{}
+		if err := r.Get(ctx, key, configMap); err != nil {
+			return err
+		}
+		rawPolicy, ok := configMap.Data[brokerAgentsConfigKey]
+		if !ok {
+			return fmt.Errorf("broker agents ConfigMap %s/%s is missing %s", key.Namespace, key.Name, brokerAgentsConfigKey)
+		}
+		policy, err := ParseBrokerAgentsYAML(rawPolicy)
+		if err != nil {
+			return fmt.Errorf("parse broker agents ConfigMap %s/%s %s: %w", key.Namespace, key.Name, brokerAgentsConfigKey, err)
+		}
+		updatedPolicy, err := mutate(policy)
+		if err != nil {
+			return err
+		}
+		if err := ValidateBrokerAgentsPolicy(updatedPolicy); err != nil {
+			return fmt.Errorf("validate broker agents ConfigMap %s/%s %s: %w", key.Namespace, key.Name, brokerAgentsConfigKey, err)
+		}
+		rendered, err := RenderBrokerAgentsYAML(updatedPolicy)
+		if err != nil {
+			return fmt.Errorf("render broker agents ConfigMap %s/%s %s: %w", key.Namespace, key.Name, brokerAgentsConfigKey, err)
+		}
+		if configMap.Data[brokerAgentsConfigKey] == rendered {
+			return nil
+		}
+		if configMap.Data == nil {
+			configMap.Data = map[string]string{}
+		}
+		configMap.Data[brokerAgentsConfigKey] = rendered
+		if err := r.Update(ctx, configMap); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return err
+		}
+		return fmt.Errorf("update broker agents ConfigMap %s/%s: %w", key.Namespace, key.Name, err)
 	}
 
 	return nil
@@ -375,6 +563,11 @@ func CallbackTokenSecretName(agentRunName string) string {
 	return agentRunName + "-callback-token"
 }
 
+// AgentRunBrokerID returns the broker identity for an AgentRun.
+func AgentRunBrokerID(namespace, name string) string {
+	return namespace + "/" + name
+}
+
 func agentRunLabels(agentRunName string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":      "nvt-agent",
@@ -390,6 +583,184 @@ func GenerateToken(reader io.Reader) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(randomBytes), nil
+}
+
+// BrokerTokenHash returns the broker policy hash for a raw token.
+func BrokerTokenHash(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// BrokerAgentGrants converts AgentRun grants into broker policy grants.
+func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEntry {
+	if broker == nil || broker.Grants == nil {
+		return []brokerAgentGrantEntry{}
+	}
+
+	grants := make([]brokerAgentGrantEntry, 0, len(broker.Grants))
+	for _, grant := range broker.Grants {
+		repositories := []string{}
+		if grant.Repositories != nil {
+			repositories = append(repositories, grant.Repositories...)
+		}
+		grants = append(grants, brokerAgentGrantEntry{
+			Provider:     grant.Provider,
+			Repositories: repositories,
+		})
+	}
+	sort.SliceStable(grants, func(i, j int) bool {
+		if grants[i].Provider != grants[j].Provider {
+			return grants[i].Provider < grants[j].Provider
+		}
+		return stringsLess(grants[i].Repositories, grants[j].Repositories)
+	})
+
+	return grants
+}
+
+// ParseBrokerAgentsYAML parses broker agents policy YAML.
+func ParseBrokerAgentsYAML(raw string) (brokerAgentsPolicy, error) {
+	if raw == "" {
+		raw = "agents: []"
+	}
+
+	var policy brokerAgentsPolicy
+	if err := yaml.Unmarshal([]byte(raw), &policy); err != nil {
+		return brokerAgentsPolicy{}, err
+	}
+	if policy.Agents == nil {
+		policy.Agents = []brokerAgentEntry{}
+	}
+	normalizeBrokerAgentsPolicy(&policy)
+
+	return policy, nil
+}
+
+// RenderBrokerAgentsYAML renders deterministic broker agents policy YAML.
+func RenderBrokerAgentsYAML(policy brokerAgentsPolicy) (string, error) {
+	normalizeBrokerAgentsPolicy(&policy)
+	if err := ValidateBrokerAgentsPolicy(policy); err != nil {
+		return "", err
+	}
+	rendered, err := yaml.Marshal(policy)
+	if err != nil {
+		return "", err
+	}
+	return string(rendered), nil
+}
+
+// UpsertBrokerAgent inserts or replaces one broker agent entry.
+func UpsertBrokerAgent(policy brokerAgentsPolicy, entry brokerAgentEntry) brokerAgentsPolicy {
+	normalizeBrokerAgentEntry(&entry)
+	agents := make([]brokerAgentEntry, 0, len(policy.Agents)+1)
+	for i := range policy.Agents {
+		if policy.Agents[i].ID == entry.ID {
+			continue
+		}
+		agents = append(agents, policy.Agents[i])
+	}
+	agents = append(agents, entry)
+	policy.Agents = agents
+	normalizeBrokerAgentsPolicy(&policy)
+	return policy
+}
+
+// RemoveBrokerAgent removes one broker agent entry by id.
+func RemoveBrokerAgent(policy brokerAgentsPolicy, id string) brokerAgentsPolicy {
+	agents := make([]brokerAgentEntry, 0, len(policy.Agents))
+	for _, agent := range policy.Agents {
+		if agent.ID == id {
+			continue
+		}
+		agents = append(agents, agent)
+	}
+	policy.Agents = agents
+	normalizeBrokerAgentsPolicy(&policy)
+	return policy
+}
+
+// ValidateBrokerAgentsPolicy checks the policy shape accepted by the broker.
+func ValidateBrokerAgentsPolicy(policy brokerAgentsPolicy) error {
+	seenIDs := map[string]struct{}{}
+	seenHashes := map[string]string{}
+	for agentIndex, agent := range policy.Agents {
+		if agent.ID == "" {
+			return fmt.Errorf("agents[%d].id is required", agentIndex)
+		}
+		if _, exists := seenIDs[agent.ID]; exists {
+			return fmt.Errorf("duplicate agent id: %s", agent.ID)
+		}
+		seenIDs[agent.ID] = struct{}{}
+		if !validBrokerTokenHash(agent.TokenSHA256) {
+			return fmt.Errorf("agents[%d].token-sha256 must be sha256:<hex>", agentIndex)
+		}
+		if existingID, exists := seenHashes[agent.TokenSHA256]; exists {
+			return fmt.Errorf("duplicate token hash for agents %s and %s", existingID, agent.ID)
+		}
+		seenHashes[agent.TokenSHA256] = agent.ID
+		for grantIndex, grant := range agent.Grants {
+			if grant.Provider == "" {
+				return fmt.Errorf("agents[%d].grants[%d].provider is required", agentIndex, grantIndex)
+			}
+			for repoIndex, repository := range grant.Repositories {
+				if repository == "" {
+					return fmt.Errorf("agents[%d].grants[%d].repositories[%d] must be a non-empty string", agentIndex, grantIndex, repoIndex)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func validBrokerTokenHash(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	encoded := strings.TrimPrefix(value, "sha256:")
+	if len(encoded) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(encoded)
+	return err == nil
+}
+
+func normalizeBrokerAgentsPolicy(policy *brokerAgentsPolicy) {
+	if policy.Agents == nil {
+		policy.Agents = []brokerAgentEntry{}
+	}
+	for i := range policy.Agents {
+		normalizeBrokerAgentEntry(&policy.Agents[i])
+	}
+	sort.SliceStable(policy.Agents, func(i, j int) bool {
+		return policy.Agents[i].ID < policy.Agents[j].ID
+	})
+}
+
+func normalizeBrokerAgentEntry(entry *brokerAgentEntry) {
+	if entry.Grants == nil {
+		entry.Grants = []brokerAgentGrantEntry{}
+	}
+	for i := range entry.Grants {
+		if entry.Grants[i].Repositories == nil {
+			entry.Grants[i].Repositories = []string{}
+		}
+	}
+	sort.SliceStable(entry.Grants, func(i, j int) bool {
+		if entry.Grants[i].Provider != entry.Grants[j].Provider {
+			return entry.Grants[i].Provider < entry.Grants[j].Provider
+		}
+		return stringsLess(entry.Grants[i].Repositories, entry.Grants[j].Repositories)
+	})
+}
+
+func stringsLess(left, right []string) bool {
+	for i := 0; i < len(left) && i < len(right); i++ {
+		if left[i] != right[i] {
+			return left[i] < right[i]
+		}
+	}
+	return len(left) < len(right)
 }
 
 // RenderAgentConfigYAML converts the preserved AgentRun agent config payload to YAML.
