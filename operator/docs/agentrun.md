@@ -88,6 +88,11 @@ broker:
 repository identifiers accepted by that provider. Patterns such as `owner/*`
 are provider-specific and follow the existing broker behavior.
 
+The controller writes these grants into the shared `nvt-broker-agents`
+ConfigMap in the same namespace as the `AgentRun`. The broker identity is
+`<namespace>/<name>`, and the policy stores only the SHA-256 hash of the
+per-run `NVT_BROKER_TOKEN`.
+
 ### `spec.agent.config`
 
 Embedded nvt agent configuration rendered by the controller into an owned
@@ -195,11 +200,22 @@ for the agent container, wires both token Secrets through `secretKeyRef`, and
 binds the DinD daemon to localhost inside the Pod network namespace. The agent
 container starts after the DinD startup probe can run `docker info`.
 
-This controller slice creates the ConfigMap, per-run token Secrets, and Pod,
-then syncs basic Pod-phase status. Broker policy registration, callback HTTP
-endpoints, lifecycle completion/failure handling, and TTL cleanup remain future
-work. Static broker providers remain outside `AgentRun`; the run only requests
-dynamic grants against them.
+Between token Secret reconciliation and Pod creation, the controller updates the
+shared `nvt-broker-agents` ConfigMap so `agents.yaml` contains the run's broker
+identity, `sha256:<hash>` of the raw broker token, and requested grants. It
+preserves unrelated agent entries and does not set `AgentRun` ownership on this
+shared infrastructure ConfigMap.
+
+The controller adds a finalizer to remove the run's broker policy entry on
+deletion. Deletion cleanup preserves unrelated entries and fails open if the
+broker agents ConfigMap has already been removed, so local/kind POC cleanup does
+not leave an `AgentRun` stuck terminating.
+
+This controller slice creates the ConfigMap, per-run token Secrets, broker
+policy entry, and Pod, then syncs basic Pod-phase status. Callback HTTP
+endpoints, lifecycle completion/failure handling, TTL cleanup, scheduler logic,
+and a broker admin API remain future work. Static broker providers remain
+outside `AgentRun`; the run only requests dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.
@@ -256,8 +272,23 @@ agents: []
 
 This mirrors the local `.broker/agents.yaml` model. Kubernetes projected
 ConfigMap updates are eventually reflected in mounted files, and the broker
-live-reloads its agents policy file; the kind POC should verify this path.
+live-reloads its agents policy file; the kind POC should verify that the broker
+sees operator-written updates through this mounted file path.
 
-The operator does not update `nvt-broker-agents` yet. Broker policy mutation,
-hashing AgentRun broker tokens into `agents.yaml`, callback HTTP endpoints,
-finalizers, TTL cleanup, and scheduler logic remain future work.
+The operator now updates `nvt-broker-agents` for each `AgentRun` in the same
+namespace as the run. A generated entry looks like:
+
+```yaml
+agents:
+  - id: default/example
+    token-sha256: sha256:<sha256-of-NVT_BROKER_TOKEN>
+    grants:
+      - provider: github-main-app
+        repositories:
+          - mirkoSekulic/nvt-agent
+```
+
+The raw token stays in the owned Secret and is not written to the ConfigMap.
+Broker providers remain static in `broker.yaml`; callback HTTP endpoints,
+lifecycle completion, TTL cleanup, scheduler logic, and a broker admin API
+remain future work.

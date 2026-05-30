@@ -2,17 +2,21 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
@@ -54,7 +58,7 @@ func TestReconcileSetsPendingForEmptyPhase(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -79,7 +83,7 @@ func TestReconcileCreatesAgentConfigMap(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -113,7 +117,7 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -211,7 +215,7 @@ func TestReconcileCreatesTokenSecrets(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -231,7 +235,210 @@ func TestReconcileCreatesTokenSecrets(t *testing.T) {
 	assertSecretKeyEnv(t, agentContainer, callbackTokenKey, callbackSecret.Name, callbackTokenKey)
 }
 
-func TestReconcileCreatesOwnedAgentConfigMap(t *testing.T) {
+func TestReconcileWritesBrokerAgentsPolicy(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
+		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+			{Provider: "github-main-app", Repositories: []string{"mirkoSekulic/nvt-agent"}},
+		},
+	}
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("raw-broker-token"))
+	callbackSecret := mustDesiredTokenSecret(t, agentRun, scheme, CallbackTokenSecretName(agentRun.Name), callbackTokenKey, []byte("callback-token"))
+	brokerAgentsConfigMap := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerAgentsConfigMap.Data[brokerAgentsConfigKey] = `agents:
+- id: kube-system/existing
+  token-sha256: ` + validTestTokenHash("existing") + `
+  grants:
+  - provider: github-main-app
+    repositories:
+    - mirkoSekulic/other
+`
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerSecret, callbackSecret, brokerAgentsConfigMap).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	configMap := getBrokerAgentsConfigMap(ctx, t, k8sClient, agentRun.Namespace)
+	if strings.Contains(configMap.Data[brokerAgentsConfigKey], "raw-broker-token") {
+		t.Fatalf("raw token leaked into broker agents policy:\n%s", configMap.Data[brokerAgentsConfigKey])
+	}
+	policy := mustParseBrokerAgentsPolicy(t, configMap.Data[brokerAgentsConfigKey])
+	if len(policy.Agents) != 2 {
+		t.Fatalf("expected two broker agent entries, got %#v", policy.Agents)
+	}
+	if policy.Agents[0].ID != AgentRunBrokerID(agentRun.Namespace, agentRun.Name) ||
+		policy.Agents[1].ID != "kube-system/existing" {
+		t.Fatalf("expected deterministic id order with existing entry preserved, got %#v", policy.Agents)
+	}
+	entry := policy.Agents[0]
+	if entry.TokenSHA256 != expectedSHA256TokenHash("raw-broker-token") {
+		t.Fatalf("expected token hash %q, got %q", expectedSHA256TokenHash("raw-broker-token"), entry.TokenSHA256)
+	}
+	if len(entry.Grants) != 1 ||
+		entry.Grants[0].Provider != "github-main-app" ||
+		len(entry.Grants[0].Repositories) != 1 ||
+		entry.Grants[0].Repositories[0] != "mirkoSekulic/nvt-agent" {
+		t.Fatalf("unexpected grants: %#v", entry.Grants)
+	}
+}
+
+func TestReconcileUpdatesBrokerAgentsPolicyGrants(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
+		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+			{Provider: "github-main-app", Repositories: []string{"mirkoSekulic/nvt-agent"}},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var updatedAgentRun nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updatedAgentRun); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	updatedAgentRun.Spec.Broker.Grants = []nvtv1alpha1.AgentRunBrokerGrant{
+		{Provider: "github-main-app", Repositories: []string{"mirkoSekulic/nvt-agent", "mirkoSekulic/nvt-runtime"}},
+	}
+	if err := k8sClient.Update(ctx, &updatedAgentRun); err != nil {
+		t.Fatalf("update AgentRun grants: %v", err)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile updated grants: %v", err)
+	}
+
+	policy := mustParseBrokerAgentsPolicy(t, getBrokerAgentsConfigMap(ctx, t, k8sClient, agentRun.Namespace).Data[brokerAgentsConfigKey])
+	entry := requireBrokerAgentEntry(t, policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name))
+	if len(entry.Grants) != 1 || len(entry.Grants[0].Repositories) != 2 {
+		t.Fatalf("expected updated repositories, got %#v", entry.Grants)
+	}
+	if entry.Grants[0].Repositories[1] != "mirkoSekulic/nvt-runtime" {
+		t.Fatalf("expected updated grant repositories, got %#v", entry.Grants[0].Repositories)
+	}
+}
+
+func TestReconcileRejectsDuplicateBrokerTokenHash(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("shared-token"))
+	callbackSecret := mustDesiredTokenSecret(t, agentRun, scheme, CallbackTokenSecretName(agentRun.Name), callbackTokenKey, []byte("callback-token"))
+	brokerAgentsConfigMap := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerAgentsConfigMap.Data[brokerAgentsConfigKey] = `agents:
+- id: default/other
+  token-sha256: ` + expectedSHA256TokenHash("shared-token") + `
+  grants: []
+`
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerSecret, callbackSecret, brokerAgentsConfigMap).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil {
+		t.Fatal("expected duplicate token hash to fail")
+	}
+	if !strings.Contains(err.Error(), "duplicate token hash") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpsertBrokerAgentRemovesDuplicateExistingID(t *testing.T) {
+	policy := brokerAgentsPolicy{
+		Agents: []brokerAgentEntry{
+			{ID: "default/example", TokenSHA256: validTestTokenHash("old-a"), Grants: []brokerAgentGrantEntry{}},
+			{ID: "default/other", TokenSHA256: validTestTokenHash("other"), Grants: []brokerAgentGrantEntry{}},
+			{ID: "default/example", TokenSHA256: validTestTokenHash("old-b"), Grants: []brokerAgentGrantEntry{}},
+		},
+	}
+
+	updated := UpsertBrokerAgent(policy, brokerAgentEntry{
+		ID:          "default/example",
+		TokenSHA256: validTestTokenHash("new"),
+		Grants:      []brokerAgentGrantEntry{},
+	})
+
+	if len(updated.Agents) != 2 {
+		t.Fatalf("expected duplicate id entries to be collapsed, got %#v", updated.Agents)
+	}
+	entry := requireBrokerAgentEntry(t, updated, "default/example")
+	if entry.TokenSHA256 != validTestTokenHash("new") {
+		t.Fatalf("expected replacement token hash, got %#v", entry)
+	}
+}
+
+func TestReconcileRejectsMalformedBrokerAgentsPolicy(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	brokerAgentsConfigMap := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerAgentsConfigMap.Data[brokerAgentsConfigKey] = "agents: ["
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerAgentsConfigMap).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil {
+		t.Fatal("expected malformed broker agents policy to fail")
+	}
+	if !strings.Contains(err.Error(), "parse broker agents ConfigMap") {
+		t.Fatalf("expected parse error context, got %v", err)
+	}
+}
+
+func TestReconcileRejectsBrokerIncompatibleAgentsPolicy(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	brokerAgentsConfigMap := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerAgentsConfigMap.Data[brokerAgentsConfigKey] = `agents:
+- id: default/other
+  token-sha256: sha256:not-valid
+  grants: []
+`
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerAgentsConfigMap).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil {
+		t.Fatal("expected broker-incompatible agents policy to fail")
+	}
+	if !strings.Contains(err.Error(), "token-sha256 must be sha256:<hex>") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReconcileRequiresBrokerAgentsConfigMap(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	agentRun := testAgentRun()
@@ -239,6 +446,211 @@ func TestReconcileCreatesOwnedAgentConfigMap(t *testing.T) {
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
 		WithObjects(agentRun).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil {
+		t.Fatal("expected missing broker agents ConfigMap to fail")
+	}
+	if !strings.Contains(err.Error(), "broker agents ConfigMap default/nvt-broker-agents is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReconcileAddsAgentRunFinalizer(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&updated, agentRunFinalizer) {
+		t.Fatalf("expected finalizer %q, got %#v", agentRunFinalizer, updated.Finalizers)
+	}
+}
+
+func TestFinalizeRemovesBrokerAgentsPolicyEntry(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Finalizers = []string{agentRunFinalizer}
+	brokerAgentsConfigMap := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerAgentsConfigMap.Data[brokerAgentsConfigKey] = `agents:
+- id: default/example
+  token-sha256: ` + validTestTokenHash("example") + `
+  grants: []
+- id: default/other
+  token-sha256: ` + validTestTokenHash("other") + `
+  grants: []
+`
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerAgentsConfigMap).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if err := reconciler.finalizeAgentRun(ctx, agentRun); err != nil {
+		t.Fatalf("finalize AgentRun: %v", err)
+	}
+
+	configMap := getBrokerAgentsConfigMap(ctx, t, k8sClient, agentRun.Namespace)
+	policy := mustParseBrokerAgentsPolicy(t, configMap.Data[brokerAgentsConfigKey])
+	if len(policy.Agents) != 1 || policy.Agents[0].ID != "default/other" {
+		t.Fatalf("expected only unrelated broker agent entry to remain, got %#v", policy.Agents)
+	}
+	if controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
+		t.Fatalf("expected finalizer to be removed, got %#v", agentRun.Finalizers)
+	}
+}
+
+func TestReconcileDeletionRemovesBrokerPolicyEntryAndFinalizer(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	now := metav1.Now()
+	agentRun := testAgentRun()
+	agentRun.Finalizers = []string{agentRunFinalizer}
+	agentRun.DeletionTimestamp = &now
+	brokerAgentsConfigMap := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerAgentsConfigMap.Data[brokerAgentsConfigKey] = `agents:
+- id: default/example
+  token-sha256: ` + validTestTokenHash("example") + `
+  grants: []
+- id: default/other
+  token-sha256: ` + validTestTokenHash("other") + `
+  grants: []
+`
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerAgentsConfigMap).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile deleting AgentRun: %v", err)
+	}
+
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err == nil {
+		if controllerutil.ContainsFinalizer(&updated, agentRunFinalizer) {
+			t.Fatalf("expected persisted finalizer to be removed, got %#v", updated.Finalizers)
+		}
+	} else if !errors.IsNotFound(err) {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	policy := mustParseBrokerAgentsPolicy(t, getBrokerAgentsConfigMap(ctx, t, k8sClient, agentRun.Namespace).Data[brokerAgentsConfigKey])
+	if len(policy.Agents) != 1 || policy.Agents[0].ID != "default/other" {
+		t.Fatalf("expected only unrelated broker agent entry to remain, got %#v", policy.Agents)
+	}
+}
+
+func TestFinalizeIgnoresMissingBrokerAgentsConfigMap(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Finalizers = []string{agentRunFinalizer}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if err := reconciler.finalizeAgentRun(ctx, agentRun); err != nil {
+		t.Fatalf("finalize with missing broker agents ConfigMap: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
+		t.Fatalf("expected finalizer to be removed, got %#v", agentRun.Finalizers)
+	}
+}
+
+func TestRenderBrokerAgentsYAMLIsDeterministic(t *testing.T) {
+	policy := brokerAgentsPolicy{
+		Agents: []brokerAgentEntry{
+			{ID: "z/run", TokenSHA256: validTestTokenHash("z"), Grants: nil},
+			{
+				ID:          "a/run",
+				TokenSHA256: validTestTokenHash("a"),
+				Grants: []brokerAgentGrantEntry{
+					{Provider: "github-z", Repositories: nil},
+					{Provider: "github-a", Repositories: []string{"repo-b"}},
+				},
+			},
+		},
+	}
+
+	rendered, err := RenderBrokerAgentsYAML(policy)
+	if err != nil {
+		t.Fatalf("render broker agents YAML: %v", err)
+	}
+	expected := `agents:
+- grants:
+  - provider: github-a
+    repositories:
+    - repo-b
+  - provider: github-z
+    repositories: []
+  id: a/run
+  token-sha256: ` + validTestTokenHash("a") + `
+- grants: []
+  id: z/run
+  token-sha256: ` + validTestTokenHash("z") + `
+`
+	if rendered != expected {
+		t.Fatalf("unexpected rendered policy:\n%s", rendered)
+	}
+}
+
+func TestAgentRunsForBrokerAgentsConfigMap(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	first := testAgentRun()
+	first.Name = "b-run"
+	second := testAgentRun()
+	second.Name = "a-run"
+	otherNamespace := testAgentRun()
+	otherNamespace.Name = "other"
+	otherNamespace.Namespace = "other"
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(first, second, otherNamespace).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	requests := reconciler.agentRunsForBrokerAgentsConfigMap(ctx, testBrokerAgentsConfigMap("default"))
+
+	if len(requests) != 2 {
+		t.Fatalf("expected two requests, got %#v", requests)
+	}
+	if requests[0].Name != "a-run" || requests[1].Name != "b-run" {
+		t.Fatalf("expected deterministic namespace-local requests, got %#v", requests)
+	}
+}
+
+func TestReconcileCreatesOwnedAgentConfigMap(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -258,7 +670,7 @@ func TestReconcileUpdatesAgentConfigMapWhenConfigChanges(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -310,7 +722,7 @@ func TestReconcileDoesNotUpdateExistingAgentPodSpec(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -353,7 +765,7 @@ func TestReconcileRejectsExistingUnownedAgentPod(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun, pod).
+		WithObjects(agentRun, pod, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -375,7 +787,7 @@ func TestReconcileReusesExistingOwnedTokenSecrets(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun, brokerSecret, callbackSecret).
+		WithObjects(agentRun, brokerSecret, callbackSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -445,7 +857,7 @@ func TestReconcileRejectsExistingUnownedCallbackTokenSecret(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun, brokerSecret, callbackSecret).
+		WithObjects(agentRun, brokerSecret, callbackSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -491,7 +903,7 @@ func TestReconcileSetsPodNameAfterPodExists(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -519,7 +931,7 @@ func TestReconcileSetsRunningAndStartedAtWhenPodRuns(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -569,7 +981,7 @@ func TestReconcileSetsFailedWhenPodFails(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
-		WithObjects(agentRun).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
@@ -639,6 +1051,18 @@ func testAgentRun() *nvtv1alpha1.AgentRun {
 	}
 }
 
+func testBrokerAgentsConfigMap(namespace string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      brokerAgentsConfigMapName,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			brokerAgentsConfigKey: "agents: []\n",
+		},
+	}
+}
+
 func clientKey(agentRun *nvtv1alpha1.AgentRun) types.NamespacedName {
 	return types.NamespacedName{Name: agentRun.Name, Namespace: agentRun.Namespace}
 }
@@ -655,6 +1079,22 @@ func getAgentConfigMap(
 	key := types.NamespacedName{Name: AgentConfigMapName(agentRun.Name), Namespace: agentRun.Namespace}
 	if err := k8sClient.Get(ctx, key, &configMap); err != nil {
 		t.Fatalf("get ConfigMap: %v", err)
+	}
+	return configMap
+}
+
+func getBrokerAgentsConfigMap(
+	ctx context.Context,
+	t *testing.T,
+	k8sClient client.Reader,
+	namespace string,
+) corev1.ConfigMap {
+	t.Helper()
+
+	var configMap corev1.ConfigMap
+	key := types.NamespacedName{Name: brokerAgentsConfigMapName, Namespace: namespace}
+	if err := k8sClient.Get(ctx, key, &configMap); err != nil {
+		t.Fatalf("get broker agents ConfigMap: %v", err)
 	}
 	return configMap
 }
@@ -690,6 +1130,37 @@ func getAgentPod(
 		t.Fatalf("get Pod: %v", err)
 	}
 	return pod
+}
+
+func mustParseBrokerAgentsPolicy(t *testing.T, raw string) brokerAgentsPolicy {
+	t.Helper()
+
+	policy, err := ParseBrokerAgentsYAML(raw)
+	if err != nil {
+		t.Fatalf("parse broker agents policy:\n%s\nerror: %v", raw, err)
+	}
+	return policy
+}
+
+func requireBrokerAgentEntry(t *testing.T, policy brokerAgentsPolicy, id string) brokerAgentEntry {
+	t.Helper()
+
+	for _, entry := range policy.Agents {
+		if entry.ID == id {
+			return entry
+		}
+	}
+	t.Fatalf("broker agent entry %q not found in %#v", id, policy.Agents)
+	return brokerAgentEntry{}
+}
+
+func expectedSHA256TokenHash(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func validTestTokenHash(seed string) string {
+	return expectedSHA256TokenHash("test-token-" + seed)
 }
 
 func assertTokenSecret(t *testing.T, secret corev1.Secret, agentRun *nvtv1alpha1.AgentRun, tokenKey string) {
