@@ -9,8 +9,8 @@ encode who scheduled it.
 ## Design Boundaries
 
 - `AgentRun` is the generic execution unit.
-- Future scheduler extensions may create `AgentRun` resources, but `AgentRun`
-  does not know who scheduled it.
+- Scheduler extensions may create `AgentRun` resources through the generic
+  `AgentSchedule` admission pool, but `AgentRun` does not know who scheduled it.
 - Runtime plugins remain configured through the embedded agent config at
   `spec.agent.config`.
 - `spec.prompt.text` is a small AgentRun convenience that renders to the
@@ -20,8 +20,7 @@ encode who scheduled it.
   dynamic grants against those static providers.
 - v1 supports `workspace.mode: Ephemeral` only. There is no PVC-backed
   workspace retention in this contract.
-- This API contract does not include scheduler CRDs, controller code, or
-  GitHub-specific scheduler/operator logic.
+- This API contract does not include GitHub-specific scheduler/operator logic.
 
 ## Example
 
@@ -300,9 +299,9 @@ overwritten by callbacks or by later Pod status sync.
 This controller slice creates the ConfigMap, per-run token Secrets, broker
 policy entry, and Pod, accepts lifecycle callbacks, syncs basic status, and
 enforces active deadlines and completed/failed terminal Pod TTLs. AgentRun CR
-cleanup, scheduler logic, external Ingress, and a broker admin API remain future
-work. Static broker providers remain outside `AgentRun`; the run only requests
-dynamic grants against them.
+cleanup, concrete scheduler plugins, external Ingress, and a broker admin API
+remain future work. Static broker providers remain outside `AgentRun`; the run
+only requests dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.
@@ -371,5 +370,5 @@ agents:
 ```
 
 The raw token stays in the owned Secret and is not written to the ConfigMap.
-Broker providers remain static in `broker.yaml`; AgentRun CR cleanup, scheduler
-logic, and a broker admin API remain future work.
+Broker providers remain static in `broker.yaml`; AgentRun CR cleanup, concrete
+scheduler plugins, and a broker admin API remain future work.

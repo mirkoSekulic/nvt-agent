@@ -3,24 +3,34 @@
 This directory contains the initial API contract and controller scaffold for the
 nvt Kubernetes operator.
 
-The first resource is `AgentRun`:
+The first resources are `AgentRun` and `AgentSchedule`:
 
 ```text
 apiVersion: nvt.dev/v1alpha1
 kind: AgentRun
+
+apiVersion: nvt.dev/v1alpha1
+kind: AgentSchedule
 ```
 
 `AgentRun` is the generic execution unit for one disposable nvt agent run. It
 does not know whether it was created manually, by GitOps, by a scheduler, or by
 some future extension.
 
+`AgentSchedule` is a generic admission pool. Trusted scheduler plugins submit a
+complete `AgentRun` spec to the operator endpoint, and the operator applies only
+generic controls such as suspend, parallelism, and duplicate active work ids.
+
 ## Files
 
-- `config/crd/bases/nvt.dev_agentruns.yaml`: v1alpha1 CRD manifest
+- `config/crd/bases/nvt.dev_agentruns.yaml`: AgentRun v1alpha1 CRD manifest
+- `config/crd/bases/nvt.dev_agentschedules.yaml`: AgentSchedule v1alpha1 CRD
+  manifest
 - `config/broker/broker.yaml`: local/kind broker Deployment, Service, and
   ConfigMaps for POC clusters
 - `examples/agentrun-basic.yaml`: example disposable agent run
-- `docs/agentrun.md`: API and intended v1 behavior notes
+- `docs/agentrun.md`: AgentRun API and intended v1 behavior notes
+- `docs/agentschedule.md`: AgentSchedule admission-pool behavior notes
 - `cmd/manager`: controller-runtime manager entrypoint
 - `internal/controller`: AgentRun reconciler
 
@@ -38,20 +48,28 @@ token Secrets into the agent container environment, and uses an ephemeral
 `emptyDir` workspace. The agent container starts after the DinD startup probe
 can run `docker info`.
 
-The controller syncs basic Pod-phase status only: it records `status.podName`,
+The AgentRun controller syncs basic Pod-phase status only: it records `status.podName`,
 sets `Running` and `startedAt` when the Pod is running, sets `Failed` when the
 Pod fails, and accepts cluster-internal lifecycle callbacks that can mark the
 run `Completed` or `Failed`. Completed and failed runs delete their owned agent
-Pod after the matching terminal Pod TTL. Scheduler logic and AgentRun CR cleanup
-remain intentionally future work.
+Pod after the matching terminal Pod TTL. AgentRun CR cleanup remains
+intentionally future work.
 
-This directory does not include scheduler CRDs or GitHub-specific operator
-logic. Runtime plugins remain configured through the embedded agent config under
-`spec.agent.config`.
+The AgentSchedule controller syncs generic admission-pool status and the
+operator HTTP server accepts cluster-internal schedule admissions at
+`POST /v1/schedules/{namespace}/{name}/runs`. The schedule admission endpoint is
+same-namespace and assumes trusted cluster-internal callers for this POC; it has
+no authentication and must not be exposed publicly. Admissions are guarded by a
+per-schedule lock inside one active operator process, so the POC assumes a
+single active HTTP process, normally via leader election.
 
-Future scheduler extensions may create `AgentRun` resources, but those
-extensions are separate from `AgentRun` itself and separate from runtime
-plugins.
+This directory does not include GitHub-specific operator logic. Runtime plugins
+remain configured through the embedded agent config under `spec.agent.config`.
+
+Future scheduler plugins may submit `AgentRun` resources through
+`AgentSchedule`, but those plugins are separate from `AgentRun` itself and
+separate from runtime plugins. Auth, template mode, per-key limits,
+multi-namespace behavior, and concrete scheduler plugins remain future work.
 
 ## Broker POC Manifests
 
@@ -113,8 +131,8 @@ updates through this mounted file path.
 
 AgentRun Pods receive `NVT_BROKER_URL=http://nvt-broker:7347` and a
 per-run `NVT_BROKER_TOKEN`. Broker provider configuration remains static;
-AgentRun CR cleanup, scheduler behavior, and a broker admin API remain future
-work.
+AgentRun CR cleanup, concrete scheduler plugins, and a broker admin API remain
+future work.
 
 ## AgentRun Callback Endpoint
 
