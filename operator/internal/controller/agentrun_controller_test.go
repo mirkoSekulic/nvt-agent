@@ -195,6 +195,8 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 		t.Fatalf("expected privileged DinD sidecar, got %#v", dindContainer.SecurityContext)
 	}
 	assertVolumeMount(t, dindContainer, "workspace", workspaceMountPath, "", false)
+	assertNoVolumeMount(t, dindContainer, runtimeAuthSourceName)
+	assertNoVolumeMount(t, dindContainer, runtimeAuthHomeName)
 
 	workspaceVolume := requireVolume(t, pod, "workspace")
 	if workspaceVolume.EmptyDir == nil {
@@ -211,6 +213,132 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 		configVolume.ConfigMap.Items[0].Key != agentConfigKey ||
 		configVolume.ConfigMap.Items[0].Path != agentConfigKey {
 		t.Fatalf("expected agent.yaml ConfigMap item, got %#v", configVolume.ConfigMap.Items)
+	}
+}
+
+func TestDesiredAgentPodSeedsRuntimeAuthSecretAtCodexDefaultPath(t *testing.T) {
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "codex-auth"}
+
+	pod, err := DesiredAgentPod(agentRun, scheme)
+	if err != nil {
+		t.Fatalf("desired AgentRun Pod: %v", err)
+	}
+
+	agentContainer := requireContainer(t, *pod, "agent")
+	assertVolumeMount(t, agentContainer, runtimeAuthHomeName, "/root/.codex", "", false)
+	assertNoVolumeMount(t, agentContainer, runtimeAuthSourceName)
+
+	copyContainer := requireInitContainer(t, *pod, "runtime-auth-copy")
+	assertVolumeMount(t, copyContainer, runtimeAuthSourceName, runtimeAuthSourcePath, "", true)
+	assertVolumeMount(t, copyContainer, runtimeAuthHomeName, runtimeAuthHomePath, "", false)
+	if strings.Join(append(copyContainer.Command, copyContainer.Args...), " ") !=
+		"sh -c cp -a /nvt-agent/runtime-auth-source/. /nvt-agent/runtime-auth-home/ && chmod -R u+rwX /nvt-agent/runtime-auth-home" {
+		t.Fatalf("unexpected runtime auth copy command/args: command=%#v args=%#v", copyContainer.Command, copyContainer.Args)
+	}
+
+	dindContainer := requireInitContainer(t, *pod, "docker")
+	assertNoVolumeMount(t, dindContainer, runtimeAuthSourceName)
+	assertNoVolumeMount(t, dindContainer, runtimeAuthHomeName)
+
+	runtimeAuthSourceVolume := requireVolume(t, *pod, runtimeAuthSourceName)
+	if runtimeAuthSourceVolume.Secret == nil {
+		t.Fatalf("expected runtime auth source Secret volume, got %#v", runtimeAuthSourceVolume.VolumeSource)
+	}
+	if runtimeAuthSourceVolume.Secret.SecretName != "codex-auth" {
+		t.Fatalf("expected runtime auth Secret %q, got %q", "codex-auth", runtimeAuthSourceVolume.Secret.SecretName)
+	}
+	runtimeAuthHomeVolume := requireVolume(t, *pod, runtimeAuthHomeName)
+	if runtimeAuthHomeVolume.EmptyDir == nil {
+		t.Fatalf("expected runtime auth home emptyDir volume, got %#v", runtimeAuthHomeVolume.VolumeSource)
+	}
+}
+
+func TestDesiredAgentPodMountsRuntimeAuthSecretAtClaudeDefaultPath(t *testing.T) {
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Runtime.Type = "claude"
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "claude-auth"}
+
+	pod, err := DesiredAgentPod(agentRun, scheme)
+	if err != nil {
+		t.Fatalf("desired AgentRun Pod: %v", err)
+	}
+
+	agentContainer := requireContainer(t, *pod, "agent")
+	assertVolumeMount(t, agentContainer, runtimeAuthHomeName, "/root/.claude", "", false)
+}
+
+func TestDesiredAgentPodMountsRuntimeAuthHomeAtExplicitPath(t *testing.T) {
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Runtime.Type = "future-runtime"
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{
+		SecretName: "future-auth",
+		MountPath:  "/var/lib/future-auth",
+	}
+
+	pod, err := DesiredAgentPod(agentRun, scheme)
+	if err != nil {
+		t.Fatalf("desired AgentRun Pod: %v", err)
+	}
+
+	agentContainer := requireContainer(t, *pod, "agent")
+	assertVolumeMount(t, agentContainer, runtimeAuthHomeName, "/var/lib/future-auth", "", false)
+	runtimeAuthSourceVolume := requireVolume(t, *pod, runtimeAuthSourceName)
+	if runtimeAuthSourceVolume.Secret == nil || runtimeAuthSourceVolume.Secret.SecretName != "future-auth" {
+		t.Fatalf("expected future-auth Secret source volume, got %#v", runtimeAuthSourceVolume.VolumeSource)
+	}
+	runtimeAuthHomeVolume := requireVolume(t, *pod, runtimeAuthHomeName)
+	if runtimeAuthHomeVolume.EmptyDir == nil {
+		t.Fatalf("expected runtime auth home emptyDir volume, got %#v", runtimeAuthHomeVolume.VolumeSource)
+	}
+}
+
+func TestDesiredAgentPodRejectsRuntimeAuthWithoutSecretName(t *testing.T) {
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{}
+
+	_, err := DesiredAgentPod(agentRun, scheme)
+	if err == nil {
+		t.Fatal("expected missing runtimeAuth secretName to fail")
+	}
+	if !strings.Contains(err.Error(), "spec.runtimeAuth.secretName is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDesiredAgentPodRejectsRuntimeAuthUnknownRuntimeWithoutMountPath(t *testing.T) {
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Runtime.Type = "future-runtime"
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "future-auth"}
+
+	_, err := DesiredAgentPod(agentRun, scheme)
+	if err == nil {
+		t.Fatal("expected unknown runtime without runtimeAuth mountPath to fail")
+	}
+	if !strings.Contains(err.Error(), `spec.runtimeAuth.mountPath is required for runtime type "future-runtime"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDesiredAgentPodRejectsRelativeRuntimeAuthMountPath(t *testing.T) {
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{
+		SecretName: "codex-auth",
+		MountPath:  "relative/path",
+	}
+
+	_, err := DesiredAgentPod(agentRun, scheme)
+	if err == nil {
+		t.Fatal("expected relative runtimeAuth mountPath to fail")
+	}
+	if !strings.Contains(err.Error(), `spec.runtimeAuth.mountPath must be an absolute path, got "relative/path"`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1027,6 +1155,37 @@ func TestAgentRunCRDSchemaIncludesPromptText(t *testing.T) {
 	}
 }
 
+func TestAgentRunCRDSchemaIncludesRuntimeAuthSecretName(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatalf("read AgentRun CRD: %v", err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("parse AgentRun CRD: %v", err)
+	}
+
+	runtimeAuth, ok := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
+		"spec", "properties", "runtimeAuth",
+	).(map[string]any)
+	if !ok {
+		t.Fatalf("expected spec.runtimeAuth schema object, got %#v", runtimeAuth)
+	}
+	required, ok := runtimeAuth["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "secretName" {
+		t.Fatalf("expected runtimeAuth.secretName to be required, got %#v", runtimeAuth["required"])
+	}
+	secretNameType := crdPath(t, runtimeAuth, "properties", "secretName", "type")
+	if secretNameType != "string" {
+		t.Fatalf("expected spec.runtimeAuth.secretName string schema, got %#v", secretNameType)
+	}
+	mountPathType := crdPath(t, runtimeAuth, "properties", "mountPath", "type")
+	if mountPathType != "string" {
+		t.Fatalf("expected spec.runtimeAuth.mountPath string schema, got %#v", mountPathType)
+	}
+}
+
 func TestReconcileSetsPodNameAfterPodExists(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
@@ -1620,6 +1779,10 @@ func testAgentRun() *nvtv1alpha1.AgentRun {
 			UID:       "agentrun-uid",
 		},
 		Spec: nvtv1alpha1.AgentRunSpec{
+			Runtime: nvtv1alpha1.AgentRunRuntime{
+				Type:     "codex",
+				Autonomy: "trusted-local",
+			},
 			Image: "nvt-agent-runtime:test",
 			Agent: nvtv1alpha1.AgentRunAgent{
 				Config: apiextensionsv1.JSON{Raw: []byte(`{
@@ -2019,6 +2182,16 @@ func assertVolumeMount(t *testing.T, container corev1.Container, name, mountPath
 		}
 	}
 	t.Fatalf("volume mount %q not found in %#v", name, container.VolumeMounts)
+}
+
+func assertNoVolumeMount(t *testing.T, container corev1.Container, name string) {
+	t.Helper()
+
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == name {
+			t.Fatalf("unexpected volume mount %q in %#v", name, container.VolumeMounts)
+		}
+	}
 }
 
 func requireVolume(t *testing.T, pod corev1.Pod, name string) corev1.Volume {

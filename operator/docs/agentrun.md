@@ -45,6 +45,31 @@ runtime:
 
 `autonomy` is `trusted-local` or `interactive`.
 
+### `spec.runtimeAuth`
+
+Optional runtime-specific auth material mounted from a Kubernetes Secret:
+
+```yaml
+runtimeAuth:
+  secretName: codex-auth
+  mountPath: /root/.codex
+```
+
+`secretName` is required when `runtimeAuth` is present and must name a Secret in
+the same namespace as the `AgentRun`. The Secret is mounted read-only into a
+copy init container, copied into a writable `emptyDir`, and the writable
+`emptyDir` is mounted into the agent container at the runtime auth home. Runtime
+auth is not mounted into the Docker-in-Docker sidecar and is separate from
+broker token Secrets.
+
+`mountPath` is optional for known runtimes. Defaults are:
+
+- `codex`: `/root/.codex`
+- `claude`: `/root/.claude`
+
+Unknown future runtime types must set `mountPath` explicitly or pod rendering
+fails with a clear validation error.
+
 ### `spec.image`
 
 Runtime image for the controller-created agent pod.
@@ -252,8 +277,13 @@ container. That Pod mounts the rendered ConfigMap at `/nvt-agent/agent.yaml`,
 provides an ephemeral `emptyDir` workspace, sets
 `DOCKER_HOST=tcp://127.0.0.1:2375` and `NVT_BROKER_URL=http://nvt-broker:7347`
 for the agent container, wires both token Secrets through `secretKeyRef`, and
-binds the DinD daemon to localhost inside the Pod network namespace. The agent
-container starts after the DinD startup probe can run `docker info`.
+optionally seeds `spec.runtimeAuth.secretName` into a writable runtime auth
+home for the agent container. Runtime auth uses a read-only Secret source volume
+and a writable `emptyDir` home volume so runtimes can update local state,
+history, caches, or SQLite WAL/SHM files. Runtime auth mounts are not added to
+the DinD sidecar. The Pod binds the DinD daemon to localhost inside the Pod
+network namespace. The agent container starts after runtime auth copying
+completes and the DinD startup probe can run `docker info`.
 
 Between token Secret reconciliation and Pod creation, the controller updates the
 shared `nvt-broker-agents` ConfigMap so `agents.yaml` contains the run's broker

@@ -1,0 +1,50 @@
+apiVersion: nvt.dev/v1alpha1
+kind: AgentRun
+metadata:
+  name: codex-kind
+  namespace: nvt
+spec:
+  runtime:
+    type: codex
+    autonomy: trusted-local
+  runtimeAuth:
+    secretName: codex-auth
+
+  image: nvt-agent-runtime:latest
+
+  workspace:
+    mode: Ephemeral
+
+  prompt:
+    text: |
+      Inspect the workspace and report the current repository status.
+
+  agent:
+    config:
+      runtime:
+        command: codex
+        args:
+          - exec
+          - --dangerously-bypass-approvals-and-sandbox
+          - --skip-git-repo-check
+      plugins:
+        - name: event-webhook
+          source: builtin
+          when: after-agent
+          restart: always
+          config:
+            url: http://nvt-operator:8082/v1/agentruns/nvt/codex-kind/events
+            since: beginning
+            filters:
+              - plugin.agent.signal.done
+            auth:
+              type: bearer-env
+              env: NVT_OPERATOR_CALLBACK_TOKEN
+
+  lifecycle:
+    completeOn:
+      - plugin.agent.signal.done
+
+  ttl:
+    completedTTLSeconds: 300
+    failedTTLSeconds: 3600

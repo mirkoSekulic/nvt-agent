@@ -49,6 +49,51 @@ make operator-kind-delete
 Future kind cases should call `operator-kind-setup` with only their
 case-specific Helm args, then keep scenario assertions in the case file.
 
+## Real Codex Auth Secret
+
+For local/dev testing of a real Codex `AgentRun`, create or refresh a
+same-namespace Secret from your local Codex auth directory:
+
+```sh
+make operator-codex-auth-secret
+```
+
+Defaults:
+
+```text
+SOURCE=$HOME/.codex
+NAMESPACE=nvt
+SECRET=codex-auth
+CLUSTER=nvt-smoke
+KUBECTL_CONTEXT=kind-$(CLUSTER)
+```
+
+Override values as needed:
+
+```sh
+make operator-codex-auth-secret SOURCE=$HOME/.nvt/k8s-auth/codex SECRET=codex-auth NAMESPACE=nvt CLUSTER=nvt-smoke
+```
+
+This copies the current local Codex auth material into a Kubernetes Secret.
+Re-run the helper after refreshing local Codex auth. The operator references
+the Secret through `spec.runtimeAuth.secretName`; it never reads host paths.
+
+```yaml
+spec:
+  runtime:
+    type: codex
+    autonomy: trusted-local
+  runtimeAuth:
+    secretName: codex-auth
+```
+
+For `codex`, the mount path defaults to `/root/.codex`. The Secret is mounted
+read-only into a copy init container, copied into a writable `emptyDir`, and the
+writable home is mounted into the agent container only. Runtime auth is not
+mounted into the DinD sidecar. This is POC/local-dev auth, separate from broker
+Secrets; production auth may use API keys or another Secret provisioning model
+later.
+
 ## Cases
 
 Select a case with `KIND_SMOKE_CASE`:

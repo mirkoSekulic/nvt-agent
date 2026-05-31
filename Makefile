@@ -3,12 +3,14 @@ AUTONOMY ?= trusted-local
 DIR ?= runtime/plugins
 CLUSTER ?= nvt-smoke
 NAMESPACE ?= nvt
+SOURCE ?= $(HOME)/.codex
+SECRET ?= codex-auth
 CREATE_CLUSTER ?= 1
 ROLLOUT_TIMEOUT ?= 180s
 KUBECTL_CONTEXT ?= kind-$(CLUSTER)
 OPERATOR_KIND_HELM_ARGS ?=
 
-.PHONY: runtime-build broker-build operator-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build operator-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render operator-codex-auth-secret infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -61,6 +63,9 @@ operator-kind-smoke:
 
 operator-kind-smoke-render:
 	KIND_SMOKE_MODE=render bash tests/operator/kind/smoke.sh
+
+operator-codex-auth-secret:
+	SOURCE="$(SOURCE)" NAMESPACE="$(NAMESPACE)" SECRET="$(SECRET)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" bash scripts/operator-codex-auth-secret.sh
 
 infra-up:
 	bash scripts/infra-up.sh

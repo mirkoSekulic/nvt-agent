@@ -18,6 +18,7 @@ helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER
 helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
+bash -n "${ROOT}/scripts/operator-codex-auth-secret.sh"
 
 has_resource() {
   local file="$1"

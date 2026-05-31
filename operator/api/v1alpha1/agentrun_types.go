@@ -37,21 +37,28 @@ type AgentRun struct {
 //
 //nolint:govet // Field order follows the CRD schema for readability.
 type AgentRunSpec struct {
-	Runtime          AgentRunRuntime    `json:"runtime"`
-	Image            string             `json:"image"`
-	RuntimeClassName *string            `json:"runtimeClassName,omitempty"`
-	Workspace        AgentRunWorkspace  `json:"workspace"`
-	Broker           *AgentRunBroker    `json:"broker,omitempty"`
-	Prompt           *AgentRunPrompt    `json:"prompt,omitempty"`
-	Agent            AgentRunAgent      `json:"agent"`
-	Lifecycle        *AgentRunLifecycle `json:"lifecycle,omitempty"`
-	TTL              *AgentRunTTL       `json:"ttl,omitempty"`
+	Runtime          AgentRunRuntime      `json:"runtime"`
+	RuntimeAuth      *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
+	Image            string               `json:"image"`
+	RuntimeClassName *string              `json:"runtimeClassName,omitempty"`
+	Workspace        AgentRunWorkspace    `json:"workspace"`
+	Broker           *AgentRunBroker      `json:"broker,omitempty"`
+	Prompt           *AgentRunPrompt      `json:"prompt,omitempty"`
+	Agent            AgentRunAgent        `json:"agent"`
+	Lifecycle        *AgentRunLifecycle   `json:"lifecycle,omitempty"`
+	TTL              *AgentRunTTL         `json:"ttl,omitempty"`
 }
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.
 type AgentRunRuntime struct {
 	Type     string `json:"type"`
 	Autonomy string `json:"autonomy"`
+}
+
+// AgentRunRuntimeAuth references runtime-specific auth material from a Kubernetes Secret.
+type AgentRunRuntimeAuth struct {
+	SecretName string `json:"secretName"`
+	MountPath  string `json:"mountPath,omitempty"`
 }
 
 // AgentRunWorkspace defines the workspace provisioning mode.
@@ -168,6 +175,9 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
 	}
+	if in.RuntimeAuth != nil {
+		out.RuntimeAuth = in.RuntimeAuth.DeepCopy()
+	}
 	if in.Broker != nil {
 		out.Broker = in.Broker.DeepCopy()
 	}
@@ -181,6 +191,17 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.TTL != nil {
 		out.TTL = in.TTL.DeepCopy()
 	}
+	return out
+}
+
+// DeepCopy returns a copy of the AgentRunRuntimeAuth.
+func (in *AgentRunRuntimeAuth) DeepCopy() *AgentRunRuntimeAuth {
+	if in == nil {
+		return nil
+	}
+
+	out := new(AgentRunRuntimeAuth)
+	*out = *in
 	return out
 }
 

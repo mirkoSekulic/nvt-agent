@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
@@ -31,11 +32,15 @@ import (
 )
 
 const (
-	agentConfigKey       = "agent.yaml"
-	agentConfigMountPath = "/nvt-agent/agent.yaml"
-	agentConfigVolumeDir = "/nvt-agent"
-	workspaceMountPath   = "/workspace"
-	initialPromptPlugin  = "initial-prompt"
+	agentConfigKey        = "agent.yaml"
+	agentConfigMountPath  = "/nvt-agent/agent.yaml"
+	agentConfigVolumeDir  = "/nvt-agent"
+	runtimeAuthSourcePath = "/nvt-agent/runtime-auth-source"
+	runtimeAuthHomePath   = "/nvt-agent/runtime-auth-home"
+	runtimeAuthSourceName = "runtime-auth-source"
+	runtimeAuthHomeName   = "runtime-auth-home"
+	workspaceMountPath    = "/workspace"
+	initialPromptPlugin   = "initial-prompt"
 
 	brokerURL                 = "http://nvt-broker:7347"
 	brokerAgentsConfigMapName = "nvt-broker-agents"
@@ -534,6 +539,97 @@ func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 
 // DesiredAgentPod returns the create-once Pod spec for an AgentRun.
 func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
+	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
+	if err != nil {
+		return nil, err
+	}
+
+	agentVolumeMounts := []corev1.VolumeMount{
+		{Name: "workspace", MountPath: workspaceMountPath},
+		{Name: "agent-config", MountPath: agentConfigVolumeDir, ReadOnly: true},
+	}
+	volumes := []corev1.Volume{
+		{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
+			Name: "agent-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AgentConfigMapName(agentRun.Name)},
+					Items: []corev1.KeyToPath{
+						{Key: agentConfigKey, Path: agentConfigKey},
+					},
+				},
+			},
+		},
+	}
+	if agentRun.Spec.RuntimeAuth != nil {
+		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+			Name:      runtimeAuthHomeName,
+			MountPath: runtimeAuthMountPath,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: runtimeAuthSourceName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: agentRun.Spec.RuntimeAuth.SecretName,
+				},
+			},
+		}, corev1.Volume{
+			Name: runtimeAuthHomeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
+
+	initContainers := []corev1.Container{}
+	if agentRun.Spec.RuntimeAuth != nil {
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "runtime-auth-copy",
+			Image:   "docker:27-dind",
+			Command: []string{"sh", "-c"},
+			Args: []string{
+				"cp -a " + runtimeAuthSourcePath + "/. " + runtimeAuthHomePath + "/ && chmod -R u+rwX " + runtimeAuthHomePath,
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: runtimeAuthSourceName, MountPath: runtimeAuthSourcePath, ReadOnly: true},
+				{Name: runtimeAuthHomeName, MountPath: runtimeAuthHomePath},
+			},
+		})
+	}
+	initContainers = append(initContainers, corev1.Container{
+		Name:          "docker",
+		Image:         "docker:27-dind",
+		RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
+		Command:       []string{"dockerd"},
+		Args: []string{
+			"--host=unix:///var/run/docker.sock",
+			"--host=tcp://127.0.0.1:2375",
+			"--tls=false",
+		},
+		Env: []corev1.EnvVar{
+			{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptrTo(true),
+		},
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
+			},
+			PeriodSeconds:    2,
+			FailureThreshold: 30,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "workspace", MountPath: workspaceMountPath},
+		},
+	})
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      AgentPodName(agentRun.Name),
@@ -543,35 +639,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		Spec: corev1.PodSpec{
 			RuntimeClassName: agentRun.Spec.RuntimeClassName,
 			RestartPolicy:    corev1.RestartPolicyNever,
-			InitContainers: []corev1.Container{
-				{
-					Name:          "docker",
-					Image:         "docker:27-dind",
-					RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
-					Command:       []string{"dockerd"},
-					Args: []string{
-						"--host=unix:///var/run/docker.sock",
-						"--host=tcp://127.0.0.1:2375",
-						"--tls=false",
-					},
-					Env: []corev1.EnvVar{
-						{Name: "DOCKER_TLS_CERTDIR", Value: ""},
-					},
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptrTo(true),
-					},
-					StartupProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
-						},
-						PeriodSeconds:    2,
-						FailureThreshold: 30,
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace", MountPath: workspaceMountPath},
-					},
-				},
-			},
+			InitContainers:   initContainers,
 			Containers: []corev1.Container{
 				{
 					Name:            "agent",
@@ -602,31 +670,10 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 							},
 						},
 					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace", MountPath: workspaceMountPath},
-						{Name: "agent-config", MountPath: agentConfigVolumeDir, ReadOnly: true},
-					},
+					VolumeMounts: agentVolumeMounts,
 				},
 			},
-			Volumes: []corev1.Volume{
-				{
-					Name: "workspace",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
-				},
-				{
-					Name: "agent-config",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: AgentConfigMapName(agentRun.Name)},
-							Items: []corev1.KeyToPath{
-								{Key: agentConfigKey, Path: agentConfigKey},
-							},
-						},
-					},
-				},
-			},
+			Volumes: volumes,
 		},
 	}
 	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
@@ -634,6 +681,31 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 	}
 
 	return pod, nil
+}
+
+// RuntimeAuthMountPath resolves the Secret mount path for the AgentRun runtime auth reference.
+func RuntimeAuthMountPath(agentRun *nvtv1alpha1.AgentRun) (string, error) {
+	runtimeAuth := agentRun.Spec.RuntimeAuth
+	if runtimeAuth == nil {
+		return "", nil
+	}
+	if runtimeAuth.SecretName == "" {
+		return "", fmt.Errorf("spec.runtimeAuth.secretName is required when runtimeAuth is present")
+	}
+	if runtimeAuth.MountPath != "" {
+		if !path.IsAbs(runtimeAuth.MountPath) {
+			return "", fmt.Errorf("spec.runtimeAuth.mountPath must be an absolute path, got %q", runtimeAuth.MountPath)
+		}
+		return runtimeAuth.MountPath, nil
+	}
+	switch agentRun.Spec.Runtime.Type {
+	case "codex":
+		return "/root/.codex", nil
+	case "claude":
+		return "/root/.claude", nil
+	default:
+		return "", fmt.Errorf("spec.runtimeAuth.mountPath is required for runtime type %q", agentRun.Spec.Runtime.Type)
+	}
 }
 
 // AgentConfigMapName returns the deterministic ConfigMap name for an AgentRun.
