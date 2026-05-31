@@ -2,9 +2,13 @@
 import hashlib
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import yaml
+
+DEFAULT_DELIVERY_ATTEMPTS = 30
+DEFAULT_DELIVERY_RETRY_DELAY_SECONDS = 1.0
 
 
 def fail(message):
@@ -60,14 +64,60 @@ def write_hash_atomically(path, value):
     temporary.replace(path)
 
 
-def deliver_prompt(text):
+def int_env(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        fail(f"{name} must be an integer")
+    if parsed < 1:
+        fail(f"{name} must be greater than or equal to 1")
+    return parsed
+
+
+def float_env(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        fail(f"{name} must be a number")
+    if parsed < 0:
+        fail(f"{name} must be greater than or equal to 0")
+    return parsed
+
+
+def delivery_attempts():
+    return int_env("NVT_INITIAL_PROMPT_RETRY_ATTEMPTS", DEFAULT_DELIVERY_ATTEMPTS)
+
+
+def delivery_retry_delay_seconds():
+    return float_env("NVT_INITIAL_PROMPT_RETRY_DELAY_SECONDS", DEFAULT_DELIVERY_RETRY_DELAY_SECONDS)
+
+
+def enqueue_prompt(text):
     command = ["agentdctl", "prompt", "--source", "plugin:initial-prompt", "--no-external"]
     try:
         result = subprocess.run(command, input=text, text=True, check=False)
     except FileNotFoundError:
         fail("agentdctl not found on PATH")
-    if result.returncode != 0:
-        fail(f"agentdctl prompt failed with exit {result.returncode}")
+    return result.returncode
+
+
+def deliver_prompt(text):
+    attempts = delivery_attempts()
+    delay_seconds = delivery_retry_delay_seconds()
+    last_exit_code = 0
+    for attempt in range(1, attempts + 1):
+        last_exit_code = enqueue_prompt(text)
+        if last_exit_code == 0:
+            return
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+    fail(f"agentdctl prompt failed after {attempts} attempts; last exit {last_exit_code}")
 
 
 def run():

@@ -25,5 +25,9 @@ If the same prompt hash was already delivered, it exits without enqueueing a
 duplicate prompt. The hash file is written only after `agentdctl prompt`
 succeeds.
 
+Delivery failures from `agentdctl prompt` are retried for a short bounded
+period to tolerate agent startup races. Config validation failures and a missing
+`agentdctl` executable fail immediately.
+
 AgentRun-generated configs can inject this plugin from `spec.prompt.text`.
 Normal local agents are unaffected unless they explicitly configure this plugin.
