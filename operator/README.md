@@ -149,6 +149,17 @@ When the event name matches `spec.lifecycle.completeOn`, the operator sets
 terminal phases (`Completed`, `Failed`, `DeadlineExceeded`) are not overwritten,
 and Pod status sync also avoids downgrading terminal phases.
 
+## Active Deadline
+
+`spec.ttl.activeDeadlineSeconds` is optional. When omitted, the run is allowed
+to run indefinitely, which is the supported long-running/manual `AgentRun` mode.
+When set, the controller starts enforcing it after `status.startedAt` is set.
+Before the deadline expires, the reconciler requeues for the remaining duration.
+After `startedAt + activeDeadlineSeconds`, the controller marks the run
+`DeadlineExceeded`, sets `status.finishedAt` and a clear reason, and deletes the
+owned `<agentrun-name>-agent` Pod so the workload stops. The `AgentRun` CR is
+kept for status/history.
+
 ## Terminal Pod Cleanup
 
 Completed and failed runs keep the `AgentRun` CR for status/history, but delete
@@ -166,4 +177,4 @@ Lifecycle failure callbacks and Kubernetes Pod `Failed` status both stamp
 cleanup. If the matching TTL or `status.finishedAt` is unset, the Pod is left in
 place. Before the TTL expires, the reconciler requeues for the remaining
 duration. If the Pod is already gone, cleanup is treated as complete.
-`DeadlineExceeded` cleanup and AgentRun CR deletion remain future work.
+AgentRun CR deletion remains future work.

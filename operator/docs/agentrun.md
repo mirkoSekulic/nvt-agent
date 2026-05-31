@@ -157,7 +157,12 @@ ttl:
   failedTTLSeconds: 3600
 ```
 
-`activeDeadlineSeconds` bounds active runtime duration but is not enforced yet.
+`activeDeadlineSeconds` is optional. When omitted, the AgentRun can run
+indefinitely, which is the supported long-running/manual-agent mode. When set,
+it is enforced after `status.startedAt`: the controller requeues before the
+deadline, and after `startedAt + activeDeadlineSeconds` it marks the run
+`DeadlineExceeded`, sets `status.finishedAt`, records a clear reason, and
+deletes the owned agent Pod.
 `completedTTLSeconds` and `failedTTLSeconds` control owned Pod cleanup after
 `Completed` and `Failed` phases. Lifecycle failure callbacks and Kubernetes Pod
 `Failed` status both stamp `status.finishedAt`, so both failure paths can use
@@ -256,10 +261,10 @@ overwritten by callbacks or by later Pod status sync.
 
 This controller slice creates the ConfigMap, per-run token Secrets, broker
 policy entry, and Pod, accepts lifecycle callbacks, syncs basic status, and
-deletes the owned Pod after completed/failed terminal Pod TTLs. AgentRun CR
-cleanup, `DeadlineExceeded` cleanup, scheduler logic, external Ingress, and a
-broker admin API remain future work. Static broker providers remain outside
-`AgentRun`; the run only requests dynamic grants against them.
+enforces active deadlines and completed/failed terminal Pod TTLs. AgentRun CR
+cleanup, scheduler logic, external Ingress, and a broker admin API remain future
+work. Static broker providers remain outside `AgentRun`; the run only requests
+dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.
@@ -328,6 +333,5 @@ agents:
 ```
 
 The raw token stays in the owned Secret and is not written to the ConfigMap.
-Broker providers remain static in `broker.yaml`; AgentRun CR cleanup,
-`DeadlineExceeded` cleanup, scheduler logic, and a broker admin API remain
-future work.
+Broker providers remain static in `broker.yaml`; AgentRun CR cleanup, scheduler
+logic, and a broker admin API remain future work.

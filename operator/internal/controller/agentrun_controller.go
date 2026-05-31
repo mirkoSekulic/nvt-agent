@@ -44,6 +44,7 @@ const (
 	agentRunFinalizer         = "nvt.dev/agentrun-broker-policy"
 	completedLifecycleReason  = "Completed by lifecycle event "
 	failedLifecycleReason     = "Failed by lifecycle event "
+	activeDeadlineReason      = "Active deadline exceeded"
 	generatedTokenByteLength  = 32
 )
 
@@ -93,6 +94,14 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
+	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
+	}
+	deadlineResult, deadlineExceeded, err := r.reconcileActiveDeadline(ctx, &agentRun)
+	if deadlineExceeded || err != nil {
+		return deadlineResult, err
+	}
+
 	if err := r.reconcileAgentConfigMap(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -104,9 +113,6 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if err := r.reconcileBrokerAgentsPolicy(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
-	}
-	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
-		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
 	}
 
 	pod, err := r.reconcileAgentPod(ctx, &agentRun)
@@ -127,7 +133,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
 	}
-	return ctrl.Result{}, nil
+	deadlineResult, deadlineExceeded, err = r.reconcileActiveDeadline(ctx, &agentRun)
+	if deadlineExceeded || err != nil {
+		return deadlineResult, err
+	}
+	return deadlineResult, nil
 }
 
 // SetupWithManager registers the AgentRun controller with the manager.
@@ -181,6 +191,13 @@ func isBrokerAgentsConfigMap(object client.Object) bool {
 }
 
 func (r *AgentRunReconciler) reconcileTerminalPodCleanup(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, error) {
+	if agentRun.Status.Phase == nvtv1alpha1.AgentRunPhaseDeadlineExceeded {
+		if err := r.deleteOwnedAgentPod(ctx, agentRun, "deadline-exceeded AgentRun Pod"); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	remaining, shouldDelete := TerminalPodCleanupDelay(agentRun, r.now())
 	if remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
@@ -189,22 +206,52 @@ func (r *AgentRunReconciler) reconcileTerminalPodCleanup(ctx context.Context, ag
 		return ctrl.Result{}, nil
 	}
 
+	if err := r.deleteOwnedAgentPod(ctx, agentRun, "terminal AgentRun Pod"); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *AgentRunReconciler) reconcileActiveDeadline(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, bool, error) {
+	now := r.now()
+	remaining, exceeded := ActiveDeadlineDelay(agentRun, now)
+	if remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, false, nil
+	}
+	if !exceeded {
+		return ctrl.Result{}, false, nil
+	}
+
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseDeadlineExceeded
+	agentRun.Status.FinishedAt = &now
+	agentRun.Status.Reason = activeDeadlineReason
+	if err := r.Status().Update(ctx, agentRun); err != nil {
+		return ctrl.Result{}, true, fmt.Errorf("mark AgentRun active deadline exceeded: %w", err)
+	}
+	if err := r.deleteOwnedAgentPod(ctx, agentRun, "active deadline AgentRun Pod"); err != nil {
+		return ctrl.Result{}, true, err
+	}
+
+	return ctrl.Result{}, true, nil
+}
+
+func (r *AgentRunReconciler) deleteOwnedAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, description string) error {
 	pod := &corev1.Pod{}
 	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}
 	if err := r.Get(ctx, key, pod); err != nil {
 		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
+			return nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get terminal AgentRun Pod for cleanup: %w", err)
+		return fmt.Errorf("get %s for cleanup: %w", description, err)
 	}
 	if !metav1.IsControlledBy(pod, agentRun) {
-		return ctrl.Result{}, fmt.Errorf("terminal AgentRun Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
+		return fmt.Errorf("%s %s/%s exists but is not controlled by AgentRun %s", description, pod.Namespace, pod.Name, agentRun.Name)
 	}
 	if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("delete terminal AgentRun Pod: %w", err)
+		return fmt.Errorf("delete %s: %w", description, err)
 	}
-
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *AgentRunReconciler) finalizeAgentRun(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
@@ -863,6 +910,23 @@ func TerminalPodCleanupDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (t
 
 	deleteAt := agentRun.Status.FinishedAt.Time.Add(time.Duration(*ttlSeconds) * time.Second)
 	remaining := deleteAt.Sub(now.Time)
+	if remaining > 0 {
+		return remaining, false
+	}
+	return 0, true
+}
+
+// ActiveDeadlineDelay returns the remaining active deadline and whether the run has exceeded it.
+func ActiveDeadlineDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.Duration, bool) {
+	if IsTerminalAgentRunPhase(agentRun.Status.Phase) ||
+		agentRun.Spec.TTL == nil ||
+		agentRun.Spec.TTL.ActiveDeadlineSeconds == nil ||
+		agentRun.Status.StartedAt == nil {
+		return 0, false
+	}
+
+	deadlineAt := agentRun.Status.StartedAt.Time.Add(time.Duration(*agentRun.Spec.TTL.ActiveDeadlineSeconds) * time.Second)
+	remaining := deadlineAt.Sub(now.Time)
 	if remaining > 0 {
 		return remaining, false
 	}
