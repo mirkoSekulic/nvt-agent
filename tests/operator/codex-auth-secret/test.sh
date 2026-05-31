@@ -43,7 +43,7 @@ if [[ "$*" == *" create secret generic "* ]]; then
     printf 'missing --from-file\n' >&2
     exit 1
   fi
-  find "${from_file}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort >"${KUBECTL_FILES_LOG}"
+  find "${from_file}" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort >"${KUBECTL_FILES_LOG}"
   printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: test-secret\n'
   exit 0
 fi
