@@ -574,9 +574,10 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			},
 			Containers: []corev1.Container{
 				{
-					Name:       "agent",
-					Image:      agentRun.Spec.Image,
-					WorkingDir: workspaceMountPath,
+					Name:            "agent",
+					Image:           agentRun.Spec.Image,
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					WorkingDir:      workspaceMountPath,
 					Env: []corev1.EnvVar{
 						{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
 						{Name: "NVT_WORKSPACE", Value: workspaceMountPath},

@@ -43,6 +43,13 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	if _, _, err := scheme.ObjectKinds(&nvtv1alpha1.AgentScheduleList{}); err != nil {
 		t.Fatalf("AgentScheduleList not registered in scheme: %v", err)
 	}
+	kinds, _, err := scheme.ObjectKinds(&metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListOptions not registered in nvt scheme: %v", err)
+	}
+	if len(kinds) != 1 || kinds[0].GroupVersion() != nvtv1alpha1.GroupVersion {
+		t.Fatalf("expected ListOptions registered for %s, got %#v", nvtv1alpha1.GroupVersion, kinds)
+	}
 }
 
 func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
