@@ -1255,6 +1255,197 @@ func TestReconcileNonTerminalRunDoesNotCleanupPod(t *testing.T) {
 	assertAgentPodExists(ctx, t, k8sClient, agentRun)
 }
 
+func TestReconcileActiveDeadlineOmittedDoesNotTimeout(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
+	agentRun := activeDeadlineAgentRun(startedAt, nil)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseRunning)
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileActiveDeadlineWithNilStartedAtDoesNotTimeout(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	agentRun := testAgentRun()
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
+	agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{ActiveDeadlineSeconds: ptrTo[int64](60)}
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseRunning)
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileActiveDeadlineBeforeDeadlineKeepsPodAndRequeues(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 11, 59, 30, 0, time.UTC)
+	agentRun := activeDeadlineAgentRun(startedAt, ptrTo[int64](60))
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("expected requeue after 30s, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseRunning)
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileActiveDeadlineAfterDeadlineMarksExceededAndDeletesPod(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := activeDeadlineAgentRun(startedAt, ptrTo[int64](60))
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	updated := assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseDeadlineExceeded)
+	if updated.Status.FinishedAt == nil || !updated.Status.FinishedAt.Equal(&now) {
+		t.Fatalf("expected finishedAt %s, got %#v", now, updated.Status.FinishedAt)
+	}
+	if updated.Status.Reason != activeDeadlineReason {
+		t.Fatalf("expected reason %q, got %q", activeDeadlineReason, updated.Status.Reason)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileActiveDeadlineDoesNotChangeCompletedOrFailedRuns(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 10, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		phase nvtv1alpha1.AgentRunPhase
+	}{
+		{name: "completed", phase: nvtv1alpha1.AgentRunPhaseCompleted},
+		{name: "failed", phase: nvtv1alpha1.AgentRunPhaseFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentRun := terminalAgentRun(tt.phase, finishedAt)
+			agentRun.Status.StartedAt = &startedAt
+			agentRun.Status.Reason = string(tt.phase)
+			agentRun.Spec.TTL.ActiveDeadlineSeconds = ptrTo[int64](60)
+			k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+			result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+
+			if result.RequeueAfter != 0 {
+				t.Fatalf("expected no active deadline requeue, got %s", result.RequeueAfter)
+			}
+			updated := assertAgentRunPhase(ctx, t, k8sClient, agentRun, tt.phase)
+			if !updated.Status.FinishedAt.Equal(&finishedAt) {
+				t.Fatalf("expected finishedAt to remain %s, got %#v", finishedAt, updated.Status.FinishedAt)
+			}
+			assertAgentPodExists(ctx, t, k8sClient, agentRun)
+		})
+	}
+}
+
+func TestReconcileActiveDeadlineMissingPodAfterDeadlineSucceeds(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := activeDeadlineAgentRun(startedAt, ptrTo[int64](60))
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseDeadlineExceeded)
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileActiveDeadlineAfterDeadlineDoesNotRequireBrokerPolicyConfigMap(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := activeDeadlineAgentRun(startedAt, ptrTo[int64](60))
+	scheme := testScheme(t)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun).
+		Build()
+	persistAgentRunStatus(ctx, t, k8sClient, agentRun)
+	reconciler := &AgentRunReconciler{
+		Client: k8sClient,
+		Scheme: scheme,
+		Now:    func() metav1.Time { return now },
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseDeadlineExceeded)
+}
+
+func TestReconcileDeadlineExceededRunDeletesPod(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseDeadlineExceeded, finishedAt)
+	agentRun.Status.StartedAt = &startedAt
+	agentRun.Status.Reason = activeDeadlineReason
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseDeadlineExceeded)
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
@@ -1305,6 +1496,16 @@ func terminalAgentRun(phase nvtv1alpha1.AgentRunPhase, finishedAt metav1.Time) *
 	return agentRun
 }
 
+func activeDeadlineAgentRun(startedAt metav1.Time, activeDeadlineSeconds *int64) *nvtv1alpha1.AgentRun {
+	agentRun := testAgentRun()
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
+	agentRun.Status.StartedAt = &startedAt
+	if activeDeadlineSeconds != nil {
+		agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{ActiveDeadlineSeconds: activeDeadlineSeconds}
+	}
+	return agentRun
+}
+
 func terminalCleanupFixture(
 	t *testing.T,
 	agentRun *nvtv1alpha1.AgentRun,
@@ -1350,6 +1551,25 @@ func persistAgentRunStatus(ctx context.Context, t *testing.T, k8sClient client.C
 	if err := k8sClient.Status().Update(ctx, current); err != nil {
 		t.Fatalf("seed AgentRun status: %v", err)
 	}
+}
+
+func assertAgentRunPhase(
+	ctx context.Context,
+	t *testing.T,
+	k8sClient client.Client,
+	agentRun *nvtv1alpha1.AgentRun,
+	phase nvtv1alpha1.AgentRunPhase,
+) *nvtv1alpha1.AgentRun {
+	t.Helper()
+
+	updated := &nvtv1alpha1.AgentRun{}
+	if err := k8sClient.Get(ctx, clientKey(agentRun), updated); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	if updated.Status.Phase != phase {
+		t.Fatalf("expected phase %q, got %q", phase, updated.Status.Phase)
+	}
+	return updated
 }
 
 func testBrokerAgentsConfigMap(namespace string) *corev1.ConfigMap {
