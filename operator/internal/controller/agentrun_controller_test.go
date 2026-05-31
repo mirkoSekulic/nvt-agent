@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -976,6 +977,7 @@ func TestReconcileSetsRunningAndStartedAtWhenPodRuns(t *testing.T) {
 
 func TestReconcileSetsFailedWhenPodFails(t *testing.T) {
 	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
 	scheme := testScheme(t)
 	agentRun := testAgentRun()
 	k8sClient := fake.NewClientBuilder().
@@ -983,7 +985,11 @@ func TestReconcileSetsFailedWhenPodFails(t *testing.T) {
 		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
 		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
-	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	reconciler := &AgentRunReconciler{
+		Client: k8sClient,
+		Scheme: scheme,
+		Now:    func() metav1.Time { return now },
+	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
 	if err != nil {
@@ -1007,6 +1013,12 @@ func TestReconcileSetsFailedWhenPodFails(t *testing.T) {
 	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed {
 		t.Fatalf("expected Failed phase, got %q", updated.Status.Phase)
 	}
+	if updated.Status.FinishedAt == nil || !updated.Status.FinishedAt.Equal(&now) {
+		t.Fatalf("expected finishedAt %s, got %#v", now, updated.Status.FinishedAt)
+	}
+	if updated.Status.Reason != "Pod failed" {
+		t.Fatalf("expected Pod failed reason, got %q", updated.Status.Reason)
+	}
 }
 
 func TestSyncAgentRunStatusFromPodDoesNotDowngradeCompleted(t *testing.T) {
@@ -1020,7 +1032,7 @@ func TestSyncAgentRunStatusFromPodDoesNotDowngradeCompleted(t *testing.T) {
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
-	changed := SyncAgentRunStatusFromPod(agentRun, pod)
+	changed := SyncAgentRunStatusFromPod(agentRun, pod, metav1.Now())
 
 	if !changed {
 		t.Fatal("expected podName sync to be recorded")
@@ -1035,6 +1047,212 @@ func TestSyncAgentRunStatusFromPodDoesNotDowngradeCompleted(t *testing.T) {
 		agentRun.Status.Reason != "Completed by lifecycle event plugin.agent.signal.done" {
 		t.Fatalf("terminal status details changed: %#v", agentRun.Status)
 	}
+}
+
+func TestReconcileCompletedRunBeforeTTLKeepsPodAndRequeues(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 59, 30, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("expected requeue after 30s, got %s", result.RequeueAfter)
+	}
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileCompletedRunAfterTTLDeletesPod(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileFailedRunBeforeTTLKeepsPodAndRequeues(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 59, 45, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseFailed, finishedAt)
+	agentRun.Spec.TTL.FailedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 45*time.Second {
+		t.Fatalf("expected requeue after 45s, got %s", result.RequeueAfter)
+	}
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileFailedRunAfterTTLDeletesPod(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseFailed, finishedAt)
+	agentRun.Spec.TTL.FailedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcilePodStatusFailedRunAfterTTLDeletesPod(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	failedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseFailed, failedAt)
+	agentRun.Status.Reason = "Pod failed"
+	agentRun.Spec.TTL.FailedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileSetsFinishedAtWhenPodFails(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	agentRun := testAgentRun()
+	agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{FailedTTLSeconds: ptrTo[int64](60)}
+	scheme := testScheme(t)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{
+		Client: k8sClient,
+		Scheme: scheme,
+		Now:    func() metav1.Time { return now },
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	pod := &corev1.Pod{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}, pod); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	pod.Status.Phase = corev1.PodFailed
+	if err := k8sClient.Status().Update(ctx, pod); err != nil {
+		t.Fatalf("update Pod status: %v", err)
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile failed Pod: %v", err)
+	}
+
+	if result.RequeueAfter != 60*time.Second {
+		t.Fatalf("expected failed TTL requeue, got %s", result.RequeueAfter)
+	}
+	updated := &nvtv1alpha1.AgentRun{}
+	if err := k8sClient.Get(ctx, clientKey(agentRun), updated); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed {
+		t.Fatalf("expected Failed phase, got %q", updated.Status.Phase)
+	}
+	if updated.Status.FinishedAt == nil || !updated.Status.FinishedAt.Equal(&now) {
+		t.Fatalf("expected finishedAt %s, got %#v", now, updated.Status.FinishedAt)
+	}
+	if updated.Status.Reason != "Pod failed" {
+		t.Fatalf("expected Pod failed reason, got %q", updated.Status.Reason)
+	}
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileTerminalRunWithNilTTLKeepsPodAndDoesNotRequeue(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 0, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = nil
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileTerminalRunMissingPodAfterTTLSucceeds(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileNonTerminalRunDoesNotCleanupPod(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 0, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseRunning, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, true)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -1079,6 +1297,61 @@ func testAgentRun() *nvtv1alpha1.AgentRun {
 	}
 }
 
+func terminalAgentRun(phase nvtv1alpha1.AgentRunPhase, finishedAt metav1.Time) *nvtv1alpha1.AgentRun {
+	agentRun := testAgentRun()
+	agentRun.Status.Phase = phase
+	agentRun.Status.FinishedAt = &finishedAt
+	agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{}
+	return agentRun
+}
+
+func terminalCleanupFixture(
+	t *testing.T,
+	agentRun *nvtv1alpha1.AgentRun,
+	now metav1.Time,
+	includePod bool,
+) (client.Client, *AgentRunReconciler) {
+	t.Helper()
+
+	scheme := testScheme(t)
+	objects := []client.Object{agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)}
+	if includePod {
+		pod, err := DesiredAgentPod(agentRun, scheme)
+		if err != nil {
+			t.Fatalf("desired AgentRun Pod: %v", err)
+		}
+		objects = append(objects, pod)
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(objects...).
+		Build()
+	if agentRun.Status.Phase != "" || agentRun.Status.FinishedAt != nil || agentRun.Status.Reason != "" {
+		persistAgentRunStatus(context.Background(), t, k8sClient, agentRun)
+	}
+	reconciler := &AgentRunReconciler{
+		Client: k8sClient,
+		Scheme: scheme,
+		Now:    func() metav1.Time { return now },
+	}
+
+	return k8sClient, reconciler
+}
+
+func persistAgentRunStatus(ctx context.Context, t *testing.T, k8sClient client.Client, agentRun *nvtv1alpha1.AgentRun) {
+	t.Helper()
+
+	current := &nvtv1alpha1.AgentRun{}
+	if err := k8sClient.Get(ctx, clientKey(agentRun), current); err != nil {
+		t.Fatalf("get AgentRun for status seed: %v", err)
+	}
+	current.Status = agentRun.Status
+	if err := k8sClient.Status().Update(ctx, current); err != nil {
+		t.Fatalf("seed AgentRun status: %v", err)
+	}
+}
+
 func testBrokerAgentsConfigMap(namespace string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1093,6 +1366,28 @@ func testBrokerAgentsConfigMap(namespace string) *corev1.ConfigMap {
 
 func clientKey(agentRun *nvtv1alpha1.AgentRun) types.NamespacedName {
 	return types.NamespacedName{Name: agentRun.Name, Namespace: agentRun.Namespace}
+}
+
+func assertAgentPodExists(ctx context.Context, t *testing.T, k8sClient client.Reader, agentRun *nvtv1alpha1.AgentRun) {
+	t.Helper()
+
+	var pod corev1.Pod
+	key := types.NamespacedName{Name: AgentPodName(agentRun.Name), Namespace: agentRun.Namespace}
+	if err := k8sClient.Get(ctx, key, &pod); err != nil {
+		t.Fatalf("expected AgentRun Pod to exist: %v", err)
+	}
+}
+
+func assertAgentPodMissing(ctx context.Context, t *testing.T, k8sClient client.Reader, agentRun *nvtv1alpha1.AgentRun) {
+	t.Helper()
+
+	var pod corev1.Pod
+	key := types.NamespacedName{Name: AgentPodName(agentRun.Name), Namespace: agentRun.Namespace}
+	if err := k8sClient.Get(ctx, key, &pod); err == nil {
+		t.Fatalf("expected AgentRun Pod to be missing")
+	} else if !errors.IsNotFound(err) {
+		t.Fatalf("get AgentRun Pod: %v", err)
+	}
 }
 
 func getAgentConfigMap(
