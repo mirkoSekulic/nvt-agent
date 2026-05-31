@@ -1,5 +1,5 @@
 namespace:
-  name: nvt
+  name: ""
   create: false
 
 runtime:

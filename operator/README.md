@@ -58,10 +58,11 @@ kind load docker-image nvt-operator:dev
 
 ## Helm Core Stack
 
-The root chart at `charts/nvt` installs the core nvt Kubernetes stack into the
-`nvt` namespace by default: `AgentRun` and `AgentSchedule` CRDs, the broker ConfigMaps,
-Deployment, and Service, the operator RBAC, Deployment, and Service, and a
-default `AgentSchedule`. It does not include a concrete scheduler plugin,
+The root chart at `charts/nvt` installs the core nvt Kubernetes stack:
+`AgentRun` and `AgentSchedule` CRDs, the broker ConfigMaps, Deployment, and
+Service, the operator RBAC, Deployment, and Service, and a default
+`AgentSchedule`. It follows the Helm release namespace unless
+`namespace.name` is set. It does not include a concrete scheduler plugin,
 external ingress, GitHub access setup, or production auth.
 
 Build the local images from the repository root:
@@ -85,12 +86,12 @@ using real providers, create the broker env Secret separately and pass its name
 to the chart:
 
 ```sh
-kubectl create secret generic nvt-broker-env --from-env-file=nvt-broker-env.env -n nvt
-helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace \
-  --set broker.envSecretName=nvt-broker-env
+kubectl create namespace nvt
+kubectl -n nvt create secret generic nvt-broker-env --from-env-file=nvt-broker-env.env
+helm upgrade --install nvt ./charts/nvt -n nvt --set broker.envSecretName=nvt-broker-env
 ```
 
-Install the default core stack with:
+For a no-secret smoke install:
 
 ```sh
 helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace
@@ -99,10 +100,12 @@ helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace
 The chart also supports rendering the Namespace object itself:
 
 ```sh
-helm upgrade --install nvt ./charts/nvt --set namespace.create=true
+helm upgrade --install nvt ./charts/nvt --set namespace.create=true --set namespace.name=nvt
 ```
 
 Override the target namespace with `--set namespace.name=<namespace>`.
+The chart currently rejects `operator.replicas` values other than `1` because
+schedule admission locking is process-local in this POC.
 
 Render-test the chart with:
 

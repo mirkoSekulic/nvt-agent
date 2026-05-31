@@ -9,12 +9,15 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 DEFAULT_RENDER="${WORKDIR}/default.yaml"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
+NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
+REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
 
-helm template nvt "${CHART}" > "${DEFAULT_RENDER}"
-helm template nvt "${CHART}" --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
-helm template nvt "${CHART}" --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
-helm template nvt "${CHART}" --set namespace.create=true > "${NAMESPACE_CREATE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
+helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
+helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
 
 has_resource() {
   local file="$1"
@@ -156,10 +159,10 @@ require_resource "${DEFAULT_RENDER}" Deployment nvt-broker
 require_resource "${DEFAULT_RENDER}" Service nvt-broker
 require_resource "${DEFAULT_RENDER}" ConfigMap nvt-broker-config
 require_resource "${DEFAULT_RENDER}" ConfigMap nvt-broker-agents
-require_resource_namespace "${DEFAULT_RENDER}" Deployment nvt-broker nvt
-require_resource_namespace "${DEFAULT_RENDER}" Service nvt-broker nvt
-require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-config nvt
-require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-agents nvt
+require_resource_namespace "${DEFAULT_RENDER}" Deployment nvt-broker custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" Service nvt-broker custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-config custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-agents custom-ns
 
 require_resource "${DEFAULT_RENDER}" Deployment nvt-operator
 require_resource "${DEFAULT_RENDER}" ServiceAccount nvt-operator
@@ -167,12 +170,12 @@ require_resource "${DEFAULT_RENDER}" Role nvt-operator
 require_resource "${DEFAULT_RENDER}" RoleBinding nvt-operator
 require_resource "${DEFAULT_RENDER}" Service nvt-operator
 require_resource "${DEFAULT_RENDER}" AgentSchedule default
-require_resource_namespace "${DEFAULT_RENDER}" Deployment nvt-operator nvt
-require_resource_namespace "${DEFAULT_RENDER}" ServiceAccount nvt-operator nvt
-require_resource_namespace "${DEFAULT_RENDER}" Role nvt-operator nvt
-require_resource_namespace "${DEFAULT_RENDER}" RoleBinding nvt-operator nvt
-require_resource_namespace "${DEFAULT_RENDER}" Service nvt-operator nvt
-require_resource_namespace "${DEFAULT_RENDER}" AgentSchedule default nvt
+require_resource_namespace "${DEFAULT_RENDER}" Deployment nvt-operator custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" ServiceAccount nvt-operator custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" Role nvt-operator custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" RoleBinding nvt-operator custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" Service nvt-operator custom-ns
+require_resource_namespace "${DEFAULT_RENDER}" AgentSchedule default custom-ns
 missing_resource "${DEFAULT_RENDER}" Namespace nvt
 
 require_file "${CHART}/crds/nvt.dev_agentruns.yaml"
@@ -199,7 +202,15 @@ fi
 grep -q 'secretRef:' "${BROKER_SECRET_RENDER}"
 grep -q 'name: "nvt-broker-env"' "${BROKER_SECRET_RENDER}"
 
+require_resource_namespace "${NAMESPACE_OVERRIDE_RENDER}" Deployment nvt-operator nvt
+require_resource_namespace "${NAMESPACE_OVERRIDE_RENDER}" AgentSchedule default nvt
 require_resource "${NAMESPACE_CREATE_RENDER}" Namespace nvt
 require_resource_namespace "${NAMESPACE_CREATE_RENDER}" Deployment nvt-operator nvt
+
+if helm template nvt "${CHART}" --set operator.replicas=2 > /dev/null 2> "${REPLICA_FAILURE}"; then
+  echo "expected operator.replicas=2 to fail rendering" >&2
+  exit 1
+fi
+grep -q "operator.replicas must be 1 in this POC because schedule admission locking is process-local" "${REPLICA_FAILURE}"
 
 echo "helm render test passed"
