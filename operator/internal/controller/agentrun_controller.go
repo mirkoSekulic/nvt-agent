@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
@@ -34,7 +35,10 @@ const (
 	agentConfigKey        = "agent.yaml"
 	agentConfigMountPath  = "/nvt-agent/agent.yaml"
 	agentConfigVolumeDir  = "/nvt-agent"
-	runtimeAuthVolumeName = "runtime-auth"
+	runtimeAuthSourcePath = "/nvt-agent/runtime-auth-source"
+	runtimeAuthHomePath   = "/nvt-agent/runtime-auth-home"
+	runtimeAuthSourceName = "runtime-auth-source"
+	runtimeAuthHomeName   = "runtime-auth-home"
 	workspaceMountPath    = "/workspace"
 	initialPromptPlugin   = "initial-prompt"
 
@@ -565,19 +569,66 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 	}
 	if agentRun.Spec.RuntimeAuth != nil {
 		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
-			Name:      runtimeAuthVolumeName,
+			Name:      runtimeAuthHomeName,
 			MountPath: runtimeAuthMountPath,
-			ReadOnly:  true,
 		})
 		volumes = append(volumes, corev1.Volume{
-			Name: runtimeAuthVolumeName,
+			Name: runtimeAuthSourceName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: agentRun.Spec.RuntimeAuth.SecretName,
 				},
 			},
+		}, corev1.Volume{
+			Name: runtimeAuthHomeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
 		})
 	}
+
+	initContainers := []corev1.Container{}
+	if agentRun.Spec.RuntimeAuth != nil {
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "runtime-auth-copy",
+			Image:   "docker:27-dind",
+			Command: []string{"sh", "-c"},
+			Args: []string{
+				"cp -a " + runtimeAuthSourcePath + "/. " + runtimeAuthHomePath + "/ && chmod -R u+rwX " + runtimeAuthHomePath,
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: runtimeAuthSourceName, MountPath: runtimeAuthSourcePath, ReadOnly: true},
+				{Name: runtimeAuthHomeName, MountPath: runtimeAuthHomePath},
+			},
+		})
+	}
+	initContainers = append(initContainers, corev1.Container{
+		Name:          "docker",
+		Image:         "docker:27-dind",
+		RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
+		Command:       []string{"dockerd"},
+		Args: []string{
+			"--host=unix:///var/run/docker.sock",
+			"--host=tcp://127.0.0.1:2375",
+			"--tls=false",
+		},
+		Env: []corev1.EnvVar{
+			{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptrTo(true),
+		},
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
+			},
+			PeriodSeconds:    2,
+			FailureThreshold: 30,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "workspace", MountPath: workspaceMountPath},
+		},
+	})
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -588,35 +639,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		Spec: corev1.PodSpec{
 			RuntimeClassName: agentRun.Spec.RuntimeClassName,
 			RestartPolicy:    corev1.RestartPolicyNever,
-			InitContainers: []corev1.Container{
-				{
-					Name:          "docker",
-					Image:         "docker:27-dind",
-					RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
-					Command:       []string{"dockerd"},
-					Args: []string{
-						"--host=unix:///var/run/docker.sock",
-						"--host=tcp://127.0.0.1:2375",
-						"--tls=false",
-					},
-					Env: []corev1.EnvVar{
-						{Name: "DOCKER_TLS_CERTDIR", Value: ""},
-					},
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptrTo(true),
-					},
-					StartupProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
-						},
-						PeriodSeconds:    2,
-						FailureThreshold: 30,
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace", MountPath: workspaceMountPath},
-					},
-				},
-			},
+			InitContainers:   initContainers,
 			Containers: []corev1.Container{
 				{
 					Name:            "agent",
@@ -670,6 +693,9 @@ func RuntimeAuthMountPath(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		return "", fmt.Errorf("spec.runtimeAuth.secretName is required when runtimeAuth is present")
 	}
 	if runtimeAuth.MountPath != "" {
+		if !path.IsAbs(runtimeAuth.MountPath) {
+			return "", fmt.Errorf("spec.runtimeAuth.mountPath must be an absolute path, got %q", runtimeAuth.MountPath)
+		}
 		return runtimeAuth.MountPath, nil
 	}
 	switch agentRun.Spec.Runtime.Type {

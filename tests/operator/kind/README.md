@@ -88,9 +88,11 @@ spec:
 ```
 
 For `codex`, the mount path defaults to `/root/.codex`. The Secret is mounted
-read-only into the agent container only and is not mounted into the DinD
-sidecar. This is POC/local-dev auth, separate from broker Secrets; production
-auth may use API keys or another Secret provisioning model later.
+read-only into a copy init container, copied into a writable `emptyDir`, and the
+writable home is mounted into the agent container only. Runtime auth is not
+mounted into the DinD sidecar. This is POC/local-dev auth, separate from broker
+Secrets; production auth may use API keys or another Secret provisioning model
+later.
 
 ## Cases
 
