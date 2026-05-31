@@ -49,6 +49,37 @@ make operator-kind-delete
 Future kind cases should call `operator-kind-setup` with only their
 case-specific Helm args, then keep scenario assertions in the case file.
 
+## Demo Smoke Scheduler Job
+
+Create one in-cluster scheduler Job that submits a single smoke `AgentRun`
+through the operator Service:
+
+```sh
+make operator-smoke-schedule NAME=demo-1
+```
+
+Common overrides:
+
+```sh
+make operator-smoke-schedule NAME=demo-1 CLUSTER=nvt-smoke NAMESPACE=nvt SMOKE_DELAY_SECONDS=5
+```
+
+The target renders and applies a Job named `smoke-scheduler-<NAME>` in the
+target namespace. The Job runs inside the cluster and posts one admission
+request to:
+
+```text
+http://nvt-operator:8082/v1/schedules/<namespace>/default/runs
+```
+
+The submitted work id is `smoke:<NAME>`, and the submitted `AgentRun` uses
+`metadata.name: <NAME>`, an ephemeral workspace, no broker grants, `bash -lc
+'echo ready; sleep infinity'`, the `event-webhook` and `smoke-complete`
+plugins, `completeOn: plugin.smoke.completed`, and a short completed Pod TTL.
+
+This is a demo/test scheduler path for kind clusters. It is not core scheduler
+logic and does not replace the reusable smoke harness cases.
+
 ## Real Codex Auth Secret
 
 For local/dev testing of a real Codex `AgentRun`, create or refresh a
