@@ -56,9 +56,62 @@ IMAGE=nvt-operator:dev make operator-build
 kind load docker-image nvt-operator:dev
 ```
 
-This slice only packages the manager binary as a container image. CRD install
-bundles, RBAC, Deployment, Service, and public ingress manifests are separate
-future work.
+## Helm Core Stack
+
+The root chart at `charts/nvt` installs the core nvt Kubernetes stack:
+`AgentRun` and `AgentSchedule` CRDs, the broker ConfigMaps, Deployment, and
+Service, the operator RBAC, Deployment, and Service, and a default
+`AgentSchedule`. It follows the Helm release namespace unless
+`namespace.name` is set. It does not include a concrete scheduler plugin,
+external ingress, GitHub access setup, or production auth.
+
+Build the local images from the repository root:
+
+```sh
+make runtime-build
+make broker-build
+make operator-build
+```
+
+For kind-based testing, load the images into the cluster after building them:
+
+```sh
+kind load docker-image nvt-agent-runtime:latest
+kind load docker-image nvt-broker:latest
+kind load docker-image nvt-operator:latest
+```
+
+Broker provider credentials are intentionally not rendered by the chart. When
+using real providers, create the broker env Secret separately and pass its name
+to the chart:
+
+```sh
+kubectl create namespace nvt
+kubectl -n nvt create secret generic nvt-broker-env --from-env-file=nvt-broker-env.env
+helm upgrade --install nvt ./charts/nvt -n nvt --set broker.envSecretName=nvt-broker-env
+```
+
+For a no-secret smoke install:
+
+```sh
+helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace
+```
+
+The chart also supports rendering the Namespace object itself:
+
+```sh
+helm upgrade --install nvt ./charts/nvt --set namespace.create=true --set namespace.name=nvt
+```
+
+Override the target namespace with `--set namespace.name=<namespace>`.
+The chart currently rejects `operator.replicas` values other than `1` because
+schedule admission locking is process-local in this POC.
+
+Render-test the chart with:
+
+```sh
+make operator-helm-test
+```
 
 ## Scope
 

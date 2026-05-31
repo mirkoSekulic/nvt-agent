@@ -1,0 +1,3 @@
+{{- if ne (int .Values.operator.replicas) 1 -}}
+{{- fail "operator.replicas must be 1 in this POC because schedule admission locking is process-local" -}}
+{{- end -}}

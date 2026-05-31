@@ -1,0 +1,16 @@
+{{- if .Values.broker.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvt-broker
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.brokerLabels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "nvt.brokerSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 7347
+      targetPort: 7347
+{{- end }}

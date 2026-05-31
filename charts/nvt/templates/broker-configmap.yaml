@@ -1,0 +1,23 @@
+{{- if .Values.broker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-broker-config
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.brokerLabels" . | nindent 4 }}
+data:
+  broker.yaml: |
+{{ toYaml .Values.broker.config | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-broker-agents
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.brokerLabels" . | nindent 4 }}
+data:
+  agents.yaml: |
+{{ toYaml .Values.broker.agents | indent 4 }}
+{{- end }}
