@@ -18,8 +18,14 @@ case_render() {
   validate_chart_render --set "agentSchedule.maxParallelism=${PARALLELISM}"
 }
 
-case_install_chart() {
-  install_chart --set "agentSchedule.maxParallelism=${PARALLELISM}"
+case_kind_setup() {
+  make -C "${ROOT}" \
+    CLUSTER="${CLUSTER}" \
+    NAMESPACE="${NAMESPACE}" \
+    CREATE_CLUSTER="${CREATE_CLUSTER}" \
+    ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT}" \
+    OPERATOR_KIND_HELM_ARGS="--set agentSchedule.maxParallelism=${PARALLELISM}" \
+    operator-kind-setup
 }
 
 case_run() {
@@ -58,11 +64,15 @@ with open(sys.argv[1], "r", encoding="utf-8") as file:
 namespace = sys.argv[2]
 run_name = sys.argv[3]
 agent_run = body["agentRun"]
+runtime = agent_run["spec"]["agent"]["config"]["runtime"]
 plugins = agent_run["spec"]["agent"]["config"]["plugins"]
 event_webhook = next(plugin for plugin in plugins if plugin["name"] == "event-webhook")
 smoke_complete = next(plugin for plugin in plugins if plugin["name"] == "smoke-complete")
 
 assert agent_run["metadata"]["name"] == run_name
+assert agent_run["spec"]["runtime"]["type"] == "codex"
+assert runtime["command"] == "bash"
+assert runtime["args"] == ["-lc", 'echo "nvt smoke agent ready"; sleep infinity']
 assert event_webhook["config"]["url"] == f"http://nvt-operator:8082/v1/agentruns/{namespace}/{run_name}/events"
 assert event_webhook["config"]["auth"]["env"] == "NVT_OPERATOR_CALLBACK_TOKEN"
 assert "plugin.smoke." in event_webhook["config"]["filters"]

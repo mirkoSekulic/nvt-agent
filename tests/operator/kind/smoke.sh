@@ -29,9 +29,7 @@ run_kind_mode() {
   require_kind_tools
   validate_common_config
   case_validate_config
-  ensure_cluster
-  build_and_load_images
-  case_install_chart
+  case_kind_setup
   start_operator_port_forward
   case_run
   log "kind operator smoke passed"

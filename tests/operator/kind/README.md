@@ -7,7 +7,7 @@ scenarios without expanding one large script.
 ```text
 tests/operator/kind/
   smoke.sh                # entrypoint and case runner
-  lib.sh                  # shared cluster/install/assert helpers
+  lib.sh                  # shared HTTP/assert/wait helpers
   agentrun-payload.py     # no-GitHub AgentSchedule admission payload renderer
   cases/
     parallel-lifecycle.sh # current smoke case
@@ -35,6 +35,19 @@ KIND_SMOKE_MODE=kind make operator-kind-smoke
 ```
 
 `KIND_SMOKE_MODE=kind` is the default.
+
+The reusable kind environment setup is exposed through Make targets:
+
+```sh
+make operator-kind-cluster
+make operator-kind-images
+make operator-kind-install OPERATOR_KIND_HELM_ARGS='--set agentSchedule.maxParallelism=3'
+make operator-kind-setup OPERATOR_KIND_HELM_ARGS='--set agentSchedule.maxParallelism=3'
+make operator-kind-delete
+```
+
+Future kind cases should call `operator-kind-setup` with only their
+case-specific Helm args, then keep scenario assertions in the case file.
 
 ## Cases
 
@@ -66,11 +79,12 @@ Each case should define:
 ```sh
 case_validate_config
 case_render
-case_install_chart
+case_kind_setup
 case_run
 ```
 
-Keep generic helpers in `lib.sh`; keep scenario-specific names, payload
+Keep reusable cluster/image/chart setup in the Makefile, keep generic runtime
+helpers in `lib.sh`, and keep scenario-specific names, payload
 assertions, admission expectations, and lifecycle waits in the case file.
 
 ## Full Kind Prerequisites

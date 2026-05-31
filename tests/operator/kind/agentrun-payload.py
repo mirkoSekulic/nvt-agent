@@ -48,6 +48,13 @@ def payload(args):
                 },
                 "agent": {
                     "config": {
+                        "runtime": {
+                            "command": "bash",
+                            "args": [
+                                "-lc",
+                                'echo "nvt smoke agent ready"; sleep infinity',
+                            ],
+                        },
                         "plugins": [
                             {
                                 "name": "event-webhook",

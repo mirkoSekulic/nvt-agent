@@ -111,64 +111,29 @@ validate_chart_render() {
   helm lint "${ROOT}/charts/nvt"
 }
 
-ensure_cluster() {
-  if kind get clusters | grep -Fxq "${CLUSTER}"; then
-    log "using existing kind cluster ${CLUSTER}"
-    return
-  fi
-
-  if [[ "${CREATE_CLUSTER}" != "1" ]]; then
-    die "kind cluster ${CLUSTER} does not exist and CREATE_CLUSTER is not 1"
-  fi
-
-  log "creating kind cluster ${CLUSTER}"
-  kind create cluster --name "${CLUSTER}"
-}
-
-build_and_load_images() {
-  log "building local images"
-  make -C "${ROOT}" runtime-build
-  make -C "${ROOT}" broker-build
-  make -C "${ROOT}" operator-build
-
-  log "loading local images into kind"
-  kind load docker-image nvt-agent-runtime:latest --name "${CLUSTER}"
-  kind load docker-image nvt-broker:latest --name "${CLUSTER}"
-  kind load docker-image nvt-operator:latest --name "${CLUSTER}"
-}
-
-install_chart() {
-  log "installing core chart into namespace ${NAMESPACE}"
-  helm upgrade --install nvt "${ROOT}/charts/nvt" \
-    -n "${NAMESPACE}" \
-    --create-namespace \
-    --wait \
-    --timeout "${ROLLOUT_TIMEOUT}" \
-    "$@"
-
-  kubectl_smoke rollout status deployment/nvt-broker -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
-  kubectl_smoke rollout status deployment/nvt-operator -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
-}
-
 start_operator_port_forward() {
   log "port-forwarding nvt-operator Service on localhost:${PORT_FORWARD_PORT}"
   kubectl_smoke port-forward -n "${NAMESPACE}" service/nvt-operator "${PORT_FORWARD_PORT}:8082" \
     >"${TMPDIR}/operator-port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
-  wait_for_port "${PORT_FORWARD_PORT}" 30
+  wait_for_operator_http 30
 }
 
-wait_for_port() {
-  local port="$1"
-  local timeout_seconds="$2"
+wait_for_operator_http() {
+  local timeout_seconds="$1"
   local deadline=$((SECONDS + timeout_seconds))
+  local status
+
   while (( SECONDS < deadline )); do
-    if (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
+    status="$(
+      curl -sS -o /dev/null -w '%{http_code}' "$(admission_url)" 2>/dev/null || true
+    )"
+    if [[ "${status}" == "405" ]]; then
       return
     fi
     sleep 1
   done
-  die "timed out waiting for localhost:${port}"
+  die "timed out waiting for operator HTTP on localhost:${PORT_FORWARD_PORT}"
 }
 
 admission_url() {

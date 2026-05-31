@@ -155,6 +155,9 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	if agentContainer.Image != agentRun.Spec.Image {
 		t.Fatalf("expected agent image %q, got %q", agentRun.Spec.Image, agentContainer.Image)
 	}
+	if agentContainer.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("expected agent imagePullPolicy IfNotPresent, got %q", agentContainer.ImagePullPolicy)
+	}
 	if agentContainer.WorkingDir != workspaceMountPath {
 		t.Fatalf("expected agent working directory %q, got %q", workspaceMountPath, agentContainer.WorkingDir)
 	}
