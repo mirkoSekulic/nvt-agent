@@ -34,6 +34,32 @@ generic controls such as suspend, parallelism, and duplicate active work ids.
 - `cmd/manager`: controller-runtime manager entrypoint
 - `internal/controller`: AgentRun reconciler
 
+## Manager Image
+
+Build the operator manager image from the repository root:
+
+```sh
+make operator-build
+```
+
+This produces `nvt-operator:latest`. Override the tag with:
+
+```sh
+IMAGE=nvt-operator:dev make operator-build
+```
+
+For kind-based testing, build the image locally and then load the chosen tag into
+the kind cluster before applying future install manifests:
+
+```sh
+IMAGE=nvt-operator:dev make operator-build
+kind load docker-image nvt-operator:dev
+```
+
+This slice only packages the manager binary as a container image. CRD install
+bundles, RBAC, Deployment, Service, and public ingress manifests are separate
+future work.
+
 ## Scope
 
 The current controller initializes empty `status.phase` values to `Pending`,

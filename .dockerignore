@@ -1,0 +1,8 @@
+.git
+.agents
+.broker
+.nvt-agent
+**/.broker
+**/.nvt-agent
+*.env
+*-env.env

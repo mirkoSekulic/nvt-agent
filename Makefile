@@ -2,13 +2,16 @@ TYPE ?= codex
 AUTONOMY ?= trusted-local
 DIR ?= runtime/plugins
 
-.PHONY: runtime-build broker-build infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build operator-build infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
 
 broker-build:
 	bash scripts/broker-build.sh
+
+operator-build:
+	bash scripts/operator-build.sh $(if $(NO_CACHE),--no-cache)
 
 infra-up:
 	bash scripts/infra-up.sh
