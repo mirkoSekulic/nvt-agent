@@ -62,8 +62,15 @@ func main() {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}
-	if err = mgr.Add(callbackServer(callbackAddr, controller.NewAgentRunCallbackHandler(mgr.GetClient()))); err != nil {
-		ctrl.Log.Error(err, "unable to add AgentRun callback server")
+	if err = (&controller.AgentScheduleReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentSchedule")
+		os.Exit(1)
+	}
+	if err = mgr.Add(callbackServer(callbackAddr, operatorHTTPHandler(mgr))); err != nil {
+		ctrl.Log.Error(err, "unable to add operator HTTP server")
 		os.Exit(1)
 	}
 
@@ -81,6 +88,13 @@ func main() {
 		ctrl.Log.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func operatorHTTPHandler(mgr manager.Manager) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/agentruns/", controller.NewAgentRunCallbackHandler(mgr.GetClient()))
+	mux.Handle("/v1/schedules/", controller.NewAgentScheduleAdmissionHandler(mgr.GetClient(), mgr.GetScheme()))
+	return mux
 }
 
 func callbackServer(addr string, handler http.Handler) manager.Runnable {
