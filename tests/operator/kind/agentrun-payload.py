@@ -19,6 +19,7 @@ def parse_args():
     parser.add_argument("--active-deadline-seconds", type=positive_int, required=True)
     parser.add_argument("--completed-ttl-seconds", type=positive_int, required=True)
     parser.add_argument("--smoke-delay-seconds", type=positive_int, required=True)
+    parser.add_argument("--runtime-script", default='echo "nvt smoke agent ready"; sleep infinity')
     return parser.parse_args()
 
 
@@ -52,7 +53,7 @@ def payload(args):
                             "command": "bash",
                             "args": [
                                 "-lc",
-                                'echo "nvt smoke agent ready"; sleep infinity',
+                                args.runtime_script,
                             ],
                         },
                         "plugins": [
