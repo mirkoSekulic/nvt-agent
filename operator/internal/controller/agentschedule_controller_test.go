@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -254,6 +255,58 @@ func TestScheduleAdmissionRejectsMissingWorkID(t *testing.T) {
 	}
 }
 
+func TestScheduleAdmissionConcurrentRequestsCannotExceedMaxParallelism(t *testing.T) {
+	schedule := testAgentSchedule()
+	schedule.Spec.MaxParallelism = 1
+	fixture := scheduleAdmissionFixture(t, schedule)
+	requests := make([]string, 8)
+	for i := range requests {
+		requests[i] = scheduleAdmissionBody(t, "work-"+string(rune('a'+i)), "", nil)
+	}
+
+	responses, k8sClient := serveConcurrentScheduleAdmissions(t, fixture, requests)
+
+	statusCounts := map[int]int{}
+	for _, response := range responses {
+		statusCounts[response.Code]++
+	}
+	if statusCounts[http.StatusCreated] != 1 {
+		t.Fatalf("expected exactly one created response, got counts %#v", statusCounts)
+	}
+	if statusCounts[http.StatusTooManyRequests] != len(requests)-1 {
+		t.Fatalf("expected remaining responses to be 429, got counts %#v", statusCounts)
+	}
+	assertScheduledRunCount(t, k8sClient, schedule, 1)
+}
+
+func TestScheduleAdmissionConcurrentDuplicateWorkCreatesOneRun(t *testing.T) {
+	schedule := testAgentSchedule()
+	schedule.Spec.MaxParallelism = 10
+	fixture := scheduleAdmissionFixture(t, schedule)
+	requests := make([]string, 8)
+	for i := range requests {
+		requests[i] = scheduleAdmissionBody(t, "same-work", "", nil)
+	}
+
+	responses, k8sClient := serveConcurrentScheduleAdmissions(t, fixture, requests)
+
+	statusCounts := map[int]int{}
+	reasonCounts := map[string]int{}
+	for _, response := range responses {
+		statusCounts[response.Code]++
+		var decoded scheduleAdmissionResponse
+		decodeAdmissionResponse(t, response, response.Code, &decoded)
+		reasonCounts[decoded.Reason]++
+	}
+	if statusCounts[http.StatusCreated] != 1 {
+		t.Fatalf("expected exactly one created response, got counts %#v", statusCounts)
+	}
+	if statusCounts[http.StatusAccepted] != len(requests)-1 || reasonCounts["duplicate-work"] != len(requests)-1 {
+		t.Fatalf("expected remaining responses to be duplicate-work, status=%#v reasons=%#v", statusCounts, reasonCounts)
+	}
+	assertScheduledRunCount(t, k8sClient, schedule, 1)
+}
+
 type scheduleAdmissionTestFixture struct {
 	schedule *nvtv1alpha1.AgentSchedule
 	objects  []client.Object
@@ -297,6 +350,48 @@ func serveScheduleAdmission(
 
 	handler.ServeHTTP(response, request)
 	return response, k8sClient
+}
+
+func serveConcurrentScheduleAdmissions(
+	t *testing.T,
+	fixture scheduleAdmissionTestFixture,
+	bodies []string,
+) ([]*httptest.ResponseRecorder, client.Client) {
+	t.Helper()
+
+	scheme := testScheme(t)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentSchedule{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(fixture.objects...).
+		Build()
+	handler := &agentScheduleAdmissionHandler{
+		client:         k8sClient,
+		scheme:         scheme,
+		now:            metav1.Now,
+		admissionLocks: newScheduleAdmissionLocks(),
+	}
+	responses := make([]*httptest.ResponseRecorder, len(bodies))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, body := range bodies {
+		wg.Add(1)
+		go func(index int, requestBody string) {
+			defer wg.Done()
+			<-start
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/schedules/"+fixture.schedule.Namespace+"/"+fixture.schedule.Name+"/runs",
+				bytes.NewBufferString(requestBody),
+			)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			responses[index] = response
+		}(i, body)
+	}
+	close(start)
+	wg.Wait()
+	return responses, k8sClient
 }
 
 func scheduleAdmissionBody(t *testing.T, workID, workURL string, agentRunOverrides map[string]any) string {

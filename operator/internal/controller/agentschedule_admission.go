@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,9 +22,10 @@ import (
 const scheduleAdmissionPathPrefix = "/v1/schedules/"
 
 type agentScheduleAdmissionHandler struct {
-	client client.Client
-	scheme *runtime.Scheme
-	now    func() metav1.Time
+	client         client.Client
+	scheme         *runtime.Scheme
+	now            func() metav1.Time
+	admissionLocks *scheduleAdmissionLocks
 }
 
 type scheduleAdmissionRequest struct {
@@ -51,9 +53,10 @@ type scheduleAdmissionAgentRun struct {
 // NewAgentScheduleAdmissionHandler returns the cluster-internal schedule admission handler.
 func NewAgentScheduleAdmissionHandler(k8sClient client.Client, scheme *runtime.Scheme) http.Handler {
 	return &agentScheduleAdmissionHandler{
-		client: k8sClient,
-		scheme: scheme,
-		now:    metav1.Now,
+		client:         k8sClient,
+		scheme:         scheme,
+		now:            metav1.Now,
+		admissionLocks: newScheduleAdmissionLocks(),
 	}
 }
 
@@ -87,6 +90,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 
 	ctx := request.Context()
+	unlock := h.lockScheduleAdmission(namespace, name)
+	defer unlock()
+
 	schedule := &nvtv1alpha1.AgentSchedule{}
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, schedule); err != nil {
 		if errors.IsNotFound(err) {
@@ -146,6 +152,13 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 			Name:      run.Name,
 		},
 	})
+}
+
+func (h *agentScheduleAdmissionHandler) lockScheduleAdmission(namespace, name string) func() {
+	if h.admissionLocks == nil {
+		h.admissionLocks = newScheduleAdmissionLocks()
+	}
+	return h.admissionLocks.lock(types.NamespacedName{Namespace: namespace, Name: name})
 }
 
 func (h *agentScheduleAdmissionHandler) recordAccepted(ctx context.Context, schedule *nvtv1alpha1.AgentSchedule) {
@@ -208,4 +221,40 @@ func countActiveScheduledRuns(runs *nvtv1alpha1.AgentRunList) int32 {
 		}
 	}
 	return active
+}
+
+type scheduleAdmissionLocks struct {
+	mu    sync.Mutex
+	locks map[types.NamespacedName]*scheduleAdmissionLock
+}
+
+type scheduleAdmissionLock struct {
+	mu       sync.Mutex
+	refCount int
+}
+
+func newScheduleAdmissionLocks() *scheduleAdmissionLocks {
+	return &scheduleAdmissionLocks{locks: map[types.NamespacedName]*scheduleAdmissionLock{}}
+}
+
+func (l *scheduleAdmissionLocks) lock(key types.NamespacedName) func() {
+	l.mu.Lock()
+	lock := l.locks[key]
+	if lock == nil {
+		lock = &scheduleAdmissionLock{}
+		l.locks[key] = lock
+	}
+	lock.refCount++
+	l.mu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		l.mu.Lock()
+		lock.refCount--
+		if lock.refCount == 0 {
+			delete(l.locks, key)
+		}
+		l.mu.Unlock()
+	}
 }

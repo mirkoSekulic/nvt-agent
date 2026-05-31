@@ -107,6 +107,13 @@ annotations:
 submitted `AgentRun` has neither `metadata.name` nor `metadata.generateName`,
 the operator defaults `generateName` to `<schedule-name>-`.
 
+Within one running operator process, admissions are serialized per
+`{namespace, schedule}` while the handler reads the schedule, checks suspend and
+capacity, checks duplicate active work, prepares the `AgentRun`, and creates it.
+Different schedules can admit independently. This POC relies on the deployment
+having a single active operator HTTP process, normally enforced with leader
+election. It is not a distributed reservation system yet.
+
 Responses:
 
 - `201 {"scheduled":true,"agentRun":{"namespace":"nvt","name":"..."}}`
@@ -120,4 +127,5 @@ Responses:
 
 This slice is intentionally same-namespace and cluster-internal. It does not add
 authentication, template mode, per-key limits, multi-namespace scheduling, or
-concrete scheduler plugins. Those are future work.
+concrete scheduler plugins. It also does not add a Kubernetes-backed
+distributed admission reservation. Those are future work.
