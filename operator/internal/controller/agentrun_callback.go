@@ -188,10 +188,10 @@ func AgentRunLifecycleTransition(lifecycle *nvtv1alpha1.AgentRunLifecycle, event
 		return "", "", false
 	}
 	if stringInSlice(eventName, lifecycle.CompleteOn) {
-		return nvtv1alpha1.AgentRunPhaseCompleted, "Completed by lifecycle event " + eventName, true
+		return nvtv1alpha1.AgentRunPhaseCompleted, completedLifecycleReason + eventName, true
 	}
 	if stringInSlice(eventName, lifecycle.FailOn) {
-		return nvtv1alpha1.AgentRunPhaseFailed, "Failed by lifecycle event " + eventName, true
+		return nvtv1alpha1.AgentRunPhaseFailed, failedLifecycleReason + eventName, true
 	}
 	return "", "", false
 }

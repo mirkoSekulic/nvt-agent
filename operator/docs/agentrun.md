@@ -157,10 +157,13 @@ ttl:
   failedTTLSeconds: 3600
 ```
 
-`activeDeadlineSeconds` bounds active runtime duration. `completedTTLSeconds`
-and `failedTTLSeconds` control eventual cleanup after terminal phases. v1 has no
-PVC/workspace retention, so cleanup removes the ephemeral workspace with the
-pod.
+`activeDeadlineSeconds` bounds active runtime duration but is not enforced yet.
+`completedTTLSeconds` and `failedTTLSeconds` control owned Pod cleanup after
+`Completed` and `Failed` phases. Lifecycle failure callbacks and Kubernetes Pod
+`Failed` status both stamp `status.finishedAt`, so both failure paths can use
+`failedTTLSeconds`. If the relevant terminal TTL or `status.finishedAt` is
+unset, the Pod is left in place. The `AgentRun` CR is not deleted by this
+controller slice, so status/history remain visible.
 
 ## Status
 
@@ -252,10 +255,11 @@ Existing terminal phases (`Completed`, `Failed`, `DeadlineExceeded`) are not
 overwritten by callbacks or by later Pod status sync.
 
 This controller slice creates the ConfigMap, per-run token Secrets, broker
-policy entry, and Pod, accepts lifecycle callbacks, then syncs basic status.
-TTL cleanup, Pod deletion, scheduler logic, external Ingress, and a broker admin
-API remain future work. Static broker providers remain outside `AgentRun`; the
-run only requests dynamic grants against them.
+policy entry, and Pod, accepts lifecycle callbacks, syncs basic status, and
+deletes the owned Pod after completed/failed terminal Pod TTLs. AgentRun CR
+cleanup, `DeadlineExceeded` cleanup, scheduler logic, external Ingress, and a
+broker admin API remain future work. Static broker providers remain outside
+`AgentRun`; the run only requests dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.
@@ -324,6 +328,6 @@ agents:
 ```
 
 The raw token stays in the owned Secret and is not written to the ConfigMap.
-Broker providers remain static in `broker.yaml`; callback HTTP endpoints,
-lifecycle completion, TTL cleanup, scheduler logic, and a broker admin API
-remain future work.
+Broker providers remain static in `broker.yaml`; AgentRun CR cleanup,
+`DeadlineExceeded` cleanup, scheduler logic, and a broker admin API remain
+future work.

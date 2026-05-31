@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -41,6 +42,8 @@ const (
 	brokerTokenKey            = "NVT_BROKER_TOKEN"
 	callbackTokenKey          = "NVT_OPERATOR_CALLBACK_TOKEN"
 	agentRunFinalizer         = "nvt.dev/agentrun-broker-policy"
+	completedLifecycleReason  = "Completed by lifecycle event "
+	failedLifecycleReason     = "Failed by lifecycle event "
 	generatedTokenByteLength  = 32
 )
 
@@ -64,6 +67,7 @@ type AgentRunReconciler struct {
 	client.Client
 
 	Scheme *runtime.Scheme
+	Now    func() metav1.Time
 }
 
 // Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
@@ -101,6 +105,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.reconcileBrokerAgentsPolicy(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
+	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
+	}
 
 	pod, err := r.reconcileAgentPod(ctx, &agentRun)
 	if err != nil {
@@ -108,7 +115,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	statusChanged := InitializeAgentRunStatus(&agentRun)
-	if SyncAgentRunStatusFromPod(&agentRun, pod) {
+	if SyncAgentRunStatusFromPod(&agentRun, pod, r.now()) {
 		statusChanged = true
 	}
 	if statusChanged {
@@ -117,6 +124,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
+	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -170,6 +180,33 @@ func isBrokerAgentsConfigMap(object client.Object) bool {
 	return object.GetName() == brokerAgentsConfigMapName
 }
 
+func (r *AgentRunReconciler) reconcileTerminalPodCleanup(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, error) {
+	remaining, shouldDelete := TerminalPodCleanupDelay(agentRun, r.now())
+	if remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	if !shouldDelete {
+		return ctrl.Result{}, nil
+	}
+
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}
+	if err := r.Get(ctx, key, pod); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("get terminal AgentRun Pod for cleanup: %w", err)
+	}
+	if !metav1.IsControlledBy(pod, agentRun) {
+		return ctrl.Result{}, fmt.Errorf("terminal AgentRun Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
+	}
+	if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("delete terminal AgentRun Pod: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
 func (r *AgentRunReconciler) finalizeAgentRun(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
 	if !controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
 		return nil
@@ -184,6 +221,13 @@ func (r *AgentRunReconciler) finalizeAgentRun(ctx context.Context, agentRun *nvt
 	}
 
 	return nil
+}
+
+func (r *AgentRunReconciler) now() metav1.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return metav1.Now()
 }
 
 func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
@@ -798,8 +842,35 @@ func IsTerminalAgentRunPhase(phase nvtv1alpha1.AgentRunPhase) bool {
 	}
 }
 
+// TerminalPodCleanupDelay returns the remaining TTL and whether the owned Pod should be deleted now.
+func TerminalPodCleanupDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.Duration, bool) {
+	if agentRun.Status.FinishedAt == nil || agentRun.Spec.TTL == nil {
+		return 0, false
+	}
+
+	var ttlSeconds *int64
+	switch agentRun.Status.Phase {
+	case nvtv1alpha1.AgentRunPhaseCompleted:
+		ttlSeconds = agentRun.Spec.TTL.CompletedTTLSeconds
+	case nvtv1alpha1.AgentRunPhaseFailed:
+		ttlSeconds = agentRun.Spec.TTL.FailedTTLSeconds
+	default:
+		return 0, false
+	}
+	if ttlSeconds == nil {
+		return 0, false
+	}
+
+	deleteAt := agentRun.Status.FinishedAt.Time.Add(time.Duration(*ttlSeconds) * time.Second)
+	remaining := deleteAt.Sub(now.Time)
+	if remaining > 0 {
+		return remaining, false
+	}
+	return 0, true
+}
+
 // SyncAgentRunStatusFromPod reflects the small Pod-phase status surface owned by this controller slice.
-func SyncAgentRunStatusFromPod(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) bool {
+func SyncAgentRunStatusFromPod(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod, now metav1.Time) bool {
 	if pod == nil {
 		return false
 	}
@@ -820,13 +891,20 @@ func SyncAgentRunStatusFromPod(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) 
 			changed = true
 		}
 		if agentRun.Status.StartedAt == nil {
-			now := metav1.Now()
 			agentRun.Status.StartedAt = &now
 			changed = true
 		}
 	case corev1.PodFailed:
 		if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed {
 			agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseFailed
+			changed = true
+		}
+		if agentRun.Status.FinishedAt == nil {
+			agentRun.Status.FinishedAt = &now
+			changed = true
+		}
+		if agentRun.Status.Reason == "" {
+			agentRun.Status.Reason = "Pod failed"
 			changed = true
 		}
 	}

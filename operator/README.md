@@ -41,7 +41,8 @@ can run `docker info`.
 The controller syncs basic Pod-phase status only: it records `status.podName`,
 sets `Running` and `startedAt` when the Pod is running, sets `Failed` when the
 Pod fails, and accepts cluster-internal lifecycle callbacks that can mark the
-run `Completed` or `Failed`. Scheduler logic, Pod deletion, and TTL cleanup
+run `Completed` or `Failed`. Completed and failed runs delete their owned agent
+Pod after the matching terminal Pod TTL. Scheduler logic and AgentRun CR cleanup
 remain intentionally future work.
 
 This directory does not include scheduler CRDs or GitHub-specific operator
@@ -112,7 +113,8 @@ updates through this mounted file path.
 
 AgentRun Pods receive `NVT_BROKER_URL=http://nvt-broker:7347` and a
 per-run `NVT_BROKER_TOKEN`. Broker provider configuration remains static;
-TTL cleanup, scheduler behavior, and a broker admin API remain future work.
+AgentRun CR cleanup, scheduler behavior, and a broker admin API remain future
+work.
 
 ## AgentRun Callback Endpoint
 
@@ -146,3 +148,22 @@ When the event name matches `spec.lifecycle.completeOn`, the operator sets
 `spec.lifecycle.failOn` sets `Failed` with the equivalent failed reason. Existing
 terminal phases (`Completed`, `Failed`, `DeadlineExceeded`) are not overwritten,
 and Pod status sync also avoids downgrading terminal phases.
+
+## Terminal Pod Cleanup
+
+Completed and failed runs keep the `AgentRun` CR for status/history, but delete
+the owned `<agentrun-name>-agent` Pod after the configured terminal TTL:
+
+```yaml
+ttl:
+  completedTTLSeconds: 300
+  failedTTLSeconds: 3600
+```
+
+`Completed` uses `completedTTLSeconds`; `Failed` uses `failedTTLSeconds`.
+Lifecycle failure callbacks and Kubernetes Pod `Failed` status both stamp
+`status.finishedAt`, so both failure paths are eligible for failed-Pod TTL
+cleanup. If the matching TTL or `status.finishedAt` is unset, the Pod is left in
+place. Before the TTL expires, the reconciler requeues for the remaining
+duration. If the Pod is already gone, cleanup is treated as complete.
+`DeadlineExceeded` cleanup and AgentRun CR deletion remain future work.
