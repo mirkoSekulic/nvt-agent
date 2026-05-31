@@ -788,6 +788,16 @@ func InitializeAgentRunStatus(agentRun *nvtv1alpha1.AgentRun) bool {
 	return true
 }
 
+// IsTerminalAgentRunPhase reports whether the phase must not be overwritten by non-terminal sync paths.
+func IsTerminalAgentRunPhase(phase nvtv1alpha1.AgentRunPhase) bool {
+	switch phase {
+	case nvtv1alpha1.AgentRunPhaseCompleted, nvtv1alpha1.AgentRunPhaseFailed, nvtv1alpha1.AgentRunPhaseDeadlineExceeded:
+		return true
+	default:
+		return false
+	}
+}
+
 // SyncAgentRunStatusFromPod reflects the small Pod-phase status surface owned by this controller slice.
 func SyncAgentRunStatusFromPod(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) bool {
 	if pod == nil {
@@ -798,6 +808,9 @@ func SyncAgentRunStatusFromPod(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) 
 	if agentRun.Status.PodName != pod.Name {
 		agentRun.Status.PodName = pod.Name
 		changed = true
+	}
+	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		return changed
 	}
 
 	switch pod.Status.Phase {

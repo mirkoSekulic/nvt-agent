@@ -78,7 +78,7 @@ spec:
           when: after-agent
           restart: always
           config:
-            url: http://nvt-operator.nvt-system.svc.cluster.local/v1/agentruns/nvt-dev/events
+            url: http://nvt-operator.nvt-system.svc.cluster.local/v1/agentruns/default/nvt-dev/events
             since: beginning
             filters:
               - plugin.github.pr.merged

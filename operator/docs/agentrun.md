@@ -128,13 +128,23 @@ lifecycle:
   failOn: []
 ```
 
-The operator should compare callback event names with `completeOn` and `failOn`.
-For plugin-published events, use the event's `plugin_event` name. For ordinary
-agent/runtime events, use the event's `event` name.
+The operator compares callback event names with `completeOn` and `failOn`. For
+plugin-published events, it uses the event's `plugin_event` name when present.
+For ordinary agent/runtime events, it uses the event's `event` name.
 
 Current controller behavior creates a stable per-run callback token Secret and
-wires it into the agent Pod as `NVT_OPERATOR_CALLBACK_TOKEN`. The callback HTTP
-endpoint and lifecycle event matching remain future work.
+wires it into the agent Pod as `NVT_OPERATOR_CALLBACK_TOKEN`.
+
+The event-webhook plugin posts to the cluster-internal operator endpoint:
+
+```text
+POST /v1/agentruns/{namespace}/{name}/events
+Authorization: Bearer <NVT_OPERATOR_CALLBACK_TOKEN>
+```
+
+The bearer token is read from the same-namespace Secret
+`<agentrun-name>-callback-token` key `NVT_OPERATOR_CALLBACK_TOKEN`. Missing or
+wrong tokens return `401`, and token values are not logged or returned.
 
 ### `spec.ttl`
 
@@ -166,8 +176,8 @@ status:
 ```
 
 `podName` is set once the owned agent Pod exists. `startedAt` is set once when
-the Pod first reaches `Running`. `finishedAt` and `reason` are reserved for
-future lifecycle callback handling.
+the Pod first reaches `Running`. `finishedAt` and `reason` are set by lifecycle
+callbacks when a configured event marks the run complete or failed.
 
 `phase` is one of:
 
@@ -211,19 +221,44 @@ deletion. Deletion cleanup preserves unrelated entries and fails open if the
 broker agents ConfigMap has already been removed, so local/kind POC cleanup does
 not leave an `AgentRun` stuck terminating.
 
+The manager exposes the AgentRun callback endpoint on `--callback-bind-address`
+(default `:8082`) for cluster-internal POC traffic:
+
+```text
+POST /v1/agentruns/{namespace}/{name}/events
+```
+
+The accepted event-webhook payload shape is:
+
+```json
+{
+  "agent": "optional-agent-name",
+  "event": {
+    "id": "evt_...",
+    "event": "plugin.event",
+    "plugin_event": "plugin.github.pr.merged",
+    "source": "plugin:github-watcher",
+    "payload": {}
+  }
+}
+```
+
+The operator resolves the lifecycle event name from `event.plugin_event` when
+non-empty, otherwise `event.event`. Empty event names return `400`; valid but
+unmatched events return `202` without changing status. `completeOn` matches set
+`Completed`, `finishedAt`, and reason `Completed by lifecycle event <event>`.
+`failOn` matches set `Failed`, `finishedAt`, and the equivalent failed reason.
+Existing terminal phases (`Completed`, `Failed`, `DeadlineExceeded`) are not
+overwritten by callbacks or by later Pod status sync.
+
 This controller slice creates the ConfigMap, per-run token Secrets, broker
-policy entry, and Pod, then syncs basic Pod-phase status. Callback HTTP
-endpoints, lifecycle completion/failure handling, TTL cleanup, scheduler logic,
-and a broker admin API remain future work. Static broker providers remain
-outside `AgentRun`; the run only requests dynamic grants against them.
+policy entry, and Pod, accepts lifecycle callbacks, then syncs basic status.
+TTL cleanup, Pod deletion, scheduler logic, external Ingress, and a broker admin
+API remain future work. Static broker providers remain outside `AgentRun`; the
+run only requests dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.
-
-The event-webhook runtime plugin can post callbacks to the operator. The
-operator can then match received event names against `spec.lifecycle.completeOn`
-and `spec.lifecycle.failOn` to update `status.phase`, set timestamps, and apply
-TTL cleanup behavior.
 
 ## Broker POC Deployment
 
