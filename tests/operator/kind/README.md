@@ -62,8 +62,10 @@ Defaults:
 
 ```text
 SOURCE=$HOME/.codex
+CODEX_AUTH_SOURCE=$SOURCE
 NAMESPACE=nvt
 SECRET=codex-auth
+CODEX_AUTH_SECRET=$SECRET
 CLUSTER=nvt-smoke
 KUBECTL_CONTEXT=kind-$(CLUSTER)
 ```
@@ -71,12 +73,15 @@ KUBECTL_CONTEXT=kind-$(CLUSTER)
 Override values as needed:
 
 ```sh
-make operator-codex-auth-secret SOURCE=$HOME/.nvt/k8s-auth/codex SECRET=codex-auth NAMESPACE=nvt CLUSTER=nvt-smoke
+make operator-codex-auth-secret CODEX_AUTH_SOURCE=$HOME/.nvt/k8s-auth/codex CODEX_AUTH_SECRET=codex-auth NAMESPACE=nvt CLUSTER=nvt-smoke
 ```
 
-This copies the current local Codex auth material into a Kubernetes Secret.
-Re-run the helper after refreshing local Codex auth. The operator references
-the Secret through `spec.runtimeAuth.secretName`; it never reads host paths.
+This filters the current local Codex auth material to `auth.json`,
+`config.toml`, and `installation_id` before creating the Kubernetes Secret.
+It intentionally excludes logs, SQLite state, sessions, cache, skills, shell
+snapshots, history, tmp files, and other large runtime data. Re-run the helper
+after refreshing local Codex auth. The operator references the Secret through
+`spec.runtimeAuth.secretName`; it never reads host paths.
 
 ```yaml
 spec:
