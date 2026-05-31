@@ -3,6 +3,7 @@ apiVersion: nvt.dev/v1alpha1
 kind: AgentSchedule
 metadata:
   name: {{ .Values.agentSchedule.name | quote }}
+  namespace: {{ include "nvt.namespace" . | quote }}
   labels:
     {{- include "nvt.labels" . | nindent 4 }}
 spec:

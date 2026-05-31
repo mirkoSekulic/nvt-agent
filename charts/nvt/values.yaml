@@ -1,3 +1,7 @@
+namespace:
+  name: nvt
+  create: false
+
 runtime:
   image: nvt-agent-runtime:latest
 

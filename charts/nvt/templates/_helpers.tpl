@@ -15,6 +15,10 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "nvt.namespace" -}}
+{{- default .Release.Namespace .Values.namespace.name -}}
+{{- end -}}
+
 {{- define "nvt.labels" -}}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}

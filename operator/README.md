@@ -58,8 +58,8 @@ kind load docker-image nvt-operator:dev
 
 ## Helm Core Stack
 
-The root chart at `charts/nvt` installs the core nvt Kubernetes stack for POC
-clusters: `AgentRun` and `AgentSchedule` CRDs, the broker ConfigMaps,
+The root chart at `charts/nvt` installs the core nvt Kubernetes stack into the
+`nvt` namespace by default: `AgentRun` and `AgentSchedule` CRDs, the broker ConfigMaps,
 Deployment, and Service, the operator RBAC, Deployment, and Service, and a
 default `AgentSchedule`. It does not include a concrete scheduler plugin,
 external ingress, GitHub access setup, or production auth.
@@ -95,6 +95,14 @@ Install the default core stack with:
 ```sh
 helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace
 ```
+
+The chart also supports rendering the Namespace object itself:
+
+```sh
+helm upgrade --install nvt ./charts/nvt --set namespace.create=true
+```
+
+Override the target namespace with `--set namespace.name=<namespace>`.
 
 Render-test the chart with:
 
