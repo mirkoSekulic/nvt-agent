@@ -42,6 +42,7 @@ operator-kind-images: operator-kind-cluster runtime-build broker-build operator-
 operator-kind-install: operator-kind-images
 	@printf '[operator-kind-setup] installing chart into namespace %s\n' "$(NAMESPACE)"
 	helm upgrade --install nvt charts/nvt \
+		--kube-context "$(KUBECTL_CONTEXT)" \
 		-n "$(NAMESPACE)" \
 		--create-namespace \
 		--wait \
