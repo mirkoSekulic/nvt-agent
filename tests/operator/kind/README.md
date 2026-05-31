@@ -64,7 +64,8 @@ Common overrides:
 make operator-smoke-schedule NAME=demo-1 CLUSTER=nvt-smoke NAMESPACE=nvt SMOKE_DELAY_SECONDS=5
 ```
 
-The target renders and applies a Job named `smoke-scheduler-<NAME>` in the
+The target renders a Kubernetes JSON Job and creates it with create-only
+semantics as `smoke-scheduler-<NAME>` in the
 target namespace. The Job runs inside the cluster and posts one admission
 request to:
 
@@ -78,7 +79,9 @@ The submitted work id is `smoke:<NAME>`, and the submitted `AgentRun` uses
 plugins, `completeOn: plugin.smoke.completed`, and a short completed Pod TTL.
 
 This is a demo/test scheduler path for kind clusters. It is not core scheduler
-logic and does not replace the reusable smoke harness cases.
+logic and does not replace the reusable smoke harness cases. Reusing a previous
+`NAME` fails with Kubernetes `AlreadyExists` for the existing Job instead of
+updating or reusing a completed scheduler Job.
 
 ## Real Codex Auth Secret
 

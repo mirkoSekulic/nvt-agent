@@ -48,7 +48,7 @@ render_job() {
   TMPDIR_OWNED_CREATED=1
 
   local payload_file="${TMPDIR_OWNED}/payload.json"
-  local job_file="${TMPDIR_OWNED}/job.yaml"
+  local job_file="${TMPDIR_OWNED}/job.json"
 
   "${SCRIPT_DIR}/agentrun-payload.py" \
     --run-name "${NAME}" \
@@ -63,7 +63,6 @@ render_job() {
   python3 - "${payload_file}" "${job_file}" "${NAME}" "${NAMESPACE}" "${SCHEDULER_IMAGE}" <<'PY'
 import json
 import sys
-import yaml
 
 payload_path = sys.argv[1]
 job_path = sys.argv[2]
@@ -142,18 +141,9 @@ job = {
     },
 }
 
-class LiteralDumper(yaml.SafeDumper):
-    pass
-
-def str_presenter(dumper, data):
-    if "\n" in data:
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
-
-LiteralDumper.add_representer(str, str_presenter)
-
 with open(job_path, "w", encoding="utf-8") as file:
-    yaml.dump(job, file, Dumper=LiteralDumper, sort_keys=False, width=1000)
+    json.dump(job, file, indent=2)
+    file.write("\n")
 PY
 
   cat "${job_file}"
@@ -170,7 +160,7 @@ main() {
       render_job
       ;;
     apply)
-      render_job | "${KUBECTL}" --context "${KUBECTL_CONTEXT}" -n "${NAMESPACE}" apply -f -
+      render_job | "${KUBECTL}" --context "${KUBECTL_CONTEXT}" -n "${NAMESPACE}" create -f -
       ;;
     *)
       die "mode must be render or apply, got ${MODE}"
