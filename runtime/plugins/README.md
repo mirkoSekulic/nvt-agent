@@ -204,6 +204,13 @@ envelopes to a configured HTTP endpoint. It is generic and does not interpret
 event payloads. See `runtime/plugins/event-webhook/README.md` for configuration
 and delivery options.
 
+`smoke-complete` is a tiny after-agent smoke/test plugin. It waits for
+`event-webhook` readiness by default, sleeps for `delaySeconds`, and publishes a
+deterministic `agentd` event, defaulting to `plugin.smoke.completed` with
+payload `{ok: true}`. It is intended for local and operator lifecycle smoke
+tests without GitHub or external services. See
+`runtime/plugins/smoke-complete/README.md` for the full config.
+
 ## Scaffolding
 
 Generate a plugin folder from templates:
