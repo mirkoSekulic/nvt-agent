@@ -30,6 +30,7 @@ generic controls such as suspend, parallelism, and duplicate active work ids.
   ConfigMaps for POC clusters
 - `examples/agentrun-basic.yaml`: example disposable agent run
 - `docs/agentrun.md`: AgentRun API and intended v1 behavior notes
+- `docs/kind-codex-auth.md`: local kind Codex auth Secret helper notes
 - `docs/agentschedule.md`: AgentSchedule admission-pool behavior notes
 - `cmd/manager`: controller-runtime manager entrypoint
 - `internal/controller`: AgentRun reconciler

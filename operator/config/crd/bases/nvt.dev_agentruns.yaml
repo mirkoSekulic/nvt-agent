@@ -51,6 +51,17 @@ spec:
                       enum:
                         - trusted-local
                         - interactive
+                runtimeAuth:
+                  type: object
+                  required:
+                    - secretName
+                  properties:
+                    secretName:
+                      type: string
+                      minLength: 1
+                    mountPath:
+                      type: string
+                      minLength: 1
                 image:
                   type: string
                   minLength: 1
