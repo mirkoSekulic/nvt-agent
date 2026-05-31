@@ -1,0 +1,21 @@
+runtime:
+  image: nvt-agent-runtime:latest
+
+broker:
+  enabled: true
+  image: nvt-broker:latest
+  envSecretName: ""
+  config:
+    providers: []
+  agents:
+    agents: []
+
+operator:
+  image: nvt-operator:latest
+  replicas: 1
+
+agentSchedule:
+  enabled: true
+  name: default
+  maxParallelism: 1
+  suspend: false

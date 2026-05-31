@@ -1,0 +1,61 @@
+{{- if .Values.broker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvt-broker
+  labels:
+    {{- include "nvt.brokerLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nvt.brokerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nvt.brokerSelectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: broker
+          image: {{ .Values.broker.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 7347
+          env:
+            - name: NVT_BROKER_BIND
+              value: 0.0.0.0:7347
+            - name: NVT_BROKER_CONFIG
+              value: /config/broker.yaml
+            - name: NVT_BROKER_AGENTS_CONFIG
+              value: /config/agents.yaml
+            - name: NVT_BROKER_AUDIT_LOG
+              value: /state/audit.jsonl
+          {{- if .Values.broker.envSecretName }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.broker.envSecretName | quote }}
+          {{- end }}
+          volumeMounts:
+            - name: broker-config
+              mountPath: /config
+              readOnly: true
+            - name: broker-state
+              mountPath: /state
+      volumes:
+        - name: broker-config
+          projected:
+            sources:
+              - configMap:
+                  name: nvt-broker-config
+                  items:
+                    - key: broker.yaml
+                      path: broker.yaml
+              - configMap:
+                  name: nvt-broker-agents
+                  items:
+                    - key: agents.yaml
+                      path: agents.yaml
+        - name: broker-state
+          emptyDir: {}
+{{- end }}

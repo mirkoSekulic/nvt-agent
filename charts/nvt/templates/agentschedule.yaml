@@ -1,0 +1,11 @@
+{{- if .Values.agentSchedule.enabled }}
+apiVersion: nvt.dev/v1alpha1
+kind: AgentSchedule
+metadata:
+  name: {{ .Values.agentSchedule.name | quote }}
+  labels:
+    {{- include "nvt.labels" . | nindent 4 }}
+spec:
+  maxParallelism: {{ .Values.agentSchedule.maxParallelism }}
+  suspend: {{ .Values.agentSchedule.suspend }}
+{{- end }}

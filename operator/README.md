@@ -56,9 +56,51 @@ IMAGE=nvt-operator:dev make operator-build
 kind load docker-image nvt-operator:dev
 ```
 
-This slice only packages the manager binary as a container image. CRD install
-bundles, RBAC, Deployment, Service, and public ingress manifests are separate
-future work.
+## Helm Core Stack
+
+The root chart at `charts/nvt` installs the core nvt Kubernetes stack for POC
+clusters: `AgentRun` and `AgentSchedule` CRDs, the broker ConfigMaps,
+Deployment, and Service, the operator RBAC, Deployment, and Service, and a
+default `AgentSchedule`. It does not include a concrete scheduler plugin,
+external ingress, GitHub access setup, or production auth.
+
+Build the local images from the repository root:
+
+```sh
+make runtime-build
+make broker-build
+make operator-build
+```
+
+For kind-based testing, load the images into the cluster after building them:
+
+```sh
+kind load docker-image nvt-agent-runtime:latest
+kind load docker-image nvt-broker:latest
+kind load docker-image nvt-operator:latest
+```
+
+Broker provider credentials are intentionally not rendered by the chart. When
+using real providers, create the broker env Secret separately and pass its name
+to the chart:
+
+```sh
+kubectl create secret generic nvt-broker-env --from-env-file=nvt-broker-env.env -n nvt
+helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace \
+  --set broker.envSecretName=nvt-broker-env
+```
+
+Install the default core stack with:
+
+```sh
+helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace
+```
+
+Render-test the chart with:
+
+```sh
+make operator-helm-test
+```
 
 ## Scope
 
