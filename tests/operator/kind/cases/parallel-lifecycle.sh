@@ -51,7 +51,7 @@ generate_payload() {
 }
 
 validate_payload_generation() {
-  local payload="${TMPDIR}/payload.json"
+  local payload="${SMOKE_TMPDIR}/payload.json"
   log "validating parallel-lifecycle admission payload"
   generate_payload "smoke-1" "smoke-1" "${payload}"
   python3 - "${payload}" "${NAMESPACE}" "smoke-1" <<'PY'
@@ -84,9 +84,9 @@ PY
 post_case_admission() {
   local run_name="$1"
   local work_id="$2"
-  local body="${TMPDIR}/${run_name}.json"
-  local response="${TMPDIR}/${run_name}.response.json"
-  local status_file="${TMPDIR}/${run_name}.status"
+  local body="${SMOKE_TMPDIR}/${run_name}.json"
+  local response="${SMOKE_TMPDIR}/${run_name}.response.json"
+  local status_file="${SMOKE_TMPDIR}/${run_name}.status"
 
   generate_payload "${run_name}" "${work_id}" "${body}"
   post_schedule_admission "${body}" "${response}" "${status_file}"
@@ -102,9 +102,9 @@ submit_parallel_admissions() {
 
 assert_admitted() {
   local run_name="$1"
-  local response="${TMPDIR}/${run_name}.response.json"
+  local response="${SMOKE_TMPDIR}/${run_name}.response.json"
   local status
-  status="$(cat "${TMPDIR}/${run_name}.status")"
+  status="$(cat "${SMOKE_TMPDIR}/${run_name}.status")"
   [[ "${status}" == "201" ]] || die "expected ${run_name} admission HTTP 201, got ${status}: $(cat "${response}")"
 
   python3 - "${response}" "${NAMESPACE}" "${run_name}" <<'PY'
@@ -122,12 +122,12 @@ PY
 }
 
 assert_overflow_rejected() {
-  local response="${TMPDIR}/smoke-overflow.response.json"
+  local response="${SMOKE_TMPDIR}/smoke-overflow.response.json"
   local status
 
   log "checking maxParallelism overflow rejection"
   post_case_admission "smoke-overflow" "smoke-overflow"
-  status="$(cat "${TMPDIR}/smoke-overflow.status")"
+  status="$(cat "${SMOKE_TMPDIR}/smoke-overflow.status")"
   [[ "${status}" == "429" ]] || die "expected overflow HTTP 429, got ${status}: $(cat "${response}")"
 
   python3 - "${response}" <<'PY'

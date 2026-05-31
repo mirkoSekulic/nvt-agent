@@ -12,7 +12,8 @@ load_config() {
   RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-300}"
   CLEANUP_TIMEOUT_SECONDS="${CLEANUP_TIMEOUT_SECONDS:-180}"
   KUBECTL_CONTEXT="kind-${CLUSTER}"
-  TMPDIR="${TMPDIR:-$(mktemp -d)}"
+  SMOKE_TMPDIR="$(mktemp -d)"
+  SMOKE_TMPDIR_CREATED=1
   PORT_FORWARD_PID="${PORT_FORWARD_PID:-}"
 }
 
@@ -79,7 +80,7 @@ diagnostics() {
     kubectl_smoke logs "${pod}" -n "${NAMESPACE}" --all-containers --tail=200 >&2 || true
   done
   if [[ -n "${PORT_FORWARD_PID:-}" ]]; then
-    cat "${TMPDIR}/operator-port-forward.log" >&2 || true
+    cat "${SMOKE_TMPDIR}/operator-port-forward.log" >&2 || true
   fi
 }
 
@@ -89,8 +90,8 @@ cleanup() {
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
     wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${TMPDIR:-}" ]]; then
-    rm -rf "${TMPDIR}"
+  if [[ "${SMOKE_TMPDIR_CREATED:-0}" == "1" && -n "${SMOKE_TMPDIR:-}" ]]; then
+    rm -rf "${SMOKE_TMPDIR}"
   fi
   if [[ "${DELETE_CLUSTER:-0}" == "1" ]]; then
     log "deleting kind cluster ${CLUSTER}"
@@ -114,7 +115,7 @@ validate_chart_render() {
 start_operator_port_forward() {
   log "port-forwarding nvt-operator Service on localhost:${PORT_FORWARD_PORT}"
   kubectl_smoke port-forward -n "${NAMESPACE}" service/nvt-operator "${PORT_FORWARD_PORT}:8082" \
-    >"${TMPDIR}/operator-port-forward.log" 2>&1 &
+    >"${SMOKE_TMPDIR}/operator-port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
   wait_for_operator_http 30
 }
