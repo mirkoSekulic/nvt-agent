@@ -65,6 +65,7 @@ RUN chmod +x \
   /usr/local/lib/nvt-agent/plugins/git-host-credentials/git-host-credential.py \
   /usr/local/lib/nvt-agent/plugins/git-host-credentials/gh-auth.py \
   /usr/local/lib/nvt-agent/plugins/event-webhook/run.py \
+  /usr/local/lib/nvt-agent/plugins/initial-prompt/run.py \
   /usr/local/lib/nvt-agent/plugins/github-watcher/run.py \
   /usr/local/lib/nvt-agent/plugins/github-watcher/github-watch.py \
   && mkdir -p /workspace /root/.nvt-agent
