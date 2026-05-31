@@ -5,6 +5,8 @@ CLUSTER ?= nvt-smoke
 NAMESPACE ?= nvt
 SOURCE ?= $(HOME)/.codex
 SECRET ?= codex-auth
+CODEX_AUTH_SOURCE ?= $(SOURCE)
+CODEX_AUTH_SECRET ?= $(SECRET)
 CREATE_CLUSTER ?= 1
 ROLLOUT_TIMEOUT ?= 180s
 KUBECTL_CONTEXT ?= kind-$(CLUSTER)
@@ -65,7 +67,7 @@ operator-kind-smoke-render:
 	KIND_SMOKE_MODE=render bash tests/operator/kind/smoke.sh
 
 operator-codex-auth-secret:
-	SOURCE="$(SOURCE)" NAMESPACE="$(NAMESPACE)" SECRET="$(SECRET)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" bash scripts/operator-codex-auth-secret.sh
+	CODEX_AUTH_SOURCE="$(CODEX_AUTH_SOURCE)" CODEX_AUTH_SECRET="$(CODEX_AUTH_SECRET)" SOURCE="$(SOURCE)" SECRET="$(SECRET)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" bash scripts/operator-codex-auth-secret.sh
 
 infra-up:
 	bash scripts/infra-up.sh
