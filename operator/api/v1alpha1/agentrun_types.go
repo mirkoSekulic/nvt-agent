@@ -42,6 +42,7 @@ type AgentRunSpec struct {
 	RuntimeClassName *string            `json:"runtimeClassName,omitempty"`
 	Workspace        AgentRunWorkspace  `json:"workspace"`
 	Broker           *AgentRunBroker    `json:"broker,omitempty"`
+	Prompt           *AgentRunPrompt    `json:"prompt,omitempty"`
 	Agent            AgentRunAgent      `json:"agent"`
 	Lifecycle        *AgentRunLifecycle `json:"lifecycle,omitempty"`
 	TTL              *AgentRunTTL       `json:"ttl,omitempty"`
@@ -67,6 +68,11 @@ type AgentRunBroker struct {
 type AgentRunBrokerGrant struct {
 	Provider     string   `json:"provider"`
 	Repositories []string `json:"repositories"`
+}
+
+// AgentRunPrompt defines the optional initial prompt for disposable runs.
+type AgentRunPrompt struct {
+	Text string `json:"text,omitempty"`
 }
 
 // AgentRunAgent contains agent-specific configuration.
@@ -165,6 +171,9 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.Broker != nil {
 		out.Broker = in.Broker.DeepCopy()
 	}
+	if in.Prompt != nil {
+		out.Prompt = in.Prompt.DeepCopy()
+	}
 	out.Agent.Config = *in.Agent.Config.DeepCopy()
 	if in.Lifecycle != nil {
 		out.Lifecycle = in.Lifecycle.DeepCopy()
@@ -201,6 +210,17 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 	out := new(AgentRunBrokerGrant)
 	*out = *in
 	out.Repositories = append([]string(nil), in.Repositories...)
+	return out
+}
+
+// DeepCopy returns a copy of the AgentRunPrompt.
+func (in *AgentRunPrompt) DeepCopy() *AgentRunPrompt {
+	if in == nil {
+		return nil
+	}
+
+	out := new(AgentRunPrompt)
+	*out = *in
 	return out
 }
 

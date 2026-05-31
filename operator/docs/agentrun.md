@@ -13,6 +13,8 @@ encode who scheduled it.
   does not know who scheduled it.
 - Runtime plugins remain configured through the embedded agent config at
   `spec.agent.config`.
+- `spec.prompt.text` is a small AgentRun convenience that renders to the
+  builtin `initial-prompt` runtime plugin for disposable runs.
 - Operator extensions and schedulers are separate from runtime plugins.
 - v1 broker providers are static. `spec.broker.grants` declares per-agent
   dynamic grants against those static providers.
@@ -92,6 +94,40 @@ The controller writes these grants into the shared `nvt-broker-agents`
 ConfigMap in the same namespace as the `AgentRun`. The broker identity is
 `<namespace>/<name>`, and the policy stores only the SHA-256 hash of the
 per-run `NVT_BROKER_TOKEN`.
+
+### `spec.prompt.text`
+
+Optional initial prompt text for scheduled or disposable AgentRuns:
+
+```yaml
+prompt:
+  text: |
+    Implement the requested change and open a pull request.
+```
+
+When `text` is non-empty, the controller prepends this plugin to the rendered
+`spec.agent.config.plugins` list:
+
+```yaml
+plugins:
+  - name: initial-prompt
+    source: builtin
+    when: after-agent
+    restart: never
+    config:
+      text: |
+        Implement the requested change and open a pull request.
+```
+
+The runtime plugin delivers the prompt once through `agentdctl prompt` and
+records a SHA-256 hash under `$NVT_STATE_DIR/initial-prompt/last.sha256` to
+avoid duplicate delivery on restart. If `spec.prompt.text` is omitted or empty,
+the agent config renders unchanged.
+
+Normal local nvt agents are unaffected unless they explicitly configure the
+`initial-prompt` plugin in their own `agent.yaml`. If `spec.prompt.text` is set
+and `spec.agent.config.plugins` already contains a plugin named
+`initial-prompt`, rendering fails to avoid ambiguity.
 
 ### `spec.agent.config`
 
@@ -199,6 +235,8 @@ callbacks when a configured event marks the run complete or failed.
 
 The current controller initializes empty `status.phase` values to `Pending` and
 renders `spec.agent.config` to an owned ConfigMap with the key `agent.yaml`.
+When `spec.prompt.text` is non-empty, it prepends the builtin `initial-prompt`
+runtime plugin during this AgentRun-specific render.
 It creates two stable owned opaque Secrets per run:
 
 ```text

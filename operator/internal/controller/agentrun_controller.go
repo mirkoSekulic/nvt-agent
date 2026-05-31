@@ -35,6 +35,7 @@ const (
 	agentConfigMountPath = "/nvt-agent/agent.yaml"
 	agentConfigVolumeDir = "/nvt-agent"
 	workspaceMountPath   = "/workspace"
+	initialPromptPlugin  = "initial-prompt"
 
 	brokerURL                 = "http://nvt-broker:7347"
 	brokerAgentsConfigMapName = "nvt-broker-agents"
@@ -861,12 +862,86 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		rawConfig = []byte("{}")
 	}
 
+	if promptText := AgentRunPromptText(agentRun); promptText != "" {
+		config := map[string]any{}
+		if err := yaml.Unmarshal(rawConfig, &config); err != nil {
+			return "", fmt.Errorf("render AgentRun agent config: %w", err)
+		}
+		renderedConfig, err := InjectInitialPromptPlugin(config, promptText)
+		if err != nil {
+			return "", err
+		}
+		rendered, err := yaml.Marshal(renderedConfig)
+		if err != nil {
+			return "", fmt.Errorf("render AgentRun agent config: %w", err)
+		}
+		return string(rendered), nil
+	}
+
 	rendered, err := yaml.JSONToYAML(rawConfig)
 	if err != nil {
 		return "", fmt.Errorf("render AgentRun agent config: %w", err)
 	}
 
 	return string(rendered), nil
+}
+
+// AgentRunPromptText returns the configured prompt text when present and non-empty.
+func AgentRunPromptText(agentRun *nvtv1alpha1.AgentRun) string {
+	if agentRun.Spec.Prompt == nil {
+		return ""
+	}
+	return agentRun.Spec.Prompt.Text
+}
+
+// InjectInitialPromptPlugin prepends the runtime plugin that delivers AgentRun prompt text.
+func InjectInitialPromptPlugin(config map[string]any, promptText string) (map[string]any, error) {
+	plugins, err := agentConfigPlugins(config)
+	if err != nil {
+		return nil, err
+	}
+	for _, plugin := range plugins {
+		pluginMap, ok := plugin.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("render AgentRun agent config: plugins entries must be objects")
+		}
+		if pluginMap["name"] == initialPromptPlugin {
+			return nil, fmt.Errorf("render AgentRun agent config: spec.prompt.text cannot be used when spec.agent.config.plugins already contains plugin %q", initialPromptPlugin)
+		}
+	}
+
+	injected := map[string]any{
+		"name":    initialPromptPlugin,
+		"source":  "builtin",
+		"when":    "after-agent",
+		"restart": "never",
+		"config": map[string]any{
+			"text": promptText,
+		},
+	}
+	updatedConfig := cloneStringAnyMap(config)
+	updatedConfig["plugins"] = append([]any{injected}, plugins...)
+	return updatedConfig, nil
+}
+
+func agentConfigPlugins(config map[string]any) ([]any, error) {
+	rawPlugins, ok := config["plugins"]
+	if !ok || rawPlugins == nil {
+		return nil, nil
+	}
+	plugins, ok := rawPlugins.([]any)
+	if !ok {
+		return nil, fmt.Errorf("render AgentRun agent config: plugins must be a list")
+	}
+	return plugins, nil
+}
+
+func cloneStringAnyMap(input map[string]any) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 // InitializeAgentRunStatus sets the initial phase when a run has no observed phase yet.

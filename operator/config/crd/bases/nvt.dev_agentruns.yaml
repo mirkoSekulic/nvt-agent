@@ -84,6 +84,11 @@ spec:
                             items:
                               type: string
                               minLength: 1
+                prompt:
+                  type: object
+                  properties:
+                    text:
+                      type: string
                 agent:
                   type: object
                   required:

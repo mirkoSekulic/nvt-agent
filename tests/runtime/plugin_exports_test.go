@@ -569,6 +569,10 @@ func eventWebhookRunBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "event-webhook", "run.py"))
 }
 
+func initialPromptRunBin(root string) string {
+	return "python3 " + shellQuote(filepath.Join(root, "runtime", "plugins", "initial-prompt", "run.py"))
+}
+
 func renderAgentExposeBin(root string) string {
 	return "python3 " + shellQuote(filepath.Join(root, "scripts", "render-agent-expose.py"))
 }
