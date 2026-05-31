@@ -97,8 +97,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
 	}
-	if result, handled, err := r.reconcileActiveDeadline(ctx, &agentRun); handled || err != nil {
-		return result, err
+	deadlineResult, deadlineExceeded, err := r.reconcileActiveDeadline(ctx, &agentRun)
+	if deadlineExceeded || err != nil {
+		return deadlineResult, err
 	}
 
 	if err := r.reconcileAgentConfigMap(ctx, &agentRun); err != nil {
@@ -132,10 +133,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
 	}
-	if result, handled, err := r.reconcileActiveDeadline(ctx, &agentRun); handled || err != nil {
-		return result, err
+	deadlineResult, deadlineExceeded, err = r.reconcileActiveDeadline(ctx, &agentRun)
+	if deadlineExceeded || err != nil {
+		return deadlineResult, err
 	}
-	return ctrl.Result{}, nil
+	return deadlineResult, nil
 }
 
 // SetupWithManager registers the AgentRun controller with the manager.
@@ -215,7 +217,7 @@ func (r *AgentRunReconciler) reconcileActiveDeadline(ctx context.Context, agentR
 	now := r.now()
 	remaining, exceeded := ActiveDeadlineDelay(agentRun, now)
 	if remaining > 0 {
-		return ctrl.Result{RequeueAfter: remaining}, true, nil
+		return ctrl.Result{RequeueAfter: remaining}, false, nil
 	}
 	if !exceeded {
 		return ctrl.Result{}, false, nil

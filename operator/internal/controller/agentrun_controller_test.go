@@ -1313,6 +1313,25 @@ func TestReconcileActiveDeadlineBeforeDeadlineKeepsPodAndRequeues(t *testing.T) 
 	assertAgentPodExists(ctx, t, k8sClient, agentRun)
 }
 
+func TestReconcileActiveDeadlineBeforeDeadlineCreatesMissingPodAndRequeues(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 11, 59, 30, 0, time.UTC)
+	agentRun := activeDeadlineAgentRun(startedAt, ptrTo[int64](60))
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("expected requeue after 30s, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseRunning)
+	assertAgentPodExists(ctx, t, k8sClient, agentRun)
+}
+
 func TestReconcileActiveDeadlineAfterDeadlineMarksExceededAndDeletesPod(t *testing.T) {
 	ctx := context.Background()
 	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
