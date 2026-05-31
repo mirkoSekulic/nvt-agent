@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/yaml"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
@@ -897,6 +899,131 @@ func TestRenderAgentConfigYAMLRejectsMalformedConfig(t *testing.T) {
 	}
 }
 
+func TestRenderAgentConfigYAMLInjectsInitialPromptPlugin(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: "Start this run.\nThen report back."}
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	config := parseAgentConfigYAML(t, rendered)
+	plugins, ok := config["plugins"].([]any)
+	if !ok || len(plugins) != 2 {
+		t.Fatalf("expected two plugins, got %#v\n%s", config["plugins"], rendered)
+	}
+	plugin, ok := plugins[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected injected plugin object, got %#v", plugins[0])
+	}
+	if plugin["name"] != "initial-prompt" ||
+		plugin["source"] != "builtin" ||
+		plugin["when"] != "after-agent" ||
+		plugin["restart"] != "never" {
+		t.Fatalf("unexpected injected plugin: %#v", plugin)
+	}
+	configValue, ok := plugin["config"].(map[string]any)
+	if !ok || configValue["text"] != agentRun.Spec.Prompt.Text {
+		t.Fatalf("unexpected injected config: %#v", plugin["config"])
+	}
+	existingPlugin, ok := plugins[1].(map[string]any)
+	if !ok || existingPlugin["name"] != "checkout-repos" {
+		t.Fatalf("expected existing plugin after injected plugin, got %#v", plugins[1])
+	}
+}
+
+func TestRenderAgentConfigYAMLInjectsInitialPromptPluginWhenPluginsMissing(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{"codeServer": {"enabled": true}}`)}
+	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: "Run without configured plugins."}
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	config := parseAgentConfigYAML(t, rendered)
+	plugins, ok := config["plugins"].([]any)
+	if !ok || len(plugins) != 1 {
+		t.Fatalf("expected injected plugin list, got %#v\n%s", config["plugins"], rendered)
+	}
+	if config["codeServer"] == nil {
+		t.Fatalf("expected existing config keys to be preserved, got %#v", config)
+	}
+}
+
+func TestRenderAgentConfigYAMLNoPromptRendersUnchanged(t *testing.T) {
+	agentRun := testAgentRun()
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	if strings.Contains(rendered, "initial-prompt") {
+		t.Fatalf("expected no injected plugin, got:\n%s", rendered)
+	}
+}
+
+func TestRenderAgentConfigYAMLEmptyPromptRendersUnchanged(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: ""}
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	if strings.Contains(rendered, "initial-prompt") {
+		t.Fatalf("expected no injected plugin, got:\n%s", rendered)
+	}
+}
+
+func TestRenderAgentConfigYAMLRejectsInitialPromptPluginConflict(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{
+		"plugins": [
+			{
+				"name": "initial-prompt",
+				"source": "builtin"
+			}
+		]
+	}`)}
+	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: "ambiguous"}
+
+	_, err := RenderAgentConfigYAML(agentRun)
+	if err == nil {
+		t.Fatal("expected initial-prompt conflict to fail")
+	}
+	if !strings.Contains(err.Error(), `already contains plugin "initial-prompt"`) {
+		t.Fatalf("expected clear conflict error, got %v", err)
+	}
+}
+
+func TestAgentRunCRDSchemaIncludesPromptText(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatalf("read AgentRun CRD: %v", err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("parse AgentRun CRD: %v", err)
+	}
+
+	prompt, ok := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
+		"spec", "properties", "prompt",
+	).(map[string]any)
+	if !ok {
+		t.Fatalf("expected spec.prompt schema object, got %#v", prompt)
+	}
+	textType := crdPath(t, prompt, "properties", "text", "type")
+	if textType != "string" {
+		t.Fatalf("expected spec.prompt.text string schema, got %#v", textType)
+	}
+}
+
 func TestReconcileSetsPodNameAfterPodExists(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
@@ -1570,6 +1697,44 @@ func persistAgentRunStatus(ctx context.Context, t *testing.T, k8sClient client.C
 	if err := k8sClient.Status().Update(ctx, current); err != nil {
 		t.Fatalf("seed AgentRun status: %v", err)
 	}
+}
+
+func parseAgentConfigYAML(t *testing.T, rendered string) map[string]any {
+	t.Helper()
+
+	var config map[string]any
+	if err := yaml.Unmarshal([]byte(rendered), &config); err != nil {
+		t.Fatalf("parse rendered agent config: %v\n%s", err, rendered)
+	}
+	return config
+}
+
+func crdPath(t *testing.T, value any, path ...any) any {
+	t.Helper()
+
+	current := value
+	for _, segment := range path {
+		switch key := segment.(type) {
+		case string:
+			object, ok := current.(map[string]any)
+			if !ok {
+				t.Fatalf("expected object at %q, got %#v", key, current)
+			}
+			current = object[key]
+		case int:
+			list, ok := current.([]any)
+			if !ok {
+				t.Fatalf("expected list at %d, got %#v", key, current)
+			}
+			if key < 0 || key >= len(list) {
+				t.Fatalf("index %d out of bounds for %#v", key, list)
+			}
+			current = list[key]
+		default:
+			t.Fatalf("unsupported path segment %#v", segment)
+		}
+	}
+	return current
 }
 
 func assertAgentRunPhase(
