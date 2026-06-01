@@ -77,6 +77,53 @@ External APIs
 brokerd -> GitHub/API using broker-held secrets, grants, and audit log
 ```
 
+Kubernetes / operator path:
+
+```text
+Helm chart
+  |
+  | installs CRDs, nvt-operator, nvt-broker, default AgentSchedule
+  v
++---------------------------- Kubernetes namespace ----------------------------+
+|                                                                              |
+| Scheduler producer                                                            |
+| smoke-scheduler Job / future GitHub issue scheduler                           |
+|   |                                                                          |
+|   | HTTP admission                                                            |
+|   v                                                                          |
+| nvt-operator Service :8082                                                    |
+|   |                                                                          |
+|   v                                                                          |
+| AgentSchedule admission                                                       |
+| maxParallelism + duplicate active work checks                                 |
+|   |                                                                          |
+|   v                                                                          |
+| AgentRun controller                                                           |
+| creates ConfigMap, token Secrets, broker policy, AgentRun Pod                 |
+|   |                                                                          |
+|   v                                                                          |
+| +---------------------------- AgentRun Pod --------------------------------+ |
+| | optional runtime-auth-copy init -> writable runtime auth home             | |
+| |                                                                          | |
+| | +-------------------------------+     +-------------------------------+  | |
+| | | agent runtime container       |     | docker:dind sidecar           |  | |
+| | | agentd + tmux + codex/claude  |     | shared Pod netns / :2375      |  | |
+| | | runtime plugins               |     | workspace Docker daemon       |  | |
+| | +-------+---------------+-------+     +-------------------------------+  | |
+| |         |               |                                                  | |
+| |         | brokerctl     | event-webhook callback                           | |
+| +---------+---------------+--------------------------------------------------+ |
+|           |               |                                                    |
+|           v               v                                                    |
+|      nvt-broker      nvt-operator callback endpoint                            |
+|           |               |                                                    |
+|           |               v                                                    |
+|           |       Completed / Failed status + Pod TTL cleanup                  |
+|           v                                                                    |
+|      GitHub/API using broker-held secrets, grants, and audit log               |
++------------------------------------------------------------------------------+
+```
+
 `agentd` is intentionally narrower than a manager. It runs inside each agent
 container and owns only interaction with the running agent session:
 
