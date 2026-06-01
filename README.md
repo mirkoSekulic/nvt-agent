@@ -86,8 +86,8 @@ Helm chart
   v
 +---------------------------- Kubernetes namespace ----------------------------+
 |                                                                              |
-| Scheduler producer                                                            |
-| smoke-scheduler Job / future GitHub issue scheduler                           |
+| Schedule producer                                                             |
+| any trusted source that submits work                                          |
 |   |                                                                          |
 |   | HTTP admission                                                            |
 |   v                                                                          |
