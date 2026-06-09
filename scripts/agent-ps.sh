@@ -20,12 +20,17 @@ for env_file in "$agents_dir"/*/env; do
 
   name="${AGENT_NAME:-$(basename "$(dirname "$env_file")")}"
   bash "$script_dir/validate-agent-name.sh" "$name"
+  expose_compose_file="$agents_dir/$name/compose.expose.yaml"
+  compose_files=(-f "$repo_root/compose.agent.yaml")
+  if [ -f "$expose_compose_file" ]; then
+    compose_files+=(-f "$expose_compose_file")
+  fi
 
   container_id="$(
     docker compose \
       -p "agent-$name" \
       --env-file "$env_file" \
-      -f "$repo_root/compose.agent.yaml" \
+      "${compose_files[@]}" \
       ps -q agent 2>/dev/null || true
   )"
 
