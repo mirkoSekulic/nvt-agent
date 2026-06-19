@@ -127,7 +127,14 @@ def setup_tmux_config():
     target = Path.home() / ".tmux.conf"
     if target.exists():
         return
-    target.write_text("set -g mouse on\n", encoding="utf-8")
+    target.write_text(
+        "\n".join([
+            "set -g mouse on",
+            "set -g history-limit 100000",
+            "setw -g mode-keys vi",
+        ]) + "\n",
+        encoding="utf-8",
+    )
 
 
 def apply_additional_paths(paths):
