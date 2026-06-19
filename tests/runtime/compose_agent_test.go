@@ -431,7 +431,12 @@ runtime:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "set -g mouse on\n" {
+	want := strings.Join([]string{
+		"set -g mouse on",
+		"set -g history-limit 100000",
+		"setw -g mode-keys vi",
+	}, "\n") + "\n"
+	if string(data) != want {
 		t.Fatalf("unexpected tmux config: %q", data)
 	}
 }
