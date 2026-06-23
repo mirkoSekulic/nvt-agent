@@ -4,6 +4,7 @@ package producer
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -76,6 +77,9 @@ func TestPollerStoresMaxUpdatedCursor(t *testing.T) {
 		},
 	}
 	poller := NewPoller(testPollerConfig(""), github, AgentRunSubmitter{}, state, slog.Default())
+	poller.now = func() time.Time {
+		return time.Date(2026, 6, 23, 11, 59, 0, 0, time.UTC)
+	}
 
 	if err := poller.PollOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -86,6 +90,72 @@ func TestPollerStoresMaxUpdatedCursor(t *testing.T) {
 	}
 	if !found || !got.Equal(second) {
 		t.Fatalf("got stored cursor %v want %s", got, second)
+	}
+}
+
+func TestPollerStoresPollStartCursorWhenNoCommentsReturned(t *testing.T) {
+	state := newMemoryStateStore()
+	pollStartedAt := time.Date(2026, 6, 23, 12, 10, 0, 0, time.UTC)
+	github := &fakeGitHubClient{}
+	poller := NewPoller(testPollerConfig(""), github, AgentRunSubmitter{}, state, slog.Default())
+	poller.now = func() time.Time {
+		return pollStartedAt
+	}
+
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := state.GetRepoCursor(context.Background(), "acme/widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || !got.Equal(pollStartedAt) {
+		t.Fatalf("got stored cursor %v want poll start %s", got, pollStartedAt)
+	}
+}
+
+func TestPollerReopenedStoreUsesEmptyPollCursorInsteadOfStartupTime(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	firstStore, err := OpenSQLiteStateStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollStartedAt := time.Date(2026, 6, 23, 12, 10, 0, 0, time.UTC)
+	firstGitHub := &fakeGitHubClient{}
+	firstPoller := NewPoller(testPollerConfig(""), firstGitHub, AgentRunSubmitter{}, firstStore, slog.Default())
+	firstPoller.startedAt = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	firstPoller.now = func() time.Time {
+		return pollStartedAt
+	}
+	pollErr := firstPoller.PollOnce(ctx)
+	if pollErr != nil {
+		t.Fatal(pollErr)
+	}
+	closeErr := firstStore.Close()
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	reopened, err := OpenSQLiteStateStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	secondGitHub := &fakeGitHubClient{}
+	secondPoller := NewPoller(testPollerConfig(""), secondGitHub, AgentRunSubmitter{}, reopened, slog.Default())
+	secondPoller.startedAt = time.Date(2026, 6, 23, 12, 15, 0, 0, time.UTC)
+
+	if err := secondPoller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := secondGitHub.listUpdatedSince[0]
+	if got == nil || !got.Equal(pollStartedAt) {
+		t.Fatalf("got since %v want persisted empty-poll cursor %s", got, pollStartedAt)
 	}
 }
 

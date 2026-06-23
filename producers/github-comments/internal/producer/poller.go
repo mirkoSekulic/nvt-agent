@@ -15,6 +15,7 @@ type Poller struct {
 	State     StateStore
 	Logger    *slog.Logger
 	startedAt time.Time
+	now       func() time.Time
 }
 
 func NewPoller(
@@ -37,6 +38,7 @@ func NewPoller(
 		State:     state,
 		Logger:    logger,
 		startedAt: time.Now(),
+		now:       time.Now,
 	}
 }
 
@@ -86,14 +88,15 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	default:
 		since = &p.startedAt
 	}
+	pollStartedAt := p.now().UTC()
 	comments, err := p.GitHub.ListUpdatedIssueComments(ctx, repo, since)
 	if err != nil {
 		return fmt.Errorf("list updated issue comments for %s: %w", key, err)
 	}
-	maxUpdated := time.Time{}
+	nextCursor := pollStartedAt
 	for _, comment := range comments {
-		if comment.UpdatedAt.After(maxUpdated) {
-			maxUpdated = comment.UpdatedAt
+		if comment.UpdatedAt.After(nextCursor) {
+			nextCursor = comment.UpdatedAt
 		}
 		command, ok := ParseCommand(comment.Body, p.Config.CommandPrefixes)
 		if !ok {
@@ -142,10 +145,8 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			idempotencyKey,
 		)
 	}
-	if !maxUpdated.IsZero() {
-		if err := p.State.SetRepoCursor(ctx, key, maxUpdated); err != nil {
-			return fmt.Errorf("set poll cursor for %s: %w", key, err)
-		}
+	if err := p.State.SetRepoCursor(ctx, key, nextCursor); err != nil {
+		return fmt.Errorf("set poll cursor for %s: %w", key, err)
 	}
 	return nil
 }
