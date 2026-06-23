@@ -24,6 +24,8 @@ Example config:
 commandPrefixes:
   - /nvtagent
 pollInterval: 30s
+state:
+  sqlitePath: /var/lib/nvt-github-comments/state.db
 repositories:
   - owner: mirkoSekulic
     name: nvt-agent
@@ -91,6 +93,8 @@ nvt.dev/idempotency-key = github:<owner>/<repo>:issue:<number>:intent:create_pr
 
 Any existing AgentRun in the target namespace with the same annotation blocks a new run, regardless of status phase. A Kubernetes `AlreadyExists` response is also treated as already accepted.
 
+Polling state is stored in SQLite at `state.sqlitePath`. The producer stores one cursor per configured repository and resumes from that cursor after a pod restart. If no cursor exists, the first poll starts at producer startup time unless `initialSince` is configured for explicit backfill.
+
 ## Local Run
 
 Use a kubeconfig that can create and list `AgentRun` resources:
@@ -133,6 +137,8 @@ spec:
             - name: github-app
               mountPath: /var/run/secrets/github-app
               readOnly: true
+            - name: state
+              mountPath: /var/lib/nvt-github-comments
       volumes:
         - name: config
           configMap:
@@ -140,6 +146,9 @@ spec:
         - name: github-app
           secret:
             secretName: nvt-github-app
+        - name: state
+          persistentVolumeClaim:
+            claimName: nvt-github-comments-producer-state
 ```
 
 The ServiceAccount needs RBAC to list and create `agentruns.nvt.dev` in the configured target namespace. Runtime auth secrets and broker/provider grants should be configured to match the runtime image and credential broker installed in that namespace.

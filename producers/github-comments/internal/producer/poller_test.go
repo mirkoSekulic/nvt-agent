@@ -11,7 +11,7 @@ import (
 func TestPollerDefaultsFirstRunSinceToStartupTime(t *testing.T) {
 	startedAt := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	github := &fakeGitHubClient{}
-	poller := NewPoller(testPollerConfig(""), github, AgentRunSubmitter{}, slog.Default())
+	poller := NewPoller(testPollerConfig(""), github, AgentRunSubmitter{}, nil, slog.Default())
 	poller.startedAt = startedAt
 
 	if err := poller.PollOnce(context.Background()); err != nil {
@@ -31,7 +31,7 @@ func TestPollerDefaultsFirstRunSinceToStartupTime(t *testing.T) {
 func TestPollerInitialSinceOverridesStartupTime(t *testing.T) {
 	initialSince := "2026-06-01T00:00:00Z"
 	github := &fakeGitHubClient{}
-	poller := NewPoller(testPollerConfig(initialSince), github, AgentRunSubmitter{}, slog.Default())
+	poller := NewPoller(testPollerConfig(initialSince), github, AgentRunSubmitter{}, nil, slog.Default())
 	poller.startedAt = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 
 	if err := poller.PollOnce(context.Background()); err != nil {
@@ -44,6 +44,48 @@ func TestPollerInitialSinceOverridesStartupTime(t *testing.T) {
 	}
 	if got == nil || !got.Equal(want) {
 		t.Fatalf("got since %v want %s", got, want)
+	}
+}
+
+func TestPollerUsesPersistedCursorBeforeInitialSince(t *testing.T) {
+	storedCursor := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	state := newMemoryStateStore()
+	if err := state.SetRepoCursor(context.Background(), "acme/widget", storedCursor); err != nil {
+		t.Fatal(err)
+	}
+	github := &fakeGitHubClient{}
+	poller := NewPoller(testPollerConfig("2026-06-01T00:00:00Z"), github, AgentRunSubmitter{}, state, slog.Default())
+
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := github.listUpdatedSince[0]
+	if got == nil || !got.Equal(storedCursor) {
+		t.Fatalf("got since %v want persisted cursor %s", got, storedCursor)
+	}
+}
+
+func TestPollerStoresMaxUpdatedCursor(t *testing.T) {
+	state := newMemoryStateStore()
+	first := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	second := time.Date(2026, 6, 23, 12, 5, 0, 0, time.UTC)
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{
+			{ID: 1, Body: "ignored", UpdatedAt: second},
+			{ID: 2, Body: "ignored", UpdatedAt: first},
+		},
+	}
+	poller := NewPoller(testPollerConfig(""), github, AgentRunSubmitter{}, state, slog.Default())
+
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := state.GetRepoCursor(context.Background(), "acme/widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || !got.Equal(second) {
+		t.Fatalf("got stored cursor %v want %s", got, second)
 	}
 }
 
@@ -61,7 +103,7 @@ func TestPollerSkipsPullRequestIssueComments(t *testing.T) {
 			PullRequest: &GitHubPullRequest{URL: "https://api.github.com/repos/acme/widget/pulls/42"},
 		},
 	}
-	poller := NewPoller(testPollerConfig(""), github, AgentRunSubmitter{}, slog.Default())
+	poller := NewPoller(testPollerConfig(""), github, AgentRunSubmitter{}, nil, slog.Default())
 
 	if err := poller.PollOnce(context.Background()); err != nil {
 		t.Fatal(err)

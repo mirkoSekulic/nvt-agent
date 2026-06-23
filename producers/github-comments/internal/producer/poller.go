@@ -12,22 +12,31 @@ type Poller struct {
 	Config    Config
 	GitHub    GitHubClient
 	Submitter AgentRunSubmitter
+	State     StateStore
 	Logger    *slog.Logger
 	startedAt time.Time
-	since     map[string]time.Time
 }
 
-func NewPoller(cfg Config, github GitHubClient, submitter AgentRunSubmitter, logger *slog.Logger) *Poller {
+func NewPoller(
+	cfg Config,
+	github GitHubClient,
+	submitter AgentRunSubmitter,
+	state StateStore,
+	logger *slog.Logger,
+) *Poller {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if state == nil {
+		state = newMemoryStateStore()
 	}
 	return &Poller{
 		Config:    cfg,
 		GitHub:    github,
 		Submitter: submitter,
+		State:     state,
 		Logger:    logger,
 		startedAt: time.Now(),
-		since:     map[string]time.Time{},
 	}
 }
 
@@ -61,15 +70,20 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	key := repo.Owner + "/" + repo.Name
 	var since *time.Time
-	if value, ok := p.since[key]; ok {
-		since = &value
-	} else if p.Config.InitialSince != "" {
+	storedCursor, foundCursor, err := p.State.GetRepoCursor(ctx, key)
+	if err != nil {
+		return fmt.Errorf("get poll cursor for %s: %w", key, err)
+	}
+	switch {
+	case foundCursor:
+		since = &storedCursor
+	case p.Config.InitialSince != "":
 		parsed, err := time.Parse(time.RFC3339, p.Config.InitialSince)
 		if err != nil {
 			return fmt.Errorf("parse initialSince: %w", err)
 		}
 		since = &parsed
-	} else {
+	default:
 		since = &p.startedAt
 	}
 	comments, err := p.GitHub.ListUpdatedIssueComments(ctx, repo, since)
@@ -129,7 +143,9 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		)
 	}
 	if !maxUpdated.IsZero() {
-		p.since[key] = maxUpdated
+		if err := p.State.SetRepoCursor(ctx, key, maxUpdated); err != nil {
+			return fmt.Errorf("set poll cursor for %s: %w", key, err)
+		}
 	}
 	return nil
 }

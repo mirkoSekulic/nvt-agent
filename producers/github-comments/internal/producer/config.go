@@ -19,6 +19,7 @@ type Config struct {
 	PollInterval     Duration        `json:"pollInterval,omitempty"`
 	Repositories     []Repository    `json:"repositories"`
 	GitHubApp        GitHubAppConfig `json:"githubApp"`
+	State            StateConfig     `json:"state,omitempty"`
 	AgentRun         AgentRunConfig  `json:"agentRun"`
 	AgentConfig      map[string]any  `json:"agentConfig,omitempty"`
 	InitialSince     string          `json:"initialSince,omitempty"`
@@ -39,6 +40,10 @@ type GitHubAppConfig struct {
 	PrivateKeyBase64    string `json:"privateKeyBase64,omitempty"`
 	PrivateKeyEnv       string `json:"privateKeyEnv,omitempty"`
 	PrivateKeyBase64Env string `json:"privateKeyBase64Env,omitempty"`
+}
+
+type StateConfig struct {
+	SQLitePath string `json:"sqlitePath,omitempty"`
 }
 
 type AgentRunConfig struct {
@@ -107,6 +112,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "nvt-github-comments-producer"
+	}
+	if c.State.SQLitePath == "" {
+		c.State.SQLitePath = "/tmp/nvt-github-comments-state.db"
 	}
 	if c.AgentRun.RuntimeType == "" {
 		c.AgentRun.RuntimeType = "codex"
