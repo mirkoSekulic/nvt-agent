@@ -14,7 +14,11 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "Path to producer config YAML")
-	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig; defaults to in-cluster config then local kubeconfig")
+	kubeconfig := flag.String(
+		"kubeconfig",
+		"",
+		"Path to kubeconfig; defaults to in-cluster config then local kubeconfig",
+	)
 	flag.Parse()
 	if *configPath == "" {
 		*configPath = os.Getenv("NVT_GITHUB_COMMENTS_CONFIG")
@@ -43,9 +47,10 @@ func main() {
 	submitter := producer.NewAgentRunSubmitter(k8sClient, cfg)
 	poller := producer.NewPoller(cfg, githubClient, submitter, slog.Default())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	if err := poller.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("producer stopped", "error", err)
+		stop()
 		os.Exit(1)
 	}
+	stop()
 }

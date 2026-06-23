@@ -1,3 +1,4 @@
+//nolint:goconst // Tests repeat command text to keep cases self-contained.
 package producer
 
 import "testing"

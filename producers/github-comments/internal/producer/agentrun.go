@@ -1,3 +1,4 @@
+//nolint:funlen // AgentRun rendering mirrors the CRD shape in one place for reviewability.
 package producer
 
 import (
@@ -28,10 +29,10 @@ func NewAgentRunSubmitter(k8sClient ctrlclient.Client, cfg Config) AgentRunSubmi
 func NewKubernetesClient(kubeconfig string) (ctrlclient.Client, error) {
 	s := runtime.NewScheme()
 	if err := scheme.AddToScheme(s); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("add kubernetes scheme: %w", err)
 	}
 	if err := nvtv1alpha1.AddToScheme(s); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("add nvt scheme: %w", err)
 	}
 	var restConfig *rest.Config
 	var err error
@@ -41,7 +42,10 @@ func NewKubernetesClient(kubeconfig string) (ctrlclient.Client, error) {
 		restConfig, err = rest.InClusterConfig()
 		if err != nil {
 			loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-			restConfig, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
+			restConfig, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				loadingRules,
+				&clientcmd.ConfigOverrides{},
+			).ClientConfig()
 		}
 	}
 	if err != nil {
@@ -54,7 +58,14 @@ func NewKubernetesClient(kubeconfig string) (ctrlclient.Client, error) {
 	return client, nil
 }
 
-func (s AgentRunSubmitter) Submit(ctx context.Context, repo Repository, issue GitHubIssue, comments []GitHubIssueComment, commandComment GitHubIssueComment, command Command) (bool, string, error) {
+func (s AgentRunSubmitter) Submit(
+	ctx context.Context,
+	repo Repository,
+	issue GitHubIssue,
+	comments []GitHubIssueComment,
+	commandComment GitHubIssueComment,
+	command Command,
+) (bool, string, error) {
 	key := IdempotencyKey(repo.Owner, repo.Name, issue.Number)
 	existing, err := s.hasExistingIdempotencyKey(ctx, key)
 	if err != nil {
@@ -89,7 +100,14 @@ func (s AgentRunSubmitter) hasExistingIdempotencyKey(ctx context.Context, key st
 	return false, nil
 }
 
-func (s AgentRunSubmitter) buildAgentRun(repo Repository, issue GitHubIssue, comments []GitHubIssueComment, commandComment GitHubIssueComment, command Command, key string) (*nvtv1alpha1.AgentRun, error) {
+func (s AgentRunSubmitter) buildAgentRun(
+	repo Repository,
+	issue GitHubIssue,
+	comments []GitHubIssueComment,
+	commandComment GitHubIssueComment,
+	command Command,
+	key string,
+) (*nvtv1alpha1.AgentRun, error) {
 	agentConfig, err := AgentConfigJSON(s.config.AgentConfig)
 	if err != nil {
 		return nil, err
@@ -176,7 +194,7 @@ func (s AgentRunSubmitter) buildAgentRun(repo Repository, issue GitHubIssue, com
 func (s AgentRunSubmitter) Get(ctx context.Context, namespace, name string) (*nvtv1alpha1.AgentRun, error) {
 	var run nvtv1alpha1.AgentRun
 	if err := s.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &run); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get AgentRun: %w", err)
 	}
 	return &run, nil
 }

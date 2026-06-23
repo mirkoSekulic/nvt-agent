@@ -1,3 +1,4 @@
+//nolint:errcheck // HTTP test handlers fail assertions before response-write errors matter.
 package producer
 
 import (
@@ -66,7 +67,15 @@ func TestGitHubAPIClientListsUpdatedIssueComments(t *testing.T) {
 			t.Fatalf("unexpected auth %q", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":1,"body":"/nvtagent pr create","issue_url":"https://api.github.com/repos/o/r/issues/9","updated_at":"2026-01-02T03:04:05Z","user":{"login":"octo"}}]`))
+		_, _ = w.Write([]byte(`[
+			{
+				"id": 1,
+				"body": "/nvtagent pr create",
+				"issue_url": "https://api.github.com/repos/o/r/issues/9",
+				"updated_at": "2026-01-02T03:04:05Z",
+				"user": {"login": "octo"}
+			}
+		]`))
 	}))
 	defer server.Close()
 	client := NewGitHubAPIClient(server.URL, "test-agent", tokenSource, server.Client())
@@ -78,7 +87,9 @@ func TestGitHubAPIClientListsUpdatedIssueComments(t *testing.T) {
 	if len(comments) != 1 || comments[0].ID != 1 {
 		t.Fatalf("unexpected comments %#v", comments)
 	}
-	if !strings.Contains(gotPath, "sort=updated") || !strings.Contains(gotPath, "direction=asc") || !strings.Contains(gotPath, "since=2026-01-01T00%3A00%3A00Z") {
+	if !strings.Contains(gotPath, "sort=updated") ||
+		!strings.Contains(gotPath, "direction=asc") ||
+		!strings.Contains(gotPath, "since=2026-01-01T00%3A00%3A00Z") {
 		t.Fatalf("unexpected request path %s", gotPath)
 	}
 }

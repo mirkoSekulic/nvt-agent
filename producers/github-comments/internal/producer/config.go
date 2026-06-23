@@ -1,7 +1,9 @@
+//nolint:err113,gocyclo,gosec,modernize,govet // Config validation keeps field-specific errors and reads an operator-provided path.
 package producer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -65,14 +67,14 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err == nil {
 		parsed, parseErr := time.ParseDuration(raw)
 		if parseErr != nil {
-			return parseErr
+			return fmt.Errorf("parse duration: %w", parseErr)
 		}
 		d.Duration = parsed
 		return nil
 	}
 	var seconds float64
 	if err := json.Unmarshal(data, &seconds); err != nil {
-		return err
+		return fmt.Errorf("parse duration seconds: %w", err)
 	}
 	d.Duration = time.Duration(seconds * float64(time.Second))
 	return nil
@@ -116,7 +118,7 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		c.AgentRun.WorkspaceMode = "Ephemeral"
 	}
 	if len(c.Repositories) == 0 {
-		return fmt.Errorf("repositories is required")
+		return errors.New("repositories is required")
 	}
 	for i, prefix := range c.CommandPrefixes {
 		if prefix == "" {
@@ -129,16 +131,16 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		}
 	}
 	if c.GitHubApp.AppID == 0 {
-		return fmt.Errorf("githubApp.appID is required")
+		return errors.New("githubApp.appID is required")
 	}
 	if c.GitHubApp.InstallationID == 0 {
-		return fmt.Errorf("githubApp.installationID is required")
+		return errors.New("githubApp.installationID is required")
 	}
 	if c.AgentRun.Namespace == "" {
-		return fmt.Errorf("agentRun.namespace is required")
+		return errors.New("agentRun.namespace is required")
 	}
 	if c.AgentRun.RuntimeImage == "" {
-		return fmt.Errorf("agentRun.runtimeImage is required")
+		return errors.New("agentRun.runtimeImage is required")
 	}
 	return nil
 }

@@ -1,3 +1,4 @@
+//nolint:goconst // Tests repeat command text to keep cases self-contained.
 package producer
 
 import (
@@ -40,10 +41,17 @@ func TestSubmitBlocksExistingIdempotencyKeyRegardlessOfPhase(t *testing.T) {
 			WorkspaceMode:   "Ephemeral",
 		},
 	})
-	created, gotKey, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"}, GitHubIssue{
-		Number: 7,
-		Title:  "broken",
-	}, nil, GitHubIssueComment{Body: "/nvtagent pr create"}, Command{Prefix: "/nvtagent"})
+	created, gotKey, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{
+			Number: 7,
+			Title:  "broken",
+		},
+		nil,
+		GitHubIssueComment{Body: "/nvtagent pr create"},
+		Command{Prefix: "/nvtagent"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

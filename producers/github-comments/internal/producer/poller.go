@@ -1,3 +1,4 @@
+//nolint:govet // Poller groups dependencies before mutable cursor state for readability.
 package producer
 
 import (
@@ -37,7 +38,7 @@ func (p *Poller) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("poller context done: %w", ctx.Err())
 		case <-ticker.C:
 			if err := p.PollOnce(ctx); err != nil {
 				p.Logger.Error("poll failed", "error", err)
@@ -97,7 +98,19 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		if err != nil {
 			return err
 		}
-		p.Logger.Info("processed pr create comment", "repo", key, "issue", issueNumber, "commentID", comment.ID, "created", created, "idempotencyKey", idempotencyKey)
+		p.Logger.Info(
+			"processed pr create comment",
+			"repo",
+			key,
+			"issue",
+			issueNumber,
+			"commentID",
+			comment.ID,
+			"created",
+			created,
+			"idempotencyKey",
+			idempotencyKey,
+		)
 	}
 	if !maxUpdated.IsZero() {
 		p.since[key] = maxUpdated

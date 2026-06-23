@@ -1,3 +1,4 @@
+//nolint:err113,inamedparam,wrapcheck,govet // GitHub API errors include response context and token-source interfaces stay minimal.
 package producer
 
 import (
@@ -11,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,7 +65,11 @@ type InstallationTokenSource struct {
 	expiresAt      time.Time
 }
 
-func NewInstallationTokenSource(cfg GitHubAppConfig, apiBaseURL string, httpClient *http.Client) (*InstallationTokenSource, error) {
+func NewInstallationTokenSource(
+	cfg GitHubAppConfig,
+	apiBaseURL string,
+	httpClient *http.Client,
+) (*InstallationTokenSource, error) {
 	keyPEM, err := loadPrivateKeyPEM(cfg)
 	if err != nil {
 		return nil, err
@@ -98,7 +104,7 @@ func (s *InstallationTokenSource) Token(ctx context.Context) (string, error) {
 	endpoint := fmt.Sprintf("%s/app/installations/%d/access_tokens", s.apiBaseURL, s.installationID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("build installation token request: %w", err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Authorization", "Bearer "+jwt)
@@ -107,10 +113,17 @@ func (s *InstallationTokenSource) Token(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create installation token: %w", err)
 	}
-	defer response.Body.Close()
+	defer closeBody(response.Body)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return "", fmt.Errorf("create installation token: status %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+		if readErr != nil {
+			body = []byte(readErr.Error())
+		}
+		return "", fmt.Errorf(
+			"create installation token: status %d: %s",
+			response.StatusCode,
+			strings.TrimSpace(string(body)),
+		)
 	}
 	var decoded struct {
 		Token     string    `json:"token"`
@@ -120,7 +133,7 @@ func (s *InstallationTokenSource) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("decode installation token: %w", err)
 	}
 	if decoded.Token == "" {
-		return "", fmt.Errorf("decode installation token: missing token")
+		return "", errors.New("decode installation token: missing token")
 	}
 	s.cachedToken = decoded.Token
 	s.expiresAt = decoded.ExpiresAt
@@ -167,7 +180,11 @@ func NewGitHubAPIClient(baseURL, userAgent string, tokenSource interface {
 	}
 }
 
-func (c *GitHubAPIClient) ListUpdatedIssueComments(ctx context.Context, repo Repository, since *time.Time) ([]GitHubIssueComment, error) {
+func (c *GitHubAPIClient) ListUpdatedIssueComments(
+	ctx context.Context,
+	repo Repository,
+	since *time.Time,
+) ([]GitHubIssueComment, error) {
 	values := url.Values{}
 	values.Set("sort", "updated")
 	values.Set("direction", "asc")
@@ -188,14 +205,27 @@ func (c *GitHubAPIClient) GetIssue(ctx context.Context, repo Repository, number 
 	return issue, nil
 }
 
-func (c *GitHubAPIClient) ListIssueComments(ctx context.Context, repo Repository, number int) ([]GitHubIssueComment, error) {
+func (c *GitHubAPIClient) ListIssueComments(
+	ctx context.Context,
+	repo Repository,
+	number int,
+) ([]GitHubIssueComment, error) {
 	values := url.Values{}
 	values.Set("per_page", "100")
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), number)
+	path := fmt.Sprintf(
+		"/repos/%s/%s/issues/%d/comments",
+		url.PathEscape(repo.Owner),
+		url.PathEscape(repo.Name),
+		number,
+	)
 	return c.getIssueCommentPages(ctx, path, values)
 }
 
-func (c *GitHubAPIClient) getIssueCommentPages(ctx context.Context, path string, values url.Values) ([]GitHubIssueComment, error) {
+func (c *GitHubAPIClient) getIssueCommentPages(
+	ctx context.Context,
+	path string,
+	values url.Values,
+) ([]GitHubIssueComment, error) {
 	var all []GitHubIssueComment
 	for page := 1; ; page++ {
 		pageValues := url.Values{}
@@ -225,17 +255,20 @@ func (c *GitHubAPIClient) getJSON(ctx context.Context, path string, output any) 
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	request.Header.Set("X-Github-Api-Version", "2022-11-28")
 	if c.userAgent != "" {
 		request.Header.Set("User-Agent", c.userAgent)
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("send github api request: %w", err)
 	}
-	defer response.Body.Close()
+	defer closeBody(response.Body)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+		if readErr != nil {
+			body = []byte(readErr.Error())
+		}
 		return fmt.Errorf("github api %s: status %d: %s", path, response.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if err := json.NewDecoder(response.Body).Decode(output); err != nil {
@@ -249,7 +282,11 @@ func loadPrivateKeyPEM(cfg GitHubAppConfig) ([]byte, error) {
 	case cfg.PrivateKey != "":
 		return []byte(cfg.PrivateKey), nil
 	case cfg.PrivateKeyBase64 != "":
-		return base64.StdEncoding.DecodeString(cfg.PrivateKeyBase64)
+		decoded, err := base64.StdEncoding.DecodeString(cfg.PrivateKeyBase64)
+		if err != nil {
+			return nil, fmt.Errorf("decode github app private key base64: %w", err)
+		}
+		return decoded, nil
 	case cfg.PrivateKeyEnv != "":
 		value := os.Getenv(cfg.PrivateKeyEnv)
 		if value == "" {
@@ -261,7 +298,11 @@ func loadPrivateKeyPEM(cfg GitHubAppConfig) ([]byte, error) {
 		if value == "" {
 			return nil, fmt.Errorf("github app private key base64 env %s is empty", cfg.PrivateKeyBase64Env)
 		}
-		return base64.StdEncoding.DecodeString(value)
+		decoded, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return nil, fmt.Errorf("decode github app private key base64 env: %w", err)
+		}
+		return decoded, nil
 	case cfg.PrivateKeyPath != "":
 		data, err := os.ReadFile(cfg.PrivateKeyPath)
 		if err != nil {
@@ -269,14 +310,14 @@ func loadPrivateKeyPEM(cfg GitHubAppConfig) ([]byte, error) {
 		}
 		return data, nil
 	default:
-		return nil, fmt.Errorf("one github app private key source is required")
+		return nil, errors.New("one github app private key source is required")
 	}
 }
 
 func parseRSAPrivateKey(data []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("decode github app private key PEM")
+		return nil, errors.New("decode github app private key PEM")
 	}
 	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
 		return key, nil
@@ -287,14 +328,23 @@ func parseRSAPrivateKey(data []byte) (*rsa.PrivateKey, error) {
 	}
 	key, ok := parsed.(*rsa.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("github app private key must be RSA")
+		return nil, errors.New("github app private key must be RSA")
 	}
 	return key, nil
 }
 
 func base64RawJSON(value any) string {
-	data, _ := json.Marshal(value)
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
 	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func closeBody(body io.Closer) {
+	if err := body.Close(); err != nil {
+		return
+	}
 }
 
 func IssueNumberFromIssueURL(issueURL string) (int, bool) {
