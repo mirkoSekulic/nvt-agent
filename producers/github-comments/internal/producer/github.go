@@ -41,10 +41,17 @@ type GitHubIssue struct {
 	URL     string     `json:"url"`
 	HTMLURL string     `json:"html_url"`
 	User    GitHubUser `json:"user"`
+	// PullRequest is set by GitHub when an issue resource represents a pull request.
+	PullRequest *GitHubPullRequest `json:"pull_request,omitempty"`
 }
 
 type GitHubUser struct {
 	Login string `json:"login"`
+}
+
+type GitHubPullRequest struct {
+	URL     string `json:"url,omitempty"`
+	HTMLURL string `json:"html_url,omitempty"`
 }
 
 type GitHubClient interface {

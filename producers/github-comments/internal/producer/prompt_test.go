@@ -1,3 +1,4 @@
+//nolint:goconst // Tests repeat repository literals to assert prompt text directly.
 package producer
 
 import (

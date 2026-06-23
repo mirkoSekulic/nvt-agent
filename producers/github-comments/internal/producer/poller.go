@@ -1,4 +1,4 @@
-//nolint:govet // Poller groups dependencies before mutable cursor state for readability.
+//nolint:govet,gocognit // Poller groups dependencies before mutable cursor state and keeps repo polling flow linear.
 package producer
 
 import (
@@ -13,6 +13,7 @@ type Poller struct {
 	GitHub    GitHubClient
 	Submitter AgentRunSubmitter
 	Logger    *slog.Logger
+	startedAt time.Time
 	since     map[string]time.Time
 }
 
@@ -25,6 +26,7 @@ func NewPoller(cfg Config, github GitHubClient, submitter AgentRunSubmitter, log
 		GitHub:    github,
 		Submitter: submitter,
 		Logger:    logger,
+		startedAt: time.Now(),
 		since:     map[string]time.Time{},
 	}
 }
@@ -67,6 +69,8 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			return fmt.Errorf("parse initialSince: %w", err)
 		}
 		since = &parsed
+	} else {
+		since = &p.startedAt
 	}
 	comments, err := p.GitHub.ListUpdatedIssueComments(ctx, repo, since)
 	if err != nil {
@@ -89,6 +93,18 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		issue, err := p.GitHub.GetIssue(ctx, repo, issueNumber)
 		if err != nil {
 			return fmt.Errorf("get issue %s#%d: %w", key, issueNumber, err)
+		}
+		if issue.PullRequest != nil {
+			p.Logger.Info(
+				"skipping pr-backed issue comment",
+				"repo",
+				key,
+				"issue",
+				issueNumber,
+				"commentID",
+				comment.ID,
+			)
+			continue
 		}
 		issueComments, err := p.GitHub.ListIssueComments(ctx, repo, issueNumber)
 		if err != nil {
