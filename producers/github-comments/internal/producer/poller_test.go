@@ -7,6 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/scheme"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestPollerDefaultsFirstRunSinceToStartupTime(t *testing.T) {
@@ -183,6 +189,54 @@ func TestPollerSkipsPullRequestIssueComments(t *testing.T) {
 	}
 }
 
+func TestPollerDefaultAllowedAuthorsAcceptsAnyCommandAuthor(t *testing.T) {
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = nil
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	created := pollCommandAndCountAgentRuns(t, cfg, "octo")
+	if created != 1 {
+		t.Fatalf("got %d AgentRuns, want 1", created)
+	}
+}
+
+func TestPollerAllowedAuthorsAcceptsListedAuthor(t *testing.T) {
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"octo"}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	created := pollCommandAndCountAgentRuns(t, cfg, "octo")
+	if created != 1 {
+		t.Fatalf("got %d AgentRuns, want 1", created)
+	}
+}
+
+func TestPollerAllowedAuthorsRejectsUnlistedAuthor(t *testing.T) {
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"maintainer"}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	created := pollCommandAndCountAgentRuns(t, cfg, "octo")
+	if created != 0 {
+		t.Fatalf("got %d AgentRuns, want 0", created)
+	}
+}
+
+func TestPollerAllowedAuthorsWildcardAcceptsAnyAuthor(t *testing.T) {
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"maintainer", "*"}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	created := pollCommandAndCountAgentRuns(t, cfg, "random-user")
+	if created != 1 {
+		t.Fatalf("got %d AgentRuns, want 1", created)
+	}
+}
+
 func testPollerConfig(initialSince string) Config {
 	return Config{
 		CommandPrefixes: []string{defaultCommandPrefix},
@@ -191,7 +245,66 @@ func testPollerConfig(initialSince string) Config {
 			Name:  "widget",
 		}},
 		InitialSince: initialSince,
+		GitHubApp: GitHubAppConfig{
+			AppID:          123,
+			InstallationID: 456,
+			PrivateKey:     "unused",
+		},
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     defaultRuntimeType,
+			RuntimeAutonomy: defaultAutonomy,
+			WorkspaceMode:   defaultWorkspaceMode,
+		},
 	}
+}
+
+func pollCommandAndCountAgentRuns(t *testing.T, cfg Config, author string) int {
+	t.Helper()
+	ctx := context.Background()
+	k8sClient := newFakeAgentRunClient(t)
+	submitter := NewAgentRunSubmitter(k8sClient, cfg)
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID:        123,
+			Body:      "/nvtagent pr create\nplease fix",
+			IssueURL:  "https://api.github.com/repos/acme/widget/issues/42",
+			UpdatedAt: time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC),
+			User:      GitHubUser{Login: author},
+		}},
+		issue: GitHubIssue{
+			Number:  42,
+			Title:   "Broken widget",
+			Body:    "Details",
+			URL:     "https://api.github.com/repos/acme/widget/issues/42",
+			HTMLURL: "https://github.com/acme/widget/issues/42",
+		},
+	}
+	poller := NewPoller(cfg, github, submitter, newMemoryStateStore(), slog.Default())
+	poller.now = func() time.Time {
+		return time.Date(2026, 6, 23, 11, 59, 0, 0, time.UTC)
+	}
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var runs nvtv1alpha1.AgentRunList
+	if err := k8sClient.List(ctx, &runs, ctrlclient.InNamespace(cfg.AgentRun.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	return len(runs.Items)
+}
+
+func newFakeAgentRunClient(t *testing.T) ctrlclient.Client {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := scheme.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := nvtv1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	return ctrlfake.NewClientBuilder().WithScheme(s).Build()
 }
 
 type fakeGitHubClient struct {

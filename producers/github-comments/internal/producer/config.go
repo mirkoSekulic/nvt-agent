@@ -1,4 +1,4 @@
-//nolint:err113,gocyclo,gosec,modernize,govet // Config validation keeps field-specific errors and reads an operator-provided path.
+//nolint:cyclop,err113,gocognit,gocyclo,gosec,modernize,govet // Config validation keeps field-specific errors and reads an operator-provided path.
 package producer
 
 import (
@@ -12,10 +12,16 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const defaultCommandPrefix = "/nvtagent"
+const (
+	defaultCommandPrefix = "/nvtagent"
+	defaultRuntimeType   = "codex"
+	defaultAutonomy      = "trusted-local"
+	defaultWorkspaceMode = "Ephemeral"
+)
 
 type Config struct {
 	CommandPrefixes  []string        `json:"commandPrefixes,omitempty"`
+	AllowedAuthors   []string        `json:"allowedAuthors,omitempty"`
 	PollInterval     Duration        `json:"pollInterval,omitempty"`
 	Repositories     []Repository    `json:"repositories"`
 	GitHubApp        GitHubAppConfig `json:"githubApp"`
@@ -104,6 +110,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if len(c.CommandPrefixes) == 0 {
 		c.CommandPrefixes = []string{defaultCommandPrefix}
 	}
+	if len(c.AllowedAuthors) == 0 {
+		c.AllowedAuthors = []string{"*"}
+	}
 	if c.PollInterval.Duration == 0 {
 		c.PollInterval.Duration = 30 * time.Second
 	}
@@ -117,13 +126,13 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		c.State.SQLitePath = "/tmp/nvt-github-comments-state.db"
 	}
 	if c.AgentRun.RuntimeType == "" {
-		c.AgentRun.RuntimeType = "codex"
+		c.AgentRun.RuntimeType = defaultRuntimeType
 	}
 	if c.AgentRun.RuntimeAutonomy == "" {
-		c.AgentRun.RuntimeAutonomy = "trusted-local"
+		c.AgentRun.RuntimeAutonomy = defaultAutonomy
 	}
 	if c.AgentRun.WorkspaceMode == "" {
-		c.AgentRun.WorkspaceMode = "Ephemeral"
+		c.AgentRun.WorkspaceMode = defaultWorkspaceMode
 	}
 	if len(c.Repositories) == 0 {
 		return errors.New("repositories is required")
@@ -131,6 +140,11 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	for i, prefix := range c.CommandPrefixes {
 		if prefix == "" {
 			return fmt.Errorf("commandPrefixes[%d] is required", i)
+		}
+	}
+	for i, author := range c.AllowedAuthors {
+		if author == "" {
+			return fmt.Errorf("allowedAuthors[%d] is required", i)
 		}
 	}
 	for i, repo := range c.Repositories {
