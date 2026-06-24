@@ -23,6 +23,8 @@ Example config:
 ```yaml
 commandPrefixes:
   - /nvtagent
+allowedAuthors:
+  - "*"
 pollInterval: 30s
 state:
   sqlitePath: /var/lib/nvt-github-comments/state.db
@@ -92,6 +94,13 @@ nvt.dev/idempotency-key = github:<owner>/<repo>:issue:<number>:intent:create_pr
 ```
 
 Any existing AgentRun in the target namespace with the same annotation blocks a new run, regardless of status phase. A Kubernetes `AlreadyExists` response is also treated as already accepted.
+
+Command comments are accepted only from `allowedAuthors`. The default is `["*"]`, which allows any GitHub login. POC deployments can restrict this to maintainer logins, for example:
+
+```yaml
+allowedAuthors:
+  - mirkoSekulic
+```
 
 Polling state is stored in SQLite at `state.sqlitePath`. The producer stores one cursor per configured repository and resumes from that cursor after a pod restart. If no cursor exists, the first poll starts at producer startup time unless `initialSince` is configured for explicit backfill.
 

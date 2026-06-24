@@ -1,4 +1,4 @@
-//nolint:govet,gocognit // Poller groups dependencies before mutable cursor state and keeps repo polling flow linear.
+//nolint:funlen,govet,gocognit // Poller groups dependencies before mutable cursor state and keeps repo polling flow linear.
 package producer
 
 import (
@@ -100,6 +100,18 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		}
 		command, ok := ParseCommand(comment.Body, p.Config.CommandPrefixes)
 		if !ok {
+			continue
+		}
+		if !IsAllowedAuthor(comment.User.Login, p.Config.AllowedAuthors) {
+			p.Logger.Info(
+				"skipping command comment from disallowed author",
+				"repo",
+				key,
+				"commentID",
+				comment.ID,
+				"author",
+				comment.User.Login,
+			)
 			continue
 		}
 		issueNumber, ok := IssueNumberFromIssueURL(comment.IssueURL)
