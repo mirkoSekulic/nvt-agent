@@ -42,16 +42,17 @@ const (
 	workspaceMountPath    = "/workspace"
 	initialPromptPlugin   = "initial-prompt"
 
-	brokerURL                 = "http://nvt-broker:7347"
-	brokerAgentsConfigMapName = "nvt-broker-agents"
-	brokerAgentsConfigKey     = "agents.yaml"
-	brokerTokenKey            = "NVT_BROKER_TOKEN"
-	callbackTokenKey          = "NVT_OPERATOR_CALLBACK_TOKEN"
-	agentRunFinalizer         = "nvt.dev/agentrun-broker-policy"
-	completedLifecycleReason  = "Completed by lifecycle event "
-	failedLifecycleReason     = "Failed by lifecycle event "
-	activeDeadlineReason      = "Active deadline exceeded"
-	generatedTokenByteLength  = 32
+	brokerURL                  = "http://nvt-broker:7347"
+	brokerAgentsConfigMapName  = "nvt-broker-agents"
+	brokerAgentsConfigKey      = "agents.yaml"
+	brokerTokenKey             = "NVT_BROKER_TOKEN"
+	callbackTokenKey           = "NVT_OPERATOR_CALLBACK_TOKEN"
+	agentRunFinalizer          = "nvt.dev/agentrun-broker-policy"
+	completedLifecycleReason   = "Completed by lifecycle event "
+	failedLifecycleReason      = "Failed by lifecycle event "
+	activeDeadlineReason       = "Active deadline exceeded"
+	generatedTokenByteLength   = 32
+	defaultRunRetentionSeconds = 30 * 24 * 60 * 60
 )
 
 type brokerAgentsPolicy struct {
@@ -201,7 +202,7 @@ func (r *AgentRunReconciler) reconcileTerminalPodCleanup(ctx context.Context, ag
 		if err := r.deleteOwnedAgentPod(ctx, agentRun, "deadline-exceeded AgentRun Pod"); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
 
 	remaining, shouldDelete := TerminalPodCleanupDelay(agentRun, r.now())
@@ -209,13 +210,30 @@ func (r *AgentRunReconciler) reconcileTerminalPodCleanup(ctx context.Context, ag
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 	if !shouldDelete {
-		return ctrl.Result{}, nil
+		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
 
 	if err := r.deleteOwnedAgentPod(ctx, agentRun, "terminal AgentRun Pod"); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
+}
+
+func (r *AgentRunReconciler) reconcileTerminalAgentRunRetention(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+) (ctrl.Result, error) {
+	remaining, shouldDelete := RunRetentionDelay(agentRun, r.now())
+	if remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	if !shouldDelete {
+		return ctrl.Result{}, nil
+	}
+	if err := r.Delete(ctx, agentRun); err != nil {
+		return ctrl.Result{}, fmt.Errorf("delete retained AgentRun: %w", err)
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -1056,7 +1074,29 @@ func TerminalPodCleanupDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (t
 		return 0, false
 	}
 
-	deleteAt := agentRun.Status.FinishedAt.Time.Add(time.Duration(*ttlSeconds) * time.Second)
+	deleteAt := agentRun.Status.FinishedAt.Add(time.Duration(*ttlSeconds) * time.Second)
+	remaining := deleteAt.Sub(now.Time)
+	if remaining > 0 {
+		return remaining, false
+	}
+	return 0, true
+}
+
+// RunRetentionDelay returns the remaining AgentRun CR retention and whether it should be deleted now.
+func RunRetentionDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.Duration, bool) {
+	if !IsTerminalAgentRunPhase(agentRun.Status.Phase) || agentRun.Status.FinishedAt == nil {
+		return 0, false
+	}
+
+	ttlSeconds := int64(defaultRunRetentionSeconds)
+	if agentRun.Spec.TTL != nil && agentRun.Spec.TTL.RunRetentionSeconds != nil {
+		ttlSeconds = *agentRun.Spec.TTL.RunRetentionSeconds
+	}
+	if ttlSeconds == 0 {
+		return 0, false
+	}
+
+	deleteAt := agentRun.Status.FinishedAt.Add(time.Duration(ttlSeconds) * time.Second)
 	remaining := deleteAt.Sub(now.Time)
 	if remaining > 0 {
 		return remaining, false

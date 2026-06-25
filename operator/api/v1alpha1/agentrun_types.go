@@ -98,6 +98,7 @@ type AgentRunTTL struct {
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 	CompletedTTLSeconds   *int64 `json:"completedTTLSeconds,omitempty"`
 	FailedTTLSeconds      *int64 `json:"failedTTLSeconds,omitempty"`
+	RunRetentionSeconds   *int64 `json:"runRetentionSeconds,omitempty"`
 }
 
 // AgentRunStatus contains observed execution state.
@@ -277,6 +278,10 @@ func (in *AgentRunTTL) DeepCopy() *AgentRunTTL {
 	if in.FailedTTLSeconds != nil {
 		out.FailedTTLSeconds = new(int64)
 		*out.FailedTTLSeconds = *in.FailedTTLSeconds
+	}
+	if in.RunRetentionSeconds != nil {
+		out.RunRetentionSeconds = new(int64)
+		*out.RunRetentionSeconds = *in.RunRetentionSeconds
 	}
 	return out
 }

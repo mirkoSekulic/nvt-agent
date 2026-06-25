@@ -1754,6 +1754,96 @@ func TestReconcileDeadlineExceededRunDeletesPod(t *testing.T) {
 	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
 }
 
+func TestReconcileDefaultRunRetentionDeletesOldTerminalAgentRun(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 59, 59, 0, time.UTC)
+	agentRun := terminalAgentRunWithRunRetention(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt, nil)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunDeleting(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileDefaultRunRetentionKeepsRecentTerminalAgentRunAndRequeues(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 12, 0, 30, 0, time.UTC)
+	agentRun := terminalAgentRunWithRunRetention(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt, nil)
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("expected requeue after 30s, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseCompleted)
+}
+
+func TestReconcileZeroRunRetentionKeepsTerminalAgentRunForever(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	agentRun := terminalAgentRunWithRunRetention(nvtv1alpha1.AgentRunPhaseFailed, finishedAt, ptrTo[int64](0))
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseFailed)
+}
+
+func TestReconcilePositiveRunRetentionDeletesExpiredTerminalAgentRun(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRunWithRunRetention(nvtv1alpha1.AgentRunPhaseDeadlineExceeded, finishedAt, ptrTo[int64](60))
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+	assertAgentRunDeleting(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcilePositiveRunRetentionKeepsTerminalAgentRunBeforeExpiryAndRequeues(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 59, 30, 0, time.UTC)
+	agentRun := terminalAgentRunWithRunRetention(nvtv1alpha1.AgentRunPhaseDeadlineExceeded, finishedAt, ptrTo[int64](60))
+	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("expected requeue after 30s, got %s", result.RequeueAfter)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseDeadlineExceeded)
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
@@ -1801,10 +1891,18 @@ func testAgentRun() *nvtv1alpha1.AgentRun {
 }
 
 func terminalAgentRun(phase nvtv1alpha1.AgentRunPhase, finishedAt metav1.Time) *nvtv1alpha1.AgentRun {
+	return terminalAgentRunWithRunRetention(phase, finishedAt, ptrTo[int64](0))
+}
+
+func terminalAgentRunWithRunRetention(
+	phase nvtv1alpha1.AgentRunPhase,
+	finishedAt metav1.Time,
+	runRetentionSeconds *int64,
+) *nvtv1alpha1.AgentRun {
 	agentRun := testAgentRun()
 	agentRun.Status.Phase = phase
 	agentRun.Status.FinishedAt = &finishedAt
-	agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{}
+	agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{RunRetentionSeconds: runRetentionSeconds}
 	return agentRun
 }
 
@@ -1813,7 +1911,10 @@ func activeDeadlineAgentRun(startedAt metav1.Time, activeDeadlineSeconds *int64)
 	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
 	agentRun.Status.StartedAt = &startedAt
 	if activeDeadlineSeconds != nil {
-		agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{ActiveDeadlineSeconds: activeDeadlineSeconds}
+		agentRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{
+			ActiveDeadlineSeconds: activeDeadlineSeconds,
+			RunRetentionSeconds:   ptrTo[int64](0),
+		}
 	}
 	return agentRun
 }
@@ -1920,6 +2021,22 @@ func assertAgentRunPhase(
 		t.Fatalf("expected phase %q, got %q", phase, updated.Status.Phase)
 	}
 	return updated
+}
+
+func assertAgentRunDeleting(ctx context.Context, t *testing.T, k8sClient client.Client, agentRun *nvtv1alpha1.AgentRun) {
+	t.Helper()
+
+	updated := &nvtv1alpha1.AgentRun{}
+	err := k8sClient.Get(ctx, clientKey(agentRun), updated)
+	if errors.IsNotFound(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	if updated.DeletionTimestamp.IsZero() {
+		t.Fatalf("expected AgentRun to be deleting, got deletion timestamp %v", updated.DeletionTimestamp)
+	}
 }
 
 func testBrokerAgentsConfigMap(namespace string) *corev1.ConfigMap {

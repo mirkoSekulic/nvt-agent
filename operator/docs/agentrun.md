@@ -215,6 +215,7 @@ ttl:
   activeDeadlineSeconds: 14400
   completedTTLSeconds: 300
   failedTTLSeconds: 3600
+  runRetentionSeconds: 2592000
 ```
 
 `activeDeadlineSeconds` is optional. When omitted, the AgentRun can run
@@ -227,8 +228,12 @@ deletes the owned agent Pod.
 `Completed` and `Failed` phases. Lifecycle failure callbacks and Kubernetes Pod
 `Failed` status both stamp `status.finishedAt`, so both failure paths can use
 `failedTTLSeconds`. If the relevant terminal TTL or `status.finishedAt` is
-unset, the Pod is left in place. The `AgentRun` CR is not deleted by this
-controller slice, so status/history remain visible.
+unset, the Pod is left in place. After terminal Pod cleanup is complete,
+`runRetentionSeconds` controls AgentRun CR retention from `status.finishedAt`:
+unset defaults to 30 days (`2592000` seconds), `0` keeps the AgentRun CR
+forever, and a positive value deletes the terminal AgentRun CR after that
+duration. Deleting old AgentRun CRs also removes AgentRun-backed
+idempotency/history after retention; this is acceptable for the current POC.
 
 ## Status
 
@@ -328,10 +333,10 @@ overwritten by callbacks or by later Pod status sync.
 
 This controller slice creates the ConfigMap, per-run token Secrets, broker
 policy entry, and Pod, accepts lifecycle callbacks, syncs basic status, and
-enforces active deadlines and completed/failed terminal Pod TTLs. AgentRun CR
-cleanup, concrete scheduler plugins, external Ingress, and a broker admin API
-remain future work. Static broker providers remain outside `AgentRun`; the run
-only requests dynamic grants against them.
+enforces active deadlines, completed/failed terminal Pod TTLs, and terminal
+AgentRun CR retention. Concrete scheduler plugins, external Ingress, and a
+broker admin API remain future work. Static broker providers remain outside
+`AgentRun`; the run only requests dynamic grants against them.
 
 Runtime plugins remain normal runtime plugins. Operator extensions and
 schedulers remain separate from runtime plugins.

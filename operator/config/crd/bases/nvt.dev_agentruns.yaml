@@ -133,6 +133,9 @@ spec:
                     failedTTLSeconds:
                       type: integer
                       minimum: 0
+                    runRetentionSeconds:
+                      type: integer
+                      minimum: 0
             status:
               type: object
               properties:
