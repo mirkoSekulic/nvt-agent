@@ -132,8 +132,8 @@ The AgentRun controller syncs basic Pod-phase status only: it records `status.po
 sets `Running` and `startedAt` when the Pod is running, sets `Failed` when the
 Pod fails, and accepts cluster-internal lifecycle callbacks that can mark the
 run `Completed` or `Failed`. Completed and failed runs delete their owned agent
-Pod after the matching terminal Pod TTL. AgentRun CR cleanup remains
-intentionally future work.
+Pod after the matching terminal Pod TTL. Terminal `AgentRun` CRs are retained
+for 30 days by default and then deleted through normal Kubernetes deletion.
 
 The AgentSchedule controller syncs generic admission-pool status and the
 operator HTTP server accepts cluster-internal schedule admissions at
@@ -267,6 +267,7 @@ the owned `<agentrun-name>-agent` Pod after the configured terminal TTL:
 ttl:
   completedTTLSeconds: 300
   failedTTLSeconds: 3600
+  runRetentionSeconds: 2592000
 ```
 
 `Completed` uses `completedTTLSeconds`; `Failed` uses `failedTTLSeconds`.
@@ -274,5 +275,9 @@ Lifecycle failure callbacks and Kubernetes Pod `Failed` status both stamp
 `status.finishedAt`, so both failure paths are eligible for failed-Pod TTL
 cleanup. If the matching TTL or `status.finishedAt` is unset, the Pod is left in
 place. Before the TTL expires, the reconciler requeues for the remaining
-duration. If the Pod is already gone, cleanup is treated as complete.
-AgentRun CR deletion remains future work.
+duration. If the Pod is already gone, cleanup is treated as complete. After Pod
+cleanup is complete, `runRetentionSeconds` controls AgentRun CR retention from
+`status.finishedAt`: unset defaults to 30 days (`2592000` seconds), `0` keeps
+the AgentRun CR forever, and a positive value deletes the terminal AgentRun CR
+after that duration. Deleting old AgentRun CRs also removes AgentRun-backed
+idempotency/history after retention; this is acceptable for the current POC.
