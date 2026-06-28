@@ -360,18 +360,20 @@ The manifest creates:
 Create broker root secrets separately before applying the manifest:
 
 ```sh
-cat > nvt-broker-env.env <<'EOF'
+cat > .broker/env <<'EOF'
 GITHUB_APP_ID=<app-id>
 GITHUB_APP_INSTALLATION_ID=<installation-id>
 GITHUB_APP_PRIVATE_KEY_BASE64=<base64-private-key>
 EOF
-chmod 600 nvt-broker-env.env
-kubectl create secret generic nvt-broker-env --from-env-file=nvt-broker-env.env
+chmod 600 .broker/env
+make broker-env-secret BROKER_ENV_FILE=.broker/env
 ```
 
 No real Secret values are committed. Avoid putting private key material directly
-in shell command arguments. Static broker providers live in `broker.yaml` and
-can reference these env var names:
+in shell command arguments. The broker env Secret is consumed by the core nvt
+broker chart through `broker.envSecretName` and is intentionally separate from
+the GitHub comments producer private key Secret. Static broker providers live
+in `broker.yaml` and can reference these env var names:
 
 ```text
 GITHUB_APP_ID
