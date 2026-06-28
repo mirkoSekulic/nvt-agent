@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nvt-github-comments-producer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nvt-github-comments-producer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nvt-github-comments-producer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nvt-github-comments-producer.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nvt-github-comments-producer.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: github-comments-producer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/nvt-github-comments/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nvt-github-comments
+              readOnly: true
+            - name: github-app
+              mountPath: {{ .Values.githubApp.privateKeyMountPath | quote }}
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/nvt-github-comments
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "nvt-github-comments-producer.configMapName" . }}
+        - name: github-app
+          secret:
+            secretName: {{ .Values.githubApp.existingSecret | quote }}
+            items:
+              - key: {{ .Values.githubApp.privateKeyKey | quote }}
+                path: {{ .Values.githubApp.privateKeyKey | quote }}
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "nvt-github-comments-producer.stateClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

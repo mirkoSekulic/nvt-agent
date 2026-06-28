@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nvt-github-comments-producer
+description: GitHub issue comments producer for nvt AgentRun creation
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
