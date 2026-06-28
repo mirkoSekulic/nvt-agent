@@ -37,7 +37,9 @@ bash "${ROOT}/tests/operator/github-comments-producer-secret/test.sh"
 bash "${ROOT}/tests/operator/broker-env-secret/test.sh"
 bash -n "${ROOT}/tests/operator/kind/smoke-scheduler-job.sh"
 bash -n "${ROOT}/tests/operator/kind/smoke-scheduler-job-test.sh"
+bash -n "${ROOT}/tests/operator/kind/producer-kind-targets-test.sh"
 bash "${ROOT}/tests/operator/kind/smoke-scheduler-job-test.sh"
+bash "${ROOT}/tests/operator/kind/producer-kind-targets-test.sh"
 
 has_resource() {
   local file="$1"

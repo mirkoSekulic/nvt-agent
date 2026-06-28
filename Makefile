@@ -12,12 +12,16 @@ PRODUCER_GITHUB_APP_SECRET ?= nvt-github-app
 PRODUCER_GITHUB_APP_KEY ?= private-key.pem
 BROKER_ENV_FILE ?= .broker/env
 BROKER_ENV_SECRET ?= nvt-broker-env
+PRODUCER_IMAGE ?= nvt-github-comments-producer:latest
+PRODUCER_VALUES ?= values.github-comments.yaml
+PRODUCER_RELEASE ?= nvt-github-comments-producer
+PRODUCER_CHART ?= charts/nvt-github-comments-producer
 CREATE_CLUSTER ?= 1
 ROLLOUT_TIMEOUT ?= 180s
 KUBECTL_CONTEXT ?= kind-$(CLUSTER)
 OPERATOR_KIND_HELM_ARGS ?=
 
-.PHONY: runtime-build broker-build operator-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build operator-build producer-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -27,6 +31,9 @@ broker-build:
 
 operator-build:
 	bash scripts/operator-build.sh $(if $(NO_CACHE),--no-cache)
+
+producer-build:
+	docker build -f producers/github-comments/Dockerfile -t "$(PRODUCER_IMAGE)" .
 
 operator-helm-test:
 	bash tests/operator/helm/test.sh
@@ -70,6 +77,23 @@ operator-kind-smoke:
 
 operator-kind-smoke-render:
 	KIND_SMOKE_MODE=render bash tests/operator/kind/smoke.sh
+
+producer-kind-load: operator-kind-cluster producer-build
+	@printf '[producer-kind-setup] loading producer image %s into kind cluster %s\n' "$(PRODUCER_IMAGE)" "$(CLUSTER)"
+	kind load docker-image "$(PRODUCER_IMAGE)" --name "$(CLUSTER)"
+
+producer-kind-install:
+	@test -f "$(PRODUCER_VALUES)" || (echo "[producer-kind-setup] ERROR: PRODUCER_VALUES file does not exist: $(PRODUCER_VALUES). Create a local values file, for example values.github-comments.yaml, or pass PRODUCER_VALUES=<path>." >&2; exit 1)
+	@printf '[producer-kind-setup] installing producer chart %s into namespace %s using %s\n' "$(PRODUCER_RELEASE)" "$(NAMESPACE)" "$(PRODUCER_VALUES)"
+	helm upgrade --install "$(PRODUCER_RELEASE)" "$(PRODUCER_CHART)" \
+		--kube-context "$(KUBECTL_CONTEXT)" \
+		-n "$(NAMESPACE)" \
+		--create-namespace \
+		-f "$(PRODUCER_VALUES)" \
+		--wait \
+		--timeout "$(ROLLOUT_TIMEOUT)"
+
+producer-kind-setup: producer-kind-load producer-kind-install
 
 operator-codex-auth-secret:
 	CODEX_AUTH_SOURCE="$(CODEX_AUTH_SOURCE)" CODEX_AUTH_SECRET="$(CODEX_AUTH_SECRET)" SOURCE="$(SOURCE)" SECRET="$(SECRET)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" bash scripts/operator-codex-auth-secret.sh
