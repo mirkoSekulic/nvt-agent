@@ -157,6 +157,29 @@ The producer GitHub App Secret and broker env Secret may use different GitHub
 Apps later. Do not commit real private keys, `.broker/env`, or other secret
 files.
 
+With local values prepared, build, load, and install the GitHub comments
+producer into the kind cluster:
+
+```sh
+make producer-kind-setup PRODUCER_VALUES=values.github-comments.yaml
+```
+
+`producer-kind-setup` runs `producer-kind-load` and `producer-kind-install`.
+It does not create Secrets because the producer private key and broker env file
+paths are user-provided. The local `values.github-comments.yaml` file should be
+uncommitted and include the target repository, GitHub App IDs, allowed author,
+broker grants, real Codex yolo runtime config, and runtime plugins.
+
+Full local POC setup sequence:
+
+```sh
+make operator-kind-setup CREATE_CLUSTER=1
+make operator-codex-auth-secret
+make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
+make broker-env-secret BROKER_ENV_FILE=.broker/env
+make producer-kind-setup PRODUCER_VALUES=values.github-comments.yaml
+```
+
 ## Cases
 
 Select a case with `KIND_SMOKE_CASE`:
