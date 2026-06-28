@@ -20,19 +20,27 @@ const (
 	defaultOperatorCallbackBaseURL = "http://nvt-operator:8082"
 )
 
+type IdempotencyScope string
+
+const (
+	IdempotencyScopeIssue   IdempotencyScope = "issue"
+	IdempotencyScopeComment IdempotencyScope = "comment"
+)
+
 type Config struct {
-	CommandPrefixes         []string        `json:"commandPrefixes,omitempty"`
-	AllowedAuthors          []string        `json:"allowedAuthors,omitempty"`
-	PollInterval            Duration        `json:"pollInterval,omitempty"`
-	Repositories            []Repository    `json:"repositories"`
-	GitHubApp               GitHubAppConfig `json:"githubApp"`
-	State                   StateConfig     `json:"state,omitempty"`
-	AgentRun                AgentRunConfig  `json:"agentRun"`
-	AgentConfig             map[string]any  `json:"agentConfig,omitempty"`
-	OperatorCallbackBaseURL string          `json:"operatorCallbackBaseURL,omitempty"`
-	InitialSince            string          `json:"initialSince,omitempty"`
-	GitHubAPIBaseURL        string          `json:"githubAPIBaseURL,omitempty"`
-	UserAgent               string          `json:"userAgent,omitempty"`
+	CommandPrefixes         []string          `json:"commandPrefixes,omitempty"`
+	AllowedAuthors          []string          `json:"allowedAuthors,omitempty"`
+	PollInterval            Duration          `json:"pollInterval,omitempty"`
+	Repositories            []Repository      `json:"repositories"`
+	GitHubApp               GitHubAppConfig   `json:"githubApp"`
+	State                   StateConfig       `json:"state,omitempty"`
+	AgentRun                AgentRunConfig    `json:"agentRun"`
+	AgentConfig             map[string]any    `json:"agentConfig,omitempty"`
+	Idempotency             IdempotencyConfig `json:"idempotency,omitempty"`
+	OperatorCallbackBaseURL string            `json:"operatorCallbackBaseURL,omitempty"`
+	InitialSince            string            `json:"initialSince,omitempty"`
+	GitHubAPIBaseURL        string            `json:"githubAPIBaseURL,omitempty"`
+	UserAgent               string            `json:"userAgent,omitempty"`
 }
 
 type Repository struct {
@@ -52,6 +60,10 @@ type GitHubAppConfig struct {
 
 type StateConfig struct {
 	SQLitePath string `json:"sqlitePath,omitempty"`
+}
+
+type IdempotencyConfig struct {
+	Scope IdempotencyScope `json:"scope,omitempty"`
 }
 
 type AgentRunConfig struct {
@@ -127,6 +139,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.OperatorCallbackBaseURL == "" {
 		c.OperatorCallbackBaseURL = defaultOperatorCallbackBaseURL
 	}
+	if c.Idempotency.Scope == "" {
+		c.Idempotency.Scope = IdempotencyScopeIssue
+	}
 	if c.State.SQLitePath == "" {
 		c.State.SQLitePath = "/tmp/nvt-github-comments-state.db"
 	}
@@ -156,6 +171,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		if repo.Owner == "" || repo.Name == "" {
 			return fmt.Errorf("repositories[%d].owner and name are required", i)
 		}
+	}
+	if c.Idempotency.Scope != IdempotencyScopeIssue && c.Idempotency.Scope != IdempotencyScopeComment {
+		return fmt.Errorf("idempotency.scope must be one of %q or %q", IdempotencyScopeIssue, IdempotencyScopeComment)
 	}
 	if c.GitHubApp.AppID == 0 {
 		return errors.New("githubApp.appID is required")

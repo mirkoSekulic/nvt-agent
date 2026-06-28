@@ -9,7 +9,9 @@ import (
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -61,6 +63,121 @@ func TestSubmitBlocksExistingIdempotencyKeyRegardlessOfPhase(t *testing.T) {
 	}
 	if gotKey != key {
 		t.Fatalf("got key %q want %q", gotKey, key)
+	}
+}
+
+func TestSubmitDefaultIssueScopeBlocksSecondCommandOnSameIssue(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := scheme.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := nvtv1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	client := ctrlfake.NewClientBuilder().WithScheme(s).Build()
+	submitter := NewAgentRunSubmitter(client, Config{
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+		},
+	})
+	repo := Repository{Owner: "acme", Name: "widget"}
+	issue := GitHubIssue{Number: 7, Title: "broken"}
+	firstCreated, firstKey, err := submitter.Submit(
+		context.Background(),
+		repo,
+		issue,
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr create"},
+		Command{Prefix: "/nvtagent"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstCreated {
+		t.Fatal("expected first issue-scoped command to create an AgentRun")
+	}
+	secondCreated, secondKey, err := submitter.Submit(
+		context.Background(),
+		repo,
+		issue,
+		nil,
+		GitHubIssueComment{ID: 202, Body: "/nvtagent pr create"},
+		Command{Prefix: "/nvtagent"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondCreated {
+		t.Fatal("expected issue-scoped second command on same issue to be blocked")
+	}
+	if firstKey != IdempotencyKey("acme", "widget", 7) || secondKey != firstKey {
+		t.Fatalf("unexpected issue-scope keys: first=%q second=%q", firstKey, secondKey)
+	}
+}
+
+func TestSubmitCommentScopeAllowsDistinctCommandsOnSameIssue(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := scheme.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := nvtv1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	client := ctrlfake.NewClientBuilder().WithScheme(s).Build()
+	submitter := NewAgentRunSubmitter(client, Config{
+		Idempotency: IdempotencyConfig{Scope: IdempotencyScopeComment},
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+		},
+	})
+	repo := Repository{Owner: "acme", Name: "widget"}
+	issue := GitHubIssue{Number: 7, Title: "broken"}
+	firstCreated, firstKey, err := submitter.Submit(
+		context.Background(),
+		repo,
+		issue,
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr create"},
+		Command{Prefix: "/nvtagent"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCreated, secondKey, err := submitter.Submit(
+		context.Background(),
+		repo,
+		issue,
+		nil,
+		GitHubIssueComment{ID: 202, Body: "/nvtagent pr create"},
+		Command{Prefix: "/nvtagent"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstCreated || !secondCreated {
+		t.Fatalf("expected both comment-scoped commands to create AgentRuns, got first=%v second=%v", firstCreated, secondCreated)
+	}
+	if firstKey != CommentIdempotencyKey("acme", "widget", 7, 101) {
+		t.Fatalf("first key = %q", firstKey)
+	}
+	if secondKey != CommentIdempotencyKey("acme", "widget", 7, 202) {
+		t.Fatalf("second key = %q", secondKey)
+	}
+	if firstKey == secondKey {
+		t.Fatalf("comment-scoped keys should be distinct: %q", firstKey)
+	}
+	firstRun := getAgentRun(t, client, "nvt", CommentAgentRunName("acme", "widget", 7, 101))
+	secondRun := getAgentRun(t, client, "nvt", CommentAgentRunName("acme", "widget", 7, 202))
+	if firstRun.Name == secondRun.Name {
+		t.Fatalf("comment-scoped AgentRun names should be distinct: %q", firstRun.Name)
 	}
 }
 
@@ -191,14 +308,27 @@ func buildTestAgentRun(t *testing.T, cfg Config) *nvtv1alpha1.AgentRun {
 		Repository{Owner: "acme", Name: "widget"},
 		GitHubIssue{Number: 7, Title: "broken"},
 		nil,
-		GitHubIssueComment{Body: "/nvtagent pr create", User: GitHubUser{Login: "alice"}},
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr create", User: GitHubUser{Login: "alice"}},
 		Command{Prefix: "/nvtagent"},
-		IdempotencyKey("acme", "widget", 7),
+		submitter.agentRunIdentity(
+			Repository{Owner: "acme", Name: "widget"},
+			GitHubIssue{Number: 7, Title: "broken"},
+			GitHubIssueComment{ID: 101},
+		),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return run
+}
+
+func getAgentRun(t *testing.T, client ctrlclient.Client, namespace, name string) *nvtv1alpha1.AgentRun {
+	t.Helper()
+	var run nvtv1alpha1.AgentRun
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, &run); err != nil {
+		t.Fatal(err)
+	}
+	return &run
 }
 
 func decodeAgentConfig(t *testing.T, run *nvtv1alpha1.AgentRun) map[string]any {

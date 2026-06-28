@@ -24,6 +24,11 @@ type AgentRunSubmitter struct {
 	config Config
 }
 
+type agentRunIdentity struct {
+	Key  string
+	Name string
+}
+
 func NewAgentRunSubmitter(k8sClient ctrlclient.Client, cfg Config) AgentRunSubmitter {
 	return AgentRunSubmitter{client: k8sClient, config: cfg}
 }
@@ -68,25 +73,25 @@ func (s AgentRunSubmitter) Submit(
 	commandComment GitHubIssueComment,
 	command Command,
 ) (bool, string, error) {
-	key := IdempotencyKey(repo.Owner, repo.Name, issue.Number)
-	existing, err := s.hasExistingIdempotencyKey(ctx, key)
+	identity := s.agentRunIdentity(repo, issue, commandComment)
+	existing, err := s.hasExistingIdempotencyKey(ctx, identity.Key)
 	if err != nil {
 		return false, "", err
 	}
 	if existing {
-		return false, key, nil
+		return false, identity.Key, nil
 	}
-	run, err := s.buildAgentRun(repo, issue, comments, commandComment, command, key)
+	run, err := s.buildAgentRun(repo, issue, comments, commandComment, command, identity)
 	if err != nil {
 		return false, "", err
 	}
 	if err := s.client.Create(ctx, run); err != nil {
 		if errors.IsAlreadyExists(err) {
-			return false, key, nil
+			return false, identity.Key, nil
 		}
 		return false, "", fmt.Errorf("create AgentRun: %w", err)
 	}
-	return true, key, nil
+	return true, identity.Key, nil
 }
 
 func (s AgentRunSubmitter) hasExistingIdempotencyKey(ctx context.Context, key string) (bool, error) {
@@ -108,12 +113,11 @@ func (s AgentRunSubmitter) buildAgentRun(
 	comments []GitHubIssueComment,
 	commandComment GitHubIssueComment,
 	command Command,
-	key string,
+	identity agentRunIdentity,
 ) (*nvtv1alpha1.AgentRun, error) {
-	runName := AgentRunName(repo.Owner, repo.Name, issue.Number)
 	agentConfigMap, err := AgentConfigWithEventWebhook(
 		s.config.AgentConfig,
-		s.operatorCallbackURL(s.config.AgentRun.Namespace, runName),
+		s.operatorCallbackURL(s.config.AgentRun.Namespace, identity.Name),
 	)
 	if err != nil {
 		return nil, err
@@ -162,9 +166,9 @@ func (s AgentRunSubmitter) buildAgentRun(
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: s.config.AgentRun.Namespace,
-			Name:      runName,
+			Name:      identity.Name,
 			Annotations: map[string]string{
-				IdempotencyAnnotation: key,
+				IdempotencyAnnotation: identity.Key,
 			},
 		},
 		Spec: nvtv1alpha1.AgentRunSpec{
@@ -206,6 +210,28 @@ func (s AgentRunSubmitter) buildAgentRun(
 		}
 	}
 	return run, nil
+}
+
+func (s AgentRunSubmitter) agentRunIdentity(repo Repository, issue GitHubIssue, commandComment GitHubIssueComment) agentRunIdentity {
+	switch s.idempotencyScope() {
+	case IdempotencyScopeComment:
+		return agentRunIdentity{
+			Key:  CommentIdempotencyKey(repo.Owner, repo.Name, issue.Number, commandComment.ID),
+			Name: CommentAgentRunName(repo.Owner, repo.Name, issue.Number, commandComment.ID),
+		}
+	default:
+		return agentRunIdentity{
+			Key:  IdempotencyKey(repo.Owner, repo.Name, issue.Number),
+			Name: AgentRunName(repo.Owner, repo.Name, issue.Number),
+		}
+	}
+}
+
+func (s AgentRunSubmitter) idempotencyScope() IdempotencyScope {
+	if s.config.Idempotency.Scope == "" {
+		return IdempotencyScopeIssue
+	}
+	return s.config.Idempotency.Scope
 }
 
 func (s AgentRunSubmitter) operatorCallbackURL(namespace, name string) string {

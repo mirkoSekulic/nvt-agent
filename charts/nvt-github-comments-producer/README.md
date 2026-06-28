@@ -62,6 +62,9 @@ githubApp:
 
 operatorCallbackBaseURL: http://nvt-operator:8082
 
+idempotency:
+  scope: issue
+
 agentRun:
   namespace: nvt
   runtimeImage: nvt-agent-runtime:latest
@@ -122,6 +125,10 @@ agentConfig:
 `allowedAuthors` defaults to `["*"]`, which allows commands from any GitHub
 login. For POC deployments, restrict it to the maintainer login, for example
 `mirkoSekulic`.
+
+`idempotency.scope` defaults to `issue`, which allows one `pr create` AgentRun
+per repository issue. For local testing, set it to `comment` so each matching
+command comment ID gets its own idempotency key and AgentRun name.
 
 The static broker config owns GitHub App providers, capabilities, and secrets.
 Producer-created AgentRuns request only broker grants through
