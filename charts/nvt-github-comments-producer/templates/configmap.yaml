@@ -13,6 +13,8 @@ data:
       {{- toYaml .Values.allowedAuthors | nindent 6 }}
     pollInterval: {{ .Values.pollInterval | quote }}
     operatorCallbackBaseURL: {{ .Values.operatorCallbackBaseURL | quote }}
+    idempotency:
+      scope: {{ .Values.idempotency.scope | quote }}
     state:
       sqlitePath: {{ .Values.state.sqlitePath | quote }}
     repositories:

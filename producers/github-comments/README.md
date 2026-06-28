@@ -27,6 +27,8 @@ allowedAuthors:
   - "*"
 pollInterval: 30s
 operatorCallbackBaseURL: http://nvt-operator:8082
+idempotency:
+  scope: issue
 state:
   sqlitePath: /var/lib/nvt-github-comments/state.db
 repositories:
@@ -108,6 +110,12 @@ nvt.dev/idempotency-key = github:<owner>/<repo>:issue:<number>:intent:create_pr
 ```
 
 Any existing AgentRun in the target namespace with the same annotation blocks a new run, regardless of status phase. A Kubernetes `AlreadyExists` response is also treated as already accepted.
+
+`idempotency.scope` defaults to `issue`, which preserves the production-safe
+behavior of allowing one `pr create` AgentRun per repository issue. For local
+testing, set `idempotency.scope: comment` to include the command comment ID in
+the idempotency key and AgentRun name so multiple command comments on the same
+issue can create separate runs.
 
 Producer-created AgentRuns complete on either `plugin.github.pr.merged` or
 `plugin.github.pr.closed`. Closed/unmerged PRs are treated as valid terminal
