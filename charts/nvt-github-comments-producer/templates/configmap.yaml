@@ -21,7 +21,7 @@ data:
       installationID: {{ .Values.githubApp.installationID }}
       privateKeyPath: {{ include "nvt-github-comments-producer.privateKeyPath" . | quote }}
     agentRun:
-      namespace: {{ default .Release.Namespace .Values.agentRun.namespace | quote }}
+      namespace: {{ include "nvt-github-comments-producer.agentRunNamespace" . | quote }}
       runtimeImage: {{ .Values.agentRun.runtimeImage | quote }}
       runtimeType: {{ .Values.agentRun.runtimeType | quote }}
       runtimeAutonomy: {{ .Values.agentRun.runtimeAutonomy | quote }}

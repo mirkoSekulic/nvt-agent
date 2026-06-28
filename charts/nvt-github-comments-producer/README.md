@@ -120,9 +120,11 @@ This uses `emptyDir`, so cursor state is lost when the pod is replaced.
 
 ## RBAC
 
-By default the chart creates a ServiceAccount, Role, and RoleBinding in the
-release namespace. The Role allows only `get`, `list`, and `create` on
-`agentruns.nvt.dev`.
+By default the chart creates a ServiceAccount in the release namespace. The
+Role and RoleBinding are created in the effective `agentRun.namespace`, which
+defaults to the release namespace. This lets the producer run in one namespace
+and create `AgentRun` resources in another. The Role allows only `get`, `list`,
+and `create` on `agentruns.nvt.dev`.
 
 To use an existing ServiceAccount:
 

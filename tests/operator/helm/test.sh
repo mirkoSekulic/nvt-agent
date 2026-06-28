@@ -17,6 +17,7 @@ PRODUCER_RENDER="${WORKDIR}/producer.yaml"
 PRODUCER_EXISTING_CLAIM_RENDER="${WORKDIR}/producer-existing-claim.yaml"
 PRODUCER_EMPTYDIR_RENDER="${WORKDIR}/producer-emptydir.yaml"
 PRODUCER_EXISTING_SA_RENDER="${WORKDIR}/producer-existing-sa.yaml"
+PRODUCER_CROSS_NAMESPACE_RENDER="${WORKDIR}/producer-cross-namespace.yaml"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
@@ -27,6 +28,7 @@ helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns > "$
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.existingClaim=existing-state > "${PRODUCER_EXISTING_CLAIM_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.enabled=false > "${PRODUCER_EMPTYDIR_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set serviceAccount.create=false --set serviceAccount.name=existing-sa --set rbac.create=false > "${PRODUCER_EXISTING_SA_RENDER}"
+helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n producer-ns --set agentRun.namespace=nvt > "${PRODUCER_CROSS_NAMESPACE_RENDER}"
 bash -n "${ROOT}/scripts/operator-codex-auth-secret.sh"
 bash "${ROOT}/tests/operator/codex-auth-secret/test.sh"
 bash -n "${ROOT}/tests/operator/kind/smoke-scheduler-job.sh"
@@ -169,6 +171,67 @@ require_file() {
   fi
 }
 
+require_rolebinding_subject_namespace() {
+  local file="$1"
+  local name="$2"
+  local namespace="$3"
+
+  awk -v want_name="${name}" -v want_namespace="${namespace}" '
+    function reset_doc() {
+      kind = ""
+      name = ""
+      in_metadata = 0
+      in_subject = 0
+    }
+    function check_doc() {
+      if (kind == "RoleBinding" && name == want_name && subject_namespace == want_namespace) {
+        found = 1
+      }
+    }
+    BEGIN {
+      reset_doc()
+    }
+    /^---[[:space:]]*$/ {
+      check_doc()
+      reset_doc()
+      next
+    }
+    /^kind:[[:space:]]*/ {
+      kind = $2
+      next
+    }
+    /^metadata:[[:space:]]*$/ {
+      in_metadata = 1
+      next
+    }
+    in_metadata && /^[[:space:]]{2}name:[[:space:]]*/ {
+      name = $2
+      gsub(/^"|"$/, "", name)
+      next
+    }
+    /^subjects:[[:space:]]*$/ {
+      in_subject = 1
+      next
+    }
+    in_subject && /^[[:space:]]{4}namespace:[[:space:]]*/ {
+      subject_namespace = $2
+      gsub(/^"|"$/, "", subject_namespace)
+      next
+    }
+    /^[^[:space:]]/ && $0 !~ /^(metadata|subjects):/ {
+      in_metadata = 0
+      in_subject = 0
+    }
+    END {
+      check_doc()
+      exit(found ? 0 : 1)
+    }
+  ' "${file}" || {
+    echo "missing RoleBinding/${name} subject namespace ${namespace} in ${file}" >&2
+    exit 1
+  }
+}
+
 require_resource "${DEFAULT_RENDER}" Deployment nvt-broker
 require_resource "${DEFAULT_RENDER}" Service nvt-broker
 require_resource "${DEFAULT_RENDER}" ConfigMap nvt-broker-config
@@ -266,5 +329,14 @@ missing_resource "${PRODUCER_EXISTING_SA_RENDER}" ServiceAccount nvt-github-comm
 missing_resource "${PRODUCER_EXISTING_SA_RENDER}" Role nvt-github-comments-producer
 missing_resource "${PRODUCER_EXISTING_SA_RENDER}" RoleBinding nvt-github-comments-producer
 grep -q 'serviceAccountName: existing-sa' "${PRODUCER_EXISTING_SA_RENDER}"
+
+require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" Deployment nvt-github-comments-producer producer-ns
+require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" ConfigMap nvt-github-comments-producer producer-ns
+require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" PersistentVolumeClaim nvt-github-comments-producer-state producer-ns
+require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" ServiceAccount nvt-github-comments-producer producer-ns
+require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" Role nvt-github-comments-producer nvt
+require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" RoleBinding nvt-github-comments-producer nvt
+require_rolebinding_subject_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" nvt-github-comments-producer producer-ns
+grep -q 'namespace: "nvt"' "${PRODUCER_CROSS_NAMESPACE_RENDER}"
 
 echo "helm render test passed"

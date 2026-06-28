@@ -43,6 +43,10 @@ app.kubernetes.io/component: github-comments-producer
 {{- include "nvt-github-comments-producer.fullname" . -}}
 {{- end -}}
 
+{{- define "nvt-github-comments-producer.agentRunNamespace" -}}
+{{- default .Release.Namespace .Values.agentRun.namespace -}}
+{{- end -}}
+
 {{- define "nvt-github-comments-producer.stateClaimName" -}}
 {{- default (printf "%s-state" (include "nvt-github-comments-producer.fullname" .)) .Values.persistence.existingClaim -}}
 {{- end -}}

@@ -3,7 +3,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "nvt-github-comments-producer.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "nvt-github-comments-producer.agentRunNamespace" . }}
   labels:
     {{- include "nvt-github-comments-producer.labels" . | nindent 4 }}
 rules:
@@ -20,7 +20,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "nvt-github-comments-producer.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "nvt-github-comments-producer.agentRunNamespace" . }}
   labels:
     {{- include "nvt-github-comments-producer.labels" . | nindent 4 }}
 subjects:
