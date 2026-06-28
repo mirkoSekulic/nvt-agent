@@ -19,10 +19,18 @@ an existing Secret and never renders private key material into Kubernetes
 manifests:
 
 ```sh
-kubectl create secret generic nvt-github-app \
-  --from-file=private-key.pem=./private-key.pem \
-  -n nvt
+make github-comments-producer-secret \
+  GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem \
+  NAMESPACE=nvt \
+  CLUSTER=nvt-smoke
 ```
+
+This producer Secret is consumed by `charts/nvt-github-comments-producer`. It
+is intentionally separate from the core nvt broker env Secret, which is created
+with `make broker-env-secret BROKER_ENV_FILE=.broker/env` and consumed by the
+core `charts/nvt` broker deployment through `broker.envSecretName`. The two
+Secrets may use different GitHub Apps later. Do not commit real private keys or
+`.broker/env`.
 
 Install the chart with values for the GitHub App, target repositories, and
 AgentRun runtime settings:

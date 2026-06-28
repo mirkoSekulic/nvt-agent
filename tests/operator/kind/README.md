@@ -133,6 +133,30 @@ mounted into the DinD sidecar. This is POC/local-dev auth, separate from broker
 Secrets; production auth may use API keys or another Secret provisioning model
 later.
 
+## Local POC Secret Setup
+
+For the GitHub comments producer POC, create or refresh the three local/kind
+Secrets before installing the charts:
+
+```sh
+make operator-codex-auth-secret
+make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
+make broker-env-secret BROKER_ENV_FILE=.broker/env
+```
+
+These Secrets are separate on purpose:
+
+- `operator-codex-auth-secret` creates the Codex runtime auth Secret consumed
+  by AgentRun Pods through `spec.runtimeAuth.secretName`.
+- `github-comments-producer-secret` creates the GitHub App private key Secret
+  consumed by `charts/nvt-github-comments-producer`.
+- `broker-env-secret` creates the broker env Secret consumed by the core
+  `charts/nvt` broker deployment through `broker.envSecretName`.
+
+The producer GitHub App Secret and broker env Secret may use different GitHub
+Apps later. Do not commit real private keys, `.broker/env`, or other secret
+files.
+
 ## Cases
 
 Select a case with `KIND_SMOKE_CASE`:
