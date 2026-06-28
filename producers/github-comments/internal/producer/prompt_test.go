@@ -41,7 +41,8 @@ func TestBuildPromptIncludesStructuredIssueCommentsAndTask(t *testing.T) {
 		"Comment 11 by alice",
 		"create a new branch",
 		"open a pull request linked to the issue",
-		"register the PR with `github-watch` if that command is available",
+		"github-watch register --repo OWNER/REPO --number PR_NUMBER",
+		"add `--provider PROVIDER` if the watcher config does not define a default provider",
 	}
 	for _, needle := range required {
 		if !strings.Contains(prompt, needle) {

@@ -3,7 +3,9 @@ package producer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -108,7 +110,15 @@ func (s AgentRunSubmitter) buildAgentRun(
 	command Command,
 	key string,
 ) (*nvtv1alpha1.AgentRun, error) {
-	agentConfig, err := AgentConfigJSON(s.config.AgentConfig)
+	runName := AgentRunName(repo.Owner, repo.Name, issue.Number)
+	agentConfigMap, err := AgentConfigWithEventWebhook(
+		s.config.AgentConfig,
+		s.operatorCallbackURL(s.config.AgentRun.Namespace, runName),
+	)
+	if err != nil {
+		return nil, err
+	}
+	agentConfig, err := AgentConfigJSON(agentConfigMap)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +162,7 @@ func (s AgentRunSubmitter) buildAgentRun(
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: s.config.AgentRun.Namespace,
-			Name:      AgentRunName(repo.Owner, repo.Name, issue.Number),
+			Name:      runName,
 			Annotations: map[string]string{
 				IdempotencyAnnotation: key,
 			},
@@ -168,6 +178,13 @@ func (s AgentRunSubmitter) buildAgentRun(
 			},
 			Prompt: &nvtv1alpha1.AgentRunPrompt{Text: prompt},
 			Agent:  nvtv1alpha1.AgentRunAgent{Config: agentConfig},
+			Lifecycle: &nvtv1alpha1.AgentRunLifecycle{
+				CompleteOn: []string{
+					"plugin.github.pr.merged",
+					"plugin.github.pr.closed",
+				},
+				FailOn: []string{},
+			},
 		},
 	}
 	if s.config.AgentRun.RuntimeClassName != "" {
@@ -189,6 +206,74 @@ func (s AgentRunSubmitter) buildAgentRun(
 		}
 	}
 	return run, nil
+}
+
+func (s AgentRunSubmitter) operatorCallbackURL(namespace, name string) string {
+	baseURL := s.config.OperatorCallbackBaseURL
+	if baseURL == "" {
+		baseURL = defaultOperatorCallbackBaseURL
+	}
+	return strings.TrimRight(baseURL, "/") +
+		"/v1/agentruns/" + namespace + "/" + name + "/events"
+}
+
+func AgentConfigWithEventWebhook(config map[string]any, callbackURL string) (map[string]any, error) {
+	copied := map[string]any{}
+	if config != nil {
+		data, err := json.Marshal(config)
+		if err != nil {
+			return nil, fmt.Errorf("marshal agent config for event-webhook injection: %w", err)
+		}
+		if err := json.Unmarshal(data, &copied); err != nil {
+			return nil, fmt.Errorf("copy agent config for event-webhook injection: %w", err)
+		}
+	}
+
+	rawPlugins, ok := copied["plugins"]
+	if !ok {
+		copied["plugins"] = []any{eventWebhookPlugin(callbackURL)}
+		return copied, nil
+	}
+	plugins, ok := rawPlugins.([]any)
+	if !ok {
+		return nil, fmt.Errorf("agentConfig.plugins must be a list")
+	}
+	for _, rawPlugin := range plugins {
+		plugin, ok := rawPlugin.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := plugin["name"].(string)
+		if name == "event-webhook" {
+			return copied, nil
+		}
+	}
+	copied["plugins"] = append(plugins, eventWebhookPlugin(callbackURL))
+	return copied, nil
+}
+
+func eventWebhookPlugin(callbackURL string) map[string]any {
+	return map[string]any{
+		"name":    "event-webhook",
+		"source":  "builtin",
+		"when":    "after-agent",
+		"restart": "always",
+		"config": map[string]any{
+			"url": callbackURL,
+			"auth": map[string]any{
+				"type": "bearer-env",
+				"env":  "NVT_OPERATOR_CALLBACK_TOKEN",
+			},
+			"filters": []any{
+				"plugin.github.pr.",
+			},
+			"delivery": map[string]any{
+				"retry": map[string]any{
+					"backoff-seconds": float64(1),
+				},
+			},
+		},
+	}
 }
 
 func (s AgentRunSubmitter) Get(ctx context.Context, namespace, name string) (*nvtv1alpha1.AgentRun, error) {

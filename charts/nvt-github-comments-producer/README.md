@@ -52,6 +52,8 @@ githubApp:
   existingSecret: nvt-github-app
   privateKeyKey: private-key.pem
 
+operatorCallbackBaseURL: http://nvt-operator:8082
+
 agentRun:
   namespace: nvt
   runtimeImage: nvt-agent-runtime:latest
@@ -65,6 +67,10 @@ agentRun:
         - mirkoSekulic/nvt-agent
 
 agentConfig:
+  runtime:
+    command: codex
+    args:
+      - --dangerously-bypass-approvals-and-sandbox
   plugins:
     - name: git-host-credentials
       source: builtin
@@ -94,11 +100,36 @@ agentConfig:
         repos:
           - url: https://github.com/mirkoSekulic/nvt-agent.git
             path: nvt-agent
+    - name: github-watcher
+      source: builtin
+      when: after-agent
+      restart: always
+      config:
+        default-provider: github-main
+        broker:
+          enabled: true
+          provider: github-main-app
 ```
 
 `allowedAuthors` defaults to `["*"]`, which allows commands from any GitHub
 login. For POC deployments, restrict it to the maintainer login, for example
 `mirkoSekulic`.
+
+The static broker config owns GitHub App providers, capabilities, and secrets.
+Producer-created AgentRuns request only broker grants through
+`agentRun.brokerGrants`, while runtime plugins use broker-backed credentials.
+Do not put GitHub provider secrets in chart values or committed examples.
+
+The producer injects an `event-webhook` after-agent plugin for each generated
+AgentRun unless `agentConfig.plugins` already contains `event-webhook`. The
+callback URL is built from `operatorCallbackBaseURL` and the generated
+AgentRun namespace/name. If you provide your own `event-webhook` plugin, it is
+responsible for forwarding `plugin.github.pr.` lifecycle events to the operator
+callback endpoint.
+
+Generated AgentRuns complete on both `plugin.github.pr.merged` and
+`plugin.github.pr.closed`. A closed/unmerged PR is a valid terminal result for
+this workflow, not an AgentRun failure.
 
 ## Persistence
 
