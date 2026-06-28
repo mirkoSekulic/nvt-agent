@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nvt-github-comments-producer.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nvt-github-comments-producer.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    commandPrefixes:
+      {{- toYaml .Values.commandPrefixes | nindent 6 }}
+    allowedAuthors:
+      {{- toYaml .Values.allowedAuthors | nindent 6 }}
+    pollInterval: {{ .Values.pollInterval | quote }}
+    state:
+      sqlitePath: {{ .Values.state.sqlitePath | quote }}
+    repositories:
+      {{- toYaml .Values.repositories | nindent 6 }}
+    githubApp:
+      appID: {{ .Values.githubApp.appID }}
+      installationID: {{ .Values.githubApp.installationID }}
+      privateKeyPath: {{ include "nvt-github-comments-producer.privateKeyPath" . | quote }}
+    agentRun:
+      namespace: {{ default .Release.Namespace .Values.agentRun.namespace | quote }}
+      runtimeImage: {{ .Values.agentRun.runtimeImage | quote }}
+      runtimeType: {{ .Values.agentRun.runtimeType | quote }}
+      runtimeAutonomy: {{ .Values.agentRun.runtimeAutonomy | quote }}
+      workspaceMode: {{ .Values.agentRun.workspaceMode | quote }}
+      {{- with .Values.agentRun.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.agentRun.runtimeAuthSecret }}
+      runtimeAuthSecret: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.agentRun.runtimeAuthMountPath }}
+      runtimeAuthMountPath: {{ . | quote }}
+      {{- end }}
+      brokerGrants:
+        {{- toYaml .Values.agentRun.brokerGrants | nindent 8 }}
+    agentConfig:
+      {{- toYaml .Values.agentConfig | nindent 6 }}
