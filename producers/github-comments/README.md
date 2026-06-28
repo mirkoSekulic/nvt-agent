@@ -26,6 +26,7 @@ commandPrefixes:
 allowedAuthors:
   - "*"
 pollInterval: 30s
+operatorCallbackBaseURL: http://nvt-operator:8082
 state:
   sqlitePath: /var/lib/nvt-github-comments/state.db
 repositories:
@@ -56,6 +57,10 @@ agentRun:
         - mirkoSekulic/nvt-agent
 
 agentConfig:
+  runtime:
+    command: codex
+    args:
+      - --dangerously-bypass-approvals-and-sandbox
   plugins:
     - name: git-host-credentials
       source: builtin
@@ -85,6 +90,15 @@ agentConfig:
         repos:
           - url: https://github.com/mirkoSekulic/nvt-agent.git
             path: nvt-agent
+    - name: github-watcher
+      source: builtin
+      when: after-agent
+      restart: always
+      config:
+        default-provider: github-main
+        broker:
+          enabled: true
+          provider: github-main-app
 ```
 
 The producer creates AgentRuns with annotation:
@@ -95,6 +109,22 @@ nvt.dev/idempotency-key = github:<owner>/<repo>:issue:<number>:intent:create_pr
 
 Any existing AgentRun in the target namespace with the same annotation blocks a new run, regardless of status phase. A Kubernetes `AlreadyExists` response is also treated as already accepted.
 
+Producer-created AgentRuns complete on either `plugin.github.pr.merged` or
+`plugin.github.pr.closed`. Closed/unmerged PRs are treated as valid terminal
+outcomes for this workflow, not AgentRun failures.
+
+The producer injects an `event-webhook` after-agent plugin unless
+`agentConfig.plugins` already contains a plugin named `event-webhook`. The
+injected webhook forwards `plugin.github.pr.` events to:
+
+```text
+<operatorCallbackBaseURL>/v1/agentruns/<namespace>/<agentrun-name>/events
+```
+
+If you provide your own `event-webhook` plugin, the producer does not add a
+duplicate; that user-provided config is responsible for forwarding PR lifecycle
+events to the operator callback endpoint.
+
 Command comments are accepted only from `allowedAuthors`. The default is `["*"]`, which allows any GitHub login. POC deployments can restrict this to maintainer logins, for example:
 
 ```yaml
@@ -103,6 +133,15 @@ allowedAuthors:
 ```
 
 Polling state is stored in SQLite at `state.sqlitePath`. The producer stores one cursor per configured repository and resumes from that cursor after a pod restart. If no cursor exists, the first poll starts at producer startup time unless `initialSince` is configured for explicit backfill.
+
+The agent prompt asks Codex to register created PRs with:
+
+```sh
+github-watch register --repo OWNER/REPO --number PR_NUMBER --provider github-main
+```
+
+The `github-watcher` plugin must be enabled in `agentConfig` so that command is
+available and PR merge/close events are published.
 
 ## Local Run
 

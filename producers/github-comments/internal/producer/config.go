@@ -13,24 +13,26 @@ import (
 )
 
 const (
-	defaultCommandPrefix = "/nvtagent"
-	defaultRuntimeType   = "codex"
-	defaultAutonomy      = "trusted-local"
-	defaultWorkspaceMode = "Ephemeral"
+	defaultCommandPrefix           = "/nvtagent"
+	defaultRuntimeType             = "codex"
+	defaultAutonomy                = "trusted-local"
+	defaultWorkspaceMode           = "Ephemeral"
+	defaultOperatorCallbackBaseURL = "http://nvt-operator:8082"
 )
 
 type Config struct {
-	CommandPrefixes  []string        `json:"commandPrefixes,omitempty"`
-	AllowedAuthors   []string        `json:"allowedAuthors,omitempty"`
-	PollInterval     Duration        `json:"pollInterval,omitempty"`
-	Repositories     []Repository    `json:"repositories"`
-	GitHubApp        GitHubAppConfig `json:"githubApp"`
-	State            StateConfig     `json:"state,omitempty"`
-	AgentRun         AgentRunConfig  `json:"agentRun"`
-	AgentConfig      map[string]any  `json:"agentConfig,omitempty"`
-	InitialSince     string          `json:"initialSince,omitempty"`
-	GitHubAPIBaseURL string          `json:"githubAPIBaseURL,omitempty"`
-	UserAgent        string          `json:"userAgent,omitempty"`
+	CommandPrefixes         []string        `json:"commandPrefixes,omitempty"`
+	AllowedAuthors          []string        `json:"allowedAuthors,omitempty"`
+	PollInterval            Duration        `json:"pollInterval,omitempty"`
+	Repositories            []Repository    `json:"repositories"`
+	GitHubApp               GitHubAppConfig `json:"githubApp"`
+	State                   StateConfig     `json:"state,omitempty"`
+	AgentRun                AgentRunConfig  `json:"agentRun"`
+	AgentConfig             map[string]any  `json:"agentConfig,omitempty"`
+	OperatorCallbackBaseURL string          `json:"operatorCallbackBaseURL,omitempty"`
+	InitialSince            string          `json:"initialSince,omitempty"`
+	GitHubAPIBaseURL        string          `json:"githubAPIBaseURL,omitempty"`
+	UserAgent               string          `json:"userAgent,omitempty"`
 }
 
 type Repository struct {
@@ -121,6 +123,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "nvt-github-comments-producer"
+	}
+	if c.OperatorCallbackBaseURL == "" {
+		c.OperatorCallbackBaseURL = defaultOperatorCallbackBaseURL
 	}
 	if c.State.SQLitePath == "" {
 		c.State.SQLitePath = "/tmp/nvt-github-comments-state.db"
