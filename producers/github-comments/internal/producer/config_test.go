@@ -57,6 +57,20 @@ func TestConfigRejectsInvalidIdempotencyScope(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsNegativeAgentRunTTL(t *testing.T) {
+	cfg := validTestConfig()
+	negative := int64(-1)
+	cfg.AgentRun.TTL.CompletedTTLSeconds = &negative
+	err := cfg.ApplyDefaultsAndValidate()
+	if err == nil {
+		t.Fatal("expected negative TTL to fail")
+	}
+	want := "agentRun.ttl.completedTTLSeconds must be greater than or equal to 0"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
 func validTestConfig() Config {
 	return Config{
 		Repositories: []Repository{{Owner: "acme", Name: "widget"}},

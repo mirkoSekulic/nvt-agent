@@ -18,6 +18,8 @@ PRODUCER_EXISTING_CLAIM_RENDER="${WORKDIR}/producer-existing-claim.yaml"
 PRODUCER_EMPTYDIR_RENDER="${WORKDIR}/producer-emptydir.yaml"
 PRODUCER_EXISTING_SA_RENDER="${WORKDIR}/producer-existing-sa.yaml"
 PRODUCER_CROSS_NAMESPACE_RENDER="${WORKDIR}/producer-cross-namespace.yaml"
+PRODUCER_NULL_TTL_RENDER="${WORKDIR}/producer-null-ttl.yaml"
+PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
@@ -29,6 +31,8 @@ helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --se
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.enabled=false > "${PRODUCER_EMPTYDIR_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set serviceAccount.create=false --set serviceAccount.name=existing-sa --set rbac.create=false > "${PRODUCER_EXISTING_SA_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n producer-ns --set agentRun.namespace=nvt > "${PRODUCER_CROSS_NAMESPACE_RENDER}"
+helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set agentRun.ttl=null > "${PRODUCER_NULL_TTL_RENDER}"
+helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set agentRun.ttl.completedTTLSeconds=null --set agentRun.ttl.failedTTLSeconds=null --set agentRun.ttl.runRetentionSeconds=null > "${PRODUCER_EMPTY_TTL_RENDER}"
 bash -n "${ROOT}/scripts/operator-codex-auth-secret.sh"
 bash -n "${ROOT}/scripts/github-comments-producer-secret.sh"
 bash -n "${ROOT}/scripts/broker-env-secret.sh"
@@ -311,6 +315,9 @@ require_resource_namespace "${PRODUCER_RENDER}" PersistentVolumeClaim nvt-github
 grep -q -- '--config=/etc/nvt-github-comments/config.yaml' "${PRODUCER_RENDER}"
 grep -q 'operatorCallbackBaseURL: "http://nvt-operator:8082"' "${PRODUCER_RENDER}"
 grep -q 'scope: "issue"' "${PRODUCER_RENDER}"
+grep -q 'completedTTLSeconds: 300' "${PRODUCER_RENDER}"
+grep -q 'failedTTLSeconds: 3600' "${PRODUCER_RENDER}"
+grep -q 'runRetentionSeconds: 2592000' "${PRODUCER_RENDER}"
 grep -q 'privateKeyPath: "/var/run/secrets/github-app/private-key.pem"' "${PRODUCER_RENDER}"
 grep -q 'secretName: "nvt-github-app"' "${PRODUCER_RENDER}"
 grep -q 'mountPath: "/var/run/secrets/github-app"' "${PRODUCER_RENDER}"
@@ -324,6 +331,14 @@ if grep -Eq 'privateKey:|privateKeyBase64:|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY
 fi
 if grep -Eq '(^|[[:space:]]+)-[[:space:]]+(update|delete)$' "${PRODUCER_RENDER}"; then
   echo "producer RBAC must not grant update/delete on AgentRuns" >&2
+  exit 1
+fi
+if grep -q 'ttl:' "${PRODUCER_NULL_TTL_RENDER}"; then
+  echo "producer chart must omit ttl when agentRun.ttl is null" >&2
+  exit 1
+fi
+if grep -q 'ttl:' "${PRODUCER_EMPTY_TTL_RENDER}"; then
+  echo "producer chart must omit ttl when all ttl fields are null" >&2
   exit 1
 fi
 

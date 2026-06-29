@@ -191,6 +191,9 @@ func (s AgentRunSubmitter) buildAgentRun(
 			},
 		},
 	}
+	if ttl := agentRunTTL(s.config.AgentRun.TTL); ttl != nil {
+		run.Spec.TTL = ttl
+	}
 	if s.config.AgentRun.RuntimeClassName != "" {
 		run.Spec.RuntimeClassName = &s.config.AgentRun.RuntimeClassName
 	}
@@ -210,6 +213,29 @@ func (s AgentRunSubmitter) buildAgentRun(
 		}
 	}
 	return run, nil
+}
+
+func agentRunTTL(config AgentRunTTL) *nvtv1alpha1.AgentRunTTL {
+	if config.ActiveDeadlineSeconds == nil &&
+		config.CompletedTTLSeconds == nil &&
+		config.FailedTTLSeconds == nil &&
+		config.RunRetentionSeconds == nil {
+		return nil
+	}
+	return &nvtv1alpha1.AgentRunTTL{
+		ActiveDeadlineSeconds: cloneInt64(config.ActiveDeadlineSeconds),
+		CompletedTTLSeconds:   cloneInt64(config.CompletedTTLSeconds),
+		FailedTTLSeconds:      cloneInt64(config.FailedTTLSeconds),
+		RunRetentionSeconds:   cloneInt64(config.RunRetentionSeconds),
+	}
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func (s AgentRunSubmitter) agentRunIdentity(repo Repository, issue GitHubIssue, commandComment GitHubIssueComment) agentRunIdentity {

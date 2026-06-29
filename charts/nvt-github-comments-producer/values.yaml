@@ -44,6 +44,11 @@ agentRun:
   runtimeAuthMountPath: ""
   workspaceMode: Ephemeral
   brokerGrants: []
+  ttl:
+    activeDeadlineSeconds: null
+    completedTTLSeconds: 300
+    failedTTLSeconds: 3600
+    runRetentionSeconds: 2592000
 
 agentConfig: {}
 

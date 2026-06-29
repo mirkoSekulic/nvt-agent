@@ -1,4 +1,7 @@
 .agents/
 .broker/
+values.github-comments.yaml
+values.nvt-local.yaml
+values.*.local.yaml
 __pycache__/
 *.pyc

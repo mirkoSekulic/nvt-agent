@@ -76,6 +76,14 @@ type AgentRunConfig struct {
 	RuntimeAuthMountPath string        `json:"runtimeAuthMountPath,omitempty"`
 	WorkspaceMode        string        `json:"workspaceMode,omitempty"`
 	BrokerGrants         []BrokerGrant `json:"brokerGrants,omitempty"`
+	TTL                  AgentRunTTL   `json:"ttl,omitempty"`
+}
+
+type AgentRunTTL struct {
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+	CompletedTTLSeconds   *int64 `json:"completedTTLSeconds,omitempty"`
+	FailedTTLSeconds      *int64 `json:"failedTTLSeconds,omitempty"`
+	RunRetentionSeconds   *int64 `json:"runRetentionSeconds,omitempty"`
 }
 
 type BrokerGrant struct {
@@ -187,7 +195,26 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.AgentRun.RuntimeImage == "" {
 		return errors.New("agentRun.runtimeImage is required")
 	}
+	if err := validateNonNegativeInt64(c.AgentRun.TTL.ActiveDeadlineSeconds, "agentRun.ttl.activeDeadlineSeconds"); err != nil {
+		return err
+	}
+	if err := validateNonNegativeInt64(c.AgentRun.TTL.CompletedTTLSeconds, "agentRun.ttl.completedTTLSeconds"); err != nil {
+		return err
+	}
+	if err := validateNonNegativeInt64(c.AgentRun.TTL.FailedTTLSeconds, "agentRun.ttl.failedTTLSeconds"); err != nil {
+		return err
+	}
+	if err := validateNonNegativeInt64(c.AgentRun.TTL.RunRetentionSeconds, "agentRun.ttl.runRetentionSeconds"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateNonNegativeInt64(value *int64, field string) error {
+	if value == nil || *value >= 0 {
+		return nil
+	}
+	return fmt.Errorf("%s must be greater than or equal to 0", field)
 }
 
 func AgentConfigJSON(config map[string]any) (apiextensionsv1.JSON, error) {

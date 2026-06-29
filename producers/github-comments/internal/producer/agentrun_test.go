@@ -204,6 +204,58 @@ func TestBuildAgentRunSetsGitHubPRLifecycle(t *testing.T) {
 	}
 }
 
+func TestBuildAgentRunSetsTTL(t *testing.T) {
+	activeDeadline := int64(14400)
+	completedTTL := int64(300)
+	failedTTL := int64(3600)
+	runRetention := int64(2592000)
+	run := buildTestAgentRun(t, Config{
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+			TTL: AgentRunTTL{
+				ActiveDeadlineSeconds: &activeDeadline,
+				CompletedTTLSeconds:   &completedTTL,
+				FailedTTLSeconds:      &failedTTL,
+				RunRetentionSeconds:   &runRetention,
+			},
+		},
+	})
+	if run.Spec.TTL == nil {
+		t.Fatal("expected ttl")
+	}
+	if *run.Spec.TTL.ActiveDeadlineSeconds != activeDeadline {
+		t.Fatalf("activeDeadlineSeconds = %d, want %d", *run.Spec.TTL.ActiveDeadlineSeconds, activeDeadline)
+	}
+	if *run.Spec.TTL.CompletedTTLSeconds != completedTTL {
+		t.Fatalf("completedTTLSeconds = %d, want %d", *run.Spec.TTL.CompletedTTLSeconds, completedTTL)
+	}
+	if *run.Spec.TTL.FailedTTLSeconds != failedTTL {
+		t.Fatalf("failedTTLSeconds = %d, want %d", *run.Spec.TTL.FailedTTLSeconds, failedTTL)
+	}
+	if *run.Spec.TTL.RunRetentionSeconds != runRetention {
+		t.Fatalf("runRetentionSeconds = %d, want %d", *run.Spec.TTL.RunRetentionSeconds, runRetention)
+	}
+}
+
+func TestBuildAgentRunOmitsEmptyTTL(t *testing.T) {
+	run := buildTestAgentRun(t, Config{
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+		},
+	})
+	if run.Spec.TTL != nil {
+		t.Fatalf("ttl = %#v, want nil", run.Spec.TTL)
+	}
+}
+
 func TestBuildAgentRunInjectsEventWebhookPlugin(t *testing.T) {
 	run := buildTestAgentRun(t, Config{
 		OperatorCallbackBaseURL: "http://operator.test/",

@@ -76,6 +76,11 @@ agentRun:
     - provider: github-main-app
       repositories:
         - mirkoSekulic/nvt-agent
+  ttl:
+    activeDeadlineSeconds: 14400
+    completedTTLSeconds: 300
+    failedTTLSeconds: 3600
+    runRetentionSeconds: 2592000
 
 agentConfig:
   runtime:
@@ -145,6 +150,13 @@ callback endpoint.
 Generated AgentRuns complete on both `plugin.github.pr.merged` and
 `plugin.github.pr.closed`. A closed/unmerged PR is a valid terminal result for
 this workflow, not an AgentRun failure.
+
+`agentRun.ttl.completedTTLSeconds` and `agentRun.ttl.failedTTLSeconds` control
+owned AgentRun Pod cleanup after terminal phases. Defaults keep successful Pods
+for 5 minutes and failed Pods for 1 hour. `agentRun.ttl.runRetentionSeconds`
+defaults to 30 days for the terminal AgentRun CR. Set a TTL field to `null` to
+leave that cleanup behavior unset, or `0` where the AgentRun API defines zero
+as a meaningful value.
 
 ## Persistence
 

@@ -57,6 +57,11 @@ agentRun:
     - provider: github-main-app
       repositories:
         - mirkoSekulic/nvt-agent
+  ttl:
+    activeDeadlineSeconds: 14400
+    completedTTLSeconds: 300
+    failedTTLSeconds: 3600
+    runRetentionSeconds: 2592000
 
 agentConfig:
   runtime:
@@ -120,6 +125,11 @@ issue can create separate runs.
 Producer-created AgentRuns complete on either `plugin.github.pr.merged` or
 `plugin.github.pr.closed`. Closed/unmerged PRs are treated as valid terminal
 outcomes for this workflow, not AgentRun failures.
+
+`agentRun.ttl.completedTTLSeconds` and `agentRun.ttl.failedTTLSeconds` are
+forwarded to `AgentRun.spec.ttl` so terminal Pods can be cleaned up by the
+operator. Chart defaults keep successful Pods for 5 minutes, failed Pods for 1
+hour, and terminal AgentRun CRs for 30 days.
 
 The producer injects an `event-webhook` after-agent plugin unless
 `agentConfig.plugins` already contains a plugin named `event-webhook`. The

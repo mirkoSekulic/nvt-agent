@@ -38,6 +38,33 @@ data:
       {{- with .Values.agentRun.runtimeAuthMountPath }}
       runtimeAuthMountPath: {{ . | quote }}
       {{- end }}
+      {{- $ttl := dict }}
+      {{- if kindIs "map" .Values.agentRun.ttl }}
+      {{- $ttl = .Values.agentRun.ttl }}
+      {{- end }}
+      {{- $activeDeadlineSeconds := get $ttl "activeDeadlineSeconds" }}
+      {{- $completedTTLSeconds := get $ttl "completedTTLSeconds" }}
+      {{- $failedTTLSeconds := get $ttl "failedTTLSeconds" }}
+      {{- $runRetentionSeconds := get $ttl "runRetentionSeconds" }}
+      {{- $hasActiveDeadlineSeconds := and (hasKey $ttl "activeDeadlineSeconds") (ne $activeDeadlineSeconds nil) }}
+      {{- $hasCompletedTTLSeconds := and (hasKey $ttl "completedTTLSeconds") (ne $completedTTLSeconds nil) }}
+      {{- $hasFailedTTLSeconds := and (hasKey $ttl "failedTTLSeconds") (ne $failedTTLSeconds nil) }}
+      {{- $hasRunRetentionSeconds := and (hasKey $ttl "runRetentionSeconds") (ne $runRetentionSeconds nil) }}
+      {{- if or $hasActiveDeadlineSeconds $hasCompletedTTLSeconds $hasFailedTTLSeconds $hasRunRetentionSeconds }}
+      ttl:
+        {{- if $hasActiveDeadlineSeconds }}
+        activeDeadlineSeconds: {{ int64 $activeDeadlineSeconds }}
+        {{- end }}
+        {{- if $hasCompletedTTLSeconds }}
+        completedTTLSeconds: {{ int64 $completedTTLSeconds }}
+        {{- end }}
+        {{- if $hasFailedTTLSeconds }}
+        failedTTLSeconds: {{ int64 $failedTTLSeconds }}
+        {{- end }}
+        {{- if $hasRunRetentionSeconds }}
+        runRetentionSeconds: {{ int64 $runRetentionSeconds }}
+        {{- end }}
+      {{- end }}
       brokerGrants:
         {{- toYaml .Values.agentRun.brokerGrants | nindent 8 }}
     agentConfig:
