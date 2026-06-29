@@ -138,6 +138,10 @@ later.
 For the GitHub comments producer POC, create or refresh the three local/kind
 Secrets before installing the charts:
 
+For the full reproducible local GitHub producer setup, including example local
+values files and the real Codex AgentRun flow, see
+[`docs/local-kind-github-producer-poc.md`](../../../docs/local-kind-github-producer-poc.md).
+
 ```sh
 make operator-codex-auth-secret
 make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
