@@ -7,6 +7,8 @@ and terminal agent session.
 The current implementation is intentionally script and Makefile driven. A
 manager/CLI can be added later on top of the same runtime pieces.
 
+This README also serves as a lightweight PR flow check target.
+
 ## Architecture
 
 `nvt-agent` is split into small runtime pieces:
