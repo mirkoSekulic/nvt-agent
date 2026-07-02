@@ -13,6 +13,7 @@ PRODUCER_GITHUB_APP_KEY ?= private-key.pem
 BROKER_ENV_FILE ?= .broker/env
 BROKER_ENV_SECRET ?= nvt-broker-env
 PRODUCER_IMAGE ?= nvt-github-comments-producer:latest
+GATEWAY_IMAGE ?= nvt-agent-gateway:latest
 PRODUCER_VALUES ?= values.github-comments.yaml
 PRODUCER_RELEASE ?= nvt-github-comments-producer
 PRODUCER_CHART ?= charts/nvt-github-comments-producer
@@ -20,8 +21,14 @@ CREATE_CLUSTER ?= 1
 ROLLOUT_TIMEOUT ?= 180s
 KUBECTL_CONTEXT ?= kind-$(CLUSTER)
 OPERATOR_KIND_HELM_ARGS ?=
+OPERATOR_KIND_GATEWAY ?= 0
 
-.PHONY: runtime-build broker-build operator-build producer-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+ifeq ($(OPERATOR_KIND_GATEWAY),1)
+OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
+OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image=$(GATEWAY_IMAGE)
+endif
+
+.PHONY: runtime-build broker-build operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -34,6 +41,9 @@ operator-build:
 
 producer-build:
 	docker build -f producers/github-comments/Dockerfile -t "$(PRODUCER_IMAGE)" .
+
+gateway-build:
+	docker build -f gateway/Dockerfile -t "$(GATEWAY_IMAGE)" .
 
 operator-helm-test:
 	bash tests/operator/helm/test.sh
@@ -55,7 +65,7 @@ operator-kind-images: operator-kind-cluster runtime-build broker-build operator-
 	kind load docker-image nvt-broker:latest --name "$(CLUSTER)"
 	kind load docker-image nvt-operator:latest --name "$(CLUSTER)"
 
-operator-kind-install: operator-kind-images
+operator-kind-install: operator-kind-images $(OPERATOR_KIND_EXTRA_IMAGE_TARGETS)
 	@printf '[operator-kind-setup] installing chart into namespace %s\n' "$(NAMESPACE)"
 	helm upgrade --install nvt charts/nvt \
 		--kube-context "$(KUBECTL_CONTEXT)" \
@@ -63,9 +73,13 @@ operator-kind-install: operator-kind-images
 		--create-namespace \
 		--wait \
 		--timeout "$(ROLLOUT_TIMEOUT)" \
+		$(OPERATOR_KIND_GATEWAY_HELM_ARGS) \
 		$(OPERATOR_KIND_HELM_ARGS)
 	kubectl --context "$(KUBECTL_CONTEXT)" rollout status deployment/nvt-broker -n "$(NAMESPACE)" --timeout="$(ROLLOUT_TIMEOUT)"
 	kubectl --context "$(KUBECTL_CONTEXT)" rollout status deployment/nvt-operator -n "$(NAMESPACE)" --timeout="$(ROLLOUT_TIMEOUT)"
+	@if [ "$(OPERATOR_KIND_GATEWAY)" = "1" ]; then \
+		kubectl --context "$(KUBECTL_CONTEXT)" rollout status deployment/nvt-agent-gateway -n "$(NAMESPACE)" --timeout="$(ROLLOUT_TIMEOUT)"; \
+	fi
 
 operator-kind-setup: operator-kind-install
 
@@ -77,6 +91,10 @@ operator-kind-smoke:
 
 operator-kind-smoke-render:
 	KIND_SMOKE_MODE=render bash tests/operator/kind/smoke.sh
+
+gateway-kind-load: operator-kind-cluster gateway-build
+	@printf '[operator-kind-setup] loading gateway image %s into kind cluster %s\n' "$(GATEWAY_IMAGE)" "$(CLUSTER)"
+	kind load docker-image "$(GATEWAY_IMAGE)" --name "$(CLUSTER)"
 
 producer-kind-load: operator-kind-cluster producer-build
 	@printf '[producer-kind-setup] loading producer image %s into kind cluster %s\n' "$(PRODUCER_IMAGE)" "$(CLUSTER)"

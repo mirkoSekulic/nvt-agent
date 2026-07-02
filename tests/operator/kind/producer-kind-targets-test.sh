@@ -49,6 +49,10 @@ PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-build PRODUCER_IMAGE=custom
 grep -q -- 'docker build -f producers/github-comments/Dockerfile -t custom-producer:test .' "${TOOL_LOG}"
 
 : >"${TOOL_LOG}"
+PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" gateway-build GATEWAY_IMAGE=custom-gateway:test >"${WORKDIR}/gateway-build.out"
+grep -q -- 'docker build -f gateway/Dockerfile -t custom-gateway:test .' "${TOOL_LOG}"
+
+: >"${TOOL_LOG}"
 PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-load \
   PRODUCER_IMAGE=custom-producer:test \
   CLUSTER="${EXPECTED_CLUSTER}" \
@@ -56,6 +60,15 @@ PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-load \
 grep -q -- 'kind get clusters' "${TOOL_LOG}"
 grep -q -- 'docker build -f producers/github-comments/Dockerfile -t custom-producer:test .' "${TOOL_LOG}"
 grep -q -- 'kind load docker-image custom-producer:test --name poc-cluster' "${TOOL_LOG}"
+
+: >"${TOOL_LOG}"
+PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" gateway-kind-load \
+  GATEWAY_IMAGE=custom-gateway:test \
+  CLUSTER="${EXPECTED_CLUSTER}" \
+  CREATE_CLUSTER=0 >"${WORKDIR}/gateway-load.out"
+grep -q -- 'kind get clusters' "${TOOL_LOG}"
+grep -q -- 'docker build -f gateway/Dockerfile -t custom-gateway:test .' "${TOOL_LOG}"
+grep -q -- 'kind load docker-image custom-gateway:test --name poc-cluster' "${TOOL_LOG}"
 
 : >"${TOOL_LOG}"
 PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-install \
@@ -83,5 +96,18 @@ PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" -n producer-kind-load \
   PRODUCER_IMAGE=dry-run:test \
   CLUSTER=dry-cluster >"${WORKDIR}/dry-load.out"
 grep -q -- 'kind load docker-image "dry-run:test" --name "dry-cluster"' "${WORKDIR}/dry-load.out"
+
+PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" -n gateway-kind-load \
+  GATEWAY_IMAGE=dry-gateway:test \
+  CLUSTER=dry-cluster >"${WORKDIR}/dry-gateway-load.out"
+grep -q -- 'kind load docker-image "dry-gateway:test" --name "dry-cluster"' "${WORKDIR}/dry-gateway-load.out"
+
+PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" -n operator-kind-install \
+  OPERATOR_KIND_GATEWAY=1 \
+  GATEWAY_IMAGE=dry-gateway:test >"${WORKDIR}/dry-operator-gateway-install.out"
+grep -q -- 'docker build -f gateway/Dockerfile -t "dry-gateway:test" .' "${WORKDIR}/dry-operator-gateway-install.out"
+grep -q -- 'kind load docker-image "dry-gateway:test" --name "nvt-smoke"' "${WORKDIR}/dry-operator-gateway-install.out"
+grep -q -- '--set gateway.enabled=true --set gateway.image=dry-gateway:test' "${WORKDIR}/dry-operator-gateway-install.out"
+grep -q 'rollout status deployment/nvt-agent-gateway' "${WORKDIR}/dry-operator-gateway-install.out"
 
 echo "producer kind Make targets test passed"

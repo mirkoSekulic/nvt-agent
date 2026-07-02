@@ -8,7 +8,14 @@ import (
 	"strings"
 )
 
-const IdempotencyAnnotation = "nvt.dev/idempotency-key"
+const (
+	IdempotencyAnnotation = "nvt.dev/idempotency-key"
+	AccessKeyAnnotation   = "nvt.dev/access-key"
+	DisplayNameAnnotation = "nvt.dev/display-name"
+	SourceURLAnnotation   = "nvt.dev/source-url"
+	RequestedByAnnotation = "nvt.dev/requested-by"
+	AccessPortAnnotation  = "nvt.dev/access-port"
+)
 
 var dnsLabelInvalid = regexp.MustCompile(`[^a-z0-9-]+`)
 

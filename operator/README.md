@@ -72,6 +72,7 @@ Build the local images from the repository root:
 make runtime-build
 make broker-build
 make operator-build
+make gateway-build
 ```
 
 For kind-based testing, load the images into the cluster after building them:
@@ -80,6 +81,7 @@ For kind-based testing, load the images into the cluster after building them:
 kind load docker-image nvt-agent-runtime:latest
 kind load docker-image nvt-broker:latest
 kind load docker-image nvt-operator:latest
+kind load docker-image nvt-agent-gateway:latest
 ```
 
 Broker provider credentials are intentionally not rendered by the chart. When
@@ -97,6 +99,53 @@ For a no-secret smoke install:
 ```sh
 helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace
 ```
+
+Enable the optional AgentRun access gateway when you want one cluster-internal
+Service to route to running code-server sessions by Host header:
+
+```sh
+make gateway-kind-load
+helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace \
+  --set gateway.enabled=true \
+  --set gateway.baseDomain=agents.localhost
+```
+
+For the local kind setup target, set `OPERATOR_KIND_GATEWAY=1` to build and load
+the gateway image and enable the chart section in one install flow:
+
+```sh
+make operator-kind-setup OPERATOR_KIND_GATEWAY=1
+```
+
+The gateway renders a `ClusterIP` Service named `nvt-agent-gateway` by default;
+v1 does not create an Ingress or expose the Service outside the cluster. It
+routes `http://<access-key>.agents.localhost/` to the running pod labeled
+`nvt.dev/agentrun=<agentrun name>` and reads the access key from the AgentRun
+annotation `nvt.dev/access-key`. The GitHub comments producer sets this to the
+DNS-safe AgentRun name and also annotates display name, source URL, requester,
+and access port metadata for the dashboard.
+
+For local testing, port-forward the Service:
+
+```sh
+kubectl -n nvt port-forward svc/nvt-agent-gateway 4090:80
+```
+
+Then open the dashboard at:
+
+```text
+http://agents.localhost:4090/
+```
+
+Open a specific session at:
+
+```text
+http://<access-key>.agents.localhost:4090/
+```
+
+The gateway only implements `auth.mode=none` today. The config shape keeps auth
+pluggable for a future mode, but this v1 gateway must be treated as a trusted
+cluster-internal development route.
 
 The chart also supports rendering the Namespace object itself:
 

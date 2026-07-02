@@ -169,6 +169,11 @@ func (s AgentRunSubmitter) buildAgentRun(
 			Name:      identity.Name,
 			Annotations: map[string]string{
 				IdempotencyAnnotation: identity.Key,
+				AccessKeyAnnotation:   identity.Name,
+				DisplayNameAnnotation: displayNameForCommand(issue),
+				SourceURLAnnotation:   sourceURLForCommand(issue, commandComment),
+				RequestedByAnnotation: commandComment.User.Login,
+				AccessPortAnnotation:  "4090",
 			},
 		},
 		Spec: nvtv1alpha1.AgentRunSpec{
@@ -213,6 +218,17 @@ func (s AgentRunSubmitter) buildAgentRun(
 		}
 	}
 	return run, nil
+}
+
+func displayNameForCommand(issue GitHubIssue) string {
+	return fmt.Sprintf("Issue #%d - PR create", issue.Number)
+}
+
+func sourceURLForCommand(issue GitHubIssue, commandComment GitHubIssueComment) string {
+	if commandComment.HTMLURL != "" {
+		return commandComment.HTMLURL
+	}
+	return issue.HTMLURL
 }
 
 func agentRunTTL(config AgentRunTTL) *nvtv1alpha1.AgentRunTTL {

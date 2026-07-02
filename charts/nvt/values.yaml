@@ -18,6 +18,19 @@ operator:
   image: nvt-operator:latest
   replicas: 1
 
+gateway:
+  enabled: false
+  image: nvt-agent-gateway:latest
+  replicas: 1
+  baseDomain: agents.localhost
+  port: 8080
+  defaultTargetPort: 4090
+  auth:
+    mode: none
+  service:
+    type: ClusterIP
+    port: 80
+
 agentSchedule:
   enabled: true
   name: default

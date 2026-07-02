@@ -8,6 +8,7 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
 DEFAULT_RENDER="${WORKDIR}/default.yaml"
+GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
 NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
@@ -22,6 +23,7 @@ PRODUCER_NULL_TTL_RENDER="${WORKDIR}/producer-null-ttl.yaml"
 PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true --set gateway.port=8091 > "${GATEWAY_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
@@ -264,6 +266,27 @@ require_resource_namespace "${DEFAULT_RENDER}" RoleBinding nvt-operator custom-n
 require_resource_namespace "${DEFAULT_RENDER}" Service nvt-operator custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" AgentSchedule default custom-ns
 missing_resource "${DEFAULT_RENDER}" Namespace nvt
+missing_resource "${DEFAULT_RENDER}" Deployment nvt-agent-gateway
+missing_resource "${DEFAULT_RENDER}" Service nvt-agent-gateway
+missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
+
+require_resource "${GATEWAY_RENDER}" Deployment nvt-agent-gateway
+require_resource "${GATEWAY_RENDER}" Service nvt-agent-gateway
+require_resource "${GATEWAY_RENDER}" ServiceAccount nvt-agent-gateway
+require_resource "${GATEWAY_RENDER}" Role nvt-agent-gateway
+require_resource "${GATEWAY_RENDER}" RoleBinding nvt-agent-gateway
+require_resource_namespace "${GATEWAY_RENDER}" Deployment nvt-agent-gateway custom-ns
+require_resource_namespace "${GATEWAY_RENDER}" Service nvt-agent-gateway custom-ns
+grep -q 'type: ClusterIP' "${GATEWAY_RENDER}"
+grep -q -- '--base-domain=agents.localhost' "${GATEWAY_RENDER}"
+grep -q -- '--listen-addr=:8091' "${GATEWAY_RENDER}"
+grep -q 'containerPort: 8091' "${GATEWAY_RENDER}"
+grep -q 'targetPort: 8091' "${GATEWAY_RENDER}"
+grep -q 'path: /healthz' "${GATEWAY_RENDER}"
+grep -q 'port: 8091' "${GATEWAY_RENDER}"
+grep -q 'nvt.dev' "${GATEWAY_RENDER}"
+grep -q 'agentruns' "${GATEWAY_RENDER}"
+grep -q 'pods' "${GATEWAY_RENDER}"
 
 require_file "${CHART}/crds/nvt.dev_agentruns.yaml"
 require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"
