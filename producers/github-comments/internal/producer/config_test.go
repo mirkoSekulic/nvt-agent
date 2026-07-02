@@ -33,6 +33,19 @@ func TestConfigDefaultIdempotencyScope(t *testing.T) {
 	}
 }
 
+func TestConfigDefaultSubmissionScheduleAdmission(t *testing.T) {
+	cfg := validTestConfig()
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Submission.Mode != SubmissionModeScheduleAdmission ||
+		cfg.Submission.AdmissionBaseURL != defaultOperatorCallbackBaseURL ||
+		cfg.Submission.ScheduleNamespace != "nvt" ||
+		cfg.Submission.ScheduleName != defaultScheduleName {
+		t.Fatalf("unexpected submission defaults: %#v", cfg.Submission)
+	}
+}
+
 func TestConfigAcceptsCommentIdempotencyScope(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Idempotency.Scope = IdempotencyScopeComment

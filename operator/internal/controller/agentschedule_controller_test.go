@@ -154,6 +154,35 @@ func TestScheduleAdmissionCreatesAgentRunUnderCapacity(t *testing.T) {
 		run.Annotations["keep"] != "annotation" {
 		t.Fatalf("unexpected annotations: %#v", run.Annotations)
 	}
+	if run.Annotations[accessKeyAnnotation] != run.Name ||
+		run.Annotations[displayNameAnnotation] != "Work work-1" ||
+		run.Annotations[sourceURLAnnotation] != "https://example.test/work/1" ||
+		run.Annotations[accessPortAnnotation] != "4090" {
+		t.Fatalf("unexpected gateway annotations: %#v", run.Annotations)
+	}
+}
+
+func TestScheduleAdmissionPreservesExplicitGatewayAnnotations(t *testing.T) {
+	fixture := scheduleAdmissionFixture(t, testAgentSchedule())
+	body := scheduleAdmissionBody(t, "work-1", "https://example.test/work/1", map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]any{
+				displayNameAnnotation: "Custom display",
+				accessPortAnnotation:  "4999",
+			},
+		},
+	})
+
+	response, k8sClient := serveScheduleAdmission(t, fixture, body)
+
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := getScheduledAgentRun(context.Background(), t, k8sClient, decoded.AgentRun.Namespace, decoded.AgentRun.Name)
+	if run.Annotations[displayNameAnnotation] != "Custom display" ||
+		run.Annotations[accessPortAnnotation] != "4999" ||
+		run.Annotations[accessKeyAnnotation] != run.Name {
+		t.Fatalf("unexpected gateway annotations: %#v", run.Annotations)
+	}
 }
 
 func TestScheduleAdmissionDefaultsGenerateName(t *testing.T) {
@@ -201,7 +230,7 @@ func TestScheduleAdmissionDuplicateActiveWorkCreatesNoRun(t *testing.T) {
 	assertScheduledRunCount(t, k8sClient, schedule, 1)
 }
 
-func TestScheduleAdmissionTerminalSameWorkDoesNotBlockNewRun(t *testing.T) {
+func TestScheduleAdmissionTerminalSameWorkCreatesNoRun(t *testing.T) {
 	schedule := testAgentSchedule()
 	schedule.Spec.MaxParallelism = 2
 	fixture := scheduleAdmissionFixture(t, schedule, scheduledRun("done", schedule, "same-work", nvtv1alpha1.AgentRunPhaseCompleted))
@@ -209,9 +238,24 @@ func TestScheduleAdmissionTerminalSameWorkDoesNotBlockNewRun(t *testing.T) {
 	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t, "same-work", "", nil))
 
 	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusAccepted, &decoded)
+	if decoded.Scheduled || decoded.Reason != "duplicate-work" {
+		t.Fatalf("expected retained terminal same work to be duplicate, got %#v", decoded)
+	}
+	assertScheduledRunCount(t, k8sClient, schedule, 1)
+}
+
+func TestScheduleAdmissionTerminalDifferentWorkDoesNotConsumeCapacity(t *testing.T) {
+	schedule := testAgentSchedule()
+	schedule.Spec.MaxParallelism = 1
+	fixture := scheduleAdmissionFixture(t, schedule, scheduledRun("done", schedule, "old-work", nvtv1alpha1.AgentRunPhaseCompleted))
+
+	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t, "new-work", "", nil))
+
+	var decoded scheduleAdmissionResponse
 	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
 	if !decoded.Scheduled {
-		t.Fatalf("expected new run for terminal same work, got %#v", decoded)
+		t.Fatalf("expected new run when only terminal different work exists, got %#v", decoded)
 	}
 	assertScheduledRunCount(t, k8sClient, schedule, 2)
 }
@@ -350,7 +394,7 @@ func serveScheduleAdmission(
 	}
 	request := httptest.NewRequest(
 		http.MethodPost,
-		"/v1/schedules/"+fixture.schedule.Namespace+"/"+fixture.schedule.Name+"/runs",
+		"/v1/schedules/"+fixture.schedule.Namespace+"/"+fixture.schedule.Name+"/admissions",
 		bytes.NewBufferString(body),
 	)
 	response := httptest.NewRecorder()
@@ -388,7 +432,7 @@ func serveConcurrentScheduleAdmissions(
 			<-start
 			request := httptest.NewRequest(
 				http.MethodPost,
-				"/v1/schedules/"+fixture.schedule.Namespace+"/"+fixture.schedule.Name+"/runs",
+				"/v1/schedules/"+fixture.schedule.Namespace+"/"+fixture.schedule.Name+"/admissions",
 				bytes.NewBufferString(requestBody),
 			)
 			response := httptest.NewRecorder()
@@ -425,8 +469,9 @@ func scheduleAdmissionBody(t *testing.T, workID, workURL string, agentRunOverrid
 	mergeMap(agentRun, agentRunOverrides)
 	payload := map[string]any{
 		"work": map[string]any{
-			"id":  workID,
-			"url": workURL,
+			"id":    workID,
+			"title": "Work " + workID,
+			"url":   workURL,
 		},
 		"agentRun": agentRun,
 	}

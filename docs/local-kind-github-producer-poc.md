@@ -93,6 +93,11 @@ allowedAuthors:
 pollInterval: 30s
 operatorCallbackBaseURL: http://nvt-operator:8082
 
+submission:
+  mode: scheduleAdmission
+  admissionBaseURL: http://nvt-operator:8082
+  scheduleName: default
+
 idempotency:
   scope: comment
 

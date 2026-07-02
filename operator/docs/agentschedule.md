@@ -10,7 +10,7 @@ spec to the operator. The operator only enforces generic controls:
 - the schedule exists
 - the schedule is not suspended
 - active runs are below `spec.maxParallelism`
-- no active run already has the same work id
+- no retained scheduled run already has the same work id
 
 The operator core does not contain GitHub, issue, Slack, or other source-specific
 logic.
@@ -56,7 +56,7 @@ active. `Completed`, `Failed`, and `DeadlineExceeded` do not.
 For this POC, trusted cluster-internal scheduler producers can submit a run to:
 
 ```text
-POST /v1/schedules/{namespace}/{name}/runs
+POST /v1/schedules/{namespace}/{name}/admissions
 ```
 
 Do not expose this endpoint publicly. v1 has no authentication and assumes
@@ -101,11 +101,22 @@ labels:
 annotations:
   nvt.dev/work-id: <work.id>
   nvt.dev/work-url: <work.url>
+  nvt.dev/access-key: <final-agentrun-name>
+  nvt.dev/display-name: <work.title-or-final-agentrun-name>
+  nvt.dev/source-url: <work.url>
+  nvt.dev/access-port: "4090"
 ```
 
 `nvt.dev/work-url` is set only when the submitted work URL is non-empty. If the
 submitted `AgentRun` has neither `metadata.name` nor `metadata.generateName`,
-the operator defaults `generateName` to `<schedule-name>-`.
+the operator defaults `generateName` to `<schedule-name>-`. The operator sets
+gateway access metadata after the final AgentRun name is known. A submitted
+`nvt.dev/display-name`, `nvt.dev/access-port`, or `nvt.dev/requested-by`
+annotation is preserved when present.
+
+Duplicate work checks include terminal `AgentRun` resources until their
+retention cleanup removes them. This makes retained `AgentRun` resources the
+idempotency history window and allows producers to safely retry deferred work.
 
 Within one running operator process, admissions are serialized per
 `{namespace, schedule}` while the handler reads the schedule, checks suspend and

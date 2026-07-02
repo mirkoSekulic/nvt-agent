@@ -70,7 +70,7 @@ target namespace. The Job runs inside the cluster and posts one admission
 request to:
 
 ```text
-http://nvt-operator:8082/v1/schedules/<namespace>/default/runs
+http://nvt-operator:8082/v1/schedules/<namespace>/default/admissions
 ```
 
 The submitted work id is `smoke:<NAME>`, and the submitted `AgentRun` uses

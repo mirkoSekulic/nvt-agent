@@ -221,11 +221,14 @@ for 30 days by default and then deleted through normal Kubernetes deletion.
 
 The AgentSchedule controller syncs generic admission-pool status and the
 operator HTTP server accepts cluster-internal schedule admissions at
-`POST /v1/schedules/{namespace}/{name}/runs`. The schedule admission endpoint is
+`POST /v1/schedules/{namespace}/{name}/admissions`. The schedule admission endpoint is
 same-namespace and assumes trusted cluster-internal callers for this POC; it has
 no authentication and must not be exposed publicly. Admissions are guarded by a
 per-schedule lock inside one active operator process, so the POC assumes a
-single active HTTP process, normally via leader election.
+single active HTTP process, normally via leader election. Producers that need
+`agentSchedule.maxParallelism`, `suspend`, and duplicate active-work controls to
+be authoritative must submit through this admission endpoint instead of creating
+`AgentRun` resources directly.
 
 This directory does not include GitHub-specific operator logic. Runtime plugins
 remain configured through the embedded agent config under `spec.agent.config`.

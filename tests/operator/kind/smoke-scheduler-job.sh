@@ -70,7 +70,7 @@ name = sys.argv[3]
 namespace = sys.argv[4]
 image = sys.argv[5]
 payload = json.load(open(payload_path, "r", encoding="utf-8"))
-admission_url = f"http://nvt-operator:8082/v1/schedules/{namespace}/default/runs"
+admission_url = f"http://nvt-operator:8082/v1/schedules/{namespace}/default/admissions"
 
 scheduler_script = r'''
 import os

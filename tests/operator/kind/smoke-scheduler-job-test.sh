@@ -38,7 +38,7 @@ container = job["spec"]["template"]["spec"]["containers"][0]
 assert container["name"] == "scheduler"
 assert container["image"] == "nvt-agent-runtime:latest"
 env = {entry["name"]: entry["value"] for entry in container["env"]}
-assert env["ADMISSION_URL"] == "http://nvt-operator:8082/v1/schedules/nvt/default/runs"
+assert env["ADMISSION_URL"] == "http://nvt-operator:8082/v1/schedules/nvt/default/admissions"
 
 payload = json.loads(env["ADMISSION_PAYLOAD"])
 assert payload["work"]["id"] == "smoke:demo-1"

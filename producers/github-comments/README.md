@@ -1,6 +1,6 @@
 # GitHub comments producer
 
-This producer polls GitHub issue comments with GitHub App installation authentication and creates `AgentRun` resources for the first supported command:
+This producer polls GitHub issue comments with GitHub App installation authentication and submits `AgentRun` work to the nvt operator schedule admission endpoint for the first supported command:
 
 ```text
 <configured-prefix> pr create
@@ -27,6 +27,10 @@ allowedAuthors:
   - "*"
 pollInterval: 30s
 operatorCallbackBaseURL: http://nvt-operator:8082
+submission:
+  mode: scheduleAdmission
+  admissionBaseURL: http://nvt-operator:8082
+  scheduleName: default
 idempotency:
   scope: issue
 state:
@@ -108,13 +112,16 @@ agentConfig:
           provider: github-main-app
 ```
 
-The producer creates AgentRuns with annotation:
+The producer uses this idempotency key as the schedule admission `work.id`:
 
 ```text
 nvt.dev/idempotency-key = github:<owner>/<repo>:issue:<number>:intent:create_pr
 ```
 
-Any existing AgentRun in the target namespace with the same annotation blocks a new run, regardless of status phase. A Kubernetes `AlreadyExists` response is also treated as already accepted.
+In `scheduleAdmission` mode, the operator is the final authority for duplicate
+work, suspension, and `maxParallelism`. A duplicate work response is treated as
+an accepted no-op. `max-parallelism-reached` and `schedule-suspended` responses
+are retried on a later poll by leaving the repository cursor unchanged.
 
 `idempotency.scope` defaults to `issue`, which preserves the production-safe
 behavior of allowing one `pr create` AgentRun per repository issue. For local
@@ -163,13 +170,20 @@ available and PR merge/close events are published.
 
 ## Local Run
 
-Use a kubeconfig that can create and list `AgentRun` resources:
+By default the producer submits to the operator admission API:
+
+```sh
+go run ./cmd/github-comments --config ./config.yaml
+```
+
+For local/dev compatibility, `submission.mode: direct` can create `AgentRun`
+resources through the Kubernetes API directly. Direct mode bypasses
+`AgentSchedule`; use it only when that is intentional. If direct mode is used
+outside the cluster, pass a kubeconfig:
 
 ```sh
 go run ./cmd/github-comments --config ./config.yaml --kubeconfig ~/.kube/config
 ```
-
-If `--kubeconfig` is omitted, the producer tries in-cluster config first and then the default local kubeconfig.
 
 ## Kubernetes
 
@@ -217,4 +231,8 @@ spec:
             claimName: nvt-github-comments-producer-state
 ```
 
-The ServiceAccount needs RBAC to list and create `agentruns.nvt.dev` in the configured target namespace. Runtime auth secrets and broker/provider grants should be configured to match the runtime image and credential broker installed in that namespace.
+In default `scheduleAdmission` mode, the ServiceAccount does not need AgentRun
+create/list RBAC for submission. The operator creates the AgentRun. Direct mode
+requires RBAC to list and create `agentruns.nvt.dev` in the configured target
+namespace. Runtime auth secrets and broker/provider grants should be configured
+to match the runtime image and credential broker installed in that namespace.

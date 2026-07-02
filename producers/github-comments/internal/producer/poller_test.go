@@ -3,7 +3,10 @@ package producer
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -117,6 +120,156 @@ func TestPollerStoresPollStartCursorWhenNoCommentsReturned(t *testing.T) {
 	}
 	if !found || !got.Equal(pollStartedAt) {
 		t.Fatalf("got stored cursor %v want poll start %s", got, pollStartedAt)
+	}
+}
+
+func TestPollerDoesNotAdvanceCursorWhenSubmissionDeferred(t *testing.T) {
+	ctx := context.Background()
+	initialCursor := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
+	state := newMemoryStateStore()
+	if err := state.SetRepoCursor(ctx, "acme/widget", initialCursor); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusTooManyRequests)
+		_, _ = response.Write([]byte(`{"scheduled":false,"reason":"max-parallelism-reached"}`))
+	}))
+	defer server.Close()
+
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	cfg.Submission = SubmissionConfig{
+		Mode:             SubmissionModeScheduleAdmission,
+		AdmissionBaseURL: server.URL,
+		ScheduleName:     "default",
+	}
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID:        123,
+			Body:      "/nvtagent pr create",
+			IssueURL:  "https://api.github.com/repos/acme/widget/issues/42",
+			UpdatedAt: time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC),
+			User:      GitHubUser{Login: "octo"},
+		}},
+		issue: GitHubIssue{
+			Number:  42,
+			Title:   "Broken widget",
+			HTMLURL: "https://github.com/acme/widget/issues/42",
+		},
+	}
+	submitter := NewAgentRunSubmitterWithHTTP(nil, server.Client(), cfg)
+	poller := NewPoller(cfg, github, submitter, state, slog.Default())
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := state.GetRepoCursor(ctx, "acme/widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || !got.Equal(initialCursor) {
+		t.Fatalf("cursor advanced after deferred submission: got %v want %s", got, initialCursor)
+	}
+}
+
+func TestPollerReplaysAcceptedWorkAsDuplicateThenAdvancesAfterDeferredWorkSucceeds(t *testing.T) {
+	ctx := context.Background()
+	initialCursor := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
+	state := newMemoryStateStore()
+	if err := state.SetRepoCursor(ctx, "acme/widget", initialCursor); err != nil {
+		t.Fatal(err)
+	}
+	requestCount := 0
+	seenWorkIDs := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var admission scheduleAdmissionRequest
+		if err := json.NewDecoder(request.Body).Decode(&admission); err != nil {
+			t.Fatal(err)
+		}
+		seenWorkIDs = append(seenWorkIDs, admission.Work.ID)
+		requestCount++
+		switch requestCount {
+		case 1:
+			response.WriteHeader(http.StatusCreated)
+			_, _ = response.Write([]byte(`{"scheduled":true,"agentRun":{"namespace":"nvt","name":"run-a"}}`))
+		case 2:
+			response.WriteHeader(http.StatusTooManyRequests)
+			_, _ = response.Write([]byte(`{"scheduled":false,"reason":"max-parallelism-reached"}`))
+		case 3:
+			response.WriteHeader(http.StatusAccepted)
+			_, _ = response.Write([]byte(`{"scheduled":false,"reason":"duplicate-work"}`))
+		case 4:
+			response.WriteHeader(http.StatusCreated)
+			_, _ = response.Write([]byte(`{"scheduled":true,"agentRun":{"namespace":"nvt","name":"run-b"}}`))
+		default:
+			t.Fatalf("unexpected admission request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	cfg.Idempotency.Scope = IdempotencyScopeComment
+	cfg.Submission = SubmissionConfig{
+		Mode:             SubmissionModeScheduleAdmission,
+		AdmissionBaseURL: server.URL,
+		ScheduleName:     "default",
+	}
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{
+			{
+				ID:        101,
+				Body:      "/nvtagent pr create",
+				IssueURL:  "https://api.github.com/repos/acme/widget/issues/42",
+				UpdatedAt: time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC),
+				User:      GitHubUser{Login: "octo"},
+			},
+			{
+				ID:        202,
+				Body:      "/nvtagent pr create",
+				IssueURL:  "https://api.github.com/repos/acme/widget/issues/43",
+				UpdatedAt: time.Date(2026, 6, 23, 12, 1, 0, 0, time.UTC),
+				User:      GitHubUser{Login: "octo"},
+			},
+		},
+		issues: map[int]GitHubIssue{
+			42: {Number: 42, Title: "A", HTMLURL: "https://github.com/acme/widget/issues/42"},
+			43: {Number: 43, Title: "B", HTMLURL: "https://github.com/acme/widget/issues/43"},
+		},
+	}
+	submitter := NewAgentRunSubmitterWithHTTP(nil, server.Client(), cfg)
+	poller := NewPoller(cfg, github, submitter, state, slog.Default())
+	pollStartedAt := time.Date(2026, 6, 23, 12, 2, 0, 0, time.UTC)
+	poller.now = func() time.Time {
+		return pollStartedAt
+	}
+
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := state.GetRepoCursor(ctx, "acme/widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || !got.Equal(initialCursor) {
+		t.Fatalf("cursor advanced after first deferred poll: got %v want %s", got, initialCursor)
+	}
+	pollStartedAt = time.Date(2026, 6, 23, 12, 3, 0, 0, time.UTC)
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err = state.GetRepoCursor(ctx, "acme/widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCursor := pollStartedAt
+	if !found || !got.Equal(wantCursor) {
+		t.Fatalf("cursor = %v want %s", got, wantCursor)
+	}
+	if requestCount != 4 {
+		t.Fatalf("admission requests = %d want 4", requestCount)
+	}
+	if seenWorkIDs[0] != seenWorkIDs[2] || seenWorkIDs[1] != seenWorkIDs[3] {
+		t.Fatalf("unexpected replay work IDs: %#v", seenWorkIDs)
 	}
 }
 
@@ -263,6 +416,7 @@ func testPollerConfig(initialSince string) Config {
 func pollCommandAndCountAgentRuns(t *testing.T, cfg Config, author string) int {
 	t.Helper()
 	ctx := context.Background()
+	cfg.Submission.Mode = SubmissionModeDirect
 	k8sClient := newFakeAgentRunClient(t)
 	submitter := NewAgentRunSubmitter(k8sClient, cfg)
 	github := &fakeGitHubClient{
@@ -310,6 +464,7 @@ func newFakeAgentRunClient(t *testing.T) ctrlclient.Client {
 type fakeGitHubClient struct {
 	updatedComments        []GitHubIssueComment
 	issue                  GitHubIssue
+	issues                 map[int]GitHubIssue
 	issueComments          []GitHubIssueComment
 	listUpdatedSince       []*time.Time
 	listIssueCommentsCalls int
@@ -324,7 +479,10 @@ func (f *fakeGitHubClient) ListUpdatedIssueComments(
 	return f.updatedComments, nil
 }
 
-func (f *fakeGitHubClient) GetIssue(_ context.Context, _ Repository, _ int) (GitHubIssue, error) {
+func (f *fakeGitHubClient) GetIssue(_ context.Context, _ Repository, issueNumber int) (GitHubIssue, error) {
+	if f.issues != nil {
+		return f.issues[issueNumber], nil
+	}
 	return f.issue, nil
 }
 

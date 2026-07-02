@@ -3,6 +3,7 @@ package producer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -94,6 +95,7 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		return fmt.Errorf("list updated issue comments for %s: %w", key, err)
 	}
 	nextCursor := pollStartedAt
+	deferredSubmission := false
 	for _, comment := range comments {
 		if comment.UpdatedAt.After(nextCursor) {
 			nextCursor = comment.UpdatedAt
@@ -140,6 +142,21 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			return fmt.Errorf("list issue comments %s#%d: %w", key, issueNumber, err)
 		}
 		created, idempotencyKey, err := p.Submitter.Submit(ctx, repo, issue, issueComments, comment, command)
+		if errors.Is(err, ErrSubmissionDeferred) {
+			p.Logger.Info(
+				"deferred pr create comment submission",
+				"repo",
+				key,
+				"issue",
+				issueNumber,
+				"commentID",
+				comment.ID,
+				"idempotencyKey",
+				idempotencyKey,
+			)
+			deferredSubmission = true
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -156,6 +173,10 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			"idempotencyKey",
 			idempotencyKey,
 		)
+	}
+	if deferredSubmission {
+		p.Logger.Info("not advancing poll cursor because at least one command submission was deferred", "repo", key)
+		return nil
 	}
 	if err := p.State.SetRepoCursor(ctx, key, nextCursor); err != nil {
 		return fmt.Errorf("set poll cursor for %s: %w", key, err)
