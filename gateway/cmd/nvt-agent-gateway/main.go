@@ -24,12 +24,32 @@ func main() {
 	var cfg gateway.Config
 	var kubeconfig string
 	flag.StringVar(&cfg.BaseDomain, "base-domain", envString("NVT_GATEWAY_BASE_DOMAIN", "agents.localhost"), "base DNS domain for AgentRun access")
+	flag.StringVar(&cfg.PublicURL, "public-url", envString("NVT_GATEWAY_PUBLIC_URL", ""), "externally visible base URL for dashboard and OAuth callbacks")
 	flag.StringVar(&cfg.ListenAddr, "listen-addr", envString("NVT_GATEWAY_LISTEN_ADDR", ":8080"), "HTTP listen address")
 	flag.IntVar(&cfg.DefaultTargetPort, "default-target-port", envInt("NVT_GATEWAY_DEFAULT_TARGET_PORT", 4090), "default AgentRun code-server target port")
-	flag.StringVar(&cfg.Auth.Mode, "auth-mode", envString("NVT_GATEWAY_AUTH_MODE", "none"), "auth mode; only none is implemented")
+	flag.StringVar(&cfg.Auth.Mode, "auth-mode", envString("NVT_GATEWAY_AUTH_MODE", "none"), "auth mode: none or oidc")
+	flag.StringVar(&cfg.Auth.Session.Secret, "session-secret", envString("NVT_GATEWAY_SESSION_SECRET", ""), "session cookie secret")
+	flag.StringVar(&cfg.Auth.Session.CookieName, "session-cookie-name", envString("NVT_GATEWAY_SESSION_COOKIE_NAME", ""), "session cookie name")
+	flag.StringVar(&cfg.Auth.Session.CookieDomain, "session-cookie-domain", envString("NVT_GATEWAY_SESSION_COOKIE_DOMAIN", ""), "session cookie domain")
+	flag.IntVar(&cfg.Auth.Session.MaxAgeSeconds, "session-max-age-seconds", envInt("NVT_GATEWAY_SESSION_MAX_AGE_SECONDS", 0), "session max age in seconds")
+	flag.BoolVar(&cfg.Auth.Session.Secure, "session-secure", envBool("NVT_GATEWAY_SESSION_COOKIE_SECURE", true), "set Secure on session cookies")
+	flag.StringVar(&cfg.Auth.OIDC.IssuerURL, "oidc-issuer-url", envString("NVT_GATEWAY_OIDC_ISSUER_URL", ""), "OIDC issuer URL")
+	flag.StringVar(&cfg.Auth.OIDC.ClientID, "oidc-client-id", envString("NVT_GATEWAY_OIDC_CLIENT_ID", ""), "OIDC client ID")
+	flag.StringVar(&cfg.Auth.OIDC.ClientSecret, "oidc-client-secret", envString("NVT_GATEWAY_OIDC_CLIENT_SECRET", ""), "OIDC client secret")
+	flag.StringVar(&cfg.Auth.OIDC.CallbackPath, "oidc-callback-path", envString("NVT_GATEWAY_OIDC_CALLBACK_PATH", ""), "OIDC callback path")
+	flag.StringVar(&cfg.Auth.OIDC.ACRValues, "oidc-acr-values", envString("NVT_GATEWAY_OIDC_ACR_VALUES", ""), "OIDC acr_values")
+	flag.StringVar(&cfg.Auth.OIDC.ValidIssuer, "oidc-valid-issuer", envString("NVT_GATEWAY_OIDC_VALID_ISSUER", ""), "expected ID token issuer override")
+	flag.StringVar(&cfg.Auth.OIDC.AuthorizationDetails, "oidc-authorization-details", envString("NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS", ""), "OIDC authorization_details JSON")
+	flag.StringVar(&cfg.Auth.OIDC.ClientAuthMethod, "oidc-client-auth-method", envString("NVT_GATEWAY_OIDC_CLIENT_AUTH_METHOD", ""), "OIDC token endpoint client auth method")
 	flag.StringVar(&kubeconfig, "kubeconfig", envString("KUBECONFIG", ""), "path to kubeconfig, optional")
 	flag.Parse()
 
+	cfg.Auth.OIDC.Scopes = gateway.SplitScopes(envString("NVT_GATEWAY_OIDC_SCOPES", ""))
+	extraAuthParams, err := gateway.ParseExtraAuthParams(envString("NVT_GATEWAY_OIDC_EXTRA_AUTH_PARAMS", ""))
+	if err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
+	cfg.Auth.OIDC.ExtraAuthParams = extraAuthParams
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}
@@ -38,7 +58,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("create kubernetes client: %v", err)
 	}
-	server := gateway.NewServer(cfg, client, namespace)
+	server, err := gateway.NewServer(cfg, client, namespace)
+	if err != nil {
+		log.Fatalf("create gateway server: %v", err)
+	}
 	log.Printf("nvt-agent-gateway listening on %s for base domain %s in namespace %s", cfg.ListenAddr, cfg.BaseDomain, namespace)
 	if err := http.ListenAndServe(cfg.ListenAddr, server); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("serve gateway: %v", err)
@@ -97,6 +120,18 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(name string, fallback bool) bool {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fallback
 	}

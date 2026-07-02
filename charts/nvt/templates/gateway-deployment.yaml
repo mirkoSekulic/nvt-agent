@@ -1,4 +1,18 @@
 {{- if .Values.gateway.enabled }}
+{{- if eq .Values.gateway.auth.mode "oidc" }}
+{{- if not .Values.gateway.auth.session.existingSecret }}
+{{- fail "gateway.auth.session.existingSecret is required when gateway.auth.mode=oidc" }}
+{{- end }}
+{{- if not .Values.gateway.auth.oidc.clientSecret.existingSecret }}
+{{- fail "gateway.auth.oidc.clientSecret.existingSecret is required when gateway.auth.mode=oidc" }}
+{{- end }}
+{{- if not .Values.gateway.auth.oidc.issuerURL }}
+{{- fail "gateway.auth.oidc.issuerURL is required when gateway.auth.mode=oidc" }}
+{{- end }}
+{{- if not .Values.gateway.auth.oidc.clientID }}
+{{- fail "gateway.auth.oidc.clientID is required when gateway.auth.mode=oidc" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,14 +37,54 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --base-domain={{ .Values.gateway.baseDomain }}
+            {{- if .Values.gateway.publicURL }}
+            - --public-url={{ .Values.gateway.publicURL }}
+            {{- end }}
             - --listen-addr=:{{ .Values.gateway.port }}
             - --default-target-port={{ .Values.gateway.defaultTargetPort }}
-            - --auth-mode={{ .Values.gateway.auth.mode }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: NVT_GATEWAY_AUTH_MODE
+              value: {{ .Values.gateway.auth.mode | quote }}
+            {{- if eq .Values.gateway.auth.mode "oidc" }}
+            - name: NVT_GATEWAY_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.auth.session.existingSecret | quote }}
+                  key: {{ .Values.gateway.auth.session.secretKey | quote }}
+            - name: NVT_GATEWAY_SESSION_COOKIE_NAME
+              value: {{ .Values.gateway.auth.session.cookieName | quote }}
+            - name: NVT_GATEWAY_SESSION_COOKIE_DOMAIN
+              value: {{ .Values.gateway.auth.session.cookieDomain | quote }}
+            - name: NVT_GATEWAY_SESSION_MAX_AGE_SECONDS
+              value: {{ .Values.gateway.auth.session.maxAgeSeconds | quote }}
+            - name: NVT_GATEWAY_SESSION_COOKIE_SECURE
+              value: {{ .Values.gateway.auth.session.secure | quote }}
+            - name: NVT_GATEWAY_OIDC_ISSUER_URL
+              value: {{ .Values.gateway.auth.oidc.issuerURL | quote }}
+            - name: NVT_GATEWAY_OIDC_CLIENT_ID
+              value: {{ .Values.gateway.auth.oidc.clientID | quote }}
+            - name: NVT_GATEWAY_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.auth.oidc.clientSecret.existingSecret | quote }}
+                  key: {{ .Values.gateway.auth.oidc.clientSecret.secretKey | quote }}
+            - name: NVT_GATEWAY_OIDC_SCOPES
+              value: {{ join "," .Values.gateway.auth.oidc.scopes | quote }}
+            - name: NVT_GATEWAY_OIDC_CALLBACK_PATH
+              value: {{ .Values.gateway.auth.oidc.callbackPath | quote }}
+            - name: NVT_GATEWAY_OIDC_ACR_VALUES
+              value: {{ .Values.gateway.auth.oidc.acrValues | quote }}
+            - name: NVT_GATEWAY_OIDC_VALID_ISSUER
+              value: {{ .Values.gateway.auth.oidc.validIssuer | quote }}
+            - name: NVT_GATEWAY_OIDC_EXTRA_AUTH_PARAMS
+              value: {{ .Values.gateway.auth.oidc.extraAuthParams | toJson | quote }}
+            - name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS
+              value: {{ .Values.gateway.auth.oidc.authorizationDetails | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.gateway.port }}

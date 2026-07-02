@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +64,7 @@ func TestResolveTarget(t *testing.T) {
 			Status: readyPodStatus("10.0.0.9"),
 		},
 	)
-	server := NewServer(Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, client, "nvt")
+	server := mustNewServer(t, Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, client)
 	target, err := server.resolveTarget(t.Context(), "access-1")
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +92,7 @@ func TestResolveTargetNoRunningPod(t *testing.T) {
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.9"},
 		},
 	)
-	server := NewServer(Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, client, "nvt")
+	server := mustNewServer(t, Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, client)
 	_, err := server.resolveTarget(t.Context(), "access-1")
 	if err != errNoRunningPod {
 		t.Fatalf("err = %v, want errNoRunningPod", err)
@@ -123,7 +125,7 @@ func TestDashboardListsAgentRuns(t *testing.T) {
 			Status: readyPodStatus("10.0.0.9"),
 		},
 	)
-	server := NewServer(Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, client, "nvt")
+	server := mustNewServer(t, Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, client)
 	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
@@ -139,7 +141,7 @@ func TestDashboardListsAgentRuns(t *testing.T) {
 }
 
 func TestHealthzDoesNotRequireKubernetes(t *testing.T) {
-	server := NewServer(Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, nil, "nvt")
+	server := mustNewServer(t, Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, nil)
 	req := httptest.NewRequest(http.MethodGet, "http://not-the-base-host/healthz", nil)
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
@@ -149,6 +151,221 @@ func TestHealthzDoesNotRequireKubernetes(t *testing.T) {
 	if recorder.Body.String() != "ok\n" {
 		t.Fatalf("body = %q", recorder.Body.String())
 	}
+}
+
+func TestAuthModeNonePreservesDashboardBehavior(t *testing.T) {
+	client := fakeClient(t)
+	server := mustNewServer(t, Config{
+		BaseDomain:        "agents.localhost",
+		ListenAddr:        ":8080",
+		DefaultTargetPort: 4090,
+		Auth:              AuthConfig{Mode: "none"},
+	}, client)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthModeOIDCRedirectsUnauthenticatedDashboardAndSession(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	client := fakeClient(t,
+		&nvtv1alpha1.AgentRun{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   "nvt",
+				Name:        "run-1",
+				Annotations: map[string]string{AccessKeyAnnotation: "access-1"},
+			},
+		},
+	)
+	server := mustNewServer(t, oidcTestConfig(provider.URL), client)
+
+	for _, target := range []string{"http://agents.localhost:4090/", "http://access-1.agents.localhost:4090/"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Accept", "text/html")
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusFound {
+			t.Fatalf("target %s status = %d body=%s", target, recorder.Code, recorder.Body.String())
+		}
+		location := recorder.Header().Get("Location")
+		if !strings.Contains(location, "/oauth2/login?return_url=") {
+			t.Fatalf("target %s location = %q", target, location)
+		}
+	}
+}
+
+func TestAuthModeOIDCAgentSubdomainRedirectsToStableLoginHost(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfigWithPublicURL(provider.URL, "https://agents.localhost"), fakeClient(t))
+	req := httptest.NewRequest(http.MethodGet, "https://access-1.agents.localhost/session", nil)
+	req.Header.Set("Accept", "text/html")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	location := recorder.Header().Get("Location")
+	if !strings.HasPrefix(location, "https://agents.localhost/oauth2/login?return_url=") {
+		t.Fatalf("location = %q", location)
+	}
+	if !strings.Contains(location, url.QueryEscape("https://access-1.agents.localhost/session")) {
+		t.Fatalf("location missing original return URL: %q", location)
+	}
+}
+
+func TestAuthCodeURLUsesStablePublicCallbackURL(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfigWithPublicURL(provider.URL, "https://agents.localhost"), fakeClient(t))
+	req := httptest.NewRequest(http.MethodGet, "https://agents.localhost/oauth2/login?return_url="+url.QueryEscape("https://access-1.agents.localhost/"), nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query().Get("redirect_uri"); got != "https://agents.localhost/oauth2/callback" {
+		t.Fatalf("redirect_uri = %q", got)
+	}
+}
+
+func TestAuthCodeURLUsesForwardedHeadersWhenPublicURLIsEmpty(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfig(provider.URL), fakeClient(t))
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost/oauth2/login", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "agents.example.com")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query().Get("redirect_uri"); got != "https://agents.example.com/oauth2/callback" {
+		t.Fatalf("redirect_uri = %q", got)
+	}
+}
+
+func TestAuthModeOIDCHealthzIsPublic(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfig(provider.URL), nil)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/healthz", nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthModeOIDCLogoutClearsCookies(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfig(provider.URL), nil)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/oauth2/logout", nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	cleared := 0
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.MaxAge < 0 {
+			cleared++
+		}
+	}
+	if cleared != 2 {
+		t.Fatalf("cleared cookies = %d, want 2", cleared)
+	}
+}
+
+func TestOIDCReturnURLRejectsUnsafeExternalURL(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfig(provider.URL), nil)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/oauth2/login?return_url="+url.QueryEscape("https://evil.test/"), nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func mustNewServer(t *testing.T, config Config, client ctrlclient.Client) *Server {
+	t.Helper()
+	server, err := NewServer(config, client, "nvt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+func oidcTestConfig(issuer string) Config {
+	return Config{
+		BaseDomain:        "agents.localhost",
+		ListenAddr:        ":8080",
+		DefaultTargetPort: 4090,
+		Auth: AuthConfig{
+			Mode: authModeOIDC,
+			Session: SessionConfig{
+				Secret:        "0123456789abcdef0123456789abcdef",
+				CookieName:    defaultSessionCookie,
+				MaxAgeSeconds: defaultSessionMaxAge,
+				Secure:        true,
+			},
+			OIDC: OIDCConfig{
+				IssuerURL:    issuer,
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+				Scopes:       []string{"openid", "profile"},
+				CallbackPath: defaultCallbackPath,
+			},
+		},
+	}
+}
+
+func oidcTestConfigWithPublicURL(issuer, publicURL string) Config {
+	config := oidcTestConfig(issuer)
+	config.PublicURL = publicURL
+	return config
+}
+
+func oidcDiscoveryServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	var issuer string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			writeJSON(t, w, map[string]any{
+				"issuer":                                issuer,
+				"authorization_endpoint":                issuer + "/auth",
+				"token_endpoint":                        issuer + "/token",
+				"jwks_uri":                              issuer + "/jwks",
+				"id_token_signing_alg_values_supported": []string{"RS256"},
+			})
+		case "/jwks":
+			writeJSON(t, w, map[string]any{"keys": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	issuer = server.URL
+	t.Cleanup(server.Close)
+	return server
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, value map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write(raw)
 }
 
 func fakeClient(t *testing.T, objects ...runtime.Object) ctrlclient.Client {

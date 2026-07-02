@@ -31,13 +31,37 @@ const (
 
 type Config struct {
 	BaseDomain        string
+	PublicURL         string
 	ListenAddr        string
 	DefaultTargetPort int
 	Auth              AuthConfig
 }
 
 type AuthConfig struct {
-	Mode string
+	Mode    string
+	Session SessionConfig
+	OIDC    OIDCConfig
+}
+
+type SessionConfig struct {
+	Secret        string
+	CookieName    string
+	CookieDomain  string
+	MaxAgeSeconds int
+	Secure        bool
+}
+
+type OIDCConfig struct {
+	IssuerURL            string
+	ClientID             string
+	ClientSecret         string
+	Scopes               []string
+	CallbackPath         string
+	ACRValues            string
+	ValidIssuer          string
+	ExtraAuthParams      map[string]string
+	AuthorizationDetails string
+	ClientAuthMethod     string
 }
 
 func (c Config) Validate() error {
@@ -47,17 +71,52 @@ func (c Config) Validate() error {
 	if strings.Contains(c.BaseDomain, "://") {
 		return fmt.Errorf("baseDomain must be a host name, got %q", c.BaseDomain)
 	}
+	if c.PublicURL != "" {
+		parsed, err := url.Parse(c.PublicURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("publicURL must be an absolute URL without path, query, or fragment")
+		}
+	}
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listenAddr is required")
 	}
 	if c.DefaultTargetPort <= 0 || c.DefaultTargetPort > 65535 {
 		return fmt.Errorf("defaultTargetPort must be between 1 and 65535")
 	}
-	if c.Auth.Mode == "" {
-		c.Auth.Mode = "none"
+	authMode := c.Auth.Mode
+	if authMode == "" {
+		authMode = "none"
 	}
-	if c.Auth.Mode != "none" {
+	switch authMode {
+	case "none":
+	case "oidc":
+		if err := c.Auth.validateOIDC(); err != nil {
+			return err
+		}
+	default:
 		return fmt.Errorf("unsupported auth.mode %q", c.Auth.Mode)
+	}
+	return nil
+}
+
+func (c AuthConfig) validateOIDC() error {
+	if strings.TrimSpace(c.Session.Secret) == "" {
+		return fmt.Errorf("auth.session.secret is required when auth.mode=oidc")
+	}
+	if _, err := sessionSecretBytes(c.Session.Secret); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.OIDC.IssuerURL) == "" {
+		return fmt.Errorf("auth.oidc.issuerURL is required when auth.mode=oidc")
+	}
+	if strings.TrimSpace(c.OIDC.ClientID) == "" {
+		return fmt.Errorf("auth.oidc.clientID is required when auth.mode=oidc")
+	}
+	if strings.TrimSpace(c.OIDC.ClientSecret) == "" {
+		return fmt.Errorf("auth.oidc.clientSecret is required when auth.mode=oidc")
+	}
+	if c.OIDC.ClientAuthMethod != "" && c.OIDC.ClientAuthMethod != oidcClientSecretPost {
+		return fmt.Errorf("unsupported auth.oidc.clientAuthMethod %q", c.OIDC.ClientAuthMethod)
 	}
 	return nil
 }
@@ -66,6 +125,7 @@ type Server struct {
 	config    Config
 	client    ctrlclient.Client
 	namespace string
+	auth      *Authenticator
 }
 
 type routeKind int
@@ -81,11 +141,15 @@ type route struct {
 	accessKey string
 }
 
-func NewServer(config Config, client ctrlclient.Client, namespace string) *Server {
+func NewServer(config Config, client ctrlclient.Client, namespace string) (*Server, error) {
 	if config.Auth.Mode == "" {
 		config.Auth.Mode = "none"
 	}
-	return &Server{config: config, client: client, namespace: namespace}
+	auth, err := NewAuthenticator(context.Background(), config)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{config: config, client: client, namespace: namespace, auth: auth}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -94,16 +158,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 		return
 	}
+	if s.auth != nil && s.auth.HandlePublic(w, r) {
+		return
+	}
 
 	route := ParseHost(r.Host, s.config.BaseDomain)
 	switch route.kind {
 	case routeDashboard:
+		if !s.authorize(w, r) {
+			return
+		}
 		s.serveDashboard(w, r)
 	case routeAgentRun:
+		if !s.authorize(w, r) {
+			return
+		}
 		s.proxyAgentRun(w, r, route.accessKey)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if s.auth == nil {
+		return true
+	}
+	return s.auth.Authorize(w, r)
 }
 
 func ParseHost(host, baseDomain string) route {

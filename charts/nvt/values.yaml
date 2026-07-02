@@ -23,10 +23,32 @@ gateway:
   image: nvt-agent-gateway:latest
   replicas: 1
   baseDomain: agents.localhost
+  publicURL: ""
   port: 8080
   defaultTargetPort: 4090
   auth:
     mode: none
+    session:
+      existingSecret: ""
+      secretKey: session-secret
+      cookieName: nvt_agent_gateway
+      cookieDomain: ""
+      maxAgeSeconds: 86400
+      secure: true
+    oidc:
+      issuerURL: ""
+      clientID: ""
+      clientSecret:
+        existingSecret: ""
+        secretKey: client-secret
+      scopes:
+        - openid
+        - profile
+      callbackPath: /oauth2/callback
+      acrValues: ""
+      validIssuer: ""
+      extraAuthParams: {}
+      authorizationDetails: ""
   service:
     type: ClusterIP
     port: 80
