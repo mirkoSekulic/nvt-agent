@@ -138,7 +138,7 @@ wait_for_operator_http() {
 }
 
 admission_url() {
-  printf 'http://127.0.0.1:%s/v1/schedules/%s/default/runs' "${PORT_FORWARD_PORT}" "${NAMESPACE}"
+  printf 'http://127.0.0.1:%s/v1/schedules/%s/default/admissions' "${PORT_FORWARD_PORT}" "${NAMESPACE}"
 }
 
 post_schedule_admission() {

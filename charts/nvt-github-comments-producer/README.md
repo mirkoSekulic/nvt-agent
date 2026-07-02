@@ -10,7 +10,9 @@ The producer polls configured GitHub repositories for:
 <configured-prefix> pr create
 ```
 
-and creates `AgentRun` resources in the configured namespace.
+and submits work to the nvt operator `AgentSchedule` admission endpoint. The
+operator creates `AgentRun` resources after applying schedule controls such as
+`maxParallelism`, `suspend`, and duplicate active-work checks.
 
 ## Install
 
@@ -61,6 +63,11 @@ githubApp:
   privateKeyKey: private-key.pem
 
 operatorCallbackBaseURL: http://nvt-operator:8082
+
+submission:
+  mode: scheduleAdmission
+  admissionBaseURL: http://nvt-operator:8082
+  scheduleName: default
 
 idempotency:
   scope: issue
@@ -179,10 +186,16 @@ This uses `emptyDir`, so cursor state is lost when the pod is replaced.
 ## RBAC
 
 By default the chart creates a ServiceAccount in the release namespace. The
-Role and RoleBinding are created in the effective `agentRun.namespace`, which
-defaults to the release namespace. This lets the producer run in one namespace
-and create `AgentRun` resources in another. The Role allows only `get`, `list`,
-and `create` on `agentruns.nvt.dev`.
+default `submission.mode` is `scheduleAdmission`, so the producer submits work
+to the operator HTTP Service and the chart does not grant AgentRun create/list
+RBAC. This is the production mode because `AgentSchedule` remains authoritative
+for concurrency, suspension, and duplicate work policy.
+
+`submission.mode: direct` is available only for local/dev compatibility and
+bypasses `AgentSchedule`. In direct mode the chart creates a Role and
+RoleBinding in the effective `agentRun.namespace`, which defaults to the
+release namespace. The Role allows only `get`, `list`, and `create` on
+`agentruns.nvt.dev`.
 
 To use an existing ServiceAccount:
 
@@ -193,4 +206,4 @@ serviceAccount:
 ```
 
 Set `rbac.create: false` only when equivalent permissions are provided
-separately.
+separately for direct mode.

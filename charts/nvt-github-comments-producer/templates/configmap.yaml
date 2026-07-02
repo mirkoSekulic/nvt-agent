@@ -13,6 +13,11 @@ data:
       {{- toYaml .Values.allowedAuthors | nindent 6 }}
     pollInterval: {{ .Values.pollInterval | quote }}
     operatorCallbackBaseURL: {{ .Values.operatorCallbackBaseURL | quote }}
+    submission:
+      mode: {{ .Values.submission.mode | quote }}
+      admissionBaseURL: {{ .Values.submission.admissionBaseURL | quote }}
+      scheduleNamespace: {{ default (include "nvt-github-comments-producer.agentRunNamespace" .) .Values.submission.scheduleNamespace | quote }}
+      scheduleName: {{ .Values.submission.scheduleName | quote }}
     idempotency:
       scope: {{ .Values.idempotency.scope | quote }}
     state:

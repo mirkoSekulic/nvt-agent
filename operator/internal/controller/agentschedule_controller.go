@@ -16,12 +16,22 @@ import (
 )
 
 const (
-	scheduleLabel       = "nvt.dev/schedule"
-	workIDAnnotation    = "nvt.dev/work-id"
-	workURLAnnotation   = "nvt.dev/work-url"
-	defaultParallelism  = int32(1)
-	generatedNameSuffix = 5
+	scheduleLabel         = "nvt.dev/schedule"
+	workIDAnnotation      = "nvt.dev/work-id"
+	workURLAnnotation     = "nvt.dev/work-url"
+	accessKeyAnnotation   = "nvt.dev/access-key"
+	displayNameAnnotation = "nvt.dev/display-name"
+	sourceURLAnnotation   = "nvt.dev/source-url"
+	accessPortAnnotation  = "nvt.dev/access-port"
+	defaultParallelism    = int32(1)
+	generatedNameSuffix   = 5
 )
+
+type scheduleAdmissionWorkMetadata struct {
+	ID    string
+	Title string
+	URL   string
+}
 
 // AgentScheduleReconciler reconciles generic AgentSchedule admission-pool status.
 type AgentScheduleReconciler struct {
@@ -116,8 +126,7 @@ func EffectiveMaxParallelism(schedule *nvtv1alpha1.AgentSchedule) int32 {
 func PrepareScheduledAgentRun(
 	schedule *nvtv1alpha1.AgentSchedule,
 	run *nvtv1alpha1.AgentRun,
-	workID string,
-	workURL string,
+	work scheduleAdmissionWorkMetadata,
 	scheme *runtime.Scheme,
 ) error {
 	run.Namespace = schedule.Namespace
@@ -146,11 +155,25 @@ func PrepareScheduledAgentRun(
 	if run.Annotations == nil {
 		run.Annotations = map[string]string{}
 	}
-	run.Annotations[workIDAnnotation] = workID
-	if workURL != "" {
-		run.Annotations[workURLAnnotation] = workURL
+	run.Annotations[workIDAnnotation] = work.ID
+	if work.URL != "" {
+		run.Annotations[workURLAnnotation] = work.URL
 	} else {
 		delete(run.Annotations, workURLAnnotation)
+	}
+	run.Annotations[accessKeyAnnotation] = run.Name
+	if run.Annotations[displayNameAnnotation] == "" {
+		if work.Title != "" {
+			run.Annotations[displayNameAnnotation] = work.Title
+		} else {
+			run.Annotations[displayNameAnnotation] = run.Name
+		}
+	}
+	if work.URL != "" {
+		run.Annotations[sourceURLAnnotation] = work.URL
+	}
+	if run.Annotations[accessPortAnnotation] == "" {
+		run.Annotations[accessPortAnnotation] = "4090"
 	}
 
 	if err := controllerutil.SetControllerReference(schedule, run, scheme); err != nil {
@@ -167,10 +190,10 @@ func generatedRunName(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(randomBytes), nil
 }
 
-func activeWorkExists(runs *nvtv1alpha1.AgentRunList, workID string) bool {
+func retainedWorkExists(runs *nvtv1alpha1.AgentRunList, workID string) bool {
 	for i := range runs.Items {
 		run := &runs.Items[i]
-		if IsActiveScheduledRun(run) && run.Annotations[workIDAnnotation] == workID {
+		if run.Annotations[workIDAnnotation] == workID {
 			return true
 		}
 	}

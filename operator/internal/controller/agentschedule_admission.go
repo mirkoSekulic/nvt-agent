@@ -126,7 +126,7 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		})
 		return
 	}
-	if activeWorkExists(runs, workID) {
+	if retainedWorkExists(runs, workID) {
 		h.recordRejected(ctx, schedule, "duplicate-work")
 		writeScheduleAdmissionJSON(response, http.StatusAccepted, scheduleAdmissionResponse{
 			Scheduled: false,
@@ -136,7 +136,11 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 
 	run := admission.AgentRun
-	if err := PrepareScheduledAgentRun(schedule, &run, workID, admission.Work.URL, h.scheme); err != nil {
+	if err := PrepareScheduledAgentRun(schedule, &run, scheduleAdmissionWorkMetadata{
+		ID:    workID,
+		Title: admission.Work.Title,
+		URL:   admission.Work.URL,
+	}, h.scheme); err != nil {
 		http.Error(response, "prepare AgentRun failed\n", http.StatusInternalServerError)
 		return
 	}
@@ -199,7 +203,7 @@ func parseScheduleAdmissionPath(path string) (string, string, bool) {
 		return "", "", false
 	}
 	parts := strings.Split(remainder, "/")
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "runs" {
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || (parts[2] != "admissions" && parts[2] != "runs") {
 		return "", "", false
 	}
 	return parts[0], parts[1], true

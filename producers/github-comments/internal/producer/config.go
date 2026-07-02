@@ -18,13 +18,19 @@ const (
 	defaultAutonomy                = "trusted-local"
 	defaultWorkspaceMode           = "Ephemeral"
 	defaultOperatorCallbackBaseURL = "http://nvt-operator:8082"
+	defaultSubmissionMode          = SubmissionModeScheduleAdmission
+	defaultScheduleName            = "default"
 )
 
 type IdempotencyScope string
+type SubmissionMode string
 
 const (
 	IdempotencyScopeIssue   IdempotencyScope = "issue"
 	IdempotencyScopeComment IdempotencyScope = "comment"
+
+	SubmissionModeDirect            SubmissionMode = "direct"
+	SubmissionModeScheduleAdmission SubmissionMode = "scheduleAdmission"
 )
 
 type Config struct {
@@ -37,6 +43,7 @@ type Config struct {
 	AgentRun                AgentRunConfig    `json:"agentRun"`
 	AgentConfig             map[string]any    `json:"agentConfig,omitempty"`
 	Idempotency             IdempotencyConfig `json:"idempotency,omitempty"`
+	Submission              SubmissionConfig  `json:"submission,omitempty"`
 	OperatorCallbackBaseURL string            `json:"operatorCallbackBaseURL,omitempty"`
 	InitialSince            string            `json:"initialSince,omitempty"`
 	GitHubAPIBaseURL        string            `json:"githubAPIBaseURL,omitempty"`
@@ -64,6 +71,13 @@ type StateConfig struct {
 
 type IdempotencyConfig struct {
 	Scope IdempotencyScope `json:"scope,omitempty"`
+}
+
+type SubmissionConfig struct {
+	Mode              SubmissionMode `json:"mode,omitempty"`
+	AdmissionBaseURL  string         `json:"admissionBaseURL,omitempty"`
+	ScheduleNamespace string         `json:"scheduleNamespace,omitempty"`
+	ScheduleName      string         `json:"scheduleName,omitempty"`
 }
 
 type AgentRunConfig struct {
@@ -147,6 +161,18 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.OperatorCallbackBaseURL == "" {
 		c.OperatorCallbackBaseURL = defaultOperatorCallbackBaseURL
 	}
+	if c.Submission.Mode == "" {
+		c.Submission.Mode = defaultSubmissionMode
+	}
+	if c.Submission.AdmissionBaseURL == "" {
+		c.Submission.AdmissionBaseURL = defaultOperatorCallbackBaseURL
+	}
+	if c.Submission.ScheduleNamespace == "" {
+		c.Submission.ScheduleNamespace = c.AgentRun.Namespace
+	}
+	if c.Submission.ScheduleName == "" {
+		c.Submission.ScheduleName = defaultScheduleName
+	}
 	if c.Idempotency.Scope == "" {
 		c.Idempotency.Scope = IdempotencyScopeIssue
 	}
@@ -183,6 +209,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.Idempotency.Scope != IdempotencyScopeIssue && c.Idempotency.Scope != IdempotencyScopeComment {
 		return fmt.Errorf("idempotency.scope must be one of %q or %q", IdempotencyScopeIssue, IdempotencyScopeComment)
 	}
+	if c.Submission.Mode != SubmissionModeDirect && c.Submission.Mode != SubmissionModeScheduleAdmission {
+		return fmt.Errorf("submission.mode must be one of %q or %q", SubmissionModeDirect, SubmissionModeScheduleAdmission)
+	}
 	if c.GitHubApp.AppID == 0 {
 		return errors.New("githubApp.appID is required")
 	}
@@ -191,6 +220,15 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	}
 	if c.AgentRun.Namespace == "" {
 		return errors.New("agentRun.namespace is required")
+	}
+	if c.Submission.ScheduleNamespace == "" {
+		return errors.New("submission.scheduleNamespace is required")
+	}
+	if c.Submission.ScheduleName == "" {
+		return errors.New("submission.scheduleName is required")
+	}
+	if c.Submission.Mode == SubmissionModeScheduleAdmission && c.Submission.AdmissionBaseURL == "" {
+		return errors.New("submission.admissionBaseURL is required when submission.mode is scheduleAdmission")
 	}
 	if c.AgentRun.RuntimeImage == "" {
 		return errors.New("agentRun.runtimeImage is required")

@@ -17,6 +17,7 @@ NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
 PRODUCER_RENDER="${WORKDIR}/producer.yaml"
+PRODUCER_DIRECT_RENDER="${WORKDIR}/producer-direct.yaml"
 PRODUCER_EXISTING_CLAIM_RENDER="${WORKDIR}/producer-existing-claim.yaml"
 PRODUCER_EMPTYDIR_RENDER="${WORKDIR}/producer-emptydir.yaml"
 PRODUCER_EXISTING_SA_RENDER="${WORKDIR}/producer-existing-sa.yaml"
@@ -46,6 +47,7 @@ helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns > "${PRODUCER_RENDER}"
+helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set submission.mode=direct > "${PRODUCER_DIRECT_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.existingClaim=existing-state > "${PRODUCER_EXISTING_CLAIM_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.enabled=false > "${PRODUCER_EMPTYDIR_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set serviceAccount.create=false --set serviceAccount.name=existing-sa --set rbac.create=false > "${PRODUCER_EXISTING_SA_RENDER}"
@@ -376,17 +378,19 @@ grep -q "operator.replicas must be 1 in this POC because schedule admission lock
 require_resource "${PRODUCER_RENDER}" Deployment nvt-github-comments-producer
 require_resource "${PRODUCER_RENDER}" ConfigMap nvt-github-comments-producer
 require_resource "${PRODUCER_RENDER}" ServiceAccount nvt-github-comments-producer
-require_resource "${PRODUCER_RENDER}" Role nvt-github-comments-producer
-require_resource "${PRODUCER_RENDER}" RoleBinding nvt-github-comments-producer
+missing_resource "${PRODUCER_RENDER}" Role nvt-github-comments-producer
+missing_resource "${PRODUCER_RENDER}" RoleBinding nvt-github-comments-producer
 require_resource "${PRODUCER_RENDER}" PersistentVolumeClaim nvt-github-comments-producer-state
 require_resource_namespace "${PRODUCER_RENDER}" Deployment nvt-github-comments-producer custom-ns
 require_resource_namespace "${PRODUCER_RENDER}" ConfigMap nvt-github-comments-producer custom-ns
 require_resource_namespace "${PRODUCER_RENDER}" ServiceAccount nvt-github-comments-producer custom-ns
-require_resource_namespace "${PRODUCER_RENDER}" Role nvt-github-comments-producer custom-ns
-require_resource_namespace "${PRODUCER_RENDER}" RoleBinding nvt-github-comments-producer custom-ns
 require_resource_namespace "${PRODUCER_RENDER}" PersistentVolumeClaim nvt-github-comments-producer-state custom-ns
 grep -q -- '--config=/etc/nvt-github-comments/config.yaml' "${PRODUCER_RENDER}"
 grep -q 'operatorCallbackBaseURL: "http://nvt-operator:8082"' "${PRODUCER_RENDER}"
+grep -q 'mode: "scheduleAdmission"' "${PRODUCER_RENDER}"
+grep -q 'admissionBaseURL: "http://nvt-operator:8082"' "${PRODUCER_RENDER}"
+grep -q 'scheduleNamespace: "custom-ns"' "${PRODUCER_RENDER}"
+grep -q 'scheduleName: "default"' "${PRODUCER_RENDER}"
 grep -q 'scope: "issue"' "${PRODUCER_RENDER}"
 grep -q 'completedTTLSeconds: 300' "${PRODUCER_RENDER}"
 grep -q 'failedTTLSeconds: 3600' "${PRODUCER_RENDER}"
@@ -396,8 +400,11 @@ grep -q 'secretName: "nvt-github-app"' "${PRODUCER_RENDER}"
 grep -q 'mountPath: "/var/run/secrets/github-app"' "${PRODUCER_RENDER}"
 grep -q 'claimName: nvt-github-comments-producer-state' "${PRODUCER_RENDER}"
 grep -q 'resources:' "${PRODUCER_RENDER}"
-grep -q 'agentruns' "${PRODUCER_RENDER}"
-grep -q 'create' "${PRODUCER_RENDER}"
+require_resource "${PRODUCER_DIRECT_RENDER}" Role nvt-github-comments-producer
+require_resource "${PRODUCER_DIRECT_RENDER}" RoleBinding nvt-github-comments-producer
+grep -q 'mode: "direct"' "${PRODUCER_DIRECT_RENDER}"
+grep -q 'agentruns' "${PRODUCER_DIRECT_RENDER}"
+grep -q 'create' "${PRODUCER_DIRECT_RENDER}"
 if grep -Eq 'privateKey:|privateKeyBase64:|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' "${PRODUCER_RENDER}"; then
   echo "producer chart must not render GitHub App private key material" >&2
   exit 1
@@ -430,9 +437,7 @@ require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" Deployment nvt-g
 require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" ConfigMap nvt-github-comments-producer producer-ns
 require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" PersistentVolumeClaim nvt-github-comments-producer-state producer-ns
 require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" ServiceAccount nvt-github-comments-producer producer-ns
-require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" Role nvt-github-comments-producer nvt
-require_resource_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" RoleBinding nvt-github-comments-producer nvt
-require_rolebinding_subject_namespace "${PRODUCER_CROSS_NAMESPACE_RENDER}" nvt-github-comments-producer producer-ns
 grep -q 'namespace: "nvt"' "${PRODUCER_CROSS_NAMESPACE_RENDER}"
+grep -q 'scheduleNamespace: "nvt"' "${PRODUCER_CROSS_NAMESPACE_RENDER}"
 
 echo "helm render test passed"

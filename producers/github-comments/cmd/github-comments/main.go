@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/mirkoSekulic/nvt-agent/producers/github-comments/internal/producer"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var errConfigPathRequired = errors.New("config path is required via --config or NVT_GITHUB_COMMENTS_CONFIG")
@@ -50,15 +51,18 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("create GitHub App token source: %w", err)
 	}
 	githubClient := producer.NewGitHubAPIClient(cfg.GitHubAPIBaseURL, cfg.UserAgent, tokenSource, httpClient)
-	k8sClient, err := producer.NewKubernetesClient(*kubeconfig)
-	if err != nil {
-		return fmt.Errorf("create Kubernetes client: %w", err)
+	var k8sClient ctrlclient.Client
+	if cfg.Submission.Mode == producer.SubmissionModeDirect {
+		k8sClient, err = producer.NewKubernetesClient(*kubeconfig)
+		if err != nil {
+			return fmt.Errorf("create Kubernetes client: %w", err)
+		}
 	}
 	stateStore, err := producer.OpenSQLiteStateStore(ctx, cfg.State.SQLitePath)
 	if err != nil {
 		return fmt.Errorf("open SQLite state: %w", err)
 	}
-	submitter := producer.NewAgentRunSubmitter(k8sClient, cfg)
+	submitter := producer.NewAgentRunSubmitterWithHTTP(k8sClient, httpClient, cfg)
 	poller := producer.NewPoller(cfg, githubClient, submitter, stateStore, slog.Default())
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	if err := poller.Run(ctx); err != nil && ctx.Err() == nil {

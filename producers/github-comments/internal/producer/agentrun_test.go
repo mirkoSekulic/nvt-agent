@@ -4,6 +4,9 @@ package producer
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -63,6 +66,117 @@ func TestSubmitBlocksExistingIdempotencyKeyRegardlessOfPhase(t *testing.T) {
 	}
 	if gotKey != key {
 		t.Fatalf("got key %q want %q", gotKey, key)
+	}
+}
+
+func TestSubmitScheduleAdmissionPostsAdmissionRequest(t *testing.T) {
+	var gotRequest scheduleAdmissionRequest
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/schedules/nvt/default/admissions" {
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		if err := json.NewDecoder(request.Body).Decode(&gotRequest); err != nil {
+			t.Fatal(err)
+		}
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true,"agentRun":{"namespace":"nvt","name":"run-1"}}`))
+	}))
+	defer server.Close()
+
+	submitter := NewAgentRunSubmitterWithHTTP(nil, server.Client(), Config{
+		Submission: SubmissionConfig{
+			Mode:             SubmissionModeScheduleAdmission,
+			AdmissionBaseURL: server.URL,
+			ScheduleName:     "default",
+		},
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+		},
+	})
+	created, key, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "Broken widget", HTMLURL: "https://github.test/acme/widget/issues/7"},
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr create", User: GitHubUser{Login: "alice"}},
+		Command{Prefix: "/nvtagent"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("expected scheduled admission to be created")
+	}
+	if gotRequest.Work.ID != key || gotRequest.Work.Title != "Broken widget" ||
+		gotRequest.Work.URL != "https://github.test/acme/widget/issues/7" {
+		t.Fatalf("unexpected work payload: %#v key=%q", gotRequest.Work, key)
+	}
+	if gotRequest.AgentRun.Name == "" || gotRequest.AgentRun.Spec.Prompt == nil {
+		t.Fatalf("expected AgentRun payload with name and prompt, got %#v", gotRequest.AgentRun)
+	}
+	if gotRequest.AgentRun.Annotations[RequestedByAnnotation] != "alice" {
+		t.Fatalf("requested-by annotation = %#v", gotRequest.AgentRun.Annotations)
+	}
+	if _, ok := gotRequest.AgentRun.Annotations[AccessKeyAnnotation]; ok {
+		t.Fatalf("producer should not send access key annotation: %#v", gotRequest.AgentRun.Annotations)
+	}
+}
+
+func TestSubmitScheduleAdmissionDuplicateWorkIsNoOpSuccess(t *testing.T) {
+	submitter := scheduleAdmissionSubmitterForStatus(t, http.StatusAccepted, `{"scheduled":false,"reason":"duplicate-work"}`)
+	created, key, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "Broken widget"},
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr create", User: GitHubUser{Login: "alice"}},
+		Command{Prefix: "/nvtagent"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || key == "" {
+		t.Fatalf("created=%v key=%q, want no-op success with key", created, key)
+	}
+}
+
+func TestSubmitScheduleAdmissionMaxParallelismIsDeferred(t *testing.T) {
+	submitter := scheduleAdmissionSubmitterForStatus(t, http.StatusTooManyRequests, `{"scheduled":false,"reason":"max-parallelism-reached"}`)
+	created, key, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "Broken widget"},
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr create", User: GitHubUser{Login: "alice"}},
+		Command{Prefix: "/nvtagent"},
+	)
+	if !errors.Is(err, ErrSubmissionDeferred) {
+		t.Fatalf("err = %v, want ErrSubmissionDeferred", err)
+	}
+	if created || key == "" {
+		t.Fatalf("created=%v key=%q, want deferred with key", created, key)
+	}
+}
+
+func TestSubmitScheduleAdmissionSuspendedIsDeferred(t *testing.T) {
+	submitter := scheduleAdmissionSubmitterForStatus(t, http.StatusAccepted, `{"scheduled":false,"reason":"schedule-suspended"}`)
+	created, key, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "Broken widget"},
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr create", User: GitHubUser{Login: "alice"}},
+		Command{Prefix: "/nvtagent"},
+	)
+	if !errors.Is(err, ErrSubmissionDeferred) {
+		t.Fatalf("err = %v, want ErrSubmissionDeferred", err)
+	}
+	if created || key == "" {
+		t.Fatalf("created=%v key=%q, want deferred with key", created, key)
 	}
 }
 
@@ -204,7 +318,7 @@ func TestBuildAgentRunSetsGitHubPRLifecycle(t *testing.T) {
 	}
 }
 
-func TestBuildAgentRunSetsAccessMetadataAnnotations(t *testing.T) {
+func TestBuildAgentRunSetsRequesterAnnotation(t *testing.T) {
 	run := buildTestAgentRun(t, Config{
 		AgentRun: AgentRunConfig{
 			Namespace:       "nvt",
@@ -214,17 +328,13 @@ func TestBuildAgentRunSetsAccessMetadataAnnotations(t *testing.T) {
 			WorkspaceMode:   "Ephemeral",
 		},
 	})
-	if run.Annotations[AccessKeyAnnotation] != run.Name {
-		t.Fatalf("access key = %q, want AgentRun name %q", run.Annotations[AccessKeyAnnotation], run.Name)
-	}
-	if run.Annotations[DisplayNameAnnotation] != "Issue #7 - PR create" {
-		t.Fatalf("display name = %q", run.Annotations[DisplayNameAnnotation])
-	}
 	if run.Annotations[RequestedByAnnotation] != "alice" {
 		t.Fatalf("requested by = %q", run.Annotations[RequestedByAnnotation])
 	}
-	if run.Annotations[AccessPortAnnotation] != "4090" {
-		t.Fatalf("access port = %q", run.Annotations[AccessPortAnnotation])
+	for _, annotation := range []string{AccessKeyAnnotation, DisplayNameAnnotation, SourceURLAnnotation, AccessPortAnnotation} {
+		if _, ok := run.Annotations[annotation]; ok {
+			t.Fatalf("producer should not set %s: %#v", annotation, run.Annotations)
+		}
 	}
 }
 
@@ -396,6 +506,29 @@ func buildTestAgentRun(t *testing.T, cfg Config) *nvtv1alpha1.AgentRun {
 		t.Fatal(err)
 	}
 	return run
+}
+
+func scheduleAdmissionSubmitterForStatus(t *testing.T, status int, body string) AgentRunSubmitter {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(status)
+		_, _ = response.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return NewAgentRunSubmitterWithHTTP(nil, server.Client(), Config{
+		Submission: SubmissionConfig{
+			Mode:             SubmissionModeScheduleAdmission,
+			AdmissionBaseURL: server.URL,
+			ScheduleName:     "default",
+		},
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+		},
+	})
 }
 
 func getAgentRun(t *testing.T, client ctrlclient.Client, namespace, name string) *nvtv1alpha1.AgentRun {

@@ -2,14 +2,18 @@
 package producer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -20,8 +24,9 @@ import (
 )
 
 type AgentRunSubmitter struct {
-	client ctrlclient.Client
-	config Config
+	client     ctrlclient.Client
+	httpClient *http.Client
+	config     Config
 }
 
 type agentRunIdentity struct {
@@ -30,7 +35,14 @@ type agentRunIdentity struct {
 }
 
 func NewAgentRunSubmitter(k8sClient ctrlclient.Client, cfg Config) AgentRunSubmitter {
-	return AgentRunSubmitter{client: k8sClient, config: cfg}
+	return AgentRunSubmitter{client: k8sClient, httpClient: http.DefaultClient, config: cfg}
+}
+
+func NewAgentRunSubmitterWithHTTP(k8sClient ctrlclient.Client, httpClient *http.Client, cfg Config) AgentRunSubmitter {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	return AgentRunSubmitter{client: k8sClient, httpClient: httpClient, config: cfg}
 }
 
 func NewKubernetesClient(kubeconfig string) (ctrlclient.Client, error) {
@@ -74,6 +86,23 @@ func (s AgentRunSubmitter) Submit(
 	command Command,
 ) (bool, string, error) {
 	identity := s.agentRunIdentity(repo, issue, commandComment)
+	if s.submissionMode() == SubmissionModeScheduleAdmission {
+		return s.submitScheduleAdmission(ctx, repo, issue, comments, commandComment, command, identity)
+	}
+	return s.submitDirect(ctx, repo, issue, comments, commandComment, command, identity)
+}
+
+var ErrSubmissionDeferred = errors.New("submission deferred")
+
+func (s AgentRunSubmitter) submitDirect(
+	ctx context.Context,
+	repo Repository,
+	issue GitHubIssue,
+	comments []GitHubIssueComment,
+	commandComment GitHubIssueComment,
+	command Command,
+	identity agentRunIdentity,
+) (bool, string, error) {
 	existing, err := s.hasExistingIdempotencyKey(ctx, identity.Key)
 	if err != nil {
 		return false, "", err
@@ -86,12 +115,103 @@ func (s AgentRunSubmitter) Submit(
 		return false, "", err
 	}
 	if err := s.client.Create(ctx, run); err != nil {
-		if errors.IsAlreadyExists(err) {
+		if apierrors.IsAlreadyExists(err) {
 			return false, identity.Key, nil
 		}
 		return false, "", fmt.Errorf("create AgentRun: %w", err)
 	}
 	return true, identity.Key, nil
+}
+
+type scheduleAdmissionRequest struct {
+	Work     scheduleAdmissionWork `json:"work"`
+	AgentRun nvtv1alpha1.AgentRun  `json:"agentRun"`
+}
+
+type scheduleAdmissionWork struct {
+	ID    string `json:"id"`
+	Title string `json:"title,omitempty"`
+	URL   string `json:"url,omitempty"`
+}
+
+type scheduleAdmissionResponse struct {
+	Scheduled bool                       `json:"scheduled"`
+	Reason    string                     `json:"reason,omitempty"`
+	AgentRun  *scheduleAdmissionAgentRun `json:"agentRun,omitempty"`
+}
+
+type scheduleAdmissionAgentRun struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+func (s AgentRunSubmitter) submitScheduleAdmission(
+	ctx context.Context,
+	repo Repository,
+	issue GitHubIssue,
+	comments []GitHubIssueComment,
+	commandComment GitHubIssueComment,
+	command Command,
+	identity agentRunIdentity,
+) (bool, string, error) {
+	run, err := s.buildAgentRun(repo, issue, comments, commandComment, command, identity)
+	if err != nil {
+		return false, "", err
+	}
+	payload := scheduleAdmissionRequest{
+		Work: scheduleAdmissionWork{
+			ID:    identity.Key,
+			Title: issue.Title,
+			URL:   sourceURLForCommand(issue, commandComment),
+		},
+		AgentRun: *run,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return false, "", fmt.Errorf("marshal schedule admission: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.scheduleAdmissionURL(), bytes.NewReader(body))
+	if err != nil {
+		return false, "", fmt.Errorf("build schedule admission request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return false, "", fmt.Errorf("post schedule admission: %w", err)
+	}
+	defer response.Body.Close()
+
+	var decoded scheduleAdmissionResponse
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		return false, "", fmt.Errorf("decode schedule admission response: %w", err)
+	}
+	switch response.StatusCode {
+	case http.StatusCreated:
+		if !decoded.Scheduled {
+			return false, "", fmt.Errorf("schedule admission returned 201 without scheduled=true")
+		}
+		return true, identity.Key, nil
+	case http.StatusAccepted:
+		if decoded.Scheduled {
+			return true, identity.Key, nil
+		}
+		switch decoded.Reason {
+		case "duplicate-work":
+			return false, identity.Key, nil
+		case "schedule-suspended":
+			return false, identity.Key, ErrSubmissionDeferred
+		default:
+			return false, "", fmt.Errorf("schedule admission returned 202 with unsupported reason %q", decoded.Reason)
+		}
+	case http.StatusTooManyRequests:
+		if decoded.Reason == "max-parallelism-reached" {
+			return false, identity.Key, ErrSubmissionDeferred
+		}
+		return false, "", fmt.Errorf("schedule admission rejected with 429 reason %q", decoded.Reason)
+	default:
+		return false, "", fmt.Errorf("schedule admission failed with HTTP %d reason %q", response.StatusCode, decoded.Reason)
+	}
 }
 
 func (s AgentRunSubmitter) hasExistingIdempotencyKey(ctx context.Context, key string) (bool, error) {
@@ -169,11 +289,7 @@ func (s AgentRunSubmitter) buildAgentRun(
 			Name:      identity.Name,
 			Annotations: map[string]string{
 				IdempotencyAnnotation: identity.Key,
-				AccessKeyAnnotation:   identity.Name,
-				DisplayNameAnnotation: displayNameForCommand(issue),
-				SourceURLAnnotation:   sourceURLForCommand(issue, commandComment),
 				RequestedByAnnotation: commandComment.User.Login,
-				AccessPortAnnotation:  "4090",
 			},
 		},
 		Spec: nvtv1alpha1.AgentRunSpec{
@@ -220,15 +336,35 @@ func (s AgentRunSubmitter) buildAgentRun(
 	return run, nil
 }
 
-func displayNameForCommand(issue GitHubIssue) string {
-	return fmt.Sprintf("Issue #%d - PR create", issue.Number)
+func (s AgentRunSubmitter) submissionMode() SubmissionMode {
+	if s.config.Submission.Mode == "" {
+		return SubmissionModeDirect
+	}
+	return s.config.Submission.Mode
+}
+
+func (s AgentRunSubmitter) scheduleAdmissionURL() string {
+	baseURL := s.config.Submission.AdmissionBaseURL
+	if baseURL == "" {
+		baseURL = defaultOperatorCallbackBaseURL
+	}
+	namespace := s.config.Submission.ScheduleNamespace
+	if namespace == "" {
+		namespace = s.config.AgentRun.Namespace
+	}
+	scheduleName := s.config.Submission.ScheduleName
+	if scheduleName == "" {
+		scheduleName = defaultScheduleName
+	}
+	return strings.TrimRight(baseURL, "/") +
+		"/v1/schedules/" + url.PathEscape(namespace) + "/" + url.PathEscape(scheduleName) + "/admissions"
 }
 
 func sourceURLForCommand(issue GitHubIssue, commandComment GitHubIssueComment) string {
-	if commandComment.HTMLURL != "" {
-		return commandComment.HTMLURL
+	if issue.HTMLURL != "" {
+		return issue.HTMLURL
 	}
-	return issue.HTMLURL
+	return commandComment.HTMLURL
 }
 
 func agentRunTTL(config AgentRunTTL) *nvtv1alpha1.AgentRunTTL {
