@@ -204,6 +204,30 @@ func TestBuildAgentRunSetsGitHubPRLifecycle(t *testing.T) {
 	}
 }
 
+func TestBuildAgentRunSetsAccessMetadataAnnotations(t *testing.T) {
+	run := buildTestAgentRun(t, Config{
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+		},
+	})
+	if run.Annotations[AccessKeyAnnotation] != run.Name {
+		t.Fatalf("access key = %q, want AgentRun name %q", run.Annotations[AccessKeyAnnotation], run.Name)
+	}
+	if run.Annotations[DisplayNameAnnotation] != "Issue #7 - PR create" {
+		t.Fatalf("display name = %q", run.Annotations[DisplayNameAnnotation])
+	}
+	if run.Annotations[RequestedByAnnotation] != "alice" {
+		t.Fatalf("requested by = %q", run.Annotations[RequestedByAnnotation])
+	}
+	if run.Annotations[AccessPortAnnotation] != "4090" {
+		t.Fatalf("access port = %q", run.Annotations[AccessPortAnnotation])
+	}
+}
+
 func TestBuildAgentRunSetsTTL(t *testing.T) {
 	activeDeadline := int64(14400)
 	completedTTL := int64(300)

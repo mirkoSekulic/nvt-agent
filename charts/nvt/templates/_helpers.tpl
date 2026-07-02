@@ -54,3 +54,15 @@ app.kubernetes.io/component: operator
 app.kubernetes.io/name: nvt-operator
 app.kubernetes.io/component: operator
 {{- end -}}
+
+{{- define "nvt.gatewayLabels" -}}
+{{ include "nvt.labels" . }}
+app.kubernetes.io/name: nvt-agent-gateway
+app.kubernetes.io/component: gateway
+{{- end -}}
+
+{{- define "nvt.gatewaySelectorLabels" -}}
+{{ include "nvt.selectorLabels" . }}
+app.kubernetes.io/name: nvt-agent-gateway
+app.kubernetes.io/component: gateway
+{{- end -}}

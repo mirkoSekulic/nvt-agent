@@ -1,0 +1,40 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nvt-agent-gateway
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.gatewayLabels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nvt-agent-gateway
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.gatewayLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["nvt.dev"]
+    resources: ["agentruns"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nvt-agent-gateway
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.gatewayLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nvt-agent-gateway
+subjects:
+  - kind: ServiceAccount
+    name: nvt-agent-gateway
+    namespace: {{ include "nvt.namespace" . | quote }}
+{{- end }}
