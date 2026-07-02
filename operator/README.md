@@ -107,7 +107,8 @@ Service to route to running code-server sessions by Host header:
 make gateway-kind-load
 helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace \
   --set gateway.enabled=true \
-  --set gateway.baseDomain=agents.localhost
+  --set gateway.baseDomain=agents.localhost \
+  --set gateway.auth.mode=none
 ```
 
 For the local kind setup target, set `OPERATOR_KIND_GATEWAY=1` to build and load
@@ -143,9 +144,43 @@ Open a specific session at:
 http://<access-key>.agents.localhost:4090/
 ```
 
-The gateway only implements `auth.mode=none` today. The config shape keeps auth
-pluggable for a future mode, but this v1 gateway must be treated as a trusted
-cluster-internal development route.
+With `gateway.auth.mode=none`, the dashboard and session routes are public to
+anyone who can reach the ClusterIP Service or local port-forward.
+
+The gateway can also protect the dashboard and session routes with generic OIDC
+Authorization Code + PKCE:
+
+```sh
+kubectl -n nvt create secret generic nvt-agent-gateway-session \
+  --from-literal=session-secret="$(openssl rand -base64 32)"
+
+kubectl -n nvt create secret generic nvt-agent-gateway-oidc \
+  --from-literal=client-secret='<oidc-client-secret>'
+
+helm upgrade --install nvt ./charts/nvt -n nvt --create-namespace \
+  --set gateway.enabled=true \
+  --set gateway.baseDomain=agents.altinn.studio \
+  --set gateway.publicURL=https://agents.altinn.studio \
+  --set gateway.auth.mode=oidc \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.session.cookieDomain=.agents.altinn.studio \
+  --set gateway.auth.oidc.issuerURL=https://issuer.example.test \
+  --set gateway.auth.oidc.clientID=nvt-agent-gateway \
+  --set gateway.auth.oidc.clientSecret.existingSecret=nvt-agent-gateway-oidc
+```
+
+Set `gateway.auth.session.cookieDomain` to the shared parent domain so the
+session cookie is sent to both the dashboard host and AgentRun subdomains. For
+local testing with `baseDomain=agents.localhost`, use
+`cookieDomain=.agents.localhost` when enabling OIDC, and set
+`gateway.auth.session.secure=false` only if you are testing through a plain HTTP
+port-forward. Set `gateway.publicURL` to the externally visible dashboard/base
+URL so OIDC uses one stable registered callback URL, for example
+`https://agents.altinn.studio/oauth2/callback`, even when the user originally
+opened an AgentRun subdomain. Provider-specific options such as Ansattporten
+`acr_values`, extra authorization parameters, or authorization details can be
+set through the generic `gateway.auth.oidc.*` values; the gateway code is not
+coupled to any one provider.
 
 The chart also supports rendering the Namespace object itself:
 

@@ -9,6 +9,8 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 
 DEFAULT_RENDER="${WORKDIR}/default.yaml"
 GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
+GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
+GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
 NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
@@ -24,6 +26,21 @@ PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true --set gateway.port=8091 > "${GATEWAY_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.publicURL=https://agents.altinn.studio \
+  --set gateway.auth.mode=oidc \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.session.cookieDomain=.agents.altinn.studio \
+  --set gateway.auth.oidc.issuerURL=https://issuer.example.test \
+  --set gateway.auth.oidc.clientID=nvt-agent-gateway \
+  --set gateway.auth.oidc.clientSecret.existingSecret=nvt-agent-gateway-oidc \
+  --set gateway.auth.oidc.callbackPath=/oauth2/custom-callback \
+  --set gateway.auth.oidc.acrValues=Level4 \
+  --set gateway.auth.oidc.validIssuer=https://issuer.example.test \
+  --set gateway.auth.oidc.extraAuthParams.prompt=login \
+  --set-string 'gateway.auth.oidc.authorizationDetails={"type":"openid_credential"}' \
+  > "${GATEWAY_OIDC_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
@@ -287,6 +304,39 @@ grep -q 'port: 8091' "${GATEWAY_RENDER}"
 grep -q 'nvt.dev' "${GATEWAY_RENDER}"
 grep -q 'agentruns' "${GATEWAY_RENDER}"
 grep -q 'pods' "${GATEWAY_RENDER}"
+grep -q 'name: NVT_GATEWAY_AUTH_MODE' "${GATEWAY_RENDER}"
+grep -q 'value: "none"' "${GATEWAY_RENDER}"
+if grep -q 'secretKeyRef:' "${GATEWAY_RENDER}"; then
+  echo "gateway auth.mode=none must not render auth Secret refs" >&2
+  exit 1
+fi
+
+grep -q 'name: NVT_GATEWAY_AUTH_MODE' "${GATEWAY_OIDC_RENDER}"
+grep -q 'value: "oidc"' "${GATEWAY_OIDC_RENDER}"
+grep -q 'name: "nvt-agent-gateway-session"' "${GATEWAY_OIDC_RENDER}"
+grep -q 'key: "session-secret"' "${GATEWAY_OIDC_RENDER}"
+grep -q 'name: "nvt-agent-gateway-oidc"' "${GATEWAY_OIDC_RENDER}"
+grep -q 'key: "client-secret"' "${GATEWAY_OIDC_RENDER}"
+grep -q 'name: NVT_GATEWAY_SESSION_COOKIE_DOMAIN' "${GATEWAY_OIDC_RENDER}"
+grep -q 'value: ".agents.altinn.studio"' "${GATEWAY_OIDC_RENDER}"
+grep -q 'name: NVT_GATEWAY_OIDC_CALLBACK_PATH' "${GATEWAY_OIDC_RENDER}"
+grep -q 'value: "/oauth2/custom-callback"' "${GATEWAY_OIDC_RENDER}"
+grep -q 'name: NVT_GATEWAY_OIDC_EXTRA_AUTH_PARAMS' "${GATEWAY_OIDC_RENDER}"
+grep -q 'prompt' "${GATEWAY_OIDC_RENDER}"
+grep -q 'name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS' "${GATEWAY_OIDC_RENDER}"
+grep -q 'openid_credential' "${GATEWAY_OIDC_RENDER}"
+grep -q -- '--public-url=https://agents.altinn.studio' "${GATEWAY_OIDC_RENDER}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=oidc \
+  --set gateway.auth.oidc.issuerURL=https://issuer.example.test \
+  --set gateway.auth.oidc.clientID=nvt-agent-gateway \
+  > /dev/null 2> "${GATEWAY_OIDC_MISSING_SECRET_FAILURE}"; then
+  echo "expected gateway oidc missing Secret config to fail rendering" >&2
+  exit 1
+fi
+grep -q "gateway.auth.session.existingSecret is required when gateway.auth.mode=oidc" "${GATEWAY_OIDC_MISSING_SECRET_FAILURE}"
 
 require_file "${CHART}/crds/nvt.dev_agentruns.yaml"
 require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"
