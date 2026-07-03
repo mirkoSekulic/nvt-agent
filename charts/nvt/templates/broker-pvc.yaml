@@ -1,0 +1,18 @@
+{{- if and .Values.broker.enabled .Values.broker.persistence.enabled (not .Values.broker.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nvt-broker-state
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.brokerLabels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.broker.persistence.size | quote }}
+  {{- if .Values.broker.persistence.storageClassName }}
+  storageClassName: {{ .Values.broker.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}

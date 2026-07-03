@@ -9,6 +9,13 @@ broker:
   enabled: true
   image: nvt-broker:latest
   envSecretName: ""
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClassName: ""
+    existingClaim: ""
+    seedSecretName: ""
+    seedTargetDir: codex
   config:
     providers: []
   agents:

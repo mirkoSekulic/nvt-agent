@@ -1,4 +1,7 @@
 {{- if .Values.broker.enabled }}
+{{- if and .Values.broker.persistence.seedSecretName (not .Values.broker.persistence.enabled) }}
+{{- fail "broker.persistence.seedSecretName requires broker.persistence.enabled=true" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +10,10 @@ metadata:
   labels:
     {{- include "nvt.brokerLabels" . | nindent 4 }}
 spec:
+  # nvt-broker is a single writer for provider state under /state; do not scale.
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "nvt.brokerSelectorLabels" . | nindent 6 }}
@@ -16,6 +22,32 @@ spec:
       labels:
         {{- include "nvt.brokerSelectorLabels" . | nindent 8 }}
     spec:
+      {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
+      initContainers:
+        - name: seed-broker-state
+          image: {{ .Values.broker.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              target="/state/{{ .Values.broker.persistence.seedTargetDir }}"
+              if [ -d "${target}" ] && [ -n "$(find "${target}" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+                echo "broker state seed target already exists and is non-empty; leaving existing state unchanged"
+                exit 0
+              fi
+              mkdir -p "${target}"
+              for path in /seed/*; do
+                [ -e "${path}" ] || continue
+                cp -p "${path}" "${target}/$(basename "${path}")"
+              done
+          volumeMounts:
+            - name: broker-state
+              mountPath: /state
+            - name: broker-state-seed
+              mountPath: /seed
+              readOnly: true
+      {{- end }}
       containers:
         - name: broker
           image: {{ .Values.broker.image | quote }}
@@ -58,5 +90,15 @@ spec:
                     - key: agents.yaml
                       path: agents.yaml
         - name: broker-state
+          {{- if .Values.broker.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default "nvt-broker-state" .Values.broker.persistence.existingClaim | quote }}
+          {{- else }}
           emptyDir: {}
+          {{- end }}
+        {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
+        - name: broker-state-seed
+          secret:
+            secretName: {{ .Values.broker.persistence.seedSecretName | quote }}
+        {{- end }}
 {{- end }}

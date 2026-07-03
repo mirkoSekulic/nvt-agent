@@ -13,6 +13,10 @@ GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
+BROKER_PERSISTENCE_RENDER="${WORKDIR}/broker-persistence.yaml"
+BROKER_EXISTING_CLAIM_RENDER="${WORKDIR}/broker-existing-claim.yaml"
+BROKER_SEED_RENDER="${WORKDIR}/broker-seed.yaml"
+BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE="${WORKDIR}/broker-seed-without-persistence-failure.txt"
 NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
@@ -44,6 +48,20 @@ helm template nvt "${CHART}" -n custom-ns \
   > "${GATEWAY_OIDC_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set broker.persistence.enabled=true \
+  --set broker.persistence.size=2Gi \
+  --set broker.persistence.storageClassName=fast-state \
+  > "${BROKER_PERSISTENCE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set broker.persistence.enabled=true \
+  --set broker.persistence.existingClaim=existing-broker-state \
+  > "${BROKER_EXISTING_CLAIM_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set broker.persistence.enabled=true \
+  --set broker.persistence.seedSecretName=codex-auth \
+  --set broker.persistence.seedTargetDir=codex \
+  > "${BROKER_SEED_RENDER}"
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns > "${PRODUCER_RENDER}"
@@ -193,6 +211,73 @@ require_resource_namespace() {
   }
 }
 
+require_deployment_strategy() {
+  local file="$1"
+  local name="$2"
+  local strategy="$3"
+
+  awk -v want_name="${name}" -v want_strategy="${strategy}" '
+    function reset_doc() {
+      kind = ""
+      name = ""
+      in_metadata = 0
+      in_strategy = 0
+      strategy = ""
+    }
+    function check_doc() {
+      if (kind == "Deployment" && name == want_name && strategy == want_strategy) {
+        found = 1
+      }
+    }
+    BEGIN {
+      reset_doc()
+    }
+    /^---[[:space:]]*$/ {
+      check_doc()
+      reset_doc()
+      next
+    }
+    /^kind:[[:space:]]*/ {
+      kind = $2
+      next
+    }
+    /^metadata:[[:space:]]*$/ {
+      in_metadata = 1
+      next
+    }
+    in_metadata && /^[[:space:]]{2}name:[[:space:]]*/ {
+      name = $2
+      gsub(/^"|"$/, "", name)
+      next
+    }
+    /^spec:[[:space:]]*$/ && kind == "Deployment" {
+      in_metadata = 0
+      next
+    }
+    /^[[:space:]]{2}strategy:[[:space:]]*$/ && kind == "Deployment" {
+      in_strategy = 1
+      next
+    }
+    in_strategy && /^[[:space:]]{4}type:[[:space:]]*/ {
+      strategy = $2
+      gsub(/^"|"$/, "", strategy)
+      in_strategy = 0
+      next
+    }
+    /^[^[:space:]]/ && $0 !~ /^(metadata|spec):/ {
+      in_metadata = 0
+      in_strategy = 0
+    }
+    END {
+      check_doc()
+      exit(found ? 0 : 1)
+    }
+  ' "${file}" || {
+    echo "missing Deployment/${name} strategy type ${strategy} in ${file}" >&2
+    exit 1
+  }
+}
+
 require_file() {
   local file="$1"
 
@@ -271,6 +356,7 @@ require_resource_namespace "${DEFAULT_RENDER}" Deployment nvt-broker custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" Service nvt-broker custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-config custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-agents custom-ns
+require_deployment_strategy "${DEFAULT_RENDER}" nvt-broker Recreate
 
 require_resource "${DEFAULT_RENDER}" Deployment nvt-operator
 require_resource "${DEFAULT_RENDER}" ServiceAccount nvt-operator
@@ -363,6 +449,37 @@ if grep -Eq '^kind:[[:space:]]*Secret$' "${BROKER_SECRET_RENDER}"; then
 fi
 grep -q 'secretRef:' "${BROKER_SECRET_RENDER}"
 grep -q 'name: "nvt-broker-env"' "${BROKER_SECRET_RENDER}"
+
+missing_resource "${DEFAULT_RENDER}" PersistentVolumeClaim nvt-broker-state
+grep -q 'emptyDir: {}' "${DEFAULT_RENDER}"
+
+require_resource "${BROKER_PERSISTENCE_RENDER}" PersistentVolumeClaim nvt-broker-state
+require_resource_namespace "${BROKER_PERSISTENCE_RENDER}" PersistentVolumeClaim nvt-broker-state custom-ns
+grep -q 'claimName: "nvt-broker-state"' "${BROKER_PERSISTENCE_RENDER}"
+grep -q 'storage: "2Gi"' "${BROKER_PERSISTENCE_RENDER}"
+grep -q 'storageClassName: "fast-state"' "${BROKER_PERSISTENCE_RENDER}"
+if grep -q 'emptyDir: {}' "${BROKER_PERSISTENCE_RENDER}"; then
+  echo "broker persistence must not render emptyDir" >&2
+  exit 1
+fi
+
+missing_resource "${BROKER_EXISTING_CLAIM_RENDER}" PersistentVolumeClaim nvt-broker-state
+grep -q 'claimName: "existing-broker-state"' "${BROKER_EXISTING_CLAIM_RENDER}"
+
+require_resource "${BROKER_SEED_RENDER}" PersistentVolumeClaim nvt-broker-state
+grep -q 'name: seed-broker-state' "${BROKER_SEED_RENDER}"
+grep -q 'secretName: "codex-auth"' "${BROKER_SEED_RENDER}"
+grep -q 'target="/state/codex"' "${BROKER_SEED_RENDER}"
+grep -q 'already exists and is non-empty; leaving existing state unchanged' "${BROKER_SEED_RENDER}"
+grep -q 'cp -p "${path}" "${target}/$(basename "${path}")"' "${BROKER_SEED_RENDER}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  --set broker.persistence.seedSecretName=codex-auth \
+  > /dev/null 2> "${BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE}"; then
+  echo "expected broker persistence seed without persistence to fail rendering" >&2
+  exit 1
+fi
+grep -q "broker.persistence.seedSecretName requires broker.persistence.enabled=true" "${BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE}"
 
 require_resource_namespace "${NAMESPACE_OVERRIDE_RENDER}" Deployment nvt-operator nvt
 require_resource_namespace "${NAMESPACE_OVERRIDE_RENDER}" AgentSchedule default nvt
