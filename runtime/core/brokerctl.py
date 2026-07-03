@@ -95,6 +95,13 @@ def command_headers(args):
     return 0 if response.get("ok") else 1
 
 
+def command_files(args):
+    payload = {"provider": args.provider}
+    response, _status = request_json("/v1/files", payload)
+    print_json(response)
+    return 0 if response.get("ok") else 1
+
+
 def main():
     parser = argparse.ArgumentParser(prog="brokerctl")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -129,6 +136,10 @@ def main():
     headers.add_argument("--target", required=True)
     headers.add_argument("--raw", action="store_true")
     headers.set_defaults(func=command_headers)
+
+    files = subparsers.add_parser("files")
+    files.add_argument("--provider", required=True)
+    files.set_defaults(func=command_files)
 
     args = parser.parse_args()
     raise SystemExit(args.func(args))

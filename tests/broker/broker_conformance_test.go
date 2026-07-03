@@ -29,6 +29,72 @@ type fakeGitHub struct {
 	userRequests  int
 }
 
+type fakeOAuth struct {
+	server   *httptest.Server
+	mu       sync.Mutex
+	fail     bool
+	requests []map[string]string
+}
+
+func newFakeOAuth(t *testing.T) *fakeOAuth {
+	t.Helper()
+	fake := &fakeOAuth{}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.handleToken))
+	t.Cleanup(fake.server.Close)
+	return fake
+}
+
+func (f *fakeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	request := map[string]string{
+		"grant_type":    r.Form.Get("grant_type"),
+		"client_id":     r.Form.Get("client_id"),
+		"refresh_token": r.Form.Get("refresh_token"),
+	}
+	f.requests = append(f.requests, request)
+	count := len(f.requests)
+	fail := f.fail
+	f.mu.Unlock()
+	if fail {
+		http.Error(w, "refresh failed", http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"access_token":  testJWT(time.Now().Add(time.Hour)),
+		"refresh_token": fmt.Sprintf("real-refresh-%d", count+1),
+		"id_token":      fmt.Sprintf("id-token-%d", count),
+	})
+}
+
+func (f *fakeOAuth) setFail(value bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = value
+}
+
+func (f *fakeOAuth) requestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
+func (f *fakeOAuth) lastRequest() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) == 0 {
+		return nil
+	}
+	return f.requests[len(f.requests)-1]
+}
+
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
 	fake := &fakeGitHub{}
@@ -165,9 +231,12 @@ type brokerFixture struct {
 	agents string
 	broker *exec.Cmd
 	fake   *fakeGitHub
+	oauth  *fakeOAuth
 	keyPEM string
 	config string
 	token  string
+	auth   string
+	extra  string
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 }
@@ -175,6 +244,7 @@ type brokerFixture struct {
 func newBrokerFixture(t *testing.T) *brokerFixture {
 	t.Helper()
 	fake := newFakeGitHub(t)
+	oauth := newFakeOAuth(t)
 	home := t.TempDir()
 	keyPEM := generateRSAKey(t)
 	port := freePort(t)
@@ -187,15 +257,23 @@ func newBrokerFixture(t *testing.T) *brokerFixture {
 		audit:  filepath.Join(home, "audit.jsonl"),
 		agents: filepath.Join(home, "agents.yaml"),
 		fake:   fake,
+		oauth:  oauth,
 		keyPEM: keyPEM,
 		token:  "frontend-token",
+		auth:   filepath.Join(home, "auth.json"),
+		extra:  filepath.Join(home, "config.toml"),
+	}
+	f.writeCodexAuth(testJWT(time.Now().Add(time.Hour)), "real-refresh-1")
+	if err := os.WriteFile(f.extra, []byte("model = \"gpt-5\"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	f.config = f.writeConfig([]string{"my-user/my-repo", "my-user/other-repo"}, "", 0, 0)
 	f.writeAgents(map[string]agentGrant{
 		"frontend": {
 			Token: f.token,
 			Grants: map[string][]string{
-				"fork-app": {"my-user/my-repo", "my-user/other-repo"},
+				"fork-app":   {"my-user/my-repo", "my-user/other-repo"},
+				"codex-main": {},
 			},
 		},
 	})
@@ -265,12 +343,35 @@ providers:
     allow:
       repositories:
         - altinn.studio/repos/digdir/oed
-`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods)
+  - name: codex-main
+    plugin: codex-oauth
+    config:
+      auth-file: %q
+      token-url: %q
+      client-id: test-client
+      refresh-margin-seconds: 600
+      stub-refresh-token: nvt-broker-stub
+      extra-files:
+        - name: config.toml
+          path: %q
+`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.auth, f.oauth.server.URL, f.extra)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)
 	}
 	return path
+}
+
+func (f *brokerFixture) writeCodexAuth(accessToken, refreshToken string) {
+	f.t.Helper()
+	writeJSONFile(f.t, f.auth, map[string]any{
+		"tokens": map[string]any{
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
+			"id_token":      "initial-id-token",
+		},
+		"last_refresh": "2026-01-01T00:00:00Z",
+	})
 }
 
 func (f *brokerFixture) start() {
@@ -747,6 +848,102 @@ func TestIdentityDeniedOutsideAgentGrant(t *testing.T) {
 	}
 }
 
+func TestCodexOAuthFilesVendStubsRefreshTokenAndExtraFiles(t *testing.T) {
+	f := newBrokerFixture(t)
+	payload, output, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("files failed: status=%d payload=%#v", status, payload)
+	}
+	if strings.Contains(output, "real-refresh-1") {
+		t.Fatalf("real refresh token appeared in response body")
+	}
+	files := payload["files"].([]any)
+	if len(files) != 2 {
+		t.Fatalf("expected auth.json plus extra file, got %#v", files)
+	}
+	authFile := files[0].(map[string]any)
+	if authFile["name"] != "auth.json" || authFile["mode"] != "0600" {
+		t.Fatalf("unexpected auth file metadata: %#v", authFile)
+	}
+	var auth map[string]any
+	if err := json.Unmarshal([]byte(authFile["content"].(string)), &auth); err != nil {
+		t.Fatal(err)
+	}
+	tokens := auth["tokens"].(map[string]any)
+	if tokens["refresh_token"] != "nvt-broker-stub" {
+		t.Fatalf("expected stub refresh token, got %#v", tokens["refresh_token"])
+	}
+	if tokens["access_token"] == "" || payload["expires_at"] == "" {
+		t.Fatalf("expected access token and expiry, payload=%#v auth=%#v", payload, auth)
+	}
+	extra := files[1].(map[string]any)
+	if extra["name"] != "config.toml" || extra["content"] != "model = \"gpt-5\"\n" {
+		t.Fatalf("unexpected extra file: %#v", extra)
+	}
+}
+
+func TestCodexOAuthRefreshPersistsRotatedTokenAndAudits(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeCodexAuth(testJWT(time.Now().Add(2*time.Minute)), "real-refresh-1")
+	payload, output, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("files failed: status=%d payload=%#v output=%s", status, payload, output)
+	}
+	if strings.Contains(output, "real-refresh-1") || strings.Contains(output, "real-refresh-2") {
+		t.Fatalf("real refresh token appeared in response body")
+	}
+	if count := f.oauth.requestCount(); count != 1 {
+		t.Fatalf("expected one refresh request, got %d", count)
+	}
+	request := f.oauth.lastRequest()
+	if request["grant_type"] != "refresh_token" || request["client_id"] != "test-client" || request["refresh_token"] != "real-refresh-1" {
+		t.Fatalf("unexpected refresh request metadata: %#v", request)
+	}
+	var canonical map[string]any
+	decodeJSONFile(t, f.auth, &canonical)
+	tokens := canonical["tokens"].(map[string]any)
+	if tokens["refresh_token"] != "real-refresh-2" || tokens["id_token"] != "id-token-1" {
+		t.Fatalf("canonical auth was not rotated: %#v", tokens)
+	}
+	payload, _, status = f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("second files failed: status=%d payload=%#v", status, payload)
+	}
+	if count := f.oauth.requestCount(); count != 1 {
+		t.Fatalf("expected refreshed access token to be reused, got %d refreshes", count)
+	}
+	events := readAudit(t, f.audit)
+	if !hasAuditOperation(events, "files.vend") || !hasAuditOperation(events, "files.refresh") {
+		t.Fatalf("expected vend and refresh audit entries, got %#v", events)
+	}
+}
+
+func TestCodexOAuthRefreshFailureServesValidButRejectsExpired(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.oauth.setFail(true)
+	f.writeCodexAuth(testJWT(time.Now().Add(2*time.Minute)), "real-refresh-1")
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("expected valid current token to be served, status=%d payload=%#v", status, payload)
+	}
+	f.writeCodexAuth(testJWT(time.Now().Add(-time.Minute)), "real-refresh-1")
+	payload, _, status = f.brokerctl("files", "--provider", "codex-main")
+	if status == 0 || payload["error"] != "token-refresh-failed" {
+		t.Fatalf("expected expired token refresh failure, status=%d payload=%#v", status, payload)
+	}
+}
+
+func TestCodexOAuthFilesRequireProviderGrant(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {Token: f.token, Grants: map[string][]string{}},
+	})
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status == 0 || payload["error"] != "provider-not-granted" {
+		t.Fatalf("expected provider-not-granted, status=%d payload=%#v", status, payload)
+	}
+}
+
 func TestAgentsConfigReloadKeepsLastGoodOnFailure(t *testing.T) {
 	f := newBrokerFixture(t)
 	payload, _, status := f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
@@ -819,6 +1016,66 @@ func TestAuditRecordsAllowedAndDenied(t *testing.T) {
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeJSONFile(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func decodeJSONFile(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testJWT(exp time.Time) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload, _ := json.Marshal(map[string]any{"exp": exp.Unix()})
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+func readAudit(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var events []map[string]any
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func hasAuditOperation(events []map[string]any, operation string) bool {
+	for _, event := range events {
+		if event["operation"] == operation && event["allowed"] == true {
+			return true
+		}
+	}
+	return false
 }
 
 func generateRSAKey(t *testing.T) string {

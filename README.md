@@ -631,6 +631,56 @@ agent container and put grants/audit in the broker, but Git token/header flows
 still return credentials to the agent. GitHub App remains the stronger Git path
 because broker-minted installation tokens are short-lived and repo-scoped.
 
+Codex ChatGPT-plan OAuth can use the broker as the single refresh-token writer.
+Configure the broker with the canonical read-write `auth.json`; agents receive
+a file bundle whose `auth.json` contains a valid access token and a stub refresh
+token:
+
+```yaml
+providers:
+  - name: codex-main
+    plugin: codex-oauth
+    config:
+      auth-file: /broker-secrets/codex/auth.json
+      token-url: https://auth.openai.com/oauth/token
+      client-id: app_EMoamEEZ73f0CkXaXp7hrann
+      refresh-margin-seconds: 600
+      stub-refresh-token: nvt-broker-stub
+      extra-files:
+        - name: config.toml
+          path: /broker-secrets/codex/config.toml
+```
+
+Grant the provider by name; repositories do not apply to file bundles:
+
+```yaml
+agents:
+  - id: frontend
+    token-sha256: sha256:<hash>
+    grants:
+      - provider: codex-main
+```
+
+Materialize the bundle before the agent starts:
+
+```yaml
+plugins:
+  - name: broker-auth-files
+    source: builtin
+    when: before-agent
+    restart: never
+    config:
+      bundles:
+        - provider: codex-main
+          target: /root/.codex
+          dir-mode: "0700"
+          file-mode: "0600"
+```
+
+The operator `runtimeAuth` Secret path documented in
+`operator/docs/kind-codex-auth.md` remains the local/dev fallback for Codex
+auth seeding; this broker path does not change the operator.
+
 `agent-init` registers each agent with an empty grant set by default. Grant a
 specific repo before the agent uses brokered credentials:
 
