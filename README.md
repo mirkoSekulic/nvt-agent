@@ -681,6 +681,18 @@ The operator `runtimeAuth` Secret path documented in
 `operator/docs/kind-codex-auth.md` remains the local/dev fallback for Codex
 auth seeding; this broker path does not change the operator.
 
+In Kubernetes, `codex-oauth` should run with persistent broker state because
+the broker-owned `/state/codex/auth.json` contains the current refresh-token
+lineage. Install order:
+
+1. Create the seed Secret with `make operator-codex-auth-secret`.
+2. Install or upgrade `charts/nvt` with `broker.persistence.enabled=true` and
+   `broker.persistence.seedSecretName=codex-auth`.
+3. Configure the provider `auth-file` as `/state/codex/auth.json`.
+
+The seed is copied only when the target state directory is absent or empty; do
+not re-apply an old seed Secret over live broker state after token rotation.
+
 `agent-init` registers each agent with an empty grant set by default. Grant a
 specific repo before the agent uses brokered credentials:
 
