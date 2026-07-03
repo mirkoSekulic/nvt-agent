@@ -64,6 +64,12 @@ class AgentRegistry:
             raise ProviderError("provider-not-granted")
         return repos
 
+    def ensure_provider_grant(self, agent, provider_name):
+        for grant in agent["grants"]:
+            if grant["provider"] == provider_name:
+                return
+        raise ProviderError("provider-not-granted")
+
     def _load_candidate(self):
         with self.path.open("r", encoding="utf-8") as file:
             data = yaml.safe_load(file) or {}

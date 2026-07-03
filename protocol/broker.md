@@ -142,6 +142,59 @@ the agent's Git config by `git-credentials`, so the agent can read them. The
 benefit over in-agent env secrets is central broker grants, audit, and keeping
 the original secret env vars out of the agent container.
 
+### POST /v1/files
+
+Returns a provider-vended UTF-8 file bundle.
+
+Request:
+
+```json
+{
+  "provider": "codex-main"
+}
+```
+
+Requires `Authorization: Bearer ...`.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "files": [
+    {"name": "auth.json", "content": "{\"tokens\":{}}\n", "mode": "0600"}
+  ],
+  "expires_at": "2026-07-03T12:00:00Z"
+}
+```
+
+Rules:
+
+- `name` must be a plain relative filename: non-empty, no `/`, no `\`, and no
+  `..`.
+- `content` is a UTF-8 string. V1 does not use base64.
+- `mode` is optional per file, a four-digit octal string, and defaults to
+  `"0600"` when omitted.
+- `expires_at` is the UTC RFC3339 time when the bundle should be considered
+  stale. `null` means the bundle does not expire.
+- Authorization uses the same bearer-token agent identity as other capability
+  endpoints. File providers are default-deny: the authenticated agent must have
+  an explicit grant entry for the provider.
+- Repository grants do not apply to file providers. The minimal grant is a
+  grant object naming the provider with no repositories:
+
+```yaml
+agents:
+  - id: frontend
+    token-sha256: sha256:<hash>
+    grants:
+      - provider: codex-main
+```
+
+Unknown providers, missing grants, and provider failures use the same
+`{"ok":false,"error":"...","message":"..."}` error shape and status
+conventions as `/v1/token`.
+
 ### POST /v1/identity
 
 Returns commit identity metadata for a broker provider after applying the same
@@ -196,6 +249,37 @@ Provider `allow.repositories` is a ceiling. In local multi-agent mode, broker
 core intersects that ceiling with the authenticated agent grant and passes the
 effective repository scope into the provider per request. Empty grants and empty
 intersections deny.
+
+## Codex OAuth Provider Rules
+
+The `codex-oauth` provider is a file-bundle provider. It keeps the canonical
+Codex OAuth `auth.json` in the broker and vends a read-only working copy to
+agents:
+
+- the broker is the only writer for the real `tokens.refresh_token`
+- the vended `auth.json` always replaces `tokens.refresh_token` with a
+  configured stub value
+- the provider decodes the `access_token` JWT payload without signature
+  verification only to read `exp`
+- when the access token is within `refresh-margin-seconds` of expiry, the
+  provider refreshes with `grant_type=refresh_token`, the configured
+  `client-id`, and the current canonical refresh token
+- successful refresh updates `access_token`, rotated `refresh_token`,
+  optional `id_token`, and `last_refresh`, then atomically replaces the
+  canonical file
+- if refresh fails while the current access token is still valid, the provider
+  serves the current token and records metadata-only audit; if the token is
+  expired, the request fails
+- `expires_at` is the access token expiry
+- audit entries record provider, agent, operation, and expiry metadata only;
+  token values and file contents must never be logged
+
+Default Codex OAuth settings match the Codex CLI refresh flow:
+
+```yaml
+token-url: https://auth.openai.com/oauth/token
+client-id: app_EMoamEEZ73f0CkXaXp7hrann
+```
 
 ## Static Token And Header Providers
 

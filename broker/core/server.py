@@ -107,6 +107,25 @@ class Broker:
         )
         return {"ok": True, "headers": headers}
 
+    def files(self, request_id, payload, authorization):
+        agent = self.agents.authenticate(authorization)
+        provider_name = string_field(payload, "provider")
+        provider = self.provider(provider_name)
+        self.agents.ensure_provider_grant(agent, provider_name)
+        if not hasattr(provider, "files"):
+            raise ProviderError("files-not-supported", f"provider {provider_name} does not support file bundles")
+        files, expires_at = provider.files(agent["id"], self.audit, request_id)
+        self.audit.write(
+            request_id=request_id,
+            agent=agent["id"],
+            provider=provider_name,
+            operation="files",
+            allowed=True,
+            expires_at=expires_at,
+            file_count=len(files),
+        )
+        return {"ok": True, "files": files, "expires_at": expires_at}
+
     def denied(self, request_id, payload, reason, message=None, authorization=None):
         agent_id = None
         try:
@@ -163,6 +182,10 @@ def make_handler(broker):
                     return
                 if self.path == "/v1/headers":
                     response = broker.headers(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
+                if self.path == "/v1/files":
+                    response = broker.files(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 self.write_json(404, {"ok": False, "error": "not-found"})
