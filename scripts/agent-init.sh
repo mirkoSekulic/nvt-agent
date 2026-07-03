@@ -215,7 +215,7 @@ python3 "$script_dir/broker-agents.py" \
   --agents-file "$broker_agents_file" \
   register \
   --name "$name" \
-  --token "$broker_token"
+  --token="$broker_token"
 
 if [ ! -f "$agent_config_file" ]; then
   AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" render_template "$templates_dir/agent.yaml" "$agent_config_file"

@@ -56,3 +56,27 @@ assert isinstance(data, dict)
 assert isinstance(data.get("agents"), list)
 `, agentsFile)
 }
+
+func TestBrokerAgentsRegisterAcceptsLeadingDashTokenWithEqualsForm(t *testing.T) {
+	f := newFixture(t)
+	agentsFile := filepath.Join(f.home, "agents.yaml")
+	if err := os.WriteFile(agentsFile, []byte("agents: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	token := "-Abc123"
+	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "register", "--name", "dash-token", "--token="+token)
+
+	data, err := os.ReadFile(agentsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedHash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(token)))
+	text := string(data)
+	if !strings.Contains(text, "id: dash-token") {
+		t.Fatalf("expected dash-token agent:\n%s", text)
+	}
+	if !strings.Contains(text, "token-sha256: "+expectedHash) {
+		t.Fatalf("expected token hash %s:\n%s", expectedHash, text)
+	}
+}
