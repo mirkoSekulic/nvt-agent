@@ -975,6 +975,32 @@ func TestCodexOAuthPersistsRotatedRefreshTokenBeforeNewAccessValidation(t *testi
 	}
 }
 
+func TestCodexOAuthRefreshesMalformedCanonicalAccessToken(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeCodexAuth("not-a-jwt", "real-refresh-1")
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("expected malformed canonical access token to self-heal, status=%d payload=%#v", status, payload)
+	}
+	if count := f.oauth.requestCount(); count != 1 {
+		t.Fatalf("expected one refresh request, got %d", count)
+	}
+
+	var canonical map[string]any
+	decodeJSONFile(t, f.auth, &canonical)
+	tokens := canonical["tokens"].(map[string]any)
+	accessToken, _ := tokens["access_token"].(string)
+	if accessToken == "" || accessToken == "not-a-jwt" {
+		t.Fatalf("expected canonical access token to be repaired: %#v", tokens)
+	}
+	if _, err := parseJWTExpForTest(accessToken); err != nil {
+		t.Fatalf("expected repaired canonical access token to be parseable: %v", err)
+	}
+	if tokens["refresh_token"] != "real-refresh-2" {
+		t.Fatalf("expected refresh token rotation to persist: %#v", tokens)
+	}
+}
+
 func TestCodexOAuthFilesRequireProviderGrant(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeAgents(map[string]agentGrant{
@@ -1087,6 +1113,26 @@ func testJWT(exp time.Time) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
 	payload, _ := json.Marshal(map[string]any{"exp": exp.Unix()})
 	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+func parseJWTExpForTest(token string) (int64, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return 0, fmt.Errorf("token is not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return 0, err
+	}
+	var data map[string]any
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return 0, err
+	}
+	exp, ok := data["exp"].(float64)
+	if !ok {
+		return 0, fmt.Errorf("missing exp")
+	}
+	return int64(exp), nil
 }
 
 func readAudit(t *testing.T, path string) []map[string]any {

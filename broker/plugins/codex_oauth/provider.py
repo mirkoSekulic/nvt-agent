@@ -90,7 +90,10 @@ class CodexOAuthProvider:
         with self.lock:
             auth = self._read_auth()
             access_token = self._token(auth, "access_token")
-            exp = self._jwt_exp(access_token)
+            try:
+                exp = self._jwt_exp(access_token)
+            except ProviderError:
+                exp = 0
             now = int(time.time())
             refreshed = False
             if exp - now <= self.refresh_margin_seconds:
