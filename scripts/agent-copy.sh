@@ -192,7 +192,7 @@ python3 "$script_dir/broker-agents.py" \
   copy-register \
   --from-name "$from_name" \
   --name "$to_name" \
-  --token "$broker_token" \
+  --token="$broker_token" \
   "$copy_grants_arg"
 
 echo "copied agent $from_name to $to_name"
