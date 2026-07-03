@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -121,6 +122,46 @@ def persist_agent_command(command, args):
     target = Path.home() / ".nvt-agent" / "agent-command.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({"command": command, "args": args}, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def codex_home():
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+
+
+def has_root_toml_key(lines, key):
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("["):
+            return False
+        if re.match(rf"^{re.escape(key)}\s*=", stripped):
+            return True
+    return False
+
+
+def insert_root_toml_key(lines, key, value):
+    entry = f"{key} = {value}"
+    for index, line in enumerate(lines):
+        if line.strip().startswith("["):
+            return [*lines[:index], entry, *lines[index:]]
+    return [*lines, entry]
+
+
+def ensure_codex_update_check_disabled(command):
+    if Path(command).name != "codex":
+        return
+
+    key = "check_for_update_on_startup"
+    target = codex_home() / "config.toml"
+    lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
+    if has_root_toml_key(lines, key):
+        print(f"bootstrap: codex startup update check already configured in {target}", flush=True)
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(insert_root_toml_key(lines, key, "false")) + "\n", encoding="utf-8")
+    print(f"bootstrap: disabled codex startup update check in {target}", flush=True)
 
 
 def setup_tmux_config():
@@ -297,6 +338,7 @@ def main():
         persist_env_var("AGENT_COMMAND", command)
         args = optional_string_list(runtime.get("args"), "runtime.args")
         persist_agent_command(command, args)
+        ensure_codex_update_check_disabled(command)
     setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_packages(configured_packages(tools))

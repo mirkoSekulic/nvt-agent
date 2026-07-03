@@ -463,6 +463,97 @@ runtime:
 	}
 }
 
+func TestBootstrapDisablesCodexStartupUpdateCheck(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+`)
+
+	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
+	data, err := os.ReadFile(codexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Count(content, "check_for_update_on_startup") != 1 {
+		t.Fatalf("expected one codex update-check setting, got:\n%s", content)
+	}
+	if !strings.Contains(content, "check_for_update_on_startup = false") {
+		t.Fatalf("expected codex update check to be disabled, got:\n%s", content)
+	}
+}
+
+func TestBootstrapPreservesExistingCodexUpdateCheckConfig(t *testing.T) {
+	f := newFixture(t)
+	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := "# user-managed codex config\ncheck_for_update_on_startup = true\n[tui]\nshow_tooltips = false\n"
+	if err := os.WriteFile(codexConfig, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+`)
+
+	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	data, err := os.ReadFile(codexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != existing {
+		t.Fatalf("bootstrap rewrote user codex config:\n%s", data)
+	}
+}
+
+func TestBootstrapAddsCodexUpdateCheckConfigAtTomlRoot(t *testing.T) {
+	f := newFixture(t)
+	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("[tui]\nshow_tooltips = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+`)
+
+	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	data, err := os.ReadFile(codexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "check_for_update_on_startup = false\n[tui]\nshow_tooltips = false\n"
+	if string(data) != want {
+		t.Fatalf("unexpected codex config:\n%s", data)
+	}
+}
+
+func TestBootstrapDoesNotWriteCodexUpdateCheckForClaude(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: claude
+`)
+
+	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
+
+	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
+	if _, err := os.Stat(codexConfig); !os.IsNotExist(err) {
+		t.Fatalf("expected no codex config for claude runtime, stat err=%v", err)
+	}
+}
+
 func TestBootstrapWritesInlineCodeServerSettingsWhenTargetMissing(t *testing.T) {
 	f := newFixture(t)
 	config := f.writeAgentConfig(`
@@ -650,6 +741,51 @@ code-server:
 				t.Fatalf("expected %q, got:\n%s", tt.want, output)
 			}
 		})
+	}
+}
+
+func TestStartAgentSessionRelaunchesFastExitUntilBound(t *testing.T) {
+	f := newFixture(t)
+	envFile := filepath.Join(f.home, ".nvt-agent", "env")
+	if err := os.MkdirAll(filepath.Dir(envFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envFile, []byte("export NVT_WORKSPACE=\""+f.workspace+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attemptsFile := filepath.Join(f.home, "tmux-attempts")
+	f.writeBin("tmux", `#!/usr/bin/env bash
+if [ "$1" = "has-session" ]; then
+  exit 1
+fi
+if [ "$1" = "new-session" ]; then
+  count=0
+  if [ -f "$TMUX_ATTEMPTS_FILE" ]; then
+    count="$(cat "$TMUX_ATTEMPTS_FILE")"
+  fi
+  count=$((count + 1))
+  printf '%s' "$count" > "$TMUX_ATTEMPTS_FILE"
+  exit 0
+fi
+exit 2
+`)
+	script := "bash " + shellQuote(filepath.Join(f.root, "runtime", "core", "start-agent-session.sh"))
+
+	output := f.runWithEnv(script, false, []string{
+		"TMUX_ATTEMPTS_FILE=" + attemptsFile,
+		"NVT_AGENT_SESSION_MAX_START_ATTEMPTS=3",
+		"NVT_AGENT_SESSION_FAST_EXIT_SECONDS=0",
+	})
+
+	data, err := os.ReadFile(attemptsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "3" {
+		t.Fatalf("expected 3 tmux start attempts, got %q\noutput:\n%s", data, output)
+	}
+	if !strings.Contains(output, "failed after 3 attempts") {
+		t.Fatalf("expected bounded failure message, got:\n%s", output)
 	}
 }
 
