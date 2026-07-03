@@ -12,6 +12,8 @@ metadata:
 spec:
   # nvt-broker is a single writer for provider state under /state; do not scale.
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "nvt.brokerSelectorLabels" . | nindent 6 }}
@@ -37,7 +39,7 @@ spec:
               mkdir -p "${target}"
               for path in /seed/*; do
                 [ -e "${path}" ] || continue
-                cp "${path}" "${target}/$(basename "${path}")"
+                cp -p "${path}" "${target}/$(basename "${path}")"
               done
           volumeMounts:
             - name: broker-state

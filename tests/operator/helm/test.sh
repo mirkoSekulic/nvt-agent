@@ -211,6 +211,73 @@ require_resource_namespace() {
   }
 }
 
+require_deployment_strategy() {
+  local file="$1"
+  local name="$2"
+  local strategy="$3"
+
+  awk -v want_name="${name}" -v want_strategy="${strategy}" '
+    function reset_doc() {
+      kind = ""
+      name = ""
+      in_metadata = 0
+      in_strategy = 0
+      strategy = ""
+    }
+    function check_doc() {
+      if (kind == "Deployment" && name == want_name && strategy == want_strategy) {
+        found = 1
+      }
+    }
+    BEGIN {
+      reset_doc()
+    }
+    /^---[[:space:]]*$/ {
+      check_doc()
+      reset_doc()
+      next
+    }
+    /^kind:[[:space:]]*/ {
+      kind = $2
+      next
+    }
+    /^metadata:[[:space:]]*$/ {
+      in_metadata = 1
+      next
+    }
+    in_metadata && /^[[:space:]]{2}name:[[:space:]]*/ {
+      name = $2
+      gsub(/^"|"$/, "", name)
+      next
+    }
+    /^spec:[[:space:]]*$/ && kind == "Deployment" {
+      in_metadata = 0
+      next
+    }
+    /^[[:space:]]{2}strategy:[[:space:]]*$/ && kind == "Deployment" {
+      in_strategy = 1
+      next
+    }
+    in_strategy && /^[[:space:]]{4}type:[[:space:]]*/ {
+      strategy = $2
+      gsub(/^"|"$/, "", strategy)
+      in_strategy = 0
+      next
+    }
+    /^[^[:space:]]/ && $0 !~ /^(metadata|spec):/ {
+      in_metadata = 0
+      in_strategy = 0
+    }
+    END {
+      check_doc()
+      exit(found ? 0 : 1)
+    }
+  ' "${file}" || {
+    echo "missing Deployment/${name} strategy type ${strategy} in ${file}" >&2
+    exit 1
+  }
+}
+
 require_file() {
   local file="$1"
 
@@ -289,6 +356,7 @@ require_resource_namespace "${DEFAULT_RENDER}" Deployment nvt-broker custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" Service nvt-broker custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-config custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" ConfigMap nvt-broker-agents custom-ns
+require_deployment_strategy "${DEFAULT_RENDER}" nvt-broker Recreate
 
 require_resource "${DEFAULT_RENDER}" Deployment nvt-operator
 require_resource "${DEFAULT_RENDER}" ServiceAccount nvt-operator
@@ -403,7 +471,7 @@ grep -q 'name: seed-broker-state' "${BROKER_SEED_RENDER}"
 grep -q 'secretName: "codex-auth"' "${BROKER_SEED_RENDER}"
 grep -q 'target="/state/codex"' "${BROKER_SEED_RENDER}"
 grep -q 'already exists and is non-empty; leaving existing state unchanged' "${BROKER_SEED_RENDER}"
-grep -q 'cp "${path}" "${target}/$(basename "${path}")"' "${BROKER_SEED_RENDER}"
+grep -q 'cp -p "${path}" "${target}/$(basename "${path}")"' "${BROKER_SEED_RENDER}"
 
 if helm template nvt "${CHART}" -n custom-ns \
   --set broker.persistence.seedSecretName=codex-auth \
