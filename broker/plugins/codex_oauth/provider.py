@@ -94,12 +94,15 @@ class CodexOAuthProvider:
             now = int(time.time())
             refreshed = False
             if exp - now <= self.refresh_margin_seconds:
+                refresh_persisted = False
                 try:
-                    auth = self._refresh(auth)
-                    access_token = self._token(auth, "access_token")
+                    refreshed_auth = self._refresh(auth)
+                    self._write_auth(refreshed_auth)
+                    refresh_persisted = True
+                    access_token = self._token(refreshed_auth, "access_token")
                     exp = self._jwt_exp(access_token)
+                    auth = refreshed_auth
                     refreshed = True
-                    self._write_auth(auth)
                     audit.write(
                         request_id=request_id,
                         agent=agent_id,
@@ -109,6 +112,16 @@ class CodexOAuthProvider:
                         expires_at=rfc3339(exp),
                     )
                 except ProviderError:
+                    if refresh_persisted:
+                        audit.write(
+                            request_id=request_id,
+                            agent=agent_id,
+                            provider=self.name,
+                            operation="files.refresh",
+                            allowed=True,
+                            expires_at=None,
+                            validation_error=True,
+                        )
                     if exp <= now:
                         raise
                     print(f"codex-oauth provider {self.name}: refresh failed; serving current valid access token", flush=True)

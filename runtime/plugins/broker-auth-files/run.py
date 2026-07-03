@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -119,10 +118,8 @@ def atomic_write(path, content, mode):
         temporary.unlink(missing_ok=True)
 
 
-def materialize_bundle(bundle):
-    files = broker_files(bundle["provider"])
-    bundle["target"].mkdir(parents=True, exist_ok=True)
-    bundle["target"].chmod(bundle["dir_mode"])
+def validated_files(files, bundle):
+    output = []
     for index, item in enumerate(files):
         if not isinstance(item, dict):
             fail(f"files[{index}] must be an object")
@@ -132,7 +129,16 @@ def materialize_bundle(bundle):
         if not isinstance(content, str):
             fail(f"files[{index}].content must be a string")
         mode, _mode_text = mode_value(item.get("mode"), f"files[{index}].mode", f"{bundle['file_mode']:04o}")
-        atomic_write(bundle["target"] / name, content, mode)
+        output.append((bundle["target"] / name, content, mode))
+    return output
+
+
+def materialize_bundle(bundle):
+    files = validated_files(broker_files(bundle["provider"]), bundle)
+    bundle["target"].mkdir(parents=True, exist_ok=True)
+    bundle["target"].chmod(bundle["dir_mode"])
+    for path, content, mode in files:
+        atomic_write(path, content, mode)
 
 
 def doctor(config):
@@ -149,7 +155,7 @@ def doctor(config):
             missing.append(str(target))
             continue
         for path in target.iterdir():
-            if path.is_file() and stat.S_IMODE(path.stat().st_mode) == bundle["file_mode"]:
+            if path.is_file():
                 break
         else:
             missing.append(str(target))

@@ -106,6 +106,40 @@ bundles:
 	}
 }
 
+func TestBrokerAuthFilesValidatesAllFilesBeforeWriting(t *testing.T) {
+	f := newFixture(t)
+	f.installBrokerctl()
+	target := filepath.Join(f.home, "bundle")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(target, "auth.json")
+	if err := os.WriteFile(existing, []byte("existing\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broker := newFakeFilesBroker(t, http.StatusOK, map[string]any{
+		"ok": true,
+		"files": []map[string]any{
+			{"name": "auth.json", "content": "new\n", "mode": "0600"},
+			{"name": "../x", "content": "bad\n", "mode": "0600"},
+		},
+	})
+	config := f.writePluginConfig("broker-auth-files.yaml", fmt.Sprintf(`
+bundles:
+  - provider: bundle-provider
+    target: %s
+`, quoteYAML(target)))
+	output := f.runWithEnv(brokerAuthFilesRunBin(f.root), false, []string{
+		"NVT_PLUGIN_CONFIG=" + config,
+		"NVT_BROKER_URL=" + broker.server.URL,
+		"NVT_BROKER_TOKEN=broker-token",
+	})
+	if !strings.Contains(output, "plain relative filenames") {
+		t.Fatalf("expected malicious name rejection, got:\n%s", output)
+	}
+	assertFileContent(t, existing, "existing\n")
+}
+
 func TestBrokerAuthFilesBrokerErrorDoesNotPartiallyOverwrite(t *testing.T) {
 	f := newFixture(t)
 	f.installBrokerctl()
@@ -138,7 +172,7 @@ func TestBrokerAuthFilesDoctorChecksBrokerAndFiles(t *testing.T) {
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(target, "auth.json"), []byte("ok\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "auth.json"), []byte("ok\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	broker := newFakeFilesBroker(t, http.StatusOK, map[string]any{"ok": true, "files": []map[string]any{}})

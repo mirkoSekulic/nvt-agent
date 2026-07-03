@@ -30,10 +30,11 @@ type fakeGitHub struct {
 }
 
 type fakeOAuth struct {
-	server   *httptest.Server
-	mu       sync.Mutex
-	fail     bool
-	requests []map[string]string
+	server          *httptest.Server
+	mu              sync.Mutex
+	fail            bool
+	malformedAccess bool
+	requests        []map[string]string
 }
 
 func newFakeOAuth(t *testing.T) *fakeOAuth {
@@ -62,13 +63,18 @@ func (f *fakeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, request)
 	count := len(f.requests)
 	fail := f.fail
+	malformedAccess := f.malformedAccess
 	f.mu.Unlock()
 	if fail {
 		http.Error(w, "refresh failed", http.StatusBadGateway)
 		return
 	}
+	accessToken := testJWT(time.Now().Add(time.Hour))
+	if malformedAccess {
+		accessToken = "not-a-jwt"
+	}
 	writeJSON(w, map[string]any{
-		"access_token":  testJWT(time.Now().Add(time.Hour)),
+		"access_token":  accessToken,
 		"refresh_token": fmt.Sprintf("real-refresh-%d", count+1),
 		"id_token":      fmt.Sprintf("id-token-%d", count),
 	})
@@ -78,6 +84,12 @@ func (f *fakeOAuth) setFail(value bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fail = value
+}
+
+func (f *fakeOAuth) setMalformedAccess(value bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.malformedAccess = value
 }
 
 func (f *fakeOAuth) requestCount() int {
@@ -930,6 +942,36 @@ func TestCodexOAuthRefreshFailureServesValidButRejectsExpired(t *testing.T) {
 	payload, _, status = f.brokerctl("files", "--provider", "codex-main")
 	if status == 0 || payload["error"] != "token-refresh-failed" {
 		t.Fatalf("expected expired token refresh failure, status=%d payload=%#v", status, payload)
+	}
+}
+
+func TestCodexOAuthPersistsRotatedRefreshTokenBeforeNewAccessValidation(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.oauth.setMalformedAccess(true)
+	oldAccessToken := testJWT(time.Now().Add(2 * time.Minute))
+	f.writeCodexAuth(oldAccessToken, "real-refresh-1")
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("expected old valid token to be served after malformed refreshed access token, status=%d payload=%#v", status, payload)
+	}
+	files := payload["files"].([]any)
+	var vended map[string]any
+	if err := json.Unmarshal([]byte(files[0].(map[string]any)["content"].(string)), &vended); err != nil {
+		t.Fatal(err)
+	}
+	vendedTokens := vended["tokens"].(map[string]any)
+	if vendedTokens["access_token"] != oldAccessToken {
+		t.Fatalf("expected old valid access token to be vended, got %#v", vendedTokens["access_token"])
+	}
+
+	var canonical map[string]any
+	decodeJSONFile(t, f.auth, &canonical)
+	tokens := canonical["tokens"].(map[string]any)
+	if tokens["refresh_token"] != "real-refresh-2" {
+		t.Fatalf("rotated refresh token was not persisted: %#v", tokens)
+	}
+	if tokens["access_token"] != "not-a-jwt" {
+		t.Fatalf("expected malformed refreshed access token to be persisted with rotated token: %#v", tokens)
 	}
 }
 
