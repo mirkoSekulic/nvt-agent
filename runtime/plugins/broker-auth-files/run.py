@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -10,6 +12,10 @@ import yaml
 
 DEFAULT_DIR_MODE = "0700"
 DEFAULT_FILE_MODE = "0600"
+DEFAULT_REFRESH_SLACK_SECONDS = 900
+DEFAULT_MIN_SLEEP_SECONDS = 60
+DEFAULT_FALLBACK_SLEEP_SECONDS = 3600
+DEFAULT_MAX_LOOPS = 0
 
 
 def fail(message):
@@ -53,6 +59,14 @@ def list_value(value, field):
     return value
 
 
+def int_value(value, field, default):
+    if value is None:
+        return default
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        fail(f"{field} must be a non-negative integer")
+    return value
+
+
 def mode_value(value, field, default):
     mode = string_value(value, field) or default
     if len(mode) != 4 or any(char not in "01234567" for char in mode):
@@ -83,7 +97,13 @@ def load_config():
         })
     if not bundles:
         fail("bundles must not be empty")
-    return {"bundles": bundles}
+    return {
+        "bundles": bundles,
+        "refresh_slack_seconds": int_value(config.get("refresh-slack-seconds"), "refresh-slack-seconds", DEFAULT_REFRESH_SLACK_SECONDS),
+        "min_sleep_seconds": int_value(config.get("min-sleep-seconds"), "min-sleep-seconds", DEFAULT_MIN_SLEEP_SECONDS),
+        "fallback_sleep_seconds": int_value(config.get("fallback-sleep-seconds"), "fallback-sleep-seconds", DEFAULT_FALLBACK_SLEEP_SECONDS),
+        "max_loops": int_value(config.get("max-loops"), "max-loops", DEFAULT_MAX_LOOPS),
+    }
 
 
 def broker_files(provider):
@@ -103,7 +123,7 @@ def broker_files(provider):
     files = payload.get("files")
     if not isinstance(files, list):
         fail("broker files response did not include files")
-    return files
+    return payload
 
 
 def atomic_write(path, content, mode):
@@ -134,11 +154,84 @@ def validated_files(files, bundle):
 
 
 def materialize_bundle(bundle):
-    files = validated_files(broker_files(bundle["provider"]), bundle)
+    payload = broker_files(bundle["provider"])
+    files = validated_files(payload["files"], bundle)
     bundle["target"].mkdir(parents=True, exist_ok=True)
     bundle["target"].chmod(bundle["dir_mode"])
     for path, content, mode in files:
         atomic_write(path, content, mode)
+    return payload.get("expires_at")
+
+
+def parse_expiry(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        fail("broker files response expires_at must be a string or null")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        fail("broker files response expires_at must be RFC3339")
+
+
+def materialize_all(config):
+    expiries = []
+    providers = []
+    for bundle in config["bundles"]:
+        providers.append(bundle["provider"])
+        expiry = parse_expiry(materialize_bundle(bundle))
+        if expiry is not None:
+            expiries.append(expiry)
+    earliest = min(expiries) if expiries else None
+    return providers, earliest
+
+
+def expiry_text(expiry):
+    if expiry is None:
+        return None
+    return expiry.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def sleep_seconds(config, earliest):
+    if earliest is None:
+        return config["fallback_sleep_seconds"]
+    target = earliest.timestamp() - config["refresh_slack_seconds"]
+    return max(config["min_sleep_seconds"], target - time.time())
+
+
+def publish_rematerialized(providers, earliest):
+    payload = json.dumps({"providers": providers, "expires_at": expiry_text(earliest)}, separators=(",", ":"))
+    source = f"plugin:{os.environ.get('NVT_PLUGIN_NAME') or 'broker-auth-files'}"
+    try:
+        subprocess.run(
+            ["agentdctl", "publish", "plugin.broker-auth-files.rematerialized", "--source", source, "--payload", payload],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return
+
+
+def loop(config):
+    attempts = 0
+    backoff = max(config["min_sleep_seconds"], 1)
+    while True:
+        attempts += 1
+        try:
+            providers, earliest = materialize_all(config)
+            publish_rematerialized(providers, earliest)
+            backoff = max(config["min_sleep_seconds"], 1)
+            if config["max_loops"] > 0 and attempts >= config["max_loops"]:
+                return 0
+            time.sleep(sleep_seconds(config, earliest))
+        except (OSError, RuntimeError, SystemExit) as error:
+            print(f"broker-auth-files: warning: re-materialization failed: {error}", flush=True)
+            if config["max_loops"] > 0 and attempts >= config["max_loops"]:
+                return 0
+            time.sleep(min(backoff, config["fallback_sleep_seconds"]))
+            backoff = min(backoff * 2, config["fallback_sleep_seconds"])
 
 
 def doctor(config):
@@ -175,10 +268,11 @@ def run():
         return doctor(config)
     if command == "ready":
         return ready(config)
+    if command == "loop":
+        return loop(config)
     if command != "run":
         fail(f"unknown command: {command}")
-    for bundle in config["bundles"]:
-        materialize_bundle(bundle)
+    materialize_all(config)
     return 0
 
 

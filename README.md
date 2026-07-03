@@ -677,6 +677,36 @@ plugins:
           file-mode: "0600"
 ```
 
+For long-lived agents, keep the bundle fresh with the generic refresher:
+
+```yaml
+plugins:
+  - name: broker-auth-files
+    source: builtin
+    when: before-agent
+    config:
+      bundles:
+        - provider: codex-main
+          target: /root/.codex
+  - name: broker-auth-files-refresher
+    source: builtin
+    when: after-agent
+    restart: always
+    config:
+      bundles:
+        - provider: codex-main
+          target: /root/.codex
+      refresh-slack-seconds: 900
+```
+
+Long-lived auth has two levers. Broker provider
+`refresh-margin-seconds` guarantees a minimum runway in every vended bundle.
+The `broker-auth-files-refresher` plugin re-materializes bundles before
+`expires_at` so indefinite runs keep fresh files on disk. For Codex, this is
+sufficient because the running CLI reloads `auth.json` from disk after a real
+401 before trying OAuth refresh, while preserving the broker-vended
+`account_id` satisfies Codex's reload guard.
+
 The operator `runtimeAuth` Secret path documented in
 `operator/docs/kind-codex-auth.md` remains the local/dev fallback for Codex
 auth seeding; this broker path does not change the operator.
