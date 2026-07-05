@@ -1,0 +1,34 @@
+# Phase 2b Codex forward-proxy plumbing harness.
+#
+# NOT a production compose file. This proves CONNECT-only proxy routing for
+# current Codex plan auth using existing Codex auth inside the agent container.
+# It is not credential-less mediation.
+services:
+  egressd:
+    image: nvt-egressd:latest
+    environment:
+      NVT_EGRESSD_CONFIG: /config/egressd.json
+    volumes:
+      - ${PHASE2B_STATE}/egressd.json:/config/egressd.json:ro
+    networks:
+      - phase2b-agent
+      - phase2b-egress
+    restart: "no"
+
+  agent:
+    image: nvt-agent-runtime:latest
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      CODEX_HOME: /root/.codex
+    volumes:
+      - ${PHASE2B_STATE}/agent-codex:/root/.codex
+    networks:
+      - phase2b-agent
+    depends_on:
+      - egressd
+    restart: "no"
+
+networks:
+  phase2b-agent:
+    internal: true
+  phase2b-egress: {}

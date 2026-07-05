@@ -9,9 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/egressd/internal/egress"
 )
+
+const forwardProxyReadHeaderTimeout = 5 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -29,17 +32,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	token := os.Getenv("NVT_BROKER_TOKEN")
-	if token == "" {
-		return fmt.Errorf("NVT_BROKER_TOKEN is required (egress-role identity)")
+	var broker *egress.BrokerClient
+	if len(config.Routes) > 0 {
+		token := os.Getenv("NVT_BROKER_TOKEN")
+		if token == "" {
+			return fmt.Errorf("NVT_BROKER_TOKEN is required when injection routes are configured")
+		}
+		brokerHTTP, err := brokerHTTPClient(config)
+		if err != nil {
+			return err
+		}
+		broker = &egress.BrokerClient{URL: config.BrokerURL, Token: token, Client: brokerHTTP}
 	}
-	brokerHTTP, err := brokerHTTPClient(config)
-	if err != nil {
-		return err
-	}
-	broker := &egress.BrokerClient{URL: config.BrokerURL, Token: token, Client: brokerHTTP}
 	transport := &http.Transport{ForceAttemptHTTP2: true}
-	errors := make(chan error, len(config.Routes))
+	listenerCount := len(config.Routes)
+	if config.ForwardProxy != nil {
+		listenerCount++
+	}
+	errors := make(chan error, listenerCount)
 	for _, route := range config.Routes {
 		proxy := &egress.Proxy{Route: route, Broker: broker, Transport: transport}
 		server := &http.Server{Addr: route.Listen, Handler: proxy}
@@ -48,13 +58,27 @@ func run() error {
 			scheme = "https"
 		}
 		log.Printf("egressd: routing %s (%s) -> %s (capability %s)", route.Listen, scheme, route.Upstream, route.Capability)
-		go func(route egress.Route) {
+		go func(route egress.Route, server *http.Server) {
 			if route.TLSEnabled() {
 				errors <- server.ListenAndServeTLS(route.ListenTLSCert, route.ListenTLSKey)
 				return
 			}
 			errors <- server.ListenAndServe()
-		}(route)
+		}(route, server)
+	}
+	if config.ForwardProxy != nil {
+		proxy := &egress.ForwardProxy{
+			Config: *config.ForwardProxy,
+			Logger: log.New(os.Stdout, "", 0),
+		}
+		server := &http.Server{
+			Addr:              config.ForwardProxy.Listen,
+			Handler:           proxy,
+			ReadHeaderTimeout: forwardProxyReadHeaderTimeout,
+		}
+		go func() {
+			errors <- server.ListenAndServe()
+		}()
 	}
 	return <-errors
 }

@@ -1,7 +1,7 @@
 # Plan: Mediated Credential Egress
 
-Status: living document — Phases 0–1 completed (#53, #54); Phase 2 in progress
-Version: v3.3 (as-executed Phase 1, transparent mediation mode, claim scope)
+Status: living document — Phases 0–2 completed (#53, #54, Phase 2 gate); Phase 2b in progress
+Version: v3.4 (Phase 2b CONNECT-only forward-proxy plumbing)
 
 ## Goal
 
@@ -163,7 +163,7 @@ As executed — adjusted from the original "Codex API-key mode" wording: no Open
 
 Broker side shipped with it: identity roles + one-to-one pairing (grants on an egress identity are unrepresentable), `/v1/injection/headers` and `/v1/injection/routing` with authorization order role → pairing → grant → materialization → host, egress identities denied on all secret-bearing endpoints, header-inject grants excluding bundle/token/header paths, denial audit with full caller context, and optional broker TLS serving (`NVT_BROKER_TLS_CERT/KEY`). All 12 injection conformance tests live in CI.
 
-### Phase 2 — ChatGPT-plan flow as the go/no-go gate (in progress)
+### Phase 2 — ChatGPT-plan flow as the go/no-go gate (completed — NO-GO for redirect-only)
 
 **Implementation spec: `docs/phase2-codex-gate-plan.md`** — an empirical gate run in an internal-only compose topology (agent on an `internal: true` network, egressd the only path out, broker owning the real `auth.json` in a throwaway state dir). Deliverable is `docs/phase2-codex-gate.md` recording required hosts, the minimal placeholder `auth.json`/JWT shape, any claim-derived headers (e.g. account-id) the provider must compute from the real token, cert-pinning observations, and the go/no-go decision. Real refresh is forced by setting `refresh-margin-seconds` beyond the token's remaining lifetime — no short-lived fixture needed against the real token URL.
 
@@ -175,6 +175,32 @@ Switch the working harness to the plan-auth path (`codex-oauth` grant in `header
 Test refresh deterministically with broker-issued artificially short-lived tokens; verify the true SSE guarantee — new requests use the refreshed token, in-flight streams complete on the old one.
 
 **Go/no-go**: if plan-auth can't be redirected, plan-auth Codex stays on bundles and we reassess — bearer-shape mediation (Phase 1's result) ships independently either way for any redirectable provider. A NO-GO is a successful phase outcome (a documented answer), not a failure of the work.
+
+### Phase 2b — CONNECT-only egressd forward proxy (low-risk plumbing)
+
+Pulled forward after the Phase 2 NO-GO: current Codex plan-auth uses
+hardcoded WebSocket endpoints, but a probe showed it honors proxy environment
+variables and the container trust store. Full TLS termination/MITM remains
+trusted-core work for a later phase, so this PR adds only the plumbing step.
+
+- egressd gains a CONNECT-only forward-proxy listener with a configurable
+  host allowlist and default-deny behavior.
+- The proxy blind-tunnels allowed `host:port` targets; it does not implement
+  plain HTTP proxying, TLS termination, WebSocket injection, or credential
+  injection.
+- The broker contract remains unchanged.
+- Sanitized logs contain only CONNECT decision metadata:
+  `event=connect`, `target_host`, `target_port`, `decision`, and optional
+  `error_class`.
+- These CONNECT decisions are sanitized egressd stdout logs in this phase, not
+  broker `audit.jsonl` per-request audit entries.
+- The Phase 2b harness runs real Codex through
+  `HTTPS_PROXY=http://egressd:<port>` with the existing Codex auth bundle.
+  This proves forward-proxy plumbing only. It is not credential-less Codex.
+
+Credential-less Codex still waits for CA/TLS termination plus WebSocket
+handshake injection. The next PR after this should focus on Codex fallback
+hardening and short-TTL vended bundles.
 
 ### Phase 3 — Operator + compose wiring (non-possession ships)
 
@@ -219,11 +245,12 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 | 1 | Phase 0: protocol doc + conformance/smoke test skeletons | human review of the contract — slowest, most careful |
 | 2 | Phase 1: egressd + identity split + Codex API-key mode | trusted-core review; timeboxed spike result |
 | 3 | Phase 2: ChatGPT-plan flow + refresh/SSE tests | **go/no-go decision recorded in the PR** |
+| 3b | Phase 2b: CONNECT-only egressd forward proxy, no TLS termination or injection | egressd CONNECT tests + Codex proxy harness |
 | 4 | Phase 3: operator + compose wiring; non-possession tests → CI | conformance green in CI |
 | 5 | Phase 4: git-HTTPS mediation (CA, TLS termination) | trusted-core review — highest-risk surface, deliberately alone |
 | 6a | Phase 5: enforcement (own-Pod evaluation, iptables + FORWARD deny) | egress-denied test → CI |
 | 6b | Phase 5: audit, quotas, revocation, Anthropic proof; flip operator default | both smoke tests green |
-| 7 | Phase 6: forward-proxy mode (CONNECT + CA) for arbitrary-tool coverage | trusted-core review (reuses Phase 4 CA) |
+| 7 | Phase 6: TLS-terminating forward-proxy mode (CONNECT + CA) for arbitrary-tool credential mediation | trusted-core review (reuses Phase 4 CA) |
 | 8 | Phase 6: true transparent REDIRECT + optional body substitution | after Phase 5 enforcement; egress-denied still green |
 
 ## Division of labor

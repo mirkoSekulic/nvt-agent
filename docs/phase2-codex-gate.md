@@ -171,6 +171,11 @@ of:
 - bring Phase 6-style forward-proxy/transparent mediation earlier for Codex
   plan-auth, because that can catch hardcoded endpoints.
 
+Phase 2b implements the low-risk first part of that last option:
+CONNECT-only forward-proxy plumbing in `egressd`, without TLS termination,
+broker API changes, or credential injection. See
+`docs/phase2b-codex-forward-proxy.md`.
+
 This is a successful Phase 2 result: the gate answered the question before
 operator/compose production wiring was built around a false assumption.
 
