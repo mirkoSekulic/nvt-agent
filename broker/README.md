@@ -63,6 +63,7 @@ providers:
       token-url: https://auth.openai.com/oauth/token
       client-id: app_EMoamEEZ73f0CkXaXp7hrann
       refresh-margin-seconds: 600
+      bundle-ttl-seconds: 1200
       stub-refresh-token: nvt-broker-stub
       extra-files:
         - name: config.toml
@@ -122,6 +123,14 @@ check; GitHub App providers return the App bot name and noreply email.
 `headers` is a compatibility mode for static Git headers. Returned headers are
 visible to the agent and may be written into Git config.
 `files` returns a UTF-8 file bundle for generic runtime materialization.
+For `codex-oauth`, the bundle contains the real OpenAI access token and an
+inert refresh-token stub, never the real broker-owned refresh token.
+The broker applies file-bundle TTL caps to returned `expires_at` metadata so
+runtime refreshers can re-materialize bundles on a bounded cadence. For
+`codex-oauth`, this does not reduce the lifetime of an already-issued OpenAI
+access token. Codex file bundles remain the insecure/compatibility fallback
+until credential-less Codex ships. The canonical contract and cadence guard are
+in `protocol/broker.md`.
 
 Grant repository patterns must match the provider target mode: GitHub-mode
 providers use `owner/repo`, while literal-mode providers use the full

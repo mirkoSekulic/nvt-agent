@@ -16,6 +16,7 @@ from broker.plugins.github_app.provider import ProviderError
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEFAULT_TOKEN_URL = "https://auth.openai.com/oauth/token"
 DEFAULT_REFRESH_MARGIN_SECONDS = 600
+DEFAULT_BUNDLE_TTL_SECONDS = 1200
 DEFAULT_STUB_REFRESH_TOKEN = "nvt-broker-stub"
 
 
@@ -35,6 +36,8 @@ class CodexOAuthProvider:
             fail(f"provider {self.name} config.token-url must be an http(s) URL")
         self.client_id = self._provider_value("client-id", DEFAULT_CLIENT_ID)
         self.refresh_margin_seconds = self._int_config("refresh-margin-seconds", DEFAULT_REFRESH_MARGIN_SECONDS)
+        self.bundle_ttl_seconds = self._int_config("bundle-ttl-seconds", DEFAULT_BUNDLE_TTL_SECONDS)
+        self.files_refresh_margin_seconds = max(self.refresh_margin_seconds, self.bundle_ttl_seconds)
         self.stub_refresh_token = string_value(
             self.config.get("stub-refresh-token") or DEFAULT_STUB_REFRESH_TOKEN,
             f"provider {self.name} config.stub-refresh-token",
@@ -112,7 +115,7 @@ class CodexOAuthProvider:
             output.append({"name": name, "path": path, "mode": mode})
         return output
 
-    def _fresh_auth(self, agent_id, audit, request_id, operation_prefix):
+    def _fresh_auth(self, agent_id, audit, request_id, operation_prefix, refresh_margin_seconds=None):
         auth = self._read_auth()
         access_token = self._token(auth, "access_token")
         try:
@@ -120,8 +123,10 @@ class CodexOAuthProvider:
         except ProviderError:
             exp = 0
         now = int(time.time())
+        if refresh_margin_seconds is None:
+            refresh_margin_seconds = self.refresh_margin_seconds
         refreshed = False
-        if exp - now <= self.refresh_margin_seconds:
+        if exp - now <= refresh_margin_seconds:
             refresh_persisted = False
             try:
                 refreshed_auth = self._refresh(auth)
@@ -200,7 +205,13 @@ class CodexOAuthProvider:
 
     def files(self, agent_id, audit, request_id):
         with self.lock:
-            auth, _access_token, exp, refreshed = self._fresh_auth(agent_id, audit, request_id, "files")
+            auth, _access_token, exp, refreshed = self._fresh_auth(
+                agent_id,
+                audit,
+                request_id,
+                "files",
+                self.files_refresh_margin_seconds,
+            )
             vended = json.loads(json.dumps(auth))
             tokens = vended.setdefault("tokens", {})
             if not isinstance(tokens, dict):
@@ -215,17 +226,11 @@ class CodexOAuthProvider:
             ]
             for item in self.extra_files:
                 files.append(self._read_extra_file(item))
-            expires_at = rfc3339(exp)
-            audit.write(
-                request_id=request_id,
-                agent=agent_id,
-                provider=self.name,
-                operation="files.vend",
-                allowed=True,
-                expires_at=expires_at,
-                refreshed=refreshed,
-            )
-            return files, expires_at
+            access_token_expires_at = rfc3339(exp)
+            return files, access_token_expires_at, {
+                "access_token_expires_at": access_token_expires_at,
+                "refreshed": refreshed,
+            }
 
     def _read_auth(self):
         try:

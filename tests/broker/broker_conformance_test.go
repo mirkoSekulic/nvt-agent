@@ -250,11 +250,16 @@ type brokerFixture struct {
 	auth              string
 	extra             string
 	codexClaimHeaders string
+	codexExtraConfig  string
 	stdout            bytes.Buffer
 	stderr            bytes.Buffer
 }
 
 func newBrokerFixture(t *testing.T) *brokerFixture {
+	return newBrokerFixtureWithCodexConfig(t, "")
+}
+
+func newBrokerFixtureWithCodexConfig(t *testing.T, codexExtraConfig string) *brokerFixture {
 	t.Helper()
 	fake := newFakeGitHub(t)
 	oauth := newFakeOAuth(t)
@@ -262,19 +267,20 @@ func newBrokerFixture(t *testing.T) *brokerFixture {
 	keyPEM := generateRSAKey(t)
 	port := freePort(t)
 	f := &brokerFixture{
-		t:      t,
-		root:   repoRoot(t),
-		home:   home,
-		bind:   fmt.Sprintf("127.0.0.1:%d", port),
-		url:    fmt.Sprintf("http://127.0.0.1:%d", port),
-		audit:  filepath.Join(home, "audit.jsonl"),
-		agents: filepath.Join(home, "agents.yaml"),
-		fake:   fake,
-		oauth:  oauth,
-		keyPEM: keyPEM,
-		token:  "frontend-token",
-		auth:   filepath.Join(home, "auth.json"),
-		extra:  filepath.Join(home, "config.toml"),
+		t:                t,
+		root:             repoRoot(t),
+		home:             home,
+		bind:             fmt.Sprintf("127.0.0.1:%d", port),
+		url:              fmt.Sprintf("http://127.0.0.1:%d", port),
+		audit:            filepath.Join(home, "audit.jsonl"),
+		agents:           filepath.Join(home, "agents.yaml"),
+		fake:             fake,
+		oauth:            oauth,
+		keyPEM:           keyPEM,
+		token:            "frontend-token",
+		auth:             filepath.Join(home, "auth.json"),
+		extra:            filepath.Join(home, "config.toml"),
+		codexExtraConfig: codexExtraConfig,
 	}
 	f.writeCodexAuth(testJWT(time.Now().Add(time.Hour)), "real-refresh-1")
 	if err := os.WriteFile(f.extra, []byte("model = \"gpt-5\"\n"), 0o644); err != nil {
@@ -365,11 +371,12 @@ providers:
       token-url: %q
       client-id: test-client
       refresh-margin-seconds: 600
+%s
       stub-refresh-token: nvt-broker-stub
       extra-files:
         - name: config.toml
           path: %q
-`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.extra)
+`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)
@@ -897,6 +904,82 @@ func TestCodexOAuthFilesVendStubsRefreshTokenAndExtraFiles(t *testing.T) {
 	}
 }
 
+func TestBrokerFilesExpiryIsCappedByDefaultBundleTTL(t *testing.T) {
+	f := newBrokerFixture(t)
+	before := time.Now().UTC()
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("files failed: status=%d payload=%#v", status, payload)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, payload["expires_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expiresAt.Before(before) || expiresAt.After(before.Add(1220*time.Second)) {
+		t.Fatalf("expected bundle expiry near default TTL, before=%s expires_at=%s", before, expiresAt)
+	}
+	files := payload["files"].([]any)
+	var auth map[string]any
+	if err := json.Unmarshal([]byte(files[0].(map[string]any)["content"].(string)), &auth); err != nil {
+		t.Fatal(err)
+	}
+	tokens := auth["tokens"].(map[string]any)
+	accessExpUnix, err := parseJWTExpForTest(tokens["access_token"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessExp := time.Unix(accessExpUnix, 0).UTC()
+	if !accessExp.After(expiresAt.Add(30 * time.Minute)) {
+		t.Fatalf("test expected provider JWT expiry to exceed bundle expiry, access=%s bundle=%s", accessExp, expiresAt)
+	}
+	events := readAudit(t, f.audit)
+	vend := lastAuditOperation(events, "files.vend")
+	if vend == nil {
+		t.Fatalf("expected files.vend audit entry, got %#v", events)
+	}
+	if vend["expires_at"] != payload["expires_at"] || vend["bundle_expires_at"] != payload["expires_at"] {
+		t.Fatalf("expected core files.vend audit to use capped bundle expiry, payload=%#v vend=%#v", payload, vend)
+	}
+	if vend["access_token_expires_at"] == payload["expires_at"] {
+		t.Fatalf("expected provider access token expiry to remain distinct from capped bundle expiry, payload=%#v vend=%#v", payload, vend)
+	}
+}
+
+func TestCodexOAuthFilesExpiryUsesConfiguredBundleTTL(t *testing.T) {
+	f := newBrokerFixtureWithCodexConfig(t, "      bundle-ttl-seconds: 300\n")
+	before := time.Now().UTC()
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("files failed: status=%d payload=%#v", status, payload)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, payload["expires_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expiresAt.Before(before) || expiresAt.After(before.Add(320*time.Second)) {
+		t.Fatalf("expected bundle expiry near configured TTL, before=%s expires_at=%s", before, expiresAt)
+	}
+}
+
+func TestCodexOAuthFilesExpiryUsesAccessTokenExpiryWhenSoonerThanBundleTTL(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.oauth.setFail(true)
+	accessExp := time.Now().Add(10 * time.Minute).UTC()
+	f.writeCodexAuth(testJWT(accessExp), "real-refresh-1")
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("expected current valid token to be served after refresh failure, status=%d payload=%#v", status, payload)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, payload["expires_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := accessExp.Truncate(time.Second)
+	if !expiresAt.Equal(want) {
+		t.Fatalf("expected expiry to use access token expiry when sooner than bundle TTL, want=%s got=%s", want, expiresAt)
+	}
+}
+
 func TestCodexOAuthRefreshPersistsRotatedTokenAndAudits(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeCodexAuth(testJWT(time.Now().Add(2*time.Minute)), "real-refresh-1")
@@ -930,6 +1013,36 @@ func TestCodexOAuthRefreshPersistsRotatedTokenAndAudits(t *testing.T) {
 	events := readAudit(t, f.audit)
 	if !hasAuditOperation(events, "files.vend") || !hasAuditOperation(events, "files.refresh") {
 		t.Fatalf("expected vend and refresh audit entries, got %#v", events)
+	}
+	var vend map[string]any
+	vend = lastAuditOperation(events, "files.vend")
+	if vend == nil {
+		t.Fatalf("expected vend audit entry, got %#v", events)
+	}
+	accessTokenExpiresAt, ok := vend["access_token_expires_at"]
+	if !ok || accessTokenExpiresAt == "" {
+		t.Fatalf("expected vend audit to include access_token_expires_at, got %#v", vend)
+	}
+	if vend["bundle_expires_at"] != vend["expires_at"] {
+		t.Fatalf("expected vend audit bundle_expires_at to match expires_at, got %#v", vend)
+	}
+	if vend["bundle_expires_at"] == accessTokenExpiresAt {
+		t.Fatalf("expected vend audit to distinguish bundle and access token expiry, got %#v", vend)
+	}
+}
+
+func TestCodexOAuthFilesRefreshesBeforeBundleTTLRunway(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeCodexAuth(testJWT(time.Now().Add(15*time.Minute)), "real-refresh-1")
+	payload, output, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("files failed: status=%d payload=%#v output=%s", status, payload, output)
+	}
+	if count := f.oauth.requestCount(); count != 1 {
+		t.Fatalf("expected refresh before vending a bundle with less than bundle TTL runway, got %d refreshes", count)
+	}
+	if strings.Contains(output, "real-refresh-1") || strings.Contains(output, "real-refresh-2") {
+		t.Fatalf("real refresh token appeared in response body")
 	}
 }
 
@@ -1177,6 +1290,16 @@ func hasAuditOperation(events []map[string]any, operation string) bool {
 		}
 	}
 	return false
+}
+
+func lastAuditOperation(events []map[string]any, operation string) map[string]any {
+	var last map[string]any
+	for _, event := range events {
+		if event["operation"] == operation && event["allowed"] == true {
+			last = event
+		}
+	}
+	return last
 }
 
 func generateRSAKey(t *testing.T) string {

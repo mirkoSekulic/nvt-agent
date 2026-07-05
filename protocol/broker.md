@@ -264,21 +264,57 @@ agents:
 - when the access token is within `refresh-margin-seconds` of expiry, the
   provider refreshes with `grant_type=refresh_token`, the configured
   `client-id`, and the current canonical refresh token
+- file-bundle vending refreshes early enough to satisfy both
+  `refresh-margin-seconds` and `bundle-ttl-seconds`
 - successful refresh updates `access_token`, rotated `refresh_token`,
   optional `id_token`, and `last_refresh`, then atomically replaces the
   canonical file
 - if refresh fails while the current access token is still valid, the provider
   serves the current token and records metadata-only audit; if the token is
   expired, the request fails
-- `expires_at` is the access token expiry
+- broker core caps file-bundle `expires_at` metadata with
+  `bundle-ttl-seconds`; if the provider expiry is sooner, `expires_at` is the
+  provider expiry instead
+- `bundle-ttl-seconds` does not reduce the lifetime of an already-issued
+  OpenAI access token; the vended `auth.json` still contains the real
+  `access_token`, which remains valid until its actual JWT expiry
+- short-lived bundle metadata drives frequent broker re-materialization by the
+  runtime refresher; this remains the insecure/compatibility file-bundle
+  fallback until credential-less Codex ships
+- `files.vend` audit `expires_at` and `bundle_expires_at` are capped bundle
+  metadata; provider-specific fields such as `access_token_expires_at` may
+  record the true credential expiry
+- `files.refresh`, injection, and token-path audit expiry metadata use the true
+  access-token expiry
 - audit entries record provider, agent, operation, and expiry metadata only;
   token values and file contents must never be logged
+
+Codex fallback refresh cadence depends on both broker and runtime settings:
+
+- broker `bundle-ttl-seconds` sets the generic maximum bundle metadata lifetime
+- runtime `broker-auth-files` `refresh-slack-seconds` is subtracted from the
+  earliest returned `expires_at`
+- runtime `broker-auth-files` `min-sleep-seconds` is the lower bound for loop
+  sleeps
+
+With the defaults, `1200 - 900 = 300s`, so each agent refresher wakes roughly
+every five minutes. If `bundle-ttl-seconds <= refresh-slack-seconds`, the next
+wake target is already due and the runtime clamps to `min-sleep-seconds`; with
+the default `min-sleep-seconds: 60`, that can create a 60-second loop per agent.
+
+The Codex plan-auth fallback remains file-bundle based. The broker owns and
+writes the root refresh token; agent bundles receive the real OpenAI access
+token plus inert stub fields. Full credential-less Codex is intentionally left
+for later CA/TLS termination and WebSocket injection work.
 
 Default Codex OAuth settings match the Codex CLI refresh flow:
 
 ```yaml
 token-url: https://auth.openai.com/oauth/token
 client-id: app_EMoamEEZ73f0CkXaXp7hrann
+refresh-margin-seconds: 600
+bundle-ttl-seconds: 1200
+stub-refresh-token: nvt-broker-stub
 ```
 
 ## Static Token And Header Providers

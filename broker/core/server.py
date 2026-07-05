@@ -1,7 +1,9 @@
 import json
 import os
 import ssl
+import time
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from broker.core.audit import AuditLog
@@ -142,7 +144,24 @@ class Broker:
         self.agents.ensure_provider_grant(agent, provider_name)
         if not hasattr(provider, "files"):
             raise ProviderError("files-not-supported", f"provider {provider_name} does not support file bundles")
-        files, expires_at = provider.files(agent["id"], self.audit, request_id)
+        files_result = provider.files(agent["id"], self.audit, request_id)
+        if len(files_result) == 2:
+            files, provider_expires_at = files_result
+            files_metadata = {}
+        else:
+            files, provider_expires_at, files_metadata = files_result
+        expires_at = capped_files_expiry(provider_expires_at, getattr(provider, "bundle_ttl_seconds", None))
+        vend_audit = {
+            **files_metadata,
+            "request_id": request_id,
+            "agent": agent["id"],
+            "provider": provider_name,
+            "operation": "files.vend",
+            "allowed": True,
+            "expires_at": expires_at,
+            "bundle_expires_at": expires_at,
+        }
+        self.audit.write(**vend_audit)
         self.audit.write(
             request_id=request_id,
             agent=agent["id"],
@@ -260,6 +279,29 @@ def string_field(payload, key):
     if not isinstance(value, str) or not value:
         raise ProviderError(f"{key}-required")
     return value
+
+
+def capped_files_expiry(provider_expires_at, bundle_ttl_seconds):
+    if provider_expires_at is None:
+        return None
+    if bundle_ttl_seconds is None:
+        return provider_expires_at
+    provider_expiry = parse_rfc3339(provider_expires_at)
+    bundle_expiry = datetime.fromtimestamp(int(time.time()) + bundle_ttl_seconds, timezone.utc)
+    return format_rfc3339(min(provider_expiry, bundle_expiry))
+
+
+def parse_rfc3339(value):
+    if not isinstance(value, str) or not value:
+        raise ProviderError("files-expiry-invalid", "provider file bundle expiry must be an RFC3339 string", 502)
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError as error:
+        raise ProviderError("files-expiry-invalid", "provider file bundle expiry must be RFC3339", 502) from error
+
+
+def format_rfc3339(value):
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def operation_from_path(path):
