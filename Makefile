@@ -29,7 +29,7 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image=$(GATEWAY_IMAGE)
 endif
 
-.PHONY: runtime-build broker-build egressd-build phase2-codex-gate operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build egressd-build phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -42,6 +42,9 @@ egressd-build:
 
 phase2-codex-gate: runtime-build broker-build egressd-build
 	bash scripts/phase2-codex-gate.sh
+
+phase2b-codex-forward-proxy: runtime-build egressd-build
+	bash scripts/phase2b-codex-forward-proxy.sh
 
 operator-build:
 	bash scripts/operator-build.sh $(if $(NO_CACHE),--no-cache)

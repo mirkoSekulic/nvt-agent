@@ -58,8 +58,18 @@ type Config struct {
 	// the agent netns is a conformance failure.
 	AllowInsecureBroker bool `json:"allow_insecure_broker"`
 	// BrokerCAFile optionally pins a CA bundle for the broker TLS endpoint.
-	BrokerCAFile string  `json:"broker_ca_file"`
-	Routes       []Route `json:"routes"`
+	BrokerCAFile string              `json:"broker_ca_file"`
+	Routes       []Route             `json:"routes"`
+	ForwardProxy *ForwardProxyConfig `json:"forward_proxy"`
+}
+
+// ForwardProxyConfig enables CONNECT-only blind-tunnel proxying. It does not
+// terminate TLS or inject credentials; it only allows configured host:port
+// targets through.
+type ForwardProxyConfig struct {
+	Listen     string   `json:"listen"`
+	AllowHosts []string `json:"allow_hosts"`
+	AllowPorts []int    `json:"allow_ports"`
 }
 
 // LoadConfig reads and validates the configuration file.
@@ -80,21 +90,23 @@ func LoadConfig(path string) (*Config, error) {
 
 // Validate enforces the transport and route rules.
 func (c *Config) Validate() error {
-	parsed, err := url.Parse(c.BrokerURL)
-	if err != nil || parsed.Host == "" {
-		return fmt.Errorf("broker_url must be a valid URL")
+	if len(c.Routes) == 0 && c.ForwardProxy == nil {
+		return fmt.Errorf("at least one route or forward_proxy is required")
 	}
-	switch parsed.Scheme {
-	case "https":
-	case "http":
-		if !c.AllowInsecureBroker {
-			return fmt.Errorf("broker_url must be https unless allow_insecure_broker is set (local dev only)")
+	if len(c.Routes) > 0 {
+		parsed, err := url.Parse(c.BrokerURL)
+		if err != nil || parsed.Host == "" {
+			return fmt.Errorf("broker_url must be a valid URL")
 		}
-	default:
-		return fmt.Errorf("broker_url must be an http(s) URL")
-	}
-	if len(c.Routes) == 0 {
-		return fmt.Errorf("at least one route is required")
+		switch parsed.Scheme {
+		case "https":
+		case "http":
+			if !c.AllowInsecureBroker {
+				return fmt.Errorf("broker_url must be https unless allow_insecure_broker is set (local dev only)")
+			}
+		default:
+			return fmt.Errorf("broker_url must be an http(s) URL")
+		}
 	}
 	for index, route := range c.Routes {
 		if route.Listen == "" {
@@ -110,7 +122,42 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("routes[%d]: listen_tls_cert and listen_tls_key must be set together", index)
 		}
 	}
+	if c.ForwardProxy != nil {
+		if err := c.ForwardProxy.Validate(); err != nil {
+			return fmt.Errorf("forward_proxy: %w", err)
+		}
+	}
 	return nil
+}
+
+// Validate enforces the forward proxy's fail-closed shape. An empty allowlist
+// is valid and means deny all.
+func (c *ForwardProxyConfig) Validate() error {
+	if c.Listen == "" {
+		return fmt.Errorf("listen is required")
+	}
+	for _, host := range c.AllowHosts {
+		normalized, err := normalizeProxyHost(host)
+		if err != nil {
+			return fmt.Errorf("allow_hosts[%q]: %w", host, err)
+		}
+		if normalized != strings.ToLower(host) {
+			return fmt.Errorf("allow_hosts[%q]: must be normalized lowercase host without brackets", host)
+		}
+	}
+	for _, port := range c.effectiveAllowPorts() {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("allow_ports contains invalid port %d", port)
+		}
+	}
+	return nil
+}
+
+func (c *ForwardProxyConfig) effectiveAllowPorts() []int {
+	if len(c.AllowPorts) == 0 {
+		return []int{443}
+	}
+	return c.AllowPorts
 }
 
 // validateUpstream enforces that the pinned re-origination target is a bare
