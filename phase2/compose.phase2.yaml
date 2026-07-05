@@ -34,7 +34,7 @@ services:
       NVT_BROKER_TOKEN: ${PHASE2_EGRESS_TOKEN}
     volumes:
       - ${PHASE2_STATE}/egressd.json:/config/egressd.json:ro
-      - ${PHASE2_STATE}/tls:/tls:ro
+      - ${PHASE2_STATE}/tls:/config/tls:ro
     networks:
       - phase2-agent
       - phase2-trusted

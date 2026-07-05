@@ -28,7 +28,7 @@ if [ -z "$AUTH_SOURCE" ]; then
 fi
 UPSTREAM_HOST="${PHASE2_UPSTREAM:-chatgpt.com}"
 BASE_SCHEME="${PHASE2_SCHEME:-https}"   # https (default, TLS listen) | http
-CODEX_CMD="${PHASE2_CODEX_CMD:-codex exec \"print pong\"}"
+CODEX_CMD="${PHASE2_CODEX_CMD:-codex exec --skip-git-repo-check \"print pong\"}"
 OUT_DIR="$REPO_ROOT/.phase2-out"
 STATE_DIR="$OUT_DIR/state"
 PROJECT="nvt-phase2"
@@ -122,7 +122,7 @@ if [ "$BASE_SCHEME" = "https" ]; then
     -CA "$STATE_DIR/tls/agent-ca.pem" -CAkey "$STATE_DIR/tls/ca-key.pem" -CAcreateserial \
     -out "$STATE_DIR/tls/cert.pem" \
     -extfile <(printf 'subjectAltName=DNS:egressd') >/dev/null 2>&1
-  LISTEN_TLS_LINES=$'      "listen_tls_cert": "/tls/cert.pem",\n      "listen_tls_key": "/tls/key.pem",'
+  LISTEN_TLS_LINES=$'      "listen_tls_cert": "/config/tls/cert.pem",\n      "listen_tls_key": "/config/tls/key.pem",'
 else
   # http mode still needs the mount target to exist for compose.
   : > "$STATE_DIR/tls/agent-ca.pem"
@@ -178,7 +178,7 @@ json.dump({
     "tokens": {
         "access_token": placeholder_jwt,
         "refresh_token": "nvt-broker-stub",
-        "id_token": "NVT-PLACEHOLDER-NOT-A-KEY",
+        "id_token": placeholder_jwt,
     },
     "last_refresh": "2020-01-01T00:00:00Z",
 }, open(sys.argv[1], "w"), indent=2)
@@ -194,7 +194,9 @@ $COMPOSE up -d --no-build broker egressd agent
 
 log "waiting for broker health"
 for _ in $(seq 1 30); do
-  if $COMPOSE exec -T egressd true 2>/dev/null && \
+  egressd_container="$($COMPOSE ps -q egressd 2>/dev/null || true)"
+  if [ -n "$egressd_container" ] && \
+     [ "$(docker inspect -f '{{.State.Running}}' "$egressd_container" 2>/dev/null || true)" = "true" ] && \
      $COMPOSE exec -T broker sh -c 'exit 0' 2>/dev/null; then break; fi
   sleep 1
 done
@@ -221,7 +223,7 @@ $COMPOSE exec -T agent bash -lc '
     export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/nvt-egressd-ca.crt
   fi
   export CODEX_HOME=/root/.codex
-  '"$CODEX_CMD"'
+  '"$CODEX_CMD"' < /dev/null
 ' > "$OUT_DIR/evidence/codex-stdout.txt" 2> "$OUT_DIR/evidence/codex-stderr.txt"
 CODEX_RC=$?
 set -e

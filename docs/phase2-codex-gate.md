@@ -1,110 +1,184 @@
 # Phase 2 Gate — Codex Plan-Auth Mediation: Findings & Decision
 
-Status: **TEMPLATE — fill from a `make phase2-codex-gate` run**
+Status: **NO-GO for redirect-only Codex plan-auth mediation**
 Parent: `docs/mediated-egress-plan.md` (Phase 2), spec:
 `docs/phase2-codex-gate-plan.md`
 
-This document is the deliverable of Phase 2. It records the empirical answer to:
+This document records the empirical answer to:
 
 > Can real Codex ChatGPT-plan auth be fully mediated through egressd via
 > base-URL redirection, with the agent container holding **no** real
 > credential?
 
-Fill each section from `.phase2-out/evidence/` after running the harness. Do
-not paste raw tokens — reference sanitized evidence only.
+## How to Run
 
-## How to run
-
-```
+```sh
 make phase2-codex-gate
-# variables:
-#   PHASE2_AUTH_SOURCE           real auth.json (default .broker/codex/auth.json)
-#   PHASE2_SCHEME                https (default, egressd serves TLS) | http
-#   PHASE2_UPSTREAM              upstream host (default chatgpt.com)
-#   PHASE2_CODEX_CMD             the turn (default: codex exec "print pong")
-#   PHASE2_MODEL_PROVIDER_BASE   optional: also set model_providers.openai.base_url
-#                                to test the API-style path (recorded as a finding)
+# useful variants:
+#   PHASE2_SCHEME=http make phase2-codex-gate
+#   PHASE2_SCHEME=http PHASE2_UPSTREAM=api.openai.com \
+#     PHASE2_MODEL_PROVIDER_BASE=http://egressd:8471/v1 make phase2-codex-gate
 ```
 
 Evidence lands in `.phase2-out/evidence/`:
 `summary.txt`, `codex-stdout.txt`, `codex-stderr.txt`, `egressd.log`,
 `broker-audit.jsonl`, `injection-audit.jsonl`.
 
-## The three possible outcomes (decision guide)
+## Runs
 
-Run `PHASE2_SCHEME=https` first (Codex almost certainly requires https). Then:
+Run date: 2026-07-05.
 
-| Observation | Meaning | Decision |
-|---|---|---|
-| Turn completes over `https` with the per-agent CA | Codex requires https but does **not** pin certs; TLS re-origination works | **GO** |
-| Turn fails over `https` with a cert/pinning error, even with the CA trusted | Codex **pins certs** on the plan-auth host | **NO-GO** for plan-auth (keep on file bundles); mediate redirectable/API-key providers only |
-| Turn fails because Codex called a host **not** covered by `chatgpt_base_url` | fixed/hardcoded endpoint outside the base URL | **NO-GO or partial** — record the host; may need multi-route or transparent mode (Phase 6) |
-| Turn completes over `http` (if you also test `PHASE2_SCHEME=http`) | base URL fully covers traffic, no TLS requirement | **GO** (simplest) |
+All runs used a placeholder `auth.json` inside the agent container and the real
+Codex `auth.json` only in broker-owned harness state.
 
-A NO-GO is a **successful phase outcome** — a documented answer — not a
-failure of the work.
+### HTTPS `chatgpt_base_url`
 
-## Findings (fill in)
+Command:
 
-### Required hosts
-_The set of hosts Codex needed, and which base-URL key routed each. From
-`egressd.log` (routed) and `codex-stderr.txt` (connect failures to
-un-routed hosts on the internal network)._
+```sh
+make phase2-codex-gate
+```
 
-- `chatgpt.com` — routed via `chatgpt_base_url`? (yes/no)
-- `auth.openai.com` — needed for refresh? routed how?
-- others: …
+Result:
 
-### Minimal placeholder shape
-_What `auth.json` shape Codex accepted at startup with no real credential.
-The harness uses a placeholder JWT (`header.payload.NVT-PLACEHOLDER-NOT-A-KEY`)
-with far-future `exp` and a placeholder account claim. Record whether that was
-sufficient, or what minimum Codex actually needs._
+- egressd started with an agent-facing HTTPS listener.
+- Codex accepted the placeholder `access_token` and `id_token` once both were
+  JWT-shaped.
+- Codex attempted redirected MCP calls to `https://egressd:8471/api/codex/ps/mcp`,
+  but the agent-facing TLS path failed during handshake.
+- Codex then attempted the main turn through a hardcoded WebSocket endpoint:
+  `wss://chatgpt.com/backend-api/codex/responses`.
+- Because the agent network is internal-only, that hardcoded direct host lookup
+  failed before any broker injection request.
 
-### Claim-derived headers
-_Did the upstream require headers beyond `Authorization`? The harness injects
-`chatgpt-account-id` from the real token's `https://api.openai.com/auth →
-chatgpt_account_id` claim and strips the placeholder. Record whether it was
-required, and the exact header name / claim path if different._
+### HTTP `chatgpt_base_url`
 
-### TLS / cert pinning
-_Did localhost TLS re-origination work with the per-agent CA, or did Codex
-reject the egressd-terminated connection? Distinguish "requires https"
-(CA works) from "pins certs" (CA cannot help)._
+Command:
 
-### Bypass attempts
-_Did any Codex traffic try to reach a fixed host directly? On the internal
-network these appear as connect failures in `codex-stderr.txt`. List them._
+```sh
+PHASE2_SCHEME=http make phase2-codex-gate
+```
+
+Result:
+
+- egressd started with an agent-facing HTTP listener.
+- Codex still attempted the main turn through a hardcoded WebSocket endpoint:
+  `wss://api.openai.com/v1/responses`.
+- No request reached egressd/broker injection.
+
+### HTTP API-style provider base URL
+
+Command:
+
+```sh
+PHASE2_SCHEME=http PHASE2_UPSTREAM=api.openai.com \
+  PHASE2_MODEL_PROVIDER_BASE=http://egressd:8471/v1 make phase2-codex-gate
+```
+
+Result:
+
+- egressd started with upstream `api.openai.com`.
+- `model_providers.openai.base_url` was written as
+  `http://egressd:8471/v1`.
+- Codex still attempted the main turn through the hardcoded WebSocket endpoint:
+  `wss://api.openai.com/v1/responses`.
+- No request reached egressd/broker injection.
+
+## Findings
+
+### Required Hosts
+
+Observed hardcoded direct endpoints:
+
+- `wss://chatgpt.com/backend-api/codex/responses`
+- `wss://api.openai.com/v1/responses`
+
+These were not redirected by `chatgpt_base_url` or by the tested
+`model_providers.openai.base_url` setting in Codex `0.142.4`.
+
+### Minimal Placeholder Shape
+
+Codex requires both `access_token` and `id_token` to be JWT-shaped. A literal
+placeholder `id_token` fails before network traffic:
+
+```text
+invalid ID token format at line 6 column 3
+```
+
+The harness now writes the same inert, zero-secret placeholder JWT shape for
+both fields, with a stub refresh token.
+
+### Claim-Derived Headers
+
+Not reached. No injection requests were made.
+
+### TLS / Cert Pinning
+
+Not fully proven. The fixed harness starts egressd with TLS certificates
+mounted correctly, but Codex's redirected MCP calls to the HTTPS listener fail
+during TLS handshake before a normal HTTP request reaches egressd:
+
+```text
+http: TLS handshake error ... remote error: tls: error decrypting message
+```
+
+This is secondary to the main result: the model turn's Responses WebSocket is
+not redirected by the tested base URL settings.
+
+### Bypass Attempts
+
+Confirmed. On the internal-only agent network, Codex repeatedly failed DNS
+lookup for hardcoded WebSocket endpoints:
+
+```text
+failed to lookup address information: Try again, url: wss://chatgpt.com/backend-api/codex/responses
+failed to lookup address information: Try again, url: wss://api.openai.com/v1/responses
+```
 
 ### Refresh
-_Refresh is **forced**: the harness computes the margin from the source token's
-`exp`, so the first injection always triggers the real refresh flow. Confirm
-`summary.txt: refresh_seen` ≥ 1 and `injection.refresh` entries in
-`broker-audit.jsonl`, and that the turn still succeeded._
 
-### model_providers coverage (optional)
-_Only if run with `PHASE2_MODEL_PROVIDER_BASE`. Record whether the API-style
-path also routed through egressd or hit a fixed host. Default runs gate
-`chatgpt_base_url` plan-auth traffic only._
+Not reached. The harness computed a forced refresh margin, but no injection
+request reached the broker:
 
-### Non-possession
-_The harness fails loudly if any real token value **or fragment** appears in:
-the agent's `auth.json`, the agent container's env, its process args
-(sampled during the run), its codex home, or any captured evidence
-(egressd log, broker audit, codex stdio). Confirm "no credential leakage
-detected (agent fs/env/args + evidence)" in the run output._
+```text
+injection_requests=0
+refresh_seen=0
+```
+
+### Non-Possession
+
+Passed in every run. The harness reported:
+
+```text
+no credential leakage detected (agent fs/env/args + evidence)
+```
+
+The scan covered real token values and stable fragments across the agent
+placeholder auth file, captured agent env, sampled process args, Codex home,
+egressd logs, broker audit, and Codex stdio evidence.
 
 ## Decision
 
-**GO / NO-GO / PARTIAL:** _____
+**NO-GO for redirect-only Codex plan-auth mediation.**
 
-**Rationale:** _____
+Redirected base URLs are not enough for current Codex plan-auth because the
+Responses WebSocket endpoint is hardcoded outside the tested redirect settings.
+The correct next step is not more Phase 3 wiring for Codex plan-auth; it is one
+of:
 
-**Consequence for Phase 3:**
-- GO → wire operator/compose for mediated `codex-oauth` (Phase 3 as planned).
-- NO-GO (cert pinning) → keep Codex plan-auth on `file-bundle`; ship mediation
-  for redirectable/API-key providers; revisit with transparent mode (Phase 6).
-- PARTIAL (extra hosts) → enumerate hosts; decide multi-route now vs. Phase 6.
+- keep Codex plan-auth on the existing file-bundle/broker-auth path for now;
+- mediate providers/tools whose HTTP base URL is actually redirectable;
+- bring Phase 6-style forward-proxy/transparent mediation earlier for Codex
+  plan-auth, because that can catch hardcoded endpoints.
 
-## Evidence references
-_Link the sanitized files under `.phase2-out/evidence/` that back each claim._
+This is a successful Phase 2 result: the gate answered the question before
+operator/compose production wiring was built around a false assumption.
+
+## Evidence References
+
+- `.phase2-out/evidence/summary.txt`
+- `.phase2-out/evidence/codex-stderr.txt`
+- `.phase2-out/evidence/egressd.log`
+- `.phase2-out/evidence/agent-container-scan.txt`
+- `.phase2-out/evidence/agent-ps-during.txt`
+- `.phase2-out/evidence/injection-audit.jsonl`
