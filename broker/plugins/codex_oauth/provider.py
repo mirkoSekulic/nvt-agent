@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from broker.core.config import env_value, fail, list_value, string_value
+from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.plugins.github_app.provider import ProviderError
 
 
@@ -41,6 +41,7 @@ class CodexOAuthProvider:
             required=True,
         )
         self.extra_files = self._extra_files()
+        self.injection_hosts = injection_hosts(self.config, self.name)
         self.lock = threading.Lock()
 
     def _provider_value(self, key, default=None):
@@ -86,48 +87,57 @@ class CodexOAuthProvider:
             output.append({"name": name, "path": path, "mode": mode})
         return output
 
-    def files(self, agent_id, audit, request_id):
-        with self.lock:
-            auth = self._read_auth()
-            access_token = self._token(auth, "access_token")
+    def _fresh_auth(self, agent_id, audit, request_id, operation_prefix):
+        auth = self._read_auth()
+        access_token = self._token(auth, "access_token")
+        try:
+            exp = self._jwt_exp(access_token)
+        except ProviderError:
+            exp = 0
+        now = int(time.time())
+        refreshed = False
+        if exp - now <= self.refresh_margin_seconds:
+            refresh_persisted = False
             try:
+                refreshed_auth = self._refresh(auth)
+                self._write_auth(refreshed_auth)
+                refresh_persisted = True
+                access_token = self._token(refreshed_auth, "access_token")
                 exp = self._jwt_exp(access_token)
+                auth = refreshed_auth
+                refreshed = True
+                audit.write(
+                    request_id=request_id,
+                    agent=agent_id,
+                    provider=self.name,
+                    operation=f"{operation_prefix}.refresh",
+                    allowed=True,
+                    expires_at=rfc3339(exp),
+                )
             except ProviderError:
-                exp = 0
-            now = int(time.time())
-            refreshed = False
-            if exp - now <= self.refresh_margin_seconds:
-                refresh_persisted = False
-                try:
-                    refreshed_auth = self._refresh(auth)
-                    self._write_auth(refreshed_auth)
-                    refresh_persisted = True
-                    access_token = self._token(refreshed_auth, "access_token")
-                    exp = self._jwt_exp(access_token)
-                    auth = refreshed_auth
-                    refreshed = True
+                if refresh_persisted:
                     audit.write(
                         request_id=request_id,
                         agent=agent_id,
                         provider=self.name,
-                        operation="files.refresh",
+                        operation=f"{operation_prefix}.refresh",
                         allowed=True,
-                        expires_at=rfc3339(exp),
+                        expires_at=None,
+                        validation_error=True,
                     )
-                except ProviderError:
-                    if refresh_persisted:
-                        audit.write(
-                            request_id=request_id,
-                            agent=agent_id,
-                            provider=self.name,
-                            operation="files.refresh",
-                            allowed=True,
-                            expires_at=None,
-                            validation_error=True,
-                        )
-                    if exp <= now:
-                        raise
-                    print(f"codex-oauth provider {self.name}: refresh failed; serving current valid access token", flush=True)
+                if exp <= now:
+                    raise
+                print(f"codex-oauth provider {self.name}: refresh failed; serving current valid access token", flush=True)
+        return auth, access_token, exp, refreshed
+
+    def injection_headers(self, host, method, path, agent_id, audit, request_id):
+        with self.lock:
+            _auth, access_token, exp, _refreshed = self._fresh_auth(agent_id, audit, request_id, "injection")
+        return {"authorization": f"Bearer {access_token}"}, rfc3339(exp), ["authorization"]
+
+    def files(self, agent_id, audit, request_id):
+        with self.lock:
+            auth, _access_token, exp, refreshed = self._fresh_auth(agent_id, audit, request_id, "files")
             vended = json.loads(json.dumps(auth))
             tokens = vended.setdefault("tokens", {})
             if not isinstance(tokens, dict):

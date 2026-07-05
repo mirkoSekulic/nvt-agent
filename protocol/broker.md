@@ -334,6 +334,31 @@ These providers are compatibility providers. They remove raw secret env vars
 from the agent container, but token/header capability calls still return
 credentials to the agent.
 
+## Injection Support (Mediated Egress)
+
+Providers opt into header injection (`protocol/injection.md`) with an
+`injection-hosts` config list naming the upstream hosts the credential may be
+injected for. A provider without `injection-hosts` does not support
+injection and `/v1/injection/*` denies with `injection-not-supported`.
+
+```yaml
+providers:
+  - name: codex-main
+    plugin: codex-oauth
+    config:
+      auth-file: /state/codex/auth.json
+      injection-hosts:
+        - chatgpt.com
+        - auth.openai.com
+```
+
+The `token` and `codex-oauth` plugins support injection. For `codex-oauth`,
+injected material is `authorization: Bearer <access token>` using the same
+refresh flow as file vending; audit entries use the `injection.*` operation
+prefix. Grants must carry `materialization: header-inject` (see
+`protocol/injection.md` for the identity role/pairing model and endpoint
+shapes).
+
 ## Headers
 
 Allowed caller request headers:

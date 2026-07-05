@@ -1,4 +1,6 @@
 import json
+import os
+import ssl
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -10,6 +12,10 @@ from broker.plugins.github_app.provider import ProviderError
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
+
+# Documented zero-entropy placeholder from protocol/injection.md. It is the
+# only credential-shaped value allowed inside a mediated agent container.
+INJECTION_PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 
 
 class Broker:
@@ -25,8 +31,27 @@ class Broker:
             raise ProviderError("provider-not-found")
         return provider
 
+    def authenticate_role(self, authorization, role):
+        identity = self.agents.authenticate(authorization)
+        if identity.get("role", "agent") != role:
+            raise ProviderError(
+                "role-not-allowed",
+                f"this endpoint requires a {role}-role identity",
+                403,
+            )
+        return identity
+
+    def ensure_not_header_inject(self, agent, provider_name):
+        grant = self.agents.grant(agent, provider_name)
+        if grant is not None and grant.get("materialization") == "header-inject":
+            raise ProviderError(
+                "materialization-mismatch",
+                f"grant for {provider_name} is header-inject; secret-bearing endpoints are disabled",
+                403,
+            )
+
     def http_request(self, request_id, payload, authorization):
-        agent = self.agents.authenticate(authorization)
+        agent = self.authenticate_role(authorization, "agent")
         provider_name = string_field(payload, "provider")
         method = string_field(payload, "method").upper()
         url = string_field(payload, "url")
@@ -52,8 +77,9 @@ class Broker:
         return {"ok": True, **result}
 
     def token(self, request_id, payload, authorization):
-        agent = self.agents.authenticate(authorization)
+        agent = self.authenticate_role(authorization, "agent")
         provider_name = string_field(payload, "provider")
+        self.ensure_not_header_inject(agent, provider_name)
         target = string_field(payload, "target")
         purpose = payload.get("purpose")
         provider = self.provider(provider_name)
@@ -72,7 +98,7 @@ class Broker:
         return {"ok": True, "token": token, "expires_at": expires_at}
 
     def identity(self, request_id, payload, authorization):
-        agent = self.agents.authenticate(authorization)
+        agent = self.authenticate_role(authorization, "agent")
         provider_name = string_field(payload, "provider")
         target = string_field(payload, "target")
         provider = self.provider(provider_name)
@@ -90,8 +116,9 @@ class Broker:
         return {"ok": True, **identity}
 
     def headers(self, request_id, payload, authorization):
-        agent = self.agents.authenticate(authorization)
+        agent = self.authenticate_role(authorization, "agent")
         provider_name = string_field(payload, "provider")
+        self.ensure_not_header_inject(agent, provider_name)
         target = string_field(payload, "target")
         provider = self.provider(provider_name)
         repo = provider.normalize_target(target)
@@ -108,8 +135,9 @@ class Broker:
         return {"ok": True, "headers": headers}
 
     def files(self, request_id, payload, authorization):
-        agent = self.agents.authenticate(authorization)
+        agent = self.authenticate_role(authorization, "agent")
         provider_name = string_field(payload, "provider")
+        self.ensure_not_header_inject(agent, provider_name)
         provider = self.provider(provider_name)
         self.agents.ensure_provider_grant(agent, provider_name)
         if not hasattr(provider, "files"):
@@ -125,6 +153,78 @@ class Broker:
             file_count=len(files),
         )
         return {"ok": True, "files": files, "expires_at": expires_at}
+
+    def _injection_grant(self, subject, capability):
+        grant = self.agents.grant(subject, capability)
+        if grant is None:
+            raise ProviderError("provider-not-granted", None, 403)
+        if grant.get("materialization") != "header-inject":
+            raise ProviderError(
+                "materialization-mismatch",
+                f"grant for {capability} is not header-inject",
+                403,
+            )
+        return grant
+
+    def _injection_provider(self, capability):
+        provider = self.provider(capability)
+        hosts = getattr(provider, "injection_hosts", None) or []
+        if not hosts or not hasattr(provider, "injection_headers"):
+            raise ProviderError(
+                "injection-not-supported",
+                f"provider {capability} does not support header injection",
+                403,
+            )
+        return provider, hosts
+
+    def injection_headers(self, request_id, payload, authorization):
+        identity = self.authenticate_role(authorization, "egress")
+        paired = self.agents.by_id(identity.get("paired_agent") or "")
+        if paired is None or paired.get("role", "agent") != "agent":
+            raise ProviderError("pairing-invalid", "egress identity has no valid paired agent", 403)
+        capability = string_field(payload, "capability")
+        host = string_field(payload, "host")
+        method = string_field(payload, "method").upper()
+        path = string_field(payload, "path")
+        self._injection_grant(paired, capability)
+        provider, hosts = self._injection_provider(capability)
+        if host not in hosts:
+            raise ProviderError("host-not-allowed", f"host {host} is not allowed for {capability}", 403)
+        headers, expires_at, strip = provider.injection_headers(host, method, path, paired["id"], self.audit, request_id)
+        self.audit.write(
+            request_id=request_id,
+            agent=identity["id"],
+            paired_agent=paired["id"],
+            provider=capability,
+            operation="injection.headers",
+            host=host,
+            method=method,
+            path=path,
+            allowed=True,
+            expires_at=expires_at,
+        )
+        return {"ok": True, "headers": headers, "expires_at": expires_at, "strip_request_headers": strip}
+
+    def injection_routing(self, request_id, payload, authorization):
+        identity = self.agents.authenticate(authorization)
+        if identity.get("role", "agent") == "egress":
+            subject = self.agents.by_id(identity.get("paired_agent") or "")
+            if subject is None or subject.get("role", "agent") != "agent":
+                raise ProviderError("pairing-invalid", "egress identity has no valid paired agent", 403)
+        else:
+            subject = identity
+        capability = string_field(payload, "capability")
+        self._injection_grant(subject, capability)
+        _, hosts = self._injection_provider(capability)
+        self.audit.write(
+            request_id=request_id,
+            agent=identity["id"],
+            paired_agent=subject["id"],
+            provider=capability,
+            operation="injection.routing",
+            allowed=True,
+        )
+        return {"ok": True, "hosts": hosts, "placeholder": INJECTION_PLACEHOLDER}
 
     def denied(self, request_id, payload, reason, message=None, authorization=None):
         agent_id = None
@@ -188,6 +288,14 @@ def make_handler(broker):
                     response = broker.files(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
+                if self.path == "/v1/injection/headers":
+                    response = broker.injection_headers(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
+                if self.path == "/v1/injection/routing":
+                    response = broker.injection_routing(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
                 self.write_json(404, {"ok": False, "error": "not-found"})
             except ProviderError as error:
                 self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization")))
@@ -221,6 +329,14 @@ def serve(bind, config_path=None, audit_path=None):
     broker = Broker(config_path, audit_path)
     host, port = parse_bind(bind)
     server = ThreadingHTTPServer((host, port), make_handler(broker))
+    cert = os.environ.get("NVT_BROKER_TLS_CERT")
+    key = os.environ.get("NVT_BROKER_TLS_KEY")
+    if bool(cert) != bool(key):
+        raise BrokerConfigError("NVT_BROKER_TLS_CERT and NVT_BROKER_TLS_KEY must be set together")
+    if cert and key:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=cert, keyfile=key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
     server.serve_forever()
 
 

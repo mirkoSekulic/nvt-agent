@@ -32,6 +32,16 @@ def list_value(value, field):
     return value
 
 
+def injection_hosts(config, name):
+    values = list_value(config.get("injection-hosts"), f"provider {name} config.injection-hosts")
+    output = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            fail(f"provider {name} config.injection-hosts[{index}] must be a non-empty string")
+        output.append(value)
+    return output
+
+
 def env_value(name):
     value = os.environ.get(name)
     if value is None:

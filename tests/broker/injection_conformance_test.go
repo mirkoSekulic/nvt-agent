@@ -1,12 +1,8 @@
 package broker_test
 
-// Phase 0 skeletons for the mediated credential egress injection contract
-// (protocol/injection.md, docs/mediated-egress-plan.md).
-//
-// Every test here is skipped pending its implementation phase. The bodies are
-// written against the intended black-box behavior so the contract is
-// reviewable as code and unskipping is the only change needed when the
-// implementation lands (plan Phase 1 for the broker side).
+// Conformance suite for the mediated credential egress injection contract
+// (protocol/injection.md, docs/mediated-egress-plan.md), live as of plan
+// Phase 1.
 
 import (
 	"bytes"
@@ -18,8 +14,6 @@ import (
 	"strings"
 	"testing"
 )
-
-const injectionPending = "pending Phase 1 (docs/mediated-egress-plan.md): /v1/injection endpoints and identity roles not implemented"
 
 // nvtPlaceholder is the documented zero-entropy placeholder constant from
 // protocol/injection.md.
@@ -167,7 +161,6 @@ func injectionRequest() map[string]any {
 // egress identity obtains injectable headers; the agent identity holding the
 // grant itself is refused. This is the load-bearing non-possession property.
 func TestInjectionRequiresEgressRole(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
@@ -189,7 +182,6 @@ func TestInjectionRequiresEgressRole(t *testing.T) {
 // TestInjectionDeniesUnpairedEgressIdentity pins pairing: an egress identity
 // paired to a different agent cannot fetch material for this agent's grants.
 func TestInjectionDeniesUnpairedEgressIdentity(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
@@ -203,7 +195,6 @@ func TestInjectionDeniesUnpairedEgressIdentity(t *testing.T) {
 // the other direction: egress identities are injection-only and must be
 // denied on every compatibility endpoint that returns secrets to the caller.
 func TestEgressRoleCannotCallSecretBearingEndpoints(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
@@ -228,7 +219,6 @@ func TestEgressRoleCannotCallSecretBearingEndpoints(t *testing.T) {
 // may discover hosts and the placeholder constant, and the response never
 // contains secret material.
 func TestAgentRoleReceivesRoutingConfigOnly(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
@@ -255,7 +245,6 @@ func TestAgentRoleReceivesRoutingConfigOnly(t *testing.T) {
 // identity without a header-inject grant for the capability is denied,
 // including for unknown capabilities.
 func TestRoutingDeniesUngrantedCapability(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
@@ -270,7 +259,6 @@ func TestRoutingDeniesUngrantedCapability(t *testing.T) {
 // TestRoutingDeniesWrongPairedEgress pins routing scoping for egress callers:
 // an egress identity is authorized against its paired agent's grants only.
 func TestRoutingDeniesWrongPairedEgress(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
@@ -284,7 +272,6 @@ func TestRoutingDeniesWrongPairedEgress(t *testing.T) {
 // a file-bundle grant is a direct-mode grant with no sidecar to route to, so
 // routing denies rather than acting as a cross-mode probe.
 func TestRoutingDeniesFileBundleGrant(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	identities := mediatedIdentities()
 	identities["frontend"] = roleIdentity{
@@ -306,7 +293,6 @@ func TestRoutingDeniesFileBundleGrant(t *testing.T) {
 // exclusion: a header-inject grant makes the compatibility file endpoint deny
 // for that provider and agent. No hybrid mode exists.
 func TestHeaderInjectGrantExcludesFileBundle(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
@@ -320,7 +306,6 @@ func TestHeaderInjectGrantExcludesFileBundle(t *testing.T) {
 // file-bundle grant (the default) denies injection for the paired egress
 // identity.
 func TestFileBundleGrantExcludesInjection(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	identities := mediatedIdentities()
 	identities["frontend"] = roleIdentity{
@@ -342,7 +327,6 @@ func TestFileBundleGrantExcludesInjection(t *testing.T) {
 // an egress identity are a validation error, not an ignored field — the
 // degeneration into "two tokens with the same grants" must be unrepresentable.
 func TestEgressIdentityWithGrantsIsConfigError(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(map[string]roleIdentity{
 		"frontend": {
@@ -374,7 +358,6 @@ func TestEgressIdentityWithGrantsIsConfigError(t *testing.T) {
 // are audited with metadata only; header values never appear in the audit
 // log on allow or deny paths.
 func TestInjectionAuditOmitsSecretValues(t *testing.T) {
-	t.Skip(injectionPending)
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(mediatedIdentities())
 
