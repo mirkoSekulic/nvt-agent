@@ -49,9 +49,11 @@ shape entirely (mediate only redirectable/API-key providers).
   key) selects ChatGPT-plan mode. Codex decodes the access-token JWT locally
   (the broker's `codex-oauth` provider does the same to read `exp`).
 - Base URL redirection points: `chatgpt_base_url` in `~/.codex/config.toml`
-  is the primary lever for the plan-auth backend; `model_providers.*.base_url`
-  covers the API-style path. **Both must be set to the egressd route** and the
-  exact key names/coverage verified empirically — this is part of the gate.
+  is the primary lever for the plan-auth backend. **Phase 2 gates
+  `chatgpt_base_url` plan-auth traffic by default.** `model_providers.*.base_url`
+  covers the API-style path and is tested only when
+  `PHASE2_MODEL_PROVIDER_BASE` is set; its coverage is recorded as a separate
+  finding rather than assumed. Verify the exact key names/coverage empirically.
 - Plan-auth requests may carry **auxiliary headers derived from token
   claims** (notably an account-id header). See "Claim-derived headers" below.
 
@@ -242,11 +244,12 @@ Evidence-capture hygiene:
 ### Task 6 — Real refresh proof
 
 You cannot mint short-lived tokens against real `auth.openai.com`, and you do
-not need to: set `refresh-margin-seconds` in the harness broker config
-**larger than the current access token's remaining lifetime**. Then the first
-injection forces the real refresh flow (real refresh token, real token URL)
-before vending. Confirm from broker audit that an `injection.refresh` entry
-appears and the turn still succeeds.
+not need to: the harness **computes** `refresh-margin-seconds` from the source
+token's `exp` (remaining lifetime + a day), so the margin always exceeds the
+token's remaining life and the first injection forces the real refresh flow
+(real refresh token, real token URL) before vending — regardless of how much
+life the token has left. Confirm from broker audit that an `injection.refresh`
+entry appears (`summary.txt: refresh_seen`) and the turn still succeeds.
 
 The mechanical cache-expiry / in-flight-stream behavior is already pinned
 deterministically by egressd and broker tests with fakes — this task only

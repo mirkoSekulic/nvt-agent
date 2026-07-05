@@ -463,6 +463,37 @@ func TestConfigRejectsMalformedUpstream(t *testing.T) {
 	}
 }
 
+// TestConfigTLSListenerRequiresBothFiles pins that the agent-facing TLS
+// listener needs cert and key together, never one alone.
+func TestConfigTLSListenerRequiresBothFiles(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			BrokerURL:           "https://broker:7347",
+			Routes:              []Route{{Listen: "0.0.0.0:8471", Capability: "codex-main", Upstream: "chatgpt.com"}},
+			AllowInsecureBroker: false,
+		}
+	}
+	certOnly := base()
+	certOnly.Routes[0].ListenTLSCert = "/tls/cert.pem"
+	if err := certOnly.Validate(); err == nil {
+		t.Fatal("cert without key must be rejected")
+	}
+	keyOnly := base()
+	keyOnly.Routes[0].ListenTLSKey = "/tls/key.pem"
+	if err := keyOnly.Validate(); err == nil {
+		t.Fatal("key without cert must be rejected")
+	}
+	both := base()
+	both.Routes[0].ListenTLSCert = "/tls/cert.pem"
+	both.Routes[0].ListenTLSKey = "/tls/key.pem"
+	if err := both.Validate(); err != nil {
+		t.Fatalf("cert+key should validate: %v", err)
+	}
+	if !both.Routes[0].TLSEnabled() {
+		t.Fatal("TLSEnabled should report true when both set")
+	}
+}
+
 // TestConfigRefusesPlaintextBrokerByDefault pins the transport rule from the
 // plan: the egressd-broker leg carries real credentials and must be TLS
 // unless local dev explicitly opts out.

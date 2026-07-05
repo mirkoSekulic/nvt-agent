@@ -359,6 +359,28 @@ prefix. Grants must carry `materialization: header-inject` (see
 `protocol/injection.md` for the identity role/pairing model and endpoint
 shapes).
 
+Some backends (Codex ChatGPT-plan) require an auxiliary header derived from
+the access-token claims (e.g. an account id). `codex-oauth` computes these
+from the **real** token via `injection-claim-headers`; the derived headers are
+returned alongside `authorization` and added to `strip_request_headers` so the
+agent's placeholder versions never reach the upstream. `claim-path` is a dotted
+string or a YAML list of exact segments (use the list form when a claim key
+itself contains dots, as the OpenAI account claim key does):
+
+```yaml
+providers:
+  - name: codex-main
+    plugin: codex-oauth
+    config:
+      injection-hosts:
+        - chatgpt.com
+      injection-claim-headers:
+        - header: chatgpt-account-id
+          claim-path:
+            - https://api.openai.com/auth
+            - chatgpt_account_id
+```
+
 ## Headers
 
 Allowed caller request headers:

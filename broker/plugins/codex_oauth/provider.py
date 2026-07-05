@@ -42,7 +42,32 @@ class CodexOAuthProvider:
         )
         self.extra_files = self._extra_files()
         self.injection_hosts = injection_hosts(self.config, self.name)
+        self.claim_headers = self._claim_headers()
         self.lock = threading.Lock()
+
+    def _claim_headers(self):
+        output = []
+        for index, item in enumerate(list_value(self.config.get("injection-claim-headers"), f"provider {self.name} config.injection-claim-headers")):
+            if not isinstance(item, dict):
+                fail(f"provider {self.name} config.injection-claim-headers[{index}] must be a YAML object")
+            header = string_value(item.get("header"), f"provider {self.name} config.injection-claim-headers[{index}].header", required=True)
+            raw_path = item.get("claim-path")
+            field = f"provider {self.name} config.injection-claim-headers[{index}].claim-path"
+            # A claim key may itself contain dots (the OpenAI account claim key
+            # is a URL), so a list of exact segments is accepted alongside the
+            # dotted-string shorthand.
+            if isinstance(raw_path, list):
+                path = []
+                for segment_index, segment in enumerate(raw_path):
+                    if not isinstance(segment, str) or not segment:
+                        fail(f"{field}[{segment_index}] must be a non-empty string")
+                    path.append(segment)
+            else:
+                path = [segment for segment in string_value(raw_path, field, required=True).split(".") if segment]
+            if not path:
+                fail(f"{field} must not be empty")
+            output.append({"header": header, "path": path})
+        return output
 
     def _provider_value(self, key, default=None):
         value = self.config.get(key)
@@ -133,7 +158,45 @@ class CodexOAuthProvider:
     def injection_headers(self, host, method, path, agent_id, audit, request_id):
         with self.lock:
             _auth, access_token, exp, _refreshed = self._fresh_auth(agent_id, audit, request_id, "injection")
-        return {"authorization": f"Bearer {access_token}"}, rfc3339(exp), ["authorization"]
+        headers = {"authorization": f"Bearer {access_token}"}
+        strip = ["authorization"]
+        if self.claim_headers:
+            claims = self._jwt_claims(access_token)
+            for entry in self.claim_headers:
+                value = self._claim_value(claims, entry["path"])
+                if value is None:
+                    raise ProviderError(
+                        "injection-claim-missing",
+                        f"claim {'.'.join(entry['path'])} not present in access token for header {entry['header']}",
+                        502,
+                    )
+                headers[entry["header"].lower()] = str(value)
+                strip.append(entry["header"].lower())
+        return headers, rfc3339(exp), strip
+
+    def _jwt_claims(self, token):
+        parts = token.split(".")
+        if len(parts) < 2:
+            raise ProviderError("access-token-invalid", "Codex access token is not a JWT", 502)
+        segment = parts[1]
+        padding = "=" * ((4 - len(segment) % 4) % 4)
+        try:
+            payload = json.loads(base64.urlsafe_b64decode((segment + padding).encode("ascii")).decode("utf-8"))
+        except Exception as error:
+            raise ProviderError("access-token-invalid", "Codex access token payload is invalid", 502) from error
+        if not isinstance(payload, dict):
+            raise ProviderError("access-token-invalid", "Codex access token payload is not an object", 502)
+        return payload
+
+    def _claim_value(self, claims, path):
+        current = claims
+        for segment in path:
+            if not isinstance(current, dict) or segment not in current:
+                return None
+            current = current[segment]
+        if isinstance(current, (dict, list)):
+            return None
+        return current
 
     def files(self, agent_id, audit, request_id):
         with self.lock:

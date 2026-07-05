@@ -32,6 +32,19 @@ type Route struct {
 	Upstream string `json:"upstream"`
 	// AllowInsecureUpstream permits a plain-HTTP upstream. Test/dev only.
 	AllowInsecureUpstream bool `json:"allow_insecure_upstream"`
+	// ListenTLSCert and ListenTLSKey optionally make the agent-facing
+	// listener serve HTTPS. Needed when the client refuses a plaintext base
+	// URL; the agent must trust the serving cert's CA. This is the same
+	// agent-facing TLS termination Phase 4 generalizes — used here only so
+	// the Phase 2 gate can distinguish "client requires https" from "client
+	// pins certs". Both must be set together or neither.
+	ListenTLSCert string `json:"listen_tls_cert"`
+	ListenTLSKey  string `json:"listen_tls_key"`
+}
+
+// TLSEnabled reports whether the agent-facing listener serves HTTPS.
+func (r Route) TLSEnabled() bool {
+	return r.ListenTLSCert != "" && r.ListenTLSKey != ""
 }
 
 // Config is the egressd configuration file shape.
@@ -92,6 +105,9 @@ func (c *Config) Validate() error {
 		}
 		if err := validateUpstream(route.Upstream); err != nil {
 			return fmt.Errorf("routes[%d].upstream: %w", index, err)
+		}
+		if (route.ListenTLSCert == "") != (route.ListenTLSKey == "") {
+			return fmt.Errorf("routes[%d]: listen_tls_cert and listen_tls_key must be set together", index)
 		}
 	}
 	return nil
