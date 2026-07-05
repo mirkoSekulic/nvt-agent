@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-const dialTimeout = 10 * time.Second
+const (
+	dialTimeout                             = 10 * time.Second
+	defaultForwardProxyMaxConcurrentTunnels = 64
+	defaultForwardProxyTunnelIdleTimeout    = 60 * time.Second
+)
 
 // ForwardProxy is a CONNECT-only blind tunnel. It does not inspect or modify
 // TLS, WebSocket frames, headers, cookies, bodies, or credentials.
@@ -22,9 +26,10 @@ type ForwardProxy struct {
 	Dialer *net.Dialer
 	Logger *log.Logger
 
-	once       sync.Once
-	allowHosts map[string]bool
-	allowPorts map[int]bool
+	once        sync.Once
+	allowHosts  map[string]bool
+	allowPorts  map[int]bool
+	tunnelSlots chan struct{}
 }
 
 func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +49,14 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
 		return
 	}
+	releaseTunnel, ok := p.acquireTunnel()
+	if !ok {
+		p.writeDecision(target.host, target.port, "deny", "tunnel_limit_exceeded")
+		http.Error(w, "CONNECT tunnel limit exceeded", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseTunnel()
+
 	upstream, err := p.dialer().DialContext(r.Context(), "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
 	if err != nil {
 		p.writeDecision(target.host, target.port, "deny", "upstream_unreachable")
@@ -70,21 +83,40 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		return
 	}
-	tunnel(client, buffered, upstream)
+	tunnel(client, buffered, upstream, p.Config.effectiveTunnelIdleTimeout())
 }
 
 func (p *ForwardProxy) allowed(target connectTarget) bool {
+	p.init()
+	return p.allowHosts[target.host] && p.allowPorts[target.port]
+}
+
+func (p *ForwardProxy) acquireTunnel() (func(), bool) {
+	p.init()
+	select {
+	case p.tunnelSlots <- struct{}{}:
+		return func() { <-p.tunnelSlots }, true
+	default:
+		return nil, false
+	}
+}
+
+func (p *ForwardProxy) init() {
 	p.once.Do(func() {
 		p.allowHosts = map[string]bool{}
 		for _, host := range p.Config.AllowHosts {
-			p.allowHosts[strings.ToLower(host)] = true
+			normalized, err := normalizeProxyHost(host)
+			if err != nil {
+				continue
+			}
+			p.allowHosts[normalized] = true
 		}
 		p.allowPorts = map[int]bool{}
 		for _, port := range p.Config.effectiveAllowPorts() {
 			p.allowPorts[port] = true
 		}
+		p.tunnelSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
 	})
-	return p.allowHosts[target.host] && p.allowPorts[target.port]
 }
 
 func (p *ForwardProxy) dialer() *net.Dialer {
@@ -144,15 +176,6 @@ func connectTargetFromRequest(r *http.Request) (connectTarget, error) {
 			return connectTarget{}, fmt.Errorf("host header does not match CONNECT target")
 		}
 	}
-	if rawHost := r.Header.Get("Host"); rawHost != "" && rawHost != r.Host {
-		hostHeader, err := parseConnectTarget(rawHost)
-		if err != nil {
-			return connectTarget{}, err
-		}
-		if hostHeader != target {
-			return connectTarget{}, fmt.Errorf("host header does not match CONNECT target")
-		}
-	}
 	return target, nil
 }
 
@@ -179,20 +202,53 @@ func normalizeProxyHost(host string) (string, error) {
 	return lower, nil
 }
 
-func tunnel(client net.Conn, buffered *bufio.ReadWriter, upstream net.Conn) {
+func tunnel(client net.Conn, buffered *bufio.ReadWriter, upstream net.Conn, idleTimeout time.Duration) {
+	setTunnelDeadline(idleTimeout, client, upstream)
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(upstream, buffered)
+		_, _ = io.Copy(upstream, tunnelActivityReader{
+			reader:      buffered,
+			idleTimeout: idleTimeout,
+			conns:       []net.Conn{client, upstream},
+		})
 		_ = closeWrite(upstream)
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(client, upstream)
+		_, _ = io.Copy(client, tunnelActivityReader{
+			reader:      upstream,
+			idleTimeout: idleTimeout,
+			conns:       []net.Conn{client, upstream},
+		})
 		_ = closeWrite(client)
 		done <- struct{}{}
 	}()
 	<-done
 	<-done
+}
+
+type tunnelActivityReader struct {
+	reader      io.Reader
+	idleTimeout time.Duration
+	conns       []net.Conn
+}
+
+func (r tunnelActivityReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		setTunnelDeadline(r.idleTimeout, r.conns...)
+	}
+	return n, err
+}
+
+func setTunnelDeadline(idleTimeout time.Duration, conns ...net.Conn) {
+	if idleTimeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(idleTimeout)
+	for _, conn := range conns {
+		_ = conn.SetDeadline(deadline)
+	}
 }
 
 func closeWrite(conn net.Conn) error {

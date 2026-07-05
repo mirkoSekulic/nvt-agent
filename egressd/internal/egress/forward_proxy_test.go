@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newForwardProxyServer(t *testing.T, config ForwardProxyConfig, logs *bytes.Buffer) *httptest.Server {
@@ -151,8 +152,7 @@ func TestConnectTargetFromRequestRejectsHostHeaderMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.URL.Scheme = ""
-	request.Host = "chatgpt.com:443"
-	request.Header.Set("Host", "api.openai.com:443")
+	request.Host = "api.openai.com:443"
 	if _, err := connectTargetFromRequest(request); err == nil {
 		t.Fatal("Host header mismatch must be rejected")
 	}
@@ -232,6 +232,87 @@ func TestForwardProxyTunnelWaitsForHalfClosedClientResponse(t *testing.T) {
 	}
 	if string(response) != "upstream-response" {
 		t.Fatalf("tunnel response after half-close = %q", response)
+	}
+}
+
+func TestForwardProxyTunnelIdleTimeoutCleansUpStalledPeers(t *testing.T) {
+	clientPeer, client := net.Pipe()
+	upstream, upstreamPeer := net.Pipe()
+	defer func() { _ = clientPeer.Close() }()
+	defer func() { _ = upstreamPeer.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		tunnel(client, bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client)), upstream, 50*time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stalled tunnel did not clean up after idle timeout")
+	}
+}
+
+func TestForwardProxyConcurrentTunnelLimitFailsClosed(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	upstreamAccepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		upstreamAccepted <- conn
+	}()
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamPort, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	proxy := newForwardProxyServer(t, ForwardProxyConfig{
+		AllowHosts:           []string{"127.0.0.1"},
+		AllowPorts:           []int{upstreamPort},
+		MaxConcurrentTunnels: 1,
+	}, &logs)
+	first, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
+		"CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", listener.Addr().String(), listener.Addr().String(),
+	))
+	defer func() { _ = first.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("first CONNECT status = %q", status)
+	}
+	var upstreamConn net.Conn
+	select {
+	case upstreamConn = <-upstreamAccepted:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not accept first tunnel")
+	}
+	defer func() { _ = upstreamConn.Close() }()
+
+	const canary = "CANARY-SECOND-TUNNEL-SECRET"
+	second, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
+		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Bearer %s\r\n\r\n",
+		listener.Addr().String(), listener.Addr().String(), canary,
+	))
+	defer func() { _ = second.Close() }()
+	if !strings.Contains(status, "503") {
+		t.Fatalf("second CONNECT status = %q", status)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "decision=deny error_class=tunnel_limit_exceeded") {
+		t.Fatalf("missing tunnel limit denial log: %q", got)
+	}
+	if strings.Contains(got, canary) || strings.Contains(strings.ToLower(got), "authorization") {
+		t.Fatalf("tunnel limit log contains sensitive input: %q", got)
 	}
 }
 
@@ -319,12 +400,18 @@ func TestForwardProxyRejectsPlainHTTPProxying(t *testing.T) {
 }
 
 func TestForwardProxyDefaultAllowPortIs443(t *testing.T) {
-	config := &ForwardProxyConfig{Listen: "127.0.0.1:0", AllowHosts: []string{"chatgpt.com"}}
+	config := &ForwardProxyConfig{Listen: "127.0.0.1:0", AllowHosts: []string{"ChatGPT.com"}}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if ports := config.effectiveAllowPorts(); len(ports) != 1 || ports[0] != 443 {
 		t.Fatalf("default ports = %v", ports)
+	}
+	if got := config.effectiveMaxConcurrentTunnels(); got != defaultForwardProxyMaxConcurrentTunnels {
+		t.Fatalf("default max concurrent tunnels = %d", got)
+	}
+	if got := config.effectiveTunnelIdleTimeout(); got != defaultForwardProxyTunnelIdleTimeout {
+		t.Fatalf("default tunnel idle timeout = %s", got)
 	}
 }
 

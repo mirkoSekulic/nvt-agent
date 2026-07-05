@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Placeholder is the documented zero-entropy constant from
@@ -67,9 +68,11 @@ type Config struct {
 // terminate TLS or inject credentials; it only allows configured host:port
 // targets through.
 type ForwardProxyConfig struct {
-	Listen     string   `json:"listen"`
-	AllowHosts []string `json:"allow_hosts"`
-	AllowPorts []int    `json:"allow_ports"`
+	Listen                   string   `json:"listen"`
+	AllowHosts               []string `json:"allow_hosts"`
+	AllowPorts               []int    `json:"allow_ports"`
+	MaxConcurrentTunnels     int      `json:"max_concurrent_tunnels"`
+	TunnelIdleTimeoutSeconds int      `json:"tunnel_idle_timeout_seconds"`
 }
 
 // LoadConfig reads and validates the configuration file.
@@ -157,18 +160,20 @@ func (c *ForwardProxyConfig) Validate() error {
 		return fmt.Errorf("listen is required")
 	}
 	for _, host := range c.AllowHosts {
-		normalized, err := normalizeProxyHost(host)
-		if err != nil {
+		if _, err := normalizeProxyHost(host); err != nil {
 			return fmt.Errorf("allow_hosts[%q]: %w", host, err)
-		}
-		if normalized != strings.ToLower(host) {
-			return fmt.Errorf("allow_hosts[%q]: must be normalized lowercase host without brackets", host)
 		}
 	}
 	for _, port := range c.effectiveAllowPorts() {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("allow_ports contains invalid port %d", port)
 		}
+	}
+	if c.MaxConcurrentTunnels < 0 {
+		return fmt.Errorf("max_concurrent_tunnels must be non-negative")
+	}
+	if c.TunnelIdleTimeoutSeconds < 0 {
+		return fmt.Errorf("tunnel_idle_timeout_seconds must be non-negative")
 	}
 	return nil
 }
@@ -178,6 +183,20 @@ func (c *ForwardProxyConfig) effectiveAllowPorts() []int {
 		return []int{443}
 	}
 	return c.AllowPorts
+}
+
+func (c *ForwardProxyConfig) effectiveMaxConcurrentTunnels() int {
+	if c.MaxConcurrentTunnels == 0 {
+		return defaultForwardProxyMaxConcurrentTunnels
+	}
+	return c.MaxConcurrentTunnels
+}
+
+func (c *ForwardProxyConfig) effectiveTunnelIdleTimeout() time.Duration {
+	if c.TunnelIdleTimeoutSeconds == 0 {
+		return defaultForwardProxyTunnelIdleTimeout
+	}
+	return time.Duration(c.TunnelIdleTimeoutSeconds) * time.Second
 }
 
 func normalizedRouteUpstreamHost(upstream string) (string, bool) {
