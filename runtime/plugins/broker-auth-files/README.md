@@ -54,9 +54,9 @@ Loop behavior:
 - use `fallback-sleep-seconds` when no bundle has an expiry
 - repeat forever when `max-loops: 0`; tests may set a positive limit
 
-For the Codex fallback, broker `bundle-ttl-seconds` caps the returned
-`expires_at` as short-lived bundle metadata and this plugin uses that metadata
-for frequent broker re-materialization. With the Codex/provider defaults,
+Broker file-bundle TTL caps the returned `expires_at` as short-lived bundle
+metadata, and this plugin uses that metadata for frequent broker
+re-materialization. With the Codex/provider defaults,
 `1200 - 900 = 300s`, so the loop wakes roughly every five minutes per agent.
 If `bundle-ttl-seconds <= refresh-slack-seconds`, the wake target is already
 due and the plugin clamps to `min-sleep-seconds`; with the default
@@ -116,7 +116,7 @@ is broken.
 The Codex fallback is still file-bundle based. The broker-owned root refresh
 token is never written to the agent bundle; the agent still receives the real
 OpenAI access token and inert stub fields. The Codex provider's
-`bundle-ttl-seconds` caps the broker `expires_at` metadata used by this
-refresher, but it does not reduce the lifetime of an already-issued OpenAI
-access token. This remains the insecure/compatibility file-bundle fallback
-until credential-less Codex ships.
+`bundle-ttl-seconds` controls refresh runway while broker core caps the
+`expires_at` metadata used by this refresher. This does not reduce the lifetime
+of an already-issued OpenAI access token. This remains the
+insecure/compatibility file-bundle fallback until credential-less Codex ships.

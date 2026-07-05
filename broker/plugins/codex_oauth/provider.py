@@ -226,22 +226,11 @@ class CodexOAuthProvider:
             ]
             for item in self.extra_files:
                 files.append(self._read_extra_file(item))
-            # OpenAI determines the JWT's true expiry. The broker can only cap
-            # the bundle's materialization lifetime and refresh cadence.
             access_token_expires_at = rfc3339(exp)
-            expires_at = rfc3339(min(exp, int(time.time()) + self.bundle_ttl_seconds))
-            audit.write(
-                request_id=request_id,
-                agent=agent_id,
-                provider=self.name,
-                operation="files.vend",
-                allowed=True,
-                expires_at=expires_at,
-                bundle_expires_at=expires_at,
-                access_token_expires_at=access_token_expires_at,
-                refreshed=refreshed,
-            )
-            return files, expires_at
+            return files, access_token_expires_at, {
+                "access_token_expires_at": access_token_expires_at,
+                "refreshed": refreshed,
+            }
 
     def _read_auth(self):
         try:

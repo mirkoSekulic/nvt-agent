@@ -904,7 +904,7 @@ func TestCodexOAuthFilesVendStubsRefreshTokenAndExtraFiles(t *testing.T) {
 	}
 }
 
-func TestCodexOAuthFilesExpiryIsCappedByDefaultBundleTTL(t *testing.T) {
+func TestBrokerFilesExpiryIsCappedByDefaultBundleTTL(t *testing.T) {
 	f := newBrokerFixture(t)
 	before := time.Now().UTC()
 	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
@@ -931,6 +931,17 @@ func TestCodexOAuthFilesExpiryIsCappedByDefaultBundleTTL(t *testing.T) {
 	accessExp := time.Unix(accessExpUnix, 0).UTC()
 	if !accessExp.After(expiresAt.Add(30 * time.Minute)) {
 		t.Fatalf("test expected provider JWT expiry to exceed bundle expiry, access=%s bundle=%s", accessExp, expiresAt)
+	}
+	events := readAudit(t, f.audit)
+	vend := lastAuditOperation(events, "files.vend")
+	if vend == nil {
+		t.Fatalf("expected files.vend audit entry, got %#v", events)
+	}
+	if vend["expires_at"] != payload["expires_at"] || vend["bundle_expires_at"] != payload["expires_at"] {
+		t.Fatalf("expected core files.vend audit to use capped bundle expiry, payload=%#v vend=%#v", payload, vend)
+	}
+	if vend["access_token_expires_at"] == payload["expires_at"] {
+		t.Fatalf("expected provider access token expiry to remain distinct from capped bundle expiry, payload=%#v vend=%#v", payload, vend)
 	}
 }
 
@@ -1004,11 +1015,7 @@ func TestCodexOAuthRefreshPersistsRotatedTokenAndAudits(t *testing.T) {
 		t.Fatalf("expected vend and refresh audit entries, got %#v", events)
 	}
 	var vend map[string]any
-	for _, event := range events {
-		if event["operation"] == "files.vend" {
-			vend = event
-		}
-	}
+	vend = lastAuditOperation(events, "files.vend")
 	if vend == nil {
 		t.Fatalf("expected vend audit entry, got %#v", events)
 	}
@@ -1283,6 +1290,16 @@ func hasAuditOperation(events []map[string]any, operation string) bool {
 		}
 	}
 	return false
+}
+
+func lastAuditOperation(events []map[string]any, operation string) map[string]any {
+	var last map[string]any
+	for _, event := range events {
+		if event["operation"] == operation && event["allowed"] == true {
+			last = event
+		}
+	}
+	return last
 }
 
 func generateRSAKey(t *testing.T) string {

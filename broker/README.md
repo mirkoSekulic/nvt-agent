@@ -125,12 +125,12 @@ visible to the agent and may be written into Git config.
 `files` returns a UTF-8 file bundle for generic runtime materialization.
 For `codex-oauth`, the bundle contains the real OpenAI access token and an
 inert refresh-token stub, never the real broker-owned refresh token.
-`bundle-ttl-seconds` caps the returned `expires_at` as short-lived bundle
-metadata so the runtime refresher performs frequent broker re-materialization;
-it does not reduce the lifetime of an already-issued OpenAI access token. This
-remains the insecure/compatibility file-bundle fallback until credential-less
-Codex ships. The canonical contract and cadence guard are in
-`protocol/broker.md`.
+The broker applies file-bundle TTL caps to returned `expires_at` metadata so
+runtime refreshers can re-materialize bundles on a bounded cadence. For
+`codex-oauth`, this does not reduce the lifetime of an already-issued OpenAI
+access token. Codex file bundles remain the insecure/compatibility fallback
+until credential-less Codex ships. The canonical contract and cadence guard are
+in `protocol/broker.md`.
 
 Grant repository patterns must match the provider target mode: GitHub-mode
 providers use `owner/repo`, while literal-mode providers use the full

@@ -272,17 +272,18 @@ agents:
 - if refresh fails while the current access token is still valid, the provider
   serves the current token and records metadata-only audit; if the token is
   expired, the request fails
-- `bundle-ttl-seconds` caps the vended bundle `expires_at` metadata; if the
-  OpenAI access token expires sooner, `expires_at` is the access token expiry
-  instead
+- broker core caps file-bundle `expires_at` metadata with
+  `bundle-ttl-seconds`; if the provider expiry is sooner, `expires_at` is the
+  provider expiry instead
 - `bundle-ttl-seconds` does not reduce the lifetime of an already-issued
   OpenAI access token; the vended `auth.json` still contains the real
   `access_token`, which remains valid until its actual JWT expiry
 - short-lived bundle metadata drives frequent broker re-materialization by the
   runtime refresher; this remains the insecure/compatibility file-bundle
   fallback until credential-less Codex ships
-- `files.vend` audit `expires_at` is capped bundle metadata; providers may also
-  record distinct `bundle_expires_at` and `access_token_expires_at` fields
+- `files.vend` audit `expires_at` and `bundle_expires_at` are capped bundle
+  metadata; provider-specific fields such as `access_token_expires_at` may
+  record the true credential expiry
 - `files.refresh`, injection, and token-path audit expiry metadata use the true
   access-token expiry
 - audit entries record provider, agent, operation, and expiry metadata only;
@@ -290,7 +291,7 @@ agents:
 
 Codex fallback refresh cadence depends on both broker and runtime settings:
 
-- broker `bundle-ttl-seconds` sets the maximum bundle metadata lifetime
+- broker `bundle-ttl-seconds` sets the generic maximum bundle metadata lifetime
 - runtime `broker-auth-files` `refresh-slack-seconds` is subtracted from the
   earliest returned `expires_at`
 - runtime `broker-auth-files` `min-sleep-seconds` is the lower bound for loop
