@@ -1,13 +1,13 @@
 # Plan: Mediated Credential Egress
 
-Status: draft for review
-Version: v3.2 (review findings 1–5 incorporated)
+Status: living document — Phases 0–1 completed (#53, #54); Phase 2 in progress
+Version: v3.3 (as-executed Phase 1, transparent mediation mode, claim scope)
 
 ## Goal
 
 Not a single raw secret is available to the agent container — including short-lived derived credentials like GitHub App installation tokens. Today, providers like `codex-oauth` materialize a usable access token into the container as a file bundle; a prompt-injected agent can exfiltrate it for its lifetime. Target state: credentials are injected into outbound requests by a trusted sidecar at the network edge, while the broker keeps doing what it does today — policy, refresh, audit. On that choke point we add per-request audit, quotas, and mid-run revocation.
 
-The invariant is a bright line, CI-enforced: inspect the container — filesystem, env, process args — and find zero secret material. No "small accepted exposures": exceptions accumulate and erode. Capabilities that cannot be mediated (git-SSH, file-native-TLS tools) are disallowed in mediated mode, not excepted.
+The invariant is a bright line, CI-enforced: inspect the container — filesystem, env, process args — and find zero secret material. No "small accepted exposures": exceptions accumulate and erode. Capabilities that cannot be mediated **at the current phase** are disallowed in mediated mode, not excepted — and coverage widens over phases (redirectable HTTP first; arbitrary/hardcoded-endpoint tools via transparent mode in Phase 6). Truly unmediable transports (git-SSH, file-native-TLS binaries) stay disallowed.
 
 The feature is optional and per-grant: "off" is exactly today's system, not a degraded mode.
 
@@ -89,6 +89,8 @@ To honor the zero-secrets bright line for git, the token must be injected, not h
 
 This is a distinct phase because TLS termination is the single highest-risk surface in the design — it never rides along with the LLM-API work.
 
+The per-agent CA built here is **not just for git**: it is the building block that closes the arbitrary-tool coverage gap (Phase 6). Once egressd can terminate TLS under a CA the agent trusts, extending mediation beyond redirectable clients is incremental, not a redesign.
+
 ### 6. Placement decision (resolved)
 
 **Same-Pod/localhost for Phases 1–4; own-Pod is the declared candidate for Phase-5 enforcement in k8s.**
@@ -141,7 +143,7 @@ Silent downgrade or ignore in either direction would violate risk #2 (silent fal
 
 ## Phases
 
-### Phase 0 — Contract and tests first
+### Phase 0 — Contract and tests first (completed — PR #53)
 
 Before any implementation is delegated; human-reviewed — this is where the security thinking lives.
 
@@ -151,13 +153,19 @@ Before any implementation is delegated; human-reviewed — this is where the sec
 - Placeholder-inertness test: where a CLI requires a syntactic key, the placeholder constant carries no entropy, is allowlisted by the non-possession test, and is rejected upstream when presented without sidecar injection.
 - Two separate smoke tests: **(a) non-possession** — boot mediated → assert zero secret material anywhere in the container (filesystem, env, process args), for all providers, including scrubbed git credential state (no helpers, no `http.extraHeader`, no stored credentials); **(b) egress-denied** — assert direct egress to upstream hosts is refused. Both mode-aware (skip *visibly* for direct runs so a misconfigured default can't pass silently). Split so (a) lands independent of the hard §7 work.
 
-### Phase 1 — Spike egressd against Codex, API-key mode
+### Phase 1 — egressd + injection endpoints, proven against fakes (completed — PR #54)
 
-Timeboxed and minimal. Build egressd, the identity role/pairing split, and bootstrap redirection using Codex with `model_providers.*.base_url` pointed at the sidecar and a plain bearer key injected from the broker (`token`-provider shape). This validates the entire chain — grant descriptor, identity split, header injection, TLS re-origination, SSE passthrough — on the simple auth mode of the provider actually in use. Separate `egress`-role broker identity from day one. Establish here whether Codex needs a syntactic placeholder key to start, and if so wire the placeholder convention (§4) including the inertness test. Run inside a crude deny-all netns as an *instrument*, not a control: any hardcoded-host call fails loudly, enumerating the real endpoint set Codex needs.
+As executed — adjusted from the original "Codex API-key mode" wording: no OpenAI API key exists in this deployment, and **no phase requires one**. The "API-key mode" was reinterpreted as the *simple bearer-injection shape*, proven with fakes:
 
-**Scope guard**: nothing beyond what Phase 2 needs to render its verdict — no operator work, no polish, no second provider.
+1. **Fake upstream proof**: egressd built and tested against a fake broker and fake upstream — client sends the placeholder, upstream receives exactly the injected real token, the placeholder never reaches the upstream; fail-closed on broker denial and on expired-at-fetch material; material cached per `(method, path)` (the scope the broker authorized); SSE passthrough; bare-`host[:port]` upstream validation (SSRF guard).
+2. **Static bearer provider**: the `token` plugin supports injection via `injection-hosts` config — no real credential anywhere.
+3. **Real codex-oauth wired**: the `codex-oauth` provider supports injection through the same refresh flow as file vending, so the broker-owned `auth.json` is injectable with zero new credentials. Real-path validation is Phase 2's gate.
 
-### Phase 2 — ChatGPT-plan flow as the go/no-go gate
+Broker side shipped with it: identity roles + one-to-one pairing (grants on an egress identity are unrepresentable), `/v1/injection/headers` and `/v1/injection/routing` with authorization order role → pairing → grant → materialization → host, egress identities denied on all secret-bearing endpoints, header-inject grants excluding bundle/token/header paths, denial audit with full caller context, and optional broker TLS serving (`NVT_BROKER_TLS_CERT/KEY`). All 12 injection conformance tests live in CI.
+
+### Phase 2 — ChatGPT-plan flow as the go/no-go gate (in progress)
+
+**Implementation spec: `docs/phase2-codex-gate-plan.md`** — an empirical gate run in an internal-only compose topology (agent on an `internal: true` network, egressd the only path out, broker owning the real `auth.json` in a throwaway state dir). Deliverable is `docs/phase2-codex-gate.md` recording required hosts, the minimal placeholder `auth.json`/JWT shape, any claim-derived headers (e.g. account-id) the provider must compute from the real token, cert-pinning observations, and the go/no-go decision. Real refresh is forced by setting `refresh-margin-seconds` beyond the token's remaining lifetime — no short-lived fixture needed against the real token URL.
 
 Switch the working harness to the plan-auth path (`codex-oauth` grant in `header-inject` mode, `chatgpt_base_url` redirection). Required spike outputs:
 
@@ -166,7 +174,7 @@ Switch the working harness to the plan-auth path (`codex-oauth` grant in `header
 
 Test refresh deterministically with broker-issued artificially short-lived tokens; verify the true SSE guarantee — new requests use the refreshed token, in-flight streams complete on the old one.
 
-**Go/no-go**: if plan-auth can't be redirected, plan-auth Codex stays on bundles and we reassess — API-key-mode Codex mediation (Phase 1's result) ships independently either way, so the fallback still retires file bundles for any agent runnable on an API key.
+**Go/no-go**: if plan-auth can't be redirected, plan-auth Codex stays on bundles and we reassess — bearer-shape mediation (Phase 1's result) ships independently either way for any redirectable provider. A NO-GO is a successful phase outcome (a documented answer), not a failure of the work.
 
 ### Phase 3 — Operator + compose wiring (non-possession ships)
 
@@ -175,6 +183,8 @@ AgentRun controller conditionally adds the egressd container, its identity Secre
 ### Phase 4 — git-over-HTTPS mediation
 
 Per-agent CA, egressd TLS termination, repo-scope extraction, GitHub App token injection. Its own phase for its own risk surface. Delivers non-possession for git tokens; the reachability half waits for Phase 5 (§5 interim note).
+
+The per-agent CA built here is not only for git: it is the **building block that closes the generality gap with transparent interception** (Phase 6). Once egressd can terminate TLS with a CA the agent trusts, mediating an arbitrary hardcoded-endpoint tool becomes an incremental extension rather than a new design. Treat the CA as a general capability with git as its first consumer.
 
 ### Phase 5 — Egress enforcement + audit + quotas + revocation
 
@@ -186,6 +196,19 @@ May split into two PRs (enforcement; observability/control) even as one phase.
 - **Revocation**: broker revokes grant → sidecar's next fetch fails → agent loses API access within one cache TTL, without killing the Pod.
 - **Anthropic as the provider-agnosticism proof**: adding `ANTHROPIC_BASE_URL` + a grant must be config-only with zero egressd changes — landing it *is* the test that the injector contract stayed provider-agnostic. If it requires sidecar code, that's a contract regression, not a feature.
 - Then flip the operator default to `mediated`.
+
+### Phase 6 — Transparent mediation mode (arbitrary-tool coverage)
+
+**This phase closes the main coverage gap between redirect-based mediation and transparent-MITM mediation: arbitrary/unmodifiable tools with hardcoded endpoints.** Everything through Phase 5 mediates *redirectable* HTTP tools (base URL / proxy env configurable) and hard-disallows the rest in mediated mode. Phase 6 extends coverage to tools that ignore configuration, reusing the Phase 4 TLS-termination machinery with **no broker-contract changes** (the injection endpoints are transport-agnostic by construction, §2).
+
+Two steps, ordered by risk/coverage ratio:
+
+1. **Forward-proxy mode (covers the bulk).** Set `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` in the agent container and have egressd handle `CONNECT` with TLS termination using the per-agent CA from Phase 4. Most CLIs, language HTTP clients, and SDKs honor proxy env vars, so this covers the majority of "arbitrary tools" with zero per-tool config. egressd matches the CONNECT target host against configured routes / capability `injection-hosts`; unknown hosts are denied (still fail-closed). Requires per-grant policy for *which* hosts a tool may reach — reuses the existing grant model.
+2. **True transparent mode (the residue).** For tools that ignore proxy env, iptables `REDIRECT`/`TPROXY` in the agent netns steers outbound 443 to egressd, which uses SNI to pick the route. This needs the Phase 5 netns/enforcement plumbing and the NET_ADMIN precondition (§7) to be a real control, so it is strictly after Phase 5 and only meaningful where enforcement holds.
+
+Optional within this phase: **body placeholder substitution** as a grant option — because egressd sees the decrypted request in these modes, it can replace `NVT-PLACEHOLDER-*` tokens in bodies/query params for allowlisted hosts, covering APIs that carry the secret outside a header. This is the direct analogue of transparent-MITM secret substitution, but gated by the same grant/audit/quota layer.
+
+Scope guard: Phase 6 is **coverage generality**, not a new security model. It must not weaken any Phase 1–5 property; every transparent-mode request flows through the same broker authorization, audit, and fail-closed paths as a redirected one.
 
 ## PR sequence
 
@@ -200,6 +223,8 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 | 5 | Phase 4: git-HTTPS mediation (CA, TLS termination) | trusted-core review — highest-risk surface, deliberately alone |
 | 6a | Phase 5: enforcement (own-Pod evaluation, iptables + FORWARD deny) | egress-denied test → CI |
 | 6b | Phase 5: audit, quotas, revocation, Anthropic proof; flip operator default | both smoke tests green |
+| 7 | Phase 6: forward-proxy mode (CONNECT + CA) for arbitrary-tool coverage | trusted-core review (reuses Phase 4 CA) |
+| 8 | Phase 6: true transparent REDIRECT + optional body substitution | after Phase 5 enforcement; egress-denied still green |
 
 ## Division of labor
 
@@ -219,6 +244,34 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 7. **Credentials sniffed in flight on the egressd↔broker leg** — the one network path carrying real secrets through the shared netns; countered by requiring TLS on that channel from Phase 1 (§2).
 8. **Secret-returning API endpoints reachable through a grant** — an allowed API that mints/returns credentials in a response body delivers a secret into the container legitimately; countered by excluding credential-minting endpoints from grant path-classes as a standing policy rule.
 
+## Secret-protection comparison & defensible claim scope
+
+This design is measured against transparent-MITM credential mediation, where a userspace network stack substitutes placeholder secrets in flight for allowlisted hosts. Recording the comparison so the security claim is stated precisely and survives an informed reviewer.
+
+**Dimensions where this design (all phases) is stronger:**
+
+- **Authorization** — per agent × capability × repo × method grants with ceiling∩grant intersection; transparent-MITM has only host allowlists. It limits *where* bytes go; this limits *where and what the credential may do*.
+- **Audit & forensics** — every injection and every denial recorded with full context; transparent-MITM has no per-request credential-use audit.
+- **Containment** — mid-run revocation within one cache TTL, plus per-grant quotas bounding blast radius on a *valid* credential; transparent-MITM offers neither.
+- **Root-secret custody** — single-writer broker with audited derivation and OAuth refresh ownership; transparent-MITM keeps host-side static files.
+- **Verifiability** — non-possession is CI-enforced (zero secret material in fs/env/args; agent identity cannot fetch secrets; placeholder inertness). A property re-checked every commit is categorically more trustworthy than a README assertion.
+
+**Dimensions at parity once all phases land:**
+
+- **Non-possession** — neither approach leaves a usable credential in the workload.
+- **Coverage of arbitrary tools** — reached at **Phase 6** (forward-proxy + transparent mode). Before Phase 6, this design mediates redirectable tools and *disallows* the rest in mediated mode (never silently leaks), so it is narrower-but-honest on coverage until then.
+
+**Dimension where transparent-MITM keeps an edge:**
+
+- **Raw isolation substrate** — a per-VM boundary is a stronger cage than a container namespace. This design's answer is `RuntimeClass` (Kata/microVM), which closes it — but that is a *deployment choice*, not something the mediation design itself provides.
+
+**The two conditions that make the strong claim unqualified:**
+
+1. **Phase 6 lands** (transparent/forward-proxy mode) — converts "better on most axes" into "at least matching coverage, winning everywhere else."
+2. **Deployment keeps enforcement outside the agent's privilege domain** — own-Pod egressd + CNI policy, or deprivileged dind, or a hardened `RuntimeClass`. In today's privileged-dind compose, non-possession holds but egress-deny is a documented speed bump (§7), so the unqualified claim does not hold there.
+
+**Defensible claim wording:** *"nvt provides stronger secret protection — non-possession plus authorization, audit, quotas, and mid-run revocation, machine-verified in CI — on any deployment where enforcement lives outside the agent's privilege domain."* Do **not** make the unqualified "protects secrets better, full stop" while the flagship local mode is privileged-dind compose and Phase 6 is unshipped; an informed reviewer will point at the netns flush (§7) and the coverage gap. Both close on the two conditions above.
+
 ## End state
 
-Agent containers hold zero credentials for mediated providers (LLM APIs, GitHub REST, git-HTTPS); the broker decides *whether* (grants, quotas), the sidecar handles *how* (injection at the edge); every credentialed request is audited; a grant is revocable mid-run within one cache TTL. Where enforcement lives outside the agent's privilege domain (own-Pod egressd + CNI policy, or deprivileged dind), a static default-deny makes the sidecar the only way out; where it does not (today's compose), non-possession still holds and egress-deny is a documented gap. All optional per grant, with today's behavior the untouched default until the smoke tests say otherwise.
+Agent containers hold zero credentials for mediated providers (LLM APIs, GitHub REST, git-HTTPS, and — from Phase 6 — arbitrary redirectable/interceptable tools); the broker decides *whether* (grants, quotas), the sidecar handles *how* (injection at the edge); every credentialed request is audited; a grant is revocable mid-run within one cache TTL. Where enforcement lives outside the agent's privilege domain (own-Pod egressd + CNI policy, or deprivileged dind), a static default-deny makes the sidecar the only way out; where it does not (today's compose), non-possession still holds and egress-deny is a documented gap. All optional per grant, with today's behavior the untouched default until the smoke tests say otherwise.
