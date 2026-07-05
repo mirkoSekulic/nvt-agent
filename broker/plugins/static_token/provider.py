@@ -1,6 +1,6 @@
 import fnmatch
 
-from broker.core.config import env_value, fail, list_value, string_value
+from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.plugins.github_app.provider import ProviderError
 from broker.plugins.static_target import normalize_target, target_mode
 
@@ -18,6 +18,7 @@ class StaticTokenProvider:
         self.target_mode = target_mode(self.config, self.name)
         self.allowed_repositories = self._allowed_strings("repositories")
         self.token = self._token()
+        self.injection_hosts = injection_hosts(self.config, self.name)
 
     def _allowed_strings(self, key):
         values = list_value(self.allow.get(key), f"provider {self.name} allow.{key}")
@@ -66,3 +67,6 @@ class StaticTokenProvider:
 
     def identity_for_repo(self, repo, effective_repositories):
         raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
+
+    def injection_headers(self, host, method, path, agent_id, audit, request_id):
+        return {"authorization": f"Bearer {self.token}"}, None, ["authorization"]

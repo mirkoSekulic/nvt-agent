@@ -358,6 +358,8 @@ providers:
   - name: codex-main
     plugin: codex-oauth
     config:
+      injection-hosts:
+        - chatgpt.com
       auth-file: %q
       token-url: %q
       client-id: test-client

@@ -25,7 +25,7 @@ import (
 
 const (
 	nonPossessionPending = "pending Phase 3 (docs/mediated-egress-plan.md): mediated operator/compose wiring not implemented"
-	placeholderPending   = "pending Phase 1 (docs/mediated-egress-plan.md): egressd and placeholder convention not implemented"
+	placeholderPending   = "pending Phase 3 (docs/mediated-egress-plan.md): protocol-level inertness is covered by egressd/internal/egress tests as of Phase 1; this container-level test lands with mediated wiring"
 	egressDeniedPending  = "pending Phase 5 (docs/mediated-egress-plan.md): egress enforcement not implemented"
 )
 
