@@ -107,6 +107,7 @@ func (p *ForwardProxy) init() {
 		for _, host := range p.Config.AllowHosts {
 			normalized, err := normalizeProxyHost(host)
 			if err != nil {
+				p.writeInvalidAllowHost(host)
 				continue
 			}
 			p.allowHosts[normalized] = true
@@ -117,6 +118,14 @@ func (p *ForwardProxy) init() {
 		}
 		p.tunnelSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
 	})
+}
+
+func (p *ForwardProxy) writeInvalidAllowHost(host string) {
+	logger := p.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Printf("event=forward_proxy_init allow_host=%q decision=deny error_class=invalid_allow_host", host)
 }
 
 func (p *ForwardProxy) dialer() *net.Dialer {

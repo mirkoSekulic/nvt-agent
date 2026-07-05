@@ -375,6 +375,32 @@ func TestForwardProxyLogsAreSanitized(t *testing.T) {
 	}
 }
 
+func TestForwardProxyInitLogsInvalidAllowHostAndFailsClosed(t *testing.T) {
+	var logs bytes.Buffer
+	proxy := &ForwardProxy{
+		Config: ForwardProxyConfig{
+			AllowHosts: []string{"chatgpt.com", "bad\nhost"},
+		},
+		Logger: log.New(&logs, "", 0),
+	}
+
+	proxy.init()
+
+	if !proxy.allowHosts["chatgpt.com"] {
+		t.Fatalf("valid allow host was not initialized: %#v", proxy.allowHosts)
+	}
+	if proxy.allowHosts["bad\nhost"] {
+		t.Fatalf("invalid allow host was initialized: %#v", proxy.allowHosts)
+	}
+	got := logs.String()
+	if !strings.Contains(got, `event=forward_proxy_init allow_host="bad\nhost" decision=deny error_class=invalid_allow_host`) {
+		t.Fatalf("missing invalid allow host diagnostic: %q", got)
+	}
+	if strings.Contains(got, "\nbad") {
+		t.Fatalf("invalid allow host log was not escaped: %q", got)
+	}
+}
+
 func TestForwardProxyRejectsPlainHTTPProxying(t *testing.T) {
 	var logs bytes.Buffer
 	proxy := newForwardProxyServer(t, ForwardProxyConfig{
