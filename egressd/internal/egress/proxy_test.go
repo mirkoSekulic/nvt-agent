@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,7 +144,7 @@ func (u *fakeUpstream) last(t *testing.T) upstreamRecord {
 	return u.records[len(u.records)-1]
 }
 
-func newTestProxy(t *testing.T, broker *fakeBroker, upstream *fakeUpstream) *httptest.Server {
+func newTestProxyWithHandle(t *testing.T, broker *fakeBroker, upstream *fakeUpstream) (*httptest.Server, *Proxy) {
 	t.Helper()
 	parsed, err := url.Parse(upstream.server.URL)
 	if err != nil {
@@ -161,6 +162,12 @@ func newTestProxy(t *testing.T, broker *fakeBroker, upstream *fakeUpstream) *htt
 	}
 	server := httptest.NewServer(proxy)
 	t.Cleanup(server.Close)
+	return server, proxy
+}
+
+func newTestProxy(t *testing.T, broker *fakeBroker, upstream *fakeUpstream) *httptest.Server {
+	t.Helper()
+	server, _ := newTestProxyWithHandle(t, broker, upstream)
 	return server
 }
 
@@ -257,9 +264,10 @@ func TestFailsClosedWhenBrokerDenies(t *testing.T) {
 	}
 }
 
-// TestNoStaleMaterialAfterExpiry pins the other half of fail-closed: expired
-// cached material is never reused; when the refetch fails, the request fails.
-func TestNoStaleMaterialAfterExpiry(t *testing.T) {
+// TestExpiredMaterialFromBrokerFailsClosed pins fail-closed at fetch time:
+// material that arrives already expired (or inside the safety margin) is an
+// error before the upstream is ever contacted.
+func TestExpiredMaterialFromBrokerFailsClosed(t *testing.T) {
 	broker := newFakeBroker(t)
 	broker.setExpiresAt(time.Now().UTC().Add(-time.Minute).Format(time.RFC3339))
 	upstream := newFakeUpstream(t)
@@ -270,10 +278,37 @@ func TestNoStaleMaterialAfterExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("already-expired material must fail closed, got %d", response.StatusCode)
+	}
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	if len(upstream.records) != 0 {
+		t.Fatal("request reached upstream with expired material")
+	}
+}
+
+// TestNoStaleMaterialAfterExpiry pins the other half of fail-closed: expired
+// cached material is never reused; when the refetch fails, the request fails.
+func TestNoStaleMaterialAfterExpiry(t *testing.T) {
+	broker := newFakeBroker(t)
+	broker.setExpiresAt(time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+	upstream := newFakeUpstream(t)
+	proxy, handle := newTestProxyWithHandle(t, broker, upstream)
+
+	var offset atomic.Int64
+	handle.Now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+
+	response, err := http.Get(proxy.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("first request should succeed (fresh fetch), got %d", response.StatusCode)
+		t.Fatalf("fresh material should succeed, got %d", response.StatusCode)
 	}
 
+	offset.Store(int64(2 * time.Hour))
 	broker.setFail(true)
 	response, err = http.Get(proxy.URL + "/")
 	if err != nil {
@@ -282,6 +317,47 @@ func TestNoStaleMaterialAfterExpiry(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusBadGateway {
 		t.Fatalf("expired material must not be reused: got %d", response.StatusCode)
+	}
+}
+
+// TestCacheKeyedByMethodAndPath pins the cache scope: the broker authorizes
+// (capability, host, method, path), so material fetched for one method/path
+// must not be reused for another without re-asking the broker.
+func TestCacheKeyedByMethodAndPath(t *testing.T) {
+	broker := newFakeBroker(t)
+	broker.setExpiresAt(time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+	upstream := newFakeUpstream(t)
+	proxy := newTestProxy(t, broker, upstream)
+
+	for _, request := range []struct{ method, path string }{
+		{http.MethodGet, "/a"},
+		{http.MethodGet, "/a"},
+		{http.MethodGet, "/b"},
+		{http.MethodPost, "/a"},
+	} {
+		req, err := http.NewRequest(request.method, proxy.URL+request.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+	}
+	if calls := broker.callCount(); calls != 3 {
+		t.Fatalf("expected 3 broker fetches for 3 distinct (method, path) scopes, got %d", calls)
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	seen := map[string]bool{}
+	for _, request := range broker.requests {
+		seen[request["method"]+" "+request["path"]] = true
+	}
+	for _, scope := range []string{"GET /a", "GET /b", "POST /a"} {
+		if !seen[scope] {
+			t.Fatalf("broker never asked for scope %q; requests: %v", scope, broker.requests)
+		}
 	}
 }
 
@@ -357,6 +433,33 @@ func TestHopByHopHeadersNotForwarded(t *testing.T) {
 	record := upstream.last(t)
 	if record.header.Get("Proxy-Authorization") != "" {
 		t.Fatal("hop-by-hop header forwarded to upstream")
+	}
+}
+
+// TestConfigRejectsMalformedUpstream pins the SSRF guard on the pinned
+// re-origination target: only bare host[:port] values are accepted.
+func TestConfigRejectsMalformedUpstream(t *testing.T) {
+	invalid := []string{
+		"",
+		"https://chatgpt.com",
+		"chatgpt.com/path",
+		"user@chatgpt.com",
+		"chatgpt.com:notaport",
+		"chatgpt.com:0",
+		":8443",
+		"chatgpt.com ",
+		"chatgpt.com#frag",
+	}
+	for _, upstream := range invalid {
+		if err := validateUpstream(upstream); err == nil {
+			t.Errorf("upstream %q must be rejected", upstream)
+		}
+	}
+	valid := []string{"chatgpt.com", "chatgpt.com:443", "127.0.0.1:8080", "[::1]:8443"}
+	for _, upstream := range valid {
+		if err := validateUpstream(upstream); err != nil {
+			t.Errorf("upstream %q should validate: %v", upstream, err)
+		}
 	}
 }
 

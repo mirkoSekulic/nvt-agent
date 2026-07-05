@@ -226,19 +226,31 @@ class Broker:
         )
         return {"ok": True, "hosts": hosts, "placeholder": INJECTION_PLACEHOLDER}
 
-    def denied(self, request_id, payload, reason, message=None, authorization=None):
+    def denied(self, request_id, payload, reason, message=None, authorization=None, operation=None):
         agent_id = None
         try:
             agent_id = self.agents.authenticate(authorization)["id"] if authorization else None
         except ProviderError:
             agent_id = None
+        provider = None
+        context = {}
+        if isinstance(payload, dict):
+            provider = payload.get("provider") or payload.get("capability")
+            # Denied entries must carry the request context the caller named
+            # (protocol/injection.md audit rules): denials are exactly the
+            # paths where audit matters most.
+            for key in ("host", "method", "path", "target"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    context[key] = value
         self.audit.write(
             request_id=request_id,
             agent=agent_id,
-            provider=payload.get("provider") if isinstance(payload, dict) else None,
-            operation=payload.get("type") if isinstance(payload, dict) else None,
+            provider=provider if isinstance(provider, str) else None,
+            operation=operation,
             allowed=False,
             reason=reason,
+            **context,
         )
         return {"ok": False, "error": reason, "message": message or reason}
 
@@ -248,6 +260,12 @@ def string_field(payload, key):
     if not isinstance(value, str) or not value:
         raise ProviderError(f"{key}-required")
     return value
+
+
+def operation_from_path(path):
+    if isinstance(path, str) and path.startswith("/v1/"):
+        return path.removeprefix("/v1/").replace("/", ".")
+    return None
 
 
 def make_handler(broker):
@@ -298,9 +316,9 @@ def make_handler(broker):
                     return
                 self.write_json(404, {"ok": False, "error": "not-found"})
             except ProviderError as error:
-                self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization")))
+                self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization"), operation_from_path(self.path)))
             except Exception as error:
-                self.write_json(500, broker.denied(request_id, payload, "internal-error", str(error), self.headers.get("authorization")))
+                self.write_json(500, broker.denied(request_id, payload, "internal-error", str(error), self.headers.get("authorization"), operation_from_path(self.path)))
 
         def read_payload(self):
             length = int(self.headers.get("content-length") or "0")

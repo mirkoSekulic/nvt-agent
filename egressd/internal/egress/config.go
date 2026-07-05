@@ -8,8 +8,11 @@ package egress
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // Placeholder is the documented zero-entropy constant from
@@ -87,9 +90,38 @@ func (c *Config) Validate() error {
 		if route.Capability == "" {
 			return fmt.Errorf("routes[%d].capability is required", index)
 		}
-		if route.Upstream == "" {
-			return fmt.Errorf("routes[%d].upstream is required", index)
+		if err := validateUpstream(route.Upstream); err != nil {
+			return fmt.Errorf("routes[%d].upstream: %w", index, err)
 		}
+	}
+	return nil
+}
+
+// validateUpstream enforces that the pinned re-origination target is a bare
+// host[:port]. Schemes, paths, userinfo, and malformed ports are rejected:
+// this value decides where credentials are sent, so upstream-host confusion
+// is an SSRF vector, not a formatting nit.
+func validateUpstream(upstream string) error {
+	if upstream == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if strings.Contains(upstream, "://") || strings.ContainsAny(upstream, "/\\@?# \t") {
+		return fmt.Errorf("must be a bare host[:port], got %q", upstream)
+	}
+	host := upstream
+	if strings.Contains(upstream, ":") {
+		split, port, err := net.SplitHostPort(upstream)
+		if err != nil {
+			return fmt.Errorf("invalid host:port %q", upstream)
+		}
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return fmt.Errorf("invalid port in %q", upstream)
+		}
+		host = split
+	}
+	if host == "" {
+		return fmt.Errorf("empty host in %q", upstream)
 	}
 	return nil
 }

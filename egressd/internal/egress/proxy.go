@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -30,6 +31,15 @@ var hopByHopHeaders = map[string]bool{
 	"Upgrade":             true,
 }
 
+// maxCacheEntries bounds the material cache under pathological request-path
+// cardinality; hitting it resets the cache, which only costs refetches.
+const maxCacheEntries = 256
+
+type cacheEntry struct {
+	material  *Material
+	fetchedAt time.Time
+}
+
 // Proxy serves one route: it injects broker-fetched headers into incoming
 // requests and forwards them to the pinned upstream.
 type Proxy struct {
@@ -38,9 +48,8 @@ type Proxy struct {
 	Transport http.RoundTripper
 	Now       func() time.Time
 
-	mu        sync.Mutex
-	cached    *Material
-	fetchedAt time.Time
+	mu    sync.Mutex
+	cache map[string]*cacheEntry
 }
 
 func (p *Proxy) now() time.Time {
@@ -50,31 +59,45 @@ func (p *Proxy) now() time.Time {
 	return time.Now()
 }
 
-// material returns valid injectable material, refetching when the cache is
-// stale. It fails closed: a fetch error is returned as-is, never masked by
-// stale material.
+// material returns valid injectable material for one (method, path),
+// refetching when the cache is stale. The cache is keyed by method and path
+// because that is the scope the broker authorized: reusing material across
+// paths would bypass provider method/path policy. It fails closed: fetch
+// errors and already-expired material are errors, never masked by stale or
+// unauthorized reuse.
 func (p *Proxy) material(ctx context.Context, method, path string) (*Material, error) {
+	key := method + " " + path
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.cached != nil && p.cacheValidLocked() {
-		return p.cached, nil
+	if entry, ok := p.cache[key]; ok {
+		if p.entryValidLocked(entry) {
+			return entry.material, nil
+		}
+		delete(p.cache, key)
 	}
-	p.cached = nil
 	material, err := p.Broker.FetchHeaders(ctx, p.Route.Capability, p.Route.Upstream, method, path)
 	if err != nil {
 		return nil, err
 	}
-	p.cached = material
-	p.fetchedAt = p.now()
+	if !material.ExpiresAt.IsZero() && !p.now().Before(material.ExpiresAt.Add(-expiryMargin)) {
+		return nil, fmt.Errorf("broker returned expired injection material")
+	}
+	if p.cache == nil {
+		p.cache = map[string]*cacheEntry{}
+	}
+	if len(p.cache) >= maxCacheEntries {
+		p.cache = map[string]*cacheEntry{}
+	}
+	p.cache[key] = &cacheEntry{material: material, fetchedAt: p.now()}
 	return material, nil
 }
 
-func (p *Proxy) cacheValidLocked() bool {
+func (p *Proxy) entryValidLocked(entry *cacheEntry) bool {
 	now := p.now()
-	if !p.cached.ExpiresAt.IsZero() {
-		return now.Before(p.cached.ExpiresAt.Add(-expiryMargin))
+	if !entry.material.ExpiresAt.IsZero() {
+		return now.Before(entry.material.ExpiresAt.Add(-expiryMargin))
 	}
-	return now.Before(p.fetchedAt.Add(defaultTTL))
+	return now.Before(entry.fetchedAt.Add(defaultTTL))
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {

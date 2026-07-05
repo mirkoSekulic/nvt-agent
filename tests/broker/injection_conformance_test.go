@@ -354,6 +354,54 @@ func TestEgressIdentityWithGrantsIsConfigError(t *testing.T) {
 	}
 }
 
+// TestDeniedInjectionAuditIncludesContext pins the audit guarantee on denial
+// paths: a denied injection request is audited with the capability, host,
+// method, path, and operation the caller named — denials are exactly where
+// audit context matters most.
+func TestDeniedInjectionAuditIncludesContext(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(mediatedIdentities())
+
+	payload := injectionRequest()
+	payload["host"] = "evil.example.com"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", payload)
+	if status == http.StatusOK || body["ok"] == true {
+		t.Fatalf("disallowed host must deny: status=%d body=%v", status, body)
+	}
+
+	audit, err := os.ReadFile(f.audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(string(audit)), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+			t.Fatal(err)
+		}
+		if candidate["reason"] == "host-not-allowed" {
+			entry = candidate
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatalf("no host-not-allowed audit entry found: %s", audit)
+	}
+	expectations := map[string]any{
+		"provider":  "codex-main",
+		"operation": "injection.headers",
+		"host":      "evil.example.com",
+		"method":    "POST",
+		"path":      "/backend-api/responses",
+		"allowed":   false,
+	}
+	for key, want := range expectations {
+		if entry[key] != want {
+			t.Fatalf("audit entry %s = %v, want %v (entry: %v)", key, entry[key], want, entry)
+		}
+	}
+}
+
 // TestInjectionAuditOmitsSecretValues pins the audit rule: injection requests
 // are audited with metadata only; header values never appear in the audit
 // log on allow or deny paths.
