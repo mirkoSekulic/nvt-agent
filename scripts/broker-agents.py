@@ -69,7 +69,7 @@ def copy_register_agent(data, from_name, to_name, token, copy_grants):
     data["agents"] = sorted(agents, key=lambda agent: agent["id"])
 
 
-def add_grant(data, name, provider, repo, materialization):
+def add_grant(data, name, provider, repo, materialization, egress_hosts):
     for agent in data["agents"]:
         if isinstance(agent, dict) and agent.get("id") == name:
             if agent.get("role", "agent") == "egress":
@@ -77,13 +77,20 @@ def add_grant(data, name, provider, repo, materialization):
             grants = agent.setdefault("grants", [])
             for grant in grants:
                 if isinstance(grant, dict) and grant.get("provider") == provider:
-                    grant["materialization"] = materialization
+                    if materialization:
+                        grant["materialization"] = materialization
                     repositories = grant.setdefault("repositories", [])
                     if repo not in repositories:
                         repositories.append(repo)
                         repositories.sort()
+                    if egress_hosts:
+                        hosts = grant.setdefault("egress-hosts", [])
+                        for host in egress_hosts:
+                            if host not in hosts:
+                                hosts.append(host)
+                        hosts.sort()
                     return
-            grants.append({"provider": provider, "repositories": [repo], "materialization": materialization})
+            grants.append({"provider": provider, "repositories": [repo], "materialization": materialization or "file-bundle", "egress-hosts": egress_hosts or []})
             grants.sort(key=lambda grant: grant["provider"])
             return
     raise SystemExit(f"agent {name} is not registered; run agent-init first")
@@ -124,7 +131,8 @@ def main():
     grant.add_argument("--name", required=True)
     grant.add_argument("--provider", required=True)
     grant.add_argument("--repo", required=True)
-    grant.add_argument("--materialization", choices=["file-bundle", "header-inject"], default="file-bundle")
+    grant.add_argument("--materialization", choices=["file-bundle", "header-inject"])
+    grant.add_argument("--egress-host", action="append", default=[])
 
     unregister = subparsers.add_parser("unregister")
     unregister.add_argument("--name", required=True)
@@ -136,7 +144,7 @@ def main():
     elif args.command == "copy-register":
         with_lock(path, lambda data: copy_register_agent(data, args.from_name, args.name, args.token, args.copy_grants))
     elif args.command == "grant":
-        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo, args.materialization))
+        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo, args.materialization, args.egress_host))
     elif args.command == "unregister":
         with_lock(path, lambda data: unregister_agent(data, args.name))
 

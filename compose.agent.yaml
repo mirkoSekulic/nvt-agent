@@ -22,9 +22,10 @@ services:
     image: nvt-egressd:latest
     profiles:
       - mediated
+    env_file:
+      - ${EGRESSD_ENV_FILE:-/dev/null}
     environment:
       NVT_EGRESSD_CONFIG: /config/egressd.json
-      NVT_BROKER_TOKEN: ${NVT_EGRESS_BROKER_TOKEN:-}
     volumes:
       - ${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro
     network_mode: service:docker

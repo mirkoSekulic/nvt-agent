@@ -73,6 +73,9 @@ spec:
                   enum:
                     - direct
                     - mediated
+                egressAllowInsecureBroker:
+                  type: boolean
+                  default: false
                 workspace:
                   type: object
                   required:
@@ -107,6 +110,11 @@ spec:
                             enum:
                               - file-bundle
                               - header-inject
+                          egressHosts:
+                            type: array
+                            items:
+                              type: string
+                              minLength: 1
                 prompt:
                   type: object
                   properties:

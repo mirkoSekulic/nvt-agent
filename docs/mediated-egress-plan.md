@@ -129,8 +129,8 @@ The in-netns layer is iptables:
 | Layer | Knob | Default |
 |---|---|---|
 | Broker | per-grant `materialization: file-bundle \| header-inject` | `file-bundle` |
-| Operator | AgentRun/AgentSchedule spec `egress: mediated \| direct`, defaultable via Helm values | opt-in; flip default to `mediated` once smoke tests are in CI |
-| Compose | `agent-init MEDIATED=1` profile adding the sidecar (+ iptables when enforcement lands), skipping bundles | `direct` |
+| Operator | AgentRun/AgentSchedule spec `egress: mediated \| direct`, per-grant `egressHosts`, and explicit `egressAllowInsecureBroker` for local plaintext broker wiring | opt-in; flip default to `mediated` once smoke tests are in CI |
+| Compose | `agent-init MEDIATED=1` profile adding the sidecar (+ iptables when enforcement lands), skipping bundles; requires `NVT_EGRESS_ALLOW_INSECURE_BROKER=1` for the local plaintext broker | `direct` |
 
 When `direct`, the operator renders exactly today's Pod — no sidecar, no NetworkPolicy, no iptables. Both paths stay conformance-tested for as long as both are supported; bundle-path tests (`broker_auth_files` etc.) do not decay while the path remains the documented fallback.
 
@@ -140,6 +140,12 @@ When `direct`, the operator renders exactly today's Pod — no sidecar, no Netwo
 - `egress: mediated` + any `file-bundle` grant → **admission failure** (a bundle written into a supposedly zero-secret container silently breaks the invariant).
 
 Silent downgrade or ignore in either direction would violate risk #2 (silent fallback). The error is loud, names the offending grant, and the operator surfaces it on the AgentRun status.
+
+In Phase 3, mediated egressd routes are rendered only from explicit route hosts
+(`egressHosts` in AgentRun, `egress-hosts` in local `agents.yaml`). The local
+compose and kind POC broker leg is plaintext, so mediated mode must opt into the
+unsafe local-only setting. Production mediated mode must use the broker TLS path
+instead of silently setting `allow_insecure_broker`.
 
 ## Phases
 
@@ -204,13 +210,15 @@ hardening and short-TTL vended bundles.
 
 ### Phase 3 — Operator + compose wiring (non-possession ships)
 
-AgentRun gains `egress: direct|mediated` and broker grants gain
-`materialization: file-bundle|header-inject`. Direct remains the default and
-renders the existing Pod/compose behavior. Mediated mode conditionally adds the
-egressd sidecar, a separate paired egress broker identity, sidecar config, and
-runtime bootstrap redirected config for header-inject grants only; mismatch in
-either direction fails admission before side effects. Codex plan-auth remains
-on the direct file-bundle fallback after the Phase 2 NO-GO. Phase-0
+AgentRun gains `egress: direct|mediated`; broker grants gain
+`materialization: file-bundle|header-inject` and explicit mediated route hosts.
+Direct remains the default and renders the existing Pod/compose behavior.
+Mediated mode conditionally adds the egressd sidecar, a separate paired egress
+broker identity, sidecar config, and runtime bootstrap redirected config for
+header-inject grants only; mismatch in either direction fails admission before
+side effects. Until multi-route agent config is fully designed, Phase 3 accepts
+exactly one header-inject grant and fails closed otherwise. Codex plan-auth
+remains on the direct file-bundle fallback after the Phase 2 NO-GO. Phase-0
 non-possession tests land in CI here; egress-denied stays skipped until Phase 5.
 (No enforcement yet — routing + non-possession only, per §3.)
 

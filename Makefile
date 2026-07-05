@@ -159,7 +159,7 @@ agent-grant:
 	@test -n "$(NAME)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
 	@test -n "$(PROVIDER)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
 	@test -n "$(REPO)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
-	bash scripts/agent-grant.sh --name "$(NAME)" --provider "$(PROVIDER)" --repo "$(REPO)"
+	bash scripts/agent-grant.sh --name "$(NAME)" --provider "$(PROVIDER)" --repo "$(REPO)" $(if $(MATERIALIZATION),--materialization "$(MATERIALIZATION)") $(if $(EGRESS_HOST),--egress-host "$(EGRESS_HOST)")
 
 agent-up:
 	@test -n "$(NAME)" || (echo "usage: make agent-up NAME=<name>"; exit 1)

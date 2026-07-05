@@ -45,17 +45,18 @@ type AgentRun struct {
 //
 //nolint:govet // Field order follows the CRD schema for readability.
 type AgentRunSpec struct {
-	Runtime          AgentRunRuntime      `json:"runtime"`
-	RuntimeAuth      *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
-	Image            string               `json:"image"`
-	RuntimeClassName *string              `json:"runtimeClassName,omitempty"`
-	Egress           AgentRunEgressMode   `json:"egress,omitempty"`
-	Workspace        AgentRunWorkspace    `json:"workspace"`
-	Broker           *AgentRunBroker      `json:"broker,omitempty"`
-	Prompt           *AgentRunPrompt      `json:"prompt,omitempty"`
-	Agent            AgentRunAgent        `json:"agent"`
-	Lifecycle        *AgentRunLifecycle   `json:"lifecycle,omitempty"`
-	TTL              *AgentRunTTL         `json:"ttl,omitempty"`
+	Runtime                   AgentRunRuntime      `json:"runtime"`
+	RuntimeAuth               *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
+	Image                     string               `json:"image"`
+	RuntimeClassName          *string              `json:"runtimeClassName,omitempty"`
+	Egress                    AgentRunEgressMode   `json:"egress,omitempty"`
+	EgressAllowInsecureBroker bool                 `json:"egressAllowInsecureBroker,omitempty"`
+	Workspace                 AgentRunWorkspace    `json:"workspace"`
+	Broker                    *AgentRunBroker      `json:"broker,omitempty"`
+	Prompt                    *AgentRunPrompt      `json:"prompt,omitempty"`
+	Agent                     AgentRunAgent        `json:"agent"`
+	Lifecycle                 *AgentRunLifecycle   `json:"lifecycle,omitempty"`
+	TTL                       *AgentRunTTL         `json:"ttl,omitempty"`
 }
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.
@@ -85,6 +86,7 @@ type AgentRunBrokerGrant struct {
 	Provider        string                       `json:"provider"`
 	Repositories    []string                     `json:"repositories"`
 	Materialization AgentRunGrantMaterialization `json:"materialization,omitempty"`
+	EgressHosts     []string                     `json:"egressHosts,omitempty"`
 }
 
 // AgentRunPrompt defines the optional initial prompt for disposable runs.

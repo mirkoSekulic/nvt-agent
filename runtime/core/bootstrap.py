@@ -188,7 +188,11 @@ def setup_tmux_config():
 
 
 def mediated_mode(egress):
-    mode = egress.get("mode") or os.environ.get("NVT_EGRESS_MODE") or "direct"
+    config_mode = egress.get("mode")
+    env_mode = os.environ.get("NVT_EGRESS_MODE")
+    if config_mode and env_mode and config_mode != env_mode:
+        raise SystemExit(f"egress.mode {config_mode} disagrees with NVT_EGRESS_MODE {env_mode}")
+    mode = config_mode or env_mode or "direct"
     if mode not in {"direct", "mediated"}:
         raise SystemExit("egress.mode must be direct or mediated")
     return mode == "mediated"
@@ -228,7 +232,6 @@ def broker_routing(capability):
 
 def apply_mediated_egress(egress):
     scrub_git_state()
-    base_url = egress.get("base-url") or "http://127.0.0.1:8471"
     placeholder = egress.get("placeholder") or PLACEHOLDER
     if placeholder != PLACEHOLDER:
         raise SystemExit("egress.placeholder must use the documented NVT placeholder")
@@ -243,6 +246,9 @@ def apply_mediated_egress(egress):
             raise SystemExit(f"egress.grants[{index}].provider must be a non-empty string")
         if grant.get("materialization") != "header-inject":
             raise SystemExit(f"egress mediated grant {provider} must be materialization header-inject")
+        base_url = grant.get("base-url")
+        if not isinstance(base_url, str) or not base_url:
+            raise SystemExit(f"egress mediated grant {provider} must include base-url")
         routing = broker_routing(provider)
         hosts = routing.get("hosts") or []
         if not hosts:
@@ -250,10 +256,9 @@ def apply_mediated_egress(egress):
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        json.dumps({"mode": "mediated", "base_url": base_url, "placeholder": PLACEHOLDER}, indent=2, sort_keys=True) + "\n",
+        json.dumps({"mode": "mediated", "placeholder": PLACEHOLDER, "grants": grants}, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    persist_env_var("NVT_EGRESS_BASE_URL", base_url)
     persist_env_var("NVT_EGRESS_PLACEHOLDER", PLACEHOLDER)
 
 

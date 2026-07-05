@@ -447,9 +447,10 @@ func TestDirectAgentRunPodDoesNotRenderMediatedSidecar(t *testing.T) {
 func TestMediatedAgentRunRendersEgressdWithoutEgressTokenInAgent(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
 	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
 		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
-			{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}},
+			{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}, EgressHosts: []string{"api.example.test:443"}},
 		},
 	}
 	pod, err := DesiredAgentPod(agentRun, testScheme(t))
@@ -476,9 +477,10 @@ func TestReconcileWritesMediatedBrokerAgentsPolicy(t *testing.T) {
 	scheme := testScheme(t)
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
 	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
 		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
-			{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}},
+			{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}, EgressHosts: []string{"api.example.test:443"}},
 		},
 	}
 	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("agent-token"))
@@ -499,6 +501,9 @@ func TestReconcileWritesMediatedBrokerAgentsPolicy(t *testing.T) {
 	if agentEntry.Role != "" || len(agentEntry.Grants) != 1 || agentEntry.Grants[0].Materialization != "header-inject" {
 		t.Fatalf("unexpected mediated agent entry: %#v", agentEntry)
 	}
+	if len(agentEntry.Grants[0].EgressHosts) != 1 || agentEntry.Grants[0].EgressHosts[0] != "api.example.test:443" {
+		t.Fatalf("unexpected mediated egress hosts: %#v", agentEntry.Grants[0])
+	}
 	if egressEntry.Role != "egress" || egressEntry.PairedAgent != agentEntry.ID || len(egressEntry.Grants) != 0 {
 		t.Fatalf("unexpected egress entry: %#v", egressEntry)
 	}
@@ -515,11 +520,79 @@ func TestValidateAgentRunEgressModeRejectsMismatches(t *testing.T) {
 
 	mediated := testAgentRun()
 	mediated.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	mediated.Spec.EgressAllowInsecureBroker = true
 	mediated.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
 		Provider: "bundle-main", Repositories: []string{},
 	}}}
 	if err := ValidateAgentRunEgressMode(mediated); err == nil || !strings.Contains(err.Error(), "bundle-main") {
 		t.Fatalf("expected mediated/file-bundle mismatch naming provider, got %v", err)
+	}
+}
+
+func TestValidateAgentRunEgressModeRejectsMediatedRuntimeAuth(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "codex-auth"}
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"},
+	}}}
+
+	err := ValidateAgentRunEgressMode(agentRun)
+	if err == nil || !strings.Contains(err.Error(), "runtimeAuth") {
+		t.Fatalf("expected mediated runtimeAuth rejection, got %v", err)
+	}
+}
+
+func TestValidateAgentRunEgressModeRejectsMissingRouteAndMultipleGrants(t *testing.T) {
+	missingRoute := testAgentRun()
+	missingRoute.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	missingRoute.Spec.EgressAllowInsecureBroker = true
+	missingRoute.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+	}}}
+	if err := ValidateAgentRunEgressMode(missingRoute); err == nil || !strings.Contains(err.Error(), "egressHosts") {
+		t.Fatalf("expected missing egressHosts rejection, got %v", err)
+	}
+
+	multiple := testAgentRun()
+	multiple.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	multiple.Spec.EgressAllowInsecureBroker = true
+	multiple.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+		{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"}},
+		{Provider: "api-alt", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"alt.example.test:443"}},
+	}}
+	if err := ValidateAgentRunEgressMode(multiple); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("expected multi-grant rejection, got %v", err)
+	}
+
+	unsafeLocal := testAgentRun()
+	unsafeLocal.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	unsafeLocal.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"},
+	}}}
+	if err := ValidateAgentRunEgressMode(unsafeLocal); err == nil || !strings.Contains(err.Error(), "egressAllowInsecureBroker") {
+		t.Fatalf("expected unsafe local broker rejection, got %v", err)
+	}
+}
+
+func TestRenderEgressdConfigUsesConfiguredRouteHost(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"},
+	}}}
+
+	rendered, err := RenderEgressdConfigJSON(agentRun)
+	if err != nil {
+		t.Fatalf("render egressd config: %v", err)
+	}
+	if !strings.Contains(rendered, `"upstream": "api.example.test:443"`) || strings.Contains(rendered, "placeholder.local") {
+		t.Fatalf("unexpected egressd config:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `"allow_insecure_broker": true`) {
+		t.Fatalf("expected explicit local insecure broker flag:\n%s", rendered)
 	}
 }
 
@@ -545,6 +618,39 @@ func TestReconcileRejectsEgressMismatchBeforePodAndSecrets(t *testing.T) {
 	var brokerSecret corev1.Secret
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}, &brokerSecret); !errors.IsNotFound(err) {
 		t.Fatalf("expected no broker token Secret, got %v", err)
+	}
+}
+
+func TestReconcileRejectsMediatedRuntimeAuthBeforePodAndSecrets(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "codex-auth"}
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"},
+	}}}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseFailed)
+	for _, name := range []string{BrokerTokenSecretName(agentRun.Name), EgressTokenSecretName(agentRun.Name), AgentConfigMapName(agentRun.Name), EgressdConfigMapName(agentRun.Name)} {
+		var secret corev1.Secret
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: name}, &secret); err == nil {
+			t.Fatalf("expected no Secret side effect %s", name)
+		}
+		var configMap corev1.ConfigMap
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: name}, &configMap); err == nil {
+			t.Fatalf("expected no ConfigMap side effect %s", name)
+		}
 	}
 }
 
@@ -1354,9 +1460,16 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if crdPath(t, spec, "egress", "default") != "direct" {
 		t.Fatalf("expected egress default direct, got %#v", crdPath(t, spec, "egress"))
 	}
+	if crdPath(t, spec, "egressAllowInsecureBroker", "default") != false {
+		t.Fatalf("expected egressAllowInsecureBroker default false, got %#v", crdPath(t, spec, "egressAllowInsecureBroker"))
+	}
 	materialization := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "materialization").(map[string]any)
 	if materialization["default"] != "file-bundle" {
 		t.Fatalf("expected materialization default file-bundle, got %#v", materialization)
+	}
+	egressHosts := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "egressHosts").(map[string]any)
+	if egressHosts["type"] != "array" {
+		t.Fatalf("expected egressHosts array schema, got %#v", egressHosts)
 	}
 }
 

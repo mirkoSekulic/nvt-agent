@@ -77,6 +77,7 @@ type brokerAgentGrantEntry struct {
 	Provider        string   `json:"provider"`
 	Repositories    []string `json:"repositories"`
 	Materialization string   `json:"materialization,omitempty"`
+	EgressHosts     []string `json:"egress-hosts,omitempty"`
 }
 
 // AgentRunReconciler reconciles AgentRun resources.
@@ -696,20 +697,25 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	}
 	grants := AgentRunBrokerGrants(agentRun.Spec.Broker)
 	routes := make([]egressdRoute, 0, len(grants))
-	for index, grant := range grants {
+	routeIndex := 0
+	for _, grant := range grants {
 		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
 		}
+		if len(grant.EgressHosts) == 0 {
+			return "", fmt.Errorf("broker grant %s egressHosts is required for mediated egress", grant.Provider)
+		}
 		routes = append(routes, egressdRoute{
-			Listen:                fmt.Sprintf("127.0.0.1:%d", 8471+index),
+			Listen:                fmt.Sprintf("127.0.0.1:%d", 8471+routeIndex),
 			Capability:            grant.Provider,
-			Upstream:              grant.Provider,
+			Upstream:              grant.EgressHosts[0],
 			AllowInsecureUpstream: false,
 		})
+		routeIndex++
 	}
 	config := egressdConfig{
 		BrokerURL:           brokerURL,
-		AllowInsecureBroker: true,
+		AllowInsecureBroker: agentRun.Spec.EgressAllowInsecureBroker,
 		Routes:              routes,
 	}
 	rendered, err := json.MarshalIndent(config, "", "  ")
@@ -1001,6 +1007,15 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	if mode != nvtv1alpha1.AgentRunEgressDirect && mode != nvtv1alpha1.AgentRunEgressMediated {
 		return fmt.Errorf("spec.egress must be direct or mediated, got %q", mode)
 	}
+	headerInjectGrants := 0
+	if mode == nvtv1alpha1.AgentRunEgressMediated {
+		if agentRun.Spec.RuntimeAuth != nil {
+			return fmt.Errorf("egress mediated is incompatible with spec.runtimeAuth")
+		}
+		if strings.HasPrefix(brokerURL, "http://") && !agentRun.Spec.EgressAllowInsecureBroker {
+			return fmt.Errorf("egress mediated with plaintext broker requires spec.egressAllowInsecureBroker=true for local/dev use")
+		}
+	}
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
 		materialization := AgentRunGrantMaterialization(grant)
 		switch materialization {
@@ -1014,8 +1029,41 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantFileBundle {
 			return fmt.Errorf("egress mediated is incompatible with broker grant %s materialization file-bundle", grant.Provider)
 		}
+		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
+			headerInjectGrants++
+			if len(grant.EgressHosts) == 0 {
+				return fmt.Errorf("egress mediated broker grant %s requires egressHosts", grant.Provider)
+			}
+			for _, host := range grant.EgressHosts {
+				if !validEgressHost(host) {
+					return fmt.Errorf("egress mediated broker grant %s has invalid egressHosts entry %q", grant.Provider, host)
+				}
+			}
+		}
+	}
+	if mode == nvtv1alpha1.AgentRunEgressMediated {
+		if headerInjectGrants == 0 {
+			return fmt.Errorf("egress mediated requires exactly one header-inject broker grant with egressHosts")
+		}
+		if headerInjectGrants > 1 {
+			return fmt.Errorf("egress mediated currently supports exactly one header-inject broker grant, got %d", headerInjectGrants)
+		}
 	}
 	return nil
+}
+
+func validEgressHost(value string) bool {
+	if value == "" || strings.Contains(value, "://") || strings.Contains(value, "/") || strings.Contains(value, "@") {
+		return false
+	}
+	host := value
+	if before, after, ok := strings.Cut(value, ":"); ok {
+		if before == "" || after == "" {
+			return false
+		}
+		host = before
+	}
+	return strings.TrimSpace(host) == host && host != "" && !strings.HasPrefix(host, ".") && !strings.HasSuffix(host, ".")
 }
 
 func agentRunLabels(agentRunName string) map[string]string {
@@ -1057,6 +1105,7 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 			Provider:        grant.Provider,
 			Repositories:    repositories,
 			Materialization: string(AgentRunGrantMaterialization(grant)),
+			EgressHosts:     append([]string{}, grant.EgressHosts...),
 		})
 	}
 	sort.SliceStable(grants, func(i, j int) bool {
@@ -1186,6 +1235,11 @@ func ValidateBrokerAgentsPolicy(policy brokerAgentsPolicy) error {
 					return fmt.Errorf("agents[%d].grants[%d].repositories[%d] must be a non-empty string", agentIndex, grantIndex, repoIndex)
 				}
 			}
+			for hostIndex, host := range grant.EgressHosts {
+				if !validEgressHost(host) {
+					return fmt.Errorf("agents[%d].grants[%d].egress-hosts[%d] must be a host or host:port, got %q", agentIndex, grantIndex, hostIndex, host)
+				}
+			}
 		}
 	}
 	for pairedAgent, egressID := range pairedAgents {
@@ -1228,6 +1282,9 @@ func normalizeBrokerAgentEntry(entry *brokerAgentEntry) {
 	for i := range entry.Grants {
 		if entry.Grants[i].Repositories == nil {
 			entry.Grants[i].Repositories = []string{}
+		}
+		if entry.Grants[i].EgressHosts == nil {
+			entry.Grants[i].EgressHosts = []string{}
 		}
 		if entry.Grants[i].Materialization == "" {
 			entry.Grants[i].Materialization = string(nvtv1alpha1.AgentRunGrantFileBundle)
@@ -1293,6 +1350,7 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 
 func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.AgentRun) map[string]any {
 	grants := []any{}
+	routeIndex := 0
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
 		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
@@ -1300,12 +1358,13 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 		grants = append(grants, map[string]any{
 			"provider":        grant.Provider,
 			"materialization": string(nvtv1alpha1.AgentRunGrantHeaderInject),
+			"base-url":        fmt.Sprintf("http://127.0.0.1:%d", 8471+routeIndex),
 		})
+		routeIndex++
 	}
 	updated := cloneStringAnyMap(config)
 	updated["egress"] = map[string]any{
 		"mode":        string(nvtv1alpha1.AgentRunEgressMediated),
-		"base-url":    "http://127.0.0.1:8471",
 		"placeholder": "NVT-PLACEHOLDER-NOT-A-KEY",
 		"grants":      grants,
 	}

@@ -67,6 +67,18 @@ func scanTreeForSecretMaterial(t *testing.T, root string, secrets []string) {
 	}
 }
 
+func scanTextForSecretMaterial(t *testing.T, label string, text string, secrets []string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if secret == "" || secret == mediatedPlaceholder {
+			continue
+		}
+		if strings.Contains(text, secret) {
+			t.Fatalf("secret material found in %s", label)
+		}
+	}
+}
+
 // assertScrubbedGitState fails if the container's git configuration retains
 // any credential path: helpers, extraHeader injection, URL rewrites, or
 // stored credential files (protocol/injection.md, plan section 5).
@@ -113,6 +125,15 @@ func assertScrubbedGitState(t *testing.T, home string) {
 // must not turn the suite green.
 func TestMediatedNonPossession(t *testing.T) {
 	f := newFixture(t)
+	secrets := []string{
+		"fixture-agent-broker-token",
+		"fixture-egress-broker-token",
+		"fixture-access-token",
+		"fixture-refresh-token",
+		"fixture-provider-header",
+		"fixture-derived-token",
+		"fixture-git-stored-token",
+	}
 	f.writeBin("brokerctl", `#!/usr/bin/env bash
 set -euo pipefail
 if [ "$*" = "injection routing --capability api-main" ]; then
@@ -126,18 +147,24 @@ exit 1
 	helper = store
 [http]
 	extraHeader = Authorization: Bearer fixture-derived-token
-[url "https://fixture-token@example.test/"]
+[url "https://fixture-git-stored-token@example.test/"]
 	insteadOf = https://example.test/
 `)
-	mustWriteFile(t, filepath.Join(f.home, ".git-credentials"), "https://fixture-token@example.test\n")
+	mustWriteFile(t, filepath.Join(f.home, ".git-credentials"), "https://fixture-git-stored-token@example.test\n")
+	mustWriteFile(t, filepath.Join(f.home, "agent-visible-env.txt"), strings.Join([]string{
+		"HOME=" + f.home,
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_PLACEHOLDER=" + mediatedPlaceholder,
+	}, "\n")+"\n")
+	mustWriteFile(t, filepath.Join(f.home, "agent-visible-argv.txt"), "bootstrap /nvt-agent/agent.yaml\n")
 	config := f.writeAgentConfig(`
 egress:
   mode: mediated
-  base-url: http://127.0.0.1:8471
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
   grants:
     - provider: api-main
       materialization: header-inject
+      base-url: http://127.0.0.1:8471
 runtime:
   command: codex
 tools:
@@ -156,10 +183,14 @@ code-server:
 	if strings.Contains(output, "fixture-access-token") || strings.Contains(output, "fixture-refresh-token") || strings.Contains(output, "fixture-derived-token") {
 		t.Fatalf("bootstrap output leaked fixture secret:\n%s", output)
 	}
-	scanTreeForSecretMaterial(t, f.home, []string{"fixture-access-token", "fixture-refresh-token", "fixture-derived-token", "fixture-token"})
+	scanTreeForSecretMaterial(t, f.home, secrets)
+	scanTextForSecretMaterial(t, "bootstrap output", output, secrets)
 	assertScrubbedGitState(t, f.home)
 	egressMetadata := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
 	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
+	if strings.Contains(envFile, "NVT_EGRESS_BROKER_TOKEN") {
+		t.Fatalf("mediated agent env must not contain egress broker token key:\n%s", envFile)
+	}
 	if !strings.Contains(egressMetadata, mediatedPlaceholder) || !strings.Contains(envFile, mediatedPlaceholder) {
 		t.Fatalf("mediated placeholder missing from metadata/env:\n%s\n%s", egressMetadata, envFile)
 	}
@@ -179,8 +210,30 @@ code-server:
 //     real credential and never sees the placeholder
 //     (strip_request_headers behavior).
 func TestMediatedPlaceholderInert(t *testing.T) {
-	if mediatedPlaceholder != "NVT-PLACEHOLDER-NOT-A-KEY" {
-		t.Fatal("placeholder constant must match protocol/injection.md")
+	t.Skip("pending full container/upstream mediated smoke: egressd/internal/egress covers placeholder stripping; avoid tautological pass here")
+}
+
+func TestBootstrapRejectsEgressModeDisagreement(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+egress:
+  mode: direct
+runtime:
+  command: codex
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"NVT_EGRESS_MODE=mediated",
+	}, config)
+	if !strings.Contains(output, "disagrees with NVT_EGRESS_MODE") {
+		t.Fatalf("expected mode disagreement failure, got:\n%s", output)
 	}
 }
 

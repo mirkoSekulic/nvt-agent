@@ -122,6 +122,7 @@ agent_dir="$repo_root/.agents/$name"
 env_file="$agent_dir/env"
 agent_config_file="$agent_dir/agent.yaml"
 egressd_config_file="$agent_dir/egressd.json"
+egressd_env_file="$agent_dir/egressd.env"
 workspace_dir="$agent_dir/workspace"
 local_instructions_file="$workspace_dir/AGENTS.local.md"
 custom_plugins_dir="$agent_dir/custom-plugins"
@@ -131,10 +132,13 @@ host_codex_config_dir="${HOME}/.codex"
 mediated="${MEDIATED:-0}"
 egress_mode="direct"
 compose_profiles=""
-if [ "$mediated" = "1" ] || [ "${mediated,,}" = "true" ]; then
+case "$mediated" in
+  1|true|TRUE|True|yes|YES|Yes)
   egress_mode="mediated"
   compose_profiles="mediated"
-fi
+  ;;
+esac
+egress_allow_insecure_broker="${NVT_EGRESS_ALLOW_INSECURE_BROKER:-0}"
 
 mkdir -p "$workspace_dir" "$custom_plugins_dir" "$claude_config_dir" "$codex_config_dir" "$broker_dir"
 
@@ -157,7 +161,9 @@ broker_token=""
 egress_token=""
 if [ -f "$env_file" ]; then
   broker_token="$(grep -E '^NVT_BROKER_TOKEN=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
-  egress_token="$(grep -E '^NVT_EGRESS_BROKER_TOKEN=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+fi
+if [ -f "$egressd_env_file" ]; then
+  egress_token="$(grep -E '^NVT_BROKER_TOKEN=' "$egressd_env_file" | tail -n 1 | cut -d= -f2- || true)"
 fi
 if [ -z "$broker_token" ]; then
   broker_token="$(python3 - <<'PY'
@@ -183,10 +189,11 @@ if [ ! -f "$env_file" ]; then
     CUSTOM_PLUGINS_DIR="$custom_plugins_dir" \
     AGENT_CONFIG_FILE="$agent_config_file" \
     EGRESSD_CONFIG_FILE="$egressd_config_file" \
+    EGRESSD_ENV_FILE="$egressd_env_file" \
     NVT_BROKER_TOKEN="$broker_token" \
     MEDIATED="$mediated" \
     NVT_EGRESS_MODE="$egress_mode" \
-    NVT_EGRESS_BROKER_TOKEN="$egress_token" \
+    NVT_EGRESS_ALLOW_INSECURE_BROKER="$egress_allow_insecure_broker" \
     COMPOSE_PROFILES="$compose_profiles" \
     CODEX_CONFIG_DIR="$codex_config_dir" \
     CLAUDE_CONFIG_DIR="$claude_config_dir" \
@@ -230,7 +237,12 @@ PY
       printf 'EGRESSD_CONFIG_FILE=%s\n' "$egressd_config_file"
     } >>"$env_file"
   fi
-  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_token" "$compose_profiles" <<'PY'
+  if ! grep -q '^EGRESSD_ENV_FILE=' "$env_file"; then
+    {
+      printf 'EGRESSD_ENV_FILE=%s\n' "$egressd_env_file"
+    } >>"$env_file"
+  fi
+  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" <<'PY'
 import sys
 from pathlib import Path
 
@@ -238,7 +250,7 @@ path = Path(sys.argv[1])
 values = {
     "MEDIATED": sys.argv[2],
     "NVT_EGRESS_MODE": sys.argv[3],
-    "NVT_EGRESS_BROKER_TOKEN": sys.argv[4],
+    "NVT_EGRESS_ALLOW_INSECURE_BROKER": sys.argv[4],
     "COMPOSE_PROFILES": sys.argv[5],
 }
 lines = path.read_text(encoding="utf-8").splitlines()
@@ -246,6 +258,8 @@ seen = set()
 updated = []
 for line in lines:
     key = line.split("=", 1)[0] if "=" in line else ""
+    if key == "NVT_EGRESS_BROKER_TOKEN":
+        continue
     if key in values:
         updated.append(f"{key}={values[key]}")
         seen.add(key)
@@ -275,7 +289,7 @@ if [ "$egress_mode" = "mediated" ]; then
     --paired-agent "$name"
 fi
 
-python3 - "$broker_agents_file" "$name" "$egress_mode" <<'PY'
+python3 - "$broker_agents_file" "$name" "$egress_mode" "$egress_allow_insecure_broker" <<'PY'
 import sys
 from pathlib import Path
 
@@ -284,10 +298,12 @@ import yaml
 agents_file = Path(sys.argv[1])
 name = sys.argv[2]
 mode = sys.argv[3]
+allow_insecure = sys.argv[4] in {"1", "true", "TRUE", "True", "yes", "YES", "Yes"}
 data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
 agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
 if agent is None:
     raise SystemExit(f"agent-init: agent {name} is not registered")
+header_inject = []
 for grant in agent.get("grants", []) or []:
     if not isinstance(grant, dict):
         continue
@@ -297,7 +313,28 @@ for grant in agent.get("grants", []) or []:
         raise SystemExit(f"agent-init: egress direct is incompatible with broker grant {provider} materialization header-inject")
     if mode == "mediated" and materialization == "file-bundle":
         raise SystemExit(f"agent-init: egress mediated is incompatible with broker grant {provider} materialization file-bundle")
+    if mode == "mediated" and materialization == "header-inject":
+        hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
+        if not isinstance(hosts, list) or not hosts or not all(isinstance(host, str) and host and "://" not in host and "/" not in host and "@" not in host for host in hosts):
+            raise SystemExit(f"agent-init: egress mediated broker grant {provider} requires egress-hosts")
+        header_inject.append((provider, hosts))
+if mode == "mediated":
+    if not allow_insecure:
+        raise SystemExit("agent-init: mediated mode with plaintext local broker requires NVT_EGRESS_ALLOW_INSECURE_BROKER=1")
+    if len(header_inject) == 0:
+        raise SystemExit("agent-init: mediated mode requires exactly one header-inject grant with egress-hosts")
+    if len(header_inject) > 1:
+        raise SystemExit(f"agent-init: mediated mode currently supports exactly one header-inject grant, got {len(header_inject)}")
 PY
+
+if [ "$egress_mode" = "mediated" ]; then
+  {
+    printf 'NVT_BROKER_TOKEN=%s\n' "$egress_token"
+  } >"$egressd_env_file"
+  chmod 600 "$egressd_env_file"
+else
+  rm -f "$egressd_env_file"
+fi
 
 if [ "$egress_mode" = "direct" ] && [ -d "$host_codex_config_dir" ] && [ -z "$(find "$codex_config_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
   cp -R "$host_codex_config_dir"/. "$codex_config_dir"/
@@ -305,20 +342,37 @@ if [ "$egress_mode" = "direct" ] && [ -d "$host_codex_config_dir" ] && [ -z "$(f
 fi
 
 if [ "$egress_mode" = "mediated" ]; then
-  cat > "$egressd_config_file" <<'JSON'
-{
-  "broker_url": "http://broker:7347",
-  "allow_insecure_broker": true,
-  "routes": [
-    {
-      "listen": "0.0.0.0:8471",
-      "capability": "placeholder",
-      "upstream": "placeholder.local",
-      "allow_insecure_upstream": false
-    }
-  ]
+  python3 - "$broker_agents_file" "$name" "$egressd_config_file" "$egress_allow_insecure_broker" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+agents_file = Path(sys.argv[1])
+name = sys.argv[2]
+target = Path(sys.argv[3])
+allow_insecure = sys.argv[4] in {"1", "true", "TRUE", "True", "yes", "YES", "Yes"}
+data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
+agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
+routes = []
+for grant in agent.get("grants", []) or []:
+    if not isinstance(grant, dict) or (grant.get("materialization") or "file-bundle") != "header-inject":
+        continue
+    hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
+    routes.append({
+        "listen": "0.0.0.0:8471",
+        "capability": grant.get("provider"),
+        "upstream": hosts[0],
+        "allow_insecure_upstream": False,
+    })
+config = {
+    "broker_url": "http://broker:7347",
+    "allow_insecure_broker": allow_insecure,
+    "routes": routes,
 }
-JSON
+target.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 else
   rm -f "$egressd_config_file"
 fi
