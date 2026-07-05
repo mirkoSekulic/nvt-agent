@@ -33,6 +33,12 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"agents-proxy",
 		"agent-internal",
 		"traefik.docker.network=agents-proxy",
+		"egressd:",
+		"profiles:",
+		"- mediated",
+		"NVT_EGRESSD_CONFIG: /config/egressd.json",
+		"NVT_BROKER_TOKEN: ${NVT_EGRESS_BROKER_TOKEN:-}",
+		"${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(compose, fragment) {

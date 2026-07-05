@@ -2,12 +2,13 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo>" >&2
+  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo> [--materialization file-bundle|header-inject]" >&2
 }
 
 name=""
 provider=""
 repo=""
+materialization="file-bundle"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -21,6 +22,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --repo)
       repo="${2:-}"
+      shift 2
+      ;;
+    --materialization)
+      materialization="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -39,6 +44,14 @@ if [ -z "$name" ] || [ -z "$provider" ] || [ -z "$repo" ]; then
   usage
   exit 1
 fi
+case "$materialization" in
+  file-bundle|header-inject) ;;
+  *)
+    echo "invalid materialization: $materialization" >&2
+    usage
+    exit 1
+    ;;
+esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
@@ -56,6 +69,7 @@ python3 "$script_dir/broker-agents.py" \
   grant \
   --name "$name" \
   --provider "$provider" \
-  --repo "$repo"
+  --repo "$repo" \
+  --materialization "$materialization"
 
-echo "granted $name provider=$provider repo=$repo"
+echo "granted $name provider=$provider repo=$repo materialization=$materialization"

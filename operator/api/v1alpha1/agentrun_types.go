@@ -8,6 +8,8 @@ import (
 
 // AgentRunPhase describes the current lifecycle phase of an AgentRun.
 type AgentRunPhase string
+type AgentRunEgressMode string
+type AgentRunGrantMaterialization string
 
 const (
 	// AgentRunPhasePending means the run has been accepted but no worker pod has started.
@@ -20,6 +22,12 @@ const (
 	AgentRunPhaseFailed AgentRunPhase = "Failed"
 	// AgentRunPhaseDeadlineExceeded means the run exceeded its active deadline.
 	AgentRunPhaseDeadlineExceeded AgentRunPhase = "DeadlineExceeded"
+
+	AgentRunEgressDirect   AgentRunEgressMode = "direct"
+	AgentRunEgressMediated AgentRunEgressMode = "mediated"
+
+	AgentRunGrantFileBundle   AgentRunGrantMaterialization = "file-bundle"
+	AgentRunGrantHeaderInject AgentRunGrantMaterialization = "header-inject"
 )
 
 // AgentRun represents one disposable nvt agent execution.
@@ -41,6 +49,7 @@ type AgentRunSpec struct {
 	RuntimeAuth      *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
 	Image            string               `json:"image"`
 	RuntimeClassName *string              `json:"runtimeClassName,omitempty"`
+	Egress           AgentRunEgressMode   `json:"egress,omitempty"`
 	Workspace        AgentRunWorkspace    `json:"workspace"`
 	Broker           *AgentRunBroker      `json:"broker,omitempty"`
 	Prompt           *AgentRunPrompt      `json:"prompt,omitempty"`
@@ -73,8 +82,9 @@ type AgentRunBroker struct {
 
 // AgentRunBrokerGrant defines repositories granted through a credential provider.
 type AgentRunBrokerGrant struct {
-	Provider     string   `json:"provider"`
-	Repositories []string `json:"repositories"`
+	Provider        string                       `json:"provider"`
+	Repositories    []string                     `json:"repositories"`
+	Materialization AgentRunGrantMaterialization `json:"materialization,omitempty"`
 }
 
 // AgentRunPrompt defines the optional initial prompt for disposable runs.

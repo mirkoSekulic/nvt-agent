@@ -204,7 +204,15 @@ hardening and short-TTL vended bundles.
 
 ### Phase 3 — Operator + compose wiring (non-possession ships)
 
-AgentRun controller conditionally adds the egressd container, its identity Secret, and config; compose gets the sidecar behind the profile flag; bootstrap generates redirected config for mediated grants. Phase-0 non-possession + identity-split tests land in CI here — from now on, later phases cannot regress the core property. (No enforcement yet — routing + non-possession only, per §3.)
+AgentRun gains `egress: direct|mediated` and broker grants gain
+`materialization: file-bundle|header-inject`. Direct remains the default and
+renders the existing Pod/compose behavior. Mediated mode conditionally adds the
+egressd sidecar, a separate paired egress broker identity, sidecar config, and
+runtime bootstrap redirected config for header-inject grants only; mismatch in
+either direction fails admission before side effects. Codex plan-auth remains
+on the direct file-bundle fallback after the Phase 2 NO-GO. Phase-0
+non-possession tests land in CI here; egress-denied stays skipped until Phase 5.
+(No enforcement yet — routing + non-possession only, per §3.)
 
 ### Phase 4 — git-over-HTTPS mediation
 
@@ -246,7 +254,7 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 | 2 | Phase 1: egressd + identity split + Codex API-key mode | trusted-core review; timeboxed spike result |
 | 3 | Phase 2: ChatGPT-plan flow + refresh/SSE tests | **go/no-go decision recorded in the PR** |
 | 3b | Phase 2b: CONNECT-only egressd forward proxy, no TLS termination or injection | egressd CONNECT tests + Codex proxy harness |
-| 4 | Phase 3: operator + compose wiring; non-possession tests → CI | conformance green in CI |
+| 4 | Phase 3: operator + compose wiring; direct/mediated admission, paired egress identity, sidecar config, bootstrap non-possession tests → CI | broker/runtime/operator conformance green in CI |
 | 5 | Phase 4: git-HTTPS mediation (CA, TLS termination) | trusted-core review — highest-risk surface, deliberately alone |
 | 6a | Phase 5: enforcement (own-Pod evaluation, iptables + FORWARD deny) | egress-denied test → CI |
 | 6b | Phase 5: audit, quotas, revocation, Anthropic proof; flip operator default | both smoke tests green |

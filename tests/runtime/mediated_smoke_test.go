@@ -112,15 +112,60 @@ func assertScrubbedGitState(t *testing.T, home string) {
 // pass silently — a misconfigured default that flips runs back to bundles
 // must not turn the suite green.
 func TestMediatedNonPossession(t *testing.T) {
-	t.Skip(nonPossessionPending)
-
-	exportRoot := t.TempDir() // Phase 3: replaced by the real container export
-	fixtureSecrets := []string{
-		// Phase 3: populated with the broker fixture's live values, e.g. the
-		// codex access/refresh tokens and static provider secrets.
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$*" = "injection routing --capability api-main" ]; then
+  printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY"}'
+  exit 0
+fi
+echo "unexpected brokerctl args: $*" >&2
+exit 1
+`)
+	mustWriteFile(t, filepath.Join(f.home, ".gitconfig"), `[credential]
+	helper = store
+[http]
+	extraHeader = Authorization: Bearer fixture-derived-token
+[url "https://fixture-token@example.test/"]
+	insteadOf = https://example.test/
+`)
+	mustWriteFile(t, filepath.Join(f.home, ".git-credentials"), "https://fixture-token@example.test\n")
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  base-url: http://127.0.0.1:8471
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants:
+    - provider: api-main
+      materialization: header-inject
+runtime:
+  command: codex
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), true, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+	}, config)
+	if strings.Contains(output, "fixture-access-token") || strings.Contains(output, "fixture-refresh-token") || strings.Contains(output, "fixture-derived-token") {
+		t.Fatalf("bootstrap output leaked fixture secret:\n%s", output)
 	}
-	scanTreeForSecretMaterial(t, exportRoot, fixtureSecrets)
-	assertScrubbedGitState(t, exportRoot)
+	scanTreeForSecretMaterial(t, f.home, []string{"fixture-access-token", "fixture-refresh-token", "fixture-derived-token", "fixture-token"})
+	assertScrubbedGitState(t, f.home)
+	egressMetadata := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
+	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
+	if !strings.Contains(egressMetadata, mediatedPlaceholder) || !strings.Contains(envFile, mediatedPlaceholder) {
+		t.Fatalf("mediated placeholder missing from metadata/env:\n%s\n%s", egressMetadata, envFile)
+	}
+	if _, err := os.Stat(filepath.Join(f.home, ".codex", "auth.json")); err == nil {
+		t.Fatalf("mediated bootstrap wrote Codex auth bundle")
+	}
 }
 
 // TestMediatedPlaceholderInert pins the placeholder convention: the constant
@@ -134,8 +179,6 @@ func TestMediatedNonPossession(t *testing.T) {
 //     real credential and never sees the placeholder
 //     (strip_request_headers behavior).
 func TestMediatedPlaceholderInert(t *testing.T) {
-	t.Skip(placeholderPending)
-
 	if mediatedPlaceholder != "NVT-PLACEHOLDER-NOT-A-KEY" {
 		t.Fatal("placeholder constant must match protocol/injection.md")
 	}

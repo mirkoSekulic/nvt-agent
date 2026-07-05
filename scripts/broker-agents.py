@@ -39,12 +39,19 @@ def token_hash(token):
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def update_agent(data, name, token):
+def update_agent(data, name, token, role="agent", paired_agent=None):
     wanted_hash = token_hash(token)
     agents = [agent for agent in data["agents"] if isinstance(agent, dict) and agent.get("id") != name]
     current = next((agent for agent in data["agents"] if isinstance(agent, dict) and agent.get("id") == name), None)
     grants = current.get("grants", []) if isinstance(current, dict) and isinstance(current.get("grants"), list) else []
-    agents.append({"id": name, "token-sha256": wanted_hash, "grants": grants})
+    entry = {"id": name, "token-sha256": wanted_hash, "grants": grants}
+    if role != "agent":
+        entry["role"] = role
+    if paired_agent:
+        entry["paired-agent"] = paired_agent
+    if role == "egress":
+        entry["grants"] = []
+    agents.append(entry)
     data["agents"] = sorted(agents, key=lambda agent: agent["id"])
 
 
@@ -62,18 +69,21 @@ def copy_register_agent(data, from_name, to_name, token, copy_grants):
     data["agents"] = sorted(agents, key=lambda agent: agent["id"])
 
 
-def add_grant(data, name, provider, repo):
+def add_grant(data, name, provider, repo, materialization):
     for agent in data["agents"]:
         if isinstance(agent, dict) and agent.get("id") == name:
+            if agent.get("role", "agent") == "egress":
+                raise SystemExit(f"agent {name} is an egress identity and cannot hold grants")
             grants = agent.setdefault("grants", [])
             for grant in grants:
                 if isinstance(grant, dict) and grant.get("provider") == provider:
+                    grant["materialization"] = materialization
                     repositories = grant.setdefault("repositories", [])
                     if repo not in repositories:
                         repositories.append(repo)
                         repositories.sort()
                     return
-            grants.append({"provider": provider, "repositories": [repo]})
+            grants.append({"provider": provider, "repositories": [repo], "materialization": materialization})
             grants.sort(key=lambda grant: grant["provider"])
             return
     raise SystemExit(f"agent {name} is not registered; run agent-init first")
@@ -101,6 +111,8 @@ def main():
     register = subparsers.add_parser("register")
     register.add_argument("--name", required=True)
     register.add_argument("--token", required=True)
+    register.add_argument("--role", choices=["agent", "egress"], default="agent")
+    register.add_argument("--paired-agent")
 
     copy_register = subparsers.add_parser("copy-register")
     copy_register.add_argument("--from-name", required=True)
@@ -112,6 +124,7 @@ def main():
     grant.add_argument("--name", required=True)
     grant.add_argument("--provider", required=True)
     grant.add_argument("--repo", required=True)
+    grant.add_argument("--materialization", choices=["file-bundle", "header-inject"], default="file-bundle")
 
     unregister = subparsers.add_parser("unregister")
     unregister.add_argument("--name", required=True)
@@ -119,11 +132,11 @@ def main():
     args = parser.parse_args()
     path = Path(args.agents_file)
     if args.command == "register":
-        with_lock(path, lambda data: update_agent(data, args.name, args.token))
+        with_lock(path, lambda data: update_agent(data, args.name, args.token, args.role, args.paired_agent))
     elif args.command == "copy-register":
         with_lock(path, lambda data: copy_register_agent(data, args.from_name, args.name, args.token, args.copy_grants))
     elif args.command == "grant":
-        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo))
+        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo, args.materialization))
     elif args.command == "unregister":
         with_lock(path, lambda data: unregister_agent(data, args.name))
 

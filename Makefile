@@ -69,10 +69,11 @@ operator-kind-cluster:
 		exit 1; \
 	fi
 
-operator-kind-images: operator-kind-cluster runtime-build broker-build operator-build
+operator-kind-images: operator-kind-cluster runtime-build broker-build egressd-build operator-build
 	@printf '[operator-kind-setup] loading local images into kind cluster %s\n' "$(CLUSTER)"
 	kind load docker-image nvt-agent-runtime:latest --name "$(CLUSTER)"
 	kind load docker-image nvt-broker:latest --name "$(CLUSTER)"
+	kind load docker-image "$(EGRESSD_IMAGE)" --name "$(CLUSTER)"
 	kind load docker-image nvt-operator:latest --name "$(CLUSTER)"
 
 operator-kind-install: operator-kind-images $(OPERATOR_KIND_EXTRA_IMAGE_TARGETS)

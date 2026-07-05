@@ -102,6 +102,13 @@ def command_files(args):
     return 0 if response.get("ok") else 1
 
 
+def command_injection_routing(args):
+    payload = {"capability": args.capability}
+    response, _status = request_json("/v1/injection/routing", payload)
+    print_json(response)
+    return 0 if response.get("ok") else 1
+
+
 def main():
     parser = argparse.ArgumentParser(prog="brokerctl")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -140,6 +147,12 @@ def main():
     files = subparsers.add_parser("files")
     files.add_argument("--provider", required=True)
     files.set_defaults(func=command_files)
+
+    injection = subparsers.add_parser("injection")
+    injection_sub = injection.add_subparsers(dest="injection_command", required=True)
+    routing = injection_sub.add_parser("routing")
+    routing.add_argument("--capability", required=True)
+    routing.set_defaults(func=command_injection_routing)
 
     args = parser.parse_args()
     raise SystemExit(args.func(args))

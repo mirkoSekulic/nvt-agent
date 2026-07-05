@@ -11,6 +11,17 @@ broker:
     enabled: false
 ```
 
+## Agent Egress
+
+Agent egress defaults to direct mode. Phase 3 mediated wiring is exposed as
+values without changing that default:
+
+```yaml
+egress:
+  mode: direct
+  egressdImage: nvt-egressd:latest
+```
+
 For providers that maintain broker-owned state, enable a PVC:
 
 ```yaml
