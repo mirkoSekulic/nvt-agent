@@ -264,21 +264,35 @@ agents:
 - when the access token is within `refresh-margin-seconds` of expiry, the
   provider refreshes with `grant_type=refresh_token`, the configured
   `client-id`, and the current canonical refresh token
+- file-bundle vending refreshes early enough to satisfy both
+  `refresh-margin-seconds` and `bundle-ttl-seconds`
 - successful refresh updates `access_token`, rotated `refresh_token`,
   optional `id_token`, and `last_refresh`, then atomically replaces the
   canonical file
 - if refresh fails while the current access token is still valid, the provider
   serves the current token and records metadata-only audit; if the token is
   expired, the request fails
-- `expires_at` is the access token expiry
+- `bundle-ttl-seconds` caps the vended bundle `expires_at`; if the OpenAI
+  access token expires sooner, `expires_at` is the access token expiry instead
+- OpenAI controls the actual JWT lifetime. The broker cannot shorten an issued
+  OpenAI access token, but it can keep agent-side materialization lifetime and
+  refresh cadence short and explicit.
 - audit entries record provider, agent, operation, and expiry metadata only;
   token values and file contents must never be logged
+
+The Codex plan-auth fallback remains file-bundle based. The broker owns and
+writes the root refresh token; agent bundles receive derived access-token
+material plus inert stub fields. Full credential-less Codex is intentionally
+left for later CA/TLS termination and WebSocket injection work.
 
 Default Codex OAuth settings match the Codex CLI refresh flow:
 
 ```yaml
 token-url: https://auth.openai.com/oauth/token
 client-id: app_EMoamEEZ73f0CkXaXp7hrann
+refresh-margin-seconds: 600
+bundle-ttl-seconds: 1200
+stub-refresh-token: nvt-broker-stub
 ```
 
 ## Static Token And Header Providers

@@ -645,6 +645,7 @@ providers:
       token-url: https://auth.openai.com/oauth/token
       client-id: app_EMoamEEZ73f0CkXaXp7hrann
       refresh-margin-seconds: 600
+      bundle-ttl-seconds: 1200
       stub-refresh-token: nvt-broker-stub
       extra-files:
         - name: config.toml
@@ -699,13 +700,22 @@ plugins:
       refresh-slack-seconds: 900
 ```
 
-Long-lived auth has two levers. Broker provider
-`refresh-margin-seconds` guarantees a minimum runway in every vended bundle.
-The `broker-auth-files-refresher` plugin re-materializes bundles before
+Long-lived auth has three levers. Broker provider
+`refresh-margin-seconds` controls when the canonical broker token is refreshed,
+and `bundle-ttl-seconds` caps the broker-vended bundle's `expires_at` metadata
+so the agent-side file exposure window is small and explicit. OpenAI owns the
+actual access-token lifetime, so this does not literally shorten the JWT; it
+limits broker materialization lifetime and drives refresh cadence. The
+`broker-auth-files-refresher` plugin re-materializes bundles before
 `expires_at` so indefinite runs keep fresh files on disk. For Codex, this is
 sufficient because the running CLI reloads `auth.json` from disk after a real
 401 before trying OAuth refresh, while preserving the broker-vended
 `account_id` satisfies Codex's reload guard.
+
+This is still the Codex plan-auth fallback file-bundle path. The root refresh
+token stays broker-owned, agent-side bundles contain short-lived derived token
+material plus inert stub fields, and full credential-less Codex still depends
+on later CA/TLS termination and WebSocket injection work.
 
 The operator `runtimeAuth` Secret path documented in
 `operator/docs/kind-codex-auth.md` remains the local/dev fallback for Codex

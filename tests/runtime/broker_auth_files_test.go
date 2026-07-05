@@ -301,7 +301,7 @@ min-sleep-seconds: 0
 fallback-sleep-seconds: 0
 max-loops: 2
 `, quoteYAML(target)))
-	f.runWithEnv(brokerAuthFilesRunBin(f.root), true, []string{
+	output := f.runWithEnv(brokerAuthFilesRunBin(f.root), true, []string{
 		"NVT_PLUGIN_CONFIG=" + config,
 		"NVT_BROKER_URL=" + broker.server.URL,
 		"NVT_BROKER_TOKEN=broker-token",
@@ -309,6 +309,10 @@ max-loops: 2
 	assertFileContent(t, filepath.Join(target, "auth.json"), "cycle-1\n")
 	if got := broker.requestCount(); got != 2 {
 		t.Fatalf("expected two broker requests, got %d", got)
+	}
+	if !strings.Contains(output, "broker-auth-files: warning: re-materialization failed: broker-auth-files: broker files request failed:") ||
+		!strings.Contains(output, `"error":"provider-failed"`) {
+		t.Fatalf("expected explicit refresh failure warning, got:\n%s", output)
 	}
 }
 

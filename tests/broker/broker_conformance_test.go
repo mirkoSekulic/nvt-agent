@@ -897,6 +897,36 @@ func TestCodexOAuthFilesVendStubsRefreshTokenAndExtraFiles(t *testing.T) {
 	}
 }
 
+func TestCodexOAuthFilesExpiryIsCappedByBundleTTL(t *testing.T) {
+	f := newBrokerFixture(t)
+	before := time.Now().UTC()
+	payload, _, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("files failed: status=%d payload=%#v", status, payload)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, payload["expires_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expiresAt.Before(before) || expiresAt.After(before.Add(1220*time.Second)) {
+		t.Fatalf("expected bundle expiry near configured TTL, before=%s expires_at=%s", before, expiresAt)
+	}
+	files := payload["files"].([]any)
+	var auth map[string]any
+	if err := json.Unmarshal([]byte(files[0].(map[string]any)["content"].(string)), &auth); err != nil {
+		t.Fatal(err)
+	}
+	tokens := auth["tokens"].(map[string]any)
+	accessExpUnix, err := parseJWTExpForTest(tokens["access_token"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessExp := time.Unix(accessExpUnix, 0).UTC()
+	if !accessExp.After(expiresAt.Add(30 * time.Minute)) {
+		t.Fatalf("test expected provider JWT expiry to exceed bundle expiry, access=%s bundle=%s", accessExp, expiresAt)
+	}
+}
+
 func TestCodexOAuthRefreshPersistsRotatedTokenAndAudits(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeCodexAuth(testJWT(time.Now().Add(2*time.Minute)), "real-refresh-1")
@@ -930,6 +960,21 @@ func TestCodexOAuthRefreshPersistsRotatedTokenAndAudits(t *testing.T) {
 	events := readAudit(t, f.audit)
 	if !hasAuditOperation(events, "files.vend") || !hasAuditOperation(events, "files.refresh") {
 		t.Fatalf("expected vend and refresh audit entries, got %#v", events)
+	}
+}
+
+func TestCodexOAuthFilesRefreshesBeforeBundleTTLRunway(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeCodexAuth(testJWT(time.Now().Add(15*time.Minute)), "real-refresh-1")
+	payload, output, status := f.brokerctl("files", "--provider", "codex-main")
+	if status != 0 || payload["ok"] != true {
+		t.Fatalf("files failed: status=%d payload=%#v output=%s", status, payload, output)
+	}
+	if count := f.oauth.requestCount(); count != 1 {
+		t.Fatalf("expected refresh before vending a bundle with less than bundle TTL runway, got %d refreshes", count)
+	}
+	if strings.Contains(output, "real-refresh-1") || strings.Contains(output, "real-refresh-2") {
+		t.Fatalf("real refresh token appeared in response body")
 	}
 }
 

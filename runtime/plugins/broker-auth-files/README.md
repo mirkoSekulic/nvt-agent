@@ -104,3 +104,11 @@ file to the running process account id. The source path is
 `openai/codex`. Broker-vended bundles preserve `account_id`, so the reload
 guard is satisfied; the stub refresh token is only used if the refresher itself
 is broken.
+
+The Codex fallback is still file-bundle based. The broker-owned root refresh
+token is never written to the agent bundle; the agent receives derived
+access-token material and inert stub fields. The Codex provider's
+`bundle-ttl-seconds` caps the broker `expires_at` metadata used by this
+refresher, but it cannot shorten an OpenAI JWT that has already been issued.
+Full credential-less Codex remains future work for CA/TLS termination and
+WebSocket injection.
