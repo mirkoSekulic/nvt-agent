@@ -179,6 +179,9 @@ func PrepareScheduledAgentRun(
 	if err := controllerutil.SetControllerReference(schedule, run, scheme); err != nil {
 		return fmt.Errorf("set AgentSchedule owner: %w", err)
 	}
+	if err := ValidateAgentRunEgressMode(run); err != nil {
+		return err
+	}
 	return nil
 }
 

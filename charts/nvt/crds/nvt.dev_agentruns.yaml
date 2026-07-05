@@ -67,6 +67,12 @@ spec:
                   minLength: 1
                 runtimeClassName:
                   type: string
+                egress:
+                  type: string
+                  default: direct
+                  enum:
+                    - direct
+                    - mediated
                 workspace:
                   type: object
                   required:
@@ -95,6 +101,12 @@ spec:
                             items:
                               type: string
                               minLength: 1
+                          materialization:
+                            type: string
+                            default: file-bundle
+                            enum:
+                              - file-bundle
+                              - header-inject
                 prompt:
                   type: object
                   properties:

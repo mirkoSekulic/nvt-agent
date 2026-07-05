@@ -29,6 +29,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: NVT_EGRESSD_IMAGE
+              value: {{ .Values.egress.egressdImage | quote }}
           ports:
             - name: metrics
               containerPort: 8080

@@ -419,9 +419,132 @@ func TestReconcileWritesBrokerAgentsPolicy(t *testing.T) {
 	}
 	if len(entry.Grants) != 1 ||
 		entry.Grants[0].Provider != "github-main-app" ||
+		entry.Grants[0].Materialization != "file-bundle" ||
 		len(entry.Grants[0].Repositories) != 1 ||
 		entry.Grants[0].Repositories[0] != "mirkoSekulic/nvt-agent" {
 		t.Fatalf("unexpected grants: %#v", entry.Grants)
+	}
+}
+
+func TestDirectAgentRunPodDoesNotRenderMediatedSidecar(t *testing.T) {
+	agentRun := testAgentRun()
+	pod, err := DesiredAgentPod(agentRun, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("direct mode must render only the agent container, got %#v", pod.Spec.Containers)
+	}
+	agent := requireContainer(t, *pod, "agent")
+	if findEnvVar(agent, "NVT_EGRESS_MODE") != nil || findEnvVar(agent, egressTokenKey) != nil {
+		t.Fatalf("direct agent container has mediated env: %#v", agent.Env)
+	}
+	if _, found := findContainer(pod.Spec.Containers, "egressd"); found {
+		t.Fatalf("direct mode rendered egressd sidecar: %#v", pod.Spec.Containers)
+	}
+}
+
+func TestMediatedAgentRunRendersEgressdWithoutEgressTokenInAgent(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
+		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+			{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}},
+		},
+	}
+	pod, err := DesiredAgentPod(agentRun, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	agent := requireContainer(t, *pod, "agent")
+	if findEnvVar(agent, egressTokenKey) != nil {
+		t.Fatalf("agent container must not receive egress broker token: %#v", agent.Env)
+	}
+	if envValue(agent, "NVT_EGRESS_MODE") != "mediated" {
+		t.Fatalf("expected mediated env on agent, got %#v", agent.Env)
+	}
+	egressd := requireContainer(t, *pod, "egressd")
+	if egressd.Image != defaultEgressdImage {
+		t.Fatalf("unexpected egressd image %q", egressd.Image)
+	}
+	assertSecretKeyEnv(t, egressd, "NVT_BROKER_TOKEN", EgressTokenSecretName(agentRun.Name), egressTokenKey)
+	assertVolumeMount(t, egressd, "egressd-config", egressdConfigPath, egressdConfigKey, true)
+}
+
+func TestReconcileWritesMediatedBrokerAgentsPolicy(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
+		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+			{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}},
+		},
+	}
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("agent-token"))
+	egressSecret := mustDesiredTokenSecret(t, agentRun, scheme, EgressTokenSecretName(agentRun.Name), egressTokenKey, []byte("egress-token"))
+	callbackSecret := mustDesiredTokenSecret(t, agentRun, scheme, CallbackTokenSecretName(agentRun.Name), callbackTokenKey, []byte("callback-token"))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerSecret, egressSecret, callbackSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	policy := mustParseBrokerAgentsPolicy(t, getBrokerAgentsConfigMap(ctx, t, k8sClient, agentRun.Namespace).Data[brokerAgentsConfigKey])
+	agentEntry := requireBrokerAgentEntry(t, policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name))
+	egressEntry := requireBrokerAgentEntry(t, policy, AgentRunEgressBrokerID(agentRun.Namespace, agentRun.Name))
+	if agentEntry.Role != "" || len(agentEntry.Grants) != 1 || agentEntry.Grants[0].Materialization != "header-inject" {
+		t.Fatalf("unexpected mediated agent entry: %#v", agentEntry)
+	}
+	if egressEntry.Role != "egress" || egressEntry.PairedAgent != agentEntry.ID || len(egressEntry.Grants) != 0 {
+		t.Fatalf("unexpected egress entry: %#v", egressEntry)
+	}
+}
+
+func TestValidateAgentRunEgressModeRejectsMismatches(t *testing.T) {
+	direct := testAgentRun()
+	direct.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{},
+	}}}
+	if err := ValidateAgentRunEgressMode(direct); err == nil || !strings.Contains(err.Error(), "api-main") {
+		t.Fatalf("expected direct/header-inject mismatch naming provider, got %v", err)
+	}
+
+	mediated := testAgentRun()
+	mediated.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	mediated.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "bundle-main", Repositories: []string{},
+	}}}
+	if err := ValidateAgentRunEgressMode(mediated); err == nil || !strings.Contains(err.Error(), "bundle-main") {
+		t.Fatalf("expected mediated/file-bundle mismatch naming provider, got %v", err)
+	}
+}
+
+func TestReconcileRejectsEgressMismatchBeforePodAndSecrets(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "bundle-main", Repositories: []string{},
+	}}}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseFailed)
+	var brokerSecret corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}, &brokerSecret); !errors.IsNotFound(err) {
+		t.Fatalf("expected no broker token Secret, got %v", err)
 	}
 }
 
@@ -735,10 +858,12 @@ func TestRenderBrokerAgentsYAMLIsDeterministic(t *testing.T) {
 	}
 	expected := `agents:
 - grants:
-  - provider: github-a
+  - materialization: file-bundle
+    provider: github-a
     repositories:
     - repo-b
-  - provider: github-z
+  - materialization: file-bundle
+    provider: github-z
     repositories: []
   id: a/run
   token-sha256: ` + validTestTokenHash("a") + `
@@ -1211,6 +1336,27 @@ func TestReconcileSetsPodNameAfterPodExists(t *testing.T) {
 	}
 	if updated.Status.Phase != nvtv1alpha1.AgentRunPhasePending {
 		t.Fatalf("expected Pending phase, got %q", updated.Status.Phase)
+	}
+}
+
+func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatalf("read AgentRun CRD: %v", err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("parse AgentRun CRD: %v", err)
+	}
+	spec := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema",
+		"properties", "spec", "properties").(map[string]any)
+	if crdPath(t, spec, "egress", "default") != "direct" {
+		t.Fatalf("expected egress default direct, got %#v", crdPath(t, spec, "egress"))
+	}
+	materialization := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "materialization").(map[string]any)
+	if materialization["default"] != "file-bundle" {
+		t.Fatalf("expected materialization default file-bundle, got %#v", materialization)
 	}
 }
 
@@ -2230,13 +2376,20 @@ func assertOwnedByAgentRun(t *testing.T, owners []metav1.OwnerReference, agentRu
 func requireContainer(t *testing.T, pod corev1.Pod, name string) corev1.Container {
 	t.Helper()
 
-	for _, container := range pod.Spec.Containers {
-		if container.Name == name {
-			return container
-		}
+	if container, ok := findContainer(pod.Spec.Containers, name); ok {
+		return container
 	}
 	t.Fatalf("container %q not found in %#v", name, pod.Spec.Containers)
 	return corev1.Container{}
+}
+
+func findContainer(containers []corev1.Container, name string) (corev1.Container, bool) {
+	for _, container := range containers {
+		if container.Name == name {
+			return container, true
+		}
+	}
+	return corev1.Container{}, false
 }
 
 func requireInitContainer(t *testing.T, pod corev1.Pod, name string) corev1.Container {

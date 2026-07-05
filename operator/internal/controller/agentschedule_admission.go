@@ -136,6 +136,15 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 
 	run := admission.AgentRun
+	if err := ValidateAgentRunEgressMode(&run); err != nil {
+		reason := err.Error()
+		h.recordRejected(ctx, schedule, reason)
+		writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+			Scheduled: false,
+			Reason:    reason,
+		})
+		return
+	}
 	if err := PrepareScheduledAgentRun(schedule, &run, scheduleAdmissionWorkMetadata{
 		ID:    workID,
 		Title: admission.Work.Title,
