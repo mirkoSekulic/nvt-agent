@@ -52,6 +52,7 @@ A small trusted reverse proxy (Go, consistent with gateway/producer style) runni
 - Listens on localhost; routes to configured upstreams; fetches injectable headers from brokerd on demand, caches until expiry, injects the header, re-originates TLS to pinned upstream hostnames.
 - Passes SSE/streaming responses through cleanly (required for LLM APIs).
 - **Fail closed**: if the broker is unreachable or a grant is revoked, requests fail — never fall back to cached-stale-beyond-TTL, never fall back to writing a bundle.
+- **The egressd↔broker channel is TLS, non-negotiable.** egressd shares the agent's network namespace, and this is the one leg that carries real credentials in flight; over plain HTTP (today's local brokerd on `:7347`), an agent that gains netns privileges (§7: privileged dind allows this today) could sniff tokens and sidestep non-possession entirely. The localhost agent→egressd hop needs no such protection (it carries no credentials — the agent has none to send), and the egressd→upstream leg is TLS by nature; the broker leg is the gap and must be closed from Phase 1.
 - Never logs header values or token material, including on error paths.
 - Makes the `broker-auth-files-refresher` plugin unnecessary for injected providers — freshness becomes the sidecar's cache policy.
 - **Placement-agnostic contract**: the injector protocol and grant descriptors reference egressd only by URL. Nothing in the contract assumes same-Pod/localhost, so placement can change later (see §6) as config, not rework.
@@ -215,6 +216,8 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 4. **Identity split retrofitted late** — countered by making it a Phase-1 requirement + pinned conformance test.
 5. **Enforcement mistaken for shipped where the agent can flush it** — countered by stating the NET_ADMIN precondition, the FORWARD-chain requirement, and marking compose egress-deny a documented gap, not an implicit control.
 6. **Phase-1 scope creep delaying the go/no-go verdict** — countered by the explicit timebox and "only what Phase 2 needs" scope guard.
+7. **Credentials sniffed in flight on the egressd↔broker leg** — the one network path carrying real secrets through the shared netns; countered by requiring TLS on that channel from Phase 1 (§2).
+8. **Secret-returning API endpoints reachable through a grant** — an allowed API that mints/returns credentials in a response body delivers a secret into the container legitimately; countered by excluding credential-minting endpoints from grant path-classes as a standing policy rule.
 
 ## End state
 
