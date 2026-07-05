@@ -143,6 +143,18 @@ Agent or egress role. Returns non-secret routing metadata for a capability.
 This is the only injection surface an `agent` identity may call, and its
 response never contains secret material — pinned by conformance test.
 
+Authorization mirrors the scoping of `/v1/injection/headers`:
+
+- An `agent` caller must itself hold a `header-inject` grant for the
+  requested capability.
+- An `egress` caller is authorized against its paired agent's grants; an
+  egress identity whose paired agent does not hold the grant is denied.
+- Capabilities not granted (including unknown capabilities) deny with the
+  standard error shape.
+- `file-bundle` grants deny. Routing is a mediated-mode surface; a
+  direct-mode grant has no sidecar to route to, and answering would let
+  routing act as a probe across materialization modes.
+
 Request:
 
 ```json

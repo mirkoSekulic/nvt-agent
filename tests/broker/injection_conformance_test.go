@@ -251,6 +251,57 @@ func TestAgentRoleReceivesRoutingConfigOnly(t *testing.T) {
 	}
 }
 
+// TestRoutingDeniesUngrantedCapability pins routing authorization: an agent
+// identity without a header-inject grant for the capability is denied,
+// including for unknown capabilities.
+func TestRoutingDeniesUngrantedCapability(t *testing.T) {
+	t.Skip(injectionPending)
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(mediatedIdentities())
+
+	for _, capability := range []string{"codex-main", "no-such-capability"} {
+		status, body := f.postJSONWithToken("backend-token", "/v1/injection/routing", map[string]any{"capability": capability})
+		if status == http.StatusOK || body["ok"] == true {
+			t.Fatalf("ungranted capability %q must deny routing: status=%d body=%v", capability, status, body)
+		}
+	}
+}
+
+// TestRoutingDeniesWrongPairedEgress pins routing scoping for egress callers:
+// an egress identity is authorized against its paired agent's grants only.
+func TestRoutingDeniesWrongPairedEgress(t *testing.T) {
+	t.Skip(injectionPending)
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(mediatedIdentities())
+
+	status, body := f.postJSONWithToken("backend-egress-token", "/v1/injection/routing", map[string]any{"capability": "codex-main"})
+	if status == http.StatusOK || body["ok"] == true {
+		t.Fatalf("egress identity paired to an ungranted agent must deny routing: status=%d body=%v", status, body)
+	}
+}
+
+// TestRoutingDeniesFileBundleGrant pins the materialization rule for routing:
+// a file-bundle grant is a direct-mode grant with no sidecar to route to, so
+// routing denies rather than acting as a cross-mode probe.
+func TestRoutingDeniesFileBundleGrant(t *testing.T) {
+	t.Skip(injectionPending)
+	f := newBrokerFixture(t)
+	identities := mediatedIdentities()
+	identities["frontend"] = roleIdentity{
+		Token: "frontend-token",
+		Role:  "agent",
+		Grants: []roleGrant{
+			{Provider: "codex-main", Materialization: "file-bundle"},
+		},
+	}
+	f.writeRoleIdentities(identities)
+
+	status, body := f.postJSONWithToken("frontend-token", "/v1/injection/routing", map[string]any{"capability": "codex-main"})
+	if status == http.StatusOK || body["ok"] == true {
+		t.Fatalf("file-bundle grant must deny routing: status=%d body=%v", status, body)
+	}
+}
+
 // TestHeaderInjectGrantExcludesFileBundle pins materialization mutual
 // exclusion: a header-inject grant makes the compatibility file endpoint deny
 // for that provider and agent. No hybrid mode exists.
