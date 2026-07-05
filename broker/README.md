@@ -123,12 +123,14 @@ check; GitHub App providers return the App bot name and noreply email.
 `headers` is a compatibility mode for static Git headers. Returned headers are
 visible to the agent and may be written into Git config.
 `files` returns a UTF-8 file bundle for generic runtime materialization.
-For `codex-oauth`, the bundle contains derived access-token material and an
+For `codex-oauth`, the bundle contains the real OpenAI access token and an
 inert refresh-token stub, never the real broker-owned refresh token.
-`bundle-ttl-seconds` caps the returned `expires_at` metadata so the runtime
-refresher replaces the file bundle frequently. OpenAI controls the issued JWT
-lifetime, so this remains the file-bundle fallback rather than full
-credential-less Codex.
+`bundle-ttl-seconds` caps the returned `expires_at` as short-lived bundle
+metadata so the runtime refresher performs frequent broker re-materialization;
+it does not reduce the lifetime of an already-issued OpenAI access token. This
+remains the insecure/compatibility file-bundle fallback until credential-less
+Codex ships. The canonical contract and cadence guard are in
+`protocol/broker.md`.
 
 Grant repository patterns must match the provider target mode: GitHub-mode
 providers use `owner/repo`, while literal-mode providers use the full

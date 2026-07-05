@@ -54,6 +54,14 @@ Loop behavior:
 - use `fallback-sleep-seconds` when no bundle has an expiry
 - repeat forever when `max-loops: 0`; tests may set a positive limit
 
+For the Codex fallback, broker `bundle-ttl-seconds` caps the returned
+`expires_at` as short-lived bundle metadata and this plugin uses that metadata
+for frequent broker re-materialization. With the Codex/provider defaults,
+`1200 - 900 = 300s`, so the loop wakes roughly every five minutes per agent.
+If `bundle-ttl-seconds <= refresh-slack-seconds`, the wake target is already
+due and the plugin clamps to `min-sleep-seconds`; with the default
+`min-sleep-seconds: 60`, that can create a 60-second loop per agent.
+
 Failed cycles log a warning and retry with exponential backoff capped at
 `fallback-sleep-seconds`. A failed cycle does not remove, truncate, or
 partially overwrite existing target files: the plugin validates every returned
@@ -106,9 +114,9 @@ guard is satisfied; the stub refresh token is only used if the refresher itself
 is broken.
 
 The Codex fallback is still file-bundle based. The broker-owned root refresh
-token is never written to the agent bundle; the agent receives derived
-access-token material and inert stub fields. The Codex provider's
+token is never written to the agent bundle; the agent still receives the real
+OpenAI access token and inert stub fields. The Codex provider's
 `bundle-ttl-seconds` caps the broker `expires_at` metadata used by this
-refresher, but it cannot shorten an OpenAI JWT that has already been issued.
-Full credential-less Codex remains future work for CA/TLS termination and
-WebSocket injection.
+refresher, but it does not reduce the lifetime of an already-issued OpenAI
+access token. This remains the insecure/compatibility file-bundle fallback
+until credential-less Codex ships.

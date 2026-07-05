@@ -703,19 +703,22 @@ plugins:
 Long-lived auth has three levers. Broker provider
 `refresh-margin-seconds` controls when the canonical broker token is refreshed,
 and `bundle-ttl-seconds` caps the broker-vended bundle's `expires_at` metadata
-so the agent-side file exposure window is small and explicit. OpenAI owns the
-actual access-token lifetime, so this does not literally shorten the JWT; it
-limits broker materialization lifetime and drives refresh cadence. The
-`broker-auth-files-refresher` plugin re-materializes bundles before
-`expires_at` so indefinite runs keep fresh files on disk. For Codex, this is
-sufficient because the running CLI reloads `auth.json` from disk after a real
-401 before trying OAuth refresh, while preserving the broker-vended
-`account_id` satisfies Codex's reload guard.
+as short-lived bundle metadata. OpenAI owns the actual access-token lifetime:
+`bundle-ttl-seconds` does not reduce the lifetime of an already-issued OpenAI
+access token. The `broker-auth-files-refresher` plugin uses that metadata for
+frequent broker re-materialization so indefinite runs keep fresh files on disk.
+With the defaults, `1200 - 900 = 300s`, so the refresher wakes roughly every
+five minutes per agent. If `bundle-ttl-seconds <= refresh-slack-seconds`, the
+runtime clamps to `min-sleep-seconds`, which can create a 60-second loop with
+the defaults. For Codex, frequent re-materialization is sufficient because the
+running CLI reloads `auth.json` from disk after a real 401 before trying OAuth
+refresh, while preserving the broker-vended `account_id` satisfies Codex's
+reload guard. The canonical contract is in `protocol/broker.md`.
 
 This is still the Codex plan-auth fallback file-bundle path. The root refresh
-token stays broker-owned, agent-side bundles contain short-lived derived token
-material plus inert stub fields, and full credential-less Codex still depends
-on later CA/TLS termination and WebSocket injection work.
+token stays broker-owned, but agent-side bundles still contain the real OpenAI
+access token plus inert stub fields. This remains the insecure/compatibility
+file-bundle fallback until credential-less Codex ships.
 
 The operator `runtimeAuth` Secret path documented in
 `operator/docs/kind-codex-auth.md` remains the local/dev fallback for Codex

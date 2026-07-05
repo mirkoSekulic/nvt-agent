@@ -196,7 +196,14 @@ def sleep_seconds(config, earliest):
     if earliest is None:
         return config["fallback_sleep_seconds"]
     target = earliest.timestamp() - config["refresh_slack_seconds"]
-    return max(config["min_sleep_seconds"], target - time.time())
+    raw_sleep = target - time.time()
+    if raw_sleep <= config["min_sleep_seconds"]:
+        print(
+            "broker-auth-files: warning: broker expires_at minus refresh-slack-seconds "
+            f"is already near the min-sleep-seconds clamp; sleeping {config['min_sleep_seconds']}s",
+            flush=True,
+        )
+    return max(config["min_sleep_seconds"], raw_sleep)
 
 
 def publish_rematerialized(providers, earliest):
