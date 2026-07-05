@@ -16,6 +16,7 @@ DEFAULT_REFRESH_SLACK_SECONDS = 900
 DEFAULT_MIN_SLEEP_SECONDS = 60
 DEFAULT_FALLBACK_SLEEP_SECONDS = 3600
 DEFAULT_MAX_LOOPS = 0
+_clamp_warning_printed = False
 
 
 def fail(message):
@@ -193,16 +194,18 @@ def expiry_text(expiry):
 
 
 def sleep_seconds(config, earliest):
+    global _clamp_warning_printed
     if earliest is None:
         return config["fallback_sleep_seconds"]
     target = earliest.timestamp() - config["refresh_slack_seconds"]
     raw_sleep = target - time.time()
-    if raw_sleep <= config["min_sleep_seconds"]:
+    if raw_sleep <= config["min_sleep_seconds"] and not _clamp_warning_printed:
         print(
             "broker-auth-files: warning: broker expires_at minus refresh-slack-seconds "
             f"is already near the min-sleep-seconds clamp; sleeping {config['min_sleep_seconds']}s",
             flush=True,
         )
+        _clamp_warning_printed = True
     return max(config["min_sleep_seconds"], raw_sleep)
 
 

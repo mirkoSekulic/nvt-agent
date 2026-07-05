@@ -277,6 +277,49 @@ max-loops: 2
 	}
 }
 
+func TestBrokerAuthFilesLoopWarnsOnceForRepeatedClamp(t *testing.T) {
+	f := newFixture(t)
+	f.installBrokerctl()
+	target := filepath.Join(f.home, "bundle")
+	broker := newSequenceFilesBroker(t,
+		[]int{http.StatusOK, http.StatusOK, http.StatusOK},
+		[]map[string]any{
+			{
+				"ok":         true,
+				"files":      []map[string]any{{"name": "auth.json", "content": "cycle-1\n", "mode": "0600"}},
+				"expires_at": loopExpiry(1),
+			},
+			{
+				"ok":         true,
+				"files":      []map[string]any{{"name": "auth.json", "content": "cycle-2\n", "mode": "0600"}},
+				"expires_at": loopExpiry(1),
+			},
+			{
+				"ok":         true,
+				"files":      []map[string]any{{"name": "auth.json", "content": "cycle-3\n", "mode": "0600"}},
+				"expires_at": loopExpiry(1),
+			},
+		},
+	)
+	config := f.writePluginConfig("broker-auth-files.yaml", fmt.Sprintf(`
+bundles:
+  - provider: bundle-provider
+    target: %s
+refresh-slack-seconds: 10
+min-sleep-seconds: 0
+fallback-sleep-seconds: 1
+max-loops: 3
+`, quoteYAML(target)))
+	output := f.runWithEnv(brokerAuthFilesRunBin(f.root), true, []string{
+		"NVT_PLUGIN_CONFIG=" + config,
+		"NVT_BROKER_URL=" + broker.server.URL,
+		"NVT_BROKER_TOKEN=broker-token",
+	}, "loop")
+	if got := strings.Count(output, "near the min-sleep-seconds clamp"); got != 1 {
+		t.Fatalf("expected one clamp warning, got %d:\n%s", got, output)
+	}
+}
+
 func TestBrokerAuthFilesLoopFailedCyclePreservesFiles(t *testing.T) {
 	f := newFixture(t)
 	f.installBrokerctl()

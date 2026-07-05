@@ -1009,7 +1009,17 @@ func TestCodexOAuthRefreshPersistsRotatedTokenAndAudits(t *testing.T) {
 			vend = event
 		}
 	}
-	if vend == nil || vend["bundle_expires_at"] != vend["expires_at"] || vend["access_token_expires_at"] == "" {
+	if vend == nil {
+		t.Fatalf("expected vend audit entry, got %#v", events)
+	}
+	accessTokenExpiresAt, ok := vend["access_token_expires_at"]
+	if !ok || accessTokenExpiresAt == "" {
+		t.Fatalf("expected vend audit to include access_token_expires_at, got %#v", vend)
+	}
+	if vend["bundle_expires_at"] != vend["expires_at"] {
+		t.Fatalf("expected vend audit bundle_expires_at to match expires_at, got %#v", vend)
+	}
+	if vend["bundle_expires_at"] == accessTokenExpiresAt {
 		t.Fatalf("expected vend audit to distinguish bundle and access token expiry, got %#v", vend)
 	}
 }
