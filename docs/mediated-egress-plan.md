@@ -192,6 +192,8 @@ trusted-core work for a later phase, so this PR adds only the plumbing step.
 - Sanitized logs contain only CONNECT decision metadata:
   `event=connect`, `target_host`, `target_port`, `decision`, and optional
   `error_class`.
+- These CONNECT decisions are sanitized egressd stdout logs in this phase, not
+  broker `audit.jsonl` per-request audit entries.
 - The Phase 2b harness runs real Codex through
   `HTTPS_PROXY=http://egressd:<port>` with the existing Codex auth bundle.
   This proves forward-proxy plumbing only. It is not credential-less Codex.

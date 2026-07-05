@@ -33,9 +33,8 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "plain HTTP proxying is not supported", http.StatusMethodNotAllowed)
 		return
 	}
-	target, err := parseConnectTarget(r.Host)
+	target, err := connectTargetFromRequest(r)
 	if err != nil {
-		target = connectTarget{}
 		p.writeDecision("", 0, "deny", "malformed_target")
 		http.Error(w, "malformed CONNECT target", http.StatusBadRequest)
 		return
@@ -131,6 +130,32 @@ func parseConnectTarget(value string) (connectTarget, error) {
 	return connectTarget{host: host, port: port}, nil
 }
 
+func connectTargetFromRequest(r *http.Request) (connectTarget, error) {
+	target, err := parseConnectTarget(r.URL.Host)
+	if err != nil {
+		return connectTarget{}, err
+	}
+	if r.Host != "" {
+		hostHeader, err := parseConnectTarget(r.Host)
+		if err != nil {
+			return connectTarget{}, err
+		}
+		if hostHeader != target {
+			return connectTarget{}, fmt.Errorf("host header does not match CONNECT target")
+		}
+	}
+	if rawHost := r.Header.Get("Host"); rawHost != "" && rawHost != r.Host {
+		hostHeader, err := parseConnectTarget(rawHost)
+		if err != nil {
+			return connectTarget{}, err
+		}
+		if hostHeader != target {
+			return connectTarget{}, fmt.Errorf("host header does not match CONNECT target")
+		}
+	}
+	return target, nil
+}
+
 func normalizeProxyHost(host string) (string, error) {
 	if host == "" {
 		return "", fmt.Errorf("empty host")
@@ -157,11 +182,7 @@ func normalizeProxyHost(host string) (string, error) {
 func tunnel(client net.Conn, buffered *bufio.ReadWriter, upstream net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
-		if buffered.Reader.Buffered() > 0 {
-			_, _ = io.Copy(upstream, buffered)
-		} else {
-			_, _ = io.Copy(upstream, client)
-		}
+		_, _ = io.Copy(upstream, buffered)
 		_ = closeWrite(upstream)
 		done <- struct{}{}
 	}()
@@ -170,6 +191,7 @@ func tunnel(client net.Conn, buffered *bufio.ReadWriter, upstream net.Conn) {
 		_ = closeWrite(client)
 		done <- struct{}{}
 	}()
+	<-done
 	<-done
 }
 

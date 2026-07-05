@@ -90,7 +90,6 @@ func sendRawProxyRequest(t *testing.T, proxy, request string) (net.Conn, string)
 			break
 		}
 	}
-	_ = reader
 	return conn, status
 }
 
@@ -126,6 +125,39 @@ func TestForwardProxyAllowedConnectEstablishesBlindTunnel(t *testing.T) {
 	}
 }
 
+func TestForwardProxyUsesConnectAuthorityInsteadOfHostHeader(t *testing.T) {
+	upstreamAddress, upstreamPort := newEchoTCPServer(t)
+	var logs bytes.Buffer
+	proxy := newForwardProxyServer(t, ForwardProxyConfig{
+		AllowHosts: []string{"127.0.0.1"},
+		AllowPorts: []int{upstreamPort},
+	}, &logs)
+	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
+		"CONNECT example.com:%d HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamPort, upstreamAddress,
+	))
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "403") {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	if got := logs.String(); !strings.Contains(got, "event=connect target_host=example.com") ||
+		!strings.Contains(got, "decision=deny error_class=target_not_allowed") {
+		t.Fatalf("CONNECT authority was not used for allow decision: %q", got)
+	}
+}
+
+func TestConnectTargetFromRequestRejectsHostHeaderMismatch(t *testing.T) {
+	request, err := http.NewRequest(http.MethodConnect, "http://chatgpt.com:443", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.URL.Scheme = ""
+	request.Host = "chatgpt.com:443"
+	request.Header.Set("Host", "api.openai.com:443")
+	if _, err := connectTargetFromRequest(request); err == nil {
+		t.Fatal("Host header mismatch must be rejected")
+	}
+}
+
 func TestForwardProxyDeniedConnectFailsClosed(t *testing.T) {
 	var logs bytes.Buffer
 	proxy := newForwardProxyServer(t, ForwardProxyConfig{
@@ -139,6 +171,67 @@ func TestForwardProxyDeniedConnectFailsClosed(t *testing.T) {
 	}
 	if got := logs.String(); !strings.Contains(got, "event=connect target_host=example.com target_port=443 decision=deny error_class=target_not_allowed") {
 		t.Fatalf("missing sanitized deny log: %q", got)
+	}
+}
+
+func TestForwardProxyTunnelWaitsForHalfClosedClientResponse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		body, err := io.ReadAll(conn)
+		if err != nil || string(body) != "request-body" {
+			return
+		}
+		_, _ = io.WriteString(conn, "upstream-response")
+	}()
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamPort, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	proxy := newForwardProxyServer(t, ForwardProxyConfig{
+		AllowHosts: []string{"127.0.0.1"},
+		AllowPorts: []int{upstreamPort},
+	}, &logs)
+	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
+		"CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", listener.Addr().String(), listener.Addr().String(),
+	))
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	if _, err := io.WriteString(conn, "request-body"); err != nil {
+		t.Fatal(err)
+	}
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	writer, ok := conn.(closeWriter)
+	if !ok {
+		t.Fatalf("client connection does not support CloseWrite")
+	}
+	if err := writer.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != "upstream-response" {
+		t.Fatalf("tunnel response after half-close = %q", response)
 	}
 }
 
@@ -232,5 +325,28 @@ func TestForwardProxyDefaultAllowPortIs443(t *testing.T) {
 	}
 	if ports := config.effectiveAllowPorts(); len(ports) != 1 || ports[0] != 443 {
 		t.Fatalf("default ports = %v", ports)
+	}
+}
+
+func TestConfigRejectsForwardProxyAllowHostOverlappingMediatedRoute(t *testing.T) {
+	config := &Config{
+		BrokerURL: "https://broker:7347",
+		Routes: []Route{{
+			Listen:     "127.0.0.1:8470",
+			Capability: "codex-main",
+			Upstream:   "ChatGPT.com:443",
+		}},
+		ForwardProxy: &ForwardProxyConfig{
+			Listen:     "127.0.0.1:8471",
+			AllowHosts: []string{"chatgpt.com"},
+		},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("forward proxy allowlist overlap with mediated route upstream must be rejected")
+	}
+
+	config.ForwardProxy.AllowHosts = []string{"api.openai.com"}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("non-overlapping forward proxy host should validate: %v", err)
 	}
 }

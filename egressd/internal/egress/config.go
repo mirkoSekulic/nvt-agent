@@ -126,6 +126,26 @@ func (c *Config) Validate() error {
 		if err := c.ForwardProxy.Validate(); err != nil {
 			return fmt.Errorf("forward_proxy: %w", err)
 		}
+		if err := c.validateForwardProxyRouteOverlap(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateForwardProxyRouteOverlap() error {
+	routeHosts := map[string]bool{}
+	for _, route := range c.Routes {
+		host, ok := normalizedRouteUpstreamHost(route.Upstream)
+		if ok {
+			routeHosts[host] = true
+		}
+	}
+	for _, host := range c.ForwardProxy.AllowHosts {
+		normalized := strings.ToLower(host)
+		if routeHosts[normalized] {
+			return fmt.Errorf("forward_proxy.allow_hosts[%q] overlaps mediated route upstream", host)
+		}
 	}
 	return nil
 }
@@ -158,6 +178,22 @@ func (c *ForwardProxyConfig) effectiveAllowPorts() []int {
 		return []int{443}
 	}
 	return c.AllowPorts
+}
+
+func normalizedRouteUpstreamHost(upstream string) (string, bool) {
+	host := upstream
+	if strings.Contains(upstream, ":") {
+		split, _, err := net.SplitHostPort(upstream)
+		if err != nil {
+			return "", false
+		}
+		host = split
+	}
+	normalized, err := normalizeProxyHost(host)
+	if err != nil {
+		return "", false
+	}
+	return normalized, true
 }
 
 // validateUpstream enforces that the pinned re-origination target is a bare

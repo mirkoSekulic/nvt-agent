@@ -19,6 +19,10 @@ What this phase does:
   `event=connect`, `target_host`, `target_port`, `decision`, and optional
   `error_class`.
 
+Those CONNECT decisions are sanitized `egressd` stdout logs only in this PR.
+They are not broker `audit.jsonl` entries; per-request broker audit remains a
+later egress enforcement/audit phase.
+
 What this phase does not do:
 
 - no plain HTTP proxying for `GET`/`POST` proxy requests;
@@ -89,6 +93,7 @@ The harness allowlist is:
 - `ab.chatgpt.com`
 - `github.com`
 - `api.openai.com`
+- `auth.openai.com`
 
 Only port `443` is allowed by default.
 

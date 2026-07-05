@@ -9,9 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/egressd/internal/egress"
 )
+
+const forwardProxyReadHeaderTimeout = 5 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -68,7 +71,11 @@ func run() error {
 			Config: *config.ForwardProxy,
 			Logger: log.New(os.Stdout, "", 0),
 		}
-		server := &http.Server{Addr: config.ForwardProxy.Listen, Handler: proxy}
+		server := &http.Server{
+			Addr:              config.ForwardProxy.Listen,
+			Handler:           proxy,
+			ReadHeaderTimeout: forwardProxyReadHeaderTimeout,
+		}
 		go func() {
 			errors <- server.ListenAndServe()
 		}()
