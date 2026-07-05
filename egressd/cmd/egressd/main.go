@@ -43,10 +43,18 @@ func run() error {
 	for _, route := range config.Routes {
 		proxy := &egress.Proxy{Route: route, Broker: broker, Transport: transport}
 		server := &http.Server{Addr: route.Listen, Handler: proxy}
-		log.Printf("egressd: routing %s -> %s (capability %s)", route.Listen, route.Upstream, route.Capability)
-		go func() {
+		scheme := "http"
+		if route.TLSEnabled() {
+			scheme = "https"
+		}
+		log.Printf("egressd: routing %s (%s) -> %s (capability %s)", route.Listen, scheme, route.Upstream, route.Capability)
+		go func(route egress.Route) {
+			if route.TLSEnabled() {
+				errors <- server.ListenAndServeTLS(route.ListenTLSCert, route.ListenTLSKey)
+				return
+			}
 			errors <- server.ListenAndServe()
-		}()
+		}(route)
 	}
 	return <-errors
 }

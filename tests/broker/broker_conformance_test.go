@@ -234,23 +234,24 @@ func (f *fakeGitHub) lastAPIRequest() *http.Request {
 }
 
 type brokerFixture struct {
-	t      *testing.T
-	root   string
-	home   string
-	bind   string
-	url    string
-	audit  string
-	agents string
-	broker *exec.Cmd
-	fake   *fakeGitHub
-	oauth  *fakeOAuth
-	keyPEM string
-	config string
-	token  string
-	auth   string
-	extra  string
-	stdout bytes.Buffer
-	stderr bytes.Buffer
+	t                 *testing.T
+	root              string
+	home              string
+	bind              string
+	url               string
+	audit             string
+	agents            string
+	broker            *exec.Cmd
+	fake              *fakeGitHub
+	oauth             *fakeOAuth
+	keyPEM            string
+	config            string
+	token             string
+	auth              string
+	extra             string
+	codexClaimHeaders string
+	stdout            bytes.Buffer
+	stderr            bytes.Buffer
 }
 
 func newBrokerFixture(t *testing.T) *brokerFixture {
@@ -360,7 +361,7 @@ providers:
     config:
       injection-hosts:
         - chatgpt.com
-      auth-file: %q
+%s      auth-file: %q
       token-url: %q
       client-id: test-client
       refresh-margin-seconds: 600
@@ -368,7 +369,7 @@ providers:
       extra-files:
         - name: config.toml
           path: %q
-`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.auth, f.oauth.server.URL, f.extra)
+`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.extra)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)
@@ -1114,6 +1115,16 @@ func decodeJSONFile(t *testing.T, path string, value any) {
 func testJWT(exp time.Time) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
 	payload, _ := json.Marshal(map[string]any{"exp": exp.Unix()})
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+func testJWTWithClaims(exp time.Time, claims map[string]any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	body := map[string]any{"exp": exp.Unix()}
+	for key, value := range claims {
+		body[key] = value
+	}
+	payload, _ := json.Marshal(body)
 	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 

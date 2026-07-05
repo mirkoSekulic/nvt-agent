@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // nvtPlaceholder is the documented zero-entropy placeholder constant from
@@ -399,6 +400,61 @@ func TestDeniedInjectionAuditIncludesContext(t *testing.T) {
 		if entry[key] != want {
 			t.Fatalf("audit entry %s = %v, want %v (entry: %v)", key, entry[key], want, entry)
 		}
+	}
+}
+
+// TestInjectionComputesClaimDerivedHeaders pins that a codex-oauth provider
+// configured with injection-claim-headers computes those headers from the
+// real access-token claims (e.g. the ChatGPT account-id header), returns them
+// in the injection response, and lists them in strip_request_headers so the
+// agent's placeholder versions are removed. Load-bearing for plan-auth, where
+// the backend requires a claim-derived header alongside the bearer.
+func TestInjectionComputesClaimDerivedHeaders(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(mediatedIdentities())
+
+	// Reconfigure codex-main with a claim-derived header whose claim key
+	// itself contains dots (the OpenAI account claim key is a URL).
+	f.codexClaimHeaders = "" +
+		"      injection-claim-headers:\n" +
+		"        - header: chatgpt-account-id\n" +
+		"          claim-path:\n" +
+		"            - https://api.openai.com/auth\n" +
+		"            - chatgpt_account_id\n"
+	token := testJWTWithClaims(time.Now().Add(time.Hour), map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-real-123"},
+	})
+	f.writeCodexAuth(token, "real-refresh-1")
+	f.config = f.writeConfig([]string{"my-user/my-repo", "my-user/other-repo"}, "", 0, 0)
+	f.stop()
+	f.start()
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", injectionRequest())
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("injection denied: status=%d body=%v", status, body)
+	}
+	headers, ok := body["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected headers, got %v", body)
+	}
+	if headers["chatgpt-account-id"] != "acct-real-123" {
+		t.Fatalf("claim-derived header = %v, want acct-real-123", headers["chatgpt-account-id"])
+	}
+	if _, present := headers["authorization"]; !present {
+		t.Fatal("authorization header missing alongside claim header")
+	}
+	strip, ok := body["strip_request_headers"].([]any)
+	if !ok {
+		t.Fatalf("expected strip_request_headers, got %v", body["strip_request_headers"])
+	}
+	stripped := map[string]bool{}
+	for _, name := range strip {
+		if text, ok := name.(string); ok {
+			stripped[text] = true
+		}
+	}
+	if !stripped["chatgpt-account-id"] || !stripped["authorization"] {
+		t.Fatalf("both injected headers must be stripped from the request, got %v", strip)
 	}
 }
 

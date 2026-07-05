@@ -1,0 +1,62 @@
+# Phase 2 Codex plan-auth mediation gate — isolation topology.
+#
+# NOT a production compose file. See docs/phase2-codex-gate-plan.md.
+#
+# Networks:
+#   phase2-agent   internal: true — no outbound internet. Agent + egressd.
+#                  The agent's ONLY reachable peer is egressd.
+#   phase2-trusted normal bridge (outbound). egressd + broker. Broker needs
+#                  outbound to auth.openai.com for OAuth refresh; egressd needs
+#                  outbound to the upstream (chatgpt.com).
+#
+# A Codex attempt to reach any fixed host directly fails at connect on the
+# internal network — exactly the signal the gate needs.
+services:
+  broker:
+    image: nvt-broker:latest
+    env_file:
+      - ${PHASE2_STATE}/env
+    environment:
+      NVT_BROKER_CONFIG: /state/broker.yaml
+      NVT_BROKER_AGENTS_CONFIG: /state/agents.yaml
+      NVT_BROKER_AUDIT_LOG: /state/audit.jsonl
+      NVT_BROKER_BIND: 0.0.0.0:7347
+    volumes:
+      - ${PHASE2_STATE}:/state
+    networks:
+      - phase2-trusted
+    restart: "no"
+
+  egressd:
+    image: nvt-egressd:latest
+    environment:
+      NVT_EGRESSD_CONFIG: /config/egressd.json
+      NVT_BROKER_TOKEN: ${PHASE2_EGRESS_TOKEN}
+    volumes:
+      - ${PHASE2_STATE}/egressd.json:/config/egressd.json:ro
+      - ${PHASE2_STATE}/tls:/tls:ro
+    networks:
+      - phase2-agent
+      - phase2-trusted
+    depends_on:
+      - broker
+    restart: "no"
+
+  agent:
+    image: nvt-agent-runtime:latest
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      CODEX_HOME: /root/.codex
+    volumes:
+      - ${PHASE2_STATE}/agent-codex:/root/.codex
+      - ${PHASE2_STATE}/tls/agent-ca.pem:/usr/local/share/ca-certificates/nvt-egressd-ca.crt:ro
+    networks:
+      - phase2-agent
+    depends_on:
+      - egressd
+    restart: "no"
+
+networks:
+  phase2-agent:
+    internal: true
+  phase2-trusted: {}
