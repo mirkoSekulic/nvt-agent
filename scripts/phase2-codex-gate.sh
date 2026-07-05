@@ -58,13 +58,30 @@ agent_hash="$(printf '%s' "$AGENT_TOKEN" | openssl dgst -sha256 | awk '{print $2
 egress_hash="$(printf '%s' "$EGRESS_TOKEN" | openssl dgst -sha256 | awk '{print $2}')"
 
 # --- broker config (harness-local; never touches .broker/) ------------------
+# Force real refresh: set the margin beyond the token's remaining lifetime so
+# the first injection always exercises the real refresh flow, regardless of how
+# much life the source token has left. Fallback is 10y if exp can't be read.
+REFRESH_MARGIN="$(python3 - "$AUTH_SOURCE" <<'PY'
+import base64, json, sys, time
+try:
+    token = json.load(open(sys.argv[1]))["tokens"]["access_token"]
+    seg = token.split(".")[1]
+    seg += "=" * ((4 - len(seg) % 4) % 4)
+    exp = int(json.loads(base64.urlsafe_b64decode(seg.encode()))["exp"])
+    print(max(exp - int(time.time()), 0) + 86400)
+except Exception:
+    print(315360000)
+PY
+)"
+log "refresh-margin-seconds=$REFRESH_MARGIN (forces real refresh on first injection)"
+
 cat > "$STATE_DIR/broker.yaml" <<YAML
 providers:
   - name: codex-main
     plugin: codex-oauth
     config:
       auth-file: /state/codex/auth.json
-      refresh-margin-seconds: 3600
+      refresh-margin-seconds: ${REFRESH_MARGIN}
       injection-hosts:
         - ${UPSTREAM_HOST}
         - auth.openai.com
@@ -135,6 +152,17 @@ cat > "$STATE_DIR/agent-codex/config.toml" <<TOML
 check_for_update_on_startup = false
 chatgpt_base_url = "${BASE_URL}"
 TOML
+# Phase 2 gates chatgpt_base_url plan-auth traffic by default. To also exercise
+# the API-style path, set PHASE2_MODEL_PROVIDER_BASE (e.g. the egressd route
+# with a /v1 suffix) — recorded as a separate finding in the gate doc.
+if [ -n "${PHASE2_MODEL_PROVIDER_BASE:-}" ]; then
+  cat >> "$STATE_DIR/agent-codex/config.toml" <<TOML
+
+[model_providers.openai]
+base_url = "${PHASE2_MODEL_PROVIDER_BASE}"
+TOML
+  log "model_providers.openai.base_url=${PHASE2_MODEL_PROVIDER_BASE}"
+fi
 
 python3 - "$STATE_DIR/agent-codex/auth.json" <<'PY'
 import base64, json, sys, time
@@ -173,6 +201,17 @@ done
 
 # --- run the real Codex turn ------------------------------------------------
 log "running Codex turn through egressd: $CODEX_CMD"
+# Sample process args in the agent container during the run so a token that
+# ever appears on a command line is captured (it must not — egressd injects it).
+touch "$OUT_DIR/.running"
+(
+  while [ -f "$OUT_DIR/.running" ]; do
+    $COMPOSE exec -T agent ps -eo args 2>/dev/null || true
+    sleep 0.5
+  done
+) > "$OUT_DIR/evidence/agent-ps-during.txt" 2>&1 &
+PS_SAMPLER=$!
+
 set +e
 $COMPOSE exec -T agent bash -lc '
   set -e
@@ -186,7 +225,19 @@ $COMPOSE exec -T agent bash -lc '
 ' > "$OUT_DIR/evidence/codex-stdout.txt" 2> "$OUT_DIR/evidence/codex-stderr.txt"
 CODEX_RC=$?
 set -e
+rm -f "$OUT_DIR/.running"
+kill "$PS_SAMPLER" 2>/dev/null || true
+wait "$PS_SAMPLER" 2>/dev/null || true
 log "Codex exit code: $CODEX_RC"
+
+# Post-run non-possession snapshot of the agent container: env, process table,
+# and the entire codex home. Scanned below for real-token fragments.
+$COMPOSE exec -T agent bash -lc '
+  echo "=== env ==="; env
+  echo "=== ps axww ==="; ps axww 2>/dev/null || true
+  echo "=== codex home files ==="; find /root/.codex -type f -print -exec cat {} \; 2>/dev/null || true
+  echo "=== /root listing ==="; ls -la /root 2>/dev/null || true
+' > "$OUT_DIR/evidence/agent-container-scan.txt" 2>&1 || true
 
 # --- capture evidence -------------------------------------------------------
 $COMPOSE logs egressd > "$OUT_DIR/evidence/egressd.log" 2>&1 || true
@@ -196,30 +247,53 @@ grep -h 'injection' "$OUT_DIR/evidence/broker-audit.jsonl" 2>/dev/null \
   > "$OUT_DIR/evidence/injection-audit.jsonl" || true
 
 # --- leak scan (fail loud if any real credential escaped) -------------------
-log "scanning for credential leakage"
+# Scans for full tokens AND stable fragments (prefix, middle, suffix), across
+# the agent auth.json plus all captured evidence — which now includes the
+# agent container's env, process args, and codex home.
+log "scanning for credential leakage (full values + fragments)"
 python3 - "$AUTH_SOURCE" "$STATE_DIR/agent-codex/auth.json" "$OUT_DIR/evidence" <<'PY'
 import json, os, sys
+
 real = json.load(open(sys.argv[1]))["tokens"]
-needles = [v for v in (real.get("access_token"), real.get("refresh_token"), real.get("id_token"))
-           if isinstance(v, str) and len(v) > 12]
-# 1) agent container auth.json must be placeholder only.
-agent = json.load(open(sys.argv[2]))["tokens"]
-for k, v in agent.items():
+
+def fragments(value):
+    if not isinstance(value, str) or len(value) < 20:
+        return set()
+    out = {value, value[:24], value[-24:]}
+    if len(value) > 64:
+        mid = len(value) // 2
+        out.add(value[mid:mid + 24])
+    return out
+
+needles = set()
+for key in ("access_token", "refresh_token", "id_token"):
+    needles |= fragments(real.get(key))
+if not needles:
+    print("WARNING: no real token found in source to scan for", file=sys.stderr)
+
+def scan(label, text):
     for n in needles:
-        if isinstance(v, str) and n in v:
-            print(f"LEAK: real {k} present in agent auth.json"); sys.exit(2)
-# 2) no real token fragment anywhere in captured evidence.
+        if n in text:
+            print(f"LEAK: real token fragment in {label}")
+            sys.exit(2)
+
+# 1) agent container auth.json must be placeholder only (direct check).
+agent = json.load(open(sys.argv[2]))["tokens"]
+for key, value in agent.items():
+    if isinstance(value, str):
+        scan(f"agent auth.json[{key}]", value)
+
+# 2) no real token fragment anywhere in captured evidence (env, ps, codex home,
+#    egressd log, broker audit, codex stdio).
 for root, _, files in os.walk(sys.argv[3]):
     for name in files:
-        path = os.path.join(root, name)
         try:
-            data = open(path, "r", errors="ignore").read()
+            data = open(os.path.join(root, name), "r", errors="ignore").read()
         except Exception:
             continue
-        for n in needles:
-            if n in data:
-                print(f"LEAK: real token fragment in evidence/{name}"); sys.exit(2)
-print("no credential leakage detected")
+        scan(f"evidence/{name}", data)
+
+print("no credential leakage detected (agent fs/env/args + evidence)")
 PY
 
 # --- verdict signal (evidence, not decision) --------------------------------

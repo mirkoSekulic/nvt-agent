@@ -18,10 +18,12 @@ not paste raw tokens — reference sanitized evidence only.
 ```
 make phase2-codex-gate
 # variables:
-#   PHASE2_AUTH_SOURCE  path to the real auth.json (default .broker/codex/auth.json)
-#   PHASE2_SCHEME       https (default, egressd serves TLS) | http
-#   PHASE2_UPSTREAM     upstream host (default chatgpt.com)
-#   PHASE2_CODEX_CMD    the turn to run (default: codex exec "print pong")
+#   PHASE2_AUTH_SOURCE           real auth.json (default .broker/codex/auth.json)
+#   PHASE2_SCHEME                https (default, egressd serves TLS) | http
+#   PHASE2_UPSTREAM              upstream host (default chatgpt.com)
+#   PHASE2_CODEX_CMD             the turn (default: codex exec "print pong")
+#   PHASE2_MODEL_PROVIDER_BASE   optional: also set model_providers.openai.base_url
+#                                to test the API-style path (recorded as a finding)
 ```
 
 Evidence lands in `.phase2-out/evidence/`:
@@ -75,14 +77,22 @@ _Did any Codex traffic try to reach a fixed host directly? On the internal
 network these appear as connect failures in `codex-stderr.txt`. List them._
 
 ### Refresh
-_Was the real refresh flow exercised? `summary.txt: refresh_seen` and
-`injection.refresh` entries in `broker-audit.jsonl`. Did the turn still
-succeed?_
+_Refresh is **forced**: the harness computes the margin from the source token's
+`exp`, so the first injection always triggers the real refresh flow. Confirm
+`summary.txt: refresh_seen` ≥ 1 and `injection.refresh` entries in
+`broker-audit.jsonl`, and that the turn still succeeded._
+
+### model_providers coverage (optional)
+_Only if run with `PHASE2_MODEL_PROVIDER_BASE`. Record whether the API-style
+path also routed through egressd or hit a fixed host. Default runs gate
+`chatgpt_base_url` plan-auth traffic only._
 
 ### Non-possession
-_The harness fails if any real token fragment appears in the agent's
-`auth.json` or in captured evidence. Confirm "no credential leakage detected"
-in the run output._
+_The harness fails loudly if any real token value **or fragment** appears in:
+the agent's `auth.json`, the agent container's env, its process args
+(sampled during the run), its codex home, or any captured evidence
+(egressd log, broker audit, codex stdio). Confirm "no credential leakage
+detected (agent fs/env/args + evidence)" in the run output._
 
 ## Decision
 
