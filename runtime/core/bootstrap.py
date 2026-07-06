@@ -53,6 +53,7 @@ PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 DEFAULT_EGRESS_CA_FILE = "/nvt-egress-ca/ca.crt"
 DEFAULT_EGRESS_CA_WAIT_SECONDS = 60
+DEFAULT_BROKER_WAIT_SECONDS = 180
 
 
 def load_bootstrap_config(path):
@@ -216,22 +217,39 @@ def scrub_git_state():
 
 
 def broker_routing(capability):
-    result = subprocess.run(
-        ["brokerctl", "injection", "routing", "--capability", capability],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"bootstrap: broker routing failed for {capability}: {result.stderr.strip() or result.stdout.strip()}")
+    # In k8s the operator registers this run's token in the broker agents
+    # ConfigMap right before creating the Pod, but the broker only sees the
+    # update after kubelet's ConfigMap sync (~1min worst case). Until then the
+    # broker answers "unauthorized" (or is not up yet), so those two failures
+    # are retried within a bounded window; everything else fails immediately.
     try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise SystemExit(f"bootstrap: broker routing response for {capability} was not JSON: {error}") from error
-    if not payload.get("ok"):
+        wait_seconds = float(os.environ.get("NVT_BROKER_WAIT_SECONDS") or DEFAULT_BROKER_WAIT_SECONDS)
+    except ValueError:
+        raise SystemExit("bootstrap: NVT_BROKER_WAIT_SECONDS must be a number")
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        result = subprocess.run(
+            ["brokerctl", "injection", "routing", "--capability", capability],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        payload = None
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            pass
+        if result.returncode == 0 and isinstance(payload, dict) and payload.get("ok"):
+            return payload
+        error = (payload or {}).get("error")
+        if error in {"unauthorized", "broker-unreachable"} and time.monotonic() < deadline:
+            print(f"bootstrap: broker not ready for {capability} ({error}); retrying", flush=True)
+            time.sleep(2)
+            continue
+        if payload is None:
+            raise SystemExit(f"bootstrap: broker routing failed for {capability}: {result.stderr.strip() or result.stdout.strip()}")
         raise SystemExit(f"bootstrap: broker routing denied for {capability}: {payload.get('message') or payload.get('error') or payload}")
-    return payload
 
 
 def apply_redirect_env(provider, grant, placeholder):
