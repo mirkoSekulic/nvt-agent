@@ -17,9 +17,15 @@ broker:
 When `existingSecret` is empty, the chart generates a self-signed CA and a
 serving cert for `nvt-broker.<namespace>.svc` into `secretName` at install
 time and preserves it across upgrades (`helm lookup`), so the trust anchor
-does not rotate on every `helm upgrade`. Note that `helm template | kubectl
-apply` bypasses `lookup` and regenerates the cert on every render — use
-`helm upgrade --install` (or `existingSecret`) for stable trust.
+does not rotate on every `helm upgrade`. The broker Deployment carries a
+`checksum/broker-tls` pod annotation derived from the same material, so the
+broker restarts exactly when the Secret changes. `helm template | kubectl
+apply` bypasses `lookup` and regenerates the cert on every render; the
+checksum tracks the regenerated material, so the broker restarts onto the
+newly applied cert — but every apply rotates the trust anchor and breaks
+in-flight mediated runs, so prefer `helm upgrade --install` (or
+`existingSecret`) for stable trust. Rotating an `existingSecret` out of band
+requires a manual `kubectl rollout restart deployment/nvt-broker`.
 
 Set `existingSecret` to bring your own cert (for example from cert-manager);
 it must be a `kubernetes.io/tls` Secret that also carries `ca.crt`. The chart

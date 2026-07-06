@@ -500,6 +500,39 @@ grep -q 'value: "https://nvt-broker:7347"' "${DEFAULT_RENDER}"
 grep -q 'name: NVT_BROKER_CA_SECRET' "${DEFAULT_RENDER}"
 grep -q 'checksum/broker-tls: ' "${DEFAULT_RENDER}"
 
+sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+broker_tls_checksum() {
+  grep 'checksum/broker-tls: ' "$1" | head -1 | awk '{print $2}' | tr -d '"'
+}
+
+# The checksum annotation must hash the same material the Secret template
+# renders: without lookup (helm template) the cert regenerates per render, so
+# the checksum must match the rendered data and differ between renders —
+# otherwise a `helm template | kubectl apply` rotation applies a new Secret
+# while the running broker keeps serving the old cert.
+rendered_tls_crt="$(grep '^  tls.crt: ' "${DEFAULT_RENDER}" | head -1 | awk '{print $2}')"
+rendered_tls_key="$(grep '^  tls.key: ' "${DEFAULT_RENDER}" | head -1 | awk '{print $2}')"
+rendered_ca_crt="$(grep '^  ca.crt: ' "${DEFAULT_RENDER}" | head -1 | awk '{print $2}')"
+expected_checksum="$(printf '{"ca.crt":"%s","tls.crt":"%s","tls.key":"%s"}' \
+  "${rendered_ca_crt}" "${rendered_tls_crt}" "${rendered_tls_key}" | sha256_hex)"
+if [[ "$(broker_tls_checksum "${DEFAULT_RENDER}")" != "${expected_checksum}" ]]; then
+  echo "broker TLS checksum does not match the rendered Secret material" >&2
+  exit 1
+fi
+DEFAULT_RERENDER="${WORKDIR}/default-rerender.yaml"
+helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RERENDER}"
+if [[ "$(broker_tls_checksum "${DEFAULT_RENDER}")" == "$(broker_tls_checksum "${DEFAULT_RERENDER}")" ]]; then
+  echo "broker TLS checksum must change when the generated Secret material changes" >&2
+  exit 1
+fi
+
 missing_resource "${BROKER_TLS_DISABLED_RENDER}" Secret nvt-broker-tls
 if grep -Eq '^kind:[[:space:]]*Secret$' "${BROKER_TLS_DISABLED_RENDER}"; then
   echo "chart must not render Kubernetes Secrets with broker TLS disabled" >&2
