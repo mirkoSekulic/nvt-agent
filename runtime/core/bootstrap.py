@@ -49,6 +49,7 @@ def optional_string_list(value, field):
 
 
 PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
+ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
 def load_bootstrap_config(path):
@@ -230,6 +231,24 @@ def broker_routing(capability):
     return payload
 
 
+def apply_redirect_env(provider, grant, placeholder):
+    redirect_env = grant.get("redirect-env") or {}
+    if not isinstance(redirect_env, dict):
+        raise SystemExit(f"egress mediated grant {provider} redirect-env must be an object")
+    base_url = grant.get("base-url")
+    for name, source in redirect_env.items():
+        if not isinstance(name, str) or not ENV_NAME_RE.match(name):
+            raise SystemExit(f"egress mediated grant {provider} redirect-env contains invalid env name {name!r}")
+        if source == "base-url":
+            persist_env_var(name, base_url)
+        elif source == "placeholder":
+            persist_env_var(name, placeholder)
+        else:
+            raise SystemExit(
+                f"egress mediated grant {provider} redirect-env.{name} must be base-url or placeholder"
+            )
+
+
 def apply_mediated_egress(egress):
     scrub_git_state()
     placeholder = egress.get("placeholder") or PLACEHOLDER
@@ -253,6 +272,7 @@ def apply_mediated_egress(egress):
         hosts = routing.get("hosts") or []
         if not hosts:
             raise SystemExit(f"bootstrap: mediated grant {provider} is not redirectable")
+        apply_redirect_env(provider, grant, placeholder)
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(

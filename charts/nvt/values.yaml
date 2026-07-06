@@ -6,7 +6,6 @@ runtime:
   image: nvt-agent-runtime:latest
 
 egress:
-  mode: direct
   egressdImage: nvt-egressd:latest
 
 broker:
