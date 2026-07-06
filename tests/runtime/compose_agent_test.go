@@ -1047,6 +1047,38 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	if config.CA["publish_dir"] != "/nvt-egress-ca" {
 		t.Fatalf("unexpected CA publish dir: %#v", config.CA)
 	}
+
+	// The agent config must carry the same grant metadata the operator
+	// injects on k8s — bootstrap reads egress.grants (base-url per route)
+	// from agent.yaml, so without this block the sidecar starts but git/tool
+	// wiring never happens. agent-init validates the merged YAML parses; the
+	// block is machine-generated, so exact-string assertions are stable.
+	agentConfig := mustReadFile(t, filepath.Join(agentDir, "agent.yaml"))
+	for _, fragment := range []string{
+		"egress:",
+		"  mode: mediated",
+		"    - provider: api-main",
+		"      base-url: http://127.0.0.1:8471",
+		"    - provider: git-app",
+		"      materialization: header-inject",
+		"      base-url: https://127.0.0.1:8472",
+	} {
+		if !strings.Contains(agentConfig, fragment) {
+			t.Fatalf("agent.yaml missing egress fragment %q:\n%s", fragment, agentConfig)
+		}
+	}
+
+	// Re-running agent-init replaces the managed block instead of stacking
+	// duplicates.
+	rerun := commandWithEnv(command, nil, "--name", name)
+	rerun.Dir = root
+	if rerunOutput, err := rerun.CombinedOutput(); err != nil {
+		t.Fatalf("agent-init re-run failed: %v\n%s", err, rerunOutput)
+	}
+	agentConfig = mustReadFile(t, filepath.Join(agentDir, "agent.yaml"))
+	if got := strings.Count(agentConfig, "BEGIN nvt-managed egress"); got != 1 {
+		t.Fatalf("managed egress block rendered %d times:\n%s", got, agentConfig)
+	}
 }
 
 func TestAgentInitMediatedRequiresUnsafeLocalBrokerFlag(t *testing.T) {

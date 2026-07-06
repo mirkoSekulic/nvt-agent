@@ -126,6 +126,10 @@ Rules:
   provider; the provider computes injectable headers for
   `(host, method, path)`. `egressd` contains no provider-specific logic —
   new providers are broker plugins with zero sidecar changes.
+- `host` is the pinned upstream **hostname without a port**. Provider
+  `injection-hosts` entries are bare hostnames, and `egressd` strips any
+  `:port` from its pinned upstream before asking; the port applies only to
+  the dial target.
 - Response header names are lowercased.
 - `expires_at` is the cache ceiling. `egressd` must not serve cached material
   past it and must not fall back to stale material when a refetch fails

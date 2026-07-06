@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -75,7 +76,7 @@ func (p *Proxy) material(ctx context.Context, method, path string) (*Material, e
 		}
 		delete(p.cache, key)
 	}
-	material, err := p.Broker.FetchHeaders(ctx, p.Route.Capability, p.Route.Upstream, method, path)
+	material, err := p.Broker.FetchHeaders(ctx, p.Route.Capability, injectionHost(p.Route.Upstream), method, path)
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +153,19 @@ func (p *Proxy) buildOutbound(r *http.Request, material *Material) (*http.Reques
 	}
 	outbound.Host = p.Route.Upstream
 	return outbound, nil
+}
+
+// injectionHost is the host presented to the broker for authorization: the
+// pinned upstream's hostname with any port stripped. Provider injection-hosts
+// are bare hostnames (protocol/injection.md); only the dial target keeps the
+// port. Without this, an upstream pinned as "github.com:443" would never
+// match a provider's "github.com" and every request would fail closed.
+func injectionHost(upstream string) string {
+	host, _, err := net.SplitHostPort(upstream)
+	if err != nil {
+		return upstream
+	}
+	return host
 }
 
 func containsPlaceholder(values []string) bool {
