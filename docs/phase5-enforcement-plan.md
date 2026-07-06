@@ -59,7 +59,7 @@ enforcement and nothing else.
 - **The egress-denied smoke skeleton is staged and skipped**:
   `TestMediatedEgressDenied` (`tests/runtime/mediated_smoke_test.go:428`).
 
-## Bugs found while planning (fix first, tiny PR or first commits of 6b)
+## Bugs found while planning (fixed — shipped as the Phase 5 fix PR)
 
 1. **`static_token.injection_headers` signature mismatch.** `server.py:212`
    calls providers with 7 args (now including `grant`), but

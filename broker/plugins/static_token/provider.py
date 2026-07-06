@@ -68,5 +68,5 @@ class StaticTokenProvider:
     def identity_for_repo(self, repo, effective_repositories):
         raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
 
-    def injection_headers(self, host, method, path, agent_id, audit, request_id):
+    def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
         return {"authorization": f"Bearer {self.token}"}, None, ["authorization"]

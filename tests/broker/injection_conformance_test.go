@@ -471,6 +471,69 @@ func TestInjectionComputesClaimDerivedHeaders(t *testing.T) {
 	}
 }
 
+// TestInjectionServesEveryProviderTypeWithInjectionHosts exercises one
+// injection fetch against every provider *type* that declares
+// injection-hosts. Providers are called with a shared positional signature
+// (host, method, path, agent_id, audit, request_id, grant); a provider
+// missing a parameter fails only at call time, invisible to type-specific
+// tests — static_token shipped broken exactly this way when the grant
+// parameter was added.
+func TestInjectionServesEveryProviderTypeWithInjectionHosts(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(map[string]roleIdentity{
+		"frontend": {
+			Token: "frontend-token",
+			Role:  "agent",
+			Grants: []roleGrant{
+				{Provider: "codex-main", Materialization: "header-inject"},
+				{Provider: "git-app", Materialization: "header-inject", Repositories: []string{"my-user/my-repo"}},
+				{Provider: "pat-provider", Materialization: "header-inject", Repositories: []string{"my-user/my-repo"}},
+			},
+		},
+		"frontend-egress": {
+			Token:       "frontend-egress-token",
+			Role:        "egress",
+			PairedAgent: "frontend",
+		},
+	})
+
+	cases := []struct {
+		capability string
+		host       string
+		method     string
+		path       string
+		wantPrefix string
+	}{
+		// codex-oauth
+		{"codex-main", "chatgpt.com", "POST", "/backend-api/responses", "Bearer "},
+		// github-app
+		{"git-app", "github.com", "GET", "/my-user/my-repo.git/info/refs", "Basic "},
+		// token (static bearer)
+		{"pat-provider", "api.example.test", "GET", "/v1/anything", "Bearer pat-secret"},
+	}
+	for _, tt := range cases {
+		payload := map[string]any{
+			"capability": tt.capability,
+			"host":       tt.host,
+			"method":     tt.method,
+			"path":       tt.path,
+		}
+		status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", payload)
+		if status != http.StatusOK || body["ok"] != true {
+			t.Fatalf("injection for provider type %s denied: status=%d body=%v", tt.capability, status, body)
+		}
+		headers, _ := body["headers"].(map[string]any)
+		value, _ := headers["authorization"].(string)
+		if !strings.HasPrefix(value, tt.wantPrefix) {
+			t.Fatalf("provider %s authorization = %q, want prefix %q", tt.capability, value, tt.wantPrefix)
+		}
+		strip, _ := body["strip_request_headers"].([]any)
+		if len(strip) == 0 {
+			t.Fatalf("provider %s returned no strip_request_headers: %v", tt.capability, body)
+		}
+	}
+}
+
 // TestInjectionAuditOmitsSecretValues pins the audit rule: injection requests
 // are audited with metadata only; header values never appear in the audit
 // log on allow or deny paths.
