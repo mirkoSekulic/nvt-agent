@@ -52,13 +52,21 @@ grant = {
     "materialization": "header-inject",
     "egressHosts": ["api.example.test:443"],
 }
+git_grant = {
+    "provider": "git-app",
+    "repositories": ["example/repo"],
+    "materialization": "header-inject",
+    "egressHosts": ["github.com:443"],
+    "git": True,
+    "permissions": {"contents": "read"},
+}
 spec = {
     "runtime": {"type": "codex", "autonomy": "trusted-local"},
     "image": "nvt-agent-runtime:latest",
     "egress": "mediated",
     "egressAllowInsecureBroker": True,
     "workspace": {"mode": "Ephemeral"},
-    "broker": {"grants": [grant]},
+    "broker": {"grants": [grant, git_grant]},
     "agent": {
         "config": {
             "runtime": {
@@ -75,17 +83,17 @@ spec = {
 if variant == "runtime-auth":
     spec["runtimeAuth"] = {"secretName": "codex-auth"}
 elif variant == "missing-egress-hosts":
-    spec["broker"]["grants"][0] = {
+    spec["broker"]["grants"] = [{
         "provider": "static-bearer-main",
         "repositories": ["example/repo"],
         "materialization": "header-inject",
-    }
+    }]
 elif variant == "file-bundle":
-    spec["broker"]["grants"][0] = {
+    spec["broker"]["grants"] = [{
         "provider": "bundle-main",
         "repositories": ["example/repo"],
         "materialization": "file-bundle",
-    }
+    }]
 elif variant != "valid":
     raise SystemExit(f"unknown variant {variant}")
 
@@ -120,6 +128,11 @@ grant = valid["broker"]["grants"][0]
 assert grant["provider"] == "static-bearer-main"
 assert grant["materialization"] == "header-inject"
 assert grant["egressHosts"] == ["api.example.test:443"]
+git_grant = valid["broker"]["grants"][1]
+assert git_grant["provider"] == "git-app"
+assert git_grant["git"] is True
+assert git_grant["egressHosts"] == ["github.com:443"]
+assert git_grant["permissions"] == {"contents": "read"}
 
 with open(sys.argv[2], "r", encoding="utf-8") as file:
     runtime_auth = json.load(file)["agentRun"]["spec"]
@@ -229,5 +242,27 @@ egress_env = {
 broker_token_ref = egress_env.get("NVT_BROKER_TOKEN")
 if not broker_token_ref or broker_token_ref.get("name") != egress_secret or broker_token_ref.get("key") != "NVT_EGRESS_BROKER_TOKEN":
     raise SystemExit(f"egressd missing egress broker token ref: {egress_env}")
+
+# Phase 4 git grant shape: shared CA volume carries the certificate only;
+# the agent mounts it read-only, egressd writable, and the agent is told
+# where to find ca.crt. The CA private key has no volume to leak through.
+volumes = {volume["name"]: volume for volume in pod["spec"].get("volumes", [])}
+ca_volume = volumes.get("egress-ca")
+if not ca_volume or "emptyDir" not in ca_volume:
+    raise SystemExit(f"expected egress-ca emptyDir volume, got {sorted(volumes)}")
+
+agent_mounts = {mount["name"]: mount for mount in agent.get("volumeMounts", [])}
+agent_ca_mount = agent_mounts.get("egress-ca")
+if not agent_ca_mount or agent_ca_mount.get("readOnly") is not True or agent_ca_mount.get("mountPath") != "/nvt-egress-ca":
+    raise SystemExit(f"agent CA mount must be read-only at /nvt-egress-ca: {agent_ca_mount}")
+
+egressd_mounts = {mount["name"]: mount for mount in egressd.get("volumeMounts", [])}
+egressd_ca_mount = egressd_mounts.get("egress-ca")
+if not egressd_ca_mount or egressd_ca_mount.get("readOnly") is True:
+    raise SystemExit(f"egressd CA mount must be writable: {egressd_ca_mount}")
+
+agent_plain_env = {env.get("name"): env.get("value") for env in agent.get("env", [])}
+if agent_plain_env.get("NVT_EGRESS_CA_FILE") != "/nvt-egress-ca/ca.crt":
+    raise SystemExit(f"agent env missing NVT_EGRESS_CA_FILE: {agent_plain_env}")
 PY
 }

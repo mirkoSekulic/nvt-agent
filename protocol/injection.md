@@ -171,6 +171,12 @@ Response:
 }
 ```
 
+A git-capable capability (a `github-app` provider with `injection-hosts`)
+additionally reports `"git": true`. The flag is a non-secret routing hint:
+runtime bootstrap installs the git redirect wiring (managed `insteadOf`
+rewrite, `http.sslCAInfo` trust for the per-agent CA, `GIT_TERMINAL_PROMPT=0`)
+for grants whose routing carries it. Non-git capabilities omit the field.
+
 The local base URL the agent's tooling points at (the `egressd` listen
 address) is composed by runtime bootstrap, not returned by the broker.
 
