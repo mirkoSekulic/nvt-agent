@@ -13,6 +13,8 @@ GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
+BROKER_TLS_DISABLED_RENDER="${WORKDIR}/broker-tls-disabled.yaml"
+BROKER_TLS_EXISTING_RENDER="${WORKDIR}/broker-tls-existing.yaml"
 BROKER_PERSISTENCE_RENDER="${WORKDIR}/broker-persistence.yaml"
 BROKER_EXISTING_CLAIM_RENDER="${WORKDIR}/broker-existing-claim.yaml"
 BROKER_SEED_RENDER="${WORKDIR}/broker-seed.yaml"
@@ -48,6 +50,8 @@ helm template nvt "${CHART}" -n custom-ns \
   > "${GATEWAY_OIDC_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set broker.tls.enabled=false > "${BROKER_TLS_DISABLED_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set broker.tls.existingSecret=corp-broker-tls > "${BROKER_TLS_EXISTING_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set broker.persistence.enabled=true \
   --set broker.persistence.size=2Gi \
@@ -431,8 +435,129 @@ require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentruns.yaml" "${CHART}/crds/nvt.dev_agentruns.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentschedules.yaml" "${CHART}/crds/nvt.dev_agentschedules.yaml"
 
-if grep -Eq '^kind:[[:space:]]*Secret$' "${DEFAULT_RENDER}"; then
-  echo "chart must not render Kubernetes Secrets by default" >&2
+rendered_secret_names() {
+  local file="$1"
+  awk '
+    function reset_doc() {
+      kind = ""
+      name = ""
+      in_metadata = 0
+    }
+    function emit_doc() {
+      if (kind == "Secret" && name != "") {
+        print name
+      }
+    }
+    BEGIN {
+      reset_doc()
+    }
+    /^---[[:space:]]*$/ {
+      emit_doc()
+      reset_doc()
+      next
+    }
+    /^kind:[[:space:]]*/ {
+      kind = $2
+      next
+    }
+    /^metadata:[[:space:]]*$/ {
+      in_metadata = 1
+      next
+    }
+    in_metadata && /^[[:space:]]{2}name:[[:space:]]*/ {
+      name = $2
+      gsub(/^"|"$/, "", name)
+      in_metadata = 0
+      next
+    }
+    /^[^[:space:]]/ && $0 !~ /^metadata:/ {
+      in_metadata = 0
+    }
+    END {
+      emit_doc()
+    }
+  ' "${file}" | sort -u
+}
+
+# The generated broker TLS Secret is the single Secret the chart may render:
+# credential material must never pass through chart templates, but the broker
+# serving cert is chart-generated (self-signed) by design.
+default_secret_names="$(rendered_secret_names "${DEFAULT_RENDER}")"
+if [[ "${default_secret_names}" != "nvt-broker-tls" ]]; then
+  echo "chart must render exactly Secret nvt-broker-tls by default, got: ${default_secret_names:-none}" >&2
+  exit 1
+fi
+grep -q 'tls.crt: ' "${DEFAULT_RENDER}"
+grep -q 'tls.key: ' "${DEFAULT_RENDER}"
+grep -q 'ca.crt: ' "${DEFAULT_RENDER}"
+grep -q 'name: NVT_BROKER_TLS_CERT' "${DEFAULT_RENDER}"
+grep -q 'value: /tls/tls.crt' "${DEFAULT_RENDER}"
+grep -q 'name: NVT_BROKER_TLS_KEY' "${DEFAULT_RENDER}"
+grep -q 'value: /tls/tls.key' "${DEFAULT_RENDER}"
+grep -q 'secretName: "nvt-broker-tls"' "${DEFAULT_RENDER}"
+grep -q 'name: NVT_BROKER_URL' "${DEFAULT_RENDER}"
+grep -q 'value: "https://nvt-broker:7347"' "${DEFAULT_RENDER}"
+grep -q 'name: NVT_BROKER_CA_SECRET' "${DEFAULT_RENDER}"
+grep -q 'checksum/broker-tls: ' "${DEFAULT_RENDER}"
+
+sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+broker_tls_checksum() {
+  grep 'checksum/broker-tls: ' "$1" | head -1 | awk '{print $2}' | tr -d '"'
+}
+
+# The checksum annotation must hash the same material the Secret template
+# renders: without lookup (helm template) the cert regenerates per render, so
+# the checksum must match the rendered data and differ between renders —
+# otherwise a `helm template | kubectl apply` rotation applies a new Secret
+# while the running broker keeps serving the old cert.
+rendered_tls_crt="$(grep '^  tls.crt: ' "${DEFAULT_RENDER}" | head -1 | awk '{print $2}')"
+rendered_tls_key="$(grep '^  tls.key: ' "${DEFAULT_RENDER}" | head -1 | awk '{print $2}')"
+rendered_ca_crt="$(grep '^  ca.crt: ' "${DEFAULT_RENDER}" | head -1 | awk '{print $2}')"
+expected_checksum="$(printf '{"ca.crt":"%s","tls.crt":"%s","tls.key":"%s"}' \
+  "${rendered_ca_crt}" "${rendered_tls_crt}" "${rendered_tls_key}" | sha256_hex)"
+if [[ "$(broker_tls_checksum "${DEFAULT_RENDER}")" != "${expected_checksum}" ]]; then
+  echo "broker TLS checksum does not match the rendered Secret material" >&2
+  exit 1
+fi
+DEFAULT_RERENDER="${WORKDIR}/default-rerender.yaml"
+helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RERENDER}"
+if [[ "$(broker_tls_checksum "${DEFAULT_RENDER}")" == "$(broker_tls_checksum "${DEFAULT_RERENDER}")" ]]; then
+  echo "broker TLS checksum must change when the generated Secret material changes" >&2
+  exit 1
+fi
+
+missing_resource "${BROKER_TLS_DISABLED_RENDER}" Secret nvt-broker-tls
+if grep -Eq '^kind:[[:space:]]*Secret$' "${BROKER_TLS_DISABLED_RENDER}"; then
+  echo "chart must not render Kubernetes Secrets with broker TLS disabled" >&2
+  exit 1
+fi
+if grep -Eq 'NVT_BROKER_TLS_CERT|NVT_BROKER_CA_SECRET|NVT_BROKER_URL' "${BROKER_TLS_DISABLED_RENDER}"; then
+  echo "broker TLS disabled must not render TLS env" >&2
+  exit 1
+fi
+if grep -q 'checksum/broker-tls' "${BROKER_TLS_DISABLED_RENDER}"; then
+  echo "broker TLS disabled must not render the TLS checksum annotation" >&2
+  exit 1
+fi
+
+if [[ -n "$(rendered_secret_names "${BROKER_TLS_EXISTING_RENDER}")" ]]; then
+  echo "broker.tls.existingSecret must not render a generated Secret" >&2
+  exit 1
+fi
+grep -q 'secretName: "corp-broker-tls"' "${BROKER_TLS_EXISTING_RENDER}"
+grep -q 'value: "corp-broker-tls"' "${BROKER_TLS_EXISTING_RENDER}"
+grep -q 'checksum/broker-tls: ' "${BROKER_TLS_EXISTING_RENDER}"
+
+missing_resource "${BROKER_DISABLED_RENDER}" Secret nvt-broker-tls
+if grep -q 'NVT_BROKER_CA_SECRET' "${BROKER_DISABLED_RENDER}"; then
+  echo "broker disabled must not render operator broker TLS env" >&2
   exit 1
 fi
 
@@ -443,8 +568,8 @@ missing_resource "${BROKER_DISABLED_RENDER}" ConfigMap nvt-broker-agents
 require_resource "${BROKER_DISABLED_RENDER}" Deployment nvt-operator
 require_resource "${BROKER_DISABLED_RENDER}" Service nvt-operator
 
-if grep -Eq '^kind:[[:space:]]*Secret$' "${BROKER_SECRET_RENDER}"; then
-  echo "chart must reference existing broker Secret without creating one" >&2
+if [[ "$(rendered_secret_names "${BROKER_SECRET_RENDER}")" != "nvt-broker-tls" ]]; then
+  echo "chart must reference existing broker env Secret without creating one" >&2
   exit 1
 fi
 grep -q 'secretRef:' "${BROKER_SECRET_RENDER}"

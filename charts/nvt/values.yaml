@@ -12,6 +12,16 @@ broker:
   enabled: true
   image: nvt-broker:latest
   envSecretName: ""
+  tls:
+    # Serve the broker over TLS. The egressd->broker leg carries real
+    # credentials through the agent's network namespace, so mediated
+    # production runs require it (mediated-egress-plan.md §2). When enabled
+    # and no existingSecret is given, the chart generates a self-signed CA +
+    # serving cert into secretName (preserved across upgrades). The CA cert
+    # is public material distributed to egressd and the agent by the operator.
+    enabled: true
+    secretName: nvt-broker-tls
+    existingSecret: ""
   persistence:
     enabled: false
     size: 1Gi

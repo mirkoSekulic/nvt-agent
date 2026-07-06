@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import ssl
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -9,6 +10,16 @@ from urllib.request import Request, urlopen
 
 def broker_url():
     return os.environ.get("NVT_BROKER_URL", "http://127.0.0.1:7347").rstrip("/")
+
+
+def broker_ssl_context():
+    ca_file = os.environ.get("NVT_BROKER_CA_FILE", "").strip()
+    if not ca_file:
+        return None
+    if not os.path.isfile(ca_file):
+        print(f"brokerctl: NVT_BROKER_CA_FILE {ca_file!r} does not exist", file=sys.stderr)
+        raise SystemExit(2)
+    return ssl.create_default_context(cafile=ca_file)
 
 
 def request_json(path, payload=None, method="POST"):
@@ -23,7 +34,7 @@ def request_json(path, payload=None, method="POST"):
         headers["Authorization"] = f"Bearer {token}"
     request = Request(url, data=data, method=method, headers=headers)
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=30, context=broker_ssl_context()) as response:
             return json.loads(response.read().decode("utf-8")), response.status
     except HTTPError as error:
         try:

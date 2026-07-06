@@ -373,6 +373,107 @@ code-server:
 	}
 }
 
+// TestMediatedBrokerRoutingNonObjectJSON pins clean failure when brokerctl
+// emits valid JSON that is not an object: bootstrap must exit with its own
+// error message, never a Python traceback.
+func TestMediatedBrokerRoutingNonObjectJSON(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+printf '%s\n' '"error"'
+exit 1
+`)
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      base-url: http://127.0.0.1:8471
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_BROKER_WAIT_SECONDS=1",
+	}, config)
+	if !strings.Contains(output, "bootstrap: broker routing failed for api-main") {
+		t.Fatalf("expected clean broker routing failure, got:\n%s", output)
+	}
+	if strings.Contains(output, "Traceback") {
+		t.Fatalf("bootstrap crashed with a traceback on non-object broker JSON:\n%s", output)
+	}
+}
+
+// TestMediatedBrokerRoutingSharedRetryDeadline pins the shared retry window:
+// retries for transient broker errors are bounded once per bootstrap pass,
+// so a second grant must not get a fresh full window after the first grant
+// already consumed it.
+func TestMediatedBrokerRoutingSharedRetryDeadline(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+capability="${!#}"
+count_file="${HOME}/routing-calls-${capability}"
+count=$(( $(cat "${count_file}" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "${count}" >"${count_file}"
+if [ "${capability}" = "api-first" ] && [ "${count}" -gt 2 ]; then
+  printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY"}'
+  exit 0
+fi
+printf '%s\n' '{"ok":false,"error":"unauthorized"}'
+exit 1
+`)
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  grants:
+    - provider: api-first
+      materialization: header-inject
+      base-url: http://127.0.0.1:8471
+    - provider: api-second
+      materialization: header-inject
+      base-url: http://127.0.0.1:8472
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	// The first grant burns most of the 5s window on two unauthorized
+	// retries (2s sleep each) before succeeding; the second grant then hits
+	// the already-consumed deadline after at most one retry.
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_BROKER_WAIT_SECONDS=5",
+	}, config)
+	if !strings.Contains(output, "bootstrap: broker routing denied for api-second: unauthorized") {
+		t.Fatalf("expected api-second to fail after the shared deadline, got:\n%s", output)
+	}
+	firstCalls := mustReadFile(t, filepath.Join(f.home, "routing-calls-api-first"))
+	if firstCalls != "3" {
+		t.Fatalf("expected api-first to succeed on its third attempt, got %s calls", firstCalls)
+	}
+	secondCalls := mustReadFile(t, filepath.Join(f.home, "routing-calls-api-second"))
+	if secondCalls != "1" && secondCalls != "2" {
+		t.Fatalf("api-second got a fresh retry window (%s calls); the deadline must be shared across grants", secondCalls)
+	}
+}
+
 // TestMediatedPlaceholderInert pins the placeholder convention: the constant
 // satisfies CLI syntax checks but grants nothing upstream.
 //

@@ -31,6 +31,12 @@ spec:
                   fieldPath: metadata.namespace
             - name: NVT_EGRESSD_IMAGE
               value: {{ .Values.egress.egressdImage | quote }}
+            {{- if and .Values.broker.enabled .Values.broker.tls.enabled }}
+            - name: NVT_BROKER_URL
+              value: "https://nvt-broker:7347"
+            - name: NVT_BROKER_CA_SECRET
+              value: {{ include "nvt.brokerTLSSecretName" . | quote }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080

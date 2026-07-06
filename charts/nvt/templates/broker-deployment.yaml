@@ -19,6 +19,12 @@ spec:
       {{- include "nvt.brokerSelectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.broker.tls.enabled }}
+      annotations:
+        # The broker loads its TLS cert/key once at startup; this checksum
+        # restarts it when the TLS Secret material (or name) changes.
+        checksum/broker-tls: {{ include "nvt.brokerTLSChecksum" . | quote }}
+      {{- end }}
       labels:
         {{- include "nvt.brokerSelectorLabels" . | nindent 8 }}
     spec:
@@ -64,6 +70,12 @@ spec:
               value: /config/agents.yaml
             - name: NVT_BROKER_AUDIT_LOG
               value: /state/audit.jsonl
+            {{- if .Values.broker.tls.enabled }}
+            - name: NVT_BROKER_TLS_CERT
+              value: /tls/tls.crt
+            - name: NVT_BROKER_TLS_KEY
+              value: /tls/tls.key
+            {{- end }}
           {{- if .Values.broker.envSecretName }}
           envFrom:
             - secretRef:
@@ -75,7 +87,17 @@ spec:
               readOnly: true
             - name: broker-state
               mountPath: /state
+            {{- if .Values.broker.tls.enabled }}
+            - name: broker-tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- if .Values.broker.tls.enabled }}
+        - name: broker-tls
+          secret:
+            secretName: {{ include "nvt.brokerTLSSecretName" . | quote }}
+        {{- end }}
         - name: broker-config
           projected:
             sources:
