@@ -16,8 +16,13 @@ import (
 // considered stale.
 const expiryMargin = 30 * time.Second
 
-// defaultTTL bounds cache reuse when the broker reports no expiry.
-const defaultTTL = 60 * time.Second
+// maxCacheTTL bounds cache reuse regardless of credential expiry. This is
+// the load-bearing half of the revocation bound: broker-side grant checks
+// run per *fetch*, so a revoked grant keeps working until the cache expires.
+// Credential validity (e.g. a ~1h GitHub installation token) must not set
+// that window; refetching is cheap because the broker caches minted tokens
+// with its own buffer.
+const maxCacheTTL = 60 * time.Second
 
 // hopByHopHeaders are never forwarded in either direction (RFC 9110 §7.6.1).
 var hopByHopHeaders = map[string]bool{
@@ -95,10 +100,13 @@ func (p *Proxy) material(ctx context.Context, method, path string) (*Material, e
 
 func (p *Proxy) entryValidLocked(entry *cacheEntry) bool {
 	now := p.now()
+	if !now.Before(entry.fetchedAt.Add(maxCacheTTL)) {
+		return false
+	}
 	if !entry.material.ExpiresAt.IsZero() {
 		return now.Before(entry.material.ExpiresAt.Add(-expiryMargin))
 	}
-	return now.Before(entry.fetchedAt.Add(defaultTTL))
+	return true
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {

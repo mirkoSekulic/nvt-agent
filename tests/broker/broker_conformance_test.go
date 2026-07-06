@@ -371,6 +371,8 @@ providers:
     plugin: token
     config:
       token-env: TEST_PAT_TOKEN
+      injection-hosts:
+        - api.example.test
     allow:
       repositories:
         - my-user/my-repo

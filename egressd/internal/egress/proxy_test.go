@@ -474,6 +474,66 @@ func TestCacheReusedUntilExpiry(t *testing.T) {
 	}
 }
 
+// TestCacheTTLClampBoundsRevocation pins the revocation bound: cached
+// material is never served past maxCacheTTL, even when the credential
+// itself is valid for much longer (the ~1h GitHub installation token is the
+// regression case). After the clamp expires, the next request re-asks the
+// broker — so a revoked grant fails closed within one clamp window, not one
+// credential lifetime.
+func TestCacheTTLClampBoundsRevocation(t *testing.T) {
+	broker := newFakeBroker(t)
+	broker.setExpiresAt(time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+	upstream := newFakeUpstream(t)
+	proxy, handle := newTestProxyWithHandle(t, broker, upstream)
+
+	var offset atomic.Int64
+	handle.Now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+
+	response, err := http.Get(proxy.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if calls := broker.callCount(); calls != 1 {
+		t.Fatalf("expected 1 initial fetch, got %d", calls)
+	}
+
+	// Within the clamp: served from cache.
+	offset.Store(int64(maxCacheTTL / 2))
+	response, err = http.Get(proxy.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if calls := broker.callCount(); calls != 1 {
+		t.Fatalf("expected cache reuse inside the clamp, got %d fetches", calls)
+	}
+
+	// Past the clamp, credential still valid for ~1h: must refetch anyway.
+	offset.Store(int64(maxCacheTTL + time.Second))
+	response, err = http.Get(proxy.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if calls := broker.callCount(); calls != 2 {
+		t.Fatalf("expected refetch after the clamp despite long-lived credential, got %d fetches", calls)
+	}
+
+	// Revocation: the broker now denies; the next post-clamp request fails
+	// closed instead of riding the hour-long credential.
+	broker.setFail(true)
+	offset.Store(int64(2*maxCacheTTL + 2*time.Second))
+	response, err = http.Get(proxy.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("revoked grant must fail closed after the clamp, got %d", response.StatusCode)
+	}
+}
+
 // TestStreamingResponsePassthrough pins SSE behavior: the first event reaches
 // the client while the upstream is still holding the connection open.
 func TestStreamingResponsePassthrough(t *testing.T) {
