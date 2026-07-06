@@ -1,7 +1,7 @@
 # Plan: Mediated Credential Egress
 
-Status: living document — Phases 0–2 completed (#53, #54, Phase 2 gate); Phase 2b in progress
-Version: v3.4 (Phase 2b CONNECT-only forward-proxy plumbing)
+Status: living document — Phases 0–3 completed (#53, #54, Phase 2 gate, #56, #58); Phase 3.5 in progress
+Version: v3.5 (Phase 3.5 redirectable-provider proof before Phase 4)
 
 ## Goal
 
@@ -66,18 +66,20 @@ A small trusted reverse proxy (Go, consistent with gateway/producer style) runni
 - **Routing** — credentialed API traffic is pointed at egressd via base-URL/proxy config. DNS, brokerd, and the event-webhook callback always go direct (they are the allowlist).
 - **Enforcement** — what stops the agent bypassing egressd and calling upstreams directly. This is the hard part (§7), and it is what separates non-possession (routing alone suffices) from exfil control (needs enforcement).
 
-Routing without enforcement still delivers non-possession once a concrete tool is
-configured to use egressd. It does not deliver egress control. Phase 3 wires the
-plumbing and metadata only; provider-specific tool redirect wiring lands in a
-later proof PR. Stated so nobody reads "traffic goes through the sidecar" as a
-property compose actually has.
+Routing without enforcement still delivers non-possession once a concrete tool
+or request path is configured to use egressd. It does not deliver egress
+control. Phase 3 wires the plumbing and metadata only; Phase 3.5 proves one
+redirectable request path against fakes. Provider-specific production tool
+redirect wiring still lands in focused provider PRs. Stated so nobody reads
+"traffic goes through the sidecar" as a blanket property compose has.
 
 ### 4. Runtime wiring
 
 `runtime/core/bootstrap.py` keys off what it's given, keeping the image mode-agnostic:
 
 - Phase 3 mediated grant → validate the mediated grant metadata, write egress metadata/placeholders needed for non-possession ratchets, and write **no** auth files. It does not yet point concrete tools at the sidecar.
-- First redirectable-provider proof PR → add provider-specific redirect wiring such as `ANTHROPIC_BASE_URL` or Codex `config.toml` (`model_providers.*.base_url`, `chatgpt_base_url`) once that provider proof is in scope.
+- Phase 3.5 redirectable-provider proof → add generic, grant-driven `redirect-env` wiring where a grant can persist selected environment variables from non-secret sources (`base-url` or the documented placeholder). The proof uses a fake/static bearer request path so CI needs no real provider subscription or key.
+- Later provider PRs → add provider-specific redirect wiring such as `ANTHROPIC_BASE_URL` or Codex `config.toml` (`model_providers.*.base_url`, `chatgpt_base_url`) only when that concrete provider proof is in scope.
 - Direct grant → today's behavior exactly (bundles / host-seeded `~/.codex`, `.agents/<name>/auth/claude`).
 
 **Non-secret placeholders are allowed where a CLI demands one.** Some CLIs refuse to start without a syntactically present API key or auth file. Mediated mode may write a fixed, obviously-non-secret placeholder (e.g. `NVT-PLACEHOLDER-NOT-A-KEY`) to satisfy the parser. Two conditions, both test-enforced: (1) the placeholder value is a documented constant carrying zero secret entropy, allowlisted by the non-possession smoke test; (2) a conformance test proves the placeholder is inert upstream — a direct (sidecar-bypassing) request presenting it is rejected by the provider, so possession of the placeholder grants nothing. egressd strips or replaces the placeholder header on injection; it must never be forwarded alongside the real credential.
@@ -233,6 +235,33 @@ proof PR. Phase-0 non-possession tests land in CI here; egress-denied stays
 skipped until Phase 5. (No enforcement yet — routing plumbing +
 non-possession only, per §3.)
 
+### Phase 3.5 — Redirectable-provider proof before Phase 4
+
+Before the Phase 4 git/TLS work, prove that the existing broker, egressd,
+sidecar, and bootstrap contract works end to end for one redirectable request
+shape without external provider dependencies:
+
+- Bootstrap supports generic `redirect-env` entries on mediated grants. Each
+  entry may persist only the grant `base-url` or the documented inert
+  placeholder into the agent env file; it cannot persist real credential
+  material.
+- The runtime non-possession smoke test verifies that the agent-visible config
+  contains only the egressd base URL plus placeholder and still has zero planted
+  broker/provider/git secrets in filesystem, generated env files, env snapshots,
+  or argv snapshots.
+- egressd has a static-bearer fake proof: the client sends the placeholder to
+  egressd, egressd calls broker `/v1/injection/headers`, the fake upstream sees
+  only the injected credential, and the placeholder never reaches upstream.
+- The operator kind smoke gains a mediated case that validates a header-inject
+  `AgentRun` with `egressHosts`, verifies the egressd sidecar and token
+  isolation in kind mode, and rejects mediated runtimeAuth, missing route hosts,
+  and file-bundle grants.
+
+This phase does **not** add CA material, TLS termination, git-over-HTTPS
+mediation, transparent proxying, NetworkPolicy, iptables, or a production
+provider-specific redirect such as Anthropic or Codex. It is the Phase 3 tail
+that proves the redirectable plumbing before Phase 4.
+
 ### Phase 4 — git-over-HTTPS mediation
 
 Per-agent CA, egressd TLS termination, repo-scope extraction, GitHub App token injection. Its own phase for its own risk surface. Delivers non-possession for git tokens; the reachability half waits for Phase 5 (§5 interim note).
@@ -274,6 +303,7 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 | 3 | Phase 2: ChatGPT-plan flow + refresh/SSE tests | **go/no-go decision recorded in the PR** |
 | 3b | Phase 2b: CONNECT-only egressd forward proxy, no TLS termination or injection | egressd CONNECT tests + Codex proxy harness |
 | 4 | Phase 3: operator + compose wiring; direct/mediated admission, paired egress identity, sidecar config, bootstrap non-possession tests → CI | broker/runtime/operator conformance green in CI |
+| 4b | Phase 3.5: redirectable static-bearer proof, generic `redirect-env`, mediated kind smoke | runtime/egressd fake proof + kind render smoke |
 | 5 | Phase 4: git-HTTPS mediation (CA, TLS termination) | trusted-core review — highest-risk surface, deliberately alone |
 | 6a | Phase 5: enforcement (own-Pod evaluation, iptables + FORWARD deny) | egress-denied test → CI |
 | 6b | Phase 5: audit, quotas, revocation, Anthropic proof; flip operator default | both smoke tests green |

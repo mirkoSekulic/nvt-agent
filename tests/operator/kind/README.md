@@ -11,6 +11,7 @@ tests/operator/kind/
   agentrun-payload.py     # no-GitHub AgentSchedule admission payload renderer
   cases/
     parallel-lifecycle.sh # current smoke case
+    mediated-egress.sh    # Phase 3.5 mediated sidecar/admission smoke
 ```
 
 ## Modes
@@ -26,6 +27,9 @@ Render mode validates the Helm chart render/lint path and case-specific payload
 generation. For `parallel-lifecycle`, it checks deterministic `metadata.name`,
 the per-run event-webhook callback URL, callback token env wiring,
 `smoke-complete`, and `completeOn: plugin.smoke.completed`.
+For `mediated-egress`, it checks mediated admission payloads for a
+header-inject grant with route hosts plus the runtimeAuth, missing-route, and
+file-bundle rejection shapes.
 
 Use kind mode for the full cluster smoke:
 
@@ -191,6 +195,7 @@ Select a case with `KIND_SMOKE_CASE`:
 ```sh
 KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
+KIND_SMOKE_MODE=render KIND_SMOKE_CASE=mediated-egress make operator-kind-smoke
 ```
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,
@@ -200,6 +205,14 @@ no-secret lifecycle:
 Helm chart -> operator + broker -> AgentSchedule admission -> AgentRun Pods ->
 event-webhook + smoke-complete -> operator callback -> Completed AgentRuns ->
 terminal Pod cleanup
+```
+
+The `mediated-egress` case exercises Phase 3.5 wiring for one redirectable
+header-inject grant:
+
+```text
+AgentSchedule admission -> mediated AgentRun -> egressd sidecar present ->
+egress broker token mounted only into egressd -> mismatch admissions rejected
 ```
 
 Future cases can be added under `tests/operator/kind/cases/`, for example:

@@ -13,12 +13,13 @@ broker:
 
 ## Agent Egress
 
-Agent egress defaults to direct mode. Phase 3 mediated wiring is exposed as
-values without changing that default:
+Agent egress mode is selected per `AgentRun` with `spec.egress`; the chart does
+not set a cluster-wide mode default. Direct mode remains the API default. The
+chart exposes only the egressd image used when an individual `AgentRun` opts
+into mediated mode:
 
 ```yaml
 egress:
-  mode: direct
   egressdImage: nvt-egressd:latest
 ```
 

@@ -171,6 +171,58 @@ func newTestProxy(t *testing.T, broker *fakeBroker, upstream *fakeUpstream) *htt
 	return server
 }
 
+// TestRedirectableStaticBearerProof is the Phase 3.5 redirectable-provider
+// proof: a generic tool config points at egressd with only the documented
+// placeholder, egressd asks the broker for injectable headers, and the fake
+// upstream receives only the real broker-owned credential.
+func TestRedirectableStaticBearerProof(t *testing.T) {
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	proxy, handle := newTestProxyWithHandle(t, broker, upstream)
+	handle.Route.Capability = "static-bearer-main"
+
+	toolBaseURL := proxy.URL
+	toolToken := Placeholder
+	request, err := http.NewRequest(http.MethodGet, toolBaseURL+"/v1/static-proof", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+toolToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from upstream, got %d", response.StatusCode)
+	}
+
+	record := upstream.last(t)
+	if got := record.header.Get("Authorization"); got != "Bearer "+realToken {
+		t.Fatalf("upstream Authorization = %q, want injected credential", got)
+	}
+	for name, values := range record.header {
+		for _, value := range values {
+			if strings.Contains(value, Placeholder) {
+				t.Fatalf("placeholder reached upstream in header %s", name)
+			}
+		}
+	}
+
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if len(broker.requests) != 1 {
+		t.Fatalf("broker request count = %d, want 1", len(broker.requests))
+	}
+	requested := broker.requests[0]
+	if requested["capability"] != "static-bearer-main" ||
+		requested["host"] != handle.Route.Upstream ||
+		requested["method"] != http.MethodGet ||
+		requested["path"] != "/v1/static-proof" {
+		t.Fatalf("unexpected broker injection request: %v", requested)
+	}
+}
+
 // TestInjectsRealTokenForPlaceholderAuth is the core Phase 1 proof: the
 // client sends the placeholder (or nothing), the upstream receives exactly
 // one Authorization header carrying the real broker-fetched token, and the

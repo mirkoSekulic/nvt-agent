@@ -112,8 +112,8 @@ func assertScrubbedGitState(t *testing.T, home string) {
 //  1. Start broker routing fixtures with known fixture secrets.
 //  2. Boot/render the agent container in mediated mode (MEDIATED=1 / egress:
 //     mediated) with header-inject grant metadata for all fixture providers.
-//  3. Validate routing-plumbing metadata only; concrete tool redirect wiring
-//     and real traffic through egressd are deferred to a provider proof PR.
+//  3. Validate routing-plumbing metadata and generic redirect env; the
+//     egressd fake-upstream proof lives in egressd/internal/egress tests.
 //  4. Export the container-visible state: agent home, NVT state dir, env
 //     (`/proc/1/environ` and shell env), process args (`ps axww`).
 //  5. Assert none of the fixture secrets appear (scanTreeForSecretMaterial
@@ -167,6 +167,9 @@ egress:
     - provider: api-main
       materialization: header-inject
       base-url: http://127.0.0.1:8471
+      redirect-env:
+        STATIC_BEARER_BASE_URL: base-url
+        STATIC_BEARER_TOKEN: placeholder
 runtime:
   command: codex
 tools:
@@ -193,11 +196,50 @@ code-server:
 	if strings.Contains(envFile, "NVT_EGRESS_BROKER_TOKEN") {
 		t.Fatalf("mediated agent env must not contain egress broker token key:\n%s", envFile)
 	}
+	if !strings.Contains(envFile, `export STATIC_BEARER_BASE_URL="http://127.0.0.1:8471"`) ||
+		!strings.Contains(envFile, `export STATIC_BEARER_TOKEN="`+mediatedPlaceholder+`"`) {
+		t.Fatalf("mediated redirect env missing base URL or placeholder:\n%s", envFile)
+	}
 	if !strings.Contains(egressMetadata, mediatedPlaceholder) || !strings.Contains(envFile, mediatedPlaceholder) {
 		t.Fatalf("mediated placeholder missing from metadata/env:\n%s\n%s", egressMetadata, envFile)
 	}
 	if _, err := os.Stat(filepath.Join(f.home, ".codex", "auth.json")); err == nil {
 		t.Fatalf("mediated bootstrap wrote Codex auth bundle")
+	}
+}
+
+func TestMediatedRedirectEnvValidation(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY"}'
+`)
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      base-url: http://127.0.0.1:8471
+      redirect-env:
+        STATIC_BEARER_SECRET: real-token
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+	}, config)
+	if !strings.Contains(output, "must be base-url or placeholder") {
+		t.Fatalf("expected redirect-env validation failure, got:\n%s", output)
 	}
 }
 
