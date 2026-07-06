@@ -1,6 +1,6 @@
 # Phase 5 Plan: Egress Enforcement + Audit + Quotas + Revocation
 
-Status: plan — implementation not started
+Status: prerequisite PR (broker TLS in the chart) in progress; 6a/6b not started
 Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §6, §7, Phase 5 (PRs 6a/6b in the sequence table)
 
 ## Goal

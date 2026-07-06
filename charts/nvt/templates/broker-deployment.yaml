@@ -64,6 +64,12 @@ spec:
               value: /config/agents.yaml
             - name: NVT_BROKER_AUDIT_LOG
               value: /state/audit.jsonl
+            {{- if .Values.broker.tls.enabled }}
+            - name: NVT_BROKER_TLS_CERT
+              value: /tls/tls.crt
+            - name: NVT_BROKER_TLS_KEY
+              value: /tls/tls.key
+            {{- end }}
           {{- if .Values.broker.envSecretName }}
           envFrom:
             - secretRef:
@@ -75,7 +81,17 @@ spec:
               readOnly: true
             - name: broker-state
               mountPath: /state
+            {{- if .Values.broker.tls.enabled }}
+            - name: broker-tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- if .Values.broker.tls.enabled }}
+        - name: broker-tls
+          secret:
+            secretName: {{ default .Values.broker.tls.secretName .Values.broker.tls.existingSecret | quote }}
+        {{- end }}
         - name: broker-config
           projected:
             sources:

@@ -49,7 +49,17 @@ const (
 	workspaceMountPath    = "/workspace"
 	initialPromptPlugin   = "initial-prompt"
 
-	brokerURL                  = "http://nvt-broker:7347"
+	defaultBrokerURL = "http://nvt-broker:7347"
+	// brokerCAVolumeName carries the broker's CA certificate (public) into
+	// the egressd and agent containers so both can verify the TLS broker leg.
+	// Only the ca.crt item is projected from the TLS Secret — the serving key
+	// never enters the agent Pod.
+	brokerCAVolumeName         = "broker-ca"
+	brokerCAKey                = "ca.crt"
+	egressdBrokerCAMount       = "/etc/nvt-egressd/broker-ca"
+	egressdBrokerCAFile        = egressdBrokerCAMount + "/" + brokerCAKey
+	agentBrokerCAMount         = "/etc/nvt-broker-ca"
+	agentBrokerCAFile          = agentBrokerCAMount + "/" + brokerCAKey
 	brokerAgentsConfigMapName  = "nvt-broker-agents"
 	brokerAgentsConfigKey      = "agents.yaml"
 	brokerTokenKey             = "NVT_BROKER_TOKEN"
@@ -701,6 +711,7 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	type egressdConfig struct {
 		BrokerURL           string         `json:"broker_url"`
 		AllowInsecureBroker bool           `json:"allow_insecure_broker"`
+		BrokerCAFile        string         `json:"broker_ca_file,omitempty"`
 		Routes              []egressdRoute `json:"routes"`
 		CA                  *egressdCA     `json:"ca,omitempty"`
 	}
@@ -731,9 +742,15 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		routeIndex++
 	}
 	config := egressdConfig{
-		BrokerURL:           brokerURL,
+		BrokerURL:           BrokerURL(),
 		AllowInsecureBroker: agentRun.Spec.EgressAllowInsecureBroker,
 		Routes:              routes,
+	}
+	if brokerCADistributed() {
+		// TLS broker leg: pin the CA so egressd verifies the broker instead
+		// of relying on the insecure flag.
+		config.BrokerCAFile = egressdBrokerCAFile
+		config.AllowInsecureBroker = false
 	}
 	if needCA {
 		config.CA = &egressdCA{PublishDir: egressCAMountPath}
@@ -776,6 +793,26 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		},
 	}
 	hasGitGrant := agentRunHasGitGrant(agentRun)
+	if brokerCADistributed() {
+		// The agent talks to the broker in both egress modes (brokerctl), so
+		// the CA rides along whenever the broker leg is TLS.
+		volumes = append(volumes, corev1.Volume{
+			Name: brokerCAVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: BrokerCASecretName(),
+					Items: []corev1.KeyToPath{
+						{Key: brokerCAKey, Path: brokerCAKey},
+					},
+				},
+			},
+		})
+		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+			Name:      brokerCAVolumeName,
+			MountPath: agentBrokerCAMount,
+			ReadOnly:  true,
+		})
+	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 		volumes = append(volumes, corev1.Volume{
 			Name: "egressd-config",
@@ -879,7 +916,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 				{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
 				{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
 				{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
-				{Name: "NVT_BROKER_URL", Value: brokerURL},
+				{Name: "NVT_BROKER_URL", Value: BrokerURL()},
 				{
 					Name: brokerTokenKey,
 					ValueFrom: &corev1.EnvVarSource{
@@ -908,9 +945,19 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_CA_FILE", Value: egressCAFilePath})
 		}
 	}
+	if brokerCADistributed() {
+		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_BROKER_CA_FILE", Value: agentBrokerCAFile})
+	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 		egressdVolumeMounts := []corev1.VolumeMount{
 			{Name: "egressd-config", MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
+		}
+		if brokerCADistributed() {
+			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
+				Name:      brokerCAVolumeName,
+				MountPath: egressdBrokerCAMount,
+				ReadOnly:  true,
+			})
 		}
 		if hasGitGrant {
 			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
@@ -924,7 +971,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Env: []corev1.EnvVar{
 				{Name: "NVT_EGRESSD_CONFIG", Value: egressdConfigPath},
-				{Name: "NVT_BROKER_URL", Value: brokerURL},
+				{Name: "NVT_BROKER_URL", Value: BrokerURL()},
 				{
 					Name: "NVT_BROKER_TOKEN",
 					ValueFrom: &corev1.EnvVarSource{
@@ -1020,6 +1067,36 @@ func EgressdImage() string {
 	return defaultEgressdImage
 }
 
+// BrokerURL is the broker base URL the operator wires into agent and egressd
+// containers. The chart sets NVT_BROKER_URL=https://nvt-broker:7347 when
+// broker TLS is enabled; the default stays plaintext so local/dev setups and
+// existing deployments are unchanged.
+func BrokerURL() string {
+	if url := strings.TrimSpace(os.Getenv("NVT_BROKER_URL")); url != "" {
+		return url
+	}
+	return defaultBrokerURL
+}
+
+// brokerIsTLS reports whether the broker leg is https, which requires the CA
+// certificate to be distributed to egressd and the agent.
+func brokerIsTLS() bool {
+	return strings.HasPrefix(BrokerURL(), "https://")
+}
+
+// BrokerCASecretName is the Secret holding the broker's CA certificate
+// (public material, key ca.crt). Empty means none configured.
+func BrokerCASecretName() string {
+	return strings.TrimSpace(os.Getenv("NVT_BROKER_CA_SECRET"))
+}
+
+// brokerCADistributed reports whether the operator both talks TLS to the
+// broker and knows which Secret carries the CA — the precondition for
+// mounting it and rendering broker_ca_file.
+func brokerCADistributed() bool {
+	return brokerIsTLS() && BrokerCASecretName() != ""
+}
+
 // AgentRunBrokerID returns the broker identity for an AgentRun.
 func AgentRunBrokerID(namespace, name string) string {
 	return namespace + "/" + name
@@ -1060,7 +1137,7 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		if agentRun.Spec.RuntimeAuth != nil {
 			return fmt.Errorf("egress mediated is incompatible with spec.runtimeAuth")
 		}
-		if strings.HasPrefix(brokerURL, "http://") && !agentRun.Spec.EgressAllowInsecureBroker {
+		if strings.HasPrefix(BrokerURL(), "http://") && !agentRun.Spec.EgressAllowInsecureBroker {
 			return fmt.Errorf("egress mediated with plaintext broker requires spec.egressAllowInsecureBroker=true for local/dev use")
 		}
 	}

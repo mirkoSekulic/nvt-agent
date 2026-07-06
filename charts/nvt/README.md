@@ -1,5 +1,36 @@
 # nvt Helm Chart
 
+## Broker TLS
+
+The broker serves TLS by default. The egressd→broker leg carries real
+credentials through the agent Pod's network namespace, so mediated runs in a
+cluster must not depend on `spec.egressAllowInsecureBroker`:
+
+```yaml
+broker:
+  tls:
+    enabled: true
+    secretName: nvt-broker-tls
+    existingSecret: ""
+```
+
+When `existingSecret` is empty, the chart generates a self-signed CA and a
+serving cert for `nvt-broker.<namespace>.svc` into `secretName` at install
+time and preserves it across upgrades (`helm lookup`), so the trust anchor
+does not rotate on every `helm upgrade`. Note that `helm template | kubectl
+apply` bypasses `lookup` and regenerates the cert on every render — use
+`helm upgrade --install` (or `existingSecret`) for stable trust.
+
+Set `existingSecret` to bring your own cert (for example from cert-manager);
+it must be a `kubernetes.io/tls` Secret that also carries `ca.crt`. The chart
+points the operator at the Secret (`NVT_BROKER_CA_SECRET`) and switches the
+operator-rendered broker URL to `https://nvt-broker:7347`; the operator then
+projects only the `ca.crt` item into agent Pods (agent and egressd
+containers) — the serving key never leaves the broker.
+
+With `tls.enabled=false` the broker stays plaintext and mediated AgentRuns
+must set `spec.egressAllowInsecureBroker: true` explicitly (local/dev only).
+
 ## Broker State Persistence
 
 By default the broker keeps `/state` on an `emptyDir`, preserving existing
