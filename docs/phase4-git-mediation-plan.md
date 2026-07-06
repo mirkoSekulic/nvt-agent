@@ -14,8 +14,11 @@ the zero-secrets invariant.
 ## Non-goals (each is its own phase)
 
 - Egress enforcement, NetworkPolicy, iptables — Phase 5. Interim honesty per
-  parent §5: the agent can still *reach* github.com directly at Phase-4 time;
-  it just gets nothing from doing so (401 without a token).
+  parent §5: the agent can still *reach* github.com directly at Phase-4 time.
+  Direct access gets no mediated credential — private-repo and write-scoped
+  operations fail — but public unauthenticated operations still work until
+  Phase-5 enforcement lands. Do not read Phase 4 as blocking direct GitHub
+  reach.
 - CONNECT-MITM, transparent proxying, proxy-env wiring — Phase 6 (reuses the
   CA built here).
 - git-SSH — disallowed in mediated mode, permanently.
@@ -75,10 +78,15 @@ considered:
 
 Hardening in the same stroke:
 
-- Leaf certs minted on demand via `tls.Config.GetCertificate` (SAN =
-  `127.0.0.1` / route hostname, hours-scale TTL, cached).
+- Leaf certs minted on demand via `tls.Config.GetCertificate` (hours-scale
+  TTL, cached). **Leafs are minted only for local redirect names** — IP SAN
+  `127.0.0.1` or a synthetic local hostname — never for real upstream names
+  such as `github.com`. Minting upstream-name SANs is exactly the line
+  Phase 6 crosses deliberately; Phase 4 must not cross it.
 - **Name constraints on the CA** so even a leaked key cannot sign for
-  arbitrary hosts.
+  arbitrary hosts. Defense-in-depth, not the boundary: the primary invariant
+  remains CA key only in egressd, CA cert only in the agent trust store,
+  leafs only for local redirect names.
 - Agent-side deletion of `ca.crt` or `GIT_SSL_NO_VERIFY` is self-DoS, not a
   bypass (parent §5): it breaks the agent's own git and still yields no token.
 
@@ -102,6 +110,12 @@ Add `injection_headers(host, method, path)` and `injection-hosts:
   carry write permission; `upload-pack` (fetch) needs read only. This is the
   first method/path-based authorization decision in the injection path —
   pinned by conformance tests.
+- **Permission shape (defined here, not improvised in the PR)** — grants gain
+  `permissions: { contents: read | write }`, mirroring GitHub App permission
+  keys. Default is `read`. The grant-level map intersects with the existing
+  provider-level `permissions` config (already passed into the mint body by
+  `_mint_token`); the broker maps `git-receive-pack` → requires
+  `contents: write` and mints the token with the narrower of the two.
 
 ### 4. egressd: generalize TLS serving + a git-aware route
 
@@ -110,6 +124,15 @@ static cert/key files remain supported. The existing `Proxy` (placeholder
 stripping, fail-closed cache, pinned upstream, `validateUpstream` SSRF guard)
 is reused as-is — git traffic is just another capability route to
 `github.com:443`.
+
+**Explicit upstream identity requirement**: the client-facing host is
+`127.0.0.1` (via the `insteadOf` rewrite), but the outbound URL, `Host`
+header, and TLS SNI must all be forced to the pinned route upstream — never
+derived from the client request's Host. `buildOutbound` already forces
+URL/Host to `Route.Upstream`; Phase 4 states this as a requirement, extends
+it explicitly to SNI on the re-originated TLS connection, and pins it with a
+test on the git route (the first route where client-facing and upstream
+identities diverge).
 
 **Spike item**: verify git smart-HTTP POST bodies (chunked pack uploads,
 `Expect: 100-continue`, large clones) stream through `buildOutbound` without
@@ -145,7 +168,7 @@ otherwise stays hard-disallowed.
 | # | Work item | Where | Test that pins it |
 |---|---|---|---|
 | 1 | `github_app.injection_headers` + git-path repo extraction + read/write permission mapping | `broker/plugins/github_app/` | `tests/broker/injection_conformance_test.go`: repo allow/deny, path shapes, push-needs-write, egress-role-only, token never vended to agent identity, audit entries |
-| 2 | CA generation at boot, cert publication, `GetCertificate` leaf signing, name constraints | `egressd/internal/egress/`, `cmd/egressd/main.go` | First real TLS e2e in `proxy_test.go`: client with CA pool → HTTPS route → fake git upstream sees injected Basic auth; client-supplied auth stripped; CA key never readable via the shared volume |
+| 2 | CA generation at boot, cert publication, `GetCertificate` leaf signing, name constraints | `egressd/internal/egress/`, `cmd/egressd/main.go` | First real TLS e2e in `proxy_test.go`: client with CA pool → HTTPS route → fake git upstream sees injected Basic auth; **agent-supplied `Authorization: Basic <garbage>` is stripped — upstream sees only the broker-injected Basic header, exactly once**; outbound Host + SNI = pinned upstream, never client Host; leaf SANs are local-only (no upstream names); CA key never readable via the shared volume |
 | 3 | git smart-HTTP streaming proof | egressd tests | `git ls-remote`/`clone` against a fake `info/refs` + `upload-pack` upstream through egressd — CI-able, no GitHub dependency |
 | 4 | Bootstrap git wiring (sslCAInfo, insteadOf, cert wait) | `runtime/core/bootstrap.py` | `mediated_smoke_test.go`: scrub still holds, rewrite + CA config present, secret scan gains needles for the installation token **and the CA private key PEM** |
 | 5 | Multi-grant admission + operator CA/TLS rendering (shared emptyDir, TLS fields in `RenderEgressdConfigJSON`) | `operator/internal/controller/` | Controller tests: N grants → N routes; volume shape (key not mounted in agent); admission failures stay loud |
@@ -172,7 +195,8 @@ phase ships alone. Review must specifically cover:
 ## Open questions (settled in the PR, not before)
 
 - Grant schema for "this is a git grant" — likely implied by provider type
-  (`github-app` + `header-inject`), no new field.
+  (`github-app` + `header-inject`); no new type/flag field beyond the
+  `permissions` map defined in §3.
 - Compose `agent-init`: CA generated host-side vs. egressd entrypoint —
   recommend entrypoint, for parity with k8s.
 - Leaf cert for `127.0.0.1` IP SAN vs. a synthetic hostname — git/curl both
