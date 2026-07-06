@@ -44,6 +44,17 @@ func run() error {
 		}
 		broker = &egress.BrokerClient{URL: config.BrokerURL, Token: token, Client: brokerHTTP}
 	}
+	var ca *egress.CA
+	if config.CA != nil {
+		ca, err = egress.NewCA()
+		if err != nil {
+			return err
+		}
+		if err := ca.PublishCert(config.CA.PublishDir); err != nil {
+			return err
+		}
+		log.Printf("egressd: published per-agent CA certificate to %s", config.CA.PublishDir)
+	}
 	transport := &http.Transport{ForceAttemptHTTP2: true}
 	listenerCount := len(config.Routes)
 	if config.ForwardProxy != nil {
@@ -59,11 +70,15 @@ func run() error {
 		}
 		log.Printf("egressd: routing %s (%s) -> %s (capability %s)", route.Listen, scheme, route.Upstream, route.Capability)
 		go func(route egress.Route, server *http.Server) {
-			if route.TLSEnabled() {
+			switch {
+			case route.ListenTLS == egress.RouteListenTLSCA:
+				server.TLSConfig = ca.ServerTLSConfig()
+				errors <- server.ListenAndServeTLS("", "")
+			case route.TLSEnabled():
 				errors <- server.ListenAndServeTLS(route.ListenTLSCert, route.ListenTLSKey)
-				return
+			default:
+				errors <- server.ListenAndServe()
 			}
-			errors <- server.ListenAndServe()
 		}(route, server)
 	}
 	if config.ForwardProxy != nil {

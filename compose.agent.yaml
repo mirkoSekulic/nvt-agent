@@ -17,6 +17,8 @@ services:
       - ${CODEX_CONFIG_DIR}:/root/.codex
       - ${CLAUDE_CONFIG_DIR}:/root/.claude
       - agent-home:/root
+      # ca.crt only; the CA private key never leaves egressd process memory.
+      - egress-ca:/nvt-egress-ca:ro
 
   egressd:
     image: nvt-egressd:latest
@@ -28,6 +30,7 @@ services:
       NVT_EGRESSD_CONFIG: /config/egressd.json
     volumes:
       - ${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro
+      - egress-ca:/nvt-egress-ca
     network_mode: service:docker
     depends_on:
       docker:
@@ -65,6 +68,7 @@ services:
 volumes:
   agent-home:
   docker-data:
+  egress-ca:
 
 networks:
   agents-proxy:

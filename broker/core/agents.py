@@ -12,6 +12,7 @@ from broker.plugins.github_app.provider import ProviderError
 
 VALID_ROLES = {"agent", "egress"}
 VALID_MATERIALIZATIONS = {"file-bundle", "header-inject"}
+VALID_PERMISSION_VALUES = {"read", "write"}
 
 
 class AgentRegistry:
@@ -144,7 +145,19 @@ class AgentRegistry:
                     if not isinstance(repo, str) or not repo:
                         fail(f"agents[{index}].grants[{grant_index}].repositories[{repo_index}] must be a non-empty string")
                     repositories.append(repo)
-                grants.append({"provider": provider, "repositories": repositories, "materialization": materialization})
+                raw_permissions = grant.get("permissions")
+                permissions = {}
+                if raw_permissions is not None:
+                    if not isinstance(raw_permissions, dict):
+                        fail(f"agents[{index}].grants[{grant_index}].permissions must be a YAML object")
+                    for key, value in raw_permissions.items():
+                        if not isinstance(key, str) or not key or value not in VALID_PERMISSION_VALUES:
+                            fail(
+                                f"agents[{index}].grants[{grant_index}].permissions must map permission names to one of: "
+                                f"{', '.join(sorted(VALID_PERMISSION_VALUES))}"
+                            )
+                        permissions[key] = value
+                grants.append({"provider": provider, "repositories": repositories, "materialization": materialization, "permissions": permissions})
             output[token_hash] = {"id": agent_id, "role": "agent", "paired_agent": None, "grants": grants}
             roles_by_id[agent_id] = "agent"
         for index, agent_id, paired_agent in pairings:

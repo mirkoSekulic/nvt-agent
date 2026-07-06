@@ -12,10 +12,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse, unquote
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from broker.core.config import env_value, fail, list_value, string_value
+from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 
 
 TOKEN_BUFFER_SECONDS = 300
+PERMISSION_ORDER = {"read": 0, "write": 1}
+GIT_SERVICES = {"git-upload-pack", "git-receive-pack"}
 DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_PAGES = 20
 DEFAULT_PER_PAGE = 100
@@ -55,6 +57,9 @@ class GithubAppProvider:
         self.max_response_bytes = self._int_config("max-response-bytes", DEFAULT_MAX_RESPONSE_BYTES)
         self.max_pages = self._int_config("max-pages", DEFAULT_MAX_PAGES)
         self.per_page = self._int_config("per-page", DEFAULT_PER_PAGE)
+        self.injection_hosts = injection_hosts(self.config, self.name)
+        # git-capable: routing tells bootstrap to install git redirect wiring.
+        self.injection_git = bool(self.injection_hosts)
         self.cache = {}
         self.cache_lock = threading.Lock()
         self.identity_cache = None
@@ -162,8 +167,8 @@ class GithubAppProvider:
     def target_from_repo(self, repo):
         return f"github.com/{repo}"
 
-    def _cache_key(self, repo):
-        permission_key = ",".join(f"{key}:{self.permissions[key]}" for key in sorted(self.permissions))
+    def _cache_key(self, repo, permissions):
+        permission_key = ",".join(f"{key}:{permissions[key]}" for key in sorted(permissions))
         return "|".join([self.name, repo, permission_key])
 
     def _key_lock(self, key):
@@ -174,22 +179,24 @@ class GithubAppProvider:
                 self.key_locks[key] = lock
             return lock
 
-    def token_for_repo(self, repo, effective_repositories):
+    def token_for_repo(self, repo, effective_repositories, permissions=None):
+        if permissions is None:
+            permissions = self.permissions
         self._ensure_repo_allowed(repo, effective_repositories)
-        key = self._cache_key(repo)
+        key = self._cache_key(repo, permissions)
         with self._key_lock(key):
             cached = self.cache.get(key, {})
             if cached.get("token") and self._parse_time(cached.get("expires_at")) > time.time() + TOKEN_BUFFER_SECONDS:
                 return cached["token"], cached.get("expires_at")
-            token, expires_at = self._mint_token(repo)
+            token, expires_at = self._mint_token(repo, permissions)
             self.cache[key] = {"token": token, "expires_at": expires_at}
             return token, expires_at
 
-    def _mint_token(self, repo):
+    def _mint_token(self, repo, permissions):
         owner, name = repo.split("/", 1)
         body = {"repositories": [name]}
-        if self.permissions:
-            body["permissions"] = self.permissions
+        if permissions:
+            body["permissions"] = permissions
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
         installation_id = self._provider_value("installation-id")
         request = Request(
@@ -309,6 +316,84 @@ class GithubAppProvider:
             if fnmatch.fnmatchcase(repo, pattern):
                 return
         raise ProviderError("repo-not-allowed")
+
+    def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
+        method = method.upper()
+        effective_repositories = (grant or {}).get("repositories")
+        git = self._git_path(path)
+        if git is not None:
+            repo, service = git
+            if service in GIT_SERVICES:
+                if method != "POST":
+                    raise ProviderError("method-not-allowed")
+            elif method != "GET":
+                raise ProviderError("method-not-allowed")
+            permissions = self._git_permissions(service, grant)
+            token, expires_at = self.token_for_repo(repo, effective_repositories, permissions)
+            credentials = base64.b64encode(f"x-access-token:{token}".encode("ascii")).decode("ascii")
+            headers = {"authorization": f"Basic {credentials}"}
+        else:
+            if method not in self.allowed_methods:
+                raise ProviderError("method-not-allowed")
+            repo = self._repo_from_path(path)
+            token, expires_at = self.token_for_repo(repo, effective_repositories)
+            headers = {"authorization": f"Bearer {token}"}
+        return headers, self._injection_expiry(expires_at), ["authorization"]
+
+    def _git_path(self, path):
+        """Classify a git smart-HTTP path; return (repo, service) or None for API paths."""
+        parts = [unquote(part) for part in path.split("/") if part]
+        if any(part in {".", ".."} or "/" in part or "\\" in part for part in parts):
+            raise ProviderError("path-not-allowed")
+        if not parts or parts[0] == "repos":
+            return None
+        if len(parts) == 4 and parts[2] == "info" and parts[3] == "refs":
+            service = "info/refs"
+        elif len(parts) == 3 and parts[2] in GIT_SERVICES:
+            service = parts[2]
+        else:
+            raise ProviderError("path-not-allowed")
+        owner = parts[0]
+        repo = parts[1].removesuffix(".git")
+        if not owner or not repo:
+            raise ProviderError("path-not-allowed")
+        return f"{owner}/{repo}", service
+
+    def _effective_contents(self, grant):
+        """Narrower of the grant-level and provider-level contents permission."""
+        grant_permissions = (grant or {}).get("permissions") or {}
+        value = grant_permissions.get("contents", "read")
+        if value not in PERMISSION_ORDER:
+            raise ProviderError("permissions-invalid", f"grant contents permission must be read or write, got {value!r}", 403)
+        if self.permissions:
+            ceiling = self.permissions.get("contents")
+            if ceiling not in PERMISSION_ORDER:
+                raise ProviderError("write-not-allowed", "provider permissions do not allow contents access", 403)
+            if PERMISSION_ORDER[ceiling] < PERMISSION_ORDER[value]:
+                value = ceiling
+        return value
+
+    def _git_permissions(self, service, grant):
+        effective = self._effective_contents(grant)
+        if service == "git-receive-pack":
+            if effective != "write":
+                raise ProviderError("write-not-allowed", "git push requires a grant with contents: write", 403)
+            contents = "write"
+        elif service == "git-upload-pack":
+            contents = "read"
+        else:
+            # info/refs advertisement: the service is in the query string,
+            # which never reaches the broker, so mint the effective (already
+            # narrowed) scope so a granted push can advertise refs.
+            contents = effective
+        return {"contents": contents}
+
+    def _injection_expiry(self, expires_at):
+        timestamp = self._parse_time(expires_at)
+        if timestamp <= 0:
+            return expires_at
+        buffered = datetime.fromtimestamp(timestamp - TOKEN_BUFFER_SECONDS, timezone.utc)
+        return buffered.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def _filtered_headers(self, headers):
         output = {}

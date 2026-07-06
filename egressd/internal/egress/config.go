@@ -41,12 +41,20 @@ type Route struct {
 	// pins certs". Both must be set together or neither.
 	ListenTLSCert string `json:"listen_tls_cert"`
 	ListenTLSKey  string `json:"listen_tls_key"`
+	// ListenTLS selects a managed TLS mode for the agent-facing listener.
+	// The only supported value is "ca": serve HTTPS with an on-demand leaf
+	// signed by the boot-generated per-agent CA (requires the config-level
+	// ca block). Mutually exclusive with listen_tls_cert/listen_tls_key.
+	ListenTLS string `json:"listen_tls"`
 }
 
 // TLSEnabled reports whether the agent-facing listener serves HTTPS.
 func (r Route) TLSEnabled() bool {
-	return r.ListenTLSCert != "" && r.ListenTLSKey != ""
+	return r.ListenTLS == RouteListenTLSCA || (r.ListenTLSCert != "" && r.ListenTLSKey != "")
 }
+
+// RouteListenTLSCA is the managed listen_tls mode backed by the per-agent CA.
+const RouteListenTLSCA = "ca"
 
 // Config is the egressd configuration file shape.
 type Config struct {
@@ -62,6 +70,17 @@ type Config struct {
 	BrokerCAFile string              `json:"broker_ca_file"`
 	Routes       []Route             `json:"routes"`
 	ForwardProxy *ForwardProxyConfig `json:"forward_proxy"`
+	// CA enables the boot-generated per-agent CA backing listen_tls: ca
+	// routes. Only the CA certificate is ever published; the key stays in
+	// egressd memory.
+	CA *CAConfig `json:"ca"`
+}
+
+// CAConfig configures the boot-generated per-agent CA.
+type CAConfig struct {
+	// PublishDir is where ca.crt is written for the agent container to
+	// trust (a shared volume mounted read-only on the agent side).
+	PublishDir string `json:"publish_dir"`
 }
 
 // ForwardProxyConfig enables CONNECT-only blind-tunnel proxying. It does not
@@ -124,6 +143,21 @@ func (c *Config) Validate() error {
 		if (route.ListenTLSCert == "") != (route.ListenTLSKey == "") {
 			return fmt.Errorf("routes[%d]: listen_tls_cert and listen_tls_key must be set together", index)
 		}
+		switch route.ListenTLS {
+		case "":
+		case RouteListenTLSCA:
+			if route.ListenTLSCert != "" || route.ListenTLSKey != "" {
+				return fmt.Errorf("routes[%d]: listen_tls: ca is mutually exclusive with listen_tls_cert/listen_tls_key", index)
+			}
+			if c.CA == nil {
+				return fmt.Errorf("routes[%d]: listen_tls: ca requires the config-level ca block", index)
+			}
+		default:
+			return fmt.Errorf("routes[%d]: listen_tls must be %q when set, got %q", index, RouteListenTLSCA, route.ListenTLS)
+		}
+	}
+	if c.CA != nil && c.CA.PublishDir == "" {
+		return fmt.Errorf("ca.publish_dir is required")
 	}
 	if c.ForwardProxy != nil {
 		if err := c.ForwardProxy.Validate(); err != nil {

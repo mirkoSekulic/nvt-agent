@@ -216,10 +216,51 @@ func TestRedirectableStaticBearerProof(t *testing.T) {
 	}
 	requested := broker.requests[0]
 	if requested["capability"] != "static-bearer-main" ||
-		requested["host"] != handle.Route.Upstream ||
+		requested["host"] != injectionHost(handle.Route.Upstream) ||
 		requested["method"] != http.MethodGet ||
 		requested["path"] != "/v1/static-proof" {
 		t.Fatalf("unexpected broker injection request: %v", requested)
+	}
+}
+
+// TestInjectionHostStripsUpstreamPort pins the host-normalization rule: the
+// broker authorizes against bare hostnames (provider injection-hosts), so a
+// route pinned as host:port must ask the broker for the hostname alone —
+// otherwise git routes pinned as github.com:443 fail closed on every request.
+func TestInjectionHostStripsUpstreamPort(t *testing.T) {
+	cases := map[string]string{
+		"github.com:443":  "github.com",
+		"github.com":      "github.com",
+		"127.0.0.1:8080":  "127.0.0.1",
+		"[::1]:8443":      "::1",
+		"api.example.test": "api.example.test",
+	}
+	for upstream, want := range cases {
+		if got := injectionHost(upstream); got != want {
+			t.Errorf("injectionHost(%q) = %q, want %q", upstream, got, want)
+		}
+	}
+
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	// The fixture pins the upstream as host:port, the same shape the
+	// operator renders for git routes (egressHosts: [github.com:443]).
+	server, handle := newTestProxyWithHandle(t, broker, upstream)
+	if !strings.Contains(handle.Route.Upstream, ":") {
+		t.Fatalf("fixture upstream %q should carry a port", handle.Route.Upstream)
+	}
+	response, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 through ported upstream, got %d", response.StatusCode)
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if len(broker.requests) == 0 || broker.requests[0]["host"] != "127.0.0.1" {
+		t.Fatalf("broker asked for %v, want the bare upstream hostname", broker.requests)
 	}
 }
 

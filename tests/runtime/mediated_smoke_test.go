@@ -81,10 +81,12 @@ func scanTextForSecretMaterial(t *testing.T, label string, text string, secrets 
 
 // assertScrubbedGitState fails if the container's git configuration retains
 // any credential path: helpers, extraHeader injection, URL rewrites, or
-// stored credential files (protocol/injection.md, plan section 5).
+// stored credential files (protocol/injection.md, plan section 5). The one
+// allowed rewrite is the managed Phase 4 insteadOf pointing at the local
+// egressd redirect listener — anything else is retained pre-existing state.
 func assertScrubbedGitState(t *testing.T, home string) {
 	t.Helper()
-	forbiddenConfig := []string{"credential.helper", "http.extraheader", "insteadof"}
+	forbiddenConfig := []string{"credential.helper", "http.extraheader", "helper =", "extraheader ="}
 	for _, name := range []string{".gitconfig", ".config/git/config"} {
 		path := filepath.Join(home, name)
 		content, err := os.ReadFile(path)
@@ -95,6 +97,18 @@ func assertScrubbedGitState(t *testing.T, home string) {
 		for _, needle := range forbiddenConfig {
 			if strings.Contains(text, needle) {
 				t.Errorf("mediated git config %s retains %q", path, needle)
+			}
+		}
+		section := ""
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "[") {
+				section = trimmed
+			}
+			if strings.Contains(trimmed, "insteadof") &&
+				!strings.HasPrefix(section, `[url "https://127.0.0.1`) &&
+				!strings.HasPrefix(section, `[url "http://127.0.0.1`) {
+				t.Errorf("mediated git config %s retains foreign insteadOf under %s: %s", path, section, trimmed)
 			}
 		}
 	}
@@ -240,6 +254,122 @@ code-server:
 	}, config)
 	if !strings.Contains(output, "must be base-url or placeholder") {
 		t.Fatalf("expected redirect-env validation failure, got:\n%s", output)
+	}
+}
+
+// TestMediatedGitWiring pins the Phase 4 bootstrap wiring for a git-typed
+// grant (docs/phase4-git-mediation-plan.md §6): pre-existing git credential
+// state is scrubbed, then the managed insteadOf rewrite and http.sslCAInfo
+// are installed pointing at the local TLS redirect, GIT_TERMINAL_PROMPT is
+// disabled, and no installation-token or CA-private-key material exists
+// anywhere the agent can read.
+func TestMediatedGitWiring(t *testing.T) {
+	f := newFixture(t)
+	secrets := []string{
+		"fixture-installation-token",
+		"fixture-ca-private-key",
+	}
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$*" = "injection routing --capability git-app" ]; then
+  printf '%s\n' '{"ok":true,"hosts":["github.com"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY","git":true}'
+  exit 0
+fi
+echo "unexpected brokerctl args: $*" >&2
+exit 1
+`)
+	mustWriteFile(t, filepath.Join(f.home, ".gitconfig"), `[credential]
+	helper = store
+[url "https://fixture-git-stored-token@example.test/"]
+	insteadOf = https://example.test/
+`)
+	mustWriteFile(t, filepath.Join(f.home, ".git-credentials"), "https://fixture-git-stored-token@example.test\n")
+	caDir := t.TempDir()
+	caFile := filepath.Join(caDir, "ca.crt")
+	mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nfixture-ca-cert\n-----END CERTIFICATE-----\n")
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants:
+    - provider: git-app
+      materialization: header-inject
+      base-url: https://127.0.0.1:8473
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), true, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+	}, config)
+
+	gitConfig := mustReadFile(t, filepath.Join(f.home, ".gitconfig"))
+	if !strings.Contains(gitConfig, "sslCAInfo = "+caFile) {
+		t.Fatalf("git config missing http.sslCAInfo:\n%s", gitConfig)
+	}
+	if !strings.Contains(gitConfig, `[url "https://127.0.0.1:8473/"]`) ||
+		!strings.Contains(gitConfig, "insteadOf = https://github.com/") {
+		t.Fatalf("git config missing managed insteadOf rewrite:\n%s", gitConfig)
+	}
+	if !strings.Contains(gitConfig, "insteadOf = git@github.com:") {
+		t.Fatalf("git config missing SSH-shape convenience rewrite:\n%s", gitConfig)
+	}
+	if strings.Contains(gitConfig, "example.test") || strings.Contains(gitConfig, "helper") {
+		t.Fatalf("pre-existing git credential state survived scrub:\n%s", gitConfig)
+	}
+	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
+	if !strings.Contains(envFile, `export GIT_TERMINAL_PROMPT="0"`) {
+		t.Fatalf("mediated git env missing GIT_TERMINAL_PROMPT:\n%s", envFile)
+	}
+	assertScrubbedGitState(t, f.home)
+	scanTreeForSecretMaterial(t, f.home, secrets)
+	scanTextForSecretMaterial(t, "bootstrap output", output, secrets)
+}
+
+// TestMediatedGitWiringFailsClosedWithoutCA pins the fail-closed CA wait: a
+// git grant with an https redirect and no published ca.crt aborts bootstrap
+// instead of continuing without a trust path.
+func TestMediatedGitWiringFailsClosedWithoutCA(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' '{"ok":true,"hosts":["github.com"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY","git":true}'
+`)
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  grants:
+    - provider: git-app
+      materialization: header-inject
+      base-url: https://127.0.0.1:8473
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + filepath.Join(t.TempDir(), "missing", "ca.crt"),
+		"NVT_EGRESS_CA_WAIT_SECONDS=1",
+	}, config)
+	if !strings.Contains(output, "CA certificate") || !strings.Contains(output, "git grant git-app") {
+		t.Fatalf("expected fail-closed CA wait error, got:\n%s", output)
 	}
 }
 

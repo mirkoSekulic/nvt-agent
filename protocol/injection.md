@@ -126,6 +126,10 @@ Rules:
   provider; the provider computes injectable headers for
   `(host, method, path)`. `egressd` contains no provider-specific logic —
   new providers are broker plugins with zero sidecar changes.
+- `host` is the pinned upstream **hostname without a port**. Provider
+  `injection-hosts` entries are bare hostnames, and `egressd` strips any
+  `:port` from its pinned upstream before asking; the port applies only to
+  the dial target.
 - Response header names are lowercased.
 - `expires_at` is the cache ceiling. `egressd` must not serve cached material
   past it and must not fall back to stale material when a refetch fails
@@ -170,6 +174,12 @@ Response:
   "placeholder": "NVT-PLACEHOLDER-NOT-A-KEY"
 }
 ```
+
+A git-capable capability (a `github-app` provider with `injection-hosts`)
+additionally reports `"git": true`. The flag is a non-secret routing hint:
+runtime bootstrap installs the git redirect wiring (managed `insteadOf`
+rewrite, `http.sslCAInfo` trust for the per-agent CA, `GIT_TERMINAL_PROMPT=0`)
+for grants whose routing carries it. Non-git capabilities omit the field.
 
 The local base URL the agent's tooling points at (the `egressd` listen
 address) is composed by runtime bootstrap, not returned by the broker.

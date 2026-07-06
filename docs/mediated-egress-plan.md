@@ -1,7 +1,7 @@
 # Plan: Mediated Credential Egress
 
-Status: living document — Phases 0–3 completed (#53, #54, Phase 2 gate, #56, #58); Phase 3.5 in progress
-Version: v3.5 (Phase 3.5 redirectable-provider proof before Phase 4)
+Status: living document — Phases 0–4 completed (#53, #54, Phase 2 gate, #56, #58, #59, Phase 4 git-over-HTTPS mediation)
+Version: v3.6 (Phase 4 landed: per-agent CA, TLS-terminated git route, repo-scoped injection, multi-grant routes)
 
 ## Goal
 
@@ -86,11 +86,17 @@ redirect wiring still lands in focused provider PRs. Stated so nobody reads
 
 ### 5. git-over-HTTPS mediation (its own phase — highest-risk surface)
 
+Landed as Phase 4 (`docs/phase4-git-mediation-plan.md`): the `github_app`
+provider serves git smart-HTTP injection with read/write permission mapping,
+egressd generates a per-agent CA at boot and terminates TLS on the git route,
+bootstrap installs the managed redirect wiring, and mediated runs support one
+route per header-inject grant.
+
 To honor the zero-secrets bright line for git, the token must be injected, not handed to git (the credential-helper path necessarily passes the token through agent-owned process memory, so it cannot satisfy the invariant):
 
 - **GitHub App is mediatable** because the repo is in the URL (`/repos/owner/name/...`, `github.com/owner/repo.git`) → egressd extracts scope, fetches a per-repo installation token, injects `Authorization`. The REST half is already broker-mediated via `/v1/http/request`.
 - **git-HTTPS forces egressd to be a TLS-terminating proxy** with a per-agent CA. Only the **CA certificate** enters the agent trust store; the **CA private key lives exclusively in egressd** and is itself subject to the zero-secrets invariant (a key in the container would let the agent impersonate any upstream to itself and harvest injected credentials). A hostile root agent deleting the CA cert or setting `GIT_SSL_NO_VERIFY` is self-DoS, not a bypass — it breaks the agent's own git and still yields no token.
-- **Mediated bootstrap scrubs pre-existing git auth state**: existing credential helpers are unset (`credential.helper` cleared at system/global scope), `http.extraHeader` and `url.*.insteadOf` rewrites are removed, and `~/.git-credentials` / credential caches are absent. Otherwise stale local credentials — seeded homes, leftover helper config — silently violate the zero-secret invariant while all injection tests pass. The non-possession smoke test asserts this scrubbed state explicitly.
+- **Mediated bootstrap scrubs pre-existing git auth state**: existing credential helpers are unset (`credential.helper` cleared at system/global scope), `http.extraHeader` and `url.*.insteadOf` rewrites are removed, and `~/.git-credentials` / credential caches are absent. Otherwise stale local credentials — seeded homes, leftover helper config — silently violate the zero-secret invariant while all injection tests pass. The non-possession smoke test asserts this scrubbed state explicitly. After the scrub, Phase 4 bootstrap installs the one managed rewrite (`url."https://127.0.0.1:<git-port>/".insteadOf`) plus `http.sslCAInfo` for the published CA certificate; the smoke test distinguishes this managed local rewrite from retained foreign ones.
 - **Interim honesty**: until Phase 5 lands, git mediation delivers non-possession only. The CA-deletion analysis is complete on its own (no CA → broken git, still no token), but "the agent cannot reach github.com directly at all" is a Phase-5 enforcement property — this doc must not be read as implying it holds at Phase-4 time.
 - **git-SSH and file-native-TLS tools are disallowed in mediated mode.** Force HTTPS remotes.
 
@@ -222,10 +228,11 @@ AgentRun gains `egress: direct|mediated`; broker grants gain
 Direct remains the default and renders the existing Pod/compose behavior.
 Mediated mode conditionally adds the egressd sidecar, a separate paired egress
 broker identity, sidecar config, and bootstrap metadata for header-inject grants
-only; mismatch in either direction fails admission before side effects. Until
-multi-route agent config is fully designed, Phase 3 accepts exactly one
-header-inject grant and fails closed otherwise. Codex plan-auth remains on the
-direct file-bundle fallback after the Phase 2 NO-GO.
+only; mismatch in either direction fails admission before side effects. Phase 3
+accepted exactly one header-inject grant; Phase 4 lifted that limit — a
+mediated run now gets one route (and local port) per header-inject grant.
+Codex plan-auth remains on the direct file-bundle fallback after the Phase 2
+NO-GO.
 
 Phase 3 is routing plumbing plus non-possession, not end-to-end tool routing.
 `bootstrap.py` validates mediated grant metadata and writes egress metadata, but

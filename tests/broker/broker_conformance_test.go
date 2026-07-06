@@ -337,6 +337,36 @@ providers:
         pull_requests: read
         checks: read
       methods:%s
+  - name: git-app
+    plugin: github-app
+    config:
+      app-id: 123
+      installation-id: 42
+      private-key-base64-env: TEST_PRIVATE_KEY_B64
+      api-url: %[1]q
+      injection-hosts:
+        - github.com
+    allow:
+      repositories:
+%[4]s      permissions:
+        contents: write
+      methods:
+        - GET
+  - name: git-app-ro
+    plugin: github-app
+    config:
+      app-id: 123
+      installation-id: 42
+      private-key-base64-env: TEST_PRIVATE_KEY_B64
+      api-url: %[1]q
+      injection-hosts:
+        - github.com
+    allow:
+      repositories:
+%[4]s      permissions:
+        contents: read
+      methods:
+        - GET
   - name: pat-provider
     plugin: token
     config:
@@ -367,15 +397,15 @@ providers:
     config:
       injection-hosts:
         - chatgpt.com
-%s      auth-file: %q
-      token-url: %q
+%[6]s      auth-file: %[7]q
+      token-url: %[8]q
       client-id: test-client
       refresh-margin-seconds: 600
-%s
+%[9]s
       stub-refresh-token: nvt-broker-stub
       extra-files:
         - name: config.toml
-          path: %q
+          path: %[10]q
 `, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
