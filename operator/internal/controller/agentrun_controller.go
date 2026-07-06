@@ -43,6 +43,9 @@ const (
 	runtimeAuthHomeName   = "runtime-auth-home"
 	egressdConfigKey      = "egressd.json"
 	egressdConfigPath     = "/etc/nvt-egressd/config.json"
+	egressCAVolumeName    = "egress-ca"
+	egressCAMountPath     = "/nvt-egress-ca"
+	egressCAFilePath      = egressCAMountPath + "/ca.crt"
 	workspaceMountPath    = "/workspace"
 	initialPromptPlugin   = "initial-prompt"
 
@@ -74,10 +77,11 @@ type brokerAgentEntry struct {
 }
 
 type brokerAgentGrantEntry struct {
-	Provider        string   `json:"provider"`
-	Repositories    []string `json:"repositories"`
-	Materialization string   `json:"materialization,omitempty"`
-	EgressHosts     []string `json:"egress-hosts,omitempty"`
+	Provider        string            `json:"provider"`
+	Repositories    []string          `json:"repositories"`
+	Materialization string            `json:"materialization,omitempty"`
+	EgressHosts     []string          `json:"egress-hosts,omitempty"`
+	Permissions     map[string]string `json:"permissions,omitempty"`
 }
 
 // AgentRunReconciler reconciles AgentRun resources.
@@ -689,15 +693,21 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		Capability            string `json:"capability"`
 		Upstream              string `json:"upstream"`
 		AllowInsecureUpstream bool   `json:"allow_insecure_upstream"`
+		ListenTLS             string `json:"listen_tls,omitempty"`
+	}
+	type egressdCA struct {
+		PublishDir string `json:"publish_dir"`
 	}
 	type egressdConfig struct {
 		BrokerURL           string         `json:"broker_url"`
 		AllowInsecureBroker bool           `json:"allow_insecure_broker"`
 		Routes              []egressdRoute `json:"routes"`
+		CA                  *egressdCA     `json:"ca,omitempty"`
 	}
 	grants := AgentRunBrokerGrants(agentRun.Spec.Broker)
 	routes := make([]egressdRoute, 0, len(grants))
 	routeIndex := 0
+	needCA := false
 	for _, grant := range grants {
 		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
@@ -705,18 +715,28 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		if len(grant.EgressHosts) == 0 {
 			return "", fmt.Errorf("broker grant %s egressHosts is required for mediated egress", grant.Provider)
 		}
-		routes = append(routes, egressdRoute{
+		route := egressdRoute{
 			Listen:                fmt.Sprintf("127.0.0.1:%d", 8471+routeIndex),
 			Capability:            grant.Provider,
 			Upstream:              grant.EgressHosts[0],
 			AllowInsecureUpstream: false,
-		})
+		}
+		if grant.Git {
+			// git clients require an https base URL; the route terminates
+			// TLS with a leaf signed by the boot-generated per-agent CA.
+			route.ListenTLS = "ca"
+			needCA = true
+		}
+		routes = append(routes, route)
 		routeIndex++
 	}
 	config := egressdConfig{
 		BrokerURL:           brokerURL,
 		AllowInsecureBroker: agentRun.Spec.EgressAllowInsecureBroker,
 		Routes:              routes,
+	}
+	if needCA {
+		config.CA = &egressdCA{PublishDir: egressCAMountPath}
 	}
 	rendered, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -755,6 +775,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			},
 		},
 	}
+	hasGitGrant := agentRunHasGitGrant(agentRun)
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 		volumes = append(volumes, corev1.Volume{
 			Name: "egressd-config",
@@ -767,6 +788,23 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 				},
 			},
 		})
+		if hasGitGrant {
+			// Shared emptyDir carrying only ca.crt: egressd publishes the
+			// CA certificate into it; the agent mounts it read-only. The CA
+			// private key never touches this volume — it lives only in
+			// egressd process memory.
+			volumes = append(volumes, corev1.Volume{
+				Name: egressCAVolumeName,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			})
+			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+				Name:      egressCAVolumeName,
+				MountPath: egressCAMountPath,
+				ReadOnly:  true,
+			})
+		}
 	}
 	if agentRun.Spec.RuntimeAuth != nil {
 		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
@@ -866,8 +904,20 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_MODE", Value: string(nvtv1alpha1.AgentRunEgressMediated)})
+		if hasGitGrant {
+			containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_CA_FILE", Value: egressCAFilePath})
+		}
 	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		egressdVolumeMounts := []corev1.VolumeMount{
+			{Name: "egressd-config", MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
+		}
+		if hasGitGrant {
+			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
+				Name:      egressCAVolumeName,
+				MountPath: egressCAMountPath,
+			})
+		}
 		containers = append(containers, corev1.Container{
 			Name:            "egressd",
 			Image:           EgressdImage(),
@@ -885,9 +935,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 					},
 				},
 			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: "egressd-config", MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
-			},
+			VolumeMounts: egressdVolumeMounts,
 		})
 	}
 
@@ -1029,6 +1077,14 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantFileBundle {
 			return fmt.Errorf("egress mediated is incompatible with broker grant %s materialization file-bundle", grant.Provider)
 		}
+		if grant.Git && materialization != nvtv1alpha1.AgentRunGrantHeaderInject {
+			return fmt.Errorf("broker grant %s git requires materialization header-inject", grant.Provider)
+		}
+		for key, value := range grant.Permissions {
+			if key == "" || (value != "read" && value != "write") {
+				return fmt.Errorf("broker grant %s permissions must map permission names to read or write", grant.Provider)
+			}
+		}
 		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
 			headerInjectGrants++
 			if len(grant.EgressHosts) == 0 {
@@ -1041,15 +1097,21 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 			}
 		}
 	}
-	if mode == nvtv1alpha1.AgentRunEgressMediated {
-		if headerInjectGrants == 0 {
-			return fmt.Errorf("egress mediated requires exactly one header-inject broker grant with egressHosts")
-		}
-		if headerInjectGrants > 1 {
-			return fmt.Errorf("egress mediated currently supports exactly one header-inject broker grant, got %d", headerInjectGrants)
-		}
+	if mode == nvtv1alpha1.AgentRunEgressMediated && headerInjectGrants == 0 {
+		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
 	}
 	return nil
+}
+
+// agentRunHasGitGrant reports whether any header-inject grant is git-typed,
+// which requires the per-agent CA volume and a TLS route.
+func agentRunHasGitGrant(agentRun *nvtv1alpha1.AgentRun) bool {
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if grant.Git && AgentRunGrantMaterialization(grant) == nvtv1alpha1.AgentRunGrantHeaderInject {
+			return true
+		}
+	}
+	return false
 }
 
 func validEgressHost(value string) bool {
@@ -1101,11 +1163,19 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 		if grant.Repositories != nil {
 			repositories = append(repositories, grant.Repositories...)
 		}
+		var permissions map[string]string
+		if len(grant.Permissions) > 0 {
+			permissions = make(map[string]string, len(grant.Permissions))
+			for key, value := range grant.Permissions {
+				permissions[key] = value
+			}
+		}
 		grants = append(grants, brokerAgentGrantEntry{
 			Provider:        grant.Provider,
 			Repositories:    repositories,
 			Materialization: string(AgentRunGrantMaterialization(grant)),
 			EgressHosts:     append([]string{}, grant.EgressHosts...),
+			Permissions:     permissions,
 		})
 	}
 	sort.SliceStable(grants, func(i, j int) bool {
@@ -1240,6 +1310,11 @@ func ValidateBrokerAgentsPolicy(policy brokerAgentsPolicy) error {
 					return fmt.Errorf("agents[%d].grants[%d].egress-hosts[%d] must be a host or host:port, got %q", agentIndex, grantIndex, hostIndex, host)
 				}
 			}
+			for key, value := range grant.Permissions {
+				if key == "" || (value != "read" && value != "write") {
+					return fmt.Errorf("agents[%d].grants[%d].permissions must map permission names to read or write", agentIndex, grantIndex)
+				}
+			}
 		}
 	}
 	for pairedAgent, egressID := range pairedAgents {
@@ -1355,10 +1430,14 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
 		}
+		scheme := "http"
+		if grant.Git {
+			scheme = "https"
+		}
 		grants = append(grants, map[string]any{
 			"provider":        grant.Provider,
 			"materialization": string(nvtv1alpha1.AgentRunGrantHeaderInject),
-			"base-url":        fmt.Sprintf("http://127.0.0.1:%d", 8471+routeIndex),
+			"base-url":        fmt.Sprintf("%s://127.0.0.1:%d", scheme, 8471+routeIndex),
 		})
 		routeIndex++
 	}

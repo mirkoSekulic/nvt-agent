@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo> [--materialization file-bundle|header-inject] [--egress-host host[:port]]" >&2
+  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo> [--materialization file-bundle|header-inject] [--egress-host host[:port]] [--git] [--permission <name>=read|write]" >&2
 }
 
 name=""
@@ -11,6 +11,8 @@ repo=""
 materialization="file-bundle"
 materialization_set=0
 egress_host_args=()
+git_grant=0
+permission_args=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -33,6 +35,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --egress-host)
       egress_host_args+=(--egress-host "${2:-}")
+      shift 2
+      ;;
+    --git)
+      git_grant=1
+      shift
+      ;;
+    --permission)
+      permission_args+=(--permission "${2:-}")
       shift 2
       ;;
     -h|--help)
@@ -84,6 +94,12 @@ if [ "$materialization_set" = "1" ]; then
 fi
 if [ "${#egress_host_args[@]}" -gt 0 ]; then
   grant_args+=("${egress_host_args[@]}")
+fi
+if [ "$git_grant" = "1" ]; then
+  grant_args+=(--git)
+fi
+if [ "${#permission_args[@]}" -gt 0 ]; then
+  grant_args+=("${permission_args[@]}")
 fi
 
 python3 "${grant_args[@]}"

@@ -115,6 +115,16 @@ spec:
                             items:
                               type: string
                               minLength: 1
+                          git:
+                            type: boolean
+                            default: false
+                          permissions:
+                            type: object
+                            additionalProperties:
+                              type: string
+                              enum:
+                                - read
+                                - write
                 prompt:
                   type: object
                   properties:

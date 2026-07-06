@@ -322,9 +322,7 @@ if mode == "mediated":
     if not allow_insecure:
         raise SystemExit("agent-init: mediated mode with plaintext local broker requires NVT_EGRESS_ALLOW_INSECURE_BROKER=1")
     if len(header_inject) == 0:
-        raise SystemExit("agent-init: mediated mode requires exactly one header-inject grant with egress-hosts")
-    if len(header_inject) > 1:
-        raise SystemExit(f"agent-init: mediated mode currently supports exactly one header-inject grant, got {len(header_inject)}")
+        raise SystemExit("agent-init: mediated mode requires at least one header-inject grant with egress-hosts")
 PY
 
 if [ "$egress_mode" = "mediated" ]; then
@@ -356,21 +354,28 @@ allow_insecure = sys.argv[4] in {"1", "true", "TRUE", "True", "yes", "YES", "Yes
 data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
 agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
 routes = []
+need_ca = False
 for grant in agent.get("grants", []) or []:
     if not isinstance(grant, dict) or (grant.get("materialization") or "file-bundle") != "header-inject":
         continue
     hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
-    routes.append({
-        "listen": "0.0.0.0:8471",
+    route = {
+        "listen": f"0.0.0.0:{8471 + len(routes)}",
         "capability": grant.get("provider"),
         "upstream": hosts[0],
         "allow_insecure_upstream": False,
-    })
+    }
+    if grant.get("git"):
+        route["listen_tls"] = "ca"
+        need_ca = True
+    routes.append(route)
 config = {
     "broker_url": "http://broker:7347",
     "allow_insecure_broker": allow_insecure,
     "routes": routes,
 }
+if need_ca:
+    config["ca"] = {"publish_dir": "/nvt-egress-ca"}
 target.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 else

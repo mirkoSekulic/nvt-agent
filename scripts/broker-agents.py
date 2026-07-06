@@ -69,7 +69,17 @@ def copy_register_agent(data, from_name, to_name, token, copy_grants):
     data["agents"] = sorted(agents, key=lambda agent: agent["id"])
 
 
-def add_grant(data, name, provider, repo, materialization, egress_hosts):
+def parse_permissions(entries):
+    permissions = {}
+    for entry in entries or []:
+        key, separator, value = entry.partition("=")
+        if not separator or not key or value not in {"read", "write"}:
+            raise SystemExit(f"--permission must be <name>=read|write, got {entry!r}")
+        permissions[key] = value
+    return permissions
+
+
+def add_grant(data, name, provider, repo, materialization, egress_hosts, git=False, permissions=None):
     for agent in data["agents"]:
         if isinstance(agent, dict) and agent.get("id") == name:
             if agent.get("role", "agent") == "egress":
@@ -89,8 +99,17 @@ def add_grant(data, name, provider, repo, materialization, egress_hosts):
                             if host not in hosts:
                                 hosts.append(host)
                         hosts.sort()
+                    if git:
+                        grant["git"] = True
+                    if permissions:
+                        grant.setdefault("permissions", {}).update(permissions)
                     return
-            grants.append({"provider": provider, "repositories": [repo], "materialization": materialization or "file-bundle", "egress-hosts": egress_hosts or []})
+            entry = {"provider": provider, "repositories": [repo], "materialization": materialization or "file-bundle", "egress-hosts": egress_hosts or []}
+            if git:
+                entry["git"] = True
+            if permissions:
+                entry["permissions"] = dict(permissions)
+            grants.append(entry)
             grants.sort(key=lambda grant: grant["provider"])
             return
     raise SystemExit(f"agent {name} is not registered; run agent-init first")
@@ -133,6 +152,8 @@ def main():
     grant.add_argument("--repo", required=True)
     grant.add_argument("--materialization", choices=["file-bundle", "header-inject"])
     grant.add_argument("--egress-host", action="append", default=[])
+    grant.add_argument("--git", action="store_true", help="git-over-HTTPS grant: TLS redirect route + git bootstrap wiring")
+    grant.add_argument("--permission", action="append", default=[], help="grant-level permission as <name>=read|write")
 
     unregister = subparsers.add_parser("unregister")
     unregister.add_argument("--name", required=True)
@@ -144,7 +165,8 @@ def main():
     elif args.command == "copy-register":
         with_lock(path, lambda data: copy_register_agent(data, args.from_name, args.name, args.token, args.copy_grants))
     elif args.command == "grant":
-        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo, args.materialization, args.egress_host))
+        permissions = parse_permissions(args.permission)
+        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo, args.materialization, args.egress_host, args.git, permissions))
     elif args.command == "unregister":
         with_lock(path, lambda data: unregister_agent(data, args.name))
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -555,15 +556,17 @@ func TestValidateAgentRunEgressModeRejectsMissingRouteAndMultipleGrants(t *testi
 		t.Fatalf("expected missing egressHosts rejection, got %v", err)
 	}
 
+	// Phase 4 lifts the exactly-one-grant limit: a realistic mediated run
+	// carries an LLM grant and a git grant, each with its own route.
 	multiple := testAgentRun()
 	multiple.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
 	multiple.Spec.EgressAllowInsecureBroker = true
 	multiple.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{
 		{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"}},
-		{Provider: "api-alt", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"alt.example.test:443"}},
+		{Provider: "git-app", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"github.com:443"}, Git: true},
 	}}
-	if err := ValidateAgentRunEgressMode(multiple); err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Fatalf("expected multi-grant rejection, got %v", err)
+	if err := ValidateAgentRunEgressMode(multiple); err != nil {
+		t.Fatalf("multiple header-inject grants must be accepted, got %v", err)
 	}
 
 	unsafeLocal := testAgentRun()
@@ -593,6 +596,154 @@ func TestRenderEgressdConfigUsesConfiguredRouteHost(t *testing.T) {
 	}
 	if !strings.Contains(rendered, `"allow_insecure_broker": true`) {
 		t.Fatalf("expected explicit local insecure broker flag:\n%s", rendered)
+	}
+	if strings.Contains(rendered, `"listen_tls"`) || strings.Contains(rendered, `"ca"`) {
+		t.Fatalf("non-git route must not render TLS or CA config:\n%s", rendered)
+	}
+}
+
+func multiGrantMediatedAgentRun() *nvtv1alpha1.AgentRun {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+		{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}, EgressHosts: []string{"api.example.test:443"}},
+		{
+			Provider:        "git-app",
+			Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+			Repositories:    []string{"my-user/my-repo"},
+			EgressHosts:     []string{"github.com:443"},
+			Git:             true,
+			Permissions:     map[string]string{"contents": "write"},
+		},
+	}}
+	return agentRun
+}
+
+func TestValidateAgentRunEgressModeRejectsInvalidGitAndPermissions(t *testing.T) {
+	gitBundle := testAgentRun()
+	gitBundle.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "git-app", Repositories: []string{}, Git: true,
+	}}}
+	if err := ValidateAgentRunEgressMode(gitBundle); err == nil || !strings.Contains(err.Error(), "git requires materialization header-inject") {
+		t.Fatalf("expected git/file-bundle rejection, got %v", err)
+	}
+
+	badPermission := testAgentRun()
+	badPermission.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	badPermission.Spec.EgressAllowInsecureBroker = true
+	badPermission.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "git-app", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{},
+		EgressHosts: []string{"github.com:443"}, Git: true, Permissions: map[string]string{"contents": "admin"},
+	}}}
+	if err := ValidateAgentRunEgressMode(badPermission); err == nil || !strings.Contains(err.Error(), "permissions") {
+		t.Fatalf("expected invalid permission rejection, got %v", err)
+	}
+}
+
+func TestRenderEgressdConfigMultiGrantRendersGitTLSRoute(t *testing.T) {
+	rendered, err := RenderEgressdConfigJSON(multiGrantMediatedAgentRun())
+	if err != nil {
+		t.Fatalf("render egressd config: %v", err)
+	}
+	var config struct {
+		Routes []map[string]any `json:"routes"`
+		CA     map[string]any   `json:"ca"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &config); err != nil {
+		t.Fatalf("parse rendered config: %v\n%s", err, rendered)
+	}
+	if len(config.Routes) != 2 {
+		t.Fatalf("expected one route per header-inject grant, got:\n%s", rendered)
+	}
+	api, git := config.Routes[0], config.Routes[1]
+	if api["listen"] != "127.0.0.1:8471" || api["capability"] != "api-main" || api["listen_tls"] != nil {
+		t.Fatalf("unexpected api route: %v", api)
+	}
+	if git["listen"] != "127.0.0.1:8472" || git["capability"] != "git-app" || git["upstream"] != "github.com:443" {
+		t.Fatalf("unexpected git route: %v", git)
+	}
+	if git["listen_tls"] != "ca" {
+		t.Fatalf("git route must terminate TLS under the CA: %v", git)
+	}
+	if config.CA["publish_dir"] != egressCAMountPath {
+		t.Fatalf("expected CA publish dir %s, got %v", egressCAMountPath, config.CA)
+	}
+}
+
+func TestRenderAgentConfigGitGrantGetsHTTPSBaseURL(t *testing.T) {
+	rendered, err := RenderAgentConfigYAML(multiGrantMediatedAgentRun())
+	if err != nil {
+		t.Fatalf("render agent config: %v", err)
+	}
+	if !strings.Contains(rendered, "base-url: http://127.0.0.1:8471") {
+		t.Fatalf("api grant must keep plain-HTTP base URL:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "base-url: https://127.0.0.1:8472") {
+		t.Fatalf("git grant must get an https base URL:\n%s", rendered)
+	}
+}
+
+func TestDesiredAgentPodMountsEgressCAForGitGrant(t *testing.T) {
+	pod, err := DesiredAgentPod(multiGrantMediatedAgentRun(), testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	var caVolume *corev1.Volume
+	for index := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[index].Name == egressCAVolumeName {
+			caVolume = &pod.Spec.Volumes[index]
+		}
+	}
+	if caVolume == nil || caVolume.EmptyDir == nil {
+		t.Fatalf("expected emptyDir CA volume, got %#v", pod.Spec.Volumes)
+	}
+
+	agent := requireContainer(t, *pod, "agent")
+	var agentMount *corev1.VolumeMount
+	for index := range agent.VolumeMounts {
+		if agent.VolumeMounts[index].Name == egressCAVolumeName {
+			agentMount = &agent.VolumeMounts[index]
+		}
+	}
+	if agentMount == nil || !agentMount.ReadOnly || agentMount.MountPath != egressCAMountPath {
+		t.Fatalf("agent CA mount must be read-only at %s, got %#v", egressCAMountPath, agent.VolumeMounts)
+	}
+	if envValue(agent, "NVT_EGRESS_CA_FILE") != egressCAFilePath {
+		t.Fatalf("agent env missing NVT_EGRESS_CA_FILE: %#v", agent.Env)
+	}
+
+	egressd := requireContainer(t, *pod, "egressd")
+	var egressdMount *corev1.VolumeMount
+	for index := range egressd.VolumeMounts {
+		if egressd.VolumeMounts[index].Name == egressCAVolumeName {
+			egressdMount = &egressd.VolumeMounts[index]
+		}
+	}
+	if egressdMount == nil || egressdMount.ReadOnly || egressdMount.MountPath != egressCAMountPath {
+		t.Fatalf("egressd CA mount must be writable at %s, got %#v", egressCAMountPath, egressd.VolumeMounts)
+	}
+}
+
+func TestDesiredAgentPodWithoutGitGrantHasNoCAVolume(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Repositories: []string{}, EgressHosts: []string{"api.example.test:443"},
+	}}}
+	pod, err := DesiredAgentPod(agentRun, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == egressCAVolumeName {
+			t.Fatalf("non-git mediated run must not mount a CA volume: %#v", pod.Spec.Volumes)
+		}
+	}
+	agent := requireContainer(t, *pod, "agent")
+	if findEnvVar(agent, "NVT_EGRESS_CA_FILE") != nil {
+		t.Fatalf("non-git agent must not carry NVT_EGRESS_CA_FILE: %#v", agent.Env)
 	}
 }
 

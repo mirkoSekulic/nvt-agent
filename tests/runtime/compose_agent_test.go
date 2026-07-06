@@ -961,23 +961,6 @@ func TestAgentInitMediatedRejectsMissingRouteHostsAndMultipleGrants(t *testing.T
 `,
 			want: "egress-hosts",
 		},
-		{
-			name: "mediated-multi-route",
-			agents: `agents:
-- id: mediated-multi-route
-  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
-  grants:
-    - provider: api-main
-      materialization: header-inject
-      egress-hosts: [api.example.test:443]
-      repositories: [example/repo]
-    - provider: api-alt
-      materialization: header-inject
-      egress-hosts: [alt.example.test:443]
-      repositories: [example/repo]
-`,
-			want: "exactly one header-inject grant",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1006,6 +989,63 @@ func TestAgentInitMediatedRejectsMissingRouteHostsAndMultipleGrants(t *testing.T
 				t.Fatalf("mediated invalid route wrote egressd env")
 			}
 		})
+	}
+}
+
+// TestAgentInitMediatedRendersMultiRouteWithGitCA pins the Phase 4 compose
+// shape: multiple header-inject grants each get their own listener port, a
+// git grant's route terminates TLS under the boot-generated CA, and the CA
+// certificate publish dir matches the shared compose volume.
+func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
+	root := repoRoot(t)
+	name := "mediated-multi-route"
+	agentDir := filepath.Join(root, ".agents", name)
+	if err := os.RemoveAll(agentDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+	agentsFile := preserveBrokerAgentsFile(t, root)
+	mustWriteFile(t, agentsFile, `agents:
+- id: mediated-multi-route
+  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      egress-hosts: [api.example.test:443]
+      repositories: [example/repo]
+    - provider: git-app
+      materialization: header-inject
+      egress-hosts: [github.com:443]
+      git: true
+      permissions:
+        contents: write
+      repositories: [example/repo]
+`)
+	home := t.TempDir()
+	command := "HOME=" + shellQuote(home) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	cmd := commandWithEnv(command, nil, "--name", name)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("agent-init failed: %v\n%s", err, output)
+	}
+	var config struct {
+		Routes []map[string]any `json:"routes"`
+		CA     map[string]any   `json:"ca"`
+	}
+	decodeJSONFile(t, filepath.Join(agentDir, "egressd.json"), &config)
+	if len(config.Routes) != 2 {
+		t.Fatalf("expected one route per header-inject grant, got %#v", config.Routes)
+	}
+	api, git := config.Routes[0], config.Routes[1]
+	if api["listen"] != "0.0.0.0:8471" || api["capability"] != "api-main" || api["listen_tls"] != nil {
+		t.Fatalf("unexpected api route: %#v", api)
+	}
+	if git["listen"] != "0.0.0.0:8472" || git["capability"] != "git-app" || git["listen_tls"] != "ca" {
+		t.Fatalf("unexpected git route: %#v", git)
+	}
+	if config.CA["publish_dir"] != "/nvt-egress-ca" {
+		t.Fatalf("unexpected CA publish dir: %#v", config.CA)
 	}
 }
 

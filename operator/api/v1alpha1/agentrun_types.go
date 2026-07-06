@@ -87,6 +87,13 @@ type AgentRunBrokerGrant struct {
 	Repositories    []string                     `json:"repositories"`
 	Materialization AgentRunGrantMaterialization `json:"materialization,omitempty"`
 	EgressHosts     []string                     `json:"egressHosts,omitempty"`
+	// Git marks a git-over-HTTPS grant: its egressd route terminates TLS
+	// under the per-agent CA and runtime bootstrap installs the git
+	// redirect wiring (docs/phase4-git-mediation-plan.md).
+	Git bool `json:"git,omitempty"`
+	// Permissions narrows the provider-level permission ceiling per grant,
+	// mirroring GitHub App permission keys (values: read or write).
+	Permissions map[string]string `json:"permissions,omitempty"`
 }
 
 // AgentRunPrompt defines the optional initial prompt for disposable runs.
@@ -244,6 +251,13 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 	out := new(AgentRunBrokerGrant)
 	*out = *in
 	out.Repositories = append([]string(nil), in.Repositories...)
+	out.EgressHosts = append([]string(nil), in.EgressHosts...)
+	if in.Permissions != nil {
+		out.Permissions = make(map[string]string, len(in.Permissions))
+		for key, value := range in.Permissions {
+			out.Permissions[key] = value
+		}
+	}
 	return out
 }
 
