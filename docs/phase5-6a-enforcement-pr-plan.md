@@ -76,8 +76,9 @@ the PR.
 
 Per-run objects in enforcement mode, all owner-referenced: egressd Pod
 `<run>-egressd`, Service `<run>-egressd` (route ports + CA port), ConfigMap
-`<run>-egress-ca`, two NetworkPolicies. Labels on both Pods:
-`nvt.dev/run: <name>`, `nvt.dev/role: agent|egressd`.
+`<run>-egress-ca`, a durable Secret with the egress CA keypair mounted only
+into egressd, and two NetworkPolicies. Labels on both Pods:
+`nvt.dev/agentrun: <name>`, `nvt.dev/role: agent|egressd`.
 
 Reconcile as a **status-condition state machine**, one observable step per
 pass (per the parent plan — not hidden ordering inside a single reconcile).
@@ -103,10 +104,10 @@ BrokerPolicyReady → EgressdCreated → EgressdReady → EgressCAPublished
 2. Render egressd config/Pod/Service → condition `EgressdCreated`.
 3. Wait for egressd Pod Ready (readiness probe = CA listener `/healthz`) →
    `EgressdReady`.
-4. The operator fetches `http://<svc>:<ca-port>/ca.crt` **once**, validates it
-   parses as a certificate (and only a certificate), publishes it into
-   `<run>-egress-ca` → `EgressCAPublished`. The agent never network-fetches
-   its own trust anchor.
+4. The operator validates the Secret-backed CA material, publishes only
+   `ca.crt` into `<run>-egress-ca` → `EgressCAPublished`. The private key
+   remains mounted only into egressd; the agent never network-fetches its own
+   trust anchor.
 5. Create the agent Pod — **never before `EgressCAPublished` and
    `BrokerPolicyReady` both hold**: `<run>-egress-ca` ConfigMap mounted
    read-only at `/nvt-egress-ca` (same path as Phase 4 — **bootstrap is
@@ -147,7 +148,7 @@ cluster-scoped baseline.
 
 - **Agent Pod, egress default-deny +**: kube-dns :53 UDP/TCP
   (namespaceSelector for `kube-system`), broker Service :7347, paired egressd
-  (`nvt.dev/run: <name>` + `role: egressd`), operator callback :8082. No
+  (`nvt.dev/agentrun: <name>` + `role: egressd`), operator callback :8082. No
   internet CIDR at all. Ingress is left unrestricted this PR (gateway /
   code-server unaffected) — state this explicitly in the PR.
 - **egressd Pod**: ingress only from the paired agent; egress to broker +

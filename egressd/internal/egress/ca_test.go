@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -296,6 +297,50 @@ func TestCAPublishesOnlyCertificate(t *testing.T) {
 	}
 	if strings.Contains(string(content), "PRIVATE KEY") {
 		t.Fatal("published file contains private key material")
+	}
+}
+
+func TestLoadCADurableKeypairServesOnlyCertificate(t *testing.T) {
+	generated, err := NewCA("run-egressd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(generated.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "ca.crt")
+	keyFile := filepath.Join(dir, "ca.key")
+	if err := os.WriteFile(certFile, generated.CertPEM(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadCA(certFile, keyFile, "run-egressd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(loaded.CertPEM()) != string(generated.CertPEM()) {
+		t.Fatal("loaded CA certificate changed")
+	}
+	server := httptest.NewServer(CAEndpointHandler(loaded))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/ca.crt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "BEGIN CERTIFICATE") {
+		t.Fatalf("/ca.crt = %d %q", response.StatusCode, body)
+	}
+	if strings.Contains(string(body), "PRIVATE KEY") {
+		t.Fatal("/ca.crt leaked private key material")
 	}
 }
 

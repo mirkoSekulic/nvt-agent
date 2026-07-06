@@ -4,12 +4,12 @@ import (
 	"net/http"
 )
 
-// CAEndpointHandler serves the CA certificate for the operator to fetch in
-// own-Pod mode, plus the readiness probe. It is deliberately plain HTTP: the
-// certificate is public material and *is* the trust anchor being
-// bootstrapped — TLS on this endpoint would be circular. Only the trusted
-// operator fetches it (once, at reconcile time); the agent receives the CA
-// through the operator-published ConfigMap, never over the network.
+// CAEndpointHandler serves the CA certificate plus the readiness probe. It is
+// deliberately plain HTTP: the certificate is public material and *is* the
+// trust anchor being bootstrapped, so TLS on this endpoint would be circular.
+// In own-Pod mode, the operator publishes the agent-facing CA from the
+// durable per-run Secret; the agent receives it through the ConfigMap, never
+// over the network.
 //
 // The handler serves exactly two paths and nothing else. Key material has no
 // code path here: the handler only ever reads CertPEM (public bytes).

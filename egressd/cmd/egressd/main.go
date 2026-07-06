@@ -46,9 +46,16 @@ func run() error {
 	}
 	var ca *egress.CA
 	if config.CA != nil {
-		ca, err = egress.NewCA(config.CA.LeafDNSNames...)
-		if err != nil {
-			return err
+		if config.CA.CertFile != "" {
+			ca, err = egress.LoadCA(config.CA.CertFile, config.CA.KeyFile, config.CA.LeafDNSNames...)
+			if err != nil {
+				return err
+			}
+		} else {
+			ca, err = egress.NewCA(config.CA.LeafDNSNames...)
+			if err != nil {
+				return err
+			}
 		}
 		if config.CA.PublishDir != "" {
 			if err := ca.PublishCert(config.CA.PublishDir); err != nil {

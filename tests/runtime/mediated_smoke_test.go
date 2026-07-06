@@ -17,10 +17,18 @@ package runtime_test
 // run against mediated agents and must skip *visibly* for direct-mode runs.
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -39,6 +47,32 @@ const (
 // protocol/injection.md. It is the only credential-shaped string allowed to
 // exist inside a mediated agent container.
 const mediatedPlaceholder = "NVT-PLACEHOLDER-NOT-A-KEY"
+
+func testCertificatePEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "nvt test CA"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
 
 // scanTreeForSecretMaterial walks root and fails the test if any known secret
 // value appears in a regular file. Phase 3 points this at an export of the
@@ -237,6 +271,7 @@ printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEH
 	config := f.writeAgentConfig(`
 egress:
   mode: mediated
+  enforcement: true
   grants:
     - provider: api-main
       materialization: header-inject
@@ -290,10 +325,11 @@ exit 1
 	insteadOf = https://example.test/
 `)
 	mustWriteFile(t, filepath.Join(f.home, ".git-credentials"), "https://fixture-git-stored-token@example.test\n")
-	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")
+	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
 	caDir := t.TempDir()
 	caFile := filepath.Join(caDir, "ca.crt")
-	mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nfixture-ca-cert\n-----END CERTIFICATE-----\n")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
 	config := f.writeAgentConfig(`
 egress:
   mode: mediated
@@ -341,6 +377,9 @@ code-server:
 	assertScrubbedGitState(t, f.home)
 	scanTreeForSecretMaterial(t, f.home, secrets)
 	scanTextForSecretMaterial(t, "bootstrap output", output, secrets)
+	if _, err := os.Stat(updateLog); err == nil {
+		t.Fatalf("same-Pod git mediation must not install system trust")
+	}
 }
 
 // TestMediatedGitWiringFailsClosedWithoutCA pins the fail-closed CA wait: a
@@ -355,6 +394,7 @@ printf '%s\n' '{"ok":true,"hosts":["github.com"],"placeholder":"NVT-PLACEHOLDER-
 	config := f.writeAgentConfig(`
 egress:
   mode: mediated
+  enforcement: true
   grants:
     - provider: git-app
       materialization: header-inject
@@ -394,11 +434,12 @@ printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEH
 	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
 	caDir := t.TempDir()
 	caFile := filepath.Join(caDir, "ca.crt")
-	mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nfixture-ca-cert\n-----END CERTIFICATE-----\n")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
 	trustDir := t.TempDir()
 	config := f.writeAgentConfig(`
 egress:
   mode: mediated
+  enforcement: true
   grants:
     - provider: api-main
       materialization: header-inject
@@ -441,6 +482,7 @@ func TestMediatedTrustStoreInstallFailsClosed(t *testing.T) {
 	config := `
 egress:
   mode: mediated
+  enforcement: true
   grants:
     - provider: api-main
       materialization: header-inject
@@ -462,7 +504,7 @@ printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEH
 `)
 		f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 1\n")
 		caFile := filepath.Join(t.TempDir(), "ca.crt")
-		mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nfixture-ca-cert\n-----END CERTIFICATE-----\n")
+		mustWriteFile(t, caFile, testCertificatePEM(t))
 		output := f.runWithEnv(bootstrapBin(f.root), false, []string{
 			"HOME=" + f.home,
 			"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -474,14 +516,14 @@ printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEH
 			t.Fatalf("expected fail-closed trust install error, got:\n%s", output)
 		}
 	})
-	t.Run("CA file is not a certificate", func(t *testing.T) {
+	t.Run("CA file has malformed certificate PEM", func(t *testing.T) {
 		f := newFixture(t)
 		f.writeBin("brokerctl", `#!/usr/bin/env bash
 printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY"}'
 `)
 		f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")
 		caFile := filepath.Join(t.TempDir(), "ca.crt")
-		mustWriteFile(t, caFile, "not a certificate\n")
+		mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nnot-a-real-certificate\n-----END CERTIFICATE-----\n")
 		output := f.runWithEnv(bootstrapBin(f.root), false, []string{
 			"HOME=" + f.home,
 			"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -489,7 +531,7 @@ printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEH
 			"NVT_EGRESS_CA_FILE=" + caFile,
 			"NVT_CA_TRUST_DIR=" + t.TempDir(),
 		}, f.writeAgentConfig(config))
-		if !strings.Contains(output, "is not a certificate") {
+		if !strings.Contains(output, "not a valid certificate") {
 			t.Fatalf("expected invalid CA rejection, got:\n%s", output)
 		}
 	})

@@ -107,6 +107,78 @@ func NewCA(leafDNSNames ...string) (*CA, error) {
 	}, nil
 }
 
+// LoadCA loads a durable CA keypair from PEM files. Own-Pod enforcement uses
+// this so egressd restarts keep the same trust anchor already mounted by the
+// agent.
+func LoadCA(certFile, keyFile string, leafDNSNames ...string) (*CA, error) {
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA certificate: %w", err)
+	}
+	block, rest := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("CA certificate file contains no certificate")
+	}
+	if len(bytesTrimSpace(rest)) != 0 {
+		return nil, fmt.Errorf("CA certificate file contains trailing data")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse CA certificate: %w", err)
+	}
+	if !cert.IsCA {
+		return nil, fmt.Errorf("CA certificate is not a CA")
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA key: %w", err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, fmt.Errorf("CA key file contains no PEM block")
+	}
+	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse CA key: %w", err)
+	}
+	if !key.PublicKey.Equal(cert.PublicKey) {
+		return nil, fmt.Errorf("CA key does not match certificate")
+	}
+	ca := &CA{
+		cert:         cert,
+		key:          key,
+		certPEM:      pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: block.Bytes}),
+		leafDNSNames: append([]string(nil), leafDNSNames...),
+	}
+	for _, name := range append([]string{localLeafName}, ca.leafDNSNames...) {
+		if !ca.allowedLeafName(name) {
+			return nil, fmt.Errorf("CA refused configured leaf name %q", name)
+		}
+	}
+	return ca, nil
+}
+
+func bytesTrimSpace(data []byte) []byte {
+	for len(data) > 0 {
+		switch data[0] {
+		case ' ', '\n', '\r', '\t':
+			data = data[1:]
+		default:
+			goto trimRight
+		}
+	}
+trimRight:
+	for len(data) > 0 {
+		switch data[len(data)-1] {
+		case ' ', '\n', '\r', '\t':
+			data = data[:len(data)-1]
+		default:
+			return data
+		}
+	}
+	return data
+}
+
 // CertPEM returns the CA certificate (public material only).
 func (ca *CA) CertPEM() []byte {
 	return append([]byte(nil), ca.certPEM...)

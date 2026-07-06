@@ -86,11 +86,15 @@ type CAConfig struct {
 	// synthetic per-run Service names (own-Pod mode). Never upstream names:
 	// any overlap with a route upstream host fails validation.
 	LeafDNSNames []string `json:"leaf_dns_names"`
-	// ServeAddr enables the plain-HTTP CA endpoint (GET /ca.crt, /healthz)
-	// the operator fetches the certificate from in own-Pod mode. The
-	// certificate is public material and is the trust anchor being
+	// ServeAddr enables the plain-HTTP CA endpoint (GET /ca.crt, /healthz).
+	// The certificate is public material and is the trust anchor being
 	// bootstrapped, so TLS here would be circular.
 	ServeAddr string `json:"serve_addr"`
+	// CertFile and KeyFile load a durable CA keypair. Own-Pod enforcement uses
+	// these from a Secret so an egressd restart keeps the agent trust anchor
+	// stable. Same-Pod/local modes may leave both empty to generate at boot.
+	CertFile string `json:"cert_file"`
+	KeyFile  string `json:"key_file"`
 }
 
 // ForwardProxyConfig enables CONNECT-only blind-tunnel proxying. It does not
@@ -169,6 +173,9 @@ func (c *Config) Validate() error {
 	if c.CA != nil {
 		if c.CA.PublishDir == "" && c.CA.ServeAddr == "" {
 			return fmt.Errorf("ca requires publish_dir or serve_addr")
+		}
+		if (c.CA.CertFile == "") != (c.CA.KeyFile == "") {
+			return fmt.Errorf("ca cert_file and key_file must be set together")
 		}
 		routeUpstreamHosts := map[string]bool{}
 		for _, route := range c.Routes {

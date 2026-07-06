@@ -56,7 +56,7 @@ broker:
         config:
           token-env: NVT_SMOKE_STATIC_TOKEN
           injection-hosts:
-            - api.example.test
+            - httpbin.org
         allow:
           repositories:
             - example/*
@@ -118,7 +118,7 @@ grant = {
     "provider": "static-bearer-main",
     "repositories": ["example/repo"],
     "materialization": "header-inject",
-    "egressHosts": ["api.example.test:443"],
+    "egressHosts": ["httpbin.org:443"],
 }
 git_grant = {
     "provider": "git-app",
@@ -281,7 +281,7 @@ with open(sys.argv[1], "r", encoding="utf-8") as file:
     pod = json.load(file)
 run = sys.argv[2]
 labels = pod["metadata"]["labels"]
-if labels.get("nvt.dev/run") != run or labels.get("nvt.dev/role") != "agent":
+if labels.get("nvt.dev/agentrun") != run or labels.get("nvt.dev/role") != "agent":
     raise SystemExit(f"agent pod missing pairing labels: {labels}")
 containers = {container["name"] for container in pod["spec"]["containers"]}
 if "egressd" in containers:
@@ -340,13 +340,18 @@ assert_egressd_path_allowed() {
   local run="$1"
   log "asserting the agent reaches its paired egressd through the Service"
   # A real request from inside the agent container, resolved through
-  # kube-dns and verified against the published CA: any HTTP status code
-  # proves DNS + policy + TLS + egressd processing under default-deny.
-  local code
-  code="$(agent_exec "${run}" curl -s -o /dev/null -w '%{http_code}' \
-    --cacert /nvt-egress-ca/ca.crt --max-time 10 "https://${run}-egressd:8471/")" \
-    || die "agent -> egressd request failed outright"
-  [[ "${code}" =~ ^[0-9]{3}$ && "${code}" != "000" ]] || die "agent -> egressd returned no HTTP status (got ${code})"
+  # kube-dns and verified against the published CA. httpbin /bearer returns
+  # 200 only when egressd fetched and injected Authorization from the broker;
+  # 5xx/502 means the mediated path is broken and must fail the smoke.
+  local response
+  response="$(agent_exec "${run}" curl -sS --fail-with-body \
+    --cacert /nvt-egress-ca/ca.crt --max-time 15 "https://${run}-egressd:8471/bearer")" \
+    || die "agent -> egressd -> upstream bearer request failed"
+  grep -q '"authenticated": true' <<<"${response}" || die "mediated upstream did not authenticate the injected bearer: ${response}"
+  grep -q 'nvt-smoke-fixture-token' <<<"${response}" || die "fixture upstream did not receive the injected bearer: ${response}"
+  if grep -q 'NVT-PLACEHOLDER-NOT-A-KEY' <<<"${response}"; then
+    die "placeholder reached upstream through egressd: ${response}"
+  fi
 }
 
 assert_cross_run_isolated() {

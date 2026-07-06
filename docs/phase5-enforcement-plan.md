@@ -148,9 +148,9 @@ pieces that are *not* yet placement-agnostic and need rework:
    `EgressdReady`, `EgressCAPublished`) with each reconcile pass advancing
    one observable step — not as hidden ordering inside a single reconcile
    path. Controller tests assert the condition progression, including the
-   stuck states (egressd never ready, fetch fails).
+   stuck states (egressd never ready, CA publication fails).
 4. **Pairing at the network layer**: per-run Pod labels so NetworkPolicies
-   select exactly the paired Pods (`nvt.dev/run: <name>`,
+   select exactly the paired Pods (`nvt.dev/agentrun: <name>`,
    `nvt.dev/role: agent|egressd`).
 
 ### NetworkPolicy templates (greenfield chart work)
