@@ -14,11 +14,53 @@ case_render() {
 case_kind_setup() {
   make -C "${ROOT}" \
     CLUSTER="${CLUSTER}" \
+    CREATE_CLUSTER="${CREATE_CLUSTER}" \
+    operator-kind-cluster
+
+  # The valid payload's grants reference real broker providers so bootstrap's
+  # injection-routing call succeeds end-to-end over the TLS broker leg. The
+  # static token is a smoke fixture, never a real credential.
+  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
+  kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-smoke-broker-env \
+    --from-literal=NVT_SMOKE_STATIC_TOKEN=nvt-smoke-fixture-token \
+    --dry-run=client -o yaml | kubectl_smoke apply -f -
+  write_broker_providers_values "${SMOKE_TMPDIR}/broker-providers.yaml"
+
+  make -C "${ROOT}" \
+    CLUSTER="${CLUSTER}" \
     NAMESPACE="${NAMESPACE}" \
     CREATE_CLUSTER="${CREATE_CLUSTER}" \
     ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT}" \
-    OPERATOR_KIND_HELM_ARGS="--set agentSchedule.maxParallelism=4" \
+    OPERATOR_KIND_HELM_ARGS="--set agentSchedule.maxParallelism=4 -f ${SMOKE_TMPDIR}/broker-providers.yaml" \
     operator-kind-setup
+}
+
+write_broker_providers_values() {
+  local output="$1"
+  cat >"${output}" <<'YAML'
+broker:
+  envSecretName: nvt-smoke-broker-env
+  config:
+    providers:
+      - name: static-bearer-main
+        plugin: token
+        config:
+          token-env: NVT_SMOKE_STATIC_TOKEN
+          injection-hosts:
+            - api.example.test
+        allow:
+          repositories:
+            - example/*
+      - name: git-app
+        plugin: token
+        config:
+          token-env: NVT_SMOKE_STATIC_TOKEN
+          injection-hosts:
+            - github.com
+        allow:
+          repositories:
+            - example/*
+YAML
 }
 
 case_run() {
@@ -27,6 +69,16 @@ case_run() {
   submit_rejected_admission "file-bundle" "file-bundle"
   submit_valid_admission
   assert_mediated_pod_shape
+  # Completing the run proves the TLS broker leg end-to-end: bootstrap only
+  # reaches the agent command after brokerctl succeeds against
+  # https://nvt-broker verified by the operator-distributed CA.
+  wait_for_phase_any "${RUN_NAME}-valid" "${RUN_TIMEOUT_SECONDS}" Completed Failed
+  local phase
+  phase="$(agentrun_phase "${RUN_NAME}-valid")"
+  if [[ "${phase}" != "Completed" ]]; then
+    kubectl_smoke logs "${RUN_NAME}-valid-agent" -n "${NAMESPACE}" -c agent --tail 20 >&2 || true
+    die "mediated run ended in phase ${phase}; bootstrap over the TLS broker leg failed"
+  fi
 }
 
 payload_file() {
@@ -38,13 +90,14 @@ generate_payload() {
   local variant="$1"
   local output="$2"
 
-  python3 - "${variant}" "${RUN_NAME}-${variant}" "${ACTIVE_DEADLINE_SECONDS}" >"${output}" <<'PY'
+  python3 - "${variant}" "${RUN_NAME}-${variant}" "${ACTIVE_DEADLINE_SECONDS}" "${NAMESPACE}" >"${output}" <<'PY'
 import json
 import sys
 
 variant = sys.argv[1]
 run_name = sys.argv[2]
 active_deadline_seconds = int(sys.argv[3])
+namespace = sys.argv[4]
 
 grant = {
     "provider": "static-bearer-main",
@@ -63,8 +116,9 @@ git_grant = {
 spec = {
     "runtime": {"type": "codex", "autonomy": "trusted-local"},
     "image": "nvt-agent-runtime:latest",
+    # No egressAllowInsecureBroker: the chart serves the broker over TLS by
+    # default, so mediated runs must pass admission without the escape hatch.
     "egress": "mediated",
-    "egressAllowInsecureBroker": True,
     "workspace": {"mode": "Ephemeral"},
     "broker": {"grants": [grant, git_grant]},
     "agent": {
@@ -73,10 +127,39 @@ spec = {
                 "command": "bash",
                 "args": ["-lc", 'echo "mediated smoke ready"; sleep infinity'],
             },
+            # Plugins run after bootstrap, so the smoke-complete event firing
+            # (and the run reaching Completed) proves bootstrap's brokerctl
+            # calls succeeded over the TLS broker leg.
+            "plugins": [
+                {
+                    "name": "event-webhook",
+                    "source": "builtin",
+                    "when": "after-agent",
+                    "restart": "always",
+                    "config": {
+                        "url": f"http://nvt-operator:8082/v1/agentruns/{namespace}/{run_name}/events",
+                        "auth": {"type": "bearer-env", "env": "NVT_OPERATOR_CALLBACK_TOKEN"},
+                        "filters": ["plugin.smoke."],
+                        "delivery": {"retry": {"backoff-seconds": 1}},
+                    },
+                },
+                {
+                    "name": "smoke-complete",
+                    "source": "builtin",
+                    "when": "after-agent",
+                    "restart": "never",
+                    "config": {
+                        "delaySeconds": 1,
+                        "event": "plugin.smoke.completed",
+                        "payload": {"ok": True},
+                    },
+                },
+            ],
             "tools": {"packages": [], "mise": [], "additional-paths": [], "shell": []},
             "code-server": {"extensions": []},
         }
     },
+    "lifecycle": {"completeOn": ["plugin.smoke.completed"], "failOn": []},
     "ttl": {"activeDeadlineSeconds": active_deadline_seconds},
 }
 
@@ -123,7 +206,8 @@ import sys
 with open(sys.argv[1], "r", encoding="utf-8") as file:
     valid = json.load(file)["agentRun"]["spec"]
 assert valid["egress"] == "mediated"
-assert valid["egressAllowInsecureBroker"] is True
+assert "egressAllowInsecureBroker" not in valid
+assert valid["lifecycle"]["completeOn"] == ["plugin.smoke.completed"]
 grant = valid["broker"]["grants"][0]
 assert grant["provider"] == "static-bearer-main"
 assert grant["materialization"] == "header-inject"
@@ -264,5 +348,28 @@ if not egressd_ca_mount or egressd_ca_mount.get("readOnly") is True:
 agent_plain_env = {env.get("name"): env.get("value") for env in agent.get("env", [])}
 if agent_plain_env.get("NVT_EGRESS_CA_FILE") != "/nvt-egress-ca/ca.crt":
     raise SystemExit(f"agent env missing NVT_EGRESS_CA_FILE: {agent_plain_env}")
+
+# Broker TLS: the run passed admission without egressAllowInsecureBroker, so
+# the broker leg must be https with the CA distributed to both containers —
+# and only the certificate item projected from the TLS Secret.
+if agent_plain_env.get("NVT_BROKER_URL") != "https://nvt-broker:7347":
+    raise SystemExit(f"agent env must use the TLS broker URL: {agent_plain_env}")
+if agent_plain_env.get("NVT_BROKER_CA_FILE") != "/etc/nvt-broker-ca/ca.crt":
+    raise SystemExit(f"agent env missing NVT_BROKER_CA_FILE: {agent_plain_env}")
+
+broker_ca_volume = volumes.get("broker-ca")
+if not broker_ca_volume or "secret" not in broker_ca_volume:
+    raise SystemExit(f"expected broker-ca Secret volume, got {sorted(volumes)}")
+items = broker_ca_volume["secret"].get("items") or []
+if [item.get("key") for item in items] != ["ca.crt"]:
+    raise SystemExit(f"broker-ca volume must project only ca.crt: {broker_ca_volume}")
+
+agent_broker_ca = agent_mounts.get("broker-ca")
+if not agent_broker_ca or agent_broker_ca.get("readOnly") is not True or agent_broker_ca.get("mountPath") != "/etc/nvt-broker-ca":
+    raise SystemExit(f"agent broker CA mount must be read-only at /etc/nvt-broker-ca: {agent_broker_ca}")
+
+egressd_broker_ca = egressd_mounts.get("broker-ca")
+if not egressd_broker_ca or egressd_broker_ca.get("readOnly") is not True or egressd_broker_ca.get("mountPath") != "/etc/nvt-egressd/broker-ca":
+    raise SystemExit(f"egressd broker CA mount must be read-only at /etc/nvt-egressd/broker-ca: {egressd_broker_ca}")
 PY
 }
