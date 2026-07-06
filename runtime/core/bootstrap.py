@@ -216,17 +216,22 @@ def scrub_git_state():
         path.unlink(missing_ok=True)
 
 
-def broker_routing(capability):
-    # In k8s the operator registers this run's token in the broker agents
-    # ConfigMap right before creating the Pod, but the broker only sees the
-    # update after kubelet's ConfigMap sync (~1min worst case). Until then the
-    # broker answers "unauthorized" (or is not up yet), so those two failures
-    # are retried within a bounded window; everything else fails immediately.
+def broker_wait_deadline():
+    # One shared window for the whole bootstrap pass: multiple grants must
+    # not multiply the startup wait.
     try:
         wait_seconds = float(os.environ.get("NVT_BROKER_WAIT_SECONDS") or DEFAULT_BROKER_WAIT_SECONDS)
     except ValueError:
         raise SystemExit("bootstrap: NVT_BROKER_WAIT_SECONDS must be a number")
-    deadline = time.monotonic() + wait_seconds
+    return time.monotonic() + wait_seconds
+
+
+def broker_routing(capability, deadline):
+    # In k8s the operator registers this run's token in the broker agents
+    # ConfigMap right before creating the Pod, but the broker only sees the
+    # update after kubelet's ConfigMap sync (~1min worst case). Until then the
+    # broker answers "unauthorized" (or is not up yet), so those two failures
+    # are retried until the shared deadline; everything else fails immediately.
     while True:
         result = subprocess.run(
             ["brokerctl", "injection", "routing", "--capability", capability],
@@ -237,10 +242,12 @@ def broker_routing(capability):
         )
         payload = None
         try:
-            payload = json.loads(result.stdout)
+            parsed = json.loads(result.stdout)
         except json.JSONDecodeError:
-            pass
-        if result.returncode == 0 and isinstance(payload, dict) and payload.get("ok"):
+            parsed = None
+        if isinstance(parsed, dict):
+            payload = parsed
+        if result.returncode == 0 and payload is not None and payload.get("ok"):
             return payload
         error = (payload or {}).get("error")
         if error in {"unauthorized", "broker-unreachable"} and time.monotonic() < deadline:
@@ -314,6 +321,7 @@ def apply_mediated_egress(egress):
     grants = egress.get("grants") or []
     if not isinstance(grants, list):
         raise SystemExit("egress.grants must be a list")
+    deadline = broker_wait_deadline()
     for index, grant in enumerate(grants):
         if not isinstance(grant, dict):
             raise SystemExit(f"egress.grants[{index}] must be an object")
@@ -325,7 +333,7 @@ def apply_mediated_egress(egress):
         base_url = grant.get("base-url")
         if not isinstance(base_url, str) or not base_url:
             raise SystemExit(f"egress mediated grant {provider} must include base-url")
-        routing = broker_routing(provider)
+        routing = broker_routing(provider, deadline)
         hosts = routing.get("hosts") or []
         if not hosts:
             raise SystemExit(f"bootstrap: mediated grant {provider} is not redirectable")
