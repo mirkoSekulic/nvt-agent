@@ -9,7 +9,8 @@ A mediated run with enforcement on cannot reach arbitrary hosts: egressd moves
 to its own Pod, CNI-enforced NetworkPolicies fence the agent Pod, and the
 egress-denied smoke lands in CI. Non-possession is untouched; this adds the
 second, independent guarantee. This is the trusted-core-review PR of Phase 5;
-it ships alone.
+it ships alone — **one PR**, with the commit order below followed strictly so
+review stays possible. Do not split it without asking first.
 
 ## Decisions settled here (don't relitigate in the PR)
 
@@ -79,34 +80,65 @@ Per-run objects in enforcement mode, all owner-referenced: egressd Pod
 `nvt.dev/run: <name>`, `nvt.dev/role: agent|egressd`.
 
 Reconcile as a **status-condition state machine**, one observable step per
-pass (per the parent plan — not hidden ordering inside a single reconcile):
+pass (per the parent plan — not hidden ordering inside a single reconcile).
+Condition order:
 
-1. Render egressd config/Pod/Service → condition `EgressdCreated`.
-2. Wait for egressd Pod Ready (readiness probe = CA listener `/healthz`) →
+```text
+BrokerPolicyReady → EgressdCreated → EgressdReady → EgressCAPublished
+                                                  → agent Pod created
+```
+
+1. Reconcile the broker agents policy (agent identity, paired egress
+   identity, grants/materialization/permissions — the existing
+   `reconcileBrokerAgentsPolicy` flow) → condition `BrokerPolicyReady`.
+   **Scope note**: this condition gates the *agent Pod*, not egressd.
+   egressd is broker-independent at startup — it fetches injectable material
+   lazily and fail-closed on the first proxied request, and CA
+   generation/publication needs no broker at all — so egressd creation may
+   proceed in parallel with policy reconciliation; do not serialize it behind
+   the broker and manufacture a deadlock when the broker is slow. The
+   condition exists for observability and to make the agent-Pod gate
+   explicit. (The #62 bootstrap retry still absorbs the ConfigMap projection
+   lag on the agent side.)
+2. Render egressd config/Pod/Service → condition `EgressdCreated`.
+3. Wait for egressd Pod Ready (readiness probe = CA listener `/healthz`) →
    `EgressdReady`.
-3. The operator fetches `http://<svc>:<ca-port>/ca.crt` **once**, validates it
+4. The operator fetches `http://<svc>:<ca-port>/ca.crt` **once**, validates it
    parses as a certificate (and only a certificate), publishes it into
    `<run>-egress-ca` → `EgressCAPublished`. The agent never network-fetches
    its own trust anchor.
-4. Create the agent Pod: `<run>-egress-ca` ConfigMap mounted read-only at
-   `/nvt-egress-ca` (same path as Phase 4 — **bootstrap is unchanged**),
-   grants' base-urls rendered as `https://<run>-egressd:<8471+i>`.
+5. Create the agent Pod — **never before `EgressCAPublished` and
+   `BrokerPolicyReady` both hold**: `<run>-egress-ca` ConfigMap mounted
+   read-only at `/nvt-egress-ca` (same path as Phase 4 — **bootstrap is
+   unchanged**), grants' base-urls rendered as
+   `https://<run>-egressd:<8471+i>`.
 
 Stuck states: conditions carry reasons, requeue with backoff,
 `activeDeadlineSeconds` still bounds the whole run. Controller tests: full
 condition progression; egressd-never-ready; CA fetch fails (non-cert body ⇒
-no publish, loud condition); same-Pod mediated and direct modes render
-exactly as today.
+no publish, loud condition); no reconcile path creates the agent Pod with
+`EgressCAPublished` unset; same-Pod mediated and direct modes render exactly
+as today.
 
 **Agent-side trust for non-git tools**: base-urls are now `https://` for
 every grant, but generic CLIs use the system trust store. Bootstrap
-(`runtime/core/bootstrap.py`): when mediated and the egress CA file is
-present, install it into the container trust store
-(`/usr/local/share/ca-certificates/` + `update-ca-certificates`; the agent is
-root) and persist `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` via the existing env
-mechanism; git keeps its explicit `http.sslCAInfo`. Runtime test: env +
-trust-store file present, secret scan still clean (the CA cert is public; the
-needle list keeps the key PEM).
+(`runtime/core/bootstrap.py`): when any grant's base-url is `https`, wait for
+the egress CA file (the existing Phase 4 fail-closed wait), install it into
+the container trust store (`/usr/local/share/ca-certificates/` +
+`update-ca-certificates`; the agent is root) and persist
+`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` via the existing env mechanism; git
+keeps its explicit `http.sslCAInfo`. **Fail closed, no fallback**: a missing
+or invalid `ca.crt`, or a non-zero `update-ca-certificates`, aborts bootstrap
+— never continue without trust, never downgrade to plain HTTP or direct
+mode. Runtime tests: env + trust-store file present on success; bootstrap
+exits non-zero on missing/invalid CA and on a failing trust-store install.
+
+**CA scan rules, stated explicitly for the smoke/secret-scan needles**: the
+CA *certificate* is public material and allowed anywhere in the agent
+container (trust store, env, git config). The CA *private key* PEM is a
+forbidden needle in `scanTreeForSecretMaterial` and the kind smoke — it must
+never appear in the agent container, the published ConfigMap, or any listener
+response.
 
 ### 4. NetworkPolicies
 
@@ -141,8 +173,21 @@ cluster-scoped baseline.
   - direct HTTPS from the agent container to a non-allowlisted host **fails
     as connection timeout/refused, not 401** (the 401-vs-refused distinction
     is what separates enforcement from non-possession);
-  - the same request via the egressd base-url **succeeds** against the
-    fixture upstream;
+  - **agent → paired egressd through the Service** succeeds: an explicit
+    request from the agent container to `https://<run>-egressd:<port>`
+    (verified against the published CA) reaches the fixture upstream. This
+    must be a real request driven from inside the agent container — "run
+    reaches Completed" alone does not prove the agent→egressd path, because
+    bootstrap's brokerctl calls go to the broker, not egressd. Implementation
+    note: under Calico the policy decision applies to the post-DNAT Pod
+    endpoint, so the distinct thing the Service path proves on top of
+    Pod-selector reachability is that kube-dns egress and Service resolution
+    work under the default-deny policy — assert the DNS+connect path, not
+    just label matching;
+  - **cross-run isolation**: run a second enforcement AgentRun and assert
+    agent A cannot reach egressd B — by Pod IP (the stronger proof, policy
+    without kube-proxy in the way) and via B's Service name where practical.
+    This is the one assertion that actually validates the pairing selectors;
   - a **dind-spawned container's** direct egress also fails (the parent §7
     FORWARD-path case — the CNI covers it because traffic still exits the
     Pod);
@@ -172,19 +217,23 @@ cluster-scoped baseline.
 
 ## Trusted-core review checklist
 
-- Pairing selectors: agent A cannot reach egressd B (second run in the smoke,
-  or a canary policy test).
+- Pairing selectors: agent A cannot reach egressd B — required smoke
+  assertion (see the enforced-egress case), not just a policy-shape review.
 - Default-deny actually denies: canary host check in the smoke, not just
   "allowed things work".
+- Agent→egressd reachability is proven through the Service DNS path from
+  inside the agent container, under the default-deny policy.
 - `GET /ca.crt` serves cert only, on every path including errors; the
   operator publishes exactly what it fetched (ConfigMap bytes == served
-  bytes).
-- Bootstrap fails closed when the CA mount is absent (already pinned in
-  Phase 4 — re-run against the ConfigMap-mount shape).
+  bytes); the CA private key PEM is a forbidden needle everywhere.
+- Bootstrap fails closed when the CA mount is absent or the trust-store
+  install fails (Phase 4 wait re-run against the ConfigMap-mount shape; no
+  insecure/direct fallback).
 - Leaf SAN scope: Service names yes, upstream names still refused; name
   constraints updated in lockstep.
 - The condition state machine has no path that creates the agent Pod before
-  `EgressCAPublished`.
+  both `BrokerPolicyReady` and `EgressCAPublished` hold — and egressd
+  creation is not serialized behind the broker.
 
 ## Explicitly out of scope
 
