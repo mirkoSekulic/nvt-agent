@@ -160,7 +160,7 @@ class CodexOAuthProvider:
                 print(f"codex-oauth provider {self.name}: refresh failed; serving current valid access token", flush=True)
         return auth, access_token, exp, refreshed
 
-    def injection_headers(self, host, method, path, agent_id, audit, request_id):
+    def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
         with self.lock:
             _auth, access_token, exp, _refreshed = self._fresh_auth(agent_id, audit, request_id, "injection")
         headers = {"authorization": f"Bearer {access_token}"}

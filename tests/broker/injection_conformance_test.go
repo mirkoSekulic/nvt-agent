@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ type roleGrant struct {
 	Provider        string
 	Repositories    []string
 	Materialization string
+	Permissions     map[string]string
 }
 
 type roleIdentity struct {
@@ -76,6 +78,17 @@ func (f *brokerFixture) writeRoleIdentities(identities map[string]roleIdentity) 
 					builder.WriteString("          - ")
 					builder.WriteString(repo)
 					builder.WriteString("\n")
+				}
+			}
+			if len(grant.Permissions) > 0 {
+				builder.WriteString("        permissions:\n")
+				keys := make([]string, 0, len(grant.Permissions))
+				for key := range grant.Permissions {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				for _, key := range keys {
+					builder.WriteString(fmt.Sprintf("          %s: %s\n", key, grant.Permissions[key]))
 				}
 			}
 		}

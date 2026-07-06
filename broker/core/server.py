@@ -205,11 +205,11 @@ class Broker:
         host = string_field(payload, "host")
         method = string_field(payload, "method").upper()
         path = string_field(payload, "path")
-        self._injection_grant(paired, capability)
+        grant = self._injection_grant(paired, capability)
         provider, hosts = self._injection_provider(capability)
         if host not in hosts:
             raise ProviderError("host-not-allowed", f"host {host} is not allowed for {capability}", 403)
-        headers, expires_at, strip = provider.injection_headers(host, method, path, paired["id"], self.audit, request_id)
+        headers, expires_at, strip = provider.injection_headers(host, method, path, paired["id"], self.audit, request_id, grant)
         self.audit.write(
             request_id=request_id,
             agent=identity["id"],
@@ -234,7 +234,7 @@ class Broker:
             subject = identity
         capability = string_field(payload, "capability")
         self._injection_grant(subject, capability)
-        _, hosts = self._injection_provider(capability)
+        provider, hosts = self._injection_provider(capability)
         self.audit.write(
             request_id=request_id,
             agent=identity["id"],
@@ -243,7 +243,12 @@ class Broker:
             operation="injection.routing",
             allowed=True,
         )
-        return {"ok": True, "hosts": hosts, "placeholder": INJECTION_PLACEHOLDER}
+        response = {"ok": True, "hosts": hosts, "placeholder": INJECTION_PLACEHOLDER}
+        # Non-secret routing hint: git-capable providers make runtime bootstrap
+        # install the git redirect/trust wiring (protocol/injection.md).
+        if getattr(provider, "injection_git", False):
+            response["git"] = True
+        return response
 
     def denied(self, request_id, payload, reason, message=None, authorization=None, operation=None):
         agent_id = None
