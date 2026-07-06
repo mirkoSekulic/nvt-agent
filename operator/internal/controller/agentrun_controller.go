@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"reflect"
@@ -18,8 +21,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -54,12 +59,26 @@ const (
 	// the egressd and agent containers so both can verify the TLS broker leg.
 	// Only the ca.crt item is projected from the TLS Secret — the serving key
 	// never enters the agent Pod.
-	brokerCAVolumeName         = "broker-ca"
-	brokerCAKey                = "ca.crt"
-	egressdBrokerCAMount       = "/etc/nvt-egressd/broker-ca"
-	egressdBrokerCAFile        = egressdBrokerCAMount + "/" + brokerCAKey
-	agentBrokerCAMount         = "/etc/nvt-broker-ca"
-	agentBrokerCAFile          = agentBrokerCAMount + "/" + brokerCAKey
+	brokerCAVolumeName   = "broker-ca"
+	brokerCAKey          = "ca.crt"
+	egressdBrokerCAMount = "/etc/nvt-egressd/broker-ca"
+	egressdBrokerCAFile  = egressdBrokerCAMount + "/" + brokerCAKey
+	agentBrokerCAMount   = "/etc/nvt-broker-ca"
+	agentBrokerCAFile    = agentBrokerCAMount + "/" + brokerCAKey
+	// Enforcement mode (docs/phase5-6a-enforcement-pr-plan.md): egressd runs
+	// in its own Pod behind a per-run Service; the operator fetches the CA
+	// certificate once and publishes it into a per-run ConfigMap the agent
+	// mounts at the same Phase 4 path.
+	runLabelKey         = "nvt.dev/run"
+	roleLabelKey        = "nvt.dev/role"
+	roleLabelAgent      = "agent"
+	roleLabelEgressd    = "egressd"
+	egressCAPort        = 8470
+	egressRouteBasePort = 8471
+	egressCACertKey     = "ca.crt"
+	egressdConfigName   = "egressd-config"
+	egressdReadyRequeue = 2 * time.Second
+
 	brokerAgentsConfigMapName  = "nvt-broker-agents"
 	brokerAgentsConfigKey      = "agents.yaml"
 	brokerTokenKey             = "NVT_BROKER_TOKEN"
@@ -72,6 +91,16 @@ const (
 	activeDeadlineReason       = "Active deadline exceeded"
 	generatedTokenByteLength   = 32
 	defaultRunRetentionSeconds = 30 * 24 * 60 * 60
+)
+
+// Enforcement-mode status conditions, in machine order. The agent Pod is
+// never created before ConditionBrokerPolicyReady and
+// ConditionEgressCAPublished both hold.
+const (
+	ConditionBrokerPolicyReady = "BrokerPolicyReady"
+	ConditionEgressdCreated    = "EgressdCreated"
+	ConditionEgressdReady      = "EgressdReady"
+	ConditionEgressCAPublished = "EgressCAPublished"
 )
 
 type brokerAgentsPolicy struct {
@@ -100,6 +129,9 @@ type AgentRunReconciler struct {
 
 	Scheme *runtime.Scheme
 	Now    func() metav1.Time
+	// EgressCAFetcher fetches the egressd CA certificate in enforcement mode;
+	// nil means the default in-cluster HTTP fetch. Test seam.
+	EgressCAFetcher func(ctx context.Context, url string) ([]byte, error)
 }
 
 // Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
@@ -166,19 +198,63 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.reconcileEgressdConfigMap(ctx, &agentRun, existingPod != nil); err != nil {
 		return ctrl.Result{}, err
 	}
+	enforced := AgentRunEgressEnforced(&agentRun)
+	conditionsChanged := false
+	if enforced && existingPod == nil {
+		// Own-Pod egressd is created before (never behind) the broker
+		// policy: egressd is broker-independent at startup — it fetches
+		// injectable material lazily and fail-closed on the first proxied
+		// request, and CA generation needs no broker at all.
+		if err := r.reconcileEgressdPod(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.reconcileEgressdService(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+		if r.setRunCondition(&agentRun, ConditionEgressdCreated, metav1.ConditionTrue, "EgressdCreated", "egressd Pod and Service exist") {
+			conditionsChanged = true
+		}
+	}
 	if err := r.reconcileBrokerAgentsPolicy(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
+	}
+	if enforced {
+		// This condition gates the agent Pod, not egressd; the #62 bootstrap
+		// retry still absorbs the broker ConfigMap projection lag agent-side.
+		if r.setRunCondition(&agentRun, ConditionBrokerPolicyReady, metav1.ConditionTrue, "BrokerPolicyReady", "broker agents policy reconciled") {
+			conditionsChanged = true
+		}
+	}
+	if enforced && existingPod == nil {
+		result, proceed, changed, gateErr := r.reconcileEnforcementGates(ctx, &agentRun)
+		conditionsChanged = conditionsChanged || changed
+		if gateErr != nil || !proceed {
+			if conditionsChanged {
+				if statusErr := r.Status().Update(ctx, &agentRun); statusErr != nil {
+					return ctrl.Result{}, fmt.Errorf("update AgentRun status: %w", statusErr)
+				}
+			}
+			return result, gateErr
+		}
 	}
 
 	pod := existingPod
 	if pod == nil {
+		if enforced && !enforcementAgentPodGatesHold(&agentRun) {
+			// Belt-and-braces: no reconcile path may create the agent Pod
+			// before BrokerPolicyReady and EgressCAPublished both hold.
+			return ctrl.Result{}, fmt.Errorf("refusing to create agent Pod before BrokerPolicyReady and EgressCAPublished hold")
+		}
 		pod, err = r.createAgentPod(ctx, &agentRun)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	statusChanged := InitializeAgentRunStatus(&agentRun)
+	statusChanged := conditionsChanged
+	if InitializeAgentRunStatus(&agentRun) {
+		statusChanged = true
+	}
 	if SyncAgentRunStatusFromPod(&agentRun, pod, r.now()) {
 		statusChanged = true
 	}
@@ -205,6 +281,7 @@ func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Pod{}).
+		Owns(&corev1.Service{}).
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.agentRunsForBrokerAgentsConfigMap),
@@ -312,8 +389,20 @@ func (r *AgentRunReconciler) reconcileActiveDeadline(ctx context.Context, agentR
 }
 
 func (r *AgentRunReconciler) deleteOwnedAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, description string) error {
+	if err := r.deleteOwnedPodByName(ctx, agentRun, AgentPodName(agentRun.Name), description); err != nil {
+		return err
+	}
+	if AgentRunEgressEnforced(agentRun) {
+		// The paired egressd Pod has no purpose past the run; the remaining
+		// enforcement objects are garbage-collected with the AgentRun.
+		return r.deleteOwnedPodByName(ctx, agentRun, EgressdPodName(agentRun.Name), description+" (egressd)")
+	}
+	return nil
+}
+
+func (r *AgentRunReconciler) deleteOwnedPodByName(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, name, description string) error {
 	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}
+	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: name}
 	if err := r.Get(ctx, key, pod); err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -667,6 +756,369 @@ func (r *AgentRunReconciler) validateBrokerCASecret(ctx context.Context, agentRu
 	return nil
 }
 
+// AgentRunEgressEnforced reports whether the run opted into network-enforced
+// egress (own-Pod egressd + NetworkPolicies). Validation guarantees this
+// implies mediated mode.
+func AgentRunEgressEnforced(agentRun *nvtv1alpha1.AgentRun) bool {
+	return agentRun.Spec.EgressEnforcement && AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated
+}
+
+// EgressdPodName returns the own-Pod egressd Pod name for an AgentRun.
+func EgressdPodName(agentRunName string) string {
+	return agentRunName + "-egressd"
+}
+
+// EgressdServiceName returns the per-run egressd Service name.
+func EgressdServiceName(agentRunName string) string {
+	return agentRunName + "-egressd"
+}
+
+// EgressCAConfigMapName returns the operator-published CA ConfigMap name.
+func EgressCAConfigMapName(agentRunName string) string {
+	return agentRunName + "-egress-ca"
+}
+
+// enforcementLabels extends the run labels with the pairing selectors the
+// NetworkPolicies match on.
+func enforcementLabels(agentRunName, role string) map[string]string {
+	labels := agentRunLabels(agentRunName)
+	labels[runLabelKey] = agentRunName
+	labels[roleLabelKey] = role
+	return labels
+}
+
+// egressdLeafDNSNames are the synthetic Service names the per-agent CA may
+// mint leafs for in own-Pod mode. Never upstream names — egressd refuses the
+// overlap at config load.
+func egressdLeafDNSNames(agentRun *nvtv1alpha1.AgentRun) []string {
+	service := EgressdServiceName(agentRun.Name)
+	return []string{
+		service,
+		service + "." + agentRun.Namespace,
+		service + "." + agentRun.Namespace + ".svc",
+	}
+}
+
+func headerInjectGrants(agentRun *nvtv1alpha1.AgentRun) []nvtv1alpha1.AgentRunBrokerGrant {
+	grants := []nvtv1alpha1.AgentRunBrokerGrant{}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if AgentRunGrantMaterialization(grant) == nvtv1alpha1.AgentRunGrantHeaderInject {
+			grants = append(grants, grant)
+		}
+	}
+	return grants
+}
+
+func (r *AgentRunReconciler) setRunCondition(agentRun *nvtv1alpha1.AgentRun, conditionType string, status metav1.ConditionStatus, reason, message string) bool {
+	return meta.SetStatusCondition(&agentRun.Status.Conditions, metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: agentRun.Generation,
+	})
+}
+
+func enforcementAgentPodGatesHold(agentRun *nvtv1alpha1.AgentRun) bool {
+	return meta.IsStatusConditionTrue(agentRun.Status.Conditions, ConditionBrokerPolicyReady) &&
+		meta.IsStatusConditionTrue(agentRun.Status.Conditions, ConditionEgressCAPublished)
+}
+
+// reconcileEnforcementGates advances the own-Pod machine past egressd
+// creation: wait for egressd Ready, then fetch and publish the CA. Returns
+// proceed=true only when the agent Pod may be created this pass.
+func (r *AgentRunReconciler) reconcileEnforcementGates(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, bool, bool, error) {
+	changed := false
+	egressdPod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}
+	if err := r.Get(ctx, key, egressdPod); err != nil {
+		return ctrl.Result{}, false, changed, fmt.Errorf("get egressd Pod: %w", err)
+	}
+	if !isPodReady(egressdPod) {
+		changed = r.setRunCondition(agentRun, ConditionEgressdReady, metav1.ConditionFalse, "EgressdNotReady", "waiting for egressd Pod readiness (CA endpoint /healthz)") || changed
+		return ctrl.Result{RequeueAfter: egressdReadyRequeue}, false, changed, nil
+	}
+	changed = r.setRunCondition(agentRun, ConditionEgressdReady, metav1.ConditionTrue, "EgressdReady", "egressd Pod is ready") || changed
+
+	published, err := r.publishEgressCAConfigMap(ctx, agentRun)
+	if err != nil {
+		changed = r.setRunCondition(agentRun, ConditionEgressCAPublished, metav1.ConditionFalse, "CAPublishFailed", err.Error()) || changed
+		return ctrl.Result{}, false, changed, err
+	}
+	if !published {
+		return ctrl.Result{RequeueAfter: egressdReadyRequeue}, false, changed, nil
+	}
+	changed = r.setRunCondition(agentRun, ConditionEgressCAPublished, metav1.ConditionTrue, "EgressCAPublished", "CA certificate published to the per-run ConfigMap") || changed
+	return ctrl.Result{}, true, changed, nil
+}
+
+func isPodReady(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// publishEgressCAConfigMap fetches the CA certificate from egressd's CA
+// endpoint exactly once and publishes it into the per-run ConfigMap the
+// agent Pod mounts. The agent never network-fetches its own trust anchor;
+// the one fetch is done here, by the trusted operator, at reconcile time.
+func (r *AgentRunReconciler) publishEgressCAConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (bool, error) {
+	configMap := &corev1.ConfigMap{}
+	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressCAConfigMapName(agentRun.Name)}
+	err := r.Get(ctx, key, configMap)
+	if err == nil {
+		if !metav1.IsControlledBy(configMap, agentRun) {
+			return false, fmt.Errorf("egress CA ConfigMap %s/%s exists but is not controlled by AgentRun %s", key.Namespace, key.Name, agentRun.Name)
+		}
+		if len(configMap.Data[egressCACertKey]) == 0 {
+			return false, fmt.Errorf("egress CA ConfigMap %s/%s is missing key %s", key.Namespace, key.Name, egressCACertKey)
+		}
+		return true, nil
+	}
+	if !errors.IsNotFound(err) {
+		return false, fmt.Errorf("get egress CA ConfigMap: %w", err)
+	}
+	url := fmt.Sprintf("http://%s.%s.svc:%d/%s", EgressdServiceName(agentRun.Name), agentRun.Namespace, egressCAPort, egressCACertKey)
+	certPEM, err := r.fetchEgressCA(ctx, url)
+	if err != nil {
+		return false, fmt.Errorf("fetch egressd CA certificate: %w", err)
+	}
+	if err := validateCACertificatePEM(certPEM); err != nil {
+		return false, fmt.Errorf("egressd CA endpoint returned invalid material: %w", err)
+	}
+	desired, err := DesiredEgressCAConfigMap(agentRun, r.Scheme, certPEM)
+	if err != nil {
+		return false, err
+	}
+	if err := r.Create(ctx, desired); err != nil {
+		return false, fmt.Errorf("create egress CA ConfigMap: %w", err)
+	}
+	return true, nil
+}
+
+func (r *AgentRunReconciler) fetchEgressCA(ctx context.Context, url string) ([]byte, error) {
+	if r.EgressCAFetcher != nil {
+		return r.EgressCAFetcher(ctx, url)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CA endpoint returned %d", response.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(response.Body, 1<<20))
+}
+
+// validateCACertificatePEM accepts only certificate PEM blocks: anything
+// else — a private key above all — must never reach the published ConfigMap.
+func validateCACertificatePEM(data []byte) error {
+	rest := data
+	blocks := 0
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("unexpected PEM block %q", block.Type)
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return fmt.Errorf("parse certificate: %w", err)
+		}
+		blocks++
+	}
+	if blocks == 0 {
+		return fmt.Errorf("no certificate PEM block found")
+	}
+	if strings.TrimSpace(string(rest)) != "" {
+		return fmt.Errorf("trailing non-PEM data after certificates")
+	}
+	return nil
+}
+
+// DesiredEgressCAConfigMap wraps the fetched CA certificate for the agent
+// Pod to mount read-only at the Phase 4 path.
+func DesiredEgressCAConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme, certPEM []byte) (*corev1.ConfigMap, error) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      EgressCAConfigMapName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    agentRunLabels(agentRun.Name),
+		},
+		Data: map[string]string{egressCACertKey: string(certPEM)},
+	}
+	if err := controllerutil.SetControllerReference(agentRun, configMap, scheme); err != nil {
+		return nil, fmt.Errorf("set egress CA ConfigMap owner: %w", err)
+	}
+	return configMap, nil
+}
+
+func (r *AgentRunReconciler) reconcileEgressdPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}
+	if err := r.Get(ctx, key, pod); err == nil {
+		if !metav1.IsControlledBy(pod, agentRun) {
+			return fmt.Errorf("egressd Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
+		}
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("get egressd Pod: %w", err)
+	}
+	desired, err := DesiredEgressdPod(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	if err := r.Create(ctx, desired); err != nil {
+		return fmt.Errorf("create egressd Pod: %w", err)
+	}
+	return nil
+}
+
+func (r *AgentRunReconciler) reconcileEgressdService(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	service := &corev1.Service{}
+	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdServiceName(agentRun.Name)}
+	if err := r.Get(ctx, key, service); err == nil {
+		if !metav1.IsControlledBy(service, agentRun) {
+			return fmt.Errorf("egressd Service %s/%s exists but is not controlled by AgentRun %s", service.Namespace, service.Name, agentRun.Name)
+		}
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("get egressd Service: %w", err)
+	}
+	desired, err := DesiredEgressdService(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	if err := r.Create(ctx, desired); err != nil {
+		return fmt.Errorf("create egressd Service: %w", err)
+	}
+	return nil
+}
+
+// DesiredEgressdPod renders the own-Pod egressd for an enforcement run. It
+// carries the same config/token/broker-CA wiring as the same-Pod sidecar,
+// plus a readiness probe on the CA endpoint so EgressdReady is observable.
+func DesiredEgressdPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
+	if err := ValidateBrokerTLSConfig(); err != nil {
+		return nil, err
+	}
+	volumes := []corev1.Volume{{
+		Name: egressdConfigName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: EgressdConfigMapName(agentRun.Name)},
+				Items: []corev1.KeyToPath{
+					{Key: egressdConfigKey, Path: egressdConfigKey},
+				},
+			},
+		},
+	}}
+	volumeMounts := []corev1.VolumeMount{
+		{Name: egressdConfigName, MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
+	}
+	if brokerCADistributed() {
+		volumes = append(volumes, corev1.Volume{
+			Name: brokerCAVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: BrokerCASecretName(),
+					Items: []corev1.KeyToPath{
+						{Key: brokerCAKey, Path: brokerCAKey},
+					},
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      brokerCAVolumeName,
+			MountPath: egressdBrokerCAMount,
+			ReadOnly:  true,
+		})
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      EgressdPodName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    enforcementLabels(agentRun.Name, roleLabelEgressd),
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyAlways,
+			Containers: []corev1.Container{{
+				Name:            "egressd",
+				Image:           EgressdImage(),
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Env: []corev1.EnvVar{
+					{Name: "NVT_EGRESSD_CONFIG", Value: egressdConfigPath},
+					{
+						Name: "NVT_BROKER_TOKEN",
+						ValueFrom: &corev1.EnvVarSource{
+							SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: EgressTokenSecretName(agentRun.Name)},
+								Key:                  egressTokenKey,
+							},
+						},
+					},
+				},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/healthz",
+							Port: intstr.FromInt32(egressCAPort),
+						},
+					},
+					PeriodSeconds: 2,
+				},
+				VolumeMounts: volumeMounts,
+			}},
+			Volumes: volumes,
+		},
+	}
+	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
+		return nil, fmt.Errorf("set egressd Pod owner: %w", err)
+	}
+	return pod, nil
+}
+
+// DesiredEgressdService exposes the CA endpoint and every route port under
+// the per-run Service name the agent's base-urls point at.
+func DesiredEgressdService(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Service, error) {
+	ports := []corev1.ServicePort{{Name: "ca", Port: egressCAPort}}
+	for index := range headerInjectGrants(agentRun) {
+		ports = append(ports, corev1.ServicePort{
+			Name: fmt.Sprintf("route-%d", index),
+			Port: int32(egressRouteBasePort + index),
+		})
+	}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      EgressdServiceName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    enforcementLabels(agentRun.Name, roleLabelEgressd),
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				runLabelKey:  agentRun.Name,
+				roleLabelKey: roleLabelEgressd,
+			},
+			Ports: ports,
+		},
+	}
+	if err := controllerutil.SetControllerReference(agentRun, service, scheme); err != nil {
+		return nil, fmt.Errorf("set egressd Service owner: %w", err)
+	}
+	return service, nil
+}
+
 // DesiredTokenSecret returns an owned token Secret, preserving an existing token when present.
 func DesiredTokenSecret(
 	agentRun *nvtv1alpha1.AgentRun,
@@ -757,7 +1209,9 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		ListenTLS             string `json:"listen_tls,omitempty"`
 	}
 	type egressdCA struct {
-		PublishDir string `json:"publish_dir"`
+		PublishDir   string   `json:"publish_dir,omitempty"`
+		LeafDNSNames []string `json:"leaf_dns_names,omitempty"`
+		ServeAddr    string   `json:"serve_addr,omitempty"`
 	}
 	type egressdConfig struct {
 		BrokerURL           string         `json:"broker_url"`
@@ -771,6 +1225,7 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	}
 	grants := AgentRunBrokerGrants(agentRun.Spec.Broker)
 	routes := make([]egressdRoute, 0, len(grants))
+	enforced := AgentRunEgressEnforced(agentRun)
 	routeIndex := 0
 	needCA := false
 	for _, grant := range grants {
@@ -781,12 +1236,18 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 			return "", fmt.Errorf("broker grant %s egressHosts is required for mediated egress", grant.Provider)
 		}
 		route := egressdRoute{
-			Listen:                fmt.Sprintf("127.0.0.1:%d", 8471+routeIndex),
+			Listen:                fmt.Sprintf("127.0.0.1:%d", egressRouteBasePort+routeIndex),
 			Capability:            grant.Provider,
 			Upstream:              grant.EgressHosts[0],
 			AllowInsecureUpstream: false,
 		}
-		if grant.Git {
+		if enforced {
+			// Own-Pod: the hop leaves localhost, so every route listens on
+			// the Pod network and terminates TLS under the per-agent CA.
+			route.Listen = fmt.Sprintf("0.0.0.0:%d", egressRouteBasePort+routeIndex)
+			route.ListenTLS = "ca"
+			needCA = true
+		} else if grant.Git {
 			// git clients require an https base URL; the route terminates
 			// TLS with a leaf signed by the boot-generated per-agent CA.
 			route.ListenTLS = "ca"
@@ -806,7 +1267,14 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		config.BrokerCAFile = egressdBrokerCAFile
 		config.AllowInsecureBroker = false
 	}
-	if needCA {
+	if enforced {
+		// The CA certificate is distributed by the operator (fetched once
+		// from the serve_addr endpoint), not through a shared volume.
+		config.CA = &egressdCA{
+			LeafDNSNames: egressdLeafDNSNames(agentRun),
+			ServeAddr:    fmt.Sprintf("0.0.0.0:%d", egressCAPort),
+		}
+	} else if needCA {
 		config.CA = &egressdCA{PublishDir: egressCAMountPath}
 	}
 	rendered, err := json.MarshalIndent(config, "", "  ")
@@ -870,9 +1338,30 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			ReadOnly:  true,
 		})
 	}
-	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+	enforced := AgentRunEgressEnforced(agentRun)
+	if enforced {
+		// Own-Pod mode: the agent's trust anchor is the operator-published
+		// per-run ConfigMap, mounted read-only at the same Phase 4 path so
+		// bootstrap is unchanged. No egressd sidecar and no shared emptyDir.
 		volumes = append(volumes, corev1.Volume{
-			Name: "egressd-config",
+			Name: egressCAVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: EgressCAConfigMapName(agentRun.Name)},
+					Items: []corev1.KeyToPath{
+						{Key: egressCACertKey, Path: egressCACertKey},
+					},
+				},
+			},
+		})
+		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+			Name:      egressCAVolumeName,
+			MountPath: egressCAMountPath,
+			ReadOnly:  true,
+		})
+	} else if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		volumes = append(volumes, corev1.Volume{
+			Name: egressdConfigName,
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{Name: EgressdConfigMapName(agentRun.Name)},
@@ -998,16 +1487,18 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_MODE", Value: string(nvtv1alpha1.AgentRunEgressMediated)})
-		if hasGitGrant {
+		if enforced || hasGitGrant {
+			// Enforcement: every base-url is https, so bootstrap always
+			// needs the CA (git wiring plus the container trust store).
 			containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_CA_FILE", Value: egressCAFilePath})
 		}
 	}
 	if brokerCADistributed() {
 		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_BROKER_CA_FILE", Value: agentBrokerCAFile})
 	}
-	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated && !enforced {
 		egressdVolumeMounts := []corev1.VolumeMount{
-			{Name: "egressd-config", MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
+			{Name: egressdConfigName, MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
 		}
 		if brokerCADistributed() {
 			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
@@ -1044,11 +1535,16 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		})
 	}
 
+	podLabels := agentRunLabels(agentRun.Name)
+	if enforced {
+		// Pairing labels the NetworkPolicies select on.
+		podLabels = enforcementLabels(agentRun.Name, roleLabelAgent)
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      AgentPodName(agentRun.Name),
 			Namespace: agentRun.Namespace,
-			Labels:    agentRunLabels(agentRun.Name),
+			Labels:    podLabels,
 		},
 		Spec: corev1.PodSpec{
 			RuntimeClassName: agentRun.Spec.RuntimeClassName,
@@ -1579,20 +2075,25 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 }
 
 func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.AgentRun) map[string]any {
+	enforced := AgentRunEgressEnforced(agentRun)
 	grants := []any{}
 	routeIndex := 0
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
 		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
 		}
-		scheme := "http"
-		if grant.Git {
-			scheme = "https"
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", egressRouteBasePort+routeIndex)
+		if enforced {
+			// Own-Pod egressd: every route is reached through the per-run
+			// Service and terminates TLS under the per-agent CA.
+			baseURL = fmt.Sprintf("https://%s:%d", EgressdServiceName(agentRun.Name), egressRouteBasePort+routeIndex)
+		} else if grant.Git {
+			baseURL = fmt.Sprintf("https://127.0.0.1:%d", egressRouteBasePort+routeIndex)
 		}
 		grants = append(grants, map[string]any{
 			"provider":        grant.Provider,
 			"materialization": string(nvtv1alpha1.AgentRunGrantHeaderInject),
-			"base-url":        fmt.Sprintf("%s://127.0.0.1:%d", scheme, 8471+routeIndex),
+			"base-url":        baseURL,
 		})
 		routeIndex++
 	}

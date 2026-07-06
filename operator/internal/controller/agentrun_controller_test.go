@@ -2,9 +2,17 @@ package controller
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"math/big"
 	"os"
 	"reflect"
 	"strings"
@@ -949,6 +957,273 @@ func TestReconcileTLSBrokerCreatesPodWhenCASecretValid(t *testing.T) {
 		t.Fatalf("expected agent Pod, got %v", err)
 	}
 	requireVolume(t, pod, brokerCAVolumeName)
+}
+
+func enforcedAgentRun() *nvtv1alpha1.AgentRun {
+	agentRun := multiGrantMediatedAgentRun()
+	agentRun.Spec.EgressEnforcement = true
+	return agentRun
+}
+
+func testCertificatePEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test egress CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(cryptorand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func markPodReady(ctx context.Context, t *testing.T, k8sClient client.Client, namespace, name string) {
+	t.Helper()
+	var pod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &pod); err != nil {
+		t.Fatalf("get pod %s: %v", name, err)
+	}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	if err := k8sClient.Status().Update(ctx, &pod); err != nil {
+		t.Fatalf("mark pod %s ready: %v", name, err)
+	}
+}
+
+func runCondition(agentRun *nvtv1alpha1.AgentRun, conditionType string) *metav1.Condition {
+	for index := range agentRun.Status.Conditions {
+		if agentRun.Status.Conditions[index].Type == conditionType {
+			return &agentRun.Status.Conditions[index]
+		}
+	}
+	return nil
+}
+
+// TestEnforcementReconcileProgression drives the full condition machine:
+// egressd Pod/Service first (never behind the broker policy), agent Pod only
+// after EgressdReady and EgressCAPublished, CA ConfigMap bytes exactly what
+// the fetcher returned.
+func TestEnforcementReconcileProgression(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	certPEM := testCertificatePEM(t)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	fetchedURLs := []string{}
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme,
+		EgressCAFetcher: func(_ context.Context, url string) ([]byte, error) {
+			fetchedURLs = append(fetchedURLs, url)
+			return certPEM, nil
+		},
+	}
+
+	// Pass 1: egressd Pod + Service exist, agent Pod does not; the machine
+	// waits on egressd readiness.
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("reconcile pass 1: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("expected requeue while egressd is not ready")
+	}
+	var egressdPod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}, &egressdPod); err != nil {
+		t.Fatalf("expected egressd Pod, got %v", err)
+	}
+	if egressdPod.Labels[runLabelKey] != agentRun.Name || egressdPod.Labels[roleLabelKey] != roleLabelEgressd {
+		t.Fatalf("egressd Pod missing pairing labels: %#v", egressdPod.Labels)
+	}
+	var service corev1.Service
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: EgressdServiceName(agentRun.Name)}, &service); err != nil {
+		t.Fatalf("expected egressd Service, got %v", err)
+	}
+	if len(service.Spec.Ports) != 3 {
+		t.Fatalf("expected CA port + 2 route ports, got %#v", service.Spec.Ports)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+	var afterFirst nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &afterFirst); err != nil {
+		t.Fatal(err)
+	}
+	for conditionType, want := range map[string]metav1.ConditionStatus{
+		ConditionEgressdCreated:    metav1.ConditionTrue,
+		ConditionBrokerPolicyReady: metav1.ConditionTrue,
+		ConditionEgressdReady:      metav1.ConditionFalse,
+	} {
+		condition := runCondition(&afterFirst, conditionType)
+		if condition == nil || condition.Status != want {
+			t.Fatalf("after pass 1 condition %s = %#v, want %s", conditionType, condition, want)
+		}
+	}
+	if runCondition(&afterFirst, ConditionEgressCAPublished) != nil {
+		t.Fatal("EgressCAPublished must not be set before egressd is ready")
+	}
+	if len(fetchedURLs) != 0 {
+		t.Fatalf("CA fetched before egressd ready: %v", fetchedURLs)
+	}
+
+	// Pass 2: egressd ready -> CA fetched once, published, agent Pod created.
+	markPodReady(ctx, t, k8sClient, agentRun.Namespace, EgressdPodName(agentRun.Name))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile pass 2: %v", err)
+	}
+	wantURL := fmt.Sprintf("http://%s.%s.svc:%d/ca.crt", EgressdServiceName(agentRun.Name), agentRun.Namespace, egressCAPort)
+	if len(fetchedURLs) != 1 || fetchedURLs[0] != wantURL {
+		t.Fatalf("CA fetch URLs = %v, want exactly [%s]", fetchedURLs, wantURL)
+	}
+	var caConfigMap corev1.ConfigMap
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: EgressCAConfigMapName(agentRun.Name)}, &caConfigMap); err != nil {
+		t.Fatalf("expected egress CA ConfigMap, got %v", err)
+	}
+	if caConfigMap.Data[egressCACertKey] != string(certPEM) {
+		t.Fatal("published ConfigMap bytes differ from the fetched certificate")
+	}
+	agentPod := getAgentPod(ctx, t, k8sClient, agentRun)
+	if agentPod.Labels[runLabelKey] != agentRun.Name || agentPod.Labels[roleLabelKey] != roleLabelAgent {
+		t.Fatalf("agent Pod missing pairing labels: %#v", agentPod.Labels)
+	}
+	if _, found := findContainer(agentPod.Spec.Containers, "egressd"); found {
+		t.Fatal("enforcement agent Pod rendered a same-Pod egressd sidecar")
+	}
+	caVolume := requireVolume(t, agentPod, egressCAVolumeName)
+	if caVolume.ConfigMap == nil || caVolume.ConfigMap.Name != EgressCAConfigMapName(agentRun.Name) {
+		t.Fatalf("agent CA volume must come from the published ConfigMap: %#v", caVolume)
+	}
+	agent := requireContainer(t, agentPod, "agent")
+	if envValue(agent, "NVT_EGRESS_CA_FILE") != egressCAFilePath {
+		t.Fatalf("agent env missing NVT_EGRESS_CA_FILE: %#v", agent.Env)
+	}
+	var final nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &final); err != nil {
+		t.Fatal(err)
+	}
+	for _, conditionType := range []string{ConditionBrokerPolicyReady, ConditionEgressdCreated, ConditionEgressdReady, ConditionEgressCAPublished} {
+		condition := runCondition(&final, conditionType)
+		if condition == nil || condition.Status != metav1.ConditionTrue {
+			t.Fatalf("final condition %s = %#v, want True", conditionType, condition)
+		}
+	}
+}
+
+// TestEnforcementEgressdNeverReady pins the stuck state: without egressd
+// readiness the machine keeps requeuing and never creates the agent Pod.
+func TestEnforcementEgressdNeverReady(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme,
+		EgressCAFetcher: func(context.Context, string) ([]byte, error) {
+			t.Fatal("CA must not be fetched while egressd is not ready")
+			return nil, nil
+		},
+	}
+	for pass := 0; pass < 3; pass++ {
+		result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+		if err != nil {
+			t.Fatalf("reconcile pass %d: %v", pass, err)
+		}
+		if result.RequeueAfter == 0 {
+			t.Fatalf("pass %d: expected requeue while egressd is not ready", pass)
+		}
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+// TestEnforcementCAFetchInvalid pins the loud CA failure: a non-certificate
+// body is never published, the condition carries the reason, and the agent
+// Pod is not created.
+func TestEnforcementCAFetchInvalid(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	keyPEM := "-----BEGIN EC PRIVATE KEY-----\nZml4dHVyZQ==\n-----END EC PRIVATE KEY-----\n"
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme,
+		EgressCAFetcher: func(context.Context, string) ([]byte, error) {
+			return []byte(keyPEM), nil
+		},
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile pass 1: %v", err)
+	}
+	markPodReady(ctx, t, k8sClient, agentRun.Namespace, EgressdPodName(agentRun.Name))
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "invalid material") {
+		t.Fatalf("expected invalid CA material error, got %v", err)
+	}
+	var caConfigMap corev1.ConfigMap
+	if getErr := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: EgressCAConfigMapName(agentRun.Name)}, &caConfigMap); !errors.IsNotFound(getErr) {
+		t.Fatalf("non-certificate material must not be published, got %v", getErr)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
+		t.Fatal(err)
+	}
+	condition := runCondition(&updated, ConditionEgressCAPublished)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "CAPublishFailed" {
+		t.Fatalf("expected loud CAPublishFailed condition, got %#v", condition)
+	}
+}
+
+// TestEnforcementRenderedConfigs pins the own-Pod rendering: all routes on
+// the Pod network with TLS, CA served (not published to a volume), leaf
+// names scoped to the per-run Service, base-urls through the Service.
+func TestEnforcementRenderedConfigs(t *testing.T) {
+	agentRun := enforcedAgentRun()
+	rendered, err := RenderEgressdConfigJSON(agentRun)
+	if err != nil {
+		t.Fatalf("render egressd config: %v", err)
+	}
+	for _, want := range []string{
+		`"listen": "0.0.0.0:8471"`,
+		`"listen": "0.0.0.0:8472"`,
+		`"serve_addr": "0.0.0.0:8470"`,
+		fmt.Sprintf("%q", EgressdServiceName(agentRun.Name)),
+		fmt.Sprintf("%q", EgressdServiceName(agentRun.Name)+"."+agentRun.Namespace+".svc"),
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("enforcement egressd config missing %s:\n%s", want, rendered)
+		}
+	}
+	if strings.Count(rendered, `"listen_tls": "ca"`) != 2 {
+		t.Fatalf("every enforcement route must terminate TLS:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "publish_dir") || strings.Contains(rendered, "127.0.0.1") {
+		t.Fatalf("enforcement config must not publish to a volume or bind loopback:\n%s", rendered)
+	}
+
+	injected := InjectMediatedEgressConfig(map[string]any{}, agentRun)
+	egress := injected["egress"].(map[string]any)
+	grants := egress["grants"].([]any)
+	if len(grants) != 2 {
+		t.Fatalf("expected 2 injected grants, got %#v", grants)
+	}
+	first := grants[0].(map[string]any)
+	if first["base-url"] != fmt.Sprintf("https://%s:8471", EgressdServiceName(agentRun.Name)) {
+		t.Fatalf("enforcement base-url must use the Service name over https, got %#v", first)
+	}
 }
 
 func TestReconcileKeepsRunningRunWhenBrokerFlipsToPlaintext(t *testing.T) {

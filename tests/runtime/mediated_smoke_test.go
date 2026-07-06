@@ -284,6 +284,7 @@ exit 1
 	insteadOf = https://example.test/
 `)
 	mustWriteFile(t, filepath.Join(f.home, ".git-credentials"), "https://fixture-git-stored-token@example.test\n")
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")
 	caDir := t.TempDir()
 	caFile := filepath.Join(caDir, "ca.crt")
 	mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nfixture-ca-cert\n-----END CERTIFICATE-----\n")
@@ -310,6 +311,7 @@ code-server:
 		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"NVT_EGRESS_MODE=mediated",
 		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + t.TempDir(),
 	}, config)
 
 	gitConfig := mustReadFile(t, filepath.Join(f.home, ".gitconfig"))
@@ -371,6 +373,120 @@ code-server:
 	if !strings.Contains(output, "CA certificate") || !strings.Contains(output, "git grant git-app") {
 		t.Fatalf("expected fail-closed CA wait error, got:\n%s", output)
 	}
+}
+
+// TestMediatedHTTPSTrustStoreInstall pins the enforcement-mode agent trust
+// path: with an https base-url, bootstrap waits for the egress CA, installs
+// it into the container trust store, and persists the bundle env for
+// generic CLIs — while git-free grants get no git wiring.
+func TestMediatedHTTPSTrustStoreInstall(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY"}'
+`)
+	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
+	caDir := t.TempDir()
+	caFile := filepath.Join(caDir, "ca.crt")
+	mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nfixture-ca-cert\n-----END CERTIFICATE-----\n")
+	trustDir := t.TempDir()
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      base-url: https://run-egressd:8471
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	f.runWithEnv(bootstrapBin(f.root), true, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + trustDir,
+		"NVT_CA_BUNDLE_FILE=/etc/ssl/certs/ca-certificates.crt",
+	}, config)
+	installed := mustReadFile(t, filepath.Join(trustDir, "nvt-egress-ca.crt"))
+	if !strings.Contains(installed, "BEGIN CERTIFICATE") {
+		t.Fatalf("trust store file is not a certificate:\n%s", installed)
+	}
+	if _, err := os.Stat(updateLog); err != nil {
+		t.Fatal("update-ca-certificates was not invoked")
+	}
+	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
+	if !strings.Contains(envFile, `export SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"`) ||
+		!strings.Contains(envFile, `export REQUESTS_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"`) {
+		t.Fatalf("bundle env not persisted:\n%s", envFile)
+	}
+}
+
+// TestMediatedTrustStoreInstallFailsClosed pins the no-fallback rule: a
+// failing trust-store install or a non-certificate CA file aborts bootstrap.
+func TestMediatedTrustStoreInstallFailsClosed(t *testing.T) {
+	config := `
+egress:
+  mode: mediated
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      base-url: https://run-egressd:8471
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`
+	t.Run("update-ca-certificates fails", func(t *testing.T) {
+		f := newFixture(t)
+		f.writeBin("brokerctl", `#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY"}'
+`)
+		f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 1\n")
+		caFile := filepath.Join(t.TempDir(), "ca.crt")
+		mustWriteFile(t, caFile, "-----BEGIN CERTIFICATE-----\nfixture-ca-cert\n-----END CERTIFICATE-----\n")
+		output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+			"HOME=" + f.home,
+			"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"NVT_EGRESS_MODE=mediated",
+			"NVT_EGRESS_CA_FILE=" + caFile,
+			"NVT_CA_TRUST_DIR=" + t.TempDir(),
+		}, f.writeAgentConfig(config))
+		if !strings.Contains(output, "refusing to continue without egress trust") {
+			t.Fatalf("expected fail-closed trust install error, got:\n%s", output)
+		}
+	})
+	t.Run("CA file is not a certificate", func(t *testing.T) {
+		f := newFixture(t)
+		f.writeBin("brokerctl", `#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"hosts":["api.example.test"],"placeholder":"NVT-PLACEHOLDER-NOT-A-KEY"}'
+`)
+		f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")
+		caFile := filepath.Join(t.TempDir(), "ca.crt")
+		mustWriteFile(t, caFile, "not a certificate\n")
+		output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+			"HOME=" + f.home,
+			"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"NVT_EGRESS_MODE=mediated",
+			"NVT_EGRESS_CA_FILE=" + caFile,
+			"NVT_CA_TRUST_DIR=" + t.TempDir(),
+		}, f.writeAgentConfig(config))
+		if !strings.Contains(output, "is not a certificate") {
+			t.Fatalf("expected invalid CA rejection, got:\n%s", output)
+		}
+	})
 }
 
 // TestMediatedBrokerRoutingNonObjectJSON pins clean failure when brokerctl

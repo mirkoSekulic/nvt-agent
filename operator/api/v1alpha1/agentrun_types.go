@@ -133,6 +133,11 @@ type AgentRunStatus struct {
 	StartedAt  *metav1.Time  `json:"startedAt,omitempty"`
 	FinishedAt *metav1.Time  `json:"finishedAt,omitempty"`
 	Reason     string        `json:"reason,omitempty"`
+	// Conditions surfaces the enforcement-mode provisioning state machine
+	// (BrokerPolicyReady, EgressdCreated, EgressdReady, EgressCAPublished):
+	// each reconcile pass advances one observable step, and the agent Pod is
+	// never created before BrokerPolicyReady and EgressCAPublished both hold.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // AgentRunList contains a list of AgentRun resources.
@@ -331,6 +336,12 @@ func (in *AgentRunStatus) DeepCopy() *AgentRunStatus {
 	}
 	if in.FinishedAt != nil {
 		out.FinishedAt = in.FinishedAt.DeepCopy()
+	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
 	}
 	return out
 }

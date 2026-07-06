@@ -298,6 +298,35 @@ def wait_for_egress_ca(provider):
         time.sleep(0.2)
 
 
+DEFAULT_CA_TRUST_DIR = "/usr/local/share/ca-certificates"
+DEFAULT_CA_BUNDLE_FILE = "/etc/ssl/certs/ca-certificates.crt"
+
+
+def install_egress_ca_trust(provider):
+    # With enforcement every grant's base-url is https on the per-run
+    # egressd Service, and generic CLIs use the system trust store — so the
+    # egress CA (public certificate) is installed system-wide; git keeps its
+    # explicit http.sslCAInfo. Fail closed, no fallback: a missing or invalid
+    # ca.crt or a failing trust-store install aborts bootstrap — never
+    # continue without trust, never downgrade to plain HTTP or direct mode.
+    ca_file = wait_for_egress_ca(provider)
+    content = ca_file.read_text(encoding="utf-8")
+    if "BEGIN CERTIFICATE" not in content:
+        raise SystemExit(f"bootstrap: egress CA file {ca_file} is not a certificate; refusing to continue without trust")
+    trust_dir = Path(os.environ.get("NVT_CA_TRUST_DIR") or DEFAULT_CA_TRUST_DIR)
+    trust_dir.mkdir(parents=True, exist_ok=True)
+    (trust_dir / "nvt-egress-ca.crt").write_text(content, encoding="utf-8")
+    try:
+        run(["update-ca-certificates"])
+    except FileNotFoundError:
+        raise SystemExit("bootstrap: update-ca-certificates not found; refusing to continue without egress trust")
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"bootstrap: update-ca-certificates failed with exit {error.returncode}; refusing to continue without egress trust")
+    bundle = os.environ.get("NVT_CA_BUNDLE_FILE") or DEFAULT_CA_BUNDLE_FILE
+    persist_env_var("SSL_CERT_FILE", bundle)
+    persist_env_var("REQUESTS_CA_BUNDLE", bundle)
+
+
 def apply_git_redirect(provider, grant, hosts):
     base_url = grant["base-url"].rstrip("/")
     if base_url.startswith("https://"):
@@ -322,6 +351,7 @@ def apply_mediated_egress(egress):
     if not isinstance(grants, list):
         raise SystemExit("egress.grants must be a list")
     deadline = broker_wait_deadline()
+    https_provider = None
     for index, grant in enumerate(grants):
         if not isinstance(grant, dict):
             raise SystemExit(f"egress.grants[{index}] must be an object")
@@ -339,7 +369,11 @@ def apply_mediated_egress(egress):
             raise SystemExit(f"bootstrap: mediated grant {provider} is not redirectable")
         if routing.get("git"):
             apply_git_redirect(provider, grant, hosts)
+        if base_url.startswith("https://") and https_provider is None:
+            https_provider = provider
         apply_redirect_env(provider, grant, placeholder)
+    if https_provider is not None:
+        install_egress_ca_trust(https_provider)
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
