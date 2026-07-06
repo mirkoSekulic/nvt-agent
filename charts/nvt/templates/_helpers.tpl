@@ -66,3 +66,32 @@ app.kubernetes.io/component: gateway
 app.kubernetes.io/name: nvt-agent-gateway
 app.kubernetes.io/component: gateway
 {{- end -}}
+
+{{- /*
+  Single source of truth for the broker TLS Secret name: a non-empty
+  existingSecret wins, otherwise the chart-managed secretName. Every template
+  that references the broker TLS Secret must use this helper so the broker
+  can never serve one Secret while the operator projects another.
+*/ -}}
+{{- define "nvt.brokerTLSSecretName" -}}
+{{- default .Values.broker.tls.secretName .Values.broker.tls.existingSecret -}}
+{{- end -}}
+
+{{- /*
+  Restart trigger for the broker Deployment: the broker loads its TLS
+  cert/key once at startup, so the pod template must change when the Secret
+  material changes. `lookup` returns the live Secret on real installs, making
+  the checksum stable across upgrades that keep the same material and
+  changing it when the material rotates. When lookup is unavailable (fresh
+  install, `helm template`), fall back to hashing the configured name — any
+  value works pre-install, and name changes still force a restart.
+*/ -}}
+{{- define "nvt.brokerTLSChecksum" -}}
+{{- $name := include "nvt.brokerTLSSecretName" . -}}
+{{- $existing := lookup "v1" "Secret" (include "nvt.namespace" .) $name -}}
+{{- if $existing -}}
+{{- $existing.data | toJson | sha256sum -}}
+{{- else -}}
+{{- $name | sha256sum -}}
+{{- end -}}
+{{- end -}}

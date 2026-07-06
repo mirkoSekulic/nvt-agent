@@ -35,7 +35,7 @@ spec:
             - name: NVT_BROKER_URL
               value: "https://nvt-broker:7347"
             - name: NVT_BROKER_CA_SECRET
-              value: {{ default .Values.broker.tls.secretName .Values.broker.tls.existingSecret | quote }}
+              value: {{ include "nvt.brokerTLSSecretName" . | quote }}
             {{- end }}
           ports:
             - name: metrics

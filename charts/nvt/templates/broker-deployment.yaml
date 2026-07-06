@@ -19,6 +19,12 @@ spec:
       {{- include "nvt.brokerSelectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.broker.tls.enabled }}
+      annotations:
+        # The broker loads its TLS cert/key once at startup; this checksum
+        # restarts it when the TLS Secret material (or name) changes.
+        checksum/broker-tls: {{ include "nvt.brokerTLSChecksum" . | quote }}
+      {{- end }}
       labels:
         {{- include "nvt.brokerSelectorLabels" . | nindent 8 }}
     spec:
@@ -90,7 +96,7 @@ spec:
         {{- if .Values.broker.tls.enabled }}
         - name: broker-tls
           secret:
-            secretName: {{ default .Values.broker.tls.secretName .Values.broker.tls.existingSecret | quote }}
+            secretName: {{ include "nvt.brokerTLSSecretName" . | quote }}
         {{- end }}
         - name: broker-config
           projected:
