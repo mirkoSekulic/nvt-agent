@@ -66,13 +66,18 @@ A small trusted reverse proxy (Go, consistent with gateway/producer style) runni
 - **Routing** — credentialed API traffic is pointed at egressd via base-URL/proxy config. DNS, brokerd, and the event-webhook callback always go direct (they are the allowlist).
 - **Enforcement** — what stops the agent bypassing egressd and calling upstreams directly. This is the hard part (§7), and it is what separates non-possession (routing alone suffices) from exfil control (needs enforcement).
 
-Routing without enforcement still delivers non-possession. It does not deliver egress control. Stated so nobody reads "traffic goes through the sidecar" as a property compose actually has.
+Routing without enforcement still delivers non-possession once a concrete tool is
+configured to use egressd. It does not deliver egress control. Phase 3 wires the
+plumbing and metadata only; provider-specific tool redirect wiring lands in a
+later proof PR. Stated so nobody reads "traffic goes through the sidecar" as a
+property compose actually has.
 
 ### 4. Runtime wiring
 
 `runtime/core/bootstrap.py` keys off what it's given, keeping the image mode-agnostic:
 
-- Mediated grant → write `ANTHROPIC_BASE_URL` / Codex `config.toml` (`model_providers.*.base_url`, `chatgpt_base_url`) pointing at the sidecar; write **no** auth files.
+- Phase 3 mediated grant → validate the mediated grant metadata, write egress metadata/placeholders needed for non-possession ratchets, and write **no** auth files. It does not yet point concrete tools at the sidecar.
+- First redirectable-provider proof PR → add provider-specific redirect wiring such as `ANTHROPIC_BASE_URL` or Codex `config.toml` (`model_providers.*.base_url`, `chatgpt_base_url`) once that provider proof is in scope.
 - Direct grant → today's behavior exactly (bundles / host-seeded `~/.codex`, `.agents/<name>/auth/claude`).
 
 **Non-secret placeholders are allowed where a CLI demands one.** Some CLIs refuse to start without a syntactically present API key or auth file. Mediated mode may write a fixed, obviously-non-secret placeholder (e.g. `NVT-PLACEHOLDER-NOT-A-KEY`) to satisfy the parser. Two conditions, both test-enforced: (1) the placeholder value is a documented constant carrying zero secret entropy, allowlisted by the non-possession smoke test; (2) a conformance test proves the placeholder is inert upstream — a direct (sidecar-bypassing) request presenting it is rejected by the provider, so possession of the placeholder grants nothing. egressd strips or replaces the placeholder header on injection; it must never be forwarded alongside the real credential.
@@ -129,8 +134,8 @@ The in-netns layer is iptables:
 | Layer | Knob | Default |
 |---|---|---|
 | Broker | per-grant `materialization: file-bundle \| header-inject` | `file-bundle` |
-| Operator | AgentRun/AgentSchedule spec `egress: mediated \| direct`, defaultable via Helm values | opt-in; flip default to `mediated` once smoke tests are in CI |
-| Compose | `agent-init MEDIATED=1` profile adding the sidecar (+ iptables when enforcement lands), skipping bundles | `direct` |
+| Operator | AgentRun/AgentSchedule spec `egress: mediated \| direct`, per-grant `egressHosts`, and explicit `egressAllowInsecureBroker` for local plaintext broker wiring | opt-in; flip default to `mediated` once smoke tests are in CI |
+| Compose | `agent-init MEDIATED=1` profile adding the sidecar (+ iptables when enforcement lands), skipping bundles; requires `NVT_EGRESS_ALLOW_INSECURE_BROKER=1` for the local plaintext broker | `direct` |
 
 When `direct`, the operator renders exactly today's Pod — no sidecar, no NetworkPolicy, no iptables. Both paths stay conformance-tested for as long as both are supported; bundle-path tests (`broker_auth_files` etc.) do not decay while the path remains the documented fallback.
 
@@ -140,6 +145,12 @@ When `direct`, the operator renders exactly today's Pod — no sidecar, no Netwo
 - `egress: mediated` + any `file-bundle` grant → **admission failure** (a bundle written into a supposedly zero-secret container silently breaks the invariant).
 
 Silent downgrade or ignore in either direction would violate risk #2 (silent fallback). The error is loud, names the offending grant, and the operator surfaces it on the AgentRun status.
+
+In Phase 3, mediated egressd routes are rendered only from explicit route hosts
+(`egressHosts` in AgentRun, `egress-hosts` in local `agents.yaml`). The local
+compose and kind POC broker leg is plaintext, so mediated mode must opt into the
+unsafe local-only setting. Production mediated mode must use the broker TLS path
+instead of silently setting `allow_insecure_broker`.
 
 ## Phases
 
@@ -204,7 +215,23 @@ hardening and short-TTL vended bundles.
 
 ### Phase 3 — Operator + compose wiring (non-possession ships)
 
-AgentRun controller conditionally adds the egressd container, its identity Secret, and config; compose gets the sidecar behind the profile flag; bootstrap generates redirected config for mediated grants. Phase-0 non-possession + identity-split tests land in CI here — from now on, later phases cannot regress the core property. (No enforcement yet — routing + non-possession only, per §3.)
+AgentRun gains `egress: direct|mediated`; broker grants gain
+`materialization: file-bundle|header-inject` and explicit mediated route hosts.
+Direct remains the default and renders the existing Pod/compose behavior.
+Mediated mode conditionally adds the egressd sidecar, a separate paired egress
+broker identity, sidecar config, and bootstrap metadata for header-inject grants
+only; mismatch in either direction fails admission before side effects. Until
+multi-route agent config is fully designed, Phase 3 accepts exactly one
+header-inject grant and fails closed otherwise. Codex plan-auth remains on the
+direct file-bundle fallback after the Phase 2 NO-GO.
+
+Phase 3 is routing plumbing plus non-possession, not end-to-end tool routing.
+`bootstrap.py` validates mediated grant metadata and writes egress metadata, but
+it does not configure concrete tools such as Anthropic or Codex to use egressd.
+Concrete tool redirect wiring is deferred to the first redirectable-provider
+proof PR. Phase-0 non-possession tests land in CI here; egress-denied stays
+skipped until Phase 5. (No enforcement yet — routing plumbing +
+non-possession only, per §3.)
 
 ### Phase 4 — git-over-HTTPS mediation
 
@@ -246,7 +273,7 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 | 2 | Phase 1: egressd + identity split + Codex API-key mode | trusted-core review; timeboxed spike result |
 | 3 | Phase 2: ChatGPT-plan flow + refresh/SSE tests | **go/no-go decision recorded in the PR** |
 | 3b | Phase 2b: CONNECT-only egressd forward proxy, no TLS termination or injection | egressd CONNECT tests + Codex proxy harness |
-| 4 | Phase 3: operator + compose wiring; non-possession tests → CI | conformance green in CI |
+| 4 | Phase 3: operator + compose wiring; direct/mediated admission, paired egress identity, sidecar config, bootstrap non-possession tests → CI | broker/runtime/operator conformance green in CI |
 | 5 | Phase 4: git-HTTPS mediation (CA, TLS termination) | trusted-core review — highest-risk surface, deliberately alone |
 | 6a | Phase 5: enforcement (own-Pod evaluation, iptables + FORWARD deny) | egress-denied test → CI |
 | 6b | Phase 5: audit, quotas, revocation, Anthropic proof; flip operator default | both smoke tests green |

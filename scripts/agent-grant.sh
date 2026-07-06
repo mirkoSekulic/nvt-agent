@@ -2,12 +2,15 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo>" >&2
+  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo> [--materialization file-bundle|header-inject] [--egress-host host[:port]]" >&2
 }
 
 name=""
 provider=""
 repo=""
+materialization="file-bundle"
+materialization_set=0
+egress_host_args=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -21,6 +24,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --repo)
       repo="${2:-}"
+      shift 2
+      ;;
+    --materialization)
+      materialization="${2:-}"
+      materialization_set=1
+      shift 2
+      ;;
+    --egress-host)
+      egress_host_args+=(--egress-host "${2:-}")
       shift 2
       ;;
     -h|--help)
@@ -39,6 +51,14 @@ if [ -z "$name" ] || [ -z "$provider" ] || [ -z "$repo" ]; then
   usage
   exit 1
 fi
+case "$materialization" in
+  file-bundle|header-inject) ;;
+  *)
+    echo "invalid materialization: $materialization" >&2
+    usage
+    exit 1
+    ;;
+esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
@@ -51,11 +71,25 @@ if [ ! -f "$agents_file" ]; then
   exit 1
 fi
 
-python3 "$script_dir/broker-agents.py" \
+grant_args=(
+  "$script_dir/broker-agents.py"
   --agents-file "$agents_file" \
   grant \
   --name "$name" \
   --provider "$provider" \
   --repo "$repo"
+)
+if [ "$materialization_set" = "1" ]; then
+  grant_args+=(--materialization "$materialization")
+fi
+if [ "${#egress_host_args[@]}" -gt 0 ]; then
+  grant_args+=("${egress_host_args[@]}")
+fi
 
-echo "granted $name provider=$provider repo=$repo"
+python3 "${grant_args[@]}"
+
+if [ "$materialization_set" = "1" ]; then
+  echo "granted $name provider=$provider repo=$repo materialization=$materialization"
+else
+  echo "granted $name provider=$provider repo=$repo materialization=preserved-or-file-bundle"
+fi

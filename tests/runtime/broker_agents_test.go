@@ -80,3 +80,30 @@ func TestBrokerAgentsRegisterAcceptsLeadingDashTokenWithEqualsForm(t *testing.T)
 		t.Fatalf("expected token hash %s:\n%s", expectedHash, text)
 	}
 }
+
+func TestBrokerAgentsGrantPreservesExistingMaterialization(t *testing.T) {
+	f := newFixture(t)
+	agentsFile := filepath.Join(f.home, "agents.yaml")
+	if err := os.WriteFile(agentsFile, []byte("agents: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "register", "--name", "frontend", "--token", "frontend-token")
+	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "grant", "--name", "frontend", "--provider", "api-main", "--repo", "my-user/frontend", "--materialization", "header-inject", "--egress-host", "api.example.test:443")
+	f.runCommand("python3", true, filepath.Join(f.root, "scripts", "broker-agents.py"), "--agents-file", agentsFile, "grant", "--name", "frontend", "--provider", "api-main", "--repo", "my-user/backend")
+
+	data, err := os.ReadFile(agentsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "materialization: header-inject") {
+		t.Fatalf("expected header-inject materialization to be preserved:\n%s", text)
+	}
+	if strings.Contains(text, "materialization: file-bundle") {
+		t.Fatalf("unexpected downgrade to file-bundle:\n%s", text)
+	}
+	if !strings.Contains(text, "- api.example.test:443") {
+		t.Fatalf("expected egress host to be preserved:\n%s", text)
+	}
+}

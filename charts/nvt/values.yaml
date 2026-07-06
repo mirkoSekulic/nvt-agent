@@ -5,6 +5,10 @@ namespace:
 runtime:
   image: nvt-agent-runtime:latest
 
+egress:
+  mode: direct
+  egressdImage: nvt-egressd:latest
+
 broker:
   enabled: true
   image: nvt-broker:latest

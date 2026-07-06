@@ -67,6 +67,15 @@ spec:
                   minLength: 1
                 runtimeClassName:
                   type: string
+                egress:
+                  type: string
+                  default: direct
+                  enum:
+                    - direct
+                    - mediated
+                egressAllowInsecureBroker:
+                  type: boolean
+                  default: false
                 workspace:
                   type: object
                   required:
@@ -91,6 +100,17 @@ spec:
                             type: string
                             minLength: 1
                           repositories:
+                            type: array
+                            items:
+                              type: string
+                              minLength: 1
+                          materialization:
+                            type: string
+                            default: file-bundle
+                            enum:
+                              - file-bundle
+                              - header-inject
+                          egressHosts:
                             type: array
                             items:
                               type: string

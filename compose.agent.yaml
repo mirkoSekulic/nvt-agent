@@ -18,6 +18,21 @@ services:
       - ${CLAUDE_CONFIG_DIR}:/root/.claude
       - agent-home:/root
 
+  egressd:
+    image: nvt-egressd:latest
+    profiles:
+      - mediated
+    env_file:
+      - ${EGRESSD_ENV_FILE:-/dev/null}
+    environment:
+      NVT_EGRESSD_CONFIG: /config/egressd.json
+    volumes:
+      - ${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro
+    network_mode: service:docker
+    depends_on:
+      docker:
+        condition: service_healthy
+
   docker:
     image: docker:27-dind
     privileged: true

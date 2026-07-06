@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"reflect"
 	"sort"
@@ -39,6 +41,8 @@ const (
 	runtimeAuthHomePath   = "/nvt-agent/runtime-auth-home"
 	runtimeAuthSourceName = "runtime-auth-source"
 	runtimeAuthHomeName   = "runtime-auth-home"
+	egressdConfigKey      = "egressd.json"
+	egressdConfigPath     = "/etc/nvt-egressd/config.json"
 	workspaceMountPath    = "/workspace"
 	initialPromptPlugin   = "initial-prompt"
 
@@ -46,6 +50,8 @@ const (
 	brokerAgentsConfigMapName  = "nvt-broker-agents"
 	brokerAgentsConfigKey      = "agents.yaml"
 	brokerTokenKey             = "NVT_BROKER_TOKEN"
+	egressTokenKey             = "NVT_EGRESS_BROKER_TOKEN"
+	defaultEgressdImage        = "nvt-egressd:latest"
 	callbackTokenKey           = "NVT_OPERATOR_CALLBACK_TOKEN"
 	agentRunFinalizer          = "nvt.dev/agentrun-broker-policy"
 	completedLifecycleReason   = "Completed by lifecycle event "
@@ -62,12 +68,16 @@ type brokerAgentsPolicy struct {
 type brokerAgentEntry struct {
 	ID          string                  `json:"id"`
 	TokenSHA256 string                  `json:"token-sha256"`
+	Role        string                  `json:"role,omitempty"`
+	PairedAgent string                  `json:"paired-agent,omitempty"`
 	Grants      []brokerAgentGrantEntry `json:"grants"`
 }
 
 type brokerAgentGrantEntry struct {
-	Provider     string   `json:"provider"`
-	Repositories []string `json:"repositories"`
+	Provider        string   `json:"provider"`
+	Repositories    []string `json:"repositories"`
+	Materialization string   `json:"materialization,omitempty"`
+	EgressHosts     []string `json:"egress-hosts,omitempty"`
 }
 
 // AgentRunReconciler reconciles AgentRun resources.
@@ -104,6 +114,12 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return r.reconcileTerminalPodCleanup(ctx, &agentRun)
 	}
+	if err := ValidateAgentRunEgressMode(&agentRun); err != nil {
+		if setErr := r.setAgentRunFailed(ctx, &agentRun, err.Error()); setErr != nil {
+			return ctrl.Result{}, setErr
+		}
+		return ctrl.Result{}, nil
+	}
 	deadlineResult, deadlineExceeded, err := r.reconcileActiveDeadline(ctx, &agentRun)
 	if deadlineExceeded || err != nil {
 		return deadlineResult, err
@@ -115,7 +131,13 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.reconcileBrokerTokenSecret(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.reconcileEgressTokenSecret(ctx, &agentRun); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.reconcileCallbackTokenSecret(ctx, &agentRun); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileEgressdConfigMap(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileBrokerAgentsPolicy(ctx, &agentRun); err != nil {
@@ -326,6 +348,42 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentR
 	return nil
 }
 
+func (r *AgentRunReconciler) reconcileEgressdConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	if AgentRunEgressMode(agentRun) != nvtv1alpha1.AgentRunEgressMediated {
+		return nil
+	}
+	desired, err := DesiredEgressdConfigMap(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	configMap := &corev1.ConfigMap{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(desired), configMap)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("get AgentRun egressd config ConfigMap: %w", err)
+		}
+		if createErr := r.Create(ctx, desired); createErr != nil {
+			return fmt.Errorf("create AgentRun egressd config ConfigMap: %w", createErr)
+		}
+		return nil
+	}
+	if !metav1.IsControlledBy(configMap, agentRun) {
+		return fmt.Errorf("AgentRun egressd config ConfigMap %s/%s exists but is not controlled by AgentRun %s", configMap.Namespace, configMap.Name, agentRun.Name)
+	}
+	if reflect.DeepEqual(configMap.Data, desired.Data) &&
+		reflect.DeepEqual(configMap.Labels, desired.Labels) &&
+		reflect.DeepEqual(configMap.OwnerReferences, desired.OwnerReferences) {
+		return nil
+	}
+	configMap.Labels = desired.Labels
+	configMap.OwnerReferences = desired.OwnerReferences
+	configMap.Data = desired.Data
+	if err := r.Update(ctx, configMap); err != nil {
+		return fmt.Errorf("update AgentRun egressd config ConfigMap: %w", err)
+	}
+	return nil
+}
+
 func (r *AgentRunReconciler) reconcileBrokerAgentsPolicy(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
 	secret := &corev1.Secret{}
 	secretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}
@@ -342,9 +400,31 @@ func (r *AgentRunReconciler) reconcileBrokerAgentsPolicy(ctx context.Context, ag
 		TokenSHA256: BrokerTokenHash(token),
 		Grants:      BrokerAgentGrants(agentRun.Spec.Broker),
 	}
+	entries := []brokerAgentEntry{entry}
+	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		egressSecret := &corev1.Secret{}
+		egressSecretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressTokenSecretName(agentRun.Name)}
+		if err := r.Get(ctx, egressSecretKey, egressSecret); err != nil {
+			return fmt.Errorf("get AgentRun egress token Secret %s/%s for broker policy: %w", egressSecretKey.Namespace, egressSecretKey.Name, err)
+		}
+		egressToken := egressSecret.Data[egressTokenKey]
+		if len(egressToken) == 0 {
+			return fmt.Errorf("AgentRun egress token Secret %s/%s is missing %s", egressSecret.Namespace, egressSecret.Name, egressTokenKey)
+		}
+		entries = append(entries, brokerAgentEntry{
+			ID:          AgentRunEgressBrokerID(agentRun.Namespace, agentRun.Name),
+			TokenSHA256: BrokerTokenHash(egressToken),
+			Role:        "egress",
+			PairedAgent: AgentRunBrokerID(agentRun.Namespace, agentRun.Name),
+			Grants:      []brokerAgentGrantEntry{},
+		})
+	}
 
 	if err := r.updateBrokerAgentsPolicy(ctx, agentRun.Namespace, func(policy brokerAgentsPolicy) (brokerAgentsPolicy, error) {
-		return UpsertBrokerAgent(policy, entry), nil
+		for _, entry := range entries {
+			policy = UpsertBrokerAgent(policy, entry)
+		}
+		return policy, nil
 	}); err != nil {
 		if errors.IsNotFound(err) {
 			return fmt.Errorf("broker agents ConfigMap %s/%s is required before reconciling AgentRun broker policy: %w", agentRun.Namespace, brokerAgentsConfigMapName, err)
@@ -357,7 +437,9 @@ func (r *AgentRunReconciler) reconcileBrokerAgentsPolicy(ctx context.Context, ag
 
 func (r *AgentRunReconciler) removeBrokerAgentsPolicyEntry(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
 	err := r.updateBrokerAgentsPolicy(ctx, agentRun.Namespace, func(policy brokerAgentsPolicy) (brokerAgentsPolicy, error) {
-		return RemoveBrokerAgent(policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name)), nil
+		policy = RemoveBrokerAgent(policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name))
+		policy = RemoveBrokerAgent(policy, AgentRunEgressBrokerID(agentRun.Namespace, agentRun.Name))
+		return policy, nil
 	})
 	if errors.IsNotFound(err) {
 		// Fail open on deletion so AgentRun cleanup is not blocked if broker
@@ -423,6 +505,13 @@ func (r *AgentRunReconciler) reconcileBrokerTokenSecret(ctx context.Context, age
 	return r.reconcileTokenSecret(ctx, agentRun, BrokerTokenSecretName(agentRun.Name), brokerTokenKey)
 }
 
+func (r *AgentRunReconciler) reconcileEgressTokenSecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	if AgentRunEgressMode(agentRun) != nvtv1alpha1.AgentRunEgressMediated {
+		return nil
+	}
+	return r.reconcileTokenSecret(ctx, agentRun, EgressTokenSecretName(agentRun.Name), egressTokenKey)
+}
+
 func (r *AgentRunReconciler) reconcileCallbackTokenSecret(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
 	return r.reconcileTokenSecret(ctx, agentRun, CallbackTokenSecretName(agentRun.Name), callbackTokenKey)
 }
@@ -468,6 +557,23 @@ func (r *AgentRunReconciler) reconcileTokenSecret(ctx context.Context, agentRun 
 	}
 
 	return nil
+}
+
+func (r *AgentRunReconciler) setAgentRunFailed(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, reason string) error {
+	key := client.ObjectKeyFromObject(agentRun)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &nvtv1alpha1.AgentRun{}
+		if err := r.Get(ctx, key, current); err != nil {
+			return err
+		}
+		now := r.now()
+		current.Status.Phase = nvtv1alpha1.AgentRunPhaseFailed
+		current.Status.Reason = reason
+		if current.Status.FinishedAt == nil {
+			current.Status.FinishedAt = &now
+		}
+		return r.Status().Update(ctx, current)
+	})
 }
 
 func (r *AgentRunReconciler) reconcileAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (*corev1.Pod, error) {
@@ -555,6 +661,70 @@ func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 	return configMap, nil
 }
 
+// DesiredEgressdConfigMap renders the mediated egressd config for an AgentRun.
+func DesiredEgressdConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.ConfigMap, error) {
+	rendered, err := RenderEgressdConfigJSON(agentRun)
+	if err != nil {
+		return nil, err
+	}
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      EgressdConfigMapName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    agentRunLabels(agentRun.Name),
+		},
+		Data: map[string]string{
+			egressdConfigKey: rendered,
+		},
+	}
+	if err := controllerutil.SetControllerReference(agentRun, configMap, scheme); err != nil {
+		return nil, fmt.Errorf("set AgentRun egressd config ConfigMap owner: %w", err)
+	}
+	return configMap, nil
+}
+
+func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
+	type egressdRoute struct {
+		Listen                string `json:"listen"`
+		Capability            string `json:"capability"`
+		Upstream              string `json:"upstream"`
+		AllowInsecureUpstream bool   `json:"allow_insecure_upstream"`
+	}
+	type egressdConfig struct {
+		BrokerURL           string         `json:"broker_url"`
+		AllowInsecureBroker bool           `json:"allow_insecure_broker"`
+		Routes              []egressdRoute `json:"routes"`
+	}
+	grants := AgentRunBrokerGrants(agentRun.Spec.Broker)
+	routes := make([]egressdRoute, 0, len(grants))
+	routeIndex := 0
+	for _, grant := range grants {
+		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
+			continue
+		}
+		if len(grant.EgressHosts) == 0 {
+			return "", fmt.Errorf("broker grant %s egressHosts is required for mediated egress", grant.Provider)
+		}
+		routes = append(routes, egressdRoute{
+			Listen:                fmt.Sprintf("127.0.0.1:%d", 8471+routeIndex),
+			Capability:            grant.Provider,
+			Upstream:              grant.EgressHosts[0],
+			AllowInsecureUpstream: false,
+		})
+		routeIndex++
+	}
+	config := egressdConfig{
+		BrokerURL:           brokerURL,
+		AllowInsecureBroker: agentRun.Spec.EgressAllowInsecureBroker,
+		Routes:              routes,
+	}
+	rendered, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("render egressd config: %w", err)
+	}
+	return string(rendered) + "\n", nil
+}
+
 // DesiredAgentPod returns the create-once Pod spec for an AgentRun.
 func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
 	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
@@ -584,6 +754,19 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 				},
 			},
 		},
+	}
+	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		volumes = append(volumes, corev1.Volume{
+			Name: "egressd-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: EgressdConfigMapName(agentRun.Name)},
+					Items: []corev1.KeyToPath{
+						{Key: egressdConfigKey, Path: egressdConfigKey},
+					},
+				},
+			},
+		})
 	}
 	if agentRun.Spec.RuntimeAuth != nil {
 		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
@@ -648,6 +831,66 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		},
 	})
 
+	containers := []corev1.Container{
+		{
+			Name:            "agent",
+			Image:           agentRun.Spec.Image,
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			WorkingDir:      workspaceMountPath,
+			Env: []corev1.EnvVar{
+				{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
+				{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
+				{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
+				{Name: "NVT_BROKER_URL", Value: brokerURL},
+				{
+					Name: brokerTokenKey,
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: BrokerTokenSecretName(agentRun.Name)},
+							Key:                  brokerTokenKey,
+						},
+					},
+				},
+				{
+					Name: callbackTokenKey,
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: CallbackTokenSecretName(agentRun.Name)},
+							Key:                  callbackTokenKey,
+						},
+					},
+				},
+			},
+			VolumeMounts: agentVolumeMounts,
+		},
+	}
+	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_MODE", Value: string(nvtv1alpha1.AgentRunEgressMediated)})
+	}
+	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		containers = append(containers, corev1.Container{
+			Name:            "egressd",
+			Image:           EgressdImage(),
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Env: []corev1.EnvVar{
+				{Name: "NVT_EGRESSD_CONFIG", Value: egressdConfigPath},
+				{Name: "NVT_BROKER_URL", Value: brokerURL},
+				{
+					Name: "NVT_BROKER_TOKEN",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: EgressTokenSecretName(agentRun.Name)},
+							Key:                  egressTokenKey,
+						},
+					},
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "egressd-config", MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
+			},
+		})
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      AgentPodName(agentRun.Name),
@@ -658,40 +901,8 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			RuntimeClassName: agentRun.Spec.RuntimeClassName,
 			RestartPolicy:    corev1.RestartPolicyNever,
 			InitContainers:   initContainers,
-			Containers: []corev1.Container{
-				{
-					Name:            "agent",
-					Image:           agentRun.Spec.Image,
-					ImagePullPolicy: corev1.PullIfNotPresent,
-					WorkingDir:      workspaceMountPath,
-					Env: []corev1.EnvVar{
-						{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
-						{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
-						{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
-						{Name: "NVT_BROKER_URL", Value: brokerURL},
-						{
-							Name: brokerTokenKey,
-							ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{Name: BrokerTokenSecretName(agentRun.Name)},
-									Key:                  brokerTokenKey,
-								},
-							},
-						},
-						{
-							Name: callbackTokenKey,
-							ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{Name: CallbackTokenSecretName(agentRun.Name)},
-									Key:                  callbackTokenKey,
-								},
-							},
-						},
-					},
-					VolumeMounts: agentVolumeMounts,
-				},
-			},
-			Volumes: volumes,
+			Containers:       containers,
+			Volumes:          volumes,
 		},
 	}
 	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
@@ -746,9 +957,113 @@ func CallbackTokenSecretName(agentRunName string) string {
 	return agentRunName + "-callback-token"
 }
 
+func EgressTokenSecretName(agentRunName string) string {
+	return agentRunName + "-egress-token"
+}
+
+func EgressdConfigMapName(agentRunName string) string {
+	return agentRunName + "-egressd-config"
+}
+
+func EgressdImage() string {
+	if image := strings.TrimSpace(os.Getenv("NVT_EGRESSD_IMAGE")); image != "" {
+		return image
+	}
+	return defaultEgressdImage
+}
+
 // AgentRunBrokerID returns the broker identity for an AgentRun.
 func AgentRunBrokerID(namespace, name string) string {
 	return namespace + "/" + name
+}
+
+func AgentRunEgressBrokerID(namespace, name string) string {
+	return namespace + "/" + name + "-egress"
+}
+
+func AgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) nvtv1alpha1.AgentRunEgressMode {
+	if agentRun.Spec.Egress == "" {
+		return nvtv1alpha1.AgentRunEgressDirect
+	}
+	return agentRun.Spec.Egress
+}
+
+func AgentRunBrokerGrants(broker *nvtv1alpha1.AgentRunBroker) []nvtv1alpha1.AgentRunBrokerGrant {
+	if broker == nil || broker.Grants == nil {
+		return []nvtv1alpha1.AgentRunBrokerGrant{}
+	}
+	return broker.Grants
+}
+
+func AgentRunGrantMaterialization(grant nvtv1alpha1.AgentRunBrokerGrant) nvtv1alpha1.AgentRunGrantMaterialization {
+	if grant.Materialization == "" {
+		return nvtv1alpha1.AgentRunGrantFileBundle
+	}
+	return grant.Materialization
+}
+
+func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
+	mode := AgentRunEgressMode(agentRun)
+	if mode != nvtv1alpha1.AgentRunEgressDirect && mode != nvtv1alpha1.AgentRunEgressMediated {
+		return fmt.Errorf("spec.egress must be direct or mediated, got %q", mode)
+	}
+	headerInjectGrants := 0
+	if mode == nvtv1alpha1.AgentRunEgressMediated {
+		if agentRun.Spec.RuntimeAuth != nil {
+			return fmt.Errorf("egress mediated is incompatible with spec.runtimeAuth")
+		}
+		if strings.HasPrefix(brokerURL, "http://") && !agentRun.Spec.EgressAllowInsecureBroker {
+			return fmt.Errorf("egress mediated with plaintext broker requires spec.egressAllowInsecureBroker=true for local/dev use")
+		}
+	}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		materialization := AgentRunGrantMaterialization(grant)
+		switch materialization {
+		case nvtv1alpha1.AgentRunGrantFileBundle, nvtv1alpha1.AgentRunGrantHeaderInject:
+		default:
+			return fmt.Errorf("broker grant %s materialization must be file-bundle or header-inject, got %q", grant.Provider, materialization)
+		}
+		if mode == nvtv1alpha1.AgentRunEgressDirect && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
+			return fmt.Errorf("egress direct is incompatible with broker grant %s materialization header-inject", grant.Provider)
+		}
+		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantFileBundle {
+			return fmt.Errorf("egress mediated is incompatible with broker grant %s materialization file-bundle", grant.Provider)
+		}
+		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
+			headerInjectGrants++
+			if len(grant.EgressHosts) == 0 {
+				return fmt.Errorf("egress mediated broker grant %s requires egressHosts", grant.Provider)
+			}
+			for _, host := range grant.EgressHosts {
+				if !validEgressHost(host) {
+					return fmt.Errorf("egress mediated broker grant %s has invalid egressHosts entry %q", grant.Provider, host)
+				}
+			}
+		}
+	}
+	if mode == nvtv1alpha1.AgentRunEgressMediated {
+		if headerInjectGrants == 0 {
+			return fmt.Errorf("egress mediated requires exactly one header-inject broker grant with egressHosts")
+		}
+		if headerInjectGrants > 1 {
+			return fmt.Errorf("egress mediated currently supports exactly one header-inject broker grant, got %d", headerInjectGrants)
+		}
+	}
+	return nil
+}
+
+func validEgressHost(value string) bool {
+	if value == "" || strings.Contains(value, "://") || strings.Contains(value, "/") || strings.Contains(value, "@") {
+		return false
+	}
+	host := value
+	if before, after, ok := strings.Cut(value, ":"); ok {
+		if before == "" || after == "" {
+			return false
+		}
+		host = before
+	}
+	return strings.TrimSpace(host) == host && host != "" && !strings.HasPrefix(host, ".") && !strings.HasSuffix(host, ".")
 }
 
 func agentRunLabels(agentRunName string) map[string]string {
@@ -787,13 +1102,18 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 			repositories = append(repositories, grant.Repositories...)
 		}
 		grants = append(grants, brokerAgentGrantEntry{
-			Provider:     grant.Provider,
-			Repositories: repositories,
+			Provider:        grant.Provider,
+			Repositories:    repositories,
+			Materialization: string(AgentRunGrantMaterialization(grant)),
+			EgressHosts:     append([]string{}, grant.EgressHosts...),
 		})
 	}
 	sort.SliceStable(grants, func(i, j int) bool {
 		if grants[i].Provider != grants[j].Provider {
 			return grants[i].Provider < grants[j].Provider
+		}
+		if grants[i].Materialization != grants[j].Materialization {
+			return grants[i].Materialization < grants[j].Materialization
 		}
 		return stringsLess(grants[i].Repositories, grants[j].Repositories)
 	})
@@ -866,6 +1186,7 @@ func RemoveBrokerAgent(policy brokerAgentsPolicy, id string) brokerAgentsPolicy 
 func ValidateBrokerAgentsPolicy(policy brokerAgentsPolicy) error {
 	seenIDs := map[string]struct{}{}
 	seenHashes := map[string]string{}
+	pairedAgents := map[string]string{}
 	for agentIndex, agent := range policy.Agents {
 		if agent.ID == "" {
 			return fmt.Errorf("agents[%d].id is required", agentIndex)
@@ -881,15 +1202,49 @@ func ValidateBrokerAgentsPolicy(policy brokerAgentsPolicy) error {
 			return fmt.Errorf("duplicate token hash for agents %s and %s", existingID, agent.ID)
 		}
 		seenHashes[agent.TokenSHA256] = agent.ID
+		switch agent.Role {
+		case "", "agent":
+			if agent.PairedAgent != "" {
+				return fmt.Errorf("agents[%d].paired-agent is valid only for egress identities", agentIndex)
+			}
+		case "egress":
+			if agent.PairedAgent == "" {
+				return fmt.Errorf("agents[%d].paired-agent is required for egress identities", agentIndex)
+			}
+			if existingEgress, exists := pairedAgents[agent.PairedAgent]; exists {
+				return fmt.Errorf("agents[%d].paired-agent duplicates egress identity %s", agentIndex, existingEgress)
+			}
+			pairedAgents[agent.PairedAgent] = agent.ID
+			if len(agent.Grants) != 0 {
+				return fmt.Errorf("agents[%d].grants must be empty for egress identities", agentIndex)
+			}
+		default:
+			return fmt.Errorf("agents[%d].role must be agent or egress", agentIndex)
+		}
 		for grantIndex, grant := range agent.Grants {
 			if grant.Provider == "" {
 				return fmt.Errorf("agents[%d].grants[%d].provider is required", agentIndex, grantIndex)
+			}
+			switch grant.Materialization {
+			case "", string(nvtv1alpha1.AgentRunGrantFileBundle), string(nvtv1alpha1.AgentRunGrantHeaderInject):
+			default:
+				return fmt.Errorf("agents[%d].grants[%d].materialization must be file-bundle or header-inject", agentIndex, grantIndex)
 			}
 			for repoIndex, repository := range grant.Repositories {
 				if repository == "" {
 					return fmt.Errorf("agents[%d].grants[%d].repositories[%d] must be a non-empty string", agentIndex, grantIndex, repoIndex)
 				}
 			}
+			for hostIndex, host := range grant.EgressHosts {
+				if !validEgressHost(host) {
+					return fmt.Errorf("agents[%d].grants[%d].egress-hosts[%d] must be a host or host:port, got %q", agentIndex, grantIndex, hostIndex, host)
+				}
+			}
+		}
+	}
+	for pairedAgent, egressID := range pairedAgents {
+		if _, exists := seenIDs[pairedAgent]; !exists {
+			return fmt.Errorf("egress identity %s paired-agent %s does not exist", egressID, pairedAgent)
 		}
 	}
 
@@ -928,10 +1283,19 @@ func normalizeBrokerAgentEntry(entry *brokerAgentEntry) {
 		if entry.Grants[i].Repositories == nil {
 			entry.Grants[i].Repositories = []string{}
 		}
+		if entry.Grants[i].EgressHosts == nil {
+			entry.Grants[i].EgressHosts = []string{}
+		}
+		if entry.Grants[i].Materialization == "" {
+			entry.Grants[i].Materialization = string(nvtv1alpha1.AgentRunGrantFileBundle)
+		}
 	}
 	sort.SliceStable(entry.Grants, func(i, j int) bool {
 		if entry.Grants[i].Provider != entry.Grants[j].Provider {
 			return entry.Grants[i].Provider < entry.Grants[j].Provider
+		}
+		if entry.Grants[i].Materialization != entry.Grants[j].Materialization {
+			return entry.Grants[i].Materialization < entry.Grants[j].Materialization
 		}
 		return stringsLess(entry.Grants[i].Repositories, entry.Grants[j].Repositories)
 	})
@@ -953,14 +1317,21 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		rawConfig = []byte("{}")
 	}
 
-	if promptText := AgentRunPromptText(agentRun); promptText != "" {
+	if promptText := AgentRunPromptText(agentRun); promptText != "" || AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 		config := map[string]any{}
 		if err := yaml.Unmarshal(rawConfig, &config); err != nil {
 			return "", fmt.Errorf("render AgentRun agent config: %w", err)
 		}
-		renderedConfig, err := InjectInitialPromptPlugin(config, promptText)
-		if err != nil {
-			return "", err
+		renderedConfig := config
+		if promptText != "" {
+			var err error
+			renderedConfig, err = InjectInitialPromptPlugin(renderedConfig, promptText)
+			if err != nil {
+				return "", err
+			}
+		}
+		if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+			renderedConfig = InjectMediatedEgressConfig(renderedConfig, agentRun)
 		}
 		rendered, err := yaml.Marshal(renderedConfig)
 		if err != nil {
@@ -975,6 +1346,29 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	}
 
 	return string(rendered), nil
+}
+
+func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.AgentRun) map[string]any {
+	grants := []any{}
+	routeIndex := 0
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
+			continue
+		}
+		grants = append(grants, map[string]any{
+			"provider":        grant.Provider,
+			"materialization": string(nvtv1alpha1.AgentRunGrantHeaderInject),
+			"base-url":        fmt.Sprintf("http://127.0.0.1:%d", 8471+routeIndex),
+		})
+		routeIndex++
+	}
+	updated := cloneStringAnyMap(config)
+	updated["egress"] = map[string]any{
+		"mode":        string(nvtv1alpha1.AgentRunEgressMediated),
+		"placeholder": "NVT-PLACEHOLDER-NOT-A-KEY",
+		"grants":      grants,
+	}
+	return updated
 }
 
 // AgentRunPromptText returns the configured prompt text when present and non-empty.

@@ -48,10 +48,13 @@ def optional_string_list(value, field):
     return value
 
 
+PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
+
+
 def load_bootstrap_config(path):
     if not path.is_file():
         print(f"bootstrap: no agent config at {path}", flush=True)
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
@@ -73,7 +76,13 @@ def load_bootstrap_config(path):
     if not isinstance(code_server, dict):
         raise SystemExit("code-server must be a YAML object")
 
-    return runtime, tools, code_server
+    egress = data.get("egress", {})
+    if egress is None:
+        egress = {}
+    if not isinstance(egress, dict):
+        raise SystemExit("egress must be a YAML object")
+
+    return runtime, tools, code_server, egress
 
 
 def expand_path(value):
@@ -176,6 +185,81 @@ def setup_tmux_config():
         ]) + "\n",
         encoding="utf-8",
     )
+
+
+def mediated_mode(egress):
+    config_mode = egress.get("mode")
+    env_mode = os.environ.get("NVT_EGRESS_MODE")
+    if config_mode and env_mode and config_mode != env_mode:
+        raise SystemExit(f"egress.mode {config_mode} disagrees with NVT_EGRESS_MODE {env_mode}")
+    mode = config_mode or env_mode or "direct"
+    if mode not in {"direct", "mediated"}:
+        raise SystemExit("egress.mode must be direct or mediated")
+    return mode == "mediated"
+
+
+def scrub_git_state():
+    for scope in ("--system", "--global"):
+        for key in ("credential.helper", "http.extraHeader"):
+            subprocess.run(["git", "config", scope, "--unset-all", key], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        result = subprocess.run(["git", "config", scope, "--get-regexp", r"^url\..*\.insteadOf$"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        for line in result.stdout.splitlines():
+            key = line.split(" ", 1)[0]
+            if key:
+                subprocess.run(["git", "config", scope, "--unset-all", key], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    for path in (Path.home() / ".git-credentials", Path.home() / ".config" / "git" / "credentials"):
+        path.unlink(missing_ok=True)
+
+
+def broker_routing(capability):
+    result = subprocess.run(
+        ["brokerctl", "injection", "routing", "--capability", capability],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"bootstrap: broker routing failed for {capability}: {result.stderr.strip() or result.stdout.strip()}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"bootstrap: broker routing response for {capability} was not JSON: {error}") from error
+    if not payload.get("ok"):
+        raise SystemExit(f"bootstrap: broker routing denied for {capability}: {payload.get('message') or payload.get('error') or payload}")
+    return payload
+
+
+def apply_mediated_egress(egress):
+    scrub_git_state()
+    placeholder = egress.get("placeholder") or PLACEHOLDER
+    if placeholder != PLACEHOLDER:
+        raise SystemExit("egress.placeholder must use the documented NVT placeholder")
+    grants = egress.get("grants") or []
+    if not isinstance(grants, list):
+        raise SystemExit("egress.grants must be a list")
+    for index, grant in enumerate(grants):
+        if not isinstance(grant, dict):
+            raise SystemExit(f"egress.grants[{index}] must be an object")
+        provider = grant.get("provider")
+        if not isinstance(provider, str) or not provider:
+            raise SystemExit(f"egress.grants[{index}].provider must be a non-empty string")
+        if grant.get("materialization") != "header-inject":
+            raise SystemExit(f"egress mediated grant {provider} must be materialization header-inject")
+        base_url = grant.get("base-url")
+        if not isinstance(base_url, str) or not base_url:
+            raise SystemExit(f"egress mediated grant {provider} must include base-url")
+        routing = broker_routing(provider)
+        hosts = routing.get("hosts") or []
+        if not hosts:
+            raise SystemExit(f"bootstrap: mediated grant {provider} is not redirectable")
+    target = Path.home() / ".nvt-agent" / "egress.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps({"mode": "mediated", "placeholder": PLACEHOLDER, "grants": grants}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    persist_env_var("NVT_EGRESS_PLACEHOLDER", PLACEHOLDER)
 
 
 def apply_additional_paths(paths):
@@ -328,9 +412,11 @@ def setup_code_server(config):
 
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
-    runtime, tools, code_server = load_bootstrap_config(config_path)
+    runtime, tools, code_server, egress = load_bootstrap_config(config_path)
 
     setup_tmux_config()
+    if mediated_mode(egress):
+        apply_mediated_egress(egress)
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         # Kept for older helper scripts and diagnostics; start-agent-session uses

@@ -69,10 +69,11 @@ operator-kind-cluster:
 		exit 1; \
 	fi
 
-operator-kind-images: operator-kind-cluster runtime-build broker-build operator-build
+operator-kind-images: operator-kind-cluster runtime-build broker-build egressd-build operator-build
 	@printf '[operator-kind-setup] loading local images into kind cluster %s\n' "$(CLUSTER)"
 	kind load docker-image nvt-agent-runtime:latest --name "$(CLUSTER)"
 	kind load docker-image nvt-broker:latest --name "$(CLUSTER)"
+	kind load docker-image "$(EGRESSD_IMAGE)" --name "$(CLUSTER)"
 	kind load docker-image nvt-operator:latest --name "$(CLUSTER)"
 
 operator-kind-install: operator-kind-images $(OPERATOR_KIND_EXTRA_IMAGE_TARGETS)
@@ -158,7 +159,7 @@ agent-grant:
 	@test -n "$(NAME)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
 	@test -n "$(PROVIDER)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
 	@test -n "$(REPO)" || (echo "usage: make agent-grant NAME=<name> PROVIDER=<provider> REPO=<owner/repo>"; exit 1)
-	bash scripts/agent-grant.sh --name "$(NAME)" --provider "$(PROVIDER)" --repo "$(REPO)"
+	bash scripts/agent-grant.sh --name "$(NAME)" --provider "$(PROVIDER)" --repo "$(REPO)" $(if $(MATERIALIZATION),--materialization "$(MATERIALIZATION)") $(if $(EGRESS_HOST),--egress-host "$(EGRESS_HOST)")
 
 agent-up:
 	@test -n "$(NAME)" || (echo "usage: make agent-up NAME=<name>"; exit 1)

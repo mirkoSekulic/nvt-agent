@@ -33,6 +33,13 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"agents-proxy",
 		"agent-internal",
 		"traefik.docker.network=agents-proxy",
+		"egressd:",
+		"profiles:",
+		"- mediated",
+		"env_file:",
+		"${EGRESSD_ENV_FILE:-/dev/null}",
+		"NVT_EGRESSD_CONFIG: /config/egressd.json",
+		"${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(compose, fragment) {
@@ -41,6 +48,9 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 	}
 	if strings.Contains(compose, "/var/run/docker.sock:") {
 		t.Fatalf("compose.agent.yaml must not mount the host Docker socket")
+	}
+	if strings.Contains(compose, "NVT_BROKER_TOKEN: ${NVT_EGRESS_BROKER_TOKEN") {
+		t.Fatalf("compose must not pass egress token through agent-loaded interpolation env:\n%s", compose)
 	}
 }
 
@@ -887,5 +897,148 @@ func TestAgentInitRejectsInvalidAutonomy(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "autonomy must be trusted-local or interactive") {
 		t.Fatalf("unexpected output:\n%s", output)
+	}
+}
+
+func TestAgentInitMediatedKeepsEgressTokenOutOfAgentEnv(t *testing.T) {
+	root := repoRoot(t)
+	name := "mediated-env-boundary"
+	agentDir := filepath.Join(root, ".agents", name)
+	if err := os.RemoveAll(agentDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+	agentsFile := preserveBrokerAgentsFile(t, root)
+	mustWriteFile(t, agentsFile, `agents:
+- id: mediated-env-boundary
+  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      egress-hosts:
+        - api.example.test:443
+      repositories:
+        - example/repo
+`)
+	home := t.TempDir()
+	command := "HOME=" + shellQuote(home) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	cmd := commandWithEnv(command, nil, "--name", name)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("agent-init failed: %v\n%s", err, output)
+	}
+	agentEnv := mustReadFile(t, filepath.Join(agentDir, "env"))
+	if strings.Contains(agentEnv, "NVT_EGRESS_BROKER_TOKEN") {
+		t.Fatalf("agent env leaked egress broker token key:\n%s", agentEnv)
+	}
+	egressEnv := mustReadFile(t, filepath.Join(agentDir, "egressd.env"))
+	if !strings.Contains(egressEnv, "NVT_BROKER_TOKEN=") {
+		t.Fatalf("egressd env missing broker token:\n%s", egressEnv)
+	}
+	egressConfig := mustReadFile(t, filepath.Join(agentDir, "egressd.json"))
+	if !strings.Contains(egressConfig, `"upstream": "api.example.test:443"`) || strings.Contains(egressConfig, "placeholder.local") {
+		t.Fatalf("unexpected egressd config:\n%s", egressConfig)
+	}
+}
+
+func TestAgentInitMediatedRejectsMissingRouteHostsAndMultipleGrants(t *testing.T) {
+	root := repoRoot(t)
+	tests := []struct {
+		name   string
+		agents string
+		want   string
+	}{
+		{
+			name: "mediated-missing-route",
+			agents: `agents:
+- id: mediated-missing-route
+  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      repositories: [example/repo]
+`,
+			want: "egress-hosts",
+		},
+		{
+			name: "mediated-multi-route",
+			agents: `agents:
+- id: mediated-multi-route
+  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      egress-hosts: [api.example.test:443]
+      repositories: [example/repo]
+    - provider: api-alt
+      materialization: header-inject
+      egress-hosts: [alt.example.test:443]
+      repositories: [example/repo]
+`,
+			want: "exactly one header-inject grant",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentDir := filepath.Join(root, ".agents", tt.name)
+			if err := os.RemoveAll(agentDir); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+			agentsFile := preserveBrokerAgentsFile(t, root)
+			mustWriteFile(t, agentsFile, tt.agents)
+			home := t.TempDir()
+			command := "HOME=" + shellQuote(home) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+			cmd := commandWithEnv(command, nil, "--name", tt.name)
+			cmd.Dir = root
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("agent-init unexpectedly succeeded:\n%s", output)
+			}
+			if !strings.Contains(string(output), tt.want) {
+				t.Fatalf("expected %q in output:\n%s", tt.want, output)
+			}
+			if _, err := os.Stat(filepath.Join(agentDir, "egressd.json")); err == nil {
+				t.Fatalf("mediated invalid route wrote egressd config")
+			}
+			if _, err := os.Stat(filepath.Join(agentDir, "egressd.env")); err == nil {
+				t.Fatalf("mediated invalid route wrote egressd env")
+			}
+		})
+	}
+}
+
+func TestAgentInitMediatedRequiresUnsafeLocalBrokerFlag(t *testing.T) {
+	root := repoRoot(t)
+	name := "mediated-unsafe-flag"
+	agentDir := filepath.Join(root, ".agents", name)
+	if err := os.RemoveAll(agentDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+	agentsFile := preserveBrokerAgentsFile(t, root)
+	mustWriteFile(t, agentsFile, `agents:
+- id: mediated-unsafe-flag
+  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      egress-hosts: [api.example.test:443]
+      repositories: [example/repo]
+`)
+	home := t.TempDir()
+	command := "HOME=" + shellQuote(home) + " MEDIATED=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	cmd := commandWithEnv(command, nil, "--name", name)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("agent-init unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "NVT_EGRESS_ALLOW_INSECURE_BROKER=1") {
+		t.Fatalf("expected unsafe local broker flag error:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, "egressd.env")); err == nil {
+		t.Fatalf("unsafe local broker rejection wrote egressd env")
 	}
 }
