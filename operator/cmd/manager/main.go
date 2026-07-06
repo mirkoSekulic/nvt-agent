@@ -44,6 +44,11 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	if err := controller.ValidateBrokerTLSConfig(); err != nil {
+		ctrl.Log.Error(err, "invalid broker TLS configuration")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Cache:                  managerCacheOptions(),

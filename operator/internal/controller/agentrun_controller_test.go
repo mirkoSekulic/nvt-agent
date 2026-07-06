@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -779,8 +780,9 @@ func TestTLSBrokerMediatedPodMountsBrokerCA(t *testing.T) {
 
 	egressd := requireContainer(t, *pod, "egressd")
 	assertVolumeMount(t, egressd, brokerCAVolumeName, egressdBrokerCAMount, "", true)
-	if envValue(egressd, "NVT_BROKER_URL") != "https://nvt-broker:7347" {
-		t.Fatalf("expected https broker URL on egressd, got %#v", egressd.Env)
+	// egressd takes the broker URL from its JSON config, not the environment.
+	if findEnvVar(egressd, "NVT_BROKER_URL") != nil {
+		t.Fatalf("egressd must not carry NVT_BROKER_URL env: %#v", egressd.Env)
 	}
 }
 
@@ -845,6 +847,136 @@ func TestTLSBrokerValidationAcceptsMediatedWithoutInsecureFlag(t *testing.T) {
 	agentRun.Spec.EgressAllowInsecureBroker = false
 	if err := ValidateAgentRunEgressMode(agentRun); err != nil {
 		t.Fatalf("mediated over TLS broker must not require egressAllowInsecureBroker, got %v", err)
+	}
+}
+
+func TestBrokerTLSConfigRejectsHTTPSWithoutCASecret(t *testing.T) {
+	t.Setenv("NVT_BROKER_URL", "https://nvt-broker:7347")
+	t.Setenv("NVT_BROKER_CA_SECRET", "")
+	if err := ValidateBrokerTLSConfig(); err == nil || !strings.Contains(err.Error(), "NVT_BROKER_CA_SECRET") {
+		t.Fatalf("expected https-without-CA-secret rejection, got %v", err)
+	}
+	if err := ValidateAgentRunEgressMode(testAgentRun()); err == nil || !strings.Contains(err.Error(), "NVT_BROKER_CA_SECRET") {
+		t.Fatalf("expected validation rejection, got %v", err)
+	}
+	if _, err := RenderEgressdConfigJSON(multiGrantMediatedAgentRun()); err == nil || !strings.Contains(err.Error(), "NVT_BROKER_CA_SECRET") {
+		t.Fatalf("expected egressd render rejection, got %v", err)
+	}
+	if _, err := DesiredAgentPod(testAgentRun(), testScheme(t)); err == nil || !strings.Contains(err.Error(), "NVT_BROKER_CA_SECRET") {
+		t.Fatalf("expected pod render rejection, got %v", err)
+	}
+}
+
+func testBrokerCASecret(namespace string, data map[string][]byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "nvt-broker-tls", Namespace: namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       data,
+	}
+}
+
+func TestReconcileRejectsMissingBrokerCASecret(t *testing.T) {
+	setTLSBrokerEnv(t)
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := multiGrantMediatedAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "broker CA Secret") || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected missing broker CA Secret error, got %v", err)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileRejectsBrokerCASecretWithoutCACrt(t *testing.T) {
+	setTLSBrokerEnv(t)
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := multiGrantMediatedAgentRun()
+	caSecret := testBrokerCASecret(agentRun.Namespace, map[string][]byte{
+		"tls.crt": []byte("fixture-cert"),
+		"tls.key": []byte("fixture-key"),
+	})
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, caSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "missing key ca.crt") {
+		t.Fatalf("expected ca.crt-missing error naming the key, got %v", err)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileTLSBrokerCreatesPodWhenCASecretValid(t *testing.T) {
+	setTLSBrokerEnv(t)
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := multiGrantMediatedAgentRun()
+	caSecret := testBrokerCASecret(agentRun.Namespace, map[string][]byte{brokerCAKey: []byte("fixture-ca")})
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, caSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var pod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}, &pod); err != nil {
+		t.Fatalf("expected agent Pod, got %v", err)
+	}
+	requireVolume(t, pod, brokerCAVolumeName)
+}
+
+func TestReconcileDoesNotRetroactivelyRewriteRunningRuns(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := multiGrantMediatedAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	// First reconcile on the plaintext broker: creates Pod and egressd config.
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var before corev1.ConfigMap
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: EgressdConfigMapName(agentRun.Name)}, &before); err != nil {
+		t.Fatalf("expected egressd ConfigMap, got %v", err)
+	}
+
+	// Operator broker env flips to TLS (even half-configured, with no CA
+	// Secret): the running run must be left alone — no failure, no config
+	// rewrite, no pod churn.
+	setTLSBrokerEnv(t)
+	t.Setenv("NVT_BROKER_CA_SECRET", "")
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile after broker env change: %v", err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	if updated.Status.Phase == nvtv1alpha1.AgentRunPhaseFailed {
+		t.Fatalf("broker env change retroactively failed a running run")
+	}
+	var after corev1.ConfigMap
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: EgressdConfigMapName(agentRun.Name)}, &after); err != nil {
+		t.Fatalf("get egressd ConfigMap: %v", err)
+	}
+	if !reflect.DeepEqual(before.Data, after.Data) {
+		t.Fatalf("egressd config rewritten under an existing Pod:\nbefore: %v\nafter: %v", before.Data, after.Data)
 	}
 }
 
