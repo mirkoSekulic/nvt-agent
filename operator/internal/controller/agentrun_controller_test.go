@@ -20,6 +20,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1224,6 +1225,139 @@ func TestEnforcementRenderedConfigs(t *testing.T) {
 	if first["base-url"] != fmt.Sprintf("https://%s:8471", EgressdServiceName(agentRun.Name)) {
 		t.Fatalf("enforcement base-url must use the Service name over https, got %#v", first)
 	}
+}
+
+// TestEnforcementNetworkPolicyShape pins the fence: agent default-deny
+// egress with exactly DNS/broker/paired-egressd/callback, egressd ingress
+// only from the paired agent, and the coarse 0.0.0.0/0:443 upstream rule.
+func TestEnforcementNetworkPolicyShape(t *testing.T) {
+	agentRun := enforcedAgentRun()
+	scheme := testScheme(t)
+	agentPolicy, err := DesiredAgentNetworkPolicy(agentRun, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentPolicy.Spec.PodSelector.MatchLabels[runLabelKey] != agentRun.Name ||
+		agentPolicy.Spec.PodSelector.MatchLabels[roleLabelKey] != roleLabelAgent {
+		t.Fatalf("agent policy selector must pin the paired agent Pod: %#v", agentPolicy.Spec.PodSelector)
+	}
+	if len(agentPolicy.Spec.PolicyTypes) != 1 || agentPolicy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Fatalf("agent policy must be egress-only (ingress unrestricted this PR): %#v", agentPolicy.Spec.PolicyTypes)
+	}
+	if len(agentPolicy.Spec.Egress) != 4 {
+		t.Fatalf("agent policy must allow exactly DNS, broker, paired egressd, callback: %#v", agentPolicy.Spec.Egress)
+	}
+	for _, rule := range agentPolicy.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.IPBlock != nil {
+				t.Fatalf("agent policy must not carry any internet CIDR: %#v", peer)
+			}
+		}
+	}
+	pairedRule := agentPolicy.Spec.Egress[2]
+	if pairedRule.To[0].PodSelector.MatchLabels[runLabelKey] != agentRun.Name ||
+		pairedRule.To[0].PodSelector.MatchLabels[roleLabelKey] != roleLabelEgressd {
+		t.Fatalf("agent policy egressd peer must pin the paired run: %#v", pairedRule.To[0])
+	}
+
+	egressdPolicy, err := DesiredEgressdNetworkPolicy(agentRun, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(egressdPolicy.Spec.Ingress) != 1 ||
+		egressdPolicy.Spec.Ingress[0].From[0].PodSelector.MatchLabels[runLabelKey] != agentRun.Name ||
+		egressdPolicy.Spec.Ingress[0].From[0].PodSelector.MatchLabels[roleLabelKey] != roleLabelAgent {
+		t.Fatalf("egressd ingress must come only from the paired agent: %#v", egressdPolicy.Spec.Ingress)
+	}
+	upstream := egressdPolicy.Spec.Egress[len(egressdPolicy.Spec.Egress)-1]
+	if upstream.To[0].IPBlock == nil || upstream.To[0].IPBlock.CIDR != "0.0.0.0/0" {
+		t.Fatalf("egressd upstream rule must be the documented coarse fence: %#v", upstream)
+	}
+	if len(upstream.Ports) != 1 || upstream.Ports[0].Port.IntValue() != 443 {
+		t.Fatalf("egressd upstream rule must be port 443 only: %#v", upstream.Ports)
+	}
+}
+
+// TestNonEnforcementRendersZeroPolicies pins that direct mode and same-Pod
+// mediated mode render exactly today's shape — no NetworkPolicies at all.
+func TestNonEnforcementRendersZeroPolicies(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	for _, agentRun := range []*nvtv1alpha1.AgentRun{testAgentRun(), multiGrantMediatedAgentRun()} {
+		k8sClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+			WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+			Build()
+		reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+			t.Fatalf("reconcile %s: %v", agentRun.Name, err)
+		}
+		var policies networkingv1.NetworkPolicyList
+		if err := k8sClient.List(ctx, &policies, client.InNamespace(agentRun.Namespace)); err != nil {
+			t.Fatal(err)
+		}
+		if len(policies.Items) != 0 {
+			t.Fatalf("%s mode rendered NetworkPolicies: %#v", agentRun.Spec.Egress, policies.Items)
+		}
+		var pods corev1.PodList
+		if err := k8sClient.List(ctx, &pods, client.InNamespace(agentRun.Namespace)); err != nil {
+			t.Fatal(err)
+		}
+		if len(pods.Items) != 1 {
+			t.Fatalf("%s mode must render exactly the agent Pod, got %d pods", agentRun.Spec.Egress, len(pods.Items))
+		}
+	}
+}
+
+// TestEnforcementObjectsAllOwned pins GC: every per-run enforcement object
+// carries the AgentRun controller reference, so deleting the run leaves no
+// orphans (the kind smoke asserts the end-to-end deletion).
+func TestEnforcementObjectsAllOwned(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	certPEM := testCertificatePEM(t)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme,
+		EgressCAFetcher: func(context.Context, string) ([]byte, error) { return certPEM, nil },
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatal(err)
+	}
+	markPodReady(ctx, t, k8sClient, agentRun.Namespace, EgressdPodName(agentRun.Name))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatal(err)
+	}
+
+	var fetched nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &fetched); err != nil {
+		t.Fatal(err)
+	}
+	assertControlled := func(object client.Object, description string) {
+		t.Helper()
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: object.GetName()}, object); err != nil {
+			t.Fatalf("get %s: %v", description, err)
+		}
+		if !metav1.IsControlledBy(object, &fetched) {
+			t.Fatalf("%s is not owned by the AgentRun; it would orphan on deletion", description)
+		}
+	}
+	assertControlled(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: AgentPodName(agentRun.Name)}}, "agent Pod")
+	assertControlled(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: EgressdPodName(agentRun.Name)}}, "egressd Pod")
+	assertControlled(&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: EgressdServiceName(agentRun.Name)}}, "egressd Service")
+	assertControlled(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: EgressCAConfigMapName(agentRun.Name)}}, "egress CA ConfigMap")
+	assertControlled(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: EgressdConfigMapName(agentRun.Name)}}, "egressd config ConfigMap")
+	assertControlled(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: AgentConfigMapName(agentRun.Name)}}, "agent config ConfigMap")
+	assertControlled(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: BrokerTokenSecretName(agentRun.Name)}}, "broker token Secret")
+	assertControlled(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: EgressTokenSecretName(agentRun.Name)}}, "egress token Secret")
+	assertControlled(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: CallbackTokenSecretName(agentRun.Name)}}, "callback token Secret")
+	assertControlled(&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: AgentNetworkPolicyName(agentRun.Name)}}, "agent NetworkPolicy")
+	assertControlled(&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: EgressdNetworkPolicyName(agentRun.Name)}}, "egressd NetworkPolicy")
 }
 
 func TestReconcileKeepsRunningRunWhenBrokerFlipsToPlaintext(t *testing.T) {
@@ -2824,6 +2958,9 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := networkingv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add networking scheme: %v", err)
 	}
 	if err := nvtv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add AgentRun scheme: %v", err)

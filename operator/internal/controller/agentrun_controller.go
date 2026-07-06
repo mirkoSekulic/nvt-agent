@@ -20,6 +20,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -205,6 +206,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// policy: egressd is broker-independent at startup — it fetches
 		// injectable material lazily and fail-closed on the first proxied
 		// request, and CA generation needs no broker at all.
+		if err := r.reconcileNetworkPolicies(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.reconcileEgressdPod(ctx, &agentRun); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -282,6 +286,7 @@ func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.agentRunsForBrokerAgentsConfigMap),
@@ -1087,6 +1092,193 @@ func DesiredEgressdPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (
 		return nil, fmt.Errorf("set egressd Pod owner: %w", err)
 	}
 	return pod, nil
+}
+
+// AgentNetworkPolicyName returns the per-run agent egress policy name.
+func AgentNetworkPolicyName(agentRunName string) string {
+	return agentRunName + "-agent"
+}
+
+// EgressdNetworkPolicyName returns the per-run egressd policy name.
+func EgressdNetworkPolicyName(agentRunName string) string {
+	return agentRunName + "-egressd"
+}
+
+func (r *AgentRunReconciler) reconcileNetworkPolicies(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	agentPolicy, err := DesiredAgentNetworkPolicy(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	egressdPolicy, err := DesiredEgressdNetworkPolicy(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	for _, desired := range []*networkingv1.NetworkPolicy{agentPolicy, egressdPolicy} {
+		policy := &networkingv1.NetworkPolicy{}
+		err := r.Get(ctx, client.ObjectKeyFromObject(desired), policy)
+		if err == nil {
+			if !metav1.IsControlledBy(policy, agentRun) {
+				return fmt.Errorf("NetworkPolicy %s/%s exists but is not controlled by AgentRun %s", policy.Namespace, policy.Name, agentRun.Name)
+			}
+			continue
+		}
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("get NetworkPolicy %s: %w", desired.Name, err)
+		}
+		if createErr := r.Create(ctx, desired); createErr != nil {
+			return fmt.Errorf("create NetworkPolicy %s: %w", desired.Name, createErr)
+		}
+	}
+	return nil
+}
+
+func protocolPtr(protocol corev1.Protocol) *corev1.Protocol {
+	return &protocol
+}
+
+func policyPort(protocol corev1.Protocol, port int) networkingv1.NetworkPolicyPort {
+	value := intstr.FromInt32(int32(port))
+	return networkingv1.NetworkPolicyPort{Protocol: protocolPtr(protocol), Port: &value}
+}
+
+func dnsPolicyEgressRule() networkingv1.NetworkPolicyEgressRule {
+	return networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+			},
+		}},
+		Ports: []networkingv1.NetworkPolicyPort{
+			policyPort(corev1.ProtocolUDP, 53),
+			policyPort(corev1.ProtocolTCP, 53),
+		},
+	}
+}
+
+func brokerPolicyEgressRule() networkingv1.NetworkPolicyEgressRule {
+	return networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{{
+			PodSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app.kubernetes.io/name": "nvt-broker"},
+			},
+		}},
+		Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, 7347)},
+	}
+}
+
+// egressdPolicyPorts are the CA endpoint plus every route port.
+func egressdPolicyPorts(agentRun *nvtv1alpha1.AgentRun) []networkingv1.NetworkPolicyPort {
+	ports := []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, egressCAPort)}
+	for index := range headerInjectGrants(agentRun) {
+		ports = append(ports, policyPort(corev1.ProtocolTCP, egressRouteBasePort+index))
+	}
+	return ports
+}
+
+// DesiredAgentNetworkPolicy is the enforcement fence around the agent Pod:
+// default-deny egress plus kube-dns, the broker, the paired egressd, and the
+// operator callback. No internet CIDR at all — including traffic from
+// dind-spawned containers, which still exits the Pod and hits the CNI.
+// Ingress is left unrestricted this PR (gateway/code-server unaffected).
+func DesiredAgentNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*networkingv1.NetworkPolicy, error) {
+	policy := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AgentNetworkPolicyName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    enforcementLabels(agentRun.Name, roleLabelAgent),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					runLabelKey:  agentRun.Name,
+					roleLabelKey: roleLabelAgent,
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				dnsPolicyEgressRule(),
+				brokerPolicyEgressRule(),
+				{
+					// Paired egressd only: the run label pins the pair, so
+					// agent A can never reach egressd B.
+					To: []networkingv1.NetworkPolicyPeer{{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								runLabelKey:  agentRun.Name,
+								roleLabelKey: roleLabelEgressd,
+							},
+						},
+					}},
+					Ports: egressdPolicyPorts(agentRun),
+				},
+				{
+					To: []networkingv1.NetworkPolicyPeer{{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"app.kubernetes.io/name": "nvt-operator"},
+						},
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, 8082)},
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(agentRun, policy, scheme); err != nil {
+		return nil, fmt.Errorf("set agent NetworkPolicy owner: %w", err)
+	}
+	return policy, nil
+}
+
+// DesiredEgressdNetworkPolicy fences the own-Pod egressd: ingress only from
+// the paired agent; egress to DNS, the broker, and upstream :443.
+//
+// The 0.0.0.0/0:443 egress is a deliberately coarse fence: vanilla
+// NetworkPolicy selects by CIDR/port, not hostname. The semantic per-host
+// allowlist lives in egressd itself (pinned route upstreams, capability
+// injection-hosts, fail-closed CONNECT allowlist) — do not read this policy
+// as host-scoped. Excluding cluster CIDRs via except blocks is a second-pass
+// hardening, not this PR.
+func DesiredEgressdNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*networkingv1.NetworkPolicy, error) {
+	policy := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      EgressdNetworkPolicyName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    enforcementLabels(agentRun.Name, roleLabelEgressd),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					runLabelKey:  agentRun.Name,
+					roleLabelKey: roleLabelEgressd,
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							runLabelKey:  agentRun.Name,
+							roleLabelKey: roleLabelAgent,
+						},
+					},
+				}},
+				Ports: egressdPolicyPorts(agentRun),
+			}},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				dnsPolicyEgressRule(),
+				brokerPolicyEgressRule(),
+				{
+					To: []networkingv1.NetworkPolicyPeer{{
+						IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0"},
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, 443)},
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(agentRun, policy, scheme); err != nil {
+		return nil, fmt.Errorf("set egressd NetworkPolicy owner: %w", err)
+	}
+	return policy, nil
 }
 
 // DesiredEgressdService exposes the CA endpoint and every route port under
