@@ -109,15 +109,17 @@ func assertScrubbedGitState(t *testing.T, home string) {
 // mode, then assert zero secret material anywhere the agent can read.
 //
 // Phase 3 wiring for this skeleton:
-//  1. Start broker + egressd fixtures with known fixture secrets.
-//  2. Boot the agent container in mediated mode (MEDIATED=1 / egress:
-//     mediated) with header-inject grants for all fixture providers.
-//  3. Export the container-visible state: agent home, NVT state dir, env
+//  1. Start broker routing fixtures with known fixture secrets.
+//  2. Boot/render the agent container in mediated mode (MEDIATED=1 / egress:
+//     mediated) with header-inject grant metadata for all fixture providers.
+//  3. Validate routing-plumbing metadata only; concrete tool redirect wiring
+//     and real traffic through egressd are deferred to a provider proof PR.
+//  4. Export the container-visible state: agent home, NVT state dir, env
 //     (`/proc/1/environ` and shell env), process args (`ps axww`).
-//  4. Assert none of the fixture secrets appear (scanTreeForSecretMaterial
+//  5. Assert none of the fixture secrets appear (scanTreeForSecretMaterial
 //     over the export; direct checks over env and args).
-//  5. Assert git state is scrubbed (assertScrubbedGitState).
-//  6. Assert no auth bundles were materialized (no auth.json for mediated
+//  6. Assert git state is scrubbed (assertScrubbedGitState).
+//  7. Assert no auth bundles were materialized (no auth.json for mediated
 //     providers).
 //
 // Mode-awareness: for a direct-mode agent this test must skip loudly, never

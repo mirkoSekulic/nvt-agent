@@ -66,13 +66,18 @@ A small trusted reverse proxy (Go, consistent with gateway/producer style) runni
 - **Routing** — credentialed API traffic is pointed at egressd via base-URL/proxy config. DNS, brokerd, and the event-webhook callback always go direct (they are the allowlist).
 - **Enforcement** — what stops the agent bypassing egressd and calling upstreams directly. This is the hard part (§7), and it is what separates non-possession (routing alone suffices) from exfil control (needs enforcement).
 
-Routing without enforcement still delivers non-possession. It does not deliver egress control. Stated so nobody reads "traffic goes through the sidecar" as a property compose actually has.
+Routing without enforcement still delivers non-possession once a concrete tool is
+configured to use egressd. It does not deliver egress control. Phase 3 wires the
+plumbing and metadata only; provider-specific tool redirect wiring lands in a
+later proof PR. Stated so nobody reads "traffic goes through the sidecar" as a
+property compose actually has.
 
 ### 4. Runtime wiring
 
 `runtime/core/bootstrap.py` keys off what it's given, keeping the image mode-agnostic:
 
-- Mediated grant → write `ANTHROPIC_BASE_URL` / Codex `config.toml` (`model_providers.*.base_url`, `chatgpt_base_url`) pointing at the sidecar; write **no** auth files.
+- Phase 3 mediated grant → validate the mediated grant metadata, write egress metadata/placeholders needed for non-possession ratchets, and write **no** auth files. It does not yet point concrete tools at the sidecar.
+- First redirectable-provider proof PR → add provider-specific redirect wiring such as `ANTHROPIC_BASE_URL` or Codex `config.toml` (`model_providers.*.base_url`, `chatgpt_base_url`) once that provider proof is in scope.
 - Direct grant → today's behavior exactly (bundles / host-seeded `~/.codex`, `.agents/<name>/auth/claude`).
 
 **Non-secret placeholders are allowed where a CLI demands one.** Some CLIs refuse to start without a syntactically present API key or auth file. Mediated mode may write a fixed, obviously-non-secret placeholder (e.g. `NVT-PLACEHOLDER-NOT-A-KEY`) to satisfy the parser. Two conditions, both test-enforced: (1) the placeholder value is a documented constant carrying zero secret entropy, allowlisted by the non-possession smoke test; (2) a conformance test proves the placeholder is inert upstream — a direct (sidecar-bypassing) request presenting it is rejected by the provider, so possession of the placeholder grants nothing. egressd strips or replaces the placeholder header on injection; it must never be forwarded alongside the real credential.
@@ -214,13 +219,19 @@ AgentRun gains `egress: direct|mediated`; broker grants gain
 `materialization: file-bundle|header-inject` and explicit mediated route hosts.
 Direct remains the default and renders the existing Pod/compose behavior.
 Mediated mode conditionally adds the egressd sidecar, a separate paired egress
-broker identity, sidecar config, and runtime bootstrap redirected config for
-header-inject grants only; mismatch in either direction fails admission before
-side effects. Until multi-route agent config is fully designed, Phase 3 accepts
-exactly one header-inject grant and fails closed otherwise. Codex plan-auth
-remains on the direct file-bundle fallback after the Phase 2 NO-GO. Phase-0
-non-possession tests land in CI here; egress-denied stays skipped until Phase 5.
-(No enforcement yet — routing + non-possession only, per §3.)
+broker identity, sidecar config, and bootstrap metadata for header-inject grants
+only; mismatch in either direction fails admission before side effects. Until
+multi-route agent config is fully designed, Phase 3 accepts exactly one
+header-inject grant and fails closed otherwise. Codex plan-auth remains on the
+direct file-bundle fallback after the Phase 2 NO-GO.
+
+Phase 3 is routing plumbing plus non-possession, not end-to-end tool routing.
+`bootstrap.py` validates mediated grant metadata and writes egress metadata, but
+it does not configure concrete tools such as Anthropic or Codex to use egressd.
+Concrete tool redirect wiring is deferred to the first redirectable-provider
+proof PR. Phase-0 non-possession tests land in CI here; egress-denied stays
+skipped until Phase 5. (No enforcement yet — routing plumbing +
+non-possession only, per §3.)
 
 ### Phase 4 — git-over-HTTPS mediation
 
