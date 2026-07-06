@@ -13,10 +13,13 @@ the Anthropic provider-agnosticism proof, and flipping the operator default to
 - **PR 6a — enforcement**: the agent Pod cannot reach arbitrary hosts;
   egress-denied smoke lands in CI.
 - **PR 6b — observability/control**: audit, quotas, revocation, Anthropic
-  proof, default flip.
+  proof. (The default flip is **deferred past Phase 5** — see below.)
 
-Plus one prerequisite PR (small, before 6a): **broker TLS in the chart** —
-production mediated mode must not require `egressAllowInsecureBroker`.
+Plus one prerequisite, **as its own PR** (not folded into 6a): **broker TLS in
+the chart** — production mediated mode must not require
+`egressAllowInsecureBroker`. It touches chart, operator, broker URL, CA
+distribution, and kind tests; keeping it separate keeps the 6a review about
+enforcement and nothing else.
 
 ## Non-goals
 
@@ -126,14 +129,17 @@ pieces that are *not* yet placement-agnostic and need rework:
    name (the Phase 4 leaf-SAN discipline — local/synthetic redirect names
    only — extends naturally; a per-run Service name is still not an upstream
    name). Non-git API routes should also serve TLS in own-Pod mode.
-3. **CA cert distribution**: the Phase 4 shared-`emptyDir` publication is
-   same-Pod-only. Own-Pod: egressd serves `GET /ca.crt` (public material) on
-   its Service; bootstrap fetches it with retry/fail-closed timeout before
-   installing trust. Integrity caveat: this fetch is TOFU within the
-   NetworkPolicy-restricted path; an attacker who can MITM pod-to-pod traffic
-   inside the cluster is outside the threat model. Document it; operator-
-   mediated cert distribution stays as the hardening alternative if review
-   disagrees.
+3. **CA cert distribution — operator-distributed (primary design)**: the
+   Phase 4 shared-`emptyDir` publication is same-Pod-only. In own-Pod mode,
+   egressd still generates the CA at boot (key never leaves it) and serves
+   `GET /ca.crt` (public material), but the **agent never network-fetches its
+   own trust anchor**: the operator sequences creation — egressd Pod first,
+   wait ready, fetch `/ca.crt` once, publish it into a per-run ConfigMap
+   (`<run>-egress-ca`) mounted read-only into the agent Pod — then creates
+   the agent Pod. Bootstrap reads trust from the mount, exactly like Phase 4.
+   The one network fetch is done once, by the trusted operator, at reconcile
+   time. Direct agent-side `GET /ca.crt` with a TOFU caveat remains the
+   documented fallback if the sequencing cost proves too high in the PR.
 4. **Pairing at the network layer**: per-run Pod labels so NetworkPolicies
    select exactly the paired Pods (`nvt.dev/run: <name>`,
    `nvt.dev/role: agent|egressd`).
@@ -143,11 +149,25 @@ pieces that are *not* yet placement-agnostic and need rework:
 - **Agent Pod egress** (default-deny +): kube-dns :53 (UDP/TCP), broker
   Service :7347, paired egressd Pod (label selector), operator callback
   Service :8082. Nothing else — no direct internet.
-- **egressd Pod**: egress to broker + upstream :443 (internet); ingress only
-  from the paired agent Pod.
+- **egressd Pod**: egress to broker + upstream :443; ingress only from the
+  paired agent Pod.
+- **CNI limitation, stated plainly**: vanilla NetworkPolicy selects by
+  CIDR/port, not hostname, so "upstream :443" concretely means
+  `0.0.0.0/0:443` (optionally excluding cluster CIDRs) on the egressd Pod.
+  That is acceptable **only because egressd enforces the semantic per-host
+  allowlist** (pinned route upstreams, capability `injection-hosts`,
+  fail-closed CONNECT allowlist). Hostname-level control lives in egressd;
+  the CNI provides the coarse fence around the *agent*, which gets no
+  internet CIDR at all. Do not present the egressd policy as host-scoped.
 - Rendered by the operator per-run (paired selectors), not static chart
   templates; chart carries any cluster-scoped baseline. Direct mode renders
   exactly today's Pod — no policies (parent config-surface table).
+- **Lifecycle/GC**: every per-run object in enforcement mode — egressd Pod,
+  Service, both NetworkPolicies, CA ConfigMap, egressd config ConfigMap,
+  egress token Secret — carries the AgentRun ownerReference and is covered by
+  the existing finalizer flow. A controller test deletes an enforcement-mode
+  AgentRun and asserts zero orphaned objects; otherwise enforcement mode
+  leaks resources on every run.
 
 ### kind harness: enforcement-capable CNI
 
@@ -201,10 +221,17 @@ With the TTL clamp from the bug-fix list, the end-to-end bound becomes:
 TTL (≤ clamp)**. Work items:
 
 - The TTL clamp in egressd (see bugs above) — the load-bearing piece.
-- Conformance test: revoke grant in fixtures → next fetch fails closed →
-  agent loses the capability without Pod restart; smoke-level test in the
-  kind mediated case (edit the ConfigMap, observe 4xx through egressd within
-  the bound).
+- **The test must cover the whole chain, not just the broker step**:
+  ConfigMap update → kubelet projection → broker mtime hot-reload → egressd
+  cache expiry → request denied. Conformance level: revoke grant in fixtures
+  → next fetch fails closed, no Pod restart. Smoke level (kind mediated
+  case): edit the ConfigMap, observe denial through egressd within the bound.
+- **Mount-mode constraint, pinned**: hot-reload is mtime-based
+  (`agents.py:40`) and works today because the chart mounts the agents
+  ConfigMap as a directory volume (`/config`, items — verified, no
+  `subPath`). A `subPath` mount would freeze the file forever and silently
+  kill revocation in k8s. Add a chart/render test asserting the agents
+  volume is not `subPath`-mounted.
 - Document the propagation bound in the parent plan §7 and the chart README.
 
 ### Anthropic as the provider-agnosticism proof
@@ -225,17 +252,25 @@ grant with `redirect-env: { ANTHROPIC_BASE_URL: base-url }`, fake-upstream
 conformance test asserting the key is injected and the placeholder/agent env
 never carries it. A real-key manual test stays optional/local.
 
-### Flip the operator default to `mediated`
+### Default egress mode: make it configurable, do NOT flip yet
 
-Last commit of 6b, gated on **both** smoke tests (non-possession + egress-
-denied) green in CI:
+The parent plan's "then flip the operator default to `mediated`" is **revised:
+the flip is product behavior, not just security hardening, and it leaves
+Phase 5's scope.** A default flip breaks every existing file-bundle consumer
+that doesn't say `egress: direct` explicitly. Instead:
 
-- `AgentRunEgressMode()` empty → `mediated` (`agentrun_controller.go:1032`),
-  CRD `default:` markers in both CRD copies, producer specs updated
-  (`producers/github-comments`).
-- Migration note: file-bundle runs must now say `egress: direct` explicitly;
-  admission errors already name the offending grant (loud, per parent plan).
-- Chart README + parent plan status bump (v3.7).
+- 6b adds a chart value `defaultEgressMode: direct | mediated` (operator env
+  → the empty-mode fallback in `AgentRunEgressMode()`,
+  `agentrun_controller.go:1032`), **defaulting to `direct`**.
+- Operators opt clusters into mediated-by-default when *their* consumers have
+  migrated; the smoke suites run against both defaults in CI.
+- The global flip happens in a later, trivial PR — after both smoke tests are
+  green in CI **and** real-cluster usage has soaked — and consists of
+  changing one default value plus CRD `default:` markers and producer specs
+  (`producers/github-comments`). Admission errors already name the offending
+  grant, so the failure mode for stragglers is loud.
+- 6b still bumps the parent plan (v3.7) and chart README to document the
+  knob and the revised flip criteria.
 
 ## Work breakdown
 
@@ -243,31 +278,37 @@ denied) green in CI:
 |---|----|-----------|-------------------|
 | 0 | fix | `static_token` injection signature + egressd `maxCacheTTL` clamp | conformance: injection fetch per provider type; unit: cache expiry ≤ clamp regardless of `expires_at` |
 | 1 | pre | Chart broker TLS + operator `https://` brokerURL + `broker_ca_file` rendering | kind smoke runs mediated without `egressAllowInsecureBroker`; egressd rejects plaintext broker without the flag |
-| 2 | 6a | Own-Pod egressd: per-run Service, TLS on agent→egressd leg, `GET /ca.crt`, run/role Pod labels | controller tests: two-Pod rendering, Service, labels; bootstrap CA fetch fail-closed test |
-| 3 | 6a | Operator-rendered NetworkPolicies (agent + egressd, paired selectors) | controller tests: policy shape; direct mode renders zero policies |
+| 2 | 6a | Own-Pod egressd: per-run Service, TLS on agent→egressd leg, egressd-Pod-first sequencing + operator-published CA ConfigMap, run/role Pod labels | controller tests: two-Pod rendering + creation order, Service, labels, CA ConfigMap contents; bootstrap fail-closed when CA mount absent |
+| 3 | 6a | Operator-rendered NetworkPolicies (agent + egressd, paired selectors) + ownership/GC of all enforcement-mode objects | controller tests: policy shape; direct mode renders zero policies; delete-run-assert-no-orphans |
 | 4 | 6a | kind Calico cluster config + egress-denied smoke (direct fails, via-egressd succeeds, dind-spawned fails) | the un-skipped egress-denied case in CI |
 | 5 | 6b | `POST /v1/injection/report` + egressd async batched reporting, `path_class` sanitization | conformance: role gating, entry shape; egressd test: reports emitted, traffic unaffected when broker report path fails |
 | 6 | 6b | Per-grant `quota.requests` end-to-end (CRD → agents.yaml → egressd enforcement) | egressd unit: N+1th request fails closed + audited; admission/controller schema tests |
-| 7 | 6b | Revocation bound: conformance + kind smoke (ConfigMap edit → loss within bound) | the revocation tests; docs updated with the bound |
+| 7 | 6b | Revocation bound: full-chain conformance + kind smoke (ConfigMap edit → broker reload → cache expiry → denial within bound) | the revocation tests; chart render test: agents volume never `subPath`-mounted; docs updated with the bound |
 | 8 | 6b | Anthropic proof: `static_token` header generalization + provider/grant config | conformance fake-upstream proof; explicit assertion of zero egressd diffs (review gate, noted in PR description) |
-| 9 | 6b | Flip default to `mediated` + CRD defaults + producer + docs (parent → v3.7) | both smokes green is the merge gate |
+| 9 | 6b | `defaultEgressMode` chart value (default `direct`) + docs (parent → v3.7); **global flip deferred** to a later PR after real-cluster soak | smoke suites pass under both default settings |
 
-Build order: 0 → 1 → 2/3 (together) → 4 → 5..8 (parallelizable) → 9.
+Build order: 0 → 1 → 2/3 (together) → 4 → 5..8 (parallelizable) → 9. The
+global default flip is intentionally **not** in this sequence.
 
 ## Review checklist (trusted-core items)
 
 - NetworkPolicy pairing selectors: no cross-run reachability (agent A ↛
   egressd B); default-deny actually default-denies (test with a canary host).
-- `GET /ca.crt` distribution: TOFU caveat documented; endpoint serves cert
-  only, never key material; fail-closed bootstrap timeout.
+- CA distribution: `GET /ca.crt` serves cert only, never key material; the
+  operator publishes exactly what it fetched (ConfigMap content matches
+  egressd's cert); agent bootstrap fails closed when the CA mount is absent;
+  if the fallback agent-side fetch is used instead, the TOFU caveat is
+  documented.
 - Audit reporting: no header/token values in any report or error path;
   bounded queue cannot OOM egressd; report failures cannot block or fail
   proxied traffic.
 - Quota counter: no TOCTOU between check and increment under concurrency.
 - TTL clamp: revocation bound holds for long-lived credentials (git's 1h
   token is the regression case).
-- Default flip: admission errors for now-invalid specs are loud and name the
-  grant; no silent downgrade path introduced.
+- `defaultEgressMode` knob: admission errors under a mediated default are
+  loud and name the grant; no silent downgrade path in either default; the
+  knob changes only the empty-mode fallback, never overrides an explicit
+  `spec.egress`.
 
 ## Open questions (settled in the PRs, not before)
 

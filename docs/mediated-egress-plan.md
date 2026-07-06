@@ -142,7 +142,7 @@ The in-netns layer is iptables:
 | Layer | Knob | Default |
 |---|---|---|
 | Broker | per-grant `materialization: file-bundle \| header-inject` | `file-bundle` |
-| Operator | AgentRun/AgentSchedule spec `egress: mediated \| direct`, per-grant `egressHosts`, and explicit `egressAllowInsecureBroker` for local plaintext broker wiring | opt-in; flip default to `mediated` once smoke tests are in CI |
+| Operator | AgentRun/AgentSchedule spec `egress: mediated \| direct`, per-grant `egressHosts`, and explicit `egressAllowInsecureBroker` for local plaintext broker wiring | opt-in; Phase 5 adds a `defaultEgressMode` chart value (default `direct`); global flip deferred until after real-cluster soak |
 | Compose | `agent-init MEDIATED=1` profile adding the sidecar (+ iptables when enforcement lands), skipping bundles; requires `NVT_EGRESS_ALLOW_INSECURE_BROKER=1` for the local plaintext broker | `direct` |
 
 When `direct`, the operator renders exactly today's Pod — no sidecar, no NetworkPolicy, no iptables. Both paths stay conformance-tested for as long as both are supported; bundle-path tests (`broker_auth_files` etc.) do not decay while the path remains the documented fallback.
@@ -284,7 +284,7 @@ May split into two PRs (enforcement; observability/control) even as one phase.
 - **Per-grant request-count quotas** at the sidecar (spend quotas deferred — they need provider-response parsing, which couples the generic proxy to each provider).
 - **Revocation**: broker revokes grant → sidecar's next fetch fails → agent loses API access within one cache TTL, without killing the Pod.
 - **Anthropic as the provider-agnosticism proof**: adding `ANTHROPIC_BASE_URL` + a grant must be config-only with zero egressd changes — landing it *is* the test that the injector contract stayed provider-agnostic. If it requires sidecar code, that's a contract regression, not a feature.
-- Then flip the operator default to `mediated`.
+- Default handling (revised, see [phase5-enforcement-plan.md](phase5-enforcement-plan.md)): Phase 5 adds a `defaultEgressMode` chart value **defaulting to `direct`**. The global flip to `mediated` is product behavior, not just hardening — it moves to its own later PR, gated on both smoke tests green in CI **and** real-cluster soak with consumers migrated.
 
 ### Phase 6 — Transparent mediation mode (arbitrary-tool coverage)
 
@@ -313,7 +313,8 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 | 4b | Phase 3.5: redirectable static-bearer proof, generic `redirect-env`, mediated kind smoke | runtime/egressd fake proof + kind render smoke |
 | 5 | Phase 4: git-HTTPS mediation (CA, TLS termination) | trusted-core review — highest-risk surface, deliberately alone |
 | 6a | Phase 5: enforcement (own-Pod evaluation, iptables + FORWARD deny) | egress-denied test → CI |
-| 6b | Phase 5: audit, quotas, revocation, Anthropic proof; flip operator default | both smoke tests green |
+| 6b | Phase 5: audit, quotas, revocation, Anthropic proof; `defaultEgressMode` knob (default stays `direct`) | both smoke tests green |
+| 7 | Global default flip to `mediated` (one value + CRD defaults + producers) | smoke tests green in CI **and** real-cluster soak/migration |
 | 7 | Phase 6: TLS-terminating forward-proxy mode (CONNECT + CA) for arbitrary-tool credential mediation | trusted-core review (reuses Phase 4 CA) |
 | 8 | Phase 6: true transparent REDIRECT + optional body substitution | after Phase 5 enforcement; egress-denied still green |
 
