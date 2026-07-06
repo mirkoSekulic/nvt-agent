@@ -26,7 +26,13 @@ import (
 const (
 	nonPossessionPending = "pending Phase 3 (docs/mediated-egress-plan.md): mediated operator/compose wiring not implemented"
 	placeholderPending   = "pending Phase 3 (docs/mediated-egress-plan.md): protocol-level inertness is covered by egressd/internal/egress tests as of Phase 1; this container-level test lands with mediated wiring"
-	egressDeniedPending  = "pending Phase 5 (docs/mediated-egress-plan.md): egress enforcement not implemented"
+	// Egress enforcement is a Kubernetes control (own-Pod egressd +
+	// CNI-enforced NetworkPolicy); the denied/allowed/cross-run assertions
+	// live in the kind case tests/operator/kind/cases/enforced-egress.sh.
+	// Compose has no enforcement — non-possession holds locally, enforcement
+	// is real in operator mode (docs/mediated-egress-plan.md §7, resolved
+	// decision). This test must never pass silently.
+	egressDeniedPending = "egress enforcement is a k8s control: covered by tests/operator/kind/cases/enforced-egress.sh (Calico cluster); compose enforcement is a documented gap (docs/mediated-egress-plan.md §7)"
 )
 
 // mediatedPlaceholder is the documented zero-entropy constant from

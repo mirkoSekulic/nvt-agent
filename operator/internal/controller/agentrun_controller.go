@@ -1252,17 +1252,31 @@ func DesiredEgressdNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime
 				},
 			},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
-			Ingress: []networkingv1.NetworkPolicyIngressRule{{
-				From: []networkingv1.NetworkPolicyPeer{{
-					PodSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							runLabelKey:  agentRun.Name,
-							roleLabelKey: roleLabelAgent,
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From: []networkingv1.NetworkPolicyPeer{{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								runLabelKey:  agentRun.Name,
+								roleLabelKey: roleLabelAgent,
+							},
 						},
-					},
-				}},
-				Ports: egressdPolicyPorts(agentRun),
-			}},
+					}},
+					Ports: egressdPolicyPorts(agentRun),
+				},
+				{
+					// The operator fetches the CA certificate from the CA
+					// port during EgressCAPublished; that request crosses the
+					// CNI, so the policy must admit it. CA port only — never
+					// the route ports.
+					From: []networkingv1.NetworkPolicyPeer{{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"app.kubernetes.io/name": "nvt-operator"},
+						},
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, egressCAPort)},
+				},
+			},
 			Egress: []networkingv1.NetworkPolicyEgressRule{
 				dnsPolicyEgressRule(),
 				brokerPolicyEgressRule(),

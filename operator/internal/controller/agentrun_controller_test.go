@@ -1264,10 +1264,18 @@ func TestEnforcementNetworkPolicyShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(egressdPolicy.Spec.Ingress) != 1 ||
+	if len(egressdPolicy.Spec.Ingress) != 2 ||
 		egressdPolicy.Spec.Ingress[0].From[0].PodSelector.MatchLabels[runLabelKey] != agentRun.Name ||
 		egressdPolicy.Spec.Ingress[0].From[0].PodSelector.MatchLabels[roleLabelKey] != roleLabelAgent {
-		t.Fatalf("egressd ingress must come only from the paired agent: %#v", egressdPolicy.Spec.Ingress)
+		t.Fatalf("egressd ingress[0] must come from the paired agent: %#v", egressdPolicy.Spec.Ingress)
+	}
+	// The operator reaches only the CA port, never the route ports.
+	operatorIngress := egressdPolicy.Spec.Ingress[1]
+	if operatorIngress.From[0].PodSelector.MatchLabels["app.kubernetes.io/name"] != "nvt-operator" {
+		t.Fatalf("egressd ingress[1] must admit the operator: %#v", operatorIngress)
+	}
+	if len(operatorIngress.Ports) != 1 || operatorIngress.Ports[0].Port.IntValue() != egressCAPort {
+		t.Fatalf("operator ingress must be the CA port only: %#v", operatorIngress.Ports)
 	}
 	upstream := egressdPolicy.Spec.Egress[len(egressdPolicy.Spec.Egress)-1]
 	if upstream.To[0].IPBlock == nil || upstream.To[0].IPBlock.CIDR != "0.0.0.0/0" {

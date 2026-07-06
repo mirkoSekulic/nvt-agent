@@ -1,6 +1,6 @@
 # Phase 5 Plan: Egress Enforcement + Audit + Quotas + Revocation
 
-Status: fixes (#61) and prerequisite broker-TLS PR (#62) merged; 6a planned ([phase5-6a-enforcement-pr-plan.md](phase5-6a-enforcement-pr-plan.md)), 6b not started
+Status: fixes (#61) and prerequisite broker-TLS PR (#62) merged; 6a implemented ([phase5-6a-enforcement-pr-plan.md](phase5-6a-enforcement-pr-plan.md) — decisions: `spec.egressEnforcement` opt-in, Calico on kind, plain-HTTP `/ca.crt` endpoint since the certificate is the trust anchor being bootstrapped); 6b not started
 Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §6, §7, Phase 5 (PRs 6a/6b in the sequence table)
 
 ## Goal
