@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -50,6 +51,8 @@ def optional_string_list(value, field):
 
 PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+DEFAULT_EGRESS_CA_FILE = "/nvt-egress-ca/ca.crt"
+DEFAULT_EGRESS_CA_WAIT_SECONDS = 60
 
 
 def load_bootstrap_config(path):
@@ -249,6 +252,42 @@ def apply_redirect_env(provider, grant, placeholder):
             )
 
 
+def wait_for_egress_ca(provider):
+    ca_file = Path(os.environ.get("NVT_EGRESS_CA_FILE") or DEFAULT_EGRESS_CA_FILE)
+    try:
+        wait_seconds = float(os.environ.get("NVT_EGRESS_CA_WAIT_SECONDS") or DEFAULT_EGRESS_CA_WAIT_SECONDS)
+    except ValueError:
+        raise SystemExit("NVT_EGRESS_CA_WAIT_SECONDS must be a number")
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            if ca_file.stat().st_size > 0:
+                return ca_file
+        except FileNotFoundError:
+            pass
+        if time.monotonic() >= deadline:
+            # Fail closed: without the CA certificate the git redirect cannot
+            # be trusted, and falling back to direct git would need
+            # credentials the agent must never hold.
+            raise SystemExit(f"bootstrap: egress CA certificate {ca_file} was not published for git grant {provider}")
+        time.sleep(0.2)
+
+
+def apply_git_redirect(provider, grant, hosts):
+    base_url = grant["base-url"].rstrip("/")
+    if base_url.startswith("https://"):
+        ca_file = wait_for_egress_ca(provider)
+        run(["git", "config", "--global", "http.sslCAInfo", str(ca_file)])
+    for host in hosts:
+        # Config, not env, so the rewrite survives any shell. scrub_git_state
+        # removed pre-existing rewrites before this managed one is installed.
+        run(["git", "config", "--global", f"url.{base_url}/.insteadOf", f"https://{host}/"])
+        # git-SSH stays disallowed in mediated mode; rewriting the SSH remote
+        # shape onto the mediated HTTPS route is a convenience, not a bypass.
+        run(["git", "config", "--global", "--add", f"url.{base_url}/.insteadOf", f"git@{host}:"])
+    persist_env_var("GIT_TERMINAL_PROMPT", "0")
+
+
 def apply_mediated_egress(egress):
     scrub_git_state()
     placeholder = egress.get("placeholder") or PLACEHOLDER
@@ -272,6 +311,8 @@ def apply_mediated_egress(egress):
         hosts = routing.get("hosts") or []
         if not hosts:
             raise SystemExit(f"bootstrap: mediated grant {provider} is not redirectable")
+        if routing.get("git"):
+            apply_git_redirect(provider, grant, hosts)
         apply_redirect_env(provider, grant, placeholder)
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
