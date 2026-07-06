@@ -51,12 +51,18 @@ type AgentRunSpec struct {
 	RuntimeClassName          *string              `json:"runtimeClassName,omitempty"`
 	Egress                    AgentRunEgressMode   `json:"egress,omitempty"`
 	EgressAllowInsecureBroker bool                 `json:"egressAllowInsecureBroker,omitempty"`
-	Workspace                 AgentRunWorkspace    `json:"workspace"`
-	Broker                    *AgentRunBroker      `json:"broker,omitempty"`
-	Prompt                    *AgentRunPrompt      `json:"prompt,omitempty"`
-	Agent                     AgentRunAgent        `json:"agent"`
-	Lifecycle                 *AgentRunLifecycle   `json:"lifecycle,omitempty"`
-	TTL                       *AgentRunTTL         `json:"ttl,omitempty"`
+	// EgressEnforcement opts a mediated run into network-enforced egress:
+	// egressd moves to its own Pod and CNI-enforced NetworkPolicies fence the
+	// agent Pod so it cannot reach arbitrary hosts
+	// (docs/phase5-6a-enforcement-pr-plan.md). Requires egress: mediated and a
+	// NetworkPolicy-enforcing CNI; same-Pod remains the default mediated shape.
+	EgressEnforcement bool               `json:"egressEnforcement,omitempty"`
+	Workspace         AgentRunWorkspace  `json:"workspace"`
+	Broker            *AgentRunBroker    `json:"broker,omitempty"`
+	Prompt            *AgentRunPrompt    `json:"prompt,omitempty"`
+	Agent             AgentRunAgent      `json:"agent"`
+	Lifecycle         *AgentRunLifecycle `json:"lifecycle,omitempty"`
+	TTL               *AgentRunTTL       `json:"ttl,omitempty"`
 }
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.

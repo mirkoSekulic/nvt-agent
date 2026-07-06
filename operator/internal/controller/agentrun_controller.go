@@ -1207,6 +1207,9 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	if mode != nvtv1alpha1.AgentRunEgressDirect && mode != nvtv1alpha1.AgentRunEgressMediated {
 		return fmt.Errorf("spec.egress must be direct or mediated, got %q", mode)
 	}
+	if agentRun.Spec.EgressEnforcement && mode != nvtv1alpha1.AgentRunEgressMediated {
+		return fmt.Errorf("spec.egressEnforcement requires spec.egress mediated, got %q", mode)
+	}
 	headerInjectGrants := 0
 	if mode == nvtv1alpha1.AgentRunEgressMediated {
 		if agentRun.Spec.RuntimeAuth != nil {

@@ -850,6 +850,20 @@ func TestTLSBrokerValidationAcceptsMediatedWithoutInsecureFlag(t *testing.T) {
 	}
 }
 
+func TestValidateAgentRunEgressModeEnforcementRequiresMediated(t *testing.T) {
+	direct := testAgentRun()
+	direct.Spec.EgressEnforcement = true
+	if err := ValidateAgentRunEgressMode(direct); err == nil || !strings.Contains(err.Error(), "egressEnforcement") {
+		t.Fatalf("expected direct+enforcement rejection naming the field, got %v", err)
+	}
+
+	enforced := multiGrantMediatedAgentRun()
+	enforced.Spec.EgressEnforcement = true
+	if err := ValidateAgentRunEgressMode(enforced); err != nil {
+		t.Fatalf("mediated enforcement run must validate, got %v", err)
+	}
+}
+
 func TestBrokerTLSConfigRejectsHTTPSWithoutCASecret(t *testing.T) {
 	t.Setenv("NVT_BROKER_URL", "https://nvt-broker:7347")
 	t.Setenv("NVT_BROKER_CA_SECRET", "")
@@ -935,6 +949,45 @@ func TestReconcileTLSBrokerCreatesPodWhenCASecretValid(t *testing.T) {
 		t.Fatalf("expected agent Pod, got %v", err)
 	}
 	requireVolume(t, pod, brokerCAVolumeName)
+}
+
+func TestReconcileKeepsRunningRunWhenBrokerFlipsToPlaintext(t *testing.T) {
+	setTLSBrokerEnv(t)
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := multiGrantMediatedAgentRun()
+	agentRun.Spec.EgressAllowInsecureBroker = false
+	caSecret := testBrokerCASecret(agentRun.Namespace, map[string][]byte{brokerCAKey: []byte("fixture-ca")})
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, caSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile under TLS broker: %v", err)
+	}
+	pod := getAgentPod(ctx, t, k8sClient, agentRun)
+	pod.Status.Phase = corev1.PodRunning
+	if err := k8sClient.Status().Update(ctx, &pod); err != nil {
+		t.Fatalf("update pod status: %v", err)
+	}
+
+	// The operator broker env flips back to plaintext: without the insecure
+	// flag this spec would no longer pass admission, but the running run must
+	// not be retroactively failed.
+	t.Setenv("NVT_BROKER_URL", "")
+	t.Setenv("NVT_BROKER_CA_SECRET", "")
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile after plaintext flip: %v", err)
+	}
+	var updated nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updated); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseRunning {
+		t.Fatalf("broker env flip retroactively changed phase to %s", updated.Status.Phase)
+	}
 }
 
 func TestReconcileDoesNotRetroactivelyRewriteRunningRuns(t *testing.T) {
@@ -1846,6 +1899,9 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	}
 	if crdPath(t, spec, "egressAllowInsecureBroker", "default") != false {
 		t.Fatalf("expected egressAllowInsecureBroker default false, got %#v", crdPath(t, spec, "egressAllowInsecureBroker"))
+	}
+	if crdPath(t, spec, "egressEnforcement", "default") != false {
+		t.Fatalf("expected egressEnforcement default false, got %#v", crdPath(t, spec, "egressEnforcement"))
 	}
 	materialization := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "materialization").(map[string]any)
 	if materialization["default"] != "file-bundle" {

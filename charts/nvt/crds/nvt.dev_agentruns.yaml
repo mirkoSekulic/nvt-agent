@@ -76,6 +76,9 @@ spec:
                 egressAllowInsecureBroker:
                   type: boolean
                   default: false
+                egressEnforcement:
+                  type: boolean
+                  default: false
                 workspace:
                   type: object
                   required:
