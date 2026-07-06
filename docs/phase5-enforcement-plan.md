@@ -140,6 +140,15 @@ pieces that are *not* yet placement-agnostic and need rework:
    The one network fetch is done once, by the trusted operator, at reconcile
    time. Direct agent-side `GET /ca.crt` with a TOFU caveat remains the
    documented fallback if the sequencing cost proves too high in the PR.
+
+   **Implementation constraint**: this sequencing (egressd Pod ready → CA
+   fetched → ConfigMap published → agent Pod created) is more controller
+   choreography than the existing reconcile does anywhere. Implement it as an
+   explicit state machine surfaced through AgentRun status conditions (e.g.
+   `EgressdReady`, `EgressCAPublished`) with each reconcile pass advancing
+   one observable step — not as hidden ordering inside a single reconcile
+   path. Controller tests assert the condition progression, including the
+   stuck states (egressd never ready, fetch fails).
 4. **Pairing at the network layer**: per-run Pod labels so NetworkPolicies
    select exactly the paired Pods (`nvt.dev/run: <name>`,
    `nvt.dev/role: agent|egressd`).
@@ -153,7 +162,9 @@ pieces that are *not* yet placement-agnostic and need rework:
   paired agent Pod.
 - **CNI limitation, stated plainly**: vanilla NetworkPolicy selects by
   CIDR/port, not hostname, so "upstream :443" concretely means
-  `0.0.0.0/0:443` (optionally excluding cluster CIDRs) on the egressd Pod.
+  `0.0.0.0/0:443` on the egressd Pod. Excluding cluster/Service CIDRs via
+  `except` blocks is a worthwhile second-pass hardening if the chosen CNI
+  handles it cleanly — do not let it complicate the first pass.
   That is acceptable **only because egressd enforces the semantic per-host
   allowlist** (pinned route upstreams, capability `injection-hosts`,
   fail-closed CONNECT allowlist). Hostname-level control lives in egressd;
