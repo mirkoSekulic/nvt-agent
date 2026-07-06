@@ -79,8 +79,18 @@ type Config struct {
 // CAConfig configures the boot-generated per-agent CA.
 type CAConfig struct {
 	// PublishDir is where ca.crt is written for the agent container to
-	// trust (a shared volume mounted read-only on the agent side).
+	// trust (a shared volume mounted read-only on the agent side). Same-Pod
+	// mode; optional when ServeAddr distributes the certificate instead.
 	PublishDir string `json:"publish_dir"`
+	// LeafDNSNames extends leaf SANs and the CA name constraints with
+	// synthetic per-run Service names (own-Pod mode). Never upstream names:
+	// any overlap with a route upstream host fails validation.
+	LeafDNSNames []string `json:"leaf_dns_names"`
+	// ServeAddr enables the plain-HTTP CA endpoint (GET /ca.crt, /healthz)
+	// the operator fetches the certificate from in own-Pod mode. The
+	// certificate is public material and is the trust anchor being
+	// bootstrapped, so TLS here would be circular.
+	ServeAddr string `json:"serve_addr"`
 }
 
 // ForwardProxyConfig enables CONNECT-only blind-tunnel proxying. It does not
@@ -156,8 +166,26 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("routes[%d]: listen_tls must be %q when set, got %q", index, RouteListenTLSCA, route.ListenTLS)
 		}
 	}
-	if c.CA != nil && c.CA.PublishDir == "" {
-		return fmt.Errorf("ca.publish_dir is required")
+	if c.CA != nil {
+		if c.CA.PublishDir == "" && c.CA.ServeAddr == "" {
+			return fmt.Errorf("ca requires publish_dir or serve_addr")
+		}
+		routeUpstreamHosts := map[string]bool{}
+		for _, route := range c.Routes {
+			if host, ok := normalizedRouteUpstreamHost(route.Upstream); ok {
+				routeUpstreamHosts[host] = true
+			}
+		}
+		for index, name := range c.CA.LeafDNSNames {
+			if name == "" {
+				return fmt.Errorf("ca.leaf_dns_names[%d] must not be empty", index)
+			}
+			// Leaf names are synthetic redirect names; minting for a real
+			// upstream is exactly the boundary Phase 4 established.
+			if routeUpstreamHosts[strings.ToLower(name)] {
+				return fmt.Errorf("ca.leaf_dns_names[%d] %q matches a route upstream host", index, name)
+			}
+		}
 	}
 	if c.ForwardProxy != nil {
 		if err := c.ForwardProxy.Validate(); err != nil {

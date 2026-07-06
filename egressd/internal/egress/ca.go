@@ -43,6 +43,11 @@ type CA struct {
 	cert    *x509.Certificate
 	key     *ecdsa.PrivateKey
 	certPEM []byte
+	// leafDNSNames are the extra DNS names leafs may carry beyond localhost:
+	// per-run egressd Service names in own-Pod mode. They are synthetic
+	// redirect names, never upstream names — the config layer refuses any
+	// overlap with route upstream hosts.
+	leafDNSNames []string
 
 	// Now is a test seam; nil means time.Now.
 	Now func() time.Time
@@ -53,7 +58,10 @@ type CA struct {
 }
 
 // NewCA generates the CA keypair and self-signed certificate in memory.
-func NewCA() (*CA, error) {
+// leafDNSNames extends the local redirect boundary with synthetic Service
+// names for own-Pod mode; name constraints cover exactly localhost plus
+// these names.
+func NewCA(leafDNSNames ...string) (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate CA key: %w", err)
@@ -62,6 +70,7 @@ func NewCA() (*CA, error) {
 	if err != nil {
 		return nil, err
 	}
+	names := append([]string(nil), leafDNSNames...)
 	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber:          serial,
@@ -76,7 +85,7 @@ func NewCA() (*CA, error) {
 		// Name constraints: this CA can only ever vouch for local redirect
 		// names, even if the key leaked.
 		PermittedDNSDomainsCritical: true,
-		PermittedDNSDomains:         []string{localLeafName},
+		PermittedDNSDomains:         append([]string{localLeafName}, names...),
 		PermittedIPRanges: []*net.IPNet{
 			{IP: net.IPv4(127, 0, 0, 0).To4(), Mask: net.CIDRMask(8, 32)},
 			{IP: net.IPv6loopback, Mask: net.CIDRMask(128, 128)},
@@ -91,9 +100,10 @@ func NewCA() (*CA, error) {
 		return nil, fmt.Errorf("parse CA certificate: %w", err)
 	}
 	return &CA{
-		cert:    cert,
-		key:     key,
-		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		cert:         cert,
+		key:          key,
+		certPEM:      pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		leafDNSNames: names,
 	}, nil
 }
 
@@ -129,13 +139,26 @@ func (ca *CA) ServerTLSConfig() *tls.Config {
 }
 
 // GetCertificate mints (and caches) the local leaf certificate on demand.
-// Leafs carry only local redirect SANs; a ClientHello naming anything else —
-// in particular a real upstream name — is refused outright.
+// Leafs carry only local redirect SANs (localhost plus the configured
+// synthetic Service names); a ClientHello naming anything else — in
+// particular a real upstream name — is refused outright.
 func (ca *CA) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if hello.ServerName != "" && hello.ServerName != localLeafName {
+	if hello.ServerName != "" && !ca.allowedLeafName(hello.ServerName) {
 		return nil, fmt.Errorf("refusing to mint leaf for non-local name %q", hello.ServerName)
 	}
 	return ca.localLeaf()
+}
+
+func (ca *CA) allowedLeafName(name string) bool {
+	if name == localLeafName {
+		return true
+	}
+	for _, allowed := range ca.leafDNSNames {
+		if name == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func (ca *CA) now() time.Time {
@@ -168,7 +191,7 @@ func (ca *CA) localLeaf() (*tls.Certificate, error) {
 		NotAfter:     expiry,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{localLeafName},
+		DNSNames:     append([]string{localLeafName}, ca.leafDNSNames...),
 		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)

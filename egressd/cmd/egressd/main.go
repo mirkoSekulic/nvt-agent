@@ -46,18 +46,23 @@ func run() error {
 	}
 	var ca *egress.CA
 	if config.CA != nil {
-		ca, err = egress.NewCA()
+		ca, err = egress.NewCA(config.CA.LeafDNSNames...)
 		if err != nil {
 			return err
 		}
-		if err := ca.PublishCert(config.CA.PublishDir); err != nil {
-			return err
+		if config.CA.PublishDir != "" {
+			if err := ca.PublishCert(config.CA.PublishDir); err != nil {
+				return err
+			}
+			log.Printf("egressd: published per-agent CA certificate to %s", config.CA.PublishDir)
 		}
-		log.Printf("egressd: published per-agent CA certificate to %s", config.CA.PublishDir)
 	}
 	transport := &http.Transport{ForceAttemptHTTP2: true}
 	listenerCount := len(config.Routes)
 	if config.ForwardProxy != nil {
+		listenerCount++
+	}
+	if config.CA != nil && config.CA.ServeAddr != "" {
 		listenerCount++
 	}
 	errors := make(chan error, listenerCount)
@@ -91,6 +96,19 @@ func run() error {
 			Handler:           proxy,
 			ReadHeaderTimeout: forwardProxyReadHeaderTimeout,
 		}
+		go func() {
+			errors <- server.ListenAndServe()
+		}()
+	}
+	if config.CA != nil && config.CA.ServeAddr != "" {
+		// Plain HTTP by design: the certificate is public material and is
+		// the trust anchor being bootstrapped (egress.CAEndpointHandler).
+		server := &http.Server{
+			Addr:              config.CA.ServeAddr,
+			Handler:           egress.CAEndpointHandler(ca),
+			ReadHeaderTimeout: forwardProxyReadHeaderTimeout,
+		}
+		log.Printf("egressd: serving CA certificate endpoint on %s", config.CA.ServeAddr)
 		go func() {
 			errors <- server.ListenAndServe()
 		}()
