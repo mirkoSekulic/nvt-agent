@@ -143,6 +143,14 @@ Acceptance:
 - Helm upgrade that changes `broker.config.providers` rolls `deployment/nvt-broker`.
 - A test or helm render assertion pins the checksum annotation.
 
+**Fixed (PR A landed):** the broker Deployment now carries a
+`checksum/broker-config` pod annotation (`nvt.brokerConfigChecksum`) that hashes
+`broker.config`, so a Helm upgrade changing `broker.config.providers` rolls
+`deployment/nvt-broker`. The `nvt-broker-agents` ConfigMap is **not** checksummed
+on purpose — the broker hot-reloads it by mtime (revocation depends on that), so
+a restart there would be counterproductive. A helm-render assertion pins that the
+annotation is present and changes when `broker.config.providers` changes.
+
 ### 2. Codex WebSocket Path Failed, HTTPS Fallback Worked
 
 Codex stderr showed repeated WebSocket failures:
@@ -201,7 +209,7 @@ Acceptance:
 
 ## Recommended PRs
 
-### PR A: Broker Config Rollout Checksum
+### PR A: Broker Config Rollout Checksum — LANDED
 
 Scope:
 
@@ -214,7 +222,10 @@ Why first:
 - This caused a real false failure during the proof.
 - It is small and production-relevant beyond Codex.
 
-### PR B: Manual Real Codex Proof Harness
+Landed as the `checksum/broker-config` pod annotation on the broker Deployment,
+pinned by `tests/operator/helm/test.sh`.
+
+### PR B: Manual Real Codex Proof Harness — LANDED
 
 Scope:
 
@@ -222,11 +233,17 @@ Scope:
 - Do not run in CI by default.
 - Should write evidence under an ignored output directory, for example `.phase6-out/real-codex-proof/`.
 
-Suggested target:
+Target (landed):
 
 ```sh
-make phase6-real-codex-proof
+make phase6-real-codex-proof            # uses ~/.codex
+CODEX_AUTH_SOURCE=/path/to/.codex make phase6-real-codex-proof
 ```
+
+Implemented in `scripts/phase6-real-codex-proof.sh`; writes evidence and a
+summary (normal turn / WebSocket / refresh / secret-scan) under
+`.phase6-out/real-codex-proof/` (git-ignored). Refresh is not forced yet (PR D)
+and the WebSocket path is recorded as fallback-only (PR C).
 
 Suggested behavior:
 

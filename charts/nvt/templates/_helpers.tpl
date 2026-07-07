@@ -117,6 +117,17 @@ app.kubernetes.io/component: gateway
   an existingSecret between upgrades still needs a manual
   `kubectl rollout restart deployment/nvt-broker`.
 */ -}}
+{{/*
+nvt.brokerConfigChecksum hashes the broker provider config (broker.yaml). The
+broker loads providers once at startup and does NOT hot-reload them (unlike the
+agents ConfigMap, which reloads by mtime), so a Helm upgrade that changes
+broker.config must roll the Deployment or the running broker keeps the old
+providers — the exact false failure hit in the real Codex proof.
+*/ -}}
+{{- define "nvt.brokerConfigChecksum" -}}
+{{- .Values.broker.config | toYaml | sha256sum -}}
+{{- end -}}
+
 {{- define "nvt.brokerTLSChecksum" -}}
 {{- if .Values.broker.tls.existingSecret -}}
 {{- $existing := lookup "v1" "Secret" (include "nvt.namespace" .) .Values.broker.tls.existingSecret -}}
