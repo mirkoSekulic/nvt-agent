@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // placeholderIdentities: an agent holding a placeholder-file grant for
@@ -149,5 +150,94 @@ func TestPlaceholderFileEgressRoleDenied(t *testing.T) {
 		map[string]any{"provider": "fixture-auth"})
 	if status == http.StatusOK || body["error"] != "role-not-allowed" {
 		t.Fatalf("egress identity must be refused on placeholder-files: status=%d body=%v", status, body)
+	}
+}
+
+// TestCodexPlaceholderFile pins the Codex preset: .codex/auth.json with
+// placeholder access/refresh tokens, a jwt id_token carrying the real
+// (non-secret) chatgpt account id + far-future exp + placeholder signature,
+// and host bindings including auth.openai.com — with no real token bytes.
+func TestCodexPlaceholderFile(t *testing.T) {
+	f := newBrokerFixtureWithCodexConfig(t, ""+
+		"      placeholder-file:\n"+
+		"        path: .codex/auth.json\n"+
+		"        hosts:\n"+
+		"          - chatgpt.com\n"+
+		"          - api.openai.com\n"+
+		"          - auth.openai.com\n"+
+		"        id-token-claims:\n"+
+		"          - claim: chatgpt_account_id\n"+
+		"            claim-path:\n"+
+		"              - https://api.openai.com/auth\n"+
+		"              - chatgpt_account_id\n")
+
+	realAccessToken := testJWTWithClaims(time.Now().Add(24*time.Hour), map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-real-123"},
+	})
+	f.writeCodexAuth(realAccessToken, "real-codex-refresh-token-secret")
+
+	identities := mediatedIdentities()
+	frontend := identities["frontend"]
+	frontend.Grants = []roleGrant{{Provider: "codex-main", Materialization: "placeholder-file"}}
+	identities["frontend"] = frontend
+	f.writeRoleIdentities(identities)
+
+	status, body := f.postJSONWithToken("frontend-token", "/v1/placeholder-files",
+		map[string]any{"provider": "codex-main"})
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("codex placeholder-files must succeed: status=%d body=%v", status, body)
+	}
+
+	raw, _ := json.Marshal(body)
+	for _, needle := range []string{"real-codex-refresh-token-secret", realAccessToken} {
+		if strings.Contains(string(raw), needle) {
+			t.Fatalf("real Codex credential leaked into the placeholder response: %s", raw)
+		}
+	}
+
+	file := body["files"].([]any)[0].(map[string]any)
+	if file["path"] != ".codex/auth.json" || file["mode"] != "0600" {
+		t.Fatalf("unexpected file path/mode: %v", file)
+	}
+	var content map[string]any
+	if err := json.Unmarshal([]byte(file["content"].(string)), &content); err != nil {
+		t.Fatalf("auth.json is not valid JSON: %v", err)
+	}
+	tokens, ok := content["tokens"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth.json missing tokens object: %v", content)
+	}
+	if tokens["access_token"] != nvtPlaceholder || tokens["refresh_token"] != nvtPlaceholder {
+		t.Fatalf("access/refresh tokens must be placeholders, got %v", tokens)
+	}
+	idToken, _ := tokens["id_token"].(string)
+	segments := strings.Split(idToken, ".")
+	if len(segments) != 3 || segments[2] != "nvt-placeholder-signature" {
+		t.Fatalf("id_token must be a jwt with a placeholder signature: %q", idToken)
+	}
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(segments[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if claims["chatgpt_account_id"] != "acct-real-123" {
+		t.Fatalf("id_token must carry the real non-secret account id, got %v", claims)
+	}
+	if exp, ok := claims["exp"].(float64); !ok || exp < 2000000000 {
+		t.Fatalf("id_token exp must be far-future, got %v", claims["exp"])
+	}
+
+	hosts := body["hosts"].([]any)
+	found := false
+	for _, h := range hosts {
+		if h == "auth.openai.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("host bindings must include the refresh endpoint auth.openai.com, got %v", hosts)
 	}
 }
