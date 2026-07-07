@@ -134,7 +134,6 @@ func runOperatorAdmissionValidationTest(t *testing.T) {
 	root := repoRoot(t)
 	cmd := exec.Command("go", "test", "./internal/controller", "-run", "Test(ValidateAgentRunEgressModeRejectsMismatches|ReconcileRejectsEgressMismatchBeforePodAndSecrets)", "-count=1")
 	cmd.Dir = filepath.Join(root, "operator")
-	cmd.Env = append(os.Environ(), "GOCACHE="+filepath.Join(t.TempDir(), "go-cache"))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("operator admission validation test failed: %v\n%s", err, output)
