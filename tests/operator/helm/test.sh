@@ -500,6 +500,14 @@ grep -q 'value: "https://nvt-broker:7347"' "${DEFAULT_RENDER}"
 grep -q 'name: NVT_BROKER_CA_SECRET' "${DEFAULT_RENDER}"
 grep -q 'checksum/broker-tls: ' "${DEFAULT_RENDER}"
 
+# defaultEgressMode knob: rendered into the operator env, default direct.
+grep -q 'name: NVT_DEFAULT_EGRESS_MODE' "${DEFAULT_RENDER}"
+grep -q 'value: "direct"' "${DEFAULT_RENDER}"
+DEFAULT_MEDIATED_RENDER="${WORKDIR}/default-egress-mediated.yaml"
+helm template nvt "${CHART}" -n custom-ns --set egress.defaultMode=mediated > "${DEFAULT_MEDIATED_RENDER}"
+grep -q 'name: NVT_DEFAULT_EGRESS_MODE' "${DEFAULT_MEDIATED_RENDER}"
+grep -q 'value: "mediated"' "${DEFAULT_MEDIATED_RENDER}"
+
 sha256_hex() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum | awk '{print $1}'

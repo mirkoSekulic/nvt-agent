@@ -7,6 +7,13 @@ runtime:
 
 egress:
   egressdImage: nvt-egressd:latest
+  # Cluster default egress mode for AgentRuns created through the nvt
+  # admission/schedule path (producers/schedules) that leave spec.egress
+  # empty. Applied once, at creation — flipping it never reclassifies an
+  # existing run. Default "direct". A raw `kubectl apply` of an AgentRun with
+  # empty egress is defaulted to "direct" by the CRD schema regardless of this
+  # knob (docs/phase5-6b-observability-pr-plan.md decision 5).
+  defaultMode: direct
 
 broker:
   enabled: true

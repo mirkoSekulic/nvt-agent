@@ -2101,6 +2101,38 @@ func ValidateBrokerTLSConfig() error {
 	return nil
 }
 
+// DefaultEgressMode is the cluster's creation-time default egress mode, read
+// from NVT_DEFAULT_EGRESS_MODE (empty means direct). It is applied ONCE, at
+// AgentRun creation on the nvt admission path (ApplyDefaultEgressMode) — never
+// at reconcile time, so flipping the knob can never reclassify an existing
+// run (the #62/#63 retroactive-reclassification hazard). AgentRunEgressMode
+// deliberately does not read this env.
+func DefaultEgressMode() nvtv1alpha1.AgentRunEgressMode {
+	mode := strings.TrimSpace(os.Getenv("NVT_DEFAULT_EGRESS_MODE"))
+	if mode == "" {
+		return nvtv1alpha1.AgentRunEgressDirect
+	}
+	return nvtv1alpha1.AgentRunEgressMode(mode)
+}
+
+// ValidateDefaultEgressMode fails fast (operator startup) on a bad knob value.
+func ValidateDefaultEgressMode() error {
+	mode := DefaultEgressMode()
+	if mode != nvtv1alpha1.AgentRunEgressDirect && mode != nvtv1alpha1.AgentRunEgressMediated {
+		return fmt.Errorf("NVT_DEFAULT_EGRESS_MODE must be direct or mediated, got %q", mode)
+	}
+	return nil
+}
+
+// ApplyDefaultEgressMode stamps the cluster default into spec.egress when the
+// incoming run leaves it empty, so the stored object is always explicit and a
+// later knob change can never alter it. It never overrides an explicit mode.
+func ApplyDefaultEgressMode(agentRun *nvtv1alpha1.AgentRun) {
+	if agentRun.Spec.Egress == "" {
+		agentRun.Spec.Egress = DefaultEgressMode()
+	}
+}
+
 // AgentRunBrokerID returns the broker identity for an AgentRun.
 func AgentRunBrokerID(namespace, name string) string {
 	return namespace + "/" + name
