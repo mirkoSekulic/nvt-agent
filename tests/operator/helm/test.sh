@@ -11,6 +11,7 @@ DEFAULT_RENDER="${WORKDIR}/default.yaml"
 GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
+GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
 BROKER_TLS_DISABLED_RENDER="${WORKDIR}/broker-tls-disabled.yaml"
@@ -427,6 +428,20 @@ grep -q 'name: NVT_GATEWAY_AUTHORIZATION' "${GATEWAY_OIDC_RENDER}"
 grep -q 'claimSource' "${GATEWAY_OIDC_RENDER}"
 grep -q 'break-glass-admins' "${GATEWAY_OIDC_RENDER}"
 grep -q -- '--public-url=https://agents.altinn.studio' "${GATEWAY_OIDC_RENDER}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.replicas=2 \
+  --set gateway.auth.mode=oidc \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.oidc.issuerURL=https://issuer.example.test \
+  --set gateway.auth.oidc.clientID=nvt-agent-gateway \
+  --set gateway.auth.oidc.clientSecret.existingSecret=nvt-agent-gateway-oidc \
+  > "${GATEWAY_OIDC_REPLICAS_FAILURE}" 2>&1; then
+  echo "expected gateway oidc replicas>1 config to fail rendering" >&2
+  exit 1
+fi
+grep -q "gateway.replicas must be 1 when gateway.auth.mode=oidc until shared sessions exist" "${GATEWAY_OIDC_REPLICAS_FAILURE}"
 
 if helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \

@@ -50,6 +50,11 @@ The default is `id_token`. Use `userinfo` when the IdP exposes entitlement
 claims there. `access_token` is accepted only for JWT access tokens that verify
 against the issuer JWKS; opaque access tokens fail closed.
 
+OIDC sessions are currently stored process-locally in the gateway. Keep
+`gateway.replicas: 1` for `auth.mode=oidc`; the chart fails rendering for
+multiple replicas until a shared session store exists. `auth.mode=none` can use
+the configured replica count.
+
 Do not use SSN, pid, or fødselsnummer claims as authorization keys. Prefer
 organization, group, resource, or entitlement claims. Gateway authorization
 policy validation rejects those sensitive claim paths, and logs intentionally
