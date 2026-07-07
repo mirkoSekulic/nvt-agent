@@ -1114,3 +1114,250 @@ func TestAgentInitMediatedRequiresUnsafeLocalBrokerFlag(t *testing.T) {
 		t.Fatalf("unsafe local broker rejection wrote egressd env")
 	}
 }
+
+// TestComposeAgentUserModeParameterized pins that the compose agent service
+// parameterizes user/HOME/state so root stays the default and non-root is
+// selectable, and that the auth/home mounts follow HOME.
+func TestComposeAgentUserModeParameterized(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "compose.agent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(data)
+	for _, fragment := range []string{
+		"user: ${AGENT_RUN_USER:-0:0}",
+		"HOME: ${AGENT_HOME:-/root}",
+		"NVT_STATE_DIR: ${AGENT_HOME:-/root}/.nvt-agent",
+		"${CODEX_CONFIG_DIR}:${AGENT_HOME:-/root}/.codex",
+		"agent-home:${AGENT_HOME:-/root}",
+	} {
+		if !strings.Contains(compose, fragment) {
+			t.Fatalf("compose.agent.yaml missing %q", fragment)
+		}
+	}
+	// The hardcoded root home targets must be gone.
+	if strings.Contains(compose, "agent-home:/root") || strings.Contains(compose, ":/root/.codex") {
+		t.Fatalf("compose.agent.yaml still hardcodes /root home targets:\n%s", compose)
+	}
+}
+
+// TestAgentInitRendersRuntimeUser pins the --user knob: default root (0:0,
+// /root) and opt-in non-root (1000:1000, /home/agent).
+func TestAgentInitRendersRuntimeUser(t *testing.T) {
+	root := repoRoot(t)
+	tests := []struct {
+		name    string
+		args    []string
+		user    string
+		runUser string
+		home    string
+	}{
+		{name: "default-root", args: nil, user: "user: root", runUser: "AGENT_RUN_USER=0:0", home: "AGENT_HOME=/root"},
+		{name: "opt-in-non-root", args: []string{"--user", "non-root"}, user: "user: non-root", runUser: "AGENT_RUN_USER=1000:1000", home: "AGENT_HOME=/home/agent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			agentDir := filepath.Join(root, ".agents", "user-"+tt.name)
+			_ = os.RemoveAll(agentDir)
+			t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+			command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+			args := append([]string{"--name", "user-" + tt.name, "--type", "claude"}, tt.args...)
+			cmd := commandWithEnv(command, nil, args...)
+			cmd.Dir = root
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("agent-init failed: %v\n%s", err, output)
+			}
+			config, err := os.ReadFile(filepath.Join(agentDir, "agent.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(config), tt.user) {
+				t.Fatalf("agent.yaml missing %q\n%s", tt.user, config)
+			}
+			env, err := os.ReadFile(filepath.Join(agentDir, "env"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{tt.runUser, tt.home} {
+				if !strings.Contains(string(env), want) {
+					t.Fatalf("env missing %q\n%s", want, env)
+				}
+			}
+		})
+	}
+}
+
+// TestAgentInitRejectsInvalidUser pins the --user validation.
+func TestAgentInitRejectsInvalidUser(t *testing.T) {
+	root := repoRoot(t)
+	home := t.TempDir()
+	command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	cmd := commandWithEnv(command, nil, "--name", "bad-user", "--user", "wheel")
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("agent-init unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "user must be root or non-root") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+}
+
+// TestBootstrapAcceptsNonRootUserAndUsesHome pins that runtime.user: non-root
+// is accepted and that bootstrap writes state under $HOME (not a hardcoded
+// /root) — the fixture HOME is a temp dir, so a /root assumption would fail.
+func TestBootstrapAcceptsNonRootUserAndUsesHome(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+  user: non-root
+`)
+	f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), true, nil, config)
+
+	if _, err := os.ReadFile(filepath.Join(f.home, ".nvt-agent", "agent-command.json")); err != nil {
+		t.Fatalf("bootstrap did not write state under $HOME: %v", err)
+	}
+}
+
+// TestBootstrapRejectsInvalidRuntimeUser pins the runtime.user validation.
+func TestBootstrapRejectsInvalidRuntimeUser(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+  user: wheel
+`)
+	output := f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), false, nil, config)
+	if !strings.Contains(output, "runtime.user must be root or non-root") {
+		t.Fatalf("expected runtime.user rejection, got:\n%s", output)
+	}
+}
+
+// TestAgentInitSwitchesExistingUserMode pins review finding 1: re-running
+// agent-init --user on an EXISTING agent actually switches it — the env
+// (compose user + HOME) and agent.yaml runtime.user both flip, so a switch to
+// non-root does not silently keep running root.
+func TestAgentInitSwitchesExistingUserMode(t *testing.T) {
+	root := repoRoot(t)
+	home := t.TempDir()
+	agentDir := filepath.Join(root, ".agents", "switch-mode")
+	_ = os.RemoveAll(agentDir)
+	t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+
+	run := func(args ...string) {
+		command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+		full := append([]string{"--name", "switch-mode", "--type", "claude"}, args...)
+		cmd := commandWithEnv(command, nil, full...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("agent-init failed: %v\n%s", err, out)
+		}
+	}
+	assertContains := func(file string, wants ...string) {
+		data, err := os.ReadFile(filepath.Join(agentDir, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Fatalf("%s missing %q\n%s", file, want, data)
+			}
+		}
+	}
+
+	run() // create as root
+	assertContains("env", "AGENT_RUN_USER=0:0", "AGENT_HOME=/root")
+	assertContains("agent.yaml", "user: root")
+
+	run("--user", "non-root") // switch the existing agent
+	assertContains("env", "AGENT_RUN_USER=1000:1000", "AGENT_HOME=/home/agent")
+	assertContains("agent.yaml", "user: non-root")
+
+	run("--user", "root") // switch back
+	assertContains("env", "AGENT_RUN_USER=0:0", "AGENT_HOME=/root")
+	assertContains("agent.yaml", "user: root")
+}
+
+// TestBootstrapInstallsPackagesViaNvtAsRoot pins that apt package install goes
+// through nvt-as-root (so it works under both root and non-root) rather than a
+// bare apt-get that would fail as the non-root agent.
+func TestBootstrapInstallsPackagesViaNvtAsRoot(t *testing.T) {
+	f := newFixture(t)
+	callLog := filepath.Join(f.home, "nvt-as-root.calls")
+	// Stub nvt-as-root and apt-get so the test does not touch the real system;
+	// nvt-as-root records its args then execs the rest (the stub apt-get).
+	f.writeBin("nvt-as-root", "#!/usr/bin/env bash\necho \"$@\" >> "+shellQuote(callLog)+"\nexec \"$@\"\n")
+	f.writeBin("apt-get", "#!/usr/bin/env bash\nexit 0\n")
+
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+tools:
+  packages:
+    - jq
+`)
+	f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), true, nil, config)
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("nvt-as-root was not invoked for package install: %v", err)
+	}
+	calls := string(data)
+	if !strings.Contains(calls, "apt-get update") {
+		t.Fatalf("expected apt-get update via nvt-as-root, got:\n%s", calls)
+	}
+	if !strings.Contains(calls, "apt-get install -y --no-install-recommends jq") {
+		t.Fatalf("expected apt-get install via nvt-as-root, got:\n%s", calls)
+	}
+}
+
+// TestNvtAsRootWrapper pins the shim contract: no args -> usage; non-root with
+// sudo -> re-runs through sudo; non-root without sudo -> fails clearly.
+func TestNvtAsRootWrapper(t *testing.T) {
+	root := repoRoot(t)
+	shim := filepath.Join(root, "runtime", "core", "nvt-as-root")
+
+	// No args -> usage, exit 2.
+	cmd := commandWithEnv("bash "+shellQuote(shim), nil)
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "usage: nvt-as-root") {
+		t.Fatalf("no-args must print usage and fail, got err=%v out=%s", err, out)
+	}
+
+	// This test process is non-root; a stubbed sudo must be invoked with the args.
+	binDir := t.TempDir()
+	sudoLog := filepath.Join(binDir, "sudo.calls")
+	mustWriteExecutable(t, filepath.Join(binDir, "sudo"), "#!/usr/bin/env bash\necho \"$@\" > "+shellQuote(sudoLog)+"\n")
+	cmd = commandWithEnv("bash "+shellQuote(shim)+" apt-get install -y jq", nil)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("non-root shim with sudo present must succeed: err=%v out=%s", err, out)
+	}
+	logged, err := os.ReadFile(sudoLog)
+	if err != nil || !strings.Contains(string(logged), "apt-get install -y jq") {
+		t.Fatalf("shim did not route through sudo with the args: %v %s", err, logged)
+	}
+
+	// Non-root without sudo on PATH -> clear failure. Keep `id` reachable (the
+	// shim needs it) but exclude sudo by pointing PATH at a minimal dir.
+	noSudo := t.TempDir()
+	if idPath, err := exec.LookPath("id"); err == nil {
+		if err := os.Symlink(idPath, filepath.Join(noSudo, "id")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noSudoCmd := exec.Command("bash", shim, "apt-get", "update")
+	noSudoCmd.Env = []string{"PATH=" + noSudo, "HOME=" + t.TempDir()}
+	if out, err := noSudoCmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "requires root privileges but sudo is unavailable") {
+		t.Fatalf("non-root without sudo must fail clearly, got err=%v out=%s", err, out)
+	}
+}
+
+func mustWriteExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -15,7 +15,20 @@ RUN apt-get update \
     gh \
     ripgrep \
     tmux \
+    sudo \
   && rm -rf /var/lib/apt/lists/*
+
+# Opt-in non-root runtime user. The base image already ships a uid/gid 1000
+# user (`ubuntu`); rename it to `agent` with home /home/agent and give it
+# passwordless sudo. The image default user stays root (no `USER agent`
+# directive) — non-root mode is selected at runtime by the operator/compose, so
+# existing root/Codex behavior is unchanged.
+RUN groupmod -n agent ubuntu \
+  && usermod -l agent -d /home/agent -m ubuntu \
+  && printf 'agent ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/nvt-agent \
+  && chmod 0440 /etc/sudoers.d/nvt-agent \
+  && mkdir -p /home/agent/.nvt-agent /home/agent/.local/bin \
+  && chown -R 1000:1000 /home/agent
 
 RUN docker --version \
   && docker compose version
@@ -29,6 +42,7 @@ RUN curl -fsSL https://code-server.dev/install.sh \
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
 COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint
+COPY runtime/core/nvt-as-root /usr/local/bin/nvt-as-root
 COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
 COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
 COPY runtime/core/export-plugin-tools.py /usr/local/bin/export-plugin-tools
@@ -47,6 +61,7 @@ COPY runtime/plugins /usr/local/lib/nvt-agent/plugins
 
 RUN chmod +x \
   /usr/local/bin/entrypoint \
+  /usr/local/bin/nvt-as-root \
   /usr/local/bin/bootstrap \
   /usr/local/bin/run-plugins \
   /usr/local/bin/export-plugin-tools \

@@ -64,6 +64,12 @@ const (
 	workspaceMountPath    = "/workspace"
 	initialPromptPlugin   = "initial-prompt"
 
+	// Non-root runtime user (opt-in via spec.runtime.user: non-root). The
+	// image ships an `agent` user at this uid/gid with HOME=agentNonRootHome.
+	agentNonRootUID  int64 = 1000
+	agentNonRootGID  int64 = 1000
+	agentNonRootHome       = "/home/agent"
+
 	defaultBrokerURL = "http://nvt-broker:7347"
 	// brokerCAVolumeName carries the broker's CA certificate (public) into
 	// the egressd and agent containers so both can verify the TLS broker leg.
@@ -1988,7 +1994,9 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			Image:   "docker:27-dind",
 			Command: []string{"sh", "-c"},
 			Args: []string{
-				"cp -a " + runtimeAuthSourcePath + "/. " + runtimeAuthHomePath + "/ && chmod -R u+rwX " + runtimeAuthHomePath,
+				// Non-root also needs group-writable auth files: fsGroup makes the
+				// mount group 1000, so ug+rwX lets the agent write seeded tokens.
+				"cp -a " + runtimeAuthSourcePath + "/. " + runtimeAuthHomePath + "/ && chmod -R " + runtimeAuthChmod(agentRun) + " " + runtimeAuthHomePath,
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: runtimeAuthSourceName, MountPath: runtimeAuthSourcePath, ReadOnly: true},
@@ -2071,6 +2079,19 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 	if brokerCADistributed() {
 		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_BROKER_CA_FILE", Value: agentBrokerCAFile})
 	}
+	if AgentRunNonRoot(agentRun) {
+		// Run the agent as the image's `agent` user; set HOME + NVT_STATE_DIR so
+		// $HOME-relative bootstrap/entrypoint target /home/agent (the baked
+		// NVT_STATE_DIR=/root/... would otherwise be unwritable).
+		containers[0].SecurityContext = &corev1.SecurityContext{
+			RunAsUser:  ptrTo(agentNonRootUID),
+			RunAsGroup: ptrTo(agentNonRootGID),
+		}
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "HOME", Value: agentNonRootHome},
+			corev1.EnvVar{Name: "NVT_STATE_DIR", Value: agentNonRootHome + "/.nvt-agent"},
+		)
+	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated && !enforced {
 		egressdVolumeMounts := []corev1.VolumeMount{
 			{Name: egressdConfigName, MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
@@ -2129,11 +2150,41 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			Volumes:          volumes,
 		},
 	}
+	if AgentRunNonRoot(agentRun) {
+		// fsGroup makes the workspace + runtime-auth emptyDir volumes group 1000
+		// and group-writable, so the non-root agent can write them. The
+		// privileged root dind container is unaffected (root ignores fsGroup).
+		pod.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: ptrTo(agentNonRootGID)}
+	}
 	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
 		return nil, fmt.Errorf("set AgentRun Pod owner: %w", err)
 	}
 
 	return pod, nil
+}
+
+// runtimeAuthChmod is the mode bump applied to seeded runtime-auth files: user
+// only for root (unchanged), user+group for non-root (paired with fsGroup 1000).
+func runtimeAuthChmod(agentRun *nvtv1alpha1.AgentRun) string {
+	if AgentRunNonRoot(agentRun) {
+		return "ug+rwX"
+	}
+	return "u+rwX"
+}
+
+// AgentRunNonRoot reports whether the agent container runs as the non-root
+// `agent` user (uid/gid 1000, HOME=/home/agent). Default is root (unchanged).
+func AgentRunNonRoot(agentRun *nvtv1alpha1.AgentRun) bool {
+	return agentRun.Spec.Runtime.User == nvtv1alpha1.AgentRunUserNonRoot
+}
+
+// agentHomePath is the agent container's HOME: /home/agent for non-root, /root
+// otherwise (matching the image's baked default).
+func agentHomePath(agentRun *nvtv1alpha1.AgentRun) string {
+	if AgentRunNonRoot(agentRun) {
+		return agentNonRootHome
+	}
+	return "/root"
 }
 
 // RuntimeAuthMountPath resolves the Secret mount path for the AgentRun runtime auth reference.
@@ -2153,9 +2204,9 @@ func RuntimeAuthMountPath(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	}
 	switch agentRun.Spec.Runtime.Type {
 	case "codex":
-		return "/root/.codex", nil
+		return agentHomePath(agentRun) + "/.codex", nil
 	case "claude":
-		return "/root/.claude", nil
+		return agentHomePath(agentRun) + "/.claude", nil
 	default:
 		return "", fmt.Errorf("spec.runtimeAuth.mountPath is required for runtime type %q", agentRun.Spec.Runtime.Type)
 	}

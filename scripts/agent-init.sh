@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --name <name> [--type codex|claude] [--autonomy trusted-local|interactive]" >&2
+  echo "usage: $0 --name <name> [--type codex|claude] [--autonomy trusted-local|interactive] [--user root|non-root]" >&2
 }
 
 render_template() {
@@ -25,6 +25,7 @@ PY
 name=""
 agent_type="codex"
 autonomy="trusted-local"
+runtime_user="root"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +51,14 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       autonomy="$2"
+      shift 2
+      ;;
+    --user)
+      if [ "$#" -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      runtime_user="$2"
       shift 2
       ;;
     -h|--help)
@@ -83,6 +92,24 @@ case "$autonomy" in
   *)
     echo "invalid autonomy: $autonomy" >&2
     echo "autonomy must be trusted-local or interactive" >&2
+    exit 1
+    ;;
+esac
+
+# Runtime user mode. Default root is unchanged; non-root runs the agent
+# container as uid/gid 1000 with HOME=/home/agent and passwordless sudo.
+case "$runtime_user" in
+  root)
+    agent_run_user="0:0"
+    agent_home="/root"
+    ;;
+  non-root)
+    agent_run_user="1000:1000"
+    agent_home="/home/agent"
+    ;;
+  *)
+    echo "invalid user: $runtime_user" >&2
+    echo "user must be root or non-root" >&2
     exit 1
     ;;
 esac
@@ -197,6 +224,8 @@ if [ ! -f "$env_file" ]; then
     COMPOSE_PROFILES="$compose_profiles" \
     CODEX_CONFIG_DIR="$codex_config_dir" \
     CLAUDE_CONFIG_DIR="$claude_config_dir" \
+    AGENT_RUN_USER="$agent_run_user" \
+    AGENT_HOME="$agent_home" \
     render_template "$templates_dir/env" "$env_file"
   echo "created $env_file"
 else
@@ -242,7 +271,7 @@ PY
       printf 'EGRESSD_ENV_FILE=%s\n' "$egressd_env_file"
     } >>"$env_file"
   fi
-  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" <<'PY'
+  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" "$agent_run_user" "$agent_home" <<'PY'
 import sys
 from pathlib import Path
 
@@ -252,6 +281,10 @@ values = {
     "NVT_EGRESS_MODE": sys.argv[3],
     "NVT_EGRESS_ALLOW_INSECURE_BROKER": sys.argv[4],
     "COMPOSE_PROFILES": sys.argv[5],
+    # Re-applying --user must actually switch an existing agent: the compose
+    # user + HOME + auth/home mount targets are driven by these two vars.
+    "AGENT_RUN_USER": sys.argv[6],
+    "AGENT_HOME": sys.argv[7],
 }
 lines = path.read_text(encoding="utf-8").splitlines()
 seen = set()
@@ -389,9 +422,24 @@ else
 fi
 
 if [ ! -f "$agent_config_file" ]; then
-  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" render_template "$templates_dir/agent.yaml" "$agent_config_file"
+  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" AGENT_USER="$runtime_user" render_template "$templates_dir/agent.yaml" "$agent_config_file"
   echo "created $agent_config_file"
 else
+  # Keep the declared runtime.user in sync when re-running with --user, without
+  # touching the rest of a possibly user-edited agent.yaml. An agent created
+  # before this field existed has no user line; recreate it to adopt the field.
+  python3 - "$agent_config_file" "$runtime_user" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+user = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+updated, count = re.subn(r"(?m)^(  user: ).*$", r"\g<1>" + user, text)
+if count:
+    path.write_text(updated, encoding="utf-8")
+PY
   echo "exists  $agent_config_file"
 fi
 

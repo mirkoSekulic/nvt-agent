@@ -71,6 +71,14 @@ def load_bootstrap_config(path):
     if not isinstance(runtime, dict):
         raise SystemExit("runtime must be a YAML object")
 
+    # runtime.user is a declarative surface (root|non-root); the container user
+    # is actually selected by compose/k8s. Validate it and reject unknown modes.
+    # bootstrap itself is $HOME-relative, so it follows whatever HOME the
+    # selected user has.
+    runtime_user = runtime.get("user", "root")
+    if runtime_user not in ("root", "non-root"):
+        raise SystemExit("runtime.user must be root or non-root")
+
     tools = data.get("tools", data)
     if not isinstance(tools, dict):
         raise SystemExit("tools must be a YAML object")
@@ -521,8 +529,10 @@ def apply_additional_paths(paths):
 def install_packages(packages):
     if not packages:
         return
-    run(["apt-get", "update"])
-    run(["apt-get", "install", "-y", "--no-install-recommends", *packages])
+    # nvt-as-root is a no-op passthrough as root (unchanged) and uses the
+    # agent's passwordless sudo in non-root mode, so apt works under both.
+    run(["nvt-as-root", "apt-get", "update"])
+    run(["nvt-as-root", "apt-get", "install", "-y", "--no-install-recommends", *packages])
 
 
 def configured_packages(tools):

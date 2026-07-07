@@ -1,10 +1,17 @@
 services:
   agent:
     image: nvt-agent-runtime:latest
+    # Default is root (0:0, HOME=/root) — unchanged. Non-root mode
+    # (AGENT_RUN_USER=1000:1000, AGENT_HOME=/home/agent) is rendered by
+    # agent-init --user non-root. The image ships the `agent` user at 1000, and
+    # a fresh agent-home named volume inherits its /home/agent ownership.
+    user: ${AGENT_RUN_USER:-0:0}
     env_file:
       - ${AGENT_ENV_FILE}
     environment:
       DOCKER_HOST: tcp://127.0.0.1:2375
+      HOME: ${AGENT_HOME:-/root}
+      NVT_STATE_DIR: ${AGENT_HOME:-/root}/.nvt-agent
     working_dir: ${NVT_WORKSPACE}
     depends_on:
       docker:
@@ -14,9 +21,9 @@ services:
       - ${WORKSPACE_DIR}:${NVT_WORKSPACE}
       - ${CUSTOM_PLUGINS_DIR}:/custom-plugins
       - ${AGENT_CONFIG_FILE}:${NVT_AGENT_CONFIG_FILE}:ro
-      - ${CODEX_CONFIG_DIR}:/root/.codex
-      - ${CLAUDE_CONFIG_DIR}:/root/.claude
-      - agent-home:/root
+      - ${CODEX_CONFIG_DIR}:${AGENT_HOME:-/root}/.codex
+      - ${CLAUDE_CONFIG_DIR}:${AGENT_HOME:-/root}/.claude
+      - agent-home:${AGENT_HOME:-/root}
       # ca.crt only; the CA private key never leaves egressd process memory.
       - egress-ca:/nvt-egress-ca:ro
 

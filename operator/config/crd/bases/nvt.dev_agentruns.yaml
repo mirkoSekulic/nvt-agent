@@ -51,6 +51,12 @@ spec:
                       enum:
                         - trusted-local
                         - interactive
+                    user:
+                      type: string
+                      default: root
+                      enum:
+                        - root
+                        - non-root
                 runtimeAuth:
                   type: object
                   required:

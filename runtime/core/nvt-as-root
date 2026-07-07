@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Portable "run this as root" wrapper for the runtime image. It lets the same
+# command work whether the agent runs as root (the default) or as the non-root
+# `agent` user (spec.runtime.user: non-root / agent-init --user non-root):
+#
+#   nvt-as-root apt-get install -y jq
+#
+# As root it execs the command directly — byte-identical to running it without
+# the wrapper. As non-root it re-runs through the agent's passwordless sudo
+# (present only in the non-root image user). It adds no new privilege: non-root
+# mode already grants passwordless sudo by design.
+#
+# Note: sudo resets the environment by default, so the command runs with a root
+# environment (HOME=/root, sanitized PATH) in non-root mode. That is what apt
+# and other system tooling want; do not rely on the agent's HOME here.
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: nvt-as-root <command> [args...]" >&2
+  exit 2
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  exec "$@"
+fi
+
+if command -v sudo >/dev/null 2>&1; then
+  exec sudo "$@"
+fi
+
+echo "nvt-as-root: command requires root privileges but sudo is unavailable: $*" >&2
+exit 1
