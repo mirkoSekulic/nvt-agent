@@ -435,6 +435,8 @@ providers:
     config:
       injection-hosts:
         - chatgpt.com
+        - api.openai.com
+        - auth.openai.com
 %[6]s      auth-file: %[7]q
       token-url: %[8]q
       client-id: test-client

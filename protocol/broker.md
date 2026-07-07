@@ -240,10 +240,13 @@ Rules:
   bindings, and a `placeholder-file` grant is denied on `/v1/token`,
   `/v1/headers`, and `/v1/files` (`materialization-mismatch`) — the real
   secret is unreachable everywhere.
-- **Injection-capable**: a `placeholder-file` grant also authorizes
-  `/v1/injection/headers` for the paired egress identity, so the same grant
-  both materializes the placeholder file and lets the edge inject the real
-  credential (no second `header-inject` grant for the provider is needed).
+- **Injection-eligible**: `/v1/injection/headers` accepts a `placeholder-file`
+  grant, so the same grant both materializes the placeholder file and lets the
+  edge inject the real credential (no second `header-inject` grant for the
+  provider is needed). This functions only for providers that also implement
+  injection (an `injection_headers` method plus `injection-hosts`), such as the
+  Codex preset; the generic `placeholder` provider is materialization-only and
+  returns `injection-not-supported`.
 - `egress`-role identities are refused; the placeholder file is inert and
   agent-owned.
 - Error shape and status conventions match `/v1/token`.

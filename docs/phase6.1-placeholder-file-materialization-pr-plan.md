@@ -182,3 +182,9 @@ Where: `runtime/core/bootstrap.py` (or the existing broker-auth-files path),
 - **Body/query placeholder substitution** — deferred (see 6.2).
 - Host-auth-file runtime sourcing — a dev import helper at most, never the
   runtime architecture.
+- **Standalone placeholder-file egress routing** — through the operator/compose
+  admission, a mediated run still requires at least one `header-inject` grant
+  with `egressHosts` for its egress route; `placeholder-file` grants are
+  materialized but not routed. A tool reaching its upstream purely via a
+  placeholder file + the forward proxy is 6.2. The broker already treats a
+  `placeholder-file` grant as injection-eligible so 6.2 needs no second grant.

@@ -2248,6 +2248,10 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		}
 	}
 	if mode == nvtv1alpha1.AgentRunEgressMediated && headerInjectGrants == 0 {
+		// 6.1 scope: placeholder-file grants are materialized but not routed
+		// (no egressd route until 6.2's forward proxy), so a mediated run still
+		// needs a header-inject grant for its egress route. Standalone
+		// placeholder-file routing lands in 6.2.
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
 	}
 	return nil

@@ -132,11 +132,27 @@ func TestPlaceholderFileRequiresGrant(t *testing.T) {
 		t.Fatalf("expected provider-not-granted, got %v", body["error"])
 	}
 
-	// The placeholder-file grant must not reach secret-bearing endpoints.
-	status, body = f.postJSONWithToken("frontend-token", "/v1/files",
-		map[string]any{"provider": "fixture-auth"})
-	if status == http.StatusOK || body["error"] != "materialization-mismatch" {
-		t.Fatalf("placeholder-file grant must be rejected on /v1/files: status=%d body=%v", status, body)
+	// The placeholder-file grant must not reach ANY secret-bearing endpoint.
+	for _, endpoint := range []string{"/v1/files", "/v1/token", "/v1/headers"} {
+		status, body = f.postJSONWithToken("frontend-token", endpoint,
+			map[string]any{"provider": "fixture-auth", "target": "my-user/my-repo"})
+		if status == http.StatusOK || body["error"] != "materialization-mismatch" {
+			t.Fatalf("placeholder-file grant must be rejected on %s: status=%d body=%v", endpoint, status, body)
+		}
+	}
+}
+
+// TestGenericPlaceholderProviderNotInjectionCapable pins review finding 1: the
+// generic placeholder provider is materialization-only, so injection is
+// refused for it even though placeholder-file is an injection-eligible mode.
+func TestGenericPlaceholderProviderNotInjectionCapable(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(placeholderIdentities())
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers",
+		map[string]any{"capability": "fixture-auth", "host": "api.fixture.test", "method": "GET", "path": "/x"})
+	if status == http.StatusOK || body["error"] != "injection-not-supported" {
+		t.Fatalf("generic placeholder provider must not support injection: status=%d body=%v", status, body)
 	}
 }
 
@@ -271,5 +287,34 @@ func TestPlaceholderFileGrantIsInjectionCapable(t *testing.T) {
 		map[string]any{"provider": "codex-main"})
 	if status == http.StatusOK || body["error"] != "materialization-mismatch" {
 		t.Fatalf("placeholder-file grant must stay denied on /v1/files: status=%d body=%v", status, body)
+	}
+}
+
+// TestCodexPlaceholderClaimGuard pins review finding 4: a configured
+// id-token-claim whose real value is token-shaped is refused rather than
+// copied into the placeholder file.
+func TestCodexPlaceholderClaimGuard(t *testing.T) {
+	f := newBrokerFixtureWithCodexConfig(t, ""+
+		"      placeholder-file:\n"+
+		"        path: .codex/auth.json\n"+
+		"        hosts:\n"+
+		"          - chatgpt.com\n"+
+		"        id-token-claims:\n"+
+		"          - claim: leaked\n"+
+		"            claim-path: secret_blob\n")
+
+	access := testJWTWithClaims(time.Now().Add(time.Hour), map[string]any{"secret_blob": strings.Repeat("x", 200)})
+	f.writeCodexAuth(access, "codex-refresh")
+
+	identities := mediatedIdentities()
+	frontend := identities["frontend"]
+	frontend.Grants = []roleGrant{{Provider: "codex-main", Materialization: "placeholder-file"}}
+	identities["frontend"] = frontend
+	f.writeRoleIdentities(identities)
+
+	status, body := f.postJSONWithToken("frontend-token", "/v1/placeholder-files",
+		map[string]any{"provider": "codex-main"})
+	if status == http.StatusOK || body["error"] != "placeholder-claim-unsafe" {
+		t.Fatalf("token-shaped id-token-claim must be refused: status=%d body=%v", status, body)
 	}
 }

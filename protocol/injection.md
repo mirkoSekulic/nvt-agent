@@ -79,10 +79,12 @@ Each grant carries a materialization mode:
   real credential stays broker-side and is injected at the edge (Phase 6.2).
   Distinct from `file-bundle`: no path in this mode writes usable credentials.
   The response's `hosts` bindings feed the forward-proxy route/injection map.
-  Like `header-inject`, it is **injection-capable**: the same grant that
-  materializes the placeholder file also authorizes `/v1/injection/headers`,
-  so the edge injects the real credential without a second grant for the
-  provider.
+  A `placeholder-file` grant is **injection-eligible**: `/v1/injection/headers`
+  accepts it, so the same grant that materializes the file can also authorize
+  edge injection without a second grant. This only functions for providers
+  that also implement injection (an `injection_headers` method and
+  `injection-hosts`) — e.g. the Codex preset. The generic `placeholder`
+  provider is materialization-only and returns `injection-not-supported`.
 
 Modes are mutually exclusive per grant, enforced broker-side:
 
@@ -102,6 +104,13 @@ AgentSchedule admission and by compose `agent-init` from plan Phase 3):
 - run `egress: mediated` with any `file-bundle` grant fails admission.
 - There is no downgrade path in either direction. The error names the
   offending grant.
+
+Operator/compose scope (6.1): `placeholder-file` grants are accepted in
+mediated mode and materialized by bootstrap, but they are **not yet routed** —
+a mediated run still requires at least one `header-inject` grant with
+`egressHosts` for its egress route. Standalone `placeholder-file` egress (the
+tool reaching its upstream through the forward proxy) lands in Phase 6.2; until
+then a placeholder file is materialized but inert.
 
 ## Endpoints
 

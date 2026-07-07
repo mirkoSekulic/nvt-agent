@@ -59,11 +59,14 @@ class PlaceholderProvider:
         for key, spec in raw.items():
             if not isinstance(key, str) or not key:
                 fail(f"provider {self.name} config.fields keys must be non-empty strings")
-            # A field is either a literal non-secret value, or a secret spec
-            # (an object naming a secret-env and optional shape/claims). Only
-            # secret specs are placeholdered; literals are emitted verbatim.
-            if isinstance(spec, dict) and ("secret-env" in spec or "shape" in spec):
+            # Fail closed on ambiguity: any object field MUST be a well-formed
+            # secret spec (naming a secret-env). A mis-keyed secret field must
+            # never silently degrade into a literal object emitted verbatim.
+            # Only scalar values are literals (emitted as-is; non-secret).
+            if isinstance(spec, dict):
                 fields[key] = self._secret_field(key, spec)
+            elif isinstance(spec, (list,)):
+                fail(f"provider {self.name} config.fields.{key} must be a scalar literal or a secret spec object")
             else:
                 fields[key] = {"kind": "literal", "value": spec}
         return fields

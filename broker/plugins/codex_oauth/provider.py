@@ -24,6 +24,12 @@ DEFAULT_TOKEN_URL = "https://auth.openai.com/oauth/token"
 DEFAULT_REFRESH_MARGIN_SECONDS = 600
 DEFAULT_BUNDLE_TTL_SECONDS = 1200
 DEFAULT_STUB_REFRESH_TOKEN = "nvt-broker-stub"
+# id-token-claims copy real token-derived data into the placeholder file. The
+# claim paths are operator-trusted (non-secret identity, same model as
+# injection-claim-headers), but as defense in depth a copied value that looks
+# token-shaped (too long, or a JWT-like dotted blob) is refused rather than
+# smuggled into the placeholder.
+MAX_PLACEHOLDER_CLAIM_LEN = 128
 
 
 class CodexOAuthProvider:
@@ -82,6 +88,12 @@ class CodexOAuthProvider:
         for index, host in enumerate(list_value(raw.get("hosts"), f"provider {self.name} config.placeholder-file.hosts")):
             if not isinstance(host, str) or not host:
                 fail(f"provider {self.name} config.placeholder-file.hosts[{index}] must be a non-empty string")
+            # The placeholder file's host bindings must be a subset of the
+            # provider's injection-hosts: every host the placeholder credential
+            # is bound to must be one the edge can actually inject for
+            # (otherwise 6.2 refresh mediation, e.g. auth.openai.com, breaks).
+            if host not in self.injection_hosts:
+                fail(f"provider {self.name} config.placeholder-file.hosts[{index}] {host} must also be listed in injection-hosts")
             hosts.append(host)
         claims = []
         for index, item in enumerate(list_value(raw.get("id-token-claims"), f"provider {self.name} config.placeholder-file.id-token-claims")):
@@ -94,6 +106,16 @@ class CodexOAuthProvider:
             )
             claims.append({"claim": claim, "path": path_segments})
         return {"path": path, "hosts": hosts, "id_token_claims": claims}
+
+    def _guard_placeholder_claim(self, claim, value):
+        # _claim_value already refuses dict/list leaves; this rejects scalar
+        # values that look like a credential rather than a non-secret claim.
+        if isinstance(value, str):
+            if len(value) > MAX_PLACEHOLDER_CLAIM_LEN:
+                raise ProviderError("placeholder-claim-unsafe", f"placeholder id-token-claim {claim} value is too long to be a non-secret claim", 502)
+            if value.count(".") >= 2 and len(value) > 40:
+                raise ProviderError("placeholder-claim-unsafe", f"placeholder id-token-claim {claim} value looks token-shaped, refusing", 502)
+        return value
 
     def placeholder_files(self, agent_id, audit, request_id, grant=None):
         # Emit .codex/auth.json carrying only placeholders: opaque access/refresh
@@ -111,7 +133,7 @@ class CodexOAuthProvider:
         for entry in self.placeholder["id_token_claims"]:
             value = self._claim_value(real_claims, entry["path"])
             if value is not None:
-                id_claims[entry["claim"]] = value
+                id_claims[entry["claim"]] = self._guard_placeholder_claim(entry["claim"], value)
         content = {
             "tokens": {
                 "access_token": render_plain(),
