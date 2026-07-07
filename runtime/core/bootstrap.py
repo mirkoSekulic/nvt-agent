@@ -393,12 +393,19 @@ def apply_mediated_egress(egress):
         if base_url.startswith("https://") and https_provider is None:
             https_provider = provider
         apply_redirect_env(provider, grant, placeholder)
-    if enforced and https_provider is not None:
-        install_egress_ca_trust(https_provider)
+    forward_proxy = bool(egress.get("forward-proxy"))
+    if enforced and (https_provider is not None or forward_proxy):
+        # Forward-proxy mode has no https base-url to trigger the install, but
+        # the MITM leaf must be trusted system-wide so proxy-env HTTPS clients
+        # (curl, requests, node, ...) accept it.
+        install_egress_ca_trust(https_provider or "forward-proxy")
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {"mode": "mediated", "placeholder": PLACEHOLDER, "grants": grants}
+    if forward_proxy:
+        metadata["forward_proxy"] = True
     target.write_text(
-        json.dumps({"mode": "mediated", "placeholder": PLACEHOLDER, "grants": grants}, indent=2, sort_keys=True) + "\n",
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     persist_env_var("NVT_EGRESS_PLACEHOLDER", PLACEHOLDER)

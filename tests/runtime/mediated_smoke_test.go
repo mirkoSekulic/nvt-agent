@@ -693,3 +693,58 @@ code-server:
 func TestMediatedEgressDenied(t *testing.T) {
 	t.Skip(egressDeniedPending)
 }
+
+// TestBootstrapForwardProxyInstallsCATrust pins Phase 6.2 bootstrap: in
+// forward-proxy mode (no https base-url to trigger it) the CA trust store is
+// still installed system-wide so proxy-env HTTPS clients trust the MITM leaf,
+// and egress.json records forward_proxy.
+func TestBootstrapForwardProxyInstallsCATrust(t *testing.T) {
+	f := newFixture(t)
+	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
+	trustDir := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "ca-bundle.crt")
+
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  enforcement: true
+  forward-proxy: true
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants: []
+runtime:
+  command: bash
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), true, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + trustDir,
+		"NVT_CA_BUNDLE_FILE=" + bundle,
+	}, config)
+
+	if _, err := os.Stat(updateLog); err != nil {
+		t.Fatalf("forward-proxy bootstrap did not install the CA trust store:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(trustDir, "nvt-egress-ca.crt")); err != nil {
+		t.Fatal("egress CA was not written into the trust dir")
+	}
+	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
+	if !strings.Contains(envFile, `export SSL_CERT_FILE="`+bundle+`"`) {
+		t.Fatalf("SSL_CERT_FILE not pointed at the bundle:\n%s", envFile)
+	}
+	meta := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
+	if !strings.Contains(meta, `"forward_proxy": true`) {
+		t.Fatalf("egress.json missing forward_proxy marker:\n%s", meta)
+	}
+}
