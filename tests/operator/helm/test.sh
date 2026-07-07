@@ -47,6 +47,7 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.oidc.validIssuer=https://issuer.example.test \
   --set gateway.auth.oidc.extraAuthParams.prompt=login \
   --set gateway.auth.oidc.extraAuthParams.authorization_details='[{"type":"ansattporten:altinn:resource"}]' \
+  --set gateway.auth.authorization.claimSource=userinfo \
   --set gateway.auth.authorization.rules[0].id=break-glass-admins \
   --set gateway.auth.authorization.rules[0].effect=allow \
   --set gateway.auth.authorization.rules[0].claimPath='groups[]' \
@@ -423,6 +424,7 @@ grep -q 'prompt' "${GATEWAY_OIDC_RENDER}"
 grep -q 'name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS' "${GATEWAY_OIDC_RENDER}"
 grep -q 'openid_credential' "${GATEWAY_OIDC_RENDER}"
 grep -q 'name: NVT_GATEWAY_AUTHORIZATION' "${GATEWAY_OIDC_RENDER}"
+grep -q 'claimSource' "${GATEWAY_OIDC_RENDER}"
 grep -q 'break-glass-admins' "${GATEWAY_OIDC_RENDER}"
 grep -q -- '--public-url=https://agents.altinn.studio' "${GATEWAY_OIDC_RENDER}"
 

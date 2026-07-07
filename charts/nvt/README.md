@@ -45,6 +45,11 @@ when `gateway.auth.mode=oidc`, the default authorization decision is deny
 unless an allow rule matches. To allow any authenticated user, configure an
 explicit `authenticated: true` rule.
 
+Authorization rules evaluate claims from `gateway.auth.authorization.claimSource`.
+The default is `id_token`. Use `userinfo` when the IdP exposes entitlement
+claims there. `access_token` is accepted only for JWT access tokens that verify
+against the issuer JWKS; opaque access tokens fail closed.
+
 Do not use SSN, pid, or fødselsnummer claims as authorization keys. Prefer
 organization, group, resource, or entitlement claims. Gateway authorization
 policy validation rejects those sensitive claim paths, and logs intentionally
@@ -52,7 +57,9 @@ include only the decision, rule id, agent access key, and a short hash of the
 subject.
 
 Example with provider-neutral OIDC fields and Ansattporten-style authorize
-parameters:
+parameters. The rule below assumes the configured claim source exposes
+`authorization_details`; choose `userinfo` or `access_token` to match the
+provider's actual claim placement:
 
 ```yaml
 gateway:
@@ -79,6 +86,8 @@ gateway:
           ]
     authorization:
       default: deny
+      # id_token (default), userinfo, or access_token for JWT access tokens
+      claimSource: userinfo
       rules:
         - id: allowed-altinn-org
           effect: allow

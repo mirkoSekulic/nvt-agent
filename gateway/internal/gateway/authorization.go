@@ -13,11 +13,15 @@ const (
 	authorizationDefaultDeny  = "deny"
 	authorizationEffectAllow  = "allow"
 	authorizationDecisionDeny = "deny"
+	claimSourceIDToken        = "id_token"
+	claimSourceAccessToken    = "access_token"
+	claimSourceUserInfo       = "userinfo"
 )
 
 type AuthorizationConfig struct {
-	Default string              `json:"default"`
-	Rules   []AuthorizationRule `json:"rules"`
+	Default     string              `json:"default"`
+	ClaimSource string              `json:"claimSource"`
+	Rules       []AuthorizationRule `json:"rules"`
 }
 
 type AuthorizationRule struct {
@@ -52,6 +56,15 @@ func (c AuthorizationConfig) validate() error {
 	if defaultDecision != authorizationDefaultDeny {
 		return fmt.Errorf("auth.authorization.default must be %q", authorizationDefaultDeny)
 	}
+	claimSource := c.ClaimSource
+	if claimSource == "" {
+		claimSource = claimSourceIDToken
+	}
+	switch claimSource {
+	case claimSourceIDToken, claimSourceAccessToken, claimSourceUserInfo:
+	default:
+		return fmt.Errorf("auth.authorization.claimSource must be one of %q, %q, or %q", claimSourceIDToken, claimSourceAccessToken, claimSourceUserInfo)
+	}
 	for index, rule := range c.Rules {
 		if strings.TrimSpace(rule.ID) == "" {
 			return fmt.Errorf("auth.authorization.rules[%d].id is required", index)
@@ -81,6 +94,9 @@ func (c AuthorizationConfig) validate() error {
 		}
 		if rule.Where.Array == "" || len(rule.Where.All) == 0 {
 			return fmt.Errorf("auth.authorization.rules[%d] requires where.array and where.all", index)
+		}
+		if isSensitiveClaimPath(rule.Where.Array) {
+			return fmt.Errorf("auth.authorization.rules[%d].where.array must not use pid, SSN, or fødselsnummer", index)
 		}
 		for conditionIndex, condition := range rule.Where.All {
 			if condition.ClaimPath == "" || len(condition.Values) == 0 {
@@ -265,5 +281,39 @@ func valueToString(value any) string {
 		return typed.String()
 	default:
 		return fmt.Sprint(value)
+	}
+}
+
+func stripSensitiveClaims(claims map[string]any) map[string]any {
+	return stripSensitiveMap(claims, "")
+}
+
+func stripSensitiveMap(input map[string]any, prefix string) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
+		if isSensitiveClaimPath(path) || isSensitiveClaimPath(key) {
+			continue
+		}
+		output[key] = stripSensitiveValue(value, path)
+	}
+	return output
+}
+
+func stripSensitiveValue(value any, path string) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return stripSensitiveMap(typed, path)
+	case []any:
+		output := make([]any, 0, len(typed))
+		for _, item := range typed {
+			output = append(output, stripSensitiveValue(item, path))
+		}
+		return output
+	default:
+		return value
 	}
 }

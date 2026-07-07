@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"golang.org/x/oauth2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -311,6 +313,69 @@ func TestAuthorizationRejectsSensitiveClaimPath(t *testing.T) {
 	}
 }
 
+func TestAuthorizationRejectsSensitiveWhereArrayPath(t *testing.T) {
+	config := AuthorizationConfig{Rules: []AuthorizationRule{{
+		ID:     "bad",
+		Effect: authorizationEffectAllow,
+		Where: AuthorizationWhere{
+			Array: "authorization_details[].pid[]",
+			All:   []AuthorizationCondition{{ClaimPath: "value", Values: []string{"01017012345"}}},
+		},
+	}}}
+	if err := config.validate(); err == nil || !strings.Contains(err.Error(), "where.array must not use pid") {
+		t.Fatalf("expected sensitive where.array error, got %v", err)
+	}
+}
+
+func TestSessionCookieDoesNotCarryLargeClaims(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfig(provider.URL), fakeClient(t))
+	claims := map[string]any{
+		"sub":                   "user-1",
+		"pid":                   "01017012345",
+		"authorization_details": largeAuthorizationDetails(),
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	cookie := setTestSession(t, server, req, "user-1", claims)
+	if strings.Contains(cookie.Value, "authorization_details") || strings.Contains(cookie.Value, "01017012345") {
+		t.Fatalf("session cookie leaked claim material: %q", cookie.Value)
+	}
+	if len(cookie.String()) > 1024 {
+		t.Fatalf("session cookie too large: %d bytes", len(cookie.String()))
+	}
+	stored := server.auth.sessions[mustReadSessionID(t, server, cookie)]
+	if _, ok := stored.Claims["pid"]; ok {
+		t.Fatalf("stored authorization claims retained forbidden pid: %#v", stored.Claims)
+	}
+	if _, ok := stored.Claims["authorization_details"]; !ok {
+		t.Fatalf("stored authorization claims lost needed authorization_details: %#v", stored.Claims)
+	}
+}
+
+func TestAuthorizationClaimSourceUserInfo(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	config := oidcTestConfig(provider.URL)
+	config.Auth.Authorization.ClaimSource = claimSourceUserInfo
+	server := mustNewServer(t, config, fakeClient(t))
+	claims, err := server.auth.authorizationClaims(t.Context(), &oauth2.Token{AccessToken: "opaque-userinfo-token"}, nil, map[string]any{"sub": "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimPathMatches(claims, "groups[]", []string{"nvt-agent-admins"}) != true {
+		t.Fatalf("userinfo claims not loaded: %#v", claims)
+	}
+}
+
+func TestAuthorizationClaimSourceAccessTokenRequiresJWT(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	config := oidcTestConfig(provider.URL)
+	config.Auth.Authorization.ClaimSource = claimSourceAccessToken
+	server := mustNewServer(t, config, fakeClient(t))
+	if _, err := server.auth.authorizationClaims(t.Context(), &oauth2.Token{AccessToken: "opaque"}, nil, map[string]any{"sub": "user-1"}); err == nil || !strings.Contains(err.Error(), "requires a JWT access token") {
+		t.Fatalf("expected opaque access token to fail closed, got %v", err)
+	}
+}
+
 func TestOIDCExtraAuthorizeParamsAreIncludedOnAuthorizeURL(t *testing.T) {
 	provider := oidcDiscoveryServer(t)
 	config := oidcTestConfig(provider.URL)
@@ -497,23 +562,42 @@ func mustNewServer(t *testing.T, config Config, client ctrlclient.Client) *Serve
 	return server
 }
 
-func setTestSession(t *testing.T, server *Server, req *http.Request, subject string, claims map[string]any) {
+func setTestSession(t *testing.T, server *Server, req *http.Request, subject string, claims map[string]any) *http.Cookie {
 	t.Helper()
-	claimsJSON, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sessionID := randomToken()
+	expiresAt := time.Now().Add(time.Hour).Unix()
+	server.auth.storeSession(sessionID, storedSession{Subject: subject, ExpiresAt: expiresAt, Claims: stripSensitiveClaims(claims)})
 	recorder := httptest.NewRecorder()
 	server.auth.setCookie(recorder, server.auth.config.Auth.Session.CookieName, sessionCookie{
-		Subject:    subject,
-		ExpiresAt:  time.Now().Add(time.Hour).Unix(),
-		ClaimsJSON: string(claimsJSON),
+		ID:        sessionID,
+		ExpiresAt: expiresAt,
 	}, server.auth.config.Auth.Session.MaxAgeSeconds)
 	cookies := recorder.Result().Cookies()
 	if len(cookies) == 0 {
 		t.Fatal("session cookie was not set")
 	}
 	req.AddCookie(cookies[0])
+	return cookies[0]
+}
+
+func mustReadSessionID(t *testing.T, server *Server, cookie *http.Cookie) string {
+	t.Helper()
+	var session sessionCookie
+	if err := server.auth.cookieCodec.Decode(server.auth.config.Auth.Session.CookieName, cookie.Value, &session); err != nil {
+		t.Fatal(err)
+	}
+	return session.ID
+}
+
+func largeAuthorizationDetails() []any {
+	parties := make([]any, 0, 40)
+	for index := 0; index < 40; index++ {
+		parties = append(parties, map[string]any{
+			"orgno":    map[string]any{"ID": fmt.Sprintf("0192:%09d", index)},
+			"resource": strings.Repeat("digdir-selvbetjening-klienter-", 4),
+		})
+	}
+	return []any{map[string]any{"authorized_parties": parties}}
 }
 
 func oidcTestConfig(issuer string) Config {
@@ -556,11 +640,21 @@ func oidcDiscoveryServer(t *testing.T) *httptest.Server {
 				"issuer":                                issuer,
 				"authorization_endpoint":                issuer + "/auth",
 				"token_endpoint":                        issuer + "/token",
+				"userinfo_endpoint":                     issuer + "/userinfo",
 				"jwks_uri":                              issuer + "/jwks",
 				"id_token_signing_alg_values_supported": []string{"RS256"},
 			})
 		case "/jwks":
 			writeJSON(t, w, map[string]any{"keys": []any{}})
+		case "/userinfo":
+			if r.Header.Get("Authorization") != "Bearer opaque-userinfo-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(t, w, map[string]any{
+				"sub":    "user-1",
+				"groups": []any{"nvt-agent-admins"},
+			})
 		default:
 			http.NotFound(w, r)
 		}
