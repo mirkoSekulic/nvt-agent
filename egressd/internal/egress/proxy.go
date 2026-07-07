@@ -52,10 +52,23 @@ type Proxy struct {
 	Route     Route
 	Broker    *BrokerClient
 	Transport http.RoundTripper
+	Reporter  *Reporter
 	Now       func() time.Time
 
 	mu    sync.Mutex
 	cache map[string]*cacheEntry
+}
+
+// report enqueues one sanitized audit entry for this route. Nil-safe and
+// non-blocking; PathClass keeps raw paths out of the report.
+func (p *Proxy) report(method, path string, status int) {
+	p.Reporter.Enqueue(ReportEntry{
+		Capability: p.Route.Capability,
+		Host:       injectionHost(p.Route.Upstream),
+		Method:     method,
+		PathClass:  PathClass(path),
+		Status:     status,
+	})
 }
 
 func (p *Proxy) now() time.Time {
@@ -114,21 +127,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// err carries broker reasons only, never header values.
 		log.Printf("egressd %s: injection material unavailable: %v", p.Route.Capability, err)
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-injection-unavailable")
 		return
 	}
 	outbound, err := p.buildOutbound(r, material)
 	if err != nil {
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-request-invalid")
 		return
 	}
 	response, err := p.Transport.RoundTrip(outbound)
 	if err != nil {
 		log.Printf("egressd %s: upstream unreachable", p.Route.Capability)
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-upstream-unreachable")
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
+	p.report(r.Method, r.URL.Path, response.StatusCode)
 	copyResponse(w, response)
 }
 

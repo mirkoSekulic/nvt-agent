@@ -21,10 +21,15 @@ const (
 
 // ForwardProxy is a CONNECT-only blind tunnel. It does not inspect or modify
 // TLS, WebSocket frames, headers, cookies, bodies, or credentials.
+// forwardProxyCapability labels forward-proxy CONNECT audit reports. The
+// forward proxy is not per-capability; this is a fixed observability label.
+const forwardProxyCapability = "forward-proxy"
+
 type ForwardProxy struct {
-	Config ForwardProxyConfig
-	Dialer *net.Dialer
-	Logger *log.Logger
+	Config   ForwardProxyConfig
+	Dialer   *net.Dialer
+	Logger   *log.Logger
+	Reporter *Reporter
 
 	once        sync.Once
 	allowHosts  map[string]bool
@@ -136,6 +141,16 @@ func (p *ForwardProxy) dialer() *net.Dialer {
 }
 
 func (p *ForwardProxy) writeDecision(host string, port int, decision, errorClass string) {
+	// A resolved target is audit-worthy; targetless denials (malformed/plain
+	// HTTP) have no host and are logged only. The broker requires a host.
+	if host != "" {
+		p.Reporter.Enqueue(ReportEntry{
+			Capability: forwardProxyCapability,
+			Host:       host,
+			Port:       port,
+			Decision:   decision,
+		})
+	}
 	logger := p.Logger
 	if logger == nil {
 		logger = log.Default()

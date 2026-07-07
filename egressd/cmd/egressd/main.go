@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -65,6 +66,12 @@ func run() error {
 		}
 	}
 	transport := &http.Transport{ForceAttemptHTTP2: true}
+	// One reporter per process, shared across routes and the forward proxy,
+	// draining a bounded queue to the broker's audit endpoint out-of-band.
+	reporter := egress.NewReporter(broker)
+	if reporter != nil {
+		go reporter.Run(context.Background())
+	}
 	listenerCount := len(config.Routes)
 	if config.ForwardProxy != nil {
 		listenerCount++
@@ -74,7 +81,7 @@ func run() error {
 	}
 	errors := make(chan error, listenerCount)
 	for _, route := range config.Routes {
-		proxy := &egress.Proxy{Route: route, Broker: broker, Transport: transport}
+		proxy := &egress.Proxy{Route: route, Broker: broker, Transport: transport, Reporter: reporter}
 		server := &http.Server{Addr: route.Listen, Handler: proxy}
 		scheme := "http"
 		if route.TLSEnabled() {
@@ -95,8 +102,9 @@ func run() error {
 	}
 	if config.ForwardProxy != nil {
 		proxy := &egress.ForwardProxy{
-			Config: *config.ForwardProxy,
-			Logger: log.New(os.Stdout, "", 0),
+			Config:   *config.ForwardProxy,
+			Logger:   log.New(os.Stdout, "", 0),
+			Reporter: reporter,
 		}
 		server := &http.Server{
 			Addr:              config.ForwardProxy.Listen,
