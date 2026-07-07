@@ -34,6 +34,7 @@ case_kind_setup() {
     --from-literal=NVT_SMOKE_STATIC_TOKEN=nvt-smoke-fixture-token \
     --dry-run=client -o yaml | kubectl_smoke apply -f -
   write_broker_providers_values "${SMOKE_TMPDIR}/broker-providers.yaml"
+  deploy_echo_fixture
 
   make -C "${ROOT}" \
     CLUSTER="${CLUSTER}" \
@@ -46,7 +47,7 @@ case_kind_setup() {
 
 write_broker_providers_values() {
   local output="$1"
-  cat >"${output}" <<'YAML'
+  cat >"${output}" <<YAML
 broker:
   envSecretName: nvt-smoke-broker-env
   config:
@@ -56,7 +57,7 @@ broker:
         config:
           token-env: NVT_SMOKE_STATIC_TOKEN
           injection-hosts:
-            - httpbin.org
+            - nvt-smoke-echo.${NAMESPACE}.svc.cluster.local
         allow:
           repositories:
             - example/*
@@ -118,7 +119,12 @@ grant = {
     "provider": "static-bearer-main",
     "repositories": ["example/repo"],
     "materialization": "header-inject",
-    "egressHosts": ["httpbin.org:443"],
+    # Hermetic in-cluster echo fixture reached over plain HTTP on :443 (the
+    # port the enforced egressd egress policy allows). allowInsecureUpstream
+    # is dev/test-only and required because an in-cluster fixture cannot
+    # present a publicly-trusted TLS cert.
+    "egressHosts": [f"nvt-smoke-echo.{namespace}.svc.cluster.local:443"],
+    "allowInsecureUpstream": True,
 }
 git_grant = {
     "provider": "git-app",
@@ -339,16 +345,19 @@ assert_direct_egress_denied() {
 assert_egressd_path_allowed() {
   local run="$1"
   log "asserting the agent reaches its paired egressd through the Service"
-  # A real request from inside the agent container, resolved through
-  # kube-dns and verified against the published CA. httpbin /bearer returns
-  # 200 only when egressd fetched and injected Authorization from the broker;
-  # 5xx/502 means the mediated path is broken and must fail the smoke.
+  # A real request from inside the agent container, resolved through kube-dns
+  # and verified against the published CA. The hermetic echo fixture reflects
+  # the request egressd forwarded: it reports authenticated:true and echoes
+  # the injected token only when egressd fetched and injected Authorization
+  # from the broker. A 5xx means the mediated path is broken and fails the
+  # smoke.
   local response
   response="$(agent_exec "${run}" curl -sS --fail-with-body \
-    --cacert /nvt-egress-ca/ca.crt --max-time 15 "https://${run}-egressd:8471/bearer")" \
-    || die "agent -> egressd -> upstream bearer request failed"
-  grep -q '"authenticated": true' <<<"${response}" || die "mediated upstream did not authenticate the injected bearer: ${response}"
-  grep -q 'nvt-smoke-fixture-token' <<<"${response}" || die "fixture upstream did not receive the injected bearer: ${response}"
+    --cacert /nvt-egress-ca/ca.crt --max-time 15 "https://${run}-egressd:8471/echo")" \
+    || die "agent -> egressd -> upstream request failed"
+  grep -q '"authenticated":true' <<<"${response}" || die "echo fixture did not see an injected credential header: ${response}"
+  grep -q 'nvt-smoke-fixture-token' <<<"${response}" || die "echo fixture did not receive the injected bearer: ${response}"
+  grep -q '"path":"/echo"' <<<"${response}" || die "echo fixture did not reflect the request path: ${response}"
   if grep -q 'NVT-PLACEHOLDER-NOT-A-KEY' <<<"${response}"; then
     die "placeholder reached upstream through egressd: ${response}"
   fi

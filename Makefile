@@ -15,6 +15,7 @@ BROKER_ENV_SECRET ?= nvt-broker-env
 PRODUCER_IMAGE ?= nvt-github-comments-producer:latest
 GATEWAY_IMAGE ?= nvt-agent-gateway:latest
 EGRESSD_IMAGE ?= nvt-egressd:latest
+ECHO_IMAGE ?= nvt-smoke-echo:latest
 PRODUCER_VALUES ?= values.github-comments.yaml
 PRODUCER_RELEASE ?= nvt-github-comments-producer
 PRODUCER_CHART ?= charts/nvt-github-comments-producer
@@ -32,7 +33,7 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image=$(GATEWAY_IMAGE)
 endif
 
-.PHONY: runtime-build broker-build egressd-build phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build egressd-build echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -57,6 +58,17 @@ producer-build:
 
 gateway-build:
 	docker build -f gateway/Dockerfile -t "$(GATEWAY_IMAGE)" .
+
+echo-build:
+	docker build -f tests/fixtures/echo/Dockerfile -t "$(ECHO_IMAGE)" .
+
+# Hermetic upstream fixture for the kind egress smokes (quota, revocation,
+# enforced-egress). Loaded into the active $(CLUSTER) after it exists; the
+# smoke case creates the cluster first, so this does not depend on
+# operator-kind-cluster.
+echo-kind-load: echo-build
+	@printf '[operator-kind-setup] loading echo fixture image %s into kind cluster %s\n' "$(ECHO_IMAGE)" "$(CLUSTER)"
+	kind load docker-image "$(ECHO_IMAGE)" --name "$(CLUSTER)"
 
 operator-helm-test:
 	bash tests/operator/helm/test.sh

@@ -100,6 +100,13 @@ type AgentRunBrokerGrant struct {
 	// Permissions narrows the provider-level permission ceiling per grant,
 	// mirroring GitHub App permission keys (values: read or write).
 	Permissions map[string]string `json:"permissions,omitempty"`
+	// AllowInsecureUpstream lets egressd reach this grant's upstream over
+	// plain HTTP instead of re-originating TLS. Dev/test only — it exists so
+	// hermetic in-cluster fixtures (which cannot present a publicly-trusted
+	// cert) are reachable from the kind egress smokes. Never set it for a
+	// real provider; a plaintext upstream leg carrying an injected credential
+	// is a conformance failure.
+	AllowInsecureUpstream bool `json:"allowInsecureUpstream,omitempty"`
 }
 
 // AgentRunPrompt defines the optional initial prompt for disposable runs.

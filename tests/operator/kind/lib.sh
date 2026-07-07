@@ -61,6 +61,70 @@ kubectl_smoke() {
   kubectl --context "${KUBECTL_CONTEXT}" "$@"
 }
 
+# deploy_echo_fixture loads and deploys the hermetic upstream echo image
+# (tests/fixtures/echo) into the active cluster/namespace. It replaces the
+# external httpbin.org dependency: egressd reaches it over plain HTTP on
+# port 443 (the port the enforced egressd egress NetworkPolicy allows, since
+# Calico evaluates the post-DNAT Pod port). The echo reflects the request so
+# a smoke can assert the injected credential arrived and the placeholder did
+# not. Reusable by the enforced-egress, quota, and revocation smokes.
+ECHO_FIXTURE_NAME="${ECHO_FIXTURE_NAME:-nvt-smoke-echo}"
+ECHO_FIXTURE_PORT="${ECHO_FIXTURE_PORT:-443}"
+
+deploy_echo_fixture() {
+  log "deploying hermetic echo upstream fixture ${ECHO_FIXTURE_NAME}"
+  make -C "${ROOT}" CLUSTER="${CLUSTER}" echo-kind-load
+  kubectl_smoke apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${ECHO_FIXTURE_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: ${ECHO_FIXTURE_NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${ECHO_FIXTURE_NAME}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${ECHO_FIXTURE_NAME}
+    spec:
+      containers:
+        - name: echo
+          image: ${ECHO_IMAGE:-nvt-smoke-echo:latest}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ECHO_LISTEN
+              value: ":${ECHO_FIXTURE_PORT}"
+          ports:
+            - containerPort: ${ECHO_FIXTURE_PORT}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: ${ECHO_FIXTURE_PORT}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${ECHO_FIXTURE_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: ${ECHO_FIXTURE_NAME}
+spec:
+  selector:
+    app.kubernetes.io/name: ${ECHO_FIXTURE_NAME}
+  ports:
+    - name: http
+      port: ${ECHO_FIXTURE_PORT}
+      targetPort: ${ECHO_FIXTURE_PORT}
+YAML
+  kubectl_smoke -n "${NAMESPACE}" rollout status "deployment/${ECHO_FIXTURE_NAME}" --timeout="${ROLLOUT_TIMEOUT}"
+}
+
 diagnostics() {
   local status=$?
   if [[ ${status} -eq 0 || "${KIND_SMOKE_MODE:-kind}" != "kind" ]]; then

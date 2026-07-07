@@ -609,6 +609,34 @@ func TestRenderEgressdConfigUsesConfiguredRouteHost(t *testing.T) {
 	}
 }
 
+func TestRenderEgressdConfigAllowInsecureUpstream(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "echo-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+		EgressHosts: []string{"nvt-smoke-echo.nvt.svc.cluster.local:443"}, AllowInsecureUpstream: true,
+	}}}
+
+	rendered, err := RenderEgressdConfigJSON(agentRun)
+	if err != nil {
+		t.Fatalf("render egressd config: %v", err)
+	}
+	if !strings.Contains(rendered, `"allow_insecure_upstream": true`) {
+		t.Fatalf("expected allow_insecure_upstream true for the grant:\n%s", rendered)
+	}
+
+	// The default (unset) stays false — no accidental plaintext upstream.
+	agentRun.Spec.Broker.Grants[0].AllowInsecureUpstream = false
+	rendered, err = RenderEgressdConfigJSON(agentRun)
+	if err != nil {
+		t.Fatalf("render egressd config: %v", err)
+	}
+	if !strings.Contains(rendered, `"allow_insecure_upstream": false`) {
+		t.Fatalf("expected allow_insecure_upstream false by default:\n%s", rendered)
+	}
+}
+
 func multiGrantMediatedAgentRun() *nvtv1alpha1.AgentRun {
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated

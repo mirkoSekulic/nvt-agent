@@ -121,6 +121,9 @@ spec:
                           git:
                             type: boolean
                             default: false
+                          allowInsecureUpstream:
+                            type: boolean
+                            default: false
                           permissions:
                             type: object
                             additionalProperties:

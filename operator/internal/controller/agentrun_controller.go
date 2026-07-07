@@ -1664,7 +1664,7 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 			Listen:                fmt.Sprintf("127.0.0.1:%d", egressRouteBasePort+routeIndex),
 			Capability:            grant.Provider,
 			Upstream:              grant.EgressHosts[0],
-			AllowInsecureUpstream: false,
+			AllowInsecureUpstream: grant.AllowInsecureUpstream,
 		}
 		if enforced {
 			// Own-Pod: the hop leaves localhost, so every route listens on
