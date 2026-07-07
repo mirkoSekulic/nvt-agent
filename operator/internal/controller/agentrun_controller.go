@@ -2779,12 +2779,15 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		rawConfig = []byte("{}")
 	}
 
-	if promptText := AgentRunPromptText(agentRun); promptText != "" || AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+	if promptText := AgentRunPromptText(agentRun); promptText != "" ||
+		AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated ||
+		AgentRunNeedsRuntimePreseed(agentRun) {
 		config := map[string]any{}
 		if err := yaml.Unmarshal(rawConfig, &config); err != nil {
 			return "", fmt.Errorf("render AgentRun agent config: %w", err)
 		}
 		renderedConfig := config
+		renderedConfig = InjectRuntimePreseed(renderedConfig, agentRun)
 		if promptText != "" {
 			var err error
 			renderedConfig, err = InjectInitialPromptPlugin(renderedConfig, promptText)
@@ -2808,6 +2811,31 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	}
 
 	return string(rendered), nil
+}
+
+func AgentRunNeedsRuntimePreseed(agentRun *nvtv1alpha1.AgentRun) bool {
+	return agentRun.Spec.Runtime.Type == "codex"
+}
+
+func InjectRuntimePreseed(config map[string]any, agentRun *nvtv1alpha1.AgentRun) map[string]any {
+	if !AgentRunNeedsRuntimePreseed(agentRun) {
+		return config
+	}
+	if _, ok := config["preseed"]; ok {
+		return config
+	}
+	updated := cloneStringAnyMap(config)
+	updated["preseed"] = map[string]any{
+		"files": []any{
+			map[string]any{
+				"path":      "$HOME/.codex/config.toml",
+				"mode":      "0600",
+				"overwrite": false,
+				"content":   "check_for_update_on_startup = false\n",
+			},
+		},
+	}
+	return updated
 }
 
 func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.AgentRun) map[string]any {

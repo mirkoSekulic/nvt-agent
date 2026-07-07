@@ -137,6 +137,32 @@ else:
 PY
 )"
 
+agent_preseed="$(python3 - "$agent_type" <<'PY'
+import sys
+
+agent_type = sys.argv[1]
+if agent_type == "codex":
+    print("""preseed:
+  files:
+    - path: "$HOME/.codex/config.toml"
+      mode: "0600"
+      overwrite: false
+      content: |
+        check_for_update_on_startup = false""")
+elif agent_type == "claude":
+    print("""preseed:
+  files:
+    - path: "$HOME/.claude/settings.json"
+      mode: "0600"
+      overwrite: false
+      json:
+        theme: dark-daltonized
+        skipDangerousModePermissionPrompt: true""")
+else:
+    print("preseed:\n  files: []")
+PY
+)"
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 templates_dir="$repo_root/templates"
@@ -442,6 +468,44 @@ if count:
 PY
   echo "exists  $agent_config_file"
 fi
+
+# Manage the generic preseed block in agent.yaml. bootstrap only knows how to
+# write configured files; the tool presets live here so core stays
+# implementation-swappable. If a user already owns an unmarked preseed block,
+# leave it untouched instead of creating duplicate top-level YAML keys.
+python3 - "$agent_config_file" "$agent_preseed" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config_file = Path(sys.argv[1])
+preseed = sys.argv[2].strip()
+
+BEGIN = "# BEGIN nvt-managed preseed (agent-init)"
+END = "# END nvt-managed preseed (agent-init)"
+
+text = config_file.read_text(encoding="utf-8")
+if BEGIN in text:
+    before, _, rest = text.partition(BEGIN)
+    _, _, after = rest.partition(END)
+    text = before.rstrip("\n") + "\n" + after.lstrip("\n")
+else:
+    parsed = yaml.safe_load(text) or {}
+    if isinstance(parsed, dict) and "preseed" in parsed:
+        raise SystemExit(0)
+
+block = "\n".join([BEGIN, preseed, END])
+if "tools:" in text:
+    text = text.replace("tools:", block + "\n\ntools:", 1)
+else:
+    text = text.rstrip("\n") + "\n\n" + block + "\n"
+parsed = yaml.safe_load(text)
+if not isinstance(parsed, dict):
+    raise SystemExit("agent-init: agent config is not a YAML object after preseed rendering")
+config_file.write_text(text, encoding="utf-8")
+print(f"rendered preseed config into {config_file}")
+PY
 
 # Manage the egress block in agent.yaml: bootstrap reads egress.grants
 # (base-url per route) from the agent config, so the compose path must render

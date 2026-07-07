@@ -59,7 +59,7 @@ DEFAULT_BROKER_WAIT_SECONDS = 180
 def load_bootstrap_config(path):
     if not path.is_file():
         print(f"bootstrap: no agent config at {path}", flush=True)
-        return {}, {}, {}, {}
+        return {}, {}, {}, {}, {}
 
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
@@ -95,7 +95,13 @@ def load_bootstrap_config(path):
     if not isinstance(egress, dict):
         raise SystemExit("egress must be a YAML object")
 
-    return runtime, tools, code_server, egress
+    preseed = data.get("preseed", {})
+    if preseed is None:
+        preseed = {}
+    if not isinstance(preseed, dict):
+        raise SystemExit("preseed must be a YAML object")
+
+    return runtime, tools, code_server, egress, preseed
 
 
 def expand_path(value):
@@ -144,46 +150,6 @@ def persist_agent_command(command, args):
     target = Path.home() / ".nvt-agent" / "agent-command.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({"command": command, "args": args}, separators=(",", ":")) + "\n", encoding="utf-8")
-
-
-def codex_home():
-    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-
-
-def has_root_toml_key(lines, key):
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("["):
-            return False
-        if re.match(rf"^{re.escape(key)}\s*=", stripped):
-            return True
-    return False
-
-
-def insert_root_toml_key(lines, key, value):
-    entry = f"{key} = {value}"
-    for index, line in enumerate(lines):
-        if line.strip().startswith("["):
-            return [*lines[:index], entry, *lines[index:]]
-    return [*lines, entry]
-
-
-def ensure_codex_update_check_disabled(command):
-    if Path(command).name != "codex":
-        return
-
-    key = "check_for_update_on_startup"
-    target = codex_home() / "config.toml"
-    lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
-    if has_root_toml_key(lines, key):
-        print(f"bootstrap: codex startup update check already configured in {target}", flush=True)
-        return
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(insert_root_toml_key(lines, key, "false")) + "\n", encoding="utf-8")
-    print(f"bootstrap: disabled codex startup update check in {target}", flush=True)
 
 
 def setup_tmux_config():
@@ -484,6 +450,56 @@ def write_placeholder_file(target, content, mode, home):
         raise
 
 
+def parse_file_mode(raw_mode, field):
+    if raw_mode is None:
+        raw_mode = "0600"
+    if not isinstance(raw_mode, str) or len(raw_mode) != 4 or any(char not in "01234567" for char in raw_mode):
+        raise SystemExit(f"{field} has an invalid mode {raw_mode!r}")
+    return int(raw_mode, 8)
+
+
+def preseed_file_target(home, path):
+    if not isinstance(path, str) or not path:
+        raise SystemExit(f"bootstrap: preseed file path {path!r} must be a non-empty string")
+    expanded = expand_path(path)
+    target = Path(expanded)
+    if not target.is_absolute():
+        target = home / expanded
+    return target
+
+
+def preseed_file_content(entry, index):
+    has_content = "content" in entry
+    has_json = "json" in entry
+    if has_content == has_json:
+        raise SystemExit(f"preseed.files[{index}] must set exactly one of content or json")
+    if has_content:
+        content = entry.get("content")
+        if not isinstance(content, str):
+            raise SystemExit(f"preseed.files[{index}].content must be a string")
+        return content
+    return json.dumps(entry.get("json"), indent=2, sort_keys=True) + "\n"
+
+
+def apply_preseed_files(preseed):
+    files = preseed.get("files") or []
+    if not isinstance(files, list):
+        raise SystemExit("preseed.files must be a list")
+    home = Path.home()
+    for index, entry in enumerate(files):
+        if not isinstance(entry, dict):
+            raise SystemExit(f"preseed.files[{index}] must be an object")
+        target = preseed_file_target(home, entry.get("path"))
+        content = preseed_file_content(entry, index)
+        mode = parse_file_mode(entry.get("mode"), f"preseed.files[{index}]")
+        overwrite = optional_bool(entry.get("overwrite"), f"preseed.files[{index}].overwrite", default=False)
+        if target.exists() and not overwrite:
+            print(f"bootstrap: preseed file {target} already exists", flush=True)
+            continue
+        write_placeholder_file(target, content, mode, home)
+        print(f"bootstrap: wrote preseed file {target}", flush=True)
+
+
 def apply_placeholder_files(egress):
     # Materialize provider-owned placeholder auth files (placeholders only; the
     # real secret stays broker-side). Runs regardless of egress mode. Never
@@ -513,11 +529,9 @@ def apply_placeholder_files(egress):
             content = entry.get("content")
             if not isinstance(content, str):
                 raise SystemExit(f"bootstrap: placeholder-files[{file_index}] for {provider} must include string content")
-            raw_mode = entry.get("mode") or "0600"
-            if not isinstance(raw_mode, str) or len(raw_mode) != 4 or any(char not in "01234567" for char in raw_mode):
-                raise SystemExit(f"bootstrap: placeholder-files[{file_index}] for {provider} has an invalid mode {raw_mode!r}")
+            mode = parse_file_mode(entry.get("mode"), f"bootstrap: placeholder-files[{file_index}] for {provider}")
             target = placeholder_file_target(home, entry.get("path"))
-            write_placeholder_file(target, content, int(raw_mode, 8), home)
+            write_placeholder_file(target, content, mode, home)
 
 
 def apply_additional_paths(paths):
@@ -672,9 +686,10 @@ def setup_code_server(config):
 
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
-    runtime, tools, code_server, egress = load_bootstrap_config(config_path)
+    runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
 
     setup_tmux_config()
+    apply_preseed_files(preseed)
     if mediated_mode(egress):
         apply_mediated_egress(egress)
     # Placeholder-file materialization is independent of egress mode: it writes
@@ -687,7 +702,6 @@ def main():
         persist_env_var("AGENT_COMMAND", command)
         args = optional_string_list(runtime.get("args"), "runtime.args")
         persist_agent_command(command, args)
-        ensure_codex_update_check_disabled(command)
     setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_packages(configured_packages(tools))
