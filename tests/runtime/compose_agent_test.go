@@ -1,6 +1,7 @@
 package runtime_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -473,94 +474,83 @@ runtime:
 	}
 }
 
-func TestBootstrapDisablesCodexStartupUpdateCheck(t *testing.T) {
+func TestBootstrapWritesPreseedFiles(t *testing.T) {
 	f := newFixture(t)
-	config := f.writeAgentConfig(`
-runtime:
-  command: codex
-`)
-
-	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
-	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
-
-	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
-	data, err := os.ReadFile(codexConfig)
-	if err != nil {
+	existingCodexConfig := filepath.Join(f.home, ".codex", "existing.toml")
+	if err := os.MkdirAll(filepath.Dir(existingCodexConfig), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
-	if strings.Count(content, "check_for_update_on_startup") != 1 {
-		t.Fatalf("expected one codex update-check setting, got:\n%s", content)
-	}
-	if !strings.Contains(content, "check_for_update_on_startup = false") {
-		t.Fatalf("expected codex update check to be disabled, got:\n%s", content)
-	}
-}
-
-func TestBootstrapPreservesExistingCodexUpdateCheckConfig(t *testing.T) {
-	f := newFixture(t)
-	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
-	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	existing := "# user-managed codex config\ncheck_for_update_on_startup = true\n[tui]\nshow_tooltips = false\n"
-	if err := os.WriteFile(codexConfig, []byte(existing), 0o600); err != nil {
+	if err := os.WriteFile(existingCodexConfig, []byte("user-managed = true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config := f.writeAgentConfig(`
-runtime:
-  command: codex
+preseed:
+  files:
+    - path: "$HOME/.claude/settings.json"
+      mode: "0600"
+      json:
+        theme: dark-daltonized
+        skipDangerousModePermissionPrompt: true
+    - path: ".codex/config.toml"
+      mode: "0640"
+      content: |
+        check_for_update_on_startup = false
+    - path: ".codex/existing.toml"
+      overwrite: false
+      content: |
+        user-managed = false
 `)
 
 	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
 
-	data, err := os.ReadFile(codexConfig)
+	claudeSettings := filepath.Join(f.home, ".claude", "settings.json")
+	data, err := os.ReadFile(claudeSettings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != existing {
-		t.Fatalf("bootstrap rewrote user codex config:\n%s", data)
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("preseed JSON is invalid: %v\n%s", err, data)
 	}
-}
-
-func TestBootstrapAddsCodexUpdateCheckConfigAtTomlRoot(t *testing.T) {
-	f := newFixture(t)
+	if settings["theme"] != "dark-daltonized" || settings["skipDangerousModePermissionPrompt"] != true {
+		t.Fatalf("unexpected claude settings: %#v", settings)
+	}
 	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
-	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(codexConfig, []byte("[tui]\nshow_tooltips = false\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config := f.writeAgentConfig(`
-runtime:
-  command: codex
-`)
-
-	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
-
-	data, err := os.ReadFile(codexConfig)
+	data, err = os.ReadFile(codexConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "check_for_update_on_startup = false\n[tui]\nshow_tooltips = false\n"
-	if string(data) != want {
+	if string(data) != "check_for_update_on_startup = false\n" {
 		t.Fatalf("unexpected codex config:\n%s", data)
 	}
+	info, err := os.Stat(codexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("expected codex config mode 0640, got %v", info.Mode().Perm())
+	}
+	data, err = os.ReadFile(existingCodexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "user-managed = true\n" {
+		t.Fatalf("overwrite=false preseed rewrote existing file:\n%s", data)
+	}
 }
 
-func TestBootstrapDoesNotWriteCodexUpdateCheckForClaude(t *testing.T) {
+func TestBootstrapPreseedRejectsEscapingHome(t *testing.T) {
 	f := newFixture(t)
 	config := f.writeAgentConfig(`
-runtime:
-  command: claude
+preseed:
+  files:
+    - path: /tmp/nvt-escape
+      content: nope
 `)
 
-	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
-
-	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
-	if _, err := os.Stat(codexConfig); !os.IsNotExist(err) {
-		t.Fatalf("expected no codex config for claude runtime, stat err=%v", err)
+	output := f.runWithEnv(bootstrapBin(f.root), false, nil, config)
+	if !strings.Contains(output, "resolves outside HOME") {
+		t.Fatalf("expected outside HOME rejection, got:\n%s", output)
 	}
 }
 
@@ -876,6 +866,58 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 			}
 			if !strings.Contains(string(localInstructions), "Add workspace-specific agent guidance here.") {
 				t.Fatalf("unexpected AGENTS.local.md:\n%s", localInstructions)
+			}
+		})
+	}
+}
+
+func TestAgentInitRendersToolPreseed(t *testing.T) {
+	root := repoRoot(t)
+	tests := []struct {
+		name string
+		typ  string
+		want []string
+	}{
+		{
+			name: "codex",
+			typ:  "codex",
+			want: []string{
+				"# BEGIN nvt-managed preseed (agent-init)",
+				`path: "$HOME/.codex/config.toml"`,
+				"overwrite: false",
+				"check_for_update_on_startup = false",
+			},
+		},
+		{
+			name: "claude",
+			typ:  "claude",
+			want: []string{
+				"# BEGIN nvt-managed preseed (agent-init)",
+				`path: "$HOME/.claude/settings.json"`,
+				"overwrite: false",
+				"theme: dark-daltonized",
+				"skipDangerousModePermissionPrompt: true",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			agentName := "preseed-" + tt.name
+			agentDir := filepath.Join(root, ".agents", agentName)
+			_ = os.RemoveAll(agentDir)
+			t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+			command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+			cmd := commandWithEnv(command, nil, "--name", agentName, "--type", tt.typ)
+			cmd.Dir = root
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("agent-init failed: %v\n%s", err, output)
+			}
+			config := mustReadFile(t, filepath.Join(agentDir, "agent.yaml"))
+			for _, want := range tt.want {
+				if !strings.Contains(config, want) {
+					t.Fatalf("agent.yaml missing %q\n%s", want, config)
+				}
 			}
 		})
 	}

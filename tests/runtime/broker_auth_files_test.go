@@ -430,7 +430,7 @@ max-loops: 1
 		"NVT_PLUGIN_CONFIG=" + config2,
 		"NVT_BROKER_URL=" + broker2.server.URL,
 		"NVT_BROKER_TOKEN=broker-token",
-		"PATH=" + f2.bin + ":/usr/bin:/bin",
+		"PATH=" + f2.bin + ":" + os.Getenv("PATH"),
 	}, "loop")
 	assertFileContent(t, filepath.Join(target2, "auth.json"), "ok\n")
 }
