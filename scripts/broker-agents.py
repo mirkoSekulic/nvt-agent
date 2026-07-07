@@ -79,7 +79,7 @@ def parse_permissions(entries):
     return permissions
 
 
-def add_grant(data, name, provider, repo, materialization, egress_hosts, git=False, permissions=None):
+def add_grant(data, name, provider, repo, materialization, egress_hosts, git=False, permissions=None, quota_requests=None):
     for agent in data["agents"]:
         if isinstance(agent, dict) and agent.get("id") == name:
             if agent.get("role", "agent") == "egress":
@@ -103,12 +103,16 @@ def add_grant(data, name, provider, repo, materialization, egress_hosts, git=Fal
                         grant["git"] = True
                     if permissions:
                         grant.setdefault("permissions", {}).update(permissions)
+                    if quota_requests is not None:
+                        grant["quota"] = {"requests": quota_requests}
                     return
             entry = {"provider": provider, "repositories": [repo], "materialization": materialization or "file-bundle", "egress-hosts": egress_hosts or []}
             if git:
                 entry["git"] = True
             if permissions:
                 entry["permissions"] = dict(permissions)
+            if quota_requests is not None:
+                entry["quota"] = {"requests": quota_requests}
             grants.append(entry)
             grants.sort(key=lambda grant: grant["provider"])
             return
@@ -154,6 +158,7 @@ def main():
     grant.add_argument("--egress-host", action="append", default=[])
     grant.add_argument("--git", action="store_true", help="git-over-HTTPS grant: TLS redirect route + git bootstrap wiring")
     grant.add_argument("--permission", action="append", default=[], help="grant-level permission as <name>=read|write")
+    grant.add_argument("--quota-requests", type=int, help="per-route request quota (positive; enforced per egressd process)")
 
     unregister = subparsers.add_parser("unregister")
     unregister.add_argument("--name", required=True)
@@ -166,7 +171,9 @@ def main():
         with_lock(path, lambda data: copy_register_agent(data, args.from_name, args.name, args.token, args.copy_grants))
     elif args.command == "grant":
         permissions = parse_permissions(args.permission)
-        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo, args.materialization, args.egress_host, args.git, permissions))
+        if args.quota_requests is not None and args.quota_requests < 1:
+            raise SystemExit("--quota-requests must be a positive integer")
+        with_lock(path, lambda data: add_grant(data, args.name, args.provider, args.repo, args.materialization, args.egress_host, args.git, permissions, args.quota_requests))
     elif args.command == "unregister":
         with_lock(path, lambda data: unregister_agent(data, args.name))
 

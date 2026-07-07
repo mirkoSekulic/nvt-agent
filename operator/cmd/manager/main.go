@@ -48,6 +48,10 @@ func main() {
 		ctrl.Log.Error(err, "invalid broker TLS configuration")
 		os.Exit(1)
 	}
+	if err := controller.ValidateDefaultEgressMode(); err != nil {
+		ctrl.Log.Error(err, "invalid default egress mode configuration")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,

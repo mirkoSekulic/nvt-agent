@@ -50,15 +50,76 @@ broker:
 
 ## Agent Egress
 
-Agent egress mode is selected per `AgentRun` with `spec.egress`; the chart does
-not set a cluster-wide mode default. Direct mode remains the API default. The
-chart exposes only the egressd image used when an individual `AgentRun` opts
-into mediated mode:
+Agent egress mode is selected per `AgentRun` with `spec.egress`; direct mode
+remains the API default. The chart exposes the egressd image and a
+creation-time default egress mode:
 
 ```yaml
 egress:
   egressdImage: nvt-egressd:latest
+  defaultMode: direct   # direct | mediated
+  allowInsecureUpstreams: false
 ```
+
+`egress.allowInsecureUpstreams` is a **test/dev opt-in** (operator env
+`NVT_ALLOW_INSECURE_UPSTREAMS`) for the per-grant `allowInsecureUpstream`
+escape hatch, which lets egressd reach an upstream over plain HTTP — used only
+so hermetic in-cluster smoke fixtures (which cannot present a publicly-trusted
+cert) are reachable. Leave it `false` in any real deployment: a plaintext
+upstream leg carries the injected credential in the clear. With it off,
+admission **rejects** any grant that sets `allowInsecureUpstream`, and it is
+**always** rejected for `git` grants.
+
+`egress.defaultMode` (operator env `NVT_DEFAULT_EGRESS_MODE`, validated at
+startup) is applied **once, at AgentRun creation on the nvt admission/schedule
+path** (producers and schedules): when an incoming run leaves `spec.egress`
+empty, the admission endpoint stamps this mode before creating the object, so
+the stored run is always explicit. Flipping the knob therefore never
+reclassifies an existing run. It never overrides an explicit `spec.egress`.
+
+Scope caveat: a **raw `kubectl apply`** of an AgentRun with empty egress is
+defaulted to `direct` by the CRD schema (the API server, not the operator),
+regardless of this knob — the operator never sees empty on that path and does
+not resolve the default at read time (that would reintroduce the
+reclassification hazard). An operator running mediated-by-default drives runs
+through the nvt path, not raw kubectl. The global mediated-by-default flip
+(changing this default value, the CRD `default:` markers, and producer specs)
+stays deferred until both egress smokes are green in CI and real-cluster
+usage has soaked.
+
+### Per-grant request quotas
+
+A mediated grant may cap its proxied requests:
+
+```yaml
+broker:
+  grants:
+    - provider: anthropic-main
+      materialization: header-inject
+      egressHosts: [api.anthropic.com:443]
+      quota:
+        requests: 1000
+```
+
+The operator renders this into the egressd route as `max_requests`; the
+(N+1)th request fails closed with a 429. **The count is per egressd process,
+not per run** — an egressd restart (in-place container restart, or the
+enforcement-mode Pod recreation after eviction) resets it. It is a soft
+resource guard, not a security boundary; durable run-lifetime quotas are
+future work. Absent = unlimited.
+
+### Revocation
+
+Removing a grant from an `AgentRun` (patch `spec.broker.grants`) makes the
+operator reconcile it out of the broker agents ConfigMap; the broker
+hot-reloads on the file's mtime change and the next `egressd` fetch for that
+grant fails closed — no broker restart. The end-to-end bound is **operator
+reconcile + kubelet ConfigMap projection (~1 min worst case) + egressd cache
+clamp (≤60s)**. Revoke through the AgentRun spec, never by editing the broker
+agents ConfigMap directly (the operator's policy reconcile would re-add the
+grant). The broker agents ConfigMap must be mounted as a directory volume,
+never with `subPath` — a subPath freezes the projected file and silently
+disables hot-reload; the helm render test guards this.
 
 A mediated run can additionally set `spec.egressEnforcement: true`: egressd
 moves to its own Pod and the operator renders per-run NetworkPolicies that

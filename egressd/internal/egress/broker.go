@@ -83,3 +83,28 @@ func (b *BrokerClient) FetchHeaders(ctx context.Context, capability, host, metho
 	}
 	return material, nil
 }
+
+// ReportRequests posts a batch of per-request audit entries to the broker.
+// It carries no credential material — only sanitized report fields — so its
+// failures are non-fatal to the request path (the Reporter drops on error).
+func (b *BrokerClient) ReportRequests(ctx context.Context, entries []map[string]any) error {
+	body, err := json.Marshal(map[string]any{"entries": entries})
+	if err != nil {
+		return fmt.Errorf("encode report request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, b.URL+"/v1/injection/report", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build report request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+b.Token)
+	response, err := b.Client.Do(request)
+	if err != nil {
+		return fmt.Errorf("broker unreachable: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("broker rejected report: status %d", response.StatusCode)
+	}
+	return nil
+}

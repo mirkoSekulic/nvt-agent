@@ -500,6 +500,35 @@ grep -q 'value: "https://nvt-broker:7347"' "${DEFAULT_RENDER}"
 grep -q 'name: NVT_BROKER_CA_SECRET' "${DEFAULT_RENDER}"
 grep -q 'checksum/broker-tls: ' "${DEFAULT_RENDER}"
 
+# Revocation depends on the broker hot-reloading the agents ConfigMap on
+# mtime change. A subPath mount freezes the projected file forever and would
+# silently kill revocation, so the broker config volume must never be
+# subPath-mounted (docs/phase5-6b-observability-pr-plan.md item 4).
+BROKER_DEPLOYMENT_RENDER="${WORKDIR}/broker-deployment.yaml"
+helm template nvt "${CHART}" -n custom-ns -s templates/broker-deployment.yaml > "${BROKER_DEPLOYMENT_RENDER}"
+grep -q 'mountPath: /config' "${BROKER_DEPLOYMENT_RENDER}"
+if grep -q 'subPath' "${BROKER_DEPLOYMENT_RENDER}"; then
+  echo "broker Deployment must not subPath-mount any volume; it freezes the agents ConfigMap and kills revocation" >&2
+  exit 1
+fi
+
+# defaultEgressMode knob: rendered into the operator env, default direct.
+grep -q 'name: NVT_DEFAULT_EGRESS_MODE' "${DEFAULT_RENDER}"
+grep -q 'value: "direct"' "${DEFAULT_RENDER}"
+
+# allowInsecureUpstreams opt-in: absent by default, rendered only when set.
+if grep -q 'NVT_ALLOW_INSECURE_UPSTREAMS' "${DEFAULT_RENDER}"; then
+  echo "NVT_ALLOW_INSECURE_UPSTREAMS must not render by default" >&2
+  exit 1
+fi
+INSECURE_UPSTREAMS_RENDER="${WORKDIR}/insecure-upstreams.yaml"
+helm template nvt "${CHART}" -n custom-ns --set egress.allowInsecureUpstreams=true > "${INSECURE_UPSTREAMS_RENDER}"
+grep -q 'name: NVT_ALLOW_INSECURE_UPSTREAMS' "${INSECURE_UPSTREAMS_RENDER}"
+DEFAULT_MEDIATED_RENDER="${WORKDIR}/default-egress-mediated.yaml"
+helm template nvt "${CHART}" -n custom-ns --set egress.defaultMode=mediated > "${DEFAULT_MEDIATED_RENDER}"
+grep -q 'name: NVT_DEFAULT_EGRESS_MODE' "${DEFAULT_MEDIATED_RENDER}"
+grep -q 'value: "mediated"' "${DEFAULT_MEDIATED_RENDER}"
+
 sha256_hex() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum | awk '{print $1}'

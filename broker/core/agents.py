@@ -157,10 +157,27 @@ class AgentRegistry:
                                 f"{', '.join(sorted(VALID_PERMISSION_VALUES))}"
                             )
                         permissions[key] = value
-                grants.append({"provider": provider, "repositories": repositories, "materialization": materialization, "permissions": permissions})
+                # Quota is validated for schema strictness but NOT enforced
+                # broker-side: enforcement is per egressd process
+                # (docs/phase5-6b-observability-pr-plan.md decision 3).
+                quota = self._grant_quota(grant.get("quota"), index, grant_index)
+                grant_entry = {"provider": provider, "repositories": repositories, "materialization": materialization, "permissions": permissions}
+                if quota is not None:
+                    grant_entry["quota"] = quota
+                grants.append(grant_entry)
             output[token_hash] = {"id": agent_id, "role": "agent", "paired_agent": None, "grants": grants}
             roles_by_id[agent_id] = "agent"
         for index, agent_id, paired_agent in pairings:
             if roles_by_id.get(paired_agent) != "agent":
                 fail(f"agents[{index}] ({agent_id}): paired-agent must reference an agent-role identity")
         return output
+
+    def _grant_quota(self, raw_quota, index, grant_index):
+        if raw_quota is None:
+            return None
+        if not isinstance(raw_quota, dict):
+            fail(f"agents[{index}].grants[{grant_index}].quota must be a YAML object")
+        requests = raw_quota.get("requests")
+        if not isinstance(requests, int) or isinstance(requests, bool) or requests < 1:
+            fail(f"agents[{index}].grants[{grant_index}].quota.requests must be a positive integer")
+        return {"requests": requests}

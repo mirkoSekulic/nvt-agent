@@ -7,6 +7,19 @@ runtime:
 
 egress:
   egressdImage: nvt-egressd:latest
+  # Cluster default egress mode for AgentRuns created through the nvt
+  # admission/schedule path (producers/schedules) that leave spec.egress
+  # empty. Applied once, at creation — flipping it never reclassifies an
+  # existing run. Default "direct". A raw `kubectl apply` of an AgentRun with
+  # empty egress is defaulted to "direct" by the CRD schema regardless of this
+  # knob (docs/phase5-6b-observability-pr-plan.md decision 5).
+  defaultMode: direct
+  # Opt into the per-grant allowInsecureUpstream escape hatch (plaintext
+  # upstream leg). Test/dev only, for hermetic in-cluster fixtures that cannot
+  # present a publicly-trusted cert. Leave false in any real deployment: a
+  # plaintext upstream carrying an injected credential is a conformance
+  # failure, and admission rejects the flag unless this is set.
+  allowInsecureUpstreams: false
 
 broker:
   enabled: true

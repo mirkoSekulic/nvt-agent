@@ -121,6 +121,9 @@ spec:
                           git:
                             type: boolean
                             default: false
+                          allowInsecureUpstream:
+                            type: boolean
+                            default: false
                           permissions:
                             type: object
                             additionalProperties:
@@ -128,6 +131,14 @@ spec:
                               enum:
                                 - read
                                 - write
+                          quota:
+                            type: object
+                            required:
+                              - requests
+                            properties:
+                              requests:
+                                type: integer
+                                minimum: 1
                 prompt:
                   type: object
                   properties:

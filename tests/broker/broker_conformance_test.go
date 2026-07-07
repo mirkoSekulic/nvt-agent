@@ -376,6 +376,19 @@ providers:
     allow:
       repositories:
         - my-user/my-repo
+  - name: anthropic-main
+    plugin: token
+    config:
+      token-env: TEST_ANTHROPIC_KEY
+      injection-hosts:
+        - api.anthropic.com
+      injection-header: x-api-key
+      injection-scheme: ""
+      injection-extra-headers:
+        anthropic-version: "2023-06-01"
+    allow:
+      repositories:
+        - my-user/my-repo
   - name: header-provider
     plugin: headers
     config:
@@ -441,6 +454,7 @@ func (f *brokerFixture) start() {
 		"TEST_AUTH_HEADER=Authorization: Bearer header-secret",
 		"TEST_EXTRA_HEADER=X-Api-Key: extra-secret",
 		"TEST_ALTINN_API_KEY_HEADER=X-API-Key: altinn-secret",
+		"TEST_ANTHROPIC_KEY=anthropic-secret-key",
 	)
 	cmd.Stdout = &f.stdout
 	cmd.Stderr = &f.stderr

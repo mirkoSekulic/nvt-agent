@@ -31,6 +31,12 @@ spec:
                   fieldPath: metadata.namespace
             - name: NVT_EGRESSD_IMAGE
               value: {{ .Values.egress.egressdImage | quote }}
+            - name: NVT_DEFAULT_EGRESS_MODE
+              value: {{ .Values.egress.defaultMode | quote }}
+            {{- if .Values.egress.allowInsecureUpstreams }}
+            - name: NVT_ALLOW_INSECURE_UPSTREAMS
+              value: "1"
+            {{- end }}
             {{- if and .Values.broker.enabled .Values.broker.tls.enabled }}
             - name: NVT_BROKER_URL
               value: "https://nvt-broker:7347"

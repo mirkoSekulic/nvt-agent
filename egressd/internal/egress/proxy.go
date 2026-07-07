@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -52,10 +53,38 @@ type Proxy struct {
 	Route     Route
 	Broker    *BrokerClient
 	Transport http.RoundTripper
+	Reporter  *Reporter
 	Now       func() time.Time
 
 	mu    sync.Mutex
 	cache map[string]*cacheEntry
+
+	// requestCount is the per-process request tally for max_requests. It is
+	// incremented atomically; see quotaExceeded for the TOCTOU-free check.
+	requestCount atomic.Int64
+}
+
+// quotaExceeded increments the request tally and reports whether this request
+// is over the route's max_requests. Add-then-compare is TOCTOU-free: exactly
+// the first MaxRequests callers observe a count within the limit; the
+// (N+1)th and beyond fail closed. 0 means unlimited.
+func (p *Proxy) quotaExceeded() bool {
+	if p.Route.MaxRequests <= 0 {
+		return false
+	}
+	return p.requestCount.Add(1) > int64(p.Route.MaxRequests)
+}
+
+// report enqueues one sanitized audit entry for this route. Nil-safe and
+// non-blocking; PathClass keeps raw paths out of the report.
+func (p *Proxy) report(method, path string, status int) {
+	p.Reporter.Enqueue(ReportEntry{
+		Capability: p.Route.Capability,
+		Host:       injectionHost(p.Route.Upstream),
+		Method:     method,
+		PathClass:  PathClass(path),
+		Status:     status,
+	})
 }
 
 func (p *Proxy) now() time.Time {
@@ -114,21 +143,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// err carries broker reasons only, never header values.
 		log.Printf("egressd %s: injection material unavailable: %v", p.Route.Capability, err)
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-injection-unavailable")
 		return
 	}
 	outbound, err := p.buildOutbound(r, material)
 	if err != nil {
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-request-invalid")
+		return
+	}
+	// Quota is checked only after the request is authorized and ready for the
+	// upstream, so exactly MaxRequests authorized attempts reach upstream. A
+	// broker outage, a revoked grant, or a projection-lag failure fails above
+	// without ever consuming quota.
+	if p.quotaExceeded() {
+		log.Printf("egressd %s: request quota exceeded", p.Route.Capability)
+		p.report(r.Method, r.URL.Path, http.StatusTooManyRequests)
+		writeError(w, http.StatusTooManyRequests, "egress-quota-exceeded")
 		return
 	}
 	response, err := p.Transport.RoundTrip(outbound)
 	if err != nil {
 		log.Printf("egressd %s: upstream unreachable", p.Route.Capability)
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-upstream-unreachable")
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
+	p.report(r.Method, r.URL.Path, response.StatusCode)
 	copyResponse(w, response)
 }
 

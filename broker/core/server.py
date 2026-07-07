@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import ssl
 import time
 import uuid
@@ -14,6 +15,17 @@ from broker.plugins.github_app.provider import ProviderError
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
+
+# Cap entries per injection report. Combined with MAX_REQUEST_BYTES this
+# bounds a single report; oversized reports are denied with the standard
+# error shape, never truncated silently.
+MAX_REPORT_ENTRIES = 100
+
+# path_class is a sanitized class computed by egressd (protocol/injection.md):
+# the git classes or a single lowercase path segment. The broker enforces the
+# shape so a buggy egressd or a leaked egress token cannot write raw paths or
+# arbitrary strings into the audit log.
+PATH_CLASS_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 
 # Documented zero-entropy placeholder from protocol/injection.md. It is the
 # only credential-shaped value allowed inside a mediated agent container.
@@ -250,6 +262,82 @@ class Broker:
             response["git"] = True
         return response
 
+    def injection_report(self, request_id, payload, authorization):
+        # Observability, not a security control (protocol/injection.md §Audit):
+        # egressd reports each proxied request here so the broker's audit log
+        # covers individual requests, not just per-fetch injection. Authorization
+        # is role + pairing only — entries are NOT re-checked against grants: a
+        # report for a just-revoked capability is still audit-worthy, and a
+        # compromised egressd could spam granted capabilities regardless.
+        identity = self.authenticate_role(authorization, "egress")
+        paired = self.agents.by_id(identity.get("paired_agent") or "")
+        if paired is None or paired.get("role", "agent") != "agent":
+            raise ProviderError("pairing-invalid", "egress identity has no valid paired agent", 403)
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            raise ProviderError("entries-required", "entries must be a list", 400)
+        if len(entries) > MAX_REPORT_ENTRIES:
+            raise ProviderError(
+                "entries-too-many",
+                f"a report carries at most {MAX_REPORT_ENTRIES} entries",
+                400,
+            )
+        records = [self._report_record(entry, index) for index, entry in enumerate(entries)]
+        # Write only after every entry validated: a malformed batch is rejected
+        # whole, never partially audited.
+        for record in records:
+            self.audit.write(
+                request_id=request_id,
+                agent=identity["id"],
+                paired_agent=paired["id"],
+                operation="injection.request",
+                allowed=True,
+                **record,
+            )
+        return {"ok": True, "reported": len(records)}
+
+    def _report_record(self, entry, index):
+        if not isinstance(entry, dict):
+            raise ProviderError("entry-invalid", f"entries[{index}] must be an object", 400)
+        capability = entry.get("capability")
+        if not isinstance(capability, str) or not capability:
+            raise ProviderError("entry-invalid", f"entries[{index}].capability is required", 400)
+        host = entry.get("host")
+        if not isinstance(host, str) or not host:
+            raise ProviderError("entry-invalid", f"entries[{index}].host is required", 400)
+        # Two shapes: a proxied HTTP request, or a forward-proxy CONNECT tunnel.
+        # A `decision` key selects CONNECT; otherwise it is an HTTP request.
+        if "decision" in entry:
+            decision = entry.get("decision")
+            if decision not in ("allow", "deny"):
+                raise ProviderError("entry-invalid", f"entries[{index}].decision must be allow or deny", 400)
+            port = entry.get("port")
+            if not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65535:
+                raise ProviderError("entry-invalid", f"entries[{index}].port must be a valid port", 400)
+            return {"provider": capability, "host": host, "port": port, "decision": decision}
+        method = entry.get("method")
+        if not isinstance(method, str) or not method:
+            raise ProviderError("entry-invalid", f"entries[{index}].method is required", 400)
+        path_class = entry.get("path_class")
+        if not isinstance(path_class, str) or not path_class:
+            raise ProviderError("entry-invalid", f"entries[{index}].path_class is required", 400)
+        if not PATH_CLASS_RE.match(path_class):
+            raise ProviderError(
+                "entry-invalid",
+                f"entries[{index}].path_class must match {PATH_CLASS_RE.pattern} (sanitized class, never a raw path)",
+                400,
+            )
+        status = entry.get("status")
+        if not isinstance(status, int) or isinstance(status, bool) or status < 0:
+            raise ProviderError("entry-invalid", f"entries[{index}].status must be a non-negative integer", 400)
+        return {
+            "provider": capability,
+            "host": host,
+            "method": method.upper(),
+            "path_class": path_class,
+            "status": status,
+        }
+
     def denied(self, request_id, payload, reason, message=None, authorization=None, operation=None):
         agent_id = None
         try:
@@ -359,6 +447,10 @@ def make_handler(broker):
                     return
                 if self.path == "/v1/injection/routing":
                     response = broker.injection_routing(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
+                if self.path == "/v1/injection/report":
+                    response = broker.injection_report(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 self.write_json(404, {"ok": False, "error": "not-found"})

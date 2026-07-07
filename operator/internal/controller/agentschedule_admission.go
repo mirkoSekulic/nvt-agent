@@ -136,6 +136,10 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 
 	run := admission.AgentRun
+	// Apply the cluster's default egress mode before validation and creation,
+	// so the stored spec.egress is always explicit and a later knob change can
+	// never reclassify this run. Never overrides an explicit mode.
+	ApplyDefaultEgressMode(&run)
 	if err := ValidateAgentRunEgressMode(&run); err != nil {
 		reason := err.Error()
 		h.recordRejected(ctx, schedule, reason)

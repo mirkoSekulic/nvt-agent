@@ -100,6 +100,26 @@ type AgentRunBrokerGrant struct {
 	// Permissions narrows the provider-level permission ceiling per grant,
 	// mirroring GitHub App permission keys (values: read or write).
 	Permissions map[string]string `json:"permissions,omitempty"`
+	// AllowInsecureUpstream lets egressd reach this grant's upstream over
+	// plain HTTP instead of re-originating TLS. Dev/test only — it exists so
+	// hermetic in-cluster fixtures (which cannot present a publicly-trusted
+	// cert) are reachable from the kind egress smokes. A plaintext upstream
+	// leg carries the injected credential in the clear, so admission rejects
+	// it unless the operator sets NVT_ALLOW_INSECURE_UPSTREAMS, and always
+	// rejects it for git grants.
+	AllowInsecureUpstream bool `json:"allowInsecureUpstream,omitempty"`
+	// Quota bounds proxied requests for this grant's route. Absent means
+	// unlimited. The count is per egressd process, not per run — an egressd
+	// restart resets it — so it is a soft resource guard, not a security
+	// boundary (docs/phase5-6b-observability-pr-plan.md decision 3).
+	Quota *AgentRunGrantQuota `json:"quota,omitempty"`
+}
+
+// AgentRunGrantQuota bounds a grant's egress.
+type AgentRunGrantQuota struct {
+	// Requests is the maximum number of proxied requests on this route.
+	// Must be positive when the quota block is present.
+	Requests int `json:"requests"`
 }
 
 // AgentRunPrompt defines the optional initial prompt for disposable runs.
@@ -268,6 +288,9 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 		for key, value := range in.Permissions {
 			out.Permissions[key] = value
 		}
+	}
+	if in.Quota != nil {
+		out.Quota = &AgentRunGrantQuota{Requests: in.Quota.Requests}
 	}
 	return out
 }

@@ -131,6 +131,11 @@ type brokerAgentGrantEntry struct {
 	Materialization string            `json:"materialization,omitempty"`
 	EgressHosts     []string          `json:"egress-hosts,omitempty"`
 	Permissions     map[string]string `json:"permissions,omitempty"`
+	Quota           *brokerAgentQuota `json:"quota,omitempty"`
+}
+
+type brokerAgentQuota struct {
+	Requests int `json:"requests"`
 }
 
 // AgentRunReconciler reconciles AgentRun resources.
@@ -1630,6 +1635,7 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		Upstream              string `json:"upstream"`
 		AllowInsecureUpstream bool   `json:"allow_insecure_upstream"`
 		ListenTLS             string `json:"listen_tls,omitempty"`
+		MaxRequests           int    `json:"max_requests,omitempty"`
 	}
 	type egressdCA struct {
 		PublishDir   string   `json:"publish_dir,omitempty"`
@@ -1664,7 +1670,10 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 			Listen:                fmt.Sprintf("127.0.0.1:%d", egressRouteBasePort+routeIndex),
 			Capability:            grant.Provider,
 			Upstream:              grant.EgressHosts[0],
-			AllowInsecureUpstream: false,
+			AllowInsecureUpstream: grant.AllowInsecureUpstream,
+		}
+		if grant.Quota != nil {
+			route.MaxRequests = grant.Quota.Requests
 		}
 		if enforced {
 			// Own-Pod: the hop leaves localhost, so every route listens on
@@ -2092,6 +2101,52 @@ func ValidateBrokerTLSConfig() error {
 	return nil
 }
 
+// DefaultEgressMode is the cluster's creation-time default egress mode, read
+// from NVT_DEFAULT_EGRESS_MODE (empty means direct). It is applied ONCE, at
+// AgentRun creation on the nvt admission path (ApplyDefaultEgressMode) — never
+// at reconcile time, so flipping the knob can never reclassify an existing
+// run (the #62/#63 retroactive-reclassification hazard). AgentRunEgressMode
+// deliberately does not read this env.
+func DefaultEgressMode() nvtv1alpha1.AgentRunEgressMode {
+	mode := strings.TrimSpace(os.Getenv("NVT_DEFAULT_EGRESS_MODE"))
+	if mode == "" {
+		return nvtv1alpha1.AgentRunEgressDirect
+	}
+	return nvtv1alpha1.AgentRunEgressMode(mode)
+}
+
+// ValidateDefaultEgressMode fails fast (operator startup) on a bad knob value.
+func ValidateDefaultEgressMode() error {
+	mode := DefaultEgressMode()
+	if mode != nvtv1alpha1.AgentRunEgressDirect && mode != nvtv1alpha1.AgentRunEgressMediated {
+		return fmt.Errorf("NVT_DEFAULT_EGRESS_MODE must be direct or mediated, got %q", mode)
+	}
+	return nil
+}
+
+// ApplyDefaultEgressMode stamps the cluster default into spec.egress when the
+// incoming run leaves it empty, so the stored object is always explicit and a
+// later knob change can never alter it. It never overrides an explicit mode.
+func ApplyDefaultEgressMode(agentRun *nvtv1alpha1.AgentRun) {
+	if agentRun.Spec.Egress == "" {
+		agentRun.Spec.Egress = DefaultEgressMode()
+	}
+}
+
+// AllowInsecureUpstreamsEnabled reports whether the cluster opted into the
+// per-grant allowInsecureUpstream escape hatch via NVT_ALLOW_INSECURE_UPSTREAMS.
+// It exists only so hermetic in-cluster test fixtures are reachable; a real
+// deployment never sets it, so a plaintext upstream leg carrying an injected
+// credential cannot be requested by an AgentRun spec.
+func AllowInsecureUpstreamsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NVT_ALLOW_INSECURE_UPSTREAMS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // AgentRunBrokerID returns the broker identity for an AgentRun.
 func AgentRunBrokerID(namespace, name string) string {
 	return namespace + "/" + name
@@ -2161,6 +2216,20 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		for key, value := range grant.Permissions {
 			if key == "" || (value != "read" && value != "write") {
 				return fmt.Errorf("broker grant %s permissions must map permission names to read or write", grant.Provider)
+			}
+		}
+		if grant.Quota != nil && grant.Quota.Requests <= 0 {
+			return fmt.Errorf("broker grant %s quota.requests must be a positive integer", grant.Provider)
+		}
+		if grant.AllowInsecureUpstream {
+			// A plaintext upstream leg carries the injected credential in the
+			// clear, so this is gated to a cluster/test opt-in and never
+			// allowed for git (git creds ride the TLS-terminated redirect).
+			if grant.Git {
+				return fmt.Errorf("broker grant %s must not set allowInsecureUpstream on a git grant", grant.Provider)
+			}
+			if !AllowInsecureUpstreamsEnabled() {
+				return fmt.Errorf("broker grant %s sets allowInsecureUpstream, which requires the operator's NVT_ALLOW_INSECURE_UPSTREAMS opt-in (test/dev only)", grant.Provider)
 			}
 		}
 		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
@@ -2248,12 +2317,17 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 				permissions[key] = value
 			}
 		}
+		var quota *brokerAgentQuota
+		if grant.Quota != nil {
+			quota = &brokerAgentQuota{Requests: grant.Quota.Requests}
+		}
 		grants = append(grants, brokerAgentGrantEntry{
 			Provider:        grant.Provider,
 			Repositories:    repositories,
 			Materialization: string(AgentRunGrantMaterialization(grant)),
 			EgressHosts:     append([]string{}, grant.EgressHosts...),
 			Permissions:     permissions,
+			Quota:           quota,
 		})
 	}
 	sort.SliceStable(grants, func(i, j int) bool {

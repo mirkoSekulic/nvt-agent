@@ -46,6 +46,11 @@ type Route struct {
 	// signed by the boot-generated per-agent CA (requires the config-level
 	// ca block). Mutually exclusive with listen_tls_cert/listen_tls_key.
 	ListenTLS string `json:"listen_tls"`
+	// MaxRequests caps proxied requests on this route. 0 means unlimited.
+	// The counter lives for the egressd process, not the run: an egressd
+	// restart resets it. This is a soft resource guard, not a security
+	// boundary (docs/phase5-6b-observability-pr-plan.md decision 3).
+	MaxRequests int `json:"max_requests"`
 }
 
 // TLSEnabled reports whether the agent-facing listener serves HTTPS.
@@ -153,6 +158,9 @@ func (c *Config) Validate() error {
 		}
 		if err := validateUpstream(route.Upstream); err != nil {
 			return fmt.Errorf("routes[%d].upstream: %w", index, err)
+		}
+		if route.MaxRequests < 0 {
+			return fmt.Errorf("routes[%d].max_requests must be non-negative", index)
 		}
 		if (route.ListenTLSCert == "") != (route.ListenTLSKey == "") {
 			return fmt.Errorf("routes[%d]: listen_tls_cert and listen_tls_key must be set together", index)
