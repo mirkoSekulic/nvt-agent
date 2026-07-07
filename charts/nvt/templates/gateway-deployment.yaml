@@ -1,5 +1,8 @@
 {{- if .Values.gateway.enabled }}
 {{- if eq .Values.gateway.auth.mode "oidc" }}
+{{- if gt (int .Values.gateway.replicas) 1 }}
+{{- fail "gateway.replicas must be 1 when gateway.auth.mode=oidc until shared sessions exist" }}
+{{- end }}
 {{- if not .Values.gateway.auth.session.existingSecret }}
 {{- fail "gateway.auth.session.existingSecret is required when gateway.auth.mode=oidc" }}
 {{- end }}
@@ -84,6 +87,8 @@ spec:
               value: {{ .Values.gateway.auth.oidc.extraAuthParams | toJson | quote }}
             - name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS
               value: {{ .Values.gateway.auth.oidc.authorizationDetails | quote }}
+            - name: NVT_GATEWAY_AUTHORIZATION
+              value: {{ .Values.gateway.auth.authorization | toJson | quote }}
             {{- end }}
           ports:
             - name: http

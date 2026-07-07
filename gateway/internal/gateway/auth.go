@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -28,16 +29,26 @@ const (
 )
 
 type Authenticator struct {
-	config      Config
-	cookieCodec *securecookie.SecureCookie
-	oauthConfig *oauth2.Config
-	verifier    *oidc.IDTokenVerifier
-	now         func() time.Time
+	config        Config
+	cookieCodec   *securecookie.SecureCookie
+	oauthConfig   *oauth2.Config
+	verifier      *oidc.IDTokenVerifier
+	tokenVerifier *oidc.IDTokenVerifier
+	provider      *oidc.Provider
+	sessions      map[string]storedSession
+	mu            sync.Mutex
+	now           func() time.Time
 }
 
 type sessionCookie struct {
-	Subject   string `json:"sub"`
+	ID        string `json:"sid"`
 	ExpiresAt int64  `json:"exp"`
+}
+
+type storedSession struct {
+	Subject   string
+	ExpiresAt int64
+	Claims    map[string]any
 }
 
 type loginStateCookieValue struct {
@@ -46,10 +57,6 @@ type loginStateCookieValue struct {
 	CodeVerifier string `json:"codeVerifier"`
 	ReturnURL    string `json:"returnUrl"`
 	ExpiresAt    int64  `json:"exp"`
-}
-
-type nonceClaims struct {
-	Nonce string `json:"nonce"`
 }
 
 func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error) {
@@ -98,12 +105,16 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 		issuer = config.Auth.OIDC.ValidIssuer
 	}
 	verifier := provider.Verifier(&oidc.Config{ClientID: config.Auth.OIDC.ClientID, SkipIssuerCheck: issuer != config.Auth.OIDC.IssuerURL})
+	tokenVerifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true, SkipIssuerCheck: issuer != config.Auth.OIDC.IssuerURL})
 	return &Authenticator{
-		config:      config,
-		cookieCodec: securecookie.New(secret, secret[:32]),
-		oauthConfig: oauthConfig,
-		verifier:    verifier,
-		now:         time.Now,
+		config:        config,
+		cookieCodec:   securecookie.New(secret, secret[:32]),
+		oauthConfig:   oauthConfig,
+		verifier:      verifier,
+		tokenVerifier: tokenVerifier,
+		provider:      provider,
+		sessions:      map[string]storedSession{},
+		now:           time.Now,
 	}, nil
 }
 
@@ -135,10 +146,23 @@ func (a *Authenticator) HandlePublic(w http.ResponseWriter, r *http.Request) boo
 	return true
 }
 
-func (a *Authenticator) Authorize(w http.ResponseWriter, r *http.Request) bool {
+func (a *Authenticator) Authorize(w http.ResponseWriter, r *http.Request, agentKey string) bool {
 	session, ok := a.readSession(r)
 	if ok && session.ExpiresAt > a.now().Unix() {
-		return true
+		stored, ok := a.lookupSession(session)
+		if !ok {
+			decision := AuthorizationDecision{Allowed: false}
+			logAuthorizationDecision(decision, agentKey, "")
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return false
+		}
+		decision := EvaluateAuthorization(a.config.Auth.Authorization, stored.Claims)
+		logAuthorizationDecision(decision, agentKey, stored.Subject)
+		if decision.Allowed {
+			return true
+		}
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
 	}
 	if isBrowserRead(r) {
 		loginURL := a.publicBaseURL(r) + "/oauth2/login?return_url=" + url.QueryEscape(a.safeReturnURL(r))
@@ -224,18 +248,27 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid issuer", http.StatusUnauthorized)
 		return
 	}
-	var claims nonceClaims
-	if err := idToken.Claims(&claims); err != nil {
+	var idClaims map[string]any
+	if err := idToken.Claims(&idClaims); err != nil {
 		http.Error(w, "parse id_token claims", http.StatusUnauthorized)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(loginState.Nonce)) != 1 {
+	nonce, _ := idClaims["nonce"].(string)
+	if subtle.ConstantTimeCompare([]byte(nonce), []byte(loginState.Nonce)) != 1 {
 		http.Error(w, "invalid nonce", http.StatusUnauthorized)
 		return
 	}
+	claims, err := a.authorizationClaims(r.Context(), token, idToken, idClaims)
+	if err != nil {
+		http.Error(w, "load authorization claims", http.StatusUnauthorized)
+		return
+	}
+	sessionID := randomToken()
+	expiresAt := a.now().Add(time.Duration(a.config.Auth.Session.MaxAgeSeconds) * time.Second).Unix()
+	a.storeSession(sessionID, storedSession{Subject: idToken.Subject, ExpiresAt: expiresAt, Claims: stripSensitiveClaims(claims)})
 	a.setCookie(w, a.config.Auth.Session.CookieName, sessionCookie{
-		Subject:   idToken.Subject,
-		ExpiresAt: a.now().Add(time.Duration(a.config.Auth.Session.MaxAgeSeconds) * time.Second).Unix(),
+		ID:        sessionID,
+		ExpiresAt: expiresAt,
 	}, a.config.Auth.Session.MaxAgeSeconds)
 	a.clearCookie(w, loginStateCookie)
 	http.Redirect(w, r, loginState.ReturnURL, http.StatusFound)
@@ -251,6 +284,71 @@ func (a *Authenticator) readSession(r *http.Request) (sessionCookie, bool) {
 		return session, false
 	}
 	return session, true
+}
+
+func (a *Authenticator) storeSession(id string, session storedSession) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now().Unix()
+	for existingID, existing := range a.sessions {
+		if existing.ExpiresAt <= now {
+			delete(a.sessions, existingID)
+		}
+	}
+	a.sessions[id] = session
+}
+
+func (a *Authenticator) lookupSession(cookie sessionCookie) (storedSession, bool) {
+	if cookie.ID == "" {
+		return storedSession{}, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	session, ok := a.sessions[cookie.ID]
+	if !ok || session.ExpiresAt != cookie.ExpiresAt || session.ExpiresAt <= a.now().Unix() {
+		return storedSession{}, false
+	}
+	return session, true
+}
+
+func (a *Authenticator) authorizationClaims(ctx context.Context, token *oauth2.Token, idToken *oidc.IDToken, idClaims map[string]any) (map[string]any, error) {
+	claimSource := a.config.Auth.Authorization.ClaimSource
+	if claimSource == "" {
+		claimSource = claimSourceIDToken
+	}
+	switch claimSource {
+	case claimSourceIDToken:
+		return idClaims, nil
+	case claimSourceAccessToken:
+		rawAccessToken := token.AccessToken
+		if rawAccessToken == "" || strings.Count(rawAccessToken, ".") != 2 {
+			return nil, fmt.Errorf("access_token claim source requires a JWT access token")
+		}
+		accessToken, err := a.tokenVerifier.Verify(ctx, rawAccessToken)
+		if err != nil {
+			return nil, fmt.Errorf("verify access_token JWT: %w", err)
+		}
+		if a.config.Auth.OIDC.ValidIssuer != "" && accessToken.Issuer != a.config.Auth.OIDC.ValidIssuer {
+			return nil, fmt.Errorf("invalid access_token issuer")
+		}
+		var claims map[string]any
+		if err := accessToken.Claims(&claims); err != nil {
+			return nil, fmt.Errorf("parse access_token claims: %w", err)
+		}
+		return claims, nil
+	case claimSourceUserInfo:
+		userInfo, err := a.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+		if err != nil {
+			return nil, fmt.Errorf("fetch userinfo: %w", err)
+		}
+		var claims map[string]any
+		if err := userInfo.Claims(&claims); err != nil {
+			return nil, fmt.Errorf("parse userinfo claims: %w", err)
+		}
+		return claims, nil
+	default:
+		return nil, fmt.Errorf("unsupported authorization claim source %q", claimSource)
+	}
 }
 
 func (a *Authenticator) readLoginState(r *http.Request) (loginStateCookieValue, bool) {
@@ -379,6 +477,18 @@ func ParseExtraAuthParams(raw string) (map[string]string, error) {
 		return nil, fmt.Errorf("parse OIDC extra auth params: %w", err)
 	}
 	return values, nil
+}
+
+// ParseAuthorizationConfig parses the gateway authorization policy.
+func ParseAuthorizationConfig(raw string) (AuthorizationConfig, error) {
+	if strings.TrimSpace(raw) == "" {
+		return AuthorizationConfig{}, nil
+	}
+	var config AuthorizationConfig
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		return AuthorizationConfig{}, fmt.Errorf("parse gateway authorization policy: %w", err)
+	}
+	return config, nil
 }
 
 // SplitScopes parses comma-separated OIDC scopes.

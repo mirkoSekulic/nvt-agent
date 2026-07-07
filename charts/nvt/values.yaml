@@ -82,6 +82,10 @@ gateway:
       validIssuer: ""
       extraAuthParams: {}
       authorizationDetails: ""
+    authorization:
+      default: deny
+      claimSource: id_token
+      rules: []
   service:
     type: ClusterIP
     port: 80
