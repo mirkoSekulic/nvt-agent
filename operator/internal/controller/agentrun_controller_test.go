@@ -480,6 +480,48 @@ func TestMediatedAgentRunRendersEgressdWithoutEgressTokenInAgent(t *testing.T) {
 	assertVolumeMount(t, egressd, "egressd-config", egressdConfigPath, egressdConfigKey, true)
 }
 
+// TestReconcileWritesPlaceholderFileBrokerPolicy pins that a placeholder-file
+// grant survives broker-policy reconciliation: admission accepts it and
+// BrokerAgentGrants serializes it, so ValidateBrokerAgentsPolicy must accept it
+// too — otherwise a forward-proxy placeholder-file run is admitted then fails
+// to reconcile.
+func TestReconcileWritesPlaceholderFileBrokerPolicy(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressEnforcement = true
+	agentRun.Spec.EgressForwardProxy = true
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
+		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+			{Provider: "codex-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile, Repositories: []string{}, EgressHosts: []string{"chatgpt.com:443"}},
+		},
+	}
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("agent-token"))
+	egressSecret := mustDesiredTokenSecret(t, agentRun, scheme, EgressTokenSecretName(agentRun.Name), egressTokenKey, []byte("egress-token"))
+	callbackSecret := mustDesiredTokenSecret(t, agentRun, scheme, CallbackTokenSecretName(agentRun.Name), callbackTokenKey, []byte("callback-token"))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerSecret, egressSecret, callbackSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile with placeholder-file grant: %v", err)
+	}
+	policy := mustParseBrokerAgentsPolicy(t, getBrokerAgentsConfigMap(ctx, t, k8sClient, agentRun.Namespace).Data[brokerAgentsConfigKey])
+	agentEntry := requireBrokerAgentEntry(t, policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name))
+	if len(agentEntry.Grants) != 1 || agentEntry.Grants[0].Materialization != "placeholder-file" {
+		t.Fatalf("broker policy did not carry the placeholder-file grant: %#v", agentEntry)
+	}
+
+	// Direct validation of the serialized policy shape.
+	if err := ValidateBrokerAgentsPolicy(policy); err != nil {
+		t.Fatalf("ValidateBrokerAgentsPolicy rejected a placeholder-file grant: %v", err)
+	}
+}
+
 func TestReconcileWritesMediatedBrokerAgentsPolicy(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
@@ -3758,4 +3800,129 @@ func requireVolume(t *testing.T, pod corev1.Pod, name string) corev1.Volume {
 	}
 	t.Fatalf("volume %q not found in %#v", name, pod.Spec.Volumes)
 	return corev1.Volume{}
+}
+
+func forwardProxyAgentRun() *nvtv1alpha1.AgentRun {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressEnforcement = true
+	agentRun.Spec.EgressForwardProxy = true
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "codex-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+		EgressHosts: []string{"chatgpt.com:443", "auth.openai.com:443"},
+	}}}
+	return agentRun
+}
+
+// TestValidateForwardProxyAdmission pins the gates: forward-proxy requires
+// enforcement, admits a placeholder-file-only run (routable via the proxy),
+// and rejects forward-proxy without enforcement.
+func TestValidateForwardProxyAdmission(t *testing.T) {
+	if err := ValidateAgentRunEgressMode(forwardProxyAgentRun()); err != nil {
+		t.Fatalf("forward-proxy placeholder-file run must be admitted, got %v", err)
+	}
+
+	noEnforce := forwardProxyAgentRun()
+	noEnforce.Spec.EgressEnforcement = false
+	if err := ValidateAgentRunEgressMode(noEnforce); err == nil || !strings.Contains(err.Error(), "egressForwardProxy requires spec.egressEnforcement") {
+		t.Fatalf("forward-proxy without enforcement must be rejected, got %v", err)
+	}
+
+	noHosts := forwardProxyAgentRun()
+	noHosts.Spec.Broker.Grants[0].EgressHosts = nil
+	if err := ValidateAgentRunEgressMode(noHosts); err == nil || !strings.Contains(err.Error(), "egressHosts") {
+		t.Fatalf("forward-proxy with no injectable egressHosts must be rejected, got %v", err)
+	}
+}
+
+// TestRenderForwardProxyEgressdConfig pins the egressd config: a forward_proxy
+// block with an inject route per egressHost, no redirect routes, and the CA.
+func TestRenderForwardProxyEgressdConfig(t *testing.T) {
+	rendered, err := RenderEgressdConfigJSON(forwardProxyAgentRun())
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var config struct {
+		Routes       []map[string]any `json:"routes"`
+		ForwardProxy *struct {
+			Listen       string           `json:"listen"`
+			InjectRoutes []map[string]any `json:"inject_routes"`
+		} `json:"forward_proxy"`
+		CA *struct {
+			CertFile string `json:"cert_file"`
+		} `json:"ca"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &config); err != nil {
+		t.Fatalf("unmarshal rendered config: %v\n%s", err, rendered)
+	}
+	if len(config.Routes) != 0 {
+		t.Fatalf("forward-proxy mode must render no redirect routes, got %v", config.Routes)
+	}
+	if config.ForwardProxy == nil || len(config.ForwardProxy.InjectRoutes) != 2 {
+		t.Fatalf("expected two inject routes, got %#v", config.ForwardProxy)
+	}
+	hosts := map[string]any{}
+	for _, route := range config.ForwardProxy.InjectRoutes {
+		hosts[route["host"].(string)] = route["capability"]
+		if route["capability"] != "codex-main" {
+			t.Fatalf("inject route capability = %v", route["capability"])
+		}
+	}
+	if _, ok := hosts["auth.openai.com"]; !ok {
+		t.Fatalf("inject routes must include the refresh host auth.openai.com, got %v", hosts)
+	}
+	if config.CA == nil || config.CA.CertFile == "" {
+		t.Fatal("forward-proxy egressd config must load the durable CA")
+	}
+}
+
+// TestForwardProxyAgentPodEnv pins the agent proxy env: HTTP(S)_PROXY points at
+// egressd and NO_PROXY covers broker/callback/DNS/localhost.
+func TestForwardProxyAgentPodEnv(t *testing.T) {
+	pod, err := DesiredAgentPod(forwardProxyAgentRun(), testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	agent := requireContainer(t, *pod, "agent")
+	proxy := envValue(agent, "HTTPS_PROXY")
+	if !strings.Contains(proxy, EgressdServiceName(forwardProxyAgentRun().Name)) || !strings.Contains(proxy, "8473") {
+		t.Fatalf("HTTPS_PROXY = %q, want the egressd forward-proxy Service", proxy)
+	}
+	noProxy := envValue(agent, "NO_PROXY")
+	for _, want := range []string{"localhost", ".svc.cluster.local", "nvt-operator"} {
+		if !strings.Contains(noProxy, want) {
+			t.Fatalf("NO_PROXY = %q, missing %q", noProxy, want)
+		}
+	}
+}
+
+// TestValidateForwardProxyMirrorsEgressdRules pins review findings 2 & 3: the
+// operator rejects forward-proxy configs that egressd's config.Validate would
+// reject at boot (duplicate normalized inject hosts, IP-literal hosts), so a
+// bad spec fails loudly at admission instead of CrashLooping egressd.
+func TestValidateForwardProxyMirrorsEgressdRules(t *testing.T) {
+	// Duplicate normalized host across egressHosts of one grant.
+	dupWithinGrant := forwardProxyAgentRun()
+	dupWithinGrant.Spec.Broker.Grants[0].EgressHosts = []string{"chatgpt.com:443", "chatgpt.com:8443"}
+	if err := ValidateAgentRunEgressMode(dupWithinGrant); err == nil || !strings.Contains(err.Error(), "chatgpt.com") {
+		t.Fatalf("duplicate inject host must be rejected, got %v", err)
+	}
+
+	// Same host claimed by two grants (genuinely ambiguous capability).
+	dupAcrossGrants := forwardProxyAgentRun()
+	dupAcrossGrants.Spec.Broker.Grants = append(dupAcrossGrants.Spec.Broker.Grants, nvtv1alpha1.AgentRunBrokerGrant{
+		Provider: "other-provider", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+		EgressHosts: []string{"chatgpt.com:443"},
+	})
+	if err := ValidateAgentRunEgressMode(dupAcrossGrants); err == nil || !strings.Contains(err.Error(), "more than one grant") {
+		t.Fatalf("host claimed by two grants must be rejected, got %v", err)
+	}
+
+	// IP-literal egressHost is rejected for forward-proxy (MITM needs a name).
+	ipHost := forwardProxyAgentRun()
+	ipHost.Spec.Broker.Grants[0].EgressHosts = []string{"10.0.0.5:443"}
+	if err := ValidateAgentRunEgressMode(ipHost); err == nil || !strings.Contains(err.Error(), "DNS name") {
+		t.Fatalf("IP-literal forward-proxy host must be rejected, got %v", err)
+	}
 }

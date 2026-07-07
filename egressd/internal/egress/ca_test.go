@@ -227,7 +227,7 @@ func TestCAConfigLeafNamesAndServeAddr(t *testing.T) {
 	}
 	upstreamLeaf := base()
 	upstreamLeaf.CA.LeafDNSNames = []string{"api.example.test"}
-	if err := upstreamLeaf.Validate(); err == nil || !strings.Contains(err.Error(), "route upstream host") {
+	if err := upstreamLeaf.Validate(); err == nil || !strings.Contains(err.Error(), "real upstream host") {
 		t.Fatalf("expected upstream leaf name rejection, got %v", err)
 	}
 	emptyLeaf := base()
@@ -568,5 +568,241 @@ func TestGitRouteTLSEndToEnd(t *testing.T) {
 	}
 	if len(upstream.serverNames) == 0 {
 		t.Fatal("upstream recorded no TLS handshakes")
+	}
+}
+
+// TestCAMintsAllowlistedUpstreamLeaf pins the Phase 6.2 widening: a CA
+// configured with upstream names mints a per-SNI leaf for each (carrying only
+// that DNS SAN, no loopback IPs), the CA name constraints cover exactly the
+// local + upstream names, and any non-allowlisted or IP-literal SNI is refused.
+func TestCAMintsAllowlistedUpstreamLeaf(t *testing.T) {
+	upstreams := []string{"chatgpt.com", "auth.openai.com"}
+	ca, err := NewCAWithUpstreams(nil, upstreams)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range upstreams {
+		cert, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+		if err != nil {
+			t.Fatalf("CA refused allowlisted upstream %q: %v", name, err)
+		}
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != name {
+			t.Fatalf("upstream leaf DNS SANs = %v, want only %q", leaf.DNSNames, name)
+		}
+		if len(leaf.IPAddresses) != 0 {
+			t.Fatalf("upstream leaf must carry no IP SANs, got %v", leaf.IPAddresses)
+		}
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: caCertPool(t, ca), DNSName: name}); err != nil {
+			t.Fatalf("upstream leaf does not verify for %q: %v", name, err)
+		}
+	}
+
+	// Per-SNI leaves are distinct certs, not the shared local leaf.
+	first, _ := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: "chatgpt.com"})
+	second, _ := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: "auth.openai.com"})
+	if first.Leaf.Subject.CommonName == second.Leaf.Subject.CommonName {
+		t.Fatalf("expected distinct per-SNI leaves, both %q", first.Leaf.Subject.CommonName)
+	}
+
+	// Non-allowlisted upstream names stay refused.
+	for _, name := range []string{"github.com", "evil.example", "api.openai.com"} {
+		if _, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name}); err == nil {
+			t.Fatalf("CA minted a leaf for non-allowlisted name %q", name)
+		}
+	}
+
+	// An IP-literal SNI is refused even if it were somehow allowlisted.
+	caIP, err := NewCAWithUpstreams(nil, []string{"93.184.216.34"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := caIP.GetCertificate(&tls.ClientHelloInfo{ServerName: "93.184.216.34"}); err == nil {
+		t.Fatal("CA minted an upstream leaf for an IP literal")
+	}
+
+	// The local leaf still works alongside upstream leaves.
+	if _, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: localLeafName}); err != nil {
+		t.Fatalf("local leaf broke after upstream widening: %v", err)
+	}
+}
+
+// TestCAUpstreamNameConstraints pins that the CA cert's critical name
+// constraints widen to exactly local + allowlisted upstream names, so a leaked
+// key still cannot sign for an arbitrary host (canary).
+func TestCAUpstreamNameConstraints(t *testing.T) {
+	ca, err := NewCAWithUpstreams([]string{"run-egressd"}, []string{"chatgpt.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(ca.CertPEM())
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cert.PermittedDNSDomainsCritical {
+		t.Fatal("CA name constraints must stay critical")
+	}
+	want := map[string]bool{localLeafName: true, "run-egressd": true, "chatgpt.com": true}
+	if len(cert.PermittedDNSDomains) != len(want) {
+		t.Fatalf("permitted domains = %v, want %v", cert.PermittedDNSDomains, want)
+	}
+	for _, name := range cert.PermittedDNSDomains {
+		if !want[name] {
+			t.Fatalf("unexpected permitted domain %q", name)
+		}
+	}
+
+	// Canary: even holding the CA key, a leaf for an unrelated host must fail
+	// name-constraint verification against the CA.
+	unrelated, err := signLeafForName(t, ca, "evil.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unrelated.Verify(x509.VerifyOptions{Roots: caCertPool(t, ca), DNSName: "evil.example.com"}); err == nil {
+		t.Fatal("a leaf for a non-permitted host verified against the name-constrained CA")
+	}
+
+	// Boundary honesty: RFC 5280 dNSName constraints are suffix matches, so a
+	// SUBDOMAIN of an allowlisted host *does* verify against the CA. The
+	// in-process GetCertificate gate is exact-match, so egressd never mints
+	// such a leaf in operation — this documents the leaked-key boundary.
+	subdomain, err := signLeafForName(t, ca, "evil.chatgpt.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := subdomain.Verify(x509.VerifyOptions{Roots: caCertPool(t, ca), DNSName: "evil.chatgpt.com"}); err != nil {
+		t.Fatalf("subdomain of an allowlisted host unexpectedly failed name-constraint verification: %v", err)
+	}
+	if _, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: "evil.chatgpt.com"}); err == nil {
+		t.Fatal("GetCertificate minted a subdomain leaf — the operational gate must stay exact-match")
+	}
+}
+
+// signLeafForName mints a leaf for an arbitrary name directly with the CA key,
+// bypassing GetCertificate's allowlist, to prove the cert-level name constraint
+// is the second, independent gate.
+func signLeafForName(t *testing.T, ca *CA, name string) (*x509.Certificate, error) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	serial, _ := randomSerial()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{name},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		return nil, err
+	}
+	return x509.ParseCertificate(der)
+}
+
+func writeCAFiles(t *testing.T, ca *CA) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "ca.crt")
+	keyFile := filepath.Join(dir, "ca.key")
+	if err := os.WriteFile(certFile, ca.CertPEM(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalECPrivateKey(ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+// TestLoadCAVerifiesDurableConstraints pins review finding 1: LoadCA asserts
+// the durable cert's actual critical name constraints match the configured
+// names, so an unconstrained or stale BYO CA fails loudly at boot rather than
+// collapsing the two-gate model or failing as a confusing handshake error.
+func TestLoadCAVerifiesDurableConstraints(t *testing.T) {
+	// A durable cert permitting only localhost, loaded with an upstream
+	// configured, is rejected (the constraints omit the upstream).
+	localOnly, err := NewCAWithUpstreams(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile := writeCAFiles(t, localOnly)
+	if _, err := LoadCAWithUpstreams(certFile, keyFile, nil, []string{"chatgpt.com"}); err == nil {
+		t.Fatal("LoadCA accepted a durable cert whose constraints omit the configured upstream")
+	}
+
+	// A matching durable cert loads.
+	matching, err := NewCAWithUpstreams([]string{"svc"}, []string{"chatgpt.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc, mk := writeCAFiles(t, matching)
+	if _, err := LoadCAWithUpstreams(mc, mk, []string{"svc"}, []string{"chatgpt.com"}); err != nil {
+		t.Fatalf("LoadCA rejected a matching durable cert: %v", err)
+	}
+
+	// An unconstrained durable CA (no critical name constraints) is rejected.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, _ := randomSerial()
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "unconstrained"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(caValidity),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	uc := filepath.Join(dir, "ca.crt")
+	uk := filepath.Join(dir, "ca.key")
+	os.WriteFile(uc, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	os.WriteFile(uk, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600)
+	if _, err := LoadCA(uc, uk); err == nil {
+		t.Fatal("LoadCA accepted a durable CA with no critical name constraints")
+	}
+}
+
+// TestCAGetCertificateSNIBehavior pins review finding 4: the actual (not
+// overclaimed) SNI behavior — empty SNI serves the local leaf, a sibling
+// allowlisted SNI serves that sibling's dedicated single-SAN leaf.
+func TestCAGetCertificateSNIBehavior(t *testing.T) {
+	ca, err := NewCAWithUpstreams(nil, []string{"chatgpt.com", "auth.openai.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := ca.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("empty SNI must serve the local leaf: %v", err)
+	}
+	if local.Leaf.DNSNames[0] != localLeafName || len(local.Leaf.IPAddresses) == 0 {
+		t.Fatalf("empty SNI leaf is not the local leaf: %v / %v", local.Leaf.DNSNames, local.Leaf.IPAddresses)
+	}
+	sibling, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: "auth.openai.com"})
+	if err != nil {
+		t.Fatalf("sibling allowlisted SNI must serve its leaf: %v", err)
+	}
+	if len(sibling.Leaf.DNSNames) != 1 || sibling.Leaf.DNSNames[0] != "auth.openai.com" || len(sibling.Leaf.IPAddresses) != 0 {
+		t.Fatalf("sibling SNI did not get its dedicated single-SAN leaf: %v", sibling.Leaf.DNSNames)
 	}
 }

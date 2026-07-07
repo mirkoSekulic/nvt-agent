@@ -102,15 +102,35 @@ type CAConfig struct {
 	KeyFile  string `json:"key_file"`
 }
 
-// ForwardProxyConfig enables CONNECT-only blind-tunnel proxying. It does not
-// terminate TLS or inject credentials; it only allows configured host:port
-// targets through.
+// ForwardProxyConfig enables CONNECT proxying. AllowHosts are blind-tunnelled
+// (no TLS termination, no injection). InjectRoutes are TLS-terminated under the
+// per-agent CA and injected — the Phase 6.2 MITM path.
 type ForwardProxyConfig struct {
 	Listen                   string   `json:"listen"`
 	AllowHosts               []string `json:"allow_hosts"`
 	AllowPorts               []int    `json:"allow_ports"`
 	MaxConcurrentTunnels     int      `json:"max_concurrent_tunnels"`
 	TunnelIdleTimeoutSeconds int      `json:"tunnel_idle_timeout_seconds"`
+	// InjectRoutes: for each CONNECT to one of these hosts, egressd terminates
+	// TLS with a CA-minted leaf for the host, injects the broker credential,
+	// and re-originates TLS to the pinned upstream.
+	InjectRoutes []ForwardProxyInjectRoute `json:"inject_routes"`
+}
+
+// ForwardProxyInjectRoute maps a MITM'd upstream host to a broker capability.
+type ForwardProxyInjectRoute struct {
+	// Host is the CONNECT/SNI host to terminate TLS for (a DNS name).
+	Host string `json:"host"`
+	// Capability is the broker capability whose injectable headers authorize
+	// requests to this host.
+	Capability string `json:"capability"`
+	// Upstream is the pinned re-origination target host[:port]. The decrypted
+	// request cannot choose a different one.
+	Upstream string `json:"upstream"`
+	// AllowInsecureUpstream permits a plain-HTTP upstream leg. Test/dev only.
+	AllowInsecureUpstream bool `json:"allow_insecure_upstream"`
+	// MaxRequests caps proxied requests on this route (0 = unlimited).
+	MaxRequests int `json:"max_requests"`
 }
 
 // LoadConfig reads and validates the configuration file.
@@ -134,7 +154,8 @@ func (c *Config) Validate() error {
 	if len(c.Routes) == 0 && c.ForwardProxy == nil {
 		return fmt.Errorf("at least one route or forward_proxy is required")
 	}
-	if len(c.Routes) > 0 {
+	forwardProxyInjects := c.ForwardProxy != nil && len(c.ForwardProxy.InjectRoutes) > 0
+	if len(c.Routes) > 0 || forwardProxyInjects {
 		parsed, err := url.Parse(c.BrokerURL)
 		if err != nil || parsed.Host == "" {
 			return fmt.Errorf("broker_url must be a valid URL")
@@ -185,10 +206,24 @@ func (c *Config) Validate() error {
 		if (c.CA.CertFile == "") != (c.CA.KeyFile == "") {
 			return fmt.Errorf("ca cert_file and key_file must be set together")
 		}
-		routeUpstreamHosts := map[string]bool{}
+		// A synthetic leaf_dns_name must not collide with any real upstream —
+		// redirect route upstreams OR forward-proxy MITM hosts — or that SNI
+		// would resolve to the broad-SAN local leaf instead of the dedicated
+		// single-SAN upstream leaf, eroding the synthetic-vs-real separation.
+		realUpstreamHosts := map[string]bool{}
 		for _, route := range c.Routes {
 			if host, ok := normalizedRouteUpstreamHost(route.Upstream); ok {
-				routeUpstreamHosts[host] = true
+				realUpstreamHosts[host] = true
+			}
+		}
+		if c.ForwardProxy != nil {
+			for _, route := range c.ForwardProxy.InjectRoutes {
+				if host, err := normalizeProxyHost(route.Host); err == nil {
+					realUpstreamHosts[host] = true
+				}
+				if host, ok := normalizedRouteUpstreamHost(route.Upstream); ok {
+					realUpstreamHosts[host] = true
+				}
 			}
 		}
 		for index, name := range c.CA.LeafDNSNames {
@@ -197,8 +232,8 @@ func (c *Config) Validate() error {
 			}
 			// Leaf names are synthetic redirect names; minting for a real
 			// upstream is exactly the boundary Phase 4 established.
-			if routeUpstreamHosts[strings.ToLower(name)] {
-				return fmt.Errorf("ca.leaf_dns_names[%d] %q matches a route upstream host", index, name)
+			if realUpstreamHosts[strings.ToLower(name)] {
+				return fmt.Errorf("ca.leaf_dns_names[%d] %q matches a real upstream host", index, name)
 			}
 		}
 	}
@@ -208,6 +243,9 @@ func (c *Config) Validate() error {
 		}
 		if err := c.validateForwardProxyRouteOverlap(); err != nil {
 			return err
+		}
+		if len(c.ForwardProxy.InjectRoutes) > 0 && c.CA == nil {
+			return fmt.Errorf("forward_proxy.inject_routes require the config-level ca block")
 		}
 	}
 	return nil
@@ -227,7 +265,57 @@ func (c *Config) validateForwardProxyRouteOverlap() error {
 			return fmt.Errorf("forward_proxy.allow_hosts[%q] overlaps mediated route upstream", host)
 		}
 	}
+	// Each MITM host must be a valid DNS host mapped to a capability and a
+	// pinned upstream, and must not collide with a mediated route upstream or a
+	// blind-tunnel host — a host mediates exactly one way.
+	blindHosts := map[string]bool{}
+	for _, host := range c.ForwardProxy.AllowHosts {
+		if normalized, err := normalizeProxyHost(host); err == nil {
+			blindHosts[normalized] = true
+		}
+	}
+	injectHosts := map[string]bool{}
+	for index, route := range c.ForwardProxy.InjectRoutes {
+		host, err := normalizeProxyHost(route.Host)
+		if err != nil {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].host: %w", index, err)
+		}
+		if net.ParseIP(host) != nil {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].host must be a DNS name, not an IP", index)
+		}
+		if route.Capability == "" {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].capability is required", index)
+		}
+		if err := validateUpstream(route.Upstream); err != nil {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].upstream: %w", index, err)
+		}
+		if route.MaxRequests < 0 {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].max_requests must be non-negative", index)
+		}
+		if injectHosts[host] {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].host %q is duplicated", index, route.Host)
+		}
+		if blindHosts[host] || routeHosts[host] {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].host %q overlaps a blind-tunnel or mediated route host", index, route.Host)
+		}
+		injectHosts[host] = true
+	}
 	return nil
+}
+
+// ForwardProxyUpstreamLeafNames is the set of MITM host names the CA must be
+// able to mint a leaf for. Used to widen the CA name constraints at boot.
+func (c *Config) ForwardProxyUpstreamLeafNames() []string {
+	if c.ForwardProxy == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.ForwardProxy.InjectRoutes))
+	for _, route := range c.ForwardProxy.InjectRoutes {
+		if host, err := normalizeProxyHost(route.Host); err == nil {
+			names = append(names, host)
+		}
+	}
+	return names
 }
 
 // Validate enforces the forward proxy's fail-closed shape. An empty allowlist

@@ -87,6 +87,32 @@ through the nvt path, not raw kubectl. The global mediated-by-default flip
 stays deferred until both egress smokes are green in CI and real-cluster
 usage has soaked.
 
+### Forward-proxy mode (arbitrary tools that honor proxy env)
+
+`spec.egressForwardProxy: true` (which **requires** `spec.egressEnforcement`)
+mediates unmodified tools with hardcoded endpoints that honor `HTTP(S)_PROXY`.
+The operator points the agent's `HTTP_PROXY`/`HTTPS_PROXY` at egressd; egressd
+terminates the `CONNECT` under the per-agent CA (already trusted by the agent),
+injects the broker credential, strips the placeholder, and re-originates TLS to
+the pinned upstream. A tool sends a plain `https://<upstream>/...` with no
+base-url override and gets mediated with **zero per-tool config**.
+
+Two independent fail-closed gates bound the MITM: the CONNECT host must be a
+configured inject route, and egressd refuses to mint a leaf for any other SNI.
+The per-agent CA's critical name constraints widen to exactly `localhost` +
+local Service names + the allowlisted upstream hosts, so a leaked CA key still
+cannot impersonate an arbitrary host. Hosts that are **not** a configured
+inject route are denied (no unmediated passthrough).
+
+`NO_PROXY` is **operator-computed** — localhost, the cluster domains, the
+broker, the operator callback, and kube-dns go direct — so infra legs never
+route through the MITM. Routing is deny-by-default; a non-allowlisted host
+fails at CONNECT (not a 401).
+
+Residue: tools that ignore proxy env entirely (a transparent `iptables`
+`REDIRECT`/`TPROXY` mode) are a separate, later step; forward-proxy covers the
+large majority of CLIs, language HTTP clients, and SDKs.
+
 ### Per-grant request quotas
 
 A mediated grant may cap its proxied requests:

@@ -60,13 +60,19 @@ type AgentRunSpec struct {
 	// agent Pod so it cannot reach arbitrary hosts
 	// (docs/phase5-6a-enforcement-pr-plan.md). Requires egress: mediated and a
 	// NetworkPolicy-enforcing CNI; same-Pod remains the default mediated shape.
-	EgressEnforcement bool               `json:"egressEnforcement,omitempty"`
-	Workspace         AgentRunWorkspace  `json:"workspace"`
-	Broker            *AgentRunBroker    `json:"broker,omitempty"`
-	Prompt            *AgentRunPrompt    `json:"prompt,omitempty"`
-	Agent             AgentRunAgent      `json:"agent"`
-	Lifecycle         *AgentRunLifecycle `json:"lifecycle,omitempty"`
-	TTL               *AgentRunTTL       `json:"ttl,omitempty"`
+	EgressEnforcement bool `json:"egressEnforcement,omitempty"`
+	// EgressForwardProxy opts a mediated+enforced run into forward-proxy mode:
+	// the agent's HTTP(S)_PROXY points at egressd, which TLS-terminates CONNECT
+	// under the per-agent CA and injects the broker credential, so unmodified
+	// tools that honor proxy env are mediated with zero per-tool config
+	// (docs/phase6.2-forward-proxy-pr-plan.md). Requires egressEnforcement.
+	EgressForwardProxy bool               `json:"egressForwardProxy,omitempty"`
+	Workspace          AgentRunWorkspace  `json:"workspace"`
+	Broker             *AgentRunBroker    `json:"broker,omitempty"`
+	Prompt             *AgentRunPrompt    `json:"prompt,omitempty"`
+	Agent              AgentRunAgent      `json:"agent"`
+	Lifecycle          *AgentRunLifecycle `json:"lifecycle,omitempty"`
+	TTL                *AgentRunTTL       `json:"ttl,omitempty"`
 }
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.

@@ -33,8 +33,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	forwardProxyInjects := config.ForwardProxy != nil && len(config.ForwardProxy.InjectRoutes) > 0
 	var broker *egress.BrokerClient
-	if len(config.Routes) > 0 {
+	if len(config.Routes) > 0 || forwardProxyInjects {
 		token := os.Getenv("NVT_BROKER_TOKEN")
 		if token == "" {
 			return fmt.Errorf("NVT_BROKER_TOKEN is required when injection routes are configured")
@@ -47,13 +48,14 @@ func run() error {
 	}
 	var ca *egress.CA
 	if config.CA != nil {
+		upstreamLeafNames := config.ForwardProxyUpstreamLeafNames()
 		if config.CA.CertFile != "" {
-			ca, err = egress.LoadCA(config.CA.CertFile, config.CA.KeyFile, config.CA.LeafDNSNames...)
+			ca, err = egress.LoadCAWithUpstreams(config.CA.CertFile, config.CA.KeyFile, config.CA.LeafDNSNames, upstreamLeafNames)
 			if err != nil {
 				return err
 			}
 		} else {
-			ca, err = egress.NewCA(config.CA.LeafDNSNames...)
+			ca, err = egress.NewCAWithUpstreams(config.CA.LeafDNSNames, upstreamLeafNames)
 			if err != nil {
 				return err
 			}
@@ -102,9 +104,12 @@ func run() error {
 	}
 	if config.ForwardProxy != nil {
 		proxy := &egress.ForwardProxy{
-			Config:   *config.ForwardProxy,
-			Logger:   log.New(os.Stdout, "", 0),
-			Reporter: reporter,
+			Config:    *config.ForwardProxy,
+			Logger:    log.New(os.Stdout, "", 0),
+			Reporter:  reporter,
+			CA:        ca,
+			Broker:    broker,
+			Transport: transport,
 		}
 		server := &http.Server{
 			Addr:              config.ForwardProxy.Listen,
