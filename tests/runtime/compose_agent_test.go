@@ -1114,3 +1114,124 @@ func TestAgentInitMediatedRequiresUnsafeLocalBrokerFlag(t *testing.T) {
 		t.Fatalf("unsafe local broker rejection wrote egressd env")
 	}
 }
+
+// TestComposeAgentUserModeParameterized pins that the compose agent service
+// parameterizes user/HOME/state so root stays the default and non-root is
+// selectable, and that the auth/home mounts follow HOME.
+func TestComposeAgentUserModeParameterized(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "compose.agent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(data)
+	for _, fragment := range []string{
+		"user: ${AGENT_RUN_USER:-0:0}",
+		"HOME: ${AGENT_HOME:-/root}",
+		"NVT_STATE_DIR: ${AGENT_HOME:-/root}/.nvt-agent",
+		"${CODEX_CONFIG_DIR}:${AGENT_HOME:-/root}/.codex",
+		"agent-home:${AGENT_HOME:-/root}",
+	} {
+		if !strings.Contains(compose, fragment) {
+			t.Fatalf("compose.agent.yaml missing %q", fragment)
+		}
+	}
+	// The hardcoded root home targets must be gone.
+	if strings.Contains(compose, "agent-home:/root") || strings.Contains(compose, ":/root/.codex") {
+		t.Fatalf("compose.agent.yaml still hardcodes /root home targets:\n%s", compose)
+	}
+}
+
+// TestAgentInitRendersRuntimeUser pins the --user knob: default root (0:0,
+// /root) and opt-in non-root (1000:1000, /home/agent).
+func TestAgentInitRendersRuntimeUser(t *testing.T) {
+	root := repoRoot(t)
+	tests := []struct {
+		name    string
+		args    []string
+		user    string
+		runUser string
+		home    string
+	}{
+		{name: "default-root", args: nil, user: "user: root", runUser: "AGENT_RUN_USER=0:0", home: "AGENT_HOME=/root"},
+		{name: "opt-in-non-root", args: []string{"--user", "non-root"}, user: "user: non-root", runUser: "AGENT_RUN_USER=1000:1000", home: "AGENT_HOME=/home/agent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			agentDir := filepath.Join(root, ".agents", "user-"+tt.name)
+			_ = os.RemoveAll(agentDir)
+			t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+			command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+			args := append([]string{"--name", "user-" + tt.name, "--type", "claude"}, tt.args...)
+			cmd := commandWithEnv(command, nil, args...)
+			cmd.Dir = root
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("agent-init failed: %v\n%s", err, output)
+			}
+			config, err := os.ReadFile(filepath.Join(agentDir, "agent.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(config), tt.user) {
+				t.Fatalf("agent.yaml missing %q\n%s", tt.user, config)
+			}
+			env, err := os.ReadFile(filepath.Join(agentDir, "env"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{tt.runUser, tt.home} {
+				if !strings.Contains(string(env), want) {
+					t.Fatalf("env missing %q\n%s", want, env)
+				}
+			}
+		})
+	}
+}
+
+// TestAgentInitRejectsInvalidUser pins the --user validation.
+func TestAgentInitRejectsInvalidUser(t *testing.T) {
+	root := repoRoot(t)
+	home := t.TempDir()
+	command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	cmd := commandWithEnv(command, nil, "--name", "bad-user", "--user", "wheel")
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("agent-init unexpectedly succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "user must be root or non-root") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+}
+
+// TestBootstrapAcceptsNonRootUserAndUsesHome pins that runtime.user: non-root
+// is accepted and that bootstrap writes state under $HOME (not a hardcoded
+// /root) — the fixture HOME is a temp dir, so a /root assumption would fail.
+func TestBootstrapAcceptsNonRootUserAndUsesHome(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+  user: non-root
+`)
+	f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), true, nil, config)
+
+	if _, err := os.ReadFile(filepath.Join(f.home, ".nvt-agent", "agent-command.json")); err != nil {
+		t.Fatalf("bootstrap did not write state under $HOME: %v", err)
+	}
+}
+
+// TestBootstrapRejectsInvalidRuntimeUser pins the runtime.user validation.
+func TestBootstrapRejectsInvalidRuntimeUser(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+  user: wheel
+`)
+	output := f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), false, nil, config)
+	if !strings.Contains(output, "runtime.user must be root or non-root") {
+		t.Fatalf("expected runtime.user rejection, got:\n%s", output)
+	}
+}

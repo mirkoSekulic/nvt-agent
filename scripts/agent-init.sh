@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --name <name> [--type codex|claude] [--autonomy trusted-local|interactive]" >&2
+  echo "usage: $0 --name <name> [--type codex|claude] [--autonomy trusted-local|interactive] [--user root|non-root]" >&2
 }
 
 render_template() {
@@ -25,6 +25,7 @@ PY
 name=""
 agent_type="codex"
 autonomy="trusted-local"
+runtime_user="root"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +51,14 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       autonomy="$2"
+      shift 2
+      ;;
+    --user)
+      if [ "$#" -lt 2 ]; then
+        usage
+        exit 1
+      fi
+      runtime_user="$2"
       shift 2
       ;;
     -h|--help)
@@ -83,6 +92,24 @@ case "$autonomy" in
   *)
     echo "invalid autonomy: $autonomy" >&2
     echo "autonomy must be trusted-local or interactive" >&2
+    exit 1
+    ;;
+esac
+
+# Runtime user mode. Default root is unchanged; non-root runs the agent
+# container as uid/gid 1000 with HOME=/home/agent and passwordless sudo.
+case "$runtime_user" in
+  root)
+    agent_run_user="0:0"
+    agent_home="/root"
+    ;;
+  non-root)
+    agent_run_user="1000:1000"
+    agent_home="/home/agent"
+    ;;
+  *)
+    echo "invalid user: $runtime_user" >&2
+    echo "user must be root or non-root" >&2
     exit 1
     ;;
 esac
@@ -197,6 +224,8 @@ if [ ! -f "$env_file" ]; then
     COMPOSE_PROFILES="$compose_profiles" \
     CODEX_CONFIG_DIR="$codex_config_dir" \
     CLAUDE_CONFIG_DIR="$claude_config_dir" \
+    AGENT_RUN_USER="$agent_run_user" \
+    AGENT_HOME="$agent_home" \
     render_template "$templates_dir/env" "$env_file"
   echo "created $env_file"
 else
@@ -389,7 +418,7 @@ else
 fi
 
 if [ ! -f "$agent_config_file" ]; then
-  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" render_template "$templates_dir/agent.yaml" "$agent_config_file"
+  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" AGENT_USER="$runtime_user" render_template "$templates_dir/agent.yaml" "$agent_config_file"
   echo "created $agent_config_file"
 else
   echo "exists  $agent_config_file"
