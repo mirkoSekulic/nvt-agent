@@ -193,7 +193,7 @@ func LoadCAWithUpstreams(certFile, keyFile string, leafDNSNames, upstreamLeafNam
 		upstreamLeafNames: append([]string(nil), upstreamLeafNames...),
 		upstreamLeaves:    map[string]*cachedLeaf{},
 	}
-	for _, name := range append(permittedDomains(ca.leafDNSNames, ca.upstreamLeafNames)) {
+	for _, name := range permittedDomains(ca.leafDNSNames, ca.upstreamLeafNames) {
 		if !ca.allowedLeafName(name) {
 			return nil, fmt.Errorf("CA refused configured leaf name %q", name)
 		}
