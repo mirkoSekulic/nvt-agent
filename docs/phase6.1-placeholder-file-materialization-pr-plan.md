@@ -1,6 +1,9 @@
 # PR 6.1 Plan: Generic placeholder-file materialization
 
-Status: plan — ready to implement (Phase 5 complete: #63 6a, #64 6b)
+Status: landed — generic placeholder-file materialization, Codex preset, and
+runtime materialization implemented with fixture-level tests (no real secrets).
+The real tool-behind-a-placeholder-file win is demonstrated after 6.2 merges
+(the honest dependency noted below).
 Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §"Phase 6", sequence
 row 7. This is the broker/provider half of Phase 6, split out from
 [phase6.2-forward-proxy-pr-plan.md](phase6.2-forward-proxy-pr-plan.md) (row 8)
@@ -179,3 +182,9 @@ Where: `runtime/core/bootstrap.py` (or the existing broker-auth-files path),
 - **Body/query placeholder substitution** — deferred (see 6.2).
 - Host-auth-file runtime sourcing — a dev import helper at most, never the
   runtime architecture.
+- **Standalone placeholder-file egress routing** — through the operator/compose
+  admission, a mediated run still requires at least one `header-inject` grant
+  with `egressHosts` for its egress route; `placeholder-file` grants are
+  materialized but not routed. A tool reaching its upstream purely via a
+  placeholder file + the forward proxy is 6.2. The broker already treats a
+  `placeholder-file` grant as injection-eligible so 6.2 needs no second grant.

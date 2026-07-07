@@ -28,6 +28,10 @@ const (
 
 	AgentRunGrantFileBundle   AgentRunGrantMaterialization = "file-bundle"
 	AgentRunGrantHeaderInject AgentRunGrantMaterialization = "header-inject"
+	// AgentRunGrantPlaceholderFile materializes an inert placeholder auth file
+	// for the agent; the real credential stays broker-side and is injected at
+	// the edge. Like header-inject, it is a zero-possession mediated mode.
+	AgentRunGrantPlaceholderFile AgentRunGrantMaterialization = "placeholder-file"
 )
 
 // AgentRun represents one disposable nvt agent execution.
@@ -89,8 +93,12 @@ type AgentRunBroker struct {
 
 // AgentRunBrokerGrant defines repositories granted through a credential provider.
 type AgentRunBrokerGrant struct {
-	Provider        string                       `json:"provider"`
-	Repositories    []string                     `json:"repositories"`
+	Provider     string   `json:"provider"`
+	Repositories []string `json:"repositories"`
+	// Materialization selects how the credential reaches the run: file-bundle
+	// (direct only; writes usable material into the container), header-inject
+	// or placeholder-file (both mediated-only, zero-possession — the real
+	// credential is injected at the edge, never handed to the agent).
 	Materialization AgentRunGrantMaterialization `json:"materialization,omitempty"`
 	EgressHosts     []string                     `json:"egressHosts,omitempty"`
 	// Git marks a git-over-HTTPS grant: its egressd route terminates TLS

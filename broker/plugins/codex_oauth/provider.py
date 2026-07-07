@@ -11,6 +11,12 @@ from urllib.request import Request, urlopen
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.plugins.github_app.provider import ProviderError
+from broker.plugins.placeholder_file import (
+    far_future_exp,
+    render_jwt,
+    render_plain,
+    validate_relative_path,
+)
 
 
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -18,6 +24,12 @@ DEFAULT_TOKEN_URL = "https://auth.openai.com/oauth/token"
 DEFAULT_REFRESH_MARGIN_SECONDS = 600
 DEFAULT_BUNDLE_TTL_SECONDS = 1200
 DEFAULT_STUB_REFRESH_TOKEN = "nvt-broker-stub"
+# id-token-claims copy real token-derived data into the placeholder file. The
+# claim paths are operator-trusted (non-secret identity, same model as
+# injection-claim-headers), but as defense in depth a copied value that looks
+# token-shaped (too long, or a JWT-like dotted blob) is refused rather than
+# smuggled into the placeholder.
+MAX_PLACEHOLDER_CLAIM_LEN = 128
 
 
 class CodexOAuthProvider:
@@ -46,7 +58,96 @@ class CodexOAuthProvider:
         self.extra_files = self._extra_files()
         self.injection_hosts = injection_hosts(self.config, self.name)
         self.claim_headers = self._claim_headers()
+        self.placeholder = self._placeholder_config()
         self.lock = threading.Lock()
+
+    def _parse_claim_path(self, raw_path, field):
+        # A claim key may itself contain dots (the OpenAI account claim key is a
+        # URL), so a list of exact segments is accepted alongside the dotted
+        # shorthand.
+        if isinstance(raw_path, list):
+            path = []
+            for segment_index, segment in enumerate(raw_path):
+                if not isinstance(segment, str) or not segment:
+                    fail(f"{field}[{segment_index}] must be a non-empty string")
+                path.append(segment)
+        else:
+            path = [segment for segment in string_value(raw_path, field, required=True).split(".") if segment]
+        if not path:
+            fail(f"{field} must not be empty")
+        return path
+
+    def _placeholder_config(self):
+        raw = self.config.get("placeholder-file")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            fail(f"provider {self.name} config.placeholder-file must be a YAML object")
+        path = validate_relative_path(raw.get("path"), f"provider {self.name} config.placeholder-file.path")
+        hosts = []
+        for index, host in enumerate(list_value(raw.get("hosts"), f"provider {self.name} config.placeholder-file.hosts")):
+            if not isinstance(host, str) or not host:
+                fail(f"provider {self.name} config.placeholder-file.hosts[{index}] must be a non-empty string")
+            # The placeholder file's host bindings must be a subset of the
+            # provider's injection-hosts: every host the placeholder credential
+            # is bound to must be one the edge can actually inject for
+            # (otherwise 6.2 refresh mediation, e.g. auth.openai.com, breaks).
+            if host not in self.injection_hosts:
+                fail(f"provider {self.name} config.placeholder-file.hosts[{index}] {host} must also be listed in injection-hosts")
+            hosts.append(host)
+        claims = []
+        for index, item in enumerate(list_value(raw.get("id-token-claims"), f"provider {self.name} config.placeholder-file.id-token-claims")):
+            if not isinstance(item, dict):
+                fail(f"provider {self.name} config.placeholder-file.id-token-claims[{index}] must be a YAML object")
+            claim = string_value(item.get("claim"), f"provider {self.name} config.placeholder-file.id-token-claims[{index}].claim", required=True)
+            path_segments = self._parse_claim_path(
+                item.get("claim-path"),
+                f"provider {self.name} config.placeholder-file.id-token-claims[{index}].claim-path",
+            )
+            claims.append({"claim": claim, "path": path_segments})
+        return {"path": path, "hosts": hosts, "id_token_claims": claims}
+
+    def _guard_placeholder_claim(self, claim, value):
+        # _claim_value already refuses dict/list leaves; this rejects scalar
+        # values that look like a credential rather than a non-secret claim.
+        if isinstance(value, str):
+            if len(value) > MAX_PLACEHOLDER_CLAIM_LEN:
+                raise ProviderError("placeholder-claim-unsafe", f"placeholder id-token-claim {claim} value is too long to be a non-secret claim", 502)
+            if value.count(".") >= 2 and len(value) > 40:
+                raise ProviderError("placeholder-claim-unsafe", f"placeholder id-token-claim {claim} value looks token-shaped, refusing", 502)
+        return value
+
+    def placeholder_files(self, agent_id, audit, request_id, grant=None):
+        # Emit .codex/auth.json carrying only placeholders: opaque access/refresh
+        # tokens and a jwt-shaped id_token whose claims are the provider's real
+        # non-secret identity (account id, plan, ...) plus a far-future exp. The
+        # real tokens stay in broker/provider state; they are injected at the
+        # edge (Phase 6.2). No refresh is triggered — this reads current state.
+        if self.placeholder is None:
+            raise ProviderError("placeholder-files-not-configured", f"provider {self.name} has no placeholder-file config", 403)
+        with self.lock:
+            auth = self._read_auth()
+            access_token = self._token(auth, "access_token")
+            real_claims = self._jwt_claims(access_token)
+        id_claims = {}
+        for entry in self.placeholder["id_token_claims"]:
+            value = self._claim_value(real_claims, entry["path"])
+            if value is not None:
+                id_claims[entry["claim"]] = self._guard_placeholder_claim(entry["claim"], value)
+        content = {
+            "tokens": {
+                "access_token": render_plain(),
+                "refresh_token": render_plain(),
+                "id_token": render_jwt(id_claims, far_future_exp()),
+            },
+            "last_refresh": rfc3339(int(time.time())),
+        }
+        files = [{
+            "path": self.placeholder["path"],
+            "content": json.dumps(content, indent=2) + "\n",
+            "mode": "0600",
+        }]
+        return files, list(self.placeholder["hosts"]), None
 
     def _claim_headers(self):
         output = []
@@ -54,21 +155,10 @@ class CodexOAuthProvider:
             if not isinstance(item, dict):
                 fail(f"provider {self.name} config.injection-claim-headers[{index}] must be a YAML object")
             header = string_value(item.get("header"), f"provider {self.name} config.injection-claim-headers[{index}].header", required=True)
-            raw_path = item.get("claim-path")
-            field = f"provider {self.name} config.injection-claim-headers[{index}].claim-path"
-            # A claim key may itself contain dots (the OpenAI account claim key
-            # is a URL), so a list of exact segments is accepted alongside the
-            # dotted-string shorthand.
-            if isinstance(raw_path, list):
-                path = []
-                for segment_index, segment in enumerate(raw_path):
-                    if not isinstance(segment, str) or not segment:
-                        fail(f"{field}[{segment_index}] must be a non-empty string")
-                    path.append(segment)
-            else:
-                path = [segment for segment in string_value(raw_path, field, required=True).split(".") if segment]
-            if not path:
-                fail(f"{field} must not be empty")
+            path = self._parse_claim_path(
+                item.get("claim-path"),
+                f"provider {self.name} config.injection-claim-headers[{index}].claim-path",
+            )
             output.append({"header": header, "path": path})
         return output
 

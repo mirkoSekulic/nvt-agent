@@ -374,7 +374,12 @@ def apply_mediated_egress(egress):
         provider = grant.get("provider")
         if not isinstance(provider, str) or not provider:
             raise SystemExit(f"egress.grants[{index}].provider must be a non-empty string")
-        if grant.get("materialization") != "header-inject":
+        materialization = grant.get("materialization")
+        if materialization == "placeholder-file":
+            # Materialized separately by apply_placeholder_files; not an egress
+            # route.
+            continue
+        if materialization != "header-inject":
             raise SystemExit(f"egress mediated grant {provider} must be materialization header-inject")
         base_url = grant.get("base-url")
         if not isinstance(base_url, str) or not base_url:
@@ -397,6 +402,107 @@ def apply_mediated_egress(egress):
         encoding="utf-8",
     )
     persist_env_var("NVT_EGRESS_PLACEHOLDER", PLACEHOLDER)
+
+
+def broker_placeholder_files(provider, deadline):
+    # Same bounded retry as broker_routing: the broker agents ConfigMap can lag
+    # behind Pod start, so unauthorized/unreachable are retried; everything else
+    # fails immediately.
+    while True:
+        result = subprocess.run(
+            ["brokerctl", "placeholder-files", "--provider", provider],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        payload = None
+        try:
+            parsed = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            payload = parsed
+        if result.returncode == 0 and payload is not None and payload.get("ok"):
+            return payload
+        error = (payload or {}).get("error")
+        if error in {"unauthorized", "broker-unreachable"} and time.monotonic() < deadline:
+            print(f"bootstrap: broker not ready for placeholder files {provider} ({error}); retrying", flush=True)
+            time.sleep(2)
+            continue
+        if payload is None:
+            raise SystemExit(f"bootstrap: placeholder-files failed for {provider}: {result.stderr.strip() or result.stdout.strip()}")
+        raise SystemExit(f"bootstrap: placeholder-files denied for {provider}: {payload.get('message') or payload.get('error') or payload}")
+
+
+def placeholder_file_target(home, rel):
+    # Defense in depth: the broker already refuses absolute/traversal paths, but
+    # the runtime re-validates before writing anywhere.
+    if not isinstance(rel, str) or not rel or rel.startswith("/") or rel.startswith("\\"):
+        raise SystemExit(f"bootstrap: placeholder file path {rel!r} must be a relative path")
+    segments = rel.replace("\\", "/").split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise SystemExit(f"bootstrap: placeholder file path {rel!r} must not contain traversal segments")
+    return home.joinpath(*segments)
+
+
+def write_placeholder_file(target, content, mode, home):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Defense in depth: the relative path had no '..', but a symlinked parent
+    # could still redirect the write outside HOME. Verify the resolved parent
+    # stays under the resolved HOME before writing anything.
+    resolved_home = Path(os.path.realpath(home))
+    resolved_parent = Path(os.path.realpath(target.parent))
+    if resolved_parent != resolved_home and resolved_home not in resolved_parent.parents:
+        raise SystemExit(f"bootstrap: placeholder file target {target} resolves outside HOME")
+    fd, temporary = tempfile.mkstemp(dir=str(target.parent), prefix=".nvt-placeholder-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.chmod(temporary, mode)
+        os.replace(temporary, str(target))
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def apply_placeholder_files(egress):
+    # Materialize provider-owned placeholder auth files (placeholders only; the
+    # real secret stays broker-side). Runs regardless of egress mode. Never
+    # reads a host auth file as the source of truth.
+    if not isinstance(egress, dict):
+        return
+    grants = egress.get("grants") or []
+    if not isinstance(grants, list):
+        return
+    deadline = None
+    for index, grant in enumerate(grants):
+        if not isinstance(grant, dict) or grant.get("materialization") != "placeholder-file":
+            continue
+        provider = grant.get("provider")
+        if not isinstance(provider, str) or not provider:
+            raise SystemExit(f"egress.grants[{index}].provider must be a non-empty string")
+        if deadline is None:
+            deadline = broker_wait_deadline()
+        response = broker_placeholder_files(provider, deadline)
+        files = response.get("files")
+        if not isinstance(files, list) or not files:
+            raise SystemExit(f"bootstrap: placeholder-files for {provider} returned no files")
+        home = Path.home()
+        for file_index, entry in enumerate(files):
+            if not isinstance(entry, dict):
+                raise SystemExit(f"bootstrap: placeholder-files[{file_index}] for {provider} must be an object")
+            content = entry.get("content")
+            if not isinstance(content, str):
+                raise SystemExit(f"bootstrap: placeholder-files[{file_index}] for {provider} must include string content")
+            raw_mode = entry.get("mode") or "0600"
+            if not isinstance(raw_mode, str) or len(raw_mode) != 4 or any(char not in "01234567" for char in raw_mode):
+                raise SystemExit(f"bootstrap: placeholder-files[{file_index}] for {provider} has an invalid mode {raw_mode!r}")
+            target = placeholder_file_target(home, entry.get("path"))
+            write_placeholder_file(target, content, int(raw_mode, 8), home)
 
 
 def apply_additional_paths(paths):
@@ -554,6 +660,9 @@ def main():
     setup_tmux_config()
     if mediated_mode(egress):
         apply_mediated_egress(egress)
+    # Placeholder-file materialization is independent of egress mode: it writes
+    # inert placeholder auth files whether or not mediated routing is applied.
+    apply_placeholder_files(egress)
     command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         # Kept for older helper scripts and diagnostics; start-agent-session uses

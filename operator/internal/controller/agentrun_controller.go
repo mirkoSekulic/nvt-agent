@@ -2200,12 +2200,15 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
 		materialization := AgentRunGrantMaterialization(grant)
 		switch materialization {
-		case nvtv1alpha1.AgentRunGrantFileBundle, nvtv1alpha1.AgentRunGrantHeaderInject:
+		case nvtv1alpha1.AgentRunGrantFileBundle, nvtv1alpha1.AgentRunGrantHeaderInject, nvtv1alpha1.AgentRunGrantPlaceholderFile:
 		default:
-			return fmt.Errorf("broker grant %s materialization must be file-bundle or header-inject, got %q", grant.Provider, materialization)
+			return fmt.Errorf("broker grant %s materialization must be file-bundle, header-inject, or placeholder-file, got %q", grant.Provider, materialization)
 		}
-		if mode == nvtv1alpha1.AgentRunEgressDirect && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
-			return fmt.Errorf("egress direct is incompatible with broker grant %s materialization header-inject", grant.Provider)
+		// header-inject and placeholder-file are zero-possession mediated modes:
+		// both are rejected in direct mode (no edge to inject at) and file-bundle
+		// is rejected in mediated mode (writes usable material into the container).
+		if mode == nvtv1alpha1.AgentRunEgressDirect && materialization != nvtv1alpha1.AgentRunGrantFileBundle {
+			return fmt.Errorf("egress direct is incompatible with broker grant %s materialization %s", grant.Provider, materialization)
 		}
 		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantFileBundle {
 			return fmt.Errorf("egress mediated is incompatible with broker grant %s materialization file-bundle", grant.Provider)
@@ -2245,6 +2248,10 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		}
 	}
 	if mode == nvtv1alpha1.AgentRunEgressMediated && headerInjectGrants == 0 {
+		// 6.1 scope: placeholder-file grants are materialized but not routed
+		// (no egressd route until 6.2's forward proxy), so a mediated run still
+		// needs a header-inject grant for its egress route. Standalone
+		// placeholder-file routing lands in 6.2.
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
 	}
 	return nil
@@ -2597,6 +2604,18 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 			"base-url":        baseURL,
 		})
 		routeIndex++
+	}
+	// placeholder-file grants carry no egressd route (edge injection is Phase
+	// 6.2); bootstrap only needs the provider + mode to materialize the inert
+	// placeholder auth file.
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantPlaceholderFile {
+			continue
+		}
+		grants = append(grants, map[string]any{
+			"provider":        grant.Provider,
+			"materialization": string(nvtv1alpha1.AgentRunGrantPlaceholderFile),
+		})
 	}
 	updated := cloneStringAnyMap(config)
 	egress := map[string]any{

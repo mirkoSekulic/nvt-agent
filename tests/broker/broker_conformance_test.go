@@ -389,6 +389,29 @@ providers:
     allow:
       repositories:
         - my-user/my-repo
+  - name: fixture-auth
+    plugin: placeholder
+    config:
+      file:
+        path: .fixture/auth.json
+        mode: "0600"
+      hosts:
+        - api.fixture.test
+        - auth.fixture.test
+      fields:
+        access_token:
+          secret-env: TEST_PLACEHOLDER_ACCESS
+          shape: plain
+        id_token:
+          secret-env: TEST_PLACEHOLDER_ID
+          shape: jwt
+          claims:
+            sub: acct-fixture-123
+            plan: pro
+        account_id: acct-fixture-123
+    allow:
+      repositories:
+        - my-user/my-repo
   - name: header-provider
     plugin: headers
     config:
@@ -412,6 +435,8 @@ providers:
     config:
       injection-hosts:
         - chatgpt.com
+        - api.openai.com
+        - auth.openai.com
 %[6]s      auth-file: %[7]q
       token-url: %[8]q
       client-id: test-client
@@ -455,6 +480,8 @@ func (f *brokerFixture) start() {
 		"TEST_EXTRA_HEADER=X-Api-Key: extra-secret",
 		"TEST_ALTINN_API_KEY_HEADER=X-API-Key: altinn-secret",
 		"TEST_ANTHROPIC_KEY=anthropic-secret-key",
+		"TEST_PLACEHOLDER_ACCESS=real-placeholder-access-token-secret",
+		"TEST_PLACEHOLDER_ID=real-placeholder-id-token-secret",
 	)
 	cmd.Stdout = &f.stdout
 	cmd.Stderr = &f.stderr

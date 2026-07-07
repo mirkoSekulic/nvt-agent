@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo> [--materialization file-bundle|header-inject] [--egress-host host[:port]] [--git] [--permission <name>=read|write]" >&2
+  echo "usage: $0 --name <name> --provider <provider> --repo <owner/repo> [--materialization file-bundle|header-inject|placeholder-file] [--egress-host host[:port]] [--git] [--permission <name>=read|write]" >&2
 }
 
 name=""
@@ -62,7 +62,7 @@ if [ -z "$name" ] || [ -z "$provider" ] || [ -z "$repo" ]; then
   exit 1
 fi
 case "$materialization" in
-  file-bundle|header-inject) ;;
+  file-bundle|header-inject|placeholder-file) ;;
   *)
     echo "invalid materialization: $materialization" >&2
     usage

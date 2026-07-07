@@ -11,7 +11,7 @@ from broker.plugins.github_app.provider import ProviderError
 
 
 VALID_ROLES = {"agent", "egress"}
-VALID_MATERIALIZATIONS = {"file-bundle", "header-inject"}
+VALID_MATERIALIZATIONS = {"file-bundle", "header-inject", "placeholder-file"}
 VALID_PERMISSION_VALUES = {"read", "write"}
 
 
@@ -165,6 +165,16 @@ class AgentRegistry:
                 if quota is not None:
                     grant_entry["quota"] = quota
                 grants.append(grant_entry)
+            # A provider may appear in multiple grants (repository aggregation),
+            # but they must agree on materialization: grant() returns the first
+            # match, so conflicting modes for one provider would be resolved
+            # order-dependently.
+            materialization_by_provider = {}
+            for grant_entry in grants:
+                existing = materialization_by_provider.get(grant_entry["provider"])
+                if existing is not None and existing != grant_entry["materialization"]:
+                    fail(f"agents[{index}] ({agent_id}): provider {grant_entry['provider']} has conflicting materializations {existing} and {grant_entry['materialization']}")
+                materialization_by_provider[grant_entry["provider"]] = grant_entry["materialization"]
             output[token_hash] = {"id": agent_id, "role": "agent", "paired_agent": None, "grants": grants}
             roles_by_id[agent_id] = "agent"
         for index, agent_id, paired_agent in pairings:

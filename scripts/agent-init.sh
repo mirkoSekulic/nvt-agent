@@ -309,8 +309,11 @@ for grant in agent.get("grants", []) or []:
         continue
     provider = grant.get("provider") or "<unknown>"
     materialization = grant.get("materialization") or "file-bundle"
-    if mode == "direct" and materialization == "header-inject":
-        raise SystemExit(f"agent-init: egress direct is incompatible with broker grant {provider} materialization header-inject")
+    if materialization not in ("file-bundle", "header-inject", "placeholder-file"):
+        raise SystemExit(f"agent-init: broker grant {provider} materialization must be file-bundle, header-inject, or placeholder-file, got {materialization}")
+    # header-inject and placeholder-file are zero-possession mediated modes.
+    if mode == "direct" and materialization != "file-bundle":
+        raise SystemExit(f"agent-init: egress direct is incompatible with broker grant {provider} materialization {materialization}")
     if mode == "mediated" and materialization == "file-bundle":
         raise SystemExit(f"agent-init: egress mediated is incompatible with broker grant {provider} materialization file-bundle")
     if mode == "mediated" and materialization == "header-inject":
@@ -431,6 +434,13 @@ if mode == "mediated":
         lines.append("      materialization: header-inject")
         lines.append(f"      base-url: {scheme}://127.0.0.1:{8471 + index}")
         index += 1
+    # placeholder-file grants carry no egressd route (edge injection is Phase
+    # 6.2); bootstrap only needs provider + mode to materialize the file.
+    for grant in (agent or {}).get("grants", []) or []:
+        if not isinstance(grant, dict) or (grant.get("materialization") or "file-bundle") != "placeholder-file":
+            continue
+        lines.append(f"    - provider: {grant.get('provider')}")
+        lines.append("      materialization: placeholder-file")
     lines.append(END)
     text = text.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n"
     changed = True

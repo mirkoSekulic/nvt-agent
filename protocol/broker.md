@@ -195,6 +195,62 @@ Unknown providers, missing grants, and provider failures use the same
 `{"ok":false,"error":"...","message":"..."}` error shape and status
 conventions as `/v1/token`.
 
+### POST /v1/placeholder-files
+
+Returns a provider-materialized **placeholder** file: a syntactically valid
+auth/config file whose secret fields carry only inert placeholders. This is
+the `placeholder-file` materialization mode — **distinct from `file-bundle`**.
+`file-bundle` writes usable credential material into the agent (the
+dev/fallback path); `placeholder-file` never does. The real secret values stay
+in broker/provider custody and are injected at the network edge (Phase 6.2),
+so a file-based tool can start against a local auth file it accepts while the
+agent holds no real credential.
+
+Request: `{"provider": "codex-main"}`. Requires an `agent`-role bearer token
+whose identity holds a `placeholder-file` grant for the provider.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "files": [
+    {"path": ".codex/auth.json", "content": "{ ... placeholders ... }\n", "mode": "0600"}
+  ],
+  "hosts": ["chatgpt.com", "api.openai.com", "auth.openai.com"],
+  "expires_at": null
+}
+```
+
+Rules:
+
+- `path` is a **relative** path under the agent home (subdirectories allowed);
+  absolute paths and `.`/`..`/empty segments are refused. `content` is a UTF-8
+  string; `mode` is a four-digit octal string (default `"0600"`).
+- Secret fields are placeholders only, on every path including errors. The two
+  placeholder shapes: `plain` (the zero-entropy `NVT-PLACEHOLDER-NOT-A-KEY`)
+  and `jwt` (a syntactically valid JWT carrying only non-secret identity claims
+  plus a far-future `exp`, with a placeholder signature — for tools that parse
+  local token claims before any network call). Non-secret literal fields are
+  emitted verbatim.
+- `hosts` are the upstream hosts the placeholder's real credential is valid
+  for; consumed by the forward-proxy route/injection map (Phase 6.2). Not a
+  secret.
+- Scoped exactly like every other grant: the agent fetches only its own
+  bindings, and a `placeholder-file` grant is denied on `/v1/token`,
+  `/v1/headers`, and `/v1/files` (`materialization-mismatch`) — the real
+  secret is unreachable everywhere.
+- **Injection-eligible**: `/v1/injection/headers` accepts a `placeholder-file`
+  grant, so the same grant both materializes the placeholder file and lets the
+  edge inject the real credential (no second `header-inject` grant for the
+  provider is needed). This functions only for providers that also implement
+  injection (an `injection_headers` method plus `injection-hosts`), such as the
+  Codex preset; the generic `placeholder` provider is materialization-only and
+  returns `injection-not-supported`.
+- `egress`-role identities are refused; the placeholder file is inert and
+  agent-owned.
+- Error shape and status conventions match `/v1/token`.
+
 ### POST /v1/identity
 
 Returns commit identity metadata for a broker provider after applying the same
