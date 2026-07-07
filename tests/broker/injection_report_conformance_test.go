@@ -208,3 +208,21 @@ func TestReportRejectsMissingEntries(t *testing.T) {
 		t.Fatalf("missing token must deny: status=%d body=%v", status, body)
 	}
 }
+
+// TestBrokerLoadsGrantQuota pins that the broker accepts a grant carrying a
+// quota block (schema strictness) and still serves injection for it — the
+// broker parses quota but does not enforce it (enforcement is per egressd
+// process, docs/phase5-6b-observability-pr-plan.md decision 3).
+func TestBrokerLoadsGrantQuota(t *testing.T) {
+	f := newBrokerFixture(t)
+	identities := mediatedIdentities()
+	frontend := identities["frontend"]
+	frontend.Grants = []roleGrant{{Provider: "codex-main", Materialization: "header-inject", QuotaRequests: 3}}
+	identities["frontend"] = frontend
+	f.writeRoleIdentities(identities)
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", injectionRequest())
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("injection must still succeed with a quota-bearing grant: status=%d body=%v", status, body)
+	}
+}

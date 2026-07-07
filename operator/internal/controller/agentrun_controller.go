@@ -131,6 +131,11 @@ type brokerAgentGrantEntry struct {
 	Materialization string            `json:"materialization,omitempty"`
 	EgressHosts     []string          `json:"egress-hosts,omitempty"`
 	Permissions     map[string]string `json:"permissions,omitempty"`
+	Quota           *brokerAgentQuota `json:"quota,omitempty"`
+}
+
+type brokerAgentQuota struct {
+	Requests int `json:"requests"`
 }
 
 // AgentRunReconciler reconciles AgentRun resources.
@@ -1630,6 +1635,7 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		Upstream              string `json:"upstream"`
 		AllowInsecureUpstream bool   `json:"allow_insecure_upstream"`
 		ListenTLS             string `json:"listen_tls,omitempty"`
+		MaxRequests           int    `json:"max_requests,omitempty"`
 	}
 	type egressdCA struct {
 		PublishDir   string   `json:"publish_dir,omitempty"`
@@ -1665,6 +1671,9 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 			Capability:            grant.Provider,
 			Upstream:              grant.EgressHosts[0],
 			AllowInsecureUpstream: grant.AllowInsecureUpstream,
+		}
+		if grant.Quota != nil {
+			route.MaxRequests = grant.Quota.Requests
 		}
 		if enforced {
 			// Own-Pod: the hop leaves localhost, so every route listens on
@@ -2163,6 +2172,9 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 				return fmt.Errorf("broker grant %s permissions must map permission names to read or write", grant.Provider)
 			}
 		}
+		if grant.Quota != nil && grant.Quota.Requests <= 0 {
+			return fmt.Errorf("broker grant %s quota.requests must be a positive integer", grant.Provider)
+		}
 		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
 			headerInjectGrants++
 			if len(grant.EgressHosts) == 0 {
@@ -2248,12 +2260,17 @@ func BrokerAgentGrants(broker *nvtv1alpha1.AgentRunBroker) []brokerAgentGrantEnt
 				permissions[key] = value
 			}
 		}
+		var quota *brokerAgentQuota
+		if grant.Quota != nil {
+			quota = &brokerAgentQuota{Requests: grant.Quota.Requests}
+		}
 		grants = append(grants, brokerAgentGrantEntry{
 			Provider:        grant.Provider,
 			Repositories:    repositories,
 			Materialization: string(AgentRunGrantMaterialization(grant)),
 			EgressHosts:     append([]string{}, grant.EgressHosts...),
 			Permissions:     permissions,
+			Quota:           quota,
 		})
 	}
 	sort.SliceStable(grants, func(i, j int) bool {

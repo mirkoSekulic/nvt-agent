@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,6 +58,21 @@ type Proxy struct {
 
 	mu    sync.Mutex
 	cache map[string]*cacheEntry
+
+	// requestCount is the per-process request tally for max_requests. It is
+	// incremented atomically; see quotaExceeded for the TOCTOU-free check.
+	requestCount atomic.Int64
+}
+
+// quotaExceeded increments the request tally and reports whether this request
+// is over the route's max_requests. Add-then-compare is TOCTOU-free: exactly
+// the first MaxRequests callers observe a count within the limit; the
+// (N+1)th and beyond fail closed. 0 means unlimited.
+func (p *Proxy) quotaExceeded() bool {
+	if p.Route.MaxRequests <= 0 {
+		return false
+	}
+	return p.requestCount.Add(1) > int64(p.Route.MaxRequests)
 }
 
 // report enqueues one sanitized audit entry for this route. Nil-safe and
@@ -123,6 +139,14 @@ func (p *Proxy) entryValidLocked(entry *cacheEntry) bool {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.quotaExceeded() {
+		// Fail closed before touching the broker or upstream. Counted and
+		// audited like any other outcome.
+		log.Printf("egressd %s: request quota exceeded", p.Route.Capability)
+		p.report(r.Method, r.URL.Path, http.StatusTooManyRequests)
+		writeError(w, http.StatusTooManyRequests, "egress-quota-exceeded")
+		return
+	}
 	material, err := p.material(r.Context(), r.Method, r.URL.Path)
 	if err != nil {
 		// err carries broker reasons only, never header values.

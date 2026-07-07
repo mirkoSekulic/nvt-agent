@@ -26,6 +26,7 @@ type roleGrant struct {
 	Repositories    []string
 	Materialization string
 	Permissions     map[string]string
+	QuotaRequests   int
 }
 
 type roleIdentity struct {
@@ -90,6 +91,9 @@ func (f *brokerFixture) writeRoleIdentities(identities map[string]roleIdentity) 
 				for _, key := range keys {
 					builder.WriteString(fmt.Sprintf("          %s: %s\n", key, grant.Permissions[key]))
 				}
+			}
+			if grant.QuotaRequests > 0 {
+				builder.WriteString(fmt.Sprintf("        quota:\n          requests: %d\n", grant.QuotaRequests))
 			}
 		}
 	}

@@ -365,6 +365,9 @@ for grant in agent.get("grants", []) or []:
         "upstream": hosts[0],
         "allow_insecure_upstream": False,
     }
+    quota = grant.get("quota")
+    if isinstance(quota, dict) and isinstance(quota.get("requests"), int):
+        route["max_requests"] = quota["requests"]
     if grant.get("git"):
         route["listen_tls"] = "ca"
         need_ca = True

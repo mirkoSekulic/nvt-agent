@@ -107,6 +107,18 @@ type AgentRunBrokerGrant struct {
 	// real provider; a plaintext upstream leg carrying an injected credential
 	// is a conformance failure.
 	AllowInsecureUpstream bool `json:"allowInsecureUpstream,omitempty"`
+	// Quota bounds proxied requests for this grant's route. Absent means
+	// unlimited. The count is per egressd process, not per run — an egressd
+	// restart resets it — so it is a soft resource guard, not a security
+	// boundary (docs/phase5-6b-observability-pr-plan.md decision 3).
+	Quota *AgentRunGrantQuota `json:"quota,omitempty"`
+}
+
+// AgentRunGrantQuota bounds a grant's egress.
+type AgentRunGrantQuota struct {
+	// Requests is the maximum number of proxied requests on this route.
+	// Must be positive when the quota block is present.
+	Requests int `json:"requests"`
 }
 
 // AgentRunPrompt defines the optional initial prompt for disposable runs.
@@ -275,6 +287,9 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 		for key, value := range in.Permissions {
 			out.Permissions[key] = value
 		}
+	}
+	if in.Quota != nil {
+		out.Quota = &AgentRunGrantQuota{Requests: in.Quota.Requests}
 	}
 	return out
 }
