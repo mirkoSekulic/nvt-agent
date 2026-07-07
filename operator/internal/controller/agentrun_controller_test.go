@@ -2574,7 +2574,7 @@ func TestRenderAgentConfigYAMLInjectsInitialPromptPluginWhenPluginsMissing(t *te
 	}
 }
 
-func TestRenderAgentConfigYAMLNoPromptRendersUnchanged(t *testing.T) {
+func TestRenderAgentConfigYAMLNoPromptDoesNotInjectInitialPrompt(t *testing.T) {
 	agentRun := testAgentRun()
 
 	rendered, err := RenderAgentConfigYAML(agentRun)
@@ -2584,6 +2584,21 @@ func TestRenderAgentConfigYAMLNoPromptRendersUnchanged(t *testing.T) {
 
 	if strings.Contains(rendered, "initial-prompt") {
 		t.Fatalf("expected no injected plugin, got:\n%s", rendered)
+	}
+}
+
+func TestRenderAgentConfigYAMLDoesNotInjectPreseedForNonCodex(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{"tools": {"packages": []}}`)}
+	agentRun.Spec.Runtime.Type = "claude"
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	if strings.Contains(rendered, "preseed") || strings.Contains(rendered, "check_for_update_on_startup") {
+		t.Fatalf("operator injected runtime preseed for non-codex run:\n%s", rendered)
 	}
 }
 
