@@ -184,6 +184,63 @@ for grants whose routing carries it. Non-git capabilities omit the field.
 The local base URL the agent's tooling points at (the `egressd` listen
 address) is composed by runtime bootstrap, not returned by the broker.
 
+### POST /v1/injection/report
+
+Egress role only. Reports proxied requests so the broker's audit log covers
+individual requests, not just per-fetch injection. This endpoint is
+**observability, not a security control**: reporting is asynchronous,
+bounded, and best-effort on the `egressd` side — a report failure is logged
+and dropped, never blocking or failing proxied traffic. Authorization and
+enforcement live in `/v1/injection/headers` and the network layer, not here.
+
+Request (batched):
+
+```json
+{"entries": [
+  {"capability": "git-app", "host": "github.com", "method": "POST",
+   "path_class": "git-upload-pack", "status": 200},
+  {"capability": "codex-main", "host": "chatgpt.com", "method": "POST",
+   "path_class": "backend-api", "status": 429}
+]}
+```
+
+Forward-proxy CONNECT entries use `{capability, host, port, decision}` where
+`decision` is `allow` or `deny`:
+
+```json
+{"entries": [
+  {"capability": "tunnel-main", "host": "example.com", "port": 443,
+   "decision": "allow"}
+]}
+```
+
+Response: `{"ok": true, "reported": <n>}`.
+
+Rules:
+
+- Egress role only; the paired agent is resolved as for
+  `/v1/injection/headers`. An `agent` identity is denied.
+- Authorization is role + pairing only. Entries are **not** re-checked
+  against grants: a report for a just-revoked capability is still
+  audit-worthy, and a compromised `egressd` can spam granted capabilities
+  regardless — re-checking buys nothing and would drop legitimate audit.
+- `path_class` is a **sanitized** class, never a raw path (see below).
+  `egressd` computes it at the source so raw paths never leave the sidecar.
+- At most 100 entries per report; combined with the request size limit this
+  bounds a report. Oversized reports are denied with the standard error
+  shape, not truncated silently. A malformed entry rejects the whole batch;
+  nothing is partially audited.
+- One audit line per entry, `operation: "injection.request"` (HTTP) with
+  `{host, method, path_class, status}` or the CONNECT shape with
+  `{host, port, decision}`. Header values and token material never appear,
+  on any path including errors.
+
+**`path_class` definition.** git smart-HTTP paths reduce to
+`git-upload-pack` | `git-receive-pack` | `info-refs`; every other path
+reduces to its first path segment (`/repos/o/r/pulls/1` → `repos`, `/` →
+`root`). This keeps the audit useful without spraying repo or file names
+into it.
+
 ## Placeholder Convention
 
 Some CLIs refuse to start without a syntactically present key. Mediated mode
@@ -219,6 +276,15 @@ Every injection request appends one JSONL audit entry: request id,
 capability, egress identity id, paired agent id, host, method, path class,
 allow/deny result, denial reason, and expiry metadata. Header values and
 token material are never logged, on any path including errors.
+
+`/v1/injection/headers` audits one entry per *fetch*, which `egressd` caches
+for a TTL window — so it does not capture individual proxied requests.
+`/v1/injection/report` (above) closes that gap: `egressd` reports each
+proxied request and forward-proxy CONNECT, appending one
+`operation: "injection.request"` line per entry to the same log. Because
+that reporting is best-effort observability, audit completeness is not a
+security guarantee — the security guarantees are non-possession and
+enforcement, neither of which depends on the report path.
 
 ## Stability
 
