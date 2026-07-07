@@ -1,6 +1,7 @@
 runtime:
   command: {{AGENT_TYPE}}
   args: {{AGENT_ARGS}}
+  user: {{AGENT_USER}}
 
 tools:
   packages: []

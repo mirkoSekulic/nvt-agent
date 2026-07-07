@@ -15,7 +15,20 @@ RUN apt-get update \
     gh \
     ripgrep \
     tmux \
+    sudo \
   && rm -rf /var/lib/apt/lists/*
+
+# Opt-in non-root runtime user. The base image already ships a uid/gid 1000
+# user (`ubuntu`); rename it to `agent` with home /home/agent and give it
+# passwordless sudo. The image default user stays root (no `USER agent`
+# directive) — non-root mode is selected at runtime by the operator/compose, so
+# existing root/Codex behavior is unchanged.
+RUN groupmod -n agent ubuntu \
+  && usermod -l agent -d /home/agent -m ubuntu \
+  && printf 'agent ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/nvt-agent \
+  && chmod 0440 /etc/sudoers.d/nvt-agent \
+  && mkdir -p /home/agent/.nvt-agent /home/agent/.local/bin \
+  && chown -R 1000:1000 /home/agent
 
 RUN docker --version \
   && docker compose version

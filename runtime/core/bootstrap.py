@@ -71,6 +71,14 @@ def load_bootstrap_config(path):
     if not isinstance(runtime, dict):
         raise SystemExit("runtime must be a YAML object")
 
+    # runtime.user is a declarative surface (root|non-root); the container user
+    # is actually selected by compose/k8s. Validate it and reject unknown modes.
+    # bootstrap itself is $HOME-relative, so it follows whatever HOME the
+    # selected user has.
+    runtime_user = runtime.get("user", "root")
+    if runtime_user not in ("root", "non-root"):
+        raise SystemExit("runtime.user must be root or non-root")
+
     tools = data.get("tools", data)
     if not isinstance(tools, dict):
         raise SystemExit("tools must be a YAML object")

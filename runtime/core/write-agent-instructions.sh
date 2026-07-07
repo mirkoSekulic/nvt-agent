@@ -7,6 +7,14 @@ local_instructions="${NVT_AGENT_LOCAL_INSTRUCTIONS:-$workspace/AGENTS.local.md}"
 
 mkdir -p "$workspace"
 
+# Reflect the actual container user so tools that refuse to run as root (e.g.
+# Claude Code's bypass mode) know sudo is available in non-root mode.
+if [ "$(id -u)" -ne 0 ]; then
+  user_line="- The agent runs as the non-root user \`$(id -un 2>/dev/null || echo agent)\` (uid $(id -u)); passwordless \`sudo\` is available for privileged operations."
+else
+  user_line="- The agent runs as \`root\`."
+fi
+
 cat > "$target" <<EOF
 # AGENTS.md
 
@@ -17,6 +25,7 @@ edit \`AGENTS.local.md\` in this workspace; if present, it is appended below.
 
 ## Runtime Context
 
+$user_line
 - The workspace path is \`$workspace\`.
 - Local override instructions are read from \`$local_instructions\` when the
   file exists.
