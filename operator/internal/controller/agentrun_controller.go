@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"os"
 	"path"
 	"reflect"
@@ -842,7 +843,7 @@ func EgressCAConfigMapName(agentRunName string) string {
 
 // EgressCASecretName returns the private per-run CA Secret mounted only into egressd.
 func EgressCASecretName(agentRunName string) string {
-	return agentRunName + "-egress-ca"
+	return agentRunName + "-egress-ca-keypair"
 }
 
 // enforcementLabels extends the run labels with the pairing selectors the
@@ -940,11 +941,8 @@ func (r *AgentRunReconciler) publishEgressCAConfigMap(ctx context.Context, agent
 		return false, fmt.Errorf("egress CA Secret %s/%s exists but is not controlled by AgentRun %s", secret.Namespace, secret.Name, agentRun.Name)
 	}
 	certPEM := secret.Data[egressCACertKey]
-	if err := validateCACertificatePEM(certPEM); err != nil {
-		return false, fmt.Errorf("egress CA Secret contains invalid certificate material: %w", err)
-	}
-	if len(secret.Data[egressCAKeyKey]) == 0 {
-		return false, fmt.Errorf("egress CA Secret %s/%s is missing key %s", secret.Namespace, secret.Name, egressCAKeyKey)
+	if err := validateCAKeyPairPEM(certPEM, secret.Data[egressCAKeyKey]); err != nil {
+		return false, fmt.Errorf("egress CA Secret contains invalid keypair: %w", err)
 	}
 	configMap := &corev1.ConfigMap{}
 	key := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressCAConfigMapName(agentRun.Name)}
@@ -1071,9 +1069,6 @@ func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentR
 		if err := validateCAKeyPairPEM(secret.Data[egressCACertKey], secret.Data[egressCAKeyKey]); err != nil {
 			return fmt.Errorf("egress CA Secret %s/%s has invalid keypair: %w", secret.Namespace, secret.Name, err)
 		}
-		if len(secret.Data[egressCAKeyKey]) == 0 {
-			return fmt.Errorf("egress CA Secret %s/%s is missing key %s", secret.Namespace, secret.Name, egressCAKeyKey)
-		}
 		return nil
 	}
 	if !errors.IsNotFound(err) {
@@ -1122,13 +1117,16 @@ func generateEgressCASecretData(leafDNSNames []string) (map[string][]byte, error
 		KeyUsage:                    x509.KeyUsageCertSign,
 		PermittedDNSDomainsCritical: true,
 		PermittedDNSDomains:         append([]string{"localhost"}, leafDNSNames...),
-		PermittedIPRanges:           nil,
-		ExcludedDNSDomains:          nil,
-		ExcludedIPRanges:            nil,
-		PermittedEmailAddresses:     nil,
-		ExcludedEmailAddresses:      nil,
-		PermittedURIDomains:         nil,
-		ExcludedURIDomains:          nil,
+		PermittedIPRanges: []*net.IPNet{
+			{IP: net.IPv4(127, 0, 0, 0).To4(), Mask: net.CIDRMask(8, 32)},
+			{IP: net.IPv6loopback, Mask: net.CIDRMask(128, 128)},
+		},
+		ExcludedDNSDomains:      nil,
+		ExcludedIPRanges:        nil,
+		PermittedEmailAddresses: nil,
+		ExcludedEmailAddresses:  nil,
+		PermittedURIDomains:     nil,
+		ExcludedURIDomains:      nil,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {

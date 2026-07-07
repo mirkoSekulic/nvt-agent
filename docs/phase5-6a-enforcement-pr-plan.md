@@ -20,7 +20,7 @@ review stays possible. Do not split it without asking first.
    and the compose shape — zero behavior change for existing runs.
 2. **CNI**: Calico on kind (lighter install than Cilium; the parent plan
    already leans this way). The kindnet path stays for all existing smokes.
-3. **CA fetch transport**: egressd serves `GET /ca.crt` on a dedicated
+3. **CA public endpoint**: egressd serves `GET /ca.crt` on a dedicated
    plain-HTTP listener (the cert is public material and *is* the trust anchor
    being bootstrapped — TLS on this endpoint would be circular). The listener
    also serves `/healthz` for the readiness probe. Key material is never
@@ -76,8 +76,9 @@ the PR.
 
 Per-run objects in enforcement mode, all owner-referenced: egressd Pod
 `<run>-egressd`, Service `<run>-egressd` (route ports + CA port), ConfigMap
-`<run>-egress-ca`, a durable Secret with the egress CA keypair mounted only
-into egressd, and two NetworkPolicies. Labels on both Pods:
+`<run>-egress-ca`, a durable Secret `<run>-egress-ca-keypair` with the egress
+CA keypair mounted only into egressd, and two NetworkPolicies. Labels on both
+Pods:
 `nvt.dev/agentrun: <name>`, `nvt.dev/role: agent|egressd`.
 
 Reconcile as a **status-condition state machine**, one observable step per
@@ -116,10 +117,10 @@ BrokerPolicyReady → EgressdCreated → EgressdReady → EgressCAPublished
 
 Stuck states: conditions carry reasons, requeue with backoff,
 `activeDeadlineSeconds` still bounds the whole run. Controller tests: full
-condition progression; egressd-never-ready; CA fetch fails (non-cert body ⇒
-no publish, loud condition); no reconcile path creates the agent Pod with
-`EgressCAPublished` unset; same-Pod mediated and direct modes render exactly
-as today.
+condition progression; egressd-never-ready; CA Secret validation fails (bad
+or mismatched keypair ⇒ no publish, loud condition); no reconcile path creates
+the agent Pod with `EgressCAPublished` unset; same-Pod mediated and direct
+modes render exactly as today.
 
 **Agent-side trust for non-git tools**: base-urls are now `https://` for
 every grant, but generic CLIs use the system trust store. Bootstrap
@@ -225,8 +226,9 @@ cluster-scoped baseline.
 - Agent→egressd reachability is proven through the Service DNS path from
   inside the agent container, under the default-deny policy.
 - `GET /ca.crt` serves cert only, on every path including errors; the
-  operator publishes exactly what it fetched (ConfigMap bytes == served
-  bytes); the CA private key PEM is a forbidden needle everywhere.
+  operator publishes only the public cert from the validated CA Secret
+  (ConfigMap bytes == Secret `ca.crt`); the CA private key PEM is a forbidden
+  needle everywhere.
 - Bootstrap fails closed when the CA mount is absent or the trust-store
   install fails (Phase 4 wait re-run against the ConfigMap-mount shape; no
   insecure/direct fallback).

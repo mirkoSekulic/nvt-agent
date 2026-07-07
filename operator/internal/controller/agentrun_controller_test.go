@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"reflect"
 	"strings"
@@ -983,6 +984,19 @@ func runCondition(agentRun *nvtv1alpha1.AgentRun, conditionType string) *metav1.
 	return nil
 }
 
+func containsIPNet(ranges []*net.IPNet, cidr string) bool {
+	_, want, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	for _, got := range ranges {
+		if got.String() == want.String() {
+			return true
+		}
+	}
+	return false
+}
+
 // TestEnforcementReconcileProgression drives the full condition machine:
 // egressd Pod/Service first (never behind the broker policy), agent Pod only
 // after EgressdReady and EgressCAPublished, CA ConfigMap bytes exactly what
@@ -1025,8 +1039,20 @@ func TestEnforcementReconcileProgression(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: EgressCASecretName(agentRun.Name)}, &caSecret); err != nil {
 		t.Fatalf("expected egress CA Secret, got %v", err)
 	}
+	if caSecret.Name == EgressCAConfigMapName(agentRun.Name) {
+		t.Fatalf("private CA Secret must not share name with public ConfigMap %q", caSecret.Name)
+	}
 	if err := validateCACertificatePEM(caSecret.Data[egressCACertKey]); err != nil {
 		t.Fatalf("generated egress CA certificate is invalid: %v", err)
+	}
+	certs, err := parseCACertificatesPEM(caSecret.Data[egressCACertKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsIPNet(certs[0].PermittedIPRanges, "127.0.0.0/8") ||
+		!containsIPNet(certs[0].PermittedIPRanges, "::1/128") ||
+		len(certs[0].PermittedIPRanges) != 2 {
+		t.Fatalf("egress CA permitted IP ranges = %v", certs[0].PermittedIPRanges)
 	}
 	if !strings.Contains(string(caSecret.Data[egressCAKeyKey]), "PRIVATE KEY") {
 		t.Fatal("egress CA Secret missing private key material")
