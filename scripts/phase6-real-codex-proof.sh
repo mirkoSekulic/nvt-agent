@@ -22,7 +22,9 @@ KUBECTL_CONTEXT="${KUBECTL_CONTEXT:-kind-${CLUSTER}}"
 CODEX_AUTH_SOURCE="${CODEX_AUTH_SOURCE:-${HOME}/.codex}"
 CODEX_AUTH_SECRET="${CODEX_AUTH_SECRET:-codex-auth}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
-RUN_NAME="${RUN_NAME:-real-codex-proof}"
+# Unique per invocation so a rerun always creates a fresh AgentRun/pod (an
+# apply over the previous run's still-sleeping pod would not start a new turn).
+RUN_NAME="${RUN_NAME:-real-codex-proof-$(date +%s)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/.phase6-out/real-codex-proof}"
 # A fixed-per-run nonce the model must echo back; passed in so the script stays
 # reproducible (no Date/Random at import time in the harness values file).
@@ -132,6 +134,14 @@ doc = {"apiVersion": "nvt.dev/v1alpha1", "kind": "AgentRun",
 print(json.dumps(doc))
 PY
 log "submitting forward-proxy placeholder-file AgentRun ${RUN_NAME}"
+# Defensive even with a unique name: if an explicit RUN_NAME is reused, delete
+# the prior AgentRun and wait for its agent pod to clear so the new run is not
+# racing a stale, still-sleeping pod.
+if "${KUBECTL[@]}" -n "${NAMESPACE}" get agentrun "${RUN_NAME}" >/dev/null 2>&1; then
+  log "deleting pre-existing AgentRun ${RUN_NAME}"
+  "${KUBECTL[@]}" -n "${NAMESPACE}" delete agentrun "${RUN_NAME}" --wait=true --timeout="${ROLLOUT_TIMEOUT}" || true
+  "${KUBECTL[@]}" -n "${NAMESPACE}" wait --for=delete "pod/${RUN_NAME}-agent" --timeout="${ROLLOUT_TIMEOUT}" 2>/dev/null || true
+fi
 "${KUBECTL[@]}" apply -f "${RUN_YAML}"
 
 # 6: wait for the agent Pod and the codex turn to finish.
@@ -163,9 +173,20 @@ collect proxy-env bash -lc 'env | grep -Ei "PROXY" | sort'
 "${KUBECTL[@]}" -n "${NAMESPACE}" cp "${RUN_NAME}-agent:/root/.codex" "${OUTPUT_DIR}/agent-codex" -c agent 2>/dev/null || true
 
 # 8: secret scan — the real host access/refresh tokens must not appear.
-log "scanning copied agent files for host Codex token material"
+log "scanning copied agent files and collected evidence for host Codex token material"
 SCAN_RESULT="clean"
-python3 - "${CODEX_AUTH_SOURCE}/auth.json" "${OUTPUT_DIR}/agent-codex" "${OUTPUT_DIR}/agent-auth.json" >"${OUTPUT_DIR}/secret-scan.txt" 2>&1 <<'PY' || SCAN_RESULT="FAIL"
+# Scan the copied agent Codex dir plus every collected evidence file (codex
+# stdout/stderr, proxy env, egressd + broker logs) for the real host tokens.
+python3 - "${CODEX_AUTH_SOURCE}/auth.json" \
+  "${OUTPUT_DIR}/agent-codex" \
+  "${OUTPUT_DIR}/agent-auth.json" \
+  "${OUTPUT_DIR}/codex.stdout" \
+  "${OUTPUT_DIR}/codex.stderr" \
+  "${OUTPUT_DIR}/last-message" \
+  "${OUTPUT_DIR}/proxy-env" \
+  "${OUTPUT_DIR}/egressd.log" \
+  "${OUTPUT_DIR}/broker.log" \
+  >"${OUTPUT_DIR}/secret-scan.txt" 2>&1 <<'PY' || SCAN_RESULT="FAIL"
 import json
 import os
 import sys
