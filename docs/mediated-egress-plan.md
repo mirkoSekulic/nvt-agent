@@ -299,7 +299,7 @@ May split into two PRs (enforcement; observability/control) even as one phase.
 
 ### Phase 6 — Transparent mediation mode (arbitrary-tool coverage)
 
-**This phase closes the main coverage gap between redirect-based mediation and transparent-MITM mediation: arbitrary/unmodifiable tools with hardcoded endpoints.** Everything through Phase 5 mediates *redirectable* HTTP tools (base URL / proxy env configurable) and hard-disallows the rest in mediated mode. Phase 6 extends coverage to tools that ignore configuration, reusing the Phase 4 TLS-termination machinery with **no broker-contract changes** (the injection endpoints are transport-agnostic by construction, §2).
+**This phase closes the main coverage gap between redirect-based mediation and transparent-MITM mediation: arbitrary/unmodifiable tools with hardcoded endpoints.** Everything through Phase 5 mediates tools that accept a base-URL / `redirect-env` override, and hard-disallows the rest in mediated mode. Phase 6 extends coverage in two increments: forward-proxy mode reaches tools that ignore base-URL config **but honor `HTTP_PROXY`/`HTTPS_PROXY`** (the bulk), and transparent REDIRECT/TPROXY later reaches tools that ignore proxy env too (the residue). The **header-injection endpoint shape is unchanged** — it is transport-agnostic by construction (§2), so forward-proxy adds no injection-contract change. Phase 6.1 does add one **new broker/provider contract**: placeholder-file materialization, so file-based tools (e.g. Codex `auth.json`) can receive a syntactically valid auth file carrying only placeholders while the real secret stays broker-owned.
 
 Two steps, ordered by risk/coverage ratio:
 
@@ -325,9 +325,10 @@ One phase per PR. This is load-bearing: line-by-line review of the trusted core 
 | 5 | Phase 4: git-HTTPS mediation (CA, TLS termination) | trusted-core review — highest-risk surface, deliberately alone |
 | 6a | Phase 5: enforcement (own-Pod evaluation, iptables + FORWARD deny) | egress-denied test → CI |
 | 6b | Phase 5: audit, quotas, revocation, Anthropic proof; `defaultEgressMode` knob (default stays `direct`) | both smoke tests green |
-| 7 | Global default flip to `mediated` (one value + CRD defaults + producers) | smoke tests green in CI **and** real-cluster soak/migration |
-| 7 | Phase 6: TLS-terminating forward-proxy mode (CONNECT + CA) for arbitrary-tool credential mediation | trusted-core review (reuses Phase 4 CA) |
-| 8 | Phase 6: true transparent REDIRECT + optional body substitution | after Phase 5 enforcement; egress-denied still green |
+| 7 | Phase 6.1: generic broker/provider placeholder-file materialization (Codex-shaped fixtures, no MITM) | trusted-core review — broker credential contract, phase-sized alone |
+| 8 | Phase 6.2: TLS-terminating forward-proxy mode (CONNECT + CA leaf-widening) + Codex go/no-go proof | trusted-core review (reuses Phase 4 CA; refresh is the kill switch) |
+| 9 | Phase 6 step 2: true transparent REDIRECT/TPROXY + optional body substitution | after Phase 5 enforcement; egress-denied still green |
+| 10 | Global default flip to `mediated` (one value + CRD defaults + producers) | smoke tests green in CI **and** real-cluster soak/migration — deliberately last |
 
 ## Division of labor
 

@@ -1,10 +1,10 @@
 # PR 6.1 Plan: Generic placeholder-file materialization
 
 Status: plan — ready to implement (Phase 5 complete: #63 6a, #64 6b)
-Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §"Phase 6". This is
-the broker/provider half of Phase 6, split out from
-[phase6.2-forward-proxy-pr-plan.md](phase6.2-forward-proxy-pr-plan.md) so each
-trusted-core surface is reviewed on a phase-sized diff.
+Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §"Phase 6", sequence
+row 7. This is the broker/provider half of Phase 6, split out from
+[phase6.2-forward-proxy-pr-plan.md](phase6.2-forward-proxy-pr-plan.md) (row 8)
+so each trusted-core surface is reviewed on a phase-sized diff.
 
 ## Why this is its own PR
 

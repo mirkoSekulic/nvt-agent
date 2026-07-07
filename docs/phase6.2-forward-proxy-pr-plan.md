@@ -2,10 +2,10 @@
 
 Status: plan — implement after PR 6.1 merges
 Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §"Phase 6", sequence
-row 7. Prerequisite:
+row 8. Prerequisite:
 [phase6.1-placeholder-file-materialization-pr-plan.md](phase6.1-placeholder-file-materialization-pr-plan.md)
-(the placeholder-file contract this PR consumes). Step 2 (transparent iptables
-REDIRECT, row 8) is a **separate** plan after this.
+(row 7 — the placeholder-file contract this PR consumes). Step 2 (transparent
+iptables REDIRECT/TPROXY, row 9) is a **separate** plan after this.
 
 ## Goal
 
@@ -266,7 +266,7 @@ paths:
 
 ## Explicitly out of scope
 
-- **Transparent iptables `REDIRECT`/`TPROXY` mode** (parent sequence row 8) —
+- **Transparent iptables `REDIRECT`/`TPROXY` mode** (parent sequence row 9) —
   its own plan, strictly after this; for tools that ignore proxy env.
 - **Body/query placeholder substitution** — deferred unless the Codex proof
   proves it required and the plan is explicitly revised first.
