@@ -160,3 +160,53 @@ func TestForwardProxyMITMQuota(t *testing.T) {
 		t.Fatalf("second MITM request status = %d, want 429", second.StatusCode)
 	}
 }
+
+// TestForwardProxyMITMCodexShaped is the fixture-level Codex proof
+// (docs/phase6.2-forward-proxy-pr-plan.md 4b): the placeholder-file tool talks
+// to both the API host and the refresh host (auth.openai.com) through the
+// proxy, and egressd injects the real credential for each — a simulated refresh
+// leg included. No real token is ever in the "tool" (it sends the placeholder).
+func TestForwardProxyMITMCodexShaped(t *testing.T) {
+	broker := newFakeBroker(t)
+	api := newFakeUpstream(t)
+	refresh := newFakeUpstream(t)
+	ca, err := NewCAWithUpstreams(nil, []string{"chatgpt.com", "auth.openai.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := &ForwardProxy{
+		Config: ForwardProxyConfig{
+			Listen: "unused",
+			InjectRoutes: []ForwardProxyInjectRoute{
+				{Host: "chatgpt.com", Capability: "codex-main", Upstream: proxyAddress(t, api.server), AllowInsecureUpstream: true},
+				{Host: "auth.openai.com", Capability: "codex-main", Upstream: proxyAddress(t, refresh.server), AllowInsecureUpstream: true},
+			},
+		},
+		CA:        ca,
+		Broker:    &BrokerClient{URL: broker.server.URL, Token: "egress-role-token", Client: broker.server.Client()},
+		Transport: http.DefaultTransport,
+	}
+	server := httptest.NewServer(fp)
+	t.Cleanup(server.Close)
+
+	for _, tc := range []struct {
+		host     string
+		upstream *fakeUpstream
+		path     string
+	}{
+		{"chatgpt.com", api, "/v1/responses"},
+		{"auth.openai.com", refresh, "/oauth/token"},
+	} {
+		resp := mitmRequest(t, mitmDial(t, server, ca, tc.host, tc.host), tc.path)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s MITM request status = %d", tc.host, resp.StatusCode)
+		}
+		record := tc.upstream.last(t)
+		if len(record.authorization) != 1 || record.authorization[0] != "Bearer "+realToken {
+			t.Fatalf("%s upstream Authorization = %v, want the injected real token", tc.host, record.authorization)
+		}
+		if strings.Contains(fmt.Sprint(record.header), Placeholder) {
+			t.Fatalf("placeholder reached %s", tc.host)
+		}
+	}
+}
