@@ -162,6 +162,35 @@ assert spec["egressForwardProxy"] is True
 PY
 }
 
+post_variant_admission() {
+  local variant="$1"
+  local body
+  body="$(payload_file "${variant}")"
+  generate_payload "${variant}" "${body}"
+  post_schedule_admission "${body}" "${SMOKE_TMPDIR}/${variant}.response.json" "${SMOKE_TMPDIR}/${variant}.status"
+}
+
+submit_rejected_admission() {
+  local variant="$1" expected="$2" status
+  log "checking forward-proxy rejection for ${variant}"
+  post_variant_admission "${variant}"
+  status="$(cat "${SMOKE_TMPDIR}/${variant}.status")"
+  [[ "${status}" == "400" ]] || die "expected ${variant} admission HTTP 400, got ${status}: $(cat "${SMOKE_TMPDIR}/${variant}.response.json")"
+  grep -q "${expected}" "${SMOKE_TMPDIR}/${variant}.response.json" || die "rejection response does not name ${expected}"
+  if kubectl_smoke get agentrun "${RUN_NAME}-${variant}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+    die "rejected ${variant} admission created an AgentRun"
+  fi
+}
+
+submit_valid_admission() {
+  local variant="$1" status
+  log "submitting forward-proxy admission ${variant}"
+  post_variant_admission "${variant}"
+  status="$(cat "${SMOKE_TMPDIR}/${variant}.status")"
+  [[ "${status}" == "201" ]] || die "expected ${variant} admission HTTP 201, got ${status}: $(cat "${SMOKE_TMPDIR}/${variant}.response.json")"
+  wait_for_agentrun_exists "${RUN_NAME}-${variant}"
+}
+
 case_run() {
   # Forward-proxy without enforcement is rejected at admission, naming the field.
   submit_rejected_admission "no-enforcement" "egressForwardProxy"
