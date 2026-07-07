@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func reportEntry() map[string]any {
@@ -224,5 +225,42 @@ func TestBrokerLoadsGrantQuota(t *testing.T) {
 	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", injectionRequest())
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("injection must still succeed with a quota-bearing grant: status=%d body=%v", status, body)
+	}
+}
+
+// TestRevocationFailsClosedOnGrantRemoval pins the broker half of the
+// revocation chain (docs/phase5-6b-observability-pr-plan.md item 4): removing a
+// grant from the agents config makes the next injection fetch fail closed via
+// the mtime hot-reload — no broker restart.
+func TestRevocationFailsClosedOnGrantRemoval(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(mediatedIdentities())
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", injectionRequest())
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("injection must succeed before revocation: status=%d body=%v", status, body)
+	}
+
+	// Revoke: rewrite the same config with the grant dropped. Atomic rename
+	// changes mtime, so the running broker hot-reloads on the next request.
+	revoked := mediatedIdentities()
+	frontend := revoked["frontend"]
+	frontend.Grants = nil
+	revoked["frontend"] = frontend
+	f.writeRoleIdentities(revoked)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", injectionRequest())
+		if status != http.StatusOK && body["ok"] != true {
+			break // failed closed, as required
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("injection still succeeds after revocation (no hot-reload): status=%d body=%v", status, body)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if body["error"] != "provider-not-granted" {
+		t.Fatalf("revoked grant must deny provider-not-granted, got %v", body["error"])
 	}
 }
