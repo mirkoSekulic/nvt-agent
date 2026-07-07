@@ -496,7 +496,6 @@ preseed:
       content: |
         check_for_update_on_startup = false
     - path: ".codex/existing.toml"
-      overwrite: false
       content: |
         user-managed = false
 `)

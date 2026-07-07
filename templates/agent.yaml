@@ -3,10 +3,6 @@ runtime:
   args: {{AGENT_ARGS}}
   user: {{AGENT_USER}}
 
-# BEGIN nvt-managed preseed (agent-init)
-{{AGENT_PRESEED}}
-# END nvt-managed preseed (agent-init)
-
 tools:
   packages: []
   mise: []

@@ -448,7 +448,7 @@ else
 fi
 
 if [ ! -f "$agent_config_file" ]; then
-  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" AGENT_USER="$runtime_user" AGENT_PRESEED="$agent_preseed" render_template "$templates_dir/agent.yaml" "$agent_config_file"
+  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" AGENT_USER="$runtime_user" render_template "$templates_dir/agent.yaml" "$agent_config_file"
   echo "created $agent_config_file"
 else
   # Keep the declared runtime.user in sync when re-running with --user, without

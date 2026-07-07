@@ -2587,6 +2587,68 @@ func TestRenderAgentConfigYAMLNoPromptRendersUnchanged(t *testing.T) {
 	}
 }
 
+func TestRenderAgentConfigYAMLInjectsCodexPreseed(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{"tools": {"packages": []}}`)}
+	agentRun.Spec.Runtime.Type = "codex"
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	config := parseAgentConfigYAML(t, rendered)
+	preseed, ok := config["preseed"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected codex preseed block, got %#v\n%s", config["preseed"], rendered)
+	}
+	files, ok := preseed["files"].([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("expected one preseed file, got %#v\n%s", preseed["files"], rendered)
+	}
+	file, ok := files[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected preseed file object, got %#v", files[0])
+	}
+	if file["path"] != "$HOME/.codex/config.toml" ||
+		file["mode"] != "0600" ||
+		file["overwrite"] != false ||
+		file["content"] != "check_for_update_on_startup = false\n" {
+		t.Fatalf("unexpected codex preseed file: %#v\n%s", file, rendered)
+	}
+}
+
+func TestRenderAgentConfigYAMLPreservesUserPreseed(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{
+		"preseed": {
+			"files": [
+				{
+					"path": "$HOME/.custom/config.json",
+					"json": {"enabled": true}
+				}
+			]
+		}
+	}`)}
+	agentRun.Spec.Runtime.Type = "codex"
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	if strings.Contains(rendered, "check_for_update_on_startup") {
+		t.Fatalf("operator overwrote user preseed:\n%s", rendered)
+	}
+	config := parseAgentConfigYAML(t, rendered)
+	preseed := config["preseed"].(map[string]any)
+	files := preseed["files"].([]any)
+	file := files[0].(map[string]any)
+	if file["path"] != "$HOME/.custom/config.json" {
+		t.Fatalf("expected user preseed to be preserved, got %#v\n%s", file, rendered)
+	}
+}
+
 func TestRenderAgentConfigYAMLEmptyPromptRendersUnchanged(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: ""}

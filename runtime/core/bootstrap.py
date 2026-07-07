@@ -492,7 +492,7 @@ def apply_preseed_files(preseed):
         target = preseed_file_target(home, entry.get("path"))
         content = preseed_file_content(entry, index)
         mode = parse_file_mode(entry.get("mode"), f"preseed.files[{index}]")
-        overwrite = optional_bool(entry.get("overwrite"), f"preseed.files[{index}].overwrite", default=True)
+        overwrite = optional_bool(entry.get("overwrite"), f"preseed.files[{index}].overwrite", default=False)
         if target.exists() and not overwrite:
             print(f"bootstrap: preseed file {target} already exists", flush=True)
             continue
