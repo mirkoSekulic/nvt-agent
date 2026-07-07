@@ -2,6 +2,8 @@ name: agentd
 
 on:
   push:
+    branches:
+      - main
     paths:
       - "runtime/agentd/**"
       - "runtime/core/**"
@@ -27,13 +29,13 @@ on:
       - ".github/workflows/agentd.yml"
 
 jobs:
-  conformance:
+  agentd:
     runs-on: ubuntu-latest
     env:
       TERM: screen
     steps:
       - uses: actions/checkout@v4
-      - name: Install runtime test dependencies
+      - name: Install agentd test dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
       - uses: actions/setup-go@v5
         with:
@@ -50,18 +52,61 @@ jobs:
           AGENTDCTL_BIN: python3 ${{ github.workspace }}/runtime/agentd/agentdctl.py
           PROMPT_AGENT_BIN: bash ${{ github.workspace }}/runtime/core/prompt-agent.sh
         run: go test -v ./...
+
+  runtime:
+    runs-on: ubuntu-latest
+    env:
+      TERM: screen
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime test dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install Python runtime dependencies
+        run: python3 -m pip install PyYAML
       - name: Run runtime conformance suite
         working-directory: tests/runtime
         env:
           EXPORT_PLUGIN_TOOLS_BIN: python3 ${{ github.workspace }}/runtime/core/export-plugin-tools.py
           RUN_PLUGINS_BIN: python3 ${{ github.workspace }}/runtime/core/run-plugins.py
         run: go test -v ./...
+
+  broker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install Python runtime dependencies
+        run: python3 -m pip install PyYAML
       - name: Run broker conformance suite
         working-directory: tests/broker
         run: go test -v ./...
+
+  egressd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       - name: Run egressd tests
         working-directory: egressd
         run: go vet ./... && go test -v ./...
+
+  images-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: Build runtime image
         run: docker build -t nvt-agent:test -f runtime/Dockerfile .
       - name: Build broker image
