@@ -230,10 +230,15 @@ class Broker:
         grant = self.agents.grant(subject, capability)
         if grant is None:
             raise ProviderError("provider-not-granted", None, 403)
-        if grant.get("materialization") != "header-inject":
+        # Both header-inject and placeholder-file are zero-possession mediated
+        # modes: the real credential is injected at the edge, never handed to
+        # the agent. A single placeholder-file grant therefore both materializes
+        # the placeholder file (agent side) and authorizes edge injection
+        # (egress side) — no second grant for the same provider is needed.
+        if grant.get("materialization") not in ("header-inject", "placeholder-file"):
             raise ProviderError(
                 "materialization-mismatch",
-                f"grant for {capability} is not header-inject",
+                f"grant for {capability} is not injection-capable (header-inject or placeholder-file)",
                 403,
             )
         return grant

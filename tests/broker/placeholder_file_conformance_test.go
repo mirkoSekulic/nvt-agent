@@ -241,3 +241,35 @@ func TestCodexPlaceholderFile(t *testing.T) {
 		t.Fatalf("host bindings must include the refresh endpoint auth.openai.com, got %v", hosts)
 	}
 }
+
+// TestPlaceholderFileGrantIsInjectionCapable pins the load-bearing 6.1↔6.2
+// contract (review finding 1): a single placeholder-file grant both
+// materializes the placeholder file (agent side) and authorizes edge injection
+// (egress side) — so 6.2's egressd can call /v1/injection/headers for it. No
+// second header-inject grant for the same provider is needed. Secret-bearing
+// endpoints stay denied.
+func TestPlaceholderFileGrantIsInjectionCapable(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeCodexAuth(testJWT(time.Now().Add(time.Hour)), "codex-refresh-token")
+
+	identities := mediatedIdentities()
+	frontend := identities["frontend"]
+	frontend.Grants = []roleGrant{{Provider: "codex-main", Materialization: "placeholder-file"}}
+	identities["frontend"] = frontend
+	f.writeRoleIdentities(identities)
+
+	// The paired egress identity injects for the placeholder-file grant.
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers",
+		map[string]any{"capability": "codex-main", "host": "chatgpt.com", "method": "GET", "path": "/v1/responses"})
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("placeholder-file grant must be injection-capable: status=%d body=%v", status, body)
+	}
+
+	// But the agent still cannot pull the real credential from any
+	// secret-bearing endpoint.
+	status, body = f.postJSONWithToken("frontend-token", "/v1/files",
+		map[string]any{"provider": "codex-main"})
+	if status == http.StatusOK || body["error"] != "materialization-mismatch" {
+		t.Fatalf("placeholder-file grant must stay denied on /v1/files: status=%d body=%v", status, body)
+	}
+}
