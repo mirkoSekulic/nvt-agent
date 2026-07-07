@@ -1,6 +1,6 @@
 # PR 6b Plan: Observability + Control (audit, quotas, revocation, Anthropic proof)
 
-Status: plan — ready to implement (PR 6a merged, #63)
+Status: implemented — broker `POST /v1/injection/report` + async egressd reporter, per-grant `quota.requests`, revocation chain tests + subPath guard, Anthropic `static_token` generalization (zero egressd diffs), `egress.defaultMode` knob (default `direct`), hermetic kind echo fixture. Global mediated-by-default flip still deferred.
 Parent: [phase5-enforcement-plan.md](phase5-enforcement-plan.md) PR 6b (work
 items 5–9); prerequisites merged (#61 fixes, #62 broker TLS, #63 PR 6a)
 
