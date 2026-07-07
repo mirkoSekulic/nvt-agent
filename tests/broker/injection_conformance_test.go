@@ -571,3 +571,50 @@ func TestInjectionAuditOmitsSecretValues(t *testing.T) {
 		}
 	}
 }
+
+// TestAnthropicProviderAgnosticismProof pins the provider-agnosticism proof
+// (docs/phase5-6b-observability-pr-plan.md item 5): a generalized static_token
+// provider injects Anthropic's x-api-key (no Bearer scheme) plus a static
+// anthropic-version header, both stripped from the request — with zero egressd
+// changes. The whole point of the proof is that adding Anthropic is broker
+// config only.
+func TestAnthropicProviderAgnosticismProof(t *testing.T) {
+	f := newBrokerFixture(t)
+	identities := mediatedIdentities()
+	frontend := identities["frontend"]
+	frontend.Grants = []roleGrant{{Provider: "anthropic-main", Materialization: "header-inject"}}
+	identities["frontend"] = frontend
+	f.writeRoleIdentities(identities)
+
+	payload := map[string]any{
+		"capability": "anthropic-main",
+		"host":       "api.anthropic.com",
+		"method":     "POST",
+		"path":       "/v1/messages",
+	}
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", payload)
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("anthropic injection must succeed: status=%d body=%v", status, body)
+	}
+	headers, ok := body["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("headers missing: %v", body)
+	}
+	if headers["x-api-key"] != "anthropic-secret-key" {
+		t.Fatalf("expected x-api-key with the raw token, got %v", headers["x-api-key"])
+	}
+	if headers["anthropic-version"] != "2023-06-01" {
+		t.Fatalf("expected anthropic-version extra header, got %v", headers["anthropic-version"])
+	}
+	// Key-header providers must not carry a Bearer authorization header.
+	if _, present := headers["authorization"]; present {
+		t.Fatalf("x-api-key provider must not inject authorization: %v", headers)
+	}
+	strip := map[string]bool{}
+	for _, name := range body["strip_request_headers"].([]any) {
+		strip[name.(string)] = true
+	}
+	if !strip["x-api-key"] || !strip["anthropic-version"] {
+		t.Fatalf("every injected header must be stripped, got %v", body["strip_request_headers"])
+	}
+}
