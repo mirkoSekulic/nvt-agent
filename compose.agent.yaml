@@ -12,6 +12,10 @@ services:
       DOCKER_HOST: tcp://127.0.0.1:2375
       HOME: ${AGENT_HOME:-/root}
       NVT_STATE_DIR: ${AGENT_HOME:-/root}/.nvt-agent
+      # The env file keeps these as host paths for compose volume
+      # interpolation. Inside the container, tools must see container paths.
+      CODEX_CONFIG_DIR: ${AGENT_HOME:-/root}/.codex
+      CLAUDE_CONFIG_DIR: ${AGENT_HOME:-/root}/.claude
     working_dir: ${NVT_WORKSPACE}
     depends_on:
       docker:
