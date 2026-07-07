@@ -23,6 +23,7 @@ import (
 func main() {
 	var cfg gateway.Config
 	var kubeconfig string
+	var authorizationRaw string
 	flag.StringVar(&cfg.BaseDomain, "base-domain", envString("NVT_GATEWAY_BASE_DOMAIN", "agents.localhost"), "base DNS domain for AgentRun access")
 	flag.StringVar(&cfg.PublicURL, "public-url", envString("NVT_GATEWAY_PUBLIC_URL", ""), "externally visible base URL for dashboard and OAuth callbacks")
 	flag.StringVar(&cfg.ListenAddr, "listen-addr", envString("NVT_GATEWAY_LISTEN_ADDR", ":8080"), "HTTP listen address")
@@ -41,6 +42,7 @@ func main() {
 	flag.StringVar(&cfg.Auth.OIDC.ValidIssuer, "oidc-valid-issuer", envString("NVT_GATEWAY_OIDC_VALID_ISSUER", ""), "expected ID token issuer override")
 	flag.StringVar(&cfg.Auth.OIDC.AuthorizationDetails, "oidc-authorization-details", envString("NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS", ""), "OIDC authorization_details JSON")
 	flag.StringVar(&cfg.Auth.OIDC.ClientAuthMethod, "oidc-client-auth-method", envString("NVT_GATEWAY_OIDC_CLIENT_AUTH_METHOD", ""), "OIDC token endpoint client auth method")
+	flag.StringVar(&authorizationRaw, "authorization", envString("NVT_GATEWAY_AUTHORIZATION", ""), "gateway authorization policy JSON")
 	flag.StringVar(&kubeconfig, "kubeconfig", envString("KUBECONFIG", ""), "path to kubeconfig, optional")
 	flag.Parse()
 
@@ -50,6 +52,11 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 	cfg.Auth.OIDC.ExtraAuthParams = extraAuthParams
+	authorization, err := gateway.ParseAuthorizationConfig(authorizationRaw)
+	if err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
+	cfg.Auth.Authorization = authorization
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}

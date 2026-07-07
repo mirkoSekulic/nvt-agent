@@ -37,6 +37,68 @@ containers) — the serving key never leaves the broker.
 With `tls.enabled=false` the broker stays plaintext and mediated AgentRuns
 must set `spec.egressAllowInsecureBroker: true` explicitly (local/dev only).
 
+## Gateway OIDC Authorization
+
+The optional access gateway supports generic OIDC login plus a separate
+authorization policy. Authentication alone is not enough in shared IdPs:
+when `gateway.auth.mode=oidc`, the default authorization decision is deny
+unless an allow rule matches. To allow any authenticated user, configure an
+explicit `authenticated: true` rule.
+
+Do not use SSN, pid, or fødselsnummer claims as authorization keys. Prefer
+organization, group, resource, or entitlement claims. Gateway authorization
+policy validation rejects those sensitive claim paths, and logs intentionally
+include only the decision, rule id, agent access key, and a short hash of the
+subject.
+
+Example with provider-neutral OIDC fields and Ansattporten-style authorize
+parameters:
+
+```yaml
+gateway:
+  enabled: true
+  auth:
+    mode: oidc
+    session:
+      existingSecret: nvt-gateway-session
+    oidc:
+      issuerURL: https://ansattporten.no
+      clientID: nvt-gateway
+      clientSecret:
+        existingSecret: nvt-gateway-oidc
+      scopes: ["openid", "profile"]
+      extraAuthParams:
+        authorization_details: |
+          [
+            {
+              "type": "ansattporten:altinn:resource",
+              "resource": "urn:altinn:resource:digdir-selvbetjening-klienter",
+              "organizationform": "enterprise",
+              "representation_is_required": false
+            }
+          ]
+    authorization:
+      default: deny
+      rules:
+        - id: allowed-altinn-org
+          effect: allow
+          where:
+            array: authorization_details[].authorized_parties[]
+            all:
+              - claimPath: orgno.ID
+                values: ["0192:991825827"]
+              - claimPath: resource
+                values: ["digdir-selvbetjening-klienter"]
+        - id: break-glass-admins
+          effect: allow
+          claimPath: groups[]
+          values: ["nvt-agent-admins"]
+```
+
+For `where.array`, all conditions are evaluated against the same selected array
+element. This prevents combining an organization match from one
+`authorized_parties[]` entry with a resource match from another entry.
+
 ## Broker State Persistence
 
 By default the broker keeps `/state` on an `emptyDir`, preserving existing

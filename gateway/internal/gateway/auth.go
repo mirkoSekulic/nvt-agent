@@ -36,8 +36,9 @@ type Authenticator struct {
 }
 
 type sessionCookie struct {
-	Subject   string `json:"sub"`
-	ExpiresAt int64  `json:"exp"`
+	Subject    string `json:"sub"`
+	ExpiresAt  int64  `json:"exp"`
+	ClaimsJSON string `json:"claims,omitempty"`
 }
 
 type loginStateCookieValue struct {
@@ -135,10 +136,23 @@ func (a *Authenticator) HandlePublic(w http.ResponseWriter, r *http.Request) boo
 	return true
 }
 
-func (a *Authenticator) Authorize(w http.ResponseWriter, r *http.Request) bool {
+func (a *Authenticator) Authorize(w http.ResponseWriter, r *http.Request, agentKey string) bool {
 	session, ok := a.readSession(r)
 	if ok && session.ExpiresAt > a.now().Unix() {
-		return true
+		claims, err := session.claims()
+		if err != nil {
+			decision := AuthorizationDecision{Allowed: false}
+			logAuthorizationDecision(decision, agentKey, session.Subject)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return false
+		}
+		decision := EvaluateAuthorization(a.config.Auth.Authorization, claims)
+		logAuthorizationDecision(decision, agentKey, session.Subject)
+		if decision.Allowed {
+			return true
+		}
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
 	}
 	if isBrowserRead(r) {
 		loginURL := a.publicBaseURL(r) + "/oauth2/login?return_url=" + url.QueryEscape(a.safeReturnURL(r))
@@ -224,18 +238,25 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid issuer", http.StatusUnauthorized)
 		return
 	}
-	var claims nonceClaims
+	var claims map[string]any
 	if err := idToken.Claims(&claims); err != nil {
 		http.Error(w, "parse id_token claims", http.StatusUnauthorized)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(loginState.Nonce)) != 1 {
+	nonce, _ := claims["nonce"].(string)
+	if subtle.ConstantTimeCompare([]byte(nonce), []byte(loginState.Nonce)) != 1 {
 		http.Error(w, "invalid nonce", http.StatusUnauthorized)
 		return
 	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		http.Error(w, "encode claims", http.StatusUnauthorized)
+		return
+	}
 	a.setCookie(w, a.config.Auth.Session.CookieName, sessionCookie{
-		Subject:   idToken.Subject,
-		ExpiresAt: a.now().Add(time.Duration(a.config.Auth.Session.MaxAgeSeconds) * time.Second).Unix(),
+		Subject:    idToken.Subject,
+		ExpiresAt:  a.now().Add(time.Duration(a.config.Auth.Session.MaxAgeSeconds) * time.Second).Unix(),
+		ClaimsJSON: string(claimsJSON),
 	}, a.config.Auth.Session.MaxAgeSeconds)
 	a.clearCookie(w, loginStateCookie)
 	http.Redirect(w, r, loginState.ReturnURL, http.StatusFound)
@@ -251,6 +272,17 @@ func (a *Authenticator) readSession(r *http.Request) (sessionCookie, bool) {
 		return session, false
 	}
 	return session, true
+}
+
+func (s sessionCookie) claims() (map[string]any, error) {
+	if strings.TrimSpace(s.ClaimsJSON) == "" {
+		return map[string]any{}, nil
+	}
+	var claims map[string]any
+	if err := json.Unmarshal([]byte(s.ClaimsJSON), &claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
 }
 
 func (a *Authenticator) readLoginState(r *http.Request) (loginStateCookieValue, bool) {
@@ -379,6 +411,18 @@ func ParseExtraAuthParams(raw string) (map[string]string, error) {
 		return nil, fmt.Errorf("parse OIDC extra auth params: %w", err)
 	}
 	return values, nil
+}
+
+// ParseAuthorizationConfig parses the gateway authorization policy.
+func ParseAuthorizationConfig(raw string) (AuthorizationConfig, error) {
+	if strings.TrimSpace(raw) == "" {
+		return AuthorizationConfig{}, nil
+	}
+	var config AuthorizationConfig
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		return AuthorizationConfig{}, fmt.Errorf("parse gateway authorization policy: %w", err)
+	}
+	return config, nil
 }
 
 // SplitScopes parses comma-separated OIDC scopes.

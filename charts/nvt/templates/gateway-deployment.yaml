@@ -84,6 +84,8 @@ spec:
               value: {{ .Values.gateway.auth.oidc.extraAuthParams | toJson | quote }}
             - name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS
               value: {{ .Values.gateway.auth.oidc.authorizationDetails | quote }}
+            - name: NVT_GATEWAY_AUTHORIZATION
+              value: {{ .Values.gateway.auth.authorization | toJson | quote }}
             {{- end }}
           ports:
             - name: http

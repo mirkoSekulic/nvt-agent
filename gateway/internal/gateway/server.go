@@ -38,9 +38,10 @@ type Config struct {
 }
 
 type AuthConfig struct {
-	Mode    string
-	Session SessionConfig
-	OIDC    OIDCConfig
+	Mode          string
+	Session       SessionConfig
+	OIDC          OIDCConfig
+	Authorization AuthorizationConfig
 }
 
 type SessionConfig struct {
@@ -118,6 +119,9 @@ func (c AuthConfig) validateOIDC() error {
 	if c.OIDC.ClientAuthMethod != "" && c.OIDC.ClientAuthMethod != oidcClientSecretPost {
 		return fmt.Errorf("unsupported auth.oidc.clientAuthMethod %q", c.OIDC.ClientAuthMethod)
 	}
+	if err := c.Authorization.validate(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -165,12 +169,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route := ParseHost(r.Host, s.config.BaseDomain)
 	switch route.kind {
 	case routeDashboard:
-		if !s.authorize(w, r) {
+		if !s.authorize(w, r, "") {
 			return
 		}
 		s.serveDashboard(w, r)
 	case routeAgentRun:
-		if !s.authorize(w, r) {
+		if !s.authorize(w, r, route.accessKey) {
 			return
 		}
 		s.proxyAgentRun(w, r, route.accessKey)
@@ -179,11 +183,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, agentKey string) bool {
 	if s.auth == nil {
 		return true
 	}
-	return s.auth.Authorize(w, r)
+	return s.auth.Authorize(w, r, agentKey)
 }
 
 func ParseHost(host, baseDomain string) route {

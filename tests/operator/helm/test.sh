@@ -46,6 +46,11 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.oidc.acrValues=Level4 \
   --set gateway.auth.oidc.validIssuer=https://issuer.example.test \
   --set gateway.auth.oidc.extraAuthParams.prompt=login \
+  --set gateway.auth.oidc.extraAuthParams.authorization_details='[{"type":"ansattporten:altinn:resource"}]' \
+  --set gateway.auth.authorization.rules[0].id=break-glass-admins \
+  --set gateway.auth.authorization.rules[0].effect=allow \
+  --set gateway.auth.authorization.rules[0].claimPath='groups[]' \
+  --set gateway.auth.authorization.rules[0].values[0]=nvt-agent-admins \
   --set-string 'gateway.auth.oidc.authorizationDetails={"type":"openid_credential"}' \
   > "${GATEWAY_OIDC_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
@@ -417,6 +422,8 @@ grep -q 'name: NVT_GATEWAY_OIDC_EXTRA_AUTH_PARAMS' "${GATEWAY_OIDC_RENDER}"
 grep -q 'prompt' "${GATEWAY_OIDC_RENDER}"
 grep -q 'name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS' "${GATEWAY_OIDC_RENDER}"
 grep -q 'openid_credential' "${GATEWAY_OIDC_RENDER}"
+grep -q 'name: NVT_GATEWAY_AUTHORIZATION' "${GATEWAY_OIDC_RENDER}"
+grep -q 'break-glass-admins' "${GATEWAY_OIDC_RENDER}"
 grep -q -- '--public-url=https://agents.altinn.studio' "${GATEWAY_OIDC_RENDER}"
 
 if helm template nvt "${CHART}" -n custom-ns \

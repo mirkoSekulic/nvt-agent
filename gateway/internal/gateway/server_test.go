@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -197,6 +199,196 @@ func TestAuthModeOIDCRedirectsUnauthenticatedDashboardAndSession(t *testing.T) {
 	}
 }
 
+func TestAuthModeOIDCAuthenticatedWithoutAuthorizationRuleIsDenied(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	server := mustNewServer(t, oidcTestConfig(provider.URL), fakeClient(t))
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1"})
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthModeOIDCAnyAuthenticatedRuleAllowsAccess(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	config := oidcTestConfig(provider.URL)
+	config.Auth.Authorization.Rules = []AuthorizationRule{{
+		ID:            "any-authenticated",
+		Effect:        authorizationEffectAllow,
+		Authenticated: true,
+	}}
+	server := mustNewServer(t, config, fakeClient(t))
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1"})
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthModeOIDCSimpleClaimRuleAllowsAccess(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	config := oidcTestConfig(provider.URL)
+	config.Auth.Authorization.Rules = []AuthorizationRule{{
+		ID:        "admins",
+		Effect:    authorizationEffectAllow,
+		ClaimPath: "groups[]",
+		Values:    []string{"nvt-agent-admins"},
+	}}
+	server := mustNewServer(t, config, fakeClient(t))
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1", "groups": []any{"nvt-agent-admins"}})
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthorizationWhereArrayRequiresSameElementMatch(t *testing.T) {
+	policy := AuthorizationConfig{Rules: []AuthorizationRule{{
+		ID:     "allowed-altinn-org",
+		Effect: authorizationEffectAllow,
+		Where: AuthorizationWhere{
+			Array: "authorization_details[].authorized_parties[]",
+			All: []AuthorizationCondition{
+				{ClaimPath: "orgno.ID", Values: []string{"0192:991825827"}},
+				{ClaimPath: "resource", Values: []string{"digdir-selvbetjening-klienter"}},
+			},
+		},
+	}}}
+	claims := map[string]any{
+		"authorization_details": []any{map[string]any{
+			"authorized_parties": []any{
+				map[string]any{"orgno": map[string]any{"ID": "0192:991825827"}, "resource": "digdir-selvbetjening-klienter"},
+			},
+		}},
+	}
+	decision := EvaluateAuthorization(policy, claims)
+	if !decision.Allowed || decision.RuleID != "allowed-altinn-org" {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
+func TestAuthorizationWhereArrayDeniesSplitElementMatch(t *testing.T) {
+	policy := AuthorizationConfig{Rules: []AuthorizationRule{{
+		ID:     "allowed-altinn-org",
+		Effect: authorizationEffectAllow,
+		Where: AuthorizationWhere{
+			Array: "authorization_details[].authorized_parties[]",
+			All: []AuthorizationCondition{
+				{ClaimPath: "orgno.ID", Values: []string{"0192:991825827"}},
+				{ClaimPath: "resource", Values: []string{"digdir-selvbetjening-klienter"}},
+			},
+		},
+	}}}
+	claims := map[string]any{
+		"authorization_details": []any{map[string]any{
+			"authorized_parties": []any{
+				map[string]any{"orgno": map[string]any{"ID": "0192:991825827"}, "resource": "other"},
+				map[string]any{"orgno": map[string]any{"ID": "0192:000000000"}, "resource": "digdir-selvbetjening-klienter"},
+			},
+		}},
+	}
+	decision := EvaluateAuthorization(policy, claims)
+	if decision.Allowed {
+		t.Fatalf("split element match allowed: %#v", decision)
+	}
+}
+
+func TestAuthorizationRejectsSensitiveClaimPath(t *testing.T) {
+	config := AuthorizationConfig{Rules: []AuthorizationRule{{
+		ID:        "bad",
+		Effect:    authorizationEffectAllow,
+		ClaimPath: "pid",
+		Values:    []string{"01017012345"},
+	}}}
+	if err := config.validate(); err == nil || !strings.Contains(err.Error(), "must not use pid") {
+		t.Fatalf("expected sensitive claim path error, got %v", err)
+	}
+}
+
+func TestOIDCExtraAuthorizeParamsAreIncludedOnAuthorizeURL(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	config := oidcTestConfig(provider.URL)
+	config.Auth.OIDC.ExtraAuthParams = map[string]string{
+		"prompt":                "login",
+		"authorization_details": `[{"type":"ansattporten:altinn:resource"}]`,
+	}
+	server := mustNewServer(t, config, fakeClient(t))
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost/oauth2/login", nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query().Get("prompt"); got != "login" {
+		t.Fatalf("prompt = %q", got)
+	}
+	if got := location.Query().Get("authorization_details"); !strings.Contains(got, "ansattporten:altinn:resource") {
+		t.Fatalf("authorization_details = %q", got)
+	}
+}
+
+func TestAuthorizationLogIsSanitized(t *testing.T) {
+	provider := oidcDiscoveryServer(t)
+	config := oidcTestConfig(provider.URL)
+	config.Auth.Authorization.Rules = []AuthorizationRule{{
+		ID:        "admins",
+		Effect:    authorizationEffectAllow,
+		ClaimPath: "groups[]",
+		Values:    []string{"nvt-agent-admins"},
+	}}
+	server := mustNewServer(t, config, fakeClient(t,
+		&nvtv1alpha1.AgentRun{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   "nvt",
+				Name:        "run-1",
+				Annotations: map[string]string{AccessKeyAnnotation: "access-1"},
+			},
+		},
+	))
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	})
+	req := httptest.NewRequest(http.MethodGet, "http://access-1.agents.localhost:4090/", nil)
+	setTestSession(t, server, req, "subject-sensitive", map[string]any{
+		"sub":                   "subject-sensitive",
+		"pid":                   "01017012345",
+		"fødselsnummer":         "01017012345",
+		"authorization_details": []any{map[string]any{"secret": "full-authorization-details"}},
+	})
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	logged := logs.String()
+	for _, forbidden := range []string{"01017012345", "subject-sensitive", "full-authorization-details", "authorization_details", "pid", "fødselsnummer"} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("log leaked %q: %s", forbidden, logged)
+		}
+	}
+	for _, want := range []string{"decision=deny", "rule=-", "agent=access-1", "subject_hash="} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("log missing %q: %s", want, logged)
+		}
+	}
+}
+
 func TestAuthModeOIDCAgentSubdomainRedirectsToStableLoginHost(t *testing.T) {
 	provider := oidcDiscoveryServer(t)
 	server := mustNewServer(t, oidcTestConfigWithPublicURL(provider.URL, "https://agents.localhost"), fakeClient(t))
@@ -303,6 +495,25 @@ func mustNewServer(t *testing.T, config Config, client ctrlclient.Client) *Serve
 		t.Fatal(err)
 	}
 	return server
+}
+
+func setTestSession(t *testing.T, server *Server, req *http.Request, subject string, claims map[string]any) {
+	t.Helper()
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.auth.setCookie(recorder, server.auth.config.Auth.Session.CookieName, sessionCookie{
+		Subject:    subject,
+		ExpiresAt:  time.Now().Add(time.Hour).Unix(),
+		ClaimsJSON: string(claimsJSON),
+	}, server.auth.config.Auth.Session.MaxAgeSeconds)
+	cookies := recorder.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("session cookie was not set")
+	}
+	req.AddCookie(cookies[0])
 }
 
 func oidcTestConfig(issuer string) Config {
