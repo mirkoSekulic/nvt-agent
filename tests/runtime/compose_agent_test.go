@@ -1280,3 +1280,84 @@ func TestAgentInitSwitchesExistingUserMode(t *testing.T) {
 	assertContains("env", "AGENT_RUN_USER=0:0", "AGENT_HOME=/root")
 	assertContains("agent.yaml", "user: root")
 }
+
+// TestBootstrapInstallsPackagesViaNvtAsRoot pins that apt package install goes
+// through nvt-as-root (so it works under both root and non-root) rather than a
+// bare apt-get that would fail as the non-root agent.
+func TestBootstrapInstallsPackagesViaNvtAsRoot(t *testing.T) {
+	f := newFixture(t)
+	callLog := filepath.Join(f.home, "nvt-as-root.calls")
+	// Stub nvt-as-root and apt-get so the test does not touch the real system;
+	// nvt-as-root records its args then execs the rest (the stub apt-get).
+	f.writeBin("nvt-as-root", "#!/usr/bin/env bash\necho \"$@\" >> "+shellQuote(callLog)+"\nexec \"$@\"\n")
+	f.writeBin("apt-get", "#!/usr/bin/env bash\nexit 0\n")
+
+	config := f.writeAgentConfig(`
+runtime:
+  command: codex
+tools:
+  packages:
+    - jq
+`)
+	f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), true, nil, config)
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("nvt-as-root was not invoked for package install: %v", err)
+	}
+	calls := string(data)
+	if !strings.Contains(calls, "apt-get update") {
+		t.Fatalf("expected apt-get update via nvt-as-root, got:\n%s", calls)
+	}
+	if !strings.Contains(calls, "apt-get install -y --no-install-recommends jq") {
+		t.Fatalf("expected apt-get install via nvt-as-root, got:\n%s", calls)
+	}
+}
+
+// TestNvtAsRootWrapper pins the shim contract: no args -> usage; non-root with
+// sudo -> re-runs through sudo; non-root without sudo -> fails clearly.
+func TestNvtAsRootWrapper(t *testing.T) {
+	root := repoRoot(t)
+	shim := filepath.Join(root, "runtime", "core", "nvt-as-root")
+
+	// No args -> usage, exit 2.
+	cmd := commandWithEnv("bash "+shellQuote(shim), nil)
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "usage: nvt-as-root") {
+		t.Fatalf("no-args must print usage and fail, got err=%v out=%s", err, out)
+	}
+
+	// This test process is non-root; a stubbed sudo must be invoked with the args.
+	binDir := t.TempDir()
+	sudoLog := filepath.Join(binDir, "sudo.calls")
+	mustWriteExecutable(t, filepath.Join(binDir, "sudo"), "#!/usr/bin/env bash\necho \"$@\" > "+shellQuote(sudoLog)+"\n")
+	cmd = commandWithEnv("bash "+shellQuote(shim)+" apt-get install -y jq", nil)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("non-root shim with sudo present must succeed: err=%v out=%s", err, out)
+	}
+	logged, err := os.ReadFile(sudoLog)
+	if err != nil || !strings.Contains(string(logged), "apt-get install -y jq") {
+		t.Fatalf("shim did not route through sudo with the args: %v %s", err, logged)
+	}
+
+	// Non-root without sudo on PATH -> clear failure. Keep `id` reachable (the
+	// shim needs it) but exclude sudo by pointing PATH at a minimal dir.
+	noSudo := t.TempDir()
+	if idPath, err := exec.LookPath("id"); err == nil {
+		if err := os.Symlink(idPath, filepath.Join(noSudo, "id")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noSudoCmd := exec.Command("bash", shim, "apt-get", "update")
+	noSudoCmd.Env = []string{"PATH=" + noSudo, "HOME=" + t.TempDir()}
+	if out, err := noSudoCmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "requires root privileges but sudo is unavailable") {
+		t.Fatalf("non-root without sudo must fail clearly, got err=%v out=%s", err, out)
+	}
+}
+
+func mustWriteExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}

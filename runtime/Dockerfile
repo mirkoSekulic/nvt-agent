@@ -42,6 +42,7 @@ RUN curl -fsSL https://code-server.dev/install.sh \
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
 COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint
+COPY runtime/core/nvt-as-root /usr/local/bin/nvt-as-root
 COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
 COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
 COPY runtime/core/export-plugin-tools.py /usr/local/bin/export-plugin-tools
@@ -60,6 +61,7 @@ COPY runtime/plugins /usr/local/lib/nvt-agent/plugins
 
 RUN chmod +x \
   /usr/local/bin/entrypoint \
+  /usr/local/bin/nvt-as-root \
   /usr/local/bin/bootstrap \
   /usr/local/bin/run-plugins \
   /usr/local/bin/export-plugin-tools \

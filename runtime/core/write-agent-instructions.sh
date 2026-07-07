@@ -10,9 +10,9 @@ mkdir -p "$workspace"
 # Reflect the actual container user so tools that refuse to run as root (e.g.
 # Claude Code's bypass mode) know sudo is available in non-root mode.
 if [ "$(id -u)" -ne 0 ]; then
-  user_line="- The agent runs as the non-root user \`$(id -un 2>/dev/null || echo agent)\` (uid $(id -u)); passwordless \`sudo\` is available for privileged operations."
+  user_line="- The agent runs as the non-root user \`$(id -un 2>/dev/null || echo agent)\` (uid $(id -u)); passwordless \`sudo\` is available. Use \`nvt-as-root <cmd>\` for privileged operations (e.g. \`nvt-as-root apt-get install -y jq\`) — it works unchanged as root too."
 else
-  user_line="- The agent runs as \`root\`."
+  user_line="- The agent runs as \`root\`. \`nvt-as-root <cmd>\` runs a command with root privileges portably (a passthrough here, sudo when non-root)."
 fi
 
 cat > "$target" <<EOF

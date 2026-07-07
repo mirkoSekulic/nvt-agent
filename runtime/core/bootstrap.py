@@ -529,8 +529,10 @@ def apply_additional_paths(paths):
 def install_packages(packages):
     if not packages:
         return
-    run(["apt-get", "update"])
-    run(["apt-get", "install", "-y", "--no-install-recommends", *packages])
+    # nvt-as-root is a no-op passthrough as root (unchanged) and uses the
+    # agent's passwordless sudo in non-root mode, so apt works under both.
+    run(["nvt-as-root", "apt-get", "update"])
+    run(["nvt-as-root", "apt-get", "install", "-y", "--no-install-recommends", *packages])
 
 
 def configured_packages(tools):
