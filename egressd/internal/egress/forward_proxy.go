@@ -149,9 +149,12 @@ func (p *ForwardProxy) serveMITM(w http.ResponseWriter, target connectTarget, pr
 		return
 	}
 
-	// Terminate TLS with a leaf minted for the CONNECT host. GetCertificate
-	// refuses any SNI that is not this allowlisted upstream, so a client that
-	// lies about SNI cannot obtain a leaf for another host.
+	// Terminate TLS under the per-agent CA. GetCertificate refuses any SNI not
+	// in the configured upstream allowlist (empty SNI -> the local leaf; a
+	// sibling allowlisted host's SNI -> that sibling's leaf), so a client
+	// cannot obtain a leaf for a non-allowlisted host. Routing stays pinned to
+	// the CONNECT host regardless of SNI: this proxy and its pinned upstream
+	// were selected by target.host, not by the ClientHello.
 	tlsConn := tls.Server(&mitmConn{Conn: client, reader: buffered.Reader}, p.CA.ServerTLSConfig())
 	defer func() { _ = tlsConn.Close() }()
 	idle := p.Config.effectiveTunnelIdleTimeout()

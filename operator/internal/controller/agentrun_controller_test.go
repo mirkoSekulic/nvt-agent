@@ -3896,3 +3896,33 @@ func TestForwardProxyAgentPodEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateForwardProxyMirrorsEgressdRules pins review findings 2 & 3: the
+// operator rejects forward-proxy configs that egressd's config.Validate would
+// reject at boot (duplicate normalized inject hosts, IP-literal hosts), so a
+// bad spec fails loudly at admission instead of CrashLooping egressd.
+func TestValidateForwardProxyMirrorsEgressdRules(t *testing.T) {
+	// Duplicate normalized host across egressHosts of one grant.
+	dupWithinGrant := forwardProxyAgentRun()
+	dupWithinGrant.Spec.Broker.Grants[0].EgressHosts = []string{"chatgpt.com:443", "chatgpt.com:8443"}
+	if err := ValidateAgentRunEgressMode(dupWithinGrant); err == nil || !strings.Contains(err.Error(), "chatgpt.com") {
+		t.Fatalf("duplicate inject host must be rejected, got %v", err)
+	}
+
+	// Same host claimed by two grants (genuinely ambiguous capability).
+	dupAcrossGrants := forwardProxyAgentRun()
+	dupAcrossGrants.Spec.Broker.Grants = append(dupAcrossGrants.Spec.Broker.Grants, nvtv1alpha1.AgentRunBrokerGrant{
+		Provider: "other-provider", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+		EgressHosts: []string{"chatgpt.com:443"},
+	})
+	if err := ValidateAgentRunEgressMode(dupAcrossGrants); err == nil || !strings.Contains(err.Error(), "more than one grant") {
+		t.Fatalf("host claimed by two grants must be rejected, got %v", err)
+	}
+
+	// IP-literal egressHost is rejected for forward-proxy (MITM needs a name).
+	ipHost := forwardProxyAgentRun()
+	ipHost.Spec.Broker.Grants[0].EgressHosts = []string{"10.0.0.5:443"}
+	if err := ValidateAgentRunEgressMode(ipHost); err == nil || !strings.Contains(err.Error(), "DNS name") {
+		t.Fatalf("IP-literal forward-proxy host must be rejected, got %v", err)
+	}
+}

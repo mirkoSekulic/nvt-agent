@@ -2405,8 +2405,23 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		// Forward-proxy makes every injection-capable grant's egressHosts
 		// routable, so the run needs at least one such host — but no longer a
 		// header-inject grant specifically.
-		if len(forwardProxyInjects(agentRun)) == 0 {
+		injects := forwardProxyInjects(agentRun)
+		if len(injects) == 0 {
 			return fmt.Errorf("spec.egressForwardProxy requires at least one header-inject or placeholder-file broker grant with egressHosts")
+		}
+		// Mirror egressd's inject-route rules at admission so a config egressd
+		// would reject at boot fails loudly here instead of CrashLooping a
+		// silently-broken run: MITM hosts must be DNS names (SNI/leaf need a
+		// name), and each normalized host maps to exactly one inject route.
+		claimedBy := map[string]string{}
+		for _, inject := range injects {
+			if net.ParseIP(inject.Host) != nil {
+				return fmt.Errorf("forward-proxy egressHost %q must be a DNS name, not an IP (TLS-MITM needs a name for SNI/leaf)", inject.Host)
+			}
+			if existing, ok := claimedBy[inject.Host]; ok {
+				return fmt.Errorf("forward-proxy host %q is claimed by more than one grant/egressHost (%s and %s); each host maps to exactly one inject route", inject.Host, existing, inject.Capability)
+			}
+			claimedBy[inject.Host] = inject.Capability
 		}
 		return nil
 	}

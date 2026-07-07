@@ -206,10 +206,24 @@ func (c *Config) Validate() error {
 		if (c.CA.CertFile == "") != (c.CA.KeyFile == "") {
 			return fmt.Errorf("ca cert_file and key_file must be set together")
 		}
-		routeUpstreamHosts := map[string]bool{}
+		// A synthetic leaf_dns_name must not collide with any real upstream —
+		// redirect route upstreams OR forward-proxy MITM hosts — or that SNI
+		// would resolve to the broad-SAN local leaf instead of the dedicated
+		// single-SAN upstream leaf, eroding the synthetic-vs-real separation.
+		realUpstreamHosts := map[string]bool{}
 		for _, route := range c.Routes {
 			if host, ok := normalizedRouteUpstreamHost(route.Upstream); ok {
-				routeUpstreamHosts[host] = true
+				realUpstreamHosts[host] = true
+			}
+		}
+		if c.ForwardProxy != nil {
+			for _, route := range c.ForwardProxy.InjectRoutes {
+				if host, err := normalizeProxyHost(route.Host); err == nil {
+					realUpstreamHosts[host] = true
+				}
+				if host, ok := normalizedRouteUpstreamHost(route.Upstream); ok {
+					realUpstreamHosts[host] = true
+				}
 			}
 		}
 		for index, name := range c.CA.LeafDNSNames {
@@ -218,8 +232,8 @@ func (c *Config) Validate() error {
 			}
 			// Leaf names are synthetic redirect names; minting for a real
 			// upstream is exactly the boundary Phase 4 established.
-			if routeUpstreamHosts[strings.ToLower(name)] {
-				return fmt.Errorf("ca.leaf_dns_names[%d] %q matches a route upstream host", index, name)
+			if realUpstreamHosts[strings.ToLower(name)] {
+				return fmt.Errorf("ca.leaf_dns_names[%d] %q matches a real upstream host", index, name)
 			}
 		}
 	}

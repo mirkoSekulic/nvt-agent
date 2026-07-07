@@ -106,7 +106,10 @@ func NewCAWithUpstreams(leafDNSNames, upstreamLeafNames []string) (*CA, error) {
 		KeyUsage:              x509.KeyUsageCertSign,
 
 		// Name constraints: even a leaked key can only ever vouch for local
-		// redirect names plus the allowlisted upstream hosts, nothing else.
+		// redirect names plus the allowlisted upstream hosts and their
+		// subdomains (RFC 5280 dNSName constraints are suffix matches — Go
+		// cannot express exact-only). The in-process GetCertificate gate is
+		// exact-match, so egressd itself never mints a subdomain leaf.
 		PermittedDNSDomainsCritical: true,
 		PermittedDNSDomains:         permittedDomains(names, upstreams),
 		PermittedIPRanges: []*net.IPNet{
@@ -193,12 +196,48 @@ func LoadCAWithUpstreams(certFile, keyFile string, leafDNSNames, upstreamLeafNam
 		upstreamLeafNames: append([]string(nil), upstreamLeafNames...),
 		upstreamLeaves:    map[string]*cachedLeaf{},
 	}
-	for _, name := range permittedDomains(ca.leafDNSNames, ca.upstreamLeafNames) {
-		if !ca.allowedLeafName(name) {
-			return nil, fmt.Errorf("CA refused configured leaf name %q", name)
-		}
+	// Verify the durable cert actually carries critical DNS name constraints
+	// covering exactly the configured names. Without this a BYO/unconstrained
+	// durable CA would load silently, collapsing the two-gate model (a leaked
+	// key could then sign any host), and a stale constrained cert would fail
+	// only as a confusing runtime handshake error instead of loudly at boot.
+	if err := ca.verifyDurableConstraints(); err != nil {
+		return nil, err
 	}
 	return ca, nil
+}
+
+func (ca *CA) verifyDurableConstraints() error {
+	if !ca.cert.PermittedDNSDomainsCritical {
+		return fmt.Errorf("durable CA certificate must carry critical DNS name constraints")
+	}
+	if len(ca.cert.ExcludedDNSDomains) != 0 || len(ca.cert.ExcludedIPRanges) != 0 {
+		return fmt.Errorf("durable CA certificate must not carry excluded-name constraints")
+	}
+	want := map[string]bool{}
+	for _, name := range permittedDomains(ca.leafDNSNames, ca.upstreamLeafNames) {
+		want[name] = true
+	}
+	got := map[string]bool{}
+	for _, name := range ca.cert.PermittedDNSDomains {
+		got[name] = true
+	}
+	if len(got) != len(want) {
+		return fmt.Errorf("durable CA permitted DNS domains %v do not match configured names %v", ca.cert.PermittedDNSDomains, permittedDomains(ca.leafDNSNames, ca.upstreamLeafNames))
+	}
+	for name := range want {
+		if !got[name] {
+			return fmt.Errorf("durable CA permitted DNS domains are missing configured name %q", name)
+		}
+	}
+	// The CA must not permit non-loopback IP leaves; loopback is the only
+	// permitted range (local redirect listeners).
+	for _, permitted := range ca.cert.PermittedIPRanges {
+		if !permitted.IP.IsLoopback() {
+			return fmt.Errorf("durable CA permits a non-loopback IP range %s", permitted.String())
+		}
+	}
+	return nil
 }
 
 func bytesTrimSpace(data []byte) []byte {
