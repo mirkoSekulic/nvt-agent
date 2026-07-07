@@ -480,6 +480,48 @@ func TestMediatedAgentRunRendersEgressdWithoutEgressTokenInAgent(t *testing.T) {
 	assertVolumeMount(t, egressd, "egressd-config", egressdConfigPath, egressdConfigKey, true)
 }
 
+// TestReconcileWritesPlaceholderFileBrokerPolicy pins that a placeholder-file
+// grant survives broker-policy reconciliation: admission accepts it and
+// BrokerAgentGrants serializes it, so ValidateBrokerAgentsPolicy must accept it
+// too — otherwise a forward-proxy placeholder-file run is admitted then fails
+// to reconcile.
+func TestReconcileWritesPlaceholderFileBrokerPolicy(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressEnforcement = true
+	agentRun.Spec.EgressForwardProxy = true
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
+		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+			{Provider: "codex-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile, Repositories: []string{}, EgressHosts: []string{"chatgpt.com:443"}},
+		},
+	}
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("agent-token"))
+	egressSecret := mustDesiredTokenSecret(t, agentRun, scheme, EgressTokenSecretName(agentRun.Name), egressTokenKey, []byte("egress-token"))
+	callbackSecret := mustDesiredTokenSecret(t, agentRun, scheme, CallbackTokenSecretName(agentRun.Name), callbackTokenKey, []byte("callback-token"))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, brokerSecret, egressSecret, callbackSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile with placeholder-file grant: %v", err)
+	}
+	policy := mustParseBrokerAgentsPolicy(t, getBrokerAgentsConfigMap(ctx, t, k8sClient, agentRun.Namespace).Data[brokerAgentsConfigKey])
+	agentEntry := requireBrokerAgentEntry(t, policy, AgentRunBrokerID(agentRun.Namespace, agentRun.Name))
+	if len(agentEntry.Grants) != 1 || agentEntry.Grants[0].Materialization != "placeholder-file" {
+		t.Fatalf("broker policy did not carry the placeholder-file grant: %#v", agentEntry)
+	}
+
+	// Direct validation of the serialized policy shape.
+	if err := ValidateBrokerAgentsPolicy(policy); err != nil {
+		t.Fatalf("ValidateBrokerAgentsPolicy rejected a placeholder-file grant: %v", err)
+	}
+}
+
 func TestReconcileWritesMediatedBrokerAgentsPolicy(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)

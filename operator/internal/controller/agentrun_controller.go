@@ -2617,9 +2617,9 @@ func ValidateBrokerAgentsPolicy(policy brokerAgentsPolicy) error {
 				return fmt.Errorf("agents[%d].grants[%d].provider is required", agentIndex, grantIndex)
 			}
 			switch grant.Materialization {
-			case "", string(nvtv1alpha1.AgentRunGrantFileBundle), string(nvtv1alpha1.AgentRunGrantHeaderInject):
+			case "", string(nvtv1alpha1.AgentRunGrantFileBundle), string(nvtv1alpha1.AgentRunGrantHeaderInject), string(nvtv1alpha1.AgentRunGrantPlaceholderFile):
 			default:
-				return fmt.Errorf("agents[%d].grants[%d].materialization must be file-bundle or header-inject", agentIndex, grantIndex)
+				return fmt.Errorf("agents[%d].grants[%d].materialization must be file-bundle, header-inject, or placeholder-file", agentIndex, grantIndex)
 			}
 			for repoIndex, repository := range grant.Repositories {
 				if repository == "" {
