@@ -271,7 +271,7 @@ PY
       printf 'EGRESSD_ENV_FILE=%s\n' "$egressd_env_file"
     } >>"$env_file"
   fi
-  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" <<'PY'
+  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" "$agent_run_user" "$agent_home" <<'PY'
 import sys
 from pathlib import Path
 
@@ -281,6 +281,10 @@ values = {
     "NVT_EGRESS_MODE": sys.argv[3],
     "NVT_EGRESS_ALLOW_INSECURE_BROKER": sys.argv[4],
     "COMPOSE_PROFILES": sys.argv[5],
+    # Re-applying --user must actually switch an existing agent: the compose
+    # user + HOME + auth/home mount targets are driven by these two vars.
+    "AGENT_RUN_USER": sys.argv[6],
+    "AGENT_HOME": sys.argv[7],
 }
 lines = path.read_text(encoding="utf-8").splitlines()
 seen = set()
@@ -421,6 +425,21 @@ if [ ! -f "$agent_config_file" ]; then
   AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" AGENT_USER="$runtime_user" render_template "$templates_dir/agent.yaml" "$agent_config_file"
   echo "created $agent_config_file"
 else
+  # Keep the declared runtime.user in sync when re-running with --user, without
+  # touching the rest of a possibly user-edited agent.yaml. An agent created
+  # before this field existed has no user line; recreate it to adopt the field.
+  python3 - "$agent_config_file" "$runtime_user" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+user = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+updated, count = re.subn(r"(?m)^(  user: ).*$", r"\g<1>" + user, text)
+if count:
+    path.write_text(updated, encoding="utf-8")
+PY
   echo "exists  $agent_config_file"
 fi
 

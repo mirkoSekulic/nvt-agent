@@ -10,6 +10,13 @@ export NVT_STATE_DIR="${NVT_STATE_DIR:-$HOME/.nvt-agent}"
 # in a bind-mounted workspace may still need host-side ownership.
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   sudo chown "$(id -u):$(id -g)" "$HOME" "${NVT_WORKSPACE:-/workspace}" 2>/dev/null || true
+  # The runtime-auth dirs are separately mounted (compose bind mounts of the
+  # per-agent auth copy; a k8s emptyDir), so the top-level chown above does not
+  # reach them. Recurse them (small credential dirs) so the tool can create and
+  # update credentials, e.g. Claude Code's .claude/.credentials.json.
+  for auth_dir in "$HOME/.codex" "$HOME/.claude"; do
+    [ -d "$auth_dir" ] && sudo chown -R "$(id -u):$(id -g)" "$auth_dir" 2>/dev/null || true
+  done
 fi
 
 mkdir -p "$HOME/.nvt-agent" "$NVT_STATE_DIR" "${NVT_WORKSPACE:-/workspace}"

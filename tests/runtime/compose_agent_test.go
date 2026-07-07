@@ -1235,3 +1235,48 @@ runtime:
 		t.Fatalf("expected runtime.user rejection, got:\n%s", output)
 	}
 }
+
+// TestAgentInitSwitchesExistingUserMode pins review finding 1: re-running
+// agent-init --user on an EXISTING agent actually switches it — the env
+// (compose user + HOME) and agent.yaml runtime.user both flip, so a switch to
+// non-root does not silently keep running root.
+func TestAgentInitSwitchesExistingUserMode(t *testing.T) {
+	root := repoRoot(t)
+	home := t.TempDir()
+	agentDir := filepath.Join(root, ".agents", "switch-mode")
+	_ = os.RemoveAll(agentDir)
+	t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+
+	run := func(args ...string) {
+		command := "HOME=" + shellQuote(home) + " bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+		full := append([]string{"--name", "switch-mode", "--type", "claude"}, args...)
+		cmd := commandWithEnv(command, nil, full...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("agent-init failed: %v\n%s", err, out)
+		}
+	}
+	assertContains := func(file string, wants ...string) {
+		data, err := os.ReadFile(filepath.Join(agentDir, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Fatalf("%s missing %q\n%s", file, want, data)
+			}
+		}
+	}
+
+	run() // create as root
+	assertContains("env", "AGENT_RUN_USER=0:0", "AGENT_HOME=/root")
+	assertContains("agent.yaml", "user: root")
+
+	run("--user", "non-root") // switch the existing agent
+	assertContains("env", "AGENT_RUN_USER=1000:1000", "AGENT_HOME=/home/agent")
+	assertContains("agent.yaml", "user: non-root")
+
+	run("--user", "root") // switch back
+	assertContains("env", "AGENT_RUN_USER=0:0", "AGENT_HOME=/root")
+	assertContains("agent.yaml", "user: root")
+}
