@@ -10,6 +10,8 @@ ENV PATH=/root/.local/bin:/root/bin:/root/.local/share/mise/shims:$PATH
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     python3-yaml \
+    ca-certificates \
+    openssl \
     gh \
     ripgrep \
     tmux \

@@ -202,6 +202,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	enforced := AgentRunEgressEnforced(&agentRun)
+	if enforced && existingPod != nil {
+		if err := r.repairOwnedPodLabels(ctx, existingPod, enforcementLabels(agentRun.Name, roleLabelAgent)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	var existingEgressdPod *corev1.Pod
 	if enforced {
 		existingEgressdPod, err = r.getOwnedEgressdPod(ctx, &agentRun)
@@ -770,6 +775,27 @@ func (r *AgentRunReconciler) getOwnedEgressdPod(ctx context.Context, agentRun *n
 	return pod, nil
 }
 
+func (r *AgentRunReconciler) repairOwnedPodLabels(ctx context.Context, pod *corev1.Pod, required map[string]string) error {
+	changed := false
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+		changed = true
+	}
+	for key, value := range required {
+		if pod.Labels[key] != value {
+			pod.Labels[key] = value
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := r.Update(ctx, pod); err != nil {
+		return fmt.Errorf("repair Pod %s/%s labels: %w", pod.Namespace, pod.Name, err)
+	}
+	return nil
+}
+
 // validateBrokerCASecret ensures the configured broker CA Secret exists in
 // the AgentRun namespace and carries ca.crt before any Pod mounts it: the
 // Pod projects ca.crt non-optionally, so a bring-your-own TLS Secret without
@@ -954,8 +980,13 @@ func (r *AgentRunReconciler) publishEgressCAConfigMap(ctx context.Context, agent
 // validateCACertificatePEM accepts only certificate PEM blocks: anything
 // else — a private key above all — must never reach the published ConfigMap.
 func validateCACertificatePEM(data []byte) error {
+	_, err := parseCACertificatesPEM(data)
+	return err
+}
+
+func parseCACertificatesPEM(data []byte) ([]*x509.Certificate, error) {
 	rest := data
-	blocks := 0
+	certs := []*x509.Certificate{}
 	for {
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
@@ -963,18 +994,51 @@ func validateCACertificatePEM(data []byte) error {
 			break
 		}
 		if block.Type != "CERTIFICATE" {
-			return fmt.Errorf("unexpected PEM block %q", block.Type)
+			return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
 		}
-		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return fmt.Errorf("parse certificate: %w", err)
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse certificate: %w", err)
 		}
-		blocks++
+		certs = append(certs, cert)
 	}
-	if blocks == 0 {
-		return fmt.Errorf("no certificate PEM block found")
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("no certificate PEM block found")
 	}
 	if strings.TrimSpace(string(rest)) != "" {
-		return fmt.Errorf("trailing non-PEM data after certificates")
+		return nil, fmt.Errorf("trailing non-PEM data after certificates")
+	}
+	return certs, nil
+}
+
+func validateCAKeyPairPEM(certPEM, keyPEM []byte) error {
+	certs, err := parseCACertificatesPEM(certPEM)
+	if err != nil {
+		return err
+	}
+	if len(keyPEM) == 0 {
+		return fmt.Errorf("missing key %s", egressCAKeyKey)
+	}
+	block, rest := pem.Decode(keyPEM)
+	if block == nil {
+		return fmt.Errorf("no EC private key PEM block found")
+	}
+	if block.Type != "EC PRIVATE KEY" {
+		return fmt.Errorf("unexpected PEM block %q", block.Type)
+	}
+	if strings.TrimSpace(string(rest)) != "" {
+		return fmt.Errorf("trailing non-PEM data after private key")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse private key: %w", err)
+	}
+	certKey, ok := certs[0].PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("certificate public key is %T, want ECDSA", certs[0].PublicKey)
+	}
+	if certKey.Curve != key.Curve || certKey.X.Cmp(key.X) != 0 || certKey.Y.Cmp(key.Y) != 0 {
+		return fmt.Errorf("%s does not match %s", egressCAKeyKey, egressCACertKey)
 	}
 	return nil
 }
@@ -1004,8 +1068,8 @@ func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentR
 		if !metav1.IsControlledBy(secret, agentRun) {
 			return fmt.Errorf("egress CA Secret %s/%s exists but is not controlled by AgentRun %s", secret.Namespace, secret.Name, agentRun.Name)
 		}
-		if err := validateCACertificatePEM(secret.Data[egressCACertKey]); err != nil {
-			return fmt.Errorf("egress CA Secret %s/%s has invalid %s: %w", secret.Namespace, secret.Name, egressCACertKey, err)
+		if err := validateCAKeyPairPEM(secret.Data[egressCACertKey], secret.Data[egressCAKeyKey]); err != nil {
+			return fmt.Errorf("egress CA Secret %s/%s has invalid keypair: %w", secret.Namespace, secret.Name, err)
 		}
 		if len(secret.Data[egressCAKeyKey]) == 0 {
 			return fmt.Errorf("egress CA Secret %s/%s is missing key %s", secret.Namespace, secret.Name, egressCAKeyKey)
@@ -1086,6 +1150,9 @@ func (r *AgentRunReconciler) reconcileEgressdPod(ctx context.Context, agentRun *
 	if err := r.Get(ctx, key, pod); err == nil {
 		if !metav1.IsControlledBy(pod, agentRun) {
 			return fmt.Errorf("egressd Pod %s/%s exists but is not controlled by AgentRun %s", pod.Namespace, pod.Name, agentRun.Name)
+		}
+		if err := r.repairOwnedPodLabels(ctx, pod, enforcementLabels(agentRun.Name, roleLabelEgressd)); err != nil {
+			return err
 		}
 		return nil
 	} else if !errors.IsNotFound(err) {
