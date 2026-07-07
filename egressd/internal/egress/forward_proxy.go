@@ -2,6 +2,7 @@ package egress
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,7 @@ const (
 	dialTimeout                             = 10 * time.Second
 	defaultForwardProxyMaxConcurrentTunnels = 64
 	defaultForwardProxyTunnelIdleTimeout    = 60 * time.Second
+	forwardProxyMITMReadHeaderTimeout       = 30 * time.Second
 )
 
 // ForwardProxy is a CONNECT-only blind tunnel. It does not inspect or modify
@@ -30,11 +32,17 @@ type ForwardProxy struct {
 	Dialer   *net.Dialer
 	Logger   *log.Logger
 	Reporter *Reporter
+	// CA, Broker, and Transport back the TLS-terminating inject routes. Nil
+	// when the forward proxy only blind-tunnels.
+	CA        *CA
+	Broker    *BrokerClient
+	Transport http.RoundTripper
 
-	once        sync.Once
-	allowHosts  map[string]bool
-	allowPorts  map[int]bool
-	tunnelSlots chan struct{}
+	once          sync.Once
+	allowHosts    map[string]bool
+	allowPorts    map[int]bool
+	tunnelSlots   chan struct{}
+	injectProxies map[string]*Proxy
 }
 
 func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +55,12 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		p.writeDecision("", 0, "deny", "malformed_target")
 		http.Error(w, "malformed CONNECT target", http.StatusBadRequest)
+		return
+	}
+	// A CONNECT to an inject-route host is TLS-terminated and injected; every
+	// other host falls through to the blind-tunnel allowlist.
+	if proxy := p.injectProxy(target.host); proxy != nil {
+		p.serveMITM(w, target, proxy)
 		return
 	}
 	if !p.allowed(target) {
@@ -91,6 +105,100 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tunnel(client, buffered, upstream, p.Config.effectiveTunnelIdleTimeout())
 }
 
+// serveMITM terminates TLS for an inject-route host under the per-agent CA,
+// then serves the decrypted request(s) through the capability's Proxy —
+// reusing its material fetch, header injection, placeholder strip, upstream
+// pinning, quota, audit, and streaming exactly as a redirect route. The agent
+// trusts the CA, so the minted leaf validates; the real upstream never sees the
+// placeholder and the decrypted request cannot redirect off the pinned host.
+func (p *ForwardProxy) serveMITM(w http.ResponseWriter, target connectTarget, proxy *Proxy) {
+	if p.CA == nil {
+		p.writeDecision(target.host, target.port, "deny", "mitm_unconfigured")
+		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !p.portAllowed(target.port) {
+		p.writeDecision(target.host, target.port, "deny", "target_not_allowed")
+		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
+		return
+	}
+	releaseTunnel, ok := p.acquireTunnel()
+	if !ok {
+		p.writeDecision(target.host, target.port, "deny", "tunnel_limit_exceeded")
+		http.Error(w, "CONNECT tunnel limit exceeded", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseTunnel()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		p.writeDecision(target.host, target.port, "deny", "hijack_unavailable")
+		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
+		return
+	}
+	client, buffered, err := hijacker.Hijack()
+	if err != nil {
+		p.writeDecision(target.host, target.port, "deny", "hijack_failed")
+		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = client.Close() }()
+
+	p.writeDecision(target.host, target.port, "allow", "")
+	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		return
+	}
+
+	// Terminate TLS with a leaf minted for the CONNECT host. GetCertificate
+	// refuses any SNI that is not this allowlisted upstream, so a client that
+	// lies about SNI cannot obtain a leaf for another host.
+	tlsConn := tls.Server(&mitmConn{Conn: client, reader: buffered.Reader}, p.CA.ServerTLSConfig())
+	defer func() { _ = tlsConn.Close() }()
+	idle := p.Config.effectiveTunnelIdleTimeout()
+	if idle > 0 {
+		_ = tlsConn.SetDeadline(time.Now().Add(idle))
+	}
+	if err := tlsConn.Handshake(); err != nil {
+		p.logf("event=mitm target_host=%s handshake_failed", target.host)
+		return
+	}
+	// Reset the deadline: the per-request path manages its own timeouts, and a
+	// long-lived SSE stream must not be killed by the handshake deadline.
+	_ = tlsConn.SetDeadline(time.Time{})
+
+	p.serveDecrypted(tlsConn, proxy, idle)
+}
+
+// serveDecrypted runs an HTTP server over the single decrypted MITM connection,
+// dispatching each request through the capability Proxy (an http.Handler). It
+// blocks until the connection closes (keep-alive drained).
+func (p *ForwardProxy) serveDecrypted(conn net.Conn, proxy *Proxy, idle time.Duration) {
+	done := make(chan struct{})
+	listener := newSingleConnListener(&notifyConn{Conn: conn, done: done})
+	server := &http.Server{
+		Handler:           proxy,
+		ReadHeaderTimeout: forwardProxyMITMReadHeaderTimeout,
+		IdleTimeout:       idle,
+	}
+	go func() { _ = server.Serve(listener) }()
+	<-done
+	_ = listener.Close()
+	_ = server.Close()
+}
+
+func (p *ForwardProxy) portAllowed(port int) bool {
+	p.init()
+	return p.allowPorts[port]
+}
+
+func (p *ForwardProxy) logf(format string, args ...any) {
+	logger := p.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Printf(format, args...)
+}
+
 func (p *ForwardProxy) allowed(target connectTarget) bool {
 	p.init()
 	return p.allowHosts[target.host] && p.allowPorts[target.port]
@@ -122,7 +230,31 @@ func (p *ForwardProxy) init() {
 			p.allowPorts[port] = true
 		}
 		p.tunnelSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
+		p.injectProxies = map[string]*Proxy{}
+		for _, route := range p.Config.InjectRoutes {
+			host, err := normalizeProxyHost(route.Host)
+			if err != nil {
+				p.writeInvalidAllowHost(route.Host)
+				continue
+			}
+			p.injectProxies[host] = &Proxy{
+				Route: Route{
+					Capability:            route.Capability,
+					Upstream:              route.Upstream,
+					AllowInsecureUpstream: route.AllowInsecureUpstream,
+					MaxRequests:           route.MaxRequests,
+				},
+				Broker:    p.Broker,
+				Transport: p.Transport,
+				Reporter:  p.Reporter,
+			}
+		}
 	})
+}
+
+func (p *ForwardProxy) injectProxy(host string) *Proxy {
+	p.init()
+	return p.injectProxies[host]
 }
 
 func (p *ForwardProxy) writeInvalidAllowHost(host string) {
@@ -284,3 +416,63 @@ func closeWrite(conn net.Conn) error {
 	}
 	return conn.Close()
 }
+
+// mitmConn feeds tls.Server from the hijack's buffered reader (which may hold
+// bytes read past the CONNECT line) while writing to the raw client conn.
+type mitmConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *mitmConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+// notifyConn closes done when the connection is closed, so serveDecrypted can
+// wait for the HTTP server to finish with the single MITM connection.
+type notifyConn struct {
+	net.Conn
+	once sync.Once
+	done chan struct{}
+}
+
+func (c *notifyConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.done) })
+	return err
+}
+
+// singleConnListener yields exactly one connection to http.Server.Serve, then
+// blocks until Close so Serve stays alive to handle keep-alive requests.
+type singleConnListener struct {
+	mu     sync.Mutex
+	conn   net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	return &singleConnListener{conn: conn, closed: make(chan struct{})}
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	conn := l.conn
+	l.conn = nil
+	l.mu.Unlock()
+	if conn != nil {
+		return conn, nil
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *singleConnListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr { return dummyAddr{} }
+
+type dummyAddr struct{}
+
+func (dummyAddr) Network() string { return "mitm" }
+func (dummyAddr) String() string  { return "mitm" }
