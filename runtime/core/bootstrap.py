@@ -446,8 +446,15 @@ def placeholder_file_target(home, rel):
     return home.joinpath(*segments)
 
 
-def write_placeholder_file(target, content, mode):
+def write_placeholder_file(target, content, mode, home):
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Defense in depth: the relative path had no '..', but a symlinked parent
+    # could still redirect the write outside HOME. Verify the resolved parent
+    # stays under the resolved HOME before writing anything.
+    resolved_home = Path(os.path.realpath(home))
+    resolved_parent = Path(os.path.realpath(target.parent))
+    if resolved_parent != resolved_home and resolved_home not in resolved_parent.parents:
+        raise SystemExit(f"bootstrap: placeholder file target {target} resolves outside HOME")
     fd, temporary = tempfile.mkstemp(dir=str(target.parent), prefix=".nvt-placeholder-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -495,7 +502,7 @@ def apply_placeholder_files(egress):
             if not isinstance(raw_mode, str) or len(raw_mode) != 4 or any(char not in "01234567" for char in raw_mode):
                 raise SystemExit(f"bootstrap: placeholder-files[{file_index}] for {provider} has an invalid mode {raw_mode!r}")
             target = placeholder_file_target(home, entry.get("path"))
-            write_placeholder_file(target, content, int(raw_mode, 8))
+            write_placeholder_file(target, content, int(raw_mode, 8), home)
 
 
 def apply_additional_paths(paths):

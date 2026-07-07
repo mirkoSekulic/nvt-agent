@@ -111,3 +111,59 @@ code-server:
 	scanTreeForSecretMaterial(t, f.home, []string{realSecret})
 	scanTextForSecretMaterial(t, "bootstrap output", output, []string{realSecret})
 }
+
+// TestBootstrapPlaceholderFileRefusesSymlinkEscape pins review finding 8: even
+// with a traversal-free relative path, a symlinked parent that resolves outside
+// HOME is refused rather than written through.
+func TestBootstrapPlaceholderFileRefusesSymlinkEscape(t *testing.T) {
+	f := newFixture(t)
+	f.installBrokerctl()
+
+	// .codex is a symlink to a directory outside HOME.
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(f.home, ".codex")); err != nil {
+		t.Fatal(err)
+	}
+
+	broker := newFakePlaceholderBroker(t, map[string]any{
+		"ok": true,
+		"files": []any{map[string]any{
+			"path":    ".codex/auth.json",
+			"mode":    "0600",
+			"content": "{\"tokens\":{}}\n",
+		}},
+		"hosts":      []any{"chatgpt.com"},
+		"expires_at": nil,
+	})
+
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  grants:
+    - provider: codex-main
+      materialization: placeholder-file
+runtime:
+  command: codex
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_BROKER_URL=" + broker.URL,
+		"NVT_BROKER_TOKEN=broker-token",
+	}, config)
+
+	if !strings.Contains(output, "resolves outside HOME") {
+		t.Fatalf("expected symlink-escape refusal, got:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "auth.json")); err == nil {
+		t.Fatalf("bootstrap wrote through the escaping symlink")
+	}
+}
