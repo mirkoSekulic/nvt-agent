@@ -69,14 +69,24 @@ Rules, all enforced broker-side:
 Each grant carries a materialization mode:
 
 - `file-bundle` (default) — current behavior; the agent identity may call the
-  compatibility endpoints per `protocol/broker.md`.
+  compatibility endpoints per `protocol/broker.md`. Writes usable credential
+  material into the container (the dev/fallback path).
 - `header-inject` — zero-possession; only the paired egress identity may
   obtain the credential, via `/v1/injection/headers`.
+- `placeholder-file` — zero-possession for file-based tools; the agent
+  identity fetches a syntactically valid auth file containing only inert
+  placeholders, via `/v1/placeholder-files` (see `protocol/broker.md`). The
+  real credential stays broker-side and is injected at the edge (Phase 6.2).
+  Distinct from `file-bundle`: no path in this mode writes usable credentials.
+  The response's `hosts` bindings feed the forward-proxy route/injection map.
 
 Modes are mutually exclusive per grant, enforced broker-side:
 
-- A `header-inject` grant denies `/v1/token`, `/v1/headers`, and `/v1/files`
-  for that provider and agent.
+- A `header-inject` or `placeholder-file` grant denies `/v1/token`,
+  `/v1/headers`, and `/v1/files` for that provider and agent.
+- A `placeholder-file` grant is the only mode that may call
+  `/v1/placeholder-files`; `file-bundle`/`header-inject` grants are denied
+  there.
 - A `file-bundle` grant denies `/v1/injection/headers` for that provider and
   the paired egress identity.
 

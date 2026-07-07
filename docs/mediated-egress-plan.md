@@ -1,7 +1,7 @@
 # Plan: Mediated Credential Egress
 
 Status: living document — Phases 0–4 completed (#53, #54, Phase 2 gate, #56, #58, #59, Phase 4 git-over-HTTPS mediation)
-Version: v3.7 (Phase 5 PR 6a landed: own-Pod egressd + CNI-enforced NetworkPolicies behind `spec.egressEnforcement`, egress-denied smoke on the Calico kind cluster; PR 6b landed: per-request audit via `POST /v1/injection/report`, per-grant request quotas, revocation bound proven + documented, Anthropic provider-agnosticism proof, `egress.defaultMode` knob defaulting to `direct` — global flip still deferred)
+Version: v3.7 (Phase 5 PR 6a landed: own-Pod egressd + CNI-enforced NetworkPolicies behind `spec.egressEnforcement`, egress-denied smoke on the Calico kind cluster; PR 6b landed: per-request audit via `POST /v1/injection/report`, per-grant request quotas, revocation bound proven + documented, Anthropic provider-agnosticism proof, `egress.defaultMode` knob defaulting to `direct` — global flip still deferred; PR 6.1 landed: generic `placeholder-file` materialization via `POST /v1/placeholder-files` — a syntactically valid auth file of inert placeholders (plain/`jwt` shapes, host bindings), Codex `.codex/auth.json` preset, runtime materialization; fixture-level only, the real tool win awaits 6.2's edge injection)
 
 ## Goal
 

@@ -1,6 +1,9 @@
 # PR 6.1 Plan: Generic placeholder-file materialization
 
-Status: plan — ready to implement (Phase 5 complete: #63 6a, #64 6b)
+Status: landed — generic placeholder-file materialization, Codex preset, and
+runtime materialization implemented with fixture-level tests (no real secrets).
+The real tool-behind-a-placeholder-file win is demonstrated after 6.2 merges
+(the honest dependency noted below).
 Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §"Phase 6", sequence
 row 7. This is the broker/provider half of Phase 6, split out from
 [phase6.2-forward-proxy-pr-plan.md](phase6.2-forward-proxy-pr-plan.md) (row 8)
