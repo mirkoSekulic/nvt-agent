@@ -224,6 +224,58 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	}
 }
 
+// TestDesiredAgentPodDefaultUserIsRootUnchanged pins that the default run adds
+// no non-root securityContext, no HOME, and no pod fsGroup — root, as today.
+func TestDesiredAgentPodDefaultUserIsRootUnchanged(t *testing.T) {
+	pod, err := DesiredAgentPod(testAgentRun(), testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	agent := requireContainer(t, *pod, "agent")
+	if agent.SecurityContext != nil {
+		t.Fatalf("default agent container must have no SecurityContext, got %#v", agent.SecurityContext)
+	}
+	if envValue(agent, "HOME") != "" {
+		t.Fatalf("default agent must not set HOME, got %q", envValue(agent, "HOME"))
+	}
+	if pod.Spec.SecurityContext != nil {
+		t.Fatalf("default pod must have no SecurityContext/fsGroup, got %#v", pod.Spec.SecurityContext)
+	}
+}
+
+// TestDesiredAgentPodNonRootUser pins the opt-in non-root shape: uid/gid 1000,
+// HOME + state under /home/agent, pod fsGroup 1000, and the codex auth path +
+// group-writable seed under /home/agent.
+func TestDesiredAgentPodNonRootUser(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Runtime.User = nvtv1alpha1.AgentRunUserNonRoot
+	agentRun.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "codex-auth"}
+
+	pod, err := DesiredAgentPod(agentRun, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	agent := requireContainer(t, *pod, "agent")
+	sc := agent.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 1000 || sc.RunAsGroup == nil || *sc.RunAsGroup != 1000 {
+		t.Fatalf("non-root agent must run as 1000:1000, got %#v", sc)
+	}
+	if envValue(agent, "HOME") != "/home/agent" {
+		t.Fatalf("HOME = %q, want /home/agent", envValue(agent, "HOME"))
+	}
+	if envValue(agent, "NVT_STATE_DIR") != "/home/agent/.nvt-agent" {
+		t.Fatalf("NVT_STATE_DIR = %q", envValue(agent, "NVT_STATE_DIR"))
+	}
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil || *pod.Spec.SecurityContext.FSGroup != 1000 {
+		t.Fatalf("non-root pod must set fsGroup 1000, got %#v", pod.Spec.SecurityContext)
+	}
+	assertVolumeMount(t, agent, runtimeAuthHomeName, "/home/agent/.codex", "", false)
+	copyContainer := requireInitContainer(t, *pod, "runtime-auth-copy")
+	if !strings.Contains(strings.Join(copyContainer.Args, " "), "chmod -R ug+rwX") {
+		t.Fatalf("non-root runtime-auth seed must be group-writable, got %#v", copyContainer.Args)
+	}
+}
+
 func TestDesiredAgentPodSeedsRuntimeAuthSecretAtCodexDefaultPath(t *testing.T) {
 	scheme := testScheme(t)
 	agentRun := testAgentRun()

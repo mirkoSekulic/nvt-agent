@@ -32,7 +32,18 @@ const (
 	// for the agent; the real credential stays broker-side and is injected at
 	// the edge. Like header-inject, it is a zero-possession mediated mode.
 	AgentRunGrantPlaceholderFile AgentRunGrantMaterialization = "placeholder-file"
+
+	// AgentRunUserRoot is the default: the agent container runs as root, HOME
+	// is /root, exactly as today.
+	AgentRunUserRoot AgentRunRuntimeUser = "root"
+	// AgentRunUserNonRoot runs the agent container as uid/gid 1000 (the image's
+	// `agent` user) with HOME=/home/agent and passwordless sudo — opt-in, for
+	// tools that refuse to run privileged (e.g. Claude Code's bypass mode).
+	AgentRunUserNonRoot AgentRunRuntimeUser = "non-root"
 )
+
+// AgentRunRuntimeUser selects the container user for the agent.
+type AgentRunRuntimeUser string
 
 // AgentRun represents one disposable nvt agent execution.
 //
@@ -79,6 +90,9 @@ type AgentRunSpec struct {
 type AgentRunRuntime struct {
 	Type     string `json:"type"`
 	Autonomy string `json:"autonomy"`
+	// User selects the container user: root (default, unchanged) or non-root
+	// (uid/gid 1000, HOME=/home/agent, passwordless sudo).
+	User AgentRunRuntimeUser `json:"user,omitempty"`
 }
 
 // AgentRunRuntimeAuth references runtime-specific auth material from a Kubernetes Secret.
