@@ -500,6 +500,23 @@ grep -q 'value: "https://nvt-broker:7347"' "${DEFAULT_RENDER}"
 grep -q 'name: NVT_BROKER_CA_SECRET' "${DEFAULT_RENDER}"
 grep -q 'checksum/broker-tls: ' "${DEFAULT_RENDER}"
 
+# checksum/broker-config rolls the broker Deployment when broker.config changes.
+# The broker loads providers once at startup and does not hot-reload them, so a
+# provider change that did not roll the Deployment would leave the old config
+# running (the real Codex proof false failure).
+grep -q 'checksum/broker-config: ' "${DEFAULT_RENDER}"
+broker_config_checksum() {
+  grep 'checksum/broker-config: ' "$1" | head -1 | awk '{print $2}' | tr -d '"'
+}
+BROKER_CONFIG_CHANGED_RENDER="${WORKDIR}/broker-config-changed.yaml"
+helm template nvt "${CHART}" -n custom-ns \
+  --set 'broker.config.providers[0].name=changed-provider' \
+  --set 'broker.config.providers[0].plugin=token' > "${BROKER_CONFIG_CHANGED_RENDER}"
+if [[ "$(broker_config_checksum "${DEFAULT_RENDER}")" == "$(broker_config_checksum "${BROKER_CONFIG_CHANGED_RENDER}")" ]]; then
+  echo "checksum/broker-config must change when broker.config.providers changes" >&2
+  exit 1
+fi
+
 # Revocation depends on the broker hot-reloading the agents ConfigMap on
 # mtime change. A subPath mount freezes the projected file forever and would
 # silently kill revocation, so the broker config volume must never be
