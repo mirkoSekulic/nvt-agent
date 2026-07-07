@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,10 +24,48 @@ func TestPathClass(t *testing.T) {
 		"":                           "root",
 		"/v1/messages":               "v1",
 		"noslashprefix/x":            "noslashprefix",
+		"/Repos/O/R":                 "repos", // uppercase is lowercased
+		"/a@b@c/x":                   "abc",   // disallowed chars dropped
+		"/@@@/x":                     "other", // all-disallowed segment buckets
 	}
 	for path, want := range cases {
 		if got := PathClass(path); got != want {
 			t.Errorf("PathClass(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// TestPathClassAlwaysValid pins the source guarantee (protocol/injection.md):
+// PathClass output always matches the broker's audit shape for any input, so
+// egressd can never emit a class the broker rejects (which would silently drop
+// the whole audit batch).
+func TestPathClassAlwaysValid(t *testing.T) {
+	shape := regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	inputs := []string{
+		"",
+		"/",
+		"//",
+		"/UPPERCASE/x",
+		"/has space/x",
+		"/tab\tchar/x",
+		"/new\nline/x",
+		"/ctrl\x00byte/x",
+		"/café/x",      // non-ASCII
+		"/%2e%2e/x",    // percent-escapes
+		"/@#$%^&*()/x", // all-disallowed
+		"/../../etc/pwd",
+		"/" + strings.Repeat("verylongsegment", 20) + "/x", // > 64 chars
+		"/a.b_c-d/x",
+		strings.Repeat("x", 500),
+		"/../",
+		".",
+		"..",
+		"-",
+	}
+	for _, in := range inputs {
+		got := PathClass(in)
+		if !shape.MatchString(got) {
+			t.Errorf("PathClass(%q) = %q, which does not match %s", in, got, shape)
 		}
 	}
 }

@@ -297,3 +297,39 @@ func TestReportRejectsRawPathClass(t *testing.T) {
 		t.Fatalf("well-formed path_class must be accepted: status=%d body=%v", status, body)
 	}
 }
+
+// TestReportRejectsConnectAndStatusBounds pins the CONNECT/HTTP bounds
+// (finding-3 addendum): out-of-range ports, non-enum decisions, and negative
+// statuses are rejected so they never reach the audit log. The code is
+// correct; this pins the coverage.
+func TestReportRejectsConnectAndStatusBounds(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(mediatedIdentities())
+
+	bad := []map[string]any{
+		{"capability": "c", "host": "h", "port": 0, "decision": "allow"},                   // port too low
+		{"capability": "c", "host": "h", "port": 65536, "decision": "allow"},               // port too high
+		{"capability": "c", "host": "h", "port": -1, "decision": "deny"},                   // negative port
+		{"capability": "c", "host": "h", "port": 443, "decision": "maybe"},                 // bad decision enum
+		{"capability": "c", "host": "h", "port": 443, "decision": ""},                      // empty decision
+		{"capability": "c", "host": "h", "method": "GET", "path_class": "x", "status": -1}, // negative status
+	}
+	for _, entry := range bad {
+		status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/report",
+			map[string]any{"entries": []any{entry}})
+		if status != http.StatusBadRequest || body["error"] != "entry-invalid" {
+			t.Fatalf("entry %v must be rejected as entry-invalid: status=%d body=%v", entry, status, body)
+		}
+	}
+
+	// Port boundaries (1 and 65535) are accepted.
+	for _, port := range []int{1, 65535} {
+		status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/report",
+			map[string]any{"entries": []any{map[string]any{
+				"capability": "c", "host": "h", "port": port, "decision": "allow",
+			}}})
+		if status != http.StatusOK || body["ok"] != true {
+			t.Fatalf("boundary port %d must be accepted: status=%d body=%v", port, status, body)
+		}
+	}
+}

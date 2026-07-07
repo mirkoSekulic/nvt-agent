@@ -8,10 +8,16 @@ import (
 	"time"
 )
 
+// pathClassMaxLen and pathClassAllowed mirror the broker's audit shape
+// (^[a-z0-9._-]{1,64}$, protocol/injection.md). PathClass guarantees its
+// output at the source so egressd can never emit a class the broker rejects.
+const pathClassMaxLen = 64
+
 // PathClass reduces a request path to a sanitized audit class, computed at the
 // source so raw paths (repo names, file names) never leave egressd. git
-// smart-HTTP paths map to the three git classes; every other path reduces to
-// its first segment, and "/" to "root".
+// smart-HTTP paths map to the three git classes; every other path reduces to a
+// sanitized form of its first segment, and "/" to "root". The result always
+// matches ^[a-z0-9._-]{1,64}$ for any input, hostile or not.
 func PathClass(path string) string {
 	switch {
 	case strings.HasSuffix(path, "/info/refs"):
@@ -22,16 +28,37 @@ func PathClass(path string) string {
 		return "git-receive-pack"
 	}
 	trimmed := strings.TrimPrefix(path, "/")
-	if trimmed == "" {
-		return "root"
-	}
 	if index := strings.IndexByte(trimmed, '/'); index >= 0 {
 		trimmed = trimmed[:index]
 	}
 	if trimmed == "" {
 		return "root"
 	}
-	return trimmed
+	class := sanitizePathClass(trimmed)
+	if class == "" {
+		// A non-empty segment made entirely of disallowed characters (e.g.
+		// "@@@", a percent-escape, non-ASCII) collapses to a safe bucket
+		// rather than leaking or emitting an invalid class.
+		return "other"
+	}
+	return class
+}
+
+// sanitizePathClass lowercases the segment and keeps only the broker's allowed
+// characters, capped at pathClassMaxLen. The kept runes are ASCII by
+// construction, so the byte cast is safe.
+func sanitizePathClass(segment string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(segment) {
+		if builder.Len() >= pathClassMaxLen {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			builder.WriteByte(byte(r))
+		}
+	}
+	return builder.String()
 }
 
 // Reporter batches per-request audit reports and flushes them to the broker
