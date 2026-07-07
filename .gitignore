@@ -7,3 +7,4 @@ __pycache__/
 *.pyc
 .phase2-out/
 .phase2b-out/
+.phase6-out/
