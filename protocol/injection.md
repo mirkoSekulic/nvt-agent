@@ -79,6 +79,10 @@ Each grant carries a materialization mode:
   real credential stays broker-side and is injected at the edge (Phase 6.2).
   Distinct from `file-bundle`: no path in this mode writes usable credentials.
   The response's `hosts` bindings feed the forward-proxy route/injection map.
+  Like `header-inject`, it is **injection-capable**: the same grant that
+  materializes the placeholder file also authorizes `/v1/injection/headers`,
+  so the edge injects the real credential without a second grant for the
+  provider.
 
 Modes are mutually exclusive per grant, enforced broker-side:
 
@@ -87,13 +91,14 @@ Modes are mutually exclusive per grant, enforced broker-side:
 - A `placeholder-file` grant is the only mode that may call
   `/v1/placeholder-files`; `file-bundle`/`header-inject` grants are denied
   there.
-- A `file-bundle` grant denies `/v1/injection/headers` for that provider and
-  the paired egress identity.
+- `/v1/injection/headers` accepts `header-inject` and `placeholder-file`
+  grants (both zero-possession); a `file-bundle` grant is denied there.
 
 Run-level admission (normative here, enforced by the operator's
 AgentSchedule admission and by compose `agent-init` from plan Phase 3):
 
-- run `egress: direct` with any `header-inject` grant fails admission.
+- run `egress: direct` with any `header-inject` or `placeholder-file` grant
+  fails admission (both are zero-possession mediated modes).
 - run `egress: mediated` with any `file-bundle` grant fails admission.
 - There is no downgrade path in either direction. The error names the
   offending grant.

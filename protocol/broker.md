@@ -240,6 +240,10 @@ Rules:
   bindings, and a `placeholder-file` grant is denied on `/v1/token`,
   `/v1/headers`, and `/v1/files` (`materialization-mismatch`) — the real
   secret is unreachable everywhere.
+- **Injection-capable**: a `placeholder-file` grant also authorizes
+  `/v1/injection/headers` for the paired egress identity, so the same grant
+  both materializes the placeholder file and lets the edge inject the real
+  credential (no second `header-inject` grant for the provider is needed).
 - `egress`-role identities are refused; the placeholder file is inert and
   agent-owned.
 - Error shape and status conventions match `/v1/token`.

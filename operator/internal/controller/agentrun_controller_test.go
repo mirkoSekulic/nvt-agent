@@ -537,6 +537,63 @@ func TestValidateAgentRunEgressModeRejectsMismatches(t *testing.T) {
 	}
 }
 
+func TestValidateAgentRunEgressModePlaceholderFile(t *testing.T) {
+	// Mediated: a placeholder-file grant alongside the header-inject route is
+	// accepted (zero-possession materialization).
+	mediated := testAgentRun()
+	mediated.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	mediated.Spec.EgressAllowInsecureBroker = true
+	mediated.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+		{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"}},
+		{Provider: "codex-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile},
+	}}
+	if err := ValidateAgentRunEgressMode(mediated); err != nil {
+		t.Fatalf("mediated placeholder-file grant must be accepted, got %v", err)
+	}
+
+	// Direct: a placeholder-file grant is rejected like header-inject — it is a
+	// zero-possession mediated mode with no edge to inject at.
+	direct := testAgentRun()
+	direct.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "codex-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+	}}}
+	if err := ValidateAgentRunEgressMode(direct); err == nil ||
+		!strings.Contains(err.Error(), "codex-main") || !strings.Contains(err.Error(), "placeholder-file") {
+		t.Fatalf("direct placeholder-file grant must be rejected naming the provider, got %v", err)
+	}
+}
+
+// TestInjectMediatedEgressConfigPlaceholderFile pins that a placeholder-file
+// grant reaches the agent egress config (materialization only, no base-url) so
+// bootstrap materializes the placeholder auth file.
+func TestInjectMediatedEgressConfigPlaceholderFile(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{
+		{Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"}},
+		{Provider: "codex-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile},
+	}}
+	config := InjectMediatedEgressConfig(map[string]any{}, agentRun)
+	egress := config["egress"].(map[string]any)
+	grants := egress["grants"].([]any)
+	var placeholder map[string]any
+	for _, raw := range grants {
+		grant := raw.(map[string]any)
+		if grant["provider"] == "codex-main" {
+			placeholder = grant
+		}
+	}
+	if placeholder == nil {
+		t.Fatalf("placeholder-file grant missing from agent egress config: %#v", grants)
+	}
+	if placeholder["materialization"] != "placeholder-file" {
+		t.Fatalf("unexpected materialization: %#v", placeholder)
+	}
+	if _, hasBaseURL := placeholder["base-url"]; hasBaseURL {
+		t.Fatalf("placeholder-file grant must not carry a base-url: %#v", placeholder)
+	}
+}
+
 func TestValidateAgentRunEgressModeRejectsMediatedRuntimeAuth(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated

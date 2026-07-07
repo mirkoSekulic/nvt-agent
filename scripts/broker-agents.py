@@ -154,7 +154,7 @@ def main():
     grant.add_argument("--name", required=True)
     grant.add_argument("--provider", required=True)
     grant.add_argument("--repo", required=True)
-    grant.add_argument("--materialization", choices=["file-bundle", "header-inject"])
+    grant.add_argument("--materialization", choices=["file-bundle", "header-inject", "placeholder-file"])
     grant.add_argument("--egress-host", action="append", default=[])
     grant.add_argument("--git", action="store_true", help="git-over-HTTPS grant: TLS redirect route + git bootstrap wiring")
     grant.add_argument("--permission", action="append", default=[], help="grant-level permission as <name>=read|write")
