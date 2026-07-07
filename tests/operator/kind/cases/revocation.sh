@@ -133,6 +133,11 @@ case_run() {
   wait_for_agentrun_exists "${RUN_NAME}-valid"
   wait_for_phase_any "${RUN_NAME}-valid" "${RUN_TIMEOUT_SECONDS}" Running
 
+  # The broker agents ConfigMap projects ~1min after Pod start, so egressd's
+  # first fetches can be unauthorized. Wait until the mediated path is
+  # authorized (either route becoming 200 proves broker readiness).
+  wait_for_route_ready "${RUN_NAME}-valid" 8471
+
   # Both routes work before revocation. Fresh path each call = cache miss, so
   # egressd refetches from the broker every time (no stale cache masking).
   assert_route_status "${RUN_NAME}-valid" 8471 200 "main route before revocation"
@@ -162,6 +167,17 @@ assert_route_status() {
   local code
   code="$(route_status "${run}" "${port}")"
   [[ "${code}" == "${want}" ]] || die "${label}: route ${port} returned ${code}, want ${want}"
+}
+
+wait_for_route_ready() {
+  local run="$1" port="$2"
+  local deadline=$((SECONDS + RUN_TIMEOUT_SECONDS)) code
+  while (( SECONDS < deadline )); do
+    code="$(route_status "${run}" "${port}")"
+    [[ "${code}" == "200" ]] && { log "route ${port} ready (broker authorized)"; return; }
+    sleep 3
+  done
+  die "route ${port} never became ready (last ${code})"
 }
 
 wait_for_route_denied() {

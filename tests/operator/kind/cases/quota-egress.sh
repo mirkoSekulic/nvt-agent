@@ -41,7 +41,16 @@ broker:
   envSecretName: nvt-smoke-broker-env
   config:
     providers:
-      - name: static-bearer-main
+      - name: static-bearer-warmup
+        plugin: token
+        config:
+          token-env: NVT_SMOKE_STATIC_TOKEN
+          injection-hosts:
+            - nvt-smoke-echo.${NAMESPACE}.svc.cluster.local
+        allow:
+          repositories:
+            - example/*
+      - name: static-bearer-quota
         plugin: token
         config:
           token-env: NVT_SMOKE_STATIC_TOKEN
@@ -67,19 +76,30 @@ active_deadline_seconds = int(sys.argv[2])
 namespace = sys.argv[3]
 quota_limit = int(sys.argv[4])
 
+echo = f"nvt-smoke-echo.{namespace}.svc.cluster.local:443"
+# Warmup route (no quota) on 8471 lets the smoke wait for broker readiness
+# without spending the quota route. The quota route is on 8472.
+warmup_grant = {
+    "provider": "static-bearer-warmup",
+    "repositories": ["example/repo"],
+    "materialization": "header-inject",
+    "egressHosts": [echo],
+    "allowInsecureUpstream": True,
+}
+quota_grant = {
+    "provider": "static-bearer-quota",
+    "repositories": ["example/repo"],
+    "materialization": "header-inject",
+    "egressHosts": [echo],
+    "allowInsecureUpstream": True,
+    "quota": {"requests": quota_limit},
+}
 spec = {
     "runtime": {"type": "codex", "autonomy": "trusted-local"},
     "image": "nvt-agent-runtime:latest",
     "egress": "mediated",
     "workspace": {"mode": "Ephemeral"},
-    "broker": {"grants": [{
-        "provider": "static-bearer-main",
-        "repositories": ["example/repo"],
-        "materialization": "header-inject",
-        "egressHosts": [f"nvt-smoke-echo.{namespace}.svc.cluster.local:443"],
-        "allowInsecureUpstream": True,
-        "quota": {"requests": quota_limit},
-    }]},
+    "broker": {"grants": [warmup_grant, quota_grant]},
     "agent": {
         "config": {
             "runtime": {"command": "bash", "args": ["-lc", 'echo "quota smoke ready"; sleep infinity']},
@@ -107,10 +127,11 @@ import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as file:
-    spec = json.load(file)["agentRun"]["spec"]
-grant = spec["broker"]["grants"][0]
-assert grant["quota"] == {"requests": int(sys.argv[2])}
-assert grant["allowInsecureUpstream"] is True
+    grants = json.load(file)["agentRun"]["spec"]["broker"]["grants"]
+assert [g["provider"] for g in grants] == ["static-bearer-warmup", "static-bearer-quota"]
+assert "quota" not in grants[0]
+assert grants[1]["quota"] == {"requests": int(sys.argv[2])}
+assert grants[1]["allowInsecureUpstream"] is True
 PY
 }
 
@@ -125,28 +146,44 @@ case_run() {
   wait_for_agentrun_exists "${RUN_NAME}-valid"
   wait_for_phase_any "${RUN_NAME}-valid" "${RUN_TIMEOUT_SECONDS}" Running
 
-  assert_quota_enforced "${RUN_NAME}-valid"
+  # The broker agents ConfigMap projects ~1min after Pod start, so egressd's
+  # first fetches can be unauthorized. Warm up on the quota-free route (8471)
+  # until the mediated path is authorized, so failed startup requests never
+  # consume the quota route (8472).
+  wait_for_route_ready "${RUN_NAME}-valid" 8471
+  assert_quota_enforced "${RUN_NAME}-valid" 8472
 }
 
-# curl_egress issues a request from the agent container through the same-Pod
+# curl_egress issues a request from the agent container through a same-Pod
 # egressd route (plain-HTTP localhost listener) and prints the HTTP status.
 curl_egress() {
-  local run="$1"
+  local run="$1" port="$2"
   kubectl_smoke exec "${run}-agent" -n "${NAMESPACE}" -c agent -- \
-    curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:8471/echo"
+    curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:${port}/echo-${RANDOM}"
+}
+
+wait_for_route_ready() {
+  local run="$1" port="$2"
+  local deadline=$((SECONDS + RUN_TIMEOUT_SECONDS)) code
+  while (( SECONDS < deadline )); do
+    code="$(curl_egress "${run}" "${port}")"
+    [[ "${code}" == "200" ]] && { log "warmup route ${port} ready (broker authorized)"; return; }
+    sleep 3
+  done
+  die "warmup route ${port} never became ready (last ${code})"
 }
 
 assert_quota_enforced() {
-  local run="$1"
+  local run="$1" port="$2"
   log "asserting per-grant request quota (limit ${QUOTA_LIMIT}) is enforced at egressd"
   local i code
   for (( i = 1; i <= QUOTA_LIMIT; i++ )); do
-    code="$(curl_egress "${run}")"
+    code="$(curl_egress "${run}" "${port}")"
     [[ "${code}" == "200" ]] || die "request ${i}/${QUOTA_LIMIT} within quota returned ${code}, want 200"
   done
-  code="$(curl_egress "${run}")"
+  code="$(curl_egress "${run}" "${port}")"
   [[ "${code}" == "429" ]] || die "request beyond quota returned ${code}, want 429"
   # And it stays closed.
-  code="$(curl_egress "${run}")"
+  code="$(curl_egress "${run}" "${port}")"
   [[ "${code}" == "429" ]] || die "quota must stay closed after breach, got ${code}"
 }
