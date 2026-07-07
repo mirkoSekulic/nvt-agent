@@ -21,8 +21,10 @@ const (
 	forwardProxyMITMReadHeaderTimeout       = 30 * time.Second
 )
 
-// ForwardProxy is a CONNECT-only blind tunnel. It does not inspect or modify
-// TLS, WebSocket frames, headers, cookies, bodies, or credentials.
+// ForwardProxy is a CONNECT-only proxy. Non-inject hosts are blind-tunnelled;
+// inject-route hosts are TLS-terminated under the per-agent CA and dispatched
+// through Proxy, which injects credentials on the decrypted HTTP request. It
+// never inspects WebSocket frames after an HTTP Upgrade is established.
 // forwardProxyCapability labels forward-proxy CONNECT audit reports. The
 // forward proxy is not per-capability; this is a fixed observability label.
 const forwardProxyCapability = "forward-proxy"
@@ -247,9 +249,10 @@ func (p *ForwardProxy) init() {
 					AllowInsecureUpstream: route.AllowInsecureUpstream,
 					MaxRequests:           route.MaxRequests,
 				},
-				Broker:    p.Broker,
-				Transport: p.Transport,
-				Reporter:  p.Reporter,
+				Broker:             p.Broker,
+				Transport:          p.Transport,
+				Reporter:           p.Reporter,
+				UpgradeIdleTimeout: p.Config.effectiveTunnelIdleTimeout(),
 			}
 		}
 	})

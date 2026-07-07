@@ -169,6 +169,7 @@ collect agent-auth.json cat "/root/.codex/auth.json"
 collect proxy-env bash -lc 'env | grep -Ei "PROXY" | sort'
 "${KUBECTL[@]}" -n "${NAMESPACE}" logs "${RUN_NAME}-egressd" >"${OUTPUT_DIR}/egressd.log" 2>/dev/null || true
 "${KUBECTL[@]}" -n "${NAMESPACE}" logs deployment/nvt-broker >"${OUTPUT_DIR}/broker.log" 2>/dev/null || true
+"${KUBECTL[@]}" -n "${NAMESPACE}" exec deployment/nvt-broker -- cat /state/audit.jsonl >"${OUTPUT_DIR}/broker-audit.jsonl" 2>/dev/null || true
 # Copy the agent home Codex/proof files for an offline secret scan.
 "${KUBECTL[@]}" -n "${NAMESPACE}" cp "${RUN_NAME}-agent:/root/.codex" "${OUTPUT_DIR}/agent-codex" -c agent 2>/dev/null || true
 
@@ -186,6 +187,7 @@ python3 - "${CODEX_AUTH_SOURCE}/auth.json" \
   "${OUTPUT_DIR}/proxy-env" \
   "${OUTPUT_DIR}/egressd.log" \
   "${OUTPUT_DIR}/broker.log" \
+  "${OUTPUT_DIR}/broker-audit.jsonl" \
   >"${OUTPUT_DIR}/secret-scan.txt" 2>&1 <<'PY' || SCAN_RESULT="FAIL"
 import json
 import os
@@ -226,7 +228,11 @@ last_message="$(cat "${OUTPUT_DIR}/last-message" 2>/dev/null || true)"
 normal_turn="FAIL"
 [[ "${last_message}" == *"${PROOF_NONCE}"* ]] && normal_turn="PASS"
 websocket="unproven"
-grep -qi "Falling back from WebSockets" "${OUTPUT_DIR}/codex.stderr" 2>/dev/null && websocket="fallback-to-https (WSS unproven)"
+if grep -qi "Falling back from WebSockets" "${OUTPUT_DIR}/codex.stderr" 2>/dev/null; then
+  websocket="fallback-to-https (WSS unproven)"
+elif grep -Eq '"status"[[:space:]]*:[[:space:]]*101' "${OUTPUT_DIR}/broker-audit.jsonl" 2>/dev/null; then
+  websocket="PASS (101 Switching Protocols audited)"
+fi
 {
   echo "nonce:          ${PROOF_NONCE}"
   echo "normal_turn:    ${normal_turn}"
@@ -237,4 +243,8 @@ grep -qi "Falling back from WebSockets" "${OUTPUT_DIR}/codex.stderr" 2>/dev/null
 } | tee "${SUMMARY}"
 
 [[ "${normal_turn}" == "PASS" && "${SCAN_RESULT}" == "clean" ]] || die "proof did not pass — see ${OUTPUT_DIR}"
-log "real Codex forward-proxy proof PASSED (normal HTTPS turn; WebSocket/refresh remain unproven)"
+if [[ "${websocket}" == PASS* ]]; then
+  log "real Codex forward-proxy proof PASSED (normal turn + WebSocket; refresh remains unproven)"
+else
+  log "real Codex forward-proxy proof PASSED (normal turn; WebSocket/refresh remain unproven)"
+fi

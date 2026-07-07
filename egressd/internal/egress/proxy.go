@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -55,6 +56,10 @@ type Proxy struct {
 	Transport http.RoundTripper
 	Reporter  *Reporter
 	Now       func() time.Time
+	// UpgradeIdleTimeout bounds upgraded HTTP/WebSocket relays. Zero disables
+	// the relay-specific deadline, which keeps redirect routes compatible; the
+	// forward-proxy MITM path sets this from its tunnel idle timeout.
+	UpgradeIdleTimeout time.Duration
 
 	mu    sync.Mutex
 	cache map[string]*cacheEntry
@@ -163,6 +168,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "egress-quota-exceeded")
 		return
 	}
+	if isUpgradeRequest(r) {
+		p.serveUpgrade(w, r, outbound)
+		return
+	}
 	response, err := p.Transport.RoundTrip(outbound)
 	if err != nil {
 		log.Printf("egressd %s: upstream unreachable", p.Route.Capability)
@@ -202,8 +211,56 @@ func (p *Proxy) buildOutbound(r *http.Request, material *Material) (*http.Reques
 	for name, value := range material.Headers {
 		outbound.Header.Set(name, value)
 	}
+	if isUpgradeRequest(r) {
+		copyUpgradeHeaders(outbound.Header, r.Header)
+	}
 	outbound.Host = p.Route.Upstream
 	return outbound, nil
+}
+
+func (p *Proxy) serveUpgrade(w http.ResponseWriter, r *http.Request, outbound *http.Request) {
+	response, err := p.Transport.RoundTrip(outbound)
+	if err != nil {
+		log.Printf("egressd %s: upstream upgrade unreachable", p.Route.Capability)
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "egress-upstream-unreachable")
+		return
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		defer func() { _ = response.Body.Close() }()
+		p.report(r.Method, r.URL.Path, response.StatusCode)
+		copyResponse(w, response)
+		return
+	}
+	upstream, ok := response.Body.(readWriteCloser)
+	if !ok {
+		_ = response.Body.Close()
+		log.Printf("egressd %s: upstream upgrade body is not bidirectional", p.Route.Capability)
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "egress-upgrade-unavailable")
+		return
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		_ = response.Body.Close()
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "egress-upgrade-unavailable")
+		return
+	}
+	client, buffered, err := hijacker.Hijack()
+	if err != nil {
+		_ = response.Body.Close()
+		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = client.Close() }()
+	defer func() { _ = upstream.Close() }()
+
+	p.report(r.Method, r.URL.Path, response.StatusCode)
+	if err := writeUpgradeResponse(client, response); err != nil {
+		return
+	}
+	relayUpgrade(client, buffered, upstream, p.UpgradeIdleTimeout)
 }
 
 // injectionHost is the host presented to the broker for authorization: the
@@ -226,6 +283,117 @@ func containsPlaceholder(values []string) bool {
 		}
 	}
 	return false
+}
+
+func isUpgradeRequest(r *http.Request) bool {
+	return headerHasToken(r.Header, "Connection", "upgrade") && r.Header.Get("Upgrade") != ""
+}
+
+func copyUpgradeHeaders(dst, src http.Header) {
+	dst.Set("Connection", "Upgrade")
+	if upgrade := src.Get("Upgrade"); upgrade != "" {
+		dst.Set("Upgrade", upgrade)
+	}
+}
+
+func headerHasToken(header http.Header, name, token string) bool {
+	for _, value := range header.Values(name) {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type readWriteCloser interface {
+	io.Reader
+	io.Writer
+	io.Closer
+}
+
+func writeUpgradeResponse(w io.Writer, response *http.Response) error {
+	reason := response.Status
+	if reason == "" {
+		reason = fmt.Sprintf("%03d %s", response.StatusCode, http.StatusText(response.StatusCode))
+	}
+	if _, err := fmt.Fprintf(w, "HTTP/%d.%d %s\r\n", response.ProtoMajor, response.ProtoMinor, reason); err != nil {
+		return err
+	}
+	for name, values := range response.Header {
+		for _, value := range values {
+			if _, err := fmt.Fprintf(w, "%s: %s\r\n", name, value); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := io.WriteString(w, "\r\n")
+	return err
+}
+
+func relayUpgrade(client net.Conn, buffered *bufio.ReadWriter, upstream readWriteCloser, idleTimeout time.Duration) {
+	setUpgradeDeadline(idleTimeout, client, upstream)
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(upstream, upgradeActivityReader{
+			reader:      buffered,
+			idleTimeout: idleTimeout,
+			values:      []any{client, upstream},
+		})
+		_ = closeWriteAny(upstream)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, upgradeActivityReader{
+			reader:      upstream,
+			idleTimeout: idleTimeout,
+			values:      []any{client, upstream},
+		})
+		_ = closeWriteAny(client)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+}
+
+type upgradeActivityReader struct {
+	reader      io.Reader
+	idleTimeout time.Duration
+	values      []any
+}
+
+func (r upgradeActivityReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		setUpgradeDeadline(r.idleTimeout, r.values...)
+	}
+	return n, err
+}
+
+func setUpgradeDeadline(idleTimeout time.Duration, values ...any) {
+	if idleTimeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(idleTimeout)
+	for _, value := range values {
+		if deadliner, ok := value.(interface{ SetDeadline(time.Time) error }); ok {
+			_ = deadliner.SetDeadline(deadline)
+		}
+	}
+}
+
+func closeWriteAny(value any) error {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if writer, ok := value.(closeWriter); ok {
+		return writer.CloseWrite()
+	}
+	if closer, ok := value.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func copyResponse(w http.ResponseWriter, response *http.Response) {

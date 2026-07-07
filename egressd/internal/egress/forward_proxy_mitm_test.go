@@ -9,10 +9,13 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newMITMProxy(t *testing.T, broker *fakeBroker, route ForwardProxyInjectRoute, upstreamNames ...string) (*httptest.Server, *CA) {
@@ -82,6 +85,106 @@ func TestForwardProxyMITMInjectsRealToken(t *testing.T) {
 	}
 	if record.path != "/v1/responses?stream=true" {
 		t.Fatalf("upstream path = %q, want the preserved request path", record.path)
+	}
+}
+
+func TestForwardProxyMITMInjectsUpgradeHandshakeAndRelays(t *testing.T) {
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	upstream.handler = func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+realToken {
+			t.Errorf("upgrade upstream Authorization = %q, want injected token", r.Header.Get("Authorization"))
+		}
+		if strings.Contains(fmt.Sprint(r.Header), Placeholder) {
+			t.Error("placeholder reached upgrade upstream")
+		}
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			t.Errorf("upgrade header = %q, want websocket", r.Header.Get("Upgrade"))
+		}
+		if !headerHasToken(r.Header, "Connection", "upgrade") {
+			t.Errorf("connection header = %q, want Upgrade token", r.Header.Values("Connection"))
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("upstream response writer cannot hijack")
+			return
+		}
+		conn, buffered, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("upstream hijack: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, err := conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
+			t.Errorf("write upgrade response: %v", err)
+			return
+		}
+		line, err := buffered.ReadString('\n')
+		if err != nil {
+			t.Errorf("read upgraded client bytes: %v", err)
+			return
+		}
+		if line != "ping\n" {
+			t.Errorf("upstream upgraded bytes = %q, want ping", line)
+			return
+		}
+		if _, err := io.WriteString(conn, "pong\n"); err != nil {
+			t.Errorf("write upgraded upstream bytes: %v", err)
+		}
+	}
+	proxy, ca := newMITMProxy(t, broker, ForwardProxyInjectRoute{
+		Host: "chatgpt.com", Capability: "codex-main",
+		Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true,
+	}, "chatgpt.com")
+
+	tlsConn := mitmDial(t, proxy, ca, "chatgpt.com", "chatgpt.com")
+	reader := bufio.NewReader(tlsConn)
+	fmt.Fprintf(tlsConn, "GET /backend-api/codex/responses HTTP/1.1\r\nHost: chatgpt.com\r\nAuthorization: Bearer %s\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: fixture\r\nSec-WebSocket-Version: 13\r\n\r\n", Placeholder)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read upgrade response: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade response status = %d, want 101", resp.StatusCode)
+	}
+	if !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
+		t.Fatalf("upgrade response header = %q, want websocket", resp.Header.Get("Upgrade"))
+	}
+	if !headerHasToken(resp.Header, "Connection", "upgrade") {
+		t.Fatalf("upgrade response connection = %q, want Upgrade token", resp.Header.Values("Connection"))
+	}
+	if _, err := io.WriteString(tlsConn, "ping\n"); err != nil {
+		t.Fatalf("write upgraded client bytes: %v", err)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read upgraded upstream bytes: %v", err)
+	}
+	if line != "pong\n" {
+		t.Fatalf("upgraded relay response = %q, want pong", line)
+	}
+	record := upstream.last(t)
+	if record.path != "/backend-api/codex/responses" {
+		t.Fatalf("upstream path = %q, want codex websocket path", record.path)
+	}
+}
+
+func TestUpgradeRelayIdleTimeoutCleansUpStalledPeers(t *testing.T) {
+	client, proxySide := net.Pipe()
+	upstream, upstreamPeer := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = upstreamPeer.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		relayUpgrade(proxySide, bufio.NewReadWriter(bufio.NewReader(proxySide), bufio.NewWriter(proxySide)), upstream, 20*time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("idle upgraded relay did not clean up stalled peers")
 	}
 }
 

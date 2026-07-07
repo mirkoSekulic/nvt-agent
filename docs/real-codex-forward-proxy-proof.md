@@ -172,21 +172,35 @@ Interpretation:
 Required investigation:
 
 - Add a focused egressd test for HTTP Upgrade/WebSocket through `serveDecrypted` and `Proxy.ServeHTTP`.
-- Verify whether Go's current handler path preserves `Connection: Upgrade`, `Upgrade: websocket`, and bidirectional streaming when the request comes through the single-connection MITM server.
-- Capture sanitized request metadata for the failed WSS handshake:
+- Preserve `Connection: Upgrade`, `Upgrade: websocket`, and bidirectional streaming when the request comes through the single-connection MITM server.
+- Capture sanitized request metadata for the WSS handshake through the existing broker audit report:
   - method
   - path class
-  - upgrade yes/no
-  - upstream response status
+  - upstream response status (`101` proves the upgrade path)
   - no header values, no bodies, no frame payloads
 
 Acceptance:
 
 - Either Codex WebSocket succeeds through egressd, or docs explicitly state that real Codex currently relies on HTTPS fallback and WebSocket remains unproven.
 
-### 3. Refresh Path Is Still Unproven
+Status:
 
-The proof did not force token expiry or refresh.
+- The generic egressd Upgrade path is implemented and pinned by a fixture-level
+  MITM test: the placeholder `Authorization` on the handshake is stripped,
+  broker-injected auth reaches upstream, the upstream returns
+  `101 Switching Protocols`, and bytes relay bidirectionally after the upgrade.
+- The manual proof harness now collects broker `audit.jsonl` and reports
+  WebSocket as `PASS` only when a `101` status is audited and Codex did not log
+  a WebSocket fallback warning.
+- Real Codex rerun on 2026-07-07 passed:
+  - `normal_turn: PASS`
+  - `websocket: PASS (101 Switching Protocols audited)`
+  - `secret_scan: clean`
+  - `refresh: PASS (broker-side refresh forced in follow-up proof)`
+
+### 3. Broker-Side Refresh Path Is Proven
+
+The original proof did not force token expiry or refresh.
 
 Risk:
 
@@ -206,6 +220,34 @@ Acceptance:
 
 - A real Codex run survives token refresh without any real refresh token in the agent.
 - Or the docs explicitly mark refresh as the remaining blocker for long-lived Codex sessions.
+
+Status:
+
+- **Broker-side refresh is proven.** On 2026-07-07, the proof cluster broker was
+  reconfigured with `refresh-margin-seconds: 500000`, above the real access
+  token's remaining lifetime. The next mediated Codex turn forced the
+  `codex-oauth` provider to refresh before serving injection headers.
+- Broker audit recorded:
+  - `operation: "injection.refresh"`
+  - refreshed `expires_at: "2026-07-17T14:37:16Z"`
+  - subsequent `injection.headers` for `chatgpt.com`
+- The Codex turn completed:
+  - nonce: `NVT_BROKER_REFRESH_PROOF_1783435040`
+  - WebSocket remained active (`status: 101` in broker audit)
+  - the agent still had only placeholder `access_token` and placeholder
+    `refresh_token`
+- The refreshed broker auth was copied back to the host after the proof so the
+  host login stayed in sync with refresh-token rotation.
+
+Important nuance:
+
+- Forcing the agent-side placeholder access token to look expired made Codex try
+  its own local refresh and log expected refresh failures. The turn still
+  succeeded because production mediated Codex does not depend on Codex-local
+  refresh: egressd asks the broker for headers, the broker refreshes its real
+  auth, and the agent remains on placeholder auth.
+- The production-relevant path is therefore broker-side refresh, not exposing a
+  real refresh token to satisfy Codex's local refresh manager.
 
 ## Recommended PRs
 
@@ -242,8 +284,9 @@ CODEX_AUTH_SOURCE=/path/to/.codex make phase6-real-codex-proof
 
 Implemented in `scripts/phase6-real-codex-proof.sh`; writes evidence and a
 summary (normal turn / WebSocket / refresh / secret-scan) under
-`.phase6-out/real-codex-proof/` (git-ignored). Refresh is not forced yet (PR D)
-and the WebSocket path is recorded as fallback-only (PR C).
+`.phase6-out/real-codex-proof/` (git-ignored). Refresh is not forced yet
+(PR D). WebSocket is reported from real evidence: fallback warning means WSS is
+still unproven; an audited `101` without fallback means WSS passed.
 
 Suggested behavior:
 
@@ -275,6 +318,11 @@ Scope:
 
 Do not add provider-specific Codex logic to egressd.
 
+Status: implemented generically in egressd and validated with
+`make phase6-real-codex-proof`. The 2026-07-07 proof run passed normal Codex
+execution and audited a real `101 Switching Protocols` WebSocket upgrade with no
+host token material in the copied agent files or collected evidence.
+
 ### PR D: Refresh Proof
 
 Scope:
@@ -284,12 +332,18 @@ Scope:
 
 Do not widen to body/query substitution unless the proof shows Codex sends required secrets in body/query and header injection cannot satisfy it.
 
+Status: broker-side refresh has been validated manually with real Codex and no
+agent-held real token. A follow-up may turn this into an opt-in harness mode, but
+no body/query substitution was needed for the production path tested here.
+
 ## Operational Recommendation
 
 For a real environment today:
 
 - Forward-proxy mediated Codex is promising and has passed the normal HTTPS turn proof.
-- Do not yet claim full long-lived Codex support until refresh is proven.
-- Do not claim WebSocket support until the `405` is understood or fixed.
-- Broker config rollout checksum should be fixed before staging deployment.
-
+- Broker-side refresh is proven for mediated Codex: the broker refreshed real
+  auth during injection while the agent kept placeholder auth.
+- WebSocket support is proven for the tested Codex version/environment: the
+  manual proof showed an audited `101` without Codex falling back to HTTPS.
+- Broker config rollout checksum is in place so broker provider config changes
+  roll the Deployment.
