@@ -16,6 +16,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path"
 	"reflect"
@@ -78,16 +79,17 @@ const (
 	// in its own Pod behind a per-run Service. The operator owns a durable
 	// per-run CA Secret mounted only into egressd and publishes ca.crt only to
 	// the agent ConfigMap.
-	agentRunLabelKey    = "nvt.dev/agentrun"
-	roleLabelKey        = "nvt.dev/role"
-	roleLabelAgent      = "agent"
-	roleLabelEgressd    = "egressd"
-	egressCAPort        = 8470
-	egressRouteBasePort = 8471
-	egressCACertKey     = "ca.crt"
-	egressCAKeyKey      = "ca.key"
-	egressdConfigName   = "egressd-config"
-	egressdReadyRequeue = 2 * time.Second
+	agentRunLabelKey       = "nvt.dev/agentrun"
+	roleLabelKey           = "nvt.dev/role"
+	roleLabelAgent         = "agent"
+	roleLabelEgressd       = "egressd"
+	egressCAPort           = 8470
+	egressRouteBasePort    = 8471
+	egressForwardProxyPort = 8473 // forward-proxy CONNECT listener (own-Pod)
+	egressCACertKey        = "ca.crt"
+	egressCAKeyKey         = "ca.key"
+	egressdConfigName      = "egressd-config"
+	egressdReadyRequeue    = 2 * time.Second
 
 	brokerAgentsConfigMapName  = "nvt-broker-agents"
 	brokerAgentsConfigKey      = "agents.yaml"
@@ -831,6 +833,93 @@ func AgentRunEgressEnforced(agentRun *nvtv1alpha1.AgentRun) bool {
 	return agentRun.Spec.EgressEnforcement && AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated
 }
 
+// AgentRunEgressForwardProxy reports whether the run uses forward-proxy mode.
+// Validation guarantees this implies mediated + enforced egress.
+func AgentRunEgressForwardProxy(agentRun *nvtv1alpha1.AgentRun) bool {
+	return agentRun.Spec.EgressForwardProxy && AgentRunEgressEnforced(agentRun)
+}
+
+// forwardProxyInjectHosts returns the (host, capability) pairs egressd MITMs
+// for a forward-proxy run: every egressHost of every injection-capable grant.
+type forwardProxyInject struct {
+	Host                  string
+	Capability            string
+	Upstream              string
+	AllowInsecureUpstream bool
+	MaxRequests           int
+}
+
+func forwardProxyInjects(agentRun *nvtv1alpha1.AgentRun) []forwardProxyInject {
+	injects := []forwardProxyInject{}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		materialization := AgentRunGrantMaterialization(grant)
+		if materialization != nvtv1alpha1.AgentRunGrantHeaderInject && materialization != nvtv1alpha1.AgentRunGrantPlaceholderFile {
+			continue
+		}
+		for _, upstream := range grant.EgressHosts {
+			host := upstream
+			if h, _, err := net.SplitHostPort(upstream); err == nil {
+				host = h
+			}
+			maxRequests := 0
+			if grant.Quota != nil {
+				maxRequests = grant.Quota.Requests
+			}
+			injects = append(injects, forwardProxyInject{
+				Host:                  host,
+				Capability:            grant.Provider,
+				Upstream:              upstream,
+				AllowInsecureUpstream: grant.AllowInsecureUpstream,
+				MaxRequests:           maxRequests,
+			})
+		}
+	}
+	return injects
+}
+
+// forwardProxyUpstreamHosts is the set of MITM leaf names the CA must permit.
+func forwardProxyUpstreamHosts(agentRun *nvtv1alpha1.AgentRun) []string {
+	seen := map[string]bool{}
+	hosts := []string{}
+	for _, inject := range forwardProxyInjects(agentRun) {
+		if !seen[inject.Host] {
+			seen[inject.Host] = true
+			hosts = append(hosts, inject.Host)
+		}
+	}
+	return hosts
+}
+
+// forwardProxyEnv points the agent's proxy env at egressd and computes NO_PROXY.
+// NO_PROXY is operator-rendered, never hand-authored, so a missed entry can't
+// silently route infra (broker, callback, DNS) through the MITM.
+func forwardProxyEnv(agentRun *nvtv1alpha1.AgentRun) []corev1.EnvVar {
+	proxyURL := fmt.Sprintf("http://%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)
+	noProxy := forwardProxyNoProxy(agentRun)
+	env := []corev1.EnvVar{}
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		env = append(env, corev1.EnvVar{Name: name, Value: proxyURL})
+	}
+	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+		env = append(env, corev1.EnvVar{Name: name, Value: noProxy})
+	}
+	return env
+}
+
+func forwardProxyNoProxy(agentRun *nvtv1alpha1.AgentRun) string {
+	hosts := []string{
+		"localhost", "127.0.0.1", "::1",
+		"kubernetes.default.svc",
+		".svc", ".svc.cluster.local", ".cluster.local",
+		EgressdServiceName(agentRun.Name),
+		"nvt-operator",
+	}
+	if parsed, err := url.Parse(BrokerURL()); err == nil && parsed.Hostname() != "" {
+		hosts = append(hosts, parsed.Hostname())
+	}
+	return strings.Join(hosts, ",")
+}
+
 // EgressdPodName returns the own-Pod egressd Pod name for an AgentRun.
 func EgressdPodName(agentRunName string) string {
 	return agentRunName + "-egressd"
@@ -1079,7 +1168,11 @@ func (r *AgentRunReconciler) reconcileEgressCASecret(ctx context.Context, agentR
 	if !errors.IsNotFound(err) {
 		return fmt.Errorf("get egress CA Secret: %w", err)
 	}
-	data, err := generateEgressCASecretData(egressdLeafDNSNames(agentRun))
+	// In forward-proxy mode the durable CA must also permit the MITM upstream
+	// hosts, or the agent's TLS verification of the minted upstream leaf fails
+	// the CA name constraint.
+	leafNames := append(egressdLeafDNSNames(agentRun), forwardProxyUpstreamHosts(agentRun)...)
+	data, err := generateEgressCASecretData(leafNames)
 	if err != nil {
 		return err
 	}
@@ -1390,11 +1483,16 @@ func brokerPolicyEgressRule() networkingv1.NetworkPolicyEgressRule {
 	}
 }
 
-// egressdPolicyPorts are the CA endpoint plus every route port.
+// egressdPolicyPorts are the CA endpoint plus every route port (and the
+// forward-proxy port in forward-proxy mode). Feeds both the agent→egressd
+// egress rule and the egressd ingress rule.
 func egressdPolicyPorts(agentRun *nvtv1alpha1.AgentRun) []networkingv1.NetworkPolicyPort {
 	ports := []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, egressCAPort)}
 	for index := range headerInjectGrants(agentRun) {
 		ports = append(ports, policyPort(corev1.ProtocolTCP, egressRouteBasePort+index))
+	}
+	if AgentRunEgressForwardProxy(agentRun) {
+		ports = append(ports, policyPort(corev1.ProtocolTCP, egressForwardProxyPort))
 	}
 	return ports
 }
@@ -1527,6 +1625,9 @@ func DesiredEgressdService(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 			Port: int32(egressRouteBasePort + index),
 		})
 	}
+	if AgentRunEgressForwardProxy(agentRun) {
+		ports = append(ports, corev1.ServicePort{Name: "forward-proxy", Port: int32(egressForwardProxyPort)})
+	}
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      EgressdServiceName(agentRun.Name),
@@ -1644,12 +1745,24 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		CertFile     string   `json:"cert_file,omitempty"`
 		KeyFile      string   `json:"key_file,omitempty"`
 	}
+	type egressdForwardProxyRoute struct {
+		Host                  string `json:"host"`
+		Capability            string `json:"capability"`
+		Upstream              string `json:"upstream"`
+		AllowInsecureUpstream bool   `json:"allow_insecure_upstream,omitempty"`
+		MaxRequests           int    `json:"max_requests,omitempty"`
+	}
+	type egressdForwardProxy struct {
+		Listen       string                     `json:"listen"`
+		InjectRoutes []egressdForwardProxyRoute `json:"inject_routes"`
+	}
 	type egressdConfig struct {
-		BrokerURL           string         `json:"broker_url"`
-		AllowInsecureBroker bool           `json:"allow_insecure_broker"`
-		BrokerCAFile        string         `json:"broker_ca_file,omitempty"`
-		Routes              []egressdRoute `json:"routes"`
-		CA                  *egressdCA     `json:"ca,omitempty"`
+		BrokerURL           string               `json:"broker_url"`
+		AllowInsecureBroker bool                 `json:"allow_insecure_broker"`
+		BrokerCAFile        string               `json:"broker_ca_file,omitempty"`
+		Routes              []egressdRoute       `json:"routes"`
+		ForwardProxy        *egressdForwardProxy `json:"forward_proxy,omitempty"`
+		CA                  *egressdCA           `json:"ca,omitempty"`
 	}
 	if err := ValidateBrokerTLSConfig(); err != nil {
 		return "", err
@@ -1657,10 +1770,13 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	grants := AgentRunBrokerGrants(agentRun.Spec.Broker)
 	routes := make([]egressdRoute, 0, len(grants))
 	enforced := AgentRunEgressEnforced(agentRun)
+	forwardProxy := AgentRunEgressForwardProxy(agentRun)
 	routeIndex := 0
 	needCA := false
 	for _, grant := range grants {
-		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
+		// In forward-proxy mode injectable grants are routed by the MITM proxy,
+		// not per-route redirect base URLs, so no redirect routes are rendered.
+		if forwardProxy || AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
 		}
 		if len(grant.EgressHosts) == 0 {
@@ -1694,6 +1810,26 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		BrokerURL:           BrokerURL(),
 		AllowInsecureBroker: agentRun.Spec.EgressAllowInsecureBroker,
 		Routes:              routes,
+	}
+	if forwardProxy {
+		injects := forwardProxyInjects(agentRun)
+		if len(injects) == 0 {
+			return "", fmt.Errorf("forward-proxy egress requires at least one injectable grant with egressHosts")
+		}
+		fpRoutes := make([]egressdForwardProxyRoute, 0, len(injects))
+		for _, inject := range injects {
+			fpRoutes = append(fpRoutes, egressdForwardProxyRoute{
+				Host:                  inject.Host,
+				Capability:            inject.Capability,
+				Upstream:              inject.Upstream,
+				AllowInsecureUpstream: inject.AllowInsecureUpstream,
+				MaxRequests:           inject.MaxRequests,
+			})
+		}
+		config.ForwardProxy = &egressdForwardProxy{
+			Listen:       fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
+			InjectRoutes: fpRoutes,
+		}
 	}
 	if brokerCADistributed() {
 		// TLS broker leg: pin the CA so egressd verifies the broker instead
@@ -1927,6 +2063,9 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			// Enforcement: every base-url is https, so bootstrap always
 			// needs the CA (git wiring plus the container trust store).
 			containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_CA_FILE", Value: egressCAFilePath})
+		}
+		if AgentRunEgressForwardProxy(agentRun) {
+			containers[0].Env = append(containers[0].Env, forwardProxyEnv(agentRun)...)
 		}
 	}
 	if brokerCADistributed() {
@@ -2188,6 +2327,12 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	if agentRun.Spec.EgressEnforcement && mode != nvtv1alpha1.AgentRunEgressMediated {
 		return fmt.Errorf("spec.egressEnforcement requires spec.egress mediated, got %q", mode)
 	}
+	if agentRun.Spec.EgressForwardProxy && !agentRun.Spec.EgressEnforcement {
+		// Without the CNI fence the agent can ignore the proxy env and reach
+		// hosts directly, so forward-proxy without enforcement is coverage
+		// theater (docs/phase6.2-forward-proxy-pr-plan.md decision 3).
+		return fmt.Errorf("spec.egressForwardProxy requires spec.egressEnforcement")
+	}
 	headerInjectGrants := 0
 	if mode == nvtv1alpha1.AgentRunEgressMediated {
 		if agentRun.Spec.RuntimeAuth != nil {
@@ -2246,12 +2391,29 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 				}
 			}
 		}
+		// In forward-proxy mode a placeholder-file grant's egressHosts become
+		// MITM routes, so validate them too.
+		if agentRun.Spec.EgressForwardProxy && materialization == nvtv1alpha1.AgentRunGrantPlaceholderFile {
+			for _, host := range grant.EgressHosts {
+				if !validEgressHost(host) {
+					return fmt.Errorf("forward-proxy broker grant %s has invalid egressHosts entry %q", grant.Provider, host)
+				}
+			}
+		}
+	}
+	if agentRun.Spec.EgressForwardProxy {
+		// Forward-proxy makes every injection-capable grant's egressHosts
+		// routable, so the run needs at least one such host — but no longer a
+		// header-inject grant specifically.
+		if len(forwardProxyInjects(agentRun)) == 0 {
+			return fmt.Errorf("spec.egressForwardProxy requires at least one header-inject or placeholder-file broker grant with egressHosts")
+		}
+		return nil
 	}
 	if mode == nvtv1alpha1.AgentRunEgressMediated && headerInjectGrants == 0 {
-		// 6.1 scope: placeholder-file grants are materialized but not routed
-		// (no egressd route until 6.2's forward proxy), so a mediated run still
-		// needs a header-inject grant for its egress route. Standalone
-		// placeholder-file routing lands in 6.2.
+		// Non-forward-proxy mediated runs still need a header-inject route:
+		// placeholder-file grants are materialized but not routed without the
+		// forward proxy.
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
 	}
 	return nil
@@ -2584,10 +2746,14 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 
 func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.AgentRun) map[string]any {
 	enforced := AgentRunEgressEnforced(agentRun)
+	forwardProxy := AgentRunEgressForwardProxy(agentRun)
 	grants := []any{}
 	routeIndex := 0
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
-		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
+		// In forward-proxy mode header-inject grants are reached through the
+		// proxy (HTTP(S)_PROXY), not a per-route base URL, so bootstrap renders
+		// no base-url redirect for them.
+		if forwardProxy || AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
 		}
 		baseURL := fmt.Sprintf("http://127.0.0.1:%d", egressRouteBasePort+routeIndex)
@@ -2625,6 +2791,11 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 	}
 	if enforced {
 		egress["enforcement"] = true
+	}
+	if forwardProxy {
+		// Signals bootstrap to install the CA trust store for proxy-env HTTPS
+		// clients (the MITM leaf must be trusted system-wide).
+		egress["forward-proxy"] = true
 	}
 	updated["egress"] = egress
 	return updated

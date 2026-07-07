@@ -154,7 +154,8 @@ func (c *Config) Validate() error {
 	if len(c.Routes) == 0 && c.ForwardProxy == nil {
 		return fmt.Errorf("at least one route or forward_proxy is required")
 	}
-	if len(c.Routes) > 0 {
+	forwardProxyInjects := c.ForwardProxy != nil && len(c.ForwardProxy.InjectRoutes) > 0
+	if len(c.Routes) > 0 || forwardProxyInjects {
 		parsed, err := url.Parse(c.BrokerURL)
 		if err != nil || parsed.Host == "" {
 			return fmt.Errorf("broker_url must be a valid URL")
