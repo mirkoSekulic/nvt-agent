@@ -678,6 +678,42 @@ func TestValidateAgentRunEgressModeRejectsInvalidQuota(t *testing.T) {
 	}
 }
 
+func insecureUpstreamAgentRun() *nvtv1alpha1.AgentRun {
+	agentRun := testAgentRun()
+	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	agentRun.Spec.EgressAllowInsecureBroker = true
+	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "echo-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+		EgressHosts: []string{"nvt-smoke-echo.nvt.svc.cluster.local:443"}, AllowInsecureUpstream: true,
+	}}}
+	return agentRun
+}
+
+func TestValidateAllowInsecureUpstreamRequiresOptIn(t *testing.T) {
+	// Without the operator opt-in, an allowInsecureUpstream grant is rejected
+	// so a bad spec cannot silently downgrade the provider leg to plaintext.
+	run := insecureUpstreamAgentRun()
+	if err := ValidateAgentRunEgressMode(run); err == nil ||
+		!strings.Contains(err.Error(), "NVT_ALLOW_INSECURE_UPSTREAMS") || !strings.Contains(err.Error(), "echo-main") {
+		t.Fatalf("expected opt-in rejection naming the grant, got %v", err)
+	}
+
+	// With the cluster/test opt-in it is allowed for a non-git grant.
+	t.Setenv("NVT_ALLOW_INSECURE_UPSTREAMS", "1")
+	if err := ValidateAgentRunEgressMode(insecureUpstreamAgentRun()); err != nil {
+		t.Fatalf("allowInsecureUpstream must be accepted under the opt-in, got %v", err)
+	}
+}
+
+func TestValidateAllowInsecureUpstreamRejectedForGit(t *testing.T) {
+	t.Setenv("NVT_ALLOW_INSECURE_UPSTREAMS", "1")
+	run := insecureUpstreamAgentRun()
+	run.Spec.Broker.Grants[0].Git = true
+	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "git") {
+		t.Fatalf("allowInsecureUpstream must never be allowed for a git grant even with the opt-in, got %v", err)
+	}
+}
+
 func multiGrantMediatedAgentRun() *nvtv1alpha1.AgentRun {
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated

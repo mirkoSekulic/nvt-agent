@@ -58,7 +58,17 @@ creation-time default egress mode:
 egress:
   egressdImage: nvt-egressd:latest
   defaultMode: direct   # direct | mediated
+  allowInsecureUpstreams: false
 ```
+
+`egress.allowInsecureUpstreams` is a **test/dev opt-in** (operator env
+`NVT_ALLOW_INSECURE_UPSTREAMS`) for the per-grant `allowInsecureUpstream`
+escape hatch, which lets egressd reach an upstream over plain HTTP — used only
+so hermetic in-cluster smoke fixtures (which cannot present a publicly-trusted
+cert) are reachable. Leave it `false` in any real deployment: a plaintext
+upstream leg carries the injected credential in the clear. With it off,
+admission **rejects** any grant that sets `allowInsecureUpstream`, and it is
+**always** rejected for `git` grants.
 
 `egress.defaultMode` (operator env `NVT_DEFAULT_EGRESS_MODE`, validated at
 startup) is applied **once, at AgentRun creation on the nvt admission/schedule

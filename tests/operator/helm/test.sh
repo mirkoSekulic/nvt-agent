@@ -515,6 +515,15 @@ fi
 # defaultEgressMode knob: rendered into the operator env, default direct.
 grep -q 'name: NVT_DEFAULT_EGRESS_MODE' "${DEFAULT_RENDER}"
 grep -q 'value: "direct"' "${DEFAULT_RENDER}"
+
+# allowInsecureUpstreams opt-in: absent by default, rendered only when set.
+if grep -q 'NVT_ALLOW_INSECURE_UPSTREAMS' "${DEFAULT_RENDER}"; then
+  echo "NVT_ALLOW_INSECURE_UPSTREAMS must not render by default" >&2
+  exit 1
+fi
+INSECURE_UPSTREAMS_RENDER="${WORKDIR}/insecure-upstreams.yaml"
+helm template nvt "${CHART}" -n custom-ns --set egress.allowInsecureUpstreams=true > "${INSECURE_UPSTREAMS_RENDER}"
+grep -q 'name: NVT_ALLOW_INSECURE_UPSTREAMS' "${INSECURE_UPSTREAMS_RENDER}"
 DEFAULT_MEDIATED_RENDER="${WORKDIR}/default-egress-mediated.yaml"
 helm template nvt "${CHART}" -n custom-ns --set egress.defaultMode=mediated > "${DEFAULT_MEDIATED_RENDER}"
 grep -q 'name: NVT_DEFAULT_EGRESS_MODE' "${DEFAULT_MEDIATED_RENDER}"

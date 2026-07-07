@@ -139,14 +139,6 @@ func (p *Proxy) entryValidLocked(entry *cacheEntry) bool {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if p.quotaExceeded() {
-		// Fail closed before touching the broker or upstream. Counted and
-		// audited like any other outcome.
-		log.Printf("egressd %s: request quota exceeded", p.Route.Capability)
-		p.report(r.Method, r.URL.Path, http.StatusTooManyRequests)
-		writeError(w, http.StatusTooManyRequests, "egress-quota-exceeded")
-		return
-	}
 	material, err := p.material(r.Context(), r.Method, r.URL.Path)
 	if err != nil {
 		// err carries broker reasons only, never header values.
@@ -159,6 +151,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		p.report(r.Method, r.URL.Path, http.StatusBadGateway)
 		writeError(w, http.StatusBadGateway, "egress-request-invalid")
+		return
+	}
+	// Quota is checked only after the request is authorized and ready for the
+	// upstream, so exactly MaxRequests authorized attempts reach upstream. A
+	// broker outage, a revoked grant, or a projection-lag failure fails above
+	// without ever consuming quota.
+	if p.quotaExceeded() {
+		log.Printf("egressd %s: request quota exceeded", p.Route.Capability)
+		p.report(r.Method, r.URL.Path, http.StatusTooManyRequests)
+		writeError(w, http.StatusTooManyRequests, "egress-quota-exceeded")
 		return
 	}
 	response, err := p.Transport.RoundTrip(outbound)

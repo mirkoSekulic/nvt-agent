@@ -2133,6 +2133,20 @@ func ApplyDefaultEgressMode(agentRun *nvtv1alpha1.AgentRun) {
 	}
 }
 
+// AllowInsecureUpstreamsEnabled reports whether the cluster opted into the
+// per-grant allowInsecureUpstream escape hatch via NVT_ALLOW_INSECURE_UPSTREAMS.
+// It exists only so hermetic in-cluster test fixtures are reachable; a real
+// deployment never sets it, so a plaintext upstream leg carrying an injected
+// credential cannot be requested by an AgentRun spec.
+func AllowInsecureUpstreamsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NVT_ALLOW_INSECURE_UPSTREAMS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // AgentRunBrokerID returns the broker identity for an AgentRun.
 func AgentRunBrokerID(namespace, name string) string {
 	return namespace + "/" + name
@@ -2206,6 +2220,17 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		}
 		if grant.Quota != nil && grant.Quota.Requests <= 0 {
 			return fmt.Errorf("broker grant %s quota.requests must be a positive integer", grant.Provider)
+		}
+		if grant.AllowInsecureUpstream {
+			// A plaintext upstream leg carries the injected credential in the
+			// clear, so this is gated to a cluster/test opt-in and never
+			// allowed for git (git creds ride the TLS-terminated redirect).
+			if grant.Git {
+				return fmt.Errorf("broker grant %s must not set allowInsecureUpstream on a git grant", grant.Provider)
+			}
+			if !AllowInsecureUpstreamsEnabled() {
+				return fmt.Errorf("broker grant %s sets allowInsecureUpstream, which requires the operator's NVT_ALLOW_INSECURE_UPSTREAMS opt-in (test/dev only)", grant.Provider)
+			}
 		}
 		if mode == nvtv1alpha1.AgentRunEgressMediated && materialization == nvtv1alpha1.AgentRunGrantHeaderInject {
 			headerInjectGrants++

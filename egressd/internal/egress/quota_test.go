@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -52,6 +53,52 @@ func TestQuotaEnforcesExactlyN(t *testing.T) {
 	}
 }
 
+// TestQuotaNotConsumedByBrokerFailures pins finding 1: requests that fail
+// before the upstream (broker outage, revoked grant, projection lag) do not
+// burn quota. After the broker recovers, the full quota is still available.
+func TestQuotaNotConsumedByBrokerFailures(t *testing.T) {
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	server, proxy := newTestProxyWithHandle(t, broker, upstream)
+	proxy.Route.MaxRequests = 2
+
+	// Broker unavailable: several requests fail closed (502) and must not
+	// consume the quota. Distinct paths avoid any caching interaction.
+	broker.setFail(true)
+	for i := 0; i < 5; i++ {
+		response, err := http.Get(fmt.Sprintf("%s/down-%d", server.URL, i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusBadGateway {
+			t.Fatalf("broker-down request %d got %d, want 502", i, response.StatusCode)
+		}
+	}
+
+	// Broker recovers: the full quota of 2 is still available, then the 3rd
+	// is rejected.
+	broker.setFail(false)
+	for i := 0; i < 2; i++ {
+		response, err := http.Get(fmt.Sprintf("%s/up-%d", server.URL, i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("within-quota request %d got %d, want 200", i, response.StatusCode)
+		}
+	}
+	response, err := http.Get(server.URL + "/up-over")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("over-quota request got %d, want 429", response.StatusCode)
+	}
+}
+
 // TestQuotaUnlimitedWhenZero pins the backward-compatible default: 0 means no
 // cap.
 func TestQuotaUnlimitedWhenZero(t *testing.T) {
@@ -73,7 +120,8 @@ func TestQuotaUnlimitedWhenZero(t *testing.T) {
 }
 
 // TestQuotaBreachIsReported pins that a quota-rejected request is audited with
-// status 429 (still observability), never reaching the broker headers path.
+// status 429 and never reaches the upstream, while exactly the within-quota
+// request does.
 func TestQuotaBreachIsReported(t *testing.T) {
 	broker := newFakeBroker(t)
 	upstream := newFakeUpstream(t)
@@ -100,9 +148,12 @@ func TestQuotaBreachIsReported(t *testing.T) {
 		}
 		return false
 	})
-	// The second (rejected) request never fetched headers: exactly one broker
-	// headers call for the one request that passed quota.
-	if broker.callCount() != 1 {
-		t.Fatalf("quota-rejected request must not hit the broker: %d calls", broker.callCount())
+	// Quota is enforced after authorization but before the upstream, so
+	// exactly the within-quota request reaches upstream.
+	upstream.mu.Lock()
+	reached := len(upstream.records)
+	upstream.mu.Unlock()
+	if reached != 1 {
+		t.Fatalf("expected exactly 1 request to reach upstream, got %d", reached)
 	}
 }

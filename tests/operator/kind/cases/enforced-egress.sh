@@ -41,7 +41,7 @@ case_kind_setup() {
     NAMESPACE="${NAMESPACE}" \
     CREATE_CLUSTER="${CREATE_CLUSTER}" \
     ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT}" \
-    OPERATOR_KIND_HELM_ARGS="--set agentSchedule.maxParallelism=4 -f ${SMOKE_TMPDIR}/broker-providers.yaml" \
+    OPERATOR_KIND_HELM_ARGS="--set agentSchedule.maxParallelism=4 --set egress.allowInsecureUpstreams=true -f ${SMOKE_TMPDIR}/broker-providers.yaml" \
     operator-kind-setup
 }
 

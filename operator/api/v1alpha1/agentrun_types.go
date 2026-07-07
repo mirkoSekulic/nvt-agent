@@ -103,9 +103,10 @@ type AgentRunBrokerGrant struct {
 	// AllowInsecureUpstream lets egressd reach this grant's upstream over
 	// plain HTTP instead of re-originating TLS. Dev/test only — it exists so
 	// hermetic in-cluster fixtures (which cannot present a publicly-trusted
-	// cert) are reachable from the kind egress smokes. Never set it for a
-	// real provider; a plaintext upstream leg carrying an injected credential
-	// is a conformance failure.
+	// cert) are reachable from the kind egress smokes. A plaintext upstream
+	// leg carries the injected credential in the clear, so admission rejects
+	// it unless the operator sets NVT_ALLOW_INSECURE_UPSTREAMS, and always
+	// rejects it for git grants.
 	AllowInsecureUpstream bool `json:"allowInsecureUpstream,omitempty"`
 	// Quota bounds proxied requests for this grant's route. Absent means
 	// unlimited. The count is per egressd process, not per run — an egressd
