@@ -57,10 +57,15 @@ class Broker:
 
     def ensure_not_header_inject(self, agent, provider_name):
         grant = self.agents.grant(agent, provider_name)
-        if grant is not None and grant.get("materialization") == "header-inject":
+        if grant is None:
+            return
+        materialization = grant.get("materialization")
+        # Both header-inject and placeholder-file keep the real secret out of
+        # the agent's hands, so neither may reach a secret-bearing endpoint.
+        if materialization in ("header-inject", "placeholder-file"):
             raise ProviderError(
                 "materialization-mismatch",
-                f"grant for {provider_name} is header-inject; secret-bearing endpoints are disabled",
+                f"grant for {provider_name} is {materialization}; secret-bearing endpoints are disabled",
                 403,
             )
 
@@ -184,6 +189,42 @@ class Broker:
             file_count=len(files),
         )
         return {"ok": True, "files": files, "expires_at": expires_at}
+
+    def placeholder_files(self, request_id, payload, authorization):
+        # The agent fetches its own placeholder file: it is inert (placeholders
+        # only), so — unlike header-inject — the agent identity itself is the
+        # caller. Scoped exactly like every other grant; another agent's
+        # bindings are unreachable. Distinct from /v1/files: this path can only
+        # emit placeholders (the provider method never has the real bundle).
+        agent = self.authenticate_role(authorization, "agent")
+        provider_name = string_field(payload, "provider")
+        grant = self.agents.grant(agent, provider_name)
+        if grant is None:
+            raise ProviderError("provider-not-granted", None, 403)
+        if grant.get("materialization") != "placeholder-file":
+            raise ProviderError(
+                "materialization-mismatch",
+                f"grant for {provider_name} is not placeholder-file",
+                403,
+            )
+        provider = self.provider(provider_name)
+        if not hasattr(provider, "placeholder_files"):
+            raise ProviderError(
+                "placeholder-files-not-supported",
+                f"provider {provider_name} does not support placeholder files",
+                403,
+            )
+        files, hosts, expires_at = provider.placeholder_files(agent["id"], self.audit, request_id, grant)
+        self.audit.write(
+            request_id=request_id,
+            agent=agent["id"],
+            provider=provider_name,
+            operation="placeholder-files",
+            allowed=True,
+            expires_at=expires_at,
+            file_count=len(files),
+        )
+        return {"ok": True, "files": files, "hosts": hosts, "expires_at": expires_at}
 
     def _injection_grant(self, subject, capability):
         grant = self.agents.grant(subject, capability)
@@ -439,6 +480,10 @@ def make_handler(broker):
                     return
                 if self.path == "/v1/files":
                     response = broker.files(request_id, payload, self.headers.get("authorization"))
+                    self.write_json(200, response)
+                    return
+                if self.path == "/v1/placeholder-files":
+                    response = broker.placeholder_files(request_id, payload, self.headers.get("authorization"))
                     self.write_json(200, response)
                     return
                 if self.path == "/v1/injection/headers":

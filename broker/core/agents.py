@@ -11,7 +11,7 @@ from broker.plugins.github_app.provider import ProviderError
 
 
 VALID_ROLES = {"agent", "egress"}
-VALID_MATERIALIZATIONS = {"file-bundle", "header-inject"}
+VALID_MATERIALIZATIONS = {"file-bundle", "header-inject", "placeholder-file"}
 VALID_PERMISSION_VALUES = {"read", "write"}
 
 

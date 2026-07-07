@@ -1,0 +1,153 @@
+package broker_test
+
+// Conformance for the placeholder-file materialization mode
+// (docs/phase6.1-placeholder-file-materialization-pr-plan.md, protocol/broker.md):
+// the agent fetches a syntactically valid auth file containing only inert
+// placeholders; the real secret values stay broker-side and never appear.
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+// placeholderIdentities: an agent holding a placeholder-file grant for
+// fixture-auth, its paired egress, plus the standard second agent.
+func placeholderIdentities() map[string]roleIdentity {
+	identities := mediatedIdentities()
+	frontend := identities["frontend"]
+	frontend.Grants = []roleGrant{
+		{Provider: "fixture-auth", Materialization: "placeholder-file", Repositories: []string{"my-user/my-repo"}},
+	}
+	identities["frontend"] = frontend
+	return identities
+}
+
+// TestPlaceholderFileMaterializesWithoutRealSecrets is the load-bearing test:
+// the vended file contains placeholders only, and none of the real broker-side
+// secret strings appear anywhere in the response.
+func TestPlaceholderFileMaterializesWithoutRealSecrets(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(placeholderIdentities())
+
+	status, body := f.postJSONWithToken("frontend-token", "/v1/placeholder-files",
+		map[string]any{"provider": "fixture-auth"})
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("placeholder-files must succeed for a granted agent: status=%d body=%v", status, body)
+	}
+
+	rawResponse, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{"real-placeholder-access-token-secret", "real-placeholder-id-token-secret"} {
+		if strings.Contains(string(rawResponse), needle) {
+			t.Fatalf("real secret %q leaked into the placeholder response: %s", needle, rawResponse)
+		}
+	}
+
+	files, ok := body["files"].([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("expected one file, got %v", body["files"])
+	}
+	file := files[0].(map[string]any)
+	if file["path"] != ".fixture/auth.json" || file["mode"] != "0600" {
+		t.Fatalf("unexpected file path/mode: %v", file)
+	}
+	var content map[string]any
+	if err := json.Unmarshal([]byte(file["content"].(string)), &content); err != nil {
+		t.Fatalf("placeholder file content is not valid JSON: %v", err)
+	}
+	if content["access_token"] != nvtPlaceholder {
+		t.Fatalf("access_token must be the zero-entropy placeholder, got %v", content["access_token"])
+	}
+	if content["account_id"] != "acct-fixture-123" {
+		t.Fatalf("non-secret literal must be emitted verbatim, got %v", content["account_id"])
+	}
+
+	// Host bindings are returned for 6.2's route/injection map.
+	hosts, ok := body["hosts"].([]any)
+	if !ok || len(hosts) != 2 || hosts[0] != "api.fixture.test" {
+		t.Fatalf("unexpected host bindings: %v", body["hosts"])
+	}
+}
+
+// TestPlaceholderFileJWTShape pins the jwt placeholder shape: a valid JWT with
+// real non-secret claims and a far-future exp, and a placeholder signature.
+func TestPlaceholderFileJWTShape(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(placeholderIdentities())
+
+	_, body := f.postJSONWithToken("frontend-token", "/v1/placeholder-files",
+		map[string]any{"provider": "fixture-auth"})
+	file := body["files"].([]any)[0].(map[string]any)
+	var content map[string]any
+	if err := json.Unmarshal([]byte(file["content"].(string)), &content); err != nil {
+		t.Fatal(err)
+	}
+	idToken, ok := content["id_token"].(string)
+	if !ok {
+		t.Fatalf("id_token missing: %v", content)
+	}
+	segments := strings.Split(idToken, ".")
+	if len(segments) != 3 {
+		t.Fatalf("id_token is not a three-segment JWT: %q", idToken)
+	}
+	if segments[2] != "nvt-placeholder-signature" {
+		t.Fatalf("id_token signature must be the placeholder, got %q", segments[2])
+	}
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(segments[1])
+	if err != nil {
+		t.Fatalf("id_token payload not base64url: %v", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+		t.Fatalf("id_token payload not JSON: %v", err)
+	}
+	if claims["sub"] != "acct-fixture-123" || claims["plan"] != "pro" {
+		t.Fatalf("id_token must carry the non-secret identity claims, got %v", claims)
+	}
+	exp, ok := claims["exp"].(float64)
+	if !ok || exp < 2000000000 { // ~2033; well beyond any session
+		t.Fatalf("id_token exp must be far-future, got %v", claims["exp"])
+	}
+}
+
+// TestPlaceholderFileRequiresGrant pins scoping: an agent without the grant is
+// denied, and the placeholder-file grant is denied on secret-bearing endpoints.
+func TestPlaceholderFileRequiresGrant(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(placeholderIdentities())
+
+	// backend holds no grant for fixture-auth.
+	status, body := f.postJSONWithToken("backend-token", "/v1/placeholder-files",
+		map[string]any{"provider": "fixture-auth"})
+	if status == http.StatusOK || body["ok"] == true {
+		t.Fatalf("ungranted agent must be denied: status=%d body=%v", status, body)
+	}
+	if body["error"] != "provider-not-granted" {
+		t.Fatalf("expected provider-not-granted, got %v", body["error"])
+	}
+
+	// The placeholder-file grant must not reach secret-bearing endpoints.
+	status, body = f.postJSONWithToken("frontend-token", "/v1/files",
+		map[string]any{"provider": "fixture-auth"})
+	if status == http.StatusOK || body["error"] != "materialization-mismatch" {
+		t.Fatalf("placeholder-file grant must be rejected on /v1/files: status=%d body=%v", status, body)
+	}
+}
+
+// TestPlaceholderFileEgressRoleDenied pins that the agent (not egress) is the
+// caller: an egress identity is refused (the file is inert, agent-owned).
+func TestPlaceholderFileEgressRoleDenied(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(placeholderIdentities())
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/placeholder-files",
+		map[string]any{"provider": "fixture-auth"})
+	if status == http.StatusOK || body["error"] != "role-not-allowed" {
+		t.Fatalf("egress identity must be refused on placeholder-files: status=%d body=%v", status, body)
+	}
+}
