@@ -113,10 +113,22 @@ validate_chart_render() {
 }
 
 start_operator_port_forward() {
+  # A stale listener on this port (e.g. a leaked port-forward from a prior
+  # run pointing at a different cluster) would silently route admissions to
+  # the wrong operator. Refuse to proceed if the port is already bound.
+  if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PORT_FORWARD_PORT}/" 2>/dev/null; then
+    die "localhost:${PORT_FORWARD_PORT} is already serving before port-forward; a stale forward would route admissions to the wrong cluster"
+  fi
   log "port-forwarding nvt-operator Service on localhost:${PORT_FORWARD_PORT}"
   kubectl_smoke port-forward -n "${NAMESPACE}" service/nvt-operator "${PORT_FORWARD_PORT}:8082" \
     >"${SMOKE_TMPDIR}/operator-port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
+  # If the local port was already bound, kubectl exits immediately; catch a
+  # dead forward loudly instead of falling through to the wrong endpoint.
+  sleep 1
+  if ! kill -0 "${PORT_FORWARD_PID}" 2>/dev/null; then
+    die "operator port-forward exited immediately: $(cat "${SMOKE_TMPDIR}/operator-port-forward.log")"
+  fi
   wait_for_operator_http 30
 }
 
@@ -124,13 +136,22 @@ wait_for_operator_http() {
   local timeout_seconds="$1"
   local deadline=$((SECONDS + timeout_seconds))
   local status
+  local consecutive=0
 
+  # Require two consecutive 405s: right after a rollout the port-forward can
+  # briefly connect to an operator whose admission server is up but still
+  # settling, so a single probe is not enough to trust the first admission.
   while (( SECONDS < deadline )); do
     status="$(
       curl -sS -o /dev/null -w '%{http_code}' "$(admission_url)" 2>/dev/null || true
     )"
     if [[ "${status}" == "405" ]]; then
-      return
+      consecutive=$((consecutive + 1))
+      if (( consecutive >= 2 )); then
+        return
+      fi
+    else
+      consecutive=0
     fi
     sleep 1
   done

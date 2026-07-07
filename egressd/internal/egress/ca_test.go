@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -94,6 +95,148 @@ func TestCARefusesUpstreamLeaf(t *testing.T) {
 	}
 }
 
+// TestCALeafIncludesServiceNames pins the own-Pod extension of the leaf-SAN
+// boundary: configured synthetic Service names are minted and verify against
+// the CA, and the name constraints extend in lockstep — while upstream names
+// remain refused (TestCARefusesUpstreamLeaf runs against this CA too).
+func TestCALeafIncludesServiceNames(t *testing.T) {
+	serviceNames := []string{"run-egressd", "run-egressd.nvt", "run-egressd.nvt.svc"}
+	ca, err := NewCA(serviceNames...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafCert, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: "run-egressd"})
+	if err != nil {
+		t.Fatalf("CA refused a configured Service name: %v", err)
+	}
+	parsed, err := x509.ParseCertificate(leafCert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames := append([]string{localLeafName}, serviceNames...)
+	if len(parsed.DNSNames) != len(wantNames) {
+		t.Fatalf("leaf DNS SANs = %v, want %v", parsed.DNSNames, wantNames)
+	}
+	for _, name := range wantNames {
+		if _, err := parsed.Verify(x509.VerifyOptions{Roots: caCertPool(t, ca), DNSName: name}); err != nil {
+			t.Fatalf("leaf does not verify for %s against the CA: %v", name, err)
+		}
+	}
+	block, _ := pem.Decode(ca.CertPEM())
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(caCert.PermittedDNSDomains) != len(wantNames) {
+		t.Fatalf("CA permitted DNS domains = %v, want %v", caCert.PermittedDNSDomains, wantNames)
+	}
+	// Upstream names stay refused even with Service names configured.
+	for _, name := range []string{"github.com", "api.github.com", "run-egressd.evil.example"} {
+		if _, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name}); err == nil {
+			t.Fatalf("CA minted a leaf for non-configured name %q", name)
+		}
+	}
+}
+
+// TestCAEndpointServesOnlyCertificate walks every listener response of the
+// CA endpoint and pins cert-only output: no path, method, or error response
+// ever carries private key bytes, and only /ca.crt and /healthz exist.
+func TestCAEndpointServesOnlyCertificate(t *testing.T) {
+	ca, err := NewCA("run-egressd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(CAEndpointHandler(ca))
+	defer server.Close()
+
+	fetch := func(method, path string) (int, string) {
+		t.Helper()
+		request, err := http.NewRequest(method, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body := make([]byte, 64*1024)
+		read, _ := response.Body.Read(body)
+		return response.StatusCode, string(body[:read])
+	}
+
+	status, body := fetch(http.MethodGet, "/ca.crt")
+	if status != http.StatusOK || !strings.Contains(body, "BEGIN CERTIFICATE") {
+		t.Fatalf("GET /ca.crt = %d %q", status, body)
+	}
+	status, _ = fetch(http.MethodGet, "/healthz")
+	if status != http.StatusOK {
+		t.Fatalf("GET /healthz = %d", status)
+	}
+	cases := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodGet, "/", http.StatusNotFound},
+		{http.MethodGet, "/ca.key", http.StatusNotFound},
+		{http.MethodGet, "/ca", http.StatusNotFound},
+		{http.MethodGet, "/tls.key", http.StatusNotFound},
+		{http.MethodPost, "/ca.crt", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed},
+	}
+	for _, tc := range cases {
+		status, body := fetch(tc.method, tc.path)
+		if status != tc.want {
+			t.Fatalf("%s %s = %d, want %d", tc.method, tc.path, status, tc.want)
+		}
+		if strings.Contains(body, "PRIVATE KEY") {
+			t.Fatalf("%s %s leaked private key material", tc.method, tc.path)
+		}
+	}
+	// The happy path must not leak key material either.
+	_, body = fetch(http.MethodGet, "/ca.crt")
+	if strings.Contains(body, "PRIVATE KEY") {
+		t.Fatal("/ca.crt response contains private key material")
+	}
+}
+
+// TestCAConfigLeafNamesAndServeAddr pins the config rules: the ca block
+// needs a distribution path (publish_dir or serve_addr), and leaf names may
+// never name a route upstream.
+func TestCAConfigLeafNamesAndServeAddr(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			BrokerURL: "https://broker:7347",
+			Routes: []Route{{
+				Listen:     "0.0.0.0:8471",
+				Capability: "api-main",
+				Upstream:   "api.example.test:443",
+				ListenTLS:  RouteListenTLSCA,
+			}},
+			CA: &CAConfig{ServeAddr: "0.0.0.0:8470", LeafDNSNames: []string{"run-egressd"}},
+		}
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("serve_addr-only CA config must validate, got %v", err)
+	}
+	noDistribution := base()
+	noDistribution.CA = &CAConfig{}
+	if err := noDistribution.Validate(); err == nil || !strings.Contains(err.Error(), "publish_dir or serve_addr") {
+		t.Fatalf("expected missing distribution path rejection, got %v", err)
+	}
+	upstreamLeaf := base()
+	upstreamLeaf.CA.LeafDNSNames = []string{"api.example.test"}
+	if err := upstreamLeaf.Validate(); err == nil || !strings.Contains(err.Error(), "route upstream host") {
+		t.Fatalf("expected upstream leaf name rejection, got %v", err)
+	}
+	emptyLeaf := base()
+	emptyLeaf.CA.LeafDNSNames = []string{""}
+	if err := emptyLeaf.Validate(); err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("expected empty leaf name rejection, got %v", err)
+	}
+}
+
 // TestCACertCarriesNameConstraints pins the defense-in-depth property: even
 // a leaked CA key could not sign for arbitrary hosts.
 func TestCACertCarriesNameConstraints(t *testing.T) {
@@ -154,6 +297,50 @@ func TestCAPublishesOnlyCertificate(t *testing.T) {
 	}
 	if strings.Contains(string(content), "PRIVATE KEY") {
 		t.Fatal("published file contains private key material")
+	}
+}
+
+func TestLoadCADurableKeypairServesOnlyCertificate(t *testing.T) {
+	generated, err := NewCA("run-egressd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(generated.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "ca.crt")
+	keyFile := filepath.Join(dir, "ca.key")
+	if err := os.WriteFile(certFile, generated.CertPEM(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadCA(certFile, keyFile, "run-egressd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(loaded.CertPEM()) != string(generated.CertPEM()) {
+		t.Fatal("loaded CA certificate changed")
+	}
+	server := httptest.NewServer(CAEndpointHandler(loaded))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/ca.crt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "BEGIN CERTIFICATE") {
+		t.Fatalf("/ca.crt = %d %q", response.StatusCode, body)
+	}
+	if strings.Contains(string(body), "PRIVATE KEY") {
+		t.Fatal("/ca.crt leaked private key material")
 	}
 }
 

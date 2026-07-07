@@ -67,6 +67,10 @@ Processes started directly in the agent and ports published by inner
 \`docker compose\` projects bind in that same namespace. Ports \`4090\`
 (code-server) and \`2375\` (Docker API) are reserved.
 
+In mediated enforced Kubernetes runs, credentialed provider traffic is fenced
+through egressd. Use the generated provider base URLs and trust settings; do
+not bypass them with direct upstream URLs or custom credential helpers.
+
 The workspace is mounted into both containers at the same path, so Compose bind
 mounts from under \`$workspace\` should work.
 

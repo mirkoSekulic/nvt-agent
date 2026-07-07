@@ -60,6 +60,17 @@ egress:
   egressdImage: nvt-egressd:latest
 ```
 
+A mediated run can additionally set `spec.egressEnforcement: true`: egressd
+moves to its own Pod and the operator renders per-run NetworkPolicies that
+fence the agent Pod (egress only to kube-dns, the broker, the paired egressd,
+and the operator callback). **Enforcement requires a NetworkPolicy-enforcing
+CNI** (Calico, Cilium, ...): on kindnet — kind's default — the policies are
+accepted but inert, and the enforcement smoke only runs on the Calico cluster
+(`make operator-kind-cluster-enforced`).
+The rendered policies assume the chart-managed broker/operator Pods run in the
+same namespace as the `AgentRun` and keep the chart labels/ports used by the
+controller selectors.
+
 For providers that maintain broker-owned state, enable a PVC:
 
 ```yaml

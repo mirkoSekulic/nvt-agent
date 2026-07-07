@@ -1,7 +1,7 @@
 # Plan: Mediated Credential Egress
 
 Status: living document — Phases 0–4 completed (#53, #54, Phase 2 gate, #56, #58, #59, Phase 4 git-over-HTTPS mediation)
-Version: v3.6 (Phase 4 landed: per-agent CA, TLS-terminated git route, repo-scoped injection, multi-grant routes)
+Version: v3.7 (Phase 5 PR 6a landed: own-Pod egressd + CNI-enforced NetworkPolicies behind `spec.egressEnforcement`, egress-denied smoke on the Calico kind cluster)
 
 ## Goal
 
@@ -112,7 +112,18 @@ Same-Pod is right for the non-possession phases: localhost keeps the plaintext a
 
 Own-Pod egressd flips it: the agent Pod's NetworkPolicy ("egress only to egressd Pod + DNS + broker + callback") is enforced at the CNI on the host side, beyond the agent's reach even with full privileges in its netns — the one clean enforcement story available today. Costs: heavier lifecycle (two Pods per run, pairing), and the plaintext hop crosses the CNI (mitigate with same-node affinity; it carries no credentials either way, since the agent has none).
 
-Because the contract is placement-agnostic (§2), this is a Phase-5 evaluation — own-Pod vs. deprivileged-dind — not a Phase-1 commitment.
+Because the contract is placement-agnostic (§2), this was a Phase-5 evaluation — own-Pod vs. deprivileged-dind — not a Phase-1 commitment.
+
+**Phase 5 outcome (PR 6a): own-Pod is the implemented k8s enforcement shape.**
+Opt-in per run via `spec.egressEnforcement: true` (requires `egress: mediated`);
+same-Pod remains the default mediated shape and the compose shape. The
+operator sequences provisioning as a status-condition state machine
+(`BrokerPolicyReady`, `EgressdCreated`, `EgressdReady`, `EgressCAPublished`)
+and the agent Pod is never created before the CA is published and the broker
+policy holds. The per-agent CA is distributed by the operator: fetched once
+from egressd's plain-HTTP `/ca.crt` endpoint (public material — the trust
+anchor being bootstrapped), validated, and published into a per-run ConfigMap
+mounted at the Phase 4 path.
 
 ### 7. Egress enforcement — the hard problem, stated honestly
 
@@ -126,7 +137,7 @@ The in-netns layer is iptables:
 
 **Unstated precondition, now explicit**: in-netns enforcement only holds where the agent cannot obtain NET_ADMIN in that netns. Today it can — the agent controls a privileged dind daemon (`privileged: true` in `compose.agent.yaml`) and can `docker run --privileged --net container:…` to flush the rules. Therefore:
 
-- Enforcement is a real control via **own-Pod egressd + CNI-enforced NetworkPolicy** (k8s), or with **dind deprivileged/relocated** (either backend).
+- Enforcement is a real control via **own-Pod egressd + CNI-enforced NetworkPolicy** (k8s — landed in Phase 5 PR 6a behind `spec.egressEnforcement`; the egress-denied smoke runs on a Calico kind cluster and covers the dind FORWARD-path case, since spawned-container traffic still exits the Pod and hits the CNI), or with **dind deprivileged/relocated** (either backend). In-netns iptables remains defense-in-depth gated on the deprivileged-dind workstream: it only holds where the agent cannot obtain NET_ADMIN in its netns, and today it can.
 - Under today's compose + `danger-full-access` + per-agent privileged dind, egress-deny is a speed bump, not a control — a **documented gap**, acceptable under the local trust model ("you trust yourself"), not an implicit one.
 - This inverts the naive asymmetry: compose is the hard side for enforcement, k8s the tractable side. Non-possession, by contrast, is clean in both.
 

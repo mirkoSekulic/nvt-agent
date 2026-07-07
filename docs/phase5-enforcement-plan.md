@@ -1,6 +1,6 @@
 # Phase 5 Plan: Egress Enforcement + Audit + Quotas + Revocation
 
-Status: fixes (#61) and prerequisite broker-TLS PR (#62) merged; 6a planned ([phase5-6a-enforcement-pr-plan.md](phase5-6a-enforcement-pr-plan.md)), 6b not started
+Status: fixes (#61) and prerequisite broker-TLS PR (#62) merged; 6a implemented ([phase5-6a-enforcement-pr-plan.md](phase5-6a-enforcement-pr-plan.md) — decisions: `spec.egressEnforcement` opt-in, Calico on kind, plain-HTTP `/ca.crt` endpoint since the certificate is the trust anchor being bootstrapped); 6b not started
 Parent: [mediated-egress-plan.md](mediated-egress-plan.md) §6, §7, Phase 5 (PRs 6a/6b in the sequence table)
 
 ## Goal
@@ -131,26 +131,22 @@ pieces that are *not* yet placement-agnostic and need rework:
    name). Non-git API routes should also serve TLS in own-Pod mode.
 3. **CA cert distribution — operator-distributed (primary design)**: the
    Phase 4 shared-`emptyDir` publication is same-Pod-only. In own-Pod mode,
-   egressd still generates the CA at boot (key never leaves it) and serves
-   `GET /ca.crt` (public material), but the **agent never network-fetches its
-   own trust anchor**: the operator sequences creation — egressd Pod first,
-   wait ready, fetch `/ca.crt` once, publish it into a per-run ConfigMap
-   (`<run>-egress-ca`) mounted read-only into the agent Pod — then creates
-   the agent Pod. Bootstrap reads trust from the mount, exactly like Phase 4.
-   The one network fetch is done once, by the trusted operator, at reconcile
-   time. Direct agent-side `GET /ca.crt` with a TOFU caveat remains the
-   documented fallback if the sequencing cost proves too high in the PR.
+   the operator creates a durable per-run CA Secret
+   (`<run>-egress-ca-keypair`) mounted only into egressd and publishes only
+   `ca.crt` into a per-run ConfigMap (`<run>-egress-ca`) mounted read-only
+   into the agent Pod. The **agent never network-fetches its own trust
+   anchor**. Bootstrap reads trust from the mount, exactly like Phase 4.
 
    **Implementation constraint**: this sequencing (egressd Pod ready → CA
-   fetched → ConfigMap published → agent Pod created) is more controller
+   keypair validated → ConfigMap published → agent Pod created) is more controller
    choreography than the existing reconcile does anywhere. Implement it as an
    explicit state machine surfaced through AgentRun status conditions (e.g.
    `EgressdReady`, `EgressCAPublished`) with each reconcile pass advancing
    one observable step — not as hidden ordering inside a single reconcile
    path. Controller tests assert the condition progression, including the
-   stuck states (egressd never ready, fetch fails).
+   stuck states (egressd never ready, CA publication fails).
 4. **Pairing at the network layer**: per-run Pod labels so NetworkPolicies
-   select exactly the paired Pods (`nvt.dev/run: <name>`,
+   select exactly the paired Pods (`nvt.dev/agentrun: <name>`,
    `nvt.dev/role: agent|egressd`).
 
 ### NetworkPolicy templates (greenfield chart work)
@@ -306,10 +302,9 @@ global default flip is intentionally **not** in this sequence.
 - NetworkPolicy pairing selectors: no cross-run reachability (agent A ↛
   egressd B); default-deny actually default-denies (test with a canary host).
 - CA distribution: `GET /ca.crt` serves cert only, never key material; the
-  operator publishes exactly what it fetched (ConfigMap content matches
-  egressd's cert); agent bootstrap fails closed when the CA mount is absent;
-  if the fallback agent-side fetch is used instead, the TOFU caveat is
-  documented.
+  operator publishes only `ca.crt` from the validated per-run Secret
+  (ConfigMap content matches the Secret cert); agent bootstrap fails closed
+  when the CA mount is absent.
 - Audit reporting: no header/token values in any report or error path;
   bounded queue cannot OOM egressd; report failures cannot block or fail
   proxied traffic.

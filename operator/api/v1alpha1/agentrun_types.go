@@ -51,12 +51,18 @@ type AgentRunSpec struct {
 	RuntimeClassName          *string              `json:"runtimeClassName,omitempty"`
 	Egress                    AgentRunEgressMode   `json:"egress,omitempty"`
 	EgressAllowInsecureBroker bool                 `json:"egressAllowInsecureBroker,omitempty"`
-	Workspace                 AgentRunWorkspace    `json:"workspace"`
-	Broker                    *AgentRunBroker      `json:"broker,omitempty"`
-	Prompt                    *AgentRunPrompt      `json:"prompt,omitempty"`
-	Agent                     AgentRunAgent        `json:"agent"`
-	Lifecycle                 *AgentRunLifecycle   `json:"lifecycle,omitempty"`
-	TTL                       *AgentRunTTL         `json:"ttl,omitempty"`
+	// EgressEnforcement opts a mediated run into network-enforced egress:
+	// egressd moves to its own Pod and CNI-enforced NetworkPolicies fence the
+	// agent Pod so it cannot reach arbitrary hosts
+	// (docs/phase5-6a-enforcement-pr-plan.md). Requires egress: mediated and a
+	// NetworkPolicy-enforcing CNI; same-Pod remains the default mediated shape.
+	EgressEnforcement bool               `json:"egressEnforcement,omitempty"`
+	Workspace         AgentRunWorkspace  `json:"workspace"`
+	Broker            *AgentRunBroker    `json:"broker,omitempty"`
+	Prompt            *AgentRunPrompt    `json:"prompt,omitempty"`
+	Agent             AgentRunAgent      `json:"agent"`
+	Lifecycle         *AgentRunLifecycle `json:"lifecycle,omitempty"`
+	TTL               *AgentRunTTL       `json:"ttl,omitempty"`
 }
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.
@@ -127,6 +133,11 @@ type AgentRunStatus struct {
 	StartedAt  *metav1.Time  `json:"startedAt,omitempty"`
 	FinishedAt *metav1.Time  `json:"finishedAt,omitempty"`
 	Reason     string        `json:"reason,omitempty"`
+	// Conditions surfaces the enforcement-mode provisioning state machine
+	// (BrokerPolicyReady, EgressdCreated, EgressdReady, EgressCAPublished):
+	// each reconcile pass advances one observable step, and the agent Pod is
+	// never created before BrokerPolicyReady and EgressCAPublished both hold.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // AgentRunList contains a list of AgentRun resources.
@@ -325,6 +336,12 @@ func (in *AgentRunStatus) DeepCopy() *AgentRunStatus {
 	}
 	if in.FinishedAt != nil {
 		out.FinishedAt = in.FinishedAt.DeepCopy()
+	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
 	}
 	return out
 }
