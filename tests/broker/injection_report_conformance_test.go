@@ -264,3 +264,36 @@ func TestRevocationFailsClosedOnGrantRemoval(t *testing.T) {
 		t.Fatalf("revoked grant must deny provider-not-granted, got %v", body["error"])
 	}
 }
+
+// TestReportRejectsRawPathClass pins finding 3: the broker enforces the
+// path_class shape, so a buggy egressd or leaked egress token cannot write
+// raw paths or arbitrary strings into the audit log.
+func TestReportRejectsRawPathClass(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(mediatedIdentities())
+
+	for _, bad := range []string{
+		"/repos/secret-owner/secret-repo/pulls/1", // a raw path with slashes
+		"has spaces",
+		"UPPERCASE",
+		"contains\nnewline",
+		strings.Repeat("x", 65), // over the length cap
+	} {
+		entry := reportEntry()
+		entry["path_class"] = bad
+		status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/report",
+			map[string]any{"entries": []any{entry}})
+		if status != http.StatusBadRequest || body["error"] != "entry-invalid" {
+			t.Fatalf("path_class %q must be rejected as entry-invalid: status=%d body=%v", bad, status, body)
+		}
+	}
+
+	// A well-formed class is accepted.
+	entry := reportEntry()
+	entry["path_class"] = "git-upload-pack"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/report",
+		map[string]any{"entries": []any{entry}})
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("well-formed path_class must be accepted: status=%d body=%v", status, body)
+	}
+}

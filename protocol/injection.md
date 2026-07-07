@@ -239,7 +239,10 @@ Rules:
 `git-upload-pack` | `git-receive-pack` | `info-refs`; every other path
 reduces to its first path segment (`/repos/o/r/pulls/1` → `repos`, `/` →
 `root`). This keeps the audit useful without spraying repo or file names
-into it.
+into it. The broker **enforces the shape** — `path_class` must match
+`^[a-z0-9._-]{1,64}$` — so a buggy or compromised `egressd` cannot write a
+raw path or arbitrary string into the audit log; a non-conforming entry
+rejects the batch.
 
 ## Placeholder Convention
 

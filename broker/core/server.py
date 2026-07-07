@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import ssl
 import time
 import uuid
@@ -19,6 +20,12 @@ MAX_REQUEST_BYTES = 1024 * 1024
 # bounds a single report; oversized reports are denied with the standard
 # error shape, never truncated silently.
 MAX_REPORT_ENTRIES = 100
+
+# path_class is a sanitized class computed by egressd (protocol/injection.md):
+# the git classes or a single lowercase path segment. The broker enforces the
+# shape so a buggy egressd or a leaked egress token cannot write raw paths or
+# arbitrary strings into the audit log.
+PATH_CLASS_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 
 # Documented zero-entropy placeholder from protocol/injection.md. It is the
 # only credential-shaped value allowed inside a mediated agent container.
@@ -314,6 +321,12 @@ class Broker:
         path_class = entry.get("path_class")
         if not isinstance(path_class, str) or not path_class:
             raise ProviderError("entry-invalid", f"entries[{index}].path_class is required", 400)
+        if not PATH_CLASS_RE.match(path_class):
+            raise ProviderError(
+                "entry-invalid",
+                f"entries[{index}].path_class must match {PATH_CLASS_RE.pattern} (sanitized class, never a raw path)",
+                400,
+            )
         status = entry.get("status")
         if not isinstance(status, int) or isinstance(status, bool) or status < 0:
             raise ProviderError("entry-invalid", f"entries[{index}].status must be a non-negative integer", 400)
