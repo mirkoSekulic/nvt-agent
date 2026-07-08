@@ -44,6 +44,13 @@ plugins:
           credential-kind: headers
           match:
             - altinn.studio/repos/digdir/oed
+
+        - name: brokered-fork-mediated
+          type: broker
+          broker-provider: fork-app
+          credential-kind: mediated
+          match:
+            - github.com/my-user/*
 ```
 
 `match` entries are glob patterns matched against normalized repo targets such
@@ -75,6 +82,18 @@ broker-provider: company-headers
 credential-kind: headers
 ```
 
+Use `credential-kind: mediated` when Git traffic for the provider is routed
+through egressd by the mediated runtime. In this mode the plugin refuses token
+and header export; it is only a provider resolver and identity source. The real
+credential is injected by egressd after broker authorization, outside the agent
+container.
+
+```yaml
+type: broker
+broker-provider: fork-app
+credential-kind: mediated
+```
+
 Broker-backed header providers need a concrete repo target so the broker can
 apply agent grants. Prefer repo-level `match` entries for them. For self-hosted
 Git, configure the broker provider with `target-mode: literal` and match the
@@ -92,6 +111,11 @@ gh-auth pr checks 123 --repo my-user/project
 When `--provider` is omitted, `gh-auth` resolves from `--repo`, the current
 `origin` remote, or `default-provider`.
 
+For `credential-kind: mediated`, `gh-auth` sets `GH_TOKEN` to the inert NVT
+placeholder and forces GitHub traffic through `NVT_EGRESS_FORWARD_PROXY_URL`.
+egressd strips the placeholder and injects the broker-owned credential. The
+agent process never receives the real token.
+
 ## Security
 
 Prefer `type: broker` for secret-bearing providers. Local `token-env` and
@@ -106,3 +130,7 @@ Broker-backed static PAT/header providers are still compatibility paths for
 Git. Token mode returns a token to the agent, and header mode writes headers into
 Git config. GitHub App providers are stronger because broker-minted Git tokens
 are short-lived and repo-scoped.
+
+`credential-kind: mediated` is the zero-secret Git mode: Git is configured by
+the runtime to reach the provider through egressd, and this plugin never returns
+the credential to Git, `gh`, or the agent process.

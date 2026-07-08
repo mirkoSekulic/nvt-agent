@@ -2890,6 +2890,7 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 		// Signals bootstrap to install the CA trust store for proxy-env HTTPS
 		// clients (the MITM leaf must be trusted system-wide).
 		egress["forward-proxy"] = true
+		egress["forward-proxy-url"] = fmt.Sprintf("http://%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)
 	}
 	updated["egress"] = egress
 	return updated

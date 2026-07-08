@@ -4018,6 +4018,12 @@ func TestForwardProxyAgentPodEnv(t *testing.T) {
 	if !strings.Contains(proxy, EgressdServiceName(forwardProxyAgentRun().Name)) || !strings.Contains(proxy, "8473") {
 		t.Fatalf("HTTPS_PROXY = %q, want the egressd forward-proxy Service", proxy)
 	}
+	config := InjectMediatedEgressConfig(map[string]any{}, forwardProxyAgentRun())
+	egress, _ := config["egress"].(map[string]any)
+	proxyURL, _ := egress["forward-proxy-url"].(string)
+	if proxyURL != proxy {
+		t.Fatalf("forward-proxy-url = %q, want %q", proxyURL, proxy)
+	}
 	noProxy := envValue(agent, "NO_PROXY")
 	for _, want := range []string{"localhost", ".svc.cluster.local", "nvt-operator"} {
 		if !strings.Contains(noProxy, want) {

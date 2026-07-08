@@ -379,8 +379,8 @@ def credential_kind(provider):
     kind = provider.get("type")
     if kind == "broker":
         value = string_value(provider.get("credential-kind"), f"provider {provider_name(provider)} credential-kind") or "token"
-        if value not in {"token", "headers"}:
-            fail(f"provider {provider_name(provider)} credential-kind must be token or headers")
+        if value not in {"token", "headers", "mediated"}:
+            fail(f"provider {provider_name(provider)} credential-kind must be token, headers, or mediated")
         return value
     if kind == "headers":
         return "headers"
@@ -391,6 +391,8 @@ def credential_kind(provider):
 
 def token(provider, target=None):
     kind = provider.get("type")
+    if credential_kind(provider) == "mediated":
+        fail(f"provider {provider_name(provider)} is mediated; token credentials are not available in the agent")
     if kind == "github-app":
         return installation_token(provider)
     if kind == "token-env":
@@ -410,6 +412,8 @@ def identity(provider, target=None):
 
 
 def headers(provider, target=None):
+    if credential_kind(provider) == "mediated":
+        fail(f"provider {provider_name(provider)} is mediated; header credentials are injected by egressd")
     if provider.get("type") == "broker":
         return broker_headers(provider, target)
     if provider.get("type") != "headers":

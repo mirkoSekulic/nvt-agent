@@ -11,6 +11,11 @@ Token providers (`github-app` and `token-env`) are exposed through
 `git-credential-nvt`. Header providers configure Git `http.<url>.extraHeader`
 entries directly.
 
+Mediated broker providers (`credential-kind: mediated`) are not exposed through
+the helper and do not write `extraHeader`. They rely on the mediated runtime's
+egressd Git routing (`url.<egressd>.insteadOf` + CA trust) so the real
+credential is injected outside the agent.
+
 ## Configuration
 
 ```yaml
@@ -108,6 +113,11 @@ It does not set global `user.name` or `user.email`.
 Broker-backed header providers configure `http.<url>.extraHeader` the same way
 local header providers do. The header secret is therefore present in Git config;
 this is a compatibility path, not a zero-trust path.
+
+Broker-backed mediated providers are deliberately skipped by the credential
+helper. In mediated mode, bootstrap/operator wiring configures Git URL rewrites
+and trust for egressd; this plugin may still configure repo-local commit
+identity, but it must not ask the provider for a token or header.
 
 ## Relationship To checkout-repos
 

@@ -201,6 +201,118 @@ providers:
 	}
 }
 
+func TestGitHostCredentialMediatedBrokerProviderRefusesTokenAndHeaders(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: fork-app-mediated
+    type: broker
+    broker-provider: fork-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	kind := strings.TrimSpace(f.runWithEnv(gitHostCredentialBin(f.root), true, env, "credential-kind", "--provider", "fork-app-mediated"))
+	if kind != "mediated" {
+		t.Fatalf("unexpected credential kind: %q", kind)
+	}
+
+	tokenOutput := f.runWithEnv(gitHostCredentialBin(f.root), false, env, "token", "--provider", "fork-app-mediated", "--target", "github.com/my-user/project")
+	if !strings.Contains(tokenOutput, "is mediated") || !strings.Contains(tokenOutput, "token credentials are not available") {
+		t.Fatalf("unexpected token failure:\n%s", tokenOutput)
+	}
+
+	headersOutput := f.runWithEnv(gitHostCredentialBin(f.root), false, env, "headers", "--provider", "fork-app-mediated", "--target", "github.com/my-user/project")
+	if !strings.Contains(headersOutput, "is mediated") || !strings.Contains(headersOutput, "injected by egressd") {
+		t.Fatalf("unexpected headers failure:\n%s", headersOutput)
+	}
+}
+
+func TestGhAuthWrapsMediatedProviderWithPlaceholderAndProxy(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
+	f.writeBin("gh", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "${GH_TOKEN:-}" != "NVT-PLACEHOLDER-NOT-A-KEY" ]; then
+  echo "unexpected GH_TOKEN=${GH_TOKEN:-}" >&2
+  exit 1
+fi
+if [ "${GITHUB_TOKEN+x}" = "x" ]; then
+  echo "GITHUB_TOKEN must be unset" >&2
+  exit 1
+fi
+if [ "${GH_ENTERPRISE_TOKEN+x}" = "x" ]; then
+  echo "GH_ENTERPRISE_TOKEN must be unset" >&2
+  exit 1
+fi
+if [ "${GITHUB_ENTERPRISE_TOKEN+x}" = "x" ]; then
+  echo "GITHUB_ENTERPRISE_TOKEN must be unset" >&2
+  exit 1
+fi
+if [ "${HTTPS_PROXY:-}" != "http://127.0.0.1:8470" ]; then
+  echo "unexpected HTTPS_PROXY=${HTTPS_PROXY:-}" >&2
+  exit 1
+fi
+case ",${NO_PROXY:-}," in
+  *,github.com,*|*,.github.com,*|*,api.github.com,*)
+    echo "NO_PROXY still bypasses github: ${NO_PROXY:-}" >&2
+    exit 1
+    ;;
+esac
+printf '%s\n' "$*"
+`)
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: fork-app-mediated
+    type: broker
+    broker-provider: fork-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*
+`)
+	env := []string{
+		"NVT_PLUGIN_CONFIG=" + config,
+		"NVT_EGRESS_FORWARD_PROXY_URL=http://127.0.0.1:8470",
+		"NVT_EGRESS_PLACEHOLDER=NVT-PLACEHOLDER-NOT-A-KEY",
+		"NO_PROXY=localhost,*,github.com,.github.com,api.github.com,example.test",
+		"GITHUB_TOKEN=must-not-survive",
+		"GH_ENTERPRISE_TOKEN=must-not-survive",
+		"GITHUB_ENTERPRISE_TOKEN=must-not-survive",
+	}
+
+	output := f.runWithEnv(ghAuthBin(f.root), true, env, "pr", "view", "--repo", "my-user/project")
+	if strings.TrimSpace(output) != "pr view --repo my-user/project" {
+		t.Fatalf("unexpected gh output:\n%s", output)
+	}
+}
+
+func TestGhAuthMediatedProviderRequiresManagedProxyURL(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("gh", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: fork-app-mediated
+    type: broker
+    broker-provider: fork-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*
+`)
+	env := []string{
+		"NVT_PLUGIN_CONFIG=" + config,
+		"HTTPS_PROXY=http://ambient-proxy.invalid:8080",
+		"https_proxy=http://ambient-proxy.invalid:8080",
+	}
+
+	output := f.runWithEnv(ghAuthBin(f.root), false, env, "pr", "view", "--repo", "my-user/project")
+	if !strings.Contains(output, "NVT_EGRESS_FORWARD_PROXY_URL is not set") {
+		t.Fatalf("unexpected missing proxy failure:\n%s", output)
+	}
+}
+
 func TestGitCredentialsDelegatesToGitHostCredential(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("git-host-credential", `#!/usr/bin/env bash
@@ -231,6 +343,58 @@ credentials:
 	if !strings.Contains(output, "username=x-access-token") ||
 		!strings.Contains(output, "password=delegated-token") {
 		t.Fatalf("unexpected credential output:\n%s", output)
+	}
+}
+
+func TestGitCredentialsSkipsHelperForMediatedProvider(t *testing.T) {
+	f := newFixture(t)
+	logPath := filepath.Join(f.home, "git.log")
+	f.writeBin("git", `#!/usr/bin/env bash
+set -euo pipefail
+printf "%s\n" "$*" >> "$GIT_LOG"
+`)
+	f.writeBin("git-host-credential", `#!/usr/bin/env bash
+set -euo pipefail
+case "$1:$3" in
+  credential-kind:fork-app-mediated)
+    echo mediated
+    ;;
+  doctor:fork-app-mediated)
+    exit 0
+    ;;
+  *)
+    echo "unexpected git-host-credential args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+	config := f.writePluginConfig("git-credentials.yaml", `
+credentials:
+  - match: https://github.com/my-user/project
+    provider: fork-app-mediated
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config, "GIT_LOG=" + logPath}
+
+	output := f.runWithEnv(gitCredentialsRunBin(f.root), true, env)
+	if !strings.Contains(output, "mediated credential rule") ||
+		!strings.Contains(output, "fork-app-mediated") {
+		t.Fatalf("expected mediated rule summary, got:\n%s", output)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "credential.helper") ||
+		strings.Contains(log, "extraHeader") {
+		t.Fatalf("mediated git credentials must not configure helper or headers:\n%s", log)
+	}
+	configData, err := os.ReadFile(filepath.Join(f.home, ".nvt-agent", "git-credentials", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configData), "fork-app-mediated") {
+		t.Fatalf("mediated provider leaked into token helper config:\n%s", configData)
 	}
 }
 

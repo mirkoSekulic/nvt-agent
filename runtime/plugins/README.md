@@ -167,10 +167,18 @@ git-host-credential doctor --provider fork-app
 gh-auth pr view 123 --repo example/project
 ```
 
+`credential-kind: mediated` is available for broker providers whose Git traffic
+is routed through egressd. In that mode `git-host-credential` refuses token and
+header export; the real credential is injected outside the agent container.
+
 `gh-auth` runs `gh` with a per-command token through `GH_TOKEN`. It
 does not call `gh auth login` and does not persist credentials in the GitHub CLI
 config. If `--provider` is omitted, it resolves a provider from `--repo`, the
 current git remote, or `default-provider`.
+For mediated providers, `GH_TOKEN` is only the inert NVT placeholder and
+`gh-auth` forces GitHub traffic through egressd using
+`NVT_EGRESS_FORWARD_PROXY_URL`; the real credential is injected outside the
+agent.
 
 Security note: `git-host-credentials` currently supports local/dev operation
 where raw provider secrets, including GitHub App private keys, are provided to

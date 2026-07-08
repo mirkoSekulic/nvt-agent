@@ -743,6 +743,9 @@ code-server:
 	if !strings.Contains(envFile, `export SSL_CERT_FILE="`+bundle+`"`) {
 		t.Fatalf("SSL_CERT_FILE not pointed at the bundle:\n%s", envFile)
 	}
+	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"`) {
+		t.Fatalf("forward proxy URL not exported for mediated tools:\n%s", envFile)
+	}
 	meta := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
 	if !strings.Contains(meta, `"forward_proxy": true`) {
 		t.Fatalf("egress.json missing forward_proxy marker:\n%s", meta)
