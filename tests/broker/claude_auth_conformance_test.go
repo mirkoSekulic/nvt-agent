@@ -88,7 +88,7 @@ func TestClaudePlaceholderFileMaterializesWithoutRealSecrets(t *testing.T) {
 	}
 
 	hosts, ok := body["hosts"].([]any)
-	if !ok || len(hosts) != 1 || hosts[0] != "api.anthropic.com" {
+	if !ok || len(hosts) != 2 || hosts[0] != "api.anthropic.com" || hosts[1] != "mcp-proxy.anthropic.com" {
 		t.Fatalf("unexpected host bindings: %v", body["hosts"])
 	}
 }
@@ -181,6 +181,17 @@ func TestClaudeInjectionIsEgressIdentityScoped(t *testing.T) {
 	}
 	if !strip["authorization"] || !strip["anthropic-beta"] {
 		t.Fatalf("every injected header must be stripped, got %v", body["strip_request_headers"])
+	}
+
+	mcpReq := map[string]any{
+		"capability": "claude-main",
+		"host":       "mcp-proxy.anthropic.com",
+		"method":     "POST",
+		"path":       "/v1/mcp",
+	}
+	status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", mcpReq)
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("paired egress must obtain injection headers for Claude MCP proxy: status=%d body=%v", status, body)
 	}
 
 	// The agent holding the grant may not obtain injectable headers.

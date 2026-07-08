@@ -471,12 +471,14 @@ providers:
       refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
+        - mcp-proxy.anthropic.com
       injection-extra-headers:
         anthropic-beta: oauth-2025-04-20
       placeholder-file:
         path: .claude/.credentials.json
         hosts:
           - api.anthropic.com
+          - mcp-proxy.anthropic.com
 `, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra, f.claudeCreds)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
