@@ -409,11 +409,14 @@ Rules:
   every request (so external rotation is picked up), refreshed when
   `expiresAt` is within `refresh-margin-seconds`, and persisted when the source
   is `credentials-file`.
-- Successful refresh uses `grant_type=refresh_token`, the configured
-  `client-id`, `token-url`, and current canonical refresh token. It updates
-  `accessToken`, rotated `refreshToken` when returned, `expiresAt`, optional
-  scope metadata, and `last_refresh`, then atomically replaces the canonical
-  credentials file.
+- The implemented broker refresh contract uses `grant_type=refresh_token`, the
+  configured `client-id`, `token-url`, and current canonical refresh token. It
+  updates `accessToken`, rotated `refreshToken` when returned, `expiresAt`,
+  optional scope metadata, and `last_refresh`, then atomically replaces the
+  canonical credentials file. This contract is conformance-tested against the
+  broker's fake OAuth endpoint; real Claude Code endpoint/client-id
+  verification is still required before treating mediated Claude refresh as
+  production-ready.
 - If refresh fails while the current access token is still valid, the provider
   serves the current token and records metadata-only audit. If the token is
   expired, the request fails closed with `token-refresh-failed`.
@@ -470,6 +473,15 @@ the Claude OAuth client id is deployment/client specific; a refresh attempt
 without it fails with `token-refresh-not-configured`. Mediated Claude requires
 broker-side refresh: the agent receives only placeholder credentials and cannot
 self-refresh.
+
+**Real endpoint proof gap.** The broker-side refresh implementation is covered
+by local conformance tests for request shape, rotation persistence, fallback,
+and non-leakage. This repository has not yet committed a manual proof that the
+default Claude token endpoint accepts this exact request shape for a real
+Claude Code credential, nor a repo-owned source for the required client id.
+Operators must configure `client-id`/`client-id-env` from their Claude Code
+OAuth client metadata and verify refresh in their environment before relying on
+production mediated Claude refresh.
 
 ## Static Token And Header Providers
 

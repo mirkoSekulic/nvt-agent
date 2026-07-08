@@ -69,7 +69,8 @@ Point the provider at the credential with exactly one of:
 Set `client-id` (or `client-id-env`) for automatic refresh. Existing static
 broker-side credentials can still be read without it, but any refresh attempt
 fails closed with `token-refresh-not-configured` until the Claude OAuth client id
-is configured.
+is configured. The Claude `.credentials.json` file does not carry that client
+id; operators must source it from their Claude Code OAuth client metadata.
 
 To seed a local dev credential, log in with Claude Code once on a trusted host
 and copy the resulting `~/.claude/.credentials.json` to the broker-side path.
@@ -187,7 +188,7 @@ These are pinned by `tests/broker/claude_auth_conformance_test.go` and
 
 ## Broker-side token refresh
 
-The broker refreshes Claude OAuth credentials before file-bundle vending,
+The broker implements Claude OAuth refresh before file-bundle vending,
 placeholder-file vending, and edge injection when `claudeAiOauth.expiresAt` is
 within `refresh-margin-seconds`. Successful refresh uses the configured
 `token-url`, `client-id` (or `client-id-env`), and broker-owned `refreshToken`,
@@ -204,3 +205,19 @@ Use `credentials-file` for automatic refresh. `credentials-env` is read-only; if
 a refresh would be required, the provider fails with
 `credentials-source-not-writable` instead of rotating a refresh token into
 nowhere.
+
+### Real endpoint proof gap
+
+The refresh path is conformance-tested against the broker's fake OAuth endpoint:
+request shape, refresh-token rotation, valid-token fallback, expired-token
+failure, injection reuse, and placeholder non-leakage are all covered. This repo
+has not yet committed a manual proof that
+`https://platform.claude.com/v1/oauth/token` accepts the exact request shape for
+a real Claude Code credential, nor a repo-owned way to derive the required
+client id from `.credentials.json` itself.
+
+Before treating mediated Claude refresh as production-ready, run a real
+broker-side refresh proof with a copied Claude credential and configured
+`client-id`/`client-id-env`, and verify that `expiresAt` and token material
+change only in the broker-owned credentials file without appearing in agent
+placeholder files, audit logs, or responses.
