@@ -248,6 +248,7 @@ type brokerFixture struct {
 	config            string
 	token             string
 	auth              string
+	claudeCreds       string
 	extra             string
 	codexClaimHeaders string
 	codexExtraConfig  string
@@ -279,10 +280,12 @@ func newBrokerFixtureWithCodexConfig(t *testing.T, codexExtraConfig string) *bro
 		keyPEM:           keyPEM,
 		token:            "frontend-token",
 		auth:             filepath.Join(home, "auth.json"),
+		claudeCreds:      filepath.Join(home, "claude-credentials.json"),
 		extra:            filepath.Join(home, "config.toml"),
 		codexExtraConfig: codexExtraConfig,
 	}
 	f.writeCodexAuth(testJWT(time.Now().Add(time.Hour)), "real-refresh-1")
+	f.writeClaudeCredentials("real-claude-access-token-secret", "real-claude-refresh-token-secret")
 	if err := os.WriteFile(f.extra, []byte("model = \"gpt-5\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +449,19 @@ providers:
       extra-files:
         - name: config.toml
           path: %[10]q
-`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra)
+  - name: claude-main
+    plugin: claude-oauth
+    config:
+      credentials-file: %[11]q
+      injection-hosts:
+        - api.anthropic.com
+      injection-extra-headers:
+        anthropic-beta: oauth-2025-04-20
+      placeholder-file:
+        path: .claude/.credentials.json
+        hosts:
+          - api.anthropic.com
+`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra, f.claudeCreds)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)
@@ -463,6 +478,20 @@ func (f *brokerFixture) writeCodexAuth(accessToken, refreshToken string) {
 			"id_token":      "initial-id-token",
 		},
 		"last_refresh": "2026-01-01T00:00:00Z",
+	})
+}
+
+func (f *brokerFixture) writeClaudeCredentials(accessToken, refreshToken string) {
+	f.t.Helper()
+	writeJSONFile(f.t, f.claudeCreds, map[string]any{
+		"claudeAiOauth": map[string]any{
+			"accessToken":      accessToken,
+			"refreshToken":     refreshToken,
+			"expiresAt":        time.Now().Add(time.Hour).UnixMilli(),
+			"scopes":           []string{"user:inference", "user:profile"},
+			"subscriptionType": "max",
+			"rateLimitTier":    "default_claude_max_20x",
+		},
 	})
 }
 
