@@ -296,9 +296,12 @@ def main():
 
     token_credentials = []
     header_credentials = []
+    mediated_credentials = []
     for rule in credentials:
         kind = provider_credential_kind(rule)
-        if kind == "headers":
+        if kind == "mediated":
+            mediated_credentials.append(rule)
+        elif kind == "headers":
             header_credentials.append(rule)
         else:
             token_credentials.append(rule)
@@ -307,6 +310,9 @@ def main():
     configure_headers(header_credentials)
     if token_credentials:
         configure_git_helper()
+    if mediated_credentials:
+        names = ", ".join(rule["provider"] for rule in mediated_credentials)
+        print(f"git-credentials: {len(mediated_credentials)} mediated credential rule(s) use egressd routing only: {names}", flush=True)
 
 
 def doctor():

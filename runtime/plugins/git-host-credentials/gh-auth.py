@@ -4,7 +4,9 @@ import shutil
 import subprocess
 import sys
 
-from git_host_credentials import load_config, normalize_repo, resolve_provider, token
+from git_host_credentials import credential_kind, load_config, normalize_repo, resolve_provider, token
+
+PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 
 
 def fail(message):
@@ -51,6 +53,53 @@ def repo_from_args(args):
         return None
 
 
+def remove_no_proxy_hosts(value, blocked):
+    kept = []
+    blocked = {item.lower() for item in blocked}
+    for part in value.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        lowered = item.lower()
+        if lowered == "*":
+            continue
+        bare = lowered[1:] if lowered.startswith(".") else lowered
+        if lowered in blocked or bare in blocked:
+            continue
+        kept.append(item)
+    return ",".join(kept)
+
+
+def mediated_env(provider, repo):
+    proxy_url = os.environ.get("NVT_EGRESS_FORWARD_PROXY_URL")
+    if not proxy_url:
+        fail(f"provider {provider['name']} is mediated but NVT_EGRESS_FORWARD_PROXY_URL is not set")
+    placeholder = os.environ.get("NVT_EGRESS_PLACEHOLDER") or PLACEHOLDER
+    env = os.environ.copy()
+    env["GH_TOKEN"] = placeholder
+    for key in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        env.pop(key, None)
+    env["HTTPS_PROXY"] = proxy_url
+    env["HTTP_PROXY"] = proxy_url
+    env["ALL_PROXY"] = proxy_url
+    env["https_proxy"] = proxy_url
+    env["http_proxy"] = proxy_url
+    env["all_proxy"] = proxy_url
+    # gh reaches both api.github.com and github.com. Remove those from broad
+    # NO_PROXY lists so egressd can inject the credential instead of the CLI
+    # bypassing mediation with the inert placeholder.
+    host = None
+    normalized = normalize_repo(repo) if repo else None
+    if normalized and "/" in normalized:
+        host = normalized.split("/", 1)[0]
+    blocked = {"github.com", "api.github.com"}
+    if host:
+        blocked.add(host)
+    for key in ("NO_PROXY", "no_proxy"):
+        env[key] = remove_no_proxy_hosts(env.get(key, ""), blocked)
+    return env
+
+
 def main():
     provider_name, gh_args = split_args(sys.argv[1:])
     if not gh_args or gh_args in (["-h"], ["--help"]):
@@ -76,9 +125,12 @@ def main():
             print(f"installation id: {installation_id}")
         return
 
-    env = os.environ.copy()
-    env["GH_TOKEN"] = token(provider, repo)
-    env.pop("GITHUB_TOKEN", None)
+    if credential_kind(provider) == "mediated":
+        env = mediated_env(provider, repo)
+    else:
+        env = os.environ.copy()
+        env["GH_TOKEN"] = token(provider, repo)
+        env.pop("GITHUB_TOKEN", None)
     os.execvpe("gh", ["gh", *gh_args], env)
 
 

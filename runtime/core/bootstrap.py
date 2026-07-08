@@ -53,6 +53,7 @@ PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 DEFAULT_EGRESS_CA_FILE = "/nvt-egress-ca/ca.crt"
 DEFAULT_EGRESS_CA_WAIT_SECONDS = 60
+DEFAULT_FORWARD_PROXY_URL = "http://127.0.0.1:8470"
 DEFAULT_BROKER_WAIT_SECONDS = 180
 
 
@@ -368,6 +369,11 @@ def apply_mediated_egress(egress):
             https_provider = provider
         apply_redirect_env(provider, grant, placeholder)
     forward_proxy = bool(egress.get("forward-proxy"))
+    if forward_proxy:
+        proxy_url = egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL
+        if not isinstance(proxy_url, str) or not proxy_url.startswith(("http://", "https://")):
+            raise SystemExit("egress.forward-proxy-url must be an http(s) URL")
+        persist_env_var("NVT_EGRESS_FORWARD_PROXY_URL", proxy_url.rstrip("/"))
     if enforced and (https_provider is not None or forward_proxy):
         # Forward-proxy mode has no https base-url to trigger the install, but
         # the MITM leaf must be trusted system-wide so proxy-env HTTPS clients
