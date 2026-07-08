@@ -55,7 +55,7 @@ Shared infra network: agents-proxy
 |  | agent container   |        | docker:dind sidecar     | |
 |  |                   |        | DOCKER_HOST :2375       | |
 |  | code-server :4090 |<-------+ same net namespace      | |
-|  | tmux agent session|                                  | |
+|  | agent session     |                                  | |
 |  | agentd            |                                  | |
 |  | /run/...sock      |                                  | |
 |  | events.jsonl      |                                  | |
@@ -71,7 +71,7 @@ Shared infra network: agents-proxy
 |       |               v                                  | |
 |       |          brokerctl ------------------------------+-+
 |       |
-|       + agentd writes prompts/events to tmux + event log
+|       + agentd writes prompts/events to the session + event log
 +-----------------------------------------------------------+
 
 External APIs
@@ -109,7 +109,7 @@ Helm chart
 | |                                                                          | |
 | | +-------------------------------+     +-------------------------------+  | |
 | | | agent runtime container       |     | docker:dind sidecar           |  | |
-| | | agentd + tmux + codex/claude  |     | shared Pod netns / :2375      |  | |
+| | | agentd + session + codex/claude |   | shared Pod netns / :2375      |  | |
 | | | runtime plugins               |     | workspace Docker daemon       |  | |
 | | +-------+---------------+-------+     +-------------------------------+  | |
 | |         |               |                                                  | |
@@ -130,7 +130,7 @@ Helm chart
 container and owns only interaction with the running agent session:
 
 - prompt queue
-- single writer into the tmux session
+- single writer into the agent session (via the `agent-session` adapter)
 - external prompt warning
 - append-only event log
 - `agentdctl` client commands
@@ -812,6 +812,33 @@ tools:
       echo "custom bootstrap"
 ```
 
+## Session drivers
+
+The interactive agent runs inside a terminal multiplexer session. The driver is
+selected with `runtime.session.driver` and defaults to `zellij`:
+
+```yaml
+runtime:
+  command: codex
+  args:
+    - --dangerously-bypass-approvals-and-sandbox
+  session:
+    driver: zellij # or tmux
+```
+
+- Valid values are `zellij` and `tmux`.
+- When `runtime.session.driver` is omitted, the driver is `zellij` — including
+  for existing configs created before this field existed.
+- `tmux` stays fully supported when set explicitly.
+- An invalid value fails loudly during bootstrap and session startup.
+
+The runtime image ships both `zellij` and `tmux`. Bootstrap persists the
+resolved driver to `~/.nvt-agent/session.json`, and a single `agent-session`
+adapter reads it so session startup, prompt delivery (`agentdctl prompt` /
+`prompt-agent`), and capture (`agent-capture`) all use the same driver. `agentd`
+itself stays session-driver agnostic and never shells out to a multiplexer
+directly.
+
 ## Code Server
 
 `agent.yaml` can install code-server extensions during bootstrap:
@@ -932,7 +959,7 @@ For simple prompts, use the compatibility wrapper:
 echo "Review failing tests and fix them." | prompt-agent
 ```
 
-To save recent terminal-agent output from tmux, use:
+To save recent terminal-agent output from the agent session, use:
 
 ```sh
 agent-capture --lines 200 --out logs.txt
@@ -940,7 +967,8 @@ agent-capture --lines 200 --out logs.txt
 
 With no flags, `agent-capture` writes the last 100 lines from session
 `${AGENT_SESSION:-agent}` to `agent-capture.txt` in the current directory. Use
-`--print` to write the capture to stdout instead.
+`--print` to write the capture to stdout instead. It captures from whichever
+session driver is configured (see [Session drivers](#session-drivers)).
 
 For the full container-local API, use `agentdctl`:
 
@@ -1021,7 +1049,7 @@ ghcr.io/catthehacker/ubuntu:act-24.04
 The image includes:
 
 - code-server on port `4090`
-- tmux
+- zellij (default session driver) and tmux
 - Docker CLI and Compose plugin
 - Codex CLI
 - Claude Code CLI
@@ -1037,7 +1065,7 @@ Container startup order:
 4. run before-agent plugins
 5. start agentd
 6. start code-server
-7. start the terminal agent in tmux
+7. start the terminal agent in the configured session driver (zellij or tmux)
 8. run after-agent plugins in the background
 ```
 

@@ -299,14 +299,17 @@ kubectl --context kind-nvt-smoke get agentruns,pods -n nvt -w
 Inspect a running agent:
 
 ```sh
-kubectl --context kind-nvt-smoke exec -n nvt -it POD_NAME -c agent -- tmux attach -t agent
+# zellij is the default session driver; use `tmux attach -t agent` when the
+# agent is configured with runtime.session.driver: tmux.
+kubectl --context kind-nvt-smoke exec -n nvt -it POD_NAME -c agent -- zellij attach agent
 ```
 
 ## Known local POC behavior
 
 Codex may stop at the workspace trust prompt. If that happens, attach to the
-agent tmux session and choose the trust option. After clearing the prompt, a
-queued prompt can be resent with:
+agent session (`zellij attach agent`, or `tmux attach -t agent` for the tmux
+driver) and choose the trust option. After clearing the prompt, a queued prompt
+can be resent with:
 
 ```sh
 kubectl --context kind-nvt-smoke exec -i -n nvt POD_NAME -c agent -- agentdctl prompt <<'EOF'

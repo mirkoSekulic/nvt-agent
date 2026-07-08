@@ -106,7 +106,7 @@ def core_checks():
         except OSError as error:
             checks.append(fail(name, f"{path} is not writable: {error}"))
 
-    for binary in ["code-server", "tmux", "git", "docker"]:
+    for binary in ["code-server", "zellij", "tmux", "git", "docker"]:
         found = shutil.which(binary)
         if found:
             checks.append(ok(f"core.{binary}", found))

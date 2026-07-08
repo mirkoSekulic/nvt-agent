@@ -5,6 +5,10 @@ workspace="${NVT_WORKSPACE:-/workspace}"
 target="$workspace/AGENTS.md"
 local_instructions="${NVT_AGENT_LOCAL_INSTRUCTIONS:-$workspace/AGENTS.local.md}"
 
+# Reflect the configured session driver (zellij by default, tmux when set) so
+# the generated guidance matches how the session actually runs.
+session_driver="$("${NVT_AGENT_SESSION_BIN:-agent-session}" driver 2>/dev/null || echo zellij)"
+
 mkdir -p "$workspace"
 
 # Reflect the actual container user so tools that refuse to run as root (e.g.
@@ -29,7 +33,7 @@ $user_line
 - The workspace path is \`$workspace\`.
 - Local override instructions are read from \`$local_instructions\` when the
   file exists.
-- The main terminal agent runs in tmux session \`${AGENT_SESSION:-agent}\`.
+- The main terminal agent runs in the \`${session_driver}\` session \`${AGENT_SESSION:-agent}\`.
 - code-server runs inside the container on port \`${CODE_SERVER_PORT:-4090}\`.
 - Custom plugins are mounted at \`/custom-plugins\`.
 - Builtin runtime plugins are installed under \`/usr/local/lib/nvt-agent/plugins\`.
@@ -59,8 +63,9 @@ yet.
 
 ## Runtime Tools
 
-Use \`agent-capture --lines 200 --out agent-capture.txt\` to save recent tmux
-session output to a file in the current directory. With no flags it captures
+Use \`agent-capture --lines 200 --out agent-capture.txt\` to save recent agent
+session output to a file in the current directory. It captures from the
+configured session driver (\`${session_driver}\`). With no flags it captures
 the last 100 lines from session \`${AGENT_SESSION:-agent}\` to
 \`agent-capture.txt\`.
 

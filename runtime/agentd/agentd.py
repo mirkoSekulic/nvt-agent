@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import queue
+import shlex
 import signal
 import socket
 import subprocess
@@ -11,6 +12,12 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+
+# agentd stays session-driver agnostic: it queues prompts and hands the rendered
+# text to the agent-session adapter, which owns all zellij/tmux specifics.
+def agent_session_command():
+    return shlex.split(os.environ.get("NVT_AGENT_SESSION_BIN", "agent-session"))
 
 
 RESERVED_EVENT_PREFIXES = ("agentd.", "health.", "prompt.", "session.")
@@ -166,18 +173,22 @@ class Agentd:
                 self.queue.task_done()
 
     def inject_prompt(self, item):
-        if not tmux_session_exists(self.session):
-            raise RuntimeError(f"tmux session not found: {self.session}")
-
         text = format_prompt(item)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as prompt_file:
             prompt_file.write(text)
             path = Path(prompt_file.name)
 
         try:
-            subprocess.run(["tmux", "load-buffer", "-b", self.prompt_buffer, str(path)], check=True)
-            subprocess.run(["tmux", "paste-buffer", "-b", self.prompt_buffer, "-t", self.session, "-p", "-r"], check=True)
-            subprocess.run(["tmux", "send-keys", "-t", self.session, "Enter"], check=True)
+            command = agent_session_command() + [
+                "send",
+                "--session", self.session,
+                "--buffer", self.prompt_buffer,
+                "--file", str(path),
+            ]
+            result = subprocess.run(command, stderr=subprocess.PIPE, text=True, check=False)
+            if result.returncode != 0:
+                detail = (result.stderr or "").strip() or f"exit {result.returncode}"
+                raise RuntimeError(f"agent-session send failed: {detail}")
         finally:
             path.unlink(missing_ok=True)
 
@@ -192,16 +203,6 @@ def string_value(value, field, required=False, default=None):
     if required and not value.strip():
         raise ValueError(f"{field} must not be empty")
     return value
-
-
-def tmux_session_exists(session):
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", session],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return result.returncode == 0
 
 
 def format_prompt(item):

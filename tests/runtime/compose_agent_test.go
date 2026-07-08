@@ -388,6 +388,10 @@ printf 'captured output\n'
 		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"TMUX_ARGS_FILE=" + argsFile,
 		"AGENT_SESSION=custom-agent",
+		// Capture goes through the agent-session adapter; this test exercises
+		// the tmux driver explicitly.
+		"NVT_SESSION_DRIVER=tmux",
+		"NVT_AGENT_SESSION_BIN=python3 " + filepath.Join(root, "runtime", "core", "agent-session.py"),
 	}
 
 	cmd := commandWithEnv(script, env)
@@ -774,6 +778,10 @@ exit 2
 		"TMUX_ATTEMPTS_FILE=" + attemptsFile,
 		"NVT_AGENT_SESSION_MAX_START_ATTEMPTS=3",
 		"NVT_AGENT_SESSION_FAST_EXIT_SECONDS=0",
+		// Startup goes through the agent-session adapter; drive the tmux driver
+		// explicitly so the fake tmux binary is exercised.
+		"NVT_SESSION_DRIVER=tmux",
+		"NVT_AGENT_SESSION_BIN=python3 " + filepath.Join(f.root, "runtime", "core", "agent-session.py"),
 	})
 
 	data, err := os.ReadFile(attemptsFile)
@@ -859,6 +867,12 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 			}
 			config := string(data)
 			for _, fragment := range tt.want {
+				if !strings.Contains(config, fragment) {
+					t.Fatalf("agent.yaml missing %q\n%s", fragment, config)
+				}
+			}
+			// New agents default to the zellij session driver.
+			for _, fragment := range []string{"session:", "driver: zellij"} {
 				if !strings.Contains(config, fragment) {
 					t.Fatalf("agent.yaml missing %q\n%s", fragment, config)
 				}

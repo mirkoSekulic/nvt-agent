@@ -49,6 +49,8 @@ def optional_string_list(value, field):
     return value
 
 
+VALID_SESSION_DRIVERS = ("zellij", "tmux")
+DEFAULT_SESSION_DRIVER = "zellij"
 PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 DEFAULT_EGRESS_CA_FILE = "/nvt-egress-ca/ca.crt"
@@ -150,6 +152,34 @@ def persist_agent_command(command, args):
     target = Path.home() / ".nvt-agent" / "agent-command.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({"command": command, "args": args}, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def session_driver(runtime):
+    # runtime.session.driver selects the terminal multiplexer that hosts the
+    # agent session. It defaults to zellij; tmux stays available when set
+    # explicitly. Fail loudly on anything else so a typo never silently falls
+    # back to a driver the operator did not choose.
+    session = runtime.get("session", {})
+    if session is None:
+        session = {}
+    if not isinstance(session, dict):
+        raise SystemExit("runtime.session must be a YAML object")
+    driver = session.get("driver", DEFAULT_SESSION_DRIVER)
+    if not isinstance(driver, str) or not driver:
+        raise SystemExit("runtime.session.driver must be a non-empty string")
+    if driver not in VALID_SESSION_DRIVERS:
+        raise SystemExit(
+            "runtime.session.driver must be one of " + ", ".join(VALID_SESSION_DRIVERS)
+        )
+    return driver
+
+
+def persist_session_driver(driver):
+    # Written next to agent-command.json so the agent-session adapter (startup,
+    # prompt delivery, capture) resolves the driver without re-parsing YAML.
+    target = Path.home() / ".nvt-agent" / "session.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"driver": driver}, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 def setup_tmux_config():
@@ -688,6 +718,7 @@ def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
 
+    persist_session_driver(session_driver(runtime))
     setup_tmux_config()
     apply_preseed_files(preseed)
     if mediated_mode(egress):

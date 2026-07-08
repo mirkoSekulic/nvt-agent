@@ -5,7 +5,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: agent-capture [--lines <count>] [--out <path>] [--session <name>] [--print]
 
-Capture recent output from the agent tmux session.
+Capture recent output from the agent session (driver-aware: zellij or tmux).
 
 Options:
   -n, --lines <count>    Number of recent lines to capture (default: 100)
@@ -80,8 +80,12 @@ if [ -z "$session" ]; then
   exit 1
 fi
 
+# The session driver (zellij by default, tmux when configured) is resolved by
+# the agent-session adapter. Override the binary only for tests.
+agent_session="${NVT_AGENT_SESSION_BIN:-agent-session}"
+
 capture() {
-  tmux capture-pane -p -S "-$lines" -t "$session"
+  $agent_session capture --session "$session" --lines "$lines"
 }
 
 if [ "$print" = true ] || [ "$out" = "-" ]; then

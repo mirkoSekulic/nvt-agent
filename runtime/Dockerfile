@@ -33,6 +33,21 @@ RUN groupmod -n agent ubuntu \
 RUN docker --version \
   && docker compose version
 
+# zellij is the default session driver; tmux (installed above) stays available
+# via runtime.session.driver: tmux.
+ARG ZELLIJ_VERSION=v0.42.2
+RUN set -eux; \
+  arch="$(uname -m)"; \
+  case "$arch" in \
+    x86_64) zj_arch=x86_64 ;; \
+    aarch64|arm64) zj_arch=aarch64 ;; \
+    *) echo "unsupported arch for zellij: $arch" >&2; exit 1 ;; \
+  esac; \
+  curl -fsSL "https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-${zj_arch}-unknown-linux-musl.tar.gz" \
+    | tar -xz -C /usr/local/bin zellij; \
+  chmod +x /usr/local/bin/zellij; \
+  zellij --version
+
 RUN curl -fsSL https://mise.run \
   | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 
@@ -55,6 +70,7 @@ COPY runtime/core/write-agent-instructions.sh /usr/local/bin/write-agent-instruc
 COPY runtime/core/start-code-server.sh /usr/local/bin/start-code-server
 COPY runtime/core/start-agent-session.sh /usr/local/bin/start-agent-session
 COPY runtime/core/start-agent-session.py /usr/local/bin/start-agent-session-exec
+COPY runtime/core/agent-session.py /usr/local/bin/agent-session
 COPY runtime/agentd/agentd.py /usr/local/bin/agentd
 COPY runtime/agentd/agentdctl.py /usr/local/bin/agentdctl
 COPY runtime/plugins /usr/local/lib/nvt-agent/plugins
@@ -74,6 +90,7 @@ RUN chmod +x \
   /usr/local/bin/start-code-server \
   /usr/local/bin/start-agent-session \
   /usr/local/bin/start-agent-session-exec \
+  /usr/local/bin/agent-session \
   /usr/local/bin/agentd \
   /usr/local/bin/agentdctl \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \

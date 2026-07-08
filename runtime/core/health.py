@@ -57,13 +57,21 @@ def read_json(path):
         return json.load(file)
 
 
-def tmux_session_ready(session):
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", session],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+def session_ready(session):
+    # Driver-aware: delegate to the agent-session adapter so readiness follows
+    # the configured session driver (zellij by default, tmux when set).
+    import shlex
+
+    command = shlex.split(os.environ.get("NVT_AGENT_SESSION_BIN", "agent-session"))
+    try:
+        result = subprocess.run(
+            command + ["exists", "--session", session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
     return result.returncode == 0
 
 
@@ -154,7 +162,7 @@ def build_result(config_path):
 
     services = {
         "agent-session": {
-            "ready": tmux_session_ready(session),
+            "ready": session_ready(session),
             "session": session,
         },
         "code-server": {

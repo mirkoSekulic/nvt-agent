@@ -465,6 +465,10 @@ func (f *fixture) env() []string {
 		"NVT_STATE_DIR=" + f.state,
 		"AGENT_SESSION=" + f.session,
 		"TERM=screen",
+		// agentd delegates prompt delivery to the agent-session adapter. The
+		// conformance suite exercises the tmux driver explicitly.
+		"NVT_SESSION_DRIVER=tmux",
+		"NVT_AGENT_SESSION_BIN=python3 " + filepath.Join(f.root, "runtime", "core", "agent-session.py"),
 	}
 }
 

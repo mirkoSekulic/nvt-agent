@@ -2,6 +2,9 @@ runtime:
   command: {{AGENT_TYPE}}
   args: {{AGENT_ARGS}}
   user: {{AGENT_USER}}
+  session:
+    # Terminal session driver: zellij (default) or tmux.
+    driver: zellij
 
 tools:
   packages: []

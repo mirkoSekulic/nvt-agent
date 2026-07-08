@@ -15,6 +15,7 @@ MANAGED_MARKER = "# managed by nvt-agent export-plugin-tools"
 TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 PROTECTED_NAMES = {
     "agent-capture",
+    "agent-session",
     "agentd",
     "agentdctl",
     "bootstrap",
