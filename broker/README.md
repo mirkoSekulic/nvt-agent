@@ -100,12 +100,14 @@ providers:
       refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
+        - mcp-proxy.anthropic.com
       injection-extra-headers:
         anthropic-beta: oauth-2025-04-20
       placeholder-file:
         path: .claude/.credentials.json
         hosts:
           - api.anthropic.com
+          - mcp-proxy.anthropic.com
 ```
 
 Grant file-bundle providers by provider name; repositories are not used:

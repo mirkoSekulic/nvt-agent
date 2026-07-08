@@ -122,8 +122,9 @@ plugin does not expand `~`).
 The agent receives only an inert placeholder `.credentials.json`
 (`accessToken`/`refreshToken` = `NVT-PLACEHOLDER-NOT-A-KEY`, far-future
 `expiresAt`, real non-secret subscription metadata copied through). `egressd`
-injects the real Bearer token on allowed `api.anthropic.com` requests. No real
-Claude credential is ever present in the agent filesystem, env, or process args.
+injects the real Bearer token on allowed Anthropic hosts such as
+`api.anthropic.com` and `mcp-proxy.anthropic.com`. No real Claude credential is
+ever present in the agent filesystem, env, or process args.
 
 Broker provider:
 
@@ -138,12 +139,14 @@ providers:
       refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
+        - mcp-proxy.anthropic.com
       injection-extra-headers:
         anthropic-beta: oauth-2025-04-20
       placeholder-file:
         path: .claude/.credentials.json
         hosts:
           - api.anthropic.com
+          - mcp-proxy.anthropic.com
 ```
 
 Agent + paired egress identity:

@@ -197,7 +197,7 @@ broker:
   grants:
     - provider: anthropic-main
       materialization: header-inject
-      egressHosts: [api.anthropic.com:443]
+      egressHosts: [api.anthropic.com:443, mcp-proxy.anthropic.com:443]
       quota:
         requests: 1000
 ```
