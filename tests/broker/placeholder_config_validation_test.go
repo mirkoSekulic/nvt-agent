@@ -75,6 +75,122 @@ raise SystemExit("expected a config error")
 	}
 }
 
+// TestClaudeCredentialsSourceMutualExclusion pins that the Claude provider
+// requires exactly one broker-side credential source: setting both a host path
+// and an env source (or neither) is a config error, so the source of truth is
+// never ambiguous.
+func TestClaudeCredentialsSourceMutualExclusion(t *testing.T) {
+	for _, tc := range []struct{ name, config string }{
+		{"both", `{"credentials-file": "/tmp/c.json", "credentials-env": "CLAUDE_CREDS", "injection-hosts": ["api.anthropic.com"]}`},
+		{"neither", `{"injection-hosts": ["api.anthropic.com"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runBrokerPython(t, `
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+try:
+    ClaudeOAuthProvider({"name": "claude-main", "config": `+tc.config+`})
+except Exception as exc:
+    print("REJECTED:", type(exc).__name__, exc)
+    raise SystemExit(0)
+raise SystemExit("expected a config error")
+`)
+			if err != nil {
+				t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+			}
+			if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "exactly one") {
+				t.Fatalf("expected exactly-one-source rejection, got %s", out)
+			}
+		})
+	}
+}
+
+// TestClaudePlaceholderHostsMustSubsetInjectionHosts pins that a Claude
+// placeholder host that is not also an injection host is rejected, so the
+// materialized host bindings can never drift from what the edge can inject for.
+func TestClaudePlaceholderHostsMustSubsetInjectionHosts(t *testing.T) {
+	out, err := runBrokerPython(t, `
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+try:
+    ClaudeOAuthProvider({"name": "claude-main", "config": {
+        "credentials-file": "/tmp/claude-credentials.json",
+        "injection-hosts": ["api.anthropic.com"],
+        "placeholder-file": {"path": ".claude/.credentials.json", "hosts": ["api.anthropic.com", "console.anthropic.com"]},
+    }})
+except Exception as exc:
+    print("REJECTED:", type(exc).__name__, exc)
+    raise SystemExit(0)
+raise SystemExit("expected a config error")
+`)
+	if err != nil {
+		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "injection-hosts") {
+		t.Fatalf("expected injection-hosts subset rejection, got %s", out)
+	}
+}
+
+// TestClaudeInjectionExtraHeadersRejectsAuthorizationOverride pins that a
+// configured extra header cannot override the injected authorization header,
+// so the real Bearer token can never be silently shadowed by config.
+func TestClaudeInjectionExtraHeadersRejectsAuthorizationOverride(t *testing.T) {
+	out, err := runBrokerPython(t, `
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+try:
+    ClaudeOAuthProvider({"name": "claude-main", "config": {
+        "credentials-file": "/tmp/claude-credentials.json",
+        "injection-hosts": ["api.anthropic.com"],
+        "injection-extra-headers": {"Authorization": "Bearer nope"},
+    }})
+except Exception as exc:
+    print("REJECTED:", type(exc).__name__, exc)
+    raise SystemExit(0)
+raise SystemExit("expected a config error")
+`)
+	if err != nil {
+		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "authorization") {
+		t.Fatalf("expected authorization-override rejection, got %s", out)
+	}
+}
+
+// TestClaudePlaceholderGuardRejectsNestedNonScalar pins that copied non-secret
+// subscription metadata must be a scalar or a flat list of scalars: a nested
+// list/dict is refused rather than copied into the placeholder file without the
+// token-shape guard running on its leaves. Defense in depth against a future
+// credential-shape change.
+func TestClaudePlaceholderGuardRejectsNestedNonScalar(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json, tempfile
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+creds = {"claudeAiOauth": {
+    "accessToken": "real-access",
+    "refreshToken": "real-refresh",
+    "expiresAt": 4102444800000,
+    "scopes": [["nested", "array"]],
+}}
+handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+json.dump(creds, handle); handle.close()
+provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
+    "credentials-file": handle.name,
+    "injection-hosts": ["api.anthropic.com"],
+    "placeholder-file": {"path": ".claude/.credentials.json", "hosts": ["api.anthropic.com"]},
+}})
+try:
+    provider.placeholder_files("agent", None, "rid")
+except Exception as exc:
+    print("REJECTED:", getattr(exc, "reason", type(exc).__name__), exc)
+    raise SystemExit(0)
+raise SystemExit("expected a placeholder-claim-unsafe error")
+`)
+	if err != nil {
+		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "placeholder-claim-unsafe") {
+		t.Fatalf("expected placeholder-claim-unsafe rejection for nested non-scalar, got %s", out)
+	}
+}
+
 // TestAgentsRejectsConflictingMaterialization pins review finding 7: two grants
 // for one provider with differing materializations are rejected, so grant()
 // selection is never order-dependent.

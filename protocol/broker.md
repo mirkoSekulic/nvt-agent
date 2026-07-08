@@ -373,6 +373,86 @@ bundle-ttl-seconds: 1200
 stub-refresh-token: nvt-broker-stub
 ```
 
+## Claude OAuth Provider Rules
+
+The `claude-oauth` provider is the Claude Code analogue of `codex-oauth`. It
+holds the Claude Code subscription OAuth credential
+(`~/.claude/.credentials.json`, a `{"claudeAiOauth": {...}}` object with
+`accessToken`/`refreshToken` secrets and non-secret `scopes`,
+`subscriptionType`, `rateLimitTier`, and a millisecond `expiresAt`) in broker
+custody and exposes the same three materialization surfaces:
+
+- **direct / file-bundle** (`/v1/files`): vends a usable `.credentials.json`
+  into the agent, including the real access and refresh token. This is the
+  insecure dev/fallback path (the `file-bundle` contract writes usable
+  credential material into the container). The vended filename defaults to
+  `.credentials.json`; place it under `~/.claude` with a runtime
+  `broker-auth-files` bundle whose `target` is `~/.claude`.
+- **mediated / placeholder-file** (`/v1/placeholder-files`): vends a
+  syntactically valid `.credentials.json` whose `accessToken` and
+  `refreshToken` are the zero-entropy `NVT-PLACEHOLDER-NOT-A-KEY` and whose
+  `expiresAt` is far-future, so Claude Code starts without ever holding real
+  credential bytes. Non-secret subscription metadata is copied through verbatim,
+  guarded so a copied value that is too long or JWT-shaped is refused
+  (`placeholder-claim-unsafe`) rather than smuggled into the placeholder.
+- **mediated / edge injection** (`/v1/injection/headers`): returns
+  `authorization: Bearer <access token>` plus any configured
+  `injection-extra-headers`, with all injected names listed in
+  `strip_request_headers`. Only the paired `egress` identity may fetch it.
+
+Rules:
+
+- Exactly one broker-side credential source: `credentials-file` (an absolute
+  host path) or `credentials-env` (an env var holding the JSON). Neither is a
+  runtime contract requirement — the agent never learns the source.
+- The real `accessToken`/`refreshToken` are read on every request (so rotation
+  is picked up) but are **never** emitted by `/v1/placeholder-files`, on any
+  path including errors. A missing or malformed broker-side credential fails
+  loudly (`credentials-not-found` / `credentials-invalid`).
+- `placeholder-file.hosts` must be a subset of `injection-hosts`, so the
+  materialized host bindings can never drift from what the edge can inject for.
+- `injection-extra-headers` may not override `authorization` and may not
+  contain the injection placeholder.
+- The API-key authentication path (`x-api-key`) does **not** need this provider:
+  a generic `token` provider with `injection-header: x-api-key` and an
+  `injection-extra-headers` `anthropic-version` already injects an Anthropic API
+  key with zero sidecar changes (see "Injection Support" below and
+  `protocol/injection.md`). `claude-oauth` exists for the subscription OAuth
+  credential, whose material lives in `.credentials.json` rather than an env var.
+
+Example (mediated, subscription OAuth):
+
+```yaml
+providers:
+  - name: claude-main
+    plugin: claude-oauth
+    config:
+      credentials-file: /state/claude/.credentials.json
+      injection-hosts:
+        - api.anthropic.com
+      injection-extra-headers:
+        anthropic-beta: oauth-2025-04-20
+      placeholder-file:
+        path: .claude/.credentials.json
+        hosts:
+          - api.anthropic.com
+```
+
+**Refresh proof gap.** This revision does not refresh the broker-side Claude
+OAuth token over the network. It serves the current access token and surfaces
+the real `expiresAt` as the injection/bundle expiry ceiling; keeping the
+broker-side credential fresh (an OAuth `refresh_token` exchange analogous to the
+Codex `token-url`/`client-id` flow) is intentionally left for a follow-up so
+this PR does not ship an unverified live-refresh path. The affected mode is
+mediated: once the broker-side access token expires, its `expiresAt` ceiling is
+past and `egressd` fails closed (it must not serve material past `expires_at`),
+so mediated Claude stops until the broker-side credential is refreshed out of
+band. The broker itself does not reject a merely-expired-but-well-formed
+credential — `/v1/files` still vends it (direct mode is possession, and the
+agent's own `refreshToken` lets Claude Code self-refresh), and
+`credentials-invalid`/`credentials-not-found` fire only for a missing or
+malformed file.
+
 ## Static Token And Header Providers
 
 Static providers use the same `allow.repositories` ceiling and authenticated
@@ -444,12 +524,15 @@ providers:
         - auth.openai.com
 ```
 
-The `token` and `codex-oauth` plugins support injection. For `codex-oauth`,
-injected material is `authorization: Bearer <access token>` using the same
-refresh flow as file vending; audit entries use the `injection.*` operation
-prefix. Grants must carry `materialization: header-inject` (see
-`protocol/injection.md` for the identity role/pairing model and endpoint
-shapes).
+The `token`, `codex-oauth`, and `claude-oauth` plugins support injection. For
+`codex-oauth`, injected material is `authorization: Bearer <access token>` using
+the same refresh flow as file vending. For `claude-oauth`, injected material is
+`authorization: Bearer <access token>` read from the broker-side
+`.credentials.json` plus any configured `injection-extra-headers` (e.g.
+`anthropic-beta`). Audit entries use the `injection.*` operation prefix. Grants
+must carry `materialization: header-inject` **or** `materialization:
+placeholder-file` (both are zero-possession; see `protocol/injection.md` for the
+identity role/pairing model and endpoint shapes).
 
 Some backends (Codex ChatGPT-plan) require an auxiliary header derived from
 the access-token claims (e.g. an account id). `codex-oauth` computes these

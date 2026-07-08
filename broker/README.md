@@ -72,6 +72,36 @@ providers:
           path: /broker-secrets/codex/installation_id
 ```
 
+Claude Code OAuth provider example. Direct/file-bundle mode (dev/fallback,
+agent receives the real credential):
+
+```yaml
+providers:
+  - name: claude-main
+    plugin: claude-oauth
+    config:
+      credentials-file: /broker-secrets/claude/.credentials.json
+```
+
+Mediated mode (zero-possession; the agent gets an inert placeholder file and
+the real Bearer token is injected at the edge for the paired egress identity):
+
+```yaml
+providers:
+  - name: claude-main
+    plugin: claude-oauth
+    config:
+      credentials-file: /broker-secrets/claude/.credentials.json
+      injection-hosts:
+        - api.anthropic.com
+      injection-extra-headers:
+        anthropic-beta: oauth-2025-04-20
+      placeholder-file:
+        path: .claude/.credentials.json
+        hosts:
+          - api.anthropic.com
+```
+
 Grant file-bundle providers by provider name; repositories are not used:
 
 ```yaml
@@ -80,6 +110,22 @@ agents:
     token-sha256: sha256:<hash>
     grants:
       - provider: codex-main
+```
+
+For mediated Claude, the agent holds a `placeholder-file` grant and its paired
+egress identity injects the real token (see `docs/claude-auth.md`):
+
+```yaml
+agents:
+  - id: frontend
+    token-sha256: sha256:<hash>
+    grants:
+      - provider: claude-main
+        materialization: placeholder-file
+  - id: frontend-egress
+    token-sha256: sha256:<hash>
+    role: egress
+    paired-agent: frontend
 ```
 
 ## Client
