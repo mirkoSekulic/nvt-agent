@@ -1,10 +1,13 @@
 package runtime_test
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func agentSessionBin(root string) string {
@@ -30,14 +33,48 @@ printf '%s\n' "$*" >> "`+zellijArgs+`"
 case "$1" in
   list-sessions) printf 'agent\n'; exit 0 ;;
 esac
-prev=""
+# Emulate zellij >= 0.44: 'action dump-screen [--full] --path FILE'. The
+# pre-0.44 positional-PATH form leaves --path unset, so a caller that still
+# passes the path positionally gets stdout output and no file — i.e. this fake
+# rejects the invalid CLI shape instead of silently accepting it.
+is_dump=0
+dump_path=""
+want_path=0
 for a in "$@"; do
-  if [ "$prev" = "dump-screen" ]; then printf 'zellij-capture\n' > "$a"; fi
-  prev="$a"
+  if [ "$want_path" = 1 ]; then dump_path="$a"; want_path=0; continue; fi
+  case "$a" in
+    dump-screen) is_dump=1 ;;
+    --path) want_path=1 ;;
+  esac
 done
+if [ "$is_dump" = 1 ]; then
+  if [ -n "$dump_path" ]; then
+    printf 'zellij-capture\n' > "$dump_path"
+  else
+    printf 'zellij-capture\n'
+  fi
+fi
 exit 0
 `)
 	return tmuxArgs, zellijArgs
+}
+
+// waitForFileContains polls path until it contains substr or the deadline
+// passes. The zellij start path spawns its client through a detached PTY
+// daemon, so the fake records its argv asynchronously.
+func waitForFileContains(t *testing.T, path, substr string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, _ := os.ReadFile(path)
+		if strings.Contains(string(data), substr) {
+			return string(data)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %q in %s; got:\n%s", substr, path, data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestBootstrapPersistsDefaultSessionDriver(t *testing.T) {
@@ -167,8 +204,9 @@ func TestAgentSessionCaptureUsesSelectedDriver(t *testing.T) {
 	if !strings.Contains(out, "zellij-capture") {
 		t.Fatalf("expected zellij capture output, got:\n%s", out)
 	}
-	if !strings.Contains(readFileString(t, zellijArgs), "dump-screen") {
-		t.Fatalf("expected zellij dump-screen, got:\n%s", readFileString(t, zellijArgs))
+	zellijCap := readFileString(t, zellijArgs)
+	if !strings.Contains(zellijCap, "dump-screen") || !strings.Contains(zellijCap, "--path") {
+		t.Fatalf("expected zellij dump-screen --path (v0.44 form), got:\n%s", zellijCap)
 	}
 
 	// Explicit tmux captures via capture-pane.
@@ -190,13 +228,19 @@ func TestAgentSessionStartUsesSelectedDriver(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Default driver starts a background zellij session.
+	// Default driver starts a headless zellij session: one client that both
+	// creates (--new-session-with-layout) and attaches the session, launched
+	// through the detached PTY daemon so it stays injectable/capturable.
 	f.run(bin, true, "start", "--session", "agent", "--command-file", commandFile, "--workdir", f.workspace)
-	zellij := readFileString(t, zellijArgs)
-	for _, fragment := range []string{"--new-session-with-layout", "attach --create-background agent"} {
+	zellij := waitForFileContains(t, zellijArgs, "--new-session-with-layout")
+	for _, fragment := range []string{"--session agent", "--new-session-with-layout"} {
 		if !strings.Contains(zellij, fragment) {
 			t.Fatalf("expected zellij start fragment %q, got:\n%s", fragment, zellij)
 		}
+	}
+	// The pre-0.44 background-attach form must be gone.
+	if strings.Contains(zellij, "create-background") {
+		t.Fatalf("start must not use attach --create-background, got:\n%s", zellij)
 	}
 	if _, err := os.Stat(tmuxArgs); err == nil {
 		t.Fatal("default driver must not start tmux")
@@ -226,7 +270,9 @@ func TestRuntimeDockerfileInstallsBothSessionDrivers(t *testing.T) {
 	required := []string{
 		// tmux stays installed via apt.
 		"    tmux \\",
-		// zellij is installed alongside it.
+		// zellij is installed alongside it, pinned to a version whose CLI the
+		// adapter targets (dump-screen --path, headless client).
+		"ARG ZELLIJ_VERSION=v0.44.3",
 		"releases/download/${ZELLIJ_VERSION}/zellij-",
 		// the adapter that both drivers go through is on PATH.
 		"COPY runtime/core/agent-session.py /usr/local/bin/agent-session",
@@ -237,6 +283,82 @@ func TestRuntimeDockerfileInstallsBothSessionDrivers(t *testing.T) {
 			t.Fatalf("runtime Dockerfile missing %q\n%s", fragment, dockerfile)
 		}
 	}
+}
+
+// TestAgentSessionZellijHeadlessSmoke drives the real zellij binary end to end
+// with no human attached: start -> exists -> send -> capture, asserting a sent
+// command's output shows up in capture. This is the check the fakes cannot make
+// -- zellij (unlike tmux) delivers no keystrokes and renders no capture without
+// a live client, so it exercises the detached PTY client and the v0.44
+// dump-screen --path form together. Skipped when a real zellij is absent (e.g.
+// the offline unit environment); it runs in the image, which ships zellij.
+func TestAgentSessionZellijHeadlessSmoke(t *testing.T) {
+	if _, err := exec.LookPath("zellij"); err != nil {
+		t.Skip("real zellij not installed; skipping headless smoke")
+	}
+	f := newFixture(t)
+	bin := agentSessionBin(f.root)
+	session := fmt.Sprintf("nvt-smoke-%d", os.Getpid())
+	marker := "NVT_SMOKE_MARKER_4731"
+
+	// The layout wrapper sources ~/.nvt-agent/env and execs the start helper;
+	// provide an empty env file and a stub helper that launches an interactive
+	// shell so send/capture have a live pane to act on.
+	nvtDir := filepath.Join(f.home, ".nvt-agent")
+	if err := os.MkdirAll(nvtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nvtDir, "env"), []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	helper := f.writeBin("smoke-exec-helper", "#!/usr/bin/env bash\nexec bash --norc -i\n")
+	commandFile := filepath.Join(f.home, "agent-command.json")
+	if err := os.WriteFile(commandFile, []byte(`{"command":"bash","args":["--norc","-i"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	promptFile := filepath.Join(f.home, "smoke-prompt.txt")
+	if err := os.WriteFile(promptFile, []byte("echo "+marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{"NVT_SESSION_DRIVER=zellij", "NVT_START_EXEC_HELPER=" + helper}
+	fullEnv := append(f.env(), env...)
+	t.Cleanup(func() {
+		commandWithEnv(bin, fullEnv, "capture", "--session", session, "--lines", "1").Run()
+		exec.Command("zellij", "--session", session, "kill-session").Run()
+		exec.Command("zellij", "delete-session", session).Run()
+	})
+
+	f.runWithEnv(bin, true, env, "start", "--session", session, "--command-file", commandFile, "--workdir", f.workspace)
+
+	// The session must come up (headless client established).
+	if !eventually(t, 10*time.Second, func() bool {
+		return commandWithEnv(bin, fullEnv, "exists", "--session", session).Run() == nil
+	}) {
+		t.Fatal("zellij session never became live after start")
+	}
+
+	// Deliver a prompt and confirm its output renders in capture -- proving
+	// both headless input and headless capture work with no attached client.
+	f.runWithEnv(bin, true, env, "send", "--session", session, "--file", promptFile)
+	if !eventually(t, 10*time.Second, func() bool {
+		out, _ := commandWithEnv(bin, fullEnv, "capture", "--session", session, "--lines", "50").CombinedOutput()
+		return strings.Contains(string(out), marker)
+	}) {
+		t.Fatalf("marker %q never appeared in headless capture", marker)
+	}
+}
+
+func eventually(t *testing.T, within time.Duration, cond func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return cond()
 }
 
 func readFileString(t *testing.T, path string) string {

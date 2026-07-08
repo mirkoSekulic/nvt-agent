@@ -32,7 +32,10 @@ VALID_DRIVERS = ("zellij", "tmux")
 DEFAULT_DRIVER = "zellij"
 
 # Kept in one place so agentd, capture, and startup all build the same wrapper.
-EXEC_HELPER = "/usr/local/bin/start-agent-session-exec"
+# Overridable via NVT_START_EXEC_HELPER so tests can point it at a stub.
+EXEC_HELPER = os.environ.get(
+    "NVT_START_EXEC_HELPER", "/usr/local/bin/start-agent-session-exec"
+)
 
 
 def fail(message):
@@ -175,6 +178,72 @@ def zellij_exists(session):
     return False
 
 
+def zellij_client_argv(session, layout_path):
+    # A single client both creates and attaches the session.
+    # --new-session-with-layout always starts a fresh session; the client is
+    # kept alive headlessly by spawn_detached_pty so the session stays
+    # renderable and injectable with no human attached.
+    return [
+        "zellij",
+        "--session",
+        session,
+        "--new-session-with-layout",
+        str(layout_path),
+    ]
+
+
+def spawn_detached_pty(argv):
+    """Run ``argv`` in a fully detached daemon that owns a pseudo-terminal.
+
+    Unlike tmux, zellij only renders panes and accepts injected keystrokes
+    while a client is attached; ``attach --create-background`` leaves no client,
+    so ``write-chars`` and ``dump-screen`` silently do nothing. Startup instead
+    leaves a headless client attached for the session's lifetime: a daemon holds
+    the PTY master (draining it so the client never blocks on a full buffer)
+    while the client runs on the slave. The daemon is double-forked and
+    ``setsid``-detached so it can never reacquire a controlling terminal and
+    survives the caller exiting.
+    """
+    pid = os.fork()
+    if pid > 0:
+        os.waitpid(pid, 0)  # reap the intermediate child
+        return
+    try:
+        os.setsid()
+        if os.fork() > 0:
+            os._exit(0)
+        # Daemon: release the caller's stdio, then supervise the PTY client.
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        if devnull > 2:
+            os.close(devnull)
+        master, slave = os.openpty()
+        client = os.fork()
+        if client == 0:
+            os.setsid()  # take the slave as the controlling terminal
+            for fd in (0, 1, 2):
+                os.dup2(slave, fd)
+            if slave > 2:
+                os.close(slave)
+            os.close(master)
+            try:
+                os.execvp(argv[0], argv)
+            finally:
+                os._exit(127)
+        os.close(slave)
+        # Drain forever so the client never stalls on a full PTY buffer; EOF
+        # (client/session gone) ends the daemon.
+        while True:
+            try:
+                if not os.read(master, 65536):
+                    break
+            except OSError:
+                break
+    finally:
+        os._exit(0)
+
+
 def zellij_start(session, command_file, workdir):
     layout_path = state_dir() / f"session-{session}.kdl"
     layout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,19 +257,7 @@ def zellij_start(session, command_file, workdir):
         "}\n"
     )
     layout_path.write_text(layout, encoding="utf-8")
-    # attach --create-background starts a detached session without needing a
-    # controlling TTY, mirroring tmux's "new-session -d".
-    run(
-        [
-            "zellij",
-            "--new-session-with-layout",
-            str(layout_path),
-            "attach",
-            "--create-background",
-            session,
-        ],
-        check=True,
-    )
+    spawn_detached_pty(zellij_client_argv(session, layout_path))
 
 
 def zellij_send(session, path):
@@ -217,8 +274,10 @@ def zellij_capture(session, lines):
     with tempfile.NamedTemporaryFile("w", suffix=".dump", delete=False) as handle:
         dump_path = Path(handle.name)
     try:
+        # zellij >= 0.44 takes the target as --path (the pre-0.44 positional
+        # PATH form is rejected); without it the dump goes to stdout.
         run(
-            ["zellij", "--session", session, "action", "dump-screen", str(dump_path), "--full"],
+            ["zellij", "--session", session, "action", "dump-screen", "--full", "--path", str(dump_path)],
             check=True,
         )
         content = dump_path.read_text(encoding="utf-8").splitlines()

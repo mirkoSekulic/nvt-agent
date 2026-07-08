@@ -35,7 +35,7 @@ RUN docker --version \
 
 # zellij is the default session driver; tmux (installed above) stays available
 # via runtime.session.driver: tmux.
-ARG ZELLIJ_VERSION=v0.42.2
+ARG ZELLIJ_VERSION=v0.44.3
 RUN set -eux; \
   arch="$(uname -m)"; \
   case "$arch" in \
