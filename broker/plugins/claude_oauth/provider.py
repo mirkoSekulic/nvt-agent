@@ -24,11 +24,10 @@ bootstrap, agentd, and egressd stay generic: bootstrap materializes the
 placeholder file by its returned ``path``, and egressd injects the returned
 headers with no Claude-specific logic.
 
-This provider does not refresh the broker-side OAuth token over the network in
-this revision (see ``protocol/broker.md`` "Claude OAuth Provider Rules" for the
-documented proof gap). It reads current credential state and surfaces the real
-``expiresAt`` as the injection/bundle expiry ceiling; keeping the broker-side
-credential fresh is out of scope here.
+When ``claudeAiOauth.expiresAt`` is within the configured refresh margin, the
+provider refreshes with the broker-owned refresh token and persists rotated
+credential state before vending files or injection headers. Runtime bootstrap,
+agentd, and egressd stay generic.
 """
 
 import json
@@ -38,8 +37,11 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
 
-from broker.core.config import fail, injection_hosts, list_value, string_value
+from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.plugins.github_app.provider import ProviderError
 from broker.plugins.placeholder_file import (
     far_future_exp,
@@ -49,6 +51,8 @@ from broker.plugins.placeholder_file import (
 
 
 DEFAULT_FILE_NAME = ".credentials.json"
+DEFAULT_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+DEFAULT_REFRESH_MARGIN_SECONDS = 600
 DEFAULT_BUNDLE_TTL_SECONDS = 1200
 
 # Non-secret subscription metadata copied into the placeholder file is
@@ -79,7 +83,14 @@ class ClaudeOAuthProvider:
             fail(f"provider {self.name} config must be a YAML object")
         self.credentials_file, self.credentials_env = self._source()
         self.file_name = self._file_name()
+        self.token_url = string_value(self.config.get("token-url") or DEFAULT_TOKEN_URL, f"provider {self.name} config.token-url", required=True)
+        parsed = urlparse(self.token_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            fail(f"provider {self.name} config.token-url must be an http(s) URL")
+        self.client_id = self._provider_value("client-id", required=False)
+        self.refresh_margin_seconds = self._int_config("refresh-margin-seconds", DEFAULT_REFRESH_MARGIN_SECONDS)
         self.bundle_ttl_seconds = self._int_config("bundle-ttl-seconds", DEFAULT_BUNDLE_TTL_SECONDS)
+        self.files_refresh_margin_seconds = max(self.refresh_margin_seconds, self.bundle_ttl_seconds)
         self.injection_hosts = injection_hosts(self.config, self.name)
         self.injection_extra_headers = self._injection_extra_headers()
         self.placeholder = self._placeholder_config()
@@ -115,6 +126,29 @@ class ClaudeOAuthProvider:
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             fail(f"provider {self.name} config.{key} must be a positive integer")
         return value
+
+    def _provider_value(self, key, default=None, required=True):
+        value = self.config.get(key)
+        env_key = f"{key}-env"
+        env_name = self.config.get(env_key)
+        if value is not None and env_name is not None:
+            fail(f"provider {self.name} cannot set both {key} and {env_key}")
+        if value is not None:
+            if isinstance(value, int):
+                return str(value)
+            if isinstance(value, str) and value:
+                return value
+            fail(f"provider {self.name} {key} must be a non-empty string or integer")
+        if isinstance(env_name, str):
+            value = env_value(env_name)
+            if not value:
+                fail(f"environment variable {env_name} must not be empty")
+            return value
+        if default is not None:
+            return default
+        if required:
+            fail(f"provider {self.name} requires {key} or {env_key}")
+        return None
 
     def _injection_extra_headers(self):
         raw = self.config.get("injection-extra-headers")
@@ -196,14 +230,156 @@ class ClaudeOAuthProvider:
             raise ProviderError("credentials-invalid", "Claude credentials missing claudeAiOauth.accessToken", 502)
         return token
 
+    def _refresh_token(self, oauth):
+        token = oauth.get("refreshToken")
+        if not isinstance(token, str) or not token:
+            raise ProviderError("credentials-invalid", "Claude credentials missing claudeAiOauth.refreshToken", 502)
+        return token
+
+    def _expiry_seconds(self, oauth):
+        exp_ms = oauth.get("expiresAt")
+        if not isinstance(exp_ms, (int, float)) or isinstance(exp_ms, bool):
+            return None
+        return int(exp_ms // 1000)
+
     def _expiry_rfc3339(self, oauth):
         # claudeAiOauth.expiresAt is a millisecond epoch. Surface it as the
         # injection/bundle expiry ceiling; a missing/invalid value means no
         # provider-side expiry (the broker still caps file bundles by TTL).
-        exp_ms = oauth.get("expiresAt")
-        if not isinstance(exp_ms, (int, float)) or isinstance(exp_ms, bool):
+        exp = self._expiry_seconds(oauth)
+        if exp is None:
             return None
-        return rfc3339(int(exp_ms // 1000))
+        return rfc3339(exp)
+
+    def _fresh_credentials(self, agent_id, audit, request_id, operation_prefix, refresh_margin_seconds=None):
+        data, oauth = self._read_credentials()
+        access_token = self._access_token(oauth)
+        self._refresh_token(oauth)
+        exp = self._expiry_seconds(oauth)
+        if exp is None:
+            return data, oauth, access_token, None, False
+
+        now = int(time.time())
+        if refresh_margin_seconds is None:
+            refresh_margin_seconds = self.refresh_margin_seconds
+        if exp - now > refresh_margin_seconds:
+            return data, oauth, access_token, exp, False
+
+        try:
+            refreshed_data = self._refresh(data, oauth)
+            self._write_credentials(refreshed_data)
+            refreshed_oauth = refreshed_data["claudeAiOauth"]
+            refreshed_access_token = self._access_token(refreshed_oauth)
+            refreshed_exp = self._expiry_seconds(refreshed_oauth)
+            audit.write(
+                request_id=request_id,
+                agent=agent_id,
+                provider=self.name,
+                operation=f"{operation_prefix}.refresh",
+                allowed=True,
+                expires_at=rfc3339(refreshed_exp) if refreshed_exp is not None else None,
+            )
+            return refreshed_data, refreshed_oauth, refreshed_access_token, refreshed_exp, True
+        except ProviderError as error:
+            if error.reason in {"credentials-source-not-writable", "token-refresh-not-configured"}:
+                raise
+            if exp <= now:
+                raise
+            print(f"claude-oauth provider {self.name}: refresh failed; serving current valid access token", flush=True)
+            return data, oauth, access_token, exp, False
+
+    def _refresh(self, data, oauth):
+        if not self.client_id:
+            raise ProviderError(
+                "token-refresh-not-configured",
+                f"Claude provider {self.name} requires client-id or client-id-env before OAuth refresh",
+                502,
+            )
+        if self.credentials_file is None:
+            raise ProviderError(
+                "credentials-source-not-writable",
+                "Claude credentials-env cannot persist refreshed or rotated OAuth tokens",
+                502,
+            )
+        refresh_token = self._refresh_token(oauth)
+        body = urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": self.client_id,
+        }).encode("utf-8")
+        request = Request(
+            self.token_url,
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            error.read()
+            raise ProviderError("token-refresh-failed", f"Claude token refresh failed: HTTP {error.code}", 502) from error
+        except URLError as error:
+            raise ProviderError("token-refresh-failed", "Claude token refresh failed: upstream unreachable", 502) from error
+        except json.JSONDecodeError as error:
+            raise ProviderError("token-refresh-failed", "Claude token refresh response was not valid JSON", 502) from error
+        if not isinstance(payload, dict):
+            raise ProviderError("token-refresh-failed", "Claude token refresh response was not an object", 502)
+        access_token = payload.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            raise ProviderError("token-refresh-failed", "Claude token refresh response missing access_token", 502)
+
+        updated = json.loads(json.dumps(data))
+        updated_oauth = updated["claudeAiOauth"]
+        updated_oauth["accessToken"] = access_token
+        refresh_token = payload.get("refresh_token")
+        if isinstance(refresh_token, str) and refresh_token:
+            updated_oauth["refreshToken"] = refresh_token
+
+        expires_at_ms = self._payload_expires_at_ms(payload)
+        if expires_at_ms is None:
+            raise ProviderError("token-refresh-failed", "Claude token refresh response missing expires_in", 502)
+        updated_oauth["expiresAt"] = expires_at_ms
+
+        scope = payload.get("scope")
+        if isinstance(scope, str) and scope:
+            updated_oauth["scopes"] = scope.split()
+        updated["last_refresh"] = datetime.now(timezone.utc).isoformat()
+        return updated
+
+    def _payload_expires_at_ms(self, payload):
+        expires_in = payload.get("expires_in")
+        if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0:
+            return int((time.time() + expires_in) * 1000)
+        expires_at = payload.get("expires_at")
+        if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
+            if expires_at > 10_000_000_000:
+                return int(expires_at)
+            if expires_at > 0:
+                return int(expires_at * 1000)
+        return None
+
+    def _write_credentials(self, data):
+        if self.credentials_file is None:
+            raise ProviderError(
+                "credentials-source-not-writable",
+                "Claude credentials-env cannot persist refreshed or rotated OAuth tokens",
+                502,
+            )
+        self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            mode = self.credentials_file.stat().st_mode & 0o777
+        except FileNotFoundError:
+            mode = 0o600
+        temporary = self.credentials_file.with_name(f".{self.credentials_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as file:
+                json.dump(data, file, indent=2)
+                file.write("\n")
+            temporary.chmod(mode)
+            os.replace(temporary, self.credentials_file)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # --- direct / file-bundle mode ------------------------------------------
 
@@ -211,12 +387,17 @@ class ClaudeOAuthProvider:
         # Insecure dev/fallback path: the agent receives the real credential
         # (access + refresh token). Mediated mode is the zero-possession path.
         with self.lock:
-            data, oauth = self._read_credentials()
-            self._access_token(oauth)
+            data, oauth, _access_token, _exp, refreshed = self._fresh_credentials(
+                agent_id,
+                audit,
+                request_id,
+                "files",
+                self.files_refresh_margin_seconds,
+            )
             expires_at = self._expiry_rfc3339(oauth)
         content = json.dumps(data, indent=2) + "\n"
         files = [{"name": self.file_name, "content": content, "mode": "0600"}]
-        return files, expires_at, {"access_token_expires_at": expires_at}
+        return files, expires_at, {"access_token_expires_at": expires_at, "refreshed": refreshed}
 
     # --- mediated placeholder mode ------------------------------------------
 
@@ -227,8 +408,12 @@ class ClaudeOAuthProvider:
             # Read (and validate) the real credential so custody is proven and a
             # missing/broken broker credential fails loudly — but the real
             # accessToken/refreshToken are NEVER emitted into the file.
-            _data, oauth = self._read_credentials()
-            self._access_token(oauth)
+            _data, oauth, _access_token, _exp, _refreshed = self._fresh_credentials(
+                agent_id,
+                audit,
+                request_id,
+                "placeholder",
+            )
         placeholder_oauth = {
             "accessToken": render_plain(),
             "refreshToken": render_plain(),
@@ -270,8 +455,12 @@ class ClaudeOAuthProvider:
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
         with self.lock:
-            _data, oauth = self._read_credentials()
-            access_token = self._access_token(oauth)
+            _data, oauth, access_token, _exp, _refreshed = self._fresh_credentials(
+                agent_id,
+                audit,
+                request_id,
+                "injection",
+            )
             expires_at = self._expiry_rfc3339(oauth)
         headers = {"authorization": f"Bearer {access_token}"}
         headers.update(self.injection_extra_headers)

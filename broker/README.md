@@ -81,6 +81,9 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
+      token-url: https://platform.claude.com/v1/oauth/token
+      client-id: <claude-code-oauth-client-id>
+      refresh-margin-seconds: 600
 ```
 
 Mediated mode (zero-possession; the agent gets an inert placeholder file and
@@ -92,6 +95,9 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
+      token-url: https://platform.claude.com/v1/oauth/token
+      client-id: <claude-code-oauth-client-id>
+      refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
       injection-extra-headers:
@@ -113,7 +119,9 @@ agents:
 ```
 
 For mediated Claude, the agent holds a `placeholder-file` grant and its paired
-egress identity injects the real token (see `docs/claude-auth.md`):
+egress identity injects the real token (see `docs/claude-auth.md`). Because the
+agent receives only placeholder credentials, the broker refreshes the
+broker-owned Claude OAuth token before vending files or injection headers:
 
 ```yaml
 agents:
@@ -171,6 +179,13 @@ visible to the agent and may be written into Git config.
 `files` returns a UTF-8 file bundle for generic runtime materialization.
 For `codex-oauth`, the bundle contains the real OpenAI access token and an
 inert refresh-token stub, never the real broker-owned refresh token.
+For `claude-oauth`, mediated placeholder bundles contain no real Claude tokens;
+the broker owns and refreshes the canonical `claudeAiOauth` access/refresh
+tokens when `credentials-file` is used. `credentials-env` is read-only and
+fails loudly if a refresh would be required. The refresh path is implemented
+and conformance-tested against the broker's fake OAuth endpoint; real Claude
+endpoint/client-id proof is still required before treating mediated Claude
+refresh as production-ready.
 The broker applies file-bundle TTL caps to returned `expires_at` metadata so
 runtime refreshers can re-materialize bundles on a bounded cadence. For
 `codex-oauth`, this does not reduce the lifetime of an already-issued OpenAI

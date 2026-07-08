@@ -77,6 +77,7 @@ func (f *fakeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
 		"access_token":  accessToken,
 		"refresh_token": fmt.Sprintf("real-refresh-%d", count+1),
 		"id_token":      fmt.Sprintf("id-token-%d", count),
+		"expires_in":    3600,
 	})
 }
 
@@ -453,6 +454,9 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: %[11]q
+      token-url: %[8]q
+      client-id: test-claude-client
+      refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
       injection-extra-headers:
@@ -483,11 +487,16 @@ func (f *brokerFixture) writeCodexAuth(accessToken, refreshToken string) {
 
 func (f *brokerFixture) writeClaudeCredentials(accessToken, refreshToken string) {
 	f.t.Helper()
+	f.writeClaudeCredentialsExp(accessToken, refreshToken, time.Now().Add(time.Hour))
+}
+
+func (f *brokerFixture) writeClaudeCredentialsExp(accessToken, refreshToken string, expiresAt time.Time) {
+	f.t.Helper()
 	writeJSONFile(f.t, f.claudeCreds, map[string]any{
 		"claudeAiOauth": map[string]any{
 			"accessToken":      accessToken,
 			"refreshToken":     refreshToken,
-			"expiresAt":        time.Now().Add(time.Hour).UnixMilli(),
+			"expiresAt":        expiresAt.UnixMilli(),
 			"scopes":           []string{"user:inference", "user:profile"},
 			"subscriptionType": "max",
 			"rateLimitTier":    "default_claude_max_20x",

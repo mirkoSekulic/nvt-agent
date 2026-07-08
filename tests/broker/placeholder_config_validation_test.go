@@ -113,6 +113,7 @@ from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
 try:
     ClaudeOAuthProvider({"name": "claude-main", "config": {
         "credentials-file": "/tmp/claude-credentials.json",
+        "client-id": "test-client",
         "injection-hosts": ["api.anthropic.com"],
         "placeholder-file": {"path": ".claude/.credentials.json", "hosts": ["api.anthropic.com", "console.anthropic.com"]},
     }})
@@ -138,6 +139,7 @@ from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
 try:
     ClaudeOAuthProvider({"name": "claude-main", "config": {
         "credentials-file": "/tmp/claude-credentials.json",
+        "client-id": "test-client",
         "injection-hosts": ["api.anthropic.com"],
         "injection-extra-headers": {"Authorization": "Bearer nope"},
     }})
@@ -173,6 +175,7 @@ handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
 json.dump(creds, handle); handle.close()
 provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
     "credentials-file": handle.name,
+    "client-id": "test-client",
     "injection-hosts": ["api.anthropic.com"],
     "placeholder-file": {"path": ".claude/.credentials.json", "hosts": ["api.anthropic.com"]},
 }})
@@ -188,6 +191,71 @@ raise SystemExit("expected a placeholder-claim-unsafe error")
 	}
 	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "placeholder-claim-unsafe") {
 		t.Fatalf("expected placeholder-claim-unsafe rejection for nested non-scalar, got %s", out)
+	}
+}
+
+// TestClaudeCredentialsEnvCannotRefresh pins the persistence limitation:
+// credentials-env is a read-only broker source, so a refresh attempt fails
+// loudly instead of rotating a Claude refresh token into nowhere.
+func TestClaudeCredentialsEnvCannotRefresh(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json, os, time
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+os.environ["CLAUDE_CREDS"] = json.dumps({"claudeAiOauth": {
+    "accessToken": "real-access",
+    "refreshToken": "real-refresh",
+    "expiresAt": int((time.time() + 60) * 1000),
+}})
+provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
+    "credentials-env": "CLAUDE_CREDS",
+    "client-id": "test-client",
+    "token-url": "http://127.0.0.1:1/token",
+}})
+try:
+    provider.files("agent", None, "rid")
+except Exception as exc:
+    print("REJECTED:", getattr(exc, "reason", type(exc).__name__), exc)
+    raise SystemExit(0)
+raise SystemExit("expected credentials-source-not-writable")
+`)
+	if err != nil {
+		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "credentials-source-not-writable") {
+		t.Fatalf("expected credentials-source-not-writable rejection, got %s", out)
+	}
+}
+
+// TestClaudeRefreshRequiresClientID pins the compatibility boundary: a legacy
+// Claude provider can still load without client-id, but refresh fails loudly
+// before any token exchange can be attempted.
+func TestClaudeRefreshRequiresClientID(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json, tempfile, time
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+creds = {"claudeAiOauth": {
+    "accessToken": "real-access",
+    "refreshToken": "real-refresh",
+    "expiresAt": int((time.time() + 60) * 1000),
+}}
+handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+json.dump(creds, handle); handle.close()
+provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
+    "credentials-file": handle.name,
+    "token-url": "http://127.0.0.1:1/token",
+}})
+try:
+    provider.files("agent", None, "rid")
+except Exception as exc:
+    print("REJECTED:", getattr(exc, "reason", type(exc).__name__), exc)
+    raise SystemExit(0)
+raise SystemExit("expected token-refresh-not-configured")
+`)
+	if err != nil {
+		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "token-refresh-not-configured") {
+		t.Fatalf("expected token-refresh-not-configured rejection, got %s", out)
 	}
 }
 

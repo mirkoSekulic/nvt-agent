@@ -405,10 +405,29 @@ Rules:
 - Exactly one broker-side credential source: `credentials-file` (an absolute
   host path) or `credentials-env` (an env var holding the JSON). Neither is a
   runtime contract requirement — the agent never learns the source.
-- The real `accessToken`/`refreshToken` are read on every request (so rotation
-  is picked up) but are **never** emitted by `/v1/placeholder-files`, on any
-  path including errors. A missing or malformed broker-side credential fails
-  loudly (`credentials-not-found` / `credentials-invalid`).
+- The real `accessToken`/`refreshToken` are broker-owned. They are read on
+  every request (so external rotation is picked up), refreshed when
+  `expiresAt` is within `refresh-margin-seconds`, and persisted when the source
+  is `credentials-file`.
+- The implemented broker refresh contract uses `grant_type=refresh_token`, the
+  configured `client-id`, `token-url`, and current canonical refresh token. It
+  updates `accessToken`, rotated `refreshToken` when returned, `expiresAt`,
+  optional scope metadata, and `last_refresh`, then atomically replaces the
+  canonical credentials file. This contract is conformance-tested against the
+  broker's fake OAuth endpoint; real Claude Code endpoint/client-id
+  verification is still required before treating mediated Claude refresh as
+  production-ready.
+- If refresh fails while the current access token is still valid, the provider
+  serves the current token and records metadata-only audit. If the token is
+  expired, the request fails closed with `token-refresh-failed`.
+- `credentials-env` is read-only. When a refresh would be required, it fails
+  loudly with `credentials-source-not-writable` instead of rotating a refresh
+  token into nowhere. Use `credentials-file` for mediated Claude runs that need
+  automatic refresh.
+- The real `accessToken`/`refreshToken` are **never** emitted by
+  `/v1/placeholder-files`, on any path including errors. A missing or malformed
+  broker-side credential fails loudly (`credentials-not-found` /
+  `credentials-invalid`).
 - `placeholder-file.hosts` must be a subset of `injection-hosts`, so the
   materialized host bindings can never drift from what the edge can inject for.
 - `injection-extra-headers` may not override `authorization` and may not
@@ -428,6 +447,9 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /state/claude/.credentials.json
+      token-url: https://platform.claude.com/v1/oauth/token
+      client-id: <claude-code-oauth-client-id>
+      refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
       injection-extra-headers:
@@ -438,20 +460,28 @@ providers:
           - api.anthropic.com
 ```
 
-**Refresh proof gap.** This revision does not refresh the broker-side Claude
-OAuth token over the network. It serves the current access token and surfaces
-the real `expiresAt` as the injection/bundle expiry ceiling; keeping the
-broker-side credential fresh (an OAuth `refresh_token` exchange analogous to the
-Codex `token-url`/`client-id` flow) is intentionally left for a follow-up so
-this PR does not ship an unverified live-refresh path. The affected mode is
-mediated: once the broker-side access token expires, its `expiresAt` ceiling is
-past and `egressd` fails closed (it must not serve material past `expires_at`),
-so mediated Claude stops until the broker-side credential is refreshed out of
-band. The broker itself does not reject a merely-expired-but-well-formed
-credential — `/v1/files` still vends it (direct mode is possession, and the
-agent's own `refreshToken` lets Claude Code self-refresh), and
-`credentials-invalid`/`credentials-not-found` fire only for a missing or
-malformed file.
+Default Claude OAuth settings:
+
+```yaml
+token-url: https://platform.claude.com/v1/oauth/token
+refresh-margin-seconds: 600
+bundle-ttl-seconds: 1200
+```
+
+`client-id` (or `client-id-env`) is required before refresh can occur because
+the Claude OAuth client id is deployment/client specific; a refresh attempt
+without it fails with `token-refresh-not-configured`. Mediated Claude requires
+broker-side refresh: the agent receives only placeholder credentials and cannot
+self-refresh.
+
+**Real endpoint proof gap.** The broker-side refresh implementation is covered
+by local conformance tests for request shape, rotation persistence, fallback,
+and non-leakage. This repository has not yet committed a manual proof that the
+default Claude token endpoint accepts this exact request shape for a real
+Claude Code credential, nor a repo-owned source for the required client id.
+Operators must configure `client-id`/`client-id-env` from their Claude Code
+OAuth client metadata and verify refresh in their environment before relying on
+production mediated Claude refresh.
 
 ## Static Token And Header Providers
 
@@ -525,12 +555,12 @@ providers:
 ```
 
 The `token`, `codex-oauth`, and `claude-oauth` plugins support injection. For
-`codex-oauth`, injected material is `authorization: Bearer <access token>` using
-the same refresh flow as file vending. For `claude-oauth`, injected material is
-`authorization: Bearer <access token>` read from the broker-side
-`.credentials.json` plus any configured `injection-extra-headers` (e.g.
-`anthropic-beta`). Audit entries use the `injection.*` operation prefix. Grants
-must carry `materialization: header-inject` **or** `materialization:
+`codex-oauth` and `claude-oauth`, injected material is
+`authorization: Bearer <access token>` using the same broker-side refresh flow
+as file vending. `claude-oauth` also returns any configured
+`injection-extra-headers` (e.g. `anthropic-beta`). Audit entries use the
+`injection.*` operation prefix. Grants must carry `materialization:
+header-inject` **or** `materialization:
 placeholder-file` (both are zero-possession; see `protocol/injection.md` for the
 identity role/pairing model and endpoint shapes).
 
