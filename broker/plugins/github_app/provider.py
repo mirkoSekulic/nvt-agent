@@ -317,27 +317,47 @@ class GithubAppProvider:
                 return
         raise ProviderError("repo-not-allowed")
 
+    def _single_concrete_grant_repo(self, effective_repositories):
+        if effective_repositories is None:
+            raise ProviderError("repo-not-allowed", "agent grant scope is required")
+        if len(effective_repositories) != 1:
+            raise ProviderError("repo-not-allowed", "GraphQL injection requires exactly one repository in the agent grant")
+        repo = effective_repositories[0]
+        if any(char in repo for char in "*?["):
+            raise ProviderError("repo-not-allowed", "GraphQL injection requires a concrete repository grant")
+        self._ensure_repo_allowed(repo, effective_repositories)
+        return repo
+
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
         method = method.upper()
         effective_repositories = (grant or {}).get("repositories")
-        git = self._git_path(path)
-        if git is not None:
-            repo, service = git
-            if service in GIT_SERVICES:
-                if method != "POST":
-                    raise ProviderError("method-not-allowed")
-            elif method != "GET":
+        if path == "/graphql":
+            if method != "POST":
                 raise ProviderError("method-not-allowed")
-            permissions = self._git_permissions(service, grant)
-            token, expires_at = self.token_for_repo(repo, effective_repositories, permissions)
-            credentials = base64.b64encode(f"x-access-token:{token}".encode("ascii")).decode("ascii")
-            headers = {"authorization": f"Basic {credentials}"}
-        else:
             if method not in self.allowed_methods:
                 raise ProviderError("method-not-allowed")
-            repo = self._repo_from_path(path)
+            repo = self._single_concrete_grant_repo(effective_repositories)
             token, expires_at = self.token_for_repo(repo, effective_repositories)
             headers = {"authorization": f"Bearer {token}"}
+        else:
+            git = self._git_path(path)
+            if git is None:
+                if method not in self.allowed_methods:
+                    raise ProviderError("method-not-allowed")
+                repo = self._repo_from_path(path)
+                token, expires_at = self.token_for_repo(repo, effective_repositories)
+                headers = {"authorization": f"Bearer {token}"}
+            else:
+                repo, service = git
+                if service in GIT_SERVICES:
+                    if method != "POST":
+                        raise ProviderError("method-not-allowed")
+                elif method != "GET":
+                    raise ProviderError("method-not-allowed")
+                permissions = self._git_permissions(service, grant)
+                token, expires_at = self.token_for_repo(repo, effective_repositories, permissions)
+                credentials = base64.b64encode(f"x-access-token:{token}".encode("ascii")).decode("ascii")
+                headers = {"authorization": f"Basic {credentials}"}
         return headers, self._injection_expiry(expires_at), ["authorization"]
 
     def _git_path(self, path):
