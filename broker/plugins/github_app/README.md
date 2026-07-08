@@ -20,9 +20,12 @@ exactly these path shapes:
 - `/{owner}/{repo}[.git]/git-upload-pack` (POST) — fetch/clone
 - `/{owner}/{repo}[.git]/git-receive-pack` (POST) — push
 - `/repos/{owner}/{repo}/...` — REST API paths (methods per `allow.methods`)
+- `/graphql` (POST) — GraphQL API paths, only when the agent grant contains
+  exactly one concrete repository. Multi-repo and wildcard grants are rejected
+  because GraphQL has no repository in the URL for the broker to scope.
 
 git paths are answered with `authorization: Basic base64(x-access-token:<token>)`;
-API paths with `Bearer`. Every shape runs the same two-layer repo check
+API and GraphQL paths with `Bearer`. Every shape runs the same two-layer repo check
 (provider `allow.repositories` ∩ the agent grant's `repositories`) and mints a
 single-repo installation token.
 

@@ -356,6 +356,7 @@ providers:
         contents: write
       methods:
         - GET
+        - POST
   - name: git-app-ro
     plugin: github-app
     config:

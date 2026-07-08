@@ -208,7 +208,7 @@ func TestGitInjectionRepoScopeDenies(t *testing.T) {
 	f.writeRoleIdentities(gitIdentities(nil))
 
 	for _, path := range []string{
-		"/my-user/other-repo.git/info/refs", // allowed by provider, not by grant
+		"/my-user/other-repo.git/info/refs",  // allowed by provider, not by grant
 		"/evil-user/evil-repo.git/info/refs", // outside the provider allowlist
 	} {
 		status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("GET", path))
@@ -268,6 +268,88 @@ func TestGitInjectionAPIPathUsesBearerDialect(t *testing.T) {
 	value, _ := headers["authorization"].(string)
 	if !strings.HasPrefix(value, "Bearer token-my-repo-") {
 		t.Fatalf("API path must use Bearer dialect, got %q", value)
+	}
+}
+
+// TestGitInjectionGraphQLUsesSingleRepoGrant pins the only supported GraphQL
+// injection shape: GitHub GraphQL has no repo in the URL, so the provider can
+// mint a token only when the agent grant is a single concrete repository.
+func TestGitInjectionGraphQLUsesSingleRepoGrant(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(gitIdentities(nil))
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("POST", "/graphql"))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("GraphQL injection denied: status=%d body=%v", status, body)
+	}
+	headers, _ := body["headers"].(map[string]any)
+	value, _ := headers["authorization"].(string)
+	if !strings.HasPrefix(value, "Bearer token-my-repo-") {
+		t.Fatalf("GraphQL path must use Bearer dialect, got %q", value)
+	}
+	minted := f.lastTokenRequest(t)
+	repos, _ := minted["repositories"].([]any)
+	if len(repos) != 1 || repos[0] != "my-repo" {
+		t.Fatalf("GraphQL token must be minted for the granted repo only, got %v", minted)
+	}
+}
+
+func TestGitInjectionGraphQLRejectsAmbiguousGrants(t *testing.T) {
+	tests := []struct {
+		name         string
+		repositories []string
+		method       string
+		want         string
+	}{
+		{
+			name:         "multi repo",
+			repositories: []string{"my-user/my-repo", "my-user/other-repo"},
+			method:       "POST",
+			want:         "repo-not-allowed",
+		},
+		{
+			name:         "wildcard repo",
+			repositories: []string{"my-user/*"},
+			method:       "POST",
+			want:         "repo-not-allowed",
+		},
+		{
+			name:         "wrong method",
+			repositories: []string{"my-user/my-repo"},
+			method:       "GET",
+			want:         "method-not-allowed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newBrokerFixture(t)
+			identities := gitIdentities(nil)
+			frontend := identities["frontend"]
+			frontend.Grants[0].Repositories = tt.repositories
+			identities["frontend"] = frontend
+			f.writeRoleIdentities(identities)
+
+			status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest(tt.method, "/graphql"))
+			if status == http.StatusOK || body["ok"] == true || body["error"] != tt.want {
+				t.Fatalf("expected %s, got status=%d body=%v", tt.want, status, body)
+			}
+		})
+	}
+}
+
+func TestGitInjectionGraphQLRespectsAllowedMethods(t *testing.T) {
+	f := newBrokerFixture(t)
+	identities := gitIdentities(nil)
+	frontend := identities["frontend"]
+	frontend.Grants[0].Provider = "git-app-ro"
+	identities["frontend"] = frontend
+	f.writeRoleIdentities(identities)
+
+	request := gitInjectionRequest("POST", "/graphql")
+	request["capability"] = "git-app-ro"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request)
+	if status == http.StatusOK || body["ok"] == true || body["error"] != "method-not-allowed" {
+		t.Fatalf("GET-only provider must deny GraphQL POST, got status=%d body=%v", status, body)
 	}
 }
 
