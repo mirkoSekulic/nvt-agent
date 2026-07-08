@@ -66,6 +66,11 @@ Point the provider at the credential with exactly one of:
 - `credentials-env`: the name of an env var holding the JSON (broker sidecar /
   Kubernetes secret). No host path required.
 
+Set `client-id` (or `client-id-env`) for automatic refresh. Existing static
+broker-side credentials can still be read without it, but any refresh attempt
+fails closed with `token-refresh-not-configured` until the Claude OAuth client id
+is configured.
+
 To seed a local dev credential, log in with Claude Code once on a trusted host
 and copy the resulting `~/.claude/.credentials.json` to the broker-side path.
 The file is broker-owned; it never needs to exist inside the agent container.
@@ -83,6 +88,9 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
+      token-url: https://platform.claude.com/v1/oauth/token
+      client-id: <claude-code-oauth-client-id>
+      refresh-margin-seconds: 600
 ```
 
 Agent grant (file-bundle is the default materialization):
@@ -124,6 +132,9 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
+      token-url: https://platform.claude.com/v1/oauth/token
+      client-id: <claude-code-oauth-client-id>
+      refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
       injection-extra-headers:
@@ -174,27 +185,22 @@ direct/file-bundle provider only.
 These are pinned by `tests/broker/claude_auth_conformance_test.go` and
 `tests/broker/placeholder_config_validation_test.go`.
 
-## Known limitation: broker-side token refresh
+## Broker-side token refresh
 
-This revision does not refresh the broker-side Claude OAuth token over the
-network. It serves the current access token and surfaces the real `expiresAt` as
-the injection/bundle expiry ceiling. Automatic refresh (an OAuth `refresh_token`
-exchange analogous to the Codex `token-url` / `client-id` flow) is intentionally
-left for a follow-up so this change does not ship an unverified live-refresh path
-against Anthropic's token endpoint.
+The broker refreshes Claude OAuth credentials before file-bundle vending,
+placeholder-file vending, and edge injection when `claudeAiOauth.expiresAt` is
+within `refresh-margin-seconds`. Successful refresh uses the configured
+`token-url`, `client-id` (or `client-id-env`), and broker-owned `refreshToken`,
+then persists the new `accessToken`, rotated `refreshToken` when returned,
+`expiresAt`, optional scope metadata, and `last_refresh`.
 
-The impact differs by mode:
+This is required for mediated mode: the agent receives only placeholder
+credentials, so it cannot self-refresh. If refresh fails while the current
+access token is still valid, the broker serves the current token and logs the
+fallback without exposing token bytes. If the token is expired, the request
+fails closed with `token-refresh-failed`.
 
-- **Mediated mode** is the one affected. The agent holds no refresh token, so it
-  cannot self-heal. Once the broker-side access token expires, its `expiresAt`
-  ceiling is in the past and `egressd` fails closed (it must not serve material
-  past `expires_at`), so mediated Claude stops working until the broker-side
-  `.credentials.json` is refreshed out of band — for example by re-copying it
-  from a host where Claude Code refreshes it, or by scripting a refresh into the
-  broker sidecar. Note the broker itself does not reject a merely-expired token;
-  the fail-closed behavior is enforced at the egress edge.
-- **Direct / file-bundle mode** is not affected in the same way: the agent
-  receives the real `refreshToken`, so Claude Code refreshes on its own. The
-  broker vends the current `.credentials.json` as-is (it does not reject an
-  expired-but-well-formed credential); `credentials-invalid` /
-  `credentials-not-found` fire only for a missing or malformed file.
+Use `credentials-file` for automatic refresh. `credentials-env` is read-only; if
+a refresh would be required, the provider fails with
+`credentials-source-not-writable` instead of rotating a refresh token into
+nowhere.
