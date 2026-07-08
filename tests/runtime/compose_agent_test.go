@@ -99,6 +99,8 @@ expose:
 	rendered := string(data)
 	required := []string{
 		"NVT_EXPOSED_HTTP_ROUTES_JSON:",
+		"  egressd:",
+		"    user: 0:0",
 		"  docker:",
 		`{"name":"app","targetPort":3000,"source":"agent"}`,
 		"traefik.http.routers.nvt-dev-app.rule: 'Host(`app.nvt-dev.agent.localhost`)'",

@@ -380,6 +380,17 @@ providers:
     allow:
       repositories:
         - my-user/my-repo
+  - name: basic-pat-provider
+    plugin: token
+    config:
+      token-env: TEST_PAT_TOKEN
+      injection-hosts:
+        - dev.azure.com
+      injection-basic-username: pat
+      injection-git: true
+    allow:
+      repositories:
+        - dev.azure.com/org/project/_git/repo
   - name: anthropic-main
     plugin: token
     config:

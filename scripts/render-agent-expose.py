@@ -164,6 +164,8 @@ def write_compose_override(path, routes, labels):
         "  agent:",
         "    environment:",
         f"      NVT_EXPOSED_HTTP_ROUTES_JSON: {yaml_quote(routes_json)}",
+        "  egressd:",
+        "    user: 0:0",
     ]
     if labels:
         lines.extend(["  docker:", "    labels:"])

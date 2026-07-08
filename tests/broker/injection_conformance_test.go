@@ -492,6 +492,7 @@ func TestInjectionServesEveryProviderTypeWithInjectionHosts(t *testing.T) {
 				{Provider: "codex-main", Materialization: "header-inject"},
 				{Provider: "git-app", Materialization: "header-inject", Repositories: []string{"my-user/my-repo"}},
 				{Provider: "pat-provider", Materialization: "header-inject", Repositories: []string{"my-user/my-repo"}},
+				{Provider: "basic-pat-provider", Materialization: "header-inject", Repositories: []string{"dev.azure.com/org/project/_git/repo"}},
 			},
 		},
 		"frontend-egress": {
@@ -514,6 +515,8 @@ func TestInjectionServesEveryProviderTypeWithInjectionHosts(t *testing.T) {
 		{"git-app", "github.com", "GET", "/my-user/my-repo.git/info/refs", "Basic "},
 		// token (static bearer)
 		{"pat-provider", "api.example.test", "GET", "/v1/anything", "Bearer pat-secret"},
+		// token (static Basic, for Git-over-HTTPS PATs)
+		{"basic-pat-provider", "dev.azure.com", "GET", "/org/project/_git/repo/info/refs", "Basic cGF0OnBhdC1zZWNyZXQ="},
 	}
 	for _, tt := range cases {
 		payload := map[string]any{

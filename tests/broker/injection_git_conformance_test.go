@@ -300,6 +300,11 @@ func TestGitInjectionRoutingAdvertisesGit(t *testing.T) {
 	identities := gitIdentities(nil)
 	frontend := identities["frontend"]
 	frontend.Grants = append(frontend.Grants, roleGrant{Provider: "codex-main", Materialization: "header-inject"})
+	frontend.Grants = append(frontend.Grants, roleGrant{
+		Provider:        "basic-pat-provider",
+		Materialization: "header-inject",
+		Repositories:    []string{"dev.azure.com/org/project/_git/repo"},
+	})
 	identities["frontend"] = frontend
 	f.writeRoleIdentities(identities)
 
@@ -313,6 +318,18 @@ func TestGitInjectionRoutingAdvertisesGit(t *testing.T) {
 	hosts, _ := body["hosts"].([]any)
 	if len(hosts) != 1 || hosts[0] != "github.com" {
 		t.Fatalf("unexpected routing hosts %v", body["hosts"])
+	}
+
+	status, body = f.postJSONWithToken("frontend-token", "/v1/injection/routing", map[string]any{"capability": "basic-pat-provider"})
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("basic PAT routing denied: status=%d body=%v", status, body)
+	}
+	if body["git"] != true {
+		t.Fatalf("basic PAT provider routing must set git: true, got %v", body)
+	}
+	hosts, _ = body["hosts"].([]any)
+	if len(hosts) != 1 || hosts[0] != "dev.azure.com" {
+		t.Fatalf("unexpected basic PAT routing hosts %v", body["hosts"])
 	}
 
 	status, body = f.postJSONWithToken("frontend-token", "/v1/injection/routing", map[string]any{"capability": "codex-main"})

@@ -1,3 +1,4 @@
+import base64
 import fnmatch
 import re
 
@@ -28,11 +29,13 @@ class StaticTokenProvider:
         self.allowed_repositories = self._allowed_strings("repositories")
         self.token = self._token()
         self.injection_hosts = injection_hosts(self.config, self.name)
+        self.injection_git = self._injection_git()
         # Generalized injection so this one provider covers Bearer APIs and
         # key-header APIs (e.g. Anthropic's x-api-key) with no egressd change
         # (docs/phase5-6b-observability-pr-plan.md decision 4).
         self.injection_header = self._injection_header()
         self.injection_scheme = self._injection_scheme()
+        self.injection_basic_username = self._injection_basic_username()
         self.injection_extra_headers = self._injection_extra_headers()
 
     def _injection_header(self):
@@ -42,6 +45,16 @@ class StaticTokenProvider:
         header = string_value(raw, f"provider {self.name} config.injection-header")
         return self._normalize_header_name(header, "injection-header")
 
+    def _injection_git(self):
+        raw = self.config.get("injection-git")
+        if raw is None:
+            return False
+        if not isinstance(raw, bool):
+            fail(f"provider {self.name} config.injection-git must be a boolean")
+        if raw and not self.injection_hosts:
+            fail(f"provider {self.name} config.injection-git requires injection-hosts")
+        return raw
+
     def _injection_scheme(self):
         raw = self.config.get("injection-scheme")
         if raw is None:
@@ -50,6 +63,19 @@ class StaticTokenProvider:
         if not isinstance(raw, str):
             fail(f"provider {self.name} config.injection-scheme must be a string")
         return raw
+
+    def _injection_basic_username(self):
+        raw = self.config.get("injection-basic-username")
+        if raw is None:
+            return None
+        username = string_value(raw, f"provider {self.name} config.injection-basic-username")
+        if self.injection_header != "authorization":
+            fail(f"provider {self.name} config.injection-basic-username requires injection-header authorization")
+        if "injection-scheme" in self.config:
+            fail(f"provider {self.name} config.injection-basic-username cannot be combined with injection-scheme")
+        if ":" in username:
+            fail(f"provider {self.name} config.injection-basic-username must not contain ':'")
+        return username
 
     def _injection_extra_headers(self):
         raw = self.config.get("injection-extra-headers")
@@ -127,7 +153,11 @@ class StaticTokenProvider:
         raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
-        value = f"{self.injection_scheme} {self.token}" if self.injection_scheme else self.token
+        if self.injection_basic_username is not None:
+            encoded = base64.b64encode(f"{self.injection_basic_username}:{self.token}".encode("utf-8")).decode("ascii")
+            value = f"Basic {encoded}"
+        else:
+            value = f"{self.injection_scheme} {self.token}" if self.injection_scheme else self.token
         headers = {self.injection_header: value}
         headers.update(self.injection_extra_headers)
         # Every injected name is stripped from the incoming request so the
