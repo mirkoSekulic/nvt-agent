@@ -154,6 +154,43 @@ raise SystemExit("expected a config error")
 	}
 }
 
+// TestClaudePlaceholderGuardRejectsNestedNonScalar pins that copied non-secret
+// subscription metadata must be a scalar or a flat list of scalars: a nested
+// list/dict is refused rather than copied into the placeholder file without the
+// token-shape guard running on its leaves. Defense in depth against a future
+// credential-shape change.
+func TestClaudePlaceholderGuardRejectsNestedNonScalar(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json, tempfile
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+creds = {"claudeAiOauth": {
+    "accessToken": "real-access",
+    "refreshToken": "real-refresh",
+    "expiresAt": 4102444800000,
+    "scopes": [["nested", "array"]],
+}}
+handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+json.dump(creds, handle); handle.close()
+provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
+    "credentials-file": handle.name,
+    "injection-hosts": ["api.anthropic.com"],
+    "placeholder-file": {"path": ".claude/.credentials.json", "hosts": ["api.anthropic.com"]},
+}})
+try:
+    provider.placeholder_files("agent", None, "rid")
+except Exception as exc:
+    print("REJECTED:", getattr(exc, "reason", type(exc).__name__), exc)
+    raise SystemExit(0)
+raise SystemExit("expected a placeholder-claim-unsafe error")
+`)
+	if err != nil {
+		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "placeholder-claim-unsafe") {
+		t.Fatalf("expected placeholder-claim-unsafe rejection for nested non-scalar, got %s", out)
+	}
+}
+
 // TestAgentsRejectsConflictingMaterialization pins review finding 7: two grants
 // for one provider with differing materializations are rejected, so grant()
 // selection is never order-dependent.

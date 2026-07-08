@@ -246,19 +246,25 @@ class ClaudeOAuthProvider:
         return files, list(self.placeholder["hosts"]), None
 
     def _guard_nonsecret(self, field, value):
+        # A copied non-secret field is a scalar or a flat list of scalars.
+        # Nested lists/dicts are refused so the token-shape guard always runs on
+        # the actual leaf value and arbitrary nested content can never be copied
+        # into the placeholder file if the credential shape ever changes.
         if isinstance(value, list):
             return [self._guard_scalar(field, item) for item in value]
         return self._guard_scalar(field, value)
 
     def _guard_scalar(self, field, value):
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            return value
         if isinstance(value, str):
             if len(value) > MAX_NONSECRET_LEN:
                 raise ProviderError("placeholder-claim-unsafe", f"Claude placeholder field {field} value is too long to be non-secret", 502)
             if value.count(".") >= 2 and len(value) > 40:
                 raise ProviderError("placeholder-claim-unsafe", f"Claude placeholder field {field} value looks token-shaped, refusing", 502)
-        elif isinstance(value, (dict,)):
-            raise ProviderError("placeholder-claim-unsafe", f"Claude placeholder field {field} must be a scalar or list, refusing", 502)
-        return value
+            return value
+        # Anything else (nested list/dict, None) is not a flat non-secret scalar.
+        raise ProviderError("placeholder-claim-unsafe", f"Claude placeholder field {field} must be a scalar or a flat list of scalars, refusing", 502)
 
     # --- mediated edge injection --------------------------------------------
 

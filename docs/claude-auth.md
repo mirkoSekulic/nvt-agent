@@ -178,12 +178,23 @@ These are pinned by `tests/broker/claude_auth_conformance_test.go` and
 
 This revision does not refresh the broker-side Claude OAuth token over the
 network. It serves the current access token and surfaces the real `expiresAt` as
-the injection/bundle expiry ceiling. When the broker-side token expires,
-injection and file-bundle vending fail closed (`credentials-invalid` /
-`credentials-not-found`) rather than being silently refreshed. Automatic refresh
-(an OAuth `refresh_token` exchange analogous to the Codex `token-url` /
-`client-id` flow) is intentionally left for a follow-up so this change does not
-ship an unverified live-refresh path against Anthropic's token endpoint. In the
-interim, keep the broker-side `.credentials.json` fresh out of band (for
-example, by re-copying it from a host where Claude Code refreshes it, or by
-scripting a refresh into the broker sidecar).
+the injection/bundle expiry ceiling. Automatic refresh (an OAuth `refresh_token`
+exchange analogous to the Codex `token-url` / `client-id` flow) is intentionally
+left for a follow-up so this change does not ship an unverified live-refresh path
+against Anthropic's token endpoint.
+
+The impact differs by mode:
+
+- **Mediated mode** is the one affected. The agent holds no refresh token, so it
+  cannot self-heal. Once the broker-side access token expires, its `expiresAt`
+  ceiling is in the past and `egressd` fails closed (it must not serve material
+  past `expires_at`), so mediated Claude stops working until the broker-side
+  `.credentials.json` is refreshed out of band — for example by re-copying it
+  from a host where Claude Code refreshes it, or by scripting a refresh into the
+  broker sidecar. Note the broker itself does not reject a merely-expired token;
+  the fail-closed behavior is enforced at the egress edge.
+- **Direct / file-bundle mode** is not affected in the same way: the agent
+  receives the real `refreshToken`, so Claude Code refreshes on its own. The
+  broker vends the current `.credentials.json` as-is (it does not reject an
+  expired-but-well-formed credential); `credentials-invalid` /
+  `credentials-not-found` fire only for a missing or malformed file.

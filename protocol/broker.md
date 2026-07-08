@@ -443,8 +443,15 @@ OAuth token over the network. It serves the current access token and surfaces
 the real `expiresAt` as the injection/bundle expiry ceiling; keeping the
 broker-side credential fresh (an OAuth `refresh_token` exchange analogous to the
 Codex `token-url`/`client-id` flow) is intentionally left for a follow-up so
-this PR does not ship an unverified live-refresh path. Until then, an expired
-broker-side credential fails closed rather than being silently refreshed.
+this PR does not ship an unverified live-refresh path. The affected mode is
+mediated: once the broker-side access token expires, its `expiresAt` ceiling is
+past and `egressd` fails closed (it must not serve material past `expires_at`),
+so mediated Claude stops until the broker-side credential is refreshed out of
+band. The broker itself does not reject a merely-expired-but-well-formed
+credential — `/v1/files` still vends it (direct mode is possession, and the
+agent's own `refreshToken` lets Claude Code self-refresh), and
+`credentials-invalid`/`credentials-not-found` fire only for a missing or
+malformed file.
 
 ## Static Token And Header Providers
 
