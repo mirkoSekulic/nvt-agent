@@ -79,16 +79,15 @@ gateway:
       clientSecret:
         existingSecret: nvt-gateway-oidc
       scopes: ["openid", "profile"]
-      extraAuthParams:
-        authorization_details: |
-          [
-            {
-              "type": "ansattporten:altinn:resource",
-              "resource": "urn:altinn:resource:digdir-selvbetjening-klienter",
-              "organizationform": "enterprise",
-              "representation_is_required": false
-            }
-          ]
+      authorizationDetails: |
+        [
+          {
+            "type": "ansattporten:altinn:resource",
+            "resource": "urn:altinn:resource:digdir-selvbetjening-klienter",
+            "organizationform": "enterprise",
+            "representation_is_required": false
+          }
+        ]
     authorization:
       default: deny
       # id_token (default), userinfo, or access_token for JWT access tokens
