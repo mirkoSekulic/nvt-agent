@@ -970,6 +970,10 @@ func TestAgentInitMediatedKeepsEgressTokenOutOfAgentEnv(t *testing.T) {
 - id: mediated-env-boundary
   token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
   grants:
+    - provider: codex-main
+      materialization: placeholder-file
+      egress-hosts:
+        - chatgpt.com:443
     - provider: api-main
       materialization: header-inject
       egress-hosts:
@@ -978,7 +982,8 @@ func TestAgentInitMediatedKeepsEgressTokenOutOfAgentEnv(t *testing.T) {
         - example/repo
 `)
 	home := t.TempDir()
-	command := "HOME=" + shellQuote(home) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	caInitBin := buildEgressCAInit(t, root)
+	command := "HOME=" + shellQuote(home) + " NVT_EGRESS_CA_INIT_BIN=" + shellQuote(caInitBin) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
 	cmd := commandWithEnv(command, nil, "--name", name)
 	cmd.Dir = root
 	output, err := cmd.CombinedOutput()
@@ -1069,6 +1074,9 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 - id: mediated-multi-route
   token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
   grants:
+    - provider: codex-main
+      materialization: placeholder-file
+      egress-hosts: [chatgpt.com:443]
     - provider: api-main
       materialization: header-inject
       egress-hosts: [api.example.test:443]
@@ -1091,19 +1099,33 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 		t.Fatalf("agent-init failed: %v\n%s", err, output)
 	}
 	var config struct {
-		Routes []map[string]any `json:"routes"`
-		CA     map[string]any   `json:"ca"`
+		Routes       []map[string]any `json:"routes"`
+		ForwardProxy struct {
+			Listen              string           `json:"listen"`
+			AllowUnmatchedHosts bool             `json:"allow_unmatched_hosts"`
+			InjectRoutes        []map[string]any `json:"inject_routes"`
+		} `json:"forward_proxy"`
+		CA map[string]any `json:"ca"`
 	}
 	decodeJSONFile(t, filepath.Join(agentDir, "egressd.json"), &config)
-	if len(config.Routes) != 2 {
-		t.Fatalf("expected one route per header-inject grant, got %#v", config.Routes)
+	if len(config.Routes) != 0 {
+		t.Fatalf("compose mediated egress should use forward_proxy routes, got %#v", config.Routes)
 	}
-	api, git := config.Routes[0], config.Routes[1]
-	if api["listen"] != "0.0.0.0:8471" || api["capability"] != "api-main" || api["listen_tls"] != nil {
-		t.Fatalf("unexpected api route: %#v", api)
+	if config.ForwardProxy.Listen != "0.0.0.0:8470" || len(config.ForwardProxy.InjectRoutes) != 3 {
+		t.Fatalf("unexpected forward proxy config: %#v", config.ForwardProxy)
 	}
-	if git["listen"] != "0.0.0.0:8472" || git["capability"] != "git-app" || git["listen_tls"] != "ca" {
-		t.Fatalf("unexpected git route: %#v", git)
+	if !config.ForwardProxy.AllowUnmatchedHosts {
+		t.Fatal("local compose forward proxy should blind-tunnel unmatched hosts for dev egress")
+	}
+	codex, api, git := config.ForwardProxy.InjectRoutes[0], config.ForwardProxy.InjectRoutes[1], config.ForwardProxy.InjectRoutes[2]
+	if codex["host"] != "chatgpt.com" || codex["capability"] != "codex-main" || codex["upstream"] != "chatgpt.com:443" {
+		t.Fatalf("unexpected codex inject route: %#v", codex)
+	}
+	if api["host"] != "api.example.test" || api["capability"] != "api-main" || api["upstream"] != "api.example.test:443" {
+		t.Fatalf("unexpected api inject route: %#v", api)
+	}
+	if git["host"] != "github.com" || git["capability"] != "git-app" || git["upstream"] != "github.com:443" {
+		t.Fatalf("unexpected git inject route: %#v", git)
 	}
 	if config.CA["cert_file"] != "/etc/nvt-egress-ca/ca.crt" || config.CA["key_file"] != "/etc/nvt-egress-ca/ca.key" {
 		t.Fatalf("unexpected durable CA config: %#v", config.CA)
@@ -1119,6 +1141,11 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	}
 	if !strings.Contains(string(certBytes), "BEGIN CERTIFICATE") {
 		t.Fatalf("durable CA cert is not PEM:\n%s", certBytes)
+	}
+	if info, err := os.Stat(certPath); err != nil {
+		t.Fatalf("stat durable CA cert: %v", err)
+	} else if info.Mode().Perm() != 0o644 {
+		t.Fatalf("durable CA cert mode = %v, want 0644", info.Mode().Perm())
 	}
 	keyBytes, err := os.ReadFile(keyPath)
 	if err != nil {
@@ -1142,20 +1169,28 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	}
 	firstFingerprint := sha256.Sum256(certBytes)
 
-	// The agent config must carry the same grant metadata the operator
-	// injects on k8s — bootstrap reads egress.grants (base-url per route)
-	// from agent.yaml, so without this block the sidecar starts but git/tool
-	// wiring never happens. agent-init validates the merged YAML parses; the
-	// block is machine-generated, so exact-string assertions are stable.
+	// The agent config must carry the same grant metadata bootstrap needs:
+	// forward-proxy mode plus provider/host metadata. Without this block the
+	// sidecar starts but runtime proxy and tool wiring never happen.
 	agentConfig := mustReadFile(t, filepath.Join(agentDir, "agent.yaml"))
 	for _, fragment := range []string{
+		"runtime:",
+		"  proxy:",
+		"    provider: codex-main",
 		"egress:",
 		"  mode: mediated",
+		"  forward-proxy: true",
+		"  forward-proxy-url: http://127.0.0.1:8470",
+		"    - provider: codex-main",
+		"      materialization: placeholder-file",
+		"      - chatgpt.com:443",
 		"    - provider: api-main",
-		"      base-url: http://127.0.0.1:8471",
+		"      egress-hosts:",
+		"      - api.example.test:443",
 		"    - provider: git-app",
 		"      materialization: header-inject",
-		"      base-url: https://127.0.0.1:8472",
+		"      - github.com:443",
+		"      git: true",
 	} {
 		if !strings.Contains(agentConfig, fragment) {
 			t.Fatalf("agent.yaml missing egress fragment %q:\n%s", fragment, agentConfig)

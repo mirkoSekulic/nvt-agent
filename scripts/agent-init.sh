@@ -399,10 +399,6 @@ PY
 
 mkdir -p "$egress_ca_dir"
 chmod 700 "$egress_ca_dir"
-if [ ! -e "$egress_ca_cert_file" ]; then
-  : >"$egress_ca_cert_file"
-fi
-chmod 644 "$egress_ca_cert_file" 2>/dev/null || true
 
 if [ "$egress_mode" = "mediated" ]; then
   {
@@ -433,31 +429,46 @@ target = Path(sys.argv[3])
 allow_insecure = sys.argv[4] in {"1", "true", "TRUE", "True", "yes", "YES", "Yes"}
 data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
 agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
-routes = []
-need_ca = False
+inject_routes = []
+seen_inject_routes = set()
 for grant in agent.get("grants", []) or []:
-    if not isinstance(grant, dict) or (grant.get("materialization") or "file-bundle") != "header-inject":
+    if not isinstance(grant, dict):
+        continue
+    materialization = grant.get("materialization") or "file-bundle"
+    if materialization not in {"header-inject", "placeholder-file"}:
         continue
     hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
-    route = {
-        "listen": f"0.0.0.0:{8471 + len(routes)}",
-        "capability": grant.get("provider"),
-        "upstream": hosts[0],
-        "allow_insecure_upstream": False,
-    }
-    quota = grant.get("quota")
-    if isinstance(quota, dict) and isinstance(quota.get("requests"), int):
-        route["max_requests"] = quota["requests"]
-    if grant.get("git"):
-        route["listen_tls"] = "ca"
-        need_ca = True
-    routes.append(route)
+    for host in hosts:
+        host = str(host).lower()
+        key = (host.split(":", 1)[0], grant.get("provider"))
+        if key in seen_inject_routes:
+            continue
+        seen_inject_routes.add(key)
+        route = {
+            "host": key[0],
+            "capability": grant.get("provider"),
+            "upstream": host,
+        }
+        quota = grant.get("quota")
+        if isinstance(quota, dict) and isinstance(quota.get("requests"), int):
+            route["max_requests"] = quota["requests"]
+        inject_routes.append(route)
 config = {
     "broker_url": "http://broker:7347",
     "allow_insecure_broker": allow_insecure,
-    "routes": routes,
+    "routes": [],
 }
-if need_ca:
+if inject_routes:
+    config["forward_proxy"] = {
+        "listen": "0.0.0.0:8470",
+        # Local compose remains a development backend: agents need normal
+        # internet access for package downloads and tool calls. Inject routes
+        # still mediate configured credential hosts; unmatched hosts are blind
+        # tunnels with no broker credential. Kubernetes enforcement is stricter
+        # and is handled by NetworkPolicy.
+        "allow_unmatched_hosts": True,
+        "inject_routes": inject_routes,
+    }
     config["ca"] = {
         "cert_file": "/etc/nvt-egress-ca/ca.crt",
         "key_file": "/etc/nvt-egress-ca/ca.key",
@@ -496,7 +507,7 @@ PY
       "$NVT_EGRESS_CA_INIT_BIN" \
         --cert-file "$egress_ca_cert_file" \
         --key-file "$egress_ca_key_file" \
-        "${ca_init_args[@]}"
+        ${ca_init_args+"${ca_init_args[@]}"}
     else
       docker run --rm \
         --user 0:0 \
@@ -505,8 +516,10 @@ PY
         "${NVT_EGRESSD_IMAGE:-nvt-egressd:latest}" \
         --cert-file /egress-ca/ca.crt \
         --key-file /egress-ca/ca.key \
-        "${ca_init_args[@]}"
+        ${ca_init_args+"${ca_init_args[@]}"}
     fi
+    chmod 644 "$egress_ca_cert_file" 2>/dev/null || true
+    chmod 600 "$egress_ca_key_file" 2>/dev/null || true
   fi
 else
   rm -f "$egressd_config_file"
@@ -572,6 +585,63 @@ config_file.write_text(text, encoding="utf-8")
 print(f"rendered preseed config into {config_file}")
 PY
 
+# Local compose needs runtime.proxy.provider for mediated forward-proxy mode.
+# The default generated runtime command is tool-specific, so agent-init owns
+# this small preset and keeps bootstrap generic.
+python3 - "$agent_config_file" "$broker_agents_file" "$name" "$egress_mode" "$agent_type" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config_file = Path(sys.argv[1])
+agents_file = Path(sys.argv[2])
+name = sys.argv[3]
+mode = sys.argv[4]
+agent_type = sys.argv[5]
+
+if mode != "mediated":
+    raise SystemExit(0)
+
+default_provider = {"codex": "codex-main", "claude": "claude-main"}.get(agent_type)
+if not default_provider:
+    raise SystemExit(0)
+
+text = config_file.read_text(encoding="utf-8")
+parsed = yaml.safe_load(text) or {}
+if not isinstance(parsed, dict):
+    raise SystemExit("agent-init: agent config is not a YAML object before runtime proxy rendering")
+runtime = parsed.get("runtime") or {}
+if not isinstance(runtime, dict):
+    raise SystemExit("agent-init: runtime must be a YAML object")
+proxy = runtime.get("proxy")
+if isinstance(proxy, dict) and proxy.get("provider"):
+    raise SystemExit(0)
+
+data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
+agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
+providers = {
+    grant.get("provider")
+    for grant in (agent or {}).get("grants", []) or []
+    if isinstance(grant, dict)
+}
+if default_provider not in providers:
+    raise SystemExit(f"agent-init: mediated {agent_type} agent requires broker grant {default_provider} or an explicit runtime.proxy.provider")
+
+lines = text.splitlines()
+runtime_index = next((index for index, line in enumerate(lines) if line == "runtime:"), None)
+if runtime_index is None:
+    raise SystemExit("agent-init: runtime block is required")
+insert_at = len(lines)
+for index in range(runtime_index + 1, len(lines)):
+    if lines[index] and not lines[index].startswith((" ", "\t", "#")):
+        insert_at = index
+        break
+lines[insert_at:insert_at] = ["  proxy:", f"    provider: {default_provider}"]
+config_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+print(f"rendered runtime proxy provider {default_provider} into {config_file}")
+PY
+
 # Manage the egress block in agent.yaml: bootstrap reads egress.grants
 # (base-url per route) from the agent config, so the compose path must render
 # the same grant metadata the operator injects on k8s. The block lives
@@ -600,17 +670,27 @@ if changed:
 if mode == "mediated":
     data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
     agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
-    lines = [BEGIN, "egress:", "  mode: mediated", "  placeholder: NVT-PLACEHOLDER-NOT-A-KEY", "  grants:"]
-    index = 0
+    lines = [
+        BEGIN,
+        "egress:",
+        "  mode: mediated",
+        "  placeholder: NVT-PLACEHOLDER-NOT-A-KEY",
+        "  forward-proxy: true",
+        "  forward-proxy-url: http://127.0.0.1:8470",
+        "  grants:",
+    ]
     for grant in (agent or {}).get("grants", []) or []:
         if not isinstance(grant, dict) or (grant.get("materialization") or "file-bundle") != "header-inject":
             continue
-        # Route order and ports must match the egressd.json render above.
-        scheme = "https" if grant.get("git") else "http"
         lines.append(f"    - provider: {grant.get('provider')}")
         lines.append("      materialization: header-inject")
-        lines.append(f"      base-url: {scheme}://127.0.0.1:{8471 + index}")
-        index += 1
+        hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
+        if hosts:
+            lines.append("      egress-hosts:")
+            for host in hosts:
+                lines.append(f"      - {host}")
+        if grant.get("git"):
+            lines.append("      git: true")
     # placeholder-file grants carry no egressd route (edge injection is Phase
     # 6.2); bootstrap only needs provider + mode to materialize the file.
     for grant in (agent or {}).get("grants", []) or []:
@@ -618,6 +698,11 @@ if mode == "mediated":
             continue
         lines.append(f"    - provider: {grant.get('provider')}")
         lines.append("      materialization: placeholder-file")
+        hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
+        if hosts:
+            lines.append("      egress-hosts:")
+            for host in hosts:
+                lines.append(f"      - {host}")
     lines.append(END)
     text = text.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n"
     changed = True
