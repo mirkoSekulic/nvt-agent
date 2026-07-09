@@ -81,8 +81,6 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
-      token-url: https://platform.claude.com/v1/oauth/token
-      client-id: <claude-code-oauth-client-id>
       refresh-margin-seconds: 600
 ```
 
@@ -95,8 +93,6 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
-      token-url: https://platform.claude.com/v1/oauth/token
-      client-id: <claude-code-oauth-client-id>
       refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
@@ -109,6 +105,14 @@ providers:
           - api.anthropic.com
           - mcp-proxy.anthropic.com
 ```
+
+`claude-oauth` defaults to the Claude Code OAuth request shape observed in
+Claude Code CLI 2.1.202: `https://console.anthropic.com/v1/oauth/token`,
+client id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`,
+`anthropic-beta: oauth-2025-04-20`, and `User-Agent: claude-code/2.1.202`.
+These values are not user/subscription secrets and can be overridden with
+`token-url`, `client-id` / `client-id-env`, `oauth-beta`, and `user-agent` if
+Anthropic changes the CLI OAuth app or endpoint.
 
 Grant file-bundle providers by provider name; repositories are not used:
 
@@ -185,9 +189,10 @@ For `claude-oauth`, mediated placeholder bundles contain no real Claude tokens;
 the broker owns and refreshes the canonical `claudeAiOauth` access/refresh
 tokens when `credentials-file` is used. `credentials-env` is read-only and
 fails loudly if a refresh would be required. The refresh path is implemented
-and conformance-tested against the broker's fake OAuth endpoint; real Claude
-endpoint/client-id proof is still required before treating mediated Claude
-refresh as production-ready.
+and conformance-tested against the broker's fake OAuth endpoint. The default
+endpoint/client-id/header values are observed from Claude Code CLI, but a real
+refresh proof should still be run in the target environment before treating
+mediated Claude refresh as production-ready.
 The broker applies file-bundle TTL caps to returned `expires_at` metadata so
 runtime refreshers can re-materialize bundles on a bounded cadence. For
 `codex-oauth`, this does not reduce the lifetime of an already-issued OpenAI

@@ -50,16 +50,30 @@ func (f *fakeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	request := map[string]string{}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		request["grant_type"] = payload["grant_type"]
+		request["client_id"] = payload["client_id"]
+		request["refresh_token"] = payload["refresh_token"]
+		request["content_type"] = "application/json"
+		request["anthropic_beta"] = r.Header.Get("anthropic-beta")
+		request["user_agent"] = r.Header.Get("User-Agent")
+	} else {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		request["grant_type"] = r.Form.Get("grant_type")
+		request["client_id"] = r.Form.Get("client_id")
+		request["refresh_token"] = r.Form.Get("refresh_token")
+		request["content_type"] = "form"
 	}
 	f.mu.Lock()
-	request := map[string]string{
-		"grant_type":    r.Form.Get("grant_type"),
-		"client_id":     r.Form.Get("client_id"),
-		"refresh_token": r.Form.Get("refresh_token"),
-	}
 	f.requests = append(f.requests, request)
 	count := len(f.requests)
 	fail := f.fail
