@@ -4057,11 +4057,17 @@ func TestForwardProxyHeaderInjectGrantIsRenderedForRuntimeProxyValidation(t *tes
 	}
 }
 
-func TestRenderForwardProxyGitGrantRequiresCapabilityHint(t *testing.T) {
+func TestRenderForwardProxyOnlySharedHostsRequireCapabilityHint(t *testing.T) {
 	agentRun := forwardProxyAgentRun()
 	agentRun.Spec.Broker.Grants = []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "azdo-infra-pat", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Git: true,
+		EgressHosts: []string{"dev.azure.com:443"},
+	}, {
 		Provider: "github-main-app", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Git: true,
-		EgressHosts: []string{"github.com:443", "api.github.com:443"},
+		EgressHosts: []string{"github.com:443"},
+	}, {
+		Provider: "github-altinn-app", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Git: true,
+		EgressHosts: []string{"github.com:443"},
 	}}
 	rendered, err := RenderEgressdConfigJSON(agentRun)
 	if err != nil {
@@ -4075,12 +4081,21 @@ func TestRenderForwardProxyGitGrantRequiresCapabilityHint(t *testing.T) {
 	if err := json.Unmarshal([]byte(rendered), &config); err != nil {
 		t.Fatalf("unmarshal rendered config: %v\n%s", err, rendered)
 	}
-	if config.ForwardProxy == nil || len(config.ForwardProxy.InjectRoutes) != 2 {
+	if config.ForwardProxy == nil || len(config.ForwardProxy.InjectRoutes) != 3 {
 		t.Fatalf("expected git inject routes, got %#v", config.ForwardProxy)
 	}
 	for _, route := range config.ForwardProxy.InjectRoutes {
-		if route["require_capability_hint"] != true {
-			t.Fatalf("git route must require explicit capability hint: %#v", route)
+		switch route["host"] {
+		case "dev.azure.com":
+			if _, ok := route["require_capability_hint"]; ok {
+				t.Fatalf("single-provider host must auto-inject without a capability hint: %#v", route)
+			}
+		case "github.com":
+			if route["require_capability_hint"] != true {
+				t.Fatalf("shared host must require explicit capability hint: %#v", route)
+			}
+		default:
+			t.Fatalf("unexpected route: %#v", route)
 		}
 	}
 }

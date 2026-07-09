@@ -857,6 +857,20 @@ type forwardProxyInject struct {
 }
 
 func forwardProxyInjects(agentRun *nvtv1alpha1.AgentRun) []forwardProxyInject {
+	hostCounts := map[string]int{}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		materialization := AgentRunGrantMaterialization(grant)
+		if materialization != nvtv1alpha1.AgentRunGrantHeaderInject && materialization != nvtv1alpha1.AgentRunGrantPlaceholderFile {
+			continue
+		}
+		for _, upstream := range grant.EgressHosts {
+			host := upstream
+			if h, _, err := net.SplitHostPort(upstream); err == nil {
+				host = h
+			}
+			hostCounts[strings.ToLower(host)]++
+		}
+	}
 	injects := []forwardProxyInject{}
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
 		materialization := AgentRunGrantMaterialization(grant)
@@ -878,7 +892,7 @@ func forwardProxyInjects(agentRun *nvtv1alpha1.AgentRun) []forwardProxyInject {
 				Upstream:              upstream,
 				AllowInsecureUpstream: grant.AllowInsecureUpstream,
 				MaxRequests:           maxRequests,
-				RequireCapabilityHint: grant.Git,
+				RequireCapabilityHint: hostCounts[strings.ToLower(host)] > 1,
 			})
 		}
 	}
