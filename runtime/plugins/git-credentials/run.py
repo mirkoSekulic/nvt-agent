@@ -255,21 +255,56 @@ def configure_git_helper():
     run(["git", "config", "--global", "credential.useHttpPath", "true"])
 
 
+def git_config_url_keys(match):
+    value = match if match.endswith("/") else match.rstrip("/")
+    keys = [value]
+    if not match.endswith("/") and not value.endswith(".git"):
+        keys.append(value + ".git")
+    return keys
+
+
 def clear_managed_headers():
     for key in read_managed_header_keys():
         subprocess.run(["git", "config", "--global", "--unset-all", key], check=False)
 
 
 def configure_headers(credentials):
-    clear_managed_headers()
     managed_keys = []
     for rule in credentials:
         match = rule["match"]
-        key = f"http.{match}.extraHeader"
-        for header in provider_headers(rule):
-            run(["git", "config", "--global", "--add", key, header])
-        managed_keys.append(key)
-    write_managed_header_keys(managed_keys)
+        for key_match in git_config_url_keys(match):
+            key = f"http.{key_match}.extraHeader"
+            for header in provider_headers(rule):
+                run(["git", "config", "--global", "--add", key, header])
+            managed_keys.append(key)
+    return managed_keys
+
+
+def provider_mediated_proxy(rule):
+    provider = string_value(rule.get("provider"), "provider", required=True)
+    try:
+        return output(["git-host-credential", "mediated-proxy", "--provider", provider]).strip()
+    except FileNotFoundError:
+        fail("git-host-credential is not on PATH")
+    except subprocess.CalledProcessError as error:
+        fail(f"git-host-credential mediated-proxy failed with exit {error.returncode}")
+
+
+def configure_mediated_proxies(credentials):
+    managed_keys = []
+    for rule in credentials:
+        match = rule["match"]
+        proxy = provider_mediated_proxy(rule)
+        if not proxy:
+            fail(f"provider {rule['provider']} returned an empty mediated proxy URL")
+        for key_match in git_config_url_keys(match):
+            key = f"http.{key_match}.proxy"
+            auth_key = f"http.{key_match}.proxyAuthMethod"
+            run(["git", "config", "--global", key, proxy])
+            run(["git", "config", "--global", auth_key, "basic"])
+            managed_keys.append(key)
+            managed_keys.append(auth_key)
+    return managed_keys
 
 
 def main():
@@ -286,7 +321,8 @@ def main():
     credentials = list_value(config.get("credentials"), "credentials")
     if not credentials:
         write_helper_config([])
-        configure_headers([])
+        clear_managed_headers()
+        write_managed_header_keys([])
         print("git-credentials: no credentials configured", flush=True)
         return
 
@@ -306,13 +342,17 @@ def main():
         else:
             token_credentials.append(rule)
 
-    write_helper_config(token_credentials)
-    configure_headers(header_credentials)
-    if token_credentials:
+    write_helper_config([*token_credentials, *mediated_credentials])
+    clear_managed_headers()
+    managed_keys = []
+    managed_keys.extend(configure_headers(header_credentials))
+    managed_keys.extend(configure_mediated_proxies(mediated_credentials))
+    write_managed_header_keys(managed_keys)
+    if token_credentials or mediated_credentials:
         configure_git_helper()
     if mediated_credentials:
         names = ", ".join(rule["provider"] for rule in mediated_credentials)
-        print(f"git-credentials: {len(mediated_credentials)} mediated credential rule(s) use egressd routing only: {names}", flush=True)
+        print(f"git-credentials: configured {len(mediated_credentials)} mediated credential rule(s) through egressd: {names}", flush=True)
 
 
 def doctor():

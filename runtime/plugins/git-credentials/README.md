@@ -11,10 +11,10 @@ Token providers (`github-app` and `token-env`) are exposed through
 `git-credential-nvt`. Header providers configure Git `http.<url>.extraHeader`
 entries directly.
 
-Mediated broker providers (`credential-kind: mediated`) are not exposed through
-the helper and do not write `extraHeader`. They rely on the mediated runtime's
-egressd Git routing (`url.<egressd>.insteadOf` + CA trust) so the real
-credential is injected outside the agent.
+Mediated broker providers (`credential-kind: mediated`) are exposed through the
+helper with an inert placeholder password only. The plugin also writes
+provider-scoped Git proxy config so GitHub traffic flows through egressd, where
+the real credential is injected outside the agent.
 
 ## Configuration
 
@@ -114,9 +114,12 @@ Broker-backed header providers configure `http.<url>.extraHeader` the same way
 local header providers do. The header secret is therefore present in Git config;
 this is a compatibility path, not a zero-trust path.
 
-Broker-backed mediated providers are deliberately skipped by the credential
-helper. In mediated mode, bootstrap/operator wiring configures Git URL rewrites
-and trust for egressd; this plugin may still configure repo-local commit
+Broker-backed mediated providers configure `http.<url>.proxy` to a
+provider-scoped egressd proxy URL, force `proxyAuthMethod=basic` so Git sends
+the non-secret provider selector on `CONNECT`, and use the same credential
+helper. The helper returns only the configured username and
+`NVT-PLACEHOLDER-NOT-A-KEY`; egressd strips that placeholder and asks the broker
+for the real credential. This plugin may still configure repo-local commit
 identity, but it must not ask the provider for a token or header.
 
 ## Relationship To checkout-repos
