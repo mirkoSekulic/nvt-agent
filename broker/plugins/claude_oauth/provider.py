@@ -38,7 +38,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
@@ -51,7 +51,13 @@ from broker.plugins.placeholder_file import (
 
 
 DEFAULT_FILE_NAME = ".credentials.json"
-DEFAULT_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# Observed from Claude Code CLI 2.1.202. This is a public OAuth client
+# identifier for the Claude Code application, not a user/subscription secret.
+# Keep it overrideable because Anthropic does not document it as stable.
+DEFAULT_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+DEFAULT_OAUTH_BETA = "oauth-2025-04-20"
+DEFAULT_USER_AGENT = "claude-code/2.1.202"
 DEFAULT_REFRESH_MARGIN_SECONDS = 600
 DEFAULT_BUNDLE_TTL_SECONDS = 1200
 
@@ -87,7 +93,9 @@ class ClaudeOAuthProvider:
         parsed = urlparse(self.token_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             fail(f"provider {self.name} config.token-url must be an http(s) URL")
-        self.client_id = self._provider_value("client-id", required=False)
+        self.client_id = self._provider_value("client-id", DEFAULT_CLIENT_ID, required=False)
+        self.oauth_beta = self._provider_value("oauth-beta", DEFAULT_OAUTH_BETA, required=False)
+        self.user_agent = self._provider_value("user-agent", DEFAULT_USER_AGENT, required=False)
         self.refresh_margin_seconds = self._int_config("refresh-margin-seconds", DEFAULT_REFRESH_MARGIN_SECONDS)
         self.bundle_ttl_seconds = self._int_config("bundle-ttl-seconds", DEFAULT_BUNDLE_TTL_SECONDS)
         self.files_refresh_margin_seconds = max(self.refresh_margin_seconds, self.bundle_ttl_seconds)
@@ -281,7 +289,7 @@ class ClaudeOAuthProvider:
             )
             return refreshed_data, refreshed_oauth, refreshed_access_token, refreshed_exp, True
         except ProviderError as error:
-            if error.reason in {"credentials-source-not-writable", "token-refresh-not-configured"}:
+            if error.reason == "credentials-source-not-writable":
                 raise
             if exp <= now:
                 raise
@@ -289,12 +297,6 @@ class ClaudeOAuthProvider:
             return data, oauth, access_token, exp, False
 
     def _refresh(self, data, oauth):
-        if not self.client_id:
-            raise ProviderError(
-                "token-refresh-not-configured",
-                f"Claude provider {self.name} requires client-id or client-id-env before OAuth refresh",
-                502,
-            )
         if self.credentials_file is None:
             raise ProviderError(
                 "credentials-source-not-writable",
@@ -302,7 +304,7 @@ class ClaudeOAuthProvider:
                 502,
             )
         refresh_token = self._refresh_token(oauth)
-        body = urlencode({
+        body = json.dumps({
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": self.client_id,
@@ -311,7 +313,12 @@ class ClaudeOAuthProvider:
             self.token_url,
             method="POST",
             data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "anthropic-beta": self.oauth_beta,
+                "User-Agent": self.user_agent,
+            },
         )
         try:
             with urlopen(request, timeout=30) as response:

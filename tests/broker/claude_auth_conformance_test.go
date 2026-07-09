@@ -311,6 +311,11 @@ func TestClaudeOAuthRefreshPersistsRotatedTokenForFileBundles(t *testing.T) {
 	if request["grant_type"] != "refresh_token" || request["client_id"] != "test-claude-client" || request["refresh_token"] != "real-claude-refresh-token-secret" {
 		t.Fatalf("unexpected Claude refresh request metadata: %#v", request)
 	}
+	if request["content_type"] != "application/json" ||
+		request["anthropic_beta"] != "oauth-2025-04-20" ||
+		request["user_agent"] != "claude-code/2.1.202" {
+		t.Fatalf("Claude refresh must use the Claude Code JSON OAuth shape, got %#v", request)
+	}
 
 	var canonical map[string]any
 	decodeJSONFile(t, f.claudeCreds, &canonical)

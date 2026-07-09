@@ -66,11 +66,20 @@ Point the provider at the credential with exactly one of:
 - `credentials-env`: the name of an env var holding the JSON (broker sidecar /
   Kubernetes secret). No host path required.
 
-Set `client-id` (or `client-id-env`) for automatic refresh. Existing static
-broker-side credentials can still be read without it, but any refresh attempt
-fails closed with `token-refresh-not-configured` until the Claude OAuth client id
-is configured. The Claude `.credentials.json` file does not carry that client
-id; operators must source it from their Claude Code OAuth client metadata.
+`claude-oauth` defaults to the Claude Code OAuth token URL, public client id,
+OAuth beta header, and user-agent observed in Claude Code CLI 2.1.202:
+
+- `token-url`: `https://console.anthropic.com/v1/oauth/token`
+- `client-id`: `9d1c250a-e61b-44d9-88ed-5944d1962f5e`
+- `oauth-beta`: `oauth-2025-04-20`
+- `user-agent`: `claude-code/2.1.202`
+
+The client id identifies the Claude Code OAuth application, not your
+subscription. It is not a secret, and the Claude `.credentials.json` file does
+not carry it. Anthropic does not document these observed values as a stability
+contract, so production deployments can override them with `token-url`,
+`client-id` / `client-id-env`, `oauth-beta`, and `user-agent` if Claude Code
+changes.
 
 To seed a local dev credential, log in with Claude Code once on a trusted host
 and copy the resulting `~/.claude/.credentials.json` to the broker-side path.
@@ -89,8 +98,6 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
-      token-url: https://platform.claude.com/v1/oauth/token
-      client-id: <claude-code-oauth-client-id>
       refresh-margin-seconds: 600
 ```
 
@@ -134,8 +141,6 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
-      token-url: https://platform.claude.com/v1/oauth/token
-      client-id: <claude-code-oauth-client-id>
       refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
@@ -193,10 +198,11 @@ These are pinned by `tests/broker/claude_auth_conformance_test.go` and
 
 The broker implements Claude OAuth refresh before file-bundle vending,
 placeholder-file vending, and edge injection when `claudeAiOauth.expiresAt` is
-within `refresh-margin-seconds`. Successful refresh uses the configured
-`token-url`, `client-id` (or `client-id-env`), and broker-owned `refreshToken`,
-then persists the new `accessToken`, rotated `refreshToken` when returned,
-`expiresAt`, optional scope metadata, and `last_refresh`.
+within `refresh-margin-seconds`. Successful refresh uses the configured or
+default `token-url`, `client-id` (or `client-id-env`), `oauth-beta`,
+`user-agent`, and broker-owned `refreshToken`, then persists the new
+`accessToken`, rotated `refreshToken` when returned, `expiresAt`, optional scope
+metadata, and `last_refresh`.
 
 This is required for mediated mode: the agent receives only placeholder
 credentials, so it cannot self-refresh. If refresh fails while the current
@@ -209,18 +215,18 @@ a refresh would be required, the provider fails with
 `credentials-source-not-writable` instead of rotating a refresh token into
 nowhere.
 
-### Real endpoint proof gap
+### Real refresh proof gap
 
 The refresh path is conformance-tested against the broker's fake OAuth endpoint:
 request shape, refresh-token rotation, valid-token fallback, expired-token
 failure, injection reuse, and placeholder non-leakage are all covered. This repo
-has not yet committed a manual proof that
-`https://platform.claude.com/v1/oauth/token` accepts the exact request shape for
-a real Claude Code credential, nor a repo-owned way to derive the required
-client id from `.credentials.json` itself.
+has not yet committed a manual proof that the observed Claude Code OAuth
+defaults successfully refresh a real Claude Code credential in a target
+environment.
 
 Before treating mediated Claude refresh as production-ready, run a real
-broker-side refresh proof with a copied Claude credential and configured
-`client-id`/`client-id-env`, and verify that `expiresAt` and token material
-change only in the broker-owned credentials file without appearing in agent
-placeholder files, audit logs, or responses.
+broker-side refresh proof with a copied Claude credential, and verify that
+`expiresAt` and token material change only in the broker-owned credentials file
+without appearing in agent placeholder files, audit logs, or responses. If
+Anthropic changes the Claude Code OAuth app, set `client-id`/`client-id-env`,
+`token-url`, `oauth-beta`, or `user-agent` explicitly.

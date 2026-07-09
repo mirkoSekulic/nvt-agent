@@ -409,14 +409,14 @@ Rules:
   every request (so external rotation is picked up), refreshed when
   `expiresAt` is within `refresh-margin-seconds`, and persisted when the source
   is `credentials-file`.
-- The implemented broker refresh contract uses `grant_type=refresh_token`, the
-  configured `client-id`, `token-url`, and current canonical refresh token. It
-  updates `accessToken`, rotated `refreshToken` when returned, `expiresAt`,
+- The implemented broker refresh contract uses JSON
+  `grant_type=refresh_token`, the configured or default `client-id`,
+  `token-url`, `oauth-beta`, `user-agent`, and current canonical refresh token.
+  It updates `accessToken`, rotated `refreshToken` when returned, `expiresAt`,
   optional scope metadata, and `last_refresh`, then atomically replaces the
   canonical credentials file. This contract is conformance-tested against the
-  broker's fake OAuth endpoint; real Claude Code endpoint/client-id
-  verification is still required before treating mediated Claude refresh as
-  production-ready.
+  broker's fake OAuth endpoint; real Claude Code refresh verification is still
+  required before treating mediated Claude refresh as production-ready.
 - If refresh fails while the current access token is still valid, the provider
   serves the current token and records metadata-only audit. If the token is
   expired, the request fails closed with `token-refresh-failed`.
@@ -447,8 +447,6 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /state/claude/.credentials.json
-      token-url: https://platform.claude.com/v1/oauth/token
-      client-id: <claude-code-oauth-client-id>
       refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
@@ -463,25 +461,27 @@ providers:
 Default Claude OAuth settings:
 
 ```yaml
-token-url: https://platform.claude.com/v1/oauth/token
+token-url: https://console.anthropic.com/v1/oauth/token
+client-id: 9d1c250a-e61b-44d9-88ed-5944d1962f5e
+oauth-beta: oauth-2025-04-20
+user-agent: claude-code/2.1.202
 refresh-margin-seconds: 600
 bundle-ttl-seconds: 1200
 ```
 
-`client-id` (or `client-id-env`) is required before refresh can occur because
-the Claude OAuth client id is deployment/client specific; a refresh attempt
-without it fails with `token-refresh-not-configured`. Mediated Claude requires
-broker-side refresh: the agent receives only placeholder credentials and cannot
-self-refresh.
+The default client id is the public Claude Code OAuth application id observed in
+Claude Code CLI 2.1.202, not a user/subscription secret. Anthropic does not
+document it as a stability contract, so deployments can override it with
+`client-id`/`client-id-env` if the CLI OAuth app changes. Mediated Claude
+requires broker-side refresh: the agent receives only placeholder credentials
+and cannot self-refresh.
 
-**Real endpoint proof gap.** The broker-side refresh implementation is covered
+**Real refresh proof gap.** The broker-side refresh implementation is covered
 by local conformance tests for request shape, rotation persistence, fallback,
 and non-leakage. This repository has not yet committed a manual proof that the
-default Claude token endpoint accepts this exact request shape for a real
-Claude Code credential, nor a repo-owned source for the required client id.
-Operators must configure `client-id`/`client-id-env` from their Claude Code
-OAuth client metadata and verify refresh in their environment before relying on
-production mediated Claude refresh.
+observed Claude Code OAuth defaults refresh a real Claude Code credential in a
+target environment. Operators should verify refresh in their environment before
+relying on production mediated Claude refresh.
 
 ## Static Token And Header Providers
 

@@ -226,10 +226,11 @@ raise SystemExit("expected credentials-source-not-writable")
 	}
 }
 
-// TestClaudeRefreshRequiresClientID pins the compatibility boundary: a legacy
-// Claude provider can still load without client-id, but refresh fails loudly
-// before any token exchange can be attempted.
-func TestClaudeRefreshRequiresClientID(t *testing.T) {
+// TestClaudeDefaultsMatchObservedClaudeCodeOAuth pins the provider defaults for
+// the observed Claude Code OAuth app. They are overrideable because Anthropic
+// does not document them as stable, but local/dev config can refresh without
+// forcing every operator to duplicate the current public client id.
+func TestClaudeDefaultsMatchObservedClaudeCodeOAuth(t *testing.T) {
 	out, err := runBrokerPython(t, `
 import json, tempfile, time
 from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
@@ -242,20 +243,20 @@ handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
 json.dump(creds, handle); handle.close()
 provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
     "credentials-file": handle.name,
-    "token-url": "http://127.0.0.1:1/token",
 }})
-try:
-    provider.files("agent", None, "rid")
-except Exception as exc:
-    print("REJECTED:", getattr(exc, "reason", type(exc).__name__), exc)
-    raise SystemExit(0)
-raise SystemExit("expected token-refresh-not-configured")
+print("CLIENT_ID", provider.client_id)
+print("TOKEN_URL", provider.token_url)
+print("OAUTH_BETA", provider.oauth_beta)
+print("USER_AGENT", provider.user_agent)
 `)
 	if err != nil {
-		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
+		t.Fatalf("expected clean defaults, got err=%v out=%s", err, out)
 	}
-	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "token-refresh-not-configured") {
-		t.Fatalf("expected token-refresh-not-configured rejection, got %s", out)
+	if !strings.Contains(out, "CLIENT_ID 9d1c250a-e61b-44d9-88ed-5944d1962f5e") ||
+		!strings.Contains(out, "TOKEN_URL https://console.anthropic.com/v1/oauth/token") ||
+		!strings.Contains(out, "OAUTH_BETA oauth-2025-04-20") ||
+		!strings.Contains(out, "USER_AGENT claude-code/2.1.202") {
+		t.Fatalf("expected observed Claude Code OAuth defaults, got %s", out)
 	}
 }
 
