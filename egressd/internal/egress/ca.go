@@ -266,6 +266,30 @@ func (ca *CA) CertPEM() []byte {
 	return append([]byte(nil), ca.certPEM...)
 }
 
+// WriteKeyPair writes the durable CA certificate and private key. This is for
+// local/host state and operator-owned Secret creation only; egressd never
+// publishes the private key into the agent-visible CA directory.
+func (ca *CA) WriteKeyPair(certFile, keyFile string) error {
+	if err := os.MkdirAll(filepath.Dir(certFile), 0o700); err != nil {
+		return fmt.Errorf("create CA certificate dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
+		return fmt.Errorf("create CA key dir: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(ca.key)
+	if err != nil {
+		return fmt.Errorf("marshal CA key: %w", err)
+	}
+	if err := writeFileAtomic(certFile, ca.certPEM, 0o644); err != nil {
+		return fmt.Errorf("write CA certificate: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := writeFileAtomic(keyFile, keyPEM, 0o600); err != nil {
+		return fmt.Errorf("write CA key: %w", err)
+	}
+	return nil
+}
+
 // PublishCert atomically writes ca.crt (and only ca.crt) into dir, the
 // shared volume the agent container mounts read-only. The private key is
 // never written anywhere.
@@ -274,12 +298,24 @@ func (ca *CA) PublishCert(dir string) error {
 		return fmt.Errorf("create CA publish dir: %w", err)
 	}
 	target := filepath.Join(dir, CACertFileName)
-	temporary := target + ".tmp"
-	if err := os.WriteFile(temporary, ca.certPEM, 0o644); err != nil {
+	if err := writeFileAtomic(target, ca.certPEM, 0o644); err != nil {
 		return fmt.Errorf("write CA certificate: %w", err)
 	}
+	return nil
+}
+
+func writeFileAtomic(target string, content []byte, mode os.FileMode) error {
+	temporary := target + ".tmp"
+	if err := os.WriteFile(temporary, content, mode); err != nil {
+		return err
+	}
+	if err := os.Chmod(temporary, mode); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
 	if err := os.Rename(temporary, target); err != nil {
-		return fmt.Errorf("publish CA certificate: %w", err)
+		_ = os.Remove(temporary)
+		return err
 	}
 	return nil
 }

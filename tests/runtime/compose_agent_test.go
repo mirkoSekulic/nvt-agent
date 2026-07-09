@@ -1,6 +1,7 @@
 package runtime_test
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -41,6 +42,10 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"${EGRESSD_ENV_FILE:-/dev/null}",
 		"NVT_EGRESSD_CONFIG: /config/egressd.json",
 		"${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro",
+		"${EGRESS_CA_CERT_FILE:-/dev/null}:/nvt-egress-ca/ca.crt:ro",
+		"user: \"0:0\"",
+		"${EGRESS_CA_CERT_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.crt:ro",
+		"${EGRESS_CA_KEY_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.key:ro",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(compose, fragment) {
@@ -52,6 +57,15 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 	}
 	if strings.Contains(compose, "NVT_BROKER_TOKEN: ${NVT_EGRESS_BROKER_TOKEN") {
 		t.Fatalf("compose must not pass egress token through agent-loaded interpolation env:\n%s", compose)
+	}
+	agentStart := strings.Index(compose, "\n  agent:\n")
+	egressStart := strings.Index(compose, "\n  egressd:\n")
+	if agentStart == -1 || egressStart == -1 || egressStart <= agentStart {
+		t.Fatalf("compose.agent.yaml missing ordered agent/egressd services:\n%s", compose)
+	}
+	agentService := compose[agentStart:egressStart]
+	if strings.Contains(agentService, "ca.key") || strings.Contains(agentService, "EGRESS_CA_DIR") || strings.Contains(agentService, "EGRESS_CA_KEY_FILE") {
+		t.Fatalf("agent service must not mount or reference the CA private key:\n%s", agentService)
 	}
 }
 
@@ -970,12 +984,15 @@ func TestAgentInitMediatedKeepsEgressTokenOutOfAgentEnv(t *testing.T) {
 		t.Fatalf("agent-init failed: %v\n%s", err, output)
 	}
 	agentEnv := mustReadFile(t, filepath.Join(agentDir, "env"))
-	if strings.Contains(agentEnv, "NVT_EGRESS_BROKER_TOKEN") {
-		t.Fatalf("agent env leaked egress broker token key:\n%s", agentEnv)
+	if strings.Contains(agentEnv, "NVT_EGRESS_BROKER_TOKEN") || strings.Contains(agentEnv, "EGRESS_CA_KEY_FILE") || strings.Contains(agentEnv, "EGRESS_CA_DIR") {
+		t.Fatalf("agent env leaked egress-only material:\n%s", agentEnv)
 	}
 	egressEnv := mustReadFile(t, filepath.Join(agentDir, "egressd.env"))
 	if !strings.Contains(egressEnv, "NVT_BROKER_TOKEN=") {
 		t.Fatalf("egressd env missing broker token:\n%s", egressEnv)
+	}
+	if !strings.Contains(egressEnv, "EGRESS_CA_KEY_FILE=") {
+		t.Fatalf("egressd env missing CA key path for compose interpolation:\n%s", egressEnv)
 	}
 	egressConfig := mustReadFile(t, filepath.Join(agentDir, "egressd.json"))
 	if !strings.Contains(egressConfig, `"upstream": "api.example.test:443"`) || strings.Contains(egressConfig, "placeholder.local") {
@@ -1063,7 +1080,8 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
       repositories: [example/repo]
 `)
 	home := t.TempDir()
-	command := "HOME=" + shellQuote(home) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	caInitBin := buildEgressCAInit(t, root)
+	command := "HOME=" + shellQuote(home) + " NVT_EGRESS_CA_INIT_BIN=" + shellQuote(caInitBin) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
 	cmd := commandWithEnv(command, nil, "--name", name)
 	cmd.Dir = root
 	output, err := cmd.CombinedOutput()
@@ -1085,9 +1103,42 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	if git["listen"] != "0.0.0.0:8472" || git["capability"] != "git-app" || git["listen_tls"] != "ca" {
 		t.Fatalf("unexpected git route: %#v", git)
 	}
-	if config.CA["publish_dir"] != "/nvt-egress-ca" {
-		t.Fatalf("unexpected CA publish dir: %#v", config.CA)
+	if config.CA["cert_file"] != "/etc/nvt-egress-ca/ca.crt" || config.CA["key_file"] != "/etc/nvt-egress-ca/ca.key" {
+		t.Fatalf("unexpected durable CA config: %#v", config.CA)
 	}
+	if _, ok := config.CA["publish_dir"]; ok {
+		t.Fatalf("local durable CA config should not rely on egressd republishing the cert: %#v", config.CA)
+	}
+	certPath := filepath.Join(agentDir, "egress-ca", "ca.crt")
+	keyPath := filepath.Join(agentDir, "egress-ca", "ca.key")
+	certBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read durable CA cert: %v", err)
+	}
+	if !strings.Contains(string(certBytes), "BEGIN CERTIFICATE") {
+		t.Fatalf("durable CA cert is not PEM:\n%s", certBytes)
+	}
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read durable CA key: %v", err)
+	}
+	if !strings.Contains(string(keyBytes), "BEGIN EC PRIVATE KEY") {
+		t.Fatalf("durable CA key is not EC PEM")
+	}
+	if info, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stat durable CA key: %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("durable CA key mode = %v, want 0600", info.Mode().Perm())
+	}
+	egressEnv := mustReadFile(t, filepath.Join(agentDir, "egressd.env"))
+	if !strings.Contains(egressEnv, "EGRESS_CA_KEY_FILE="+keyPath) {
+		t.Fatalf("egressd env missing private key path:\n%s", egressEnv)
+	}
+	agentEnv := mustReadFile(t, filepath.Join(agentDir, "env"))
+	if strings.Contains(agentEnv, "EGRESS_CA_KEY_FILE") || strings.Contains(agentEnv, "EGRESS_CA_DIR") {
+		t.Fatalf("agent env leaked egress CA private path:\n%s", agentEnv)
+	}
+	firstFingerprint := sha256.Sum256(certBytes)
 
 	// The agent config must carry the same grant metadata the operator
 	// injects on k8s — bootstrap reads egress.grants (base-url per route)
@@ -1115,6 +1166,13 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	rerun.Dir = root
 	if rerunOutput, err := rerun.CombinedOutput(); err != nil {
 		t.Fatalf("agent-init re-run failed: %v\n%s", err, rerunOutput)
+	}
+	rerunCertBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read durable CA cert after rerun: %v", err)
+	}
+	if got := sha256.Sum256(rerunCertBytes); got != firstFingerprint {
+		t.Fatalf("agent-init rerun changed durable CA fingerprint")
 	}
 	agentConfig = mustReadFile(t, filepath.Join(agentDir, "agent.yaml"))
 	if got := strings.Count(agentConfig, "BEGIN nvt-managed egress"); got != 1 {
@@ -1401,4 +1459,15 @@ func mustWriteExecutable(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func buildEgressCAInit(t *testing.T, root string) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "egress-ca-init")
+	cmd := exec.Command("go", "build", "-o", bin, "./cmd/egress-ca-init")
+	cmd.Dir = filepath.Join(root, "egressd")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build egress-ca-init: %v\n%s", err, out)
+	}
+	return bin
 }

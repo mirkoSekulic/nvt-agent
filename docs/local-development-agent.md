@@ -129,6 +129,14 @@ make agent-init NAME=$AGENT
 This creates `.agents/$AGENT/env`, `.agents/$AGENT/agent.yaml`, workspace,
 auth, and custom plugin directories. It also creates a per-agent broker token
 and registers only the token hash in `.broker/agents.yaml` with no grants.
+For mediated local compose agents, it also creates or reuses
+`.agents/$AGENT/egress-ca/ca.crt` and `.agents/$AGENT/egress-ca/ca.key`.
+Only the public certificate is mounted into the agent container at
+`/nvt-egress-ca/ca.crt`; the private key path stays out of the agent env, and
+the key is mounted only into egressd. Local compose runs that trusted egressd
+sidecar as root so `ca.key` can stay `0600`. Deleting
+`.agents/$AGENT/egress-ca/` rotates the local egress CA on the next mediated
+creation.
 
 To create a parallel local agent from an existing initialized one, copy the
 agent definition and broker grants while generating a fresh broker token:

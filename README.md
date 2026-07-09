@@ -513,6 +513,9 @@ make nuke FORCE=1
   custom-plugins/
   auth/
     claude/
+  egress-ca/
+    ca.crt
+    ca.key
 ```
 
 `.agents/` is ignored by git.
@@ -528,6 +531,8 @@ Useful paths:
 .agents/<name>/custom-plugins/       host directory for custom plugin binaries/scripts
 .agents/<name>/auth/codex/           per-agent Codex auth/config seeded from host
 .agents/<name>/auth/claude/          per-agent Claude Code auth/config
+.agents/<name>/egress-ca/ca.crt      durable local egress CA certificate
+.agents/<name>/egress-ca/ca.key      durable local egress CA private key; mounted only into egressd
 ```
 
 The runtime generates `.agents/<name>/workspace/AGENTS.md` at container startup.
@@ -544,6 +549,7 @@ WORKSPACE_DIR=/absolute/path/.agents/frontend/workspace
 NVT_WORKSPACE=/absolute/path/.agents/frontend/workspace
 CUSTOM_PLUGINS_DIR=/absolute/path/.agents/frontend/custom-plugins
 AGENT_CONFIG_FILE=/absolute/path/.agents/frontend/agent.yaml
+EGRESS_CA_CERT_FILE=/absolute/path/.agents/frontend/egress-ca/ca.crt
 NVT_AGENT_CONFIG_FILE=/nvt-agent/agent.yaml
 
 NVT_BROKER_URL=http://broker:7347
@@ -556,6 +562,17 @@ CLAUDE_CONFIG_DIR=/absolute/path/.agents/frontend/auth/claude
 The workspace is bind-mounted at the same absolute path inside the container.
 This is also mounted into the per-agent Docker sidecar at the same path, so
 Docker Compose bind mounts from the workspace resolve correctly.
+
+In mediated local compose mode, `agent-init` creates or reuses a durable
+per-agent egress CA under `.agents/<name>/egress-ca/`, matching Kubernetes'
+per-run CA semantics. The agent container mounts only `ca.crt` at
+`/nvt-egress-ca/ca.crt`; the private key path is kept out of the agent env and
+`ca.key` is mounted only into egressd. Local compose runs the trusted egressd
+sidecar as root so the bind-mounted key can remain `0600`. Restarting or
+recreating only the egressd container keeps the same CA fingerprint, so the
+agent trust store does not drift. To rotate the local egress CA, stop the agent
+and delete `.agents/<name>/egress-ca/`; the next mediated `agent-init`
+recreates it.
 
 ## Local Broker
 

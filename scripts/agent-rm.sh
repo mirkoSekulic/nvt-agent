@@ -46,6 +46,7 @@ bash "$script_dir/validate-agent-name.sh" "$name"
 
 agent_dir="$repo_root/.agents/$name"
 env_file="$agent_dir/env"
+egressd_env_file="$agent_dir/egressd.env"
 
 if [ ! -d "$agent_dir" ]; then
   echo "agent $name does not exist"
@@ -65,9 +66,13 @@ if [ "$force" -ne 1 ]; then
 fi
 
 if [ -f "$env_file" ]; then
+  compose_env_args=(--env-file "$env_file")
+  if [ -f "$egressd_env_file" ]; then
+    compose_env_args+=(--env-file "$egressd_env_file")
+  fi
   docker compose \
     -p "agent-$name" \
-    --env-file "$env_file" \
+    "${compose_env_args[@]}" \
     -f "$repo_root/compose.agent.yaml" \
     down -v
 fi

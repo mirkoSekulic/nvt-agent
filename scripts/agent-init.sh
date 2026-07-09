@@ -176,6 +176,9 @@ env_file="$agent_dir/env"
 agent_config_file="$agent_dir/agent.yaml"
 egressd_config_file="$agent_dir/egressd.json"
 egressd_env_file="$agent_dir/egressd.env"
+egress_ca_dir="$agent_dir/egress-ca"
+egress_ca_cert_file="$egress_ca_dir/ca.crt"
+egress_ca_key_file="$egress_ca_dir/ca.key"
 workspace_dir="$agent_dir/workspace"
 local_instructions_file="$workspace_dir/AGENTS.local.md"
 custom_plugins_dir="$agent_dir/custom-plugins"
@@ -243,6 +246,7 @@ if [ ! -f "$env_file" ]; then
     AGENT_CONFIG_FILE="$agent_config_file" \
     EGRESSD_CONFIG_FILE="$egressd_config_file" \
     EGRESSD_ENV_FILE="$egressd_env_file" \
+    EGRESS_CA_CERT_FILE="$egress_ca_cert_file" \
     NVT_BROKER_TOKEN="$broker_token" \
     MEDIATED="$mediated" \
     NVT_EGRESS_MODE="$egress_mode" \
@@ -297,7 +301,12 @@ PY
       printf 'EGRESSD_ENV_FILE=%s\n' "$egressd_env_file"
     } >>"$env_file"
   fi
-  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" "$agent_run_user" "$agent_home" <<'PY'
+  if ! grep -q '^EGRESS_CA_CERT_FILE=' "$env_file"; then
+    {
+      printf 'EGRESS_CA_CERT_FILE=%s\n' "$egress_ca_cert_file"
+    } >>"$env_file"
+  fi
+  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" "$agent_run_user" "$agent_home" "$egress_ca_cert_file" <<'PY'
 import sys
 from pathlib import Path
 
@@ -311,13 +320,14 @@ values = {
     # user + HOME + auth/home mount targets are driven by these two vars.
     "AGENT_RUN_USER": sys.argv[6],
     "AGENT_HOME": sys.argv[7],
+    "EGRESS_CA_CERT_FILE": sys.argv[8],
 }
 lines = path.read_text(encoding="utf-8").splitlines()
 seen = set()
 updated = []
 for line in lines:
     key = line.split("=", 1)[0] if "=" in line else ""
-    if key == "NVT_EGRESS_BROKER_TOKEN":
+    if key in {"NVT_EGRESS_BROKER_TOKEN", "EGRESS_CA_DIR", "EGRESS_CA_KEY_FILE"}:
         continue
     if key in values:
         updated.append(f"{key}={values[key]}")
@@ -387,9 +397,17 @@ if mode == "mediated":
         raise SystemExit("agent-init: mediated mode requires at least one header-inject grant with egress-hosts")
 PY
 
+mkdir -p "$egress_ca_dir"
+chmod 700 "$egress_ca_dir"
+if [ ! -e "$egress_ca_cert_file" ]; then
+  : >"$egress_ca_cert_file"
+fi
+chmod 644 "$egress_ca_cert_file" 2>/dev/null || true
+
 if [ "$egress_mode" = "mediated" ]; then
   {
     printf 'NVT_BROKER_TOKEN=%s\n' "$egress_token"
+    printf 'EGRESS_CA_KEY_FILE=%s\n' "$egress_ca_key_file"
   } >"$egressd_env_file"
   chmod 600 "$egressd_env_file"
 else
@@ -440,9 +458,56 @@ config = {
     "routes": routes,
 }
 if need_ca:
-    config["ca"] = {"publish_dir": "/nvt-egress-ca"}
+    config["ca"] = {
+        "cert_file": "/etc/nvt-egress-ca/ca.crt",
+        "key_file": "/etc/nvt-egress-ca/ca.key",
+    }
 target.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+  ca_init_args=()
+  while IFS= read -r arg; do
+    [ -n "$arg" ] && ca_init_args+=("$arg")
+  done < <(python3 - "$egressd_config_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not config.get("ca"):
+    raise SystemExit(0)
+for name in config.get("ca", {}).get("leaf_dns_names") or []:
+    print(f"--leaf-dns-name={name}")
+for route in (config.get("forward_proxy") or {}).get("inject_routes") or []:
+    host = route.get("host")
+    if host:
+        print(f"--upstream-leaf-name={host.lower()}")
+PY
+)
+  ca_configured="$(
+    python3 - "$egressd_config_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+print("1" if json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("ca") else "0")
+PY
+  )"
+  if [ "$ca_configured" = "1" ]; then
+    if [ -n "${NVT_EGRESS_CA_INIT_BIN:-}" ]; then
+      "$NVT_EGRESS_CA_INIT_BIN" \
+        --cert-file "$egress_ca_cert_file" \
+        --key-file "$egress_ca_key_file" \
+        "${ca_init_args[@]}"
+    else
+      docker run --rm \
+        --user 0:0 \
+        --entrypoint /usr/local/bin/egress-ca-init \
+        -v "$egress_ca_dir:/egress-ca" \
+        "${NVT_EGRESSD_IMAGE:-nvt-egressd:latest}" \
+        --cert-file /egress-ca/ca.crt \
+        --key-file /egress-ca/ca.key \
+        "${ca_init_args[@]}"
+    fi
+  fi
 else
   rm -f "$egressd_config_file"
 fi

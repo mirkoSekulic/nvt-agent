@@ -75,13 +75,13 @@ type Config struct {
 	BrokerCAFile string              `json:"broker_ca_file"`
 	Routes       []Route             `json:"routes"`
 	ForwardProxy *ForwardProxyConfig `json:"forward_proxy"`
-	// CA enables the boot-generated per-agent CA backing listen_tls: ca
-	// routes. Only the CA certificate is ever published; the key stays in
-	// egressd memory.
+	// CA enables the per-agent CA backing listen_tls: ca routes. Local
+	// compose and own-Pod enforcement load a durable keypair; same-Pod
+	// bootstrap-only configurations may still generate one at boot.
 	CA *CAConfig `json:"ca"`
 }
 
-// CAConfig configures the boot-generated per-agent CA.
+// CAConfig configures the per-agent CA.
 type CAConfig struct {
 	// PublishDir is where ca.crt is written for the agent container to
 	// trust (a shared volume mounted read-only on the agent side). Same-Pod
@@ -96,8 +96,8 @@ type CAConfig struct {
 	// bootstrapped, so TLS here would be circular.
 	ServeAddr string `json:"serve_addr"`
 	// CertFile and KeyFile load a durable CA keypair. Own-Pod enforcement uses
-	// these from a Secret so an egressd restart keeps the agent trust anchor
-	// stable. Same-Pod/local modes may leave both empty to generate at boot.
+	// these from a Secret and local compose uses host state so an egressd
+	// restart keeps the agent trust anchor stable.
 	CertFile string `json:"cert_file"`
 	KeyFile  string `json:"key_file"`
 }
@@ -200,11 +200,11 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.CA != nil {
-		if c.CA.PublishDir == "" && c.CA.ServeAddr == "" {
-			return fmt.Errorf("ca requires publish_dir or serve_addr")
-		}
 		if (c.CA.CertFile == "") != (c.CA.KeyFile == "") {
 			return fmt.Errorf("ca cert_file and key_file must be set together")
+		}
+		if c.CA.PublishDir == "" && c.CA.ServeAddr == "" && c.CA.CertFile == "" {
+			return fmt.Errorf("ca requires publish_dir, serve_addr, or cert_file/key_file")
 		}
 		// A synthetic leaf_dns_name must not collide with any real upstream —
 		// redirect route upstreams OR forward-proxy MITM hosts — or that SNI

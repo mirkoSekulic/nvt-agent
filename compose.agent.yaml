@@ -28,11 +28,15 @@ services:
       - ${CODEX_CONFIG_DIR}:${AGENT_HOME:-/root}/.codex
       - ${CLAUDE_CONFIG_DIR}:${AGENT_HOME:-/root}/.claude
       - agent-home:${AGENT_HOME:-/root}
-      # ca.crt only; the CA private key never leaves egressd process memory.
-      - egress-ca:/nvt-egress-ca:ro
+      # ca.crt only; the CA private key is mounted only into egressd.
+      - ${EGRESS_CA_CERT_FILE:-/dev/null}:/nvt-egress-ca/ca.crt:ro
 
   egressd:
     image: nvt-egressd:latest
+    # Local compose runs this trusted sidecar as root so a bind-mounted
+    # ca.key can stay 0600 instead of becoming group/world-readable. The
+    # agent container still receives only ca.crt.
+    user: "0:0"
     profiles:
       - mediated
     env_file:
@@ -41,7 +45,8 @@ services:
       NVT_EGRESSD_CONFIG: /config/egressd.json
     volumes:
       - ${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro
-      - egress-ca:/nvt-egress-ca
+      - ${EGRESS_CA_CERT_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.crt:ro
+      - ${EGRESS_CA_KEY_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.key:ro
     network_mode: service:docker
     depends_on:
       docker:
@@ -79,7 +84,6 @@ services:
 volumes:
   agent-home:
   docker-data:
-  egress-ca:
 
 networks:
   agents-proxy:
