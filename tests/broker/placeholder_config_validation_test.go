@@ -113,7 +113,6 @@ from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
 try:
     ClaudeOAuthProvider({"name": "claude-main", "config": {
         "credentials-file": "/tmp/claude-credentials.json",
-        "client-id": "test-client",
         "injection-hosts": ["api.anthropic.com"],
         "placeholder-file": {"path": ".claude/.credentials.json", "hosts": ["api.anthropic.com", "console.anthropic.com"]},
     }})
@@ -139,7 +138,6 @@ from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
 try:
     ClaudeOAuthProvider({"name": "claude-main", "config": {
         "credentials-file": "/tmp/claude-credentials.json",
-        "client-id": "test-client",
         "injection-hosts": ["api.anthropic.com"],
         "injection-extra-headers": {"Authorization": "Bearer nope"},
     }})
@@ -175,7 +173,6 @@ handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
 json.dump(creds, handle); handle.close()
 provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
     "credentials-file": handle.name,
-    "client-id": "test-client",
     "injection-hosts": ["api.anthropic.com"],
     "placeholder-file": {"path": ".claude/.credentials.json", "hosts": ["api.anthropic.com"]},
 }})
@@ -191,38 +188,6 @@ raise SystemExit("expected a placeholder-claim-unsafe error")
 	}
 	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "placeholder-claim-unsafe") {
 		t.Fatalf("expected placeholder-claim-unsafe rejection for nested non-scalar, got %s", out)
-	}
-}
-
-// TestClaudeCredentialsEnvCannotRefresh pins the persistence limitation:
-// credentials-env is a read-only broker source, so a refresh attempt fails
-// loudly instead of rotating a Claude refresh token into nowhere.
-func TestClaudeCredentialsEnvCannotRefresh(t *testing.T) {
-	out, err := runBrokerPython(t, `
-import json, os, time
-from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
-os.environ["CLAUDE_CREDS"] = json.dumps({"claudeAiOauth": {
-    "accessToken": "real-access",
-    "refreshToken": "real-refresh",
-    "expiresAt": int((time.time() + 60) * 1000),
-}})
-provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
-    "credentials-env": "CLAUDE_CREDS",
-    "client-id": "test-client",
-    "token-url": "http://127.0.0.1:1/token",
-}})
-try:
-    provider.files("agent", None, "rid")
-except Exception as exc:
-    print("REJECTED:", getattr(exc, "reason", type(exc).__name__), exc)
-    raise SystemExit(0)
-raise SystemExit("expected credentials-source-not-writable")
-`)
-	if err != nil {
-		t.Fatalf("expected clean rejection, got err=%v out=%s", err, out)
-	}
-	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "credentials-source-not-writable") {
-		t.Fatalf("expected credentials-source-not-writable rejection, got %s", out)
 	}
 }
 
@@ -257,6 +222,131 @@ print("USER_AGENT", provider.user_agent)
 		!strings.Contains(out, "OAUTH_BETA oauth-2025-04-20") ||
 		!strings.Contains(out, "USER_AGENT claude-code/2.1.202") {
 		t.Fatalf("expected observed Claude Code OAuth defaults, got %s", out)
+	}
+}
+
+// TestClaudeProviderValueResolvesLiteralOrEnv pins that client-id / oauth-beta /
+// user-agent each accept a literal or an env indirection (client-id-env, …),
+// that the two forms are mutually exclusive, and that the public default is
+// preserved when neither is set. This keeps documented client-id-env
+// configuration working instead of being silently ignored.
+func TestClaudeProviderValueResolvesLiteralOrEnv(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json, os, tempfile
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+creds = {"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": 4102444800000}}
+handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+json.dump(creds, handle); handle.close()
+
+# Default preserved when neither client-id nor client-id-env is set.
+default = ClaudeOAuthProvider({"name": "c", "config": {"credentials-file": handle.name}})
+assert default.client_id == "9d1c250a-e61b-44d9-88ed-5944d1962f5e", default.client_id
+
+# client-id-env resolves from the environment.
+os.environ["CLAUDE_CID"] = "operator-client-id"
+os.environ["CLAUDE_BETA"] = "operator-beta"
+resolved = ClaudeOAuthProvider({"name": "c", "config": {
+    "credentials-file": handle.name,
+    "client-id-env": "CLAUDE_CID",
+    "oauth-beta-env": "CLAUDE_BETA",
+}})
+assert resolved.client_id == "operator-client-id", resolved.client_id
+assert resolved.oauth_beta == "operator-beta", resolved.oauth_beta
+
+# Literal and env forms are mutually exclusive.
+try:
+    ClaudeOAuthProvider({"name": "c", "config": {
+        "credentials-file": handle.name,
+        "client-id": "x",
+        "client-id-env": "CLAUDE_CID",
+    }})
+except Exception as exc:
+    print("REJECTED:", exc)
+else:
+    raise SystemExit("expected mutual-exclusion rejection")
+
+# Empty env value is rejected rather than silently defaulting.
+os.environ["CLAUDE_EMPTY"] = ""
+try:
+    ClaudeOAuthProvider({"name": "c", "config": {
+        "credentials-file": handle.name,
+        "client-id-env": "CLAUDE_EMPTY",
+    }})
+except Exception as exc:
+    print("EMPTY-REJECTED:", exc)
+else:
+    raise SystemExit("expected empty-env rejection")
+print("OK")
+`)
+	if err != nil {
+		t.Fatalf("expected clean resolver behavior, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "REJECTED") || !strings.Contains(out, "cannot set both client-id and client-id-env") {
+		t.Fatalf("expected client-id/client-id-env mutual-exclusion rejection, got %s", out)
+	}
+	if !strings.Contains(out, "EMPTY-REJECTED") || !strings.Contains(out, "OK") {
+		t.Fatalf("expected empty-env rejection and OK, got %s", out)
+	}
+}
+
+// TestClaudeCredentialsEnvNeverNetworkRefreshes pins finding 1: a credentials-env
+// source is never network-refreshed (its rotation could not be persisted back to
+// an env var and would be lost on restart). Near expiry it serves the current
+// token without any upstream call; expired it fails closed on the mediated
+// injection path and vends the expired credential on the direct /v1/files path —
+// all without ever invoking the refresh exchange. credentials-file remains the
+// refreshable source.
+func TestClaudeCredentialsEnvNeverNetworkRefreshes(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json, os, time, tempfile
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+
+def cred(delta_seconds):
+    return json.dumps({"claudeAiOauth": {
+        "accessToken": "env-access", "refreshToken": "env-refresh",
+        "expiresAt": int((time.time() + delta_seconds) * 1000)}})
+
+# credentials-env cannot refresh; wire _refresh to explode if it is ever called.
+os.environ["CLAUDE_ENV_CRED"] = cred(60)  # near expiry (< 900s margin) but valid
+env = ClaudeOAuthProvider({"name": "c", "config": {
+    "credentials-env": "CLAUDE_ENV_CRED",
+    "injection-hosts": ["api.anthropic.com"]}})
+assert env._can_refresh() is False
+def boom(*a, **k):
+    raise AssertionError("credentials-env must never trigger a network refresh")
+env._refresh = boom
+
+# Near-expiry valid: mediated injection serves the current token, no refresh.
+headers, _exp, _strip = env.injection_headers("api.anthropic.com", "POST", "/v1/messages", "agent", None, "rid")
+assert headers["authorization"] == "Bearer env-access", headers
+
+# Expired: mediated injection fails closed (no refresh), direct files vends it.
+os.environ["CLAUDE_ENV_CRED"] = cred(-60)
+try:
+    env.injection_headers("api.anthropic.com", "POST", "/v1/messages", "agent", None, "rid")
+except Exception as exc:
+    print("ENV-FAILCLOSED:", getattr(exc, "reason", type(exc).__name__))
+else:
+    raise SystemExit("expected expired credentials-env injection to fail closed")
+files, _fexp, meta = env.files("agent", None, "rid")
+vended = json.loads(files[0]["content"])
+assert vended["claudeAiOauth"]["accessToken"] == "env-access", vended
+assert meta["refreshed"] is False, meta
+
+# credentials-file remains refreshable.
+handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+handle.write(cred(60)); handle.close()
+filed = ClaudeOAuthProvider({"name": "c", "config": {
+    "credentials-file": handle.name,
+    "injection-hosts": ["api.anthropic.com"]}})
+assert filed._can_refresh() is True
+print("OK")
+`)
+	if err != nil {
+		t.Fatalf("expected credentials-env to never network-refresh, got err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "ENV-FAILCLOSED: credentials-expired") || !strings.Contains(out, "OK") {
+		t.Fatalf("expected env fail-closed and file-refreshable, got %s", out)
 	}
 }
 

@@ -24,22 +24,46 @@ bootstrap, agentd, and egressd stay generic: bootstrap materializes the
 placeholder file by its returned ``path``, and egressd injects the returned
 headers with no Claude-specific logic.
 
-When ``claudeAiOauth.expiresAt`` is within the configured refresh margin, the
-provider refreshes with the broker-owned refresh token and persists rotated
-credential state before vending files or injection headers. Runtime bootstrap,
-agentd, and egressd stay generic.
+Refresh: the broker keeps the broker-side access token fresh over the network
+(an OAuth ``refresh_token`` exchange against ``token-url``, analogous to the
+Codex flow). Claude credentials only expose ``expiresAt`` for the *access*
+token; refresh-token expiry is unknown, so the broker refreshes the access
+token proactively (before ``expiresAt`` minus a safety margin) rather than
+waiting for a 401. Refresh is serialized: single-flight *within* the broker
+process (a thread lock) and *across* processes (an advisory ``flock`` on a lock
+file beside ``credentials-file``) so a second broker or the manual probe cannot
+run a competing refresh-token exchange and invalidate the rotation. It is
+rate-limit aware: on a transient upstream failure (HTTP 429/5xx) the sanitized
+failure is cached for a cooldown so Claude Code retries cannot storm the OAuth
+endpoint. A still-valid access token is served through a transient refresh
+failure; on the mediated injection path an expired one fails closed, while the
+direct ``/v1/files`` path still vends the (expired) real credential so Claude
+Code — which possesses the refresh token in direct mode — can self-refresh.
+
+Durability: network refresh requires a durable sink for the rotated credential,
+so it is only performed for a ``credentials-file`` source. A ``credentials-env``
+source cannot write a rotated credential back to an env var; refreshing it only
+in memory would be lost on restart, after which the broker would reload the
+now-stale (possibly already-rotated-away) env refresh token. So a
+``credentials-env`` source never triggers a network refresh: a still-valid token
+is served, an expired one fails closed on the mediated path. Token values never
+appear in logs, errors, or audit — only the upstream HTTP status and a safe
+OAuth error class are surfaced.
 """
 
+import fcntl
 import json
 import os
+import random
 import re
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
 from broker.plugins.github_app.provider import ProviderError
@@ -51,15 +75,29 @@ from broker.plugins.placeholder_file import (
 
 
 DEFAULT_FILE_NAME = ".credentials.json"
-# Observed from Claude Code CLI 2.1.202. This is a public OAuth client
-# identifier for the Claude Code application, not a user/subscription secret.
-# Keep it overrideable because Anthropic does not document it as stable.
+DEFAULT_BUNDLE_TTL_SECONDS = 1200
+# Claude Code's public OAuth token endpoint and client id. Both are overridable
+# in config (token-url/client-id) so a fake endpoint can be pinned in tests and
+# a future endpoint change needs no code change.
 DEFAULT_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# The refresh request must match the shape Claude Code's CLI sends or the OAuth
+# endpoint rejects it. anthropic-beta / User-Agent are observed from Claude Code
+# CLI 2.1.202; both are overridable in config since Anthropic does not document
+# them as stable.
 DEFAULT_OAUTH_BETA = "oauth-2025-04-20"
 DEFAULT_USER_AGENT = "claude-code/2.1.202"
-DEFAULT_REFRESH_MARGIN_SECONDS = 600
-DEFAULT_BUNDLE_TTL_SECONDS = 1200
+# Refresh the access token this many seconds before its expiresAt. Claude
+# credentials do not expose refresh-token expiry, so we cannot key off it; a
+# generous access-token margin keeps a usable token in hand well before Claude
+# Code would notice a 401 and start retrying.
+DEFAULT_REFRESH_MARGIN_SECONDS = 900
+# After a transient refresh failure, cache the sanitized failure for a cooldown
+# (with light jitter and exponential backoff up to the max) so concurrent Claude
+# CLI retries do not hammer the OAuth endpoint. Fail fast (or serve a still-valid
+# token) during the cooldown instead of re-calling upstream.
+DEFAULT_REFRESH_COOLDOWN_SECONDS = 90
+DEFAULT_REFRESH_COOLDOWN_MAX_SECONDS = 900
 
 # Non-secret subscription metadata copied into the placeholder file is
 # operator-trusted identity, but as defense in depth a copied value that looks
@@ -75,6 +113,18 @@ NONSECRET_FIELDS = ("scopes", "subscriptionType", "rateLimitTier")
 # RFC 7230 header field-name token, lowercased.
 _HEADER_NAME_RE = re.compile(r"^[a-z0-9!#$%&'*+.^_`|~-]+$")
 
+# A safe OAuth/API error code is a short enum-like token. Only such a value is
+# ever surfaced in a ProviderError message — never an error_description free
+# string or a raw response body, either of which could echo secret material.
+_SAFE_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+# Upstream OAuth error codes that mean the refresh token itself is no longer
+# usable: the operator must re-login. These are surfaced distinctly from the
+# transient (retryable) failures so an operator/alert can tell them apart.
+_LOGIN_REQUIRED_ERROR_CODES = frozenset(
+    {"invalid_grant", "unauthorized_client", "invalid_client", "access_denied"}
+)
+
 # The zero-entropy placeholder from protocol/injection.md. No injected header
 # value may collide with it (that would defeat the non-possession point).
 INJECTION_PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
@@ -89,20 +139,44 @@ class ClaudeOAuthProvider:
             fail(f"provider {self.name} config must be a YAML object")
         self.credentials_file, self.credentials_env = self._source()
         self.file_name = self._file_name()
-        self.token_url = string_value(self.config.get("token-url") or DEFAULT_TOKEN_URL, f"provider {self.name} config.token-url", required=True)
+        self.bundle_ttl_seconds = self._int_config("bundle-ttl-seconds", DEFAULT_BUNDLE_TTL_SECONDS)
+        self.token_url = string_value(
+            self.config.get("token-url") or DEFAULT_TOKEN_URL,
+            f"provider {self.name} config.token-url",
+            required=True,
+        )
         parsed = urlparse(self.token_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             fail(f"provider {self.name} config.token-url must be an http(s) URL")
-        self.client_id = self._provider_value("client-id", DEFAULT_CLIENT_ID, required=False)
-        self.oauth_beta = self._provider_value("oauth-beta", DEFAULT_OAUTH_BETA, required=False)
-        self.user_agent = self._provider_value("user-agent", DEFAULT_USER_AGENT, required=False)
+        # client-id / oauth-beta / user-agent each accept a literal (`client-id`)
+        # or an env indirection (`client-id-env`), mutually exclusive, falling
+        # back to the public Claude Code default when neither is set. This keeps
+        # existing documented `client-id-env` configuration working instead of
+        # silently ignoring it.
+        self.client_id = self._provider_value("client-id", DEFAULT_CLIENT_ID)
+        self.oauth_beta = self._provider_value("oauth-beta", DEFAULT_OAUTH_BETA)
+        self.user_agent = self._provider_value("user-agent", DEFAULT_USER_AGENT)
         self.refresh_margin_seconds = self._int_config("refresh-margin-seconds", DEFAULT_REFRESH_MARGIN_SECONDS)
-        self.bundle_ttl_seconds = self._int_config("bundle-ttl-seconds", DEFAULT_BUNDLE_TTL_SECONDS)
+        self.refresh_cooldown_seconds = self._int_config("refresh-cooldown-seconds", DEFAULT_REFRESH_COOLDOWN_SECONDS)
+        self.refresh_cooldown_max_seconds = self._int_config(
+            "refresh-cooldown-max-seconds", DEFAULT_REFRESH_COOLDOWN_MAX_SECONDS
+        )
+        if self.refresh_cooldown_max_seconds < self.refresh_cooldown_seconds:
+            self.refresh_cooldown_max_seconds = self.refresh_cooldown_seconds
+        # A file bundle must be usable for its whole TTL, so refresh far enough
+        # ahead that the whole bundle window stays covered.
         self.files_refresh_margin_seconds = max(self.refresh_margin_seconds, self.bundle_ttl_seconds)
         self.injection_hosts = injection_hosts(self.config, self.name)
         self.injection_extra_headers = self._injection_extra_headers()
         self.placeholder = self._placeholder_config()
-        self.lock = threading.Lock()
+        # Single-flight refresh state. _refresh_lock serializes the upstream
+        # refresh call (and the re-read that lets a queued caller observe a
+        # just-refreshed credential without calling upstream itself); it does
+        # NOT serialize the common read-only path.
+        self._refresh_lock = threading.Lock()
+        self._cooldown_until = 0.0
+        self._cooldown_error = None
+        self._backoff_seconds = self.refresh_cooldown_seconds
 
     def _source(self):
         # Exactly one broker-side source of the Claude credentials. A host path
@@ -136,22 +210,29 @@ class ClaudeOAuthProvider:
         return value
 
     def _provider_value(self, key, default=None, required=True):
+        # Resolve a config value that may be given literally (``key``) or via an
+        # env indirection (``key-env``). The two are mutually exclusive; when
+        # neither is set the caller's ``default`` is used (or a config error is
+        # raised when required and no default exists). Restored so documented
+        # override fields (notably ``client-id-env``) keep working rather than
+        # being silently ignored.
         value = self.config.get(key)
         env_key = f"{key}-env"
         env_name = self.config.get(env_key)
         if value is not None and env_name is not None:
             fail(f"provider {self.name} cannot set both {key} and {env_key}")
         if value is not None:
-            if isinstance(value, int):
+            if isinstance(value, int) and not isinstance(value, bool):
                 return str(value)
             if isinstance(value, str) and value:
                 return value
             fail(f"provider {self.name} {key} must be a non-empty string or integer")
-        if isinstance(env_name, str):
-            value = env_value(env_name)
-            if not value:
-                fail(f"environment variable {env_name} must not be empty")
-            return value
+        if env_name is not None:
+            env_ref = string_value(env_name, f"provider {self.name} config.{env_key}", required=True)
+            resolved = env_value(env_ref)
+            if not resolved:
+                fail(f"environment variable {env_ref} must not be empty")
+            return resolved
         if default is not None:
             return default
         if required:
@@ -245,64 +326,183 @@ class ClaudeOAuthProvider:
         return token
 
     def _expiry_seconds(self, oauth):
+        # claudeAiOauth.expiresAt is a millisecond epoch for the ACCESS token
+        # only. A missing/invalid value means no known provider-side expiry.
         exp_ms = oauth.get("expiresAt")
         if not isinstance(exp_ms, (int, float)) or isinstance(exp_ms, bool):
             return None
         return int(exp_ms // 1000)
 
-    def _expiry_rfc3339(self, oauth):
-        # claudeAiOauth.expiresAt is a millisecond epoch. Surface it as the
-        # injection/bundle expiry ceiling; a missing/invalid value means no
-        # provider-side expiry (the broker still caps file bundles by TTL).
-        exp = self._expiry_seconds(oauth)
-        if exp is None:
-            return None
-        return rfc3339(exp)
+    # --- proactive, single-flight refresh -----------------------------------
 
-    def _fresh_credentials(self, agent_id, audit, request_id, operation_prefix, refresh_margin_seconds=None):
+    def _can_refresh(self):
+        # Network refresh needs a durable sink for the rotated credential. Only a
+        # credentials-file source has one; a credentials-env source would lose the
+        # rotation on restart (and reload a possibly-invalid env refresh token),
+        # so it is never network-refreshed.
+        return self.credentials_file is not None
+
+    def _fresh_credentials(self, agent_id, audit, request_id, operation_prefix, margin=None, serve_expired=False):
+        """Return (data, oauth, access_token, exp_seconds, refreshed).
+
+        Reads current custody, refreshing proactively when the access token is
+        within ``margin`` of expiry. Refresh is single-flight (one upstream call
+        at a time, in-process and cross-process) and a transient failure is
+        served from a cached cooldown rather than re-attempted.
+
+        Expiry handling is the caller's contract: with ``serve_expired`` the
+        (possibly expired) credential is always returned (the direct
+        ``/v1/files`` path, where the agent holds the refresh token and can
+        self-refresh); without it an expired-and-unrefreshable credential fails
+        closed (the mediated injection path).
+        """
+        if margin is None:
+            margin = self.refresh_margin_seconds
         data, oauth = self._read_credentials()
         access_token = self._access_token(oauth)
-        self._refresh_token(oauth)
         exp = self._expiry_seconds(oauth)
-        if exp is None:
-            return data, oauth, access_token, None, False
-
         now = int(time.time())
-        if refresh_margin_seconds is None:
-            refresh_margin_seconds = self.refresh_margin_seconds
-        if exp - now > refresh_margin_seconds:
+        # Common path: comfortably valid (or no known expiry) — no refresh, no
+        # lock, no upstream call.
+        if exp is None or exp - now > margin:
             return data, oauth, access_token, exp, False
-
-        try:
-            refreshed_data = self._refresh(data, oauth)
-            self._write_credentials(refreshed_data)
-            refreshed_oauth = refreshed_data["claudeAiOauth"]
-            refreshed_access_token = self._access_token(refreshed_oauth)
-            refreshed_exp = self._expiry_seconds(refreshed_oauth)
-            audit.write(
-                request_id=request_id,
-                agent=agent_id,
-                provider=self.name,
-                operation=f"{operation_prefix}.refresh",
-                allowed=True,
-                expires_at=rfc3339(refreshed_exp) if refreshed_exp is not None else None,
+        # Near/at expiry but this source cannot durably persist a rotation:
+        # never call upstream. Serve a still-valid token; fail closed (or serve
+        # the expired credential on the direct path) once actually expired. No
+        # refresh was attempted, so no refresh audit event is emitted.
+        if not self._can_refresh():
+            if exp > now or serve_expired:
+                return data, oauth, access_token, exp, False
+            raise self._expired_failure()
+        # Near/at expiry. Serialize so concurrent callers — threads in this
+        # broker and other processes (a second broker, the manual probe) sharing
+        # the credentials-file — collapse to at most one upstream refresh call.
+        with self._refresh_guard():
+            data, oauth = self._read_credentials()
+            access_token = self._access_token(oauth)
+            exp = self._expiry_seconds(oauth)
+            now = int(time.time())
+            # A concurrent caller may have already refreshed and persisted.
+            if exp is not None and exp - now > margin:
+                return data, oauth, access_token, exp, False
+            if time.monotonic() < self._cooldown_until:
+                # Cooling down after a recent failure: never call upstream (no
+                # refresh attempt, so no refresh audit event — the cooldown must
+                # not manufacture noisy duplicate upstream-refresh events). Serve
+                # a still-valid token; fail closed only once actually expired.
+                if exp is not None and exp > now:
+                    self._log("refresh in cooldown; serving current valid access token")
+                    return data, oauth, access_token, exp, False
+                if serve_expired:
+                    return data, oauth, access_token, exp, False
+                raise self._cooldown_failure()
+            try:
+                refreshed = self._refresh(data, oauth)
+            except ProviderError as error:
+                self._enter_cooldown(error)
+                # Audit every genuine upstream-refresh attempt failure exactly
+                # once, even when a still-valid token is then served, so an
+                # operator sees the failure before the token actually expires.
+                self._audit_refresh(audit, request_id, agent_id, operation_prefix, False, None, error.reason)
+                if exp is not None and exp > now:
+                    self._log(f"refresh failed ({error.reason}); serving current valid access token")
+                    return data, oauth, access_token, exp, False
+                if serve_expired:
+                    self._log(f"refresh failed ({error.reason}); vending expired credential for self-refresh")
+                    return data, oauth, access_token, exp, False
+                # Expired and refresh failed on the mediated path: fail closed.
+                raise
+            self._persist(refreshed)
+            self._reset_cooldown()
+            data = refreshed
+            oauth = data["claudeAiOauth"]
+            access_token = self._access_token(oauth)
+            exp = self._expiry_seconds(oauth)
+            self._audit_refresh(
+                audit, request_id, agent_id, operation_prefix, True,
+                rfc3339(exp) if exp is not None else None, None,
             )
-            return refreshed_data, refreshed_oauth, refreshed_access_token, refreshed_exp, True
-        except ProviderError as error:
-            if error.reason == "credentials-source-not-writable":
-                raise
-            if exp <= now:
-                raise
-            print(f"claude-oauth provider {self.name}: refresh failed; serving current valid access token", flush=True)
-            return data, oauth, access_token, exp, False
+            return data, oauth, access_token, exp, True
+
+    def _enter_cooldown(self, error):
+        backoff = self._backoff_seconds or self.refresh_cooldown_seconds
+        jitter = backoff * 0.1 * random.random()
+        self._cooldown_until = time.monotonic() + backoff + jitter
+        self._cooldown_error = error
+        self._backoff_seconds = min(backoff * 2, self.refresh_cooldown_max_seconds)
+
+    def _reset_cooldown(self):
+        self._cooldown_until = 0.0
+        self._cooldown_error = None
+        self._backoff_seconds = self.refresh_cooldown_seconds
+
+    def _cooldown_failure(self):
+        if self._cooldown_error is not None:
+            return self._cooldown_error
+        return ProviderError("token-refresh-failed", "Claude token refresh is in cooldown", 502)
+
+    def _expired_failure(self):
+        # Fail-closed sentinel for the mediated path when the access token is
+        # expired and no network refresh is possible (a credentials-env source,
+        # which cannot durably persist a rotation).
+        return ProviderError(
+            "credentials-expired",
+            "Claude access token is expired and this credential source cannot refresh",
+            502,
+        )
+
+    def _refresh_lock_path(self):
+        # Advisory cross-process lock file beside the credentials-file. Only a
+        # credentials-file source refreshes, so env sources have no lock file.
+        if self.credentials_file is None:
+            return None
+        return self.credentials_file.with_name(f".{self.credentials_file.name}.refresh.lock")
+
+    @contextmanager
+    def _refresh_guard(self):
+        # Serialize the refresh critical section against other threads in this
+        # broker (the in-process lock) AND other processes that share the same
+        # credentials-file — a second broker instance or the manual refresh probe
+        # (an flock on a lock file). Without the cross-process lock, two rotating
+        # refresh-token exchanges could interleave and invalidate each other's
+        # rotation. Callers re-read the credential after acquiring the guard so a
+        # rotation persisted by whoever held it first is observed.
+        with self._refresh_lock:
+            lock_path = self._refresh_lock_path()
+            if lock_path is None:
+                yield
+                return
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def _audit_refresh(self, audit, request_id, agent_id, operation_prefix, allowed, expires_at, reason):
+        if audit is None:
+            return
+        fields = {
+            "request_id": request_id,
+            "agent": agent_id,
+            "provider": self.name,
+            "operation": f"{operation_prefix}.refresh",
+            "allowed": allowed,
+            "expires_at": expires_at,
+        }
+        if reason:
+            fields["reason"] = reason
+        audit.write(**fields)
 
     def _refresh(self, data, oauth):
-        if self.credentials_file is None:
-            raise ProviderError(
-                "credentials-source-not-writable",
-                "Claude credentials-env cannot persist refreshed or rotated OAuth tokens",
-                502,
-            )
+        """Exchange the refresh token for a new access token.
+
+        On failure raises a ProviderError whose reason/message carry only the
+        upstream HTTP status and a safe OAuth error class — never token bytes,
+        Authorization headers, the request body, or a raw response body.
+        """
         refresh_token = self._refresh_token(oauth)
         body = json.dumps({
             "grant_type": "refresh_token",
@@ -314,96 +514,130 @@ class ClaudeOAuthProvider:
             method="POST",
             data=body,
             headers={
-                "Accept": "application/json",
                 "Content-Type": "application/json",
+                "Accept": "application/json",
                 "anthropic-beta": self.oauth_beta,
                 "User-Agent": self.user_agent,
             },
         )
         try:
             with urlopen(request, timeout=30) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                raw = response.read()
+            payload = json.loads(raw.decode("utf-8"))
         except HTTPError as error:
-            error.read()
-            raise ProviderError("token-refresh-failed", f"Claude token refresh failed: HTTP {error.code}", 502) from error
-        except URLError as error:
-            raise ProviderError("token-refresh-failed", "Claude token refresh failed: upstream unreachable", 502) from error
-        except json.JSONDecodeError as error:
-            raise ProviderError("token-refresh-failed", "Claude token refresh response was not valid JSON", 502) from error
+            raise self._classify_http_error(error) from None
+        except URLError:
+            raise ProviderError("token-refresh-failed", "Claude token refresh failed: upstream unreachable", 502) from None
+        except json.JSONDecodeError:
+            raise ProviderError("token-refresh-failed", "Claude token refresh response was not valid JSON", 502) from None
         if not isinstance(payload, dict):
             raise ProviderError("token-refresh-failed", "Claude token refresh response was not an object", 502)
         access_token = payload.get("access_token")
         if not isinstance(access_token, str) or not access_token:
             raise ProviderError("token-refresh-failed", "Claude token refresh response missing access_token", 502)
-
+        expires_in = payload.get("expires_in")
+        if not isinstance(expires_in, (int, float)) or isinstance(expires_in, bool) or expires_in <= 0:
+            raise ProviderError("token-refresh-failed", "Claude token refresh response missing expires_in", 502)
         updated = json.loads(json.dumps(data))
         updated_oauth = updated["claudeAiOauth"]
         updated_oauth["accessToken"] = access_token
-        refresh_token = payload.get("refresh_token")
-        if isinstance(refresh_token, str) and refresh_token:
-            updated_oauth["refreshToken"] = refresh_token
-
-        expires_at_ms = self._payload_expires_at_ms(payload)
-        if expires_at_ms is None:
-            raise ProviderError("token-refresh-failed", "Claude token refresh response missing expires_in", 502)
-        updated_oauth["expiresAt"] = expires_at_ms
-
-        scope = payload.get("scope")
-        if isinstance(scope, str) and scope:
-            updated_oauth["scopes"] = scope.split()
-        updated["last_refresh"] = datetime.now(timezone.utc).isoformat()
+        rotated = payload.get("refresh_token")
+        if isinstance(rotated, str) and rotated:
+            updated_oauth["refreshToken"] = rotated
+        updated_oauth["expiresAt"] = (int(time.time()) + int(expires_in)) * 1000
         return updated
 
-    def _payload_expires_at_ms(self, payload):
-        expires_in = payload.get("expires_in")
-        if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0:
-            return int((time.time() + expires_in) * 1000)
-        expires_at = payload.get("expires_at")
-        if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
-            if expires_at > 10_000_000_000:
-                return int(expires_at)
-            if expires_at > 0:
-                return int(expires_at * 1000)
+    def _classify_http_error(self, error):
+        status = error.code
+        code = self._safe_error_code(error)
+        if status == 429:
+            reason = "token-refresh-rate-limited"
+            message = f"Claude token refresh rate limited: HTTP {status}"
+        elif 500 <= status < 600:
+            reason = "token-refresh-failed"
+            message = f"Claude token refresh failed: HTTP {status}"
+        elif status in (400, 401, 403) or code in _LOGIN_REQUIRED_ERROR_CODES:
+            reason = "token-refresh-login-required"
+            message = f"Claude token refresh requires re-login: HTTP {status}"
+        else:
+            reason = "token-refresh-failed"
+            message = f"Claude token refresh failed: HTTP {status}"
+        if code:
+            message = f"{message} ({code})"
+        return ProviderError(reason, message, 502)
+
+    def _safe_error_code(self, error):
+        # Extract only a short enum-like error code from the response. Never
+        # surface error_description free text or a raw body (either could echo
+        # credential material). Must not raise.
+        try:
+            raw = error.read(4096)
+        except Exception:
+            return None
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            return None
+        code = None
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, str):
+                code = err
+            elif isinstance(err, dict):
+                code = err.get("type") or err.get("code")
+            if code is None:
+                code = payload.get("type")
+        if isinstance(code, str) and _SAFE_ERROR_CODE_RE.match(code):
+            return code
         return None
 
-    def _write_credentials(self, data):
+    def _persist(self, data):
+        # Only a credentials-file source is ever refreshed (see _can_refresh), so
+        # a rotated credential always has a durable sink. Guard defensively.
         if self.credentials_file is None:
             raise ProviderError(
-                "credentials-source-not-writable",
-                "Claude credentials-env cannot persist refreshed or rotated OAuth tokens",
+                "refresh-source-unpersistable",
+                "credentials-env source cannot persist a rotated Claude credential",
                 502,
             )
-        self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
+        self._write_credentials(data)
+
+    def _write_credentials(self, data):
+        path = self.credentials_file
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            mode = self.credentials_file.stat().st_mode & 0o777
+            mode = path.stat().st_mode & 0o777
         except FileNotFoundError:
             mode = 0o600
-        temporary = self.credentials_file.with_name(f".{self.credentials_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         try:
             with temporary.open("w", encoding="utf-8") as file:
                 json.dump(data, file, indent=2)
                 file.write("\n")
             temporary.chmod(mode)
-            os.replace(temporary, self.credentials_file)
+            os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def _log(self, message):
+        # Provider diagnostics only — callers must never pass token material.
+        print(f"claude-oauth provider {self.name}: {message}", flush=True)
 
     # --- direct / file-bundle mode ------------------------------------------
 
     def files(self, agent_id, audit, request_id):
         # Insecure dev/fallback path: the agent receives the real credential
         # (access + refresh token). Mediated mode is the zero-possession path.
-        with self.lock:
-            data, oauth, _access_token, _exp, refreshed = self._fresh_credentials(
-                agent_id,
-                audit,
-                request_id,
-                "files",
-                self.files_refresh_margin_seconds,
-            )
-            expires_at = self._expiry_rfc3339(oauth)
+        # serve_expired: direct mode is possession — the agent holds the refresh
+        # token, so vend even an expired credential (Claude Code self-refreshes)
+        # rather than failing closed the way the mediated injection path does.
+        data, _oauth, _access_token, exp, refreshed = self._fresh_credentials(
+            agent_id, audit, request_id, "files", self.files_refresh_margin_seconds,
+            serve_expired=True,
+        )
         content = json.dumps(data, indent=2) + "\n"
         files = [{"name": self.file_name, "content": content, "mode": "0600"}]
+        expires_at = rfc3339(exp) if exp is not None else None
         return files, expires_at, {"access_token_expires_at": expires_at, "refreshed": refreshed}
 
     # --- mediated placeholder mode ------------------------------------------
@@ -411,16 +645,13 @@ class ClaudeOAuthProvider:
     def placeholder_files(self, agent_id, audit, request_id, grant=None):
         if self.placeholder is None:
             raise ProviderError("placeholder-files-not-configured", f"provider {self.name} has no placeholder-file config", 403)
-        with self.lock:
-            # Read (and validate) the real credential so custody is proven and a
-            # missing/broken broker credential fails loudly — but the real
-            # accessToken/refreshToken are NEVER emitted into the file.
-            _data, oauth, _access_token, _exp, _refreshed = self._fresh_credentials(
-                agent_id,
-                audit,
-                request_id,
-                "placeholder",
-            )
+        # Read (and validate) the real credential so custody is proven and a
+        # missing/broken broker credential fails loudly — but the real
+        # accessToken/refreshToken are NEVER emitted into the file. This is a
+        # pure custody proof; it does not trigger a network refresh (the
+        # placeholder carries only inert tokens with a far-future expiry).
+        _data, oauth = self._read_credentials()
+        self._access_token(oauth)
         placeholder_oauth = {
             "accessToken": render_plain(),
             "refreshToken": render_plain(),
@@ -461,20 +692,55 @@ class ClaudeOAuthProvider:
     # --- mediated edge injection --------------------------------------------
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
-        with self.lock:
-            _data, oauth, access_token, _exp, _refreshed = self._fresh_credentials(
-                agent_id,
-                audit,
-                request_id,
-                "injection",
-            )
-            expires_at = self._expiry_rfc3339(oauth)
+        _data, _oauth, access_token, exp, _refreshed = self._fresh_credentials(
+            agent_id, audit, request_id, "injection"
+        )
         headers = {"authorization": f"Bearer {access_token}"}
         headers.update(self.injection_extra_headers)
         # Every injected name is stripped from the incoming request so the
         # agent's placeholder version is removed before injection.
         strip = list(headers.keys())
+        expires_at = rfc3339(exp) if exp is not None else None
         return headers, expires_at, strip
+
+    # --- manual refresh probe (broker-side operator tool) -------------------
+
+    def force_refresh(self):
+        """One-shot refresh for the manual probe (scripts/claude-refresh-probe.py).
+
+        Persists rotated tokens on success and returns ONLY redacted metadata —
+        never token values. Refuses a credentials-env source because a rotated
+        credential cannot be written back to an env var.
+
+        Uses the same cross-process refresh guard as the broker's own refresh, so
+        running the probe against a live broker cannot race its refresh: the two
+        rotating refresh-token exchanges serialize on the shared lock file rather
+        than both spending the same refresh token and invalidating each other.
+        """
+        if self.credentials_env is not None:
+            raise ProviderError(
+                "refresh-source-unpersistable",
+                "credentials-env source cannot persist rotated Claude tokens; configure credentials-file",
+                400,
+            )
+        with self._refresh_guard():
+            data, oauth = self._read_credentials()
+            self._access_token(oauth)
+            old_exp = self._expiry_seconds(oauth)
+            old_refresh = oauth.get("refreshToken")
+            refreshed = self._refresh(data, oauth)
+            self._persist(refreshed)
+            self._reset_cooldown()
+            new_oauth = refreshed["claudeAiOauth"]
+            new_exp = self._expiry_seconds(new_oauth)
+            return {
+                "status": "ok",
+                "source": "credentials-file",
+                "keys": sorted(new_oauth.keys()),
+                "old_expires_at": rfc3339(old_exp) if old_exp is not None else None,
+                "new_expires_at": rfc3339(new_exp) if new_exp is not None else None,
+                "refresh_token_rotated": bool(new_oauth.get("refreshToken") != old_refresh),
+            }
 
 
 def rfc3339(exp):
