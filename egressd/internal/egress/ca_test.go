@@ -201,9 +201,9 @@ func TestCAEndpointServesOnlyCertificate(t *testing.T) {
 	}
 }
 
-// TestCAConfigLeafNamesAndServeAddr pins the config rules: the ca block
-// needs a distribution path (publish_dir or serve_addr), and leaf names may
-// never name a route upstream.
+// TestCAConfigLeafNamesAndServeAddr pins the config rules: the ca block needs
+// a distribution path or durable keypair, and leaf names may never name a route
+// upstream.
 func TestCAConfigLeafNamesAndServeAddr(t *testing.T) {
 	base := func() *Config {
 		return &Config{
@@ -222,7 +222,7 @@ func TestCAConfigLeafNamesAndServeAddr(t *testing.T) {
 	}
 	noDistribution := base()
 	noDistribution.CA = &CAConfig{}
-	if err := noDistribution.Validate(); err == nil || !strings.Contains(err.Error(), "publish_dir or serve_addr") {
+	if err := noDistribution.Validate(); err == nil || !strings.Contains(err.Error(), "publish_dir, serve_addr, or cert_file/key_file") {
 		t.Fatalf("expected missing distribution path rejection, got %v", err)
 	}
 	upstreamLeaf := base()

@@ -17,10 +17,15 @@ for env_file in "$agents_dir"/*/env; do
 
   name="${AGENT_NAME:-$(basename "$(dirname "$env_file")")}"
   bash "$script_dir/validate-agent-name.sh" "$name"
+  egressd_env_file="$agents_dir/$name/egressd.env"
+  compose_env_args=(--env-file "$env_file")
+  if [ -f "$egressd_env_file" ]; then
+    compose_env_args+=(--env-file "$egressd_env_file")
+  fi
 
   docker compose \
     -p "agent-$name" \
-    --env-file "$env_file" \
+    "${compose_env_args[@]}" \
     -f "$repo_root/compose.agent.yaml" \
     down
 

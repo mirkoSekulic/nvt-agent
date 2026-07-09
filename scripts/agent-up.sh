@@ -40,6 +40,7 @@ repo_root="$(cd "$script_dir/.." && pwd -P)"
 bash "$script_dir/validate-agent-name.sh" "$name"
 
 env_file="$repo_root/.agents/$name/env"
+egressd_env_file="$repo_root/.agents/$name/egressd.env"
 
 if [ ! -f "$env_file" ]; then
   echo "agent $name is not initialized; run: make agent-init NAME=$name" >&2
@@ -62,9 +63,14 @@ if ! docker network inspect agents-proxy >/dev/null 2>&1; then
   docker network create agents-proxy >/dev/null
 fi
 
+compose_env_args=(--env-file "$env_file")
+if [ -f "$egressd_env_file" ]; then
+  compose_env_args+=(--env-file "$egressd_env_file")
+fi
+
 docker compose \
   -p "agent-$name" \
-  --env-file "$env_file" \
+  "${compose_env_args[@]}" \
   -f "$repo_root/compose.agent.yaml" \
   -f "$expose_compose_file" \
   up -d
