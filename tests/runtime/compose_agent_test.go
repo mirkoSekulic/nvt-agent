@@ -875,9 +875,10 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 func TestAgentInitRendersToolPreseed(t *testing.T) {
 	root := repoRoot(t)
 	tests := []struct {
-		name string
-		typ  string
-		want []string
+		name                  string
+		typ                   string
+		want                  []string
+		wantDisableAutoupdate string
 	}{
 		{
 			name: "codex",
@@ -888,6 +889,7 @@ func TestAgentInitRendersToolPreseed(t *testing.T) {
 				"overwrite: false",
 				"check_for_update_on_startup = false",
 			},
+			wantDisableAutoupdate: "",
 		},
 		{
 			name: "claude",
@@ -899,6 +901,7 @@ func TestAgentInitRendersToolPreseed(t *testing.T) {
 				"theme: dark-daltonized",
 				"skipDangerousModePermissionPrompt: true",
 			},
+			wantDisableAutoupdate: "1",
 		},
 	}
 	for _, tt := range tests {
@@ -919,6 +922,10 @@ func TestAgentInitRendersToolPreseed(t *testing.T) {
 				if !strings.Contains(config, want) {
 					t.Fatalf("agent.yaml missing %q\n%s", want, config)
 				}
+			}
+			env := mustReadFile(t, filepath.Join(agentDir, "env"))
+			if !strings.Contains(env, "DISABLE_AUTOUPDATER="+tt.wantDisableAutoupdate+"\n") {
+				t.Fatalf("env missing expected DISABLE_AUTOUPDATER=%q\n%s", tt.wantDisableAutoupdate, env)
 			}
 		})
 	}

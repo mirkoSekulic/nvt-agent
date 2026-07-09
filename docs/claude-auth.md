@@ -85,6 +85,10 @@ To seed a local dev credential, log in with Claude Code once on a trusted host
 and copy the resulting `~/.claude/.credentials.json` to the broker-side path.
 The file is broker-owned; it never needs to exist inside the agent container.
 
+Claude Code tries to auto-update its installed package by default. nvt sets
+`DISABLE_AUTOUPDATER=1` for Claude agent containers so ephemeral root/non-root
+images do not fail startup with npm-prefix write-permission warnings.
+
 ### Direct / local fallback mode
 
 Vends a usable `.credentials.json` into the agent. This is the insecure

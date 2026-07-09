@@ -2079,6 +2079,9 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 	if brokerCADistributed() {
 		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_BROKER_CA_FILE", Value: agentBrokerCAFile})
 	}
+	if agentRun.Spec.Runtime.Type == "claude" {
+		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "DISABLE_AUTOUPDATER", Value: "1"})
+	}
 	if AgentRunNonRoot(agentRun) {
 		// Run the agent as the image's `agent` user; set HOME + NVT_STATE_DIR so
 		// $HOME-relative bootstrap/entrypoint target /home/agent (the baked

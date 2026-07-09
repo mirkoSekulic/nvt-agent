@@ -243,6 +243,31 @@ func TestDesiredAgentPodDefaultUserIsRootUnchanged(t *testing.T) {
 	}
 }
 
+func TestDesiredAgentPodDisablesClaudeAutoUpdater(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Runtime.Type = "claude"
+
+	pod, err := DesiredAgentPod(agentRun, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired pod: %v", err)
+	}
+	agent := requireContainer(t, *pod, "agent")
+	if got := envValue(agent, "DISABLE_AUTOUPDATER"); got != "1" {
+		t.Fatalf("Claude AgentRun must disable auto-updater, got %q", got)
+	}
+
+	codexRun := testAgentRun()
+	codexRun.Spec.Runtime.Type = "codex"
+	pod, err = DesiredAgentPod(codexRun, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired codex pod: %v", err)
+	}
+	agent = requireContainer(t, *pod, "agent")
+	if got := envValue(agent, "DISABLE_AUTOUPDATER"); got != "" {
+		t.Fatalf("non-Claude AgentRun must not set DISABLE_AUTOUPDATER, got %q", got)
+	}
+}
+
 // TestDesiredAgentPodNonRootUser pins the opt-in non-root shape: uid/gid 1000,
 // HOME + state under /home/agent, pod fsGroup 1000, and the codex auth path +
 // group-writable seed under /home/agent.

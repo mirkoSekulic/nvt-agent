@@ -163,6 +163,11 @@ else:
 PY
 )"
 
+disable_autoupdater=""
+if [ "$agent_type" = "claude" ]; then
+  disable_autoupdater="1"
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 templates_dir="$repo_root/templates"
@@ -250,6 +255,7 @@ if [ ! -f "$env_file" ]; then
     COMPOSE_PROFILES="$compose_profiles" \
     CODEX_CONFIG_DIR="$codex_config_dir" \
     CLAUDE_CONFIG_DIR="$claude_config_dir" \
+    DISABLE_AUTOUPDATER="$disable_autoupdater" \
     AGENT_RUN_USER="$agent_run_user" \
     AGENT_HOME="$agent_home" \
     render_template "$templates_dir/env" "$env_file"
@@ -297,7 +303,7 @@ PY
       printf 'EGRESSD_ENV_FILE=%s\n' "$egressd_env_file"
     } >>"$env_file"
   fi
-  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" "$agent_run_user" "$agent_home" <<'PY'
+  python3 - "$env_file" "$mediated" "$egress_mode" "$egress_allow_insecure_broker" "$compose_profiles" "$agent_run_user" "$agent_home" "$disable_autoupdater" <<'PY'
 import sys
 from pathlib import Path
 
@@ -311,6 +317,7 @@ values = {
     # user + HOME + auth/home mount targets are driven by these two vars.
     "AGENT_RUN_USER": sys.argv[6],
     "AGENT_HOME": sys.argv[7],
+    "DISABLE_AUTOUPDATER": sys.argv[8],
 }
 lines = path.read_text(encoding="utf-8").splitlines()
 seen = set()
