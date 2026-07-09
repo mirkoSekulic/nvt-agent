@@ -252,7 +252,7 @@ if [ "${GITHUB_ENTERPRISE_TOKEN+x}" = "x" ]; then
   echo "GITHUB_ENTERPRISE_TOKEN must be unset" >&2
   exit 1
 fi
-if [ "${HTTPS_PROXY:-}" != "http://127.0.0.1:8470" ]; then
+if [ "${HTTPS_PROXY:-}" != "http://fork-app@127.0.0.1:8470" ]; then
   echo "unexpected HTTPS_PROXY=${HTTPS_PROXY:-}" >&2
   exit 1
 fi

@@ -702,6 +702,14 @@ func TestBootstrapForwardProxyInstallsCATrust(t *testing.T) {
 	f := newFixture(t)
 	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
 	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" != "placeholder-files" ] || [ "$2" != "--provider" ] || [ "$3" != "codex-main" ]; then
+  echo "unexpected brokerctl args: $*" >&2
+  exit 1
+fi
+printf '%s\n' '{"ok":true,"files":[{"path":".codex/auth.json","content":"{\"access_token\":\"NVT-PLACEHOLDER-NOT-A-KEY\"}\n","mode":"0600"}],"hosts":["chatgpt.com"],"expires_at":"2099-01-01T00:00:00Z"}'
+`)
 	caFile := filepath.Join(t.TempDir(), "ca.crt")
 	mustWriteFile(t, caFile, testCertificatePEM(t))
 	trustDir := t.TempDir()
@@ -713,9 +721,13 @@ egress:
   enforcement: true
   forward-proxy: true
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
-  grants: []
+  grants:
+    - provider: codex-main
+      materialization: placeholder-file
 runtime:
   command: bash
+  proxy:
+    provider: codex-main
 tools:
   packages: []
   mise: []
@@ -746,8 +758,158 @@ code-server:
 	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"`) {
 		t.Fatalf("forward proxy URL not exported for mediated tools:\n%s", envFile)
 	}
+	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN="http://codex-main@127.0.0.1:8470"`) {
+		t.Fatalf("provider-selected forward proxy URL not exported for mediated tools:\n%s", envFile)
+	}
+	if !strings.Contains(envFile, `export HTTPS_PROXY="http://codex-main@127.0.0.1:8470"`) ||
+		!strings.Contains(envFile, `export https_proxy="http://codex-main@127.0.0.1:8470"`) {
+		t.Fatalf("runtime proxy env not bound to selected provider:\n%s", envFile)
+	}
 	meta := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
 	if !strings.Contains(meta, `"forward_proxy": true`) {
 		t.Fatalf("egress.json missing forward_proxy marker:\n%s", meta)
+	}
+}
+
+func TestBootstrapForwardProxyRequiresRuntimeProxyProvider(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  enforcement: true
+  forward-proxy: true
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants:
+    - provider: claude-auth-mirko
+      materialization: placeholder-file
+runtime:
+  command: claude
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + t.TempDir(),
+		"NVT_CA_BUNDLE_FILE=" + filepath.Join(t.TempDir(), "bundle.crt"),
+	}, config)
+	if !strings.Contains(output, "runtime.proxy.provider is required") {
+		t.Fatalf("expected missing runtime proxy provider failure, got:\n%s", output)
+	}
+}
+
+func TestBootstrapForwardProxyRequiresRuntimeProxyProviderForImplicitCommand(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  enforcement: true
+  forward-proxy: true
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants:
+    - provider: claude-auth-mirko
+      materialization: placeholder-file
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + t.TempDir(),
+		"NVT_CA_BUNDLE_FILE=" + filepath.Join(t.TempDir(), "bundle.crt"),
+	}, config)
+	if !strings.Contains(output, "runtime.proxy.provider is required") {
+		t.Fatalf("expected missing runtime proxy provider failure for implicit command, got:\n%s", output)
+	}
+}
+
+func TestBootstrapForwardProxyHeaderInjectGrantSupportsRuntimeProxyProvider(t *testing.T) {
+	f := newFixture(t)
+	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
+	bundle := filepath.Join(t.TempDir(), "ca-bundle.crt")
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  enforcement: true
+  forward-proxy: true
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants:
+    - provider: static-bearer-main
+      materialization: header-inject
+runtime:
+  command: bash
+  proxy:
+    provider: static-bearer-main
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), true, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + t.TempDir(),
+		"NVT_CA_BUNDLE_FILE=" + bundle,
+	}, config)
+	if _, err := os.Stat(updateLog); err != nil {
+		t.Fatalf("forward-proxy header-inject bootstrap did not install CA trust:\n%s", output)
+	}
+	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
+	if !strings.Contains(envFile, `export HTTPS_PROXY="http://static-bearer-main@127.0.0.1:8470"`) {
+		t.Fatalf("runtime proxy env not bound for header-inject grant:\n%s", envFile)
+	}
+}
+
+func TestBootstrapRuntimeProxyProviderRequiresForwardProxy(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+egress:
+  mode: direct
+runtime:
+  command: claude
+  proxy:
+    provider: claude-auth-mirko
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}, config)
+	if !strings.Contains(output, "runtime.proxy.provider requires mediated forward-proxy egress") {
+		t.Fatalf("expected wrong-mode runtime proxy provider failure, got:\n%s", output)
 	}
 }

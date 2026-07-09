@@ -3,6 +3,7 @@ package egress
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -44,7 +45,12 @@ type ForwardProxy struct {
 	allowHosts    map[string]bool
 	allowPorts    map[int]bool
 	tunnelSlots   chan struct{}
-	injectProxies map[string]*Proxy
+	injectProxies map[string][]injectProxy
+}
+
+type injectProxy struct {
+	capability string
+	proxy      *Proxy
 }
 
 func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +67,13 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A CONNECT to an inject-route host is TLS-terminated and injected; every
 	// other host falls through to the blind-tunnel allowlist.
-	if proxy := p.injectProxy(target.host); proxy != nil {
+	proxy, found, err := p.injectProxy(target.host, capabilityHintFromConnect(r))
+	if err != nil {
+		p.writeDecision(target.host, target.port, "deny", "capability_not_allowed")
+		http.Error(w, "CONNECT capability not allowed", http.StatusForbidden)
+		return
+	}
+	if found {
 		p.serveMITM(w, target, proxy)
 		return
 	}
@@ -235,32 +247,73 @@ func (p *ForwardProxy) init() {
 			p.allowPorts[port] = true
 		}
 		p.tunnelSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
-		p.injectProxies = map[string]*Proxy{}
+		p.injectProxies = map[string][]injectProxy{}
 		for _, route := range p.Config.InjectRoutes {
 			host, err := normalizeProxyHost(route.Host)
 			if err != nil {
 				p.writeInvalidAllowHost(route.Host)
 				continue
 			}
-			p.injectProxies[host] = &Proxy{
-				Route: Route{
-					Capability:            route.Capability,
-					Upstream:              route.Upstream,
-					AllowInsecureUpstream: route.AllowInsecureUpstream,
-					MaxRequests:           route.MaxRequests,
+			p.injectProxies[host] = append(p.injectProxies[host], injectProxy{
+				capability: route.Capability,
+				proxy: &Proxy{
+					Route: Route{
+						Capability:            route.Capability,
+						Upstream:              route.Upstream,
+						AllowInsecureUpstream: route.AllowInsecureUpstream,
+						MaxRequests:           route.MaxRequests,
+					},
+					Broker:             p.Broker,
+					Transport:          p.Transport,
+					Reporter:           p.Reporter,
+					UpgradeIdleTimeout: p.Config.effectiveTunnelIdleTimeout(),
 				},
-				Broker:             p.Broker,
-				Transport:          p.Transport,
-				Reporter:           p.Reporter,
-				UpgradeIdleTimeout: p.Config.effectiveTunnelIdleTimeout(),
-			}
+			})
 		}
 	})
 }
 
-func (p *ForwardProxy) injectProxy(host string) *Proxy {
+func (p *ForwardProxy) injectProxy(host, capabilityHint string) (*Proxy, bool, error) {
 	p.init()
-	return p.injectProxies[host]
+	routes := p.injectProxies[host]
+	if len(routes) == 0 {
+		return nil, false, nil
+	}
+	if capabilityHint != "" {
+		for _, route := range routes {
+			if route.capability == capabilityHint {
+				return route.proxy, true, nil
+			}
+		}
+		return nil, true, fmt.Errorf("capability %q is not configured for host %s", capabilityHint, host)
+	}
+	if len(routes) == 1 {
+		return routes[0].proxy, true, nil
+	}
+	return nil, true, fmt.Errorf("host %s has multiple injectable capabilities and requires an explicit capability hint", host)
+}
+
+func capabilityHintFromConnect(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("X-NVT-Capability")); value != "" {
+		return value
+	}
+	value := strings.TrimSpace(r.Header.Get("Proxy-Authorization"))
+	if value == "" {
+		return ""
+	}
+	const prefix = "Basic "
+	if len(value) < len(prefix) || !strings.EqualFold(value[:len(prefix)], prefix) {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value[len(prefix):]))
+	if err != nil {
+		return ""
+	}
+	user, _, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		return ""
+	}
+	return user
 }
 
 func (p *ForwardProxy) writeInvalidAllowHost(host string) {

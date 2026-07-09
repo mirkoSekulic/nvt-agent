@@ -113,8 +113,14 @@ When `--provider` is omitted, `gh-auth` resolves from `--repo`, the current
 
 For `credential-kind: mediated`, `gh-auth` sets `GH_TOKEN` to the inert NVT
 placeholder and forces GitHub traffic through `NVT_EGRESS_FORWARD_PROXY_URL`.
-egressd strips the placeholder and injects the broker-owned credential. The
-agent process never receives the real token.
+It also encodes the selected `broker-provider` as the proxy username. That
+username is a non-secret capability selector: egressd consumes it from the
+CONNECT request, strips the placeholder, and injects the broker-owned
+credential for that exact provider. This lets one agent use multiple GitHub App
+providers for the same `github.com` / `api.github.com` hosts without host-based
+guessing. The broker still enforces the paired agent grant, host, method, path,
+and repository scope; naming an ungranted provider fails closed. The agent
+process never receives the real token.
 
 ## Security
 

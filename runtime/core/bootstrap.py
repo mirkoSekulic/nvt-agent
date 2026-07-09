@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import yaml
 
@@ -145,6 +146,61 @@ def persist_env_var(name, value):
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+
+
+def env_suffix(value):
+    suffix = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
+    if not suffix:
+        raise SystemExit(f"cannot derive env suffix from {value!r}")
+    return suffix
+
+
+def proxy_url_for_provider(proxy_url, provider):
+    parts = urlsplit(proxy_url)
+    if not parts.scheme or not parts.hostname:
+        raise SystemExit(f"egress.forward-proxy-url is not a valid proxy URL: {proxy_url!r}")
+    host = parts.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    netloc = f"{quote(provider, safe='')}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def runtime_proxy_provider(runtime):
+    proxy = runtime.get("proxy")
+    if proxy is None:
+        return None
+    if not isinstance(proxy, dict):
+        raise SystemExit("runtime.proxy must be a YAML object")
+    provider = proxy.get("provider")
+    if not isinstance(provider, str) or not provider:
+        raise SystemExit("runtime.proxy.provider must be a non-empty string")
+    return provider
+
+
+def apply_runtime_proxy(runtime, egress, command):
+    provider = runtime_proxy_provider(runtime)
+    forward_proxy = mediated_mode(egress) and bool(egress.get("forward-proxy"))
+    if provider is not None and not forward_proxy:
+        raise SystemExit("runtime.proxy.provider requires mediated forward-proxy egress")
+    if not command:
+        return
+    if forward_proxy and provider is None:
+        raise SystemExit("runtime.proxy.provider is required when runtime.command uses mediated forward-proxy egress")
+    if provider is None:
+        return
+    grants = egress.get("grants") or []
+    if not isinstance(grants, list):
+        raise SystemExit("egress.grants must be a list")
+    if not any(isinstance(grant, dict) and grant.get("provider") == provider for grant in grants):
+        raise SystemExit(f"runtime.proxy.provider {provider} is not present in egress.grants")
+    proxy_url = (egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL).rstrip("/")
+    selected = proxy_url_for_provider(proxy_url, provider)
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+        persist_env_var(name, selected)
 
 
 def persist_agent_command(command, args):
@@ -343,6 +399,7 @@ def apply_mediated_egress(egress):
     deadline = broker_wait_deadline()
     https_provider = None
     enforced = bool(egress.get("enforcement"))
+    forward_proxy = bool(egress.get("forward-proxy"))
     for index, grant in enumerate(grants):
         if not isinstance(grant, dict):
             raise SystemExit(f"egress.grants[{index}] must be an object")
@@ -356,6 +413,11 @@ def apply_mediated_egress(egress):
             continue
         if materialization != "header-inject":
             raise SystemExit(f"egress mediated grant {provider} must be materialization header-inject")
+        if forward_proxy:
+            # Forward-proxy header-inject grants are reached through
+            # HTTP(S)_PROXY and selected by runtime.proxy.provider or a tool
+            # wrapper. They intentionally have no redirect base-url.
+            continue
         base_url = grant.get("base-url")
         if not isinstance(base_url, str) or not base_url:
             raise SystemExit(f"egress mediated grant {provider} must include base-url")
@@ -368,12 +430,22 @@ def apply_mediated_egress(egress):
         if base_url.startswith("https://") and https_provider is None:
             https_provider = provider
         apply_redirect_env(provider, grant, placeholder)
-    forward_proxy = bool(egress.get("forward-proxy"))
     if forward_proxy:
         proxy_url = egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL
         if not isinstance(proxy_url, str) or not proxy_url.startswith(("http://", "https://")):
             raise SystemExit("egress.forward-proxy-url must be an http(s) URL")
-        persist_env_var("NVT_EGRESS_FORWARD_PROXY_URL", proxy_url.rstrip("/"))
+        proxy_url = proxy_url.rstrip("/")
+        persist_env_var("NVT_EGRESS_FORWARD_PROXY_URL", proxy_url)
+        for grant in grants:
+            if not isinstance(grant, dict):
+                continue
+            provider = grant.get("provider")
+            if not isinstance(provider, str) or not provider:
+                continue
+            persist_env_var(
+                "NVT_EGRESS_FORWARD_PROXY_URL_" + env_suffix(provider),
+                proxy_url_for_provider(proxy_url, provider),
+            )
     if enforced and (https_provider is not None or forward_proxy):
         # Forward-proxy mode has no https base-url to trigger the install, but
         # the MITM leaf must be trusted system-wide so proxy-env HTTPS clients
@@ -693,15 +765,17 @@ def setup_code_server(config):
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
+    command = optional_string(runtime.get("command"), "runtime.command")
+    effective_command = command or "codex"
 
     setup_tmux_config()
     apply_preseed_files(preseed)
     if mediated_mode(egress):
         apply_mediated_egress(egress)
+    apply_runtime_proxy(runtime, egress, effective_command)
     # Placeholder-file materialization is independent of egress mode: it writes
     # inert placeholder auth files whether or not mediated routing is applied.
     apply_placeholder_files(egress)
-    command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         # Kept for older helper scripts and diagnostics; start-agent-session uses
         # agent-command.json so runtime.args are passed without shell parsing.
