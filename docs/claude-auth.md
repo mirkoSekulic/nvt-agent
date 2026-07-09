@@ -62,9 +62,13 @@ a usable copy (direct) or an inert placeholder (mediated) into the agent.
 
 Point the provider at the credential with exactly one of:
 
-- `credentials-file`: an absolute host path to `.credentials.json` (local dev).
+- `credentials-file`: an absolute host path to `.credentials.json`. This is the
+  durable, refreshable source — required for broker-side token refresh (see
+  [Broker-side token refresh](#broker-side-token-refresh)).
 - `credentials-env`: the name of an env var holding the JSON (broker sidecar /
-  Kubernetes secret). No host path required.
+  Kubernetes secret). No host path required. Read-only: it is never
+  network-refreshed (a rotation cannot be persisted back to an env var), so use
+  it only when an out-of-band process keeps the credential fresh.
 
 `claude-oauth` defaults to the Claude Code OAuth token URL, public client id,
 OAuth beta header, and user-agent observed in Claude Code CLI 2.1.202:
@@ -196,36 +200,84 @@ These are pinned by `tests/broker/claude_auth_conformance_test.go` and
 
 ## Broker-side token refresh
 
-The broker implements Claude OAuth refresh before file-bundle vending,
-placeholder-file vending, and edge injection when `claudeAiOauth.expiresAt` is
-within `refresh-margin-seconds`. Successful refresh uses the configured or
-default `token-url`, `client-id` (or `client-id-env`), `oauth-beta`,
-`user-agent`, and broker-owned `refreshToken`, then persists the new
-`accessToken`, rotated `refreshToken` when returned, `expiresAt`, optional scope
-metadata, and `last_refresh`.
+The broker refreshes the broker-owned Claude OAuth access token before
+file-bundle vending and edge injection when `claudeAiOauth.expiresAt` is within
+`refresh-margin-seconds` (default 900). Claude credentials expose only the
+access-token `expiresAt` (refresh-token expiry is unknown), so refresh is
+proactive — ahead of expiry — rather than reactive to a 401. Successful refresh
+uses the configured or default `token-url`, `client-id` (or `client-id-env`),
+`oauth-beta`, `user-agent`, and broker-owned `refreshToken`, then persists the
+new `accessToken`, rotated `refreshToken` when returned, and recomputed
+`expiresAt`.
 
-This is required for mediated mode: the agent receives only placeholder
+Refresh is **single-flight**: concurrent callers collapse to at most one
+upstream refresh. Serialization is both in-process (a thread lock) and
+cross-process (an advisory `flock` on a lock file beside `credentials-file`,
+shared with the manual probe), so a second broker instance or the probe cannot
+run a competing refresh-token exchange that invalidates the rotation. A queued
+caller re-reads the just-refreshed credential instead of calling upstream. After
+a transient failure (HTTP 429/5xx/network) the sanitized failure is cached for
+`refresh-cooldown-seconds` (default 90, jittered, exponential backoff up to
+`refresh-cooldown-max-seconds`) so Claude Code retries cannot storm the OAuth
+endpoint. A request served from the cooldown makes no upstream call and emits no
+refresh audit event; a genuine upstream-refresh failure is audited once (a
+sanitized `<operation>.refresh` event with `allowed: false` and the reason, no
+token material) even when a still-valid token is then served.
+
+Placeholder-file vending does **not** trigger a refresh: the placeholder carries
+only inert tokens with a far-future expiry, so a placeholder fetch stays a pure
+custody proof and adds no upstream load.
+
+This is required for **mediated** mode: the agent receives only placeholder
 credentials, so it cannot self-refresh. If refresh fails while the current
 access token is still valid, the broker serves the current token and logs the
-fallback without exposing token bytes. If the token is expired, the request
-fails closed with `token-refresh-failed`.
+fallback without exposing token bytes. If the token is expired, the mediated
+injection request fails closed with a sanitized reason —
+`token-refresh-rate-limited` (429),
+`token-refresh-login-required` (`invalid_grant`/`unauthorized_client`, 400/401/403),
+or `token-refresh-failed` (5xx/network). Only the upstream HTTP status and a safe
+OAuth error class ever reach error messages or audit; token bytes, `Authorization`
+headers, request bodies, and raw response bodies never do.
 
-Use `credentials-file` for automatic refresh. `credentials-env` is read-only; if
-a refresh would be required, the provider fails with
-`credentials-source-not-writable` instead of rotating a refresh token into
-nowhere.
+The **direct** `/v1/files` path is different: it is a possession path where the
+agent holds the refresh token, so even when the access token is expired and a
+broker refresh fails, the broker still vends the well-formed (expired) real
+credential and lets Claude Code self-refresh. Only the mediated injection path
+fails closed on an expired token.
 
-### Real refresh proof gap
+Use `credentials-file` for durable refresh. A `credentials-env` source is
+**never network-refreshed**: a rotated credential cannot be written back to an
+env var, so refreshing it only in memory would be lost on restart — after which
+the broker would reload the now-stale (possibly already-rotated-away) env
+refresh token, a production/Kubernetes time bomb. A `credentials-env` source
+therefore serves a still-valid token and fails closed on the mediated path once
+expired, and the manual probe below refuses it outright.
 
-The refresh path is conformance-tested against the broker's fake OAuth endpoint:
-request shape, refresh-token rotation, valid-token fallback, expired-token
-failure, injection reuse, and placeholder non-leakage are all covered. This repo
-has not yet committed a manual proof that the observed Claude Code OAuth
-defaults successfully refresh a real Claude Code credential in a target
-environment.
+### Manual refresh proof
 
-Before treating mediated Claude refresh as production-ready, run a real
-broker-side refresh proof with a copied Claude credential, and verify that
+`scripts/claude-refresh-probe.py` runs a one-shot broker-side refresh against a
+configured provider. On success it persists the rotated credential to the
+broker-owned `credentials-file` and prints only redacted metadata (status,
+credential field names, old/new `expiresAt`, rotation flag) — never token bytes.
+It refuses a `credentials-env` source (which cannot persist a rotation).
+
+The probe is **safe to run against a live broker**: it takes the same
+cross-process refresh `flock` (beside `credentials-file`) that the broker's own
+refresh takes, so the probe and an in-broker refresh serialize on the shared
+lock rather than spending the same refresh token twice and invalidating each
+other's rotation. (It is still a manual/operator tool; routine refresh is
+automatic.)
+
+The refresh path is also conformance-tested against the broker's fake OAuth
+endpoint: request shape (JSON body, `anthropic-beta`/`User-Agent` headers),
+refresh-token rotation, single-flight collapse, cross-process probe/broker
+serialization, 429 cooldown/back-off, refresh-failure audit, valid-token
+fallback, mediated expired-token fail-closed vs. direct expired-credential
+self-refresh, `credentials-env` never-refresh, `invalid_grant` re-login
+classification, and no-token-leak in responses/logs/audit are all covered.
+
+Before treating mediated Claude refresh as production-ready, run the probe
+against a copied Claude credential in the target environment and verify that
 `expiresAt` and token material change only in the broker-owned credentials file
 without appearing in agent placeholder files, audit logs, or responses. If
 Anthropic changes the Claude Code OAuth app, set `client-id`/`client-id-env`,

@@ -122,6 +122,118 @@ func (f *fakeOAuth) lastRequest() map[string]string {
 	return f.requests[len(f.requests)-1]
 }
 
+// fakeClaudeOAuth is a fake Anthropic OAuth token endpoint for the claude-oauth
+// provider. Unlike the Codex fake it speaks JSON (request and response) and
+// returns an opaque access token plus expires_in, matching the Claude refresh
+// flow. It is independently controllable so tests can exercise rotation,
+// rate-limit (429), re-login (invalid_grant), and slow/concurrent refreshes.
+type fakeClaudeOAuth struct {
+	server    *httptest.Server
+	mu        sync.Mutex
+	requests  []map[string]any
+	status    int           // non-2xx status to return instead of a token, 0 for success
+	errorType string        // OAuth/API error code echoed in the error body
+	rotate    bool          // include a rotated refresh_token in the response
+	expiresIn int           // access token lifetime in seconds (default 3600)
+	delay     time.Duration // artificial latency, to widen the concurrency window
+	inFlight  int           // upstream refreshes currently being served
+	maxFlight int           // high-water mark of concurrent upstream refreshes
+}
+
+func newFakeClaudeOAuth(t *testing.T) *fakeClaudeOAuth {
+	t.Helper()
+	fake := &fakeClaudeOAuth{expiresIn: 3600}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.handleToken))
+	t.Cleanup(fake.server.Close)
+	return fake
+}
+
+func (f *fakeClaudeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	f.requests = append(f.requests, body)
+	count := len(f.requests)
+	status := f.status
+	errorType := f.errorType
+	rotate := f.rotate
+	expiresIn := f.expiresIn
+	delay := f.delay
+	// Track concurrent in-flight upstream refreshes so a test can assert the
+	// broker/probe cross-process lock actually serializes them.
+	f.inFlight++
+	if f.inFlight > f.maxFlight {
+		f.maxFlight = f.inFlight
+	}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
+	}()
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	if status != 0 && status/100 != 2 {
+		w.WriteHeader(status)
+		payload := map[string]any{}
+		if errorType != "" {
+			payload["error"] = errorType
+		}
+		writeJSON(w, payload)
+		return
+	}
+	if expiresIn == 0 {
+		expiresIn = 3600
+	}
+	response := map[string]any{
+		"access_token": fmt.Sprintf("refreshed-claude-access-%d", count),
+		"token_type":   "Bearer",
+		"expires_in":   expiresIn,
+	}
+	if rotate {
+		response["refresh_token"] = fmt.Sprintf("rotated-claude-refresh-%d", count)
+	}
+	writeJSON(w, response)
+}
+
+func (f *fakeClaudeOAuth) configure(mutate func(*fakeClaudeOAuth)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mutate(f)
+}
+
+func (f *fakeClaudeOAuth) requestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
+// maxConcurrent returns the high-water mark of upstream refreshes served at the
+// same time. With the cross-process refresh lock this must stay at 1.
+func (f *fakeClaudeOAuth) maxConcurrent() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxFlight
+}
+
+func (f *fakeClaudeOAuth) lastRequest() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) == 0 {
+		return nil
+	}
+	return f.requests[len(f.requests)-1]
+}
+
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
 	fake := &fakeGitHub{}
@@ -259,6 +371,7 @@ type brokerFixture struct {
 	broker            *exec.Cmd
 	fake              *fakeGitHub
 	oauth             *fakeOAuth
+	claudeOAuth       *fakeClaudeOAuth
 	keyPEM            string
 	config            string
 	token             string
@@ -279,6 +392,7 @@ func newBrokerFixtureWithCodexConfig(t *testing.T, codexExtraConfig string) *bro
 	t.Helper()
 	fake := newFakeGitHub(t)
 	oauth := newFakeOAuth(t)
+	claudeOAuth := newFakeClaudeOAuth(t)
 	home := t.TempDir()
 	keyPEM := generateRSAKey(t)
 	port := freePort(t)
@@ -292,6 +406,7 @@ func newBrokerFixtureWithCodexConfig(t *testing.T, codexExtraConfig string) *bro
 		agents:           filepath.Join(home, "agents.yaml"),
 		fake:             fake,
 		oauth:            oauth,
+		claudeOAuth:      claudeOAuth,
 		keyPEM:           keyPEM,
 		token:            "frontend-token",
 		auth:             filepath.Join(home, "auth.json"),
@@ -480,9 +595,10 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: %[11]q
-      token-url: %[8]q
-      client-id: test-claude-client
-      refresh-margin-seconds: 600
+      token-url: %[12]q
+      client-id: claude-test-client
+      refresh-margin-seconds: 900
+      refresh-cooldown-seconds: 120
       injection-hosts:
         - api.anthropic.com
         - mcp-proxy.anthropic.com
@@ -493,7 +609,7 @@ providers:
         hosts:
           - api.anthropic.com
           - mcp-proxy.anthropic.com
-`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra, f.claudeCreds)
+`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra, f.claudeCreds, f.claudeOAuth.server.URL)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)
@@ -514,11 +630,13 @@ func (f *brokerFixture) writeCodexAuth(accessToken, refreshToken string) {
 }
 
 func (f *brokerFixture) writeClaudeCredentials(accessToken, refreshToken string) {
-	f.t.Helper()
-	f.writeClaudeCredentialsExp(accessToken, refreshToken, time.Now().Add(time.Hour))
+	f.writeClaudeCredentialsExpiring(accessToken, refreshToken, time.Now().Add(time.Hour))
 }
 
-func (f *brokerFixture) writeClaudeCredentialsExp(accessToken, refreshToken string, expiresAt time.Time) {
+// writeClaudeCredentialsExpiring seeds the broker-side Claude credential with an
+// explicit access-token expiry, used to drive the proactive-refresh, cooldown,
+// and fail-closed paths.
+func (f *brokerFixture) writeClaudeCredentialsExpiring(accessToken, refreshToken string, expiresAt time.Time) {
 	f.t.Helper()
 	writeJSONFile(f.t, f.claudeCreds, map[string]any{
 		"claudeAiOauth": map[string]any{

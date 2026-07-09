@@ -81,7 +81,6 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
-      refresh-margin-seconds: 600
 ```
 
 Mediated mode (zero-possession; the agent gets an inert placeholder file and
@@ -93,7 +92,6 @@ providers:
     plugin: claude-oauth
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
-      refresh-margin-seconds: 600
       injection-hosts:
         - api.anthropic.com
         - mcp-proxy.anthropic.com
@@ -113,6 +111,17 @@ client id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`,
 These values are not user/subscription secrets and can be overridden with
 `token-url`, `client-id` / `client-id-env`, `oauth-beta`, and `user-agent` if
 Anthropic changes the CLI OAuth app or endpoint.
+
+The broker refreshes the broker-owned Claude access token proactively (default
+`refresh-margin-seconds: 900`), serializes concurrent refreshes to a single
+upstream call — both within the broker process and across processes (an advisory
+`flock` beside `credentials-file`, shared with the manual probe below) — and
+backs off after a transient failure (`refresh-cooldown-seconds`,
+`refresh-cooldown-max-seconds`) so Claude Code retries cannot storm the OAuth
+endpoint. Network refresh is only performed for a durable `credentials-file`
+source; a `credentials-env` source is read-only and never network-refreshed
+(the rotation could not be persisted), serving a still-valid token and failing
+closed on the mediated path once expired.
 
 Grant file-bundle providers by provider name; repositories are not used:
 
@@ -187,9 +196,13 @@ For `codex-oauth`, the bundle contains the real OpenAI access token and an
 inert refresh-token stub, never the real broker-owned refresh token.
 For `claude-oauth`, mediated placeholder bundles contain no real Claude tokens;
 the broker owns and refreshes the canonical `claudeAiOauth` access/refresh
-tokens when `credentials-file` is used. `credentials-env` is read-only and
-fails loudly if a refresh would be required. The refresh path is implemented
-and conformance-tested against the broker's fake OAuth endpoint. The default
+tokens when `credentials-file` is used. `credentials-env` is read-only: it is
+never network-refreshed (a rotation could not be persisted back to an env var,
+so it would be lost on restart), serving a still-valid token and failing closed
+on the mediated path once expired. The direct `/v1/files` path always vends the
+real credential (even when expired) so Claude Code, which holds the refresh
+token in direct mode, can self-refresh. The refresh path is implemented and
+conformance-tested against the broker's fake OAuth endpoint. The default
 endpoint/client-id/header values are observed from Claude Code CLI, but a real
 refresh proof should still be run in the target environment before treating
 mediated Claude refresh as production-ready.
