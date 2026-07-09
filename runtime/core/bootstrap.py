@@ -169,6 +169,40 @@ def proxy_url_for_provider(proxy_url, provider):
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def runtime_proxy_provider(runtime):
+    proxy = runtime.get("proxy")
+    if proxy is None:
+        return None
+    if not isinstance(proxy, dict):
+        raise SystemExit("runtime.proxy must be a YAML object")
+    provider = proxy.get("provider")
+    if not isinstance(provider, str) or not provider:
+        raise SystemExit("runtime.proxy.provider must be a non-empty string")
+    return provider
+
+
+def apply_runtime_proxy(runtime, egress, command):
+    provider = runtime_proxy_provider(runtime)
+    forward_proxy = mediated_mode(egress) and bool(egress.get("forward-proxy"))
+    if provider is not None and not forward_proxy:
+        raise SystemExit("runtime.proxy.provider requires mediated forward-proxy egress")
+    if not command:
+        return
+    if forward_proxy and provider is None:
+        raise SystemExit("runtime.proxy.provider is required when runtime.command uses mediated forward-proxy egress")
+    if provider is None:
+        return
+    grants = egress.get("grants") or []
+    if not isinstance(grants, list):
+        raise SystemExit("egress.grants must be a list")
+    if not any(isinstance(grant, dict) and grant.get("provider") == provider for grant in grants):
+        raise SystemExit(f"runtime.proxy.provider {provider} is not present in egress.grants")
+    proxy_url = (egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL).rstrip("/")
+    selected = proxy_url_for_provider(proxy_url, provider)
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+        persist_env_var(name, selected)
+
+
 def persist_agent_command(command, args):
     target = Path.home() / ".nvt-agent" / "agent-command.json"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -726,15 +760,16 @@ def setup_code_server(config):
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
+    command = optional_string(runtime.get("command"), "runtime.command")
 
     setup_tmux_config()
     apply_preseed_files(preseed)
     if mediated_mode(egress):
         apply_mediated_egress(egress)
+    apply_runtime_proxy(runtime, egress, command)
     # Placeholder-file materialization is independent of egress mode: it writes
     # inert placeholder auth files whether or not mediated routing is applied.
     apply_placeholder_files(egress)
-    command = optional_string(runtime.get("command"), "runtime.command")
     if command:
         # Kept for older helper scripts and diagnostics; start-agent-session uses
         # agent-command.json so runtime.args are passed without shell parsing.

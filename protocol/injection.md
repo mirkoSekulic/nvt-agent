@@ -244,6 +244,20 @@ Tool wrappers or preseeded runtime profiles that explicitly reference a broker
 provider should use the provider-scoped URL. The plain URL remains valid when a
 CONNECT host maps to a single inject route.
 
+When `runtime.command` is used with mediated forward-proxy egress, runtime
+bootstrap requires:
+
+```yaml
+runtime:
+  proxy:
+    provider: codex-main
+```
+
+Bootstrap binds `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and their lowercase
+variants to that provider-scoped URL. This keeps the runtime's primary agent
+CLI explicit without teaching bootstrap about Codex, Claude, GitHub, or any
+other provider type.
+
 ### POST /v1/injection/report
 
 Egress role only. Reports proxied requests so the broker's audit log covers
