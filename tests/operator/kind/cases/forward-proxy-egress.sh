@@ -126,7 +126,11 @@ spec = {
     "broker": {"grants": [grant]},
     "agent": {
         "config": {
-            "runtime": {"command": "bash", "args": ["-lc", 'echo "forward-proxy smoke ready"; sleep infinity']},
+            "runtime": {
+                "command": "bash",
+                "args": ["-lc", 'echo "forward-proxy smoke ready"; sleep infinity'],
+                "proxy": {"provider": "static-bearer-main"},
+            },
             "tools": {"packages": [], "mise": [], "additional-paths": [], "shell": []},
             "code-server": {"extensions": []},
         }

@@ -399,6 +399,7 @@ def apply_mediated_egress(egress):
     deadline = broker_wait_deadline()
     https_provider = None
     enforced = bool(egress.get("enforcement"))
+    forward_proxy = bool(egress.get("forward-proxy"))
     for index, grant in enumerate(grants):
         if not isinstance(grant, dict):
             raise SystemExit(f"egress.grants[{index}] must be an object")
@@ -412,6 +413,11 @@ def apply_mediated_egress(egress):
             continue
         if materialization != "header-inject":
             raise SystemExit(f"egress mediated grant {provider} must be materialization header-inject")
+        if forward_proxy:
+            # Forward-proxy header-inject grants are reached through
+            # HTTP(S)_PROXY and selected by runtime.proxy.provider or a tool
+            # wrapper. They intentionally have no redirect base-url.
+            continue
         base_url = grant.get("base-url")
         if not isinstance(base_url, str) or not base_url:
             raise SystemExit(f"egress mediated grant {provider} must include base-url")
@@ -424,7 +430,6 @@ def apply_mediated_egress(egress):
         if base_url.startswith("https://") and https_provider is None:
             https_provider = provider
         apply_redirect_env(provider, grant, placeholder)
-    forward_proxy = bool(egress.get("forward-proxy"))
     if forward_proxy:
         proxy_url = egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL
         if not isinstance(proxy_url, str) or not proxy_url.startswith(("http://", "https://")):
@@ -761,12 +766,13 @@ def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
     command = optional_string(runtime.get("command"), "runtime.command")
+    effective_command = command or "codex"
 
     setup_tmux_config()
     apply_preseed_files(preseed)
     if mediated_mode(egress):
         apply_mediated_egress(egress)
-    apply_runtime_proxy(runtime, egress, command)
+    apply_runtime_proxy(runtime, egress, effective_command)
     # Placeholder-file materialization is independent of egress mode: it writes
     # inert placeholder auth files whether or not mediated routing is applied.
     apply_placeholder_files(egress)

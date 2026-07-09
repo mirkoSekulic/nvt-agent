@@ -2849,9 +2849,17 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 	routeIndex := 0
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
 		// In forward-proxy mode header-inject grants are reached through the
-		// proxy (HTTP(S)_PROXY), not a per-route base URL, so bootstrap renders
-		// no base-url redirect for them.
-		if forwardProxy || AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
+		// proxy (HTTP(S)_PROXY), not a per-route base URL. Still render the
+		// grant metadata so runtime.proxy.provider can validate the selected
+		// provider against egress.grants.
+		if forwardProxy && AgentRunGrantMaterialization(grant) == nvtv1alpha1.AgentRunGrantHeaderInject {
+			grants = append(grants, map[string]any{
+				"provider":        grant.Provider,
+				"materialization": string(nvtv1alpha1.AgentRunGrantHeaderInject),
+			})
+			continue
+		}
+		if AgentRunGrantMaterialization(grant) != nvtv1alpha1.AgentRunGrantHeaderInject {
 			continue
 		}
 		baseURL := fmt.Sprintf("http://127.0.0.1:%d", egressRouteBasePort+routeIndex)

@@ -4032,6 +4032,27 @@ func TestForwardProxyAgentPodEnv(t *testing.T) {
 	}
 }
 
+func TestForwardProxyHeaderInjectGrantIsRenderedForRuntimeProxyValidation(t *testing.T) {
+	agentRun := forwardProxyAgentRun()
+	agentRun.Spec.Broker.Grants = []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "static-bearer-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+		EgressHosts: []string{"api.example.test:443"},
+	}}
+	config := InjectMediatedEgressConfig(map[string]any{}, agentRun)
+	egress, _ := config["egress"].(map[string]any)
+	grants, _ := egress["grants"].([]any)
+	if len(grants) != 1 {
+		t.Fatalf("expected one rendered egress grant, got %#v", grants)
+	}
+	grant, _ := grants[0].(map[string]any)
+	if grant["provider"] != "static-bearer-main" || grant["materialization"] != string(nvtv1alpha1.AgentRunGrantHeaderInject) {
+		t.Fatalf("unexpected rendered grant: %#v", grant)
+	}
+	if _, ok := grant["base-url"]; ok {
+		t.Fatalf("forward-proxy header-inject grant must not render redirect base-url: %#v", grant)
+	}
+}
+
 // TestValidateForwardProxyMirrorsEgressdRules pins that the operator rejects
 // forward-proxy configs that egressd's config.Validate would reject at boot
 // (duplicate host+capability, IP-literal hosts), so a bad spec fails loudly at
