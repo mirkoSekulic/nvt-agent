@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import yaml
 
@@ -145,6 +146,27 @@ def persist_env_var(name, value):
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+
+
+def env_suffix(value):
+    suffix = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
+    if not suffix:
+        raise SystemExit(f"cannot derive env suffix from {value!r}")
+    return suffix
+
+
+def proxy_url_for_provider(proxy_url, provider):
+    parts = urlsplit(proxy_url)
+    if not parts.scheme or not parts.hostname:
+        raise SystemExit(f"egress.forward-proxy-url is not a valid proxy URL: {proxy_url!r}")
+    host = parts.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    netloc = f"{quote(provider, safe='')}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def persist_agent_command(command, args):
@@ -373,7 +395,18 @@ def apply_mediated_egress(egress):
         proxy_url = egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL
         if not isinstance(proxy_url, str) or not proxy_url.startswith(("http://", "https://")):
             raise SystemExit("egress.forward-proxy-url must be an http(s) URL")
-        persist_env_var("NVT_EGRESS_FORWARD_PROXY_URL", proxy_url.rstrip("/"))
+        proxy_url = proxy_url.rstrip("/")
+        persist_env_var("NVT_EGRESS_FORWARD_PROXY_URL", proxy_url)
+        for grant in grants:
+            if not isinstance(grant, dict):
+                continue
+            provider = grant.get("provider")
+            if not isinstance(provider, str) or not provider:
+                continue
+            persist_env_var(
+                "NVT_EGRESS_FORWARD_PROXY_URL_" + env_suffix(provider),
+                proxy_url_for_provider(proxy_url, provider),
+            )
     if enforced and (https_provider is not None or forward_proxy):
         # Forward-proxy mode has no https base-url to trigger the install, but
         # the MITM leaf must be trusted system-wide so proxy-env HTTPS clients

@@ -702,6 +702,14 @@ func TestBootstrapForwardProxyInstallsCATrust(t *testing.T) {
 	f := newFixture(t)
 	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
 	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\necho called >> "+updateLog+"\nexit 0\n")
+	f.writeBin("brokerctl", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" != "placeholder-files" ] || [ "$2" != "--provider" ] || [ "$3" != "codex-main" ]; then
+  echo "unexpected brokerctl args: $*" >&2
+  exit 1
+fi
+printf '%s\n' '{"ok":true,"files":[{"path":".codex/auth.json","content":"{\"access_token\":\"NVT-PLACEHOLDER-NOT-A-KEY\"}\n","mode":"0600"}],"hosts":["chatgpt.com"],"expires_at":"2099-01-01T00:00:00Z"}'
+`)
 	caFile := filepath.Join(t.TempDir(), "ca.crt")
 	mustWriteFile(t, caFile, testCertificatePEM(t))
 	trustDir := t.TempDir()
@@ -713,7 +721,9 @@ egress:
   enforcement: true
   forward-proxy: true
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
-  grants: []
+  grants:
+    - provider: codex-main
+      materialization: placeholder-file
 runtime:
   command: bash
 tools:
@@ -745,6 +755,9 @@ code-server:
 	}
 	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"`) {
 		t.Fatalf("forward proxy URL not exported for mediated tools:\n%s", envFile)
+	}
+	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN="http://codex-main@127.0.0.1:8470"`) {
+		t.Fatalf("provider-selected forward proxy URL not exported for mediated tools:\n%s", envFile)
 	}
 	meta := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
 	if !strings.Contains(meta, `"forward_proxy": true`) {

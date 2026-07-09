@@ -4032,26 +4032,28 @@ func TestForwardProxyAgentPodEnv(t *testing.T) {
 	}
 }
 
-// TestValidateForwardProxyMirrorsEgressdRules pins review findings 2 & 3: the
-// operator rejects forward-proxy configs that egressd's config.Validate would
-// reject at boot (duplicate normalized inject hosts, IP-literal hosts), so a
-// bad spec fails loudly at admission instead of CrashLooping egressd.
+// TestValidateForwardProxyMirrorsEgressdRules pins that the operator rejects
+// forward-proxy configs that egressd's config.Validate would reject at boot
+// (duplicate host+capability, IP-literal hosts), so a bad spec fails loudly at
+// admission instead of CrashLooping egressd.
 func TestValidateForwardProxyMirrorsEgressdRules(t *testing.T) {
-	// Duplicate normalized host across egressHosts of one grant.
+	// Duplicate normalized host for the same grant/capability.
 	dupWithinGrant := forwardProxyAgentRun()
 	dupWithinGrant.Spec.Broker.Grants[0].EgressHosts = []string{"chatgpt.com:443", "chatgpt.com:8443"}
 	if err := ValidateAgentRunEgressMode(dupWithinGrant); err == nil || !strings.Contains(err.Error(), "chatgpt.com") {
-		t.Fatalf("duplicate inject host must be rejected, got %v", err)
+		t.Fatalf("duplicate inject host for one capability must be rejected, got %v", err)
 	}
 
-	// Same host claimed by two grants (genuinely ambiguous capability).
+	// Same host claimed by two different grants is valid: egressd requires an
+	// explicit non-secret capability hint on CONNECT and fails closed without
+	// one.
 	dupAcrossGrants := forwardProxyAgentRun()
 	dupAcrossGrants.Spec.Broker.Grants = append(dupAcrossGrants.Spec.Broker.Grants, nvtv1alpha1.AgentRunBrokerGrant{
 		Provider: "other-provider", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
 		EgressHosts: []string{"chatgpt.com:443"},
 	})
-	if err := ValidateAgentRunEgressMode(dupAcrossGrants); err == nil || !strings.Contains(err.Error(), "more than one grant") {
-		t.Fatalf("host claimed by two grants must be rejected, got %v", err)
+	if err := ValidateAgentRunEgressMode(dupAcrossGrants); err != nil {
+		t.Fatalf("host claimed by two grants should be admitted for explicit selection, got %v", err)
 	}
 
 	// IP-literal egressHost is rejected for forward-proxy (MITM needs a name).

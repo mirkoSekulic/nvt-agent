@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from git_host_credentials import credential_kind, load_config, normalize_repo, resolve_provider, token
 
@@ -70,10 +71,29 @@ def remove_no_proxy_hosts(value, blocked):
     return ",".join(kept)
 
 
+def proxy_url_for_provider(proxy_url, provider_name):
+    parts = urlsplit(proxy_url)
+    if not parts.scheme or not parts.hostname:
+        fail(f"NVT_EGRESS_FORWARD_PROXY_URL is not a valid proxy URL: {proxy_url!r}")
+    host = parts.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    # The username is a non-secret capability selector. HTTP clients send it
+    # as Proxy-Authorization on CONNECT; egressd consumes it and never forwards
+    # it upstream. This lets one agent use multiple GitHub App providers for
+    # the same github.com/api.github.com hosts without host-based guessing.
+    netloc = f"{quote(provider_name, safe='')}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def mediated_env(provider, repo):
     proxy_url = os.environ.get("NVT_EGRESS_FORWARD_PROXY_URL")
     if not proxy_url:
         fail(f"provider {provider['name']} is mediated but NVT_EGRESS_FORWARD_PROXY_URL is not set")
+    proxy_url = proxy_url_for_provider(proxy_url, provider["broker-provider"])
     placeholder = os.environ.get("NVT_EGRESS_PLACEHOLDER") or PLACEHOLDER
     env = os.environ.copy()
     env["GH_TOKEN"] = placeholder

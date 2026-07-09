@@ -48,3 +48,26 @@ func TestLoadForwardProxyInjectConfig(t *testing.T) {
 		t.Fatal("inject routes without a ca block must be rejected")
 	}
 }
+
+func TestForwardProxyInjectRoutesAllowSameHostWithExplicitCapabilities(t *testing.T) {
+	base := &Config{
+		BrokerURL: "https://broker:7347",
+		Routes:    []Route{},
+		CA:        &CAConfig{ServeAddr: "0.0.0.0:8470"},
+		ForwardProxy: &ForwardProxyConfig{
+			Listen: "0.0.0.0:8473",
+			InjectRoutes: []ForwardProxyInjectRoute{
+				{Host: "api.github.com", Capability: "github-main-app", Upstream: "api.github.com:443"},
+				{Host: "api.github.com", Capability: "github-altinn-app", Upstream: "api.github.com:443"},
+			},
+		},
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("same host with distinct capabilities should be valid: %v", err)
+	}
+
+	base.ForwardProxy.InjectRoutes[1].Capability = "github-main-app"
+	if err := base.Validate(); err == nil {
+		t.Fatal("same host with duplicate capability must be rejected")
+	}
+}

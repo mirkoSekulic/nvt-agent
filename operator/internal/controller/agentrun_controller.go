@@ -2463,16 +2463,20 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		// Mirror egressd's inject-route rules at admission so a config egressd
 		// would reject at boot fails loudly here instead of CrashLooping a
 		// silently-broken run: MITM hosts must be DNS names (SNI/leaf need a
-		// name), and each normalized host maps to exactly one inject route.
-		claimedBy := map[string]string{}
+		// name), and each normalized host/capability pair is unique. A host may
+		// map to more than one capability; egressd then requires an explicit
+		// non-secret capability hint on the CONNECT request and fails closed
+		// without one.
+		claimedBy := map[string]bool{}
 		for _, inject := range injects {
 			if net.ParseIP(inject.Host) != nil {
 				return fmt.Errorf("forward-proxy egressHost %q must be a DNS name, not an IP (TLS-MITM needs a name for SNI/leaf)", inject.Host)
 			}
-			if existing, ok := claimedBy[inject.Host]; ok {
-				return fmt.Errorf("forward-proxy host %q is claimed by more than one grant/egressHost (%s and %s); each host maps to exactly one inject route", inject.Host, existing, inject.Capability)
+			key := inject.Host + "\x00" + inject.Capability
+			if claimedBy[key] {
+				return fmt.Errorf("forward-proxy host %q is duplicated for broker grant %s", inject.Host, inject.Capability)
 			}
-			claimedBy[inject.Host] = inject.Capability
+			claimedBy[key] = true
 		}
 		return nil
 	}

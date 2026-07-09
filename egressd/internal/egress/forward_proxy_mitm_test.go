@@ -8,6 +8,7 @@ package egress
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -42,8 +43,18 @@ func newMITMProxy(t *testing.T, broker *fakeBroker, route ForwardProxyInjectRout
 // the tunnel, validating the minted leaf against the given SNI.
 func mitmDial(t *testing.T, proxy *httptest.Server, ca *CA, connectHost, sni string) *tls.Conn {
 	t.Helper()
+	return mitmDialWithCapability(t, proxy, ca, connectHost, sni, "")
+}
+
+func mitmDialWithCapability(t *testing.T, proxy *httptest.Server, ca *CA, connectHost, sni, capability string) *tls.Conn {
+	t.Helper()
+	extra := ""
+	if capability != "" {
+		token := base64.StdEncoding.EncodeToString([]byte(capability + ":"))
+		extra = "Proxy-Authorization: Basic " + token + "\r\n"
+	}
 	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
-		"CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", connectHost, connectHost))
+		"CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n%s\r\n", connectHost, connectHost, extra))
 	if !strings.Contains(status, "200") {
 		_ = conn.Close()
 		t.Fatalf("CONNECT status = %q", status)
@@ -85,6 +96,51 @@ func TestForwardProxyMITMInjectsRealToken(t *testing.T) {
 	}
 	if record.path != "/v1/responses?stream=true" {
 		t.Fatalf("upstream path = %q, want the preserved request path", record.path)
+	}
+}
+
+func TestForwardProxyMITMRequiresCapabilityForAmbiguousHost(t *testing.T) {
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	ca, err := NewCAWithUpstreams(nil, []string{"api.github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := &ForwardProxy{
+		Config: ForwardProxyConfig{
+			Listen: "unused",
+			InjectRoutes: []ForwardProxyInjectRoute{
+				{Host: "api.github.com", Capability: "github-main-app", Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true},
+				{Host: "api.github.com", Capability: "github-altinn-app", Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true},
+			},
+		},
+		CA:        ca,
+		Broker:    &BrokerClient{URL: broker.server.URL, Token: "egress-role-token", Client: broker.server.Client()},
+		Transport: http.DefaultTransport,
+	}
+	server := httptest.NewServer(fp)
+	t.Cleanup(server.Close)
+
+	conn, status := sendRawProxyRequest(t, proxyAddress(t, server),
+		"CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n\r\n")
+	_ = conn.Close()
+	if !strings.Contains(status, "403") {
+		t.Fatalf("ambiguous CONNECT without capability status = %q, want 403", status)
+	}
+
+	tlsConn := mitmDialWithCapability(t, server, ca, "api.github.com", "api.github.com", "github-altinn-app")
+	fmt.Fprintf(tlsConn, "GET /repos/Altinn/altinn-studio/pulls/1 HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n", Placeholder)
+	resp, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
+	if err != nil {
+		t.Fatalf("read selected MITM response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("selected MITM request status = %d", resp.StatusCode)
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if len(broker.requests) != 1 || broker.requests[0]["capability"] != "github-altinn-app" {
+		t.Fatalf("broker requests = %#v, want selected github-altinn-app capability", broker.requests)
 	}
 }
 

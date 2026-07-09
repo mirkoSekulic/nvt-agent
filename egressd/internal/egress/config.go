@@ -274,7 +274,7 @@ func (c *Config) validateForwardProxyRouteOverlap() error {
 			blindHosts[normalized] = true
 		}
 	}
-	injectHosts := map[string]bool{}
+	injectHostCapabilities := map[string]bool{}
 	for index, route := range c.ForwardProxy.InjectRoutes {
 		host, err := normalizeProxyHost(route.Host)
 		if err != nil {
@@ -292,13 +292,14 @@ func (c *Config) validateForwardProxyRouteOverlap() error {
 		if route.MaxRequests < 0 {
 			return fmt.Errorf("forward_proxy.inject_routes[%d].max_requests must be non-negative", index)
 		}
-		if injectHosts[host] {
-			return fmt.Errorf("forward_proxy.inject_routes[%d].host %q is duplicated", index, route.Host)
+		hostCapability := host + "\x00" + route.Capability
+		if injectHostCapabilities[hostCapability] {
+			return fmt.Errorf("forward_proxy.inject_routes[%d].host %q and capability %q are duplicated", index, route.Host, route.Capability)
 		}
 		if blindHosts[host] || routeHosts[host] {
 			return fmt.Errorf("forward_proxy.inject_routes[%d].host %q overlaps a blind-tunnel or mediated route host", index, route.Host)
 		}
-		injectHosts[host] = true
+		injectHostCapabilities[hostCapability] = true
 	}
 	return nil
 }

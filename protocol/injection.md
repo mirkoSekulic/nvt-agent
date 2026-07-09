@@ -208,6 +208,42 @@ for grants whose routing carries it. Non-git capabilities omit the field.
 The local base URL the agent's tooling points at (the `egressd` listen
 address) is composed by runtime bootstrap, not returned by the broker.
 
+### Explicit forward-proxy capability selection
+
+Forward-proxy MITM may have several mediated providers for the same upstream
+host, for example multiple GitHub Apps on `api.github.com`, or multiple Codex
+or Claude sessions on their shared service hosts. Host-only selection is
+ambiguous and must not guess.
+
+When more than one inject route is configured for a CONNECT host, `egressd`
+requires an explicit non-secret capability selector on the CONNECT request.
+The supported selector is HTTP proxy Basic auth where the username is the
+broker provider name, e.g. a proxy URL shaped like:
+
+```text
+http://github-altinn-app@egressd:8473
+```
+
+The password is ignored. The selector is consumed by `egressd` and never
+forwarded upstream. It is not authority by itself: `egressd` still calls
+`/v1/injection/headers` with the selected capability, and the broker enforces
+the paired agent grant, materialization mode, host, method, path, and
+provider-specific scope. If the selector names a capability that is not
+configured for that host, or no selector is present for an ambiguous host, the
+CONNECT fails closed.
+
+Runtime bootstrap exports both the plain forward proxy URL and provider-scoped
+variants:
+
+```text
+NVT_EGRESS_FORWARD_PROXY_URL=http://egressd:8473
+NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN=http://codex-main@egressd:8473
+```
+
+Tool wrappers or preseeded runtime profiles that explicitly reference a broker
+provider should use the provider-scoped URL. The plain URL remains valid when a
+CONNECT host maps to a single inject route.
+
 ### POST /v1/injection/report
 
 Egress role only. Reports proxied requests so the broker's audit log covers
