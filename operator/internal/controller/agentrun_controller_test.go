@@ -3975,8 +3975,9 @@ func TestRenderForwardProxyEgressdConfig(t *testing.T) {
 	var config struct {
 		Routes       []map[string]any `json:"routes"`
 		ForwardProxy *struct {
-			Listen       string           `json:"listen"`
-			InjectRoutes []map[string]any `json:"inject_routes"`
+			Listen              string           `json:"listen"`
+			AllowUnmatchedHosts bool             `json:"allow_unmatched_hosts"`
+			InjectRoutes        []map[string]any `json:"inject_routes"`
 		} `json:"forward_proxy"`
 		CA *struct {
 			CertFile string `json:"cert_file"`
@@ -3990,6 +3991,9 @@ func TestRenderForwardProxyEgressdConfig(t *testing.T) {
 	}
 	if config.ForwardProxy == nil || len(config.ForwardProxy.InjectRoutes) != 2 {
 		t.Fatalf("expected two inject routes, got %#v", config.ForwardProxy)
+	}
+	if !config.ForwardProxy.AllowUnmatchedHosts {
+		t.Fatalf("forward-proxy mode must blind-tunnel unmatched hosts: %#v", config.ForwardProxy)
 	}
 	hosts := map[string]any{}
 	for _, route := range config.ForwardProxy.InjectRoutes {
@@ -4050,6 +4054,34 @@ func TestForwardProxyHeaderInjectGrantIsRenderedForRuntimeProxyValidation(t *tes
 	}
 	if _, ok := grant["base-url"]; ok {
 		t.Fatalf("forward-proxy header-inject grant must not render redirect base-url: %#v", grant)
+	}
+}
+
+func TestRenderForwardProxyGitGrantRequiresCapabilityHint(t *testing.T) {
+	agentRun := forwardProxyAgentRun()
+	agentRun.Spec.Broker.Grants = []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "github-main-app", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Git: true,
+		EgressHosts: []string{"github.com:443", "api.github.com:443"},
+	}}
+	rendered, err := RenderEgressdConfigJSON(agentRun)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var config struct {
+		ForwardProxy *struct {
+			InjectRoutes []map[string]any `json:"inject_routes"`
+		} `json:"forward_proxy"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &config); err != nil {
+		t.Fatalf("unmarshal rendered config: %v\n%s", err, rendered)
+	}
+	if config.ForwardProxy == nil || len(config.ForwardProxy.InjectRoutes) != 2 {
+		t.Fatalf("expected git inject routes, got %#v", config.ForwardProxy)
+	}
+	for _, route := range config.ForwardProxy.InjectRoutes {
+		if route["require_capability_hint"] != true {
+			t.Fatalf("git route must require explicit capability hint: %#v", route)
+		}
 	}
 }
 

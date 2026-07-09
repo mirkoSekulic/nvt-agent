@@ -174,6 +174,59 @@ func TestForwardProxyDeniedConnectFailsClosed(t *testing.T) {
 	}
 }
 
+func TestForwardProxyAllowUnmatchedHostsBlindTunnels(t *testing.T) {
+	upstreamAddress, upstreamPort := newEchoTCPServer(t)
+	var logs bytes.Buffer
+	proxy := newForwardProxyServer(t, ForwardProxyConfig{
+		AllowUnmatchedHosts: true,
+		AllowPorts:          []int{upstreamPort},
+	}, &logs)
+	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
+		"CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamAddress, upstreamAddress,
+	))
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	if _, err := io.WriteString(conn, "ping\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response != "echo:ping\n" {
+		t.Fatalf("tunnel response = %q", response)
+	}
+	if got := logs.String(); !strings.Contains(got, "decision=allow") ||
+		!strings.Contains(got, fmt.Sprintf("target_port=%d", upstreamPort)) {
+		t.Fatalf("missing blind-tunnel allow log: %q", got)
+	}
+}
+
+func TestForwardProxyHintRequiredRouteDoesNotCaptureGenericTraffic(t *testing.T) {
+	proxy := &ForwardProxy{
+		Config: ForwardProxyConfig{
+			AllowUnmatchedHosts: true,
+			InjectRoutes: []ForwardProxyInjectRoute{{
+				Host:                  "github.com",
+				Capability:            "github-main-app",
+				Upstream:              "github.com:443",
+				RequireCapabilityHint: true,
+			}},
+		},
+	}
+	if got, found, err := proxy.injectProxy("github.com", ""); err != nil || found || got != nil {
+		t.Fatalf("generic traffic to a hint-required route must blind-tunnel, got proxy=%v found=%v err=%v", got, found, err)
+	}
+	if _, found, err := proxy.injectProxy("github.com", "github-main-app"); err != nil || !found {
+		t.Fatalf("explicit capability hint must select the route, found=%v err=%v", found, err)
+	}
+	if _, found, err := proxy.injectProxy("github.com", "github-other-app"); err == nil || !found {
+		t.Fatalf("wrong capability hint must fail closed, found=%v err=%v", found, err)
+	}
+}
+
 func TestForwardProxyTunnelWaitsForHalfClosedClientResponse(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

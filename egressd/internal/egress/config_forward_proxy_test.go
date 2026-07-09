@@ -18,6 +18,7 @@ func TestLoadForwardProxyInjectConfig(t *testing.T) {
   "routes": [],
   "forward_proxy": {
     "listen": "0.0.0.0:8473",
+    "allow_unmatched_hosts": true,
     "inject_routes": [
       {"host": "chatgpt.com", "capability": "codex-main", "upstream": "chatgpt.com:443"},
       {"host": "auth.openai.com", "capability": "codex-main", "upstream": "auth.openai.com:443"}
@@ -34,6 +35,9 @@ func TestLoadForwardProxyInjectConfig(t *testing.T) {
 	}
 	if loaded.ForwardProxy == nil || len(loaded.ForwardProxy.InjectRoutes) != 2 {
 		t.Fatalf("inject routes not parsed: %#v", loaded.ForwardProxy)
+	}
+	if !loaded.ForwardProxy.AllowUnmatchedHosts {
+		t.Fatalf("allow_unmatched_hosts not parsed: %#v", loaded.ForwardProxy)
 	}
 	if names := loaded.ForwardProxyUpstreamLeafNames(); len(names) != 2 || names[0] != "chatgpt.com" {
 		t.Fatalf("upstream leaf names = %v", names)

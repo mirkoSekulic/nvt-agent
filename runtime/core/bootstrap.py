@@ -198,9 +198,8 @@ def apply_runtime_proxy(runtime, egress, command):
     if not any(isinstance(grant, dict) and grant.get("provider") == provider for grant in grants):
         raise SystemExit(f"runtime.proxy.provider {provider} is not present in egress.grants")
     proxy_url = (egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL).rstrip("/")
-    selected = proxy_url_for_provider(proxy_url, provider)
     for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
-        persist_env_var(name, selected)
+        persist_env_var(name, proxy_url)
 
 
 def persist_agent_command(command, args):
@@ -359,17 +358,24 @@ def install_egress_ca_trust(provider):
     content = ca_file.read_text(encoding="utf-8")
     validate_certificate_file(ca_file)
     trust_dir = Path(os.environ.get("NVT_CA_TRUST_DIR") or DEFAULT_CA_TRUST_DIR)
-    trust_dir.mkdir(parents=True, exist_ok=True)
-    (trust_dir / "nvt-egress-ca.crt").write_text(content, encoding="utf-8")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
     try:
-        run(["update-ca-certificates"])
+        run(["nvt-as-root", "mkdir", "-p", str(trust_dir)])
+        run(["nvt-as-root", "cp", str(tmp_path), str(trust_dir / "nvt-egress-ca.crt")])
+        run(["nvt-as-root", "update-ca-certificates"])
     except FileNotFoundError:
-        raise SystemExit("bootstrap: update-ca-certificates not found; refusing to continue without egress trust")
+        raise SystemExit("bootstrap: nvt-as-root or update-ca-certificates not found; refusing to continue without egress trust")
     except subprocess.CalledProcessError as error:
-        raise SystemExit(f"bootstrap: update-ca-certificates failed with exit {error.returncode}; refusing to continue without egress trust")
+        raise SystemExit(f"bootstrap: egress CA trust install failed with exit {error.returncode}; refusing to continue without egress trust")
+    finally:
+        tmp_path.unlink(missing_ok=True)
     bundle = os.environ.get("NVT_CA_BUNDLE_FILE") or DEFAULT_CA_BUNDLE_FILE
+    persist_env_var("NODE_EXTRA_CA_CERTS", str(ca_file))
     persist_env_var("SSL_CERT_FILE", bundle)
     persist_env_var("REQUESTS_CA_BUNDLE", bundle)
+    persist_env_var("GIT_SSL_CAINFO", str(ca_file))
 
 
 def apply_git_redirect(provider, grant, hosts):
@@ -446,7 +452,7 @@ def apply_mediated_egress(egress):
                 "NVT_EGRESS_FORWARD_PROXY_URL_" + env_suffix(provider),
                 proxy_url_for_provider(proxy_url, provider),
             )
-    if enforced and (https_provider is not None or forward_proxy):
+    if forward_proxy or (enforced and https_provider is not None):
         # Forward-proxy mode has no https base-url to trigger the install, but
         # the MITM leaf must be trusted system-wide so proxy-env HTTPS clients
         # (curl, requests, node, ...) accept it.

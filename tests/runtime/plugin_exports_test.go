@@ -373,7 +373,7 @@ func newFixture(t *testing.T) *fixture {
 		}
 	}
 
-	return &fixture{
+	f := &fixture{
 		t:          t,
 		root:       root,
 		home:       home,
@@ -382,6 +382,8 @@ func newFixture(t *testing.T) *fixture {
 		bin:        bin,
 		pathPrefix: filepath.Join(home, ".local", "bin") + string(os.PathListSeparator) + bin,
 	}
+	f.writeBin("nvt-as-root", "#!/usr/bin/env bash\nexec \"$@\"\n")
+	return f
 }
 
 func (f *fixture) writeTool(name, content string) string {

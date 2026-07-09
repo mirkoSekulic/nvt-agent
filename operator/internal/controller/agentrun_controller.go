@@ -853,6 +853,7 @@ type forwardProxyInject struct {
 	Upstream              string
 	AllowInsecureUpstream bool
 	MaxRequests           int
+	RequireCapabilityHint bool
 }
 
 func forwardProxyInjects(agentRun *nvtv1alpha1.AgentRun) []forwardProxyInject {
@@ -877,6 +878,7 @@ func forwardProxyInjects(agentRun *nvtv1alpha1.AgentRun) []forwardProxyInject {
 				Upstream:              upstream,
 				AllowInsecureUpstream: grant.AllowInsecureUpstream,
 				MaxRequests:           maxRequests,
+				RequireCapabilityHint: grant.Git,
 			})
 		}
 	}
@@ -1757,10 +1759,12 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		Upstream              string `json:"upstream"`
 		AllowInsecureUpstream bool   `json:"allow_insecure_upstream,omitempty"`
 		MaxRequests           int    `json:"max_requests,omitempty"`
+		RequireCapabilityHint bool   `json:"require_capability_hint,omitempty"`
 	}
 	type egressdForwardProxy struct {
-		Listen       string                     `json:"listen"`
-		InjectRoutes []egressdForwardProxyRoute `json:"inject_routes"`
+		Listen              string                     `json:"listen"`
+		AllowUnmatchedHosts bool                       `json:"allow_unmatched_hosts"`
+		InjectRoutes        []egressdForwardProxyRoute `json:"inject_routes"`
 	}
 	type egressdConfig struct {
 		BrokerURL           string               `json:"broker_url"`
@@ -1830,11 +1834,13 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 				Upstream:              inject.Upstream,
 				AllowInsecureUpstream: inject.AllowInsecureUpstream,
 				MaxRequests:           inject.MaxRequests,
+				RequireCapabilityHint: inject.RequireCapabilityHint,
 			})
 		}
 		config.ForwardProxy = &egressdForwardProxy{
-			Listen:       fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
-			InjectRoutes: fpRoutes,
+			Listen:              fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
+			AllowUnmatchedHosts: true,
+			InjectRoutes:        fpRoutes,
 		}
 	}
 	if brokerCADistributed() {

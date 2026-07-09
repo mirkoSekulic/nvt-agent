@@ -49,8 +49,9 @@ type ForwardProxy struct {
 }
 
 type injectProxy struct {
-	capability string
-	proxy      *Proxy
+	capability            string
+	requireCapabilityHint bool
+	proxy                 *Proxy
 }
 
 func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +219,7 @@ func (p *ForwardProxy) logf(format string, args ...any) {
 
 func (p *ForwardProxy) allowed(target connectTarget) bool {
 	p.init()
-	return p.allowHosts[target.host] && p.allowPorts[target.port]
+	return (p.Config.AllowUnmatchedHosts || p.allowHosts[target.host]) && p.allowPorts[target.port]
 }
 
 func (p *ForwardProxy) acquireTunnel() (func(), bool) {
@@ -255,7 +256,8 @@ func (p *ForwardProxy) init() {
 				continue
 			}
 			p.injectProxies[host] = append(p.injectProxies[host], injectProxy{
-				capability: route.Capability,
+				capability:            route.Capability,
+				requireCapabilityHint: route.RequireCapabilityHint,
 				proxy: &Proxy{
 					Route: Route{
 						Capability:            route.Capability,
@@ -287,8 +289,17 @@ func (p *ForwardProxy) injectProxy(host, capabilityHint string) (*Proxy, bool, e
 		}
 		return nil, true, fmt.Errorf("capability %q is not configured for host %s", capabilityHint, host)
 	}
-	if len(routes) == 1 {
-		return routes[0].proxy, true, nil
+	autoRoutes := make([]injectProxy, 0, len(routes))
+	for _, route := range routes {
+		if !route.requireCapabilityHint {
+			autoRoutes = append(autoRoutes, route)
+		}
+	}
+	if len(autoRoutes) == 0 {
+		return nil, false, nil
+	}
+	if len(autoRoutes) == 1 {
+		return autoRoutes[0].proxy, true, nil
 	}
 	return nil, true, fmt.Errorf("host %s has multiple injectable capabilities and requires an explicit capability hint", host)
 }

@@ -108,6 +108,7 @@ type CAConfig struct {
 type ForwardProxyConfig struct {
 	Listen                   string   `json:"listen"`
 	AllowHosts               []string `json:"allow_hosts"`
+	AllowUnmatchedHosts      bool     `json:"allow_unmatched_hosts"`
 	AllowPorts               []int    `json:"allow_ports"`
 	MaxConcurrentTunnels     int      `json:"max_concurrent_tunnels"`
 	TunnelIdleTimeoutSeconds int      `json:"tunnel_idle_timeout_seconds"`
@@ -131,6 +132,11 @@ type ForwardProxyInjectRoute struct {
 	AllowInsecureUpstream bool `json:"allow_insecure_upstream"`
 	// MaxRequests caps proxied requests on this route (0 = unlimited).
 	MaxRequests int `json:"max_requests"`
+	// RequireCapabilityHint makes this route opt-in per request. CONNECTs to
+	// the host blind-tunnel unless the client selects this capability through
+	// X-NVT-Capability or proxy userinfo. This is for shared hosts such as
+	// github.com where normal developer traffic must not be credentialed.
+	RequireCapabilityHint bool `json:"require_capability_hint"`
 }
 
 // LoadConfig reads and validates the configuration file.

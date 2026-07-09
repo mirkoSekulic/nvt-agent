@@ -761,9 +761,12 @@ code-server:
 	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN="http://codex-main@127.0.0.1:8470"`) {
 		t.Fatalf("provider-selected forward proxy URL not exported for mediated tools:\n%s", envFile)
 	}
-	if !strings.Contains(envFile, `export HTTPS_PROXY="http://codex-main@127.0.0.1:8470"`) ||
-		!strings.Contains(envFile, `export https_proxy="http://codex-main@127.0.0.1:8470"`) {
-		t.Fatalf("runtime proxy env not bound to selected provider:\n%s", envFile)
+	if !strings.Contains(envFile, `export HTTPS_PROXY="http://127.0.0.1:8470"`) ||
+		!strings.Contains(envFile, `export https_proxy="http://127.0.0.1:8470"`) {
+		t.Fatalf("runtime proxy env not bound to generic forward proxy:\n%s", envFile)
+	}
+	if strings.Contains(envFile, `export HTTPS_PROXY="http://codex-main@127.0.0.1:8470"`) {
+		t.Fatalf("runtime proxy env must not include provider userinfo:\n%s", envFile)
 	}
 	meta := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
 	if !strings.Contains(meta, `"forward_proxy": true`) {
@@ -883,8 +886,11 @@ code-server:
 		t.Fatalf("forward-proxy header-inject bootstrap did not install CA trust:\n%s", output)
 	}
 	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
-	if !strings.Contains(envFile, `export HTTPS_PROXY="http://static-bearer-main@127.0.0.1:8470"`) {
+	if !strings.Contains(envFile, `export HTTPS_PROXY="http://127.0.0.1:8470"`) {
 		t.Fatalf("runtime proxy env not bound for header-inject grant:\n%s", envFile)
+	}
+	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_STATIC_BEARER_MAIN="http://static-bearer-main@127.0.0.1:8470"`) {
+		t.Fatalf("provider-selected proxy URL not exported for tools:\n%s", envFile)
 	}
 }
 
