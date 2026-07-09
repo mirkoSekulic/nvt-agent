@@ -2,6 +2,7 @@ import base64
 import fnmatch
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -9,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from re import fullmatch
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -17,6 +18,7 @@ import yaml
 
 
 CACHE_FILE = Path.home() / ".nvt-agent" / "git-host-credentials" / "cache.json"
+RUNTIME_ENV_FILE = Path.home() / ".nvt-agent" / "env"
 
 
 def fail(message):
@@ -28,6 +30,37 @@ def env_value(name):
     if value is None:
         fail(f"environment variable {name} is not set")
     return value
+
+
+def runtime_env_value(name):
+    value = os.environ.get(name)
+    if value is not None:
+        return value
+    if not RUNTIME_ENV_FILE.is_file():
+        return None
+    try:
+        lines = RUNTIME_ENV_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    prefix = f"{name}="
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            candidate = stripped[len("export "):]
+        else:
+            candidate = stripped
+        if not candidate.startswith(prefix):
+            continue
+        try:
+            parts = shlex.split(candidate, posix=True)
+        except ValueError:
+            return candidate[len(prefix):]
+        if not parts:
+            return ""
+        key, separator, parsed = parts[0].partition("=")
+        if key == name and separator:
+            return parsed
+    return None
 
 
 def load_config():
@@ -321,7 +354,7 @@ def github_app_identity(provider):
 
 
 def broker_token(provider, target):
-    broker_provider = string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+    broker_provider = broker_provider_name(provider)
     if not target:
         fail(f"provider {provider_name(provider)} broker token requires --target")
     command = ["brokerctl", "token", "--provider", broker_provider, "--target", target, "--raw"]
@@ -337,7 +370,7 @@ def broker_token(provider, target):
 
 
 def broker_identity(provider, target):
-    broker_provider = string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+    broker_provider = broker_provider_name(provider)
     if not target:
         fail(f"provider {provider_name(provider)} broker identity requires --target")
     command = ["brokerctl", "identity", "--provider", broker_provider, "--target", target]
@@ -360,7 +393,7 @@ def broker_identity(provider, target):
 
 
 def broker_headers(provider, target):
-    broker_provider = string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+    broker_provider = broker_provider_name(provider)
     if not target:
         fail(f"provider {provider_name(provider)} broker headers require --target")
     command = ["brokerctl", "headers", "--provider", broker_provider, "--target", target, "--raw"]
@@ -387,6 +420,33 @@ def credential_kind(provider):
     if kind in {"github-app", "token-env"}:
         return "token"
     fail(f"provider {provider_name(provider)} does not provide Git credentials")
+
+
+def broker_provider_name(provider):
+    return string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
+
+
+def proxy_url_for_provider(proxy_url, provider_name_value):
+    parts = urlsplit(proxy_url)
+    if not parts.scheme or not parts.hostname:
+        fail(f"NVT_EGRESS_FORWARD_PROXY_URL is not a valid proxy URL: {proxy_url!r}")
+    host = parts.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    netloc = f"{quote(provider_name_value, safe='')}:x@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def mediated_proxy_url(provider):
+    if credential_kind(provider) != "mediated":
+        fail(f"provider {provider_name(provider)} is not mediated")
+    proxy_url = runtime_env_value("NVT_EGRESS_FORWARD_PROXY_URL")
+    if not proxy_url:
+        fail(f"provider {provider_name(provider)} is mediated but NVT_EGRESS_FORWARD_PROXY_URL is not set")
+    return proxy_url_for_provider(proxy_url, broker_provider_name(provider))
 
 
 def token(provider, target=None):

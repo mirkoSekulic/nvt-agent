@@ -66,6 +66,7 @@ git-host-credential token --provider fork-app
 git-host-credential token --provider brokered-fork-app --target github.com/my-user/project
 git-host-credential identity --provider brokered-fork-app --target github.com/my-user/project
 git-host-credential headers --provider brokered-company-headers --target altinn.studio/repos/digdir/oed
+git-host-credential mediated-proxy --provider brokered-fork-mediated
 git-host-credential doctor --provider fork-app
 ```
 
@@ -84,9 +85,9 @@ credential-kind: headers
 
 Use `credential-kind: mediated` when Git traffic for the provider is routed
 through egressd by the mediated runtime. In this mode the plugin refuses token
-and header export; it is only a provider resolver and identity source. The real
-credential is injected by egressd after broker authorization, outside the agent
-container.
+and header export; it is a provider resolver, identity source, and source of the
+provider-scoped egress proxy URL used by Git. The real credential is injected by
+egressd after broker authorization, outside the agent container.
 
 ```yaml
 type: broker
@@ -113,14 +114,15 @@ When `--provider` is omitted, `gh-auth` resolves from `--repo`, the current
 
 For `credential-kind: mediated`, `gh-auth` sets `GH_TOKEN` to the inert NVT
 placeholder and forces GitHub traffic through `NVT_EGRESS_FORWARD_PROXY_URL`.
-It also encodes the selected `broker-provider` as the proxy username. That
-username is a non-secret capability selector: egressd consumes it from the
-CONNECT request, strips the placeholder, and injects the broker-owned
-credential for that exact provider. This lets one agent use multiple GitHub App
-providers for the same `github.com` / `api.github.com` hosts without host-based
-guessing. The broker still enforces the paired agent grant, host, method, path,
-and repository scope; naming an ungranted provider fails closed. The agent
-process never receives the real token.
+It also encodes the selected `broker-provider` as the proxy username, with a
+fixed dummy proxy password so HTTP clients reliably send `Proxy-Authorization`
+on `CONNECT`. The username is a non-secret capability selector: egressd consumes
+it from the CONNECT request, strips the placeholder, and injects the
+broker-owned credential for that exact provider. This lets one agent use
+multiple GitHub App providers for the same `github.com` / `api.github.com`
+hosts without host-based guessing. The broker still enforces the paired agent
+grant, host, method, path, and repository scope; naming an ungranted provider
+fails closed. The agent process never receives the real token.
 
 ## Security
 

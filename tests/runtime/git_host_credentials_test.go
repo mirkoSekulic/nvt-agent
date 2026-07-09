@@ -231,6 +231,32 @@ providers:
 	}
 }
 
+func TestGitHostCredentialMediatedProxyReadsRuntimeEnvFile(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: fork-app-mediated
+    type: broker
+    broker-provider: github-main-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*
+`)
+	envDir := filepath.Join(f.home, ".nvt-agent")
+	if err := os.MkdirAll(envDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(envDir, "env"), []byte(`export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	output := f.runWithEnv(gitHostCredentialBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "mediated-proxy", "--provider", "fork-app-mediated")
+	if strings.TrimSpace(output) != "http://github-main-app:x@127.0.0.1:8470" {
+		t.Fatalf("unexpected mediated proxy URL: %q", output)
+	}
+}
+
 func TestGhAuthWrapsMediatedProviderWithPlaceholderAndProxy(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
@@ -252,7 +278,7 @@ if [ "${GITHUB_ENTERPRISE_TOKEN+x}" = "x" ]; then
   echo "GITHUB_ENTERPRISE_TOKEN must be unset" >&2
   exit 1
 fi
-if [ "${HTTPS_PROXY:-}" != "http://fork-app@127.0.0.1:8470" ]; then
+if [ "${HTTPS_PROXY:-}" != "http://fork-app:x@127.0.0.1:8470" ]; then
   echo "unexpected HTTPS_PROXY=${HTTPS_PROXY:-}" >&2
   exit 1
 fi
@@ -322,6 +348,11 @@ if [ "$1" = "token" ] && [ "$2" = "--provider" ] && [ "$3" = "fork-app" ] &&
   echo delegated-token
   exit 0
 fi
+if [ "$1" = "credential-kind" ] && [ "$2" = "--provider" ] && [ "$3" = "fork-app" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ]; then
+  echo token
+  exit 0
+fi
 echo "unexpected git-host-credential args: $*" >&2
 exit 1
 `)
@@ -346,7 +377,7 @@ credentials:
 	}
 }
 
-func TestGitCredentialsSkipsHelperForMediatedProvider(t *testing.T) {
+func TestGitCredentialsConfiguresMediatedProviderWithPlaceholderAndProxy(t *testing.T) {
 	f := newFixture(t)
 	logPath := filepath.Join(f.home, "git.log")
 	f.writeBin("git", `#!/usr/bin/env bash
@@ -358,6 +389,9 @@ set -euo pipefail
 case "$1:$3" in
   credential-kind:fork-app-mediated)
     echo mediated
+    ;;
+  mediated-proxy:fork-app-mediated)
+    echo http://fork-app:x@127.0.0.1:8470
     ;;
   doctor:fork-app-mediated)
     exit 0
@@ -385,16 +419,31 @@ credentials:
 		t.Fatal(err)
 	}
 	log := string(logData)
-	if strings.Contains(log, "credential.helper") ||
-		strings.Contains(log, "extraHeader") {
-		t.Fatalf("mediated git credentials must not configure helper or headers:\n%s", log)
+	if !strings.Contains(log, "config --global http.https://github.com/my-user/project.proxy http://fork-app:x@127.0.0.1:8470") {
+		t.Fatalf("mediated git credentials must configure provider-scoped proxy:\n%s", log)
+	}
+	if !strings.Contains(log, "config --global http.https://github.com/my-user/project.proxyAuthMethod basic") {
+		t.Fatalf("mediated git credentials must force basic proxy auth for capability hinting:\n%s", log)
+	}
+	if !strings.Contains(log, "config --global credential.helper nvt") {
+		t.Fatalf("mediated git credentials must configure helper:\n%s", log)
+	}
+	if strings.Contains(log, "extraHeader") {
+		t.Fatalf("mediated git credentials must not configure headers:\n%s", log)
 	}
 	configData, err := os.ReadFile(filepath.Join(f.home, ".nvt-agent", "git-credentials", "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(configData), "fork-app-mediated") {
-		t.Fatalf("mediated provider leaked into token helper config:\n%s", configData)
+	if !strings.Contains(string(configData), "fork-app-mediated") {
+		t.Fatalf("mediated provider must be present in placeholder helper config:\n%s", configData)
+	}
+
+	input := "protocol=https\nhost=github.com\npath=my-user/project.git\n\n"
+	helperOutput := f.runWithInput(gitCredentialNvtBin(f.root), input, true, "get")
+	if !strings.Contains(helperOutput, "username=x-access-token") ||
+		!strings.Contains(helperOutput, "password=NVT-PLACEHOLDER-NOT-A-KEY") {
+		t.Fatalf("unexpected mediated helper output:\n%s", helperOutput)
 	}
 }
 
@@ -681,5 +730,60 @@ credentials:
 	}
 	if !strings.Contains(log, "config --global --unset-all http.https://git.company.com/team/.extraHeader") {
 		t.Fatalf("expected stale header unset command, got:\n%s", log)
+	}
+}
+
+func TestGitCredentialsClearsRemovedMediatedProxy(t *testing.T) {
+	f := newFixture(t)
+	logPath := filepath.Join(f.home, "git.log")
+	f.writeBin("git", `#!/usr/bin/env bash
+set -euo pipefail
+printf "%s\n" "$*" >> "$GIT_LOG"
+`)
+	f.writeBin("git-host-credential", `#!/usr/bin/env bash
+set -euo pipefail
+case "$1:$3" in
+  credential-kind:fork-app-mediated)
+    echo mediated
+    ;;
+  mediated-proxy:fork-app-mediated)
+    echo http://fork-app:x@127.0.0.1:8470
+    ;;
+  *)
+    echo "unexpected git-host-credential args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+
+	firstConfig := f.writePluginConfig("git-credentials-first.yaml", `
+credentials:
+  - match: https://github.com/my-user/project
+    provider: fork-app-mediated
+`)
+	env := []string{
+		"NVT_PLUGIN_CONFIG=" + firstConfig,
+		"GIT_LOG=" + logPath,
+	}
+	f.runWithEnv(gitCredentialsRunBin(f.root), true, env)
+
+	secondConfig := f.writePluginConfig("git-credentials-second.yaml", "credentials: []\n")
+	env[0] = "NVT_PLUGIN_CONFIG=" + secondConfig
+	f.runWithEnv(gitCredentialsRunBin(f.root), true, env)
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "config --global http.https://github.com/my-user/project.proxy http://fork-app:x@127.0.0.1:8470") ||
+		!strings.Contains(log, "config --global http.https://github.com/my-user/project.git.proxy http://fork-app:x@127.0.0.1:8470") {
+		t.Fatalf("expected mediated proxy config commands, got:\n%s", log)
+	}
+	if !strings.Contains(log, "config --global --unset-all http.https://github.com/my-user/project.proxy") ||
+		!strings.Contains(log, "config --global --unset-all http.https://github.com/my-user/project.proxyAuthMethod") ||
+		!strings.Contains(log, "config --global --unset-all http.https://github.com/my-user/project.git.proxy") ||
+		!strings.Contains(log, "config --global --unset-all http.https://github.com/my-user/project.git.proxyAuthMethod") {
+		t.Fatalf("expected stale mediated proxy unset commands, got:\n%s", log)
 	}
 }

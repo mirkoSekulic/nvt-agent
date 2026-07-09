@@ -2,7 +2,7 @@
 import argparse
 import json
 
-from git_host_credentials import credential_kind, headers, identity, load_config, providers, resolve_provider, token, validate_provider
+from git_host_credentials import credential_kind, headers, identity, load_config, mediated_proxy_url, providers, resolve_provider, token, validate_provider
 
 
 def command_token(args):
@@ -34,6 +34,11 @@ def command_type(args):
 def command_credential_kind(args):
     provider = resolve_provider(load_config(), args.provider, args.target)
     print(credential_kind(provider))
+
+
+def command_mediated_proxy(args):
+    provider = resolve_provider(load_config(), args.provider, args.target)
+    print(mediated_proxy_url(provider))
 
 
 def command_doctor(args):
@@ -79,6 +84,11 @@ def main():
     credential_kind_parser.add_argument("--provider")
     credential_kind_parser.add_argument("--target")
     credential_kind_parser.set_defaults(func=command_credential_kind)
+
+    mediated_proxy_parser = subparsers.add_parser("mediated-proxy")
+    mediated_proxy_parser.add_argument("--provider")
+    mediated_proxy_parser.add_argument("--target")
+    mediated_proxy_parser.set_defaults(func=command_mediated_proxy)
 
     doctor = subparsers.add_parser("doctor")
     doctor.add_argument("--provider")

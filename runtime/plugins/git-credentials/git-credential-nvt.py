@@ -8,6 +8,7 @@ import yaml
 
 
 CONFIG_FILE = Path.home() / ".nvt-agent" / "git-credentials" / "config.yaml"
+PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 
 
 def fail(message):
@@ -91,6 +92,17 @@ def provider_credentials(rule, target):
     username = rule.get("username") or "x-access-token"
     if not isinstance(username, str):
         fail("credential rule username must be a string")
+    try:
+        kind_command = ["git-host-credential", "credential-kind", "--provider", provider]
+        if target:
+            kind_command.extend(["--target", target])
+        kind = output(kind_command).strip()
+    except FileNotFoundError:
+        fail("git-host-credential is not on PATH")
+    except subprocess.CalledProcessError as error:
+        fail(f"git-host-credential credential-kind failed with exit {error.returncode}")
+    if kind == "mediated":
+        return username, os.environ.get("NVT_EGRESS_PLACEHOLDER") or PLACEHOLDER
     try:
         command = ["git-host-credential", "token", "--provider", provider]
         if target:

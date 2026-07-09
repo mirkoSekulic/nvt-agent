@@ -81,11 +81,12 @@ def proxy_url_for_provider(proxy_url, provider_name):
     netloc = host
     if parts.port is not None:
         netloc = f"{netloc}:{parts.port}"
-    # The username is a non-secret capability selector. HTTP clients send it
-    # as Proxy-Authorization on CONNECT; egressd consumes it and never forwards
-    # it upstream. This lets one agent use multiple GitHub App providers for
-    # the same github.com/api.github.com hosts without host-based guessing.
-    netloc = f"{quote(provider_name, safe='')}@{netloc}"
+    # The username is a non-secret capability selector; the password is a fixed
+    # dummy value so clients reliably send Proxy-Authorization on CONNECT.
+    # egressd consumes it and never forwards it upstream. This lets one agent
+    # use multiple GitHub App providers for the same github.com/api.github.com
+    # hosts without host-based guessing.
+    netloc = f"{quote(provider_name, safe='')}:x@{netloc}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
