@@ -364,6 +364,7 @@ def install_egress_ca_trust(provider):
     try:
         run(["nvt-as-root", "mkdir", "-p", str(trust_dir)])
         run(["nvt-as-root", "cp", str(tmp_path), str(trust_dir / "nvt-egress-ca.crt")])
+        run(["nvt-as-root", "chmod", "0644", str(trust_dir / "nvt-egress-ca.crt")])
         run(["nvt-as-root", "update-ca-certificates"])
     except FileNotFoundError:
         raise SystemExit("bootstrap: nvt-as-root or update-ca-certificates not found; refusing to continue without egress trust")
@@ -387,7 +388,7 @@ def apply_git_redirect(provider, grant, hosts):
     for host in hosts:
         # Config, not env, so the rewrite survives any shell. scrub_git_state
         # removed pre-existing rewrites before this managed one is installed.
-        run(["git", "config", "--global", f"url.{base_url}/.insteadOf", f"https://{host}/"])
+        run(["git", "config", "--global", "--add", f"url.{base_url}/.insteadOf", f"https://{host}/"])
         # git-SSH stays disallowed in mediated mode; rewriting the SSH remote
         # shape onto the mediated HTTPS route is a convenience, not a bypass.
         run(["git", "config", "--global", "--add", f"url.{base_url}/.insteadOf", f"git@{host}:"])
