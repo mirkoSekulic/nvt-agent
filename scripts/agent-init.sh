@@ -461,6 +461,8 @@ config = {
 if inject_routes:
     config["forward_proxy"] = {
         "listen": "0.0.0.0:8470",
+        "transparent_mode": True,
+        "allow_ports": [80, 443],
         # Local compose remains a development backend: agents need normal
         # internet access for package downloads and tool calls. Inject routes
         # still mediate configured credential hosts; unmatched hosts are blind
@@ -642,83 +644,13 @@ config_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 print(f"rendered runtime proxy provider {default_provider} into {config_file}")
 PY
 
-# Manage the egress block in agent.yaml: bootstrap reads egress.grants
-# (base-url per route) from the agent config, so the compose path must render
-# the same grant metadata the operator injects on k8s. The block lives
-# between markers so re-runs replace it without touching user edits.
-python3 - "$agent_config_file" "$broker_agents_file" "$name" "$egress_mode" <<'PY'
-import sys
-from pathlib import Path
-
-import yaml
-
-config_file = Path(sys.argv[1])
-agents_file = Path(sys.argv[2])
-name = sys.argv[3]
-mode = sys.argv[4]
-
-BEGIN = "# BEGIN nvt-managed egress (agent-init)"
-END = "# END nvt-managed egress (agent-init)"
-
-text = config_file.read_text(encoding="utf-8")
-changed = BEGIN in text
-if changed:
-    before, _, rest = text.partition(BEGIN)
-    _, _, after = rest.partition(END)
-    text = before.rstrip("\n") + "\n" + after.lstrip("\n")
-
-if mode == "mediated":
-    data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
-    agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
-    lines = [
-        BEGIN,
-        "egress:",
-        "  mode: mediated",
-        "  placeholder: NVT-PLACEHOLDER-NOT-A-KEY",
-        "  forward-proxy: true",
-        "  forward-proxy-url: http://127.0.0.1:8470",
-        "  grants:",
-    ]
-    for grant in (agent or {}).get("grants", []) or []:
-        if not isinstance(grant, dict) or (grant.get("materialization") or "file-bundle") != "header-inject":
-            continue
-        lines.append(f"    - provider: {grant.get('provider')}")
-        lines.append("      materialization: header-inject")
-        hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
-        if hosts:
-            lines.append("      egress-hosts:")
-            for host in hosts:
-                lines.append(f"      - {host}")
-        if grant.get("git"):
-            lines.append("      git: true")
-    # placeholder-file grants carry no egressd route (edge injection is Phase
-    # 6.2); bootstrap only needs provider + mode to materialize the file.
-    for grant in (agent or {}).get("grants", []) or []:
-        if not isinstance(grant, dict) or (grant.get("materialization") or "file-bundle") != "placeholder-file":
-            continue
-        lines.append(f"    - provider: {grant.get('provider')}")
-        lines.append("      materialization: placeholder-file")
-        hosts = grant.get("egress-hosts") or grant.get("egressHosts") or []
-        if hosts:
-            lines.append("      egress-hosts:")
-            for host in hosts:
-                lines.append(f"      - {host}")
-    lines.append(END)
-    text = text.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n"
-    changed = True
-
-parsed = yaml.safe_load(text)
-if not isinstance(parsed, dict):
-    raise SystemExit("agent-init: agent config is not a YAML object after egress rendering")
-egress = parsed.get("egress") or {}
-if mode == "mediated" and not egress.get("grants"):
-    raise SystemExit("agent-init: mediated agent config rendered no egress grants")
-if mode != "mediated" and egress.get("mode") == "mediated":
-    raise SystemExit("agent-init: direct mode but agent config still declares egress mediated")
-if changed:
-    config_file.write_text(text, encoding="utf-8")
-    print(f"rendered egress config into {config_file}")
-PY
+# Manage the marker-owned egress block without touching user-authored config.
+python3 "$script_dir/render-managed-egress.py" \
+  --agent-config "$agent_config_file" \
+  --broker-agents "$broker_agents_file" \
+  --agent-name "$name" \
+  --mode "$egress_mode" \
+  --ensure
 
 if [ ! -f "$local_instructions_file" ]; then
   cp "$templates_dir/AGENTS.local.md" "$local_instructions_file"

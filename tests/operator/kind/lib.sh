@@ -65,9 +65,9 @@ kubectl_smoke() {
 # (tests/fixtures/echo) into the active cluster/namespace. It replaces the
 # external httpbin.org dependency: egressd reaches it over plain HTTP on
 # port 443 (the port the enforced egressd egress NetworkPolicy allows, since
-# Calico evaluates the post-DNAT Pod port). The echo reflects the request so
-# a smoke can assert the injected credential arrived and the placeholder did
-# not. Reusable by the enforced-egress, quota, and revocation smokes.
+# Calico evaluates the post-DNAT Pod port). The echo reports a one-way exact
+# credential comparison and placeholder presence without reflecting header
+# values. Reusable by the enforced-egress, quota, and revocation smokes.
 ECHO_FIXTURE_NAME="${ECHO_FIXTURE_NAME:-nvt-smoke-echo}"
 ECHO_FIXTURE_PORT="${ECHO_FIXTURE_PORT:-443}"
 
@@ -99,6 +99,8 @@ spec:
           env:
             - name: ECHO_LISTEN
               value: ":${ECHO_FIXTURE_PORT}"
+            - name: ECHO_EXPECTED_CREDENTIAL_SHA256
+              value: "${ECHO_EXPECTED_CREDENTIAL_SHA256:-}"
           ports:
             - containerPort: ${ECHO_FIXTURE_PORT}
           readinessProbe:

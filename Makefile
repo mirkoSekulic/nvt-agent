@@ -15,6 +15,7 @@ BROKER_ENV_SECRET ?= nvt-broker-env
 PRODUCER_IMAGE ?= nvt-github-comments-producer:latest
 GATEWAY_IMAGE ?= nvt-agent-gateway:latest
 EGRESSD_IMAGE ?= nvt-egressd:latest
+CAPTURED_IMAGE ?= nvt-captured:latest
 ECHO_IMAGE ?= nvt-smoke-echo:latest
 PRODUCER_VALUES ?= values.github-comments.yaml
 PRODUCER_RELEASE ?= nvt-github-comments-producer
@@ -33,7 +34,7 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image=$(GATEWAY_IMAGE)
 endif
 
-.PHONY: runtime-build broker-build egressd-build echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret phase6-real-codex-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret phase6-real-codex-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -43,6 +44,12 @@ broker-build:
 
 egressd-build:
 	docker build -f egressd/Dockerfile -t "$(EGRESSD_IMAGE)" .
+
+captured-build:
+	docker build -f captured/Dockerfile -t "$(CAPTURED_IMAGE)" .
+
+transparent-compose-smoke:
+	bash tests/runtime/compose-transparent-smoke.sh
 
 phase2-codex-gate: runtime-build broker-build egressd-build
 	bash scripts/phase2-codex-gate.sh
@@ -78,7 +85,7 @@ operator-kind-cluster:
 		printf '[operator-kind-setup] using existing kind cluster %s\n' "$(CLUSTER)"; \
 	elif [ "$(CREATE_CLUSTER)" = "1" ]; then \
 		printf '[operator-kind-setup] creating kind cluster %s\n' "$(CLUSTER)"; \
-		kind create cluster --name "$(CLUSTER)" $(if $(KIND_CLUSTER_CONFIG),--config "$(KIND_CLUSTER_CONFIG)"); \
+		tests/operator/kind/kind-command.sh kind create cluster --name "$(CLUSTER)" $(if $(KIND_CLUSTER_CONFIG),--config "$(KIND_CLUSTER_CONFIG)"); \
 	else \
 		printf '[operator-kind-setup] ERROR: kind cluster %s does not exist and CREATE_CLUSTER is not 1\n' "$(CLUSTER)" >&2; \
 		exit 1; \
@@ -95,11 +102,12 @@ operator-kind-cluster-enforced:
 	fi
 	kubectl --context "$(KUBECTL_CONTEXT)" rollout status daemonset/calico-node -n kube-system --timeout="$(ROLLOUT_TIMEOUT)"
 
-operator-kind-images: operator-kind-cluster runtime-build broker-build egressd-build operator-build
+operator-kind-images: operator-kind-cluster runtime-build broker-build egressd-build captured-build operator-build
 	@printf '[operator-kind-setup] loading local images into kind cluster %s\n' "$(CLUSTER)"
 	kind load docker-image nvt-agent-runtime:latest --name "$(CLUSTER)"
 	kind load docker-image nvt-broker:latest --name "$(CLUSTER)"
 	kind load docker-image "$(EGRESSD_IMAGE)" --name "$(CLUSTER)"
+	kind load docker-image "$(CAPTURED_IMAGE)" --name "$(CLUSTER)"
 	kind load docker-image nvt-operator:latest --name "$(CLUSTER)"
 
 operator-kind-install: operator-kind-images $(OPERATOR_KIND_EXTRA_IMAGE_TARGETS)

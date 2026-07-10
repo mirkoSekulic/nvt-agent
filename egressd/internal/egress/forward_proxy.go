@@ -2,6 +2,7 @@ package egress
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,19 +35,24 @@ const forwardProxyCapability = "forward-proxy"
 type ForwardProxy struct {
 	Config   ForwardProxyConfig
 	Dialer   *net.Dialer
-	Logger   *log.Logger
-	Reporter *Reporter
+	Resolver IPResolver
+	// DialContext is a test seam. Production dials the already validated IP
+	// address and never resolves the hostname a second time.
+	DialContext func(context.Context, string, string) (net.Conn, error)
+	Logger      *log.Logger
+	Reporter    *Reporter
 	// CA, Broker, and Transport back the TLS-terminating inject routes. Nil
 	// when the forward proxy only blind-tunnels.
 	CA        *CA
 	Broker    *BrokerClient
 	Transport http.RoundTripper
 
-	once          sync.Once
-	allowHosts    map[string]bool
-	allowPorts    map[int]bool
-	tunnelSlots   chan struct{}
-	injectProxies map[string][]injectProxy
+	once              sync.Once
+	allowHosts        map[string]bool
+	allowPorts        map[int]bool
+	tunnelSlots       chan struct{}
+	injectProxies     map[string][]injectProxy
+	destinationPolicy destinationPolicy
 }
 
 type injectProxy struct {
@@ -69,6 +76,9 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A CONNECT to an inject-route host is TLS-terminated and injected; every
 	// other host falls through to the blind-tunnel allowlist.
 	proxy, found, err := p.injectProxy(target.host, capabilityHintFromConnect(r))
+	if p.Config.TransparentMode {
+		proxy, found, err = p.transparentInjectProxy(target.host, capabilityHintFromConnect(r))
+	}
 	if err != nil {
 		p.writeDecision(target.host, target.port, "deny", "capability_not_allowed")
 		http.Error(w, "CONNECT capability not allowed", http.StatusForbidden)
@@ -91,7 +101,13 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseTunnel()
 
-	upstream, err := p.dialer().DialContext(r.Context(), "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+	address, err := p.resolveTarget(r.Context(), target)
+	if err != nil {
+		p.writeDecision(target.host, target.port, "deny", "destination_denied")
+		http.Error(w, "CONNECT destination denied", http.StatusForbidden)
+		return
+	}
+	upstream, err := p.dial(r.Context(), net.JoinHostPort(address.String(), strconv.Itoa(target.port)))
 	if err != nil {
 		p.writeDecision(target.host, target.port, "deny", "upstream_unreachable")
 		http.Error(w, "CONNECT upstream unreachable", http.StatusBadGateway)
@@ -249,6 +265,7 @@ func (p *ForwardProxy) init() {
 		}
 		p.tunnelSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
 		p.injectProxies = map[string][]injectProxy{}
+		p.destinationPolicy, _ = newDestinationPolicy(p.Config.DenyCIDRs)
 		for _, route := range p.Config.InjectRoutes {
 			host, err := normalizeProxyHost(route.Host)
 			if err != nil {
@@ -266,7 +283,7 @@ func (p *ForwardProxy) init() {
 						MaxRequests:           route.MaxRequests,
 					},
 					Broker:             p.Broker,
-					Transport:          p.Transport,
+					Transport:          p.injectRouteTransport(route),
 					Reporter:           p.Reporter,
 					UpgradeIdleTimeout: p.Config.effectiveTunnelIdleTimeout(),
 				},
@@ -274,6 +291,40 @@ func (p *ForwardProxy) init() {
 		}
 	})
 }
+
+func (p *ForwardProxy) injectRouteTransport(route ForwardProxyInjectRoute) http.RoundTripper {
+	// Plain HTTP upstreams are an explicit test/dev escape hatch used by
+	// hermetic fixtures. Production HTTPS injection routes use a cloned
+	// transport whose dial path cannot perform a second DNS lookup.
+	if route.AllowInsecureUpstream {
+		return p.Transport
+	}
+	base := p.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return roundTripError{err: fmt.Errorf("inject route transport cannot enforce destination policy")}
+	}
+	clone := transport.Clone()
+	clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("parse inject route destination: %w", err)
+		}
+		resolved, err := resolveAllowedAddress(ctx, p.resolver(), p.destinationPolicy, host)
+		if err != nil {
+			return nil, err
+		}
+		return p.dial(ctx, net.JoinHostPort(resolved.String(), port))
+	}
+	return clone
+}
+
+type roundTripError struct{ err error }
+
+func (r roundTripError) RoundTrip(*http.Request) (*http.Response, error) { return nil, r.err }
 
 func (p *ForwardProxy) injectProxy(host, capabilityHint string) (*Proxy, bool, error) {
 	p.init()
@@ -302,6 +353,27 @@ func (p *ForwardProxy) injectProxy(host, capabilityHint string) (*Proxy, bool, e
 		return autoRoutes[0].proxy, true, nil
 	}
 	return nil, true, fmt.Errorf("host %s has multiple injectable capabilities and requires an explicit capability hint", host)
+}
+
+func (p *ForwardProxy) transparentInjectProxy(host, capabilityHint string) (*Proxy, bool, error) {
+	p.init()
+	routes := p.injectProxies[host]
+	if len(routes) == 0 {
+		return nil, false, nil
+	}
+	if capabilityHint != "" {
+		return p.injectProxy(host, capabilityHint)
+	}
+	autoRoutes := make([]injectProxy, 0, len(routes))
+	for _, route := range routes {
+		if !route.requireCapabilityHint {
+			autoRoutes = append(autoRoutes, route)
+		}
+	}
+	if len(autoRoutes) == 1 {
+		return autoRoutes[0].proxy, true, nil
+	}
+	return nil, true, fmt.Errorf("transparent host %s requires an explicit capability hint", host)
 }
 
 func capabilityHintFromConnect(r *http.Request) string {
@@ -340,6 +412,25 @@ func (p *ForwardProxy) dialer() *net.Dialer {
 		return p.Dialer
 	}
 	return &net.Dialer{Timeout: dialTimeout}
+}
+
+func (p *ForwardProxy) resolver() IPResolver {
+	if p.Resolver != nil {
+		return p.Resolver
+	}
+	return net.DefaultResolver
+}
+
+func (p *ForwardProxy) resolveTarget(ctx context.Context, target connectTarget) (netip.Addr, error) {
+	p.init()
+	return resolveAllowedAddress(ctx, p.resolver(), p.destinationPolicy, target.host)
+}
+
+func (p *ForwardProxy) dial(ctx context.Context, address string) (net.Conn, error) {
+	if p.DialContext != nil {
+		return p.DialContext(ctx, "tcp", address)
+	}
+	return p.dialer().DialContext(ctx, "tcp", address)
 }
 
 func (p *ForwardProxy) writeDecision(host string, port int, decision, errorClass string) {
@@ -411,6 +502,9 @@ func normalizeProxyHost(host string) (string, error) {
 	}
 	if strings.HasPrefix(host, "[") || strings.HasSuffix(host, "]") {
 		return "", fmt.Errorf("bracketed host is not allowed in allowlist")
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		return address.Unmap().String(), nil
 	}
 	if strings.ContainsAny(host, "/\\@?#: \t\r\n") || strings.Contains(host, "%") {
 		return "", fmt.Errorf("invalid host")

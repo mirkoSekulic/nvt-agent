@@ -107,11 +107,15 @@ type CAConfig struct {
 // per-agent CA and injected — the Phase 6.2 MITM path.
 type ForwardProxyConfig struct {
 	Listen                   string   `json:"listen"`
+	TransparentMode          bool     `json:"transparent_mode"`
 	AllowHosts               []string `json:"allow_hosts"`
 	AllowUnmatchedHosts      bool     `json:"allow_unmatched_hosts"`
 	AllowPorts               []int    `json:"allow_ports"`
 	MaxConcurrentTunnels     int      `json:"max_concurrent_tunnels"`
 	TunnelIdleTimeoutSeconds int      `json:"tunnel_idle_timeout_seconds"`
+	// DenyCIDRs adds deployment-specific Pod, Service, node, cluster, and VNet
+	// ranges to the built-in non-public destination deny policy.
+	DenyCIDRs []string `json:"deny_cidrs"`
 	// InjectRoutes: for each CONNECT to one of these hosts, egressd terminates
 	// TLS with a CA-minted leaf for the host, injects the broker credential,
 	// and re-originates TLS to the pinned upstream.
@@ -347,12 +351,15 @@ func (c *ForwardProxyConfig) Validate() error {
 	if c.TunnelIdleTimeoutSeconds < 0 {
 		return fmt.Errorf("tunnel_idle_timeout_seconds must be non-negative")
 	}
+	if _, err := newDestinationPolicy(c.DenyCIDRs); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (c *ForwardProxyConfig) effectiveAllowPorts() []int {
 	if len(c.AllowPorts) == 0 {
-		return []int{443}
+		return []int{80, 443}
 	}
 	return c.AllowPorts
 }

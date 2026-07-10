@@ -51,6 +51,22 @@ set -a
 source "$env_file"
 set +a
 
+# Upgrade only nvt's marker-owned egress block. Existing identities, Secrets,
+# runtime settings, and unmarked user-authored YAML remain untouched.
+egress_mode="${NVT_EGRESS_MODE:-}"
+if [ -z "$egress_mode" ]; then
+  case "${MEDIATED:-0}" in
+    1|true|TRUE|True|yes|YES|Yes) egress_mode="mediated" ;;
+    *) egress_mode="direct" ;;
+  esac
+fi
+python3 "$script_dir/render-managed-egress.py" \
+  --agent-config "$AGENT_CONFIG_FILE" \
+  --broker-agents "$repo_root/.broker/agents.yaml" \
+  --agent-name "$name" \
+  --mode "$egress_mode" \
+  --egressd-config "$EGRESSD_CONFIG_FILE"
+
 expose_compose_file="$repo_root/.agents/$name/compose.expose.yaml"
 
 python3 "$script_dir/render-agent-expose.py" \

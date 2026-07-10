@@ -7,6 +7,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -14,20 +16,20 @@ import (
 )
 
 type reflection struct {
-	Method        string              `json:"method"`
-	Path          string              `json:"path"`
-	Query         string              `json:"query"`
-	Headers       map[string][]string `json:"headers"`
-	Authenticated bool                `json:"authenticated"`
+	Method          string `json:"method"`
+	Path            string `json:"path"`
+	Query           string `json:"query"`
+	Authenticated   bool   `json:"authenticated"`
+	CredentialMatch bool   `json:"credential_match"`
+	PlaceholderSeen bool   `json:"placeholder_seen"`
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	// Reflect headers with canonical names. The smoke greps this for the
-	// injected credential value and asserts the placeholder never appears.
-	headers := make(map[string][]string, len(r.Header))
 	authenticated := false
+	credentialMatch := false
+	placeholderSeen := false
+	expectedHash := os.Getenv("ECHO_EXPECTED_CREDENTIAL_SHA256")
 	for name, values := range r.Header {
-		headers[name] = values
 		lower := strings.ToLower(name)
 		// A credential-bearing header proves egressd injected material. Both
 		// the Bearer path (authorization) and key-header providers (x-api-key)
@@ -37,15 +39,21 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				if strings.TrimSpace(v) != "" {
 					authenticated = true
 				}
+				digest := sha256.Sum256([]byte(v))
+				credentialMatch = credentialMatch || (expectedHash != "" && hex.EncodeToString(digest[:]) == expectedHash)
 			}
+		}
+		for _, value := range values {
+			placeholderSeen = placeholderSeen || strings.Contains(value, "NVT-PLACEHOLDER-NOT-A-KEY")
 		}
 	}
 	body := reflection{
-		Method:        r.Method,
-		Path:          r.URL.Path,
-		Query:         r.URL.RawQuery,
-		Headers:       headers,
-		Authenticated: authenticated,
+		Method:          r.Method,
+		Path:            r.URL.Path,
+		Query:           r.URL.RawQuery,
+		Authenticated:   authenticated,
+		CredentialMatch: credentialMatch,
+		PlaceholderSeen: placeholderSeen,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

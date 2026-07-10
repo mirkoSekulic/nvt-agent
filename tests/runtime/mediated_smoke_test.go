@@ -894,6 +894,55 @@ code-server:
 	}
 }
 
+func TestBootstrapTransparentTransportLeavesPlainHTTPUnproxied(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	mustWriteFile(t, caFile, testCertificatePEM(t))
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  transport: transparent
+  enforcement: true
+  forward-proxy: true
+  forward-proxy-url: http://127.0.0.1:15002
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  grants:
+    - provider: static-bearer-main
+      materialization: header-inject
+runtime:
+  command: bash
+  proxy:
+    provider: static-bearer-main
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	f.runWithEnv(bootstrapBin(f.root), true, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_CA_FILE=" + caFile,
+		"NVT_CA_TRUST_DIR=" + t.TempDir(),
+		"NVT_CA_BUNDLE_FILE=" + filepath.Join(t.TempDir(), "bundle.crt"),
+	}, config)
+	envFile := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "env"))
+	for _, want := range []string{
+		`export HTTPS_PROXY="http://127.0.0.1:15002"`,
+		`export https_proxy="http://127.0.0.1:15002"`,
+		`export HTTP_PROXY=""`, `export http_proxy=""`,
+		`export ALL_PROXY=""`, `export all_proxy=""`,
+	} {
+		if !strings.Contains(envFile, want) {
+			t.Fatalf("transparent proxy env missing %q:\n%s", want, envFile)
+		}
+	}
+}
+
 func TestBootstrapRuntimeProxyProviderRequiresForwardProxy(t *testing.T) {
 	f := newFixture(t)
 	config := f.writeAgentConfig(`

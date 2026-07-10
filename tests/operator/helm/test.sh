@@ -8,6 +8,7 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
 DEFAULT_RENDER="${WORKDIR}/default.yaml"
+EGRESS_POLICY_RENDER="${WORKDIR}/egress-policy.yaml"
 GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
@@ -33,6 +34,10 @@ PRODUCER_NULL_TTL_RENDER="${WORKDIR}/producer-null-ttl.yaml"
 PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set 'egress.allowedTCPPorts={80,8443}' \
+  --set 'egress.denyCIDRs={10.240.0.0/16,fd00:1234::/48}' \
+  > "${EGRESS_POLICY_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true --set gateway.port=8091 > "${GATEWAY_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
@@ -91,9 +96,19 @@ bash "${ROOT}/tests/operator/github-comments-producer-secret/test.sh"
 bash "${ROOT}/tests/operator/broker-env-secret/test.sh"
 bash -n "${ROOT}/tests/operator/kind/smoke-scheduler-job.sh"
 bash -n "${ROOT}/tests/operator/kind/smoke-scheduler-job-test.sh"
+bash -n "${ROOT}/tests/operator/kind/kind-command.sh"
 bash -n "${ROOT}/tests/operator/kind/producer-kind-targets-test.sh"
 bash "${ROOT}/tests/operator/kind/smoke-scheduler-job-test.sh"
 bash "${ROOT}/tests/operator/kind/producer-kind-targets-test.sh"
+
+grep -q 'value: "80,8443"' "${EGRESS_POLICY_RENDER}" || {
+  echo "chart did not render configured external TCP ports" >&2
+  exit 1
+}
+grep -q 'value: "10.240.0.0/16,fd00:1234::/48"' "${EGRESS_POLICY_RENDER}" || {
+  echo "chart did not render configured IPv4/IPv6 deployment exclusions" >&2
+  exit 1
+}
 
 has_resource() {
   local file="$1"

@@ -133,8 +133,11 @@ NetworkPolicies before creating the Agent Pod.
 
 ### Proxy-aware clients
 
-The runtime keeps `HTTP_PROXY`, `HTTPS_PROXY`, and provider-scoped proxy URLs,
-but points them at an explicit local listener:
+The runtime keeps `HTTPS_PROXY` and provider-scoped proxy URLs, pointing them
+at an explicit local listener. `HTTP_PROXY`, lowercase `http_proxy`, and
+generic `ALL_PROXY` remain unset in transparent mode because the downstream
+explicit listener is CONNECT-only; ordinary HTTP takes the transparent TCP
+path instead.
 
 ```text
 tool
@@ -318,8 +321,9 @@ Agent/DinD network namespace                 Trusted egress namespace
 - Only the egressd-specific environment file contains the paired egress broker
   identity. The agent receives public CA certificates, inert placeholders,
   routes, and non-secret provider selectors only.
-- Existing explicit proxy variables continue to point to the local `captured`
-  listener. Transparent rules capture tools that ignore those variables.
+- HTTPS and provider-scoped explicit proxy variables continue to point to the
+  local `captured` listener. Plain HTTP proxy variables remain unset, and
+  transparent rules capture both HTTP and tools that ignore proxy variables.
 - The current `MEDIATED=1`-style configuration may select this topology while
   direct mode remains the default local compatibility path.
 
@@ -376,6 +380,10 @@ CNI policy are separate layers.
 ## Protocol Coverage
 
 The first version guarantees routing for permitted external TCP traffic.
+
+The operator renders one external TCP port contract into both egressd and its
+NetworkPolicy. It is configurable through Helm and defaults to ports 80 and
+443 so normal HTTP package/bootstrap traffic and HTTPS work together.
 
 - HTTPS, HTTP, Git-over-HTTPS, WebSocket, and SSE use TCP and are covered.
 - Generic non-HTTP TCP can be blind-tunnelled when its port is explicitly

@@ -1,0 +1,57 @@
+services:
+  netns:
+    image: docker:27-dind
+    privileged: true
+    command: ["sh", "-c", "sleep infinity"]
+    networks: [capture, external]
+  egressd:
+    image: nvt-egressd:latest
+    environment:
+      NVT_EGRESSD_CONFIG: /config/egressd.json
+      COMPOSE_PROVIDER_CANARY: ${COMPOSE_PROVIDER_CANARY:?set by compose-transparent-smoke.sh}
+    volumes:
+      - ./transparent-egressd.json:/config/egressd.json:ro
+    networks: [capture, external]
+  captured:
+    image: nvt-captured:latest
+    network_mode: service:netns
+    environment:
+      NVT_CAPTURED_EXPLICIT_LISTEN: "[::]:15002"
+      NVT_CAPTURED_TRANSPARENT_LISTEN: "[::]:15001"
+      NVT_EGRESS_PROXY: egressd:8473
+    depends_on: [egressd, netns]
+  net-init:
+    image: docker:27-dind
+    network_mode: service:netns
+    user: "0:0"
+    cap_add: [NET_ADMIN]
+    depends_on: [captured]
+    command:
+      - sh
+      - -ec
+      - |
+        iptables -t nat -N NVT_CAPTURE
+        iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
+        iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+        iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+        iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+  tester:
+    image: docker:27-dind
+    network_mode: service:netns
+    depends_on:
+      net-init:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -ec
+      - |
+        until test -f /tmp/scan-complete; do sleep 0.1; done
+        wget -q -T 20 -O /tmp/result https://example.com/
+        grep -qi example /tmp/result
+        wget -q -T 20 -O /tmp/http-result http://example.com/
+        grep -qi example /tmp/http-result
+        echo "compose transparent functional/best-effort smoke passed"
+networks:
+  capture:
+    internal: true
+  external: {}

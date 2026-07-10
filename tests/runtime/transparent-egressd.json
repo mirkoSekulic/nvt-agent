@@ -1,0 +1,9 @@
+{
+  "routes": [],
+  "forward_proxy": {
+    "listen": "0.0.0.0:8473",
+    "allow_unmatched_hosts": true,
+    "allow_ports": [80, 443],
+    "inject_routes": []
+  }
+}

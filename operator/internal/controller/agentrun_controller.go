@@ -16,11 +16,13 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,19 +99,42 @@ const (
 	egressdConfigName      = "egressd-config"
 	egressdReadyRequeue    = 2 * time.Second
 
-	brokerAgentsConfigMapName  = "nvt-broker-agents"
-	brokerAgentsConfigKey      = "agents.yaml"
-	brokerTokenKey             = "NVT_BROKER_TOKEN"
-	egressTokenKey             = "NVT_EGRESS_BROKER_TOKEN"
-	defaultEgressdImage        = "nvt-egressd:latest"
-	callbackTokenKey           = "NVT_OPERATOR_CALLBACK_TOKEN"
-	agentRunFinalizer          = "nvt.dev/agentrun-broker-policy"
-	completedLifecycleReason   = "Completed by lifecycle event "
-	failedLifecycleReason      = "Failed by lifecycle event "
-	activeDeadlineReason       = "Active deadline exceeded"
-	generatedTokenByteLength   = 32
-	defaultRunRetentionSeconds = 30 * 24 * 60 * 60
+	brokerAgentsConfigMapName        = "nvt-broker-agents"
+	brokerAgentsConfigKey            = "agents.yaml"
+	brokerTokenKey                   = "NVT_BROKER_TOKEN"
+	egressTokenKey                   = "NVT_EGRESS_BROKER_TOKEN"
+	defaultEgressdImage              = "nvt-egressd:latest"
+	defaultCapturedImage             = "nvt-captured:latest"
+	capturedTransparentPort          = 15001
+	capturedExplicitPort             = 15002
+	capturedUID                int64 = 65532
+	callbackTokenKey                 = "NVT_OPERATOR_CALLBACK_TOKEN"
+	agentRunFinalizer                = "nvt.dev/agentrun-broker-policy"
+	completedLifecycleReason         = "Completed by lifecycle event "
+	failedLifecycleReason            = "Failed by lifecycle event "
+	activeDeadlineReason             = "Active deadline exceeded"
+	generatedTokenByteLength         = 32
+	defaultRunRetentionSeconds       = 30 * 24 * 60 * 60
 )
+
+var defaultExternalTCPPorts = []int{80, 443}
+
+// builtInEgressDenyCIDRs mirrors egressd's IANA-derived destination policy.
+// The same normalized result is rendered into egressd and NetworkPolicy, so
+// the application and CNI defense use one operator-side source.
+var builtInEgressDenyCIDRs = []string{
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+	"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+	"192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+	"224.0.0.0/4", "240.0.0.0/4",
+	// Kubernetes rejects IPv4-mapped IPv6 prefixes in ipBlock.except. Mapped
+	// traffic is covered by the IPv4 exclusions, while egressd additionally
+	// unmaps every address before applying its application policy.
+	"::/96", "64:ff9b::/96", "64:ff9b:1::/48",
+	"100::/64", "100:0:0:1::/64", "2001::/32", "2001:2::/48",
+	"2001:10::/28", "2001:20::/28", "2001:db8::/32", "2002::/16",
+	"3fff::/20", "5f00::/16", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
+}
 
 // Enforcement-mode status conditions, in machine order. The agent Pod is
 // never created before ConditionBrokerPolicyReady and
@@ -842,7 +867,22 @@ func AgentRunEgressEnforced(agentRun *nvtv1alpha1.AgentRun) bool {
 // AgentRunEgressForwardProxy reports whether the run uses forward-proxy mode.
 // Validation guarantees this implies mediated + enforced egress.
 func AgentRunEgressForwardProxy(agentRun *nvtv1alpha1.AgentRun) bool {
-	return agentRun.Spec.EgressForwardProxy && AgentRunEgressEnforced(agentRun)
+	transport := AgentRunEgressTransport(agentRun)
+	return (transport == nvtv1alpha1.AgentRunEgressTransportForwardProxy || transport == nvtv1alpha1.AgentRunEgressTransportTransparent) && AgentRunEgressEnforced(agentRun)
+}
+
+func AgentRunEgressTransport(agentRun *nvtv1alpha1.AgentRun) nvtv1alpha1.AgentRunEgressTransport {
+	if agentRun.Spec.EgressTransport != "" {
+		return agentRun.Spec.EgressTransport
+	}
+	if agentRun.Spec.EgressForwardProxy {
+		return nvtv1alpha1.AgentRunEgressTransportForwardProxy
+	}
+	return nvtv1alpha1.AgentRunEgressTransportRedirect
+}
+
+func AgentRunEgressTransparent(agentRun *nvtv1alpha1.AgentRun) bool {
+	return AgentRunEgressEnforced(agentRun) && AgentRunEgressTransport(agentRun) == nvtv1alpha1.AgentRunEgressTransportTransparent
 }
 
 // forwardProxyInjectHosts returns the (host, capability) pairs egressd MITMs
@@ -917,10 +957,25 @@ func forwardProxyUpstreamHosts(agentRun *nvtv1alpha1.AgentRun) []string {
 // silently route infra (broker, callback, DNS) through the MITM.
 func forwardProxyEnv(agentRun *nvtv1alpha1.AgentRun) []corev1.EnvVar {
 	proxyURL := fmt.Sprintf("http://%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)
+	if AgentRunEgressTransparent(agentRun) {
+		proxyURL = fmt.Sprintf("http://127.0.0.1:%d", capturedExplicitPort)
+	}
 	noProxy := forwardProxyNoProxy(agentRun)
+	proxyNames := []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"}
+	if AgentRunEgressTransparent(agentRun) {
+		// Plain HTTP must take the normal TCP path so iptables redirects it to
+		// captured's transparent listener. egressd's explicit listener is
+		// CONNECT-only; HTTPS keeps the explicit path and provider hints.
+		proxyNames = []string{"HTTPS_PROXY", "https_proxy"}
+	}
 	env := []corev1.EnvVar{}
-	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+	for _, name := range proxyNames {
 		env = append(env, corev1.EnvVar{Name: name, Value: proxyURL})
+	}
+	if AgentRunEgressTransparent(agentRun) {
+		for _, name := range []string{"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+			env = append(env, corev1.EnvVar{Name: name, Value: ""})
+		}
 	}
 	for _, name := range []string{"NO_PROXY", "no_proxy"} {
 		env = append(env, corev1.EnvVar{Name: name, Value: noProxy})
@@ -1573,15 +1628,73 @@ func DesiredAgentNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.S
 }
 
 // DesiredEgressdNetworkPolicy fences the own-Pod egressd: ingress only from
-// the paired agent; egress to DNS, the broker, and upstream :443.
+// the paired agent; egress to DNS, the broker, and configured external TCP
+// ports (HTTP/HTTPS by default).
 //
-// The 0.0.0.0/0:443 egress is a deliberately coarse fence: vanilla
+// The public-CIDR/port egress is a deliberately coarse fence: vanilla
 // NetworkPolicy selects by CIDR/port, not hostname. The semantic per-host
 // allowlist lives in egressd itself (pinned route upstreams, capability
-// injection-hosts, fail-closed CONNECT allowlist) — do not read this policy
-// as host-scoped. Excluding cluster CIDRs via except blocks is a second-pass
-// hardening, not this PR.
+// injection-hosts, fail-closed CONNECT allowlist) — do not read the public
+// CIDR rules as host-scoped. Cluster CIDRs remain excluded; a test/dev-only
+// allowInsecureUpstream can instead select an explicitly labelled fixture.
 func DesiredEgressdNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*networkingv1.NetworkPolicy, error) {
+	denyCIDRs, err := DeploymentDenyCIDRs()
+	if err != nil {
+		return nil, err
+	}
+	externalPorts, err := ExternalTCPPorts()
+	if err != nil {
+		return nil, err
+	}
+	var ipv4Except, ipv6Except []string
+	for _, cidr := range denyCIDRs {
+		if strings.Contains(cidr, ":") {
+			ipv6Except = append(ipv6Except, cidr)
+		} else {
+			ipv4Except = append(ipv4Except, cidr)
+		}
+	}
+	egressRules := []networkingv1.NetworkPolicyEgressRule{dnsPolicyEgressRule(), brokerPolicyEgressRule()}
+	// Test/dev-only explicitly configured in-cluster upstreams get a narrow
+	// Pod-selector exception. External-looking fixture names must opt in by
+	// carrying the hash label; blind tunnels never receive this exception.
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if !grant.AllowInsecureUpstream {
+			continue
+		}
+		for _, upstream := range grant.EgressHosts {
+			host, portText, err := net.SplitHostPort(upstream)
+			if err != nil {
+				continue
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				continue
+			}
+			labels := map[string]string{"nvt.dev/egress-host": egressHostLabel(host)}
+			if strings.HasSuffix(host, ".svc.cluster.local") {
+				labels = map[string]string{"app.kubernetes.io/name": strings.Split(host, ".")[0]}
+			}
+			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+				To:    []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: labels}}},
+				Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, port)},
+			})
+		}
+	}
+	externalPolicyPorts := make([]networkingv1.NetworkPolicyPort, 0, len(externalPorts))
+	for _, port := range externalPorts {
+		externalPolicyPorts = append(externalPolicyPorts, policyPort(corev1.ProtocolTCP, port))
+	}
+	egressRules = append(egressRules,
+		networkingv1.NetworkPolicyEgressRule{
+			To:    []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: ipv4Except}}},
+			Ports: externalPolicyPorts,
+		},
+		networkingv1.NetworkPolicyEgressRule{
+			To:    []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: ipv6Except}}},
+			Ports: externalPolicyPorts,
+		},
+	)
 	policy := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      EgressdNetworkPolicyName(agentRun.Name),
@@ -1619,22 +1732,18 @@ func DesiredEgressdNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime
 					Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, egressCAPort)},
 				},
 			},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
-				dnsPolicyEgressRule(),
-				brokerPolicyEgressRule(),
-				{
-					To: []networkingv1.NetworkPolicyPeer{{
-						IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0"},
-					}},
-					Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, 443)},
-				},
-			},
+			Egress: egressRules,
 		},
 	}
 	if err := controllerutil.SetControllerReference(agentRun, policy, scheme); err != nil {
 		return nil, fmt.Errorf("set egressd NetworkPolicy owner: %w", err)
 	}
 	return policy, nil
+}
+
+func egressHostLabel(host string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(strings.TrimSuffix(host, "."))))
+	return hex.EncodeToString(digest[:16])
 }
 
 // DesiredEgressdService exposes the CA endpoint and every route port under
@@ -1777,7 +1886,10 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	}
 	type egressdForwardProxy struct {
 		Listen              string                     `json:"listen"`
+		TransparentMode     bool                       `json:"transparent_mode,omitempty"`
 		AllowUnmatchedHosts bool                       `json:"allow_unmatched_hosts"`
+		AllowPorts          []int                      `json:"allow_ports"`
+		DenyCIDRs           []string                   `json:"deny_cidrs,omitempty"`
 		InjectRoutes        []egressdForwardProxyRoute `json:"inject_routes"`
 	}
 	type egressdConfig struct {
@@ -1836,6 +1948,14 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		Routes:              routes,
 	}
 	if forwardProxy {
+		denyCIDRs, err := DeploymentDenyCIDRs()
+		if err != nil {
+			return "", err
+		}
+		externalPorts, err := ExternalTCPPorts()
+		if err != nil {
+			return "", err
+		}
 		injects := forwardProxyInjects(agentRun)
 		if len(injects) == 0 {
 			return "", fmt.Errorf("forward-proxy egress requires at least one injectable grant with egressHosts")
@@ -1853,7 +1973,10 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		}
 		config.ForwardProxy = &egressdForwardProxy{
 			Listen:              fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
+			TransparentMode:     AgentRunEgressTransparent(agentRun),
 			AllowUnmatchedHosts: true,
+			AllowPorts:          externalPorts,
+			DenyCIDRs:           denyCIDRs,
 			InjectRoutes:        fpRoutes,
 		}
 	}
@@ -2024,6 +2147,28 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			},
 		})
 	}
+	if AgentRunEgressTransparent(agentRun) {
+		initContainers = append(initContainers, corev1.Container{
+			Name:            "captured",
+			Image:           CapturedImage(),
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			RestartPolicy:   ptrTo(corev1.ContainerRestartPolicyAlways),
+			Env: []corev1.EnvVar{
+				{Name: "NVT_CAPTURED_EXPLICIT_LISTEN", Value: fmt.Sprintf("[::]:%d", capturedExplicitPort)},
+				{Name: "NVT_CAPTURED_TRANSPARENT_LISTEN", Value: fmt.Sprintf("[::]:%d", capturedTransparentPort)},
+				{Name: "NVT_EGRESS_PROXY", Value: fmt.Sprintf("%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)},
+			},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsNonRoot:             ptrTo(true),
+				RunAsUser:                ptrTo(capturedUID),
+				RunAsGroup:               ptrTo(capturedUID),
+				AllowPrivilegeEscalation: ptrTo(false),
+				ReadOnlyRootFilesystem:   ptrTo(true),
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+		})
+	}
 	initContainers = append(initContainers, corev1.Container{
 		Name:          "docker",
 		Image:         "docker:27-dind",
@@ -2051,6 +2196,58 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			{Name: "workspace", MountPath: workspaceMountPath},
 		},
 	})
+	if AgentRunEgressTransparent(agentRun) {
+		const rules = `set -eu
+exclude_v4=""
+exclude_v6=""
+for host in $NVT_CAPTURE_EXCLUDE_HOSTS; do
+  for ip in $(getent ahosts "$host" | awk '{print $1}' | sort -u); do
+    case "$ip" in *:*) exclude_v6="$exclude_v6 $ip" ;; *) exclude_v4="$exclude_v4 $ip" ;; esac
+  done
+done
+iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
+iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
+for ip in $exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$ip/32" -j RETURN; done
+iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
+for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
+iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
+ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
+ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
+for ip in $exclude_v6; do ip6tables -t nat -A NVT_CAPTURE -d "$ip/128" -j RETURN; done
+ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
+for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
+ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "net-init",
+			Image:   "docker:27-dind",
+			Command: []string{"sh", "-c"},
+			Args:    []string{rules},
+			Env: []corev1.EnvVar{{
+				Name: "NVT_CAPTURE_EXCLUDE_HOSTS",
+				Value: strings.Join([]string{
+					EgressdServiceName(agentRun.Name), "nvt-broker", "nvt-operator",
+					"kubernetes.default.svc", "kube-dns.kube-system.svc",
+				}, " "),
+			}},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser:                ptrTo(int64(0)),
+				AllowPrivilegeEscalation: ptrTo(false),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+					Add:  []corev1.Capability{"NET_ADMIN"},
+				},
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+		})
+	}
 
 	containers := []corev1.Container{
 		{
@@ -2267,6 +2464,108 @@ func EgressdImage() string {
 	return defaultEgressdImage
 }
 
+func CapturedImage() string {
+	if image := strings.TrimSpace(os.Getenv("NVT_CAPTURED_IMAGE")); image != "" {
+		return image
+	}
+	return defaultCapturedImage
+}
+
+func NetworkPolicyCapable() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("NVT_NETWORK_POLICY_CAPABLE")))
+	return value == "1" || value == "true" || value == "yes"
+}
+
+// DeploymentDenyCIDRs combines the built-in IANA non-public/transition ranges
+// with deployment-specific cluster, Pod, Service, node, and VNet ranges.
+func DeploymentDenyCIDRs() ([]string, error) {
+	values := append([]string(nil), builtInEgressDenyCIDRs...)
+	if configured := strings.TrimSpace(os.Getenv("NVT_EGRESS_DENY_CIDRS")); configured != "" {
+		for _, value := range strings.Split(configured, ",") {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				values = append(values, value)
+			}
+		}
+	}
+	return normalizeCIDRs(values)
+}
+
+func normalizeCIDRs(values []string) ([]string, error) {
+	unique := map[string]netip.Prefix{}
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid egress deny CIDR %q: %w", value, err)
+		}
+		prefix = prefix.Masked()
+		unique[prefix.String()] = prefix
+	}
+	prefixes := make([]netip.Prefix, 0, len(unique))
+	for _, prefix := range unique {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Slice(prefixes, func(i, j int) bool {
+		if prefixes[i].Addr().BitLen() != prefixes[j].Addr().BitLen() {
+			return prefixes[i].Addr().BitLen() < prefixes[j].Addr().BitLen()
+		}
+		if prefixes[i].Bits() != prefixes[j].Bits() {
+			return prefixes[i].Bits() < prefixes[j].Bits()
+		}
+		if prefixes[i].Addr() != prefixes[j].Addr() {
+			return prefixes[i].Addr().Less(prefixes[j].Addr())
+		}
+		return false
+	})
+	normalized := make([]netip.Prefix, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		covered := false
+		for _, existing := range normalized {
+			if existing.Contains(prefix.Addr()) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			normalized = append(normalized, prefix)
+		}
+	}
+	result := make([]string, 0, len(normalized))
+	for _, prefix := range normalized {
+		result = append(result, prefix.String())
+	}
+	return result, nil
+}
+
+// ExternalTCPPorts is the single operator-side port contract rendered into
+// both egressd and its NetworkPolicy.
+func ExternalTCPPorts() ([]int, error) {
+	values := append([]int(nil), defaultExternalTCPPorts...)
+	if configured := strings.TrimSpace(os.Getenv("NVT_EGRESS_ALLOWED_TCP_PORTS")); configured != "" {
+		values = nil
+		for _, raw := range strings.Split(configured, ",") {
+			port, err := strconv.Atoi(strings.TrimSpace(raw))
+			if err != nil || port < 1 || port > 65535 {
+				return nil, fmt.Errorf("invalid external TCP port %q", raw)
+			}
+			values = append(values, port)
+		}
+	}
+	seen := map[int]bool{}
+	result := values[:0]
+	for _, port := range values {
+		if !seen[port] {
+			seen[port] = true
+			result = append(result, port)
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("external TCP ports must not be empty")
+	}
+	sort.Ints(result)
+	return result, nil
+}
+
 // BrokerURL is the broker base URL the operator wires into agent and egressd
 // containers. The chart sets NVT_BROKER_URL=https://nvt-broker:7347 when
 // broker TLS is enabled; the default stays plaintext so local/dev setups and
@@ -2391,6 +2690,12 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	if err := ValidateBrokerTLSConfig(); err != nil {
 		return err
 	}
+	if _, err := DeploymentDenyCIDRs(); err != nil {
+		return err
+	}
+	if _, err := ExternalTCPPorts(); err != nil {
+		return err
+	}
 	mode := AgentRunEgressMode(agentRun)
 	if mode != nvtv1alpha1.AgentRunEgressDirect && mode != nvtv1alpha1.AgentRunEgressMediated {
 		return fmt.Errorf("spec.egress must be direct or mediated, got %q", mode)
@@ -2399,10 +2704,24 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("spec.egressEnforcement requires spec.egress mediated, got %q", mode)
 	}
 	if agentRun.Spec.EgressForwardProxy && !agentRun.Spec.EgressEnforcement {
-		// Without the CNI fence the agent can ignore the proxy env and reach
-		// hosts directly, so forward-proxy without enforcement is coverage
-		// theater (docs/phase6.2-forward-proxy-pr-plan.md decision 3).
 		return fmt.Errorf("spec.egressForwardProxy requires spec.egressEnforcement")
+	}
+	transport := AgentRunEgressTransport(agentRun)
+	switch transport {
+	case nvtv1alpha1.AgentRunEgressTransportRedirect,
+		nvtv1alpha1.AgentRunEgressTransportForwardProxy,
+		nvtv1alpha1.AgentRunEgressTransportTransparent:
+	default:
+		return fmt.Errorf("spec.egressTransport must be redirect, forward-proxy, or transparent, got %q", transport)
+	}
+	if agentRun.Spec.EgressTransport != "" && agentRun.Spec.EgressForwardProxy && transport != nvtv1alpha1.AgentRunEgressTransportForwardProxy {
+		return fmt.Errorf("spec.egressTransport conflicts with compatibility field spec.egressForwardProxy")
+	}
+	if transport != nvtv1alpha1.AgentRunEgressTransportRedirect && (!agentRun.Spec.EgressEnforcement || mode != nvtv1alpha1.AgentRunEgressMediated) {
+		return fmt.Errorf("spec.egressTransport %s requires spec.egress mediated and spec.egressEnforcement", transport)
+	}
+	if transport == nvtv1alpha1.AgentRunEgressTransportTransparent && !NetworkPolicyCapable() {
+		return fmt.Errorf("spec.egressTransport transparent requires a NetworkPolicy-capable deployment")
 	}
 	headerInjectGrants := 0
 	if mode == nvtv1alpha1.AgentRunEgressMediated {
@@ -2464,7 +2783,7 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		}
 		// In forward-proxy mode a placeholder-file grant's egressHosts become
 		// MITM routes, so validate them too.
-		if agentRun.Spec.EgressForwardProxy && materialization == nvtv1alpha1.AgentRunGrantPlaceholderFile {
+		if AgentRunEgressForwardProxy(agentRun) && materialization == nvtv1alpha1.AgentRunGrantPlaceholderFile {
 			for _, host := range grant.EgressHosts {
 				if !validEgressHost(host) {
 					return fmt.Errorf("forward-proxy broker grant %s has invalid egressHosts entry %q", grant.Provider, host)
@@ -2472,7 +2791,7 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 			}
 		}
 	}
-	if agentRun.Spec.EgressForwardProxy {
+	if AgentRunEgressForwardProxy(agentRun) {
 		// Forward-proxy makes every injection-capable grant's egressHosts
 		// routable, so the run needs at least one such host — but no longer a
 		// header-inject grant specifically.
@@ -2912,6 +3231,7 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 	updated := cloneStringAnyMap(config)
 	egress := map[string]any{
 		"mode":        string(nvtv1alpha1.AgentRunEgressMediated),
+		"transport":   string(AgentRunEgressTransport(agentRun)),
 		"placeholder": "NVT-PLACEHOLDER-NOT-A-KEY",
 		"grants":      grants,
 	}
@@ -2922,7 +3242,14 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 		// Signals bootstrap to install the CA trust store for proxy-env HTTPS
 		// clients (the MITM leaf must be trusted system-wide).
 		egress["forward-proxy"] = true
-		egress["forward-proxy-url"] = fmt.Sprintf("http://%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)
+		proxyURL := fmt.Sprintf("http://%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)
+		if AgentRunEgressTransport(agentRun) == nvtv1alpha1.AgentRunEgressTransportTransparent {
+			// Keep proxy-aware tools on the credential-less local transport too.
+			// captured preserves explicit provider userinfo before relaying to the
+			// paired egressd; bootstrap must not overwrite this with the Service.
+			proxyURL = fmt.Sprintf("http://127.0.0.1:%d", capturedExplicitPort)
+		}
+		egress["forward-proxy-url"] = proxyURL
 	}
 	updated["egress"] = egress
 	return updated

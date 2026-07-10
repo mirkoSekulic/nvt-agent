@@ -20,6 +20,9 @@ services:
     depends_on:
       docker:
         condition: service_healthy
+      net-init:
+        condition: service_completed_successfully
+        required: false
     network_mode: service:docker
     volumes:
       - ${WORKSPACE_DIR}:${NVT_WORKSPACE}
@@ -47,10 +50,53 @@ services:
       - ${EGRESSD_CONFIG_FILE:-/dev/null}:/config/egressd.json:ro
       - ${EGRESS_CA_CERT_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.crt:ro
       - ${EGRESS_CA_KEY_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.key:ro
+    networks:
+      - agent-internal
+      - egress-private
+
+  captured:
+    image: nvt-captured:latest
+    profiles:
+      - mediated
     network_mode: service:docker
+    environment:
+      NVT_CAPTURED_EXPLICIT_LISTEN: "[::]:15002"
+      NVT_CAPTURED_TRANSPARENT_LISTEN: "[::]:15001"
+      NVT_EGRESS_PROXY: egressd:8470
+    depends_on:
+      egressd:
+        condition: service_started
+
+  net-init:
+    image: docker:27-dind
+    profiles:
+      - mediated
+    network_mode: service:docker
+    user: "0:0"
+    cap_add:
+      - NET_ADMIN
     depends_on:
       docker:
         condition: service_healthy
+      captured:
+        condition: service_started
+    command:
+      - sh
+      - -ec
+      - |
+        iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
+        iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
+        iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+        iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+        iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+        iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
+        iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+        iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
+        ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
+        ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
+        ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+        ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+        ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 
   docker:
     image: docker:27-dind
@@ -73,6 +119,7 @@ services:
     networks:
       - agents-proxy
       - agent-internal
+      - egress-private
     labels:
       - traefik.enable=true
       - traefik.docker.network=agents-proxy
@@ -89,3 +136,5 @@ networks:
   agents-proxy:
     external: true
   agent-internal:
+  egress-private:
+    internal: true
