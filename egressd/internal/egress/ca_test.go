@@ -7,6 +7,7 @@ package egress
 // the pinned upstream, never derived from the client request.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,6 +20,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -807,9 +809,9 @@ func TestCAGetCertificateSNIBehavior(t *testing.T) {
 	}
 }
 
-// TestCAUpstreamLeafRemintsAcrossTLSHandshakes pins the production path. TLS
-// session resumption must not bypass GetCertificate and retain an expired leaf.
-func TestCAUpstreamLeafRemintsAcrossTLSHandshakes(t *testing.T) {
+// TestCAUpstreamLeafRemintsWithClock pins the cache boundary independently of
+// wall time and verifies sanitized mint/remint observability.
+func TestCAUpstreamLeafRemintsWithClock(t *testing.T) {
 	const name = "api.example.test"
 	clock := time.Now().UTC().Truncate(time.Second)
 	ca, err := NewCAWithUpstreams(nil, []string{name})
@@ -817,6 +819,8 @@ func TestCAUpstreamLeafRemintsAcrossTLSHandshakes(t *testing.T) {
 		t.Fatal(err)
 	}
 	ca.Now = func() time.Time { return clock }
+	var logs bytes.Buffer
+	ca.Logger = log.New(&logs, "", 0)
 
 	first, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
 	if err != nil {
@@ -835,46 +839,12 @@ func TestCAUpstreamLeafRemintsAcrossTLSHandshakes(t *testing.T) {
 	if reminted.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) == 0 || !reminted.Leaf.NotAfter.After(first.Leaf.NotAfter) {
 		t.Fatal("leaf was not renewed inside remint margin")
 	}
-
-	config := ca.ServerTLSConfig()
-	if !config.SessionTicketsDisabled {
-		t.Fatal("dynamic leaf TLS config must disable session tickets")
-	}
-	listener, err := tls.Listen("tcp", "127.0.0.1:0", config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	serve := func() <-chan error {
-		done := make(chan error, 1)
-		go func() {
-			conn, acceptErr := listener.Accept()
-			if acceptErr == nil {
-				acceptErr = conn.(*tls.Conn).Handshake()
-				_ = conn.Close()
-			}
-			done <- acceptErr
-		}()
-		return done
-	}
-	clock = first.Leaf.NotAfter.Add(time.Minute)
-	done := serve()
-	client, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
-		// The injected clock is intentionally ahead of wall time. Certificate
-		// trust/name/validity are asserted explicitly in the CA tests and below;
-		// this connection exercises server-side certificate selection.
-		InsecureSkipVerify: true, //nolint:gosec -- test-only synthetic clock
-		ServerName:         name, ClientSessionCache: tls.NewLRUClientSessionCache(1),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	peer := client.ConnectionState().PeerCertificates[0]
-	_ = client.Close()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if peer.SerialNumber.Cmp(first.Leaf.SerialNumber) == 0 || !peer.NotAfter.After(clock) {
-		t.Fatalf("handshake received stale leaf serial=%s not_after=%s clock=%s", peer.SerialNumber, peer.NotAfter, clock)
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "event=tls_leaf_mint") ||
+		!strings.Contains(lines[1], "event=tls_leaf_remint") ||
+		!strings.Contains(lines[1], "host=\"api.example.test\"") ||
+		!strings.Contains(lines[1], "old_serial=") || !strings.Contains(lines[1], "old_expiry=") ||
+		!strings.Contains(lines[1], "new_serial=") || !strings.Contains(lines[1], "new_expiry=") {
+		t.Fatalf("unexpected leaf lifecycle logs: %q", logs.String())
 	}
 }

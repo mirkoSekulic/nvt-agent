@@ -66,6 +66,7 @@ func run() error {
 			}
 			log.Printf("egressd: published per-agent CA certificate to %s", config.CA.PublishDir)
 		}
+		ca.Logger = log.Default()
 	}
 	transport := &http.Transport{ForceAttemptHTTP2: true}
 	// One reporter per process, shared across routes and the forward proxy,

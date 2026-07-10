@@ -85,7 +85,6 @@ DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # client. These values are configurable because this is empirical compatibility,
 # not a stable API contract documented by Anthropic.
 DEFAULT_REFRESH_SCOPE = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
-DEFAULT_OAUTH_BETA = "oauth-2025-04-20"
 DEFAULT_USER_AGENT = "axios/1.15.2"
 # Refresh the access token this many seconds before its expiresAt. Claude
 # credentials do not expose refresh-token expiry, so we cannot key off it; a
@@ -148,14 +147,13 @@ class ClaudeOAuthProvider:
         parsed = urlparse(self.token_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             fail(f"provider {self.name} config.token-url must be an http(s) URL")
-        # client-id / refresh-scope / oauth-beta / user-agent each accept a literal
+        # client-id / refresh-scope / user-agent each accept a literal
         # or an env indirection (`client-id-env`), mutually exclusive, falling
         # back to the public Claude Code default when neither is set. This keeps
         # existing documented `client-id-env` configuration working instead of
         # silently ignoring it.
         self.client_id = self._provider_value("client-id", DEFAULT_CLIENT_ID)
         self.refresh_scope = self._provider_value("refresh-scope", DEFAULT_REFRESH_SCOPE)
-        self.oauth_beta = self._provider_value("oauth-beta", DEFAULT_OAUTH_BETA)
         self.user_agent = self._provider_value("user-agent", DEFAULT_USER_AGENT)
         self.refresh_margin_seconds = self._int_config("refresh-margin-seconds", DEFAULT_REFRESH_MARGIN_SECONDS)
         self.refresh_cooldown_seconds = self._int_config("refresh-cooldown-seconds", DEFAULT_REFRESH_COOLDOWN_SECONDS)

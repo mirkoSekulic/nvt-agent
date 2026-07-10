@@ -78,16 +78,16 @@ CLI 2.1.205. This is empirical compatibility, not a documented stable contract:
 - `refresh-scope`: `user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`
 - `user-agent`: `axios/1.15.2`
 
-The refresh request does not send `anthropic-beta`. The provider's separate
-`oauth-beta` setting remains available for injected Claude API requests.
+The refresh request does not send `anthropic-beta`. API beta headers are a
+separate concern and must be configured explicitly under
+`injection-extra-headers`.
 
 The client id identifies the Claude Code OAuth application, not your
 subscription. It is not a secret, and the Claude `.credentials.json` file does
 not carry it. Anthropic does not document these observed values as a stability
 contract, so production deployments can override them with `token-url`,
-`client-id` / `client-id-env`, `refresh-scope` / `refresh-scope-env`,
-`oauth-beta` / `oauth-beta-env`, and `user-agent` / `user-agent-env` if Claude
-Code changes.
+`client-id` / `client-id-env`, `refresh-scope` / `refresh-scope-env`, and
+`user-agent` / `user-agent-env` if Claude Code changes.
 
 To seed a local dev credential, log in with Claude Code once on a trusted host
 and copy the resulting `~/.claude/.credentials.json` to the broker-side path.

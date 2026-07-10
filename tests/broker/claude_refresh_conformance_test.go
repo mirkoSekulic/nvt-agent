@@ -121,6 +121,20 @@ func TestClaudeRefreshProactivelyBeforeExpiry(t *testing.T) {
 	}
 }
 
+func TestClaudeRefreshSendsLiteralScopeOverride(t *testing.T) {
+	f := newBrokerFixtureWithClaudeConfig(t, "      refresh-scope: literal-refresh-scope")
+	f.writeRoleIdentities(claudePlaceholderIdentities())
+	f.writeClaudeCredentialsExpiring("claude-access-near-expiry", "claude-refresh-fixture", time.Now().Add(5*time.Minute))
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", claudeInjectionRequest())
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("literal-scope refresh failed: status=%d body=%v", status, body)
+	}
+	if got := f.claudeOAuth.lastRequest()["scope"]; got != "literal-refresh-scope" {
+		t.Fatalf("endpoint received scope %v, want literal override", got)
+	}
+}
+
 // TestClaudeRefreshPersistsRotatedToken pins refresh-token rotation: when the
 // endpoint returns a new refresh_token, the canonical credential adopts it so
 // the next refresh uses the rotated token.
