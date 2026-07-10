@@ -34,7 +34,10 @@ Read/write mapping: `git-upload-pack` mints `contents: read`;
 and mints `contents: write`; `info/refs` mints the effective permission (the
 `?service=` query never reaches the broker). The effective permission is the
 narrower of the grant-level `permissions.contents` (default `read`) and the
-provider-level `allow.permissions.contents` ceiling.
+provider-level `allow.permissions.contents` ceiling. Push and `info/refs`
+tokens also retain explicitly granted non-content permissions, such as
+`workflows: write`, only when the provider allowlist permits the same level.
+Fetch-only `git-upload-pack` tokens remain scoped to `contents: read`.
 
 Routing (`/v1/injection/routing`) reports `git: true` for this provider so
 runtime bootstrap installs the git redirect wiring.

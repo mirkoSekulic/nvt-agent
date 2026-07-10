@@ -406,7 +406,24 @@ class GithubAppProvider:
             # which never reaches the broker, so mint the effective (already
             # narrowed) scope so a granted push can advertise refs.
             contents = effective
-        return {"contents": contents}
+        permissions = {"contents": contents}
+        if service != "git-upload-pack":
+            permissions.update(self._effective_extra_git_permissions(grant))
+        return permissions
+
+    def _effective_extra_git_permissions(self, grant):
+        """Preserve explicit non-content grants needed by a smart-HTTP push."""
+        output = {}
+        for name, value in ((grant or {}).get("permissions") or {}).items():
+            if name == "contents":
+                continue
+            if value not in PERMISSION_ORDER:
+                raise ProviderError("permissions-invalid", f"grant {name} permission must be read or write, got {value!r}", 403)
+            ceiling = self.permissions.get(name)
+            if ceiling not in PERMISSION_ORDER or PERMISSION_ORDER[value] > PERMISSION_ORDER[ceiling]:
+                raise ProviderError("permission-not-allowed", f"provider permissions do not allow {name}: {value}", 403)
+            output[name] = value
+        return output
 
     def _injection_expiry(self, expires_at):
         timestamp = self._parse_time(expires_at)

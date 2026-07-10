@@ -150,6 +150,72 @@ func TestGitInjectionPushRequiresWriteGrant(t *testing.T) {
 	}
 }
 
+// TestGitInjectionPushPreservesGrantedWorkflowPermission pins GitHub's
+// workflow-file rule: smart-HTTP push tokens retain explicitly granted
+// non-content permissions while upload-pack remains read-only.
+func TestGitInjectionPushPreservesGrantedWorkflowPermission(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(gitIdentities(map[string]string{
+		"contents":  "write",
+		"workflows": "write",
+	}))
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("GET", "/my-user/my-repo.git/info/refs"))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("push advertisement denied: status=%d body=%v", status, body)
+	}
+	minted := mintedPermissions(t, f.lastTokenRequest(t))
+	if minted["contents"] != "write" || minted["workflows"] != "write" || len(minted) != 2 {
+		t.Fatalf("push advertisement must retain the granted workflow permission, got %v", minted)
+	}
+
+	status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("POST", "/my-user/my-repo.git/git-receive-pack"))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("push denied: status=%d body=%v", status, body)
+	}
+	minted = mintedPermissions(t, f.lastTokenRequest(t))
+	if minted["contents"] != "write" || minted["workflows"] != "write" || len(minted) != 2 {
+		t.Fatalf("push must retain the granted workflow permission, got %v", minted)
+	}
+
+	status, body = f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", gitInjectionRequest("POST", "/my-user/my-repo.git/git-upload-pack"))
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("fetch denied: status=%d body=%v", status, body)
+	}
+	minted = mintedPermissions(t, f.lastTokenRequest(t))
+	if minted["contents"] != "read" || len(minted) != 1 {
+		t.Fatalf("fetch must remain contents: read only, got %v", minted)
+	}
+}
+
+func TestGitInjectionRejectsExtraPermissionAboveProviderCeiling(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(map[string]roleIdentity{
+		"frontend": {
+			Token: "frontend-token",
+			Role:  "agent",
+			Grants: []roleGrant{{
+				Provider:        "git-app-ro",
+				Materialization: "header-inject",
+				Repositories:    []string{"my-user/my-repo"},
+				Permissions:     map[string]string{"contents": "read", "workflows": "write"},
+			}},
+		},
+		"frontend-egress": {
+			Token:       "frontend-egress-token",
+			Role:        "egress",
+			PairedAgent: "frontend",
+		},
+	})
+
+	request := gitInjectionRequest("GET", "/my-user/my-repo.git/info/refs")
+	request["capability"] = "git-app-ro"
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", request)
+	if status != http.StatusForbidden || body["error"] != "permission-not-allowed" {
+		t.Fatalf("permission above provider ceiling must deny: status=%d body=%v", status, body)
+	}
+}
+
 // TestGitInjectionProviderCeilingCapsGrantWrite pins the two-layer
 // intersection: a grant asking for contents: write cannot push through a
 // provider whose own permissions ceiling is read, and fetch through that

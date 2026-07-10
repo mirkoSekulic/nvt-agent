@@ -498,6 +498,7 @@ providers:
       repositories:
 %[4]s      permissions:
         contents: write
+        workflows: write
       methods:
         - GET
         - POST
