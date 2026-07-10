@@ -239,6 +239,8 @@ type podCredentialVolumeMountState struct {
 	SubPathExpr string `json:"subPathExpr,omitempty"`
 }
 
+const defaultProjectedVolumeMode int32 = 420
+
 // Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
 func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var agentRun nvtv1alpha1.AgentRun
@@ -777,13 +779,23 @@ func (r *AgentRunReconciler) ensureImmutablePodSecurityState(ctx context.Context
 	if err != nil {
 		return err
 	}
-	desiredState, err := podCredentialProjectionSignature(desiredPod)
+	desiredState, err := podCredentialProjectionSignature(agentRun, desiredPod)
 	if err != nil {
 		return err
 	}
-	actualState, err := podCredentialProjectionSignature(existingPod)
+	actualState, err := podCredentialProjectionSignature(agentRun, existingPod)
 	if err != nil {
-		return err
+		reason := err.Error()
+		if setErr := r.setAgentRunFailed(ctx, agentRun, reason); setErr != nil {
+			return setErr
+		}
+		if delErr := r.deleteOwnedPodByName(ctx, agentRun, AgentPodName(agentRun.Name), reason); delErr != nil {
+			return delErr
+		}
+		if delErr := r.deleteOwnedPodByName(ctx, agentRun, EgressdPodName(agentRun.Name), reason+" (egressd)"); delErr != nil {
+			return delErr
+		}
+		return fmt.Errorf("%s", reason)
 	}
 	if desiredState != actualState {
 		reason := "security-sensitive AgentRun fields changed after Pod creation"
@@ -1195,7 +1207,7 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 		// privileged root dind container is unaffected (root ignores fsGroup).
 		pod.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: ptrTo(agentNonRootGID)}
 	}
-	desiredState, err := podCredentialProjectionSignature(pod)
+	desiredState, err := podCredentialProjectionSignature(agentRun, pod)
 	if err != nil {
 		return nil, err
 	}
@@ -1209,26 +1221,38 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 	return pod, nil
 }
 
-func podCredentialProjectionSignature(pod *corev1.Pod) (string, error) {
+func podCredentialProjectionSignature(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) (string, error) {
 	state := podCredentialProjectionState{
 		AutomountServiceAccountToken: pod.Spec.AutomountServiceAccountToken,
-		ServiceAccountName:           pod.Spec.ServiceAccountName,
+		ServiceAccountName:           canonicalServiceAccountName(pod.Spec.ServiceAccountName),
 		SecurityContext:              pod.Spec.SecurityContext,
 		Volumes:                      make([]podCredentialVolumeState, 0, len(pod.Spec.Volumes)),
 		InitContainers:               make([]podCredentialContainerState, 0, len(pod.Spec.InitContainers)),
 		Containers:                   make([]podCredentialContainerState, 0, len(pod.Spec.Containers)),
+	}
+	if emptyPodSecurityContext(state.SecurityContext) {
+		state.SecurityContext = nil
 	}
 	credentialVolumes := map[string]bool{}
 	for _, volume := range pod.Spec.Volumes {
 		switch {
 		case volume.Name == brokerCAVolumeName && volume.Secret != nil:
 			continue
+		case volume.Projected != nil && containsServiceAccountTokenProjection(volume.Projected):
+			if AgentRunLiteralZeroSecret(agentRun) {
+				return "", fmt.Errorf("literal-zero-secret AgentRun Pod must not project a service-account token volume")
+			}
+			continue
 		case volume.Secret != nil:
 			credentialVolumes[volume.Name] = true
-			state.Volumes = append(state.Volumes, podCredentialVolumeState{Name: volume.Name, Secret: volume.Secret})
+			state.Volumes = append(state.Volumes, podCredentialVolumeState{Name: volume.Name, Secret: normalizeSecretVolumeSource(volume.Secret)})
 		case volume.Projected != nil:
+			projected := normalizeProjectedVolumeSource(volume.Projected)
+			if projected == nil {
+				continue
+			}
 			credentialVolumes[volume.Name] = true
-			state.Volumes = append(state.Volumes, podCredentialVolumeState{Name: volume.Name, Projected: volume.Projected})
+			state.Volumes = append(state.Volumes, podCredentialVolumeState{Name: volume.Name, Projected: projected})
 		}
 	}
 	for _, container := range pod.Spec.InitContainers {
@@ -1236,7 +1260,7 @@ func podCredentialProjectionSignature(pod *corev1.Pod) (string, error) {
 			Name:            container.Name,
 			Env:             credentialEnvState(container.Env),
 			VolumeMounts:    credentialVolumeMountState(container.VolumeMounts, credentialVolumes),
-			SecurityContext: container.SecurityContext,
+			SecurityContext: normalizeSecurityContext(container.SecurityContext),
 			RestartPolicy:   container.RestartPolicy,
 		})
 	}
@@ -1245,7 +1269,7 @@ func podCredentialProjectionSignature(pod *corev1.Pod) (string, error) {
 			Name:            container.Name,
 			Env:             credentialEnvState(container.Env),
 			VolumeMounts:    credentialVolumeMountState(container.VolumeMounts, credentialVolumes),
-			SecurityContext: container.SecurityContext,
+			SecurityContext: normalizeSecurityContext(container.SecurityContext),
 		})
 	}
 	rendered, err := json.Marshal(state)
@@ -1254,6 +1278,83 @@ func podCredentialProjectionSignature(pod *corev1.Pod) (string, error) {
 	}
 	sum := sha256.Sum256(rendered)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func canonicalServiceAccountName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
+func emptyPodSecurityContext(sc *corev1.PodSecurityContext) bool {
+	if sc == nil {
+		return true
+	}
+	zero := corev1.PodSecurityContext{}
+	return reflect.DeepEqual(*sc, zero)
+}
+
+func normalizeSecurityContext(sc *corev1.SecurityContext) *corev1.SecurityContext {
+	if sc == nil {
+		return nil
+	}
+	if reflect.DeepEqual(*sc, corev1.SecurityContext{}) {
+		return nil
+	}
+	copy := sc.DeepCopy()
+	return copy
+}
+
+func normalizeSecretVolumeSource(src *corev1.SecretVolumeSource) *corev1.SecretVolumeSource {
+	if src == nil {
+		return nil
+	}
+	copy := src.DeepCopy()
+	if copy.DefaultMode == nil {
+		copy.DefaultMode = ptrTo(defaultProjectedVolumeMode)
+	}
+	return copy
+}
+
+func normalizeProjectedVolumeSource(src *corev1.ProjectedVolumeSource) *corev1.ProjectedVolumeSource {
+	if src == nil {
+		return nil
+	}
+	copy := src.DeepCopy()
+	copy.Sources = normalizeProjectedVolumeSources(copy.Sources)
+	if len(copy.Sources) == 0 {
+		return nil
+	}
+	if copy.DefaultMode == nil {
+		copy.DefaultMode = ptrTo(defaultProjectedVolumeMode)
+	}
+	return copy
+}
+
+func normalizeProjectedVolumeSources(sources []corev1.VolumeProjection) []corev1.VolumeProjection {
+	normalized := make([]corev1.VolumeProjection, 0, len(sources))
+	for _, source := range sources {
+		switch {
+		case source.Secret != nil:
+			copy := *source.Secret
+			normalized = append(normalized, corev1.VolumeProjection{Secret: &copy})
+		}
+	}
+	return normalized
+}
+
+func containsServiceAccountTokenProjection(src *corev1.ProjectedVolumeSource) bool {
+	if src == nil {
+		return false
+	}
+	for _, source := range src.Sources {
+		if source.ServiceAccountToken != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func credentialEnvState(env []corev1.EnvVar) []podCredentialEnvState {

@@ -2577,15 +2577,18 @@ func TestLiteralZeroSecretPlaceholderRenderingKeepsUserAndBrokerEntriesUnique(t 
 	}
 }
 
-func TestReconcileAdoptsUnannotatedLegacyAgentPod(t *testing.T) {
+func TestReconcileAdoptsServerDefaultedLegacyAgentPod(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	agentRun := testAgentRun()
+	runtimeAuth := &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "runtime-auth"}
+	agentRun.Spec.RuntimeAuth = runtimeAuth
 	desiredPod, err := DesiredAgentPod(agentRun, scheme)
 	if err != nil {
 		t.Fatalf("desired AgentRun Pod: %v", err)
 	}
-	expectedAnnotation, err := podCredentialProjectionSignature(desiredPod)
+	applyServerAdmissionDefaults(desiredPod, true)
+	expectedAnnotation, err := podCredentialProjectionSignature(agentRun, desiredPod)
 	if err != nil {
 		t.Fatalf("desired AgentRun Pod security signature: %v", err)
 	}
@@ -2608,9 +2611,21 @@ func TestReconcileAdoptsUnannotatedLegacyAgentPod(t *testing.T) {
 	if pod.Annotations[agentPodSecurityStateAnnotation] != expectedAnnotation {
 		t.Fatalf("expected adopted annotation %q, got %q", expectedAnnotation, pod.Annotations[agentPodSecurityStateAnnotation])
 	}
+	if pod.Spec.ServiceAccountName != "default" {
+		t.Fatalf("expected admitted serviceAccountName default, got %q", pod.Spec.ServiceAccountName)
+	}
+	if pod.Spec.SecurityContext == nil {
+		t.Fatal("expected admitted empty securityContext to be preserved")
+	}
+	if volume := requireVolume(t, pod, "kube-api-access-server-default"); volume.Projected == nil || volume.Projected.DefaultMode == nil || *volume.Projected.DefaultMode != defaultProjectedVolumeMode {
+		t.Fatalf("expected admitted service-account projection with defaultMode 420, got %#v", volume.VolumeSource)
+	}
+	if volume := requireVolume(t, pod, runtimeAuthSourceName); volume.Secret == nil || volume.Secret.DefaultMode == nil || *volume.Secret.DefaultMode != defaultProjectedVolumeMode {
+		t.Fatalf("expected admitted runtime-auth Secret defaultMode 420, got %#v", volume.VolumeSource)
+	}
 }
 
-func TestReconcileAdoptsUnannotatedLegacyLiteralZeroSecretPod(t *testing.T) {
+func TestReconcileRejectsInjectedServiceAccountTokenProjectionForLiteralZeroSecretPod(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	agentRun := enforcedAgentRun()
@@ -2618,10 +2633,7 @@ func TestReconcileAdoptsUnannotatedLegacyLiteralZeroSecretPod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("desired literal-zero-secret Pod: %v", err)
 	}
-	expectedAnnotation, err := podCredentialProjectionSignature(desiredPod)
-	if err != nil {
-		t.Fatalf("desired literal-zero-secret Pod security signature: %v", err)
-	}
+	applyServerAdmissionDefaults(desiredPod, true)
 	delete(desiredPod.Annotations, agentPodSecurityStateAnnotation)
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -2631,19 +2643,13 @@ func TestReconcileAdoptsUnannotatedLegacyLiteralZeroSecretPod(t *testing.T) {
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
-		t.Fatalf("reconcile legacy literal-zero-secret Pod: %v", err)
+		if !strings.Contains(err.Error(), "service-account token volume") {
+			t.Fatalf("expected service-account token rejection, got %v", err)
+		}
+	} else {
+		t.Fatal("expected literal-zero-secret Pod with injected service-account token projection to fail")
 	}
-
-	pod := getAgentPod(ctx, t, k8sClient, agentRun)
-	if pod.Annotations[agentPodSecurityStateAnnotation] == "" {
-		t.Fatalf("expected literal-zero-secret Pod to be annotated after adoption, got %#v", pod.Annotations)
-	}
-	if pod.Annotations[agentPodSecurityStateAnnotation] != expectedAnnotation {
-		t.Fatalf("expected adopted annotation %q, got %q", expectedAnnotation, pod.Annotations[agentPodSecurityStateAnnotation])
-	}
-	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
-		t.Fatalf("expected literal-zero-secret Pod to keep automount disabled, got %#v", pod.Spec.AutomountServiceAccountToken)
-	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
 }
 
 func TestReconcileRejectsUnannotatedLegacyPodSecurityMismatch(t *testing.T) {
@@ -4412,6 +4418,53 @@ func requireVolume(t *testing.T, pod corev1.Pod, name string) corev1.Volume {
 	}
 	t.Fatalf("volume %q not found in %#v", name, pod.Spec.Volumes)
 	return corev1.Volume{}
+}
+
+func applyServerAdmissionDefaults(pod *corev1.Pod, injectServiceAccountProjection bool) {
+	pod.Spec.ServiceAccountName = "default"
+	pod.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Secret != nil && pod.Spec.Volumes[i].Secret.DefaultMode == nil {
+			pod.Spec.Volumes[i].Secret.DefaultMode = ptrTo(defaultProjectedVolumeMode)
+		}
+		if pod.Spec.Volumes[i].Projected != nil && pod.Spec.Volumes[i].Projected.DefaultMode == nil {
+			pod.Spec.Volumes[i].Projected.DefaultMode = ptrTo(defaultProjectedVolumeMode)
+		}
+	}
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].SecurityContext == nil {
+			pod.Spec.InitContainers[i].SecurityContext = &corev1.SecurityContext{}
+		}
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].SecurityContext == nil {
+			pod.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{}
+		}
+	}
+	if !injectServiceAccountProjection {
+		return
+	}
+	saVolumeName := "kube-api-access-server-default"
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: saVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				DefaultMode: ptrTo(defaultProjectedVolumeMode),
+				Sources: []corev1.VolumeProjection{
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "https://kubernetes.default.svc", Path: "token"}},
+					{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"}}},
+					{DownwardAPI: &corev1.DownwardAPIProjection{}},
+				},
+			},
+		},
+	})
+	if len(pod.Spec.Containers) > 0 {
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      saVolumeName,
+			MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+			ReadOnly:  true,
+		})
+	}
 }
 
 func forwardProxyAgentRun() *nvtv1alpha1.AgentRun {
