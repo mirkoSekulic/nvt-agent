@@ -828,399 +828,6 @@ func agentRunMaxConcurrentReconciles() int {
 	return 2
 }
 
-func desiredAgentPodForSecurityProjection(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
-	return buildDesiredAgentPod(agentRun, scheme, true)
-}
-
-func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
-	return buildDesiredAgentPod(agentRun, scheme, false)
-}
-
-func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme, projectionOnly bool) (*corev1.Pod, error) {
-	if !projectionOnly {
-		if err := ValidateBrokerTLSConfig(); err != nil {
-			return nil, err
-		}
-	}
-	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
-	if err != nil {
-		return nil, err
-	}
-
-	agentVolumeMounts := []corev1.VolumeMount{
-		{Name: "workspace", MountPath: workspaceMountPath},
-		{Name: "agent-config", MountPath: agentConfigVolumeDir, ReadOnly: true},
-	}
-	volumes := []corev1.Volume{
-		{
-			Name: "workspace",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		},
-		{
-			Name: "agent-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: AgentConfigMapName(agentRun.Name)},
-					Items: []corev1.KeyToPath{
-						{Key: agentConfigKey, Path: agentConfigKey},
-					},
-				},
-			},
-		},
-	}
-	hasGitGrant := agentRunHasGitGrant(agentRun)
-	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
-		// Compatibility modes call brokerctl from the agent. Enforced runs are
-		// operator-prepared and do not mount even this public broker CA bundle.
-		volumes = append(volumes, corev1.Volume{
-			Name: brokerCAVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: BrokerCASecretName(),
-					Items: []corev1.KeyToPath{
-						{Key: brokerCAKey, Path: brokerCAKey},
-					},
-				},
-			},
-		})
-		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
-			Name:      brokerCAVolumeName,
-			MountPath: agentBrokerCAMount,
-			ReadOnly:  true,
-		})
-	}
-	enforced := AgentRunEgressEnforced(agentRun)
-	if enforced {
-		// Own-Pod mode: the agent's trust anchor is the operator-published
-		// per-run ConfigMap, mounted read-only at the same Phase 4 path so
-		// bootstrap is unchanged. No egressd sidecar and no shared emptyDir.
-		volumes = append(volumes, corev1.Volume{
-			Name: egressCAVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: EgressCAConfigMapName(agentRun.Name)},
-					Items: []corev1.KeyToPath{
-						{Key: egressCACertKey, Path: egressCACertKey},
-					},
-				},
-			},
-		})
-		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
-			Name:      egressCAVolumeName,
-			MountPath: egressCAMountPath,
-			ReadOnly:  true,
-		})
-	} else if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
-		volumes = append(volumes, corev1.Volume{
-			Name: egressdConfigName,
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: EgressdConfigMapName(agentRun.Name)},
-					Items: []corev1.KeyToPath{
-						{Key: egressdConfigKey, Path: egressdConfigKey},
-					},
-				},
-			},
-		})
-		if hasGitGrant {
-			// Shared emptyDir carrying only ca.crt: egressd publishes the
-			// CA certificate into it; the agent mounts it read-only. The CA
-			// private key never touches this volume — it lives only in
-			// egressd process memory.
-			volumes = append(volumes, corev1.Volume{
-				Name: egressCAVolumeName,
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{},
-				},
-			})
-			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
-				Name:      egressCAVolumeName,
-				MountPath: egressCAMountPath,
-				ReadOnly:  true,
-			})
-		}
-	}
-	if agentRun.Spec.RuntimeAuth != nil {
-		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
-			Name:      runtimeAuthHomeName,
-			MountPath: runtimeAuthMountPath,
-		})
-		volumes = append(volumes, corev1.Volume{
-			Name: runtimeAuthSourceName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: agentRun.Spec.RuntimeAuth.SecretName,
-				},
-			},
-		}, corev1.Volume{
-			Name: runtimeAuthHomeName,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		})
-	}
-
-	initContainers := []corev1.Container{}
-	if agentRun.Spec.RuntimeAuth != nil {
-		initContainers = append(initContainers, corev1.Container{
-			Name:    "runtime-auth-copy",
-			Image:   "docker:27-dind",
-			Command: []string{"sh", "-c"},
-			Args: []string{
-				// Non-root also needs group-writable auth files: fsGroup makes the
-				// mount group 1000, so ug+rwX lets the agent write seeded tokens.
-				"cp -a " + runtimeAuthSourcePath + "/. " + runtimeAuthHomePath + "/ && chmod -R " + runtimeAuthChmod(agentRun) + " " + runtimeAuthHomePath,
-			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: runtimeAuthSourceName, MountPath: runtimeAuthSourcePath, ReadOnly: true},
-				{Name: runtimeAuthHomeName, MountPath: runtimeAuthHomePath},
-			},
-		})
-	}
-	if AgentRunEgressTransparent(agentRun) {
-		initContainers = append(initContainers, corev1.Container{
-			Name:            "captured",
-			Image:           CapturedImage(),
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			RestartPolicy:   ptrTo(corev1.ContainerRestartPolicyAlways),
-			Env: []corev1.EnvVar{
-				{Name: "NVT_CAPTURED_EXPLICIT_LISTEN", Value: fmt.Sprintf("[::]:%d", capturedExplicitPort)},
-				{Name: "NVT_CAPTURED_TRANSPARENT_LISTEN", Value: fmt.Sprintf("[::]:%d", capturedTransparentPort)},
-				{Name: "NVT_EGRESS_PROXY", Value: fmt.Sprintf("%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)},
-			},
-			SecurityContext: &corev1.SecurityContext{
-				RunAsNonRoot:             ptrTo(true),
-				RunAsUser:                ptrTo(capturedUID),
-				RunAsGroup:               ptrTo(capturedUID),
-				AllowPrivilegeEscalation: ptrTo(false),
-				ReadOnlyRootFilesystem:   ptrTo(true),
-				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-			},
-		})
-	}
-	initContainers = append(initContainers, corev1.Container{
-		Name:          "docker",
-		Image:         "docker:27-dind",
-		RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
-		Command:       []string{"dockerd"},
-		Args: []string{
-			"--host=unix:///var/run/docker.sock",
-			"--host=tcp://127.0.0.1:2375",
-			"--tls=false",
-		},
-		Env: []corev1.EnvVar{
-			{Name: "DOCKER_TLS_CERTDIR", Value: ""},
-		},
-		SecurityContext: &corev1.SecurityContext{
-			Privileged: ptrTo(true),
-		},
-		StartupProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
-			},
-			PeriodSeconds:    2,
-			FailureThreshold: 30,
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "workspace", MountPath: workspaceMountPath},
-		},
-	})
-	if AgentRunEgressTransparent(agentRun) {
-		const rules = `set -eu
-exclude_v4=""
-exclude_v6=""
-for host in $NVT_CAPTURE_EXCLUDE_HOSTS; do
-  for ip in $(getent ahosts "$host" | awk '{print $1}' | sort -u); do
-    case "$ip" in *:*) exclude_v6="$exclude_v6 $ip" ;; *) exclude_v4="$exclude_v4 $ip" ;; esac
-  done
-done
-iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
-iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
-for ip in $exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$ip/32" -j RETURN; done
-iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
-iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
-iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
-iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
-for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
-iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
-iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
-ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
-ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
-for ip in $exclude_v6; do ip6tables -t nat -A NVT_CAPTURE -d "$ip/128" -j RETURN; done
-ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
-ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
-ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
-ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
-for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
-ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
-ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
-		initContainers = append(initContainers, corev1.Container{
-			Name:    "net-init",
-			Image:   "docker:27-dind",
-			Command: []string{"sh", "-c"},
-			Args:    []string{rules},
-			Env: []corev1.EnvVar{{
-				Name: "NVT_CAPTURE_EXCLUDE_HOSTS",
-				Value: strings.Join([]string{
-					EgressdServiceName(agentRun.Name),
-					"kubernetes.default.svc", "kube-dns.kube-system.svc",
-				}, " "),
-			}},
-			SecurityContext: &corev1.SecurityContext{
-				RunAsUser:                ptrTo(int64(0)),
-				AllowPrivilegeEscalation: ptrTo(false),
-				Capabilities: &corev1.Capabilities{
-					Drop: []corev1.Capability{"ALL"},
-					Add:  []corev1.Capability{"NET_ADMIN"},
-				},
-				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-			},
-		})
-	}
-
-	agentEnv := []corev1.EnvVar{
-		{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
-		{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
-		{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
-	}
-	if !AgentRunLiteralZeroSecret(agentRun) {
-		agentEnv = append(agentEnv,
-			corev1.EnvVar{Name: "NVT_BROKER_URL", Value: BrokerURL()},
-			corev1.EnvVar{
-				Name: brokerTokenKey,
-				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: BrokerTokenSecretName(agentRun.Name)}, Key: brokerTokenKey,
-				}},
-			},
-			corev1.EnvVar{
-				Name: callbackTokenKey,
-				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: CallbackTokenSecretName(agentRun.Name)}, Key: callbackTokenKey,
-				}},
-			},
-		)
-	}
-	containers := []corev1.Container{
-		{
-			Name:            "agent",
-			Image:           agentRun.Spec.Image,
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			WorkingDir:      workspaceMountPath,
-			Env:             agentEnv,
-			VolumeMounts:    agentVolumeMounts,
-		},
-	}
-	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
-		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_MODE", Value: string(nvtv1alpha1.AgentRunEgressMediated)})
-		if enforced || hasGitGrant {
-			// Enforcement: every base-url is https, so bootstrap always
-			// needs the CA (git wiring plus the container trust store).
-			containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_CA_FILE", Value: egressCAFilePath})
-		}
-		if AgentRunEgressForwardProxy(agentRun) {
-			containers[0].Env = append(containers[0].Env, forwardProxyEnv(agentRun)...)
-		}
-	}
-	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
-		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_BROKER_CA_FILE", Value: agentBrokerCAFile})
-	}
-	if AgentRunNonRoot(agentRun) {
-		// Run the agent as the image's `agent` user; set HOME + NVT_STATE_DIR so
-		// $HOME-relative bootstrap/entrypoint target /home/agent (the baked
-		// NVT_STATE_DIR=/root/... would otherwise be unwritable).
-		containers[0].SecurityContext = &corev1.SecurityContext{
-			RunAsUser:  ptrTo(agentNonRootUID),
-			RunAsGroup: ptrTo(agentNonRootGID),
-		}
-		containers[0].Env = append(containers[0].Env,
-			corev1.EnvVar{Name: "HOME", Value: agentNonRootHome},
-			corev1.EnvVar{Name: "NVT_STATE_DIR", Value: agentNonRootHome + "/.nvt-agent"},
-		)
-	}
-	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated && !enforced {
-		egressdVolumeMounts := []corev1.VolumeMount{
-			{Name: egressdConfigName, MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
-		}
-		if !projectionOnly && brokerCADistributed() {
-			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
-				Name:      brokerCAVolumeName,
-				MountPath: egressdBrokerCAMount,
-				ReadOnly:  true,
-			})
-		}
-		if hasGitGrant {
-			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
-				Name:      egressCAVolumeName,
-				MountPath: egressCAMountPath,
-			})
-		}
-		containers = append(containers, corev1.Container{
-			Name:            "egressd",
-			Image:           EgressdImage(),
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			Env: []corev1.EnvVar{
-				// egressd reads the broker URL from its JSON config
-				// (broker_url), not from the environment.
-				{Name: "NVT_EGRESSD_CONFIG", Value: egressdConfigPath},
-				{
-					Name: "NVT_BROKER_TOKEN",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: EgressTokenSecretName(agentRun.Name)},
-							Key:                  egressTokenKey,
-						},
-					},
-				},
-			},
-			VolumeMounts: egressdVolumeMounts,
-		})
-	}
-
-	podLabels := agentRunLabels(agentRun.Name)
-	if enforced {
-		// Pairing labels the NetworkPolicies select on.
-		podLabels = enforcementLabels(agentRun.Name, roleLabelAgent)
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      AgentPodName(agentRun.Name),
-			Namespace: agentRun.Namespace,
-			Labels:    podLabels,
-		},
-		Spec: corev1.PodSpec{
-			RuntimeClassName: agentRun.Spec.RuntimeClassName,
-			RestartPolicy:    corev1.RestartPolicyNever,
-			InitContainers:   initContainers,
-			Containers:       containers,
-			Volumes:          volumes,
-		},
-	}
-	if AgentRunLiteralZeroSecret(agentRun) {
-		pod.Spec.AutomountServiceAccountToken = ptrTo(false)
-	}
-	if AgentRunNonRoot(agentRun) {
-		// fsGroup makes the workspace + runtime-auth emptyDir volumes group 1000
-		// and group-writable, so the non-root agent can write them. The
-		// privileged root dind container is unaffected (root ignores fsGroup).
-		pod.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: ptrTo(agentNonRootGID)}
-	}
-	desiredState, err := podCredentialProjectionSignature(agentRun, pod)
-	if err != nil {
-		return nil, err
-	}
-	pod.Annotations = map[string]string{
-		agentPodSecurityStateAnnotation: desiredState,
-	}
-	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
-		return nil, fmt.Errorf("set AgentRun Pod owner: %w", err)
-	}
-
-	return pod, nil
-}
-
 func podCredentialProjectionSignature(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) (string, error) {
 	state := podCredentialProjectionState{
 		AutomountServiceAccountToken: pod.Spec.AutomountServiceAccountToken,
@@ -1238,15 +845,13 @@ func podCredentialProjectionSignature(agentRun *nvtv1alpha1.AgentRun, pod *corev
 		switch {
 		case volume.Name == brokerCAVolumeName && volume.Secret != nil:
 			continue
-		case volume.Projected != nil && containsServiceAccountTokenProjection(volume.Projected):
-			if AgentRunLiteralZeroSecret(agentRun) {
-				return "", fmt.Errorf("literal-zero-secret AgentRun Pod must not project a service-account token volume")
-			}
-			continue
 		case volume.Secret != nil:
 			credentialVolumes[volume.Name] = true
 			state.Volumes = append(state.Volumes, podCredentialVolumeState{Name: volume.Name, Secret: normalizeSecretVolumeSource(volume.Secret)})
 		case volume.Projected != nil:
+			if projectedVolumeHasServiceAccountToken(volume.Projected) && AgentRunLiteralZeroSecret(agentRun) {
+				return "", fmt.Errorf("literal-zero-secret AgentRun Pod must not project a service-account token volume")
+			}
 			projected := normalizeProjectedVolumeSource(volume.Projected)
 			if projected == nil {
 				continue
@@ -1345,7 +950,7 @@ func normalizeProjectedVolumeSources(sources []corev1.VolumeProjection) []corev1
 	return normalized
 }
 
-func containsServiceAccountTokenProjection(src *corev1.ProjectedVolumeSource) bool {
+func projectedVolumeHasServiceAccountToken(src *corev1.ProjectedVolumeSource) bool {
 	if src == nil {
 		return false
 	}
@@ -2311,6 +1916,378 @@ func (r *AgentRunReconciler) reconcileEgressdService(ctx context.Context, agentR
 		return fmt.Errorf("create egressd Service: %w", err)
 	}
 	return nil
+}
+
+func desiredAgentPodForSecurityProjection(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
+	return buildDesiredAgentPod(agentRun, scheme, true)
+}
+
+// DesiredAgentPod returns the create-once Pod spec for an AgentRun.
+func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
+	return buildDesiredAgentPod(agentRun, scheme, false)
+}
+
+func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme, projectionOnly bool) (*corev1.Pod, error) {
+	if !projectionOnly {
+		if err := ValidateBrokerTLSConfig(); err != nil {
+			return nil, err
+		}
+	}
+	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
+	if err != nil {
+		return nil, err
+	}
+
+	agentVolumeMounts := []corev1.VolumeMount{
+		{Name: "workspace", MountPath: workspaceMountPath},
+		{Name: "agent-config", MountPath: agentConfigVolumeDir, ReadOnly: true},
+	}
+	volumes := []corev1.Volume{
+		{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
+			Name: "agent-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AgentConfigMapName(agentRun.Name)},
+					Items: []corev1.KeyToPath{
+						{Key: agentConfigKey, Path: agentConfigKey},
+					},
+				},
+			},
+		},
+	}
+	hasGitGrant := agentRunHasGitGrant(agentRun)
+	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
+		volumes = append(volumes, corev1.Volume{
+			Name: brokerCAVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: BrokerCASecretName(),
+					Items: []corev1.KeyToPath{
+						{Key: brokerCAKey, Path: brokerCAKey},
+					},
+				},
+			},
+		})
+		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+			Name:      brokerCAVolumeName,
+			MountPath: agentBrokerCAMount,
+			ReadOnly:  true,
+		})
+	}
+	enforced := AgentRunEgressEnforced(agentRun)
+	if enforced {
+		volumes = append(volumes, corev1.Volume{
+			Name: egressCAVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: EgressCAConfigMapName(agentRun.Name)},
+					Items: []corev1.KeyToPath{
+						{Key: egressCACertKey, Path: egressCACertKey},
+					},
+				},
+			},
+		})
+		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+			Name:      egressCAVolumeName,
+			MountPath: egressCAMountPath,
+			ReadOnly:  true,
+		})
+	} else if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		volumes = append(volumes, corev1.Volume{
+			Name: egressdConfigName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: EgressdConfigMapName(agentRun.Name)},
+					Items: []corev1.KeyToPath{
+						{Key: egressdConfigKey, Path: egressdConfigKey},
+					},
+				},
+			},
+		})
+		if hasGitGrant {
+			volumes = append(volumes, corev1.Volume{
+				Name: egressCAVolumeName,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			})
+			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+				Name:      egressCAVolumeName,
+				MountPath: egressCAMountPath,
+				ReadOnly:  true,
+			})
+		}
+	}
+	if agentRun.Spec.RuntimeAuth != nil {
+		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+			Name:      runtimeAuthHomeName,
+			MountPath: runtimeAuthMountPath,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: runtimeAuthSourceName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: agentRun.Spec.RuntimeAuth.SecretName,
+				},
+			},
+		}, corev1.Volume{
+			Name: runtimeAuthHomeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
+
+	initContainers := []corev1.Container{}
+	if agentRun.Spec.RuntimeAuth != nil {
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "runtime-auth-copy",
+			Image:   "docker:27-dind",
+			Command: []string{"sh", "-c"},
+			Args: []string{
+				"cp -a " + runtimeAuthSourcePath + "/. " + runtimeAuthHomePath + "/ && chmod -R " + runtimeAuthChmod(agentRun) + " " + runtimeAuthHomePath,
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: runtimeAuthSourceName, MountPath: runtimeAuthSourcePath, ReadOnly: true},
+				{Name: runtimeAuthHomeName, MountPath: runtimeAuthHomePath},
+			},
+		})
+	}
+	if AgentRunEgressTransparent(agentRun) {
+		initContainers = append(initContainers, corev1.Container{
+			Name:            "captured",
+			Image:           CapturedImage(),
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			RestartPolicy:   ptrTo(corev1.ContainerRestartPolicyAlways),
+			Env: []corev1.EnvVar{
+				{Name: "NVT_CAPTURED_EXPLICIT_LISTEN", Value: fmt.Sprintf("[::]:%d", capturedExplicitPort)},
+				{Name: "NVT_CAPTURED_TRANSPARENT_LISTEN", Value: fmt.Sprintf("[::]:%d", capturedTransparentPort)},
+				{Name: "NVT_EGRESS_PROXY", Value: fmt.Sprintf("%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)},
+			},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsNonRoot:             ptrTo(true),
+				RunAsUser:                ptrTo(capturedUID),
+				RunAsGroup:               ptrTo(capturedUID),
+				AllowPrivilegeEscalation: ptrTo(false),
+				ReadOnlyRootFilesystem:   ptrTo(true),
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+		})
+	}
+	initContainers = append(initContainers, corev1.Container{
+		Name:          "docker",
+		Image:         "docker:27-dind",
+		RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
+		Command:       []string{"dockerd"},
+		Args: []string{
+			"--host=unix:///var/run/docker.sock",
+			"--host=tcp://127.0.0.1:2375",
+			"--tls=false",
+		},
+		Env: []corev1.EnvVar{
+			{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptrTo(true),
+		},
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
+			},
+			PeriodSeconds:    2,
+			FailureThreshold: 30,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "workspace", MountPath: workspaceMountPath},
+		},
+	})
+	if AgentRunEgressTransparent(agentRun) {
+		const rules = `set -eu
+exclude_v4=""
+exclude_v6=""
+for host in $NVT_CAPTURE_EXCLUDE_HOSTS; do
+  for ip in $(getent ahosts "$host" | awk '{print $1}' | sort -u); do
+    case "$ip" in *:*) exclude_v6="$exclude_v6 $ip" ;; *) exclude_v4="$exclude_v4 $ip" ;; esac
+  done
+done
+iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
+iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
+for ip in $exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$ip/32" -j RETURN; done
+iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
+for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
+iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
+ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
+ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
+for ip in $exclude_v6; do ip6tables -t nat -A NVT_CAPTURE -d "$ip/128" -j RETURN; done
+ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
+for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
+ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "net-init",
+			Image:   "docker:27-dind",
+			Command: []string{"sh", "-c"},
+			Args:    []string{rules},
+			Env: []corev1.EnvVar{{
+				Name: "NVT_CAPTURE_EXCLUDE_HOSTS",
+				Value: strings.Join([]string{
+					EgressdServiceName(agentRun.Name),
+					"kubernetes.default.svc", "kube-dns.kube-system.svc",
+				}, " "),
+			}},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser:                ptrTo(int64(0)),
+				AllowPrivilegeEscalation: ptrTo(false),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+					Add:  []corev1.Capability{"NET_ADMIN"},
+				},
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+		})
+	}
+
+	agentEnv := []corev1.EnvVar{
+		{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
+		{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
+		{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
+	}
+	if !AgentRunLiteralZeroSecret(agentRun) {
+		agentEnv = append(agentEnv,
+			corev1.EnvVar{Name: "NVT_BROKER_URL", Value: BrokerURL()},
+			corev1.EnvVar{
+				Name: brokerTokenKey,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: BrokerTokenSecretName(agentRun.Name)}, Key: brokerTokenKey,
+				}},
+			},
+			corev1.EnvVar{
+				Name: callbackTokenKey,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: CallbackTokenSecretName(agentRun.Name)}, Key: callbackTokenKey,
+				}},
+			},
+		)
+	}
+	containers := []corev1.Container{
+		{
+			Name:            "agent",
+			Image:           agentRun.Spec.Image,
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			WorkingDir:      workspaceMountPath,
+			Env:             agentEnv,
+			VolumeMounts:    agentVolumeMounts,
+		},
+	}
+	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
+		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_MODE", Value: string(nvtv1alpha1.AgentRunEgressMediated)})
+		if enforced || hasGitGrant {
+			containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_CA_FILE", Value: egressCAFilePath})
+		}
+		if AgentRunEgressForwardProxy(agentRun) {
+			containers[0].Env = append(containers[0].Env, forwardProxyEnv(agentRun)...)
+		}
+	}
+	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
+		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_BROKER_CA_FILE", Value: agentBrokerCAFile})
+	}
+	if AgentRunNonRoot(agentRun) {
+		containers[0].SecurityContext = &corev1.SecurityContext{
+			RunAsUser:  ptrTo(agentNonRootUID),
+			RunAsGroup: ptrTo(agentNonRootGID),
+		}
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "HOME", Value: agentNonRootHome},
+			corev1.EnvVar{Name: "NVT_STATE_DIR", Value: agentNonRootHome + "/.nvt-agent"},
+		)
+	}
+	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated && !enforced {
+		egressdVolumeMounts := []corev1.VolumeMount{
+			{Name: egressdConfigName, MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
+		}
+		if !projectionOnly && brokerCADistributed() {
+			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
+				Name:      brokerCAVolumeName,
+				MountPath: egressdBrokerCAMount,
+				ReadOnly:  true,
+			})
+		}
+		if hasGitGrant {
+			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
+				Name:      egressCAVolumeName,
+				MountPath: egressCAMountPath,
+			})
+		}
+		containers = append(containers, corev1.Container{
+			Name:            "egressd",
+			Image:           EgressdImage(),
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Env: []corev1.EnvVar{
+				{Name: "NVT_EGRESSD_CONFIG", Value: egressdConfigPath},
+				{
+					Name: "NVT_BROKER_TOKEN",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: EgressTokenSecretName(agentRun.Name)},
+							Key:                  egressTokenKey,
+						},
+					},
+				},
+			},
+			VolumeMounts: egressdVolumeMounts,
+		})
+	}
+
+	podLabels := agentRunLabels(agentRun.Name)
+	if enforced {
+		podLabels = enforcementLabels(agentRun.Name, roleLabelAgent)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AgentPodName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    podLabels,
+		},
+		Spec: corev1.PodSpec{
+			RuntimeClassName: agentRun.Spec.RuntimeClassName,
+			RestartPolicy:    corev1.RestartPolicyNever,
+			InitContainers:   initContainers,
+			Containers:       containers,
+			Volumes:          volumes,
+		},
+	}
+	if AgentRunLiteralZeroSecret(agentRun) {
+		pod.Spec.AutomountServiceAccountToken = ptrTo(false)
+	}
+	if AgentRunNonRoot(agentRun) {
+		pod.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: ptrTo(agentNonRootGID)}
+	}
+	desiredState, err := podCredentialProjectionSignature(agentRun, pod)
+	if err != nil {
+		return nil, err
+	}
+	pod.Annotations = map[string]string{
+		agentPodSecurityStateAnnotation: desiredState,
+	}
+	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
+		return nil, fmt.Errorf("set AgentRun Pod owner: %w", err)
+	}
+
+	return pod, nil
 }
 
 // DesiredEgressdPod renders the own-Pod egressd for an enforcement run. It

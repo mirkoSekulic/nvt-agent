@@ -2652,6 +2652,49 @@ func TestReconcileRejectsInjectedServiceAccountTokenProjectionForLiteralZeroSecr
 	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
 }
 
+func TestReconcileRejectsMixedServiceAccountAndSecretProjectionDrift(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	desiredPod, err := DesiredAgentPod(agentRun, scheme)
+	if err != nil {
+		t.Fatalf("desired AgentRun Pod: %v", err)
+	}
+	applyServerAdmissionDefaults(desiredPod, true)
+	mixedPod := desiredPod.DeepCopy()
+	mixedPod.Annotations = map[string]string{}
+	mixedPod.Spec.Volumes = append(mixedPod.Spec.Volumes, corev1.Volume{
+		Name: "extra-secret-projection",
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				DefaultMode: ptrTo(defaultProjectedVolumeMode),
+				Sources: []corev1.VolumeProjection{
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "https://kubernetes.default.svc", Path: "token"}},
+					{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"}}},
+					{DownwardAPI: &corev1.DownwardAPIProjection{}},
+					{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "operator-extra-secret"}, Optional: ptrTo(true)}},
+				},
+			},
+		},
+	})
+	mixedPod.Spec.Containers[0].VolumeMounts = append(mixedPod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      "extra-secret-projection",
+		MountPath: "/var/run/secrets/extra",
+		ReadOnly:  true,
+	})
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace), mixedPod).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err == nil || !strings.Contains(err.Error(), "security-sensitive AgentRun fields changed") {
+		t.Fatalf("expected mixed projected volume drift rejection, got %v", err)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
 func TestReconcileRejectsUnannotatedLegacyPodSecurityMismatch(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
