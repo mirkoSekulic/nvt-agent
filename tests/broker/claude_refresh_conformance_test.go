@@ -89,8 +89,14 @@ func TestClaudeRefreshProactivelyBeforeExpiry(t *testing.T) {
 		t.Fatalf("expected exactly one upstream refresh, got %d", count)
 	}
 	request := f.claudeOAuth.lastRequest()
-	if request["grant_type"] != "refresh_token" || request["client_id"] != "claude-test-client" || request["refresh_token"] != "claude-refresh-real" {
+	if request["grant_type"] != "refresh_token" || request["client_id"] != "claude-test-client" || request["refresh_token"] != "claude-refresh-real" ||
+		request["scope"] != "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload" || request["body_key_count"] != 4 {
 		t.Fatalf("unexpected refresh request metadata: %#v", request)
+	}
+	if request["header_accept"] != "application/json, text/plain, */*" ||
+		request["header_content_type"] != "application/json" ||
+		request["header_user_agent"] != "axios/1.15.2" || request["header_anthropic_beta"] != "" {
+		t.Fatalf("refresh headers do not match the native request shape: %#v", request)
 	}
 
 	oauth := decodeClaudeCanonical(t, f)

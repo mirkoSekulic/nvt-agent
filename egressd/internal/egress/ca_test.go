@@ -806,3 +806,75 @@ func TestCAGetCertificateSNIBehavior(t *testing.T) {
 		t.Fatalf("sibling SNI did not get its dedicated single-SAN leaf: %v", sibling.Leaf.DNSNames)
 	}
 }
+
+// TestCAUpstreamLeafRemintsAcrossTLSHandshakes pins the production path. TLS
+// session resumption must not bypass GetCertificate and retain an expired leaf.
+func TestCAUpstreamLeafRemintsAcrossTLSHandshakes(t *testing.T) {
+	const name = "api.example.test"
+	clock := time.Now().UTC().Truncate(time.Second)
+	ca, err := NewCAWithUpstreams(nil, []string{name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca.Now = func() time.Time { return clock }
+
+	first, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = first.Leaf.NotAfter.Add(-leafRemintMargin - time.Minute)
+	reused, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+	if err != nil || reused.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) != 0 {
+		t.Fatalf("leaf was not reused before remint margin: err=%v", err)
+	}
+	clock = first.Leaf.NotAfter.Add(-leafRemintMargin + time.Minute)
+	reminted, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reminted.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) == 0 || !reminted.Leaf.NotAfter.After(first.Leaf.NotAfter) {
+		t.Fatal("leaf was not renewed inside remint margin")
+	}
+
+	config := ca.ServerTLSConfig()
+	if !config.SessionTicketsDisabled {
+		t.Fatal("dynamic leaf TLS config must disable session tickets")
+	}
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serve := func() <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			conn, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				acceptErr = conn.(*tls.Conn).Handshake()
+				_ = conn.Close()
+			}
+			done <- acceptErr
+		}()
+		return done
+	}
+	clock = first.Leaf.NotAfter.Add(time.Minute)
+	done := serve()
+	client, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+		// The injected clock is intentionally ahead of wall time. Certificate
+		// trust/name/validity are asserted explicitly in the CA tests and below;
+		// this connection exercises server-side certificate selection.
+		InsecureSkipVerify: true, //nolint:gosec -- test-only synthetic clock
+		ServerName:         name, ClientSessionCache: tls.NewLRUClientSessionCache(1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := client.ConnectionState().PeerCertificates[0]
+	_ = client.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if peer.SerialNumber.Cmp(first.Leaf.SerialNumber) == 0 || !peer.NotAfter.After(clock) {
+		t.Fatalf("handshake received stale leaf serial=%s not_after=%s clock=%s", peer.SerialNumber, peer.NotAfter, clock)
+	}
+}

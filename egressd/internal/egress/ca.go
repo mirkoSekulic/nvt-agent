@@ -325,6 +325,10 @@ func (ca *CA) ServerTLSConfig() *tls.Config {
 	return &tls.Config{
 		MinVersion:     tls.VersionTLS12,
 		GetCertificate: ca.GetCertificate,
+		// A resumed TLS session bypasses GetCertificate and can keep presenting
+		// the leaf associated with its ticket after that six-hour leaf expires.
+		// Dynamic leaf renewal therefore requires a full handshake each time.
+		SessionTicketsDisabled: true,
 	}
 }
 

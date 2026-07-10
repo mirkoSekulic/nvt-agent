@@ -158,6 +158,11 @@ func (f *fakeClaudeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	body["body_key_count"] = len(body)
+	body["header_accept"] = r.Header.Get("Accept")
+	body["header_content_type"] = r.Header.Get("Content-Type")
+	body["header_user_agent"] = r.Header.Get("User-Agent")
+	body["header_anthropic_beta"] = r.Header.Get("anthropic-beta")
 	f.mu.Lock()
 	f.requests = append(f.requests, body)
 	count := len(f.requests)
