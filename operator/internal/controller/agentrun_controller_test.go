@@ -4237,7 +4237,7 @@ func TestForwardProxyHeaderInjectGrantIsRenderedForRuntimeProxyValidation(t *tes
 	}
 }
 
-func TestRenderForwardProxyOnlySharedHostsRequireCapabilityHint(t *testing.T) {
+func TestRenderForwardProxyGitAndSharedHostsRequireCapabilityHint(t *testing.T) {
 	agentRun := forwardProxyAgentRun()
 	agentRun.Spec.Broker.Grants = []nvtv1alpha1.AgentRunBrokerGrant{{
 		Provider: "azdo-infra-pat", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, Git: true,
@@ -4267,8 +4267,8 @@ func TestRenderForwardProxyOnlySharedHostsRequireCapabilityHint(t *testing.T) {
 	for _, route := range config.ForwardProxy.InjectRoutes {
 		switch route["host"] {
 		case "dev.azure.com":
-			if _, ok := route["require_capability_hint"]; ok {
-				t.Fatalf("single-provider host must auto-inject without a capability hint: %#v", route)
+			if route["require_capability_hint"] != true {
+				t.Fatalf("git host must require an explicit capability hint: %#v", route)
 			}
 		case "github.com":
 			if route["require_capability_hint"] != true {

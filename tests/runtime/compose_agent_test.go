@@ -43,6 +43,8 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"NVT_EGRESS_PROXY: egressd:8470",
 		"net-init:",
 		"NET_ADMIN",
+		"NVT_CAPTURE_EXCLUDE_HOSTS: broker",
+		"for ip in $$exclude_v4; do iptables -t nat -A NVT_CAPTURE",
 		"ip6tables -t nat",
 		"profiles:",
 		"- mediated",
@@ -82,6 +84,9 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 	egressService := compose[egressStart:capturedStart]
 	if strings.Contains(egressService, "network_mode: service:docker") {
 		t.Fatal("trusted egressd must use a separate Compose network namespace")
+	}
+	if !strings.Contains(egressService, "- agents-proxy") {
+		t.Fatal("trusted egressd must join the infrastructure network to reach broker")
 	}
 }
 
@@ -1148,6 +1153,9 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	if git["host"] != "github.com" || git["capability"] != "git-app" || git["upstream"] != "github.com:443" {
 		t.Fatalf("unexpected git inject route: %#v", git)
 	}
+	if git["require_capability_hint"] != true {
+		t.Fatalf("git inject route must require an explicit provider hint: %#v", git)
+	}
 	if config.CA["cert_file"] != "/etc/nvt-egress-ca/ca.crt" || config.CA["key_file"] != "/etc/nvt-egress-ca/ca.key" {
 		t.Fatalf("unexpected durable CA config: %#v", config.CA)
 	}
@@ -1255,6 +1263,7 @@ func TestAgentUpMigratesPreTransparentManagedEgress(t *testing.T) {
     - provider: api-main
       materialization: header-inject
       egress-hosts: [api.example.test:443]
+      git: true
 `)
 	configPath := filepath.Join(agentDir, "agent.yaml")
 	mustWriteFile(t, configPath, `runtime:
@@ -1274,7 +1283,7 @@ tools: {packages: [], mise: [], additional-paths: [], shell: []}
 code-server: {extensions: []}
 `)
 	egressdPath := filepath.Join(agentDir, "egressd.json")
-	mustWriteFile(t, egressdPath, `{"routes":[],"forward_proxy":{"listen":"0.0.0.0:8470","allow_unmatched_hosts":true,"allow_ports":[443],"inject_routes":[]}}`)
+	mustWriteFile(t, egressdPath, `{"routes":[],"forward_proxy":{"listen":"0.0.0.0:8470","allow_unmatched_hosts":true,"allow_ports":[443],"inject_routes":[{"host":"api.example.test","capability":"api-main","upstream":"api.example.test:443"}]}}`)
 	envPath := filepath.Join(agentDir, "env")
 	mustWriteFile(t, envPath, strings.Join([]string{
 		"AGENT_NAME=" + name,
@@ -1307,8 +1316,9 @@ code-server: {extensions: []}
 	}
 	var egressd struct {
 		ForwardProxy struct {
-			TransparentMode bool  `json:"transparent_mode"`
-			AllowPorts      []int `json:"allow_ports"`
+			TransparentMode bool             `json:"transparent_mode"`
+			AllowPorts      []int            `json:"allow_ports"`
+			InjectRoutes    []map[string]any `json:"inject_routes"`
 		} `json:"forward_proxy"`
 	}
 	if err := json.Unmarshal([]byte(mustReadFile(t, egressdPath)), &egressd); err != nil {
@@ -1316,6 +1326,9 @@ code-server: {extensions: []}
 	}
 	if !egressd.ForwardProxy.TransparentMode || !reflect.DeepEqual(egressd.ForwardProxy.AllowPorts, []int{80, 443}) {
 		t.Fatalf("egressd upgrade migration incomplete: %#v", egressd.ForwardProxy)
+	}
+	if len(egressd.ForwardProxy.InjectRoutes) != 1 || egressd.ForwardProxy.InjectRoutes[0]["require_capability_hint"] != true {
+		t.Fatalf("git route migration did not require an explicit provider hint: %#v", egressd.ForwardProxy.InjectRoutes)
 	}
 	if calls := mustReadFile(t, dockerLog); !strings.Contains(calls, "compose") || !strings.Contains(calls, "up -d") {
 		t.Fatalf("agent-up did not continue to Compose after migration:\n%s", calls)

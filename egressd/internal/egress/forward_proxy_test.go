@@ -253,8 +253,8 @@ func TestTransparentProviderSelectionHonorsHintRequirements(t *testing.T) {
 		{Host: "api.example", Capability: "one", Upstream: "api.example:443", RequireCapabilityHint: true},
 		{Host: "api.example", Capability: "two", Upstream: "api.example:443", RequireCapabilityHint: true},
 	}}}
-	if _, found, err := proxy.transparentInjectProxy("api.example", ""); err == nil || !found {
-		t.Fatalf("ambiguous transparent host must fail closed, found=%v err=%v", found, err)
+	if selected, found, err := proxy.transparentInjectProxy("api.example", ""); err != nil || found || selected != nil {
+		t.Fatalf("hint-only transparent host must blind-tunnel without credentials, found=%v err=%v", found, err)
 	}
 	if selected, found, err := proxy.transparentInjectProxy("api.example", "two"); err != nil || !found || selected == nil {
 		t.Fatalf("explicit transparent hint must select provider: found=%v err=%v", found, err)
@@ -262,8 +262,8 @@ func TestTransparentProviderSelectionHonorsHintRequirements(t *testing.T) {
 	singleRequired := &ForwardProxy{Config: ForwardProxyConfig{TransparentMode: true, InjectRoutes: []ForwardProxyInjectRoute{
 		{Host: "required.example", Capability: "one", Upstream: "required.example:443", RequireCapabilityHint: true},
 	}}}
-	if _, found, err := singleRequired.transparentInjectProxy("required.example", ""); err == nil || !found {
-		t.Fatalf("single hint-required route must remain hint-required, found=%v err=%v", found, err)
+	if selected, found, err := singleRequired.transparentInjectProxy("required.example", ""); err != nil || found || selected != nil {
+		t.Fatalf("single hint-required route must blind-tunnel without credentials, found=%v err=%v", found, err)
 	}
 	singleAutomatic := &ForwardProxy{Config: ForwardProxyConfig{TransparentMode: true, InjectRoutes: []ForwardProxyInjectRoute{
 		{Host: "automatic.example", Capability: "one", Upstream: "automatic.example:443"},

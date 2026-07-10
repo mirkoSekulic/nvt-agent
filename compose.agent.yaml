@@ -51,6 +51,7 @@ services:
       - ${EGRESS_CA_CERT_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.crt:ro
       - ${EGRESS_CA_KEY_FILE:-/dev/null}:/etc/nvt-egress-ca/ca.key:ro
     networks:
+      - agents-proxy
       - agent-internal
       - egress-private
 
@@ -75,6 +76,8 @@ services:
     user: "0:0"
     cap_add:
       - NET_ADMIN
+    environment:
+      NVT_CAPTURE_EXCLUDE_HOSTS: broker
     depends_on:
       docker:
         condition: service_healthy
@@ -84,8 +87,16 @@ services:
       - sh
       - -ec
       - |
+        exclude_v4=""
+        exclude_v6=""
+        for host in $$NVT_CAPTURE_EXCLUDE_HOSTS; do
+          for ip in $$(getent ahosts "$$host" | awk '{print $$1}' | sort -u); do
+            case "$$ip" in *:*) exclude_v6="$$exclude_v6 $$ip" ;; *) exclude_v4="$$exclude_v4 $$ip" ;; esac
+          done
+        done
         iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
         iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
+        for ip in $$exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$$ip/32" -j RETURN; done
         iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
         iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
         iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
@@ -94,6 +105,7 @@ services:
         iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
         ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
         ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
+        for ip in $$exclude_v6; do ip6tables -t nat -A NVT_CAPTURE -d "$$ip/128" -j RETURN; done
         ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
         ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
         ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE

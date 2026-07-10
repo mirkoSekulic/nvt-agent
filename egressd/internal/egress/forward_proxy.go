@@ -370,6 +370,12 @@ func (p *ForwardProxy) transparentInjectProxy(host, capabilityHint string) (*Pro
 			autoRoutes = append(autoRoutes, route)
 		}
 	}
+	if len(autoRoutes) == 0 {
+		// The host is known only through opt-in routes. Preserve ordinary,
+		// credential-free traffic by falling through to the blind-tunnel policy;
+		// never guess or inject a capability without its explicit hint.
+		return nil, false, nil
+	}
 	if len(autoRoutes) == 1 {
 		return autoRoutes[0].proxy, true, nil
 	}

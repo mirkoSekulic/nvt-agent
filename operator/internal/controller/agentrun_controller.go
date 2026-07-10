@@ -932,7 +932,7 @@ func forwardProxyInjects(agentRun *nvtv1alpha1.AgentRun) []forwardProxyInject {
 				Upstream:              upstream,
 				AllowInsecureUpstream: grant.AllowInsecureUpstream,
 				MaxRequests:           maxRequests,
-				RequireCapabilityHint: hostCounts[strings.ToLower(host)] > 1,
+				RequireCapabilityHint: grant.Git || hostCounts[strings.ToLower(host)] > 1,
 			})
 		}
 	}

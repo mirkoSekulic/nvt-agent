@@ -449,6 +449,8 @@ for grant in agent.get("grants", []) or []:
             "capability": grant.get("provider"),
             "upstream": host,
         }
+        if grant.get("git"):
+            route["require_capability_hint"] = True
         quota = grant.get("quota")
         if isinstance(quota, dict) and isinstance(quota.get("requests"), int):
             route["max_requests"] = quota["requests"]

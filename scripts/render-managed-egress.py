@@ -104,6 +104,19 @@ def main():
                 forward_proxy["transparent_mode"] = True
                 if forward_proxy.get("allow_ports") in (None, [], [443]):
                     forward_proxy["allow_ports"] = [80, 443]
+                data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
+                agent = next(
+                    (item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == args.agent_name),
+                    None,
+                )
+                git_providers = {
+                    grant.get("provider")
+                    for grant in (agent or {}).get("grants", []) or []
+                    if isinstance(grant, dict) and grant.get("git") and grant.get("provider")
+                }
+                for route in forward_proxy.get("inject_routes", []) or []:
+                    if isinstance(route, dict) and route.get("capability") in git_providers:
+                        route["require_capability_hint"] = True
                 egressd_file.write_text(json.dumps(egressd, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
