@@ -31,6 +31,12 @@ spec:
                   fieldPath: metadata.namespace
             - name: NVT_EGRESSD_IMAGE
               value: {{ .Values.egress.egressdImage | quote }}
+            - name: NVT_CAPTURED_IMAGE
+              value: {{ .Values.egress.capturedImage | quote }}
+            - name: NVT_NETWORK_POLICY_CAPABLE
+              value: {{ .Values.egress.networkPolicyCapable | quote }}
+            - name: NVT_EGRESS_DENY_CIDRS
+              value: {{ join "," .Values.egress.denyCIDRs | quote }}
             - name: NVT_DEFAULT_EGRESS_MODE
               value: {{ .Values.egress.defaultMode | quote }}
             {{- if .Values.egress.allowInsecureUpstreams }}

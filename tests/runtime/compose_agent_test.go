@@ -36,6 +36,13 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"agent-internal",
 		"traefik.docker.network=agents-proxy",
 		"egressd:",
+		"captured:",
+		"image: nvt-captured:latest",
+		"NVT_CAPTURED_TRANSPARENT_LISTEN: \"[::]:15001\"",
+		"NVT_EGRESS_PROXY: egressd:8470",
+		"net-init:",
+		"NET_ADMIN",
+		"ip6tables -t nat",
 		"profiles:",
 		"- mediated",
 		"env_file:",
@@ -66,6 +73,14 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 	agentService := compose[agentStart:egressStart]
 	if strings.Contains(agentService, "ca.key") || strings.Contains(agentService, "EGRESS_CA_DIR") || strings.Contains(agentService, "EGRESS_CA_KEY_FILE") {
 		t.Fatalf("agent service must not mount or reference the CA private key:\n%s", agentService)
+	}
+	capturedStart := strings.Index(compose, "\n  captured:\n")
+	if capturedStart == -1 {
+		t.Fatal("compose missing captured service")
+	}
+	egressService := compose[egressStart:capturedStart]
+	if strings.Contains(egressService, "network_mode: service:docker") {
+		t.Fatal("trusted egressd must use a separate Compose network namespace")
 	}
 }
 
@@ -1180,7 +1195,7 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 		"egress:",
 		"  mode: mediated",
 		"  forward-proxy: true",
-		"  forward-proxy-url: http://127.0.0.1:8470",
+		"  forward-proxy-url: http://127.0.0.1:15002",
 		"    - provider: codex-main",
 		"      materialization: placeholder-file",
 		"      - chatgpt.com:443",

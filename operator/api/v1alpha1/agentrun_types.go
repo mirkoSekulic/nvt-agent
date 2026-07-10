@@ -9,6 +9,7 @@ import (
 // AgentRunPhase describes the current lifecycle phase of an AgentRun.
 type AgentRunPhase string
 type AgentRunEgressMode string
+type AgentRunEgressTransport string
 type AgentRunGrantMaterialization string
 
 const (
@@ -23,8 +24,11 @@ const (
 	// AgentRunPhaseDeadlineExceeded means the run exceeded its active deadline.
 	AgentRunPhaseDeadlineExceeded AgentRunPhase = "DeadlineExceeded"
 
-	AgentRunEgressDirect   AgentRunEgressMode = "direct"
-	AgentRunEgressMediated AgentRunEgressMode = "mediated"
+	AgentRunEgressDirect                AgentRunEgressMode      = "direct"
+	AgentRunEgressMediated              AgentRunEgressMode      = "mediated"
+	AgentRunEgressTransportRedirect     AgentRunEgressTransport = "redirect"
+	AgentRunEgressTransportForwardProxy AgentRunEgressTransport = "forward-proxy"
+	AgentRunEgressTransportTransparent  AgentRunEgressTransport = "transparent"
 
 	AgentRunGrantFileBundle   AgentRunGrantMaterialization = "file-bundle"
 	AgentRunGrantHeaderInject AgentRunGrantMaterialization = "header-inject"
@@ -77,13 +81,16 @@ type AgentRunSpec struct {
 	// under the per-agent CA and injects the broker credential, so unmodified
 	// tools that honor proxy env are mediated with zero per-tool config
 	// (docs/phase6.2-forward-proxy-pr-plan.md). Requires egressEnforcement.
-	EgressForwardProxy bool               `json:"egressForwardProxy,omitempty"`
-	Workspace          AgentRunWorkspace  `json:"workspace"`
-	Broker             *AgentRunBroker    `json:"broker,omitempty"`
-	Prompt             *AgentRunPrompt    `json:"prompt,omitempty"`
-	Agent              AgentRunAgent      `json:"agent"`
-	Lifecycle          *AgentRunLifecycle `json:"lifecycle,omitempty"`
-	TTL                *AgentRunTTL       `json:"ttl,omitempty"`
+	EgressForwardProxy bool `json:"egressForwardProxy,omitempty"`
+	// EgressTransport selects redirect, forward-proxy, or transparent routing.
+	// EgressForwardProxy remains a compatibility input during migration.
+	EgressTransport AgentRunEgressTransport `json:"egressTransport,omitempty"`
+	Workspace       AgentRunWorkspace       `json:"workspace"`
+	Broker          *AgentRunBroker         `json:"broker,omitempty"`
+	Prompt          *AgentRunPrompt         `json:"prompt,omitempty"`
+	Agent           AgentRunAgent           `json:"agent"`
+	Lifecycle       *AgentRunLifecycle      `json:"lifecycle,omitempty"`
+	TTL             *AgentRunTTL            `json:"ttl,omitempty"`
 }
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.

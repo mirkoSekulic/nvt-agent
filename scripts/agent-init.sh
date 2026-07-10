@@ -676,7 +676,7 @@ if mode == "mediated":
         "  mode: mediated",
         "  placeholder: NVT-PLACEHOLDER-NOT-A-KEY",
         "  forward-proxy: true",
-        "  forward-proxy-url: http://127.0.0.1:8470",
+        "  forward-proxy-url: http://127.0.0.1:15002",
         "  grants:",
     ]
     for grant in (agent or {}).get("grants", []) or []:

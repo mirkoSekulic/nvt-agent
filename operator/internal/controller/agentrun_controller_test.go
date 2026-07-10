@@ -1581,12 +1581,19 @@ func TestEnforcementNetworkPolicyShape(t *testing.T) {
 	if len(operatorIngress.Ports) != 1 || operatorIngress.Ports[0].Port.IntValue() != egressCAPort {
 		t.Fatalf("operator ingress must be the CA port only: %#v", operatorIngress.Ports)
 	}
-	upstream := egressdPolicy.Spec.Egress[len(egressdPolicy.Spec.Egress)-1]
+	upstream := egressdPolicy.Spec.Egress[len(egressdPolicy.Spec.Egress)-2]
 	if upstream.To[0].IPBlock == nil || upstream.To[0].IPBlock.CIDR != "0.0.0.0/0" {
 		t.Fatalf("egressd upstream rule must be the documented coarse fence: %#v", upstream)
 	}
 	if len(upstream.Ports) != 1 || upstream.Ports[0].Port.IntValue() != 443 {
 		t.Fatalf("egressd upstream rule must be port 443 only: %#v", upstream.Ports)
+	}
+	if len(upstream.To[0].IPBlock.Except) == 0 {
+		t.Fatal("egressd public CIDR must exclude deployment private ranges")
+	}
+	ipv6 := egressdPolicy.Spec.Egress[len(egressdPolicy.Spec.Egress)-1]
+	if ipv6.To[0].IPBlock == nil || ipv6.To[0].IPBlock.CIDR != "::/0" {
+		t.Fatalf("missing IPv6 external TCP policy: %#v", ipv6)
 	}
 }
 
@@ -3942,6 +3949,67 @@ func forwardProxyAgentRun() *nvtv1alpha1.AgentRun {
 		EgressHosts: []string{"chatgpt.com:443", "auth.openai.com:443"},
 	}}}
 	return agentRun
+}
+
+func transparentAgentRun(t *testing.T) *nvtv1alpha1.AgentRun {
+	t.Helper()
+	t.Setenv("NVT_NETWORK_POLICY_CAPABLE", "true")
+	run := forwardProxyAgentRun()
+	run.Spec.EgressForwardProxy = false
+	run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
+	return run
+}
+
+func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
+	run := transparentAgentRun(t)
+	if err := ValidateAgentRunEgressMode(run); err != nil {
+		t.Fatalf("transparent run rejected: %v", err)
+	}
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, container := range pod.Spec.InitContainers {
+		names = append(names, container.Name)
+	}
+	if strings.Join(names, ",") != "captured,docker,net-init" {
+		t.Fatalf("native sidecar/init order = %v", names)
+	}
+	captured := pod.Spec.InitContainers[0]
+	if captured.RestartPolicy == nil || *captured.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatal("captured must be a native sidecar")
+	}
+	for _, env := range captured.Env {
+		if strings.Contains(env.Name, "TOKEN") || env.ValueFrom != nil {
+			t.Fatalf("captured received credential-bearing env: %#v", env)
+		}
+	}
+	netInit := pod.Spec.InitContainers[2]
+	if netInit.SecurityContext == nil || netInit.SecurityContext.Privileged != nil ||
+		len(netInit.SecurityContext.Capabilities.Add) != 1 || netInit.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" {
+		t.Fatalf("net-init capability boundary = %#v", netInit.SecurityContext)
+	}
+	if !strings.Contains(netInit.Args[0], "iptables") || !strings.Contains(netInit.Args[0], "ip6tables") || !strings.Contains(netInit.Args[0], "docker0") {
+		t.Fatalf("net-init rules incomplete: %q", netInit.Args)
+	}
+	proxyEnv := map[string]string{}
+	for _, env := range pod.Spec.Containers[0].Env {
+		proxyEnv[env.Name] = env.Value
+	}
+	if proxyEnv["HTTPS_PROXY"] != "http://127.0.0.1:15002" {
+		t.Fatalf("agent explicit proxy does not point to captured: %q", proxyEnv["HTTPS_PROXY"])
+	}
+}
+
+func TestTransparentAdmissionRequiresDeploymentCapability(t *testing.T) {
+	t.Setenv("NVT_NETWORK_POLICY_CAPABLE", "false")
+	run := forwardProxyAgentRun()
+	run.Spec.EgressForwardProxy = false
+	run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
+	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "NetworkPolicy-capable") {
+		t.Fatalf("transparent admission should fail before Pod creation: %v", err)
+	}
 }
 
 // TestValidateForwardProxyAdmission pins the gates: forward-proxy requires

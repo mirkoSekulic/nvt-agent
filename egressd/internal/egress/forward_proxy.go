@@ -82,11 +82,6 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if found {
-		if _, err := p.resolveTarget(r.Context(), target); err != nil {
-			p.writeDecision(target.host, target.port, "deny", "destination_denied")
-			http.Error(w, "CONNECT destination denied", http.StatusForbidden)
-			return
-		}
 		p.serveMITM(w, target, proxy)
 		return
 	}
