@@ -404,24 +404,34 @@ information, but insufficient on its own for tools that ignore proxy settings.
 
 ## Delivery Sequence
 
-### PR 1: gateway hardening
+Deliver the architecture in two PRs. PR 1 establishes the external traffic
+path and provider-credential non-possession. PR 2 removes the remaining
+restricted control-plane bearer material and earns the stronger literal
+zero-secret claim. Do not describe PR 1 as literal zero-secret.
+
+### PR 1: transparent, enforced egress
+
+This PR contains four reviewable commits. Each commit keeps its own tests and
+must remain independently reviewable even though the feature merges as one
+PR.
+
+#### Commit 1: gateway hardening
 
 - deny private, cluster, link-local, metadata, and reserved destinations;
 - make hostname resolution and dial atomic against DNS rebinding;
 - add deployment-configured CNI `except` ranges;
-- disable unnecessary service-account token mounting;
 - add SSRF and destination-policy tests.
 
-### PR 2: captured transport
+#### Commit 2: captured transport
 
 - implement explicit and transparent local listeners;
-- recover original TCP destination;
+- recover the original TCP destination;
 - perform bounded SNI/Host detection;
-- relay CONNECT to egressd without credentials;
+- relay CONNECT to egressd without provider credentials;
 - preserve provider hints on the explicit path;
 - add hermetic TCP, TLS, half-close, timeout, and malformed-input tests.
 
-### PR 3: operator and network wiring
+#### Commit 3: operator and network wiring
 
 - add the transport enum and admission;
 - render captured as a native sidecar;
@@ -429,27 +439,49 @@ information, but insufficient on its own for tools that ignore proxy settings.
 - update NetworkPolicies and lifecycle conditions;
 - keep direct and existing forward-proxy modes unchanged.
 
-### PR 4: enforced cluster proof
+#### Commit 4: enforced cluster proof
 
-- proxy-aware client succeeds;
-- client with proxy variables removed still succeeds through transparent
+- prove a proxy-aware client succeeds;
+- prove a client with proxy variables removed succeeds through transparent
   capture;
-- raw TCP from the agent is captured;
-- traffic from a DinD-spawned container is captured;
-- direct bypass after removing local rules is denied by the CNI;
-- cross-run egressd access is denied;
-- private and metadata destinations are denied;
-- injected upstream receives the fixture credential while scans find no secret
-  in the Agent Pod;
-- unmatched permitted HTTPS succeeds as a blind tunnel;
-- ambiguous provider selection fails closed without a hint.
+- prove raw TCP from the agent is captured;
+- prove traffic from a DinD-spawned container is captured;
+- prove direct bypass after removing local rules is denied by the CNI;
+- prove cross-run egressd access is denied;
+- prove private and metadata destinations are denied;
+- prove the injected upstream receives the fixture credential while scans find
+  no provider credential or CA private key in the Agent Pod;
+- prove unmatched permitted HTTPS succeeds as a blind tunnel;
+- prove ambiguous provider selection fails closed without a hint.
 
-### PR 5: literal zero-secret cleanup
+PR 1 is complete when every permitted external TCP path either reaches the
+paired egressd or is denied by the CNI, including DinD traffic. The Agent Pod
+may still contain its existing restricted broker, callback, and Kubernetes
+service-account bearer material; none of those identities may retrieve a
+provider credential.
 
-- remove the agent broker and callback bearer tokens;
-- move inert bootstrap preparation to the operator or another trusted
-  control-plane component;
-- extend the non-possession CI scan to every bearer-material canary.
+### PR 2: literal zero-secret Agent Pod
+
+- set `automountServiceAccountToken: false` on the Agent Pod and on other
+  per-run Pods that do not require Kubernetes workload identity;
+- remove the agent broker token and callback bearer token;
+- move inert placeholder and routing preparation to the operator or another
+  trusted control-plane component;
+- replace bearer-authenticated lifecycle callbacks with operator-observed Pod
+  status, termination messages, or a source-isolated non-credentialed event
+  path;
+- remove direct Agent Pod access to broker and callback endpoints when no
+  longer needed;
+- extend the non-possession CI scan to provider tokens, broker tokens, callback
+  tokens, service-account tokens, CA private keys, environment, process
+  arguments, filesystems, mounts, and logs;
+- prove direct, existing non-enforced mediated, and local development modes do
+  not change unless explicitly configured.
+
+PR 2 is complete only when the Agent Pod contains public CA certificates,
+inert placeholders, route metadata, and provider selectors, but no reusable
+bearer or private-key material. Egressd and broker remain the only components
+that possess provider credentials.
 
 ## Acceptance Criteria
 
@@ -470,4 +502,3 @@ machine-tested:
 9. Multiple providers sharing a host require and honor an explicit selector.
 10. Broker denial, revocation, quota exhaustion, and refresh failure remain
     fail-closed and sanitized.
-
