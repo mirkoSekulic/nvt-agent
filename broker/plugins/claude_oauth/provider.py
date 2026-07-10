@@ -79,14 +79,13 @@ DEFAULT_BUNDLE_TTL_SECONDS = 1200
 # Claude Code's public OAuth token endpoint and client id. Both are overridable
 # in config (token-url/client-id) so a fake endpoint can be pinned in tests and
 # a future endpoint change needs no code change.
-DEFAULT_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+DEFAULT_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-# The refresh request must match the shape Claude Code's CLI sends or the OAuth
-# endpoint rejects it. anthropic-beta / User-Agent are observed from Claude Code
-# CLI 2.1.202; both are overridable in config since Anthropic does not document
-# them as stable.
-DEFAULT_OAUTH_BETA = "oauth-2025-04-20"
-DEFAULT_USER_AGENT = "claude-code/2.1.202"
+# The refresh request must match the shape observed from Claude Code's native
+# client. These values are configurable because this is empirical compatibility,
+# not a stable API contract documented by Anthropic.
+DEFAULT_REFRESH_SCOPE = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+DEFAULT_USER_AGENT = "axios/1.15.2"
 # Refresh the access token this many seconds before its expiresAt. Claude
 # credentials do not expose refresh-token expiry, so we cannot key off it; a
 # generous access-token margin keeps a usable token in hand well before Claude
@@ -148,13 +147,13 @@ class ClaudeOAuthProvider:
         parsed = urlparse(self.token_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             fail(f"provider {self.name} config.token-url must be an http(s) URL")
-        # client-id / oauth-beta / user-agent each accept a literal (`client-id`)
+        # client-id / refresh-scope / user-agent each accept a literal
         # or an env indirection (`client-id-env`), mutually exclusive, falling
         # back to the public Claude Code default when neither is set. This keeps
         # existing documented `client-id-env` configuration working instead of
         # silently ignoring it.
         self.client_id = self._provider_value("client-id", DEFAULT_CLIENT_ID)
-        self.oauth_beta = self._provider_value("oauth-beta", DEFAULT_OAUTH_BETA)
+        self.refresh_scope = self._provider_value("refresh-scope", DEFAULT_REFRESH_SCOPE)
         self.user_agent = self._provider_value("user-agent", DEFAULT_USER_AGENT)
         self.refresh_margin_seconds = self._int_config("refresh-margin-seconds", DEFAULT_REFRESH_MARGIN_SECONDS)
         self.refresh_cooldown_seconds = self._int_config("refresh-cooldown-seconds", DEFAULT_REFRESH_COOLDOWN_SECONDS)
@@ -508,6 +507,7 @@ class ClaudeOAuthProvider:
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": self.client_id,
+            "scope": self.refresh_scope,
         }).encode("utf-8")
         request = Request(
             self.token_url,
@@ -515,8 +515,7 @@ class ClaudeOAuthProvider:
             data=body,
             headers={
                 "Content-Type": "application/json",
-                "Accept": "application/json",
-                "anthropic-beta": self.oauth_beta,
+                "Accept": "application/json, text/plain, */*",
                 "User-Agent": self.user_agent,
             },
         )

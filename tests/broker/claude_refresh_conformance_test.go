@@ -89,8 +89,14 @@ func TestClaudeRefreshProactivelyBeforeExpiry(t *testing.T) {
 		t.Fatalf("expected exactly one upstream refresh, got %d", count)
 	}
 	request := f.claudeOAuth.lastRequest()
-	if request["grant_type"] != "refresh_token" || request["client_id"] != "claude-test-client" || request["refresh_token"] != "claude-refresh-real" {
+	if request["grant_type"] != "refresh_token" || request["client_id"] != "claude-test-client" || request["refresh_token"] != "claude-refresh-real" ||
+		request["scope"] != "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload" || request["body_key_count"] != 4 {
 		t.Fatalf("unexpected refresh request metadata: %#v", request)
+	}
+	if request["header_accept"] != "application/json, text/plain, */*" ||
+		request["header_content_type"] != "application/json" ||
+		request["header_user_agent"] != "axios/1.15.2" || request["header_anthropic_beta"] != "" {
+		t.Fatalf("refresh headers do not match the native request shape: %#v", request)
 	}
 
 	oauth := decodeClaudeCanonical(t, f)
@@ -112,6 +118,20 @@ func TestClaudeRefreshProactivelyBeforeExpiry(t *testing.T) {
 		if strings.Contains(string(line), "claude-refresh-real") || strings.Contains(string(line), "refreshed-claude-access-1") {
 			t.Fatalf("audit log leaked a Claude token: %s", line)
 		}
+	}
+}
+
+func TestClaudeRefreshSendsLiteralScopeOverride(t *testing.T) {
+	f := newBrokerFixtureWithClaudeConfig(t, "      refresh-scope: literal-refresh-scope")
+	f.writeRoleIdentities(claudePlaceholderIdentities())
+	f.writeClaudeCredentialsExpiring("claude-access-near-expiry", "claude-refresh-fixture", time.Now().Add(5*time.Minute))
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", claudeInjectionRequest())
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("literal-scope refresh failed: status=%d body=%v", status, body)
+	}
+	if got := f.claudeOAuth.lastRequest()["scope"]; got != "literal-refresh-scope" {
+		t.Fatalf("endpoint received scope %v, want literal override", got)
 	}
 }
 

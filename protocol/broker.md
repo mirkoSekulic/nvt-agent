@@ -517,14 +517,14 @@ exchanges against one canonical credential. This replaces ad-hoc Python run
 inside a live container.
 
 **Defaults.** The Claude OAuth request shape defaults to the values observed in
-Claude Code CLI 2.1.202; all are overridable because Anthropic does not document
+Claude Code CLI 2.1.205; all are overridable because Anthropic does not document
 them as a stability contract:
 
 ```yaml
-token-url: https://console.anthropic.com/v1/oauth/token
+token-url: https://platform.claude.com/v1/oauth/token
 client-id: 9d1c250a-e61b-44d9-88ed-5944d1962f5e
-oauth-beta: oauth-2025-04-20
-user-agent: claude-code/2.1.202
+refresh-scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+user-agent: axios/1.15.2
 refresh-margin-seconds: 900
 refresh-cooldown-seconds: 90
 refresh-cooldown-max-seconds: 900

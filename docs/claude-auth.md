@@ -70,20 +70,24 @@ Point the provider at the credential with exactly one of:
   network-refreshed (a rotation cannot be persisted back to an env var), so use
   it only when an out-of-band process keeps the credential fresh.
 
-`claude-oauth` defaults to the Claude Code OAuth token URL, public client id,
-OAuth beta header, and user-agent observed in Claude Code CLI 2.1.202:
+`claude-oauth` defaults to the refresh request shape observed from Claude Code
+CLI 2.1.205. This is empirical compatibility, not a documented stable contract:
 
-- `token-url`: `https://console.anthropic.com/v1/oauth/token`
+- `token-url`: `https://platform.claude.com/v1/oauth/token`
 - `client-id`: `9d1c250a-e61b-44d9-88ed-5944d1962f5e`
-- `oauth-beta`: `oauth-2025-04-20`
-- `user-agent`: `claude-code/2.1.202`
+- `refresh-scope`: `user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`
+- `user-agent`: `axios/1.15.2`
+
+The refresh request does not send `anthropic-beta`. API beta headers are a
+separate concern and must be configured explicitly under
+`injection-extra-headers`.
 
 The client id identifies the Claude Code OAuth application, not your
 subscription. It is not a secret, and the Claude `.credentials.json` file does
 not carry it. Anthropic does not document these observed values as a stability
 contract, so production deployments can override them with `token-url`,
-`client-id` / `client-id-env`, `oauth-beta`, and `user-agent` if Claude Code
-changes.
+`client-id` / `client-id-env`, `refresh-scope` / `refresh-scope-env`, and
+`user-agent` / `user-agent-env` if Claude Code changes.
 
 To seed a local dev credential, log in with Claude Code once on a trusted host
 and copy the resulting `~/.claude/.credentials.json` to the broker-side path.
@@ -205,8 +209,8 @@ file-bundle vending and edge injection when `claudeAiOauth.expiresAt` is within
 `refresh-margin-seconds` (default 900). Claude credentials expose only the
 access-token `expiresAt` (refresh-token expiry is unknown), so refresh is
 proactive — ahead of expiry — rather than reactive to a 401. Successful refresh
-uses the configured or default `token-url`, `client-id` (or `client-id-env`),
-`oauth-beta`, `user-agent`, and broker-owned `refreshToken`, then persists the
+uses the configured or default `token-url`, `client-id`, `refresh-scope`,
+`user-agent`, and broker-owned `refreshToken`, then persists the
 new `accessToken`, rotated `refreshToken` when returned, and recomputed
 `expiresAt`.
 
@@ -269,7 +273,8 @@ other's rotation. (It is still a manual/operator tool; routine refresh is
 automatic.)
 
 The refresh path is also conformance-tested against the broker's fake OAuth
-endpoint: request shape (JSON body, `anthropic-beta`/`User-Agent` headers),
+endpoint: exact request shape (JSON body including `scope`, safe headers, and
+no `anthropic-beta` header),
 refresh-token rotation, single-flight collapse, cross-process probe/broker
 serialization, 429 cooldown/back-off, refresh-failure audit, valid-token
 fallback, mediated expired-token fail-closed vs. direct expired-credential
@@ -281,4 +286,25 @@ against a copied Claude credential in the target environment and verify that
 `expiresAt` and token material change only in the broker-owned credentials file
 without appearing in agent placeholder files, audit logs, or responses. If
 Anthropic changes the Claude Code OAuth app, set `client-id`/`client-id-env`,
-`token-url`, `oauth-beta`, or `user-agent` explicitly.
+`token-url`, `refresh-scope`/`refresh-scope-env`, or
+`user-agent`/`user-agent-env` explicitly.
+
+For a native-vs-broker release gate, use two independently obtained disposable
+credentials in isolated trusted containers (refresh-token rotation means one
+credential must not be shared between the two arms). Pin and record the Claude
+Code version, run one normal non-interactive Claude request in the native arm,
+and run the command below in the broker arm:
+
+```sh
+python3 scripts/claude-refresh-probe.py \
+  --config /trusted/redacted-proof/broker.yaml \
+  --provider claude-main >broker-refresh-summary.json
+```
+
+The gate passes only when both requests succeed, both credential files rotate,
+the probe output contains metadata only, and a reviewer confirms that broker
+audit/log output and the captured endpoint-facing request contain no token
+values. If capturing TLS in the trusted environment, retain only the method,
+URL, safe header names/values, and JSON key names; delete bodies and raw capture
+files. Never commit either disposable credential or a raw capture. This manual
+gate intentionally does not run in CI and must not use a production credential.

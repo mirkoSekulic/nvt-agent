@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -58,6 +59,9 @@ type CA struct {
 
 	// Now is a test seam; nil means time.Now.
 	Now func() time.Time
+	// Logger receives one sanitized event when a leaf is minted or reminted.
+	// Nil disables event logging (primarily useful in tests and library use).
+	Logger *log.Logger
 
 	mu         sync.Mutex
 	leaf       *tls.Certificate
@@ -383,6 +387,7 @@ func (ca *CA) localLeaf() (*tls.Certificate, error) {
 	if ca.leaf != nil && now.Before(ca.leafExpiry.Add(-leafRemintMargin)) {
 		return ca.leaf, nil
 	}
+	old := ca.leaf
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate leaf key: %w", err)
@@ -416,6 +421,7 @@ func (ca *CA) localLeaf() (*tls.Certificate, error) {
 		Leaf:        leaf,
 	}
 	ca.leafExpiry = expiry
+	ca.logLeafEvent(localLeafName, old, ca.leaf)
 	return ca.leaf, nil
 }
 
@@ -431,6 +437,10 @@ func (ca *CA) upstreamLeaf(name string) (*tls.Certificate, error) {
 	now := ca.now()
 	if entry, ok := ca.upstreamLeaves[name]; ok && now.Before(entry.expiry.Add(-leafRemintMargin)) {
 		return entry.cert, nil
+	}
+	var old *tls.Certificate
+	if entry, ok := ca.upstreamLeaves[name]; ok {
+		old = entry.cert
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -464,7 +474,22 @@ func (ca *CA) upstreamLeaf(name string) (*tls.Certificate, error) {
 		Leaf:        leaf,
 	}
 	ca.upstreamLeaves[name] = &cachedLeaf{cert: cert, expiry: expiry}
+	ca.logLeafEvent(name, old, cert)
 	return cert, nil
+}
+
+func (ca *CA) logLeafEvent(host string, old, current *tls.Certificate) {
+	if ca.Logger == nil || current == nil || current.Leaf == nil {
+		return
+	}
+	if old == nil || old.Leaf == nil {
+		ca.Logger.Printf("event=tls_leaf_mint host=%q new_serial=%s new_expiry=%s",
+			host, current.Leaf.SerialNumber, current.Leaf.NotAfter.UTC().Format(time.RFC3339))
+		return
+	}
+	ca.Logger.Printf("event=tls_leaf_remint host=%q old_serial=%s old_expiry=%s new_serial=%s new_expiry=%s",
+		host, old.Leaf.SerialNumber, old.Leaf.NotAfter.UTC().Format(time.RFC3339),
+		current.Leaf.SerialNumber, current.Leaf.NotAfter.UTC().Format(time.RFC3339))
 }
 
 func randomSerial() (*big.Int, error) {

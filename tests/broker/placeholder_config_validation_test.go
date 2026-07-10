@@ -211,22 +211,22 @@ provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
 }})
 print("CLIENT_ID", provider.client_id)
 print("TOKEN_URL", provider.token_url)
-print("OAUTH_BETA", provider.oauth_beta)
+print("REFRESH_SCOPE", provider.refresh_scope)
 print("USER_AGENT", provider.user_agent)
 `)
 	if err != nil {
 		t.Fatalf("expected clean defaults, got err=%v out=%s", err, out)
 	}
 	if !strings.Contains(out, "CLIENT_ID 9d1c250a-e61b-44d9-88ed-5944d1962f5e") ||
-		!strings.Contains(out, "TOKEN_URL https://console.anthropic.com/v1/oauth/token") ||
-		!strings.Contains(out, "OAUTH_BETA oauth-2025-04-20") ||
-		!strings.Contains(out, "USER_AGENT claude-code/2.1.202") {
+		!strings.Contains(out, "TOKEN_URL https://platform.claude.com/v1/oauth/token") ||
+		!strings.Contains(out, "REFRESH_SCOPE user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload") ||
+		!strings.Contains(out, "USER_AGENT axios/1.15.2") {
 		t.Fatalf("expected observed Claude Code OAuth defaults, got %s", out)
 	}
 }
 
-// TestClaudeProviderValueResolvesLiteralOrEnv pins that client-id / oauth-beta /
-// user-agent each accept a literal or an env indirection (client-id-env, …),
+// TestClaudeProviderValueResolvesLiteralOrEnv pins that client-id, refresh-scope,
+// and user-agent accept a literal or an env indirection (client-id-env, …),
 // that the two forms are mutually exclusive, and that the public default is
 // preserved when neither is set. This keeps documented client-id-env
 // configuration working instead of being silently ignored.
@@ -244,14 +244,20 @@ assert default.client_id == "9d1c250a-e61b-44d9-88ed-5944d1962f5e", default.clie
 
 # client-id-env resolves from the environment.
 os.environ["CLAUDE_CID"] = "operator-client-id"
-os.environ["CLAUDE_BETA"] = "operator-beta"
+os.environ["CLAUDE_SCOPE"] = "operator-scope"
 resolved = ClaudeOAuthProvider({"name": "c", "config": {
     "credentials-file": handle.name,
     "client-id-env": "CLAUDE_CID",
-    "oauth-beta-env": "CLAUDE_BETA",
+    "refresh-scope-env": "CLAUDE_SCOPE",
 }})
 assert resolved.client_id == "operator-client-id", resolved.client_id
-assert resolved.oauth_beta == "operator-beta", resolved.oauth_beta
+assert resolved.refresh_scope == "operator-scope", resolved.refresh_scope
+
+literal = ClaudeOAuthProvider({"name": "c", "config": {
+    "credentials-file": handle.name,
+    "refresh-scope": "literal-scope",
+}})
+assert literal.refresh_scope == "literal-scope", literal.refresh_scope
 
 # Literal and env forms are mutually exclusive.
 try:
@@ -265,12 +271,23 @@ except Exception as exc:
 else:
     raise SystemExit("expected mutual-exclusion rejection")
 
+try:
+    ClaudeOAuthProvider({"name": "c", "config": {
+        "credentials-file": handle.name,
+        "refresh-scope": "literal",
+        "refresh-scope-env": "CLAUDE_SCOPE",
+    }})
+except Exception as exc:
+    print("SCOPE-REJECTED:", exc)
+else:
+    raise SystemExit("expected refresh-scope mutual-exclusion rejection")
+
 # Empty env value is rejected rather than silently defaulting.
 os.environ["CLAUDE_EMPTY"] = ""
 try:
     ClaudeOAuthProvider({"name": "c", "config": {
         "credentials-file": handle.name,
-        "client-id-env": "CLAUDE_EMPTY",
+        "refresh-scope-env": "CLAUDE_EMPTY",
     }})
 except Exception as exc:
     print("EMPTY-REJECTED:", exc)
@@ -286,6 +303,9 @@ print("OK")
 	}
 	if !strings.Contains(out, "EMPTY-REJECTED") || !strings.Contains(out, "OK") {
 		t.Fatalf("expected empty-env rejection and OK, got %s", out)
+	}
+	if !strings.Contains(out, "SCOPE-REJECTED") || !strings.Contains(out, "cannot set both refresh-scope and refresh-scope-env") {
+		t.Fatalf("expected refresh-scope mutual-exclusion rejection, got %s", out)
 	}
 }
 

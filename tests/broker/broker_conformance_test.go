@@ -158,6 +158,11 @@ func (f *fakeClaudeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	body["body_key_count"] = len(body)
+	body["header_accept"] = r.Header.Get("Accept")
+	body["header_content_type"] = r.Header.Get("Content-Type")
+	body["header_user_agent"] = r.Header.Get("User-Agent")
+	body["header_anthropic_beta"] = r.Header.Get("anthropic-beta")
 	f.mu.Lock()
 	f.requests = append(f.requests, body)
 	count := len(f.requests)
@@ -380,6 +385,7 @@ type brokerFixture struct {
 	extra             string
 	codexClaimHeaders string
 	codexExtraConfig  string
+	claudeExtraConfig string
 	stdout            bytes.Buffer
 	stderr            bytes.Buffer
 }
@@ -389,6 +395,14 @@ func newBrokerFixture(t *testing.T) *brokerFixture {
 }
 
 func newBrokerFixtureWithCodexConfig(t *testing.T, codexExtraConfig string) *brokerFixture {
+	return newBrokerFixtureWithProviderConfig(t, codexExtraConfig, "")
+}
+
+func newBrokerFixtureWithClaudeConfig(t *testing.T, claudeExtraConfig string) *brokerFixture {
+	return newBrokerFixtureWithProviderConfig(t, "", claudeExtraConfig)
+}
+
+func newBrokerFixtureWithProviderConfig(t *testing.T, codexExtraConfig, claudeExtraConfig string) *brokerFixture {
 	t.Helper()
 	fake := newFakeGitHub(t)
 	oauth := newFakeOAuth(t)
@@ -397,22 +411,23 @@ func newBrokerFixtureWithCodexConfig(t *testing.T, codexExtraConfig string) *bro
 	keyPEM := generateRSAKey(t)
 	port := freePort(t)
 	f := &brokerFixture{
-		t:                t,
-		root:             repoRoot(t),
-		home:             home,
-		bind:             fmt.Sprintf("127.0.0.1:%d", port),
-		url:              fmt.Sprintf("http://127.0.0.1:%d", port),
-		audit:            filepath.Join(home, "audit.jsonl"),
-		agents:           filepath.Join(home, "agents.yaml"),
-		fake:             fake,
-		oauth:            oauth,
-		claudeOAuth:      claudeOAuth,
-		keyPEM:           keyPEM,
-		token:            "frontend-token",
-		auth:             filepath.Join(home, "auth.json"),
-		claudeCreds:      filepath.Join(home, "claude-credentials.json"),
-		extra:            filepath.Join(home, "config.toml"),
-		codexExtraConfig: codexExtraConfig,
+		t:                 t,
+		root:              repoRoot(t),
+		home:              home,
+		bind:              fmt.Sprintf("127.0.0.1:%d", port),
+		url:               fmt.Sprintf("http://127.0.0.1:%d", port),
+		audit:             filepath.Join(home, "audit.jsonl"),
+		agents:            filepath.Join(home, "agents.yaml"),
+		fake:              fake,
+		oauth:             oauth,
+		claudeOAuth:       claudeOAuth,
+		keyPEM:            keyPEM,
+		token:             "frontend-token",
+		auth:              filepath.Join(home, "auth.json"),
+		claudeCreds:       filepath.Join(home, "claude-credentials.json"),
+		extra:             filepath.Join(home, "config.toml"),
+		codexExtraConfig:  codexExtraConfig,
+		claudeExtraConfig: claudeExtraConfig,
 	}
 	f.writeCodexAuth(testJWT(time.Now().Add(time.Hour)), "real-refresh-1")
 	f.writeClaudeCredentials("real-claude-access-token-secret", "real-claude-refresh-token-secret")
@@ -597,6 +612,7 @@ providers:
       credentials-file: %[11]q
       token-url: %[12]q
       client-id: claude-test-client
+%[13]s
       refresh-margin-seconds: 900
       refresh-cooldown-seconds: 120
       injection-hosts:
@@ -609,7 +625,7 @@ providers:
         hosts:
           - api.anthropic.com
           - mcp-proxy.anthropic.com
-`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra, f.claudeCreds, f.claudeOAuth.server.URL)
+`, f.fake.server.URL, perPage, maxResponseBytes, repoLines.String(), methods, f.codexClaimHeaders, f.auth, f.oauth.server.URL, f.codexExtraConfig, f.extra, f.claudeCreds, f.claudeOAuth.server.URL, f.claudeExtraConfig)
 	path := filepath.Join(f.home, "broker.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)

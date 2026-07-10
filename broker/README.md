@@ -104,12 +104,15 @@ providers:
           - mcp-proxy.anthropic.com
 ```
 
-`claude-oauth` defaults to the Claude Code OAuth request shape observed in
-Claude Code CLI 2.1.202: `https://console.anthropic.com/v1/oauth/token`,
-client id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`,
-`anthropic-beta: oauth-2025-04-20`, and `User-Agent: claude-code/2.1.202`.
+`claude-oauth` defaults to the refresh shape observed in Claude Code CLI
+2.1.205: `https://platform.claude.com/v1/oauth/token`, client id
+`9d1c250a-e61b-44d9-88ed-5944d1962f5e`, the default `refresh-scope`, and
+`User-Agent: axios/1.15.2`. Refresh does not send `anthropic-beta`; that
+header belongs under `injection-extra-headers` when an injected API request
+requires it.
 These values are not user/subscription secrets and can be overridden with
-`token-url`, `client-id` / `client-id-env`, `oauth-beta`, and `user-agent` if
+`token-url`, `client-id` / `client-id-env`, `refresh-scope` /
+`refresh-scope-env`, and `user-agent` if
 Anthropic changes the CLI OAuth app or endpoint.
 
 The broker refreshes the broker-owned Claude access token proactively (default

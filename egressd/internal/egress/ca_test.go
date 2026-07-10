@@ -7,6 +7,7 @@ package egress
 // the pinned upstream, never derived from the client request.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,6 +20,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -804,5 +806,45 @@ func TestCAGetCertificateSNIBehavior(t *testing.T) {
 	}
 	if len(sibling.Leaf.DNSNames) != 1 || sibling.Leaf.DNSNames[0] != "auth.openai.com" || len(sibling.Leaf.IPAddresses) != 0 {
 		t.Fatalf("sibling SNI did not get its dedicated single-SAN leaf: %v", sibling.Leaf.DNSNames)
+	}
+}
+
+// TestCAUpstreamLeafRemintsWithClock pins the cache boundary independently of
+// wall time and verifies sanitized mint/remint observability.
+func TestCAUpstreamLeafRemintsWithClock(t *testing.T) {
+	const name = "api.example.test"
+	clock := time.Now().UTC().Truncate(time.Second)
+	ca, err := NewCAWithUpstreams(nil, []string{name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca.Now = func() time.Time { return clock }
+	var logs bytes.Buffer
+	ca.Logger = log.New(&logs, "", 0)
+
+	first, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = first.Leaf.NotAfter.Add(-leafRemintMargin - time.Minute)
+	reused, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+	if err != nil || reused.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) != 0 {
+		t.Fatalf("leaf was not reused before remint margin: err=%v", err)
+	}
+	clock = first.Leaf.NotAfter.Add(-leafRemintMargin + time.Minute)
+	reminted, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reminted.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) == 0 || !reminted.Leaf.NotAfter.After(first.Leaf.NotAfter) {
+		t.Fatal("leaf was not renewed inside remint margin")
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "event=tls_leaf_mint") ||
+		!strings.Contains(lines[1], "event=tls_leaf_remint") ||
+		!strings.Contains(lines[1], "host=\"api.example.test\"") ||
+		!strings.Contains(lines[1], "old_serial=") || !strings.Contains(lines[1], "old_expiry=") ||
+		!strings.Contains(lines[1], "new_serial=") || !strings.Contains(lines[1], "new_expiry=") {
+		t.Fatalf("unexpected leaf lifecycle logs: %q", logs.String())
 	}
 }

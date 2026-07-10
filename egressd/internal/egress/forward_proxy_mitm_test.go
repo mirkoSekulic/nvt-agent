@@ -19,6 +19,22 @@ import (
 	"time"
 )
 
+type trackingClientSessionCache struct {
+	cache tls.ClientSessionCache
+	puts  int
+	gets  int
+}
+
+func (c *trackingClientSessionCache) Put(key string, state *tls.ClientSessionState) {
+	c.puts++
+	c.cache.Put(key, state)
+}
+
+func (c *trackingClientSessionCache) Get(key string) (*tls.ClientSessionState, bool) {
+	c.gets++
+	return c.cache.Get(key)
+}
+
 func newMITMProxy(t *testing.T, broker *fakeBroker, route ForwardProxyInjectRoute, upstreamNames ...string) (*httptest.Server, *CA) {
 	t.Helper()
 	ca, err := NewCAWithUpstreams(nil, upstreamNames)
@@ -96,6 +112,76 @@ func TestForwardProxyMITMInjectsRealToken(t *testing.T) {
 	}
 	if record.path != "/v1/responses?stream=true" {
 		t.Fatalf("upstream path = %q, want the preserved request path", record.path)
+	}
+}
+
+// TestForwardProxyMITMRemintsExpiredLeafOnNextCONNECT exercises the exact
+// production CONNECT -> tls.Server(ServerTLSConfig) path twice. Each CONNECT
+// receives a fresh server tls.Config, so even a client with a populated session
+// cache must perform a full handshake and invoke the CA's renewal callback.
+func TestForwardProxyMITMRemintsExpiredLeafOnNextCONNECT(t *testing.T) {
+	const host = "chatgpt.com"
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	proxy, ca := newMITMProxy(t, broker, ForwardProxyInjectRoute{
+		Host: host, Capability: "codex-main",
+		Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true,
+	}, host)
+	clock := time.Now().UTC().Truncate(time.Second)
+	ca.Now = func() time.Time { return clock }
+	sessions := &trackingClientSessionCache{cache: tls.NewLRUClientSessionCache(1)}
+	clientConfig := &tls.Config{
+		RootCAs:            caCertPool(t, ca),
+		ServerName:         host,
+		Time:               func() time.Time { return clock },
+		ClientSessionCache: sessions,
+		MinVersion:         tls.VersionTLS12,
+		MaxVersion:         tls.VersionTLS12,
+	}
+	dial := func() *tls.Conn {
+		t.Helper()
+		conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy),
+			"CONNECT chatgpt.com:443 HTTP/1.1\r\nHost: chatgpt.com:443\r\n\r\n")
+		if !strings.Contains(status, "200") {
+			_ = conn.Close()
+			t.Fatalf("CONNECT status = %q", status)
+		}
+		tlsConn := tls.Client(conn, clientConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			t.Fatalf("MITM handshake: %v", err)
+		}
+		return tlsConn
+	}
+
+	first := dial()
+	firstState := first.ConnectionState()
+	if firstState.DidResume {
+		t.Fatal("first MITM handshake unexpectedly resumed")
+	}
+	oldLeaf := firstState.PeerCertificates[0]
+	response := mitmRequest(t, first, "/first")
+	_ = response.Body.Close()
+	_ = first.Close()
+	if sessions.puts == 0 {
+		t.Fatal("first handshake did not populate the client session cache")
+	}
+
+	clock = oldLeaf.NotAfter.Add(time.Minute)
+	second := dial()
+	defer second.Close()
+	secondState := second.ConnectionState()
+	if secondState.DidResume {
+		t.Fatal("second CONNECT resumed despite the production path using a fresh server tls.Config")
+	}
+	if sessions.gets == 0 {
+		t.Fatal("second handshake did not consult the populated client session cache")
+	}
+	newLeaf := secondState.PeerCertificates[0]
+	if newLeaf.SerialNumber.Cmp(oldLeaf.SerialNumber) == 0 {
+		t.Fatalf("second CONNECT received stale leaf serial %s", newLeaf.SerialNumber)
+	}
+	if !newLeaf.NotAfter.After(clock) {
+		t.Fatalf("second CONNECT leaf expired at %s before advanced clock %s", newLeaf.NotAfter, clock)
 	}
 }
 
