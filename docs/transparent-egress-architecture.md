@@ -271,6 +271,86 @@ local rules:
 - the agent can still reach only the paired egressd and explicit internal
   exceptions.
 
+## Local Docker Compose Backend
+
+Docker Compose remains the development backend and supports two explicit
+modes. The direct mode must remain unchanged. The mediated mode should exercise
+the same capture, provider-selection, injection, and non-possession contracts
+as Kubernetes, but it must not claim the same bypass-resistant enforcement as
+a CNI NetworkPolicy.
+
+### Direct mode
+
+Direct mode preserves the current local workflow:
+
+```text
+agent or plugin
+  -> brokerctl with the restricted agent broker identity
+  -> broker
+```
+
+No `captured` or `net-init` container is required, and the existing local
+file-bundle and broker-backed development paths remain available.
+
+### Mediated transparent mode
+
+The target Compose topology is:
+
+```text
+Agent/DinD network namespace                 Trusted egress namespace
++--------------------------------+           +---------------------------+
+| agent                          |           | egressd                   |
+| DinD                           |           | - egress broker identity  |
+| captured                       |---------->| - interception CA key     |
+| net-init (exits after setup)   |           | - provider access tokens  |
++--------------------------------+           +-------------+-------------+
+                                                           |
+                                                           +--> broker
+                                                           +--> internet
+```
+
+- `agent`, DinD, and `captured` share the DinD service network namespace.
+- `net-init` temporarily joins that namespace with `NET_ADMIN`, installs the
+  IPv4/IPv6 redirect rules, and exits before the agent starts.
+- `egressd` must not use `network_mode: service:docker`; it runs in a separate
+  Compose network namespace and connects to `captured` over a private Compose
+  network.
+- Only the egressd-specific environment file contains the paired egress broker
+  identity. The agent receives public CA certificates, inert placeholders,
+  routes, and non-secret provider selectors only.
+- Existing explicit proxy variables continue to point to the local `captured`
+  listener. Transparent rules capture tools that ignore those variables.
+- The current `MEDIATED=1`-style configuration may select this topology while
+  direct mode remains the default local compatibility path.
+
+For literal zero-secret mode, the trusted host-side `agent-init` flow prepares
+placeholder files and routing metadata before the containers start. Plugins
+that require ongoing broker operations must use a credential-less local
+egressd contract or ordinary mediated network requests; they must not receive
+`NVT_BROKER_TOKEN`. Lifecycle reporting must similarly avoid placing a reusable
+callback bearer token in the agent container.
+
+### Compose enforcement boundary
+
+Compose can prove transparent functionality and provider-secret
+non-possession, but ordinary Docker networking is not equivalent to a
+Kubernetes CNI fence. A privileged DinD container shares the agent network
+namespace and can alter local iptables rules. Networks used for inbound
+Traefik/code-server routing may also provide outbound connectivity unless the
+host applies additional firewall or namespace policy.
+
+Therefore the supported claims are:
+
+- Kubernetes enforced mode: attempted local-capture bypass is denied by the
+  CNI, so permitted internet traffic must traverse the paired egressd Pod.
+- Compose mediated mode: traffic is transparently routed through egressd and
+  secrets remain outside the agent container, but bypass resistance is
+  best-effort unless a separate host-level network enforcement mechanism is
+  configured.
+
+Local tests must describe which claim they prove and must not use a successful
+Compose capture test as evidence of CNI-equivalent isolation.
+
 ## Destination and SSRF Protection
 
 Allowing unmatched blind tunnels makes egressd a general egress gateway. It
