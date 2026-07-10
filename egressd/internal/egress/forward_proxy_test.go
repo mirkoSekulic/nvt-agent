@@ -248,6 +248,49 @@ func TestForwardProxyHintRequiredRouteDoesNotCaptureGenericTraffic(t *testing.T)
 	}
 }
 
+func TestTransparentProviderSelectionHonorsHintRequirements(t *testing.T) {
+	proxy := &ForwardProxy{Config: ForwardProxyConfig{TransparentMode: true, InjectRoutes: []ForwardProxyInjectRoute{
+		{Host: "api.example", Capability: "one", Upstream: "api.example:443", RequireCapabilityHint: true},
+		{Host: "api.example", Capability: "two", Upstream: "api.example:443", RequireCapabilityHint: true},
+	}}}
+	if _, found, err := proxy.transparentInjectProxy("api.example", ""); err == nil || !found {
+		t.Fatalf("ambiguous transparent host must fail closed, found=%v err=%v", found, err)
+	}
+	if selected, found, err := proxy.transparentInjectProxy("api.example", "two"); err != nil || !found || selected == nil {
+		t.Fatalf("explicit transparent hint must select provider: found=%v err=%v", found, err)
+	}
+	singleRequired := &ForwardProxy{Config: ForwardProxyConfig{TransparentMode: true, InjectRoutes: []ForwardProxyInjectRoute{
+		{Host: "required.example", Capability: "one", Upstream: "required.example:443", RequireCapabilityHint: true},
+	}}}
+	if _, found, err := singleRequired.transparentInjectProxy("required.example", ""); err == nil || !found {
+		t.Fatalf("single hint-required route must remain hint-required, found=%v err=%v", found, err)
+	}
+	singleAutomatic := &ForwardProxy{Config: ForwardProxyConfig{TransparentMode: true, InjectRoutes: []ForwardProxyInjectRoute{
+		{Host: "automatic.example", Capability: "one", Upstream: "automatic.example:443"},
+	}}}
+	if selected, found, err := singleAutomatic.transparentInjectProxy("automatic.example", ""); err != nil || !found || selected == nil {
+		t.Fatalf("unambiguous automatic route was not selected: found=%v err=%v", found, err)
+	}
+}
+
+func TestForgedTransparentHeaderCannotSelectHintRequiredRoute(t *testing.T) {
+	var logs bytes.Buffer
+	proxy := &ForwardProxy{Config: ForwardProxyConfig{
+		Listen: "127.0.0.1:0",
+		InjectRoutes: []ForwardProxyInjectRoute{{
+			Host: "required.example", Capability: "one", Upstream: "required.example:443", RequireCapabilityHint: true,
+		}},
+	}, Logger: log.New(&logs, "", 0)}
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+	conn, status := sendRawProxyRequest(t, proxyAddress(t, server),
+		"CONNECT required.example:443 HTTP/1.1\r\nHost: required.example:443\r\nX-NVT-Transparent: 1\r\n\r\n")
+	defer conn.Close()
+	if !strings.Contains(status, "403") {
+		t.Fatalf("forged marker status = %q, want target denial", status)
+	}
+}
+
 func TestForwardProxyTunnelWaitsForHalfClosedClientResponse(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -498,12 +541,12 @@ func TestForwardProxyRejectsPlainHTTPProxying(t *testing.T) {
 	}
 }
 
-func TestForwardProxyDefaultAllowPortIs443(t *testing.T) {
+func TestForwardProxyDefaultAllowPortsSupportHTTPAndHTTPS(t *testing.T) {
 	config := &ForwardProxyConfig{Listen: "127.0.0.1:0", AllowHosts: []string{"ChatGPT.com"}}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if ports := config.effectiveAllowPorts(); len(ports) != 1 || ports[0] != 443 {
+	if ports := config.effectiveAllowPorts(); len(ports) != 2 || ports[0] != 80 || ports[1] != 443 {
 		t.Fatalf("default ports = %v", ports)
 	}
 	if got := config.effectiveMaxConcurrentTunnels(); got != defaultForwardProxyMaxConcurrentTunnels {

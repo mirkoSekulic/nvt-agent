@@ -34,6 +34,7 @@ case_kind_setup() {
     --from-literal=NVT_SMOKE_STATIC_TOKEN=nvt-smoke-fixture-token \
     --dry-run=client -o yaml | kubectl_smoke apply -f -
   write_broker_providers_values "${SMOKE_TMPDIR}/broker-providers.yaml"
+  ECHO_EXPECTED_CREDENTIAL_SHA256="$(printf '%s' 'Bearer nvt-smoke-fixture-token' | sha256sum | cut -d' ' -f1)"
   deploy_echo_fixture
 
   make -C "${ROOT}" \
@@ -347,18 +348,16 @@ assert_egressd_path_allowed() {
   log "asserting the agent reaches its paired egressd through the Service"
   # A real request from inside the agent container, resolved through kube-dns
   # and verified against the published CA. The hermetic echo fixture reflects
-  # the request egressd forwarded: it reports authenticated:true and echoes
-  # the injected token only when egressd fetched and injected Authorization
-  # from the broker. A 5xx means the mediated path is broken and fails the
-  # smoke.
+  # the request egressd forwarded. It compares a one-way credential digest and
+  # never reflects the injected value back into the untrusted Agent Pod.
   local response
   response="$(agent_exec "${run}" curl -sS --fail-with-body \
     --cacert /nvt-egress-ca/ca.crt --max-time 15 "https://${run}-egressd:8471/echo")" \
     || die "agent -> egressd -> upstream request failed"
   grep -q '"authenticated":true' <<<"${response}" || die "echo fixture did not see an injected credential header: ${response}"
-  grep -q 'nvt-smoke-fixture-token' <<<"${response}" || die "echo fixture did not receive the injected bearer: ${response}"
+  grep -q '"credential_match":true' <<<"${response}" || die "echo fixture did not receive the exact injected bearer: ${response}"
   grep -q '"path":"/echo"' <<<"${response}" || die "echo fixture did not reflect the request path: ${response}"
-  if grep -q 'NVT-PLACEHOLDER-NOT-A-KEY' <<<"${response}"; then
+  if ! grep -q '"placeholder_seen":false' <<<"${response}"; then
     die "placeholder reached upstream through egressd: ${response}"
   fi
 }

@@ -10,6 +10,7 @@ on:
       - "runtime/plugins/**"
       - "broker/**"
       - "egressd/**"
+      - "captured/**"
       - "protocol/**"
       - "tests/agentd/**"
       - "tests/broker/**"
@@ -22,6 +23,7 @@ on:
       - "runtime/plugins/**"
       - "broker/**"
       - "egressd/**"
+      - "captured/**"
       - "protocol/**"
       - "tests/agentd/**"
       - "tests/broker/**"
@@ -101,7 +103,18 @@ jobs:
           go-version: "1.26"
       - name: Run egressd tests
         working-directory: egressd
-        run: go vet ./... && go test -v ./...
+        run: go vet ./... && go test -race -v ./...
+
+  captured:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Run captured tests
+        working-directory: captured
+        run: go vet ./... && go test -race -v ./...
 
   images-smoke:
     runs-on: ubuntu-latest

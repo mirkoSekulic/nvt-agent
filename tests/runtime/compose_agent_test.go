@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1117,7 +1118,9 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 		Routes       []map[string]any `json:"routes"`
 		ForwardProxy struct {
 			Listen              string           `json:"listen"`
+			TransparentMode     bool             `json:"transparent_mode"`
 			AllowUnmatchedHosts bool             `json:"allow_unmatched_hosts"`
+			AllowPorts          []int            `json:"allow_ports"`
 			InjectRoutes        []map[string]any `json:"inject_routes"`
 		} `json:"forward_proxy"`
 		CA map[string]any `json:"ca"`
@@ -1131,6 +1134,9 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	}
 	if !config.ForwardProxy.AllowUnmatchedHosts {
 		t.Fatal("local compose forward proxy should blind-tunnel unmatched hosts for dev egress")
+	}
+	if !config.ForwardProxy.TransparentMode || !reflect.DeepEqual(config.ForwardProxy.AllowPorts, []int{80, 443}) {
+		t.Fatalf("local transparent port contract missing: %#v", config.ForwardProxy)
 	}
 	codex, api, git := config.ForwardProxy.InjectRoutes[0], config.ForwardProxy.InjectRoutes[1], config.ForwardProxy.InjectRoutes[2]
 	if codex["host"] != "chatgpt.com" || codex["capability"] != "codex-main" || codex["upstream"] != "chatgpt.com:443" {
@@ -1194,6 +1200,7 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 		"    provider: codex-main",
 		"egress:",
 		"  mode: mediated",
+		"  transport: transparent",
 		"  forward-proxy: true",
 		"  forward-proxy-url: http://127.0.0.1:15002",
 		"    - provider: codex-main",
@@ -1232,6 +1239,101 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 	}
 }
 
+func TestAgentUpMigratesPreTransparentManagedEgress(t *testing.T) {
+	root := repoRoot(t)
+	name := "upgrade-managed-egress"
+	agentDir := filepath.Join(root, ".agents", name)
+	_ = os.RemoveAll(agentDir)
+	t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agentsFile := preserveBrokerAgentsFile(t, root)
+	mustWriteFile(t, agentsFile, `agents:
+- id: upgrade-managed-egress
+  grants:
+    - provider: api-main
+      materialization: header-inject
+      egress-hosts: [api.example.test:443]
+`)
+	configPath := filepath.Join(agentDir, "agent.yaml")
+	mustWriteFile(t, configPath, `runtime:
+  command: bash
+user-owned: keep-me
+# BEGIN nvt-managed egress (agent-init)
+egress:
+  mode: mediated
+  placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  forward-proxy: true
+  forward-proxy-url: http://127.0.0.1:8470
+  grants:
+    - provider: api-main
+      materialization: header-inject
+# END nvt-managed egress (agent-init)
+tools: {packages: [], mise: [], additional-paths: [], shell: []}
+code-server: {extensions: []}
+`)
+	egressdPath := filepath.Join(agentDir, "egressd.json")
+	mustWriteFile(t, egressdPath, `{"routes":[],"forward_proxy":{"listen":"0.0.0.0:8470","allow_unmatched_hosts":true,"allow_ports":[443],"inject_routes":[]}}`)
+	envPath := filepath.Join(agentDir, "env")
+	mustWriteFile(t, envPath, strings.Join([]string{
+		"AGENT_NAME=" + name,
+		"AGENT_HOST=" + name + ".agent.localhost",
+		"AGENT_CONFIG_FILE=" + configPath,
+		"EGRESSD_CONFIG_FILE=" + egressdPath,
+		"MEDIATED=1",
+		"NVT_WORKSPACE=/workspace",
+	}, "\n")+"\n")
+	binDir := t.TempDir()
+	dockerLog := filepath.Join(binDir, "docker.calls")
+	mustWriteExecutable(t, filepath.Join(binDir, "docker"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> "+shellQuote(dockerLog)+"\nexit 0\n")
+
+	for range 2 {
+		cmd := exec.Command("bash", filepath.Join(root, "scripts", "agent-up.sh"), "--name", name)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("agent-up migration failed: %v\n%s", err, output)
+		}
+	}
+	config := mustReadFile(t, configPath)
+	for _, want := range []string{"user-owned: keep-me", "transport: transparent", "forward-proxy-url: http://127.0.0.1:15002"} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("migrated config missing %q:\n%s", want, config)
+		}
+	}
+	if strings.Contains(config, "forward-proxy-url: http://127.0.0.1:8470") || strings.Count(config, "BEGIN nvt-managed egress") != 1 {
+		t.Fatalf("managed migration was not idempotent:\n%s", config)
+	}
+	var egressd struct {
+		ForwardProxy struct {
+			TransparentMode bool  `json:"transparent_mode"`
+			AllowPorts      []int `json:"allow_ports"`
+		} `json:"forward_proxy"`
+	}
+	if err := json.Unmarshal([]byte(mustReadFile(t, egressdPath)), &egressd); err != nil {
+		t.Fatal(err)
+	}
+	if !egressd.ForwardProxy.TransparentMode || !reflect.DeepEqual(egressd.ForwardProxy.AllowPorts, []int{80, 443}) {
+		t.Fatalf("egressd upgrade migration incomplete: %#v", egressd.ForwardProxy)
+	}
+	if calls := mustReadFile(t, dockerLog); !strings.Contains(calls, "compose") || !strings.Contains(calls, "up -d") {
+		t.Fatalf("agent-up did not continue to Compose after migration:\n%s", calls)
+	}
+
+	unmarked := filepath.Join(t.TempDir(), "agent.yaml")
+	mustWriteFile(t, unmarked, "runtime: {command: bash}\negress: {mode: mediated, forward-proxy-url: http://user-proxy:9999}\n")
+	before := mustReadFile(t, unmarked)
+	cmd := exec.Command("python3", filepath.Join(root, "scripts", "render-managed-egress.py"),
+		"--agent-config", unmarked, "--broker-agents", agentsFile, "--agent-name", name, "--mode", "mediated")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unmarked migration failed: %v\n%s", err, output)
+	}
+	if after := mustReadFile(t, unmarked); after != before {
+		t.Fatalf("agent-up renderer changed user-authored config:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
 func TestAgentInitMediatedRequiresUnsafeLocalBrokerFlag(t *testing.T) {
 	root := repoRoot(t)
 	name := "mediated-unsafe-flag"
@@ -1245,13 +1347,13 @@ func TestAgentInitMediatedRequiresUnsafeLocalBrokerFlag(t *testing.T) {
 - id: mediated-unsafe-flag
   token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
   grants:
-    - provider: api-main
+    - provider: codex-main
       materialization: header-inject
       egress-hosts: [api.example.test:443]
       repositories: [example/repo]
 `)
 	home := t.TempDir()
-	command := "HOME=" + shellQuote(home) + " MEDIATED=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+	command := "HOME=" + shellQuote(home) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=0 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
 	cmd := commandWithEnv(command, nil, "--name", name)
 	cmd.Dir = root
 	output, err := cmd.CombinedOutput()
@@ -1470,19 +1572,49 @@ tools:
 func TestNvtAsRootWrapper(t *testing.T) {
 	root := repoRoot(t)
 	shim := filepath.Join(root, "runtime", "core", "nvt-as-root")
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessibleTempDir := func(pattern string) string {
+		t.Helper()
+		dir, err := os.MkdirTemp("", pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	nonRootCommand := func(args ...string) *exec.Cmd {
+		if os.Geteuid() != 0 {
+			return exec.Command(args[0], args[1:]...)
+		}
+		setpriv, err := exec.LookPath("setpriv")
+		if err != nil {
+			t.Fatalf("root test process requires setpriv to exercise non-root contract: %v", err)
+		}
+		wrapped := append([]string{"--reuid=65534", "--regid=65534", "--clear-groups", "--"}, args...)
+		return exec.Command(setpriv, wrapped...)
+	}
 
 	// No args -> usage, exit 2.
-	cmd := commandWithEnv("bash "+shellQuote(shim), nil)
+	cmd := nonRootCommand(bashPath, shim)
 	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "usage: nvt-as-root") {
 		t.Fatalf("no-args must print usage and fail, got err=%v out=%s", err, out)
 	}
 
 	// This test process is non-root; a stubbed sudo must be invoked with the args.
-	binDir := t.TempDir()
+	binDir := accessibleTempDir("nvt-as-root-bin-")
+	if err := os.Chmod(binDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	sudoLog := filepath.Join(binDir, "sudo.calls")
 	mustWriteExecutable(t, filepath.Join(binDir, "sudo"), "#!/usr/bin/env bash\necho \"$@\" > "+shellQuote(sudoLog)+"\n")
-	cmd = commandWithEnv("bash "+shellQuote(shim)+" apt-get install -y jq", nil)
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd = nonRootCommand(bashPath, shim, "apt-get", "install", "-y", "jq")
+	cmd.Env = mergedEnv([]string{"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")})
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("non-root shim with sudo present must succeed: err=%v out=%s", err, out)
 	}
@@ -1493,14 +1625,15 @@ func TestNvtAsRootWrapper(t *testing.T) {
 
 	// Non-root without sudo on PATH -> clear failure. Keep `id` reachable (the
 	// shim needs it) but exclude sudo by pointing PATH at a minimal dir.
-	noSudo := t.TempDir()
+	noSudo := accessibleTempDir("nvt-as-root-path-")
 	if idPath, err := exec.LookPath("id"); err == nil {
 		if err := os.Symlink(idPath, filepath.Join(noSudo, "id")); err != nil {
 			t.Fatal(err)
 		}
 	}
-	noSudoCmd := exec.Command("bash", shim, "apt-get", "update")
-	noSudoCmd.Env = []string{"PATH=" + noSudo, "HOME=" + t.TempDir()}
+	noSudoCmd := nonRootCommand(bashPath, shim, "apt-get", "update")
+	home := accessibleTempDir("nvt-as-root-home-")
+	noSudoCmd.Env = []string{"PATH=" + noSudo, "HOME=" + home}
 	if out, err := noSudoCmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "requires root privileges but sudo is unavailable") {
 		t.Fatalf("non-root without sudo must fail clearly, got err=%v out=%s", err, out)
 	}

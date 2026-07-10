@@ -329,6 +329,7 @@ providers:
 `)
 	env := []string{
 		"NVT_PLUGIN_CONFIG=" + config,
+		"NVT_EGRESS_FORWARD_PROXY_URL=",
 		"HTTPS_PROXY=http://ambient-proxy.invalid:8080",
 		"https_proxy=http://ambient-proxy.invalid:8080",
 	}

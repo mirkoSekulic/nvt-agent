@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -46,6 +47,38 @@ func TestInspectHostnameHTTPAndTLS(t *testing.T) {
 	host, err = inspectHostname(bufio.NewReaderSize(bytes.NewReader(hello), len(hello)+1), len(hello)+1)
 	if err != nil || host != "tls.example" {
 		t.Fatalf("TLS SNI=%q err=%v", host, err)
+	}
+}
+
+func TestInspectHTTPHostDelimiterNearLimit(t *testing.T) {
+	const limit = 16 << 10
+	prefix := "GET / HTTP/1.1\r\nHost: near-limit.example\r\nX-Fill: "
+	preface := prefix + strings.Repeat("a", limit-len(prefix)-6) + "\r\n\r\n"
+	if len(preface) != limit-2 {
+		t.Fatalf("fixture length = %d", len(preface))
+	}
+	host, err := inspectHTTPHost(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
+	if err != nil || host != "near-limit.example" {
+		t.Fatalf("near-limit host=%q err=%v", host, err)
+	}
+}
+
+func TestInspectHTTPHostWithoutDelimiterAtLimit(t *testing.T) {
+	const limit = 16 << 10
+	preface := "GET / HTTP/1.1\r\nHost: no-end.example\r\nX-Fill: " + strings.Repeat("a", limit)
+	_, err := inspectHTTPHost(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
+	if err == nil || errors.Is(err, errHostnameUnavailable) {
+		t.Fatalf("unterminated limit preface must hard-deny, err=%v", err)
+	}
+}
+
+func BenchmarkInspectHTTPHostNearLimit(b *testing.B) {
+	const limit = 16 << 10
+	prefix := "GET / HTTP/1.1\r\nHost: benchmark.example\r\nX-Fill: "
+	preface := prefix + strings.Repeat("a", limit-len(prefix)-4) + "\r\n\r\n"
+	b.ReportAllocs()
+	for range b.N {
+		_, _ = inspectHTTPHost(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
 	}
 }
 
@@ -101,11 +134,43 @@ func TestTransparentRelayUsesSNIAndPreservesBytes(t *testing.T) {
 	if !bytes.Equal(echoed, hello) {
 		t.Fatal("transparent relay changed inspected bytes")
 	}
-	if request := <-received; !strings.HasPrefix(request, "CONNECT captured.example:443 ") {
-		t.Fatalf("CONNECT request = %q", request)
+	if request := <-received; !strings.HasPrefix(request, "CONNECT captured.example:443 ") || strings.Contains(strings.ToLower(request), "x-nvt-transparent") {
+		t.Fatalf("transparent CONNECT request = %q", request)
 	}
 	if strings.Contains(logs.String(), "Cookie") || strings.Contains(logs.String(), string(hello)) {
 		t.Fatalf("logs contain inspected payload: %q", logs.String())
+	}
+}
+
+func TestTransparentRelayShortHTTPIsPromptAndPreservesBytes(t *testing.T) {
+	received := make(chan string, 1)
+	proxy := fakeEgressProxy(t, received)
+	const inspectTimeout = 1500 * time.Millisecond
+	server := &Server{EgressProxy: proxy, InspectTimeout: inspectTimeout}
+	left, right := net.Pipe()
+	done := make(chan struct{})
+	started := time.Now()
+	go func() {
+		server.relayTransparent(right, "93.184.216.34:80")
+		_ = right.Close()
+		close(done)
+	}()
+	request := "GET /package HTTP/1.1\r\nHost: packages.example\r\nUser-Agent: apt-like\r\n\r\n"
+	go func() { _, _ = io.WriteString(left, request) }()
+	echoed := make([]byte, len(request))
+	if _, err := io.ReadFull(left, echoed); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed >= inspectTimeout/2 {
+		t.Fatalf("short HTTP inspection took %s, want comfortably below %s deadline", elapsed, inspectTimeout)
+	}
+	_ = left.Close()
+	<-done
+	if string(echoed) != request {
+		t.Fatalf("HTTP bytes changed: %q", echoed)
+	}
+	if connect := <-received; !strings.HasPrefix(connect, "CONNECT packages.example:80 ") {
+		t.Fatalf("HTTP CONNECT request = %q", connect)
 	}
 }
 

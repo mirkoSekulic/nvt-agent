@@ -37,6 +37,8 @@ spec:
               value: {{ .Values.egress.networkPolicyCapable | quote }}
             - name: NVT_EGRESS_DENY_CIDRS
               value: {{ join "," .Values.egress.denyCIDRs | quote }}
+            - name: NVT_EGRESS_ALLOWED_TCP_PORTS
+              value: {{ join "," .Values.egress.allowedTCPPorts | quote }}
             - name: NVT_DEFAULT_EGRESS_MODE
               value: {{ .Values.egress.defaultMode | quote }}
             {{- if .Values.egress.allowInsecureUpstreams }}

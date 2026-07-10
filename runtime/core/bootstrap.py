@@ -198,7 +198,16 @@ def apply_runtime_proxy(runtime, egress, command):
     if not any(isinstance(grant, dict) and grant.get("provider") == provider for grant in grants):
         raise SystemExit(f"runtime.proxy.provider {provider} is not present in egress.grants")
     proxy_url = (egress.get("forward-proxy-url") or DEFAULT_FORWARD_PROXY_URL).rstrip("/")
-    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+
+    proxy_names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+    if egress.get("transport") == "transparent":
+        # Plain HTTP must connect normally and be captured by iptables. The
+        # explicit local proxy is CONNECT-only; HTTPS retains it so provider
+        # selectors carried by wrappers/profile URLs remain available.
+        proxy_names = ("HTTPS_PROXY", "https_proxy")
+        for name in ("HTTP_PROXY", "ALL_PROXY", "http_proxy", "all_proxy"):
+            persist_env_var(name, "")
+    for name in proxy_names:
         persist_env_var(name, proxy_url)
 
 
@@ -407,6 +416,11 @@ def apply_mediated_egress(egress):
     https_provider = None
     enforced = bool(egress.get("enforcement"))
     forward_proxy = bool(egress.get("forward-proxy"))
+    transport_mode = egress.get("transport") or ("forward-proxy" if forward_proxy else "redirect")
+    if transport_mode not in {"redirect", "forward-proxy", "transparent"}:
+        raise SystemExit("egress.transport must be redirect, forward-proxy, or transparent")
+    if transport_mode == "transparent" and not forward_proxy:
+        raise SystemExit("egress.transport transparent requires forward-proxy routing")
     for index, grant in enumerate(grants):
         if not isinstance(grant, dict):
             raise SystemExit(f"egress.grants[{index}] must be an object")
@@ -460,7 +474,12 @@ def apply_mediated_egress(egress):
         install_egress_ca_trust(https_provider or "forward-proxy")
     target = Path.home() / ".nvt-agent" / "egress.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    metadata = {"mode": "mediated", "placeholder": PLACEHOLDER, "grants": grants}
+    metadata = {
+        "mode": "mediated",
+        "transport": transport_mode,
+        "placeholder": PLACEHOLDER,
+        "grants": grants,
+    }
     if forward_proxy:
         metadata["forward_proxy"] = True
     target.write_text(

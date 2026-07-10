@@ -76,6 +76,9 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A CONNECT to an inject-route host is TLS-terminated and injected; every
 	// other host falls through to the blind-tunnel allowlist.
 	proxy, found, err := p.injectProxy(target.host, capabilityHintFromConnect(r))
+	if p.Config.TransparentMode {
+		proxy, found, err = p.transparentInjectProxy(target.host, capabilityHintFromConnect(r))
+	}
 	if err != nil {
 		p.writeDecision(target.host, target.port, "deny", "capability_not_allowed")
 		http.Error(w, "CONNECT capability not allowed", http.StatusForbidden)
@@ -280,7 +283,7 @@ func (p *ForwardProxy) init() {
 						MaxRequests:           route.MaxRequests,
 					},
 					Broker:             p.Broker,
-					Transport:          p.Transport,
+					Transport:          p.injectRouteTransport(route),
 					Reporter:           p.Reporter,
 					UpgradeIdleTimeout: p.Config.effectiveTunnelIdleTimeout(),
 				},
@@ -288,6 +291,40 @@ func (p *ForwardProxy) init() {
 		}
 	})
 }
+
+func (p *ForwardProxy) injectRouteTransport(route ForwardProxyInjectRoute) http.RoundTripper {
+	// Plain HTTP upstreams are an explicit test/dev escape hatch used by
+	// hermetic fixtures. Production HTTPS injection routes use a cloned
+	// transport whose dial path cannot perform a second DNS lookup.
+	if route.AllowInsecureUpstream {
+		return p.Transport
+	}
+	base := p.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return roundTripError{err: fmt.Errorf("inject route transport cannot enforce destination policy")}
+	}
+	clone := transport.Clone()
+	clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("parse inject route destination: %w", err)
+		}
+		resolved, err := resolveAllowedAddress(ctx, p.resolver(), p.destinationPolicy, host)
+		if err != nil {
+			return nil, err
+		}
+		return p.dial(ctx, net.JoinHostPort(resolved.String(), port))
+	}
+	return clone
+}
+
+type roundTripError struct{ err error }
+
+func (r roundTripError) RoundTrip(*http.Request) (*http.Response, error) { return nil, r.err }
 
 func (p *ForwardProxy) injectProxy(host, capabilityHint string) (*Proxy, bool, error) {
 	p.init()
@@ -316,6 +353,27 @@ func (p *ForwardProxy) injectProxy(host, capabilityHint string) (*Proxy, bool, e
 		return autoRoutes[0].proxy, true, nil
 	}
 	return nil, true, fmt.Errorf("host %s has multiple injectable capabilities and requires an explicit capability hint", host)
+}
+
+func (p *ForwardProxy) transparentInjectProxy(host, capabilityHint string) (*Proxy, bool, error) {
+	p.init()
+	routes := p.injectProxies[host]
+	if len(routes) == 0 {
+		return nil, false, nil
+	}
+	if capabilityHint != "" {
+		return p.injectProxy(host, capabilityHint)
+	}
+	autoRoutes := make([]injectProxy, 0, len(routes))
+	for _, route := range routes {
+		if !route.requireCapabilityHint {
+			autoRoutes = append(autoRoutes, route)
+		}
+	}
+	if len(autoRoutes) == 1 {
+		return autoRoutes[0].proxy, true, nil
+	}
+	return nil, true, fmt.Errorf("transparent host %s requires an explicit capability hint", host)
 }
 
 func capabilityHintFromConnect(r *http.Request) string {

@@ -34,7 +34,7 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image=$(GATEWAY_IMAGE)
 endif
 
-.PHONY: runtime-build broker-build egressd-build captured-build echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret phase6-real-codex-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build broker-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret phase6-real-codex-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -47,6 +47,9 @@ egressd-build:
 
 captured-build:
 	docker build -f captured/Dockerfile -t "$(CAPTURED_IMAGE)" .
+
+transparent-compose-smoke:
+	bash tests/runtime/compose-transparent-smoke.sh
 
 phase2-codex-gate: runtime-build broker-build egressd-build
 	bash scripts/phase2-codex-gate.sh
@@ -82,7 +85,7 @@ operator-kind-cluster:
 		printf '[operator-kind-setup] using existing kind cluster %s\n' "$(CLUSTER)"; \
 	elif [ "$(CREATE_CLUSTER)" = "1" ]; then \
 		printf '[operator-kind-setup] creating kind cluster %s\n' "$(CLUSTER)"; \
-		kind create cluster --name "$(CLUSTER)" $(if $(KIND_CLUSTER_CONFIG),--config "$(KIND_CLUSTER_CONFIG)"); \
+		tests/operator/kind/kind-command.sh kind create cluster --name "$(CLUSTER)" $(if $(KIND_CLUSTER_CONFIG),--config "$(KIND_CLUSTER_CONFIG)"); \
 	else \
 		printf '[operator-kind-setup] ERROR: kind cluster %s does not exist and CREATE_CLUSTER is not 1\n' "$(CLUSTER)" >&2; \
 		exit 1; \

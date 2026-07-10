@@ -229,10 +229,10 @@ func TestRedirectableStaticBearerProof(t *testing.T) {
 // otherwise git routes pinned as github.com:443 fail closed on every request.
 func TestInjectionHostStripsUpstreamPort(t *testing.T) {
 	cases := map[string]string{
-		"github.com:443":  "github.com",
-		"github.com":      "github.com",
-		"127.0.0.1:8080":  "127.0.0.1",
-		"[::1]:8443":      "::1",
+		"github.com:443":   "github.com",
+		"github.com":       "github.com",
+		"127.0.0.1:8080":   "127.0.0.1",
+		"[::1]:8443":       "::1",
 		"api.example.test": "api.example.test",
 	}
 	for upstream, want := range cases {

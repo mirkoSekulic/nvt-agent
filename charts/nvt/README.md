@@ -170,6 +170,9 @@ usage has soaked.
 requires `egress.networkPolicyCapable=true`; it renders the credential-less
 captured native sidecar and NET_ADMIN one-shot routing init while egressd stays
 in its separate trusted Pod.
+`egress.allowedTCPPorts` is the shared egressd/NetworkPolicy external TCP
+contract and defaults to HTTP/HTTPS (`80`, `443`). `egress.denyCIDRs` adds
+deployment ranges to the built-in IANA non-public and transition exclusions.
 mediates unmodified tools with hardcoded endpoints that honor `HTTP(S)_PROXY`.
 The operator points the agent's `HTTP_PROXY`/`HTTPS_PROXY` at egressd; egressd
 terminates the `CONNECT` under the per-agent CA (already trusted by the agent),

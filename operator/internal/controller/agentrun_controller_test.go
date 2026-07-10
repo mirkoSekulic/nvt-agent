@@ -1533,7 +1533,7 @@ func TestEnforcementRenderedConfigs(t *testing.T) {
 
 // TestEnforcementNetworkPolicyShape pins the fence: agent default-deny
 // egress with exactly DNS/broker/paired-egressd/callback, egressd ingress
-// only from the paired agent, and the coarse 0.0.0.0/0:443 upstream rule.
+// only from the paired agent, and mirrored public HTTP/HTTPS upstream rules.
 func TestEnforcementNetworkPolicyShape(t *testing.T) {
 	agentRun := enforcedAgentRun()
 	scheme := testScheme(t)
@@ -1585,15 +1585,27 @@ func TestEnforcementNetworkPolicyShape(t *testing.T) {
 	if upstream.To[0].IPBlock == nil || upstream.To[0].IPBlock.CIDR != "0.0.0.0/0" {
 		t.Fatalf("egressd upstream rule must be the documented coarse fence: %#v", upstream)
 	}
-	if len(upstream.Ports) != 1 || upstream.Ports[0].Port.IntValue() != 443 {
-		t.Fatalf("egressd upstream rule must be port 443 only: %#v", upstream.Ports)
+	if len(upstream.Ports) != 2 || upstream.Ports[0].Port.IntValue() != 80 || upstream.Ports[1].Port.IntValue() != 443 {
+		t.Fatalf("egressd upstream rule must use the shared HTTP/HTTPS ports: %#v", upstream.Ports)
 	}
-	if len(upstream.To[0].IPBlock.Except) == 0 {
-		t.Fatal("egressd public CIDR must exclude deployment private ranges")
+	excepts := strings.Join(upstream.To[0].IPBlock.Except, ",")
+	for _, want := range []string{"10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4"} {
+		if !strings.Contains(excepts, want) {
+			t.Fatalf("IPv4 egress policy missing %s: %v", want, upstream.To[0].IPBlock.Except)
+		}
 	}
 	ipv6 := egressdPolicy.Spec.Egress[len(egressdPolicy.Spec.Egress)-1]
 	if ipv6.To[0].IPBlock == nil || ipv6.To[0].IPBlock.CIDR != "::/0" {
 		t.Fatalf("missing IPv6 external TCP policy: %#v", ipv6)
+	}
+	ipv6Excepts := strings.Join(ipv6.To[0].IPBlock.Except, ",")
+	for _, want := range []string{"64:ff9b::/96", "2002::/16", "fc00::/7", "fe80::/10", "fec0::/10"} {
+		if !strings.Contains(ipv6Excepts, want) {
+			t.Fatalf("IPv6 egress policy missing %s: %v", want, ipv6.To[0].IPBlock.Except)
+		}
+	}
+	if strings.Contains(ipv6Excepts, "::ffff:") {
+		t.Fatalf("Kubernetes rejects mapped IPv6 prefixes in ipBlock.except: %v", ipv6.To[0].IPBlock.Except)
 	}
 }
 
@@ -3993,12 +4005,31 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	if !strings.Contains(netInit.Args[0], "iptables") || !strings.Contains(netInit.Args[0], "ip6tables") || !strings.Contains(netInit.Args[0], "docker0") {
 		t.Fatalf("net-init rules incomplete: %q", netInit.Args)
 	}
+	if strings.Contains(netInit.Args[0], "NVT_CAPTURE_EXCLUDE_CIDRS") || !strings.Contains(netInit.Args[0], "getent ahosts") {
+		t.Fatalf("net-init must resolve only narrow control-plane exceptions: %q", netInit.Args)
+	}
+	if got := envValue(netInit, "NVT_CAPTURE_EXCLUDE_HOSTS"); !strings.Contains(got, EgressdServiceName(run.Name)) || !strings.Contains(got, "nvt-broker") {
+		t.Fatalf("net-init control-plane exceptions = %q", got)
+	}
 	proxyEnv := map[string]string{}
 	for _, env := range pod.Spec.Containers[0].Env {
 		proxyEnv[env.Name] = env.Value
 	}
 	if proxyEnv["HTTPS_PROXY"] != "http://127.0.0.1:15002" {
 		t.Fatalf("agent explicit proxy does not point to captured: %q", proxyEnv["HTTPS_PROXY"])
+	}
+	for _, name := range []string{"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+		if proxyEnv[name] != "" {
+			t.Fatalf("transparent agent must clear %s: %#v", name, proxyEnv)
+		}
+	}
+	config := InjectMediatedEgressConfig(map[string]any{}, run)
+	egress, _ := config["egress"].(map[string]any)
+	if got := egress["forward-proxy-url"]; got != "http://127.0.0.1:15002" {
+		t.Fatalf("bootstrap proxy URL bypasses captured: %v", got)
+	}
+	if got := egress["transport"]; got != string(nvtv1alpha1.AgentRunEgressTransportTransparent) {
+		t.Fatalf("bootstrap egress transport = %v", got)
 	}
 }
 
@@ -4010,6 +4041,75 @@ func TestTransparentAdmissionRequiresDeploymentCapability(t *testing.T) {
 	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "NetworkPolicy-capable") {
 		t.Fatalf("transparent admission should fail before Pod creation: %v", err)
 	}
+}
+
+func TestAdmissionRejectsInvalidDeploymentEgressPolicy(t *testing.T) {
+	run := transparentAgentRun(t)
+	t.Run("cidr", func(t *testing.T) {
+		t.Setenv("NVT_EGRESS_DENY_CIDRS", "not-a-cidr")
+		if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "invalid egress deny CIDR") {
+			t.Fatalf("invalid deployment CIDR was not rejected: %v", err)
+		}
+	})
+	t.Run("port", func(t *testing.T) {
+		t.Setenv("NVT_EGRESS_ALLOWED_TCP_PORTS", "80,70000")
+		if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "invalid external TCP port") {
+			t.Fatalf("invalid external port was not rejected: %v", err)
+		}
+	})
+}
+
+func TestConfiguredExternalPortsStayAligned(t *testing.T) {
+	t.Setenv("NVT_EGRESS_ALLOWED_TCP_PORTS", "8443,80,8443")
+	run := transparentAgentRun(t)
+	rendered, err := RenderEgressdConfigJSON(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		ForwardProxy struct {
+			TransparentMode bool  `json:"transparent_mode"`
+			AllowPorts      []int `json:"allow_ports"`
+		} `json:"forward_proxy"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &config); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := DesiredEgressdNetworkPolicy(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int{80, 8443}
+	if !reflect.DeepEqual(config.ForwardProxy.AllowPorts, want) {
+		t.Fatalf("egressd ports = %v, want %v", config.ForwardProxy.AllowPorts, want)
+	}
+	if !config.ForwardProxy.TransparentMode {
+		t.Fatal("transparent run did not render transparent_mode")
+	}
+	publicRule := policy.Spec.Egress[len(policy.Spec.Egress)-2]
+	got := []int{publicRule.Ports[0].Port.IntValue(), publicRule.Ports[1].Port.IntValue()}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("NetworkPolicy ports = %v, want %v", got, want)
+	}
+}
+
+func TestEgressdPolicyAllowsOnlyExplicitlyLabelledExternalFixture(t *testing.T) {
+	run := transparentAgentRun(t)
+	run.Spec.Broker.Grants[0].AllowInsecureUpstream = true
+	run.Spec.Broker.Grants[0].EgressHosts = []string{"echo.nvt-fixture.test:443"}
+	policy, err := DesiredEgressdNetworkPolicy(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := egressHostLabel("echo.nvt-fixture.test")
+	for _, rule := range policy.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.PodSelector != nil && peer.PodSelector.MatchLabels["nvt.dev/egress-host"] == want {
+				return
+			}
+		}
+	}
+	t.Fatalf("egressd policy has no fixture selector nvt.dev/egress-host=%s", want)
 }
 
 // TestValidateForwardProxyAdmission pins the gates: forward-proxy requires
@@ -4044,7 +4144,10 @@ func TestRenderForwardProxyEgressdConfig(t *testing.T) {
 		Routes       []map[string]any `json:"routes"`
 		ForwardProxy *struct {
 			Listen              string           `json:"listen"`
+			TransparentMode     bool             `json:"transparent_mode"`
 			AllowUnmatchedHosts bool             `json:"allow_unmatched_hosts"`
+			AllowPorts          []int            `json:"allow_ports"`
+			DenyCIDRs           []string         `json:"deny_cidrs"`
 			InjectRoutes        []map[string]any `json:"inject_routes"`
 		} `json:"forward_proxy"`
 		CA *struct {
@@ -4062,6 +4165,15 @@ func TestRenderForwardProxyEgressdConfig(t *testing.T) {
 	}
 	if !config.ForwardProxy.AllowUnmatchedHosts {
 		t.Fatalf("forward-proxy mode must blind-tunnel unmatched hosts: %#v", config.ForwardProxy)
+	}
+	if config.ForwardProxy.TransparentMode {
+		t.Fatal("existing forward-proxy mode must not be reclassified as transparent")
+	}
+	if len(config.ForwardProxy.AllowPorts) != 2 || config.ForwardProxy.AllowPorts[0] != 80 || config.ForwardProxy.AllowPorts[1] != 443 {
+		t.Fatalf("forward proxy ports = %v", config.ForwardProxy.AllowPorts)
+	}
+	if len(config.ForwardProxy.DenyCIDRs) == 0 {
+		t.Fatal("forward proxy config must receive the same normalized deny ranges as NetworkPolicy")
 	}
 	hosts := map[string]any{}
 	for _, route := range config.ForwardProxy.InjectRoutes {

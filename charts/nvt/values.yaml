@@ -9,11 +9,12 @@ egress:
   egressdImage: nvt-egressd:latest
   capturedImage: nvt-captured:latest
   networkPolicyCapable: false
-  denyCIDRs:
-    - 10.0.0.0/8
-    - 172.16.0.0/12
-    - 192.168.0.0/16
-    - fc00::/7
+  allowedTCPPorts:
+    - 80
+    - 443
+  # Additional deployment Pod, Service, node, cluster, and VNet ranges. The
+  # operator always adds its built-in IANA non-public and transition ranges.
+  denyCIDRs: []
   # Cluster default egress mode for AgentRuns created through the nvt
   # admission/schedule path (producers/schedules) that leave spec.egress
   # empty. Applied once, at creation — flipping it never reclassifies an

@@ -107,6 +107,7 @@ type CAConfig struct {
 // per-agent CA and injected — the Phase 6.2 MITM path.
 type ForwardProxyConfig struct {
 	Listen                   string   `json:"listen"`
+	TransparentMode          bool     `json:"transparent_mode"`
 	AllowHosts               []string `json:"allow_hosts"`
 	AllowUnmatchedHosts      bool     `json:"allow_unmatched_hosts"`
 	AllowPorts               []int    `json:"allow_ports"`
@@ -358,7 +359,7 @@ func (c *ForwardProxyConfig) Validate() error {
 
 func (c *ForwardProxyConfig) effectiveAllowPorts() []int {
 	if len(c.AllowPorts) == 0 {
-		return []int{443}
+		return []int{80, 443}
 	}
 	return c.AllowPorts
 }

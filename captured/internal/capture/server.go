@@ -2,6 +2,7 @@ package capture
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -74,10 +75,10 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = explicit.Close()
 		_ = transparent.Close()
 	}()
-	errors := make(chan error, 2)
-	go func() { errors <- s.serve(explicit, false) }()
-	go func() { errors <- s.serve(transparent, true) }()
-	err = <-errors
+	serveErrs := make(chan error, 2)
+	go func() { serveErrs <- s.serve(explicit, false) }()
+	go func() { serveErrs <- s.serve(transparent, true) }()
+	err = <-serveErrs
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -208,23 +209,52 @@ func inspectHostname(reader *bufio.Reader, limit int) (string, error) {
 }
 
 func inspectHTTPHost(reader *bufio.Reader, limit int) (string, error) {
-	var peek []byte
-	var err error
-	end := -1
-	for size := 1; size <= limit; size++ {
-		peek, err = reader.Peek(size)
-		end = strings.Index(string(peek), "\r\n\r\n")
-		if end >= 0 {
-			break
+	const delimiter = "\r\n\r\n"
+	if limit <= 0 {
+		return "", fmt.Errorf("HTTP preface exceeds inspection limit")
+	}
+	scanned := 0
+	for {
+		// Scan everything already buffered before asking the socket for more.
+		// Peek only one byte beyond the buffered prefix so a complete short
+		// request never waits for a speculative chunk size or the deadline.
+		buffered := reader.Buffered()
+		if buffered > limit {
+			buffered = limit
 		}
+		if buffered > scanned {
+			peek, err := reader.Peek(buffered)
+			if err != nil {
+				return "", errHostnameUnavailable
+			}
+			start := scanned - (len(delimiter) - 1)
+			if start < 0 {
+				start = 0
+			}
+			if relative := bytes.Index(peek[start:], []byte(delimiter)); relative >= 0 {
+				end := start + relative
+				return parseHTTPHost(peek[:end+len(delimiter)])
+			}
+			scanned = buffered
+			if scanned >= limit {
+				return "", fmt.Errorf("HTTP preface exceeds inspection limit")
+			}
+		}
+
+		_, err := reader.Peek(reader.Buffered() + 1)
 		if err != nil {
+			// Peek can reveal a final partial prefix together with EOF or a
+			// deadline error. Give those bytes one scan before falling back.
+			if reader.Buffered() > scanned {
+				continue
+			}
 			return "", errHostnameUnavailable
 		}
 	}
-	if end < 0 {
-		return "", fmt.Errorf("HTTP preface exceeds inspection limit")
-	}
-	request, err := http.ReadRequest(bufio.NewReader(strings.NewReader(string(peek[:end+4]))))
+}
+
+func parseHTTPHost(preface []byte) (string, error) {
+	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(preface)))
 	if err != nil {
 		return "", fmt.Errorf("malformed HTTP preface")
 	}
@@ -239,6 +269,10 @@ func inspectHTTPHost(reader *bufio.Reader, limit int) (string, error) {
 }
 
 func inspectTLSSNI(reader *bufio.Reader, limit int) (string, error) {
+	// Transparent credential injection requires readable SNI. Fragmented
+	// ClientHello records or ECH may leave the hostname unavailable; captured
+	// then relays only the original IP and egressd still applies destination
+	// policy, so a credential route cannot be selected accidentally.
 	header, err := reader.Peek(5)
 	if err != nil {
 		return "", errHostnameUnavailable
