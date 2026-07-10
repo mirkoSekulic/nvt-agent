@@ -192,8 +192,12 @@ The operator compares callback event names with `completeOn` and `failOn`. For
 plugin-published events, it uses the event's `plugin_event` name when present.
 For ordinary agent/runtime events, it uses the event's `event` name.
 
-Current controller behavior creates a stable per-run callback token Secret and
-wires it into the agent Pod as `NVT_OPERATOR_CALLBACK_TOKEN`.
+Direct and existing non-enforced mediated runs retain the stable per-run
+callback token for compatibility. Enforced mediated runs are literal
+zero-secret: the operator replaces its own callback webhook plugin with the
+builtin `lifecycle-termination` reporter, observes the owned agent container's
+termination message, and re-validates the event against `spec.lifecycle`.
+Those Agent Pods receive no callback token or direct operator endpoint access.
 
 The event-webhook plugin posts to the cluster-internal operator endpoint:
 
@@ -266,7 +270,7 @@ The current controller initializes empty `status.phase` values to `Pending` and
 renders `spec.agent.config` to an owned ConfigMap with the key `agent.yaml`.
 When `spec.prompt.text` is non-empty, it prepends the builtin `initial-prompt`
 runtime plugin during this AgentRun-specific render.
-It creates two stable owned opaque Secrets per run:
+Compatibility modes create two stable owned opaque Secrets per run:
 
 ```text
 <agentrun-name>-broker-token    NVT_BROKER_TOKEN
@@ -275,6 +279,15 @@ It creates two stable owned opaque Secrets per run:
 
 These tokens are generated once and reused across reconciles. Existing same-name
 Secrets that are not owned by the `AgentRun` are rejected.
+
+Enforced mediated runs keep the restricted broker identity only in trusted
+operator control-plane state long enough to authorize and prepare inert
+placeholder files. The Agent Pod does not mount or reference it, and no
+callback token Secret is created. Route hosts, provider selectors, inert
+placeholders, and public CA certificates are the only auth-related material
+rendered for the Agent Pod. Agent and egressd Pods set
+`automountServiceAccountToken: false`; egressd alone mounts its paired egress
+broker identity and interception CA key.
 
 The controller then creates one owned Pod named `<agentrun-name>-agent` with the
 configured agent image and a Docker-in-Docker native sidecar-style init

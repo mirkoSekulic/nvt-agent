@@ -298,8 +298,10 @@ files, and the broker already live-reloads its agents policy file locally. The
 kind POC should verify that the broker observes operator-written ConfigMap
 updates through this mounted file path.
 
-AgentRun Pods receive `NVT_BROKER_URL=http://nvt-broker:7347` and a
-per-run `NVT_BROKER_TOKEN`. Broker provider configuration remains static;
+Direct and same-Pod mediated AgentRun Pods receive `NVT_BROKER_URL` and a
+per-run `NVT_BROKER_TOKEN` for compatibility. Enforced mediated Agent Pods
+receive neither; the trusted operator prepares inert inputs and only paired
+egressd receives broker authority. Broker provider configuration remains static;
 AgentRun CR cleanup, concrete scheduler plugins, and a broker admin API remain
 future work.
 
@@ -309,7 +311,8 @@ The manager exposes a cluster-internal callback HTTP listener on
 `--callback-bind-address` (default `:8082`). A Service for the operator should
 route to that port for POC clusters; no external Ingress is included.
 
-The event-webhook plugin should post lifecycle events to:
+In direct and same-Pod mediated compatibility modes, the event-webhook plugin
+posts lifecycle events to:
 
 ```text
 POST /v1/agentruns/{namespace}/{name}/events
@@ -335,6 +338,11 @@ When the event name matches `spec.lifecycle.completeOn`, the operator sets
 `spec.lifecycle.failOn` sets `Failed` with the equivalent failed reason. Existing
 terminal phases (`Completed`, `Failed`, `DeadlineExceeded`) are not overwritten,
 and Pod status sync also avoids downgrading terminal phases.
+
+Enforced mediated runs do not create or mount a callback token. The operator
+injects `lifecycle-termination`, observes the owned agent container's structured
+termination message, applies the same lifecycle match, and removes direct
+Agent-Pod access to the callback endpoint.
 
 ## Active Deadline
 

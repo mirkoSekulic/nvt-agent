@@ -53,4 +53,10 @@ start-code-server
 start-agent-session
 run-plugins after-agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}" &
 
-tail -f /dev/null
+# Kubernetes lifecycle reporting writes /dev/termination-log and signals PID
+# 1. Reap the keepalive promptly so kubelet can observe the message and the
+# operator can complete the owning AgentRun without a callback bearer token.
+tail -f /dev/null &
+keepalive_pid=$!
+trap 'kill "${keepalive_pid}" 2>/dev/null || true; wait "${keepalive_pid}" 2>/dev/null || true; exit 0' TERM INT
+wait "${keepalive_pid}"

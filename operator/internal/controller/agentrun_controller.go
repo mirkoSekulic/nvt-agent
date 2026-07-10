@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -16,6 +18,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -37,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -47,24 +51,28 @@ import (
 )
 
 const (
-	agentConfigKey        = "agent.yaml"
-	agentConfigMountPath  = "/nvt-agent/agent.yaml"
-	agentConfigVolumeDir  = "/nvt-agent"
-	runtimeAuthSourcePath = "/nvt-agent/runtime-auth-source"
-	runtimeAuthHomePath   = "/nvt-agent/runtime-auth-home"
-	runtimeAuthSourceName = "runtime-auth-source"
-	runtimeAuthHomeName   = "runtime-auth-home"
-	egressdConfigKey      = "egressd.json"
-	egressdConfigPath     = "/etc/nvt-egressd/config.json"
-	egressCAVolumeName    = "egress-ca"
-	egressCAMountPath     = "/nvt-egress-ca"
-	egressCAFilePath      = egressCAMountPath + "/ca.crt"
-	egressCASecretVolume  = "egress-ca-keypair"
-	egressCASecretMount   = "/etc/nvt-egressd/egress-ca"
-	egressCASecretCert    = egressCASecretMount + "/ca.crt"
-	egressCASecretKeyFile = egressCASecretMount + "/ca.key"
-	workspaceMountPath    = "/workspace"
-	initialPromptPlugin   = "initial-prompt"
+	agentConfigKey                        = "agent.yaml"
+	preparedPlaceholderFilesKey           = "prepared-placeholder-files.json"
+	agentConfigMountPath                  = "/nvt-agent/agent.yaml"
+	agentConfigVolumeDir                  = "/nvt-agent"
+	runtimeAuthSourcePath                 = "/nvt-agent/runtime-auth-source"
+	runtimeAuthHomePath                   = "/nvt-agent/runtime-auth-home"
+	runtimeAuthSourceName                 = "runtime-auth-source"
+	runtimeAuthHomeName                   = "runtime-auth-home"
+	egressdConfigKey                      = "egressd.json"
+	egressdConfigPath                     = "/etc/nvt-egressd/config.json"
+	egressCAVolumeName                    = "egress-ca"
+	egressCAMountPath                     = "/nvt-egress-ca"
+	egressCAFilePath                      = egressCAMountPath + "/ca.crt"
+	egressCASecretVolume                  = "egress-ca-keypair"
+	egressCASecretMount                   = "/etc/nvt-egressd/egress-ca"
+	egressCASecretCert                    = egressCASecretMount + "/ca.crt"
+	egressCASecretKeyFile                 = egressCASecretMount + "/ca.key"
+	workspaceMountPath                    = "/workspace"
+	initialPromptPlugin                   = "initial-prompt"
+	lifecycleReporterPlugin               = "lifecycle-termination"
+	agentPodSecurityStateAnnotation       = "nvt.dev/pod-security-state"
+	agentConfigPlaceholderCacheAnnotation = "nvt.dev/placeholder-cache-key"
 
 	// Non-root runtime user (opt-in via spec.runtime.user: non-root). The
 	// image ships an `agent` user at this uid/gid with HOME=agentNonRootHome.
@@ -175,9 +183,63 @@ type brokerAgentQuota struct {
 type AgentRunReconciler struct {
 	client.Client
 
-	Scheme *runtime.Scheme
-	Now    func() metav1.Time
+	Scheme           *runtime.Scheme
+	Now              func() metav1.Time
+	BrokerHTTPClient *http.Client
 }
+
+type preparedPlaceholderFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Mode    string `json:"mode"`
+}
+
+type placeholderFilesResponse struct {
+	OK      bool                      `json:"ok"`
+	Files   []preparedPlaceholderFile `json:"files"`
+	Error   string                    `json:"error"`
+	Message string                    `json:"message"`
+}
+
+type podCredentialProjectionState struct {
+	AutomountServiceAccountToken *bool                         `json:"automountServiceAccountToken,omitempty"`
+	ServiceAccountName           string                        `json:"serviceAccountName,omitempty"`
+	SecurityContext              *corev1.PodSecurityContext    `json:"securityContext,omitempty"`
+	Volumes                      []podCredentialVolumeState    `json:"volumes,omitempty"`
+	InitContainers               []podCredentialContainerState `json:"initContainers,omitempty"`
+	Containers                   []podCredentialContainerState `json:"containers,omitempty"`
+}
+
+type podCredentialContainerState struct {
+	Name            string                          `json:"name"`
+	Env             []podCredentialEnvState         `json:"env,omitempty"`
+	VolumeMounts    []podCredentialVolumeMountState `json:"volumeMounts,omitempty"`
+	SecurityContext *corev1.SecurityContext         `json:"securityContext,omitempty"`
+	RestartPolicy   *corev1.ContainerRestartPolicy  `json:"restartPolicy,omitempty"`
+}
+
+type podCredentialEnvState struct {
+	Name       string `json:"name"`
+	SecretName string `json:"secretName,omitempty"`
+	SecretKey  string `json:"secretKey,omitempty"`
+	Optional   *bool  `json:"optional,omitempty"`
+}
+
+type podCredentialVolumeState struct {
+	Name      string                        `json:"name"`
+	Secret    *corev1.SecretVolumeSource    `json:"secret,omitempty"`
+	Projected *corev1.ProjectedVolumeSource `json:"projected,omitempty"`
+}
+
+type podCredentialVolumeMountState struct {
+	Name        string `json:"name"`
+	MountPath   string `json:"mountPath"`
+	ReadOnly    bool   `json:"readOnly,omitempty"`
+	SubPath     string `json:"subPath,omitempty"`
+	SubPathExpr string `json:"subPathExpr,omitempty"`
+}
+
+const defaultProjectedVolumeMode int32 = 420
 
 // Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
 func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -209,6 +271,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if existingPod != nil {
+		if err := r.ensureImmutablePodSecurityState(ctx, &agentRun, existingPod); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if existingPod == nil {
 		// Egress/TLS validation applies at creation time only: operator
 		// broker env changes must not retroactively fail runs whose Pod
@@ -228,17 +295,16 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return deadlineResult, err
 	}
 
-	if err := r.reconcileAgentConfigMap(ctx, &agentRun); err != nil {
-		return ctrl.Result{}, err
-	}
 	if err := r.reconcileBrokerTokenSecret(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileEgressTokenSecret(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileCallbackTokenSecret(ctx, &agentRun); err != nil {
-		return ctrl.Result{}, err
+	if !AgentRunLiteralZeroSecret(&agentRun) {
+		if err := r.reconcileCallbackTokenSecret(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	enforced := AgentRunEgressEnforced(&agentRun)
 	if enforced && existingPod != nil {
@@ -282,6 +348,16 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.reconcileBrokerAgentsPolicy(ctx, &agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
+	var preparedFiles []preparedPlaceholderFile
+	if AgentRunLiteralZeroSecret(&agentRun) && existingPod == nil {
+		preparedFiles, err = r.preparePlaceholderFiles(ctx, &agentRun)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if err := r.reconcileAgentConfigMap(ctx, &agentRun, preparedFiles); err != nil {
+		return ctrl.Result{}, err
+	}
 	if enforced {
 		// This condition gates the agent Pod, not egressd; the #62 bootstrap
 		// retry still absorbs the broker ConfigMap projection lag agent-side.
@@ -319,6 +395,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if InitializeAgentRunStatus(&agentRun) {
 		statusChanged = true
 	}
+	if SyncAgentRunLifecycleFromPodTermination(&agentRun, pod, r.now()) {
+		statusChanged = true
+	}
 	if SyncAgentRunStatusFromPod(&agentRun, pod, r.now()) {
 		statusChanged = true
 	}
@@ -352,6 +431,7 @@ func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.agentRunsForBrokerAgentsConfigMap),
 			builder.WithPredicates(predicate.NewPredicateFuncs(isBrokerAgentsConfigMap)),
 		).
+		WithOptions(controller.Options{MaxConcurrentReconciles: agentRunMaxConcurrentReconciles()}).
 		Complete(r); err != nil {
 		return fmt.Errorf("build AgentRun controller: %w", err)
 	}
@@ -506,10 +586,31 @@ func (r *AgentRunReconciler) now() metav1.Time {
 	return metav1.Now()
 }
 
-func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, preparedFiles []preparedPlaceholderFile) error {
 	desired, err := DesiredAgentConfigMap(agentRun, r.Scheme)
 	if err != nil {
 		return err
+	}
+	if AgentRunLiteralZeroSecret(agentRun) {
+		if len(preparedFiles) > 0 {
+			encodedPreparedFiles, marshalErr := json.Marshal(preparedFiles)
+			if marshalErr != nil {
+				return fmt.Errorf("marshal prepared placeholder files: %w", marshalErr)
+			}
+			if desired.Data == nil {
+				desired.Data = map[string]string{}
+			}
+			desired.Data[preparedPlaceholderFilesKey] = string(encodedPreparedFiles)
+		}
+		if desired.Annotations == nil {
+			desired.Annotations = map[string]string{}
+		}
+		desired.Annotations[agentConfigPlaceholderCacheAnnotation] = agentConfigPlaceholderCacheKey(agentRun)
+		rendered, renderErr := InjectPreparedPlaceholderFiles(desired.Data[agentConfigKey], preparedFiles)
+		if renderErr != nil {
+			return renderErr
+		}
+		desired.Data[agentConfigKey] = rendered
 	}
 
 	configMap := &corev1.ConfigMap{
@@ -520,6 +621,7 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentR
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
 		configMap.Labels = desired.Labels
+		configMap.Annotations = desired.Annotations
 		configMap.OwnerReferences = desired.OwnerReferences
 		configMap.Data = desired.Data
 		return nil
@@ -529,6 +631,444 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentR
 	}
 
 	return nil
+}
+
+func (r *AgentRunReconciler) preparePlaceholderFiles(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) ([]preparedPlaceholderFile, error) {
+	providers := []string{}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if AgentRunGrantMaterialization(grant) == nvtv1alpha1.AgentRunGrantPlaceholderFile {
+			providers = append(providers, grant.Provider)
+		}
+	}
+	if len(providers) == 0 {
+		return nil, nil
+	}
+	cacheKey := agentConfigPlaceholderCacheKey(agentRun)
+	existing := &corev1.ConfigMap{}
+	configKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentConfigMapName(agentRun.Name)}
+	if err := r.Get(ctx, configKey, existing); err == nil {
+		if metav1.IsControlledBy(existing, agentRun) && existing.Annotations[agentConfigPlaceholderCacheAnnotation] == cacheKey {
+			files, loadErr := loadPreparedPlaceholderFiles(existing.Data[preparedPlaceholderFilesKey])
+			if loadErr != nil {
+				return nil, fmt.Errorf("load cached prepared placeholder files from ConfigMap %s/%s: %w", existing.Namespace, existing.Name, loadErr)
+			}
+			if len(files) == 0 {
+				return nil, fmt.Errorf("cached AgentRun config ConfigMap %s/%s is missing prepared placeholder files", existing.Namespace, existing.Name)
+			}
+			return files, nil
+		}
+	} else if !errors.IsNotFound(err) {
+		return nil, fmt.Errorf("get AgentRun config ConfigMap for placeholder cache: %w", err)
+	}
+	secret := &corev1.Secret{}
+	secretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		return nil, fmt.Errorf("get control-plane broker token for placeholder preparation: %w", err)
+	}
+	token := secret.Data[brokerTokenKey]
+	if len(token) == 0 {
+		return nil, fmt.Errorf("control-plane broker token Secret %s/%s is missing %s", secretKey.Namespace, secretKey.Name, brokerTokenKey)
+	}
+	httpClient, err := r.placeholderHTTPClient(ctx, agentRun.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	prepCtx, cancel := context.WithTimeout(ctx, placeholderPreparationTimeout())
+	defer cancel()
+	prepared := []preparedPlaceholderFile{}
+	seenPaths := map[string]string{}
+	for _, provider := range providers {
+		payload, err := json.Marshal(map[string]string{"provider": provider})
+		if err != nil {
+			return nil, fmt.Errorf("marshal placeholder request for %s: %w", provider, err)
+		}
+		request, err := http.NewRequestWithContext(prepCtx, http.MethodPost, strings.TrimRight(BrokerURL(), "/")+"/v1/placeholder-files", bytes.NewReader(payload))
+		if err != nil {
+			return nil, fmt.Errorf("create placeholder request for %s: %w", provider, err)
+		}
+		request.Header.Set("Authorization", "Bearer "+string(token))
+		request.Header.Set("Content-Type", "application/json")
+		response, err := httpClient.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("prepare inert placeholder files for %s: %w", provider, err)
+		}
+		var decoded placeholderFilesResponse
+		decodeErr := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded)
+		response.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode placeholder response for %s: %w", provider, decodeErr)
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 || !decoded.OK {
+			reason := decoded.Error
+			if decoded.Message != "" {
+				reason = decoded.Message
+			}
+			return nil, fmt.Errorf("broker denied inert placeholder preparation for %s: %s", provider, reason)
+		}
+		if len(decoded.Files) == 0 {
+			return nil, fmt.Errorf("broker returned no inert placeholder files for %s", provider)
+		}
+		for _, file := range decoded.Files {
+			if err := validatePreparedPlaceholderFile(file); err != nil {
+				return nil, fmt.Errorf("invalid inert placeholder file for %s: %w", provider, err)
+			}
+			if prior, exists := seenPaths[file.Path]; exists {
+				return nil, fmt.Errorf("placeholder providers %s and %s both target %s", prior, provider, file.Path)
+			}
+			seenPaths[file.Path] = provider
+			prepared = append(prepared, file)
+		}
+	}
+	return prepared, nil
+}
+
+func agentConfigPlaceholderCacheKey(agentRun *nvtv1alpha1.AgentRun) string {
+	payload := map[string]any{
+		"agent-config": string(agentRun.Spec.Agent.Config.Raw),
+		"egress": map[string]any{
+			"mode":        string(AgentRunEgressMode(agentRun)),
+			"enforcement": agentRun.Spec.EgressEnforcement,
+			"transport":   string(AgentRunEgressTransport(agentRun)),
+			"forward":     agentRun.Spec.EgressForwardProxy,
+		},
+		"grants": normalizePlaceholderCacheGrants(agentRun),
+	}
+	rendered, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(rendered)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func placeholderPreparationTimeout() time.Duration {
+	return 4 * time.Second
+}
+
+func normalizePlaceholderCacheGrants(agentRun *nvtv1alpha1.AgentRun) []map[string]any {
+	normalized := make([]map[string]any, 0, len(AgentRunBrokerGrants(agentRun.Spec.Broker)))
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		normalized = append(normalized, map[string]any{
+			"provider":        grant.Provider,
+			"materialization": string(AgentRunGrantMaterialization(grant)),
+			"git":             grant.Git,
+			"egress-hosts":    append([]string(nil), grant.EgressHosts...),
+		})
+	}
+	return normalized
+}
+
+func loadPreparedPlaceholderFiles(raw string) ([]preparedPlaceholderFile, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	files := []preparedPlaceholderFile{}
+	if err := json.Unmarshal([]byte(raw), &files); err != nil {
+		return nil, fmt.Errorf("decode prepared placeholder files JSON: %w", err)
+	}
+	for _, file := range files {
+		if err := validatePreparedPlaceholderFile(file); err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
+func (r *AgentRunReconciler) ensureImmutablePodSecurityState(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, existingPod *corev1.Pod) error {
+	desiredPod, err := desiredAgentPodForSecurityProjection(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	desiredState, err := podCredentialProjectionSignature(agentRun, desiredPod)
+	if err != nil {
+		return err
+	}
+	actualState, err := podCredentialProjectionSignature(agentRun, existingPod)
+	if err != nil {
+		reason := err.Error()
+		if setErr := r.setAgentRunFailed(ctx, agentRun, reason); setErr != nil {
+			return setErr
+		}
+		if delErr := r.deleteOwnedPodByName(ctx, agentRun, AgentPodName(agentRun.Name), reason); delErr != nil {
+			return delErr
+		}
+		if delErr := r.deleteOwnedPodByName(ctx, agentRun, EgressdPodName(agentRun.Name), reason+" (egressd)"); delErr != nil {
+			return delErr
+		}
+		return fmt.Errorf("%s", reason)
+	}
+	if desiredState != actualState {
+		reason := "security-sensitive AgentRun fields changed after Pod creation"
+		if err := r.setAgentRunFailed(ctx, agentRun, reason); err != nil {
+			return err
+		}
+		if err := r.deleteOwnedPodByName(ctx, agentRun, AgentPodName(agentRun.Name), reason); err != nil {
+			return err
+		}
+		if err := r.deleteOwnedPodByName(ctx, agentRun, EgressdPodName(agentRun.Name), reason+" (egressd)"); err != nil {
+			return err
+		}
+		return fmt.Errorf("security-sensitive AgentRun fields changed after Pod creation")
+	}
+	if existingPod.Annotations != nil && existingPod.Annotations[agentPodSecurityStateAnnotation] == desiredState {
+		return nil
+	}
+	updated := existingPod.DeepCopy()
+	if updated.Annotations == nil {
+		updated.Annotations = map[string]string{}
+	}
+	updated.Annotations[agentPodSecurityStateAnnotation] = desiredState
+	if err := r.Update(ctx, updated); err != nil {
+		return fmt.Errorf("patch AgentRun Pod security annotation: %w", err)
+	}
+	return nil
+}
+
+func agentRunMaxConcurrentReconciles() int {
+	return 2
+}
+
+func podCredentialProjectionSignature(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) (string, error) {
+	state := podCredentialProjectionState{
+		AutomountServiceAccountToken: pod.Spec.AutomountServiceAccountToken,
+		ServiceAccountName:           canonicalServiceAccountName(pod.Spec.ServiceAccountName),
+		SecurityContext:              pod.Spec.SecurityContext,
+		Volumes:                      make([]podCredentialVolumeState, 0, len(pod.Spec.Volumes)),
+		InitContainers:               make([]podCredentialContainerState, 0, len(pod.Spec.InitContainers)),
+		Containers:                   make([]podCredentialContainerState, 0, len(pod.Spec.Containers)),
+	}
+	if emptyPodSecurityContext(state.SecurityContext) {
+		state.SecurityContext = nil
+	}
+	credentialVolumes := map[string]bool{}
+	for _, volume := range pod.Spec.Volumes {
+		switch {
+		case volume.Name == brokerCAVolumeName && volume.Secret != nil:
+			continue
+		case volume.Secret != nil:
+			credentialVolumes[volume.Name] = true
+			state.Volumes = append(state.Volumes, podCredentialVolumeState{Name: volume.Name, Secret: normalizeSecretVolumeSource(volume.Secret)})
+		case volume.Projected != nil:
+			if projectedVolumeHasServiceAccountToken(volume.Projected) && AgentRunLiteralZeroSecret(agentRun) {
+				return "", fmt.Errorf("literal-zero-secret AgentRun Pod must not project a service-account token volume")
+			}
+			projected := normalizeProjectedVolumeSource(volume.Projected)
+			if projected == nil {
+				continue
+			}
+			credentialVolumes[volume.Name] = true
+			state.Volumes = append(state.Volumes, podCredentialVolumeState{Name: volume.Name, Projected: projected})
+		}
+	}
+	for _, container := range pod.Spec.InitContainers {
+		state.InitContainers = append(state.InitContainers, podCredentialContainerState{
+			Name:            container.Name,
+			Env:             credentialEnvState(container.Env),
+			VolumeMounts:    credentialVolumeMountState(container.VolumeMounts, credentialVolumes),
+			SecurityContext: normalizeSecurityContext(container.SecurityContext),
+			RestartPolicy:   container.RestartPolicy,
+		})
+	}
+	for _, container := range pod.Spec.Containers {
+		state.Containers = append(state.Containers, podCredentialContainerState{
+			Name:            container.Name,
+			Env:             credentialEnvState(container.Env),
+			VolumeMounts:    credentialVolumeMountState(container.VolumeMounts, credentialVolumes),
+			SecurityContext: normalizeSecurityContext(container.SecurityContext),
+		})
+	}
+	rendered, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("marshal pod credential projection signature: %w", err)
+	}
+	sum := sha256.Sum256(rendered)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func canonicalServiceAccountName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
+func emptyPodSecurityContext(sc *corev1.PodSecurityContext) bool {
+	if sc == nil {
+		return true
+	}
+	zero := corev1.PodSecurityContext{}
+	return reflect.DeepEqual(*sc, zero)
+}
+
+func normalizeSecurityContext(sc *corev1.SecurityContext) *corev1.SecurityContext {
+	if sc == nil {
+		return nil
+	}
+	if reflect.DeepEqual(*sc, corev1.SecurityContext{}) {
+		return nil
+	}
+	copy := sc.DeepCopy()
+	return copy
+}
+
+func normalizeSecretVolumeSource(src *corev1.SecretVolumeSource) *corev1.SecretVolumeSource {
+	if src == nil {
+		return nil
+	}
+	copy := src.DeepCopy()
+	if copy.DefaultMode == nil {
+		copy.DefaultMode = ptrTo(defaultProjectedVolumeMode)
+	}
+	return copy
+}
+
+func normalizeProjectedVolumeSource(src *corev1.ProjectedVolumeSource) *corev1.ProjectedVolumeSource {
+	if src == nil {
+		return nil
+	}
+	copy := src.DeepCopy()
+	copy.Sources = normalizeProjectedVolumeSources(copy.Sources)
+	if len(copy.Sources) == 0 {
+		return nil
+	}
+	if copy.DefaultMode == nil {
+		copy.DefaultMode = ptrTo(defaultProjectedVolumeMode)
+	}
+	return copy
+}
+
+func normalizeProjectedVolumeSources(sources []corev1.VolumeProjection) []corev1.VolumeProjection {
+	normalized := make([]corev1.VolumeProjection, 0, len(sources))
+	for _, source := range sources {
+		switch {
+		case source.Secret != nil:
+			copy := *source.Secret
+			normalized = append(normalized, corev1.VolumeProjection{Secret: &copy})
+		}
+	}
+	return normalized
+}
+
+func projectedVolumeHasServiceAccountToken(src *corev1.ProjectedVolumeSource) bool {
+	if src == nil {
+		return false
+	}
+	for _, source := range src.Sources {
+		if source.ServiceAccountToken != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialEnvState(env []corev1.EnvVar) []podCredentialEnvState {
+	state := []podCredentialEnvState{}
+	for _, variable := range env {
+		if variable.ValueFrom == nil || variable.ValueFrom.SecretKeyRef == nil {
+			continue
+		}
+		ref := variable.ValueFrom.SecretKeyRef
+		state = append(state, podCredentialEnvState{
+			Name:       variable.Name,
+			SecretName: ref.Name,
+			SecretKey:  ref.Key,
+			Optional:   ref.Optional,
+		})
+	}
+	return state
+}
+
+func credentialVolumeMountState(volumeMounts []corev1.VolumeMount, credentialVolumes map[string]bool) []podCredentialVolumeMountState {
+	state := []podCredentialVolumeMountState{}
+	for _, mount := range volumeMounts {
+		if !credentialVolumes[mount.Name] {
+			continue
+		}
+		state = append(state, podCredentialVolumeMountState{
+			Name:        mount.Name,
+			MountPath:   mount.MountPath,
+			ReadOnly:    mount.ReadOnly,
+			SubPath:     mount.SubPath,
+			SubPathExpr: mount.SubPathExpr,
+		})
+	}
+	return state
+}
+
+func (r *AgentRunReconciler) placeholderHTTPClient(ctx context.Context, namespace string) (*http.Client, error) {
+	if r.BrokerHTTPClient != nil {
+		return r.BrokerHTTPClient, nil
+	}
+	client := &http.Client{}
+	if !brokerIsTLS() {
+		return client, nil
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, clientKeyFor(namespace, BrokerCASecretName()), secret); err != nil {
+		return nil, fmt.Errorf("get broker CA Secret for operator placeholder preparation: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(secret.Data[brokerCAKey]) {
+		return nil, fmt.Errorf("broker CA Secret %s/%s has no valid %s", namespace, BrokerCASecretName(), brokerCAKey)
+	}
+	client.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}}
+	return client, nil
+}
+
+func clientKeyFor(namespace, name string) client.ObjectKey {
+	return client.ObjectKey{Namespace: namespace, Name: name}
+}
+
+func validatePreparedPlaceholderFile(file preparedPlaceholderFile) error {
+	if file.Path == "" || strings.HasPrefix(file.Path, "/") || strings.HasPrefix(file.Path, "\\") {
+		return fmt.Errorf("path %q must be relative", file.Path)
+	}
+	for _, segment := range strings.Split(strings.ReplaceAll(file.Path, "\\", "/"), "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("path %q contains traversal", file.Path)
+		}
+	}
+	if file.Mode == "" {
+		file.Mode = "0600"
+	}
+	if len(file.Mode) != 4 || strings.Trim(file.Mode, "01234567") != "" {
+		return fmt.Errorf("mode %q is not four-digit octal", file.Mode)
+	}
+	if !strings.Contains(file.Content, "NVT-PLACEHOLDER-NOT-A-KEY") {
+		return fmt.Errorf("content for %s does not contain the inert placeholder", file.Path)
+	}
+	return nil
+}
+
+func InjectPreparedPlaceholderFiles(rendered string, files []preparedPlaceholderFile) (string, error) {
+	config := map[string]any{}
+	if err := yaml.Unmarshal([]byte(rendered), &config); err != nil {
+		return "", fmt.Errorf("inject prepared placeholder files: %w", err)
+	}
+	if len(files) > 0 {
+		preseed, _ := config["preseed"].(map[string]any)
+		if preseed == nil {
+			preseed = map[string]any{}
+		}
+		entries, _ := preseed["files"].([]any)
+		for _, file := range files {
+			mode := file.Mode
+			if mode == "" {
+				mode = "0600"
+			}
+			entries = append(entries, map[string]any{
+				"path": "$HOME/" + file.Path, "content": file.Content, "mode": mode, "overwrite": true,
+			})
+		}
+		preseed["files"] = entries
+		config["preseed"] = preseed
+	}
+	output, err := yaml.Marshal(config)
+	if err != nil {
+		return "", fmt.Errorf("render prepared placeholder files: %w", err)
+	}
+	return string(output), nil
 }
 
 func (r *AgentRunReconciler) reconcileEgressdConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, podExists bool) error {
@@ -941,6 +1481,9 @@ func forwardProxyInjects(agentRun *nvtv1alpha1.AgentRun) []forwardProxyInject {
 
 // forwardProxyUpstreamHosts is the set of MITM leaf names the CA must permit.
 func forwardProxyUpstreamHosts(agentRun *nvtv1alpha1.AgentRun) []string {
+	if !AgentRunEgressForwardProxy(agentRun) {
+		return nil
+	}
 	seen := map[string]bool{}
 	hosts := []string{}
 	for _, inject := range forwardProxyInjects(agentRun) {
@@ -1440,7 +1983,8 @@ func DesiredEgressdPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (
 			Labels:    enforcementLabels(agentRun.Name, roleLabelEgressd),
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyAlways,
+			AutomountServiceAccountToken: ptrTo(false),
+			RestartPolicy:                corev1.RestartPolicyAlways,
 			Containers: []corev1.Container{{
 				Name:            "egressd",
 				Image:           EgressdImage(),
@@ -1575,8 +2119,8 @@ func egressdPolicyPorts(agentRun *nvtv1alpha1.AgentRun) []networkingv1.NetworkPo
 }
 
 // DesiredAgentNetworkPolicy is the enforcement fence around the agent Pod:
-// default-deny egress plus kube-dns, the broker, the paired egressd, and the
-// operator callback. No internet CIDR at all — including traffic from
+// default-deny egress plus kube-dns and the paired egressd. Literal zero-secret
+// runs have no direct broker or callback path. No internet CIDR at all — including traffic from
 // dind-spawned containers, which still exits the Pod and hits the CNI.
 // Ingress is left unrestricted this PR (gateway/code-server unaffected).
 func DesiredAgentNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*networkingv1.NetworkPolicy, error) {
@@ -1596,7 +2140,6 @@ func DesiredAgentNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.S
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
 			Egress: []networkingv1.NetworkPolicyEgressRule{
 				dnsPolicyEgressRule(),
-				brokerPolicyEgressRule(),
 				{
 					// Paired egressd only: the run label pins the pair, so
 					// agent A can never reach egressd B.
@@ -1609,14 +2152,6 @@ func DesiredAgentNetworkPolicy(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.S
 						},
 					}},
 					Ports: egressdPolicyPorts(agentRun),
-				},
-				{
-					To: []networkingv1.NetworkPolicyPeer{{
-						PodSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"app.kubernetes.io/name": "nvt-operator"},
-						},
-					}},
-					Ports: []networkingv1.NetworkPolicyPort{policyPort(corev1.ProtocolTCP, 8082)},
 				},
 			},
 		},
@@ -2005,10 +2540,20 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	return string(rendered) + "\n", nil
 }
 
+func desiredAgentPodForSecurityProjection(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
+	return buildDesiredAgentPod(agentRun, scheme, true)
+}
+
 // DesiredAgentPod returns the create-once Pod spec for an AgentRun.
 func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.Pod, error) {
-	if err := ValidateBrokerTLSConfig(); err != nil {
-		return nil, err
+	return buildDesiredAgentPod(agentRun, scheme, false)
+}
+
+func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme, projectionOnly bool) (*corev1.Pod, error) {
+	if !projectionOnly {
+		if err := ValidateBrokerTLSConfig(); err != nil {
+			return nil, err
+		}
 	}
 	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
 	if err != nil {
@@ -2039,9 +2584,7 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 		},
 	}
 	hasGitGrant := agentRunHasGitGrant(agentRun)
-	if brokerCADistributed() {
-		// The agent talks to the broker in both egress modes (brokerctl), so
-		// the CA rides along whenever the broker leg is TLS.
+	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
 		volumes = append(volumes, corev1.Volume{
 			Name: brokerCAVolumeName,
 			VolumeSource: corev1.VolumeSource{
@@ -2061,9 +2604,6 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 	}
 	enforced := AgentRunEgressEnforced(agentRun)
 	if enforced {
-		// Own-Pod mode: the agent's trust anchor is the operator-published
-		// per-run ConfigMap, mounted read-only at the same Phase 4 path so
-		// bootstrap is unchanged. No egressd sidecar and no shared emptyDir.
 		volumes = append(volumes, corev1.Volume{
 			Name: egressCAVolumeName,
 			VolumeSource: corev1.VolumeSource{
@@ -2093,10 +2633,6 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			},
 		})
 		if hasGitGrant {
-			// Shared emptyDir carrying only ca.crt: egressd publishes the
-			// CA certificate into it; the agent mounts it read-only. The CA
-			// private key never touches this volume — it lives only in
-			// egressd process memory.
 			volumes = append(volumes, corev1.Volume{
 				Name: egressCAVolumeName,
 				VolumeSource: corev1.VolumeSource{
@@ -2137,8 +2673,6 @@ func DesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*c
 			Image:   "docker:27-dind",
 			Command: []string{"sh", "-c"},
 			Args: []string{
-				// Non-root also needs group-writable auth files: fsGroup makes the
-				// mount group 1000, so ug+rwX lets the agent write seeded tokens.
 				"cp -a " + runtimeAuthSourcePath + "/. " + runtimeAuthHomePath + "/ && chmod -R " + runtimeAuthChmod(agentRun) + " " + runtimeAuthHomePath,
 			},
 			VolumeMounts: []corev1.VolumeMount{
@@ -2233,7 +2767,7 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 			Env: []corev1.EnvVar{{
 				Name: "NVT_CAPTURE_EXCLUDE_HOSTS",
 				Value: strings.Join([]string{
-					EgressdServiceName(agentRun.Name), "nvt-broker", "nvt-operator",
+					EgressdServiceName(agentRun.Name),
 					"kubernetes.default.svc", "kube-dns.kube-system.svc",
 				}, " "),
 			}},
@@ -2249,57 +2783,51 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 		})
 	}
 
+	agentEnv := []corev1.EnvVar{
+		{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
+		{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
+		{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
+	}
+	if !AgentRunLiteralZeroSecret(agentRun) {
+		agentEnv = append(agentEnv,
+			corev1.EnvVar{Name: "NVT_BROKER_URL", Value: BrokerURL()},
+			corev1.EnvVar{
+				Name: brokerTokenKey,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: BrokerTokenSecretName(agentRun.Name)}, Key: brokerTokenKey,
+				}},
+			},
+			corev1.EnvVar{
+				Name: callbackTokenKey,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: CallbackTokenSecretName(agentRun.Name)}, Key: callbackTokenKey,
+				}},
+			},
+		)
+	}
 	containers := []corev1.Container{
 		{
 			Name:            "agent",
 			Image:           agentRun.Spec.Image,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			WorkingDir:      workspaceMountPath,
-			Env: []corev1.EnvVar{
-				{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
-				{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
-				{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
-				{Name: "NVT_BROKER_URL", Value: BrokerURL()},
-				{
-					Name: brokerTokenKey,
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: BrokerTokenSecretName(agentRun.Name)},
-							Key:                  brokerTokenKey,
-						},
-					},
-				},
-				{
-					Name: callbackTokenKey,
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: CallbackTokenSecretName(agentRun.Name)},
-							Key:                  callbackTokenKey,
-						},
-					},
-				},
-			},
-			VolumeMounts: agentVolumeMounts,
+			Env:             agentEnv,
+			VolumeMounts:    agentVolumeMounts,
 		},
 	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_MODE", Value: string(nvtv1alpha1.AgentRunEgressMediated)})
 		if enforced || hasGitGrant {
-			// Enforcement: every base-url is https, so bootstrap always
-			// needs the CA (git wiring plus the container trust store).
 			containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_EGRESS_CA_FILE", Value: egressCAFilePath})
 		}
 		if AgentRunEgressForwardProxy(agentRun) {
 			containers[0].Env = append(containers[0].Env, forwardProxyEnv(agentRun)...)
 		}
 	}
-	if brokerCADistributed() {
+	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
 		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "NVT_BROKER_CA_FILE", Value: agentBrokerCAFile})
 	}
 	if AgentRunNonRoot(agentRun) {
-		// Run the agent as the image's `agent` user; set HOME + NVT_STATE_DIR so
-		// $HOME-relative bootstrap/entrypoint target /home/agent (the baked
-		// NVT_STATE_DIR=/root/... would otherwise be unwritable).
 		containers[0].SecurityContext = &corev1.SecurityContext{
 			RunAsUser:  ptrTo(agentNonRootUID),
 			RunAsGroup: ptrTo(agentNonRootGID),
@@ -2313,7 +2841,7 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 		egressdVolumeMounts := []corev1.VolumeMount{
 			{Name: egressdConfigName, MountPath: egressdConfigPath, SubPath: egressdConfigKey, ReadOnly: true},
 		}
-		if brokerCADistributed() {
+		if !projectionOnly && brokerCADistributed() {
 			egressdVolumeMounts = append(egressdVolumeMounts, corev1.VolumeMount{
 				Name:      brokerCAVolumeName,
 				MountPath: egressdBrokerCAMount,
@@ -2331,8 +2859,6 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 			Image:           EgressdImage(),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Env: []corev1.EnvVar{
-				// egressd reads the broker URL from its JSON config
-				// (broker_url), not from the environment.
 				{Name: "NVT_EGRESSD_CONFIG", Value: egressdConfigPath},
 				{
 					Name: "NVT_BROKER_TOKEN",
@@ -2350,7 +2876,6 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 
 	podLabels := agentRunLabels(agentRun.Name)
 	if enforced {
-		// Pairing labels the NetworkPolicies select on.
 		podLabels = enforcementLabels(agentRun.Name, roleLabelAgent)
 	}
 	pod := &corev1.Pod{
@@ -2367,11 +2892,18 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 			Volumes:          volumes,
 		},
 	}
+	if AgentRunLiteralZeroSecret(agentRun) {
+		pod.Spec.AutomountServiceAccountToken = ptrTo(false)
+	}
 	if AgentRunNonRoot(agentRun) {
-		// fsGroup makes the workspace + runtime-auth emptyDir volumes group 1000
-		// and group-writable, so the non-root agent can write them. The
-		// privileged root dind container is unaffected (root ignores fsGroup).
 		pod.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: ptrTo(agentNonRootGID)}
+	}
+	desiredState, err := podCredentialProjectionSignature(agentRun, pod)
+	if err != nil {
+		return nil, err
+	}
+	pod.Annotations = map[string]string{
+		agentPodSecurityStateAnnotation: desiredState,
 	}
 	if err := controllerutil.SetControllerReference(agentRun, pod, scheme); err != nil {
 		return nil, fmt.Errorf("set AgentRun Pod owner: %w", err)
@@ -2603,7 +3135,7 @@ func brokerCADistributed() bool {
 func ValidateBrokerTLSConfig() error {
 	if brokerIsTLS() && BrokerCASecretName() == "" {
 		return fmt.Errorf(
-			"NVT_BROKER_URL %s is https but NVT_BROKER_CA_SECRET is not set; agent Pods need the broker CA Secret (key %s) to verify the broker",
+			"NVT_BROKER_URL %s is https but NVT_BROKER_CA_SECRET is not set; trusted broker clients need the broker CA Secret (key %s) to verify the broker",
 			BrokerURL(), brokerCAKey,
 		)
 	}
@@ -3141,6 +3673,13 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
 			renderedConfig = InjectMediatedEgressConfig(renderedConfig, agentRun)
 		}
+		if AgentRunLiteralZeroSecret(agentRun) {
+			var err error
+			renderedConfig, err = InjectLifecycleTerminationPlugin(renderedConfig, agentRun)
+			if err != nil {
+				return "", err
+			}
+		}
 		rendered, err := yaml.Marshal(renderedConfig)
 		if err != nil {
 			return "", fmt.Errorf("render AgentRun agent config: %w", err)
@@ -3213,6 +3752,8 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 			"provider":        grant.Provider,
 			"materialization": string(nvtv1alpha1.AgentRunGrantHeaderInject),
 			"base-url":        baseURL,
+			"hosts":           append([]string(nil), grant.EgressHosts...),
+			"git":             grant.Git,
 		})
 		routeIndex++
 	}
@@ -3237,6 +3778,7 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 	}
 	if enforced {
 		egress["enforcement"] = true
+		egress["operator-prepared"] = true
 	}
 	if forwardProxy {
 		// Signals bootstrap to install the CA trust store for proxy-env HTTPS
@@ -3253,6 +3795,63 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 	}
 	updated["egress"] = egress
 	return updated
+}
+
+func AgentRunLiteralZeroSecret(agentRun *nvtv1alpha1.AgentRun) bool {
+	return AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated && AgentRunEgressEnforced(agentRun)
+}
+
+func InjectLifecycleTerminationPlugin(config map[string]any, agentRun *nvtv1alpha1.AgentRun) (map[string]any, error) {
+	if agentRun.Spec.Lifecycle == nil || (len(agentRun.Spec.Lifecycle.CompleteOn) == 0 && len(agentRun.Spec.Lifecycle.FailOn) == 0) {
+		return config, nil
+	}
+	plugins, err := agentConfigPlugins(config)
+	if err != nil {
+		return nil, err
+	}
+	updatedPlugins := make([]any, 0, len(plugins)+1)
+	for _, raw := range plugins {
+		plugin, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("render AgentRun agent config: plugins entries must be objects")
+		}
+		name, _ := plugin["name"].(string)
+		if name == lifecycleReporterPlugin {
+			return nil, fmt.Errorf("render AgentRun agent config: plugin %q is reserved for enforced zero-secret lifecycle reporting", lifecycleReporterPlugin)
+		}
+		if name == "event-webhook" && isOperatorLifecycleWebhook(plugin) {
+			continue
+		}
+		if name == "smoke-complete" {
+			plugin = cloneStringAnyMap(plugin)
+			pluginConfig, _ := plugin["config"].(map[string]any)
+			pluginConfig = cloneStringAnyMap(pluginConfig)
+			if wait, present := pluginConfig["waitForPlugin"]; !present || wait == "event-webhook" {
+				pluginConfig["waitForPlugin"] = lifecycleReporterPlugin
+			}
+			plugin["config"] = pluginConfig
+		}
+		updatedPlugins = append(updatedPlugins, plugin)
+	}
+	updatedPlugins = append(updatedPlugins, map[string]any{
+		"name": lifecycleReporterPlugin, "source": "builtin", "when": "after-agent", "restart": "always",
+		"config": map[string]any{
+			"completeOn":             append([]string(nil), agentRun.Spec.Lifecycle.CompleteOn...),
+			"failOn":                 append([]string(nil), agentRun.Spec.Lifecycle.FailOn...),
+			"terminationMessagePath": "/dev/termination-log",
+		},
+	})
+	updated := cloneStringAnyMap(config)
+	updated["plugins"] = updatedPlugins
+	return updated, nil
+}
+
+func isOperatorLifecycleWebhook(plugin map[string]any) bool {
+	config, _ := plugin["config"].(map[string]any)
+	urlValue, _ := config["url"].(string)
+	auth, _ := config["auth"].(map[string]any)
+	env, _ := auth["env"].(string)
+	return strings.Contains(urlValue, "/v1/agentruns/") && strings.HasSuffix(urlValue, "/events") && env == callbackTokenKey
 }
 
 // AgentRunPromptText returns the configured prompt text when present and non-empty.
@@ -3397,6 +3996,35 @@ func ActiveDeadlineDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.
 		return remaining, false
 	}
 	return 0, true
+}
+
+// SyncAgentRunLifecycleFromPodTermination consumes the credential-less,
+// source-isolated lifecycle path: only this AgentRun's owned Pod status is
+// observed, and the event must still match spec.lifecycle.
+func SyncAgentRunLifecycleFromPodTermination(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod, now metav1.Time) bool {
+	if pod == nil || !AgentRunLiteralZeroSecret(agentRun) || IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != "agent" || status.State.Terminated == nil || status.State.Terminated.Message == "" {
+			continue
+		}
+		message := struct {
+			Event string `json:"nvtLifecycleEvent"`
+		}{}
+		if err := json.Unmarshal([]byte(status.State.Terminated.Message), &message); err != nil || message.Event == "" {
+			return false
+		}
+		nextPhase, reason, matched := AgentRunLifecycleTransition(agentRun.Spec.Lifecycle, message.Event)
+		if !matched {
+			return false
+		}
+		agentRun.Status.Phase = nextPhase
+		agentRun.Status.FinishedAt = &now
+		agentRun.Status.Reason = reason
+		return true
+	}
+	return false
 }
 
 // SyncAgentRunStatusFromPod reflects the small Pod-phase status surface owned by this controller slice.
