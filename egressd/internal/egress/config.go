@@ -112,6 +112,9 @@ type ForwardProxyConfig struct {
 	AllowPorts               []int    `json:"allow_ports"`
 	MaxConcurrentTunnels     int      `json:"max_concurrent_tunnels"`
 	TunnelIdleTimeoutSeconds int      `json:"tunnel_idle_timeout_seconds"`
+	// DenyCIDRs adds deployment-specific Pod, Service, node, cluster, and VNet
+	// ranges to the built-in non-public destination deny policy.
+	DenyCIDRs []string `json:"deny_cidrs"`
 	// InjectRoutes: for each CONNECT to one of these hosts, egressd terminates
 	// TLS with a CA-minted leaf for the host, injects the broker credential,
 	// and re-originates TLS to the pinned upstream.
@@ -346,6 +349,9 @@ func (c *ForwardProxyConfig) Validate() error {
 	}
 	if c.TunnelIdleTimeoutSeconds < 0 {
 		return fmt.Errorf("tunnel_idle_timeout_seconds must be non-negative")
+	}
+	if _, err := newDestinationPolicy(c.DenyCIDRs); err != nil {
+		return err
 	}
 	return nil
 }

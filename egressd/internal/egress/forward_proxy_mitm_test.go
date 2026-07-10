@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,7 @@ func newMITMProxy(t *testing.T, broker *fakeBroker, route ForwardProxyInjectRout
 		CA:        ca,
 		Broker:    &BrokerClient{URL: broker.server.URL, Token: "egress-role-token", Client: broker.server.Client()},
 		Transport: http.DefaultTransport,
+		Resolver:  &staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
 	}
 	server := httptest.NewServer(fp)
 	t.Cleanup(server.Close)
@@ -203,6 +205,7 @@ func TestForwardProxyMITMRequiresCapabilityForAmbiguousHost(t *testing.T) {
 		CA:        ca,
 		Broker:    &BrokerClient{URL: broker.server.URL, Token: "egress-role-token", Client: broker.server.Client()},
 		Transport: http.DefaultTransport,
+		Resolver:  &staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
 	}
 	server := httptest.NewServer(fp)
 	t.Cleanup(server.Close)
@@ -430,6 +433,7 @@ func TestForwardProxyMITMCodexShaped(t *testing.T) {
 		CA:        ca,
 		Broker:    &BrokerClient{URL: broker.server.URL, Token: "egress-role-token", Client: broker.server.Client()},
 		Transport: http.DefaultTransport,
+		Resolver:  &staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
 	}
 	server := httptest.NewServer(fp)
 	t.Cleanup(server.Close)

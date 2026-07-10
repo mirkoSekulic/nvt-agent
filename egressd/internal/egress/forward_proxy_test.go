@@ -3,23 +3,44 @@ package egress
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
+type staticResolver struct {
+	addresses []netip.Addr
+	err       error
+	calls     int
+}
+
+func (r *staticResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	r.calls++
+	return append([]netip.Addr(nil), r.addresses...), r.err
+}
+
 func newForwardProxyServer(t *testing.T, config ForwardProxyConfig, logs *bytes.Buffer) *httptest.Server {
 	t.Helper()
 	proxy := &ForwardProxy{
-		Config: config,
-		Logger: log.New(logs, "", 0),
+		Config:   config,
+		Logger:   log.New(logs, "", 0),
+		Resolver: &staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+		},
 	}
 	server := httptest.NewServer(proxy)
 	t.Cleanup(server.Close)
@@ -95,13 +116,13 @@ func sendRawProxyRequest(t *testing.T, proxy, request string) (net.Conn, string)
 }
 
 func TestForwardProxyAllowedConnectEstablishesBlindTunnel(t *testing.T) {
-	upstreamAddress, upstreamPort := newEchoTCPServer(t)
+	_, upstreamPort := newEchoTCPServer(t)
 	var logs bytes.Buffer
 	proxy := newForwardProxyServer(t, ForwardProxyConfig{
-		AllowHosts: []string{"127.0.0.1"},
+		AllowHosts: []string{"fixture.external"},
 		AllowPorts: []int{upstreamPort},
 	}, &logs)
-	target := upstreamAddress
+	target := net.JoinHostPort("fixture.external", strconv.Itoa(upstreamPort))
 	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
 		"CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target,
 	))
@@ -119,7 +140,7 @@ func TestForwardProxyAllowedConnectEstablishesBlindTunnel(t *testing.T) {
 	if response != "echo:ping\n" {
 		t.Fatalf("tunnel response = %q", response)
 	}
-	if got := logs.String(); !strings.Contains(got, "event=connect target_host=127.0.0.1") ||
+	if got := logs.String(); !strings.Contains(got, "event=connect target_host=fixture.external") ||
 		!strings.Contains(got, fmt.Sprintf("target_port=%d", upstreamPort)) ||
 		!strings.Contains(got, "decision=allow") {
 		t.Fatalf("missing sanitized allow log: %q", got)
@@ -127,14 +148,14 @@ func TestForwardProxyAllowedConnectEstablishesBlindTunnel(t *testing.T) {
 }
 
 func TestForwardProxyUsesConnectAuthorityInsteadOfHostHeader(t *testing.T) {
-	upstreamAddress, upstreamPort := newEchoTCPServer(t)
+	_, upstreamPort := newEchoTCPServer(t)
 	var logs bytes.Buffer
 	proxy := newForwardProxyServer(t, ForwardProxyConfig{
-		AllowHosts: []string{"127.0.0.1"},
+		AllowHosts: []string{"fixture.external"},
 		AllowPorts: []int{upstreamPort},
 	}, &logs)
 	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
-		"CONNECT example.com:%d HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamPort, upstreamAddress,
+		"CONNECT example.com:%d HTTP/1.1\r\nHost: fixture.external:%d\r\n\r\n", upstreamPort, upstreamPort,
 	))
 	defer func() { _ = conn.Close() }()
 	if !strings.Contains(status, "403") {
@@ -175,14 +196,14 @@ func TestForwardProxyDeniedConnectFailsClosed(t *testing.T) {
 }
 
 func TestForwardProxyAllowUnmatchedHostsBlindTunnels(t *testing.T) {
-	upstreamAddress, upstreamPort := newEchoTCPServer(t)
+	_, upstreamPort := newEchoTCPServer(t)
 	var logs bytes.Buffer
 	proxy := newForwardProxyServer(t, ForwardProxyConfig{
 		AllowUnmatchedHosts: true,
 		AllowPorts:          []int{upstreamPort},
 	}, &logs)
 	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
-		"CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamAddress, upstreamAddress,
+		"CONNECT fixture.external:%d HTTP/1.1\r\nHost: fixture.external:%d\r\n\r\n", upstreamPort, upstreamPort,
 	))
 	defer func() { _ = conn.Close() }()
 	if !strings.Contains(status, "200") {
@@ -256,11 +277,11 @@ func TestForwardProxyTunnelWaitsForHalfClosedClientResponse(t *testing.T) {
 
 	var logs bytes.Buffer
 	proxy := newForwardProxyServer(t, ForwardProxyConfig{
-		AllowHosts: []string{"127.0.0.1"},
+		AllowHosts: []string{"fixture.external"},
 		AllowPorts: []int{upstreamPort},
 	}, &logs)
 	conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
-		"CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", listener.Addr().String(), listener.Addr().String(),
+		"CONNECT fixture.external:%d HTTP/1.1\r\nHost: fixture.external:%d\r\n\r\n", upstreamPort, upstreamPort,
 	))
 	defer func() { _ = conn.Close() }()
 	if !strings.Contains(status, "200") {
@@ -332,12 +353,12 @@ func TestForwardProxyConcurrentTunnelLimitFailsClosed(t *testing.T) {
 
 	var logs bytes.Buffer
 	proxy := newForwardProxyServer(t, ForwardProxyConfig{
-		AllowHosts:           []string{"127.0.0.1"},
+		AllowHosts:           []string{"fixture.external"},
 		AllowPorts:           []int{upstreamPort},
 		MaxConcurrentTunnels: 1,
 	}, &logs)
 	first, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
-		"CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", listener.Addr().String(), listener.Addr().String(),
+		"CONNECT fixture.external:%d HTTP/1.1\r\nHost: fixture.external:%d\r\n\r\n", upstreamPort, upstreamPort,
 	))
 	defer func() { _ = first.Close() }()
 	if !strings.Contains(status, "200") {
@@ -353,8 +374,8 @@ func TestForwardProxyConcurrentTunnelLimitFailsClosed(t *testing.T) {
 
 	const canary = "CANARY-SECOND-TUNNEL-SECRET"
 	second, status := sendRawProxyRequest(t, proxyAddress(t, proxy), fmt.Sprintf(
-		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Bearer %s\r\n\r\n",
-		listener.Addr().String(), listener.Addr().String(), canary,
+		"CONNECT fixture.external:%d HTTP/1.1\r\nHost: fixture.external:%d\r\nProxy-Authorization: Bearer %s\r\n\r\n",
+		upstreamPort, upstreamPort, canary,
 	))
 	defer func() { _ = second.Close() }()
 	if !strings.Contains(status, "503") {
@@ -378,7 +399,6 @@ func TestForwardProxyMalformedConnectTargetsRejected(t *testing.T) {
 		"chatgpt.com:0",
 		"chatgpt.com:443/path",
 		"chatgpt.com.:443",
-		"[::1]:443",
 	}
 	for _, target := range malformed {
 		t.Run(target, func(t *testing.T) {

@@ -2,6 +2,7 @@ package egress
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,19 +35,24 @@ const forwardProxyCapability = "forward-proxy"
 type ForwardProxy struct {
 	Config   ForwardProxyConfig
 	Dialer   *net.Dialer
-	Logger   *log.Logger
-	Reporter *Reporter
+	Resolver IPResolver
+	// DialContext is a test seam. Production dials the already validated IP
+	// address and never resolves the hostname a second time.
+	DialContext func(context.Context, string, string) (net.Conn, error)
+	Logger      *log.Logger
+	Reporter    *Reporter
 	// CA, Broker, and Transport back the TLS-terminating inject routes. Nil
 	// when the forward proxy only blind-tunnels.
 	CA        *CA
 	Broker    *BrokerClient
 	Transport http.RoundTripper
 
-	once          sync.Once
-	allowHosts    map[string]bool
-	allowPorts    map[int]bool
-	tunnelSlots   chan struct{}
-	injectProxies map[string][]injectProxy
+	once              sync.Once
+	allowHosts        map[string]bool
+	allowPorts        map[int]bool
+	tunnelSlots       chan struct{}
+	injectProxies     map[string][]injectProxy
+	destinationPolicy destinationPolicy
 }
 
 type injectProxy struct {
@@ -75,6 +82,11 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if found {
+		if _, err := p.resolveTarget(r.Context(), target); err != nil {
+			p.writeDecision(target.host, target.port, "deny", "destination_denied")
+			http.Error(w, "CONNECT destination denied", http.StatusForbidden)
+			return
+		}
 		p.serveMITM(w, target, proxy)
 		return
 	}
@@ -91,7 +103,13 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseTunnel()
 
-	upstream, err := p.dialer().DialContext(r.Context(), "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+	address, err := p.resolveTarget(r.Context(), target)
+	if err != nil {
+		p.writeDecision(target.host, target.port, "deny", "destination_denied")
+		http.Error(w, "CONNECT destination denied", http.StatusForbidden)
+		return
+	}
+	upstream, err := p.dial(r.Context(), net.JoinHostPort(address.String(), strconv.Itoa(target.port)))
 	if err != nil {
 		p.writeDecision(target.host, target.port, "deny", "upstream_unreachable")
 		http.Error(w, "CONNECT upstream unreachable", http.StatusBadGateway)
@@ -249,6 +267,7 @@ func (p *ForwardProxy) init() {
 		}
 		p.tunnelSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
 		p.injectProxies = map[string][]injectProxy{}
+		p.destinationPolicy, _ = newDestinationPolicy(p.Config.DenyCIDRs)
 		for _, route := range p.Config.InjectRoutes {
 			host, err := normalizeProxyHost(route.Host)
 			if err != nil {
@@ -342,6 +361,25 @@ func (p *ForwardProxy) dialer() *net.Dialer {
 	return &net.Dialer{Timeout: dialTimeout}
 }
 
+func (p *ForwardProxy) resolver() IPResolver {
+	if p.Resolver != nil {
+		return p.Resolver
+	}
+	return net.DefaultResolver
+}
+
+func (p *ForwardProxy) resolveTarget(ctx context.Context, target connectTarget) (netip.Addr, error) {
+	p.init()
+	return resolveAllowedAddress(ctx, p.resolver(), p.destinationPolicy, target.host)
+}
+
+func (p *ForwardProxy) dial(ctx context.Context, address string) (net.Conn, error) {
+	if p.DialContext != nil {
+		return p.DialContext(ctx, "tcp", address)
+	}
+	return p.dialer().DialContext(ctx, "tcp", address)
+}
+
 func (p *ForwardProxy) writeDecision(host string, port int, decision, errorClass string) {
 	// A resolved target is audit-worthy; targetless denials (malformed/plain
 	// HTTP) have no host and are logged only. The broker requires a host.
@@ -411,6 +449,9 @@ func normalizeProxyHost(host string) (string, error) {
 	}
 	if strings.HasPrefix(host, "[") || strings.HasSuffix(host, "]") {
 		return "", fmt.Errorf("bracketed host is not allowed in allowlist")
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		return address.Unmap().String(), nil
 	}
 	if strings.ContainsAny(host, "/\\@?#: \t\r\n") || strings.Contains(host, "%") {
 		return "", fmt.Errorf("invalid host")
