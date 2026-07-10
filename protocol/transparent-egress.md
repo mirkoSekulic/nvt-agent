@@ -29,3 +29,26 @@ to the recovered original IP; egressd still applies its full destination
 policy. TLS credential injection therefore requires readable SNI. Fragmented
 ClientHello records and ECH can take the opaque path and fail provider
 authentication, but cannot cause a credential route to be guessed.
+
+## Literal zero-secret Agent Pod
+
+For enforced mediated runs, the operator resolves broker-owned inert
+placeholder files before creating the Agent Pod and embeds them as ordinary
+preseed entries. Route hosts and git flags come from the admitted AgentRun
+grant. Runtime bootstrap treats `egress.operator-prepared: true` as a strict
+contract: it never falls back to `brokerctl` for routing or placeholder files.
+
+The Agent Pod disables Kubernetes service-account projection and carries no
+broker, callback, egress, provider, or private-CA credential. Its NetworkPolicy
+allows DNS and its paired egressd only. Egressd retains the paired egress
+broker identity and CA key.
+
+Lifecycle completion uses the agent container termination message:
+
+```json
+{"nvtLifecycleEvent":"plugin.agent.signal.done","outcome":"completed"}
+```
+
+The `outcome` is diagnostic. The operator derives the actual transition by
+matching `nvtLifecycleEvent` against the owning AgentRun's `completeOn` and
+`failOn` lists. Unmatched or malformed messages have no lifecycle authority.

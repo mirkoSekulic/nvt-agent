@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -558,7 +560,16 @@ func TestReconcileWritesPlaceholderFileBrokerPolicy(t *testing.T) {
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
 		WithObjects(agentRun, brokerSecret, egressSecret, callbackSecret, testBrokerAgentsConfigMap(agentRun.Namespace)).
 		Build()
-	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer agent-token" {
+			t.Fatal("operator placeholder request did not use the control-plane token")
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"ok":true,"files":[{"path":".codex/auth.json","content":"{\"access_token\":\"NVT-PLACEHOLDER-NOT-A-KEY\"}\n","mode":"0600"}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("NVT_BROKER_URL", server.URL)
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: server.Client()}
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
 		t.Fatalf("reconcile with placeholder-file grant: %v", err)
 	}
@@ -571,6 +582,17 @@ func TestReconcileWritesPlaceholderFileBrokerPolicy(t *testing.T) {
 	// Direct validation of the serialized policy shape.
 	if err := ValidateBrokerAgentsPolicy(policy); err != nil {
 		t.Fatalf("ValidateBrokerAgentsPolicy rejected a placeholder-file grant: %v", err)
+	}
+	configMap := &corev1.ConfigMap{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: AgentConfigMapName(agentRun.Name)}, configMap); err != nil {
+		t.Fatal(err)
+	}
+	rendered := configMap.Data[agentConfigKey]
+	if !strings.Contains(rendered, "operator-prepared: true") || !strings.Contains(rendered, "$HOME/.codex/auth.json") || !strings.Contains(rendered, "NVT-PLACEHOLDER-NOT-A-KEY") {
+		t.Fatalf("operator did not precompute inert placeholder inputs:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "agent-token") {
+		t.Fatalf("operator embedded its preparation token in agent config:\n%s", rendered)
 	}
 }
 
@@ -1532,7 +1554,7 @@ func TestEnforcementRenderedConfigs(t *testing.T) {
 }
 
 // TestEnforcementNetworkPolicyShape pins the fence: agent default-deny
-// egress with exactly DNS/broker/paired-egressd/callback, egressd ingress
+// egress with exactly DNS/paired-egressd, egressd ingress
 // only from the paired agent, and mirrored public HTTP/HTTPS upstream rules.
 func TestEnforcementNetworkPolicyShape(t *testing.T) {
 	agentRun := enforcedAgentRun()
@@ -1548,8 +1570,8 @@ func TestEnforcementNetworkPolicyShape(t *testing.T) {
 	if len(agentPolicy.Spec.PolicyTypes) != 1 || agentPolicy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
 		t.Fatalf("agent policy must be egress-only (ingress unrestricted this PR): %#v", agentPolicy.Spec.PolicyTypes)
 	}
-	if len(agentPolicy.Spec.Egress) != 4 {
-		t.Fatalf("agent policy must allow exactly DNS, broker, paired egressd, callback: %#v", agentPolicy.Spec.Egress)
+	if len(agentPolicy.Spec.Egress) != 2 {
+		t.Fatalf("agent policy must allow exactly DNS and paired egressd: %#v", agentPolicy.Spec.Egress)
 	}
 	for _, rule := range agentPolicy.Spec.Egress {
 		for _, peer := range rule.To {
@@ -1558,7 +1580,7 @@ func TestEnforcementNetworkPolicyShape(t *testing.T) {
 			}
 		}
 	}
-	pairedRule := agentPolicy.Spec.Egress[2]
+	pairedRule := agentPolicy.Spec.Egress[1]
 	if pairedRule.To[0].PodSelector.MatchLabels[agentRunLabelKey] != agentRun.Name ||
 		pairedRule.To[0].PodSelector.MatchLabels[roleLabelKey] != roleLabelEgressd {
 		t.Fatalf("agent policy egressd peer must pin the paired run: %#v", pairedRule.To[0])
@@ -1684,7 +1706,10 @@ func TestEnforcementObjectsAllOwned(t *testing.T) {
 	assertControlled(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: BrokerTokenSecretName(agentRun.Name)}}, "broker token Secret")
 	assertControlled(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: EgressTokenSecretName(agentRun.Name)}}, "egress token Secret")
 	assertControlled(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: EgressCASecretName(agentRun.Name)}}, "egress CA Secret")
-	assertControlled(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: CallbackTokenSecretName(agentRun.Name)}}, "callback token Secret")
+	callbackSecret := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: CallbackTokenSecretName(agentRun.Name)}, callbackSecret); !errors.IsNotFound(err) {
+		t.Fatalf("literal zero-secret run unexpectedly created callback Secret: %v", err)
+	}
 	assertControlled(&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: AgentNetworkPolicyName(agentRun.Name)}}, "agent NetworkPolicy")
 	assertControlled(&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: EgressdNetworkPolicyName(agentRun.Name)}}, "egressd NetworkPolicy")
 }
@@ -4008,7 +4033,7 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	if strings.Contains(netInit.Args[0], "NVT_CAPTURE_EXCLUDE_CIDRS") || !strings.Contains(netInit.Args[0], "getent ahosts") {
 		t.Fatalf("net-init must resolve only narrow control-plane exceptions: %q", netInit.Args)
 	}
-	if got := envValue(netInit, "NVT_CAPTURE_EXCLUDE_HOSTS"); !strings.Contains(got, EgressdServiceName(run.Name)) || !strings.Contains(got, "nvt-broker") {
+	if got := envValue(netInit, "NVT_CAPTURE_EXCLUDE_HOSTS"); got != EgressdServiceName(run.Name)+" kubernetes.default.svc kube-dns.kube-system.svc" {
 		t.Fatalf("net-init control-plane exceptions = %q", got)
 	}
 	proxyEnv := map[string]string{}
@@ -4030,6 +4055,117 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	}
 	if got := egress["transport"]; got != string(nvtv1alpha1.AgentRunEgressTransportTransparent) {
 		t.Fatalf("bootstrap egress transport = %v", got)
+	}
+}
+
+func TestLiteralZeroSecretPodHasNoReusableCredentialProjection(t *testing.T) {
+	run := transparentAgentRun(t)
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
+		t.Fatal("Agent Pod must disable service-account token projection")
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Secret != nil || volume.Projected != nil {
+			t.Fatalf("Agent Pod projected a Secret/service-account volume: %#v", volume)
+		}
+	}
+	allContainers := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+	for _, container := range allContainers {
+		for _, env := range container.Env {
+			if env.ValueFrom != nil || env.Name == brokerTokenKey || env.Name == callbackTokenKey || env.Name == egressTokenKey {
+				t.Fatalf("untrusted container %s received credential env %#v", container.Name, env)
+			}
+		}
+		serialized, _ := json.Marshal(container)
+		for _, forbidden := range []string{BrokerTokenSecretName(run.Name), CallbackTokenSecretName(run.Name), EgressTokenSecretName(run.Name), EgressCASecretName(run.Name)} {
+			if strings.Contains(string(serialized), forbidden) {
+				t.Fatalf("untrusted container %s references Secret %s", container.Name, forbidden)
+			}
+		}
+	}
+	egressd, err := DesiredEgressdPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if egressd.Spec.AutomountServiceAccountToken == nil || *egressd.Spec.AutomountServiceAccountToken {
+		t.Fatal("egressd Pod must disable unnecessary service-account projection")
+	}
+	assertSecretKeyEnv(t, egressd.Spec.Containers[0], "NVT_BROKER_TOKEN", EgressTokenSecretName(run.Name), egressTokenKey)
+}
+
+func TestLiteralZeroSecretTLSBrokerCATrustStaysWithTrustedComponents(t *testing.T) {
+	setTLSBrokerEnv(t)
+	run := transparentAgentRun(t)
+	agentPod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, volume := range agentPod.Spec.Volumes {
+		if volume.Name == brokerCAVolumeName {
+			t.Fatalf("literal zero-secret Agent Pod mounted broker CA Secret: %#v", volume)
+		}
+	}
+	egressdPod, err := DesiredEgressdPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume := requireVolume(t, *egressdPod, brokerCAVolumeName)
+	if volume.Secret == nil || volume.Secret.SecretName != BrokerCASecretName() {
+		t.Fatalf("trusted egressd lost broker CA trust: %#v", volume)
+	}
+}
+
+func TestRedirectCAConstraintsDoNotIncludeForwardProxyUpstreams(t *testing.T) {
+	if hosts := forwardProxyUpstreamHosts(enforcedAgentRun()); len(hosts) != 0 {
+		t.Fatalf("redirect run widened durable CA for forward-proxy hosts: %v", hosts)
+	}
+	if hosts := forwardProxyUpstreamHosts(forwardProxyAgentRun()); len(hosts) == 0 {
+		t.Fatal("forward-proxy run omitted its MITM upstream CA constraints")
+	}
+}
+
+func TestLiteralZeroSecretLifecycleUsesTerminationMessage(t *testing.T) {
+	run := transparentAgentRun(t)
+	run.Spec.Lifecycle = &nvtv1alpha1.AgentRunLifecycle{CompleteOn: []string{"plugin.smoke.completed"}, FailOn: []string{"plugin.smoke.failed"}}
+	run.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{"plugins":[{"name":"event-webhook","source":"builtin","when":"after-agent","restart":"always","config":{"url":"http://nvt-operator:8082/v1/agentruns/default/example/events","auth":{"type":"bearer-env","env":"NVT_OPERATOR_CALLBACK_TOKEN"}}},{"name":"smoke-complete","source":"builtin","when":"after-agent","config":{}}]}`)}
+	rendered, err := RenderAgentConfigYAML(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(rendered, "NVT_OPERATOR_CALLBACK_TOKEN") || strings.Contains(rendered, "/v1/agentruns/") {
+		t.Fatalf("rendered zero-secret config retained callback bearer wiring:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "name: lifecycle-termination") || !strings.Contains(rendered, "waitForPlugin: lifecycle-termination") {
+		t.Fatalf("rendered config did not install termination lifecycle path:\n%s", rendered)
+	}
+
+	now := metav1.NewTime(time.Unix(123, 0))
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: `{"nvtLifecycleEvent":"plugin.smoke.completed","outcome":"completed"}`}},
+	}}}}
+	if !SyncAgentRunLifecycleFromPodTermination(run, pod, now) {
+		t.Fatal("operator did not consume lifecycle termination message")
+	}
+	if run.Status.Phase != nvtv1alpha1.AgentRunPhaseCompleted || run.Status.Reason != "Completed by lifecycle event plugin.smoke.completed" {
+		t.Fatalf("unexpected lifecycle status: %#v", run.Status)
+	}
+}
+
+func TestDirectAndNonEnforcedMediatedKeepLegacyBearerCompatibility(t *testing.T) {
+	for _, run := range []*nvtv1alpha1.AgentRun{testAgentRun(), multiGrantMediatedAgentRun()} {
+		pod, err := DesiredAgentPod(run, testScheme(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent := requireContainer(t, *pod, "agent")
+		assertSecretKeyEnv(t, agent, brokerTokenKey, BrokerTokenSecretName(run.Name), brokerTokenKey)
+		assertSecretKeyEnv(t, agent, callbackTokenKey, CallbackTokenSecretName(run.Name), callbackTokenKey)
+		if pod.Spec.AutomountServiceAccountToken != nil {
+			t.Fatalf("compatibility mode changed service-account automount default: %#v", pod.Spec.AutomountServiceAccountToken)
+		}
 	}
 }
 

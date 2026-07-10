@@ -219,6 +219,12 @@ payload `{ok: true}`. It is intended for local and operator lifecycle smoke
 tests without GitHub or external services. See
 `runtime/plugins/smoke-complete/README.md` for the full config.
 
+`lifecycle-termination` is injected by the Kubernetes operator for enforced
+literal zero-secret AgentRuns. It reports a matched lifecycle event through
+the agent container's Kubernetes termination message and carries no reusable
+callback credential. See
+`runtime/plugins/lifecycle-termination/README.md`.
+
 ## Scaffolding
 
 Generate a plugin folder from templates:

@@ -442,8 +442,14 @@ def apply_mediated_egress(egress):
         base_url = grant.get("base-url")
         if not isinstance(base_url, str) or not base_url:
             raise SystemExit(f"egress mediated grant {provider} must include base-url")
-        routing = broker_routing(provider, deadline)
-        hosts = routing.get("hosts") or []
+        # Enforced zero-secret runs receive route metadata from the operator;
+        # only compatibility modes call brokerctl from inside the agent.
+        if egress.get("operator-prepared"):
+            hosts = grant.get("hosts") or []
+            routing = {"hosts": hosts, "git": bool(grant.get("git"))}
+        else:
+            routing = broker_routing(provider, deadline)
+            hosts = routing.get("hosts") or []
         if not hosts:
             raise SystemExit(f"bootstrap: mediated grant {provider} is not redirectable")
         if routing.get("git"):
@@ -609,6 +615,11 @@ def apply_placeholder_files(egress):
     # real secret stays broker-side). Runs regardless of egress mode. Never
     # reads a host auth file as the source of truth.
     if not isinstance(egress, dict):
+        return
+    # The operator has already fetched and embedded inert files as preseed
+    # entries. Never fall back to brokerctl: a missing prepared file must fail
+    # before Pod creation, not cause a bearer credential to re-enter the Pod.
+    if egress.get("operator-prepared"):
         return
     grants = egress.get("grants") or []
     if not isinstance(grants, list):
