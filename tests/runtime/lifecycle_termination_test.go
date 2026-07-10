@@ -44,6 +44,38 @@ terminationMessagePath: `+messagePath+`
 	}
 }
 
+func TestLifecycleTerminationReplaysEventAfterRestart(t *testing.T) {
+	f := newFixture(t)
+	messagePath := filepath.Join(f.home, "termination-log")
+	config := f.writePluginConfig("lifecycle-termination.yaml", `
+completeOn:
+  - plugin.smoke.completed
+terminationMessagePath: `+messagePath+`
+`)
+	writeFakeAgentdctl(t, f, []map[string]any{{"event": "plugin.event", "plugin_event": "plugin.smoke.completed"}})
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := os.Remove(messagePath); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		f.runWithEnv(lifecycleTerminationRunBin(f.root), true, []string{
+			"NVT_PLUGIN_CONFIG=" + config,
+			"NVT_LIFECYCLE_TERMINATE_PID=0",
+		})
+		data, err := os.ReadFile(messagePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var message map[string]string
+		if err := json.Unmarshal(data, &message); err != nil {
+			t.Fatalf("invalid termination message: %v: %s", err, data)
+		}
+		if message["nvtLifecycleEvent"] != "plugin.smoke.completed" || message["outcome"] != "completed" {
+			t.Fatalf("unexpected termination message on attempt %d: %#v", attempt, message)
+		}
+	}
+}
+
 func TestLifecycleTerminationRejectsMissingEvents(t *testing.T) {
 	f := newFixture(t)
 	config := f.writePluginConfig("lifecycle-termination.yaml", "terminationMessagePath: /tmp/message\n")

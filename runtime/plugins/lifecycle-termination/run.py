@@ -62,7 +62,7 @@ def write_termination(path, name, outcome):
 def run():
     message_path, complete, failed = load_config()
     process = subprocess.Popen(
-        ["agentdctl", "subscribe", "--since", "end"],
+        ["agentdctl", "subscribe", "--since", "beginning"],
         stdout=subprocess.PIPE,
         text=True,
     )

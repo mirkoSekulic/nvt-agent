@@ -2383,6 +2383,115 @@ func TestReconcileUpdatesAgentConfigMapWhenConfigChanges(t *testing.T) {
 	}
 }
 
+func TestLiteralZeroSecretReconcileUpdatesAgentConfigMapWhenConfigChanges(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	agentRun.Spec.Broker.Grants = append(agentRun.Spec.Broker.Grants, nvtv1alpha1.AgentRunBrokerGrant{
+		Provider:        "codex-main",
+		Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+	})
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"files": []map[string]any{{
+				"path":    ".codex/auth.json",
+				"content": "{\n  \"access_token\": \"NVT-PLACEHOLDER-NOT-A-KEY\"\n}\n",
+				"mode":    "0600",
+			}},
+		})
+	}))
+	t.Cleanup(broker.Close)
+	t.Setenv("NVT_BROKER_URL", broker.URL)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+
+	var updatedAgentRun nvtv1alpha1.AgentRun
+	if getErr := k8sClient.Get(ctx, clientKey(agentRun), &updatedAgentRun); getErr != nil {
+		t.Fatalf("get AgentRun: %v", getErr)
+	}
+	updatedAgentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{
+		"plugins": [
+			{
+				"name": "checkout-repos",
+				"config": {
+					"repository": "github.com/mirkoSekulic/nvt-agent-zero-secret-updated"
+				}
+			}
+		]
+	}`)}
+	if updateErr := k8sClient.Update(ctx, &updatedAgentRun); updateErr != nil {
+		t.Fatalf("update AgentRun: %v", updateErr)
+	}
+
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+
+	configMap := getAgentConfigMap(ctx, t, k8sClient, agentRun)
+	agentConfig := configMap.Data[agentConfigKey]
+	if strings.Contains(agentConfig, "repository: github.com/mirkoSekulic/nvt-agent\n") {
+		t.Fatalf("expected previous zero-secret config to be replaced, got:\n%s", agentConfig)
+	}
+	if !strings.Contains(agentConfig, "repository: github.com/mirkoSekulic/nvt-agent-zero-secret-updated") {
+		t.Fatalf("expected updated zero-secret config, got:\n%s", agentConfig)
+	}
+	if !strings.Contains(agentConfig, "$HOME/.codex/auth.json") || !strings.Contains(agentConfig, "NVT-PLACEHOLDER-NOT-A-KEY") {
+		t.Fatalf("expected placeholder preseed to remain intact, got:\n%s", agentConfig)
+	}
+}
+
+func TestLiteralZeroSecretPlaceholderPreparationIsCachedAcrossReconciles(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	agentRun.Spec.Broker.Grants = append(agentRun.Spec.Broker.Grants, nvtv1alpha1.AgentRunBrokerGrant{
+		Provider:        "codex-main",
+		Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+	})
+	brokerRequests := 0
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		brokerRequests++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"files": []map[string]any{{
+				"path":    ".codex/auth.json",
+				"content": "{\n  \"access_token\": \"NVT-PLACEHOLDER-NOT-A-KEY\"\n}\n",
+				"mode":    "0600",
+			}},
+		})
+	}))
+	t.Cleanup(broker.Close)
+	t.Setenv("NVT_BROKER_URL", broker.URL)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
+
+	for pass := 0; pass < 2; pass++ {
+		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+		if err != nil {
+			t.Fatalf("reconcile pass %d: %v", pass+1, err)
+		}
+	}
+
+	if brokerRequests != 1 {
+		t.Fatalf("expected placeholder preparation to be cached across reconciles, got %d broker requests", brokerRequests)
+	}
+}
+
 func TestReconcileDoesNotUpdateExistingAgentPodSpec(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
@@ -2418,6 +2527,80 @@ func TestReconcileDoesNotUpdateExistingAgentPodSpec(t *testing.T) {
 	if agentContainer.Image != "nvt-agent-runtime:test" {
 		t.Fatalf("expected existing Pod image to remain unchanged, got %q", agentContainer.Image)
 	}
+}
+
+func TestReconcileRejectsDirectToEnforcedSecurityModeMutation(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := testAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("direct reconcile: %v", err)
+	}
+
+	var updatedAgentRun nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updatedAgentRun); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	updatedAgentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	updatedAgentRun.Spec.EgressEnforcement = true
+	updatedAgentRun.Spec.EgressAllowInsecureBroker = true
+	updatedAgentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider:        "api-main",
+		Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+		EgressHosts:     []string{"api.example.test:443"},
+	}}}
+	if err := k8sClient.Update(ctx, &updatedAgentRun); err != nil {
+		t.Fatalf("update AgentRun: %v", err)
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "security-sensitive AgentRun fields changed") {
+		t.Fatalf("expected security transition rejection, got %v", err)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+}
+
+func TestReconcileRejectsEnforcedToDirectSecurityModeMutation(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("first enforced reconcile: %v", err)
+	}
+	markPodReady(ctx, t, k8sClient, agentRun.Namespace, EgressdPodName(agentRun.Name))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("second enforced reconcile: %v", err)
+	}
+
+	var updatedAgentRun nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, clientKey(agentRun), &updatedAgentRun); err != nil {
+		t.Fatalf("get AgentRun: %v", err)
+	}
+	updatedAgentRun.Spec = testAgentRun().Spec
+	if err := k8sClient.Update(ctx, &updatedAgentRun); err != nil {
+		t.Fatalf("update AgentRun: %v", err)
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "security-sensitive AgentRun fields changed") {
+		t.Fatalf("expected security transition rejection, got %v", err)
+	}
+	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
+	assertEgressdPodMissing(ctx, t, k8sClient, agentRun)
 }
 
 func TestReconcileRejectsExistingUnownedAgentPod(t *testing.T) {
@@ -3722,6 +3905,18 @@ func assertAgentPodMissing(ctx context.Context, t *testing.T, k8sClient client.R
 	}
 }
 
+func assertEgressdPodMissing(ctx context.Context, t *testing.T, k8sClient client.Reader, agentRun *nvtv1alpha1.AgentRun) {
+	t.Helper()
+
+	var pod corev1.Pod
+	key := types.NamespacedName{Name: EgressdPodName(agentRun.Name), Namespace: agentRun.Namespace}
+	if err := k8sClient.Get(ctx, key, &pod); err == nil {
+		t.Fatalf("expected egressd Pod to be missing")
+	} else if !errors.IsNotFound(err) {
+		t.Fatalf("get egressd Pod: %v", err)
+	}
+}
+
 func getAgentConfigMap(
 	ctx context.Context,
 	t *testing.T,
@@ -3783,6 +3978,22 @@ func getAgentPod(
 	key := types.NamespacedName{Name: AgentPodName(agentRun.Name), Namespace: agentRun.Namespace}
 	if err := k8sClient.Get(ctx, key, &pod); err != nil {
 		t.Fatalf("get Pod: %v", err)
+	}
+	return pod
+}
+
+func getEgressdPod(
+	ctx context.Context,
+	t *testing.T,
+	k8sClient client.Reader,
+	agentRun *nvtv1alpha1.AgentRun,
+) corev1.Pod {
+	t.Helper()
+
+	var pod corev1.Pod
+	key := types.NamespacedName{Name: EgressdPodName(agentRun.Name), Namespace: agentRun.Namespace}
+	if err := k8sClient.Get(ctx, key, &pod); err != nil {
+		t.Fatalf("get egressd Pod: %v", err)
 	}
 	return pod
 }
