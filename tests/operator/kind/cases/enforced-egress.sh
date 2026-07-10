@@ -80,8 +80,8 @@ case_run() {
   submit_valid_admission probe-a
   submit_valid_admission probe-b
 
-  # The completion-driven run proves DNS, broker, and the operator callback
-  # all work under the default-deny policy.
+  # The completion-driven run proves the credential-less termination-message
+  # lifecycle path works under the default-deny policy.
   wait_for_phase_any "${RUN_NAME}-valid" "${RUN_TIMEOUT_SECONDS}" Completed Failed
   local phase
   phase="$(agentrun_phase "${RUN_NAME}-valid")"
@@ -90,6 +90,7 @@ case_run() {
   wait_for_phase_any "${RUN_NAME}-probe-a" "${RUN_TIMEOUT_SECONDS}" Running
   wait_for_phase_any "${RUN_NAME}-probe-b" "${RUN_TIMEOUT_SECONDS}" Running
   assert_enforced_shape "${RUN_NAME}-probe-a"
+  assert_literal_zero_secret "${RUN_NAME}-probe-a"
   assert_conditions "${RUN_NAME}-probe-a"
   assert_ca_published_matches_mounted "${RUN_NAME}-probe-a"
   assert_direct_egress_denied "${RUN_NAME}-probe-a"
@@ -293,10 +294,78 @@ if labels.get("nvt.dev/agentrun") != run or labels.get("nvt.dev/role") != "agent
 containers = {container["name"] for container in pod["spec"]["containers"]}
 if "egressd" in containers:
     raise SystemExit("enforcement agent pod must not carry a same-Pod egressd sidecar")
+if pod["spec"].get("automountServiceAccountToken") is not False:
+    raise SystemExit("literal zero-secret Agent Pod must disable service-account projection")
 volumes = {volume["name"]: volume for volume in pod["spec"].get("volumes", [])}
+for name, volume in volumes.items():
+    if "secret" in volume or "projected" in volume:
+        raise SystemExit(f"literal zero-secret Agent Pod projects credential volume {name}: {volume}")
 ca_volume = volumes.get("egress-ca")
 if not ca_volume or ca_volume.get("configMap", {}).get("name") != f"{run}-egress-ca":
     raise SystemExit(f"agent CA volume must come from the published ConfigMap: {ca_volume}")
+PY
+}
+
+assert_literal_zero_secret() {
+  local run="$1"
+  local needles="${SMOKE_TMPDIR}/${run}-secret-canaries.json"
+  local logs="${SMOKE_TMPDIR}/${run}-agent.log"
+  local provider_b64 broker_b64 egress_b64 ca_key_b64
+  provider_b64="$(kubectl_smoke get secret nvt-smoke-broker-env -n "${NAMESPACE}" -o jsonpath='{.data.NVT_SMOKE_STATIC_TOKEN}')"
+  broker_b64="$(kubectl_smoke get secret "${run}-broker-token" -n "${NAMESPACE}" -o jsonpath='{.data.NVT_BROKER_TOKEN}')"
+  egress_b64="$(kubectl_smoke get secret "${run}-egress-token" -n "${NAMESPACE}" -o jsonpath='{.data.NVT_EGRESS_BROKER_TOKEN}')"
+  ca_key_b64="$(kubectl_smoke get secret "${run}-egress-ca-keypair" -n "${NAMESPACE}" -o jsonpath='{.data.ca\.key}')"
+  python3 - "${needles}" "${provider_b64}" "${broker_b64}" "${egress_b64}" "${ca_key_b64}" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump({"needles": sys.argv[2:]}, f)
+PY
+
+  if kubectl_smoke get secret "${run}-callback-token" -n "${NAMESPACE}" >/dev/null 2>&1; then
+    die "literal zero-secret run created a callback bearer Secret"
+  fi
+  kubectl_smoke get pod "${run}-egressd" -n "${NAMESPACE}" -o json | python3 -c '
+import json, sys
+pod=json.load(sys.stdin)
+assert pod["spec"].get("automountServiceAccountToken") is False
+env={item["name"]:item for item in pod["spec"]["containers"][0].get("env",[])}
+assert env["NVT_BROKER_TOKEN"]["valueFrom"]["secretKeyRef"]["name"].endswith("-egress-token")
+' || die "trusted egressd identity/service-account boundary is wrong"
+
+  # Pass canaries over stdin, never argv/env. Scan every process environment
+  # and command line plus readable ordinary files and mounted-volume metadata.
+  kubectl_smoke exec -i "${run}-agent" -n "${NAMESPACE}" -c agent -- python3 -c '
+import base64, json, os, sys
+needles=[base64.b64decode(v) for v in json.load(sys.stdin)["needles"] if v]
+needles += [b"NVT_OPERATOR_CALLBACK_TOKEN="]
+def check(label, data):
+    for needle in needles:
+        if needle and needle in data:
+            raise SystemExit("secret canary found in " + label)
+for pid in os.listdir("/proc"):
+    if not pid.isdigit() or int(pid) == os.getpid(): continue
+    for leaf in ("environ", "cmdline"):
+        try: check(f"/proc/{pid}/{leaf}", open(f"/proc/{pid}/{leaf}", "rb").read())
+        except (FileNotFoundError, PermissionError, ProcessLookupError): pass
+for root in ("/root", "/home", "/workspace", "/nvt-agent", "/nvt-egress-ca", "/tmp", "/var/log", "/run"):
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not (root == "/run" and d in {"containerd", "docker"})]
+        for name in files:
+            path=os.path.join(directory,name)
+            try:
+                if os.path.getsize(path) <= 8*1024*1024: check(path, open(path,"rb").read())
+            except (FileNotFoundError, PermissionError, OSError): pass
+check("mountinfo", open("/proc/self/mountinfo","rb").read())
+if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token"):
+    raise SystemExit("Kubernetes service-account token is mounted")
+' <"${needles}" || die "literal zero-secret process/filesystem/mount scan failed"
+
+  kubectl_smoke logs "${run}-agent" -n "${NAMESPACE}" --all-containers=true >"${logs}"
+  python3 - "${needles}" "${logs}" <<'PY' || die "literal zero-secret log scan failed"
+import base64, json, sys
+needles=[base64.b64decode(v) for v in json.load(open(sys.argv[1], encoding="utf-8"))["needles"] if v]
+data=open(sys.argv[2],"rb").read()
+assert all(needle not in data for needle in needles)
 PY
 }
 
@@ -350,10 +419,20 @@ assert_egressd_path_allowed() {
   # and verified against the published CA. The hermetic echo fixture reflects
   # the request egressd forwarded. It compares a one-way credential digest and
   # never reflects the injected value back into the untrusted Agent Pod.
-  local response
-  response="$(agent_exec "${run}" curl -sS --fail-with-body \
-    --cacert /nvt-egress-ca/ca.crt --max-time 15 "https://${run}-egressd:8471/echo")" \
-    || die "agent -> egressd -> upstream request failed"
+  local response="" deadline=$((SECONDS + 90))
+  # The broker's agents ConfigMap projection is eventually consistent. Every
+  # pre-projection request must fail closed; retry until the broker observes
+  # the operator-written paired identities.
+  while (( SECONDS < deadline )); do
+    if response="$(agent_exec "${run}" curl -sS --fail-with-body \
+      --cacert /nvt-egress-ca/ca.crt --max-time 15 "https://${run}-egressd:8471/echo" 2>/dev/null)"; then
+      if grep -q '"credential_match":true' <<<"${response}"; then
+        break
+      fi
+    fi
+    sleep 2
+  done
+  [[ -n "${response}" ]] || die "agent -> egressd -> upstream request did not become ready after broker policy projection"
   grep -q '"authenticated":true' <<<"${response}" || die "echo fixture did not see an injected credential header: ${response}"
   grep -q '"credential_match":true' <<<"${response}" || die "echo fixture did not receive the exact injected bearer: ${response}"
   grep -q '"path":"/echo"' <<<"${response}" || die "echo fixture did not reflect the request path: ${response}"

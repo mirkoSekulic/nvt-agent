@@ -6,7 +6,7 @@ This document defines the target architecture for transparently routing an
 AgentRun's internet-bound traffic through its paired `egressd` Pod while
 keeping provider credentials outside the Agent Pod.
 
-The following pieces already exist:
+The following pieces exist:
 
 - broker-owned provider credentials and OAuth refresh;
 - per-run broker grants and paired agent/egress identities;
@@ -15,8 +15,9 @@ The following pieces already exist:
 - a separate per-run `egressd` Pod in enforced Kubernetes mode;
 - per-run NetworkPolicies and a durable per-run interception CA.
 
-Transparent capture for tools that ignore proxy configuration is not yet
-implemented. This document is the design contract for that work.
+Transparent capture and the literal zero-secret Agent Pod are implemented by
+the two-PR delivery sequence below. This document remains the architecture and
+acceptance contract.
 
 ## Goals
 
@@ -418,6 +419,15 @@ For a literal zero-secret Agent Pod:
 5. Continue scanning agent filesystem, environment, and process arguments for
    provider tokens, broker tokens, callback tokens, CA private keys, and test
    canaries.
+
+The implemented replacement path uses operator-observed container termination
+messages. For enforced runs, the operator prepares route metadata and inert
+placeholder preseed entries before creating the Agent Pod, replaces its own
+bearer-authenticated event-webhook wiring with the provider-agnostic
+`lifecycle-termination` runtime plugin, and accepts only event names that still
+match the owning AgentRun's lifecycle specification. Direct and same-Pod
+mediated compatibility modes retain their existing brokerctl and callback
+behavior.
 
 The public CA certificate, route metadata, provider names, and placeholders are
 not secrets.

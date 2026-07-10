@@ -30,6 +30,10 @@ the per-run event-webhook callback URL, callback token env wiring,
 For `mediated-egress`, it checks mediated admission payloads for a
 header-inject grant with route hosts plus the runtimeAuth, missing-route, and
 file-bundle rejection shapes.
+For enforced egress, the completion smoke uses the credential-less
+termination-message lifecycle path. Its acceptance scan checks provider,
+broker, egress, callback, service-account, and CA-key non-possession across Pod
+specs, environments, process arguments, readable files, mounts, and logs.
 
 Use kind mode for the full cluster smoke:
 
