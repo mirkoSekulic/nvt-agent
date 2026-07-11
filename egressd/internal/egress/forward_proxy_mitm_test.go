@@ -187,6 +187,83 @@ func TestForwardProxyMITMRemintsExpiredLeafOnNextCONNECT(t *testing.T) {
 	}
 }
 
+// TestForwardProxyMITMRemintsAcrossMultipleExpiryCycles exercises the real
+// CONNECT -> tls.Server(ServerTLSConfig) path across two renewal boundaries.
+// Each handshake must observe a fresh leaf once the prior leaf is inside or
+// beyond the remint margin; the proxy must not keep serving a stale cached
+// certificate after more than one renewal.
+func TestForwardProxyMITMRemintsAcrossMultipleExpiryCycles(t *testing.T) {
+	const host = "chatgpt.com"
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	proxy, ca := newMITMProxy(t, broker, ForwardProxyInjectRoute{
+		Host: host, Capability: "codex-main",
+		Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true,
+	}, host)
+	clock := time.Now().UTC().Truncate(time.Second)
+	ca.Now = func() time.Time { return clock }
+
+	type result struct {
+		serial string
+		expiry time.Time
+	}
+	handshake := func() result {
+		t.Helper()
+		conn, status := sendRawProxyRequest(t, proxyAddress(t, proxy),
+			"CONNECT chatgpt.com:443 HTTP/1.1\r\nHost: chatgpt.com:443\r\n\r\n")
+		if !strings.Contains(status, "200") {
+			_ = conn.Close()
+			t.Fatalf("CONNECT status = %q", status)
+		}
+		clientConfig := &tls.Config{
+			RootCAs:    caCertPool(t, ca),
+			ServerName: host,
+			Time:       func() time.Time { return clock },
+			MinVersion: tls.VersionTLS12,
+			MaxVersion: tls.VersionTLS12,
+		}
+		tlsConn := tls.Client(conn, clientConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			t.Fatalf("MITM handshake: %v", err)
+		}
+		state := tlsConn.ConnectionState()
+		leaf := state.PeerCertificates[0]
+		_ = tlsConn.Close()
+		return result{serial: leaf.SerialNumber.String(), expiry: leaf.NotAfter.UTC()}
+	}
+
+	first := handshake()
+	clock = first.expiry.Add(-leafRemintMargin - time.Minute)
+	reused := handshake()
+	if reused.serial != first.serial {
+		t.Fatalf("leaf changed before remint margin: first=%s reused=%s", first.serial, reused.serial)
+	}
+
+	clock = first.expiry.Add(-leafRemintMargin + time.Minute)
+	second := handshake()
+	if second.serial == first.serial {
+		t.Fatalf("leaf was not renewed in remint margin: serial=%s", second.serial)
+	}
+	if !second.expiry.After(first.expiry) {
+		t.Fatalf("second leaf expiry %s did not advance beyond first expiry %s", second.expiry, first.expiry)
+	}
+
+	clock = second.expiry.Add(time.Minute)
+	third := handshake()
+	if third.serial == second.serial {
+		t.Fatalf("leaf was not renewed after second expiry: serial=%s", third.serial)
+	}
+	if !third.expiry.After(clock) {
+		t.Fatalf("third CONNECT leaf expired at %s before advanced clock %s", third.expiry, clock)
+	}
+
+	clock = third.expiry.Add(-leafRemintMargin + time.Minute)
+	fourth := handshake()
+	if fourth.serial == third.serial {
+		t.Fatalf("leaf was not renewed on the second remint boundary: serial=%s", fourth.serial)
+	}
+}
+
 func TestForwardProxyMITMRequiresCapabilityForAmbiguousHost(t *testing.T) {
 	broker := newFakeBroker(t)
 	upstream := newFakeUpstream(t)

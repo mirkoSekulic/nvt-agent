@@ -327,8 +327,17 @@ func writeFileAtomic(target string, content []byte, mode os.FileMode) error {
 // ServerTLSConfig returns the tls.Config for a listen_tls: ca route.
 func (ca *CA) ServerTLSConfig() *tls.Config {
 	return &tls.Config{
-		MinVersion:     tls.VersionTLS12,
-		GetCertificate: ca.GetCertificate,
+		MinVersion: tls.VersionTLS12,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			cert, err := ca.GetCertificate(hello)
+			if err != nil {
+				return nil, err
+			}
+			return &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{*cert},
+			}, nil
+		},
 	}
 }
 
