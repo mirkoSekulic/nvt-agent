@@ -66,10 +66,6 @@ type CA struct {
 	mu         sync.Mutex
 	leaf       *tls.Certificate
 	leafExpiry time.Time
-	// leafSessionTicketKey is rotated whenever the local leaf is minted or
-	// reminted. That keeps TLS 1.3 resumption working for a fresh leaf while
-	// invalidating stale session tickets when the certificate changes.
-	leafSessionTicketKey [32]byte
 	// upstreamLeaves caches one leaf per allowlisted upstream SNI.
 	upstreamLeaves map[string]*cachedLeaf
 }
@@ -77,9 +73,6 @@ type CA struct {
 type cachedLeaf struct {
 	cert   *tls.Certificate
 	expiry time.Time
-	// sessionTicketKey rotates with the cached leaf so resumed sessions stop
-	// at the same freshness boundary as certificate reuse.
-	sessionTicketKey [32]byte
 }
 
 // NewCA generates the CA keypair and self-signed certificate in memory.
@@ -332,24 +325,10 @@ func writeFileAtomic(target string, content []byte, mode os.FileMode) error {
 }
 
 // ServerTLSConfig returns the tls.Config for a listen_tls: ca route.
-// Session tickets stay enabled, but the ticket key is leaf-scoped and rotates
-// with each remint so TLS 1.3 resumption works before the freshness boundary
-// and fails closed after the certificate changes.
 func (ca *CA) ServerTLSConfig() *tls.Config {
 	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			cert, ticketKey, err := ca.certificateAndTicketKey(hello)
-			if err != nil {
-				return nil, err
-			}
-			return &tls.Config{
-				MinVersion:             tls.VersionTLS12,
-				SessionTicketsDisabled: false,
-				SessionTicketKey:       ticketKey,
-				Certificates:           []tls.Certificate{*cert},
-			}, nil
-		},
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: ca.GetCertificate,
 	}
 }
 
@@ -359,19 +338,14 @@ func (ca *CA) ServerTLSConfig() *tls.Config {
 // that DNS SAN (Phase 6.2 forward-proxy MITM). Any other ServerName — and any
 // IP-literal upstream SNI — is refused outright.
 func (ca *CA) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	cert, _, err := ca.certificateAndTicketKey(hello)
-	return cert, err
-}
-
-func (ca *CA) certificateAndTicketKey(hello *tls.ClientHelloInfo) (*tls.Certificate, [32]byte, error) {
 	name := hello.ServerName
 	if name == "" || ca.isLocalLeafName(name) {
-		return ca.localLeafState()
+		return ca.localLeaf()
 	}
 	if ca.isUpstreamLeafName(name) {
-		return ca.upstreamLeafState(name)
+		return ca.upstreamLeaf(name)
 	}
-	return nil, [32]byte{}, fmt.Errorf("refusing to mint leaf for non-allowlisted name %q", name)
+	return nil, fmt.Errorf("refusing to mint leaf for non-allowlisted name %q", name)
 }
 
 func (ca *CA) allowedLeafName(name string) bool {
@@ -407,29 +381,20 @@ func (ca *CA) now() time.Time {
 }
 
 func (ca *CA) localLeaf() (*tls.Certificate, error) {
-	cert, _, err := ca.localLeafState()
-	return cert, err
-}
-
-func (ca *CA) localLeafState() (*tls.Certificate, [32]byte, error) {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 	now := ca.now()
 	if ca.leaf != nil && now.Before(ca.leafExpiry.Add(-leafRemintMargin)) {
-		return ca.leaf, ca.leafSessionTicketKey, nil
+		return ca.leaf, nil
 	}
 	old := ca.leaf
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("generate leaf key: %w", err)
+		return nil, fmt.Errorf("generate leaf key: %w", err)
 	}
 	serial, err := randomSerial()
 	if err != nil {
-		return nil, [32]byte{}, err
-	}
-	ticketKey, err := randomSessionTicketKey()
-	if err != nil {
-		return nil, [32]byte{}, err
+		return nil, err
 	}
 	expiry := now.Add(leafValidity)
 	template := &x509.Certificate{
@@ -444,11 +409,11 @@ func (ca *CA) localLeafState() (*tls.Certificate, [32]byte, error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("sign leaf certificate: %w", err)
+		return nil, fmt.Errorf("sign leaf certificate: %w", err)
 	}
 	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("parse leaf certificate: %w", err)
+		return nil, fmt.Errorf("parse leaf certificate: %w", err)
 	}
 	ca.leaf = &tls.Certificate{
 		Certificate: [][]byte{der},
@@ -456,28 +421,22 @@ func (ca *CA) localLeafState() (*tls.Certificate, [32]byte, error) {
 		Leaf:        leaf,
 	}
 	ca.leafExpiry = expiry
-	ca.leafSessionTicketKey = ticketKey
 	ca.logLeafEvent(localLeafName, old, ca.leaf)
-	return ca.leaf, ticketKey, nil
+	return ca.leaf, nil
 }
 
 // upstreamLeaf mints (and caches per SNI) a leaf for an allowlisted upstream
 // host. The leaf carries only that DNS SAN and no IP SANs; an IP-literal SNI is
 // refused so the MITM boundary is exactly the configured DNS hosts.
 func (ca *CA) upstreamLeaf(name string) (*tls.Certificate, error) {
-	cert, _, err := ca.upstreamLeafState(name)
-	return cert, err
-}
-
-func (ca *CA) upstreamLeafState(name string) (*tls.Certificate, [32]byte, error) {
 	if net.ParseIP(name) != nil {
-		return nil, [32]byte{}, fmt.Errorf("refusing to mint upstream leaf for IP literal %q", name)
+		return nil, fmt.Errorf("refusing to mint upstream leaf for IP literal %q", name)
 	}
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 	now := ca.now()
 	if entry, ok := ca.upstreamLeaves[name]; ok && now.Before(entry.expiry.Add(-leafRemintMargin)) {
-		return entry.cert, entry.sessionTicketKey, nil
+		return entry.cert, nil
 	}
 	var old *tls.Certificate
 	if entry, ok := ca.upstreamLeaves[name]; ok {
@@ -485,15 +444,11 @@ func (ca *CA) upstreamLeafState(name string) (*tls.Certificate, [32]byte, error)
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("generate leaf key: %w", err)
+		return nil, fmt.Errorf("generate leaf key: %w", err)
 	}
 	serial, err := randomSerial()
 	if err != nil {
-		return nil, [32]byte{}, err
-	}
-	ticketKey, err := randomSessionTicketKey()
-	if err != nil {
-		return nil, [32]byte{}, err
+		return nil, err
 	}
 	expiry := now.Add(leafValidity)
 	template := &x509.Certificate{
@@ -507,28 +462,20 @@ func (ca *CA) upstreamLeafState(name string) (*tls.Certificate, [32]byte, error)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("sign upstream leaf certificate: %w", err)
+		return nil, fmt.Errorf("sign upstream leaf certificate: %w", err)
 	}
 	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("parse upstream leaf certificate: %w", err)
+		return nil, fmt.Errorf("parse upstream leaf certificate: %w", err)
 	}
 	cert := &tls.Certificate{
 		Certificate: [][]byte{der},
 		PrivateKey:  key,
 		Leaf:        leaf,
 	}
-	ca.upstreamLeaves[name] = &cachedLeaf{cert: cert, expiry: expiry, sessionTicketKey: ticketKey}
+	ca.upstreamLeaves[name] = &cachedLeaf{cert: cert, expiry: expiry}
 	ca.logLeafEvent(name, old, cert)
-	return cert, ticketKey, nil
-}
-
-func randomSessionTicketKey() ([32]byte, error) {
-	var key [32]byte
-	if _, err := rand.Read(key[:]); err != nil {
-		return [32]byte{}, fmt.Errorf("generate session ticket key: %w", err)
-	}
-	return key, nil
+	return cert, nil
 }
 
 func (ca *CA) logLeafEvent(host string, old, current *tls.Certificate) {
