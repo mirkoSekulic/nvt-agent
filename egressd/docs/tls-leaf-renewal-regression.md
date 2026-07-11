@@ -14,16 +14,22 @@ Observed behavior in production-shaped traffic:
 
 Root cause category:
 
-- the bug lives at the TLS server handshake boundary, not in broker OAuth,
-  not in the upstream request path, and not in the CA mint helper alone;
-- each new handshake must consult current leaf freshness through a fresh
-  server TLS configuration boundary.
+- the bug lives at the TLS server handshake boundary where TLS 1.3 session
+  tickets interact with leaf freshness;
+- the server must keep resumption working for a fresh leaf, but rotate the
+  ticket key when the leaf remints so stale tickets stop at the renewal
+  boundary;
+- the fix is not in broker OAuth, not in the upstream request path, and not in
+  the CA mint helper alone.
 
 Regression coverage:
 
 - `TestForwardProxyMITMRemintsExpiredLeafOnNextCONNECT`
 - `TestForwardProxyMITMRemintsAcrossMultipleExpiryCycles`
 
-These tests exercise the real CONNECT path, terminate TLS through egressd, and
-verify that successive handshakes receive fresh certificates across multiple
-expiry cycles.
+These tests exercise the real CONNECT path with one shared TLS 1.3 client
+config and a populated session cache, then verify that:
+
+- the connection resumes before each freshness boundary;
+- a remint invalidates the stale ticket and yields a fresh certificate;
+- the behavior holds across multiple expiry cycles.
