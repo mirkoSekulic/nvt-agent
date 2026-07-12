@@ -1,0 +1,117 @@
+name: kind
+
+on:
+  pull_request:
+    paths:
+      - "runtime/**"
+      - "broker/**"
+      - "egressd/**"
+      - "captured/**"
+      - "operator/**"
+      - "gateway/**"
+      - "producers/github-comments/**"
+      - "charts/**"
+      - "scripts/**"
+      - "tests/operator/**"
+      - "tests/fixtures/echo/**"
+      - "protocol/**"
+      - "Makefile"
+      - ".github/workflows/kind.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kind-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - mediated-egress
+          - enforced-egress
+          - transparent-egress
+    env:
+      CREATE_CLUSTER: 1
+      DELETE_CLUSTER: 1
+      CLUSTER: nvt-${{ github.run_id }}-${{ matrix.case }}
+      KIND_SMOKE_CASE: ${{ matrix.case }}
+      KIND_SMOKE_MODE: kind
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: operator/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.0
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.24.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          python3 -m pip install PyYAML
+      - name: Run kind smoke case
+        run: make operator-kind-smoke
+      - name: Cleanup kind cluster
+        if: always()
+        run: kind delete cluster --name "${CLUSTER}" >/dev/null 2>&1 || true
+
+  kind-full:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - mediated-egress
+          - enforced-egress
+          - transparent-egress
+          - quota-egress
+          - revocation
+          - parallel-lifecycle
+    env:
+      CREATE_CLUSTER: 1
+      DELETE_CLUSTER: 1
+      CLUSTER: nvt-${{ github.run_id }}-${{ matrix.case }}
+      KIND_SMOKE_CASE: ${{ matrix.case }}
+      KIND_SMOKE_MODE: kind
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: operator/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.0
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.24.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          python3 -m pip install PyYAML
+      - name: Run kind smoke case
+        run: make operator-kind-smoke
+      - name: Cleanup kind cluster
+        if: always()
+        run: kind delete cluster --name "${CLUSTER}" >/dev/null 2>&1 || true

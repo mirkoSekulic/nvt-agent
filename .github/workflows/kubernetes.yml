@@ -1,0 +1,92 @@
+name: kubernetes
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "operator/**"
+      - "gateway/**"
+      - "producers/github-comments/**"
+      - "charts/**"
+      - "scripts/**"
+      - "tests/operator/**"
+      - "protocol/**"
+      - "Makefile"
+      - ".github/workflows/kubernetes.yml"
+  pull_request:
+    paths:
+      - "operator/**"
+      - "gateway/**"
+      - "producers/github-comments/**"
+      - "charts/**"
+      - "scripts/**"
+      - "tests/operator/**"
+      - "protocol/**"
+      - "Makefile"
+      - ".github/workflows/kubernetes.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  operator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: operator/go.sum
+      - name: Run operator tests
+        working-directory: operator
+        run: |
+          go vet ./...
+          go test ./...
+
+  gateway:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: gateway/go.sum
+      - name: Run gateway tests
+        working-directory: gateway
+        run: |
+          go vet ./...
+          go test ./...
+
+  producer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: producers/github-comments/go.sum
+      - name: Run github-comments producer tests
+        working-directory: producers/github-comments
+        run: |
+          go vet ./...
+          go test ./...
+
+  operator-helm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Run operator Helm and shell coverage
+        run: make operator-helm-test
