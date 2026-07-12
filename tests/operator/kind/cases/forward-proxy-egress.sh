@@ -37,10 +37,10 @@ case_kind_setup() {
     ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT}" \
     operator-kind-cluster-enforced
 
-  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
+  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_apply_retry
   kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-smoke-broker-env \
     --from-literal=NVT_SMOKE_STATIC_TOKEN=nvt-smoke-fixture-token \
-    --dry-run=client -o yaml | kubectl_smoke apply -f -
+    --dry-run=client -o yaml | kubectl_apply_retry
   write_broker_providers_values "${SMOKE_TMPDIR}/broker-providers.yaml"
   deploy_echo_fixture
   install_fixture_dns_rewrite
@@ -70,7 +70,7 @@ install_fixture_dns_rewrite() {
     rewrite name ${FIXTURE_HOST} ${target}}"
     fi
     kubectl_smoke -n kube-system create configmap coredns \
-      --from-literal=Corefile="${corefile}" --dry-run=client -o yaml | kubectl_smoke -n kube-system apply -f -
+      --from-literal=Corefile="${corefile}" --dry-run=client -o yaml | kubectl_apply_retry
     kubectl_smoke -n kube-system rollout restart deployment/coredns
     kubectl_smoke -n kube-system rollout status deployment/coredns --timeout="${ROLLOUT_TIMEOUT}"
   fi

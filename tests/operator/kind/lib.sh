@@ -61,6 +61,21 @@ kubectl_smoke() {
   kubectl --context "${KUBECTL_CONTEXT}" "$@"
 }
 
+kubectl_apply_retry() {
+  local manifest
+  local deadline
+  local wait_seconds="${KUBECTL_APPLY_RETRY_SECONDS:-300}"
+  manifest="$(cat)"
+  deadline=$((SECONDS + wait_seconds))
+  while (( SECONDS < deadline )); do
+    if printf '%s' "${manifest}" | kubectl_smoke apply --validate=false -f - >/dev/null 2>&1; then
+      return
+    fi
+    sleep 2
+  done
+  printf '%s' "${manifest}" | kubectl_smoke apply --validate=false -f -
+}
+
 # deploy_echo_fixture loads and deploys the hermetic upstream echo image
 # (tests/fixtures/echo) into the active cluster/namespace. It replaces the
 # external httpbin.org dependency: egressd reaches it over plain HTTP on
@@ -74,7 +89,7 @@ ECHO_FIXTURE_PORT="${ECHO_FIXTURE_PORT:-443}"
 deploy_echo_fixture() {
   log "deploying hermetic echo upstream fixture ${ECHO_FIXTURE_NAME}"
   make -C "${ROOT}" CLUSTER="${CLUSTER}" echo-kind-load
-  kubectl_smoke apply -f - <<YAML
+  kubectl_apply_retry <<YAML
 apiVersion: apps/v1
 kind: Deployment
 metadata:
