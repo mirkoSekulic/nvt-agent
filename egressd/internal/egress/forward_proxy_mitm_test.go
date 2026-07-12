@@ -118,9 +118,10 @@ func TestForwardProxyMITMInjectsRealToken(t *testing.T) {
 }
 
 // TestForwardProxyMITMRemintsExpiredLeafOnNextCONNECT exercises the exact
-// production CONNECT -> tls.Server(ServerTLSConfig) path twice. Each CONNECT
-// receives a fresh server tls.Config, so even a client with a populated session
-// cache must perform a full handshake and invoke the CA's renewal callback.
+// production CONNECT -> tls.Server(ServerTLSConfig) path across two renewal
+// cycles. Each CONNECT receives a fresh server tls.Config, so even a client
+// with a populated session cache must perform a full handshake and invoke the
+// CA's renewal callback.
 func TestForwardProxyMITMRemintsExpiredLeafOnNextCONNECT(t *testing.T) {
 	const host = "chatgpt.com"
 	broker := newFakeBroker(t)
@@ -185,6 +186,26 @@ func TestForwardProxyMITMRemintsExpiredLeafOnNextCONNECT(t *testing.T) {
 	if !newLeaf.NotAfter.After(clock) {
 		t.Fatalf("second CONNECT leaf expired at %s before advanced clock %s", newLeaf.NotAfter, clock)
 	}
+	response = mitmRequest(t, second, "/second")
+	_ = response.Body.Close()
+	_ = second.Close()
+
+	clock = newLeaf.NotAfter.Add(time.Minute)
+	third := dial()
+	defer third.Close()
+	thirdState := third.ConnectionState()
+	if thirdState.DidResume {
+		t.Fatal("third CONNECT resumed despite the production path using a fresh server tls.Config")
+	}
+	thirdLeaf := thirdState.PeerCertificates[0]
+	if thirdLeaf.SerialNumber.Cmp(newLeaf.SerialNumber) == 0 {
+		t.Fatalf("third CONNECT received stale leaf serial %s", thirdLeaf.SerialNumber)
+	}
+	if !thirdLeaf.NotAfter.After(clock) {
+		t.Fatalf("third CONNECT leaf expired at %s before advanced clock %s", thirdLeaf.NotAfter, clock)
+	}
+	response = mitmRequest(t, third, "/third")
+	_ = response.Body.Close()
 }
 
 func TestForwardProxyMITMRequiresCapabilityForAmbiguousHost(t *testing.T) {

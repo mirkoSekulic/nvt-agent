@@ -98,7 +98,9 @@ func NewCAWithUpstreams(leafDNSNames, upstreamLeafNames []string) (*CA, error) {
 	}
 	names := append([]string(nil), leafDNSNames...)
 	upstreams := append([]string(nil), upstreamLeafNames...)
-	now := time.Now()
+	// X.509 validity is wall-clock based. Keep certificate timestamps free of
+	// Go's monotonic reading so suspend/resume cannot skew later comparisons.
+	now := time.Now().UTC().Truncate(time.Second)
 	template := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "nvt-egressd per-agent CA"},
@@ -375,9 +377,9 @@ func (ca *CA) isUpstreamLeafName(name string) bool {
 
 func (ca *CA) now() time.Time {
 	if ca.Now != nil {
-		return ca.Now()
+		return ca.Now().UTC()
 	}
-	return time.Now()
+	return time.Now().UTC()
 }
 
 func (ca *CA) localLeaf() (*tls.Certificate, error) {
@@ -420,7 +422,10 @@ func (ca *CA) localLeaf() (*tls.Certificate, error) {
 		PrivateKey:  key,
 		Leaf:        leaf,
 	}
-	ca.leafExpiry = expiry
+	// Use the parsed X.509 timestamp as the cache deadline. Besides matching
+	// the certificate's second precision exactly, parsed timestamps carry no
+	// monotonic reading, so wall time advanced by host/VM suspend is honored.
+	ca.leafExpiry = leaf.NotAfter
 	ca.logLeafEvent(localLeafName, old, ca.leaf)
 	return ca.leaf, nil
 }
@@ -473,7 +478,7 @@ func (ca *CA) upstreamLeaf(name string) (*tls.Certificate, error) {
 		PrivateKey:  key,
 		Leaf:        leaf,
 	}
-	ca.upstreamLeaves[name] = &cachedLeaf{cert: cert, expiry: expiry}
+	ca.upstreamLeaves[name] = &cachedLeaf{cert: cert, expiry: leaf.NotAfter}
 	ca.logLeafEvent(name, old, cert)
 	return cert, nil
 }

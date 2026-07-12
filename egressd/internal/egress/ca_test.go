@@ -848,3 +848,81 @@ func TestCAUpstreamLeafRemintsWithClock(t *testing.T) {
 		t.Fatalf("unexpected leaf lifecycle logs: %q", logs.String())
 	}
 }
+
+// TestCALeafCacheDeadlinesUseWallClock pins the suspend/resume invariant:
+// certificate cache deadlines must match parsed X.509 NotAfter values and
+// must not retain time.Now's monotonic reading. Both local and upstream caches
+// must continue renewing across more than one wall-clock validity cycle.
+func TestCALeafCacheDeadlinesUseWallClock(t *testing.T) {
+	const upstream = "api.example.test"
+
+	for _, tc := range []struct {
+		name string
+		sni  string
+	}{
+		{name: "local"},
+		{name: "upstream", sni: upstream},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := time.Now()
+			ca, err := NewCAWithUpstreams(nil, []string{upstream})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ca.Now = func() time.Time { return clock }
+			normalizedNow := ca.now()
+			if normalizedNow != normalizedNow.Round(0) || normalizedNow.Location() != time.UTC {
+				t.Fatalf("CA clock %s is not normalized UTC wall time", normalizedNow)
+			}
+
+			get := func() *tls.Certificate {
+				t.Helper()
+				cert, err := ca.GetCertificate(&tls.ClientHelloInfo{ServerName: tc.sni})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return cert
+			}
+			cacheExpiry := func() time.Time {
+				t.Helper()
+				ca.mu.Lock()
+				defer ca.mu.Unlock()
+				if tc.sni == "" {
+					return ca.leafExpiry
+				}
+				return ca.upstreamLeaves[tc.sni].expiry
+			}
+			assertWallDeadline := func(cert *tls.Certificate) {
+				t.Helper()
+				expiry := cacheExpiry()
+				if expiry != expiry.Round(0) {
+					t.Fatalf("cache expiry %s retains a monotonic clock reading", expiry)
+				}
+				if !expiry.Equal(cert.Leaf.NotAfter) {
+					t.Fatalf("cache expiry %s != certificate NotAfter %s", expiry, cert.Leaf.NotAfter)
+				}
+			}
+
+			first := get()
+			assertWallDeadline(first)
+			clock = first.Leaf.NotAfter.Add(-leafRemintMargin - time.Minute)
+			if reused := get(); reused.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) != 0 {
+				t.Fatal("leaf changed before remint margin")
+			}
+
+			clock = first.Leaf.NotAfter.Add(-leafRemintMargin + time.Minute)
+			second := get()
+			if second.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) == 0 {
+				t.Fatal("leaf was not renewed at first wall-clock boundary")
+			}
+			assertWallDeadline(second)
+
+			clock = second.Leaf.NotAfter.Add(time.Minute)
+			third := get()
+			if third.Leaf.SerialNumber.Cmp(second.Leaf.SerialNumber) == 0 {
+				t.Fatal("leaf was not renewed after the second wall-clock expiry")
+			}
+			assertWallDeadline(third)
+		})
+	}
+}
