@@ -1,11 +1,11 @@
 package broker_test
 
 // Conformance for the hardened Claude Code OAuth refresh path (protocol/broker.md
-// "Claude OAuth Provider Rules"). Claude credentials expose an access-token
-// expiresAt only (refresh-token expiry is unknown), so the broker refreshes the
-// access token proactively, serializes refresh to a single upstream call, and
-// backs off on transient failure so Claude Code retries cannot storm the OAuth
-// endpoint. Token values must never appear in responses, audit, or broker logs.
+// "Claude OAuth Provider Rules"). The broker refreshes the access token
+// proactively, persists the returned access/refresh lifetime metadata,
+// serializes refresh to a single upstream call, and backs off on transient
+// failure so Claude Code retries cannot storm the OAuth endpoint. Token values
+// must never appear in responses, audit, or broker logs.
 
 import (
 	"bytes"
@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -141,7 +142,11 @@ func TestClaudeRefreshSendsLiteralScopeOverride(t *testing.T) {
 func TestClaudeRefreshPersistsRotatedToken(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(claudePlaceholderIdentities())
-	f.claudeOAuth.configure(func(c *fakeClaudeOAuth) { c.rotate = true })
+	f.claudeOAuth.configure(func(c *fakeClaudeOAuth) {
+		c.rotate = true
+		c.refreshExpiresIn = 30 * 24 * 60 * 60
+		c.scope = "user:inference user:profile user:mcp_servers"
+	})
 	f.writeClaudeCredentialsExpiring("claude-access-near-expiry", "claude-refresh-real", time.Now().Add(5*time.Minute))
 
 	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", claudeInjectionRequest())
@@ -157,6 +162,44 @@ func TestClaudeRefreshPersistsRotatedToken(t *testing.T) {
 	}
 	if oauth["accessToken"] != "refreshed-claude-access-1" {
 		t.Fatalf("access token was not refreshed alongside rotation: %#v", oauth["accessToken"])
+	}
+	refreshExpiresAt, ok := oauth["refreshTokenExpiresAt"].(float64)
+	if !ok || int64(refreshExpiresAt) < time.Now().Add(29*24*time.Hour).UnixMilli() {
+		t.Fatalf("refreshTokenExpiresAt was not advanced from refresh_token_expires_in: %#v", oauth["refreshTokenExpiresAt"])
+	}
+	if got := oauth["scopes"]; !reflect.DeepEqual(got, []any{"user:inference", "user:profile", "user:mcp_servers"}) {
+		t.Fatalf("granted scopes were not persisted: %#v", got)
+	}
+	if oauth["clientId"] != "claude-test-client" {
+		t.Fatalf("refresh client id was not persisted: %#v", oauth["clientId"])
+	}
+}
+
+func TestClaudeRefreshPreservesOptionalMetadataWhenResponseOmitsIt(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeRoleIdentities(claudePlaceholderIdentities())
+	f.claudeOAuth.configure(func(c *fakeClaudeOAuth) { c.rotate = true })
+	refreshExpiresAt := time.Now().Add(20 * 24 * time.Hour).UnixMilli()
+	writeJSONFile(t, f.claudeCreds, map[string]any{
+		"claudeAiOauth": map[string]any{
+			"accessToken":           "claude-access-near-expiry",
+			"refreshToken":          "claude-refresh-real",
+			"expiresAt":             time.Now().Add(5 * time.Minute).UnixMilli(),
+			"refreshTokenExpiresAt": refreshExpiresAt,
+			"scopes":                []string{"user:inference", "user:profile"},
+		},
+	})
+
+	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", claudeInjectionRequest())
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("refresh failed: status=%d body=%v", status, body)
+	}
+	oauth := decodeClaudeCanonical(t, f)
+	if int64(oauth["refreshTokenExpiresAt"].(float64)) != refreshExpiresAt {
+		t.Fatalf("refresh expiry changed when the response omitted it: %#v", oauth["refreshTokenExpiresAt"])
+	}
+	if got := oauth["scopes"]; !reflect.DeepEqual(got, []any{"user:inference", "user:profile"}) {
+		t.Fatalf("scopes changed when the response omitted them: %#v", got)
 	}
 }
 
@@ -533,7 +576,10 @@ func runClaudeProbe(t *testing.T, root, configPath, provider string) (map[string
 // (status, field names, old/new expiresAt, rotation flag) — never token values.
 func TestClaudeRefreshProbePersistsAndRedacts(t *testing.T) {
 	f := newBrokerFixture(t)
-	f.claudeOAuth.configure(func(c *fakeClaudeOAuth) { c.rotate = true })
+	f.claudeOAuth.configure(func(c *fakeClaudeOAuth) {
+		c.rotate = true
+		c.refreshExpiresIn = 30 * 24 * 60 * 60
+	})
 	f.writeClaudeCredentialsExpiring("claude-access-secret-value", "claude-refresh-secret-value", time.Now().Add(time.Hour))
 
 	payload, output, status := runClaudeProbe(t, f.root, f.config, "claude-main")
@@ -542,6 +588,9 @@ func TestClaudeRefreshProbePersistsAndRedacts(t *testing.T) {
 	}
 	if payload["status"] != "ok" || payload["refresh_token_rotated"] != true {
 		t.Fatalf("unexpected probe summary: %#v", payload)
+	}
+	if payload["new_refresh_expires_at"] == nil {
+		t.Fatalf("probe summary must report the refreshed credential lifetime: %#v", payload)
 	}
 	keys, ok := payload["keys"].([]any)
 	if !ok || len(keys) == 0 {
@@ -556,6 +605,13 @@ func TestClaudeRefreshProbePersistsAndRedacts(t *testing.T) {
 	oauth := decodeClaudeCanonical(t, f)
 	if oauth["refreshToken"] != "rotated-claude-refresh-1" || oauth["accessToken"] != "refreshed-claude-access-1" {
 		t.Fatalf("probe did not persist the rotated credential: %#v", oauth)
+	}
+	info, err := os.Stat(f.claudeCreds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("persisted Claude credential mode = %o, want 600", got)
 	}
 }
 

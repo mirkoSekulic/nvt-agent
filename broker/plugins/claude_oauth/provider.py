@@ -27,9 +27,11 @@ headers with no Claude-specific logic.
 Refresh: the broker keeps the broker-side access token fresh over the network
 (an OAuth ``refresh_token`` exchange against ``token-url``, analogous to the
 Codex flow). Claude credentials only expose ``expiresAt`` for the *access*
-token; refresh-token expiry is unknown, so the broker refreshes the access
-token proactively (before ``expiresAt`` minus a safety margin) rather than
-waiting for a 401. Refresh is serialized: single-flight *within* the broker
+token. Newer Claude credentials may also carry ``refreshTokenExpiresAt``; the
+broker preserves it and advances it when the token endpoint returns
+``refresh_token_expires_in``. Access-token refresh remains proactive (before
+``expiresAt`` minus a safety margin) rather than waiting for a 401. Refresh is
+serialized: single-flight *within* the broker
 process (a thread lock) and *across* processes (an advisory ``flock`` on a lock
 file beside ``credentials-file``) so a second broker or the manual probe cannot
 run a competing refresh-token exchange and invalidate the rotation. It is
@@ -87,10 +89,11 @@ DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 DEFAULT_REFRESH_SCOPE = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 DEFAULT_USER_AGENT = "axios/1.15.2"
 # Refresh the access token this many seconds before its expiresAt. Claude
-# credentials do not expose refresh-token expiry, so we cannot key off it; a
-# generous access-token margin keeps a usable token in hand well before Claude
-# Code would notice a 401 and start retrying.
+# Refresh is driven by access-token expiry. A refresh-token expiry, when known,
+# is retained for operator visibility but cannot replace proactive access-token
+# refresh: no token exchange can extend a refresh token after it has expired.
 DEFAULT_REFRESH_MARGIN_SECONDS = 900
+DEFAULT_REFRESH_EXPIRY_WARNING_SECONDS = 5 * 24 * 60 * 60
 # After a transient refresh failure, cache the sanitized failure for a cooldown
 # (with light jitter and exponential backoff up to the max) so concurrent Claude
 # CLI retries do not hammer the OAuth endpoint. Fail fast (or serve a still-valid
@@ -156,6 +159,9 @@ class ClaudeOAuthProvider:
         self.refresh_scope = self._provider_value("refresh-scope", DEFAULT_REFRESH_SCOPE)
         self.user_agent = self._provider_value("user-agent", DEFAULT_USER_AGENT)
         self.refresh_margin_seconds = self._int_config("refresh-margin-seconds", DEFAULT_REFRESH_MARGIN_SECONDS)
+        self.refresh_expiry_warning_seconds = self._int_config(
+            "refresh-expiry-warning-seconds", DEFAULT_REFRESH_EXPIRY_WARNING_SECONDS
+        )
         self.refresh_cooldown_seconds = self._int_config("refresh-cooldown-seconds", DEFAULT_REFRESH_COOLDOWN_SECONDS)
         self.refresh_cooldown_max_seconds = self._int_config(
             "refresh-cooldown-max-seconds", DEFAULT_REFRESH_COOLDOWN_MAX_SECONDS
@@ -176,6 +182,7 @@ class ClaudeOAuthProvider:
         self._cooldown_until = 0.0
         self._cooldown_error = None
         self._backoff_seconds = self.refresh_cooldown_seconds
+        self._refresh_expiry_warned = False
 
     def _source(self):
         # Exactly one broker-side source of the Claude credentials. A host path
@@ -332,6 +339,26 @@ class ClaudeOAuthProvider:
             return None
         return int(exp_ms // 1000)
 
+    def _refresh_expiry_seconds(self, oauth):
+        exp_ms = oauth.get("refreshTokenExpiresAt")
+        if not isinstance(exp_ms, (int, float)) or isinstance(exp_ms, bool):
+            return None
+        return int(exp_ms // 1000)
+
+    def _warn_refresh_expiry(self, oauth):
+        exp = self._refresh_expiry_seconds(oauth)
+        if exp is None:
+            return
+        if exp - int(time.time()) > self.refresh_expiry_warning_seconds:
+            self._refresh_expiry_warned = False
+            return
+        if not self._refresh_expiry_warned:
+            self._log(
+                f"refresh authorization expires at {rfc3339(exp)}; "
+                "replace the broker credential from a trusted login before then"
+            )
+            self._refresh_expiry_warned = True
+
     # --- proactive, single-flight refresh -----------------------------------
 
     def _can_refresh(self):
@@ -358,6 +385,7 @@ class ClaudeOAuthProvider:
         if margin is None:
             margin = self.refresh_margin_seconds
         data, oauth = self._read_credentials()
+        self._warn_refresh_expiry(oauth)
         access_token = self._access_token(oauth)
         exp = self._expiry_seconds(oauth)
         now = int(time.time())
@@ -411,7 +439,12 @@ class ClaudeOAuthProvider:
                     return data, oauth, access_token, exp, False
                 # Expired and refresh failed on the mediated path: fail closed.
                 raise
-            self._persist(refreshed)
+            try:
+                self._persist(refreshed)
+            except ProviderError as error:
+                self._enter_cooldown(error)
+                self._audit_refresh(audit, request_id, agent_id, operation_prefix, False, None, error.reason)
+                raise
             self._reset_cooldown()
             data = refreshed
             oauth = data["claudeAiOauth"]
@@ -543,7 +576,19 @@ class ClaudeOAuthProvider:
         rotated = payload.get("refresh_token")
         if isinstance(rotated, str) and rotated:
             updated_oauth["refreshToken"] = rotated
-        updated_oauth["expiresAt"] = (int(time.time()) + int(expires_in)) * 1000
+        now = time.time()
+        updated_oauth["expiresAt"] = int((now + float(expires_in)) * 1000)
+        refresh_expires_in = payload.get("refresh_token_expires_in")
+        if (
+            isinstance(refresh_expires_in, (int, float))
+            and not isinstance(refresh_expires_in, bool)
+            and refresh_expires_in > 0
+        ):
+            updated_oauth["refreshTokenExpiresAt"] = int((now + float(refresh_expires_in)) * 1000)
+        scope = payload.get("scope")
+        if isinstance(scope, str):
+            updated_oauth["scopes"] = scope.split()
+        updated_oauth["clientId"] = self.client_id
         return updated
 
     def _classify_http_error(self, error):
@@ -599,24 +644,46 @@ class ClaudeOAuthProvider:
                 "credentials-env source cannot persist a rotated Claude credential",
                 502,
             )
-        self._write_credentials(data)
+        try:
+            self._write_credentials(data)
+        except OSError as error:
+            raise ProviderError(
+                "token-refresh-persist-failed",
+                "Claude token refresh succeeded but the rotated credential could not be persisted",
+                502,
+            ) from error
 
     def _write_credentials(self, data):
         path = self.credentials_file
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            mode = path.stat().st_mode & 0o777
-        except FileNotFoundError:
-            mode = 0o600
         temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        retain_recovery = False
         try:
-            with temporary.open("w", encoding="utf-8") as file:
+            # Create secret-bearing temporary state as 0600 from its first byte;
+            # writing with the process umask and chmodding afterward creates a
+            # brief world/group-readable exposure window on permissive umasks.
+            fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
                 json.dump(data, file, indent=2)
                 file.write("\n")
-            temporary.chmod(mode)
-            os.replace(temporary, path)
+                file.flush()
+                os.fsync(file.fileno())
+            try:
+                os.replace(temporary, path)
+            except OSError:
+                # The upstream may already have invalidated the old refresh
+                # token. Retain the fully-written 0600 file as the only possible
+                # recovery copy instead of deleting the rotated credential.
+                retain_recovery = True
+                raise
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
-            temporary.unlink(missing_ok=True)
+            if not retain_recovery:
+                temporary.unlink(missing_ok=True)
 
     def _log(self, message):
         # Provider diagnostics only — callers must never pass token material.
@@ -726,18 +793,22 @@ class ClaudeOAuthProvider:
             data, oauth = self._read_credentials()
             self._access_token(oauth)
             old_exp = self._expiry_seconds(oauth)
+            old_refresh_exp = self._refresh_expiry_seconds(oauth)
             old_refresh = oauth.get("refreshToken")
             refreshed = self._refresh(data, oauth)
             self._persist(refreshed)
             self._reset_cooldown()
             new_oauth = refreshed["claudeAiOauth"]
             new_exp = self._expiry_seconds(new_oauth)
+            new_refresh_exp = self._refresh_expiry_seconds(new_oauth)
             return {
                 "status": "ok",
                 "source": "credentials-file",
                 "keys": sorted(new_oauth.keys()),
                 "old_expires_at": rfc3339(old_exp) if old_exp is not None else None,
                 "new_expires_at": rfc3339(new_exp) if new_exp is not None else None,
+                "old_refresh_expires_at": rfc3339(old_refresh_exp) if old_refresh_exp is not None else None,
+                "new_refresh_expires_at": rfc3339(new_refresh_exp) if new_refresh_exp is not None else None,
                 "refresh_token_rotated": bool(new_oauth.get("refreshToken") != old_refresh),
             }
 
