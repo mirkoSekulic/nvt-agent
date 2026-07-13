@@ -477,11 +477,20 @@ class ExecutableProviderAdapter:
                 if self._closing:
                     return
             try:
+                with self._lock:
+                    self._restart_requested = False
                 self._start(initial=False)
                 with self._lock:
-                    if self._ready and not self._restart_requested:
-                        return
-                    self._restart_requested = False
+                    requested = self._restart_requested
+                    generation = self._generation
+                    ready = self._ready
+                if ready and not requested:
+                    return
+                if ready and requested:
+                    # A failure raced with initialization. Retire this child
+                    # before another attempt so no credential-bearing process
+                    # is orphaned or overwritten.
+                    self._fail_generation(generation, "provider-unavailable")
             except (ProviderError, BrokerConfigError):
                 with self._lock:
                     delay = self._restart_delay
