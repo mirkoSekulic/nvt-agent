@@ -1,0 +1,90 @@
+name: runtime
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "runtime/**"
+      - "templates/**"
+      - "compose.agent.yaml"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/agentd/**"
+      - "tests/runtime/**"
+      - "protocol/**"
+      - ".github/workflows/runtime.yml"
+  pull_request:
+    paths:
+      - "runtime/**"
+      - "templates/**"
+      - "compose.agent.yaml"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/agentd/**"
+      - "tests/runtime/**"
+      - "protocol/**"
+      - ".github/workflows/runtime.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agentd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TERM: screen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: tests/agentd/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install agentd test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+          python3 -m pip install PyYAML
+      - name: Run agentd conformance suite
+        working-directory: tests/agentd
+        env:
+          AGENTD_BIN: python3 ${{ github.workspace }}/runtime/agentd/agentd.py
+          AGENTDCTL_BIN: python3 ${{ github.workspace }}/runtime/agentd/agentdctl.py
+          PROMPT_AGENT_BIN: bash ${{ github.workspace }}/runtime/core/prompt-agent.sh
+        run: go test -v ./...
+
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TERM: screen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: tests/runtime/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install runtime test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+          python3 -m pip install PyYAML
+      - name: Run runtime conformance suite
+        working-directory: tests/runtime
+        env:
+          EXPORT_PLUGIN_TOOLS_BIN: python3 ${{ github.workspace }}/runtime/core/export-plugin-tools.py
+          RUN_PLUGINS_BIN: python3 ${{ github.workspace }}/runtime/core/run-plugins.py
+        run: go test -v ./...

@@ -1,0 +1,54 @@
+name: broker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "broker/**"
+      - "runtime/core/**"
+      - "runtime/plugins/**"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/broker/**"
+      - "protocol/**"
+      - ".github/workflows/broker.yml"
+  pull_request:
+    paths:
+      - "broker/**"
+      - "runtime/core/**"
+      - "runtime/plugins/**"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/broker/**"
+      - "protocol/**"
+      - ".github/workflows/broker.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: broker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  broker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: tests/broker/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install broker test dependencies
+        run: python3 -m pip install PyYAML
+      - name: Run broker conformance suite
+        working-directory: tests/broker
+        run: |
+          go vet ./...
+          go test -v ./...

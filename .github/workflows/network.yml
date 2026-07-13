@@ -1,0 +1,75 @@
+name: network
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "egressd/**"
+      - "captured/**"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/runtime/compose-transparent-smoke.sh"
+      - "tests/runtime/transparent-compose.yaml"
+      - "tests/runtime/transparent-egressd.json"
+      - "protocol/**"
+      - ".github/workflows/network.yml"
+  pull_request:
+    paths:
+      - "egressd/**"
+      - "captured/**"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/runtime/compose-transparent-smoke.sh"
+      - "tests/runtime/transparent-compose.yaml"
+      - "tests/runtime/transparent-egressd.json"
+      - "protocol/**"
+      - ".github/workflows/network.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  egressd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: egressd/go.sum
+      - name: Run egressd tests
+        working-directory: egressd
+        run: |
+          go vet ./...
+          go test -race -v ./...
+
+  captured:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: captured/go.sum
+      - name: Run captured tests
+        working-directory: captured
+        run: |
+          go vet ./...
+          go test -race -v ./...
+
+  transparent-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run transparent Compose smoke
+        run: bash tests/runtime/compose-transparent-smoke.sh

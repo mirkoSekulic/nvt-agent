@@ -1,0 +1,81 @@
+name: images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "runtime/**"
+      - "broker/**"
+      - "egressd/**"
+      - "captured/**"
+      - "operator/**"
+      - "gateway/**"
+      - "producers/github-comments/**"
+      - "tests/fixtures/echo/**"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/runtime/git_credentials_smoke.sh"
+      - ".github/workflows/images.yml"
+  pull_request:
+    paths:
+      - "runtime/**"
+      - "broker/**"
+      - "egressd/**"
+      - "captured/**"
+      - "operator/**"
+      - "gateway/**"
+      - "producers/github-comments/**"
+      - "tests/fixtures/echo/**"
+      - "scripts/**"
+      - "Makefile"
+      - "tests/runtime/git_credentials_smoke.sh"
+      - ".github/workflows/images.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runtime
+            dockerfile: runtime/Dockerfile
+            image: nvt-agent:test
+            smoke: true
+          - name: broker
+            dockerfile: broker/Dockerfile
+            image: nvt-broker:test
+          - name: egressd
+            dockerfile: egressd/Dockerfile
+            image: nvt-egressd:test
+          - name: captured
+            dockerfile: captured/Dockerfile
+            image: nvt-captured:test
+          - name: operator
+            dockerfile: operator/Dockerfile
+            image: nvt-operator:test
+          - name: gateway
+            dockerfile: gateway/Dockerfile
+            image: nvt-agent-gateway:test
+          - name: producer
+            dockerfile: producers/github-comments/Dockerfile
+            image: nvt-github-comments-producer:test
+          - name: echo
+            dockerfile: tests/fixtures/echo/Dockerfile
+            image: nvt-smoke-echo:test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.name }} image
+        run: docker build -t "${{ matrix.image }}" -f "${{ matrix.dockerfile }}" .
+      - name: Run runtime git credentials smoke
+        if: matrix.smoke
+        run: bash tests/runtime/git_credentials_smoke.sh "${{ matrix.image }}"
