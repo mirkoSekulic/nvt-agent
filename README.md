@@ -174,3 +174,7 @@ Codex/Claude OAuth providers. Security-sensitive features remain opt-in so they
 can be introduced per workload and provider.
 
 Repository contribution and test guidance is in [AGENTS.md](AGENTS.md).
+
+## Acknowledgements
+
+Thanks to [agentdp](https://github.com/martinothamar/agentdp) for the inspiration.
