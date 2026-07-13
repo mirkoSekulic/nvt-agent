@@ -128,16 +128,18 @@ func (f *fakeOAuth) lastRequest() map[string]string {
 // flow. It is independently controllable so tests can exercise rotation,
 // rate-limit (429), re-login (invalid_grant), and slow/concurrent refreshes.
 type fakeClaudeOAuth struct {
-	server    *httptest.Server
-	mu        sync.Mutex
-	requests  []map[string]any
-	status    int           // non-2xx status to return instead of a token, 0 for success
-	errorType string        // OAuth/API error code echoed in the error body
-	rotate    bool          // include a rotated refresh_token in the response
-	expiresIn int           // access token lifetime in seconds (default 3600)
-	delay     time.Duration // artificial latency, to widen the concurrency window
-	inFlight  int           // upstream refreshes currently being served
-	maxFlight int           // high-water mark of concurrent upstream refreshes
+	server           *httptest.Server
+	mu               sync.Mutex
+	requests         []map[string]any
+	status           int           // non-2xx status to return instead of a token, 0 for success
+	errorType        string        // OAuth/API error code echoed in the error body
+	rotate           bool          // include a rotated refresh_token in the response
+	expiresIn        int           // access token lifetime in seconds (default 3600)
+	refreshExpiresIn int           // refresh token lifetime in seconds (omitted when zero)
+	scope            string        // granted scope string (omitted when empty)
+	delay            time.Duration // artificial latency, to widen the concurrency window
+	inFlight         int           // upstream refreshes currently being served
+	maxFlight        int           // high-water mark of concurrent upstream refreshes
 }
 
 func newFakeClaudeOAuth(t *testing.T) *fakeClaudeOAuth {
@@ -170,6 +172,8 @@ func (f *fakeClaudeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
 	errorType := f.errorType
 	rotate := f.rotate
 	expiresIn := f.expiresIn
+	refreshExpiresIn := f.refreshExpiresIn
+	scope := f.scope
 	delay := f.delay
 	// Track concurrent in-flight upstream refreshes so a test can assert the
 	// broker/probe cross-process lock actually serializes them.
@@ -206,6 +210,12 @@ func (f *fakeClaudeOAuth) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if rotate {
 		response["refresh_token"] = fmt.Sprintf("rotated-claude-refresh-%d", count)
+	}
+	if refreshExpiresIn > 0 {
+		response["refresh_token_expires_in"] = refreshExpiresIn
+	}
+	if scope != "" {
+		response["scope"] = scope
 	}
 	writeJSON(w, response)
 }

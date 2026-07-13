@@ -443,15 +443,24 @@ providers:
 **Refresh.** The broker keeps the broker-side Claude access token fresh over the
 network with an OAuth `refresh_token` exchange (`token-url`/`client-id`,
 analogous to the Codex flow; both default to Claude Code's public values and are
-overridable). Claude credentials expose `expiresAt` for the **access token
-only** — refresh-token expiry is unknown from the credential — so the broker
-cannot wait for a signal that the refresh token is about to lapse. Instead it
+overridable). Claude credentials expose `expiresAt` for the access token and
+newer versions may also expose `refreshTokenExpiresAt`. The latter is useful
+status metadata, but the broker cannot wait until it lapses because an expired
+refresh token cannot renew itself. Instead it
 refreshes **proactively**: on any `/v1/files` or `/v1/injection/headers` request
 where the access token is within `refresh-margin-seconds` (default 900) of
 `expiresAt`, it exchanges the refresh token, persists the rotated credential
-(new `accessToken`, any rotated `refreshToken`, recomputed `expiresAt`) back to
-`credentials-file`, and serves the fresh token. This front-runs Claude Code's
+(new `accessToken`, any rotated `refreshToken`, recomputed `expiresAt`, returned
+`refreshTokenExpiresAt`, granted scopes, and client ID) back to
+`credentials-file`, and serves the fresh token. If the response omits refresh
+expiry or scope metadata, the existing value is preserved. This front-runs Claude Code's
 own 401-driven retries, which would otherwise storm the OAuth endpoint.
+
+Anthropic's returned `refresh_token_expires_in` is authoritative and is
+persisted as `refreshTokenExpiresAt`; rotation alone does not imply lifetime
+extension. Operators must replace the broker credential from a trusted login
+before that absolute expiry. The provider emits one sanitized warning when the
+credential enters `refresh-expiry-warning-seconds` (default 432000, five days).
 
 Refresh is hardened against retry storms:
 
@@ -482,6 +491,16 @@ Refresh is hardened against retry storms:
   event, so cooldowns cannot manufacture noisy or misleading duplicate
   upstream-refresh events. A successful refresh audits `allowed: true` with the
   new expiry.
+- **Durable rotation.** The refreshed credential is created as mode `0600`,
+  file-`fsync`ed, and atomically replaces the canonical file (also intentionally
+  mode `0600`; group-readable sharing is unsupported). Directory `fsync` is
+  attempted after replacement; an unsupported/failed directory `fsync` logs
+  reduced crash durability but does not misreport the completed replacement as
+  a content failure. If replacement itself fails after upstream rotation, the
+  uniquely named completed temporary credential is retained beside the
+  canonical file as a recovery copy and the failure is audited as
+  `token-refresh-persist-failed`. A still-valid canonical access token may be
+  served during cooldown; expired use fails closed.
 
 **Sanitized diagnostics.** A refresh failure surfaces only the upstream HTTP
 status and a safe OAuth error class (e.g. `HTTP 429 (rate_limit_error)`) in the
@@ -509,7 +528,7 @@ not reintroduce in-memory env refresh without a genuinely durable sink.
 **Manual probe.** `scripts/claude-refresh-probe.py --provider <name>` runs a
 single one-shot refresh against the configured `token-url`, persists the rotated
 credential on success, and prints only redacted metadata (status, credential
-field names, old/new `expiresAt`, whether the refresh token rotated). It refuses
+field names, old/new access and refresh expiry, whether the refresh token rotated). It refuses
 a `credentials-env` source (rotation cannot be persisted there). It is safe to
 run against a live broker: it takes the same cross-process refresh `flock` as
 the broker's own refresh, so the two serialize instead of racing two rotating

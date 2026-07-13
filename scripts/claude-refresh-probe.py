@@ -5,8 +5,8 @@ Loads the broker config, instantiates the named ``claude-oauth`` provider, and
 performs a single refresh-token exchange against its configured ``token-url``.
 On success the rotated credential is persisted (to ``credentials-file``) and
 only redacted metadata is printed — status, credential field names, old/new
-``expiresAt``, and whether the refresh token rotated. Token values are never
-printed.
+access/refresh expiry, and whether the refresh token rotated. Token values are
+never printed.
 
 This replaces ad-hoc Python run inside a live agent/broker container. It refuses
 a ``credentials-env`` source, because a rotated credential cannot be written

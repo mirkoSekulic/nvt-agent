@@ -43,6 +43,7 @@ providers:
     config:
       credentials-file: /broker-secrets/claude/.credentials.json
       refresh-margin-seconds: 600
+      refresh-expiry-warning-seconds: 432000
       injection-hosts:
         - api.anthropic.com
         - mcp-proxy.anthropic.com
@@ -123,8 +124,18 @@ non-injection traffic as policy-approved blind tunnels.
 ## Refresh
 
 Before injection or direct file vending, the broker refreshes when `expiresAt`
-enters `refresh-margin-seconds` (default 900). A successful exchange persists
-the new access token, rotated refresh token, and expiry atomically.
+enters `refresh-margin-seconds` (default 900). A successful exchange durably
+persists the new access token, any rotated refresh token, access expiry,
+returned refresh-token expiry, granted scopes, and OAuth client ID. Older
+credentials or responses may omit refresh-token expiry; in that case the
+existing value is preserved.
+
+Rotation and lifetime extension are separate: a new refresh token can retain
+the old token's absolute expiry. Monitor the persisted
+`refreshTokenExpiresAt` and replace the broker credential from a trusted login
+before it lapses; once it expires, interactive login is required. The provider
+logs one sanitized warning when the authorization enters
+`refresh-expiry-warning-seconds` (default five days).
 
 Refresh is single-flight in-process and protected across processes by a lock
 beside the credential file. Transient failures use bounded cooldown and
@@ -135,6 +146,17 @@ backoff. If refresh fails:
 - errors expose only a sanitized class such as rate-limited, login-required,
   or refresh-failed;
 - token values and response bodies never enter logs or audit events.
+
+Credential replacement is written and `fsync`ed before atomic rename. The
+canonical file is intentionally forced to mode `0600`; deployments must not
+depend on group-readable broker credentials. The parent directory is then
+`fsync`ed when the filesystem supports it; a post-rename directory-`fsync`
+failure is logged as reduced crash durability without misreporting the completed
+replacement as a content failure. If rename itself fails after Anthropic has
+rotated the token, a uniquely named mode-`0600` temporary file is retained
+beside the canonical credential as the recovery copy. A still-valid canonical
+access token may continue during cooldown; expired use fails closed with
+`token-refresh-persist-failed`.
 
 Placeholder-file vending does not itself refresh because the file contains no
 usable token.
@@ -150,7 +172,8 @@ python3 scripts/claude-refresh-probe.py \
 ```
 
 The probe uses the same cross-process lock as the broker, persists rotation,
-and prints only metadata such as expiry and whether the refresh token rotated.
+and prints only metadata such as old/new access and refresh expiry and whether
+the refresh token rotated.
 It refuses `credentials-env` because rotation cannot be persisted there.
 
 Never run competing native and broker refreshes against the same refresh token.
