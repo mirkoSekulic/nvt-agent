@@ -13,6 +13,7 @@ RUN apt-get update \
     ca-certificates \
     openssl \
     gh \
+    git \
     ripgrep \
     tmux \
     sudo \
@@ -46,6 +47,7 @@ COPY runtime/core/nvt-as-root /usr/local/bin/nvt-as-root
 COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
 COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
 COPY runtime/core/export-plugin-tools.py /usr/local/bin/export-plugin-tools
+COPY shared /usr/local/lib/nvt-agent/shared
 COPY runtime/core/health.py /usr/local/bin/health
 COPY runtime/core/doctor.py /usr/local/bin/doctor
 COPY runtime/core/agent-capture.sh /usr/local/bin/agent-capture

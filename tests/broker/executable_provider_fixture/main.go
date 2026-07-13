@@ -62,6 +62,9 @@ func (s *server) handle(req request) {
 		s.stateFile, _ = s.config["state-file"].(string)
 		if s.stateFile != "" {
 			_ = os.WriteFile(s.stateFile+".pid", []byte(strconv.Itoa(os.Getpid())), 0o600)
+			if data, err := json.Marshal(s.config); err == nil {
+				_ = os.WriteFile(s.stateFile+".config.json", data, 0o600)
+			}
 		}
 		mode, _ := s.config["mode"].(string)
 		initialization := s.initializationCount()

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import yaml
 
+from shared.git_source import GitSourceError, acquire, resolve_executable
+
 
 class BrokerConfigError(Exception):
     pass
@@ -91,7 +93,7 @@ def provider_plugin_entries(config, builtin_plugins):
         if not isinstance(entry, dict):
             fail(f"{field} must be a YAML object")
         name = string_value(entry.get("name"), f"{field}.name", required=True)
-        unknown = set(entry) - {"name", "command", "pass-env", "initialize-timeout-seconds", "request-timeout-seconds"}
+        unknown = set(entry) - {"name", "source", "command", "pass-env", "initialize-timeout-seconds", "request-timeout-seconds"}
         if unknown:
             fail(f"{field} has unknown keys: {', '.join(sorted(unknown))}")
         if name in builtin_plugins:
@@ -103,14 +105,24 @@ def provider_plugin_entries(config, builtin_plugins):
         command = list_value(entry.get("command"), f"{field}.command")
         if not command:
             fail(f"{field}.command must be a non-empty argument list")
+        command = list(command)
         for argument_index, argument in enumerate(command):
             if not isinstance(argument, str) or not argument:
                 fail(f"{field}.command[{argument_index}] must be a non-empty string")
-        executable = Path(command[0])
-        if not executable.is_absolute():
-            fail(f"{field}.command[0] must be an absolute path")
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            fail(f"{field}.command[0] must be an executable file")
+        source = entry.get("source")
+        try:
+            if source is not None:
+                root = acquire(source, os.environ.get("NVT_GIT_SOURCE_CACHE", "/state/git-sources"))
+                executable = resolve_executable(root, command[0])
+                command[0] = str(executable)
+            else:
+                executable = Path(command[0])
+                if not executable.is_absolute():
+                    fail(f"{field}.command[0] must be an absolute path")
+                if not executable.is_file() or not os.access(executable, os.X_OK):
+                    fail(f"{field}.command[0] must be an executable file")
+        except GitSourceError as error:
+            fail(f"{field}.source is invalid: {error}")
 
         pass_env = list_value(entry.get("pass-env"), f"{field}.pass-env")
         passed = []
