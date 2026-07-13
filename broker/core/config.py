@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 import yaml
@@ -6,6 +7,9 @@ import yaml
 
 class BrokerConfigError(Exception):
     pass
+
+
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def fail(message):
@@ -76,3 +80,59 @@ def provider_entries(config, supported_plugins=None):
             fail(f"unsupported providers[{index}].plugin: {plugin}")
         output.append(entry)
     return output
+
+
+def provider_plugin_entries(config, builtin_plugins):
+    entries = list_value(config.get("provider-plugins"), "provider-plugins")
+    seen = set()
+    output = {}
+    for index, entry in enumerate(entries):
+        field = f"provider-plugins[{index}]"
+        if not isinstance(entry, dict):
+            fail(f"{field} must be a YAML object")
+        name = string_value(entry.get("name"), f"{field}.name", required=True)
+        if name in builtin_plugins:
+            fail(f"external provider plugin name collides with built-in plugin: {name}")
+        if name in seen:
+            fail(f"duplicate provider plugin name: {name}")
+        seen.add(name)
+
+        command = list_value(entry.get("command"), f"{field}.command")
+        if not command:
+            fail(f"{field}.command must be a non-empty argument list")
+        for argument_index, argument in enumerate(command):
+            if not isinstance(argument, str) or not argument:
+                fail(f"{field}.command[{argument_index}] must be a non-empty string")
+        executable = Path(command[0])
+        if not executable.is_absolute():
+            fail(f"{field}.command[0] must be an absolute path")
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            fail(f"{field}.command[0] must be an executable file")
+
+        pass_env = list_value(entry.get("pass-env"), f"{field}.pass-env")
+        passed = []
+        for env_index, env_name in enumerate(pass_env):
+            if not isinstance(env_name, str) or not ENV_NAME_RE.fullmatch(env_name):
+                fail(f"{field}.pass-env[{env_index}] must be an environment variable name")
+            if env_name in passed:
+                fail(f"{field}.pass-env contains duplicate name: {env_name}")
+            if env_name not in os.environ:
+                fail(f"environment variable {env_name} requested by {field}.pass-env is not set")
+            passed.append(env_name)
+
+        initialize_timeout = _positive_timeout(entry.get("initialize-timeout-seconds", 10), f"{field}.initialize-timeout-seconds")
+        request_timeout = _positive_timeout(entry.get("request-timeout-seconds", 30), f"{field}.request-timeout-seconds")
+        output[name] = {
+            "name": name,
+            "command": list(command),
+            "pass_env": passed,
+            "initialize_timeout": initialize_timeout,
+            "request_timeout": request_timeout,
+        }
+    return output
+
+
+def _positive_timeout(value, field):
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        fail(f"{field} must be a positive number")
+    return float(value)

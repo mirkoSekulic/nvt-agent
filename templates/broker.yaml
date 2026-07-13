@@ -19,4 +19,5 @@
 #       methods:
 #         - GET
 
+provider-plugins: []
 providers: []

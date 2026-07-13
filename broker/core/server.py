@@ -39,6 +39,23 @@ class Broker:
         self.audit = AuditLog(audit_path)
         self.agents = AgentRegistry()
 
+    def close(self):
+        for provider in self.providers.values():
+            provider.close()
+
+    def health(self):
+        external = [provider for provider in self.providers.values() if provider.external]
+        if not external:
+            return {"ok": True, "status": "ready"}
+        ready = sum(1 for provider in self.providers.values() if provider.ready)
+        configured = len(self.providers)
+        unavailable = configured - ready
+        return {
+            "ok": True,
+            "status": "healthy" if unavailable == 0 else "degraded",
+            "providers": {"configured": configured, "ready": ready, "unavailable": unavailable},
+        }
+
     def provider(self, name):
         provider = self.providers.get(name)
         if provider is None:
@@ -458,7 +475,7 @@ def make_handler(broker):
 
         def do_GET(self):
             if self.path == "/health":
-                self.write_json(200, {"ok": True, "status": "ready"})
+                self.write_json(200, broker.health())
                 return
             self.write_json(404, {"ok": False, "error": "not-found"})
 
@@ -544,7 +561,11 @@ def serve(bind, config_path=None, audit_path=None):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=cert, keyfile=key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        broker.close()
 
 
 def parse_bind(bind):

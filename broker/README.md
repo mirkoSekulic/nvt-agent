@@ -52,6 +52,28 @@ providers:
         - GET
 ```
 
+Unsupported or organization-specific implementations may be registered as
+trusted executables. They are broker code, not sandboxed workloads. See
+[`protocol/broker-provider.md`](../protocol/broker-provider.md) for the complete
+configuration and wire contract.
+
+```yaml
+provider-plugins:
+  - name: company-oauth
+    command: [/opt/nvt/providers/company-oauth]
+    pass-env: [COMPANY_CLIENT_ID, COMPANY_CREDENTIAL]
+    initialize-timeout-seconds: 10
+    request-timeout-seconds: 30
+
+providers:
+  - name: company-main
+    plugin: company-oauth
+    config:
+      credentials-file: /broker-secrets/company/credentials.json
+    allow:
+      repositories: [example/*]
+```
+
 Codex OAuth file-bundle provider example:
 
 ```yaml

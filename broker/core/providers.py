@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 
-from broker.core.config import provider_entries
+from broker.core.config import provider_entries, provider_plugin_entries
+from broker.core.executable_provider import ExecutableProviderAdapter
 from broker.plugins.registry import BUILTIN_PROVIDERS
 
 
@@ -76,6 +77,17 @@ class InProcessProviderAdapter(ProviderAdapter):
         self._name = provider.name
 
     @property
+    def ready(self):
+        return True
+
+    @property
+    def external(self):
+        return False
+
+    def close(self):
+        return None
+
+    @property
     def name(self):
         return self._name
 
@@ -130,8 +142,19 @@ class InProcessProviderAdapter(ProviderAdapter):
 
 def load_providers(config):
     output = {}
-    for entry in provider_entries(config, BUILTIN_PROVIDERS):
-        provider = BUILTIN_PROVIDERS[entry["plugin"]](entry)
-        adapter = InProcessProviderAdapter(provider)
-        output[adapter.name] = adapter
+    external_plugins = provider_plugin_entries(config, BUILTIN_PROVIDERS)
+    supported = set(BUILTIN_PROVIDERS) | set(external_plugins)
+    try:
+        for entry in provider_entries(config, supported):
+            plugin_name = entry["plugin"]
+            if plugin_name in BUILTIN_PROVIDERS:
+                provider = BUILTIN_PROVIDERS[plugin_name](entry)
+                adapter = InProcessProviderAdapter(provider)
+            else:
+                adapter = ExecutableProviderAdapter(entry, external_plugins[plugin_name])
+            output[adapter.name] = adapter
+    except Exception:
+        for adapter in output.values():
+            adapter.close()
+        raise
     return output
