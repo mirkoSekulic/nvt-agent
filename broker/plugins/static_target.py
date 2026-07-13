@@ -1,7 +1,8 @@
 from urllib.parse import urlparse
 
 from broker.core.config import fail, string_value
-from broker.plugins.github_app.provider import ProviderError, github_repo_from_target
+from broker.core.errors import ProviderError
+from broker.plugins.github_app.provider import github_repo_from_target
 
 
 def target_mode(config, provider_name):

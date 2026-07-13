@@ -10,7 +10,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
-from broker.plugins.github_app.provider import ProviderError
+from broker.core.errors import ProviderError
 from broker.plugins.placeholder_file import (
     far_future_exp,
     render_jwt,

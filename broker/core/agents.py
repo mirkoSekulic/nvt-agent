@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from broker.core.config import fail, list_value, string_value
-from broker.plugins.github_app.provider import ProviderError
+from broker.core.errors import ProviderError
 
 
 VALID_ROLES = {"agent", "egress"}

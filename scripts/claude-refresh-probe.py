@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from broker.core.config import BrokerConfigError, load_config, provider_entries
 from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
-from broker.plugins.github_app.provider import ProviderError
+from broker.core.errors import ProviderError
 
 
 def build_provider(config_path, provider_name):

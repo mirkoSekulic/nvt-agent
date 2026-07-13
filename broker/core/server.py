@@ -10,8 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from broker.core.audit import AuditLog
 from broker.core.agents import AgentRegistry
 from broker.core.config import BrokerConfigError, load_config
+from broker.core.errors import ProviderError
 from broker.core.providers import load_providers
-from broker.plugins.github_app.provider import ProviderError
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -159,7 +159,7 @@ class Broker:
         self.ensure_not_header_inject(agent, provider_name)
         provider = self.provider(provider_name)
         self.agents.ensure_provider_grant(agent, provider_name)
-        if not hasattr(provider, "files"):
+        if not provider.supports("files"):
             raise ProviderError("files-not-supported", f"provider {provider_name} does not support file bundles")
         files_result = provider.files(agent["id"], self.audit, request_id)
         if len(files_result) == 2:
@@ -167,7 +167,7 @@ class Broker:
             files_metadata = {}
         else:
             files, provider_expires_at, files_metadata = files_result
-        expires_at = capped_files_expiry(provider_expires_at, getattr(provider, "bundle_ttl_seconds", None))
+        expires_at = capped_files_expiry(provider_expires_at, provider.bundle_ttl_seconds)
         vend_audit = {
             **files_metadata,
             "request_id": request_id,
@@ -208,7 +208,7 @@ class Broker:
                 403,
             )
         provider = self.provider(provider_name)
-        if not hasattr(provider, "placeholder_files"):
+        if not provider.supports("placeholder-files"):
             raise ProviderError(
                 "placeholder-files-not-supported",
                 f"provider {provider_name} does not support placeholder files",
@@ -245,8 +245,8 @@ class Broker:
 
     def _injection_provider(self, capability):
         provider = self.provider(capability)
-        hosts = getattr(provider, "injection_hosts", None) or []
-        if not hosts or not hasattr(provider, "injection_headers"):
+        hosts = provider.injection_hosts
+        if not provider.supports("injection"):
             raise ProviderError(
                 "injection-not-supported",
                 f"provider {capability} does not support header injection",
@@ -304,7 +304,7 @@ class Broker:
         response = {"ok": True, "hosts": hosts, "placeholder": INJECTION_PLACEHOLDER}
         # Non-secret routing hint: git-capable providers make runtime bootstrap
         # install the git redirect/trust wiring (protocol/injection.md).
-        if getattr(provider, "injection_git", False):
+        if provider.injection_git:
             response["git"] = True
         return response
 
