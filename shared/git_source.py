@@ -164,7 +164,10 @@ def _valid_checkout(checkout, canonical, revision, environment=None):
             return False
         _git(["update-index", "--refresh"], checkout, environment)
         _git(["diff-index", "--quiet", "HEAD", "--"], checkout, environment)
-        return not _git(["ls-files", "--others", "--exclude-standard"], checkout, environment)
+        # Cached content is executable input, so ignored files are no safer
+        # than ordinary untracked files. Ignore no repository or local exclude
+        # rules when deciding whether the checkout is pristine.
+        return not _git(["ls-files", "--others"], checkout, environment)
     except (OSError, ValueError, GitSourceError):
         return False
 

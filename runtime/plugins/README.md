@@ -418,6 +418,11 @@ manifest are executable paths relative to that directory. Each implementation
 is declared separately; repositories are never scanned or auto-enabled, so two
 entries can select different subdirectories of one repository.
 
+A Git-sourced `health.command` follows the same containment rule: it is a safe
+relative executable path beneath the selected directory and runs directly,
+without shell expression parsing. Existing builtin, custom, and local health
+commands keep their current behavior.
+
 Only public HTTPS sources are supported. Interactive authentication, credential
 helpers, redirects, submodules, Git LFS, hooks, builds, installs, and floating
 revisions are disabled. `NVT_GIT_SOURCE_ALLOWED_HOSTS` is a comma-separated
