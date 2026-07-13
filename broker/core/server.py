@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import signal
 import ssl
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -557,20 +559,32 @@ def make_handler(broker):
 
 def serve(bind, config_path=None, audit_path=None):
     broker = Broker(config_path, audit_path)
-    host, port = parse_bind(bind)
-    server = ThreadingHTTPServer((host, port), make_handler(broker))
-    cert = os.environ.get("NVT_BROKER_TLS_CERT")
-    key = os.environ.get("NVT_BROKER_TLS_KEY")
-    if bool(cert) != bool(key):
-        raise BrokerConfigError("NVT_BROKER_TLS_CERT and NVT_BROKER_TLS_KEY must be set together")
-    if cert and key:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=cert, keyfile=key)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+    server = None
+    previous_sigterm = None
     try:
+        host, port = parse_bind(bind)
+        server = ThreadingHTTPServer((host, port), make_handler(broker))
+        cert = os.environ.get("NVT_BROKER_TLS_CERT")
+        key = os.environ.get("NVT_BROKER_TLS_KEY")
+        if bool(cert) != bool(key):
+            raise BrokerConfigError("NVT_BROKER_TLS_CERT and NVT_BROKER_TLS_KEY must be set together")
+        if cert and key:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=cert, keyfile=key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+
+        def stop_for_sigterm(_signum, _frame):
+            # HTTPServer.shutdown must run outside serve_forever's thread.
+            threading.Thread(target=server.shutdown, name="broker-sigterm", daemon=True).start()
+
+        if threading.current_thread() is threading.main_thread():
+            previous_sigterm = signal.signal(signal.SIGTERM, stop_for_sigterm)
         server.serve_forever()
     finally:
-        server.server_close()
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        if server is not None:
+            server.server_close()
         broker.close()
 
 

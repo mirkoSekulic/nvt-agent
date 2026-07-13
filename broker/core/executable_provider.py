@@ -2,15 +2,17 @@
 
 import json
 import os
+import queue
+import re
 import subprocess
 import threading
 import time
 import uuid
-import re
 from dataclasses import dataclass
 
 from broker.core.config import BrokerConfigError
 from broker.core.errors import ProviderError
+from broker.core.provider_adapter import ProviderAdapter
 
 
 PROTOCOL_VERSION = "nvt.broker-provider/v1"
@@ -18,6 +20,9 @@ MAX_PROTOCOL_LINE_BYTES = 1024 * 1024
 MAX_PENDING_REQUESTS = 128
 MAX_TEXT_LENGTH = 4096
 MAX_TARGET_LENGTH = 8192
+RESTART_INITIAL_SECONDS = 0.1
+RESTART_MAX_SECONDS = 5.0
+STABILITY_RESET_SECONDS = 5.0
 CAPABILITIES = {
     "http.request",
     "token",
@@ -42,13 +47,34 @@ class ExecutableTarget:
 
 
 class _Pending:
-    def __init__(self):
+    def __init__(self, generation):
+        self.generation = generation
         self.event = threading.Event()
         self.response = None
         self.error = None
 
 
-class ExecutableProviderAdapter:
+class _Write:
+    def __init__(self, data, deadline):
+        self.data = data
+        self.deadline = deadline
+        self.event = threading.Event()
+        self.error = None
+
+
+class _Generation:
+    def __init__(self, number, process):
+        self.number = number
+        self.process = process
+        self.writes = queue.Queue(MAX_PENDING_REQUESTS)
+        self.stop = threading.Event()
+        self.started_at = time.monotonic()
+        self.writer = None
+        self.stdout_reader = None
+        self.stderr_reader = None
+
+
+class ExecutableProviderAdapter(ProviderAdapter):
     """One long-lived, correlated JSON-RPC process for one provider instance."""
 
     def __init__(self, entry, plugin):
@@ -57,15 +83,15 @@ class ExecutableProviderAdapter:
         self._entry = entry
         self._plugin = plugin
         self._lock = threading.RLock()
-        self._write_lock = threading.Lock()
         self._pending = {}
-        self._process = None
+        self._current = None
         self._generation = 0
         self._closing = False
         self._ready = False
-        self._restart_thread = None
-        self._restart_delay = 0.1
-        self._restart_requested = False
+        self._restart_delay = RESTART_INITIAL_SECONDS
+        self._restart_event = threading.Event()
+        self._supervisor_stop = threading.Event()
+        self._supervisor = None
         self._capabilities = set()
         self._injection_hosts = []
         self._injection_git = False
@@ -74,6 +100,10 @@ class ExecutableProviderAdapter:
         self._configured_allow = self._allow_object()
         try:
             self._start(initial=True)
+            self._supervisor = threading.Thread(
+                target=self._supervise, name=f"provider-supervisor-{self._name}", daemon=True,
+            )
+            self._supervisor.start()
         except Exception:
             self.close()
             raise
@@ -90,6 +120,12 @@ class ExecutableProviderAdapter:
     @property
     def external(self):
         return True
+
+    @property
+    def _process(self):
+        """Compatibility for focused lifecycle tests; process ownership is generation-scoped."""
+        with self._lock:
+            return self._current.process if self._current is not None else None
 
     @property
     def injection_hosts(self):
@@ -198,17 +234,18 @@ class ExecutableProviderAdapter:
             if self._closing:
                 return
             self._closing = True
-            process = self._process
-        if process is not None and process.poll() is None:
+            generation = self._current
+        self._supervisor_stop.set()
+        self._restart_event.set()
+        if generation is not None and generation.process.poll() is None:
             try:
                 self._request("shutdown", {}, timeout=min(2.0, self._plugin["request_timeout"]), allow_unready=True)
             except ProviderError:
                 pass
-        self._stop_process(process)
-        self._fail_generation(self._generation, "provider-unavailable", schedule_restart=False)
-        thread = self._restart_thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2)
+        self._fail_generation(generation.number if generation else self._generation, "provider-unavailable", restart=False)
+        supervisor = self._supervisor
+        if supervisor is not None and supervisor is not threading.current_thread():
+            supervisor.join(timeout=2)
 
     def _start(self, initial=False):
         environment = dict(SAFE_ENVIRONMENT)
@@ -227,12 +264,25 @@ class ExecutableProviderAdapter:
             if self._closing:
                 self._stop_process(process)
                 return
+            if self._current is not None:
+                self._stop_process(process)
+                raise ProviderError("provider-unavailable", "provider is already running", 503)
             self._generation += 1
-            generation = self._generation
-            self._process = process
+            generation = _Generation(self._generation, process)
+            self._current = generation
             self._ready = False
-        threading.Thread(target=self._read_stdout, args=(process, generation), daemon=True).start()
-        threading.Thread(target=self._drain_stderr, args=(process,), daemon=True).start()
+        generation.writer = threading.Thread(
+            target=self._write_stdin, args=(generation,), name=f"provider-writer-{self._name}-{generation.number}", daemon=True,
+        )
+        generation.stdout_reader = threading.Thread(
+            target=self._read_stdout, args=(generation,), name=f"provider-stdout-{self._name}-{generation.number}", daemon=True,
+        )
+        generation.stderr_reader = threading.Thread(
+            target=self._drain_stderr, args=(generation,), name=f"provider-stderr-{self._name}-{generation.number}", daemon=True,
+        )
+        generation.writer.start()
+        generation.stdout_reader.start()
+        generation.stderr_reader.start()
         try:
             result = self._request("initialize", {
                 "protocol_version": PROTOCOL_VERSION,
@@ -243,12 +293,12 @@ class ExecutableProviderAdapter:
             }, timeout=self._plugin["initialize_timeout"], allow_unready=True)
             self._validate_initialize(result)
         except ProviderError as error:
-            self._fail_generation(generation, error.reason, schedule_restart=not initial)
+            self._fail_generation(generation.number, error.reason, restart=False)
             if initial:
                 raise BrokerConfigError(f"provider {self._name} initialize failed: {error.reason}") from error
             raise
         with self._lock:
-            if self._generation == generation and process.poll() is None:
+            if self._current is generation and process.poll() is None:
                 self._ready = True
 
     def _config_object(self):
@@ -321,20 +371,21 @@ class ExecutableProviderAdapter:
             raise ProviderError(reason, f"provider {self._name} does not support {capability}")
 
     def _request(self, method, params, timeout=None, allow_unready=False):
+        timeout = timeout if timeout is not None else self._plugin["request_timeout"]
+        deadline = time.monotonic() + timeout
         with self._lock:
             if self._closing and method != "shutdown":
                 raise ProviderError("provider-unavailable", "provider is unavailable", 503)
             if not allow_unready and not self._ready:
                 raise ProviderError("provider-unavailable", "provider is unavailable", 503)
-            process = self._process
-            generation = self._generation
-            if process is None or process.poll() is not None:
-                self._fail_generation(generation, "provider-unavailable")
+            generation = self._current
+            if generation is None or generation.process.poll() is not None:
+                self._fail_generation(self._generation, "provider-unavailable")
                 raise ProviderError("provider-unavailable", "provider is unavailable", 503)
             if len(self._pending) >= MAX_PENDING_REQUESTS:
                 raise ProviderError("provider-unavailable", "provider request capacity is exhausted", 503)
             request_id = str(uuid.uuid4())
-            pending = _Pending()
+            pending = _Pending(generation.number)
             self._pending[request_id] = pending
         payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
@@ -342,75 +393,90 @@ class ExecutableProviderAdapter:
             with self._lock:
                 self._pending.pop(request_id, None)
             raise ProviderError("provider-protocol-error", "provider request exceeds the protocol line limit", 502)
-        wait_timeout = timeout if timeout is not None else self._plugin["request_timeout"]
-        write_done = threading.Event()
-        write_error = []
-        def write_frame():
-            try:
-                with self._write_lock:
-                    view = memoryview(data)
-                    while view:
-                        written = process.stdin.write(view)
-                        if not written:
-                            raise BrokenPipeError()
-                        view = view[written:]
-                    process.stdin.flush()
-            except (BrokenPipeError, OSError, ValueError) as error:
-                write_error.append(error)
-            finally:
-                write_done.set()
-        threading.Thread(target=write_frame, daemon=True).start()
-        if not write_done.wait(wait_timeout):
-            self._fail_generation(generation, "provider-unavailable")
+        write = _Write(data, deadline)
+        try:
+            generation.writes.put(write, timeout=max(0, deadline - time.monotonic()))
+        except queue.Full:
+            self._fail_generation(generation.number, "provider-unavailable")
             raise ProviderError("provider-unavailable", "provider request timed out", 503)
-        if write_error:
-            self._fail_generation(generation, "provider-unavailable")
+        remaining = max(0, deadline - time.monotonic())
+        if not write.event.wait(remaining):
+            self._fail_generation(generation.number, "provider-unavailable")
+            raise ProviderError("provider-unavailable", "provider request timed out", 503)
+        if write.error is not None:
+            self._fail_generation(generation.number, "provider-unavailable")
             raise ProviderError("provider-unavailable", "provider is unavailable", 503)
-        if not pending.event.wait(wait_timeout):
-            self._fail_generation(generation, "provider-unavailable")
+        remaining = max(0, deadline - time.monotonic())
+        if not pending.event.wait(remaining):
+            self._fail_generation(generation.number, "provider-unavailable")
             raise ProviderError("provider-unavailable", "provider request timed out", 503)
         if pending.error is not None:
             raise pending.error
+        self._mark_stable(generation)
         return pending.response
 
-    def _read_stdout(self, process, generation):
+    def _write_stdin(self, generation):
+        while not generation.stop.is_set():
+            try:
+                item = generation.writes.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if time.monotonic() >= item.deadline:
+                item.error = TimeoutError()
+                item.event.set()
+                continue
+            try:
+                view = memoryview(item.data)
+                while view:
+                    written = generation.process.stdin.write(view)
+                    if not written:
+                        raise BrokenPipeError()
+                    view = view[written:]
+                generation.process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as error:
+                item.error = error
+            finally:
+                item.event.set()
+
+    def _read_stdout(self, generation):
+        process = generation.process
         while True:
             try:
                 line = process.stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1)
             except (OSError, ValueError):
-                self._fail_generation(generation, "provider-unavailable")
+                self._fail_generation(generation.number, "provider-unavailable")
                 return
             if not line:
-                self._fail_generation(generation, "provider-unavailable")
+                self._fail_generation(generation.number, "provider-unavailable")
                 return
             if len(line) > MAX_PROTOCOL_LINE_BYTES or not line.endswith(b"\n"):
-                self._fail_generation(generation, "provider-protocol-error")
+                self._fail_generation(generation.number, "provider-protocol-error")
                 return
             try:
                 message = json.loads(line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                self._fail_generation(generation, "provider-protocol-error")
+                self._fail_generation(generation.number, "provider-protocol-error")
                 return
             if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-                self._fail_generation(generation, "provider-protocol-error")
+                self._fail_generation(generation.number, "provider-protocol-error")
                 return
             response_id = message.get("id")
             if not isinstance(response_id, str):
-                self._fail_generation(generation, "provider-protocol-error")
+                self._fail_generation(generation.number, "provider-protocol-error")
                 return
             with self._lock:
-                if generation != self._generation:
+                if self._current is not generation:
                     return
                 pending = self._pending.pop(response_id, None)
             if pending is None:
-                self._fail_generation(generation, "provider-protocol-error")
+                self._fail_generation(generation.number, "provider-protocol-error")
                 return
             has_result = "result" in message
             has_error = "error" in message
             if has_result == has_error or set(message) - {"jsonrpc", "id", "result", "error"}:
                 pending.error = ProviderError("provider-protocol-error", "provider returned an invalid response", 502)
                 pending.event.set()
-                self._fail_generation(generation, "provider-protocol-error")
+                self._fail_generation(generation.number, "provider-protocol-error")
                 return
             if has_error:
                 try:
@@ -418,7 +484,7 @@ class ExecutableProviderAdapter:
                 except ProviderError as error:
                     pending.error = error
                     pending.event.set()
-                    self._fail_generation(generation, "provider-protocol-error")
+                    self._fail_generation(generation.number, "provider-protocol-error")
                     return
             else:
                 pending.response = message["result"]
@@ -443,63 +509,68 @@ class ExecutableProviderAdapter:
             self._protocol_error("provider error message is invalid")
         return ProviderError(reason, message, status)
 
-    def _fail_generation(self, generation, reason, schedule_restart=True):
+    def _fail_generation(self, generation_number, reason, restart=True):
         error = ProviderError(reason, "provider is unavailable" if reason == "provider-unavailable" else "provider protocol failed", 503 if reason == "provider-unavailable" else 502)
         with self._lock:
-            if generation != self._generation:
+            generation = self._current
+            if generation is None or generation.number != generation_number:
                 return
             self._ready = False
-            process = self._process
-            self._process = None
-            pending = list(self._pending.values())
-            self._pending.clear()
+            self._current = None
+            pending = [item for item in self._pending.values() if item.generation == generation_number]
+            self._pending = {key: item for key, item in self._pending.items() if item.generation != generation_number}
+        generation.stop.set()
+        while True:
+            try:
+                write = generation.writes.get_nowait()
+            except queue.Empty:
+                break
+            write.error = error
+            write.event.set()
         for item in pending:
             item.error = error
             item.event.set()
-        self._stop_process(process)
-        if schedule_restart and not self._closing:
-            self._schedule_restart()
+        self._stop_process(generation.process)
+        for thread in (generation.writer, generation.stdout_reader, generation.stderr_reader):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=1)
+        if restart and not self._closing:
+            self._restart_event.set()
 
-    def _schedule_restart(self):
-        with self._lock:
-            if self._restart_thread is not None and self._restart_thread.is_alive():
-                self._restart_requested = True
+    def _supervise(self):
+        while not self._supervisor_stop.is_set():
+            self._restart_event.wait(0.5)
+            if self._supervisor_stop.is_set():
                 return
-            delay = self._restart_delay
-            self._restart_delay = min(self._restart_delay * 2, 5.0)
-            self._restart_thread = threading.Thread(target=self._restart, args=(delay,), daemon=True)
-            self._restart_thread.start()
-
-    def _restart(self, delay):
-        while True:
-            time.sleep(delay)
-            with self._lock:
-                if self._closing:
-                    return
-            try:
+            if not self._restart_event.is_set():
+                continue
+            self._restart_event.clear()
+            while not self._supervisor_stop.is_set():
                 with self._lock:
-                    self._restart_requested = False
-                self._start(initial=False)
-                with self._lock:
-                    requested = self._restart_requested
-                    generation = self._generation
-                    ready = self._ready
-                if ready and not requested:
-                    return
-                if ready and requested:
-                    # A failure raced with initialization. Retire this child
-                    # before another attempt so no credential-bearing process
-                    # is orphaned or overwritten.
-                    self._fail_generation(generation, "provider-unavailable")
-            except (ProviderError, BrokerConfigError):
-                with self._lock:
+                    if self._current is not None:
+                        break
                     delay = self._restart_delay
-                    self._restart_delay = min(self._restart_delay * 2, 5.0)
+                    self._restart_delay = min(delay * 2, RESTART_MAX_SECONDS)
+                if self._supervisor_stop.wait(delay):
+                    return
+                try:
+                    self._start(initial=False)
+                    break
+                except (ProviderError, BrokerConfigError):
+                    continue
+
+    def _mark_stable(self, generation):
+        if time.monotonic() - generation.started_at < STABILITY_RESET_SECONDS:
+            return
+        with self._lock:
+            if self._current is generation and self._ready:
+                self._restart_delay = RESTART_INITIAL_SECONDS
 
     @staticmethod
-    def _drain_stderr(process):
+    def _drain_stderr(generation):
+        process = generation.process
         try:
-            while process.stderr.read(8192):
+            while not generation.stop.is_set() and process.stderr.read(8192):
                 pass
         except (OSError, ValueError):
             pass

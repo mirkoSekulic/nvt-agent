@@ -57,6 +57,13 @@ The broker never logs raw protocol lines: results can contain credentials.
 stderr is continuously drained to prevent deadlock, but is discarded by the
 broker; it is never copied into HTTP errors, audit records, or normal logs.
 
+The first valid response for an ID may complete its caller. A later response
+with that same ID is a protocol violation: it invalidates the process
+generation and fails every request still pending in that generation. It cannot
+retroactively fail a caller that already returned. Recovery is complete only
+after that generation has become unavailable, a new child has initialized, and
+a fresh request succeeds.
+
 Request:
 
 ```json
@@ -99,6 +106,10 @@ values fail initialization. Metadata defaults are an empty `injection_hosts`
 list, false `injection_git`, and null `bundle_ttl_seconds`; a non-null TTL is a
 positive integer. Injection metadata requires `injection.headers`. Providers
 declaring `token`, `identity`, or `headers` must implement `target.normalize`.
+Each injection host must be a unique normalized lowercase DNS hostname: labels
+contain only `a-z`, `0-9`, and interior hyphens, with no scheme, path, wildcard,
+port, trailing dot, or uppercase characters. `injection.headers` with an empty
+host list is valid metadata but is not exposed as an injection-capable provider.
 
 ## Operations
 
@@ -139,6 +150,8 @@ no cached secret result is returned. The bad child is terminated and reaped.
 After an initial successful startup, a failed instance becomes unavailable and
 is restarted with bounded exponential backoff. Calls during backoff return a
 sanitized provider-unavailable error. A successful reinitialize makes that
-instance ready again. Other providers remain live. Health reports only aggregate
-configured, ready, and unavailable counts—never provider names, config, or
-credential state—and does not call providers or upstream services.
+instance ready again. Backoff is not reset by initialization alone; it resets
+only after the generation has remained live for at least five seconds and
+successfully completed a request. Other providers remain live. Health reports
+only aggregate configured, ready, and unavailable counts—never provider names,
+config, or credential state—and does not call providers or upstream services.

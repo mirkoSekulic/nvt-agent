@@ -6,12 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -64,6 +67,10 @@ func buildExecutableProvider(t *testing.T) string {
 }
 
 func newExecutableBrokerFixture(t *testing.T) *executableBrokerFixture {
+	return newExecutableBrokerFixtureMode(t, "")
+}
+
+func newExecutableBrokerFixtureMode(t *testing.T, mode string) *executableBrokerFixture {
 	t.Helper()
 	f := &executableBrokerFixture{t: t, root: repoRoot(t), bin: buildExecutableProvider(t), dir: t.TempDir(), agent: "agent-secret", egress: "egress-secret"}
 	f.config = filepath.Join(f.dir, "broker.yaml")
@@ -71,7 +78,7 @@ func newExecutableBrokerFixture(t *testing.T) *executableBrokerFixture {
 	f.audit = filepath.Join(f.dir, "audit.jsonl")
 	f.state = filepath.Join(f.dir, "state")
 	f.url = fmt.Sprintf("http://127.0.0.1:%d", freePort(t))
-	f.writeConfig(0.35)
+	f.writeConfigMode(0.35, mode)
 	f.writeAgents()
 	f.start()
 	t.Cleanup(f.stop)
@@ -79,7 +86,15 @@ func newExecutableBrokerFixture(t *testing.T) *executableBrokerFixture {
 }
 
 func (f *executableBrokerFixture) writeConfig(timeout float64) {
+	f.writeConfigMode(timeout, "")
+}
+
+func (f *executableBrokerFixture) writeConfigMode(timeout float64, mode string) {
 	f.t.Helper()
+	modeLine := ""
+	if mode != "" {
+		modeLine = fmt.Sprintf("      mode: %q\n", mode)
+	}
 	config := fmt.Sprintf(`provider-plugins:
   - name: fixture
     command: [%q]
@@ -91,15 +106,17 @@ providers:
     plugin: fixture
     config:
       state-file: %q
+%s
     allow:
       repositories: ["*"]
   - name: fixture-inject
     plugin: fixture
     config:
       state-file: %q
+%s
     allow:
       repositories: ["*"]
-`, f.bin, timeout, f.state+"-direct", f.state+"-inject")
+`, f.bin, timeout, f.state+"-direct", modeLine, f.state+"-inject", modeLine)
 	if err := os.WriteFile(f.config, []byte(config), 0o600); err != nil {
 		f.t.Fatal(err)
 	}
@@ -262,12 +279,34 @@ func TestExecutableProviderOutOfOrderAndSafeDeclaredError(t *testing.T) {
 	}
 }
 
+func TestExecutableProviderRejectsUnsupportedBeforeNormalize(t *testing.T) {
+	f := &executableBrokerFixture{t: t, root: repoRoot(t), bin: buildExecutableProvider(t), dir: t.TempDir(), agent: "agent-secret", egress: "egress-secret"}
+	f.config = filepath.Join(f.dir, "broker.yaml")
+	f.agents = filepath.Join(f.dir, "agents.yaml")
+	f.audit = filepath.Join(f.dir, "audit.jsonl")
+	f.state = filepath.Join(f.dir, "state")
+	f.url = fmt.Sprintf("http://127.0.0.1:%d", freePort(t))
+	f.writeConfigMode(.35, "files-only")
+	f.writeAgents()
+	f.start()
+	t.Cleanup(f.stop)
+	for _, endpoint := range []string{"token", "identity", "headers"} {
+		status, body := f.post(f.agent, "/v1/"+endpoint, map[string]any{"provider": "fixture-direct", "target": "owner/repo"})
+		if status != 403 || body["error"] != endpoint+"-not-supported" {
+			t.Fatalf("unsupported %s mapping: status=%d body=%#v", endpoint, status, body)
+		}
+	}
+	if _, err := os.Stat(f.state + "-direct.normalized"); !os.IsNotExist(err) {
+		t.Fatalf("target.normalize was invoked for unsupported capability: %v", err)
+	}
+}
+
 func TestExecutableProviderFaultsFailClosedAndRecover(t *testing.T) {
-	for _, fault := range []string{"fault-crash", "fault-eof", "fault-timeout", "fault-malformed", "fault-nonobject", "fault-oversized", "fault-unknown-id", "fault-duplicate-id"} {
+	for _, fault := range []string{"fault-crash", "fault-eof", "fault-timeout", "fault-malformed", "fault-nonobject", "fault-oversized", "fault-unknown-id"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newExecutableBrokerFixture(t)
 			status, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": fault})
-			if fault != "fault-duplicate-id" && (status == 200 || (body["error"] != "provider-unavailable" && body["error"] != "provider-protocol-error")) {
+			if status == 200 || (body["error"] != "provider-unavailable" && body["error"] != "provider-protocol-error") {
 				t.Fatalf("fault did not fail closed: status=%d body=%#v", status, body)
 			}
 			waitFor(t, 2*time.Second, func() bool {
@@ -285,6 +324,33 @@ func TestExecutableProviderFaultsFailClosedAndRecover(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExecutableProviderDuplicateInvalidatesGeneration(t *testing.T) {
+	f := newExecutableBrokerFixture(t)
+	pending := make(chan map[string]any, 1)
+	go func() {
+		_, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "slow"})
+		pending <- body
+	}()
+	time.Sleep(40 * time.Millisecond)
+	_, _ = f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "fault-duplicate-id"})
+	select {
+	case body := <-pending:
+		if body["ok"] != false {
+			t.Fatalf("duplicate did not fail pending generation request: %#v", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending request hung after duplicate response")
+	}
+	if health := f.health(); health["status"] != "degraded" {
+		t.Fatalf("duplicate generation was not degraded: %#v", health)
+	}
+	waitFor(t, 3*time.Second, func() bool { return f.health()["status"] == "healthy" })
+	status, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "recovered"})
+	if status != 200 || body["token"] != executableCanary {
+		t.Fatalf("fresh generation did not recover: status=%d body=%#v", status, body)
 	}
 }
 
@@ -320,6 +386,7 @@ import os, tempfile, time
 from broker.core.config import BrokerConfigError, provider_plugin_entries
 from broker.core.errors import ProviderError
 from broker.core.providers import load_providers
+from broker.core.provider_adapter import ProviderAdapter
 
 os.environ["FIXTURE_CREDENTIAL"] = %q
 binary = %q
@@ -332,6 +399,7 @@ bad = [
   ({"provider-plugins":[dict(base, command=["/missing"])]}, "executable"),
   ({"provider-plugins":[{**base, "pass-env":["BAD-NAME"]}]}, "environment variable name"),
   ({"provider-plugins":[{**base, "pass-env":["MISSING_FIXTURE_ENV"]}]}, "not set"),
+  ({"provider-plugins":[{**base, "request-timeout-second":1}]}, "unknown keys"),
 ]
 for config, expected in bad:
   try: provider_plugin_entries(config, {"token": object()})
@@ -339,7 +407,7 @@ for config, expected in bad:
     assert expected in str(error), (expected, str(error))
   else: raise AssertionError(expected)
 
-for mode in ("unknown-capability", "duplicate-capability", "bad-metadata", "initialize-error"):
+for mode in ("unknown-capability", "duplicate-capability", "bad-metadata", "initialize-error", "duplicate-hosts", "malformed-host", "uppercase-host", "port-host", "trailing-dot-host"):
   config={"provider-plugins":[base], "providers":[{"name":"one","plugin":"fixture","config":{"mode":mode}}]}
   try: load_providers(config)
   except BrokerConfigError: pass
@@ -347,6 +415,7 @@ for mode in ("unknown-capability", "duplicate-capability", "bad-metadata", "init
 
 config={"provider-plugins":[base], "providers":[{"name":"one","plugin":"fixture","config":{"mode":"token-only"}}]}
 p=load_providers(config)["one"]
+assert isinstance(p, ProviderAdapter)
 assert p.supports("token") and not p.supports("files")
 try: p.files("a", None, "r")
 except ProviderError as error: assert error.reason == "files-not-supported"
@@ -359,6 +428,25 @@ p.close()
 try: os.kill(pid, 0)
 except ProcessLookupError: pass
 else: raise AssertionError("provider process was not reaped")
+
+config={"provider-plugins":[base], "providers":[{"name":"one","plugin":"fixture","config":{"mode":"empty-injection-hosts"}}]}
+p=load_providers(config)["one"]
+assert not p.supports("injection")
+p.close()
+
+state=tempfile.mktemp(prefix="provider-stop-reading-")
+blocked={"provider-plugins":[{**base, "request-timeout-seconds":.2}], "providers":[{"name":"one","plugin":"fixture","config":{"mode":"stop-reading", "state-file":state}}]}
+p=load_providers(blocked)["one"]
+started=time.monotonic()
+try: p._request("files", {"blob":"x" * 900000})
+except ProviderError as error: assert error.reason == "provider-unavailable"
+else: raise AssertionError("blocked stdin request succeeded")
+assert time.monotonic() - started < .6
+deadline=time.monotonic()+3
+while not p.ready and time.monotonic() < deadline: time.sleep(.02)
+assert p.ready, "provider did not recover after blocked stdin"
+assert p.normalize_target("owner/repo").audit_target == "audit/owner/repo"
+p.close()
 print("OK")
 `, executableCanary, bin)
 	cmd := exec.Command("python3", "-c", script)
@@ -379,6 +467,21 @@ func readOptional(t *testing.T, path string) []byte {
 	return data
 }
 
+func assertProviderStopped(t *testing.T, state string) {
+	t.Helper()
+	data, err := os.ReadFile(state + ".pid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatalf("provider child %d survived broker cleanup", pid)
+	}
+}
+
 func TestExecutableProviderHealthDegradesDuringBackoff(t *testing.T) {
 	f := newExecutableBrokerFixture(t)
 	_, _ = f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "fault-timeout"})
@@ -391,4 +494,96 @@ func TestExecutableProviderHealthDegradesDuringBackoff(t *testing.T) {
 		t.Fatalf("expected unavailable provider count, got %#v", health)
 	}
 	waitFor(t, 2*time.Second, func() bool { return f.health()["status"] == "healthy" })
+}
+
+func TestExecutableProviderDurableSupervisorLifecycle(t *testing.T) {
+	for _, mode := range []string{"restart-initialize-fail-once", "restart-crash-after-initialize"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newExecutableBrokerFixtureMode(t, mode)
+			_, _ = f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "fault-crash"})
+			waitFor(t, 4*time.Second, func() bool {
+				data, err := os.ReadFile(f.state + "-direct.initializations")
+				return err == nil && strings.TrimSpace(string(data)) >= "3"
+			})
+			waitFor(t, 4*time.Second, func() bool { return f.health()["status"] == "healthy" })
+			status, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "recovered"})
+			if status != 200 || body["token"] != executableCanary {
+				t.Fatalf("supervisor did not recover: status=%d body=%#v", status, body)
+			}
+			data, err := os.ReadFile(f.state + "-direct.initializations")
+			if err != nil || strings.TrimSpace(string(data)) < "3" {
+				t.Fatalf("expected at least three supervised generations: %q %v", data, err)
+			}
+		})
+	}
+
+	f := newExecutableBrokerFixture(t)
+	started := time.Now()
+	for i := 0; i < 3; i++ {
+		target := fmt.Sprintf("fault-crash-cycle-%d", i)
+		_, _ = f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": target})
+		waitFor(t, 5*time.Second, func() bool { return f.health()["status"] == "healthy" })
+	}
+	if elapsed := time.Since(started); elapsed < 600*time.Millisecond || elapsed > 8*time.Second {
+		t.Fatalf("restart backoff was not bounded: %v", elapsed)
+	}
+	_, _ = f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "fault-crash-cycle-close"})
+	f.stop()
+}
+
+func TestExecutableProviderCleanupOnSetupFailureAndSIGTERM(t *testing.T) {
+	newUnstarted := func(t *testing.T) *executableBrokerFixture {
+		f := &executableBrokerFixture{t: t, root: repoRoot(t), bin: buildExecutableProvider(t), dir: t.TempDir(), agent: "agent-secret", egress: "egress-secret"}
+		f.config = filepath.Join(f.dir, "broker.yaml")
+		f.agents = filepath.Join(f.dir, "agents.yaml")
+		f.audit = filepath.Join(f.dir, "audit.jsonl")
+		f.state = filepath.Join(f.dir, "state")
+		f.writeConfig(.35)
+		f.writeAgents()
+		return f
+	}
+	runFailure := func(t *testing.T, bind string, extra ...string) {
+		f := newUnstarted(t)
+		cmd := exec.Command("python3", filepath.Join(f.root, "broker", "brokerd.py"))
+		cmd.Env = append(os.Environ(), "NVT_BROKER_CONFIG="+f.config, "NVT_BROKER_AGENTS_CONFIG="+f.agents, "NVT_BROKER_AUDIT_LOG="+f.audit, "NVT_BROKER_BIND="+bind, "FIXTURE_CREDENTIAL="+executableCanary)
+		cmd.Env = append(cmd.Env, extra...)
+		if err := cmd.Run(); err == nil {
+			t.Fatal("broker setup failure unexpectedly succeeded")
+		}
+		for _, state := range []string{f.state + "-direct.shutdown", f.state + "-inject.shutdown"} {
+			if _, err := os.Stat(state); err != nil {
+				t.Fatalf("provider shutdown was not attempted: %s: %v", state, err)
+			}
+		}
+		assertProviderStopped(t, f.state+"-direct")
+		assertProviderStopped(t, f.state+"-inject")
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runFailure(t, listener.Addr().String())
+	_ = listener.Close()
+	runFailure(t, fmt.Sprintf("127.0.0.1:%d", freePort(t)), "NVT_BROKER_TLS_CERT=/missing/cert", "NVT_BROKER_TLS_KEY=/missing/key")
+
+	f := newExecutableBrokerFixture(t)
+	if err := f.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("broker did not exit after SIGTERM")
+	}
+	f.cmd = nil
+	for _, state := range []string{f.state + "-direct.shutdown", f.state + "-inject.shutdown"} {
+		if _, err := os.Stat(state); err != nil {
+			t.Fatalf("SIGTERM did not attempt provider shutdown: %s: %v", state, err)
+		}
+	}
+	assertProviderStopped(t, f.state+"-direct")
+	assertProviderStopped(t, f.state+"-inject")
 }

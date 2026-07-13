@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,14 @@ func main() {
 		if json.Unmarshal(scanner.Bytes(), &req) != nil {
 			return
 		}
+		if req.Method == "initialize" {
+			s.handle(req)
+			mode, _ := s.config["mode"].(string)
+			if mode == "stop-reading" && s.firstFault("stop-reading") {
+				select {}
+			}
+			continue
+		}
 		go s.handle(req)
 	}
 }
@@ -45,14 +54,25 @@ func (s *server) handle(req request) {
 		s.config, _ = req.Params["config"].(map[string]any)
 		s.allow, _ = req.Params["allow"].(map[string]any)
 		s.stateFile, _ = s.config["state-file"].(string)
+		if s.stateFile != "" {
+			_ = os.WriteFile(s.stateFile+".pid", []byte(strconv.Itoa(os.Getpid())), 0o600)
+		}
 		mode, _ := s.config["mode"].(string)
+		initialization := s.initializationCount()
 		if mode == "initialize-error" {
 			s.failure(req.ID, "initialize-denied", 503, "safe initialize failure")
+			return
+		}
+		if mode == "restart-initialize-fail-once" && initialization == 2 {
+			s.failure(req.ID, "initialize-retry", 503, "safe retry")
 			return
 		}
 		capabilities := []string{"http.request", "token", "identity", "headers", "files", "placeholder-files", "injection.headers"}
 		if mode == "token-only" {
 			capabilities = []string{"token"}
+		}
+		if mode == "files-only" {
+			capabilities = []string{"files"}
 		}
 		if mode == "unknown-capability" {
 			capabilities = append(capabilities, "unknown")
@@ -67,18 +87,39 @@ func (s *server) handle(req request) {
 			"injection_git":      true,
 			"bundle_ttl_seconds": 60,
 		}
-		if mode == "token-only" {
+		if mode == "token-only" || mode == "files-only" || mode == "empty-injection-hosts" {
 			result["injection_hosts"] = []string{}
 			result["injection_git"] = false
+		}
+		if mode == "duplicate-hosts" {
+			result["injection_hosts"] = []string{"api.example.test", "api.example.test"}
+		}
+		if mode == "malformed-host" {
+			result["injection_hosts"] = []string{"bad_host.example"}
+		}
+		if mode == "uppercase-host" {
+			result["injection_hosts"] = []string{"API.example.test"}
+		}
+		if mode == "port-host" {
+			result["injection_hosts"] = []string{"api.example.test:443"}
+		}
+		if mode == "trailing-dot-host" {
+			result["injection_hosts"] = []string{"api.example.test."}
 		}
 		if mode == "bad-metadata" {
 			result["bundle_ttl_seconds"] = 0
 		}
 		s.success(req.ID, result)
+		if mode == "restart-crash-after-initialize" && initialization == 2 {
+			go func() { time.Sleep(10 * time.Millisecond); os.Exit(24) }()
+		}
 		return
 	}
 
 	if req.Method == "shutdown" {
+		if s.stateFile != "" {
+			_ = os.WriteFile(s.stateFile+".shutdown", []byte("attempted"), 0o600)
+		}
 		s.success(req.ID, map[string]any{"ok": true})
 		return
 	}
@@ -98,6 +139,9 @@ func (s *server) handle(req request) {
 
 	switch req.Method {
 	case "target.normalize":
+		if s.stateFile != "" {
+			_ = os.WriteFile(s.stateFile+".normalized", []byte("called"), 0o600)
+		}
 		raw, _ := req.Params["target"].(string)
 		raw = strings.TrimPrefix(raw, "github.com/")
 		s.success(req.ID, map[string]any{"target": raw, "audit_target": "audit/" + raw})
@@ -120,6 +164,18 @@ func (s *server) handle(req request) {
 	}
 }
 
+func (s *server) initializationCount() int {
+	if s.stateFile == "" {
+		return 1
+	}
+	path := s.stateFile + ".initializations"
+	data, _ := os.ReadFile(path)
+	count, _ := strconv.Atoi(string(data))
+	count++
+	_ = os.WriteFile(path, []byte(strconv.Itoa(count)), 0o600)
+	return count
+}
+
 func (s *server) firstFault(name string) bool {
 	if s.stateFile == "" {
 		return true
@@ -136,6 +192,9 @@ func (s *server) fault(name, id string) {
 	// Deliberately secret-shaped diagnostics prove the broker drains and
 	// discards stderr instead of surfacing it.
 	_, _ = fmt.Fprintln(os.Stderr, s.secret)
+	if strings.HasPrefix(name, "fault-crash-cycle-") {
+		os.Exit(23)
+	}
 	switch name {
 	case "fault-crash", "fault-eof":
 		os.Exit(23)
