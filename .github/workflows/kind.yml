@@ -60,6 +60,24 @@ jobs:
       - uses: azure/setup-kubectl@v4
         with:
           version: v1.32.0
+      - name: Free runner disk
+        run: |
+          echo "before cleanup"
+          df -h
+          docker system df || true
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/mono \
+            /usr/local/share/powershell \
+            /opt/hostedtoolcache/PowerShell || true
+          sudo apt-get clean || true
+          echo "after cleanup"
+          df -h
+          docker system df || true
       - name: Install kind
         run: |
           go install sigs.k8s.io/kind@v0.24.0
@@ -105,6 +123,24 @@ jobs:
       - uses: azure/setup-kubectl@v4
         with:
           version: v1.32.0
+      - name: Free runner disk
+        run: |
+          echo "before cleanup"
+          df -h
+          docker system df || true
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/mono \
+            /usr/local/share/powershell \
+            /opt/hostedtoolcache/PowerShell || true
+          sudo apt-get clean || true
+          echo "after cleanup"
+          df -h
+          docker system df || true
       - name: Install kind
         run: |
           go install sigs.k8s.io/kind@v0.24.0
