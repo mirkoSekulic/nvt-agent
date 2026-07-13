@@ -65,6 +65,7 @@ class ExecutableProviderAdapter:
         self._ready = False
         self._restart_thread = None
         self._restart_delay = 0.1
+        self._restart_requested = False
         self._capabilities = set()
         self._injection_hosts = []
         self._injection_git = False
@@ -249,7 +250,6 @@ class ExecutableProviderAdapter:
         with self._lock:
             if self._generation == generation and process.poll() is None:
                 self._ready = True
-                self._restart_delay = 0.1
 
     def _config_object(self):
         value = self._entry.get("config") or {}
@@ -463,6 +463,7 @@ class ExecutableProviderAdapter:
     def _schedule_restart(self):
         with self._lock:
             if self._restart_thread is not None and self._restart_thread.is_alive():
+                self._restart_requested = True
                 return
             delay = self._restart_delay
             self._restart_delay = min(self._restart_delay * 2, 5.0)
@@ -477,7 +478,10 @@ class ExecutableProviderAdapter:
                     return
             try:
                 self._start(initial=False)
-                return
+                with self._lock:
+                    if self._ready and not self._restart_requested:
+                        return
+                    self._restart_requested = False
             except (ProviderError, BrokerConfigError):
                 with self._lock:
                     delay = self._restart_delay
