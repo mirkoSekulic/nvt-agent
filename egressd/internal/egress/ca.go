@@ -20,7 +20,7 @@ import (
 
 // CACertFileName is the only file the CA ever publishes. The private key
 // stays in egressd process memory: it is subject to the same zero-secrets
-// invariant as every other credential (docs/phase4-git-mediation-plan.md §2).
+// invariant as every other credential (protocol/injection.md).
 const CACertFileName = "ca.crt"
 
 const (
@@ -30,9 +30,7 @@ const (
 )
 
 // localLeafName is the only DNS name leafs are ever minted for. Together
-// with the loopback IP SANs it defines the "local redirect names" boundary:
-// minting an upstream-name SAN (github.com, ...) is exactly the line Phase 6
-// crosses deliberately and Phase 4 must not.
+// with the loopback IP SANs it defines the local redirect-name boundary.
 const localLeafName = "localhost"
 
 // CA is the per-agent certificate authority generated at egressd boot. It
@@ -51,9 +49,8 @@ type CA struct {
 	leafDNSNames []string
 
 	// upstreamLeafNames are the real upstream hostnames this CA may mint a
-	// per-SNI leaf for, to TLS-terminate the forward proxy (Phase 6.2). This
-	// is the line Phase 4 deliberately refused; it is bounded by exactly the
-	// configured, allowlisted injectable hosts. Each name is minted as its own
+	// per-SNI leaf for, to TLS-terminate the forward proxy. It is bounded by
+	// exactly the configured, allowlisted injectable hosts. Each name is minted as its own
 	// leaf carrying only that DNS SAN (never a loopback IP SAN).
 	upstreamLeafNames []string
 
@@ -84,8 +81,8 @@ func NewCA(leafDNSNames ...string) (*CA, error) {
 }
 
 // NewCAWithUpstreams additionally allows minting a per-SNI leaf for each name
-// in upstreamLeafNames — the real upstream hosts the forward proxy MITMs
-// (Phase 6.2). Name constraints cover exactly localhost, the local Service
+// in upstreamLeafNames — the real upstream hosts the forward proxy terminates.
+// Name constraints cover exactly localhost, the local Service
 // names, and these allowlisted upstream hosts, and nothing else.
 func NewCAWithUpstreams(leafDNSNames, upstreamLeafNames []string) (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -156,7 +153,7 @@ func LoadCA(certFile, keyFile string, leafDNSNames ...string) (*CA, error) {
 }
 
 // LoadCAWithUpstreams loads a durable CA and additionally allows the
-// allowlisted upstream hosts as per-SNI leaf names (Phase 6.2). A durable cert
+// allowlisted upstream hosts as per-SNI leaf names. A durable cert
 // minted before the upstream widening will not carry the upstream name
 // constraints, so leaf signing for those names fails verification at handshake
 // time — the durable Secret must be regenerated when the allowlist changes.
@@ -337,7 +334,7 @@ func (ca *CA) ServerTLSConfig() *tls.Config {
 // GetCertificate mints (and caches) a leaf certificate on demand. A local name
 // (localhost or a configured synthetic Service name) gets the shared local
 // leaf; an allowlisted upstream name gets its own per-SNI leaf carrying only
-// that DNS SAN (Phase 6.2 forward-proxy MITM). Any other ServerName — and any
+// that DNS SAN for forward-proxy TLS termination. Any other ServerName — and any
 // IP-literal upstream SNI — is refused outright.
 func (ca *CA) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	name := hello.ServerName

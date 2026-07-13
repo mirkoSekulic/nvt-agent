@@ -1,6 +1,6 @@
 package egress
 
-// Phase 4 git smart-HTTP streaming proof (docs/phase4-git-mediation-plan.md
+// Mediated git smart-HTTP streaming proof (protocol/injection.md
 // §4 spike item): a real git client clones and pushes through the
 // TLS-terminated egressd route against a local `git http-backend` upstream —
 // pack POSTs stream through buildOutbound, no GitHub dependency. The
@@ -59,7 +59,7 @@ func TestGitSmartHTTPThroughTLSRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGit(t, seed, nil, "init", "--initial-branch=main", ".")
-	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("phase 4\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("mediated git\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// A multi-megabyte blob so the upload-pack/receive-pack bodies exercise
@@ -155,7 +155,7 @@ func TestGitSmartHTTPThroughTLSRoute(t *testing.T) {
 	clone := filepath.Join(root, "clone")
 	runGit(t, root, gitEnv, "clone", "--quiet", remote, clone)
 	content, err := os.ReadFile(filepath.Join(clone, "README.md"))
-	if err != nil || string(content) != "phase 4\n" {
+	if err != nil || string(content) != "mediated git\n" {
 		t.Fatalf("cloned content mismatch: %v %q", err, content)
 	}
 	cloned, err := os.ReadFile(filepath.Join(clone, "blob.bin"))

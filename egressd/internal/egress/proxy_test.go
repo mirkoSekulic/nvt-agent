@@ -1,6 +1,6 @@
 package egress
 
-// Phase 1 proof of the generic injection path (docs/mediated-egress-plan.md):
+// Generic injection-path proof (protocol/injection.md):
 // agent request -> egressd -> broker /v1/injection/headers -> upstream
 // receives the injected Authorization. No real provider credential is
 // involved anywhere; the broker and upstream are fakes.
@@ -171,7 +171,7 @@ func newTestProxy(t *testing.T, broker *fakeBroker, upstream *fakeUpstream) *htt
 	return server
 }
 
-// TestRedirectableStaticBearerProof is the Phase 3.5 redirectable-provider
+// TestRedirectableStaticBearerProof is the redirectable-provider
 // proof: a generic tool config points at egressd with only the documented
 // placeholder, egressd asks the broker for injectable headers, and the fake
 // upstream receives only the real broker-owned credential.
@@ -264,7 +264,7 @@ func TestInjectionHostStripsUpstreamPort(t *testing.T) {
 	}
 }
 
-// TestInjectsRealTokenForPlaceholderAuth is the core Phase 1 proof: the
+// TestInjectsRealTokenForPlaceholderAuth is the core injection proof: the
 // client sends the placeholder (or nothing), the upstream receives exactly
 // one Authorization header carrying the real broker-fetched token, and the
 // placeholder never reaches the upstream.

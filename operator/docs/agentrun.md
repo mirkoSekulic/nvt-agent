@@ -1,53 +1,70 @@
 # AgentRun v1alpha1
 
-`AgentRun` represents one disposable nvt agent execution.
-
-It is generic by design. An `AgentRun` can be created manually, by GitOps, by a
-future scheduler, or by another future extension. The resource itself does not
-encode who scheduled it.
-
-## Design Boundaries
-
-- `AgentRun` is the generic execution unit.
-- Scheduler extensions may create `AgentRun` resources through the generic
-  `AgentSchedule` admission pool, but `AgentRun` does not know who scheduled it.
-- Runtime plugins remain configured through the embedded agent config at
-  `spec.agent.config`.
-- `spec.prompt.text` is a small AgentRun convenience that renders to the
-  builtin `initial-prompt` runtime plugin for disposable runs.
-- Operator extensions and schedulers are separate from runtime plugins.
-- v1 broker providers are static. `spec.broker.grants` declares per-agent
-  dynamic grants against those static providers.
-- v1 supports `workspace.mode: Ephemeral` only. There is no PVC-backed
-  workspace retention in this contract.
-- This API contract does not include GitHub-specific scheduler/operator logic.
+`AgentRun` is one disposable nvt agent execution. Producers and schedulers may
+create it, but producer-specific behavior does not belong in the resource.
 
 ## Example
 
-See `operator/examples/agentrun-basic.yaml`.
+```yaml
+apiVersion: nvt.dev/v1alpha1
+kind: AgentRun
+metadata:
+  name: issue-123
+  namespace: nvt
+spec:
+  runtime:
+    type: codex
+    autonomy: trusted-local
+    user: non-root
+  image: nvt-agent-runtime:latest
+  runtimeClassName: kata-vm-isolation
+  egress: mediated
+  egressEnforcement: true
+  egressTransport: transparent
+  workspace:
+    mode: Ephemeral
+  broker:
+    grants:
+      - provider: github-main-app
+        materialization: header-inject
+        repositories: [mirkoSekulic/nvt-agent]
+        egressHosts: [github.com:443, api.github.com:443]
+        git: true
+        permissions:
+          contents: write
+          pull_requests: write
+  prompt:
+    text: Implement the issue and create a pull request.
+  agent:
+    config:
+      runtime:
+        command: codex
+      plugins: []
+  lifecycle:
+    completeOn:
+      - plugin.github.pr.merged
+      - plugin.github.pr.closed
+  ttl:
+    activeDeadlineSeconds: 14400
+    completedTTLSeconds: 300
+    failedTTLSeconds: 3600
+    runRetentionSeconds: 2592000
+```
 
-The example uses `runtimeClassName: kata-vm-isolation` to show the intended
-isolation class for disposable agent pods.
-
-## Spec
-
-### `spec.runtime`
-
-Selects the agent runtime and autonomy mode.
+## Runtime
 
 ```yaml
 runtime:
-  type: codex
+  type: codex          # codex | claude
   autonomy: trusted-local
+  user: root           # root | non-root
 ```
 
-`type` is `codex` or `claude`.
+`non-root` runs as uid/gid 1000 with `HOME=/home/agent` and passwordless sudo.
+Root remains the compatibility default.
 
-`autonomy` is `trusted-local` or `interactive`.
-
-### `spec.runtimeAuth`
-
-Optional runtime-specific auth material mounted from a Kubernetes Secret:
+Optional `runtimeAuth` copies files from a same-namespace Secret into a
+writable runtime home:
 
 ```yaml
 runtimeAuth:
@@ -55,164 +72,101 @@ runtimeAuth:
   mountPath: /root/.codex
 ```
 
-`secretName` is required when `runtimeAuth` is present and must name a Secret in
-the same namespace as the `AgentRun`. The Secret is mounted read-only into a
-copy init container, copied into a writable `emptyDir`, and the writable
-`emptyDir` is mounted into the agent container at the runtime auth home. Runtime
-auth is not mounted into the Docker-in-Docker sidecar and is separate from
-broker token Secrets.
+Known defaults are `/root/.codex` and `/root/.claude`. Runtime auth is a direct
+compatibility path and is not mounted into DinD. Mediated providers use broker
+custody and placeholders instead.
 
-`mountPath` is optional for known runtimes. Defaults are:
+`image` selects the runtime image. `runtimeClassName` optionally selects a
+hardened runtime such as Kata Containers.
 
-- `codex`: `/root/.codex`
-- `claude`: `/root/.claude`
+## Egress
 
-Unknown future runtime types must set `mountPath` explicitly or pod rendering
-fails with a clear validation error.
-
-### `spec.image`
-
-Runtime image for the controller-created agent pod.
+`egress` is `direct` or `mediated`; omitted means direct.
 
 ```yaml
-image: nvt-agent-runtime:latest
+egress: mediated
+egressEnforcement: true
+egressTransport: transparent
 ```
 
-### `spec.runtimeClassName`
+- `egressEnforcement` creates a separate egressd Pod and per-run
+  NetworkPolicies. It requires mediated mode and a policy-enforcing CNI.
+- `egressTransport` is `redirect`, `forward-proxy`, or `transparent`.
+  Forward-proxy and transparent require enforcement.
+- `egressForwardProxy` remains a compatibility alias for forward-proxy.
+- `egressAllowInsecureBroker` permits local plaintext broker traffic only.
 
-Optional Kubernetes runtime class for the agent pod.
+See [Transparent mediated egress](../../docs/transparent-egress-architecture.md).
 
-```yaml
-runtimeClassName: kata-vm-isolation
-```
+## Workspace
 
-### `spec.workspace`
-
-v1 supports ephemeral workspaces only:
+v1 supports only:
 
 ```yaml
 workspace:
   mode: Ephemeral
 ```
 
-The intended controller mapping is `emptyDir`. The workspace survives container
-restart inside the same pod, but is lost if the pod is deleted or rescheduled.
+The operator uses `emptyDir`. Data survives container restart in the same Pod
+but not Pod deletion or replacement.
 
-### `spec.broker.grants`
-
-Declares per-run dynamic grants against static broker providers:
+## Broker Grants
 
 ```yaml
 broker:
   grants:
     - provider: github-main-app
-      repositories:
-        - mirkoSekulic/nvt-agent
+      materialization: header-inject
+      repositories: [owner/repo]
+      egressHosts: [github.com:443]
+      git: true
+      permissions:
+        contents: write
+      quota:
+        requests: 1000
 ```
 
-`provider` names a statically configured broker provider. `repositories` are
-repository identifiers accepted by that provider. Patterns such as `owner/*`
-are provider-specific and follow the existing broker behavior.
+- `provider` names a statically configured broker provider.
+- `repositories` narrows its repository scope.
+- `materialization` is `file-bundle` for direct mode or `header-inject` /
+  `placeholder-file` for mediated mode. Admission rejects mixed modes.
+- `egressHosts` binds valid upstream host:port destinations.
+- `git` enables mediated git smart-HTTP behavior.
+- `permissions` narrows the provider's permission ceiling.
+- `allowInsecureUpstream` enables a plain-HTTP test fixture and is rejected
+  unless the operator explicitly allows it. It is always invalid for git.
+- `quota.requests` is a soft per-egressd-process limit; restart resets it.
 
-The controller writes these grants into the shared `nvt-broker-agents`
-ConfigMap in the same namespace as the `AgentRun`. The broker identity is
-`<namespace>/<name>`, and the policy stores only the SHA-256 hash of the
-per-run `NVT_BROKER_TOKEN`.
+The controller reconciles each run's agent and paired egress identities into
+broker policy. Removing a grant revokes it after policy projection and egressd
+cache expiry.
 
-### `spec.prompt.text`
+## Prompt And Agent Config
 
-Optional initial prompt text for scheduled or disposable AgentRuns:
+`prompt.text` is an optional convenience for disposable runs. The operator
+renders it as the builtin `initial-prompt` plugin. If the embedded config
+already declares that plugin, rendering fails to avoid ambiguity.
 
-```yaml
-prompt:
-  text: |
-    Implement the requested change and open a pull request.
-```
+`agent.config` is the normal agent YAML object. Unknown fields are preserved so
+plugin configuration can remain implementation-swappable. Runtime tools,
+code-server, exposed ports, repositories, and plugins live there.
 
-When `text` is non-empty, the controller prepends this plugin to the rendered
-`spec.agent.config.plugins` list:
-
-```yaml
-plugins:
-  - name: initial-prompt
-    source: builtin
-    when: after-agent
-    restart: never
-    config:
-      text: |
-        Implement the requested change and open a pull request.
-```
-
-The runtime plugin delivers the prompt once through `agentdctl prompt` and
-records a SHA-256 hash under `$NVT_STATE_DIR/initial-prompt/last.sha256` to
-avoid duplicate delivery on restart. If `spec.prompt.text` is omitted or empty,
-the agent config renders unchanged.
-
-Normal local nvt agents are unaffected unless they explicitly configure the
-`initial-prompt` plugin in their own `agent.yaml`. If `spec.prompt.text` is set
-and `spec.agent.config.plugins` already contains a plugin named
-`initial-prompt`, rendering fails to avoid ambiguity.
-
-### `spec.agent.config`
-
-Embedded nvt agent configuration rendered by the controller into an owned
-ConfigMap:
-
-```text
-<agentrun-name>-agent-config
-```
-
-The ConfigMap stores the rendered YAML under:
-
-```text
-/nvt-agent/agent.yaml
-```
-
-The CRD preserves unknown fields in this object because it mirrors the current
-`agent.yaml` shape and plugin config can be arbitrary.
-
-Runtime plugins, tools, code-server settings, exposed ports, and repository
-checkout behavior all live here.
-
-### `spec.lifecycle`
-
-Lifecycle event rules define how future webhook callbacks can mark the
-`AgentRun` complete or failed:
+## Lifecycle
 
 ```yaml
 lifecycle:
-  completeOn:
-    - plugin.github.pr.merged
-    - plugin.github.pr.closed
-    - plugin.agent.signal.done
-  failOn: []
+  completeOn: [plugin.github.pr.merged]
+  failOn: [plugin.agent.signal.failed]
 ```
 
-The operator compares callback event names with `completeOn` and `failOn`. For
-plugin-published events, it uses the event's `plugin_event` name when present.
-For ordinary agent/runtime events, it uses the event's `event` name.
+Direct and non-enforced mediated runs may report events through the
+authenticated callback endpoint. Enforced runs avoid callback credentials in
+the Agent Pod: the operator observes a termination message and validates it
+against the same lifecycle lists.
 
-Direct and existing non-enforced mediated runs retain the stable per-run
-callback token for compatibility. Enforced mediated runs are literal
-zero-secret: the operator replaces its own callback webhook plugin with the
-builtin `lifecycle-termination` reporter, observes the owned agent container's
-termination message, and re-validates the event against `spec.lifecycle`.
-Those Agent Pods receive no callback token or direct operator endpoint access.
+Terminal phases are `Completed`, `Failed`, and `DeadlineExceeded`.
 
-The event-webhook plugin posts to the cluster-internal operator endpoint:
-
-```text
-POST /v1/agentruns/{namespace}/{name}/events
-Authorization: Bearer <NVT_OPERATOR_CALLBACK_TOKEN>
-```
-
-The bearer token is read from the same-namespace Secret
-`<agentrun-name>-callback-token` key `NVT_OPERATOR_CALLBACK_TOKEN`. Missing or
-wrong tokens return `401`, and token values are not logged or returned.
-
-### `spec.ttl`
-
-Cleanup timing hints:
+## TTL
 
 ```yaml
 ttl:
@@ -222,203 +176,28 @@ ttl:
   runRetentionSeconds: 2592000
 ```
 
-`activeDeadlineSeconds` is optional. When omitted, the AgentRun can run
-indefinitely, which is the supported long-running/manual-agent mode. When set,
-it is enforced after `status.startedAt`: the controller requeues before the
-deadline, and after `startedAt + activeDeadlineSeconds` it marks the run
-`DeadlineExceeded`, sets `status.finishedAt`, records a clear reason, and
-deletes the owned agent Pod.
-`completedTTLSeconds` and `failedTTLSeconds` control owned Pod cleanup after
-`Completed` and `Failed` phases. Lifecycle failure callbacks and Kubernetes Pod
-`Failed` status both stamp `status.finishedAt`, so both failure paths can use
-`failedTTLSeconds`. If the relevant terminal TTL or `status.finishedAt` is
-unset, the Pod is left in place. After terminal Pod cleanup is complete,
-`runRetentionSeconds` controls AgentRun CR retention from `status.finishedAt`:
-unset defaults to 30 days (`2592000` seconds), `0` keeps the AgentRun CR
-forever, and a positive value deletes the terminal AgentRun CR after that
-duration. Deleting old AgentRun CRs also removes AgentRun-backed
-idempotency/history after retention; this is acceptable for the current POC.
+- Active deadline marks a running workload `DeadlineExceeded` and removes its
+  Pod.
+- Completed and failed TTLs control terminal Pod cleanup.
+- Run retention controls deletion of the terminal AgentRun object.
 
 ## Status
 
-The controller currently writes basic Pod-phase status:
-
 ```yaml
 status:
-  phase: Pending
-  podName: nvt-dev-agent
-  startedAt: "2026-05-29T16:00:00Z"
-  finishedAt: "2026-05-29T16:30:00Z"
-  reason: Completed by lifecycle event plugin.agent.signal.done
+  phase: Running
+  podName: issue-123-agent
+  startedAt: "..."
+  finishedAt: null
+  reason: ""
+  conditions: []
 ```
 
-`podName` is set once the owned agent Pod exists. `startedAt` is set once when
-the Pod first reaches `Running`. `finishedAt` and `reason` are set by lifecycle
-callbacks when a configured event marks the run complete or failed.
+Phases are `Pending`, `Running`, `Completed`, `Failed`, and
+`DeadlineExceeded`. Enforced runs expose provisioning conditions including
+`BrokerPolicyReady`, `EgressdCreated`, `EgressdReady`, and
+`EgressCAPublished`; the agent Pod is not created before its trust and policy
+prerequisites are ready.
 
-`phase` is one of:
-
-- `Pending`
-- `Running`
-- `Completed`
-- `Failed`
-- `DeadlineExceeded`
-
-## Intended v1 Controller Behavior
-
-The current controller initializes empty `status.phase` values to `Pending` and
-renders `spec.agent.config` to an owned ConfigMap with the key `agent.yaml`.
-When `spec.prompt.text` is non-empty, it prepends the builtin `initial-prompt`
-runtime plugin during this AgentRun-specific render.
-Compatibility modes create two stable owned opaque Secrets per run:
-
-```text
-<agentrun-name>-broker-token    NVT_BROKER_TOKEN
-<agentrun-name>-callback-token  NVT_OPERATOR_CALLBACK_TOKEN
-```
-
-These tokens are generated once and reused across reconciles. Existing same-name
-Secrets that are not owned by the `AgentRun` are rejected.
-
-Enforced mediated runs keep the restricted broker identity only in trusted
-operator control-plane state long enough to authorize and prepare inert
-placeholder files. The Agent Pod does not mount or reference it, and no
-callback token Secret is created. Route hosts, provider selectors, inert
-placeholders, and public CA certificates are the only auth-related material
-rendered for the Agent Pod. Agent and egressd Pods set
-`automountServiceAccountToken: false`; egressd alone mounts its paired egress
-broker identity and interception CA key.
-
-The controller then creates one owned Pod named `<agentrun-name>-agent` with the
-configured agent image and a Docker-in-Docker native sidecar-style init
-container. That Pod mounts the rendered ConfigMap at `/nvt-agent/agent.yaml`,
-provides an ephemeral `emptyDir` workspace, sets
-`DOCKER_HOST=tcp://127.0.0.1:2375` and `NVT_BROKER_URL=http://nvt-broker:7347`
-for the agent container, wires both token Secrets through `secretKeyRef`, and
-optionally seeds `spec.runtimeAuth.secretName` into a writable runtime auth
-home for the agent container. Runtime auth uses a read-only Secret source volume
-and a writable `emptyDir` home volume so runtimes can update local state,
-history, caches, or SQLite WAL/SHM files. Runtime auth mounts are not added to
-the DinD sidecar. The Pod binds the DinD daemon to localhost inside the Pod
-network namespace. The agent container starts after runtime auth copying
-completes and the DinD startup probe can run `docker info`.
-
-Between token Secret reconciliation and Pod creation, the controller updates the
-shared `nvt-broker-agents` ConfigMap so `agents.yaml` contains the run's broker
-identity, `sha256:<hash>` of the raw broker token, and requested grants. It
-preserves unrelated agent entries and does not set `AgentRun` ownership on this
-shared infrastructure ConfigMap.
-
-The controller adds a finalizer to remove the run's broker policy entry on
-deletion. Deletion cleanup preserves unrelated entries and fails open if the
-broker agents ConfigMap has already been removed, so local/kind POC cleanup does
-not leave an `AgentRun` stuck terminating.
-
-The manager exposes the AgentRun callback endpoint on `--callback-bind-address`
-(default `:8082`) for cluster-internal POC traffic:
-
-```text
-POST /v1/agentruns/{namespace}/{name}/events
-```
-
-The accepted event-webhook payload shape is:
-
-```json
-{
-  "agent": "optional-agent-name",
-  "event": {
-    "id": "evt_...",
-    "event": "plugin.event",
-    "plugin_event": "plugin.github.pr.merged",
-    "source": "plugin:github-watcher",
-    "payload": {}
-  }
-}
-```
-
-The operator resolves the lifecycle event name from `event.plugin_event` when
-non-empty, otherwise `event.event`. Empty event names return `400`; valid but
-unmatched events return `202` without changing status. `completeOn` matches set
-`Completed`, `finishedAt`, and reason `Completed by lifecycle event <event>`.
-`failOn` matches set `Failed`, `finishedAt`, and the equivalent failed reason.
-Existing terminal phases (`Completed`, `Failed`, `DeadlineExceeded`) are not
-overwritten by callbacks or by later Pod status sync.
-
-This controller slice creates the ConfigMap, per-run token Secrets, broker
-policy entry, and Pod, accepts lifecycle callbacks, syncs basic status, and
-enforces active deadlines, completed/failed terminal Pod TTLs, and terminal
-AgentRun CR retention. Concrete scheduler plugins, external Ingress, and a
-broker admin API remain future work. Static broker providers remain outside
-`AgentRun`; the run only requests dynamic grants against them.
-
-Runtime plugins remain normal runtime plugins. Operator extensions and
-schedulers remain separate from runtime plugins.
-
-## Broker POC Deployment
-
-`operator/config/broker/broker.yaml` provides local/kind POC manifests for the
-broker endpoint used by AgentRun Pods:
-
-```text
-http://nvt-broker:7347
-```
-
-The manifest creates:
-
-- `nvt-broker-config` ConfigMap with `broker.yaml`
-- `nvt-broker-agents` ConfigMap with initial `agents.yaml`
-- `nvt-broker` Deployment using `nvt-broker:latest`
-- `nvt-broker` ClusterIP Service on port `7347`
-
-Create broker root secrets separately before applying the manifest:
-
-```sh
-cat > .broker/env <<'EOF'
-GITHUB_APP_ID=<app-id>
-GITHUB_APP_INSTALLATION_ID=<installation-id>
-GITHUB_APP_PRIVATE_KEY_BASE64=<base64-private-key>
-EOF
-chmod 600 .broker/env
-make broker-env-secret BROKER_ENV_FILE=.broker/env
-```
-
-No real Secret values are committed. Avoid putting private key material directly
-in shell command arguments. The broker env Secret is consumed by the core nvt
-broker chart through `broker.envSecretName` and is intentionally separate from
-the GitHub comments producer private key Secret. Static broker providers live
-in `broker.yaml` and can reference these env var names:
-
-```text
-GITHUB_APP_ID
-GITHUB_APP_INSTALLATION_ID
-GITHUB_APP_PRIVATE_KEY_BASE64
-```
-
-Dynamic agent identities and grants live in `agents.yaml`. For this POC,
-`agents.yaml` is mounted from the `nvt-broker-agents` ConfigMap and starts as:
-
-```yaml
-agents: []
-```
-
-This mirrors the local `.broker/agents.yaml` model. Kubernetes projected
-ConfigMap updates are eventually reflected in mounted files, and the broker
-live-reloads its agents policy file; the kind POC should verify that the broker
-sees operator-written updates through this mounted file path.
-
-The operator now updates `nvt-broker-agents` for each `AgentRun` in the same
-namespace as the run. A generated entry looks like:
-
-```yaml
-agents:
-  - id: default/example
-    token-sha256: sha256:<sha256-of-NVT_BROKER_TOKEN>
-    grants:
-      - provider: github-main-app
-        repositories:
-          - mirkoSekulic/nvt-agent
-```
-
-The raw token stays in the owned Secret and is not written to the ConfigMap.
-Broker providers remain static in `broker.yaml`; AgentRun CR cleanup, concrete
-scheduler plugins, and a broker admin API remain future work.
+The CRD schema under `operator/config/crd/bases/` is authoritative for exact
+validation and defaults.

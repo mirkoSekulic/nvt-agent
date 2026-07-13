@@ -327,7 +327,7 @@ broker_token_ref = egress_env.get("NVT_BROKER_TOKEN")
 if not broker_token_ref or broker_token_ref.get("name") != egress_secret or broker_token_ref.get("key") != "NVT_EGRESS_BROKER_TOKEN":
     raise SystemExit(f"egressd missing egress broker token ref: {egress_env}")
 
-# Phase 4 git grant shape: shared CA volume carries the certificate only;
+# Mediated git grant shape: the shared CA volume carries the certificate only;
 # the agent mounts it read-only, egressd writable, and the agent is told
 # where to find ca.crt. The CA private key has no volume to leak through.
 volumes = {volume["name"]: volume for volume in pod["spec"].get("volumes", [])}

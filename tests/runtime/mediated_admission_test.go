@@ -1,13 +1,12 @@
 package runtime_test
 
-// Phase 0 skeletons for the run-level admission rules of mediated credential
-// egress (protocol/injection.md "Materialization Modes";
-// docs/mediated-egress-plan.md configuration surface).
+// Run-level admission rules for mediated credential egress
+// (protocol/injection.md "Materialization Modes").
 //
 // The run-level egress mode and every grant's materialization must agree,
 // and a mismatch fails admission loudly in both directions — there is no
 // downgrade or ignore path. This is one of the two main protections against
-// silent-fallback (plan risk 2): without it, a direct run could quietly
+// silent fallback: without it, a direct run could quietly
 // materialize a header-inject grant as a bundle, or a mediated run could
 // quietly write bundles into a supposedly zero-secret container.
 //
@@ -17,9 +16,6 @@ package runtime_test
 //     the AgentRun status
 //   - compose: `agent-init` validation exits non-zero naming the offending
 //     grant before any container starts
-//
-// Skipped pending plan Phase 3 (operator/compose wiring), where admission
-// gains the egress mode field. Bodies document the required assertions.
 
 import (
 	"os"
@@ -29,13 +25,11 @@ import (
 	"testing"
 )
 
-const admissionPending = "pending Phase 3 (docs/mediated-egress-plan.md): egress mode admission not implemented"
-
 // TestAdmissionRejectsDirectRunWithHeaderInjectGrant pins the first
 // direction: egress mode `direct` combined with any `header-inject` grant
 // fails admission.
 //
-// Phase 3 wiring for this skeleton:
+// Test setup:
 //  1. Configure an agent whose broker grants include
 //     `materialization: header-inject`.
 //  2. Submit work with `egress: direct` via the operator admission endpoint;
@@ -85,7 +79,7 @@ func TestAdmissionRejectsDirectRunWithHeaderInjectGrant(t *testing.T) {
 // direction: egress mode `mediated` combined with any `file-bundle` grant
 // fails admission.
 //
-// Phase 3 wiring for this skeleton:
+// Test setup:
 //  1. Configure an agent whose broker grants include a `file-bundle`
 //     (or defaulted) materialization.
 //  2. Submit work with `egress: mediated` via the operator admission

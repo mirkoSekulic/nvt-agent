@@ -1,6 +1,6 @@
 package egress
 
-// Phase 4 CA and TLS-termination proofs (docs/phase4-git-mediation-plan.md
+// CA and TLS-termination proofs (protocol/injection.md
 // §2, §4): the boot-generated CA publishes only its certificate, mints leafs
 // only for local redirect names, and the first TLS-terminated route pins the
 // upstream identity requirement — outbound URL, Host, and SNI all forced to
@@ -83,7 +83,7 @@ func TestCALeafIsLocalOnly(t *testing.T) {
 	}
 }
 
-// TestCARefusesUpstreamLeaf pins the Phase 4/Phase 6 boundary: a ClientHello
+// TestCARefusesUpstreamLeaf pins the local/upstream leaf boundary: a ClientHello
 // naming a real upstream is refused, not answered with a minted certificate.
 func TestCARefusesUpstreamLeaf(t *testing.T) {
 	ca, err := NewCA()
@@ -573,7 +573,7 @@ func TestGitRouteTLSEndToEnd(t *testing.T) {
 	}
 }
 
-// TestCAMintsAllowlistedUpstreamLeaf pins the Phase 6.2 widening: a CA
+// TestCAMintsAllowlistedUpstreamLeaf pins allowlisted upstream minting: a CA
 // configured with upstream names mints a per-SNI leaf for each (carrying only
 // that DNS SAN, no loopback IPs), the CA name constraints cover exactly the
 // local + upstream names, and any non-allowlisted or IP-literal SNI is refused.

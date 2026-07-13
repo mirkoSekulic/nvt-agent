@@ -1,20 +1,8 @@
 package runtime_test
 
-// Phase 0 skeletons for the mediated-mode smoke tests
-// (protocol/injection.md, docs/mediated-egress-plan.md).
-//
-// The plan defines two decoupled guarantees with one smoke test each:
-//
-//   (a) non-possession  - zero secret material in the agent container
-//                         (ships with plan Phase 3, operator/compose wiring)
-//   (b) egress-denied   - direct egress to upstream hosts is refused
-//                         (ships with plan Phase 5, enforcement)
-//
-// plus the placeholder-inertness test from the placeholder convention.
-// The tests are split so (a) lands and ratchets in CI independent of the
-// harder enforcement work. All are skipped pending their phase; bodies pin
-// the intended assertions. Both smoke tests are mode-aware by design: they
-// run against mediated agents and must skip *visibly* for direct-mode runs.
+// Mediated-mode smoke tests for the two independent guarantees documented in
+// protocol/injection.md and docs/transparent-egress-architecture.md:
+// credential non-possession and CNI-enforced denial of direct egress.
 
 import (
 	"crypto/ecdsa"
@@ -32,15 +20,12 @@ import (
 )
 
 const (
-	nonPossessionPending = "pending Phase 3 (docs/mediated-egress-plan.md): mediated operator/compose wiring not implemented"
-	placeholderPending   = "pending Phase 3 (docs/mediated-egress-plan.md): protocol-level inertness is covered by egressd/internal/egress tests as of Phase 1; this container-level test lands with mediated wiring"
 	// Egress enforcement is a Kubernetes control (own-Pod egressd +
 	// CNI-enforced NetworkPolicy); the denied/allowed/cross-run assertions
 	// live in the kind case tests/operator/kind/cases/enforced-egress.sh.
 	// Compose has no enforcement — non-possession holds locally, enforcement
-	// is real in operator mode (docs/mediated-egress-plan.md §7, resolved
-	// decision). This test must never pass silently.
-	egressDeniedPending = "egress enforcement is a k8s control: covered by tests/operator/kind/cases/enforced-egress.sh (Calico cluster); compose enforcement is a documented gap (docs/mediated-egress-plan.md §7)"
+	// is real in operator mode. This test must never pass silently.
+	egressDeniedPending = "egress enforcement is covered by tests/operator/kind/cases/enforced-egress.sh on a Calico cluster; Compose has no equivalent CNI fence"
 )
 
 // mediatedPlaceholder is the documented zero-entropy constant from
@@ -75,9 +60,8 @@ func testCertificatePEM(t *testing.T) string {
 }
 
 // scanTreeForSecretMaterial walks root and fails the test if any known secret
-// value appears in a regular file. Phase 3 points this at an export of the
-// mediated agent container filesystem (state dir, home, git config, env
-// snapshots) with the real fixture secrets as needles.
+// value appears in a regular file. The mediated smoke points this at an export
+// of the agent-visible filesystem with real fixture secrets as needles.
 func scanTreeForSecretMaterial(t *testing.T, root string, secrets []string) {
 	t.Helper()
 	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
@@ -121,9 +105,9 @@ func scanTextForSecretMaterial(t *testing.T, label string, text string, secrets 
 
 // assertScrubbedGitState fails if the container's git configuration retains
 // any credential path: helpers, extraHeader injection, URL rewrites, or
-// stored credential files (protocol/injection.md, plan section 5). The one
-// allowed rewrite is the managed Phase 4 insteadOf pointing at the local
-// egressd redirect listener — anything else is retained pre-existing state.
+// stored credential files (protocol/injection.md). The one allowed rewrite is
+// the managed insteadOf pointing at the local egressd redirect listener;
+// anything else is retained pre-existing state.
 func assertScrubbedGitState(t *testing.T, home string) {
 	t.Helper()
 	forbiddenConfig := []string{"credential.helper", "http.extraheader", "helper =", "extraheader ="}
@@ -162,7 +146,7 @@ func assertScrubbedGitState(t *testing.T, home string) {
 // TestMediatedNonPossession is smoke test (a): boot an agent in mediated
 // mode, then assert zero secret material anywhere the agent can read.
 //
-// Phase 3 wiring for this skeleton:
+// Test flow:
 //  1. Start broker routing fixtures with known fixture secrets.
 //  2. Boot/render the agent container in mediated mode (MEDIATED=1 / egress:
 //     mediated) with header-inject grant metadata for all fixture providers.
@@ -298,8 +282,8 @@ code-server:
 	}
 }
 
-// TestMediatedGitWiring pins the Phase 4 bootstrap wiring for a git-typed
-// grant (docs/phase4-git-mediation-plan.md §6): pre-existing git credential
+// TestMediatedGitWiring pins the bootstrap wiring for a git-typed
+// grant (protocol/injection.md): pre-existing git credential
 // state is scrubbed, then the managed insteadOf rewrite and http.sslCAInfo
 // are installed pointing at the local TLS redirect, GIT_TERMINAL_PROMPT is
 // disabled, and no installation-token or CA-private-key material exists
@@ -641,7 +625,7 @@ code-server:
 // TestMediatedPlaceholderInert pins the placeholder convention: the constant
 // satisfies CLI syntax checks but grants nothing upstream.
 //
-// Phase 1 wiring for this skeleton:
+// Test flow:
 //  1. Start a fake upstream that accepts only the real fixture credential.
 //  2. Issue a direct request (bypassing egressd) presenting the placeholder
 //     as a bearer token; assert the upstream rejects it.
@@ -679,7 +663,7 @@ code-server:
 // TestMediatedEgressDenied is smoke test (b): direct egress from the agent
 // to upstream hosts is refused; egressd is the only way out.
 //
-// Phase 5 wiring for this skeleton:
+// Enforced cluster flow:
 //  1. Boot a mediated agent with enforcement enabled.
 //  2. From the agent process: direct connections to the mediated upstream
 //     hosts must fail (connection refused/blocked, not 401).
@@ -694,7 +678,7 @@ func TestMediatedEgressDenied(t *testing.T) {
 	t.Skip(egressDeniedPending)
 }
 
-// TestBootstrapForwardProxyInstallsCATrust pins Phase 6.2 bootstrap: in
+// TestBootstrapForwardProxyInstallsCATrust pins forward-proxy bootstrap: in
 // forward-proxy mode (no https base-url to trigger it) the CA trust store is
 // still installed system-wide so proxy-env HTTPS clients trust the MITM leaf,
 // and egress.json records forward_proxy.

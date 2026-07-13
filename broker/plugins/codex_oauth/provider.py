@@ -122,7 +122,7 @@ class CodexOAuthProvider:
         # tokens and a jwt-shaped id_token whose claims are the provider's real
         # non-secret identity (account id, plan, ...) plus a far-future exp. The
         # real tokens stay in broker/provider state; they are injected at the
-        # edge (Phase 6.2). No refresh is triggered — this reads current state.
+        # edge. No refresh is triggered — this reads current state.
         if self.placeholder is None:
             raise ProviderError("placeholder-files-not-configured", f"provider {self.name} has no placeholder-file config", 403)
         with self.lock:

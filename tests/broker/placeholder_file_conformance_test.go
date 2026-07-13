@@ -1,7 +1,7 @@
 package broker_test
 
 // Conformance for the placeholder-file materialization mode
-// (docs/phase6.1-placeholder-file-materialization-pr-plan.md, protocol/broker.md):
+// (protocol/broker.md):
 // the agent fetches a syntactically valid auth file containing only inert
 // placeholders; the real secret values stay broker-side and never appear.
 

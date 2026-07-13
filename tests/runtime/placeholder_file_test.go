@@ -1,7 +1,7 @@
 package runtime_test
 
 // Runtime materialization of the placeholder-file mode
-// (docs/phase6.1-placeholder-file-materialization-pr-plan.md work item 3):
+// (protocol/broker.md):
 // bootstrap writes the broker's placeholder auth file verbatim (placeholders
 // only) and never reads a host auth file as the source of truth.
 

@@ -32,7 +32,7 @@ class StaticTokenProvider:
         self.injection_git = self._injection_git()
         # Generalized injection so this one provider covers Bearer APIs and
         # key-header APIs (e.g. Anthropic's x-api-key) with no egressd change
-        # (docs/phase5-6b-observability-pr-plan.md decision 4).
+        # (protocol/injection.md).
         self.injection_header = self._injection_header()
         self.injection_scheme = self._injection_scheme()
         self.injection_basic_username = self._injection_basic_username()

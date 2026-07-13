@@ -159,7 +159,7 @@ class AgentRegistry:
                         permissions[key] = value
                 # Quota is validated for schema strictness but NOT enforced
                 # broker-side: enforcement is per egressd process
-                # (docs/phase5-6b-observability-pr-plan.md decision 3).
+                # (protocol/injection.md).
                 quota = self._grant_quota(grant.get("quota"), index, grant_index)
                 grant_entry = {"provider": provider, "repositories": repositories, "materialization": materialization, "permissions": permissions}
                 if quota is not None:

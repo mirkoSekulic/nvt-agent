@@ -3,8 +3,8 @@
 Non-secret example configs for running Codex ChatGPT-plan auth in **mediated
 mode**: the broker owns the real `auth.json`, egressd injects the access token
 (and any claim-derived header) at the network edge, and the agent container
-holds no real credential. See `docs/mediated-egress-plan.md` and
-`protocol/injection.md`.
+holds no real credential. See `docs/codex-auth.md`,
+`docs/transparent-egress-architecture.md`, and `protocol/injection.md`.
 
 All tokens/hashes below are placeholders — generate your own.
 

@@ -12,8 +12,8 @@ identity. The noreply email uses the bot user's numeric id from
 ## Header injection (mediated git-over-HTTPS)
 
 With `config.injection-hosts` (e.g. `[github.com]`) the provider serves
-`/v1/injection/headers` for the paired egress identity, becoming the Phase 4
-git credential source (`docs/phase4-git-mediation-plan.md`). Injection accepts
+`/v1/injection/headers` for the paired egress identity, becoming the mediated
+git credential source (`protocol/injection.md`). Injection accepts
 exactly these path shapes:
 
 - `/{owner}/{repo}[.git]/info/refs` (GET) — smart-HTTP ref advertisement

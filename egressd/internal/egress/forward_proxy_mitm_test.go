@@ -1,6 +1,6 @@
 package egress
 
-// Phase 6.2 forward-proxy TLS-MITM: egressd terminates CONNECT under the
+// Forward-proxy TLS termination: egressd terminates CONNECT under the
 // per-agent CA, injects the broker credential into the decrypted request, and
 // re-originates to the pinned upstream. The agent never holds the credential;
 // the upstream never sees the placeholder; SNI/upstream are pinned.
@@ -431,7 +431,7 @@ func TestForwardProxyMITMQuota(t *testing.T) {
 }
 
 // TestForwardProxyMITMCodexShaped is the fixture-level Codex proof
-// (docs/phase6.2-forward-proxy-pr-plan.md 4b): the placeholder-file tool talks
+// (protocol/injection.md): the placeholder-file tool talks
 // to both the API host and the refresh host (auth.openai.com) through the
 // proxy, and egressd injects the real credential for each — a simulated refresh
 // leg included. No real token is ever in the "tool" (it sends the placeholder).

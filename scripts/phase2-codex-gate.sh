@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 2 Codex plan-auth mediation gate (docs/phase2-codex-gate-plan.md).
+# Historical redirect-only Codex mediation harness.
 #
 # Brings up broker + egressd + an isolated agent container, runs a real Codex
 # turn through egressd with the broker owning the real auth.json, and captures
@@ -7,9 +7,10 @@
 # whether TLS re-origination worked, and whether the agent container held any
 # real credential.
 #
-# This produces the EVIDENCE. A human fills the go/no-go decision into
-# docs/phase2-codex-gate.md from it. It never writes real credentials into the
-# repo, and fails loudly if any token-shaped string lands in the output dir.
+# This produces local evidence under .phase2-out. It never writes real
+# credentials into tracked files and fails loudly if token-shaped material
+# lands in the evidence directory. The current supported proof is documented
+# in docs/codex-auth.md.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -314,4 +315,4 @@ if [ "$CODEX_RC" -eq 0 ]; then
 else
   log "Codex turn did not complete — inspect codex-stderr.txt and egressd.log for the failing host / TLS behavior."
 fi
-log "Fill the decision into docs/phase2-codex-gate.md using .phase2-out/evidence/."
+log "Evidence written to .phase2-out/evidence/. See docs/codex-auth.md for the current mediated proof."

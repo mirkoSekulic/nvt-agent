@@ -161,7 +161,7 @@ producer-kind-setup: producer-kind-load producer-kind-install
 operator-codex-auth-secret:
 	CODEX_AUTH_SOURCE="$(CODEX_AUTH_SOURCE)" CODEX_AUTH_SECRET="$(CODEX_AUTH_SECRET)" SOURCE="$(SOURCE)" SECRET="$(SECRET)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" bash scripts/operator-codex-auth-secret.sh
 
-# Manual, opt-in real-Codex forward-proxy proof (docs/real-codex-forward-proxy-proof.md).
+# Manual, opt-in real-Codex mediated-auth proof (docs/codex-auth.md).
 # NOT run in CI: needs real host Codex auth. Writes evidence to .phase6-out/.
 phase6-real-codex-proof:
 	CODEX_AUTH_SOURCE="$(CODEX_AUTH_SOURCE)" CODEX_AUTH_SECRET="$(CODEX_AUTH_SECRET)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" ROLLOUT_TIMEOUT="$(ROLLOUT_TIMEOUT)" bash scripts/phase6-real-codex-proof.sh

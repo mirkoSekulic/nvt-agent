@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Forward-proxy smoke (docs/phase6.2-forward-proxy-pr-plan.md work item 4): a
+# Forward-proxy smoke (docs/transparent-egress-architecture.md): a
 # mediated + enforced run with spec.egressForwardProxy reaches an allowlisted
 # upstream through HTTPS_PROXY with no base-url override — egressd TLS-terminates
 # the CONNECT under the per-agent CA, injects the broker credential, and

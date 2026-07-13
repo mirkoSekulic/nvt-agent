@@ -1,10 +1,20 @@
 # nvt Helm Chart
 
+The chart installs the AgentRun and AgentSchedule CRDs, operator, broker, and
+optional browser gateway.
+
+```sh
+helm upgrade --install nvt ./charts/nvt \
+  --namespace nvt \
+  --create-namespace
+```
+
+Provider credentials are supplied through existing Secrets, never literal
+chart values.
+
 ## Broker TLS
 
-The broker serves TLS by default. The egressd→broker leg carries real
-credentials through the agent Pod's network namespace, so mediated runs in a
-cluster must not depend on `spec.egressAllowInsecureBroker`:
+Broker TLS is enabled by default:
 
 ```yaml
 broker:
@@ -14,234 +24,32 @@ broker:
     existingSecret: ""
 ```
 
-When `existingSecret` is empty, the chart generates a self-signed CA and a
-serving cert for `nvt-broker.<namespace>.svc` into `secretName` at install
-time and preserves it across upgrades (`helm lookup`), so the trust anchor
-does not rotate on every `helm upgrade`. The broker Deployment carries a
-`checksum/broker-tls` pod annotation derived from the same material, so the
-broker restarts exactly when the Secret changes. `helm template | kubectl
-apply` bypasses `lookup` and regenerates the cert on every render; the
-checksum tracks the regenerated material, so the broker restarts onto the
-newly applied cert — but every apply rotates the trust anchor and breaks
-in-flight mediated runs, so prefer `helm upgrade --install` (or
-`existingSecret`) for stable trust. Rotating an `existingSecret` out of band
-requires a manual `kubectl rollout restart deployment/nvt-broker`.
+Without `existingSecret`, Helm creates and preserves a self-signed CA and
+serving certificate across normal upgrades. The broker Deployment checksum
+rolls the Pod when the material changes.
 
-Set `existingSecret` to bring your own cert (for example from cert-manager);
-it must be a `kubernetes.io/tls` Secret that also carries `ca.crt`. The chart
-points the operator at the Secret (`NVT_BROKER_CA_SECRET`) and switches the
-operator-rendered broker URL to `https://nvt-broker:7347`; the operator then
-projects only the `ca.crt` item into agent Pods (agent and egressd
-containers) — the serving key never leaves the broker.
-
-With `tls.enabled=false` the broker stays plaintext and mediated AgentRuns
-must set `spec.egressAllowInsecureBroker: true` explicitly (local/dev only).
-
-## Gateway OIDC Authorization
-
-The optional access gateway supports generic OIDC login plus a separate
-authorization policy. Authentication alone is not enough in shared IdPs:
-when `gateway.auth.mode=oidc`, the default authorization decision is deny
-unless an allow rule matches. To allow any authenticated user, configure an
-explicit `authenticated: true` rule.
-
-Authorization rules evaluate claims from `gateway.auth.authorization.claimSource`.
-The default is `id_token`. Use `userinfo` when the IdP exposes entitlement
-claims there. `access_token` is accepted only for JWT access tokens that verify
-against the issuer JWKS; opaque access tokens fail closed.
-
-OIDC sessions are currently stored process-locally in the gateway. Keep
-`gateway.replicas: 1` for `auth.mode=oidc`; the chart fails rendering for
-multiple replicas until a shared session store exists. `auth.mode=none` can use
-the configured replica count.
-
-Do not use SSN, pid, or fødselsnummer claims as authorization keys. Prefer
-organization, group, resource, or entitlement claims. Gateway authorization
-policy validation rejects those sensitive claim paths, and logs intentionally
-include only the decision, rule id, agent access key, and a short hash of the
-subject.
-
-Example with provider-neutral OIDC fields and Ansattporten-style authorize
-parameters. The rule below assumes the configured claim source exposes
-`authorization_details`; choose `userinfo` or `access_token` to match the
-provider's actual claim placement:
-
-```yaml
-gateway:
-  enabled: true
-  auth:
-    mode: oidc
-    session:
-      existingSecret: nvt-gateway-session
-    oidc:
-      issuerURL: https://ansattporten.no
-      clientID: nvt-gateway
-      clientSecret:
-        existingSecret: nvt-gateway-oidc
-      scopes: ["openid", "profile"]
-      authorizationDetails: |
-        [
-          {
-            "type": "ansattporten:altinn:resource",
-            "resource": "urn:altinn:resource:digdir-selvbetjening-klienter",
-            "organizationform": "enterprise",
-            "representation_is_required": false
-          }
-        ]
-    authorization:
-      default: deny
-      # id_token (default), userinfo, or access_token for JWT access tokens
-      claimSource: userinfo
-      rules:
-        - id: allowed-altinn-org
-          effect: allow
-          where:
-            array: authorization_details[].authorized_parties[]
-            all:
-              - claimPath: orgno.ID
-                values: ["0192:991825827"]
-              - claimPath: resource
-                values: ["digdir-selvbetjening-klienter"]
-        - id: break-glass-admins
-          effect: allow
-          claimPath: groups[]
-          values: ["nvt-agent-admins"]
-```
-
-For `where.array`, all conditions are evaluated against the same selected array
-element. This prevents combining an organization match from one
-`authorized_parties[]` entry with a resource match from another entry.
-
-## Broker State Persistence
-
-By default the broker keeps `/state` on an `emptyDir`, preserving existing
-kind/smoke behavior:
+For production, prefer an existing `kubernetes.io/tls` Secret containing
+`tls.crt`, `tls.key`, and `ca.crt`:
 
 ```yaml
 broker:
-  persistence:
-    enabled: false
+  tls:
+    enabled: true
+    existingSecret: nvt-broker-tls
 ```
 
-## Agent Egress
+The operator projects only `ca.crt` into workloads. The serving key remains in
+the broker Pod. Rotating an externally managed Secret requires restarting the
+broker Deployment unless the external controller performs that rollout.
 
-Agent egress mode is selected per `AgentRun` with `spec.egress`; direct mode
-remains the API default. The chart exposes the egressd image and a
-creation-time default egress mode:
+Plain HTTP requires `broker.tls.enabled=false` plus explicit
+`spec.egressAllowInsecureBroker: true` on mediated runs. This is for local tests
+only.
 
-```yaml
-egress:
-  egressdImage: nvt-egressd:latest
-  defaultMode: direct   # direct | mediated
-  allowInsecureUpstreams: false
-```
+## Broker State
 
-`egress.allowInsecureUpstreams` is a **test/dev opt-in** (operator env
-`NVT_ALLOW_INSECURE_UPSTREAMS`) for the per-grant `allowInsecureUpstream`
-escape hatch, which lets egressd reach an upstream over plain HTTP — used only
-so hermetic in-cluster smoke fixtures (which cannot present a publicly-trusted
-cert) are reachable. Leave it `false` in any real deployment: a plaintext
-upstream leg carries the injected credential in the clear. With it off,
-admission **rejects** any grant that sets `allowInsecureUpstream`, and it is
-**always** rejected for `git` grants.
-
-`egress.defaultMode` (operator env `NVT_DEFAULT_EGRESS_MODE`, validated at
-startup) is applied **once, at AgentRun creation on the nvt admission/schedule
-path** (producers and schedules): when an incoming run leaves `spec.egress`
-empty, the admission endpoint stamps this mode before creating the object, so
-the stored run is always explicit. Flipping the knob therefore never
-reclassifies an existing run. It never overrides an explicit `spec.egress`.
-
-Scope caveat: a **raw `kubectl apply`** of an AgentRun with empty egress is
-defaulted to `direct` by the CRD schema (the API server, not the operator),
-regardless of this knob — the operator never sees empty on that path and does
-not resolve the default at read time (that would reintroduce the
-reclassification hazard). An operator running mediated-by-default drives runs
-through the nvt path, not raw kubectl. The global mediated-by-default flip
-(changing this default value, the CRD `default:` markers, and producer specs)
-stays deferred until both egress smokes are green in CI and real-cluster
-usage has soaked.
-
-### Forward-proxy mode (arbitrary tools that honor proxy env)
-
-`spec.egressForwardProxy: true` remains a compatibility input for
-`spec.egressTransport: forward-proxy` (which **requires**
-`spec.egressEnforcement`). `spec.egressTransport: transparent` additionally
-requires `egress.networkPolicyCapable=true`; it renders the credential-less
-captured native sidecar and NET_ADMIN one-shot routing init while egressd stays
-in its separate trusted Pod.
-`egress.allowedTCPPorts` is the shared egressd/NetworkPolicy external TCP
-contract and defaults to HTTP/HTTPS (`80`, `443`). `egress.denyCIDRs` adds
-deployment ranges to the built-in IANA non-public and transition exclusions.
-mediates unmodified tools with hardcoded endpoints that honor `HTTP(S)_PROXY`.
-The operator points the agent's `HTTP_PROXY`/`HTTPS_PROXY` at egressd; egressd
-terminates the `CONNECT` under the per-agent CA (already trusted by the agent),
-injects the broker credential, strips the placeholder, and re-originates TLS to
-the pinned upstream. A tool sends a plain `https://<upstream>/...` with no
-base-url override and gets mediated with **zero per-tool config**.
-
-Two independent fail-closed gates bound the MITM: the CONNECT host must be a
-configured inject route, and egressd refuses to mint a leaf for any other SNI.
-The per-agent CA's critical name constraints widen to exactly `localhost` +
-local Service names + the allowlisted upstream hosts, so a leaked CA key still
-cannot impersonate an arbitrary host. Hosts that are **not** a configured
-inject route are denied (no unmediated passthrough).
-
-`NO_PROXY` is **operator-computed** — localhost, the cluster domains, the
-broker, the operator callback, and kube-dns go direct — so infra legs never
-route through the MITM. Routing is deny-by-default; a non-allowlisted host
-fails at CONNECT (not a 401).
-
-Residue: tools that ignore proxy env entirely (a transparent `iptables`
-`REDIRECT`/`TPROXY` mode) are a separate, later step; forward-proxy covers the
-large majority of CLIs, language HTTP clients, and SDKs.
-
-### Per-grant request quotas
-
-A mediated grant may cap its proxied requests:
-
-```yaml
-broker:
-  grants:
-    - provider: anthropic-main
-      materialization: header-inject
-      egressHosts: [api.anthropic.com:443, mcp-proxy.anthropic.com:443]
-      quota:
-        requests: 1000
-```
-
-The operator renders this into the egressd route as `max_requests`; the
-(N+1)th request fails closed with a 429. **The count is per egressd process,
-not per run** — an egressd restart (in-place container restart, or the
-enforcement-mode Pod recreation after eviction) resets it. It is a soft
-resource guard, not a security boundary; durable run-lifetime quotas are
-future work. Absent = unlimited.
-
-### Revocation
-
-Removing a grant from an `AgentRun` (patch `spec.broker.grants`) makes the
-operator reconcile it out of the broker agents ConfigMap; the broker
-hot-reloads on the file's mtime change and the next `egressd` fetch for that
-grant fails closed — no broker restart. The end-to-end bound is **operator
-reconcile + kubelet ConfigMap projection (~1 min worst case) + egressd cache
-clamp (≤60s)**. Revoke through the AgentRun spec, never by editing the broker
-agents ConfigMap directly (the operator's policy reconcile would re-add the
-grant). The broker agents ConfigMap must be mounted as a directory volume,
-never with `subPath` — a subPath freezes the projected file and silently
-disables hot-reload; the helm render test guards this.
-
-A mediated run can additionally set `spec.egressEnforcement: true`: egressd
-moves to its own Pod and the operator renders per-run NetworkPolicies that
-fence the agent Pod (egress only to kube-dns, the broker, the paired egressd,
-and the operator callback). **Enforcement requires a NetworkPolicy-enforcing
-CNI** (Calico, Cilium, ...): on kindnet — kind's default — the policies are
-accepted but inert, and the enforcement smoke only runs on the Calico cluster
-(`make operator-kind-cluster-enforced`).
-The rendered policies assume the chart-managed broker/operator Pods run in the
-same namespace as the `AgentRun` and keep the chart labels/ports used by the
-controller selectors.
-
-For providers that maintain broker-owned state, enable a PVC:
+Broker state uses `emptyDir` by default. Stateful OAuth providers should use a
+PVC:
 
 ```yaml
 broker:
@@ -252,12 +60,7 @@ broker:
     existingClaim: ""
 ```
 
-When `existingClaim` is empty, the chart renders `PersistentVolumeClaim`
-`nvt-broker-state` with `ReadWriteOnce`. Set `storageClassName` to choose a
-class; leave it empty to use the cluster default. When `existingClaim` is set,
-the broker mounts that pre-created claim and the chart does not render a PVC.
-
-Optional one-time seed:
+Optionally seed an empty state directory once from an existing Secret:
 
 ```yaml
 broker:
@@ -267,11 +70,167 @@ broker:
     seedTargetDir: codex
 ```
 
-When `seedSecretName` is set, an init container using the broker image copies
-the Secret files into `/state/<seedTargetDir>/` only when that directory is
-absent or empty. It never overwrites existing state. This matters for stateful
-providers: after a provider rotates credentials, old seed Secret contents may
-be stale and must not be re-applied over live broker state.
+Seeding never overwrites existing broker state. This protects refreshed and
+rotated credentials from stale Secret contents.
 
-`seedSecretName` requires `persistence.enabled=true`; rendering fails if a seed
-Secret is configured with ephemeral broker state.
+## Agent Egress
+
+Direct mode remains the default:
+
+```yaml
+egress:
+  egressdImage: nvt-egressd:latest
+  capturedImage: nvt-captured:latest
+  defaultMode: direct
+  networkPolicyCapable: false
+  allowedTCPPorts: [80, 443]
+  denyCIDRs: []
+  allowInsecureUpstreams: false
+```
+
+`defaultMode` is applied once when an AgentRun enters through schedule
+admission. It never reclassifies an existing object and does not override an
+explicit `spec.egress`. Raw `kubectl apply` with an omitted field follows the
+CRD default, which is direct.
+
+### Enforced Transparent Mode
+
+```yaml
+egress:
+  networkPolicyCapable: true
+```
+
+```yaml
+spec:
+  egress: mediated
+  egressEnforcement: true
+  egressTransport: transparent
+```
+
+The operator creates a separate paired egressd Pod, per-run NetworkPolicies, a
+credential-less captured sidecar, and a one-shot NET_ADMIN routing init
+container. Normal outbound TCP, including DinD traffic, is redirected through
+captured and egressd. The Agent Pod has no direct internet egress rule.
+
+`networkPolicyCapable=true` is an operator assertion, not CNI installation.
+Set it only when the cluster CNI enforces NetworkPolicy. The enforced kind
+smoke uses Calico because default kind networking does not prove the boundary.
+
+Forward-proxy transport remains available for clients that honor
+`HTTP(S)_PROXY`. `spec.egressForwardProxy` is a compatibility input; new
+resources use `spec.egressTransport: forward-proxy`.
+
+`allowInsecureUpstreams` permits explicitly marked plain-HTTP fixtures for
+hermetic tests. Leave it false in real deployments; plaintext would expose an
+injected credential on the upstream leg.
+
+### Quotas And Revocation
+
+A grant may set a soft per-egressd-process request limit:
+
+```yaml
+spec:
+  broker:
+    grants:
+      - provider: anthropic-main
+        materialization: header-inject
+        egressHosts: [api.anthropic.com:443]
+        quota:
+          requests: 1000
+```
+
+The next request after the limit receives 429. An egressd restart resets the
+counter, so this is a resource guard rather than durable accounting.
+
+To revoke access, remove the grant from `AgentRun.spec.broker.grants`. The
+operator updates broker policy; the broker hot-reloads it; egressd stops
+receiving material after policy projection and cache expiry. Do not edit the
+broker ConfigMap directly or mount its policy file with `subPath`.
+
+See [Transparent mediated egress](../../docs/transparent-egress-architecture.md)
+for trust boundaries and traffic behavior.
+
+## Gateway
+
+Enable the optional gateway to list and route browser sessions:
+
+```yaml
+gateway:
+  enabled: true
+  baseDomain: agents.example.com
+  publicURL: https://agents.example.com
+```
+
+The chart creates a ClusterIP Service, not an external Ingress. Configure the
+cluster's ingress layer separately.
+
+### OIDC
+
+External deployments should use generic OIDC authorization code flow with
+PKCE:
+
+```yaml
+gateway:
+  enabled: true
+  replicas: 1
+  auth:
+    mode: oidc
+    session:
+      existingSecret: nvt-gateway-session
+      cookieDomain: .agents.example.com
+    oidc:
+      issuerURL: https://issuer.example.com
+      clientID: nvt-gateway
+      clientSecret:
+        existingSecret: nvt-gateway-oidc
+    authorization:
+      default: deny
+      claimSource: id_token
+      rules:
+        - id: platform-team
+          effect: allow
+          claimPath: groups[]
+          values: [nvt-agent-users]
+```
+
+Authentication does not imply authorization. OIDC defaults to deny until a
+rule allows the user. Session state is process-local, so OIDC mode currently
+requires one gateway replica.
+
+Authorization may read verified claims from `id_token`, `userinfo`, or a JWT
+`access_token`. Sensitive identity claims such as SSN or pid are rejected as
+authorization keys.
+
+For Ansattporten-style authorization details:
+
+```yaml
+gateway:
+  auth:
+    oidc:
+      authorizationDetails: |
+        [{"type":"ansattporten:altinn:resource","resource":"urn:altinn:resource:example"}]
+    authorization:
+      claimSource: userinfo
+      rules:
+        - id: authorized-organization
+          effect: allow
+          where:
+            array: authorization_details[].authorized_parties[]
+            all:
+              - claimPath: orgno.ID
+                values: ["0192:991825827"]
+              - claimPath: resource
+                values: [example]
+```
+
+All `where.all` conditions must match the same array element. See the
+[gateway README](../../gateway/README.md) for callback and session behavior.
+
+## Validation
+
+```sh
+make operator-helm-test
+```
+
+The render suite checks TLS, Secrets, policy mounts, gateway authorization,
+and egress configuration.

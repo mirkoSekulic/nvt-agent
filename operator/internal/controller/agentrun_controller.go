@@ -91,7 +91,7 @@ const (
 	egressdBrokerCAFile  = egressdBrokerCAMount + "/" + brokerCAKey
 	agentBrokerCAMount   = "/etc/nvt-broker-ca"
 	agentBrokerCAFile    = agentBrokerCAMount + "/" + brokerCAKey
-	// Enforcement mode (docs/phase5-6a-enforcement-pr-plan.md): egressd runs
+	// Enforcement mode (docs/transparent-egress-architecture.md): egressd runs
 	// in its own Pod behind a per-run Service. The operator owns a durable
 	// per-run CA Secret mounted only into egressd and publishes ca.crt only to
 	// the agent ConfigMap.
@@ -1756,7 +1756,7 @@ func validateCAKeyPairPEM(certPEM, keyPEM []byte) error {
 }
 
 // DesiredEgressCAConfigMap wraps the public CA certificate for the agent Pod
-// to mount read-only at the Phase 4 path.
+// to mount read-only at the managed egress CA path.
 func DesiredEgressCAConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme, certPEM []byte) (*corev1.ConfigMap, error) {
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{

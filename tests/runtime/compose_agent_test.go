@@ -1078,7 +1078,7 @@ func TestAgentInitMediatedRejectsMissingRouteHostsAndMultipleGrants(t *testing.T
 	}
 }
 
-// TestAgentInitMediatedRendersMultiRouteWithGitCA pins the Phase 4 compose
+// TestAgentInitMediatedRendersMultiRouteWithGitCA pins the mediated Compose
 // shape: multiple header-inject grants each get their own listener port, a
 // git grant's route terminates TLS under the boot-generated CA, and the CA
 // certificate publish dir matches the shared compose volume.

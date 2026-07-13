@@ -73,14 +73,14 @@ type AgentRunSpec struct {
 	// EgressEnforcement opts a mediated run into network-enforced egress:
 	// egressd moves to its own Pod and CNI-enforced NetworkPolicies fence the
 	// agent Pod so it cannot reach arbitrary hosts
-	// (docs/phase5-6a-enforcement-pr-plan.md). Requires egress: mediated and a
+	// (docs/transparent-egress-architecture.md). Requires egress: mediated and a
 	// NetworkPolicy-enforcing CNI; same-Pod remains the default mediated shape.
 	EgressEnforcement bool `json:"egressEnforcement,omitempty"`
 	// EgressForwardProxy opts a mediated+enforced run into forward-proxy mode:
 	// the agent's HTTP(S)_PROXY points at egressd, which TLS-terminates CONNECT
 	// under the per-agent CA and injects the broker credential, so unmodified
 	// tools that honor proxy env are mediated with zero per-tool config
-	// (docs/phase6.2-forward-proxy-pr-plan.md). Requires egressEnforcement.
+	// (docs/transparent-egress-architecture.md). Requires egressEnforcement.
 	EgressForwardProxy bool `json:"egressForwardProxy,omitempty"`
 	// EgressTransport selects redirect, forward-proxy, or transparent routing.
 	// EgressForwardProxy remains a compatibility input during migration.
@@ -130,7 +130,7 @@ type AgentRunBrokerGrant struct {
 	EgressHosts     []string                     `json:"egressHosts,omitempty"`
 	// Git marks a git-over-HTTPS grant: its egressd route terminates TLS
 	// under the per-agent CA and runtime bootstrap installs the git
-	// redirect wiring (docs/phase4-git-mediation-plan.md).
+	// redirect wiring (protocol/injection.md).
 	Git bool `json:"git,omitempty"`
 	// Permissions narrows the provider-level permission ceiling per grant,
 	// mirroring GitHub App permission keys (values: read or write).
@@ -146,7 +146,7 @@ type AgentRunBrokerGrant struct {
 	// Quota bounds proxied requests for this grant's route. Absent means
 	// unlimited. The count is per egressd process, not per run — an egressd
 	// restart resets it — so it is a soft resource guard, not a security
-	// boundary (docs/phase5-6b-observability-pr-plan.md decision 3).
+	// boundary (protocol/injection.md).
 	Quota *AgentRunGrantQuota `json:"quota,omitempty"`
 }
 

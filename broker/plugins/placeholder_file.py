@@ -2,7 +2,7 @@
 
 A placeholder file is a syntactically valid auth/config file that carries only
 inert placeholders: the real secret values stay in broker/provider custody and
-never reach the agent (docs/phase6.1-placeholder-file-materialization-pr-plan.md).
+never reach the agent (protocol/broker.md).
 These helpers render the two placeholder shapes and validate the target path;
 they hold no secret state.
 """

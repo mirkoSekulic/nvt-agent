@@ -736,7 +736,7 @@ func TestValidateAgentRunEgressModeRejectsMissingRouteAndMultipleGrants(t *testi
 		t.Fatalf("expected missing egressHosts rejection, got %v", err)
 	}
 
-	// Phase 4 lifts the exactly-one-grant limit: a realistic mediated run
+	// A realistic mediated run
 	// carries an LLM grant and a git grant, each with its own route.
 	multiple := testAgentRun()
 	multiple.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated

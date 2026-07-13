@@ -11,7 +11,7 @@ tests/operator/kind/
   agentrun-payload.py     # no-GitHub AgentSchedule admission payload renderer
   cases/
     parallel-lifecycle.sh # current smoke case
-    mediated-egress.sh    # Phase 3.5 mediated sidecar/admission smoke
+    mediated-egress.sh    # mediated routing and admission smoke
 ```
 
 ## Modes
@@ -148,7 +148,7 @@ Secrets before installing the charts:
 
 For the full reproducible local GitHub producer setup, including example local
 values files and the real Codex AgentRun flow, see
-[`docs/local-kind-github-producer-poc.md`](../../../docs/local-kind-github-producer-poc.md).
+[`docs/local-kind-github-producer.md`](../../../docs/local-kind-github-producer.md).
 
 ```sh
 make operator-codex-auth-secret
@@ -211,7 +211,7 @@ event-webhook + smoke-complete -> operator callback -> Completed AgentRuns ->
 terminal Pod cleanup
 ```
 
-The `mediated-egress` case exercises Phase 3.5 wiring for one redirectable
+The `mediated-egress` case exercises mediated wiring for one redirectable
 header-inject grant:
 
 ```text

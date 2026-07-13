@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Enforcement smoke (docs/phase5-6a-enforcement-pr-plan.md §5): a mediated
+# Enforcement smoke (docs/transparent-egress-architecture.md): a mediated
 # run with egressEnforcement cannot reach arbitrary hosts. Requires the
 # Calico cluster (operator-kind-cluster-enforced); on kindnet the policies
 # are inert and the denied assertions would fail.

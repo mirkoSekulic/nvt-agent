@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Manual, opt-in real-Codex forward-proxy proof
-# (docs/real-codex-forward-proxy-proof.md). NOT run in CI: it needs real host
+# (docs/codex-auth.md). NOT run in CI: it needs real host
 # Codex auth. It stands up a Calico kind cluster, seeds the broker with the
 # host Codex credential, runs `codex exec` inside a mediated + enforced +
 # forward-proxy AgentRun whose codex-main grant is materialization

@@ -559,7 +559,7 @@ fi
 # Revocation depends on the broker hot-reloading the agents ConfigMap on
 # mtime change. A subPath mount freezes the projected file forever and would
 # silently kill revocation, so the broker config volume must never be
-# subPath-mounted (docs/phase5-6b-observability-pr-plan.md item 4).
+# subPath-mounted (protocol/injection.md revocation contract).
 BROKER_DEPLOYMENT_RENDER="${WORKDIR}/broker-deployment.yaml"
 helm template nvt "${CHART}" -n custom-ns -s templates/broker-deployment.yaml > "${BROKER_DEPLOYMENT_RENDER}"
 grep -q 'mountPath: /config' "${BROKER_DEPLOYMENT_RENDER}"

@@ -213,7 +213,7 @@ func TestReportRejectsMissingEntries(t *testing.T) {
 // TestBrokerLoadsGrantQuota pins that the broker accepts a grant carrying a
 // quota block (schema strictness) and still serves injection for it — the
 // broker parses quota but does not enforce it (enforcement is per egressd
-// process, docs/phase5-6b-observability-pr-plan.md decision 3).
+// process; see protocol/injection.md).
 func TestBrokerLoadsGrantQuota(t *testing.T) {
 	f := newBrokerFixture(t)
 	identities := mediatedIdentities()
@@ -229,7 +229,7 @@ func TestBrokerLoadsGrantQuota(t *testing.T) {
 }
 
 // TestRevocationFailsClosedOnGrantRemoval pins the broker half of the
-// revocation chain (docs/phase5-6b-observability-pr-plan.md item 4): removing a
+// revocation chain (protocol/injection.md): removing a
 // grant from the agents config makes the next injection fetch fail closed via
 // the mtime hot-reload — no broker restart.
 func TestRevocationFailsClosedOnGrantRemoval(t *testing.T) {

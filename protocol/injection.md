@@ -1,19 +1,18 @@
 # Injection Protocol (Mediated Credential Egress)
 
-Status: draft contract (Phase 0 of `docs/mediated-egress-plan.md`).
-Implementation begins in Phase 1. The conformance tests referenced at the
-bottom pin this contract before any implementation exists.
+Status: implemented and pinned by the conformance suites referenced below.
 
 This protocol delivers credential **non-possession**: for mediated grants, no
 provider credential — API key, OAuth access/refresh token, installation token —
 is ever available to the agent container. Credentials are injected into
-outbound requests by `egressd`, a trusted reverse proxy running alongside the
-agent, which fetches injectable material from `brokerd` under an identity the
-agent does not hold.
+outbound requests by `egressd`, a trusted reverse proxy that fetches injectable
+material from `brokerd` under an identity the agent does not hold. Depending on
+the selected mode, egressd runs beside the agent for local compatibility or in
+a separately fenced Pod for Kubernetes enforcement.
 
 ```text
-agent    holds no credentials; sends requests to egressd over localhost
-egressd  trusted sidecar; fetches injectable headers, injects, re-originates TLS
+agent    holds no credentials; sends placeholder-bearing requests toward egressd
+egressd  trusted service; fetches injectable headers, injects, re-originates TLS
 brokerd  policy, refresh, audit; releases injectable material to egress
          identities only
 ```
@@ -29,7 +28,7 @@ for injection; it remains unchanged for direct-mode compatibility.
 ## Identity Model: Roles And Pairing
 
 Broker identities gain a `role`. Reusing plain agent identities for the
-sidecar would produce two bearer tokens with the same powers, which loses the
+egress service would produce two bearer tokens with the same powers, which loses the
 non-possession property.
 
 ```yaml
@@ -59,7 +58,7 @@ Rules, all enforced broker-side:
 - `agent` identities may not call `/v1/injection/headers`.
 - An injection request is authorized only when the caller's role is `egress`
   **and** the requested capability is granted to the caller's paired agent.
-  Agent A's sidecar cannot fetch material for agent B's grants.
+  Agent A's egress identity cannot fetch material for agent B's grants.
 - Kubernetes deployments replace bearer tokens with projected ServiceAccount
   tokens validated via TokenReview; the role and pairing semantics are
   unchanged.
@@ -76,7 +75,7 @@ Each grant carries a materialization mode:
 - `placeholder-file` — zero-possession for file-based tools; the agent
   identity fetches a syntactically valid auth file containing only inert
   placeholders, via `/v1/placeholder-files` (see `protocol/broker.md`). The
-  real credential stays broker-side and is injected at the edge (Phase 6.2).
+  real credential stays broker-side and is injected at the edge.
   Distinct from `file-bundle`: no path in this mode writes usable credentials.
   The response's `hosts` bindings feed the forward-proxy route/injection map.
   A `placeholder-file` grant is **injection-eligible**: `/v1/injection/headers`
@@ -96,8 +95,8 @@ Modes are mutually exclusive per grant, enforced broker-side:
 - `/v1/injection/headers` accepts `header-inject` and `placeholder-file`
   grants (both zero-possession); a `file-bundle` grant is denied there.
 
-Run-level admission (normative here, enforced by the operator's
-AgentSchedule admission and by compose `agent-init` from plan Phase 3):
+Run-level admission is enforced by the operator's AgentSchedule admission and
+by Compose `agent-init`:
 
 - run `egress: direct` with any `header-inject` or `placeholder-file` grant
   fails admission (both are zero-possession mediated modes).
@@ -105,12 +104,10 @@ AgentSchedule admission and by compose `agent-init` from plan Phase 3):
 - There is no downgrade path in either direction. The error names the
   offending grant.
 
-Operator/compose scope (6.1): `placeholder-file` grants are accepted in
-mediated mode and materialized by bootstrap, but they are **not yet routed** —
-a mediated run still requires at least one `header-inject` grant with
-`egressHosts` for its egress route. Standalone `placeholder-file` egress (the
-tool reaching its upstream through the forward proxy) lands in Phase 6.2; until
-then a placeholder file is materialized but inert.
+`placeholder-file` grants are accepted in mediated mode and their host bindings
+feed the egress route map. A provider must implement injection and declare its
+injection hosts for those placeholders to become usable at the edge; otherwise
+the run fails closed rather than falling back to a usable file.
 
 ## Endpoints
 
@@ -149,7 +146,7 @@ Rules:
 - The endpoint is provider-agnostic. The broker maps `capability` to a
   provider; the provider computes injectable headers for
   `(host, method, path)`. `egressd` contains no provider-specific logic —
-  new providers are broker plugins with zero sidecar changes.
+  new providers are broker plugins with zero egressd changes.
 - `host` is the pinned upstream **hostname without a port**. Provider
   `injection-hosts` entries are bare hostnames, and `egressd` strips any
   `:port` from its pinned upstream before asking; the port applies only to
@@ -180,7 +177,7 @@ Authorization mirrors the scoping of `/v1/injection/headers`:
 - Capabilities not granted (including unknown capabilities) deny with the
   standard error shape.
 - `file-bundle` grants deny. Routing is a mediated-mode surface; a
-  direct-mode grant has no sidecar to route to, and answering would let
+  direct-mode grant has no mediated egress path to route to, and answering would let
   routing act as a probe across materialization modes.
 
 Request:
@@ -299,7 +296,7 @@ Rules:
   audit-worthy, and a compromised `egressd` can spam granted capabilities
   regardless — re-checking buys nothing and would drop legitimate audit.
 - `path_class` is a **sanitized** class, never a raw path (see below).
-  `egressd` computes it at the source so raw paths never leave the sidecar.
+  `egressd` computes it at the source so raw paths never leave the trusted edge.
 - At most 100 entries per report; combined with the request size limit this
   bounds a report. Oversized reports are denied with the standard error
   shape, not truncated silently. A malformed entry rejects the whole batch;
@@ -332,20 +329,18 @@ Rules:
 - The constant is documented here, carries zero secret entropy, and is
   allowlisted by the non-possession smoke test.
 - A conformance test proves the placeholder is inert: a direct
-  (sidecar-bypassing) upstream request presenting it is rejected.
+  (egress-bypassing) upstream request presenting it is rejected.
 - `egressd` strips or replaces the placeholder header on injection
   (`strip_request_headers`); it is never forwarded alongside the real
   credential.
 
 ## Transport Requirements
 
-The `egressd -> brokerd` leg is the one network path that carries real
-credentials in flight, and `egressd` shares the agent's network namespace. In
-mediated deployments this leg must use TLS or a transport unreachable from
-the agent's network namespace. Serving `/v1/injection/headers` over plaintext
-HTTP on a network reachable from the agent netns is a conformance failure for
-mediated mode. The `agent -> egressd` localhost hop needs no such protection:
-it carries no credentials, because the agent has none.
+The `egressd -> brokerd` leg carries real credentials in flight. In mediated
+deployments it must use TLS or a transport unreachable from the agent. Serving
+`/v1/injection/headers` over plaintext HTTP on an agent-reachable network is a
+conformance failure. The agent-to-egress path carries only inert placeholders
+and non-secret routing metadata; the agent has no real credential to send.
 
 ## Audit
 
@@ -367,5 +362,5 @@ enforcement, neither of which depends on the report path.
 
 The stable contract is the JSON shapes and authorization rules documented
 here, pinned by `tests/broker/injection_conformance_test.go` and the mediated
-smoke tests in `tests/runtime/`. Broker and sidecar implementations may be
+smoke tests in `tests/runtime/`. Broker and egress implementations may be
 replaced as long as the black-box suites keep passing.

@@ -1,8 +1,8 @@
 package broker_test
 
 // Conformance suite for the mediated credential egress injection contract
-// (protocol/injection.md, docs/mediated-egress-plan.md), live as of plan
-// Phase 1.
+// (protocol/injection.md),
+// the implementation.
 
 import (
 	"bytes"
@@ -576,7 +576,7 @@ func TestInjectionAuditOmitsSecretValues(t *testing.T) {
 }
 
 // TestAnthropicProviderAgnosticismProof pins the provider-agnosticism proof
-// (docs/phase5-6b-observability-pr-plan.md item 5): a generalized static_token
+// (protocol/injection.md): a generalized static_token
 // provider injects Anthropic's x-api-key (no Bearer scheme) plus a static
 // anthropic-version header, both stripped from the request — with zero egressd
 // changes. The whole point of the proof is that adding Anthropic is broker

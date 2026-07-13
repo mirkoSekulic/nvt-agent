@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Quota smoke (docs/phase5-6b-observability-pr-plan.md item 3): a mediated
+# Quota smoke (protocol/injection.md): a mediated
 # grant with quota.requests: N is enforced at the sidecar — the (N+1)th
 # proxied request fails closed with 429. Runs same-Pod on kindnet (quota is
 # enforced in egressd regardless of placement) against the hermetic echo

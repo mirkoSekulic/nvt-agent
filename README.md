@@ -157,11 +157,12 @@ See [Runtime plugins](runtime/plugins/README.md) and the contracts under
 
 ## Documentation
 
+- [Documentation map](docs/README.md)
 - [Local development agent](docs/local-development-agent.md)
+- [Codex authentication](docs/codex-auth.md)
 - [Claude authentication](docs/claude-auth.md)
 - [Transparent egress architecture](docs/transparent-egress-architecture.md)
-- [Local GitHub producer POC](docs/local-kind-github-producer-poc.md)
-- [Mediated egress design history](docs/mediated-egress-plan.md)
+- [Local GitHub producer](docs/local-kind-github-producer.md)
 - [`agentd` protocol](protocol/agentd.md)
 - [Broker protocol](protocol/broker.md)
 

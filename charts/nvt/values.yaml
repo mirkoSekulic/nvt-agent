@@ -20,7 +20,7 @@ egress:
   # empty. Applied once, at creation — flipping it never reclassifies an
   # existing run. Default "direct". A raw `kubectl apply` of an AgentRun with
   # empty egress is defaulted to "direct" by the CRD schema regardless of this
-  # knob (docs/phase5-6b-observability-pr-plan.md decision 5).
+  # knob (docs/transparent-egress-architecture.md).
   defaultMode: direct
   # Opt into the per-grant allowInsecureUpstream escape hatch (plaintext
   # upstream leg). Test/dev only, for hermetic in-cluster fixtures that cannot
@@ -36,7 +36,7 @@ broker:
   tls:
     # Serve the broker over TLS. The egressd->broker leg carries real
     # credentials through the agent's network namespace, so mediated
-    # production runs require it (mediated-egress-plan.md §2). When enabled
+    # production runs require it (protocol/injection.md). When enabled
     # and no existingSecret is given, the chart generates a self-signed CA +
     # serving cert into secretName (preserved across upgrades). The CA cert
     # is public material distributed to egressd and the agent by the operator.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Revocation smoke (docs/phase5-6b-observability-pr-plan.md item 4): revoke a
+# Revocation smoke (protocol/injection.md): revoke a
 # grant through the SUPPORTED path — patch the AgentRun spec to drop a grant —
 # and observe egressd deny that grant's route within the bound, while a second
 # grant keeps working. Do NOT edit the broker agents ConfigMap directly: the

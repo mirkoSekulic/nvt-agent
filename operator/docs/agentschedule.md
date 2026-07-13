@@ -1,8 +1,7 @@
 # AgentSchedule v1alpha1
 
-`AgentSchedule` is the first POC scheduling foundation for the Kubernetes
-operator. It is a generic admission pool for disposable `AgentRun` resources,
-not a plugin-specific schedule, template, or event source.
+`AgentSchedule` is a generic admission pool for disposable `AgentRun`
+resources, not a plugin-specific schedule, template, or event source.
 
 Scheduler plugins decide what work should run and submit a complete `AgentRun`
 spec to the operator. The operator only enforces generic controls:
@@ -53,7 +52,7 @@ active. `Completed`, `Failed`, and `DeadlineExceeded` do not.
 
 ## Admission Endpoint
 
-For this POC, trusted cluster-internal scheduler producers can submit a run to:
+Trusted cluster-internal scheduler producers submit a run to:
 
 ```text
 POST /v1/schedules/{namespace}/{name}/admissions
@@ -121,9 +120,9 @@ idempotency history window and allows producers to safely retry deferred work.
 Within one running operator process, admissions are serialized per
 `{namespace, schedule}` while the handler reads the schedule, checks suspend and
 capacity, checks duplicate active work, prepares the `AgentRun`, and creates it.
-Different schedules can admit independently. This POC relies on the deployment
-having a single active operator HTTP process, normally enforced with leader
-election. It is not a distributed reservation system yet.
+Different schedules can admit independently. The deployment requires one
+active operator HTTP process, normally enforced with leader election. This is
+not a distributed reservation system.
 
 Responses:
 
@@ -134,9 +133,9 @@ Responses:
 - `400` for malformed JSON or missing `work.id`
 - `404` when the schedule does not exist
 
-## Scope
+## Limitations
 
 This slice is intentionally same-namespace and cluster-internal. It does not add
 authentication, template mode, per-key limits, multi-namespace scheduling, or
-concrete scheduler plugins. It also does not add a Kubernetes-backed
-distributed admission reservation. Those are future work.
+concrete scheduler plugins, or a Kubernetes-backed distributed admission
+reservation.

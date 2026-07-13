@@ -36,8 +36,8 @@ type Route struct {
 	// ListenTLSCert and ListenTLSKey optionally make the agent-facing
 	// listener serve HTTPS. Needed when the client refuses a plaintext base
 	// URL; the agent must trust the serving cert's CA. This is the same
-	// agent-facing TLS termination Phase 4 generalizes — used here only so
-	// the Phase 2 gate can distinguish "client requires https" from "client
+	// agent-facing TLS termination uses this mode. It is also useful for
+	// distinguishing "client requires https" from "client
 	// pins certs". Both must be set together or neither.
 	ListenTLSCert string `json:"listen_tls_cert"`
 	ListenTLSKey  string `json:"listen_tls_key"`
@@ -49,7 +49,7 @@ type Route struct {
 	// MaxRequests caps proxied requests on this route. 0 means unlimited.
 	// The counter lives for the egressd process, not the run: an egressd
 	// restart resets it. This is a soft resource guard, not a security
-	// boundary (docs/phase5-6b-observability-pr-plan.md decision 3).
+	// boundary (protocol/injection.md).
 	MaxRequests int `json:"max_requests"`
 }
 
@@ -65,7 +65,7 @@ const RouteListenTLSCA = "ca"
 type Config struct {
 	// BrokerURL is the brokerd base URL. Must be https: the egressd-broker
 	// leg is the one network path carrying real credentials through the
-	// agent's network namespace (docs/mediated-egress-plan.md section 2).
+	// agent-reachable network (protocol/injection.md transport requirements).
 	BrokerURL string `json:"broker_url"`
 	// AllowInsecureBroker permits a plain-HTTP broker URL. Local dev only;
 	// a mediated deployment serving injection over plaintext reachable from
@@ -104,7 +104,7 @@ type CAConfig struct {
 
 // ForwardProxyConfig enables CONNECT proxying. AllowHosts are blind-tunnelled
 // (no TLS termination, no injection). InjectRoutes are TLS-terminated under the
-// per-agent CA and injected — the Phase 6.2 MITM path.
+// per-agent CA and injected.
 type ForwardProxyConfig struct {
 	Listen                   string   `json:"listen"`
 	TransparentMode          bool     `json:"transparent_mode"`
@@ -241,7 +241,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("ca.leaf_dns_names[%d] must not be empty", index)
 			}
 			// Leaf names are synthetic redirect names; minting for a real
-			// upstream is exactly the boundary Phase 4 established.
+			// upstream is the managed TLS-termination boundary.
 			if realUpstreamHosts[strings.ToLower(name)] {
 				return fmt.Errorf("ca.leaf_dns_names[%d] %q matches a real upstream host", index, name)
 			}

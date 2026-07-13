@@ -7,7 +7,7 @@ import (
 )
 
 // TestLoadForwardProxyInjectConfig pins that egressd accepts the forward-proxy
-// inject-route config shape the operator renders (Phase 6.2).
+// inject-route config shape the operator renders.
 func TestLoadForwardProxyInjectConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

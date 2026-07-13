@@ -1,6 +1,6 @@
 # Phase 2 Codex plan-auth mediation gate — isolation topology.
 #
-# NOT a production compose file. See docs/phase2-codex-gate-plan.md.
+# Historical redirect-only Codex test harness. NOT a production compose file.
 #
 # Networks:
 #   phase2-agent   internal: true — no outbound internet. Agent + egressd.

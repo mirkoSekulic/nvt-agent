@@ -1,7 +1,7 @@
 package broker_test
 
-// Phase 4 conformance for git-over-HTTPS injection through the github-app
-// provider (docs/phase4-git-mediation-plan.md §3): git smart-HTTP path
+// Conformance for git-over-HTTPS injection through the github-app
+// provider (protocol/injection.md): git smart-HTTP path
 // shapes, repo scoping, the Basic/Bearer header dialects, and the
 // read/write permission mapping — the first method/path-based authorization
 // decision in the injection path.

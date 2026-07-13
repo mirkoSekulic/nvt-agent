@@ -1,32 +1,21 @@
-# Local Development Agent From Scratch
+# Local Development Agent
 
-This guide sets up one local agent for developing this repository with a shared
-local broker and a GitHub App provider. The agent gets a broker identity token;
-the GitHub App private key stays in `.broker/env` and is mounted only into the
-broker service.
-
-The examples use:
-
-```sh
-AGENT=nvt-dev
-REPO=mirkosekulic/nvt-agent
-PROVIDER=github-main-app
-```
-
-Replace those values for another agent, repository, or broker provider.
+This guide creates one Docker Compose agent with a broker-backed GitHub App.
+The App private key stays in the broker; the agent receives only a scoped
+broker identity.
 
 ## Prerequisites
 
-- Docker Desktop or another Docker engine with Compose support.
-- A GitHub App installed on the repository you want the agent to work on.
-- The GitHub App ID, installation ID, and private key `.pem` file.
-- Local Codex auth under `~/.codex` if the agent uses Codex.
-- This repository checked out locally.
+- Docker with Compose
+- Make
+- A GitHub App installed on the target repository
+- The App ID, installation ID, and private key
+- Codex or Claude credentials when using that runtime
 
-Keep the GitHub App private key outside the repository. Do not commit `.broker/`
-or `.agents/`; both are local runtime state.
+`.broker/` and `.agents/` are ignored local state. Never commit provider
+credentials from either directory.
 
-## 1. Prepare Local Variables
+## Configure The Broker
 
 From the repository root:
 
@@ -34,186 +23,86 @@ From the repository root:
 export AGENT=nvt-dev
 export REPO=mirkosekulic/nvt-agent
 export PROVIDER=github-main-app
-export GITHUB_APP_ID=<numeric-app-id>
-export GITHUB_APP_INSTALLATION_ID=<numeric-installation-id>
-export GITHUB_APP_KEY_PEM=/absolute/path/to/private-key.pem
-```
 
-On macOS, encode the private key for the broker env file:
-
-```sh
-export GITHUB_APP_PRIVATE_KEY_BASE64="$(base64 -i "$GITHUB_APP_KEY_PEM" | tr -d '\n')"
-```
-
-On GNU/Linux, use:
-
-```sh
-export GITHUB_APP_PRIVATE_KEY_BASE64="$(base64 -w0 "$GITHUB_APP_KEY_PEM")"
-```
-
-## 2. Configure The Broker
-
-Create local broker files:
-
-```sh
 mkdir -p .broker
 cp -n templates/broker-agents.yaml .broker/agents.yaml
 ```
 
-Write broker-only secret env vars:
+Create `.broker/env` with mode `0600`:
 
-```sh
-cat > .broker/env <<EOF
-GITHUB_APP_ID=$GITHUB_APP_ID
-GITHUB_APP_INSTALLATION_ID=$GITHUB_APP_INSTALLATION_ID
-GITHUB_APP_PRIVATE_KEY_BASE64=$GITHUB_APP_PRIVATE_KEY_BASE64
-EOF
-chmod 600 .broker/env
+```text
+GITHUB_APP_ID=<app-id>
+GITHUB_APP_INSTALLATION_ID=<installation-id>
+GITHUB_APP_PRIVATE_KEY_BASE64=<base64-private-key>
 ```
 
-Write a GitHub App provider. The provider ceiling is the maximum scope the
-broker can grant from this provider:
+Generate the final value portably with:
 
 ```sh
-cat > .broker/broker.yaml <<EOF
+base64 < /absolute/path/to/private-key.pem | tr -d '\n'
+```
+
+Create `.broker/broker.yaml`:
+
+```yaml
 providers:
-  - name: $PROVIDER
+  - name: github-main-app
     plugin: github-app
     config:
       app-id-env: GITHUB_APP_ID
       installation-id-env: GITHUB_APP_INSTALLATION_ID
       private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
       api-url: https://api.github.com
+      injection-hosts: [github.com, api.github.com]
     allow:
-      repositories:
-        - $REPO
+      repositories: [mirkoSekulic/nvt-agent]
       permissions:
         contents: write
         pull_requests: write
         checks: read
-      methods:
-        - GET
-EOF
+      methods: [GET, POST, PATCH]
 ```
 
-`permissions` are GitHub App installation-token permissions requested from
-GitHub. `methods` controls broker HTTP executor methods; v1 uses `GET` for
-brokered API reads. Git push uses token mode through Git credentials.
+Provider `allow` is the maximum ceiling. Each agent grant narrows it further.
 
-## 3. Build And Start Shared Infra
-
-Build both images:
+## Build And Start
 
 ```sh
-make runtime-build
-make broker-build
-```
-
-Start the local proxy and broker:
-
-```sh
+make runtime-build broker-build egressd-build captured-build
 make infra-up
-```
-
-The broker is not published to the host. Agents reach it at
-`http://broker:7347` on the internal Compose network.
-
-## 4. Create And Grant The Agent
-
-Create the agent directory and env:
-
-```sh
 make agent-init NAME=$AGENT
-```
-
-This creates `.agents/$AGENT/env`, `.agents/$AGENT/agent.yaml`, workspace,
-auth, and custom plugin directories. It also creates a per-agent broker token
-and registers only the token hash in `.broker/agents.yaml` with no grants.
-For mediated local compose agents, it also creates or reuses
-`.agents/$AGENT/egress-ca/ca.crt` and `.agents/$AGENT/egress-ca/ca.key`.
-Only the public certificate is mounted into the agent container at
-`/nvt-egress-ca/ca.crt`; the private key path stays out of the agent env, and
-the key is mounted only into egressd. Local compose runs that trusted egressd
-sidecar as root so `ca.key` can stay `0600`. Deleting
-`.agents/$AGENT/egress-ca/` rotates the local egress CA on the next mediated
-creation.
-
-To create a parallel local agent from an existing initialized one, copy the
-agent definition and broker grants while generating a fresh broker token:
-
-```sh
-make agent-copy FROM=$AGENT TO=nvt-dev-copy
-```
-
-`make agent-cp` is the same command. Pass `COPY_GRANTS=0` to create the new
-agent without copying broker grants. Pass `COPY_WORKSPACE=1` to copy workspace
-contents and per-agent auth files. Add `COPY_AUTH=0` if you want the workspace
-copy without auth.
-
-Grant the agent access to the repository:
-
-```sh
 make agent-grant NAME=$AGENT PROVIDER=$PROVIDER REPO=$REPO
+make agent-up NAME=$AGENT
 ```
 
-The broker enforces:
+`agent-init` creates `.agents/$AGENT/agent.yaml`, environment, workspace,
+state, and a unique broker identity. The broker stores only its token hash.
+
+Open code-server:
 
 ```text
-effective scope = provider ceiling in .broker/broker.yaml
-                ∩ agent grant in .broker/agents.yaml
+http://nvt-dev.agent.localhost:4090
 ```
 
-The default empty grant set is deny-by-default. `agents.yaml` is live-reloaded
-by the broker, so this does not require a broker restart.
-
-## 5. Configure The Agent
-
-Edit `.agents/$AGENT/agent.yaml`:
+Useful commands:
 
 ```sh
-$EDITOR ".agents/$AGENT/agent.yaml"
+make agent-logs NAME=$AGENT
+make agent-shell NAME=$AGENT
+make agent-doctor NAME=$AGENT
+make agent-ps
 ```
 
-New agents default to `AUTONOMY=trusted-local`, which writes explicit
-auto-approval flags into `runtime.args`. That trusts the local agent environment:
-the workspace mount, agent container, broker-granted capabilities, and
-per-agent Docker daemon. Use `AUTONOMY=interactive` during `agent-init` if you
-want the terminal agent CLI to ask for approvals normally.
+## Configure Repositories And Tools
 
-A broker-backed configuration for developing this repo:
+Edit `.agents/$AGENT/agent.yaml`. Generated defaults already contain the
+runtime, tools, code-server, and plugin sections.
+
+Broker-backed repository access uses the public provider alias exported by
+`git-host-credentials`, then references that alias from checkout and watcher
+plugins:
 
 ```yaml
-runtime:
-  command: codex
-  args:
-    - --sandbox
-    - danger-full-access
-    - --ask-for-approval
-    - never
-
-tools:
-  packages:
-    - jq
-  mise: []
-  additional-paths: []
-  shell: []
-
-code-server:
-  extensions:
-    - redhat.vscode-yaml
-  settings:
-    overwrite: false
-    values:
-      workbench.colorTheme: "Default Dark Modern"
-      workbench.startupEditor: "none"
-      editor.minimap.enabled: false
-      security.workspace.trust.enabled: false
-
-expose:
-  http:
-    - name: app
-      targetPort: 3000
-
 plugins:
   - name: git-host-credentials
     source: builtin
@@ -243,195 +132,93 @@ plugins:
     config:
       repos:
         - url: https://github.com/mirkosekulic/nvt-agent.git
-
-  - name: github-watcher
-    source: builtin
-    when: after-agent
-    restart: always
-    config:
-      default-provider: github-main
-      poll-seconds: 60
-      broker:
-        enabled: true
-        provider: github-main-app
-      prs: []
 ```
 
-Keep the `broker-provider` value aligned with `.broker/broker.yaml`. Keep the
-`provider` values aligned with the local `git-host-credentials` provider name.
+Keep `broker-provider` aligned with `.broker/broker.yaml`. Plugin `provider`
+values refer to the local exported alias, not directly to the broker provider.
 
-Git auth username defaults to `x-access-token` internally. `identity.mode:
-provider` asks the broker-backed GitHub App provider for the App bot commit
-identity and writes repo-local `user.name` / `user.email` after checkout.
+For custom tools, exposed ports, runtime arguments, and watcher configuration,
+see [Runtime plugins](../runtime/plugins/README.md) and the generated comments
+in `agent.yaml`.
 
-## 6. Start The Agent
+## Verify
 
-```sh
-make agent-up NAME=$AGENT
-make agent-logs NAME=$AGENT
-```
-
-Open code-server:
-
-```text
-http://nvt-dev.agent.localhost:4090
-```
-
-If you start an HTTP dev server inside the agent on port `3000`, open the
-named route:
-
-```text
-http://app.nvt-dev.agent.localhost:4090
-```
-
-`expose.http` is local-development routing for HTTP services listening on ports
-in the agent's shared local network namespace. That includes direct agent
-processes and inner Docker Compose services that publish a port. Keep it in
-block YAML form as shown. Ports `4090` and `2375` are reserved.
-
-For temporary access to another port without editing `agent.yaml`:
-
-```sh
-make forward NAME=$AGENT PORT=5173
-make forward NAME=$AGENT PORT=5173 LOCAL=9000
-```
-
-Open a shell:
-
-```sh
-make agent-shell NAME=$AGENT
-```
-
-## 7. Verify From Inside The Agent
-
-Inside `make agent-shell`:
+Inside `make agent-shell NAME=$AGENT`:
 
 ```sh
 brokerctl health
 docker info
 docker compose version
-git-host-credential token --provider github-main --target github.com/mirkosekulic/nvt-agent | wc -c
 cd "$NVT_WORKSPACE/nvt-agent"
 git fetch
 agentdctl status
 doctor
 ```
 
-The token command should print a non-zero byte count. Do not print tokens in
-logs or paste them into chat.
+Do not print broker tokens or provider credentials during verification.
 
-Optional push smoke test:
-
-```sh
-git switch -c nvt-agent-smoke
-date > .nvt-smoke
-git add .nvt-smoke
-git commit -m "Smoke test brokered agent push"
-git push -u origin nvt-agent-smoke
-```
-
-Delete the smoke branch and test file after verifying the path.
-
-## 8. Optional: Watch A Pull Request
-
-The watcher can be configured statically in `agent.yaml`, or dynamically from
-inside the running agent:
+Register a pull-request watcher dynamically:
 
 ```sh
 github-watch register \
-  --repo mirkosekulic/nvt-agent \
+  --repo mirkoSekulic/nvt-agent \
   --number <pr-number> \
   --label nvt-dev
 
 github-watch list
 ```
 
-Dynamic registrations are stored under the agent state directory and survive
+Registrations live in the persistent agent state directory and survive
 container restart.
-By default they accept PR comments and reviews from `OWNER`, `MEMBER`,
-`COLLABORATOR`, and `CONTRIBUTOR`; include `CONTRIBUTOR` in static watcher
-config for fork, upstream, or organization PR workflows where GitHub reports
-maintainers that way.
+
+## HTTP Services
+
+Declare named routes in `agent.yaml`:
+
+```yaml
+expose:
+  http:
+    - name: app
+      targetPort: 3000
+```
+
+Then open:
+
+```text
+http://app.nvt-dev.agent.localhost:4090
+```
+
+For temporary forwarding:
+
+```sh
+make forward NAME=$AGENT PORT=5173
+make forward NAME=$AGENT PORT=5173 LOCAL=9000
+```
+
+Ports 4090 and 2375 are reserved.
 
 ## Troubleshooting
 
-`nvt-broker:latest` cannot be found:
-
-```sh
-make broker-build
-make infra-up
-```
-
-`brokerctl` says `NVT_BROKER_TOKEN` is not set:
-
-- Recreate or inspect `.agents/$AGENT/env`.
-- Start the shell with `make agent-shell NAME=$AGENT` so the agent env is loaded.
-
-Broker returns `unauthorized`:
-
-- Run `make agent-grant NAME=$AGENT PROVIDER=$PROVIDER REPO=$REPO`.
-- Check `.broker/agents.yaml` has the agent entry and grant.
-- Check the broker container is using the current `.broker` directory.
-
-GitHub token minting fails:
-
-- Confirm the GitHub App is installed on the repository.
-- Confirm the app has the required repository permissions.
-- Confirm `.broker/env` contains the app ID, installation ID, and base64 private
-  key.
-
-`git fetch` cannot find `git-credential-nvt`:
-
-- Rebuild and restart the runtime image.
-- Use `make agent-shell NAME=$AGENT` for an env-loaded shell.
-
-`docker info` cannot reach Docker:
-
-- Confirm the agent was recreated after the DinD change.
-- Run `make agent-down NAME=$AGENT && make agent-up NAME=$AGENT`.
-- Confirm `DOCKER_HOST=tcp://127.0.0.1:2375` is set inside the agent.
-
-Docker API exposure check:
-
-- Inside the agent, confirm dockerd listens only on localhost. If `ss` is
-  installed, run `ss -ltn | grep 2375` and expect `127.0.0.1:2375`, not
-  `0.0.0.0:2375`.
-- If `ss` is unavailable, inspect `/proc/net/tcp`:
-
-  ```sh
-  python3 - <<'PY'
-  from pathlib import Path
-  for line in Path("/proc/net/tcp").read_text().splitlines()[1:]:
-      parts = line.split()
-      addr, port = parts[1].split(":")
-      if port.upper() == "0947":
-          ip = ".".join(str(int(addr[i:i+2], 16)) for i in (6, 4, 2, 0))
-          print(f"{ip}:2375 state={parts[3]}")
-  PY
-  ```
-
-  Expected output:
-
-  ```text
-  127.0.0.1:2375 state=0A
-  ```
+- **Broker image missing:** run `make broker-build && make infra-up`.
+- **Unauthorized:** verify the grant in `.broker/agents.yaml` and provider
+  ceiling in `.broker/broker.yaml`.
+- **GitHub mint failure:** verify App installation, permissions, IDs, and the
+  base64 private key in `.broker/env`.
+- **Docker unavailable:** recreate the agent and verify
+  `DOCKER_HOST=tcp://127.0.0.1:2375`.
+- **Runtime credentials stale:** update the broker-owned credential source;
+  mediated agents should not receive copied provider credentials.
 
 ## Cleanup
 
-Stop the agent:
-
 ```sh
 make agent-down NAME=$AGENT
-```
-
-Remove the agent and its local state:
-
-```sh
 make agent-rm NAME=$AGENT FORCE=1
+make infra-down
 ```
 
-Stop shared infra:
+To clone an initialized agent definition with a fresh broker identity:
 
 ```sh
-make infra-down
+make agent-copy FROM=$AGENT TO=nvt-dev-copy
 ```
