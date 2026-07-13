@@ -23,12 +23,12 @@ case_kind_setup() {
   FIXTURE_TOKEN="fixture-${RANDOM}-${RANDOM}"
   make -C "${ROOT}" CLUSTER="${CLUSTER}" CREATE_CLUSTER="${CREATE_CLUSTER}" \
     ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT}" operator-kind-cluster-enforced
-  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_apply_retry
+  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
   ECHO_EXPECTED_CREDENTIAL_SHA256="$(printf 'Bearer %s' "${FIXTURE_TOKEN}" | sha256sum | cut -d' ' -f1)"
   printf 'NVT_SMOKE_STATIC_TOKEN=%s\n' "${FIXTURE_TOKEN}" | \
     kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-smoke-broker-env \
     --from-env-file=/dev/stdin \
-    --dry-run=client -o yaml | kubectl_apply_retry
+    --dry-run=client -o yaml | kubectl_smoke apply -f -
   unset FIXTURE_TOKEN
   write_broker_providers_values "${SMOKE_TMPDIR}/broker-providers.yaml"
   deploy_echo_fixture

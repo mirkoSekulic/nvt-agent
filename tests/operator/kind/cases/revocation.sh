@@ -23,10 +23,10 @@ case_render() {
 
 case_kind_setup() {
   make -C "${ROOT}" CLUSTER="${CLUSTER}" CREATE_CLUSTER="${CREATE_CLUSTER}" operator-kind-cluster
-  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_apply_retry
+  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
   kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-smoke-broker-env \
     --from-literal=NVT_SMOKE_STATIC_TOKEN=nvt-smoke-fixture-token \
-    --dry-run=client -o yaml | kubectl_apply_retry
+    --dry-run=client -o yaml | kubectl_smoke apply -f -
   write_broker_providers_values "${SMOKE_TMPDIR}/broker-providers.yaml"
   deploy_echo_fixture
   make -C "${ROOT}" \

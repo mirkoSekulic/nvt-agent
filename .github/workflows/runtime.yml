@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - "runtime/**"
+      - "templates/**"
+      - "compose.agent.yaml"
       - "scripts/**"
       - "Makefile"
       - "tests/agentd/**"
@@ -15,6 +17,8 @@ on:
   pull_request:
     paths:
       - "runtime/**"
+      - "templates/**"
+      - "compose.agent.yaml"
       - "scripts/**"
       - "Makefile"
       - "tests/agentd/**"

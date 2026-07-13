@@ -58,6 +58,15 @@ precise and every hermetic suite has a clear home.
 - `operator/internal/controller/agentschedule_controller_test.go`
 - `operator/internal/controller/default_egress_mode_test.go`
 
+The `kubernetes.yml / operator-helm` job also runs the shell-level chart and
+helper coverage aggregated by `tests/operator/helm/test.sh`:
+
+- `tests/operator/broker-env-secret/test.sh`
+- `tests/operator/codex-auth-secret/test.sh`
+- `tests/operator/github-comments-producer-secret/test.sh`
+- `tests/operator/kind/producer-kind-targets-test.sh`
+- `tests/operator/kind/smoke-scheduler-job-test.sh`
+
 ### gateway
 
 - `gateway/internal/gateway/server_test.go`

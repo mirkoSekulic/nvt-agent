@@ -20,10 +20,10 @@ case_kind_setup() {
   # The valid payload's grants reference real broker providers so bootstrap's
   # injection-routing call succeeds end-to-end over the TLS broker leg. The
   # static token is a smoke fixture, never a real credential.
-  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_apply_retry
+  kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
   kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-smoke-broker-env \
     --from-literal=NVT_SMOKE_STATIC_TOKEN=nvt-smoke-fixture-token \
-    --dry-run=client -o yaml | kubectl_apply_retry
+    --dry-run=client -o yaml | kubectl_smoke apply -f -
   write_broker_providers_values "${SMOKE_TMPDIR}/broker-providers.yaml"
 
   make -C "${ROOT}" \
