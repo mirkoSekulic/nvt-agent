@@ -91,6 +91,9 @@ def provider_plugin_entries(config, builtin_plugins):
         if not isinstance(entry, dict):
             fail(f"{field} must be a YAML object")
         name = string_value(entry.get("name"), f"{field}.name", required=True)
+        unknown = set(entry) - {"name", "command", "pass-env", "initialize-timeout-seconds", "request-timeout-seconds"}
+        if unknown:
+            fail(f"{field} has unknown keys: {', '.join(sorted(unknown))}")
         if name in builtin_plugins:
             fail(f"external provider plugin name collides with built-in plugin: {name}")
         if name in seen:

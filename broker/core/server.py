@@ -119,6 +119,8 @@ class Broker:
         target = string_field(payload, "target")
         purpose = payload.get("purpose")
         provider = self.provider(provider_name)
+        if getattr(provider, "external", False) and not provider.supports("token"):
+            raise ProviderError("token-not-supported", f"provider {provider_name} does not support tokens", 403)
         repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         token, expires_at = provider.token_for_repo(repo, effective_repositories)
@@ -138,6 +140,8 @@ class Broker:
         provider_name = string_field(payload, "provider")
         target = string_field(payload, "target")
         provider = self.provider(provider_name)
+        if getattr(provider, "external", False) and not provider.supports("identity"):
+            raise ProviderError("identity-not-supported", f"provider {provider_name} does not support identity", 403)
         repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         identity = provider.identity_for_repo(repo, effective_repositories)
@@ -157,6 +161,8 @@ class Broker:
         self.ensure_not_header_inject(agent, provider_name)
         target = string_field(payload, "target")
         provider = self.provider(provider_name)
+        if getattr(provider, "external", False) and not provider.supports("headers"):
+            raise ProviderError("headers-not-supported", f"provider {provider_name} does not support headers", 403)
         repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         headers = provider.headers_for_repo(repo, effective_repositories)

@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 import uuid
+import re
 from dataclasses import dataclass
 
 from broker.core.config import BrokerConfigError
@@ -102,8 +103,9 @@ class ExecutableProviderAdapter:
         return self._bundle_ttl_seconds
 
     def supports(self, capability):
-        translated = "injection.headers" if capability == "injection" else capability
-        return translated in self._capabilities
+        if capability == "injection":
+            return "injection.headers" in self._capabilities and bool(self._injection_hosts)
+        return capability in self._capabilities
 
     def normalize_target(self, target):
         result = self._request("target.normalize", {"target": target})
@@ -274,7 +276,9 @@ class ExecutableProviderAdapter:
         if len(set(capabilities)) != len(capabilities) or not set(capabilities).issubset(CAPABILITIES):
             self._protocol_error("provider declared unknown or duplicate capabilities")
         hosts = value.get("injection_hosts", [])
-        if not isinstance(hosts, list) or any(not isinstance(host, str) or not host or len(host) > 253 for host in hosts):
+        host_pattern = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+        if (not isinstance(hosts, list) or len(set(hosts)) != len(hosts) or
+                any(not isinstance(host, str) or not host_pattern.fullmatch(host) for host in hosts)):
             self._protocol_error("provider injection_hosts metadata is invalid")
         injection_git = value.get("injection_git", False)
         if not isinstance(injection_git, bool):
@@ -338,13 +342,30 @@ class ExecutableProviderAdapter:
             with self._lock:
                 self._pending.pop(request_id, None)
             raise ProviderError("provider-protocol-error", "provider request exceeds the protocol line limit", 502)
-        try:
-            with self._write_lock:
-                process.stdin.write(data)
-                process.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError):
-            self._fail_generation(generation, "provider-unavailable")
         wait_timeout = timeout if timeout is not None else self._plugin["request_timeout"]
+        write_done = threading.Event()
+        write_error = []
+        def write_frame():
+            try:
+                with self._write_lock:
+                    view = memoryview(data)
+                    while view:
+                        written = process.stdin.write(view)
+                        if not written:
+                            raise BrokenPipeError()
+                        view = view[written:]
+                    process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as error:
+                write_error.append(error)
+            finally:
+                write_done.set()
+        threading.Thread(target=write_frame, daemon=True).start()
+        if not write_done.wait(wait_timeout):
+            self._fail_generation(generation, "provider-unavailable")
+            raise ProviderError("provider-unavailable", "provider request timed out", 503)
+        if write_error:
+            self._fail_generation(generation, "provider-unavailable")
+            raise ProviderError("provider-unavailable", "provider is unavailable", 503)
         if not pending.event.wait(wait_timeout):
             self._fail_generation(generation, "provider-unavailable")
             raise ProviderError("provider-unavailable", "provider request timed out", 503)
