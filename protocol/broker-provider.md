@@ -33,7 +33,8 @@ providers:
 
 External names may not collide with built-in plugin names. `command` is a
 non-empty argument list. It is executed directly, never through a shell, and
-`command[0]` must be an absolute executable file. `pass-env` is the explicit
+`command[0]` must be an absolute executable file for a local registration.
+`pass-env` is the explicit
 list of additional environment-variable names; a missing requested variable is
 a startup error. The child does not inherit the broker environment. Its fixed,
 non-secret baseline is only `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
@@ -42,6 +43,43 @@ non-secret baseline is only `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 There is one long-lived child per configured provider instance. Two instances
 using the same registered implementation therefore have separate process state
 and caches.
+
+An implementation may instead come from an immutable public Git source:
+
+```yaml
+provider-plugins:
+  - name: company-oauth
+    source:
+      git:
+        url: https://github.com/example/nvt-plugins.git
+        revision: 0123456789abcdef0123456789abcdef01234567
+        subdir: providers/company-oauth
+    command: [company-oauth]
+
+providers:
+  - name: claude-mirko
+    plugin: company-oauth
+    config: {credentials-file: /broker-secrets/mirko.json}
+  - name: claude-john
+    plugin: company-oauth
+    config: {credentials-file: /broker-secrets/john.json}
+```
+
+For a Git source, `command[0]` is a safe relative path beneath the selected
+subdirectory and is resolved to a verified absolute executable before startup;
+remaining arguments stay explicit. Each provider instance still receives its
+own long-lived child, config, credentials, refresh lineage, and cache. Provider
+selection remains the explicit instance name and is never inferred from a host.
+
+Only public HTTPS repositories at full immutable commit IDs are supported.
+`NVT_GIT_SOURCE_ALLOWED_HOSTS` is an exact-host allowlist that defaults to
+`github.com`. Authentication, credential helpers, redirects, submodules, Git
+LFS, hooks, builds, installs, and floating revisions are disabled. Checkouts are
+cached and atomically published by canonical URL plus revision; cache hits,
+commit identity, subdirectories, and symlink containment are revalidated. A
+repository is never scanned and a declaration is never automatically updated.
+Fetched executable providers are trusted broker code, exactly like local
+executable providers; the subprocess is not a sandbox.
 
 ## Transport and framing
 

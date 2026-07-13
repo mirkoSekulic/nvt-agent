@@ -9,6 +9,10 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, "/usr/local/lib/nvt-agent")
+from shared.git_source import GitSourceError, acquire, resolve_executable, resolve_file
+
 
 BUILTIN_PLUGIN_DIR = Path("/usr/local/lib/nvt-agent/plugins")
 MANAGED_MARKER = "# managed by nvt-agent export-plugin-tools"
@@ -99,7 +103,17 @@ def plugin_name(plugin):
 
 
 def plugin_source(plugin):
-    return string_value(plugin.get("source"), "plugin.source") or "builtin"
+    source = plugin.get("source")
+    if isinstance(source, dict):
+        return "git"
+    return string_value(source, "plugin.source") or "builtin"
+
+
+def git_plugin_root(plugin):
+    try:
+        return acquire(plugin.get("source"), state_dir() / "git-sources")
+    except GitSourceError as error:
+        fail(f"plugin {plugin_name(plugin)} source is invalid: {error}")
 
 
 def builtin_manifest(name):
@@ -113,6 +127,12 @@ def plugin_manifest(plugin):
         return builtin_manifest(name)
     if source == "custom":
         return {}
+    if source == "git":
+        try:
+            path = resolve_file(git_plugin_root(plugin), "plugin.yaml")
+        except GitSourceError as error:
+            fail(f"plugin {name} manifest is invalid: {error}")
+        return load_yaml(path)
     fail(f"unsupported plugin.source: {source}")
 
 
@@ -213,7 +233,13 @@ def export_tools(config_path):
                 fail(f"exported tool {tool_name} is defined by both {seen[tool_name]} and {name}")
             seen[tool_name] = name
             validate_tool_name(tool_name)
-            command_path = validate_command(command, tool_name)
+            if plugin_source(plugin) == "git":
+                try:
+                    command_path = resolve_executable(git_plugin_root(plugin), command)
+                except GitSourceError as error:
+                    fail(f"plugin {name} exported tool is invalid: {error}")
+            else:
+                command_path = validate_command(command, tool_name)
             render_wrapper(tool_name, command_path, name, config_path_for_plugin)
             exported.append({
                 "name": tool_name,

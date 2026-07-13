@@ -10,6 +10,10 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, "/usr/local/lib/nvt-agent")
+from shared.git_source import GitSourceError, acquire, resolve_executable, resolve_file
+
 
 BUILTIN_PLUGIN_DIR = Path("/usr/local/lib/nvt-agent/plugins")
 
@@ -81,7 +85,18 @@ def utc_now():
 
 
 def plugin_source(plugin):
-    return string_value(plugin.get("source"), "plugin.source") or "builtin"
+    source = plugin.get("source")
+    if isinstance(source, dict):
+        return "git"
+    return string_value(source, "plugin.source") or "builtin"
+
+
+def git_plugin_root(plugin):
+    name = string_value(plugin.get("name"), "plugin.name", required=True)
+    try:
+        return acquire(plugin.get("source"), state_dir() / "git-sources")
+    except GitSourceError as error:
+        fail(f"plugin {name} source is invalid: {error}")
 
 
 def plugin_health(plugin):
@@ -164,12 +179,30 @@ def plugin_command(plugin):
 
     override = string_value(plugin.get("command"), "plugin.command")
     if override:
+        if source == "git":
+            try:
+                return str(resolve_executable(git_plugin_root(plugin), override))
+            except GitSourceError as error:
+                fail(f"plugin {name} command is invalid: {error}")
         return override
 
     if source == "builtin":
         return builtin_command(name)
     if source == "custom":
         return None
+    if source == "git":
+        root = git_plugin_root(plugin)
+        try:
+            manifest = load_yaml(resolve_file(root, "plugin.yaml"))
+        except GitSourceError as error:
+            fail(f"plugin {name} manifest is invalid: {error}")
+        command = string_value(manifest.get("command"), f"Git plugin {name} command")
+        if not command:
+            return None
+        try:
+            return str(resolve_executable(root, command))
+        except GitSourceError as error:
+            fail(f"plugin {name} command is invalid: {error}")
 
     fail(f"unsupported plugin.source: {source}")
 
@@ -213,7 +246,7 @@ def run_plugin(plugin, state, attempt):
     env["NVT_PLUGIN_CONFIG"] = str(config_path)
 
     print(f"run-plugins: {name} attempt {attempt} started", flush=True)
-    process = subprocess.Popen(command, shell=True, env=env)
+    process = subprocess.Popen(command, shell=plugin_source(plugin) != "git", env=env)
     state.update(
         {
             "status": "running",

@@ -4,10 +4,11 @@ ENV PYTHONUNBUFFERED=1
 ENV NVT_BROKER_BIND=0.0.0.0:7347
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends openssl python3-yaml \
+  && apt-get install -y --no-install-recommends git openssl python3-yaml \
   && rm -rf /var/lib/apt/lists/*
 
 COPY broker /opt/nvt-broker/broker
+COPY shared /opt/nvt-broker/shared
 
 WORKDIR /opt/nvt-broker
 

@@ -8,6 +8,10 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, "/usr/local/lib/nvt-agent")
+from shared.git_source import GitSourceError, acquire, resolve_executable
+
 
 def state_dir():
     return Path(os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
@@ -89,14 +93,27 @@ def agentd_ready():
         return False
 
 
-def run_plugin_health_command(name, command):
+def git_plugin_health_command(plugin, command):
+    name = plugin_name(plugin)
+    try:
+        root = acquire(plugin.get("source"), state_dir() / "git-sources")
+        return str(resolve_executable(root, command))
+    except GitSourceError as error:
+        raise SystemExit(f"health: plugin {name} health command is invalid: {error}") from error
+
+
+def run_plugin_health_command(plugin, command):
+    name = plugin_name(plugin)
+    git_source = isinstance(plugin.get("source"), dict)
+    if git_source:
+        command = git_plugin_health_command(plugin, command)
     config_path = state_dir() / "plugins" / name / "config.yaml"
     env = os.environ.copy()
     env["NVT_PLUGIN_NAME"] = name
     env["NVT_PLUGIN_CONFIG"] = str(config_path)
     result = subprocess.run(
         command,
-        shell=True,
+        shell=not git_source,
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -130,7 +147,7 @@ def readiness_plugin_result(plugin):
         }
 
     if command:
-        ready = run_plugin_health_command(name, command)
+        ready = run_plugin_health_command(plugin, command)
         return {
             "ready": ready,
             "status": state.get("status", "unknown"),

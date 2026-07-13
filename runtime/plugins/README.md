@@ -396,6 +396,45 @@ Plugins inherit the agent container environment. If a plugin needs to read or
 write files in the agent workspace, it can use `NVT_WORKSPACE` as the workspace
 path.
 
+### Public Git sources
+
+An implementation can instead be selected explicitly from a public HTTPS Git
+repository at an immutable full commit object ID:
+
+```yaml
+plugins:
+  - name: example-runtime
+    source:
+      git:
+        url: https://github.com/example/nvt-plugins.git
+        revision: 0123456789abcdef0123456789abcdef01234567
+        subdir: plugins/example-runtime
+    when: after-agent
+```
+
+The selected directory must contain the same `plugin.yaml` manifest used by
+packaged plugins. Lifecycle and exported-tool commands in a Git-sourced
+manifest are executable paths relative to that directory. Each implementation
+is declared separately; repositories are never scanned or auto-enabled, so two
+entries can select different subdirectories of one repository.
+
+A Git-sourced `health.command` follows the same containment rule: it is a safe
+relative executable path beneath the selected directory and runs directly,
+without shell expression parsing. Existing builtin, custom, and local health
+commands keep their current behavior.
+
+Only public HTTPS sources are supported. Interactive authentication, credential
+helpers, redirects, submodules, Git LFS, hooks, builds, installs, and floating
+revisions are disabled. `NVT_GIT_SOURCE_ALLOWED_HOSTS` is a comma-separated
+exact-host allowlist and defaults conservatively to `github.com`. The runtime
+caches a verified checkout by canonical URL plus revision, publishes it
+atomically, revalidates cache hits, and independently checks each selected
+subdirectory against traversal and symlink escape. It never updates a declared
+revision automatically.
+
+Fetched runtime plugins remain untrusted code inside the agent container. This
+does not grant them broker trust or create a sandbox boundary.
+
 ## Prompting The Agent
 
 Plugins should use `prompt-agent` to send work to the running Codex or Claude

@@ -33,6 +33,7 @@ $user_line
 - code-server runs inside the container on port \`${CODE_SERVER_PORT:-4090}\`.
 - Custom plugins are mounted at \`/custom-plugins\`.
 - Builtin runtime plugins are installed under \`/usr/local/lib/nvt-agent/plugins\`.
+- Public Git-sourced runtime plugins are immutable, explicitly configured implementations cached under the runtime state directory; treat them as untrusted agent-container code.
 
 ## Plugin Prompts
 
