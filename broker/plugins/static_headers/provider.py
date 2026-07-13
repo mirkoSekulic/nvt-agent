@@ -1,7 +1,7 @@
 import fnmatch
 
 from broker.core.config import env_value, fail, list_value, string_value
-from broker.plugins.github_app.provider import ProviderError
+from broker.core.errors import ProviderError
 from broker.plugins.static_target import normalize_target, target_mode
 
 

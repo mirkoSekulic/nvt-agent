@@ -276,7 +276,7 @@ import tempfile
 import time
 from pathlib import Path
 from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
-from broker.plugins.github_app.provider import ProviderError
+from broker.core.errors import ProviderError
 
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory) / ".credentials.json"

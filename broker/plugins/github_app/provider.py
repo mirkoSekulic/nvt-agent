@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse, unqu
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
+from broker.core.errors import ProviderError
 
 
 TOKEN_BUFFER_SECONDS = 300
@@ -22,14 +23,6 @@ DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_PAGES = 20
 DEFAULT_PER_PAGE = 100
 REQUEST_HEADER_ALLOWLIST = {"accept", "if-none-match", "x-github-api-version", "content-type"}
-
-
-class ProviderError(Exception):
-    def __init__(self, reason, message=None, status=400):
-        super().__init__(message or reason)
-        self.reason = reason
-        self.message = message or reason
-        self.status = status
 
 
 class NoRedirect(HTTPRedirectHandler):

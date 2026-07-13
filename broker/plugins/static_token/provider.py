@@ -3,7 +3,7 @@ import fnmatch
 import re
 
 from broker.core.config import env_value, fail, injection_hosts, list_value, string_value
-from broker.plugins.github_app.provider import ProviderError
+from broker.core.errors import ProviderError
 from broker.plugins.static_target import normalize_target, target_mode
 
 
