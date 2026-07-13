@@ -491,11 +491,16 @@ Refresh is hardened against retry storms:
   event, so cooldowns cannot manufacture noisy or misleading duplicate
   upstream-refresh events. A successful refresh audits `allowed: true` with the
   new expiry.
-- **Durable rotation.** The refreshed credential is file- and directory-`fsync`ed
-  around atomic replacement. If replacement fails after upstream rotation, the
-  completed mode-`0600` temporary credential is retained beside the canonical
-  file as a recovery copy, the failure is audited as
-  `token-refresh-persist-failed`, and mediated use fails closed.
+- **Durable rotation.** The refreshed credential is created as mode `0600`,
+  file-`fsync`ed, and atomically replaces the canonical file (also intentionally
+  mode `0600`; group-readable sharing is unsupported). Directory `fsync` is
+  attempted after replacement; an unsupported/failed directory `fsync` logs
+  reduced crash durability but does not misreport the completed replacement as
+  a content failure. If replacement itself fails after upstream rotation, the
+  uniquely named completed temporary credential is retained beside the
+  canonical file as a recovery copy and the failure is audited as
+  `token-refresh-persist-failed`. A still-valid canonical access token may be
+  served during cooldown; expired use fails closed.
 
 **Sanitized diagnostics.** A refresh failure surfaces only the upstream HTTP
 status and a safe OAuth error class (e.g. `HTTP 429 (rate_limit_error)`) in the

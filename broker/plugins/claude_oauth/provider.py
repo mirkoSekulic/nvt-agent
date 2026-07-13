@@ -58,6 +58,7 @@ import json
 import os
 import random
 import re
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -88,7 +89,6 @@ DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # not a stable API contract documented by Anthropic.
 DEFAULT_REFRESH_SCOPE = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 DEFAULT_USER_AGENT = "axios/1.15.2"
-# Refresh the access token this many seconds before its expiresAt. Claude
 # Refresh is driven by access-token expiry. A refresh-token expiry, when known,
 # is retained for operator visibility but cannot replace proactive access-token
 # refresh: no token exchange can extend a refresh token after it has expired.
@@ -420,7 +420,10 @@ class ClaudeOAuthProvider:
                 if exp is not None and exp > now:
                     self._log("refresh in cooldown; serving current valid access token")
                     return data, oauth, access_token, exp, False
-                if serve_expired:
+                if serve_expired and not (
+                    self._cooldown_error is not None
+                    and self._cooldown_error.reason == "token-refresh-persist-failed"
+                ):
                     return data, oauth, access_token, exp, False
                 raise self._cooldown_failure()
             try:
@@ -444,6 +447,9 @@ class ClaudeOAuthProvider:
             except ProviderError as error:
                 self._enter_cooldown(error)
                 self._audit_refresh(audit, request_id, agent_id, operation_prefix, False, None, error.reason)
+                if exp is not None and exp > now:
+                    self._log(f"refresh persistence failed ({error.reason}); serving current valid access token")
+                    return data, oauth, access_token, exp, False
                 raise
             self._reset_cooldown()
             data = refreshed
@@ -586,8 +592,9 @@ class ClaudeOAuthProvider:
         ):
             updated_oauth["refreshTokenExpiresAt"] = int((now + float(refresh_expires_in)) * 1000)
         scope = payload.get("scope")
-        if isinstance(scope, str):
-            updated_oauth["scopes"] = scope.split()
+        granted_scopes = scope.split() if isinstance(scope, str) else []
+        if granted_scopes:
+            updated_oauth["scopes"] = granted_scopes
         updated_oauth["clientId"] = self.client_id
         return updated
 
@@ -656,14 +663,20 @@ class ClaudeOAuthProvider:
     def _write_credentials(self, data):
         path = self.credentials_file
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        recovery_prefix = path.name if path.name.startswith(".") else f".{path.name}"
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f"{recovery_prefix}.recovery.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temporary = Path(temporary_name)
         retain_recovery = False
         try:
             # Create secret-bearing temporary state as 0600 from its first byte;
             # writing with the process umask and chmodding afterward creates a
             # brief world/group-readable exposure window on permissive umasks.
-            fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as file:
+                os.fchmod(file.fileno(), 0o600)
                 json.dump(data, file, indent=2)
                 file.write("\n")
                 file.flush()
@@ -676,11 +689,18 @@ class ClaudeOAuthProvider:
                 # recovery copy instead of deleting the rotated credential.
                 retain_recovery = True
                 raise
-            directory_fd = os.open(str(path.parent), os.O_RDONLY)
             try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+                directory_fd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                # Replacement already succeeded and the canonical content is
+                # complete. Some filesystems do not support opening/fsyncing a
+                # directory; report reduced crash durability without turning a
+                # successful credential replacement into a failed refresh.
+                self._log("credential replaced but directory fsync failed; crash durability is uncertain")
         finally:
             if not retain_recovery:
                 temporary.unlink(missing_ok=True)

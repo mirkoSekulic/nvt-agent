@@ -147,11 +147,16 @@ backoff. If refresh fails:
   or refresh-failed;
 - token values and response bodies never enter logs or audit events.
 
-Credential replacement is written and `fsync`ed before atomic rename, then the
-parent directory is `fsync`ed. If rename fails after Anthropic has rotated the
-token, the completed mode-`0600` temporary file is retained beside the
-canonical credential as the recovery copy and the mediated request fails
-closed with `token-refresh-persist-failed`.
+Credential replacement is written and `fsync`ed before atomic rename. The
+canonical file is intentionally forced to mode `0600`; deployments must not
+depend on group-readable broker credentials. The parent directory is then
+`fsync`ed when the filesystem supports it; a post-rename directory-`fsync`
+failure is logged as reduced crash durability without misreporting the completed
+replacement as a content failure. If rename itself fails after Anthropic has
+rotated the token, a uniquely named mode-`0600` temporary file is retained
+beside the canonical credential as the recovery copy. A still-valid canonical
+access token may continue during cooldown; expired use fails closed with
+`token-refresh-persist-failed`.
 
 Placeholder-file vending does not itself refresh because the file contains no
 usable token.

@@ -178,7 +178,10 @@ func TestClaudeRefreshPersistsRotatedToken(t *testing.T) {
 func TestClaudeRefreshPreservesOptionalMetadataWhenResponseOmitsIt(t *testing.T) {
 	f := newBrokerFixture(t)
 	f.writeRoleIdentities(claudePlaceholderIdentities())
-	f.claudeOAuth.configure(func(c *fakeClaudeOAuth) { c.rotate = true })
+	f.claudeOAuth.configure(func(c *fakeClaudeOAuth) {
+		c.rotate = true
+		c.scope = "   "
+	})
 	refreshExpiresAt := time.Now().Add(20 * 24 * time.Hour).UnixMilli()
 	writeJSONFile(t, f.claudeCreds, map[string]any{
 		"claudeAiOauth": map[string]any{
@@ -200,6 +203,118 @@ func TestClaudeRefreshPreservesOptionalMetadataWhenResponseOmitsIt(t *testing.T)
 	}
 	if got := oauth["scopes"]; !reflect.DeepEqual(got, []any{"user:inference", "user:profile"}) {
 		t.Fatalf("scopes changed when the response omitted them: %#v", got)
+	}
+}
+
+// TestClaudeRefreshRecoverySurvivesNextPersist pins the recovery contract: a
+// failed canonical replacement leaves a unique 0600 copy, and the next persist
+// uses another temporary name without deleting or overwriting that recovery.
+func TestClaudeRefreshRecoverySurvivesNextPersist(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json
+import os
+import stat
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / ".credentials.json"
+    path.write_text('{"claudeAiOauth":{"accessToken":"old","refreshToken":"old"}}')
+    path.chmod(0o600)
+    provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
+        "credentials-file": str(path),
+        "injection-hosts": ["api.anthropic.com"],
+    }})
+    first = {"claudeAiOauth": {"accessToken": "first", "refreshToken": "first"}}
+    second = {"claudeAiOauth": {"accessToken": "second", "refreshToken": "second"}}
+    real_replace = os.replace
+    def fail_canonical(source, target):
+        if Path(target) == path:
+            raise OSError("injected replace failure")
+        return real_replace(source, target)
+    try:
+        with patch("broker.plugins.claude_oauth.provider.os.replace", side_effect=fail_canonical):
+            provider._write_credentials(first)
+    except OSError:
+        pass
+    else:
+        raise SystemExit("expected replacement failure")
+    recoveries = list(path.parent.glob(".credentials.json.recovery.*.tmp"))
+    if len(recoveries) != 1:
+        raise SystemExit(f"expected one recovery, got {recoveries}")
+    recovery = recoveries[0]
+    if json.loads(recovery.read_text()) != first or recovery.stat().st_mode & 0o777 != 0o600:
+        raise SystemExit("recovery content or mode is wrong")
+    provider._write_credentials(second)
+    if not recovery.exists() or json.loads(recovery.read_text()) != first:
+        raise SystemExit("next persist deleted or changed recovery")
+    if json.loads(path.read_text()) != second:
+        raise SystemExit("next canonical persist failed")
+    third = {"claudeAiOauth": {"accessToken": "third", "refreshToken": "third"}}
+    real_fsync = os.fsync
+    def fail_directory_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("directory fsync unsupported")
+        return real_fsync(fd)
+    with patch("broker.plugins.claude_oauth.provider.os.fsync", side_effect=fail_directory_fsync):
+        provider._write_credentials(third)
+    if json.loads(path.read_text()) != third:
+        raise SystemExit("directory fsync failure misreported successful replacement")
+print("OK")
+`)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("recovery persistence test failed: err=%v out=%s", err, out)
+	}
+}
+
+func TestClaudePersistFailureServesOnlyValidCanonicalAccess(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import json
+import tempfile
+import time
+from pathlib import Path
+from broker.plugins.claude_oauth.provider import ClaudeOAuthProvider
+from broker.plugins.github_app.provider import ProviderError
+
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / ".credentials.json"
+    def write(exp):
+        path.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "canonical-access",
+            "refreshToken": "canonical-refresh",
+            "expiresAt": exp,
+        }}))
+        path.chmod(0o600)
+    provider = ClaudeOAuthProvider({"name": "claude-main", "config": {
+        "credentials-file": str(path),
+        "injection-hosts": ["api.anthropic.com"],
+    }})
+    provider._refresh = lambda data, oauth: {"claudeAiOauth": {
+        "accessToken": "unpersisted-access",
+        "refreshToken": "unpersisted-refresh",
+        "expiresAt": int((time.time() + 3600) * 1000),
+    }}
+    def fail_persist(data):
+        raise ProviderError("token-refresh-persist-failed", "injected", 502)
+    provider._persist = fail_persist
+    write(int((time.time() + 300) * 1000))
+    _, _, token, _, refreshed = provider._fresh_credentials("agent", None, "request", "injection")
+    if token != "canonical-access" or refreshed:
+        raise SystemExit("valid canonical token was not served")
+    write(int((time.time() - 60) * 1000))
+    try:
+        provider._fresh_credentials("agent", None, "request", "files", serve_expired=True)
+    except ProviderError as error:
+        if error.reason != "token-refresh-persist-failed":
+            raise
+    else:
+        raise SystemExit("expired canonical token was served after persist failure")
+print("OK")
+`)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("persist failure behavior test failed: err=%v out=%s", err, out)
 	}
 }
 
