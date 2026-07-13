@@ -8,8 +8,23 @@ import (
 func TestProviderBoundary(t *testing.T) {
 	out, err := runBrokerPython(t, `
 import os
+import sys
 
 from broker.core.errors import ProviderError
+
+import broker.plugins.placeholder_file
+
+provider_modules = {
+    "broker.plugins.claude_oauth.provider",
+    "broker.plugins.codex_oauth.provider",
+    "broker.plugins.github_app.provider",
+    "broker.plugins.placeholder.provider",
+    "broker.plugins.static_headers.provider",
+    "broker.plugins.static_token.provider",
+}
+if provider_modules.intersection(sys.modules):
+    raise SystemExit("importing a plugin helper eagerly loaded provider modules")
+
 from broker.core.providers import InProcessProviderAdapter, ProviderAdapter, load_providers
 from broker.core.server import Broker
 
@@ -42,13 +57,30 @@ class FullProvider:
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant):
         return [host, method, path, agent_id, audit, request_id, grant]
 
-full = InProcessProviderAdapter(FullProvider())
+full_provider = FullProvider()
+full = InProcessProviderAdapter(full_provider)
 if not all(full.supports(capability) for capability in ("files", "placeholder-files", "injection")):
     raise SystemExit("adapter did not centralize supported capabilities")
 if full.supports("unknown"):
     raise SystemExit("adapter reported an unknown capability")
 if full.injection_hosts != ["example.test"] or not full.injection_git or full.bundle_ttl_seconds != 17:
     raise SystemExit("adapter did not preserve provider metadata")
+
+full_provider.injection_hosts = []
+full_provider.injection_git = False
+full_provider.bundle_ttl_seconds = 23
+del FullProvider.files
+del FullProvider.placeholder_files
+full_provider.injection_headers = None
+if any(full.supports(capability) for capability in ("files", "placeholder-files", "injection")):
+    raise SystemExit("adapter did not reflect removed capabilities")
+if full.injection_hosts != [] or full.injection_git or full.bundle_ttl_seconds != 23:
+    raise SystemExit("adapter did not reflect changed provider metadata")
+
+full_provider.injection_hosts = ["changed.example.test"]
+full_provider.injection_headers = lambda *args: args
+if not full.supports("injection") or full.injection_hosts != ["changed.example.test"]:
+    raise SystemExit("adapter did not reflect restored injection support")
 
 class EmptyProvider:
     name = "empty"

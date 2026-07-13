@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
 from broker.core.config import provider_entries
-from broker.plugins import BUILTIN_PROVIDERS
+from broker.plugins.registry import BUILTIN_PROVIDERS
 
 
 class ProviderAdapter(ABC):
@@ -74,14 +74,6 @@ class InProcessProviderAdapter(ProviderAdapter):
     def __init__(self, provider):
         self._provider = provider
         self._name = provider.name
-        self._injection_hosts = getattr(provider, "injection_hosts", None) or []
-        self._injection_git = bool(getattr(provider, "injection_git", False))
-        self._bundle_ttl_seconds = getattr(provider, "bundle_ttl_seconds", None)
-        self._capabilities = {
-            "files": callable(getattr(provider, "files", None)),
-            "placeholder-files": callable(getattr(provider, "placeholder_files", None)),
-            "injection": bool(self._injection_hosts) and callable(getattr(provider, "injection_headers", None)),
-        }
 
     @property
     def name(self):
@@ -89,18 +81,24 @@ class InProcessProviderAdapter(ProviderAdapter):
 
     @property
     def injection_hosts(self):
-        return self._injection_hosts
+        return getattr(self._provider, "injection_hosts", None) or []
 
     @property
     def injection_git(self):
-        return self._injection_git
+        return getattr(self._provider, "injection_git", False)
 
     @property
     def bundle_ttl_seconds(self):
-        return self._bundle_ttl_seconds
+        return getattr(self._provider, "bundle_ttl_seconds", None)
 
     def supports(self, capability):
-        return self._capabilities.get(capability, False)
+        if capability == "files":
+            return hasattr(self._provider, "files")
+        if capability == "placeholder-files":
+            return hasattr(self._provider, "placeholder_files")
+        if capability == "injection":
+            return bool(self.injection_hosts) and callable(getattr(self._provider, "injection_headers", None))
+        return False
 
     def http_request(self, method, url, headers, paginate, effective_repositories):
         return self._provider.http_request(method, url, headers, paginate, effective_repositories)
