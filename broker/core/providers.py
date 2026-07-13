@@ -1,71 +1,7 @@
-from abc import ABC, abstractmethod
-
-from broker.core.config import provider_entries
+from broker.core.config import provider_entries, provider_plugin_entries
+from broker.core.executable_provider import ExecutableProviderAdapter
+from broker.core.provider_adapter import ProviderAdapter
 from broker.plugins.registry import BUILTIN_PROVIDERS
-
-
-class ProviderAdapter(ABC):
-    """Core-owned boundary consumed by Broker."""
-
-    @property
-    @abstractmethod
-    def name(self):
-        raise NotImplementedError
-
-    @abstractmethod
-    def supports(self, capability):
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def injection_hosts(self):
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def injection_git(self):
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def bundle_ttl_seconds(self):
-        raise NotImplementedError
-
-    @abstractmethod
-    def http_request(self, method, url, headers, paginate, effective_repositories):
-        raise NotImplementedError
-
-    @abstractmethod
-    def normalize_target(self, target):
-        raise NotImplementedError
-
-    @abstractmethod
-    def target_from_repo(self, repo):
-        raise NotImplementedError
-
-    @abstractmethod
-    def token_for_repo(self, repo, effective_repositories):
-        raise NotImplementedError
-
-    @abstractmethod
-    def identity_for_repo(self, repo, effective_repositories):
-        raise NotImplementedError
-
-    @abstractmethod
-    def headers_for_repo(self, repo, effective_repositories):
-        raise NotImplementedError
-
-    @abstractmethod
-    def files(self, agent_id, audit, request_id):
-        raise NotImplementedError
-
-    @abstractmethod
-    def placeholder_files(self, agent_id, audit, request_id, grant):
-        raise NotImplementedError
-
-    @abstractmethod
-    def injection_headers(self, host, method, path, agent_id, audit, request_id, grant):
-        raise NotImplementedError
 
 
 class InProcessProviderAdapter(ProviderAdapter):
@@ -74,6 +10,17 @@ class InProcessProviderAdapter(ProviderAdapter):
     def __init__(self, provider):
         self._provider = provider
         self._name = provider.name
+
+    @property
+    def ready(self):
+        return True
+
+    @property
+    def external(self):
+        return False
+
+    def close(self):
+        return None
 
     @property
     def name(self):
@@ -128,10 +75,21 @@ class InProcessProviderAdapter(ProviderAdapter):
         return self._provider.injection_headers(host, method, path, agent_id, audit, request_id, grant)
 
 
-def load_providers(config):
-    output = {}
-    for entry in provider_entries(config, BUILTIN_PROVIDERS):
-        provider = BUILTIN_PROVIDERS[entry["plugin"]](entry)
-        adapter = InProcessProviderAdapter(provider)
-        output[adapter.name] = adapter
+def load_providers(config) -> dict[str, ProviderAdapter]:
+    output: dict[str, ProviderAdapter] = {}
+    external_plugins = provider_plugin_entries(config, BUILTIN_PROVIDERS)
+    supported = set(BUILTIN_PROVIDERS) | set(external_plugins)
+    try:
+        for entry in provider_entries(config, supported):
+            plugin_name = entry["plugin"]
+            if plugin_name in BUILTIN_PROVIDERS:
+                provider = BUILTIN_PROVIDERS[plugin_name](entry)
+                adapter = InProcessProviderAdapter(provider)
+            else:
+                adapter = ExecutableProviderAdapter(entry, external_plugins[plugin_name])
+            output[adapter.name] = adapter
+    except Exception:
+        for adapter in output.values():
+            adapter.close()
+        raise
     return output

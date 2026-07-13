@@ -12,6 +12,10 @@ The agent image contains only `brokerctl`, a thin client. `brokerd`, provider
 implementations, root secrets, token caches, and audit logs live in a separate
 broker image/service.
 
+Administrators can also register trusted, language-agnostic executable provider
+implementations. Their configuration, JSON-RPC transport, supervision, and
+security contract are specified in [broker-provider.md](broker-provider.md).
+
 ## Transport
 
 V1 uses HTTP JSON. `brokerctl` hides the transport so later deployments can use

@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import signal
 import ssl
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -38,6 +40,23 @@ class Broker:
         self.providers = load_providers(self.config)
         self.audit = AuditLog(audit_path)
         self.agents = AgentRegistry()
+
+    def close(self):
+        for provider in self.providers.values():
+            provider.close()
+
+    def health(self):
+        external = [provider for provider in self.providers.values() if provider.external]
+        if not external:
+            return {"ok": True, "status": "ready"}
+        ready = sum(1 for provider in self.providers.values() if provider.ready)
+        configured = len(self.providers)
+        unavailable = configured - ready
+        return {
+            "ok": True,
+            "status": "healthy" if unavailable == 0 else "degraded",
+            "providers": {"configured": configured, "ready": ready, "unavailable": unavailable},
+        }
 
     def provider(self, name):
         provider = self.providers.get(name)
@@ -102,6 +121,8 @@ class Broker:
         target = string_field(payload, "target")
         purpose = payload.get("purpose")
         provider = self.provider(provider_name)
+        if getattr(provider, "external", False) and not provider.supports("token"):
+            raise ProviderError("token-not-supported", f"provider {provider_name} does not support tokens", 403)
         repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         token, expires_at = provider.token_for_repo(repo, effective_repositories)
@@ -121,6 +142,8 @@ class Broker:
         provider_name = string_field(payload, "provider")
         target = string_field(payload, "target")
         provider = self.provider(provider_name)
+        if getattr(provider, "external", False) and not provider.supports("identity"):
+            raise ProviderError("identity-not-supported", f"provider {provider_name} does not support identity", 403)
         repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         identity = provider.identity_for_repo(repo, effective_repositories)
@@ -140,6 +163,8 @@ class Broker:
         self.ensure_not_header_inject(agent, provider_name)
         target = string_field(payload, "target")
         provider = self.provider(provider_name)
+        if getattr(provider, "external", False) and not provider.supports("headers"):
+            raise ProviderError("headers-not-supported", f"provider {provider_name} does not support headers", 403)
         repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
         headers = provider.headers_for_repo(repo, effective_repositories)
@@ -458,7 +483,7 @@ def make_handler(broker):
 
         def do_GET(self):
             if self.path == "/health":
-                self.write_json(200, {"ok": True, "status": "ready"})
+                self.write_json(200, broker.health())
                 return
             self.write_json(404, {"ok": False, "error": "not-found"})
 
@@ -534,17 +559,33 @@ def make_handler(broker):
 
 def serve(bind, config_path=None, audit_path=None):
     broker = Broker(config_path, audit_path)
-    host, port = parse_bind(bind)
-    server = ThreadingHTTPServer((host, port), make_handler(broker))
-    cert = os.environ.get("NVT_BROKER_TLS_CERT")
-    key = os.environ.get("NVT_BROKER_TLS_KEY")
-    if bool(cert) != bool(key):
-        raise BrokerConfigError("NVT_BROKER_TLS_CERT and NVT_BROKER_TLS_KEY must be set together")
-    if cert and key:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=cert, keyfile=key)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-    server.serve_forever()
+    server = None
+    previous_sigterm = None
+    try:
+        host, port = parse_bind(bind)
+        server = ThreadingHTTPServer((host, port), make_handler(broker))
+        cert = os.environ.get("NVT_BROKER_TLS_CERT")
+        key = os.environ.get("NVT_BROKER_TLS_KEY")
+        if bool(cert) != bool(key):
+            raise BrokerConfigError("NVT_BROKER_TLS_CERT and NVT_BROKER_TLS_KEY must be set together")
+        if cert and key:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=cert, keyfile=key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+
+        def stop_for_sigterm(_signum, _frame):
+            # HTTPServer.shutdown must run outside serve_forever's thread.
+            threading.Thread(target=server.shutdown, name="broker-sigterm", daemon=True).start()
+
+        if threading.current_thread() is threading.main_thread():
+            previous_sigterm = signal.signal(signal.SIGTERM, stop_for_sigterm)
+        server.serve_forever()
+    finally:
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        if server is not None:
+            server.server_close()
+        broker.close()
 
 
 def parse_bind(bind):
