@@ -331,11 +331,18 @@ func TestExecutableProviderDuplicateInvalidatesGeneration(t *testing.T) {
 	f := newExecutableBrokerFixture(t)
 	pending := make(chan map[string]any, 1)
 	go func() {
-		_, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "slow"})
+		_, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "duplicate-pending"})
 		pending <- body
 	}()
-	time.Sleep(40 * time.Millisecond)
+	waitFor(t, 2*time.Second, func() bool {
+		_, err := os.Stat(f.state + "-direct.duplicate-pending")
+		return err == nil
+	})
 	_, _ = f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "fault-duplicate-id"})
+	waitFor(t, 2*time.Second, func() bool {
+		_, err := os.Stat(f.state + "-direct.duplicate-emitted")
+		return err == nil
+	})
 	select {
 	case body := <-pending:
 		if body["ok"] != false {
@@ -347,6 +354,10 @@ func TestExecutableProviderDuplicateInvalidatesGeneration(t *testing.T) {
 	if health := f.health(); health["status"] != "degraded" {
 		t.Fatalf("duplicate generation was not degraded: %#v", health)
 	}
+	waitFor(t, 3*time.Second, func() bool {
+		data, err := os.ReadFile(f.state + "-direct.initializations")
+		return err == nil && strings.TrimSpace(string(data)) >= "2"
+	})
 	waitFor(t, 3*time.Second, func() bool { return f.health()["status"] == "healthy" })
 	status, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "recovered"})
 	if status != 200 || body["token"] != executableCanary {
@@ -407,7 +418,7 @@ for config, expected in bad:
     assert expected in str(error), (expected, str(error))
   else: raise AssertionError(expected)
 
-for mode in ("unknown-capability", "duplicate-capability", "bad-metadata", "initialize-error", "duplicate-hosts", "malformed-host", "uppercase-host", "port-host", "trailing-dot-host"):
+for mode in ("unknown-capability", "duplicate-capability", "bad-metadata", "initialize-error", "duplicate-hosts", "malformed-host", "uppercase-host", "port-host", "trailing-dot-host", "ipv4-host", "ipv6-host"):
   config={"provider-plugins":[base], "providers":[{"name":"one","plugin":"fixture","config":{"mode":mode}}]}
   try: load_providers(config)
   except BrokerConfigError: pass
@@ -435,18 +446,36 @@ assert not p.supports("injection")
 p.close()
 
 state=tempfile.mktemp(prefix="provider-stop-reading-")
-blocked={"provider-plugins":[{**base, "request-timeout-seconds":.2}], "providers":[{"name":"one","plugin":"fixture","config":{"mode":"stop-reading", "state-file":state}}]}
+blocked={"provider-plugins":[{**base, "request-timeout-seconds":.2}], "providers":[{"name":"one","plugin":"fixture","config":{"mode":"stop-reading-ignore-sigterm", "state-file":state}}]}
 p=load_providers(blocked)["one"]
+blocked_pid=int(open(state+".pid").read())
 started=time.monotonic()
 try: p._request("files", {"blob":"x" * 900000})
 except ProviderError as error: assert error.reason == "provider-unavailable"
 else: raise AssertionError("blocked stdin request succeeded")
-assert time.monotonic() - started < .6
-deadline=time.monotonic()+3
+assert time.monotonic() - started < .45
+deadline=time.monotonic()+4
+while time.monotonic() < deadline:
+  try: os.kill(blocked_pid, 0)
+  except ProcessLookupError: break
+  time.sleep(.02)
+else: raise AssertionError("retired blocked provider was not reaped")
 while not p.ready and time.monotonic() < deadline: time.sleep(.02)
 assert p.ready, "provider did not recover after blocked stdin"
 assert p.normalize_target("owner/repo").audit_target == "audit/owner/repo"
 p.close()
+
+state=tempfile.mktemp(prefix="provider-close-retirement-")
+blocked["providers"][0]["config"]["state-file"]=state
+p=load_providers(blocked)["one"]
+blocked_pid=int(open(state+".pid").read())
+try: p._request("files", {"blob":"x" * 900000})
+except ProviderError: pass
+else: raise AssertionError("second blocked stdin request succeeded")
+p.close()
+try: os.kill(blocked_pid, 0)
+except ProcessLookupError: pass
+else: raise AssertionError("close returned before retired provider was reaped")
 print("OK")
 `, executableCanary, bin)
 	cmd := exec.Command("python3", "-c", script)

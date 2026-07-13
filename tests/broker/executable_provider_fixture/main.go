@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -40,6 +42,10 @@ func main() {
 		if req.Method == "initialize" {
 			s.handle(req)
 			mode, _ := s.config["mode"].(string)
+			if mode == "stop-reading-ignore-sigterm" && s.firstFault("stop-reading-ignore-sigterm") {
+				signal.Ignore(syscall.SIGTERM)
+				select {}
+			}
 			if mode == "stop-reading" && s.firstFault("stop-reading") {
 				select {}
 			}
@@ -106,6 +112,12 @@ func (s *server) handle(req request) {
 		if mode == "trailing-dot-host" {
 			result["injection_hosts"] = []string{"api.example.test."}
 		}
+		if mode == "ipv4-host" {
+			result["injection_hosts"] = []string{"127.0.0.1"}
+		}
+		if mode == "ipv6-host" {
+			result["injection_hosts"] = []string{"2001:db8::1"}
+		}
 		if mode == "bad-metadata" {
 			result["bundle_ttl_seconds"] = 0
 		}
@@ -125,6 +137,12 @@ func (s *server) handle(req request) {
 	}
 
 	target, _ := req.Params["target"].(string)
+	if target == "duplicate-pending" {
+		if s.stateFile != "" {
+			_ = os.WriteFile(s.stateFile+".duplicate-pending", []byte("received"), 0o600)
+		}
+		time.Sleep(3 * time.Second)
+	}
 	if target == "slow" {
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -211,6 +229,9 @@ func (s *server) fault(name, id string) {
 	case "fault-duplicate-id":
 		s.success(id, map[string]any{"token": "first", "expires_at": nil})
 		s.success(id, map[string]any{"token": "second", "expires_at": nil})
+		if s.stateFile != "" {
+			_ = os.WriteFile(s.stateFile+".duplicate-emitted", []byte("emitted"), 0o600)
+		}
 	}
 }
 

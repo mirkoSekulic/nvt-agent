@@ -1,5 +1,6 @@
 """Supervision and validation for trusted executable broker providers."""
 
+import ipaddress
 import json
 import os
 import queue
@@ -91,6 +92,7 @@ class ExecutableProviderAdapter(ProviderAdapter):
         self._restart_delay = RESTART_INITIAL_SECONDS
         self._restart_event = threading.Event()
         self._supervisor_stop = threading.Event()
+        self._retired = queue.Queue()
         self._supervisor = None
         self._capabilities = set()
         self._injection_hosts = []
@@ -235,17 +237,18 @@ class ExecutableProviderAdapter(ProviderAdapter):
                 return
             self._closing = True
             generation = self._current
-        self._supervisor_stop.set()
-        self._restart_event.set()
         if generation is not None and generation.process.poll() is None:
             try:
                 self._request("shutdown", {}, timeout=min(2.0, self._plugin["request_timeout"]), allow_unready=True)
             except ProviderError:
                 pass
         self._fail_generation(generation.number if generation else self._generation, "provider-unavailable", restart=False)
+        self._supervisor_stop.set()
+        self._restart_event.set()
         supervisor = self._supervisor
         if supervisor is not None and supervisor is not threading.current_thread():
-            supervisor.join(timeout=2)
+            supervisor.join(timeout=8)
+        self._retire_pending()
 
     def _start(self, initial=False):
         environment = dict(SAFE_ENVIRONMENT)
@@ -327,9 +330,19 @@ class ExecutableProviderAdapter(ProviderAdapter):
             self._protocol_error("provider declared unknown or duplicate capabilities")
         hosts = value.get("injection_hosts", [])
         host_pattern = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-        if (not isinstance(hosts, list) or len(set(hosts)) != len(hosts) or
-                any(not isinstance(host, str) or not host_pattern.fullmatch(host) for host in hosts)):
+        if not isinstance(hosts, list) or any(not isinstance(host, str) for host in hosts):
             self._protocol_error("provider injection_hosts metadata is invalid")
+        if len(set(hosts)) != len(hosts):
+            self._protocol_error("provider injection_hosts metadata is invalid")
+        for host in hosts:
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                pass
+            else:
+                self._protocol_error("provider injection_hosts metadata is invalid")
+            if not host_pattern.fullmatch(host):
+                self._protocol_error("provider injection_hosts metadata is invalid")
         injection_git = value.get("injection_git", False)
         if not isinstance(injection_git, bool):
             self._protocol_error("provider injection_git metadata is invalid")
@@ -530,10 +543,7 @@ class ExecutableProviderAdapter(ProviderAdapter):
         for item in pending:
             item.error = error
             item.event.set()
-        self._stop_process(generation.process)
-        for thread in (generation.writer, generation.stdout_reader, generation.stderr_reader):
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=1)
+        self._retired.put(generation)
         if restart and not self._closing:
             self._restart_event.set()
 
@@ -545,6 +555,7 @@ class ExecutableProviderAdapter(ProviderAdapter):
             if not self._restart_event.is_set():
                 continue
             self._restart_event.clear()
+            self._retire_pending()
             while not self._supervisor_stop.is_set():
                 with self._lock:
                     if self._current is not None:
@@ -557,7 +568,19 @@ class ExecutableProviderAdapter(ProviderAdapter):
                     self._start(initial=False)
                     break
                 except (ProviderError, BrokerConfigError):
+                    self._retire_pending()
                     continue
+
+    def _retire_pending(self):
+        while True:
+            try:
+                generation = self._retired.get_nowait()
+            except queue.Empty:
+                return
+            self._stop_process(generation.process)
+            for thread in (generation.writer, generation.stdout_reader, generation.stderr_reader):
+                if thread is not None and thread is not threading.current_thread():
+                    thread.join(timeout=1)
 
     def _mark_stable(self, generation):
         if time.monotonic() - generation.started_at < STABILITY_RESET_SECONDS:

@@ -108,8 +108,9 @@ positive integer. Injection metadata requires `injection.headers`. Providers
 declaring `token`, `identity`, or `headers` must implement `target.normalize`.
 Each injection host must be a unique normalized lowercase DNS hostname: labels
 contain only `a-z`, `0-9`, and interior hyphens, with no scheme, path, wildcard,
-port, trailing dot, or uppercase characters. `injection.headers` with an empty
-host list is valid metadata but is not exposed as an injection-capable provider.
+port, trailing dot, uppercase characters, or IPv4/IPv6 literals.
+`injection.headers` with an empty host list is valid metadata but is not exposed
+as an injection-capable provider.
 
 ## Operations
 
@@ -146,6 +147,8 @@ Initialize and ordinary requests use their configured timeouts. EOF, timeout,
 crash, malformed or oversized output, or response correlation violations fail
 the triggering and all pending requests closed. No other provider is tried and
 no cached secret result is returned. The bad child is terminated and reaped.
+Timeout callers return at their absolute request deadline; lifecycle-owned
+cleanup retires and reaps the failed generation before any replacement starts.
 
 After an initial successful startup, a failed instance becomes unavailable and
 is restarted with bounded exponential backoff. Calls during backoff return a
