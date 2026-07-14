@@ -103,8 +103,14 @@ func TestDirectAgentRouteAuthenticatesBeforeLookupAndEnforcesOwner(t *testing.T)
 	setTestPrincipalSession(t, server, denied, Principal{Issuer: "https://github.com", Subject: "99"})
 	deniedResponse := httptest.NewRecorder()
 	server.ServeHTTP(deniedResponse, denied)
-	if deniedResponse.Code != http.StatusForbidden {
-		t.Fatalf("non-owner status = %d body=%s", deniedResponse.Code, deniedResponse.Body.String())
+
+	missing := httptest.NewRequest(http.MethodGet, "http://missing.agents.localhost/", nil)
+	setTestPrincipalSession(t, server, missing, Principal{Issuer: "https://github.com", Subject: "99"})
+	missingResponse := httptest.NewRecorder()
+	server.ServeHTTP(missingResponse, missing)
+	if deniedResponse.Code != http.StatusNotFound || deniedResponse.Code != missingResponse.Code || deniedResponse.Body.String() != missingResponse.Body.String() {
+		t.Fatalf("non-owner response=(%d, %q), missing response=(%d, %q), want identical generic 404s",
+			deniedResponse.Code, deniedResponse.Body.String(), missingResponse.Code, missingResponse.Body.String())
 	}
 
 	allowed := httptest.NewRequest(http.MethodGet, "http://access-1.agents.localhost/", nil)

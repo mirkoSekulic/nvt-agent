@@ -270,7 +270,7 @@ func (s *Server) serveAuthorizedAgentRun(w http.ResponseWriter, r *http.Request,
 	decision := EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run)
 	logAuthorizationDecision(decision, accessKey, *principal)
 	if !decision.Allowed {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.NotFound(w, r)
 		return
 	}
 	s.proxyResolvedAgentRun(w, r, run)

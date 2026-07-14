@@ -445,7 +445,7 @@ func TestAuthorizationLogIsSanitized(t *testing.T) {
 	})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusForbidden {
+	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	logged := logs.String()
