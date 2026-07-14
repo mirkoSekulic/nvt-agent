@@ -158,7 +158,11 @@ func TestHealthzDoesNotRequireKubernetes(t *testing.T) {
 }
 
 func TestAuthModeNonePreservesDashboardBehavior(t *testing.T) {
-	client := fakeClient(t)
+	client := fakeClient(t, &nvtv1alpha1.AgentRun{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "nvt", Name: "legacy-run", Annotations: map[string]string{
+			AccessKeyAnnotation: "legacy-key", DisplayNameAnnotation: "Legacy run",
+		},
+	}})
 	server := mustNewServer(t, Config{
 		BaseDomain:        "agents.localhost",
 		ListenAddr:        ":8080",
@@ -170,6 +174,9 @@ func TestAuthModeNonePreservesDashboardBehavior(t *testing.T) {
 	server.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "Legacy run") {
+		t.Fatalf("auth.mode=none hid legacy AgentRun: %s", recorder.Body.String())
 	}
 }
 
@@ -208,8 +215,8 @@ func TestAuthModeOIDCAuthenticatedWithoutAuthorizationRuleIsDenied(t *testing.T)
 	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1"})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "No AgentRuns") {
+		t.Fatalf("status = %d body=%s, want an authenticated empty dashboard", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -221,12 +228,12 @@ func TestAuthModeOIDCAnyAuthenticatedRuleAllowsAccess(t *testing.T) {
 		Effect:        authorizationEffectAllow,
 		Authenticated: true,
 	}}
-	server := mustNewServer(t, config, fakeClient(t))
+	server := mustNewServer(t, config, fakeClient(t, dashboardTestRun("authenticated-run")))
 	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
 	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1"})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "authenticated-run") {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -240,12 +247,12 @@ func TestAuthModeOIDCSimpleClaimRuleAllowsAccess(t *testing.T) {
 		ClaimPath: "groups[]",
 		Values:    []string{"nvt-agent-admins"},
 	}}
-	server := mustNewServer(t, config, fakeClient(t))
+	server := mustNewServer(t, config, fakeClient(t, dashboardTestRun("claim-authorized-run")))
 	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
 	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1", "groups": []any{"nvt-agent-admins"}})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "claim-authorized-run") {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -269,7 +276,7 @@ func TestAuthorizationWhereArrayRequiresSameElementMatch(t *testing.T) {
 			},
 		}},
 	}
-	decision := EvaluateAuthorization(policy, claims)
+	decision := EvaluateAuthorization(policy, Principal{Claims: claims}, nil)
 	if !decision.Allowed || decision.RuleID != "allowed-altinn-org" {
 		t.Fatalf("decision = %#v", decision)
 	}
@@ -295,7 +302,7 @@ func TestAuthorizationWhereArrayDeniesSplitElementMatch(t *testing.T) {
 			},
 		}},
 	}
-	decision := EvaluateAuthorization(policy, claims)
+	decision := EvaluateAuthorization(policy, Principal{Claims: claims}, nil)
 	if decision.Allowed {
 		t.Fatalf("split element match allowed: %#v", decision)
 	}
@@ -344,11 +351,11 @@ func TestSessionCookieDoesNotCarryLargeClaims(t *testing.T) {
 		t.Fatalf("session cookie too large: %d bytes", len(cookie.String()))
 	}
 	stored := server.auth.sessions[mustReadSessionID(t, server, cookie)]
-	if _, ok := stored.Claims["pid"]; ok {
-		t.Fatalf("stored authorization claims retained forbidden pid: %#v", stored.Claims)
+	if _, ok := stored.Principal.Claims["pid"]; ok {
+		t.Fatalf("stored authorization claims retained forbidden pid: %#v", stored.Principal.Claims)
 	}
-	if _, ok := stored.Claims["authorization_details"]; !ok {
-		t.Fatalf("stored authorization claims lost needed authorization_details: %#v", stored.Claims)
+	if _, ok := stored.Principal.Claims["authorization_details"]; !ok {
+		t.Fatalf("stored authorization claims lost needed authorization_details: %#v", stored.Principal.Claims)
 	}
 }
 
@@ -438,16 +445,16 @@ func TestAuthorizationLogIsSanitized(t *testing.T) {
 	})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusForbidden {
+	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	logged := logs.String()
-	for _, forbidden := range []string{"01017012345", "subject-sensitive", "full-authorization-details", "authorization_details", "pid", "fødselsnummer"} {
+	for _, forbidden := range []string{"01017012345", "subject-sensitive", "https://issuer.test", "full-authorization-details", "authorization_details", "pid", "fødselsnummer"} {
 		if strings.Contains(logged, forbidden) {
 			t.Fatalf("log leaked %q: %s", forbidden, logged)
 		}
 	}
-	for _, want := range []string{"decision=deny", "rule=-", "agent=access-1", "subject_hash="} {
+	for _, want := range []string{"decision=deny", "rule=-", "agent=access-1", "principal_hash="} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("log missing %q: %s", want, logged)
 		}
@@ -564,9 +571,17 @@ func mustNewServer(t *testing.T, config Config, client ctrlclient.Client) *Serve
 
 func setTestSession(t *testing.T, server *Server, req *http.Request, subject string, claims map[string]any) *http.Cookie {
 	t.Helper()
+	return setTestPrincipalSession(t, server, req, Principal{
+		Issuer: "https://issuer.test", Subject: subject, Claims: stripSensitiveClaims(claims),
+	})
+}
+
+func setTestPrincipalSession(t *testing.T, server *Server, req *http.Request, principal Principal) *http.Cookie {
+	t.Helper()
 	sessionID := randomToken()
 	expiresAt := time.Now().Add(time.Hour).Unix()
-	server.auth.storeSession(sessionID, storedSession{Subject: subject, ExpiresAt: expiresAt, Claims: stripSensitiveClaims(claims)})
+	principal.Claims = stripSensitiveClaims(principal.Claims)
+	server.auth.storeSession(sessionID, storedSession{Principal: principal, ExpiresAt: expiresAt})
 	recorder := httptest.NewRecorder()
 	server.auth.setCookie(recorder, server.auth.config.Auth.Session.CookieName, sessionCookie{
 		ID:        sessionID,
@@ -693,4 +708,10 @@ func readyPodStatus(podIP string) corev1.PodStatus {
 			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 		},
 	}
+}
+
+func dashboardTestRun(name string) *nvtv1alpha1.AgentRun {
+	return &nvtv1alpha1.AgentRun{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "nvt", Name: name, Annotations: map[string]string{AccessKeyAnnotation: name, DisplayNameAnnotation: name},
+	}}
 }

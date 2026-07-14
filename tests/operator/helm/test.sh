@@ -14,6 +14,8 @@ GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
+GATEWAY_GITHUB_RENDER="${WORKDIR}/gateway-github.yaml"
+GATEWAY_GITHUB_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-github-missing-secret-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
 BROKER_TLS_DISABLED_RENDER="${WORKDIR}/broker-tls-disabled.yaml"
@@ -64,6 +66,18 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.authorization.rules[0].values[0]=nvt-agent-admins \
   --set-string 'gateway.auth.oidc.authorizationDetails={"type":"openid_credential"}' \
   > "${GATEWAY_OIDC_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.publicURL=https://agents.example.com \
+  --set gateway.auth.mode=github \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+  --set gateway.auth.github.credentials.clientIDKey=github-client-id \
+  --set gateway.auth.github.credentials.clientSecretKey=github-client-secret \
+  --set gateway.auth.authorization.rules[0].id=agent-owner \
+  --set gateway.auth.authorization.rules[0].effect=allow \
+  --set gateway.auth.authorization.rules[0].owner=true \
+  > "${GATEWAY_GITHUB_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.tls.enabled=false > "${BROKER_TLS_DISABLED_RENDER}"
@@ -471,7 +485,7 @@ if helm template nvt "${CHART}" -n custom-ns \
   echo "expected gateway oidc replicas>1 config to fail rendering" >&2
   exit 1
 fi
-grep -q "gateway.replicas must be 1 when gateway.auth.mode=oidc until shared sessions exist" "${GATEWAY_OIDC_REPLICAS_FAILURE}"
+grep -q "gateway.replicas must be 1 when gateway authentication is enabled until shared sessions exist" "${GATEWAY_OIDC_REPLICAS_FAILURE}"
 
 if helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
@@ -482,7 +496,33 @@ if helm template nvt "${CHART}" -n custom-ns \
   echo "expected gateway oidc missing Secret config to fail rendering" >&2
   exit 1
 fi
-grep -q "gateway.auth.session.existingSecret is required when gateway.auth.mode=oidc" "${GATEWAY_OIDC_MISSING_SECRET_FAILURE}"
+grep -q "gateway.auth.session.existingSecret is required when gateway authentication is enabled" "${GATEWAY_OIDC_MISSING_SECRET_FAILURE}"
+
+grep -q 'value: "github"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'name: NVT_GATEWAY_GITHUB_CLIENT_ID' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'name: "nvt-agent-gateway-github"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'key: "github-client-id"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'name: NVT_GATEWAY_GITHUB_CLIENT_SECRET' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'key: "github-client-secret"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'value: "/oauth2/github/callback"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'value: "https://github.com"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'value: "https://github.com/login/oauth/authorize"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'value: "https://github.com/login/oauth/access_token"' "${GATEWAY_GITHUB_RENDER}"
+grep -q 'value: "https://api.github.com/user"' "${GATEWAY_GITHUB_RENDER}"
+grep -Fq '\"owner\":true' "${GATEWAY_GITHUB_RENDER}"
+if grep -Eq 'value:.*(github-client-id|github-client-secret)' "${GATEWAY_GITHUB_RENDER}"; then
+  echo "gateway GitHub OAuth credentials must only come from Secret refs" >&2
+  exit 1
+fi
+if helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=github \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  > /dev/null 2> "${GATEWAY_GITHUB_MISSING_SECRET_FAILURE}"; then
+  echo "expected gateway github missing credential Secret to fail rendering" >&2
+  exit 1
+fi
+grep -q "gateway.auth.github.credentials.existingSecret is required when gateway.auth.mode=github" "${GATEWAY_GITHUB_MISSING_SECRET_FAILURE}"
 
 require_file "${CHART}/crds/nvt.dev_agentruns.yaml"
 require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"

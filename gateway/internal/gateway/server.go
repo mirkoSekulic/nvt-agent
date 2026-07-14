@@ -41,6 +41,7 @@ type AuthConfig struct {
 	Mode          string
 	Session       SessionConfig
 	OIDC          OIDCConfig
+	GitHub        GitHubConfig
 	Authorization AuthorizationConfig
 }
 
@@ -65,6 +66,16 @@ type OIDCConfig struct {
 	ClientAuthMethod     string
 }
 
+type GitHubConfig struct {
+	ClientID         string
+	ClientSecret     string
+	CallbackPath     string
+	Issuer           string
+	AuthorizationURL string
+	TokenURL         string
+	UserURL          string
+}
+
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.BaseDomain) == "" {
 		return fmt.Errorf("baseDomain is required")
@@ -86,12 +97,16 @@ func (c Config) Validate() error {
 	}
 	authMode := c.Auth.Mode
 	if authMode == "" {
-		authMode = "none"
+		authMode = authModeNone
 	}
 	switch authMode {
-	case "none":
-	case "oidc":
+	case authModeNone:
+	case authModeOIDC:
 		if err := c.Auth.validateOIDC(); err != nil {
+			return err
+		}
+	case authModeGitHub:
+		if err := c.Auth.validateGitHub(); err != nil {
 			return err
 		}
 	default:
@@ -100,11 +115,18 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func (c AuthConfig) validateOIDC() error {
+func (c AuthConfig) validateCommonAuthenticated() error {
 	if strings.TrimSpace(c.Session.Secret) == "" {
-		return fmt.Errorf("auth.session.secret is required when auth.mode=oidc")
+		return fmt.Errorf("auth.session.secret is required when authentication is enabled")
 	}
 	if _, err := sessionSecretBytes(c.Session.Secret); err != nil {
+		return err
+	}
+	return c.Authorization.validate()
+}
+
+func (c AuthConfig) validateOIDC() error {
+	if err := c.validateCommonAuthenticated(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(c.OIDC.IssuerURL) == "" {
@@ -119,10 +141,48 @@ func (c AuthConfig) validateOIDC() error {
 	if c.OIDC.ClientAuthMethod != "" && c.OIDC.ClientAuthMethod != oidcClientSecretPost {
 		return fmt.Errorf("unsupported auth.oidc.clientAuthMethod %q", c.OIDC.ClientAuthMethod)
 	}
-	if err := c.Authorization.validate(); err != nil {
+	return nil
+}
+
+func (c AuthConfig) validateGitHub() error {
+	if err := c.validateCommonAuthenticated(); err != nil {
 		return err
 	}
+	if strings.TrimSpace(c.GitHub.ClientID) == "" {
+		return fmt.Errorf("auth.github.clientID is required when auth.mode=github")
+	}
+	if strings.TrimSpace(c.GitHub.ClientSecret) == "" {
+		return fmt.Errorf("auth.github.clientSecret is required when auth.mode=github")
+	}
+	github := c.GitHub
+	applyGitHubDefaults(&github)
+	if !strings.HasPrefix(github.CallbackPath, "/") || strings.HasPrefix(github.CallbackPath, "//") || strings.ContainsAny(github.CallbackPath, "?#") {
+		return fmt.Errorf("auth.github.callbackPath must be an absolute path without query or fragment")
+	}
+	for field, value := range map[string]string{
+		"issuer": github.Issuer, "authorizationURL": github.AuthorizationURL,
+		"tokenURL": github.TokenURL, "userURL": github.UserURL,
+	} {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+			return fmt.Errorf("auth.github.%s must be an absolute HTTP(S) URL", field)
+		}
+		if field == "issuer" && parsed.Scheme != "https" {
+			return fmt.Errorf("auth.github.issuer must use HTTPS")
+		}
+		if field != "issuer" && parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+			return fmt.Errorf("auth.github.%s must use HTTPS except for loopback tests", field)
+		}
+	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type Server struct {
@@ -147,7 +207,7 @@ type route struct {
 
 func NewServer(config Config, client ctrlclient.Client, namespace string) (*Server, error) {
 	if config.Auth.Mode == "" {
-		config.Auth.Mode = "none"
+		config.Auth.Mode = authModeNone
 	}
 	auth, err := NewAuthenticator(context.Background(), config)
 	if err != nil {
@@ -169,25 +229,51 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route := ParseHost(r.Host, s.config.BaseDomain)
 	switch route.kind {
 	case routeDashboard:
-		if !s.authorize(w, r, "") {
+		principal, ok := s.authenticate(w, r)
+		if !ok {
 			return
 		}
-		s.serveDashboard(w, r)
+		s.serveDashboard(w, r, principal)
 	case routeAgentRun:
-		if !s.authorize(w, r, route.accessKey) {
-			return
+		if s.auth == nil {
+			s.proxyAgentRun(w, r, route.accessKey)
+		} else {
+			s.serveAuthorizedAgentRun(w, r, route.accessKey)
 		}
-		s.proxyAgentRun(w, r, route.accessKey)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (s *Server) authorize(w http.ResponseWriter, r *http.Request, agentKey string) bool {
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*Principal, bool) {
 	if s.auth == nil {
-		return true
+		return nil, true
 	}
-	return s.auth.Authorize(w, r, agentKey)
+	principal, ok := s.auth.Authenticate(w, r)
+	return &principal, ok
+}
+
+func (s *Server) serveAuthorizedAgentRun(w http.ResponseWriter, r *http.Request, accessKey string) {
+	principal, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	run, err := s.resolveAgentRun(r.Context(), accessKey)
+	if errors.IsNotFound(err) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "resolve AgentRun", http.StatusInternalServerError)
+		return
+	}
+	decision := EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run)
+	logAuthorizationDecision(decision, accessKey, *principal)
+	if !decision.Allowed {
+		http.NotFound(w, r)
+		return
+	}
+	s.proxyResolvedAgentRun(w, r, run)
 }
 
 func ParseHost(host, baseDomain string) route {
@@ -214,11 +300,20 @@ func stripPort(host string) string {
 }
 
 func (s *Server) proxyAgentRun(w http.ResponseWriter, r *http.Request, accessKey string) {
-	target, err := s.resolveTarget(r.Context(), accessKey)
+	run, err := s.resolveAgentRun(r.Context(), accessKey)
 	if errors.IsNotFound(err) {
 		http.NotFound(w, r)
 		return
 	}
+	if err != nil {
+		http.Error(w, "resolve AgentRun target", http.StatusInternalServerError)
+		return
+	}
+	s.proxyResolvedAgentRun(w, r, run)
+}
+
+func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, run nvtv1alpha1.AgentRun) {
+	target, err := s.resolveTargetForRun(r.Context(), run)
 	if err == errNoRunningPod {
 		http.Error(w, "AgentRun has no ready running pod with a pod IP", http.StatusServiceUnavailable)
 		return
@@ -256,6 +351,10 @@ func (s *Server) resolveTarget(ctx context.Context, accessKey string) (target, e
 	if err != nil {
 		return target{}, err
 	}
+	return s.resolveTargetForRun(ctx, run)
+}
+
+func (s *Server) resolveTargetForRun(ctx context.Context, run nvtv1alpha1.AgentRun) (target, error) {
 	pod, ok, err := s.runningPodForAgentRun(ctx, run.Name)
 	if err != nil {
 		return target{}, err
@@ -316,7 +415,7 @@ func targetPort(run nvtv1alpha1.AgentRun, fallback int) int {
 	return port
 }
 
-func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principal *Principal) {
 	var runs nvtv1alpha1.AgentRunList
 	if err := s.client.List(r.Context(), &runs, ctrlclient.InNamespace(s.namespace)); err != nil {
 		http.Error(w, "list AgentRuns", http.StatusInternalServerError)
@@ -326,6 +425,9 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, run := range runs.Items {
 		key := run.Annotations[AccessKeyAnnotation]
 		if key == "" {
+			continue
+		}
+		if principal != nil && !EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run).Allowed {
 			continue
 		}
 		_, routable, err := s.runningPodForAgentRun(r.Context(), run.Name)

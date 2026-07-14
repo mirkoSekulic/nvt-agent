@@ -234,6 +234,45 @@ gateway:
 All `where.all` conditions must match the same array element. See the
 [gateway README](../../gateway/README.md) for callback and session behavior.
 
+### GitHub owner login
+
+Direct GitHub OAuth2 login uses a dedicated GitHub App and the same generic
+authorization engine. Put its client ID and secret in one existing Secret; the
+chart never renders credential values into a ConfigMap or Pod environment
+literal:
+
+```yaml
+gateway:
+  enabled: true
+  replicas: 1
+  baseDomain: agents.example.com
+  publicURL: https://agents.example.com
+  auth:
+    mode: github
+    session:
+      existingSecret: nvt-gateway-session
+      cookieDomain: .agents.example.com
+    github:
+      credentials:
+        existingSecret: nvt-gateway-github
+        clientIDKey: client-id
+        clientSecretKey: client-secret
+    authorization:
+      default: deny
+      rules:
+        - id: agent-owner
+          effect: allow
+          owner: true
+```
+
+Register `https://agents.example.com/oauth2/github/callback` as the GitHub App
+callback. No repository permission or scope is needed for the current-user
+identity lookup. Owner matching uses only exact normalized issuer and immutable
+subject from `AgentRun.spec.profileProvenance.principal`; login/display name and
+requested-by annotations are ignored. See the [gateway
+README](../../gateway/README.md) for GitHub Enterprise endpoint overrides and
+trust details.
+
 ## Validation
 
 ```sh

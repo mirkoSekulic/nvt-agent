@@ -90,6 +90,16 @@ gateway:
       validIssuer: ""
       extraAuthParams: {}
       authorizationDetails: ""
+    github:
+      credentials:
+        existingSecret: ""
+        clientIDKey: client-id
+        clientSecretKey: client-secret
+      callbackPath: /oauth2/github/callback
+      issuer: https://github.com
+      authorizationURL: https://github.com/login/oauth/authorize
+      tokenURL: https://github.com/login/oauth/access_token
+      userURL: https://api.github.com/user
     authorization:
       default: deny
       claimSource: id_token

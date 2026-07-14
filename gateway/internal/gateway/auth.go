@@ -20,12 +20,18 @@ import (
 )
 
 const (
-	authModeOIDC         = "oidc"
-	oidcClientSecretPost = "client_secret_post"
-	defaultSessionCookie = "nvt_agent_gateway"
-	defaultCallbackPath  = "/oauth2/callback"
-	defaultSessionMaxAge = 24 * 60 * 60
-	loginStateCookie     = "nvt_agent_gateway_login"
+	authModeNone          = "none"
+	authModeOIDC          = "oidc"
+	authModeGitHub        = "github"
+	oidcClientSecretPost  = "client_secret_post"
+	defaultSessionCookie  = "nvt_agent_gateway"
+	defaultCallbackPath   = "/oauth2/callback"
+	defaultGitHubIssuer   = "https://github.com"
+	defaultGitHubAuthURL  = "https://github.com/login/oauth/authorize"
+	defaultGitHubTokenURL = "https://github.com/login/oauth/access_token"
+	defaultGitHubUserURL  = "https://api.github.com/user"
+	defaultSessionMaxAge  = 24 * 60 * 60
+	loginStateCookie      = "nvt_agent_gateway_login"
 )
 
 type Authenticator struct {
@@ -35,6 +41,7 @@ type Authenticator struct {
 	verifier      *oidc.IDTokenVerifier
 	tokenVerifier *oidc.IDTokenVerifier
 	provider      *oidc.Provider
+	httpClient    *http.Client
 	sessions      map[string]storedSession
 	mu            sync.Mutex
 	now           func() time.Time
@@ -46,9 +53,8 @@ type sessionCookie struct {
 }
 
 type storedSession struct {
-	Subject   string
+	Principal Principal
 	ExpiresAt int64
-	Claims    map[string]any
 }
 
 type loginStateCookieValue struct {
@@ -60,10 +66,10 @@ type loginStateCookieValue struct {
 }
 
 func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error) {
-	if config.Auth.Mode == "" || config.Auth.Mode == "none" {
+	if config.Auth.Mode == "" || config.Auth.Mode == authModeNone {
 		return nil, nil
 	}
-	if config.Auth.Mode != authModeOIDC {
+	if config.Auth.Mode != authModeOIDC && config.Auth.Mode != authModeGitHub {
 		return nil, fmt.Errorf("unsupported auth.mode %q", config.Auth.Mode)
 	}
 	if config.Auth.Session.CookieName == "" {
@@ -72,14 +78,18 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 	if config.Auth.Session.MaxAgeSeconds == 0 {
 		config.Auth.Session.MaxAgeSeconds = defaultSessionMaxAge
 	}
-	if config.Auth.OIDC.CallbackPath == "" {
-		config.Auth.OIDC.CallbackPath = defaultCallbackPath
-	}
-	if len(config.Auth.OIDC.Scopes) == 0 {
-		config.Auth.OIDC.Scopes = []string{oidc.ScopeOpenID, "profile"}
-	}
-	if config.Auth.OIDC.ClientAuthMethod == "" {
-		config.Auth.OIDC.ClientAuthMethod = oidcClientSecretPost
+	if config.Auth.Mode == authModeOIDC {
+		if config.Auth.OIDC.CallbackPath == "" {
+			config.Auth.OIDC.CallbackPath = defaultCallbackPath
+		}
+		if len(config.Auth.OIDC.Scopes) == 0 {
+			config.Auth.OIDC.Scopes = []string{oidc.ScopeOpenID, "profile"}
+		}
+		if config.Auth.OIDC.ClientAuthMethod == "" {
+			config.Auth.OIDC.ClientAuthMethod = oidcClientSecretPost
+		}
+	} else {
+		applyGitHubDefaults(&config.Auth.GitHub)
 	}
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -88,34 +98,60 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 	if err != nil {
 		return nil, err
 	}
+	authenticator := &Authenticator{
+		config:      config,
+		cookieCodec: securecookie.New(secret, secret[:32]),
+		sessions:    map[string]storedSession{},
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		now: time.Now,
+	}
+	if config.Auth.Mode == authModeGitHub {
+		authenticator.oauthConfig = &oauth2.Config{
+			ClientID: config.Auth.GitHub.ClientID, ClientSecret: config.Auth.GitHub.ClientSecret,
+			Endpoint: oauth2.Endpoint{AuthURL: config.Auth.GitHub.AuthorizationURL, TokenURL: config.Auth.GitHub.TokenURL, AuthStyle: oauth2.AuthStyleInParams},
+		}
+		return authenticator, nil
+	}
 	provider, err := oidc.NewProvider(ctx, config.Auth.OIDC.IssuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("discover OIDC provider: %w", err)
 	}
 	endpoint := provider.Endpoint()
 	endpoint.AuthStyle = oauth2.AuthStyleInParams
-	oauthConfig := &oauth2.Config{
-		ClientID:     config.Auth.OIDC.ClientID,
-		ClientSecret: config.Auth.OIDC.ClientSecret,
-		Endpoint:     endpoint,
-		Scopes:       config.Auth.OIDC.Scopes,
-	}
+	authenticator.oauthConfig = &oauth2.Config{ClientID: config.Auth.OIDC.ClientID, ClientSecret: config.Auth.OIDC.ClientSecret, Endpoint: endpoint, Scopes: config.Auth.OIDC.Scopes}
 	issuer := config.Auth.OIDC.IssuerURL
 	if config.Auth.OIDC.ValidIssuer != "" {
 		issuer = config.Auth.OIDC.ValidIssuer
 	}
-	verifier := provider.Verifier(&oidc.Config{ClientID: config.Auth.OIDC.ClientID, SkipIssuerCheck: issuer != config.Auth.OIDC.IssuerURL})
-	tokenVerifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true, SkipIssuerCheck: issuer != config.Auth.OIDC.IssuerURL})
-	return &Authenticator{
-		config:        config,
-		cookieCodec:   securecookie.New(secret, secret[:32]),
-		oauthConfig:   oauthConfig,
-		verifier:      verifier,
-		tokenVerifier: tokenVerifier,
-		provider:      provider,
-		sessions:      map[string]storedSession{},
-		now:           time.Now,
-	}, nil
+	authenticator.verifier = provider.Verifier(&oidc.Config{ClientID: config.Auth.OIDC.ClientID, SkipIssuerCheck: issuer != config.Auth.OIDC.IssuerURL})
+	authenticator.tokenVerifier = provider.Verifier(&oidc.Config{SkipClientIDCheck: true, SkipIssuerCheck: issuer != config.Auth.OIDC.IssuerURL})
+	authenticator.provider = provider
+	return authenticator, nil
+}
+
+func applyGitHubDefaults(config *GitHubConfig) {
+	if config.CallbackPath == "" {
+		config.CallbackPath = defaultCallbackPath
+	}
+	if config.Issuer == "" {
+		config.Issuer = defaultGitHubIssuer
+	} else {
+		config.Issuer = strings.TrimRight(config.Issuer, "/")
+	}
+	if config.AuthorizationURL == "" {
+		config.AuthorizationURL = defaultGitHubAuthURL
+	}
+	if config.TokenURL == "" {
+		config.TokenURL = defaultGitHubTokenURL
+	}
+	if config.UserURL == "" {
+		config.UserURL = defaultGitHubUserURL
+	}
 }
 
 func sessionSecretBytes(raw string) ([]byte, error) {
@@ -135,7 +171,7 @@ func (a *Authenticator) HandlePublic(w http.ResponseWriter, r *http.Request) boo
 	switch r.URL.Path {
 	case "/oauth2/login":
 		a.handleLogin(w, r)
-	case a.config.Auth.OIDC.CallbackPath:
+	case a.callbackPath():
 		a.handleCallback(w, r)
 	case "/oauth2/logout":
 		a.clearCookies(w)
@@ -146,31 +182,23 @@ func (a *Authenticator) HandlePublic(w http.ResponseWriter, r *http.Request) boo
 	return true
 }
 
-func (a *Authenticator) Authorize(w http.ResponseWriter, r *http.Request, agentKey string) bool {
+func (a *Authenticator) Authenticate(w http.ResponseWriter, r *http.Request) (Principal, bool) {
 	session, ok := a.readSession(r)
 	if ok && session.ExpiresAt > a.now().Unix() {
 		stored, ok := a.lookupSession(session)
 		if !ok {
-			decision := AuthorizationDecision{Allowed: false}
-			logAuthorizationDecision(decision, agentKey, "")
 			http.Error(w, "forbidden", http.StatusForbidden)
-			return false
+			return Principal{}, false
 		}
-		decision := EvaluateAuthorization(a.config.Auth.Authorization, stored.Claims)
-		logAuthorizationDecision(decision, agentKey, stored.Subject)
-		if decision.Allowed {
-			return true
-		}
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return false
+		return stored.Principal, true
 	}
 	if isBrowserRead(r) {
 		loginURL := a.publicBaseURL(r) + "/oauth2/login?return_url=" + url.QueryEscape(a.safeReturnURL(r))
 		http.Redirect(w, r, loginURL, http.StatusFound)
-		return false
+		return Principal{}, false
 	}
 	http.Error(w, "authentication required", http.StatusUnauthorized)
-	return false
+	return Principal{}, false
 }
 
 func isBrowserRead(r *http.Request) bool {
@@ -201,16 +229,20 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	options := []oauth2.AuthCodeOption{
 		oauth2.S256ChallengeOption(verifier),
-		oauth2.SetAuthURLParam("nonce", nonce),
 	}
-	if a.config.Auth.OIDC.ACRValues != "" {
+	if a.config.Auth.Mode == authModeOIDC {
+		options = append(options, oauth2.SetAuthURLParam("nonce", nonce))
+	}
+	if a.config.Auth.Mode == authModeOIDC && a.config.Auth.OIDC.ACRValues != "" {
 		options = append(options, oauth2.SetAuthURLParam("acr_values", a.config.Auth.OIDC.ACRValues))
 	}
-	if a.config.Auth.OIDC.AuthorizationDetails != "" {
+	if a.config.Auth.Mode == authModeOIDC && a.config.Auth.OIDC.AuthorizationDetails != "" {
 		options = append(options, oauth2.SetAuthURLParam("authorization_details", a.config.Auth.OIDC.AuthorizationDetails))
 	}
-	for key, value := range a.config.Auth.OIDC.ExtraAuthParams {
-		options = append(options, oauth2.SetAuthURLParam(key, value))
+	if a.config.Auth.Mode == authModeOIDC {
+		for key, value := range a.config.Auth.OIDC.ExtraAuthParams {
+			options = append(options, oauth2.SetAuthURLParam(key, value))
+		}
 	}
 	http.Redirect(w, r, a.oauthConfigForRequest(r).AuthCodeURL(state, options...), http.StatusFound)
 }
@@ -225,8 +257,17 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
+	if a.config.Auth.Mode == authModeGitHub {
+		a.handleGitHubCallback(w, r, loginState)
+		return
+	}
+	a.handleOIDCCallback(w, r, loginState)
+}
+
+func (a *Authenticator) handleOIDCCallback(w http.ResponseWriter, r *http.Request, loginState loginStateCookieValue) {
+	oauthContext := context.WithValue(r.Context(), oauth2.HTTPClient, a.httpClient)
 	token, err := a.oauthConfigForRequest(r).Exchange(
-		r.Context(),
+		oauthContext,
 		r.URL.Query().Get("code"),
 		oauth2.VerifierOption(loginState.CodeVerifier),
 	)
@@ -263,9 +304,26 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load authorization claims", http.StatusUnauthorized)
 		return
 	}
+	issuer := idToken.Issuer
+	if a.config.Auth.OIDC.ValidIssuer != "" {
+		issuer = a.config.Auth.OIDC.ValidIssuer
+	}
+	displayName, _ := idClaims["name"].(string)
+	if displayName == "" {
+		displayName, _ = idClaims["preferred_username"].(string)
+	}
+	a.finishLogin(w, r, loginState, Principal{Issuer: issuer, Subject: idToken.Subject, DisplayName: displayName, Claims: stripSensitiveClaims(claims)})
+}
+
+func (a *Authenticator) finishLogin(w http.ResponseWriter, r *http.Request, loginState loginStateCookieValue, principal Principal) {
+	if strings.TrimSpace(principal.Issuer) == "" || strings.TrimSpace(principal.Subject) == "" {
+		http.Error(w, "invalid authenticated principal", http.StatusUnauthorized)
+		return
+	}
+	principal.Claims = stripSensitiveClaims(principal.Claims)
 	sessionID := randomToken()
 	expiresAt := a.now().Add(time.Duration(a.config.Auth.Session.MaxAgeSeconds) * time.Second).Unix()
-	a.storeSession(sessionID, storedSession{Subject: idToken.Subject, ExpiresAt: expiresAt, Claims: stripSensitiveClaims(claims)})
+	a.storeSession(sessionID, storedSession{Principal: principal, ExpiresAt: expiresAt})
 	a.setCookie(w, a.config.Auth.Session.CookieName, sessionCookie{
 		ID:        sessionID,
 		ExpiresAt: expiresAt,
@@ -405,8 +463,15 @@ func (a *Authenticator) safeReturnURL(r *http.Request) string {
 
 func (a *Authenticator) oauthConfigForRequest(r *http.Request) *oauth2.Config {
 	config := *a.oauthConfig
-	config.RedirectURL = a.publicBaseURL(r) + a.config.Auth.OIDC.CallbackPath
+	config.RedirectURL = a.publicBaseURL(r) + a.callbackPath()
 	return &config
+}
+
+func (a *Authenticator) callbackPath() string {
+	if a.config.Auth.Mode == authModeGitHub {
+		return a.config.Auth.GitHub.CallbackPath
+	}
+	return a.config.Auth.OIDC.CallbackPath
 }
 
 func (a *Authenticator) publicBaseURL(r *http.Request) string {

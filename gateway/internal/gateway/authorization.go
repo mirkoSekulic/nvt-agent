@@ -7,6 +7,8 @@ import (
 	"log"
 	"reflect"
 	"strings"
+
+	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
 
 const (
@@ -28,6 +30,7 @@ type AuthorizationRule struct {
 	ID            string             `json:"id"`
 	Effect        string             `json:"effect"`
 	Authenticated bool               `json:"authenticated"`
+	Owner         bool               `json:"owner"`
 	ClaimPath     string             `json:"claimPath"`
 	Values        []string           `json:"values"`
 	Where         AuthorizationWhere `json:"where"`
@@ -46,6 +49,15 @@ type AuthorizationCondition struct {
 type AuthorizationDecision struct {
 	Allowed bool
 	RuleID  string
+}
+
+// Principal is the normalized identity produced by every authenticated mode.
+// Issuer and Subject are the only ownership keys; DisplayName is display-only.
+type Principal struct {
+	Issuer      string
+	Subject     string
+	DisplayName string
+	Claims      map[string]any
 }
 
 func (c AuthorizationConfig) validate() error {
@@ -74,14 +86,17 @@ func (c AuthorizationConfig) validate() error {
 		}
 		hasSimple := rule.ClaimPath != "" || len(rule.Values) > 0
 		hasWhere := rule.Where.Array != "" || len(rule.Where.All) > 0
-		if rule.Authenticated {
-			if hasSimple || hasWhere {
-				return fmt.Errorf("auth.authorization.rules[%d] authenticated rule must not include claimPath, values, or where", index)
+		predicateCount := 0
+		for _, present := range []bool{rule.Authenticated, rule.Owner, hasSimple, hasWhere} {
+			if present {
+				predicateCount++
 			}
-			continue
 		}
-		if hasSimple == hasWhere {
-			return fmt.Errorf("auth.authorization.rules[%d] must define exactly one of authenticated, claimPath+values, or where.array+all", index)
+		if predicateCount != 1 {
+			return fmt.Errorf("auth.authorization.rules[%d] must define exactly one of authenticated, owner, claimPath+values, or where.array+all", index)
+		}
+		if rule.Authenticated || rule.Owner {
+			continue
 		}
 		if hasSimple {
 			if rule.ClaimPath == "" || len(rule.Values) == 0 {
@@ -124,7 +139,7 @@ func isSensitiveClaimPath(path string) bool {
 	return false
 }
 
-func EvaluateAuthorization(policy AuthorizationConfig, claims map[string]any) AuthorizationDecision {
+func EvaluateAuthorization(policy AuthorizationConfig, principal Principal, run *nvtv1alpha1.AgentRun) AuthorizationDecision {
 	for _, rule := range policy.Rules {
 		if rule.Effect != authorizationEffectAllow {
 			continue
@@ -132,17 +147,28 @@ func EvaluateAuthorization(policy AuthorizationConfig, claims map[string]any) Au
 		if rule.Authenticated {
 			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
 		}
-		if rule.ClaimPath != "" && claimPathMatches(claims, rule.ClaimPath, rule.Values) {
+		if rule.Owner && principalOwnsAgentRun(principal, run) {
 			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
 		}
-		if rule.Where.Array != "" && whereArrayMatches(claims, rule.Where) {
+		if rule.ClaimPath != "" && claimPathMatches(principal.Claims, rule.ClaimPath, rule.Values) {
+			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
+		}
+		if rule.Where.Array != "" && whereArrayMatches(principal.Claims, rule.Where) {
 			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
 		}
 	}
 	return AuthorizationDecision{Allowed: false}
 }
 
-func logAuthorizationDecision(decision AuthorizationDecision, agentKey, subject string) {
+func principalOwnsAgentRun(principal Principal, run *nvtv1alpha1.AgentRun) bool {
+	if run == nil || principal.Issuer == "" || principal.Subject == "" || run.Spec.ProfileProvenance == nil || run.Spec.ProfileProvenance.Principal == nil {
+		return false
+	}
+	owner := run.Spec.ProfileProvenance.Principal
+	return owner.Issuer != "" && owner.Subject != "" && principal.Issuer == owner.Issuer && principal.Subject == owner.Subject
+}
+
+func logAuthorizationDecision(decision AuthorizationDecision, agentKey string, principal Principal) {
 	ruleID := decision.RuleID
 	if ruleID == "" {
 		ruleID = "-"
@@ -151,7 +177,14 @@ func logAuthorizationDecision(decision AuthorizationDecision, agentKey, subject 
 	if decision.Allowed {
 		outcome = "allow"
 	}
-	log.Printf("gateway authorization decision=%s rule=%s agent=%s subject_hash=%s", outcome, ruleID, sanitizeLogValue(agentKey), shortHash(subject))
+	log.Printf("gateway authorization decision=%s rule=%s agent=%s principal_hash=%s", outcome, ruleID, sanitizeLogValue(agentKey), principalHash(principal))
+}
+
+func principalHash(principal Principal) string {
+	if principal.Issuer == "" || principal.Subject == "" {
+		return "-"
+	}
+	return shortHash(principal.Issuer + "\x00" + principal.Subject)
 }
 
 func sanitizeLogValue(value string) string {
