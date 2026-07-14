@@ -480,7 +480,11 @@ for invalid_args in \
   '--set gateway.routing.mode=unknown' \
   '--set gateway.routing.mode=path' \
   '--set gateway.routing.mode=path --set gateway.publicURL=http://agents.altinn.studio' \
-  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/base'; do
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/base' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.session.cookieDomain=.altinn.studio' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oidc.callbackPath=/callback' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.github.callbackPath=/oauth2/../callback' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oidc.callbackPath=/oauth2%2Fcallback'; do
   if helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true ${invalid_args} > /dev/null 2> "${GATEWAY_PATH_FAILURE}"; then
     echo "expected invalid gateway routing config to fail: ${invalid_args}" >&2
     exit 1

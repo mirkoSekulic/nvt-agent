@@ -110,6 +110,23 @@ func (c Config) Validate() error {
 		if (c.Auth.Mode == authModeOIDC || c.Auth.Mode == authModeGitHub) && !c.Auth.Session.Secure {
 			return fmt.Errorf("auth.session.secure must be true when routing.mode=path")
 		}
+		if c.Auth.Session.CookieDomain != "" {
+			return fmt.Errorf("auth.session.cookieDomain must be empty when routing.mode=path")
+		}
+		oidcCallbackPath := c.Auth.OIDC.CallbackPath
+		if oidcCallbackPath == "" {
+			oidcCallbackPath = defaultCallbackPath
+		}
+		githubCallbackPath := c.Auth.GitHub.CallbackPath
+		if githubCallbackPath == "" {
+			githubCallbackPath = defaultCallbackPath
+		}
+		if !validOAuthCallbackPath(oidcCallbackPath) {
+			return fmt.Errorf("auth.oidc.callbackPath must be an unambiguous path below /oauth2/ when routing.mode=path")
+		}
+		if !validOAuthCallbackPath(githubCallbackPath) {
+			return fmt.Errorf("auth.github.callbackPath must be an unambiguous path below /oauth2/ when routing.mode=path")
+		}
 	}
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listenAddr is required")
@@ -378,19 +395,30 @@ func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, r
 
 	targetURL := &url.URL{Scheme: "http", Host: net.JoinHostPort(target.PodIP, strconv.Itoa(target.Port))}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	ownedCookies := gatewayCookieNames(s.config.Auth.Session.CookieName)
+	responseCookiePath := ""
+	if s.config.routingMode() == routingModePath {
+		responseCookiePath = pathCookiePrefix(accessKey)
+	}
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
+		filterUpstreamRequestCookies(req.Header, ownedCookies)
 		if s.config.routingMode() == routingModePath {
 			stripPathAccessKey(req.URL, accessKey)
 			publicOrigin, _ := url.Parse(s.config.PublicURL)
-			req.Header.Del("Forwarded")
+			removeForwardingHeaders(req.Header)
 			req.Header.Set("X-Forwarded-Host", publicOrigin.Host)
 			req.Header.Set("X-Forwarded-Proto", publicOrigin.Scheme)
+			req.Header.Set("X-Forwarded-Port", publicForwardedPort(publicOrigin))
 		}
 		req.Host = targetURL.Host
 		req.URL.Scheme = targetURL.Scheme
 		req.URL.Host = targetURL.Host
+	}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		filterUpstreamResponseCookies(response, ownedCookies, responseCookiePath)
+		return nil
 	}
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 		http.Error(rw, "proxy AgentRun session", http.StatusBadGateway)

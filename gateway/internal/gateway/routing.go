@@ -105,3 +105,43 @@ func requestMatchesPublicOrigin(r *http.Request, publicURL string) bool {
 	}
 	return strings.EqualFold(r.Host, publicOrigin.Host)
 }
+
+func removeForwardingHeaders(header http.Header) {
+	header.Del("Forwarded")
+	for name := range header {
+		if strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
+			header.Del(name)
+		}
+	}
+}
+
+func publicForwardedPort(publicOrigin *url.URL) string {
+	if port := publicOrigin.Port(); port != "" {
+		return port
+	}
+	if publicOrigin.Scheme == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+func validOAuthCallbackPath(raw string) bool {
+	callbackURL, err := url.Parse(raw)
+	if err != nil || callbackURL.IsAbs() || callbackURL.Host != "" || callbackURL.RawQuery != "" || callbackURL.Fragment != "" {
+		return false
+	}
+	path, ok := unambiguousPath(callbackURL)
+	if !ok {
+		return false
+	}
+	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(segments) < 2 || segments[0] != "oauth2" {
+		return false
+	}
+	for _, segment := range segments[1:] {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}

@@ -22,11 +22,17 @@ mode.
 - `https://agents.altinn.studio/<access-key>/` is an AgentRun session;
 - `/healthz` and all `/oauth2/*` paths are reserved for the gateway.
 
+The access key is a routing identifier, not a secret or authorization factor;
+the operator currently derives it from the AgentRun name. Authorization must
+always come from the configured gateway policy.
+
 Path mode requires `publicURL` to be an HTTPS origin with no non-root path,
 query, fragment, or embedded credentials. Requests must carry that configured
 origin's Host header. Forwarded host/proto headers do not influence routing,
 links, callbacks, or return URLs. OAuth return URLs are restricted to the same
 origin and a valid dashboard or AgentRun route.
+OIDC and GitHub callback paths must be unambiguous children of `/oauth2/` in
+path mode so they cannot collide with routing identifiers.
 
 The gateway removes exactly `/<access-key>` before proxying while preserving
 the remainder path, query string, and WebSocket upgrade. This behavior was
@@ -43,6 +49,15 @@ The proof loads the initial redirect and workbench HTML, fetches a referenced
 versioned JavaScript asset, and completes a WebSocket upgrade through the
 access-key route. The runtime currently resolves code-server at image build
 time, so record the resolved version when repeating this proof.
+
+Path-routed agents share one browser origin. Consequently they also share the
+origin's browser storage boundary and can make same-origin requests to other
+paths on that origin. Owner authorization controls gateway requests but is not
+browser-origin isolation. Subdomain mode provides stronger per-agent origin
+isolation and remains preferred where the certificate and external router can
+support it. When path mode is necessary, use a dedicated origin such as
+`agents.altinn.studio`; never mount it below a broader application origin such
+as `dev.altinn.studio/agents`.
 
 Do not use SSN, `pid`, or fødselsnummer claims for authorization. Prefer
 organization, group, resource, or entitlement claims. The gateway rejects
@@ -113,9 +128,11 @@ Server deployments can configure the issuer, authorization, token, and user
 URLs explicitly. GitHub and OIDC principals are never guessed or linked across
 issuers; any future account correlation requires an external explicit mapping.
 
-In path mode, leave `session.cookieDomain` empty for a host-only cookie on the
-dedicated gateway origin. Secure session cookies are mandatory in path mode;
-do not broaden the cookie to `.altinn.studio`.
+In path mode, `session.cookieDomain` must be empty so the gateway cookie is
+host-only on the dedicated origin. Secure session cookies are mandatory; do
+not broaden the cookie to `.altinn.studio`. Gateway cookies are removed before
+proxying to an AgentRun and agent responses cannot set or overwrite them.
+Remaining agent cookies are forced to the selected access-key path.
 
 ## Ansattporten example
 

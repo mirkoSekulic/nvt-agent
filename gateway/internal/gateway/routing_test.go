@@ -47,6 +47,13 @@ func TestPathRoutingConfigValidation(t *testing.T) {
 		{name: "query", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio?next=bad" }},
 		{name: "fragment", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/#bad" }},
 		{name: "userinfo", mutate: func(config *Config) { config.PublicURL = "https://user@agents.altinn.studio" }},
+		{name: "cookie domain", mutate: func(config *Config) { config.Auth.Session.CookieDomain = ".altinn.studio" }},
+		{name: "OIDC callback outside namespace", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/callback" }},
+		{name: "GitHub callback outside namespace", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/callback" }},
+		{name: "encoded callback separator", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/oauth2%2fcallback" }},
+		{name: "callback dot segment", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/../callback" }},
+		{name: "callback query", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/oauth2/callback?next=bad" }},
+		{name: "callback fragment", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/callback#bad" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			config := validPath
@@ -60,6 +67,13 @@ func TestPathRoutingConfigValidation(t *testing.T) {
 	subdomainWithoutBase.BaseDomain = ""
 	if err := subdomainWithoutBase.Validate(); err == nil {
 		t.Fatal("subdomain routing accepted an empty baseDomain")
+	}
+	subdomainCompatibility := validSubdomain
+	subdomainCompatibility.Auth.Session.CookieDomain = ".agents.localhost"
+	subdomainCompatibility.Auth.OIDC.CallbackPath = "/custom-oidc-callback"
+	subdomainCompatibility.Auth.GitHub.CallbackPath = "/custom-github-callback"
+	if err := subdomainCompatibility.Validate(); err != nil {
+		t.Fatalf("subdomain compatibility config: %v", err)
 	}
 	authenticatedPath := validPath
 	authenticatedPath.Auth = authenticatedTestConfig().Auth
@@ -260,17 +274,21 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 
 func TestPathModeWebSocketUpgradeStripsOnlyRoutingPrefix(t *testing.T) {
 	type upstreamRequest struct {
-		path           string
-		forwarded      string
-		forwardedHost  string
-		forwardedProto string
-		origin         string
+		path            string
+		cookie          string
+		forwarded       string
+		forwardedHost   string
+		forwardedProto  string
+		forwardedPort   string
+		forwardedPrefix string
+		origin          string
 	}
 	upstreamCall := make(chan upstreamRequest, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCall <- upstreamRequest{
-			path: r.URL.RequestURI(), forwarded: r.Header.Get("Forwarded"), forwardedHost: r.Header.Get("X-Forwarded-Host"),
-			forwardedProto: r.Header.Get("X-Forwarded-Proto"), origin: r.Header.Get("Origin"),
+			path: r.URL.RequestURI(), cookie: r.Header.Get("Cookie"), forwarded: r.Header.Get("Forwarded"), forwardedHost: r.Header.Get("X-Forwarded-Host"),
+			forwardedProto: r.Header.Get("X-Forwarded-Proto"), forwardedPort: r.Header.Get("X-Forwarded-Port"),
+			forwardedPrefix: r.Header.Get("X-Forwarded-Prefix"), origin: r.Header.Get("Origin"),
 		}
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
@@ -283,7 +301,7 @@ func TestPathModeWebSocketUpgradeStripsOnlyRoutingPrefix(t *testing.T) {
 			return
 		}
 		defer connection.Close()
-		_, _ = buffer.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+		_, _ = buffer.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSet-Cookie: nvt_agent_gateway=agent-overwrite; Path=/\r\nSet-Cookie: agent-ws=kept; Domain=agent.invalid; Path=/\r\n\r\n")
 		_ = buffer.Flush()
 	}))
 	defer upstream.Close()
@@ -298,7 +316,7 @@ func TestPathModeWebSocketUpgradeStripsOnlyRoutingPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
-	_, _ = fmt.Fprintf(connection, "GET /opaque-key/websocket?reconnect=1 HTTP/1.1\r\nHost: agents.altinn.studio\r\nOrigin: https://agents.altinn.studio\r\nForwarded: host=evil.example;proto=http\r\nX-Forwarded-Host: evil.example\r\nX-Forwarded-Proto: http\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	_, _ = fmt.Fprintf(connection, "GET /opaque-key/websocket?reconnect=1 HTTP/1.1\r\nHost: agents.altinn.studio\r\nOrigin: https://agents.altinn.studio\r\nCookie: nvt_agent_gateway=session-canary; nvt_agent_gateway_login=login-canary; agent-ws=kept\r\nForwarded: host=evil.example;proto=http\r\nX-Forwarded-Host: evil.example\r\nX-Forwarded-Proto: http\r\nX-Forwarded-Port: 9999\r\nX-Forwarded-Prefix: /evil\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 	response, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodGet})
 	if err != nil {
 		t.Fatal(err)
@@ -308,8 +326,12 @@ func TestPathModeWebSocketUpgradeStripsOnlyRoutingPrefix(t *testing.T) {
 		t.Fatalf("upgrade status=%d", response.StatusCode)
 	}
 	got := <-upstreamCall
-	if got.path != "/websocket?reconnect=1" || got.forwarded != "" || got.forwardedHost != "agents.altinn.studio" || got.forwardedProto != "https" || got.origin != "https://agents.altinn.studio" {
+	if got.path != "/websocket?reconnect=1" || got.cookie != "agent-ws=kept" || got.forwarded != "" || got.forwardedHost != "agents.altinn.studio" || got.forwardedProto != "https" || got.forwardedPort != "443" || got.forwardedPrefix != "" || got.origin != "https://agents.altinn.studio" {
 		t.Fatalf("upstream WebSocket request=%#v", got)
+	}
+	setCookies := response.Header.Values("Set-Cookie")
+	if len(setCookies) != 1 || !strings.Contains(setCookies[0], "agent-ws=kept") || !strings.Contains(setCookies[0], "Path=/opaque-key/") || strings.Contains(strings.ToLower(setCookies[0]), "domain=") || strings.Contains(strings.Join(setCookies, "\n"), defaultSessionCookie) {
+		t.Fatalf("WebSocket Set-Cookie filtering=%q", setCookies)
 	}
 }
 

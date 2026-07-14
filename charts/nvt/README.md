@@ -276,7 +276,8 @@ trust details.
 ### Path routing
 
 Subdomain routing remains the default. A dedicated origin covered by an
-existing certificate can instead route sessions below opaque access-key paths:
+existing certificate can instead route sessions below access-key routing
+identifier paths:
 
 ```yaml
 gateway:
@@ -307,6 +308,16 @@ This renders the dashboard at `https://agents.altinn.studio/` and sessions at
 `https://agents.altinn.studio/<access-key>/`. `publicURL` must be an HTTPS root
 origin. The Service remains `ClusterIP`; DNS, certificates, and external load
 balancer routing are deployment-owned and are not created by this chart.
+
+The access key is a routing identifier derived from the AgentRun name today,
+not a secret or authorization mechanism. Path-routed agents share browser
+storage and same-origin request reachability, so owner authorization does not
+provide browser-origin isolation. Prefer subdomain mode for stronger per-agent
+origin isolation. If path mode is required, dedicate a complete origin such as
+`agents.altinn.studio`; never configure a path such as
+`dev.altinn.studio/agents`. Path mode requires an empty `cookieDomain`, Secure
+gateway cookies, and OIDC/GitHub callbacks below the reserved `/oauth2/`
+namespace.
 
 ## Validation
 

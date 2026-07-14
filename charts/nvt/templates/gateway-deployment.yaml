@@ -15,6 +15,14 @@
 {{- if and (ne .Values.gateway.auth.mode "none") (not .Values.gateway.auth.session.secure) }}
 {{- fail "gateway.auth.session.secure must be true when gateway.routing.mode=path" }}
 {{- end }}
+{{- if .Values.gateway.auth.session.cookieDomain }}
+{{- fail "gateway.auth.session.cookieDomain must be empty when gateway.routing.mode=path" }}
+{{- end }}
+{{- range $name, $callback := dict "oidc" .Values.gateway.auth.oidc.callbackPath "github" .Values.gateway.auth.github.callbackPath }}
+{{- if or (not (hasPrefix "/oauth2/" $callback)) (ne (clean $callback) $callback) (contains "%" $callback) (contains "?" $callback) (contains "#" $callback) }}
+{{- fail (printf "gateway.auth.%s.callbackPath must be an unambiguous path below /oauth2/ when gateway.routing.mode=path" $name) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if not (has .Values.gateway.auth.mode (list "none" "oidc" "github")) }}
 {{- fail "gateway.auth.mode must be one of none, oidc, or github" }}
