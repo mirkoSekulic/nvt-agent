@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -19,11 +20,13 @@ const (
 	defaultWorkspaceMode           = "Ephemeral"
 	defaultOperatorCallbackBaseURL = "http://nvt-operator:8082"
 	defaultSubmissionMode          = SubmissionModeScheduleAdmission
+	defaultAdmissionMode           = AdmissionModeLegacy
 	defaultScheduleName            = "default"
 )
 
 type IdempotencyScope string
 type SubmissionMode string
+type AdmissionMode string
 
 const (
 	IdempotencyScopeIssue   IdempotencyScope = "issue"
@@ -31,6 +34,9 @@ const (
 
 	SubmissionModeDirect            SubmissionMode = "direct"
 	SubmissionModeScheduleAdmission SubmissionMode = "scheduleAdmission"
+
+	AdmissionModeLegacy   AdmissionMode = "legacy"
+	AdmissionModeProfiled AdmissionMode = "profiled"
 )
 
 type Config struct {
@@ -74,10 +80,12 @@ type IdempotencyConfig struct {
 }
 
 type SubmissionConfig struct {
-	Mode              SubmissionMode `json:"mode,omitempty"`
-	AdmissionBaseURL  string         `json:"admissionBaseURL,omitempty"`
-	ScheduleNamespace string         `json:"scheduleNamespace,omitempty"`
-	ScheduleName      string         `json:"scheduleName,omitempty"`
+	Mode               SubmissionMode `json:"mode,omitempty"`
+	AdmissionMode      AdmissionMode  `json:"admissionMode,omitempty"`
+	AdmissionBaseURL   string         `json:"admissionBaseURL,omitempty"`
+	AdmissionTokenFile string         `json:"admissionTokenFile,omitempty"`
+	ScheduleNamespace  string         `json:"scheduleNamespace,omitempty"`
+	ScheduleName       string         `json:"scheduleName,omitempty"`
 }
 
 type AgentRunConfig struct {
@@ -164,6 +172,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.Submission.Mode == "" {
 		c.Submission.Mode = defaultSubmissionMode
 	}
+	if c.Submission.AdmissionMode == "" {
+		c.Submission.AdmissionMode = defaultAdmissionMode
+	}
 	if c.Submission.AdmissionBaseURL == "" {
 		c.Submission.AdmissionBaseURL = defaultOperatorCallbackBaseURL
 	}
@@ -212,14 +223,17 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.Submission.Mode != SubmissionModeDirect && c.Submission.Mode != SubmissionModeScheduleAdmission {
 		return fmt.Errorf("submission.mode must be one of %q or %q", SubmissionModeDirect, SubmissionModeScheduleAdmission)
 	}
+	if c.Submission.AdmissionMode != AdmissionModeLegacy && c.Submission.AdmissionMode != AdmissionModeProfiled {
+		return fmt.Errorf("submission.admissionMode must be one of %q or %q", AdmissionModeLegacy, AdmissionModeProfiled)
+	}
+	if c.Submission.AdmissionMode == AdmissionModeProfiled && c.Submission.Mode != SubmissionModeScheduleAdmission {
+		return errors.New("submission.admissionMode profiled requires submission.mode scheduleAdmission")
+	}
 	if c.GitHubApp.AppID == 0 {
 		return errors.New("githubApp.appID is required")
 	}
 	if c.GitHubApp.InstallationID == 0 {
 		return errors.New("githubApp.installationID is required")
-	}
-	if c.AgentRun.Namespace == "" {
-		return errors.New("agentRun.namespace is required")
 	}
 	if c.Submission.ScheduleNamespace == "" {
 		return errors.New("submission.scheduleNamespace is required")
@@ -230,8 +244,20 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.Submission.Mode == SubmissionModeScheduleAdmission && c.Submission.AdmissionBaseURL == "" {
 		return errors.New("submission.admissionBaseURL is required when submission.mode is scheduleAdmission")
 	}
-	if c.AgentRun.RuntimeImage == "" {
-		return errors.New("agentRun.runtimeImage is required")
+	if c.Submission.AdmissionMode == AdmissionModeProfiled {
+		if c.Submission.AdmissionTokenFile == "" {
+			return errors.New("submission.admissionTokenFile is required in profiled admission mode")
+		}
+		if !filepath.IsAbs(c.Submission.AdmissionTokenFile) {
+			return errors.New("submission.admissionTokenFile must be an absolute path")
+		}
+	} else {
+		if c.AgentRun.Namespace == "" {
+			return errors.New("agentRun.namespace is required")
+		}
+		if c.AgentRun.RuntimeImage == "" {
+			return errors.New("agentRun.runtimeImage is required")
+		}
 	}
 	if err := validateNonNegativeInt64(c.AgentRun.TTL.ActiveDeadlineSeconds, "agentRun.ttl.activeDeadlineSeconds"); err != nil {
 		return err

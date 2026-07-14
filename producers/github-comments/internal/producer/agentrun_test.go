@@ -7,6 +7,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -123,6 +128,230 @@ func TestSubmitScheduleAdmissionPostsAdmissionRequest(t *testing.T) {
 	}
 	if _, ok := gotRequest.AgentRun.Annotations[AccessKeyAnnotation]; ok {
 		t.Fatalf("producer should not send access key annotation: %#v", gotRequest.AgentRun.Annotations)
+	}
+}
+
+func TestSubmitProfiledScheduleAdmissionSendsOnlyWorkPrincipalAndPrompt(t *testing.T) {
+	tokenFile := writeTestAdmissionToken(t, testAdmissionToken("c2lnMQ"))
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer "+testAdmissionToken("c2lnMQ") {
+			t.Fatalf("Authorization = %q", authorization)
+		}
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true}`))
+	}))
+	defer server.Close()
+
+	submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+	created, _, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "Broken widget", HTMLURL: "https://github.test/acme/widget/issues/7"},
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent fix it", User: GitHubUser{Login: "alice", ID: 424242}},
+		Command{Prefix: "/nvtagent", AdditionalInstructions: "fix it"},
+	)
+	if err != nil || !created {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	if !reflect.DeepEqual(sortedMapKeys(got), []string{"input", "work"}) {
+		t.Fatalf("top-level payload keys = %v, payload=%#v", sortedMapKeys(got), got)
+	}
+	work := mapValue(t, got, "work")
+	if !reflect.DeepEqual(sortedMapKeys(work), []string{"id", "principal", "repository", "title", "url"}) {
+		t.Fatalf("work keys = %v, work=%#v", sortedMapKeys(work), work)
+	}
+	if work["repository"] != "acme/widget" {
+		t.Fatalf("repository = %#v", work["repository"])
+	}
+	principal := mapValue(t, work, "principal")
+	wantPrincipal := map[string]any{
+		"issuer": "https://github.com", "subject": "424242", "displayName": "alice",
+	}
+	if !reflect.DeepEqual(principal, wantPrincipal) {
+		t.Fatalf("principal = %#v, want %#v", principal, wantPrincipal)
+	}
+	input := mapValue(t, got, "input")
+	if !reflect.DeepEqual(sortedMapKeys(input), []string{"prompt"}) || !strings.Contains(input["prompt"].(string), "fix it") {
+		t.Fatalf("input = %#v", input)
+	}
+	for _, forbidden := range []string{"agentRun", "profile", "provider", "broker", "grant", "proxy", "egress", "image", "tools", "plugins", "runtime"} {
+		if strings.Contains(string(mustJSON(t, got)), `"`+forbidden+`"`) {
+			t.Fatalf("profiled payload contains forbidden field %q: %#v", forbidden, got)
+		}
+	}
+}
+
+func TestProfiledAdmissionSubjectDoesNotDependOnLoginAndTokenRotates(t *testing.T) {
+	firstToken := testAdmissionToken("c2lnMQ")
+	secondToken := testAdmissionToken("c2lnMg")
+	tokenFile := writeTestAdmissionToken(t, firstToken)
+	var authorizations []string
+	var subjects []string
+	var displayNames []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		authorizations = append(authorizations, request.Header.Get("Authorization"))
+		var payload profiledScheduleAdmissionRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		subjects = append(subjects, payload.Work.Principal.Subject)
+		displayNames = append(displayNames, payload.Work.Principal.DisplayName)
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true}`))
+	}))
+	defer server.Close()
+	submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+	for index, login := range []string{"old-login", "new-login"} {
+		if index == 1 {
+			if err := os.WriteFile(tokenFile, []byte(secondToken+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"},
+			GitHubIssue{Number: 7 + index}, nil,
+			GitHubIssueComment{ID: int64(101 + index), Body: "/nvtagent", User: GitHubUser{Login: login, ID: 99}},
+			Command{Prefix: "/nvtagent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(subjects, []string{"99", "99"}) || !reflect.DeepEqual(displayNames, []string{"old-login", "new-login"}) {
+		t.Fatalf("subjects=%v displayNames=%v", subjects, displayNames)
+	}
+	if !reflect.DeepEqual(authorizations, []string{"Bearer " + firstToken, "Bearer " + secondToken}) {
+		t.Fatalf("Authorization headers = %#v", authorizations)
+	}
+}
+
+func TestProfiledAdmissionInvalidIdentityAndTokenFailBeforeHTTP(t *testing.T) {
+	secret := testAdmissionToken("Y2FuYXJ5")
+	tokenFile := writeTestAdmissionToken(t, secret)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests++
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true}`))
+	}))
+	defer server.Close()
+
+	cases := []struct {
+		name      string
+		authorID  int64
+		tokenPath string
+	}{
+		{name: "missing author ID", tokenPath: tokenFile},
+		{name: "negative author ID", authorID: -1, tokenPath: tokenFile},
+		{name: "missing token", authorID: 1, tokenPath: filepath.Join(t.TempDir(), "missing")},
+		{name: "unreadable token", authorID: 1, tokenPath: t.TempDir()},
+		{name: "empty token", authorID: 1, tokenPath: writeTestAdmissionToken(t, "")},
+		{name: "malformed token", authorID: 1, tokenPath: writeTestAdmissionToken(t, secret+" extra")},
+		{name: "invalid base64url punctuation", authorID: 1, tokenPath: writeTestAdmissionToken(t, "eyJhbGciOiJSUzI1NiJ9.e30.c2ln!")},
+		{name: "padded base64url", authorID: 1, tokenPath: writeTestAdmissionToken(t, "eyJhbGciOiJSUzI1NiJ9.e30=.c2ln")},
+		{name: "non-JSON claims", authorID: 1, tokenPath: writeTestAdmissionToken(t, "aGVhZA.e30.c2ln")},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			submitter := profiledAdmissionSubmitter(server.Client(), server.URL, test.tokenPath)
+			_, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"}, GitHubIssue{Number: 7}, nil,
+				GitHubIssueComment{ID: 101, User: GitHubUser{Login: "alice", ID: test.authorID}}, Command{})
+			if err == nil {
+				t.Fatal("expected failure")
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), test.tokenPath) {
+				t.Fatalf("error exposed token material or path: %v", err)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("HTTP requests = %d, want 0", requests)
+	}
+}
+
+func TestProfiledAdmissionNeverFallsBackToLegacy(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			tokenFile := writeTestAdmissionToken(t, testAdmissionToken("c2ln"))
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests++
+				var payload map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := payload["agentRun"]; exists {
+					t.Fatalf("profiled request fell back to AgentRun payload: %#v", payload)
+				}
+				response.WriteHeader(status)
+				_, _ = response.Write([]byte(`{"scheduled":false,"reason":"rejected"}`))
+			}))
+			defer server.Close()
+			submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+			_, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"}, GitHubIssue{Number: 7}, nil,
+				GitHubIssueComment{ID: 101, User: GitHubUser{Login: "alice", ID: 42}}, Command{})
+			if err == nil || requests != 1 {
+				t.Fatalf("err=%v requests=%d, want one failed profiled request", err, requests)
+			}
+		})
+	}
+}
+
+func TestProfiledAdmissionResponseErrorsAreBoundedStatusAwareAndSanitized(t *testing.T) {
+	const bodyCanary = "response-body-canary-credential"
+	token := testAdmissionToken("Y2FuYXJ5LXRva2VuLWNyZWRlbnRpYWw")
+	for _, test := range []struct {
+		name       string
+		status     int
+		body       string
+		wantError  string
+		unexpected string
+	}{
+		{name: "plain text unauthorized", status: http.StatusUnauthorized, body: bodyCanary, wantError: "HTTP 401", unexpected: "decode schedule admission response"},
+		{name: "plain text forbidden", status: http.StatusForbidden, body: bodyCanary, wantError: "HTTP 403", unexpected: "decode schedule admission response"},
+		{name: "structured safe reason", status: http.StatusBadRequest, body: `{"scheduled":false,"reason":"profile-selection-denied"}`, wantError: `HTTP 400 reason "profile-selection-denied"`},
+		{name: "structured unsafe reason hidden", status: http.StatusInternalServerError, body: `{"scheduled":false,"reason":"response-body-canary-credential"}`, wantError: "HTTP 500", unexpected: bodyCanary},
+		{name: "malformed created contract", status: http.StatusCreated, body: bodyCanary, wantError: "decode schedule admission response"},
+		{name: "malformed accepted contract", status: http.StatusAccepted, body: bodyCanary, wantError: "decode schedule admission response"},
+		{name: "malformed throttled contract", status: http.StatusTooManyRequests, body: bodyCanary, wantError: "decode schedule admission response"},
+		{name: "oversized created contract", status: http.StatusCreated, body: strings.Repeat("x", maxScheduleAdmissionResponseBytes+1), wantError: "response exceeds size limit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tokenFile := writeTestAdmissionToken(t, token)
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests++
+				var payload map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := payload["agentRun"]; exists {
+					t.Fatalf("profiled request contained legacy AgentRun payload: %#v", payload)
+				}
+				response.WriteHeader(test.status)
+				_, _ = response.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+			_, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"}, GitHubIssue{Number: 7}, nil,
+				GitHubIssueComment{ID: 101, User: GitHubUser{Login: "alice", ID: 42}}, Command{})
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want substring %q", err, test.wantError)
+			}
+			if test.unexpected != "" && strings.Contains(err.Error(), test.unexpected) {
+				t.Fatalf("error contains unexpected text %q: %v", test.unexpected, err)
+			}
+			if strings.Contains(err.Error(), bodyCanary) || strings.Contains(err.Error(), token) {
+				t.Fatalf("error exposed response or token canary: %v", err)
+			}
+			if requests != 1 {
+				t.Fatalf("HTTP requests = %d, want exactly 1", requests)
+			}
+		})
 	}
 }
 
@@ -529,6 +758,50 @@ func scheduleAdmissionSubmitterForStatus(t *testing.T, status int, body string) 
 			WorkspaceMode:   "Ephemeral",
 		},
 	})
+}
+
+func profiledAdmissionSubmitter(httpClient *http.Client, baseURL, tokenFile string) AgentRunSubmitter {
+	return NewAgentRunSubmitterWithHTTP(nil, httpClient, Config{
+		Submission: SubmissionConfig{
+			Mode:               SubmissionModeScheduleAdmission,
+			AdmissionMode:      AdmissionModeProfiled,
+			AdmissionBaseURL:   baseURL,
+			AdmissionTokenFile: tokenFile,
+			ScheduleNamespace:  "nvt",
+			ScheduleName:       "default",
+		},
+	})
+}
+
+func writeTestAdmissionToken(t *testing.T, token string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func testAdmissionToken(signature string) string {
+	return "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJudnQtb3BlcmF0b3IifQ." + signature
+}
+
+func sortedMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func getAgentRun(t *testing.T, client ctrlclient.Client, namespace, name string) *nvtv1alpha1.AgentRun {

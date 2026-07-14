@@ -73,7 +73,7 @@ func TestGitHubAPIClientListsUpdatedIssueComments(t *testing.T) {
 				"body": "/nvtagent pr create",
 				"issue_url": "https://api.github.com/repos/o/r/issues/9",
 				"updated_at": "2026-01-02T03:04:05Z",
-				"user": {"login": "octo"}
+				"user": {"login": "octo", "id": 424242}
 			}
 		]`))
 	}))
@@ -84,13 +84,25 @@ func TestGitHubAPIClientListsUpdatedIssueComments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(comments) != 1 || comments[0].ID != 1 {
+	if len(comments) != 1 || comments[0].ID != 1 || comments[0].User.Login != "octo" || comments[0].User.ID != 424242 {
 		t.Fatalf("unexpected comments %#v", comments)
 	}
 	if !strings.Contains(gotPath, "sort=updated") ||
 		!strings.Contains(gotPath, "direction=asc") ||
 		!strings.Contains(gotPath, "since=2026-01-01T00%3A00%3A00Z") {
 		t.Fatalf("unexpected request path %s", gotPath)
+	}
+}
+
+func TestGitHubAPIClientRejectsUnrepresentableAuthorID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":1,"issue_url":"https://api.github.com/repos/o/r/issues/9","user":{"login":"octo","id":9223372036854775808}}]`))
+	}))
+	defer server.Close()
+	client := NewGitHubAPIClient(server.URL, "test-agent", staticTokenSource("token"), server.Client())
+	if _, err := client.ListUpdatedIssueComments(context.Background(), Repository{Owner: "o", Name: "r"}, nil); err == nil {
+		t.Fatal("expected an unrepresentable numeric author ID to fail decoding")
 	}
 }
 

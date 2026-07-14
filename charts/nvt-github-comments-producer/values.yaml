@@ -21,7 +21,11 @@ operatorCallbackBaseURL: http://nvt-operator:8082
 
 submission:
   mode: scheduleAdmission
+  # legacy posts a complete AgentRun. profiled posts only work, prompt, and principal facts.
+  admissionMode: legacy
   admissionBaseURL: http://nvt-operator:8082
+  admissionTokenFile: /var/run/secrets/nvt-operator/token
+  tokenExpirationSeconds: 3600
   scheduleNamespace: ""
   scheduleName: default
 

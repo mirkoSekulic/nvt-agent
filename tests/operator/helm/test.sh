@@ -27,6 +27,8 @@ NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
 PRODUCER_RENDER="${WORKDIR}/producer.yaml"
 PRODUCER_DIRECT_RENDER="${WORKDIR}/producer-direct.yaml"
+PRODUCER_PROFILED_RENDER="${WORKDIR}/producer-profiled.yaml"
+PRODUCER_PROFILED_EXPIRATION_FAILURE="${WORKDIR}/producer-profiled-expiration-failure.txt"
 PRODUCER_EXISTING_CLAIM_RENDER="${WORKDIR}/producer-existing-claim.yaml"
 PRODUCER_EMPTYDIR_RENDER="${WORKDIR}/producer-emptydir.yaml"
 PRODUCER_EXISTING_SA_RENDER="${WORKDIR}/producer-existing-sa.yaml"
@@ -84,6 +86,10 @@ helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RE
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns > "${PRODUCER_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set submission.mode=direct > "${PRODUCER_DIRECT_RENDER}"
+helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns \
+  --set submission.admissionMode=profiled \
+  --set submission.tokenExpirationSeconds=1800 \
+  > "${PRODUCER_PROFILED_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.existingClaim=existing-state > "${PRODUCER_EXISTING_CLAIM_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.enabled=false > "${PRODUCER_EMPTYDIR_RENDER}"
 helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set serviceAccount.create=false --set serviceAccount.name=existing-sa --set rbac.create=false > "${PRODUCER_EXISTING_SA_RENDER}"
@@ -724,6 +730,7 @@ require_resource_namespace "${PRODUCER_RENDER}" PersistentVolumeClaim nvt-github
 grep -q -- '--config=/etc/nvt-github-comments/config.yaml' "${PRODUCER_RENDER}"
 grep -q 'operatorCallbackBaseURL: "http://nvt-operator:8082"' "${PRODUCER_RENDER}"
 grep -q 'mode: "scheduleAdmission"' "${PRODUCER_RENDER}"
+grep -q 'admissionMode: "legacy"' "${PRODUCER_RENDER}"
 grep -q 'admissionBaseURL: "http://nvt-operator:8082"' "${PRODUCER_RENDER}"
 grep -q 'scheduleNamespace: "custom-ns"' "${PRODUCER_RENDER}"
 grep -q 'scheduleName: "default"' "${PRODUCER_RENDER}"
@@ -736,11 +743,36 @@ grep -q 'secretName: "nvt-github-app"' "${PRODUCER_RENDER}"
 grep -q 'mountPath: "/var/run/secrets/github-app"' "${PRODUCER_RENDER}"
 grep -q 'claimName: nvt-github-comments-producer-state' "${PRODUCER_RENDER}"
 grep -q 'resources:' "${PRODUCER_RENDER}"
+grep -q 'automountServiceAccountToken: false' "${PRODUCER_RENDER}"
+if grep -q 'operator-admission-token' "${PRODUCER_RENDER}"; then
+  echo "legacy producer mode must not project an operator admission token" >&2
+  exit 1
+fi
 require_resource "${PRODUCER_DIRECT_RENDER}" Role nvt-github-comments-producer
 require_resource "${PRODUCER_DIRECT_RENDER}" RoleBinding nvt-github-comments-producer
 grep -q 'mode: "direct"' "${PRODUCER_DIRECT_RENDER}"
 grep -q 'agentruns' "${PRODUCER_DIRECT_RENDER}"
 grep -q 'create' "${PRODUCER_DIRECT_RENDER}"
+if grep -q 'automountServiceAccountToken: false' "${PRODUCER_DIRECT_RENDER}"; then
+  echo "direct producer mode requires the default Kubernetes client token" >&2
+  exit 1
+fi
+grep -q 'admissionMode: "profiled"' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'admissionTokenFile: "/var/run/secrets/nvt-operator/token"' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'automountServiceAccountToken: false' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'mountPath: "/var/run/secrets/nvt-operator"' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'audience: nvt-operator' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'expirationSeconds: 1800' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'path: "token"' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'defaultMode: 0440' "${PRODUCER_PROFILED_RENDER}"
+if helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns \
+  --set submission.admissionMode=profiled \
+  --set submission.tokenExpirationSeconds=599 \
+  > /dev/null 2> "${PRODUCER_PROFILED_EXPIRATION_FAILURE}"; then
+  echo "expected too-short projected token expiration to fail rendering" >&2
+  exit 1
+fi
+grep -q 'submission.tokenExpirationSeconds must be between 600 and 86400' "${PRODUCER_PROFILED_EXPIRATION_FAILURE}"
 if grep -Eq 'privateKey:|privateKeyBase64:|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' "${PRODUCER_RENDER}"; then
   echo "producer chart must not render GitHub App private key material" >&2
   exit 1

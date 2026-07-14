@@ -15,7 +15,11 @@ data:
     operatorCallbackBaseURL: {{ .Values.operatorCallbackBaseURL | quote }}
     submission:
       mode: {{ .Values.submission.mode | quote }}
+      admissionMode: {{ .Values.submission.admissionMode | quote }}
       admissionBaseURL: {{ .Values.submission.admissionBaseURL | quote }}
+      {{- if eq .Values.submission.admissionMode "profiled" }}
+      admissionTokenFile: {{ .Values.submission.admissionTokenFile | quote }}
+      {{- end }}
       scheduleNamespace: {{ default (include "nvt-github-comments-producer.agentRunNamespace" .) .Values.submission.scheduleNamespace | quote }}
       scheduleName: {{ .Values.submission.scheduleName | quote }}
     idempotency:

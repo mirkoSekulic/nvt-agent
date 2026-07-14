@@ -39,10 +39,51 @@ func TestConfigDefaultSubmissionScheduleAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Submission.Mode != SubmissionModeScheduleAdmission ||
+		cfg.Submission.AdmissionMode != AdmissionModeLegacy ||
 		cfg.Submission.AdmissionBaseURL != defaultOperatorCallbackBaseURL ||
 		cfg.Submission.ScheduleNamespace != "nvt" ||
 		cfg.Submission.ScheduleName != defaultScheduleName {
 		t.Fatalf("unexpected submission defaults: %#v", cfg.Submission)
+	}
+}
+
+func TestConfigAcceptsProfiledAdmissionWithoutAgentRunSecurityConfig(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.AgentRun = AgentRunConfig{}
+	cfg.Submission = SubmissionConfig{
+		Mode:               SubmissionModeScheduleAdmission,
+		AdmissionMode:      AdmissionModeProfiled,
+		AdmissionTokenFile: "/var/run/secrets/nvt-operator/token",
+		ScheduleNamespace:  "nvt",
+		ScheduleName:       "default",
+	}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigRejectsInvalidProfiledAdmissionConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		mode      SubmissionMode
+		tokenFile string
+		admission AdmissionMode
+	}{
+		{name: "profiled direct", mode: SubmissionModeDirect, admission: AdmissionModeProfiled, tokenFile: "/token"},
+		{name: "missing token", mode: SubmissionModeScheduleAdmission, admission: AdmissionModeProfiled},
+		{name: "relative token", mode: SubmissionModeScheduleAdmission, admission: AdmissionModeProfiled, tokenFile: "token"},
+		{name: "unknown admission mode", mode: SubmissionModeScheduleAdmission, admission: "automatic", tokenFile: "/token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Submission = SubmissionConfig{
+				Mode: test.mode, AdmissionMode: test.admission, AdmissionTokenFile: test.tokenFile,
+				ScheduleNamespace: "nvt", ScheduleName: "default",
+			}
+			if err := cfg.ApplyDefaultsAndValidate(); err == nil {
+				t.Fatal("expected configuration to fail")
+			}
+		})
 	}
 }
 

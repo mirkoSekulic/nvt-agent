@@ -19,7 +19,7 @@ case_kind_setup() {
     CREATE_CLUSTER="${CREATE_CLUSTER}" \
     operator-kind-cluster
 
-  # This focused case needs only the operator and a static admission client.
+  # This focused case needs only the operator and the producer admission fixture.
   # The accepted AgentRun snapshot is asserted without starting an agent Pod.
   make -C "${ROOT}" operator-build
   build_profile_auth_client
@@ -39,10 +39,13 @@ case_kind_setup() {
 build_profile_auth_client() {
   local arch
   arch="$(go env GOARCH)"
-  CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build \
-    -trimpath -ldflags='-s -w' \
-    -o "${SMOKE_TMPDIR}/profile-auth-client" \
-    "${SCRIPT_DIR}/profile-auth-client.go"
+  (
+    cd "${ROOT}/producers/github-comments"
+    CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build \
+      -trimpath -ldflags='-s -w' \
+      -o "${SMOKE_TMPDIR}/profile-auth-client" \
+      ./testfixture/profile-auth-client
+  )
   docker build -t nvt-profile-auth-client:latest -f - "${SMOKE_TMPDIR}" <<'DOCKERFILE'
 FROM scratch
 COPY profile-auth-client /profile-auth-client
@@ -229,24 +232,22 @@ import json
 import sys
 
 document = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-runs = [
-    item for item in document["items"]
-    if item.get("metadata", {}).get("annotations", {}).get("nvt.dev/work-id") == "profile-auth-accepted"
-]
+runs = document["items"]
 assert len(runs) == 1, document["items"]
 run = runs[0]
 spec = run["spec"]
 provenance = spec["profileProvenance"]
 assert provenance["authenticatedProducer"] == f"system:serviceaccount:{sys.argv[2]}:profile-auth-allowed"
 assert provenance["selectedProfile"] == "default-profile"
+assert provenance["principal"]["issuer"] == "https://github.com"
+assert provenance["principal"]["subject"] == "424242"
+assert provenance["principal"]["displayName"] == "octocat"
 assert spec["agent"]["config"]["runtime"]["command"] == "bash"
 
 work_ids = {
     item.get("metadata", {}).get("annotations", {}).get("nvt.dev/work-id")
     for item in document["items"]
 }
-assert "profile-auth-wrong-audience" not in work_ids
-assert "profile-auth-unlisted" not in work_ids
 assert "profile-auth-injected" not in work_ids
 PY
 }

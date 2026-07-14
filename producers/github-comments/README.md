@@ -29,6 +29,7 @@ pollInterval: 30s
 operatorCallbackBaseURL: http://nvt-operator:8082
 submission:
   mode: scheduleAdmission
+  admissionMode: legacy
   admissionBaseURL: http://nvt-operator:8082
   scheduleName: default
 idempotency:
@@ -123,6 +124,36 @@ work, suspension, and `maxParallelism`. A duplicate work response is treated as
 an accepted no-op. `max-parallelism-reached` and `schedule-suspended` responses
 are retried on a later poll by leaving the repository cursor unchanged.
 
+`submission.admissionMode` is an explicit migration boundary:
+
+- `legacy` is the backward-compatible default. The producer sends the complete
+  `agentRun` configured by `agentRun` and `agentConfig`, and the target schedule
+  must be a legacy schedule.
+- `profiled` sends only work metadata, the generated prompt, and GitHub
+  principal facts. It never sends a profile, runtime, image, proxy/provider,
+  broker grant, egress policy, tool, or plugin setting. The operator-owned
+  `AgentSchedule` resolves all of those fields.
+
+Profiled mode identifies the command author with issuer `https://github.com`,
+the immutable numeric GitHub user ID as the decimal subject, and the login as
+display-only metadata. A missing or invalid numeric ID fails before admission.
+`allowedAuthors` remains an optional login convenience filter; it is not profile
+authorization. The operator authorizes exact issuer/subject rules.
+
+```yaml
+submission:
+  mode: scheduleAdmission
+  admissionMode: profiled
+  admissionBaseURL: http://nvt-operator:8082
+  admissionTokenFile: /var/run/secrets/nvt-operator/token
+  scheduleNamespace: nvt
+  scheduleName: default
+```
+
+The projected ServiceAccount token must have audience `nvt-operator`. It is
+read for every request so Kubernetes rotation works without a restart.
+Authentication, principal, or admission failures never fall back to legacy.
+
 `idempotency.scope` defaults to `issue`, which preserves the production-safe
 behavior of allowing one `pr create` AgentRun per repository issue. For local
 testing, set `idempotency.scope: comment` to include the command comment ID in
@@ -138,7 +169,7 @@ forwarded to `AgentRun.spec.ttl` so terminal Pods can be cleaned up by the
 operator. Chart defaults keep successful Pods for 5 minutes, failed Pods for 1
 hour, and terminal AgentRun CRs for 30 days.
 
-The producer injects an `event-webhook` after-agent plugin unless
+In legacy mode, the producer injects an `event-webhook` after-agent plugin unless
 `agentConfig.plugins` already contains a plugin named `event-webhook`. The
 injected webhook forwards `plugin.github.pr.` events to:
 
@@ -231,8 +262,11 @@ spec:
             claimName: nvt-github-comments-producer-state
 ```
 
-In default `scheduleAdmission` mode, the ServiceAccount does not need AgentRun
+In `scheduleAdmission` mode, the ServiceAccount does not need AgentRun
 create/list RBAC for submission. The operator creates the AgentRun. Direct mode
 requires RBAC to list and create `agentruns.nvt.dev` in the configured target
 namespace. Runtime auth secrets and broker/provider grants should be configured
 to match the runtime image and credential broker installed in that namespace.
+The Helm chart disables the default ServiceAccount token in schedule admission
+mode and mounts only the audience-scoped projection when `admissionMode` is
+`profiled`.
