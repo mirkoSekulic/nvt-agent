@@ -300,6 +300,61 @@ func TestProfiledAdmissionNeverFallsBackToLegacy(t *testing.T) {
 	}
 }
 
+func TestProfiledAdmissionResponseErrorsAreBoundedStatusAwareAndSanitized(t *testing.T) {
+	const bodyCanary = "response-body-canary-credential"
+	token := testAdmissionToken("Y2FuYXJ5LXRva2VuLWNyZWRlbnRpYWw")
+	for _, test := range []struct {
+		name       string
+		status     int
+		body       string
+		wantError  string
+		unexpected string
+	}{
+		{name: "plain text unauthorized", status: http.StatusUnauthorized, body: bodyCanary, wantError: "HTTP 401", unexpected: "decode schedule admission response"},
+		{name: "plain text forbidden", status: http.StatusForbidden, body: bodyCanary, wantError: "HTTP 403", unexpected: "decode schedule admission response"},
+		{name: "structured safe reason", status: http.StatusBadRequest, body: `{"scheduled":false,"reason":"profile-selection-denied"}`, wantError: `HTTP 400 reason "profile-selection-denied"`},
+		{name: "structured unsafe reason hidden", status: http.StatusInternalServerError, body: `{"scheduled":false,"reason":"response-body-canary-credential"}`, wantError: "HTTP 500", unexpected: bodyCanary},
+		{name: "malformed created contract", status: http.StatusCreated, body: bodyCanary, wantError: "decode schedule admission response"},
+		{name: "malformed accepted contract", status: http.StatusAccepted, body: bodyCanary, wantError: "decode schedule admission response"},
+		{name: "malformed throttled contract", status: http.StatusTooManyRequests, body: bodyCanary, wantError: "decode schedule admission response"},
+		{name: "oversized created contract", status: http.StatusCreated, body: strings.Repeat("x", maxScheduleAdmissionResponseBytes+1), wantError: "response exceeds size limit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tokenFile := writeTestAdmissionToken(t, token)
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests++
+				var payload map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := payload["agentRun"]; exists {
+					t.Fatalf("profiled request contained legacy AgentRun payload: %#v", payload)
+				}
+				response.WriteHeader(test.status)
+				_, _ = response.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+			_, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"}, GitHubIssue{Number: 7}, nil,
+				GitHubIssueComment{ID: 101, User: GitHubUser{Login: "alice", ID: 42}}, Command{})
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want substring %q", err, test.wantError)
+			}
+			if test.unexpected != "" && strings.Contains(err.Error(), test.unexpected) {
+				t.Fatalf("error contains unexpected text %q: %v", test.unexpected, err)
+			}
+			if strings.Contains(err.Error(), bodyCanary) || strings.Contains(err.Error(), token) {
+				t.Fatalf("error exposed response or token canary: %v", err)
+			}
+			if requests != 1 {
+				t.Fatalf("HTTP requests = %d, want exactly 1", requests)
+			}
+		})
+	}
+}
+
 func TestSubmitScheduleAdmissionDuplicateWorkIsNoOpSuccess(t *testing.T) {
 	submitter := scheduleAdmissionSubmitterForStatus(t, http.StatusAccepted, `{"scheduled":false,"reason":"duplicate-work"}`)
 	created, key, err := submitter.Submit(

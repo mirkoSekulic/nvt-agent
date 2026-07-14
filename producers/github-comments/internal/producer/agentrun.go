@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -127,6 +128,7 @@ func (s AgentRunSubmitter) submitDirect(
 }
 
 const githubPrincipalIssuer = "https://github.com"
+const maxScheduleAdmissionResponseBytes = 64 * 1024
 
 type legacyScheduleAdmissionRequest struct {
 	Work     scheduleAdmissionWork `json:"work"`
@@ -208,17 +210,25 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 	}
 	defer response.Body.Close()
 
-	var decoded scheduleAdmissionResponse
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return false, "", fmt.Errorf("decode schedule admission response: %w", err)
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxScheduleAdmissionResponseBytes+1))
+	if err != nil {
+		return false, "", errors.New("read schedule admission response")
 	}
 	switch response.StatusCode {
 	case http.StatusCreated:
+		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
+		if decodeErr != nil {
+			return false, "", decodeErr
+		}
 		if !decoded.Scheduled {
 			return false, "", fmt.Errorf("schedule admission returned 201 without scheduled=true")
 		}
 		return true, identity.Key, nil
 	case http.StatusAccepted:
+		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
+		if decodeErr != nil {
+			return false, "", decodeErr
+		}
 		if decoded.Scheduled {
 			return true, identity.Key, nil
 		}
@@ -231,12 +241,52 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 			return false, "", fmt.Errorf("schedule admission returned 202 with unsupported reason %q", decoded.Reason)
 		}
 	case http.StatusTooManyRequests:
+		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
+		if decodeErr != nil {
+			return false, "", decodeErr
+		}
 		if decoded.Reason == "max-parallelism-reached" {
 			return false, identity.Key, ErrSubmissionDeferred
 		}
 		return false, "", fmt.Errorf("schedule admission rejected with 429 reason %q", decoded.Reason)
 	default:
-		return false, "", fmt.Errorf("schedule admission failed with HTTP %d reason %q", response.StatusCode, decoded.Reason)
+		reason := safeScheduleAdmissionReason(responseBody)
+		if reason != "" {
+			return false, "", fmt.Errorf("schedule admission failed with HTTP %d reason %q", response.StatusCode, reason)
+		}
+		return false, "", fmt.Errorf("schedule admission failed with HTTP %d", response.StatusCode)
+	}
+}
+
+func decodeScheduleAdmissionContract(body []byte) (scheduleAdmissionResponse, error) {
+	if len(body) > maxScheduleAdmissionResponseBytes {
+		return scheduleAdmissionResponse{}, errors.New("schedule admission response exceeds size limit")
+	}
+	var decoded scheduleAdmissionResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return scheduleAdmissionResponse{}, errors.New("decode schedule admission response")
+	}
+	return decoded, nil
+}
+
+func safeScheduleAdmissionReason(body []byte) string {
+	if len(body) > maxScheduleAdmissionResponseBytes {
+		return ""
+	}
+	var decoded scheduleAdmissionResponse
+	if json.Unmarshal(body, &decoded) != nil {
+		return ""
+	}
+	switch decoded.Reason {
+	case "duplicate-work",
+		"schedule-suspended",
+		"max-parallelism-reached",
+		"profile-selection-denied",
+		"invalid-execution-profile-configuration",
+		"response-encode-failed":
+		return decoded.Reason
+	default:
+		return ""
 	}
 }
 
