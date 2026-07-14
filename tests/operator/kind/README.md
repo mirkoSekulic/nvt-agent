@@ -34,6 +34,11 @@ For enforced egress, the completion smoke uses the credential-less
 termination-message lifecycle path. Its acceptance scan checks provider,
 broker, egress, callback, service-account, and CA-key non-possession across Pod
 specs, environments, process arguments, readable files, mounts, and logs.
+For `profile-auth`, two small in-cluster clients use explicit projected
+ServiceAccount token volumes. The case proves the real TokenReview path accepts
+the allowlisted identity and `nvt-operator` audience, rejects a wrong audience
+and an unlisted ServiceAccount, and rejects producer-supplied profile/provider
+or security configuration.
 
 Use kind mode for the full cluster smoke:
 
@@ -200,6 +205,7 @@ Select a case with `KIND_SMOKE_CASE`:
 KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=mediated-egress make operator-kind-smoke
+KIND_SMOKE_MODE=render KIND_SMOKE_CASE=profile-auth make operator-kind-smoke
 ```
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,

@@ -8,6 +8,7 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
 DEFAULT_RENDER="${WORKDIR}/default.yaml"
+PROFILE_RENDER="${WORKDIR}/profile.yaml"
 EGRESS_POLICY_RENDER="${WORKDIR}/egress-policy.yaml"
 GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
@@ -34,6 +35,7 @@ PRODUCER_NULL_TTL_RENDER="${WORKDIR}/producer-null-ttl.yaml"
 PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set 'egress.allowedTCPPorts={80,8443}' \
   --set 'egress.denyCIDRs={10.240.0.0/16,fd00:1234::/48}' \
@@ -390,6 +392,8 @@ require_resource "${DEFAULT_RENDER}" Role nvt-operator
 require_resource "${DEFAULT_RENDER}" RoleBinding nvt-operator
 require_resource "${DEFAULT_RENDER}" Service nvt-operator
 require_resource "${DEFAULT_RENDER}" AgentSchedule default
+require_resource "${DEFAULT_RENDER}" ClusterRole nvt-tokenreview
+require_resource "${DEFAULT_RENDER}" ClusterRoleBinding nvt-tokenreview
 require_resource_namespace "${DEFAULT_RENDER}" Deployment nvt-operator custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" ServiceAccount nvt-operator custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" Role nvt-operator custom-ns
@@ -400,6 +404,11 @@ missing_resource "${DEFAULT_RENDER}" Namespace nvt
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Service nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
+
+grep -q 'name: default-codex' "${PROFILE_RENDER}"
+grep -q 'provider: codex-main' "${PROFILE_RENDER}"
+grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
+grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
 
 require_resource "${GATEWAY_RENDER}" Deployment nvt-agent-gateway
 require_resource "${GATEWAY_RENDER}" Service nvt-agent-gateway

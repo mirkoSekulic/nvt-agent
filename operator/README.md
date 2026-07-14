@@ -84,7 +84,9 @@ Runtime behavior stays inside the agent image and plugin contracts.
 
 ## Security Boundaries
 
-- Schedule admission is cluster-internal and intended for trusted producers.
+- Profiled schedule admission authenticates projected ServiceAccount tokens
+  through TokenReview and exact-matches `spec.allowedProducers`; legacy
+  full-AgentRun admission remains cluster-internal during migration.
 - Provider credentials belong to the broker and trusted egress path, not the
   Agent Pod in mediated mode.
 - Transparent enforcement requires a CNI that enforces NetworkPolicy.

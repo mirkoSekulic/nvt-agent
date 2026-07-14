@@ -9,4 +9,20 @@ metadata:
 spec:
   maxParallelism: {{ .Values.agentSchedule.maxParallelism }}
   suspend: {{ .Values.agentSchedule.suspend }}
+  {{- with .Values.agentSchedule.template }}
+  template:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.agentSchedule.profiles }}
+  profiles:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.agentSchedule.profileSelection }}
+  profileSelection:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.agentSchedule.allowedProducers }}
+  allowedProducers:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}

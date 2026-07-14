@@ -1,0 +1,58 @@
+apiVersion: nvt.dev/v1alpha1
+kind: AgentSchedule
+metadata:
+  name: profiled
+  namespace: nvt
+spec:
+  maxParallelism: 5
+  allowedProducers:
+    - system:serviceaccount:nvt:nvt-github-comments-producer
+  template:
+    image: nvt-agent-runtime:latest
+    workspace:
+      mode: Ephemeral
+    agent:
+      config:
+        packages: [git]
+        plugins: []
+    lifecycle:
+      completeOn: [plugin.github.pr.completed]
+      failOn: [plugin.github.pr.failed]
+  profiles:
+    - name: codex-default
+      runtime:
+        type: codex
+        autonomy: trusted-local
+      agentRuntimeConfig:
+        command: codex
+        proxy:
+          provider: codex-main
+      egress: mediated
+      broker:
+        grants:
+          - provider: codex-main
+            repositories: [example/*]
+            materialization: header-inject
+            egressHosts: [chatgpt.com]
+    - name: claude-john
+      runtime:
+        type: claude
+        autonomy: trusted-local
+      agentRuntimeConfig:
+        command: claude
+        proxy:
+          provider: claude-john
+      egress: mediated
+      broker:
+        grants:
+          - provider: claude-john
+            repositories: [example/*]
+            materialization: header-inject
+            egressHosts: [api.anthropic.com]
+  profileSelection:
+    defaultProfile: codex-default
+    onNoMatch: useDefault
+    rules:
+      - issuer: https://github.com
+        subject: "12345678"
+        profile: claude-john

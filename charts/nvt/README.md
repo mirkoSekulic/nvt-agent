@@ -93,6 +93,14 @@ admission. It never reclassifies an existing object and does not override an
 explicit `spec.egress`. Raw `kubectl apply` with an omitted field follows the
 CRD default, which is direct.
 
+## Execution profiles
+
+`agentSchedule.template`, `profiles`, `profileSelection`, and
+`allowedProducers` configure operator-owned execution profiles. Empty values
+preserve legacy full-`AgentRun` admission. Profiled admission requires a
+projected ServiceAccount token with audience `nvt-operator`; see the
+[AgentSchedule contract](../../operator/docs/agentschedule.md).
+
 ### Enforced Transparent Mode
 
 ```yaml

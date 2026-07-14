@@ -1,141 +1,124 @@
 # AgentSchedule v1alpha1
 
-`AgentSchedule` is a generic admission pool for disposable `AgentRun`
-resources, not a plugin-specific schedule, template, or event source.
+`AgentSchedule` is an admission pool for disposable `AgentRun` resources. It
+supports an operator-owned profiled mode and a compatibility-only legacy mode.
+The operator core remains producer-agnostic.
 
-Scheduler plugins decide what work should run and submit a complete `AgentRun`
-spec to the operator. The operator only enforces generic controls:
+## Profiled schedules
 
-- the schedule exists
-- the schedule is not suspended
-- active runs are below `spec.maxParallelism`
-- no retained scheduled run already has the same work id
+A profiled schedule owns a typed common template, named execution profiles,
+static principal selection, and the exact Kubernetes producer identities that
+may submit work. See
+[`operator/examples/agentschedule-profiled.yaml`](../examples/agentschedule-profiled.yaml)
+for a complete resource.
 
-The operator core does not contain GitHub, issue, Slack, or other source-specific
-logic.
+The common `template` owns the runtime image, RuntimeClass, workspace, shared
+agent config (packages, tools, and plugins), lifecycle defaults, and TTL. It
+does not contain a prompt or top-level `agent.config.runtime` key.
 
-## Spec
+Each `profiles[]` entry owns runtime type/auth, the complete top-level agent
+runtime configuration (including exact `runtime.proxy.provider`), egress mode
+and enforcement, and broker providers/grants. The operator inserts
+`profile.agentRuntimeConfig` as `AgentRun.spec.agent.config.runtime`. This is an
+explicit replacement boundary, not an arbitrary merge patch.
 
-```yaml
-apiVersion: nvt.dev/v1alpha1
-kind: AgentSchedule
-metadata:
-  name: default
-spec:
-  suspend: false
-  maxParallelism: 5
-```
+`profileSelection.rules` match exact `issuer` plus immutable `subject` values.
+`displayName` is stored for audit/display only and never participates in
+selection. Duplicate selectors/profile names, missing references, invalid
+`onNoMatch`, and unusable selection paths fail closed. There are no
+producer-selectable profile names, candidates, or fallbacks.
 
-`spec.suspend` stops new admissions without deleting or modifying existing
-`AgentRun` resources.
-
-`spec.maxParallelism` is optional. When omitted or set to `0`, the effective
-default is `1`, which is the conservative default for disposable automation.
-
-## Status
-
-```yaml
-status:
-  observedGeneration: 1
-  activeRuns: 0
-  lastAcceptedAt: "2026-05-31T12:00:00Z"
-  lastRejectedAt: "2026-05-31T12:05:00Z"
-  lastRejectionReason: "max-parallelism-reached"
-```
-
-`status.observedGeneration` mirrors the reconciled
-`metadata.generation`. It is not a run counter.
-
-`status.activeRuns` counts accepted child `AgentRun` resources in the same
-namespace that are not terminal. Empty phase, `Pending`, and `Running` count as
-active. `Completed`, `Failed`, and `DeadlineExceeded` do not.
-
-## Admission Endpoint
-
-Trusted cluster-internal scheduler producers submit a run to:
-
-```text
-POST /v1/schedules/{namespace}/{name}/admissions
-```
-
-Do not expose this endpoint publicly. v1 has no authentication and assumes
-trusted same-cluster callers.
-
-Payload:
+Profiled requests contain only work metadata and prompt input:
 
 ```json
 {
   "work": {
-    "id": "github:Altinn/altinn-studio:issue:123",
-    "title": "Warm runner cache",
-    "url": "https://github.com/Altinn/altinn-studio/issues/123"
+    "id": "github:example/repo:issue:123",
+    "title": "Fix the failing test",
+    "url": "https://github.com/example/repo/issues/123",
+    "repository": "example/repo",
+    "principal": {
+      "issuer": "https://github.com",
+      "subject": "12345678",
+      "displayName": "octocat"
+    }
   },
+  "input": {"prompt": "Investigate and open a PR"}
+}
+```
+
+The principal may be absent when `onNoMatch: useDefault` names a valid default.
+Unknown and missing principals follow `onNoMatch` exactly. Any top-level field
+other than `work` or `input`, including `agentRun`, profile, broker, grant,
+provider, proxy, or egress configuration, is rejected rather than ignored.
+
+### Producer authentication
+
+Profiled admission requires a projected Kubernetes ServiceAccount bearer token
+with audience `nvt-operator`. The operator validates it with TokenReview and
+exact-matches the authenticated username against `spec.allowedProducers`:
+
+```yaml
+allowedProducers:
+  - system:serviceaccount:nvt:nvt-github-comments-producer
+```
+
+Requested-by annotations, principal display names, and request content are not
+authentication. Missing, malformed, failed, wrong-audience, and unauthorized
+credentials fail closed.
+
+### Immutable resolution
+
+The operator resolves once, builds the complete `AgentRun`, generates its final
+name, injects lifecycle callback configuration, and creates it. The stored run
+contains the resolved configuration and `spec.profileProvenance`: authenticated
+producer, schedule identity/generation, selected profile, and principal.
+Subsequent schedule edits do not change existing runs. Structured provenance is
+authoritative; labels and annotations are display data only.
+
+When the common template configures lifecycle events, `event-webhook` is
+reserved for the operator-generated callback. Declaring that plugin in the
+common config is rejected so the callback cannot be replaced or ambiguously
+merged.
+
+## Legacy migration mode
+
+A schedule with none of `template`, `profiles`, `profileSelection`, or
+`allowedProducers` keeps the existing full-`AgentRun` request contract. It
+remains unauthenticated for compatibility in this PR and must stay
+cluster-internal:
+
+```json
+{
+  "work": {"id": "work-123", "title": "Legacy work"},
   "agentRun": {
-    "metadata": {
-      "generateName": "github-issue-"
-    },
+    "metadata": {"generateName": "legacy-"},
     "spec": {
-      "runtime": {
-        "type": "codex",
-        "autonomy": "trusted-local"
-      },
+      "runtime": {"type": "codex", "autonomy": "trusted-local"},
       "image": "nvt-agent-runtime:latest",
-      "workspace": {
-        "mode": "Ephemeral"
-      },
-      "agent": {
-        "config": {}
-      }
+      "workspace": {"mode": "Ephemeral"},
+      "agent": {"config": {}}
     }
   }
 }
 ```
 
-Admission is create-only. The operator forces the `AgentRun` namespace to the
-schedule namespace, sets `AgentSchedule` ownership, and sets reserved metadata:
+Do not expose either mode publicly. Profiled authentication proves the
+Kubernetes producer workload identity, not an end-user identity.
 
-```yaml
-labels:
-  nvt.dev/schedule: <schedule-name>
-annotations:
-  nvt.dev/work-id: <work.id>
-  nvt.dev/work-url: <work.url>
-  nvt.dev/access-key: <final-agentrun-name>
-  nvt.dev/display-name: <work.title-or-final-agentrun-name>
-  nvt.dev/source-url: <work.url>
-  nvt.dev/access-port: "4090"
-```
+## Generic admission controls
 
-`nvt.dev/work-url` is set only when the submitted work URL is non-empty. If the
-submitted `AgentRun` has neither `metadata.name` nor `metadata.generateName`,
-the operator defaults `generateName` to `<schedule-name>-`. The operator sets
-gateway access metadata after the final AgentRun name is known. A submitted
-`nvt.dev/display-name`, `nvt.dev/access-port`, or `nvt.dev/requested-by`
-annotation is preserved when present.
+Both modes enforce suspend, max parallelism, and retained work-ID
+deduplication. The parallelism default is `1`. Admissions are serialized per
+schedule within the active operator process. The operator forces namespace and
+ownership and records work/gateway metadata; `work.repository` is stored in
+`nvt.dev/work-repository` when present.
 
-Duplicate work checks include terminal `AgentRun` resources until their
-retention cleanup removes them. This makes retained `AgentRun` resources the
-idempotency history window and allows producers to safely retry deferred work.
+Responses use `201` for creation, `202` for suspended/duplicate work, `429` for
+capacity, `401` for failed profiled authentication, `403` for unauthorized
+producer/profile denial, `400` for malformed or invalid requests/config, and
+`404` for a missing schedule.
 
-Within one running operator process, admissions are serialized per
-`{namespace, schedule}` while the handler reads the schedule, checks suspend and
-capacity, checks duplicate active work, prepares the `AgentRun`, and creates it.
-Different schedules can admit independently. The deployment requires one
-active operator HTTP process, normally enforced with leader election. This is
-not a distributed reservation system.
-
-Responses:
-
-- `201 {"scheduled":true,"agentRun":{"namespace":"nvt","name":"..."}}`
-- `202 {"scheduled":false,"reason":"schedule-suspended"}`
-- `202 {"scheduled":false,"reason":"duplicate-work"}`
-- `429 {"scheduled":false,"reason":"max-parallelism-reached"}`
-- `400` for malformed JSON or missing `work.id`
-- `404` when the schedule does not exist
-
-## Limitations
-
-This slice is intentionally same-namespace and cluster-internal. It does not add
-authentication, template mode, per-key limits, multi-namespace scheduling, or
-concrete scheduler plugins, or a Kubernetes-backed distributed admission
-reservation.
+This PR intentionally has no external resolver, profile choices, repository
+templating, producer migration, gateway creator-only authorization, or
+runtime/broker/egress/agentd changes.
