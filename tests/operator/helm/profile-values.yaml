@@ -1,0 +1,29 @@
+agentSchedule:
+  template:
+    image: runtime:test
+    workspace:
+      mode: Ephemeral
+    agent:
+      config:
+        plugins: []
+  profiles:
+    - name: default-codex
+      runtime:
+        type: codex
+        autonomy: trusted-local
+      agentRuntimeConfig:
+        command: codex
+        proxy:
+          provider: codex-main
+      egress: direct
+      broker:
+        grants:
+          - provider: codex-main
+            repositories: [example/*]
+            materialization: file-bundle
+  profileSelection:
+    defaultProfile: default-codex
+    onNoMatch: useDefault
+    rules: []
+  allowedProducers:
+    - system:serviceaccount:custom-ns:producer

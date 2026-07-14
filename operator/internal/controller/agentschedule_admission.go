@@ -3,13 +3,14 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -22,21 +23,36 @@ import (
 const scheduleAdmissionPathPrefix = "/v1/schedules/"
 
 type agentScheduleAdmissionHandler struct {
-	client         client.Client
-	scheme         *runtime.Scheme
-	now            func() metav1.Time
-	admissionLocks *scheduleAdmissionLocks
+	client          client.Client
+	scheme          *runtime.Scheme
+	authenticator   ScheduleProducerAuthenticator
+	profileResolver ExecutionProfileResolver
+	now             func() metav1.Time
+	admissionLocks  *scheduleAdmissionLocks
 }
 
 type scheduleAdmissionRequest struct {
-	Work     scheduleAdmissionWork `json:"work"`
-	AgentRun nvtv1alpha1.AgentRun  `json:"agentRun"`
+	Work     scheduleAdmissionWork   `json:"work"`
+	Input    *scheduleAdmissionInput `json:"input,omitempty"`
+	AgentRun *nvtv1alpha1.AgentRun   `json:"agentRun,omitempty"`
 }
 
 type scheduleAdmissionWork struct {
-	ID    string `json:"id"`
-	Title string `json:"title,omitempty"`
-	URL   string `json:"url,omitempty"`
+	ID         string                      `json:"id"`
+	Title      string                      `json:"title,omitempty"`
+	URL        string                      `json:"url,omitempty"`
+	Repository string                      `json:"repository,omitempty"`
+	Principal  *scheduleAdmissionPrincipal `json:"principal,omitempty"`
+}
+
+type scheduleAdmissionPrincipal struct {
+	Issuer      string `json:"issuer"`
+	Subject     string `json:"subject"`
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+type scheduleAdmissionInput struct {
+	Prompt string `json:"prompt,omitempty"`
 }
 
 type scheduleAdmissionResponse struct {
@@ -53,10 +69,12 @@ type scheduleAdmissionAgentRun struct {
 // NewAgentScheduleAdmissionHandler returns the cluster-internal schedule admission handler.
 func NewAgentScheduleAdmissionHandler(k8sClient client.Client, scheme *runtime.Scheme) http.Handler {
 	return &agentScheduleAdmissionHandler{
-		client:         k8sClient,
-		scheme:         scheme,
-		now:            metav1.Now,
-		admissionLocks: newScheduleAdmissionLocks(),
+		client:          k8sClient,
+		scheme:          scheme,
+		authenticator:   NewKubernetesTokenReviewProducerAuthenticator(k8sClient),
+		profileResolver: StaticExecutionProfileResolver{},
+		now:             metav1.Now,
+		admissionLocks:  newScheduleAdmissionLocks(),
 	}
 }
 
@@ -72,9 +90,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		return
 	}
 
-	var admission scheduleAdmissionRequest
+	var rawAdmission map[string]json.RawMessage
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 1<<20))
-	if err := decoder.Decode(&admission); err != nil {
+	if err := decoder.Decode(&rawAdmission); err != nil || rawAdmission == nil {
 		http.Error(response, "malformed JSON\n", http.StatusBadRequest)
 		return
 	}
@@ -82,10 +100,14 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		http.Error(response, "malformed JSON\n", http.StatusBadRequest)
 		return
 	}
-
-	workID := strings.TrimSpace(admission.Work.ID)
-	if workID == "" {
-		http.Error(response, "missing work.id\n", http.StatusBadRequest)
+	encodedAdmission, err := json.Marshal(rawAdmission)
+	if err != nil {
+		http.Error(response, "malformed JSON\n", http.StatusBadRequest)
+		return
+	}
+	var admission scheduleAdmissionRequest
+	if err := json.Unmarshal(encodedAdmission, &admission); err != nil {
+		http.Error(response, "malformed JSON\n", http.StatusBadRequest)
 		return
 	}
 
@@ -95,11 +117,40 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 
 	schedule := &nvtv1alpha1.AgentSchedule{}
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, schedule); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			http.Error(response, "AgentSchedule not found\n", http.StatusNotFound)
 			return
 		}
 		http.Error(response, "get AgentSchedule failed\n", http.StatusInternalServerError)
+		return
+	}
+
+	profiled := ScheduleUsesExecutionProfiles(schedule)
+	producer := ""
+	if profiled {
+		token, ok := bearerToken(request.Header.Get("Authorization"))
+		if !ok || h.authenticator == nil {
+			http.Error(response, "producer authentication failed\n", http.StatusUnauthorized)
+			return
+		}
+		producer, err = h.authenticator.Authenticate(ctx, token)
+		if err != nil {
+			http.Error(response, "producer authentication failed\n", http.StatusUnauthorized)
+			return
+		}
+		if !containsString(schedule.Spec.AllowedProducers, producer) {
+			http.Error(response, "producer is not allowed\n", http.StatusForbidden)
+			return
+		}
+		if err := validateProfiledAdmissionShape(rawAdmission); err != nil {
+			http.Error(response, "profiled admission accepts only work and input\n", http.StatusBadRequest)
+			return
+		}
+	}
+
+	workID := strings.TrimSpace(admission.Work.ID)
+	if workID == "" {
+		http.Error(response, "missing work.id\n", http.StatusBadRequest)
 		return
 	}
 
@@ -135,12 +186,61 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		return
 	}
 
-	run := admission.AgentRun
+	var run nvtv1alpha1.AgentRun
+	if profiled {
+		if h.profileResolver == nil {
+			h.profileResolver = StaticExecutionProfileResolver{}
+		}
+		principal := admissionPrincipal(admission.Work.Principal)
+		if principal != nil && (strings.TrimSpace(principal.Issuer) == "" || strings.TrimSpace(principal.Subject) == "") {
+			http.Error(response, "principal issuer and subject are required\n", http.StatusBadRequest)
+			return
+		}
+		resolved, resolveErr := h.profileResolver.Resolve(schedule, principal)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, errExecutionProfileSelectionDenied) {
+				h.recordRejected(ctx, schedule, "profile-selection-denied")
+				writeScheduleAdmissionJSON(response, http.StatusForbidden, scheduleAdmissionResponse{
+					Scheduled: false, Reason: "profile-selection-denied",
+				})
+				return
+			}
+			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
+			return
+		}
+		prompt := ""
+		if admission.Input != nil {
+			prompt = admission.Input.Prompt
+		}
+		profiledRun, buildErr := buildProfiledAgentRun(schedule, resolved, producer, principal, prompt)
+		if buildErr != nil {
+			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
+			return
+		}
+		run = *profiledRun
+	} else if admission.AgentRun != nil {
+		run = *admission.AgentRun
+		run.ObjectMeta = *admission.AgentRun.ObjectMeta.DeepCopy()
+		run.Spec = *admission.AgentRun.Spec.DeepCopy()
+	}
 	// Apply the cluster's default egress mode before validation and creation,
 	// so the stored spec.egress is always explicit and a later knob change can
 	// never reclassify this run. Never overrides an explicit mode.
 	ApplyDefaultEgressMode(&run)
 	if err := ValidateAgentRunEgressMode(&run); err != nil {
+		if profiled {
+			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
+			return
+		}
 		reason := err.Error()
 		h.recordRejected(ctx, schedule, reason)
 		writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
@@ -150,12 +250,22 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		return
 	}
 	if err := PrepareScheduledAgentRun(schedule, &run, scheduleAdmissionWorkMetadata{
-		ID:    workID,
-		Title: admission.Work.Title,
-		URL:   admission.Work.URL,
+		ID:         workID,
+		Title:      admission.Work.Title,
+		URL:        admission.Work.URL,
+		Repository: admission.Work.Repository,
 	}, h.scheme); err != nil {
 		http.Error(response, "prepare AgentRun failed\n", http.StatusInternalServerError)
 		return
+	}
+	if profiled {
+		if err := injectProfiledLifecycleCallback(&run); err != nil {
+			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
+			return
+		}
 	}
 	if err := h.client.Create(ctx, &run); err != nil {
 		http.Error(response, "create AgentRun failed\n", http.StatusInternalServerError)
@@ -169,6 +279,68 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 			Name:      run.Name,
 		},
 	})
+}
+
+func admissionPrincipal(input *scheduleAdmissionPrincipal) *nvtv1alpha1.AgentRunPrincipal {
+	if input == nil {
+		return nil
+	}
+	return &nvtv1alpha1.AgentRunPrincipal{
+		Issuer: input.Issuer, Subject: input.Subject, DisplayName: input.DisplayName,
+	}
+}
+
+func validateProfiledAdmissionShape(raw map[string]json.RawMessage) error {
+	if err := validateJSONKeys(raw, "work", "input"); err != nil {
+		return err
+	}
+	work, err := rawJSONObject(raw["work"])
+	if err != nil {
+		return err
+	}
+	if err := validateJSONKeys(work, "id", "title", "url", "repository", "principal"); err != nil {
+		return err
+	}
+	if principalRaw, present := work["principal"]; present {
+		principal, err := rawJSONObject(principalRaw)
+		if err != nil {
+			return err
+		}
+		if err := validateJSONKeys(principal, "issuer", "subject", "displayName"); err != nil {
+			return err
+		}
+	}
+	if inputRaw, present := raw["input"]; present {
+		input, err := rawJSONObject(inputRaw)
+		if err != nil {
+			return err
+		}
+		if err := validateJSONKeys(input, "prompt"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rawJSONObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &object) != nil || object == nil {
+		return nil, errors.New("expected JSON object")
+	}
+	return object, nil
+}
+
+func validateJSONKeys(object map[string]json.RawMessage, allowed ...string) error {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	for key := range object {
+		if _, ok := allowedSet[key]; !ok {
+			return errors.New("unexpected request field")
+		}
+	}
+	return nil
 }
 
 func (h *agentScheduleAdmissionHandler) lockScheduleAdmission(namespace, name string) func() {

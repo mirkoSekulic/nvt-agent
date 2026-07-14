@@ -103,3 +103,9 @@ agentSchedule:
   name: default
   maxParallelism: 1
   suspend: false
+  # Empty profile fields preserve the legacy full-AgentRun admission contract.
+  # See operator/docs/agentschedule.md for a complete profiled example.
+  template: {}
+  profiles: []
+  profileSelection: {}
+  allowedProducers: []

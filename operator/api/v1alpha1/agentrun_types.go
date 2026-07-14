@@ -84,13 +84,31 @@ type AgentRunSpec struct {
 	EgressForwardProxy bool `json:"egressForwardProxy,omitempty"`
 	// EgressTransport selects redirect, forward-proxy, or transparent routing.
 	// EgressForwardProxy remains a compatibility input during migration.
-	EgressTransport AgentRunEgressTransport `json:"egressTransport,omitempty"`
-	Workspace       AgentRunWorkspace       `json:"workspace"`
-	Broker          *AgentRunBroker         `json:"broker,omitempty"`
-	Prompt          *AgentRunPrompt         `json:"prompt,omitempty"`
-	Agent           AgentRunAgent           `json:"agent"`
-	Lifecycle       *AgentRunLifecycle      `json:"lifecycle,omitempty"`
-	TTL             *AgentRunTTL            `json:"ttl,omitempty"`
+	EgressTransport   AgentRunEgressTransport    `json:"egressTransport,omitempty"`
+	Workspace         AgentRunWorkspace          `json:"workspace"`
+	Broker            *AgentRunBroker            `json:"broker,omitempty"`
+	Prompt            *AgentRunPrompt            `json:"prompt,omitempty"`
+	Agent             AgentRunAgent              `json:"agent"`
+	Lifecycle         *AgentRunLifecycle         `json:"lifecycle,omitempty"`
+	TTL               *AgentRunTTL               `json:"ttl,omitempty"`
+	ProfileProvenance *AgentRunProfileProvenance `json:"profileProvenance,omitempty"`
+}
+
+// AgentRunProfileProvenance is the immutable record of a profiled schedule resolution.
+type AgentRunProfileProvenance struct {
+	AuthenticatedProducer string             `json:"authenticatedProducer"`
+	ScheduleName          string             `json:"scheduleName"`
+	ScheduleUID           string             `json:"scheduleUID"`
+	ScheduleGeneration    int64              `json:"scheduleGeneration"`
+	SelectedProfile       string             `json:"selectedProfile"`
+	Principal             *AgentRunPrincipal `json:"principal,omitempty"`
+}
+
+// AgentRunPrincipal records immutable authorization keys and optional display data.
+type AgentRunPrincipal struct {
+	Issuer      string `json:"issuer"`
+	Subject     string `json:"subject"`
+	DisplayName string `json:"displayName,omitempty"`
 }
 
 // AgentRunRuntime defines the selected runtime and autonomy mode.
@@ -276,6 +294,23 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	}
 	if in.TTL != nil {
 		out.TTL = in.TTL.DeepCopy()
+	}
+	if in.ProfileProvenance != nil {
+		out.ProfileProvenance = in.ProfileProvenance.DeepCopy()
+	}
+	return out
+}
+
+func (in *AgentRunProfileProvenance) DeepCopy() *AgentRunProfileProvenance {
+	if in == nil {
+		return nil
+	}
+	out := new(AgentRunProfileProvenance)
+	*out = *in
+	if in.Principal != nil {
+		out.Principal = &AgentRunPrincipal{
+			Issuer: in.Principal.Issuer, Subject: in.Principal.Subject, DisplayName: in.Principal.DisplayName,
+		}
 	}
 	return out
 }

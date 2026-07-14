@@ -34,6 +34,9 @@ spec:
                 - image
                 - workspace
                 - agent
+              x-kubernetes-validations:
+                - rule: "has(self.profileProvenance) == has(oldSelf.profileProvenance) && (!has(self.profileProvenance) || self.profileProvenance == oldSelf.profileProvenance)"
+                  message: spec.profileProvenance is immutable
               properties:
                 runtime:
                   type: object
@@ -196,6 +199,44 @@ spec:
                     runRetentionSeconds:
                       type: integer
                       minimum: 0
+                profileProvenance:
+                  type: object
+                  required:
+                    - authenticatedProducer
+                    - scheduleName
+                    - scheduleUID
+                    - scheduleGeneration
+                    - selectedProfile
+                  properties:
+                    authenticatedProducer:
+                      type: string
+                      minLength: 1
+                    scheduleName:
+                      type: string
+                      minLength: 1
+                    scheduleUID:
+                      type: string
+                      minLength: 1
+                    scheduleGeneration:
+                      type: integer
+                      format: int64
+                    selectedProfile:
+                      type: string
+                      minLength: 1
+                    principal:
+                      type: object
+                      required:
+                        - issuer
+                        - subject
+                      properties:
+                        issuer:
+                          type: string
+                          minLength: 1
+                        subject:
+                          type: string
+                          minLength: 1
+                        displayName:
+                          type: string
             status:
               type: object
               properties:

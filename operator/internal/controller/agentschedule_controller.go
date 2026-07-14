@@ -16,21 +16,23 @@ import (
 )
 
 const (
-	scheduleLabel         = "nvt.dev/schedule"
-	workIDAnnotation      = "nvt.dev/work-id"
-	workURLAnnotation     = "nvt.dev/work-url"
-	accessKeyAnnotation   = "nvt.dev/access-key"
-	displayNameAnnotation = "nvt.dev/display-name"
-	sourceURLAnnotation   = "nvt.dev/source-url"
-	accessPortAnnotation  = "nvt.dev/access-port"
-	defaultParallelism    = int32(1)
-	generatedNameSuffix   = 5
+	scheduleLabel            = "nvt.dev/schedule"
+	workIDAnnotation         = "nvt.dev/work-id"
+	workURLAnnotation        = "nvt.dev/work-url"
+	workRepositoryAnnotation = "nvt.dev/work-repository"
+	accessKeyAnnotation      = "nvt.dev/access-key"
+	displayNameAnnotation    = "nvt.dev/display-name"
+	sourceURLAnnotation      = "nvt.dev/source-url"
+	accessPortAnnotation     = "nvt.dev/access-port"
+	defaultParallelism       = int32(1)
+	generatedNameSuffix      = 5
 )
 
 type scheduleAdmissionWorkMetadata struct {
-	ID    string
-	Title string
-	URL   string
+	ID         string
+	Title      string
+	URL        string
+	Repository string
 }
 
 // AgentScheduleReconciler reconciles generic AgentSchedule admission-pool status.
@@ -160,6 +162,11 @@ func PrepareScheduledAgentRun(
 		run.Annotations[workURLAnnotation] = work.URL
 	} else {
 		delete(run.Annotations, workURLAnnotation)
+	}
+	if work.Repository != "" {
+		run.Annotations[workRepositoryAnnotation] = work.Repository
+	} else {
+		delete(run.Annotations, workRepositoryAnnotation)
 	}
 	run.Annotations[accessKeyAnnotation] = run.Name
 	if run.Annotations[displayNameAnnotation] == "" {

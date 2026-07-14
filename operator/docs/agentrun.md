@@ -151,6 +151,13 @@ already declares that plugin, rendering fails to avoid ambiguity.
 plugin configuration can remain implementation-swappable. Runtime tools,
 code-server, exposed ports, repositories, and plugins live there.
 
+Runs created through profiled `AgentSchedule` admission also carry
+`spec.profileProvenance`. It snapshots the authenticated Kubernetes producer,
+schedule identity and generation, selected profile, and the immutable
+principal issuer/subject plus optional display name. The fully resolved
+runtime, agent runtime config, egress, and broker grants are stored directly in
+the same `AgentRun`; later schedule edits do not re-resolve existing runs.
+
 ## Lifecycle
 
 ```yaml

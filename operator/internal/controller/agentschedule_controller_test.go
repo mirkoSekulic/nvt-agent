@@ -57,6 +57,10 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read AgentSchedule CRD: %v", err)
 	}
+	chartData, err := os.ReadFile("../../../charts/nvt/crds/nvt.dev_agentschedules.yaml")
+	if err != nil || !bytes.Equal(data, chartData) {
+		t.Fatalf("generated and Helm AgentSchedule CRDs differ: %v", err)
+	}
 	var crd map[string]any
 	if err := yaml.Unmarshal(data, &crd); err != nil {
 		t.Fatalf("parse AgentSchedule CRD: %v", err)
@@ -68,6 +72,15 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	).(map[string]any)
 	if crdPath(t, properties, "maxParallelism", "type") != "integer" {
 		t.Fatalf("expected spec.maxParallelism integer schema, got %#v", properties["maxParallelism"])
+	}
+	if crdPath(t, properties, "profiles", "items", "properties", "agentRuntimeConfig", "x-kubernetes-preserve-unknown-fields") != true {
+		t.Fatalf("expected profile runtime config preservation schema, got %#v", properties["profiles"])
+	}
+	if crdPath(t, properties, "profileSelection", "properties", "onNoMatch", "type") != "string" {
+		t.Fatalf("expected profileSelection.onNoMatch schema, got %#v", properties["profileSelection"])
+	}
+	if crdPath(t, properties, "allowedProducers", "items", "type") != "string" {
+		t.Fatalf("expected allowedProducers string schema, got %#v", properties["allowedProducers"])
 	}
 	status := crdPath(t, crd,
 		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
