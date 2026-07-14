@@ -126,6 +126,9 @@ func publicForwardedPort(publicOrigin *url.URL) string {
 }
 
 func validOAuthCallbackPath(raw string) bool {
+	if strings.Contains(raw, "%") {
+		return false
+	}
 	callbackURL, err := url.Parse(raw)
 	if err != nil || callbackURL.IsAbs() || callbackURL.Host != "" || callbackURL.RawQuery != "" || callbackURL.Fragment != "" {
 		return false

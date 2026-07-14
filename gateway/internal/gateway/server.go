@@ -404,10 +404,10 @@ func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, r
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		filterUpstreamRequestCookies(req.Header, ownedCookies)
+		removeForwardingHeaders(req.Header)
 		if s.config.routingMode() == routingModePath {
 			stripPathAccessKey(req.URL, accessKey)
 			publicOrigin, _ := url.Parse(s.config.PublicURL)
-			removeForwardingHeaders(req.Header)
 			req.Header.Set("X-Forwarded-Host", publicOrigin.Host)
 			req.Header.Set("X-Forwarded-Proto", publicOrigin.Scheme)
 			req.Header.Set("X-Forwarded-Port", publicForwardedPort(publicOrigin))

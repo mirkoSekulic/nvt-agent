@@ -80,3 +80,44 @@ func TestCookieFiltersPreserveUnrelatedSubdomainCookies(t *testing.T) {
 		t.Fatalf("subdomain response cookies=%q", got)
 	}
 }
+
+func TestSubdomainProxyRemovesUntrustedForwardingHeaders(t *testing.T) {
+	type forwardingHeaders struct {
+		forwarded string
+		host      string
+		proto     string
+		port      string
+		prefix    string
+	}
+	upstreamHeaders := make(chan forwardingHeaders, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamHeaders <- forwardingHeaders{
+			forwarded: request.Header.Get("Forwarded"),
+			host:      request.Header.Get("X-Forwarded-Host"),
+			proto:     request.Header.Get("X-Forwarded-Proto"),
+			port:      request.Header.Get("X-Forwarded-Port"),
+			prefix:    request.Header.Get("X-Forwarded-Prefix"),
+		}
+		_, _ = response.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	run, pod := pathRoutableAgentRun(t, upstream.URL, "routing-key")
+	server := mustNewServer(t, Config{
+		BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090,
+	}, fakeClient(t, &run, &pod))
+
+	request := httptest.NewRequest(http.MethodGet, "https://routing-key.agents.localhost/", nil)
+	request.Header.Set("Forwarded", "host=evil.example;proto=http")
+	request.Header.Set("X-Forwarded-Host", "evil.example")
+	request.Header.Set("X-Forwarded-Proto", "http")
+	request.Header.Set("X-Forwarded-Port", "9999")
+	request.Header.Set("X-Forwarded-Prefix", "/evil")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("proxy status=%d body=%q", response.Code, response.Body.String())
+	}
+	if got := <-upstreamHeaders; got != (forwardingHeaders{}) {
+		t.Fatalf("untrusted forwarding headers reached subdomain upstream: %#v", got)
+	}
+}

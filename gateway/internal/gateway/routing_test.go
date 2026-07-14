@@ -51,6 +51,7 @@ func TestPathRoutingConfigValidation(t *testing.T) {
 		{name: "OIDC callback outside namespace", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/callback" }},
 		{name: "GitHub callback outside namespace", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/callback" }},
 		{name: "encoded callback separator", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/oauth2%2fcallback" }},
+		{name: "encoded callback character", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/%63allback" }},
 		{name: "callback dot segment", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/../callback" }},
 		{name: "callback query", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/oauth2/callback?next=bad" }},
 		{name: "callback fragment", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/callback#bad" }},
