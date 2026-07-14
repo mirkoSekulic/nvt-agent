@@ -1,14 +1,82 @@
 # nvt-agent gateway
 
 The gateway routes browser access to running agent sessions and can protect the
-dashboard and session routes with OIDC. Authentication and authorization are
-separate: with `auth.mode=oidc`, the default authorization decision is deny
-unless an allow rule matches.
+dashboard and session routes with OIDC or direct GitHub OAuth2. Authentication
+adapters produce the same normalized principal (`issuer`, immutable `subject`,
+optional display name, sanitized claims). Authorization is separate and
+defaults to deny whenever authentication is enabled.
+
+`auth.mode=none` remains the default and preserves unrestricted access to all
+routable AgentRuns, including legacy runs.
 
 Do not use SSN, `pid`, or fødselsnummer claims for authorization. Prefer
 organization, group, resource, or entitlement claims. The gateway rejects
 sensitive claim paths and logs only the decision, rule id, agent access key, and
-a short subject hash.
+a short hash of issuer plus subject.
+
+## AgentRun owner authorization
+
+An owner rule compares the authenticated principal to immutable profiled
+admission provenance using exact issuer plus subject:
+
+```yaml
+authorization:
+  default: deny
+  rules:
+    - id: agent-owner
+      effect: allow
+      owner: true
+```
+
+Display names, GitHub logins, and `nvt.dev/requested-by` annotations never
+participate. Legacy or malformed AgentRuns without
+`spec.profileProvenance.principal` do not match an owner rule. Dashboard results
+are filtered with the same policy; inaccessible run metadata is not rendered.
+Each rule must contain exactly one of `authenticated`, `owner`,
+`claimPath`+`values`, or `where`.
+
+## GitHub login
+
+Create a dedicated GitHub App for human gateway login. Configure its callback
+URL as `https://<gateway-host>/oauth2/github/callback`; it needs no repository
+permissions, repository scopes, webhook subscriptions, or installation access
+for this profile-only identity lookup. Store both OAuth credentials in a
+Kubernetes Secret:
+
+```sh
+kubectl -n nvt create secret generic nvt-gateway-github \
+  --from-literal=client-id='<github-app-client-id>' \
+  --from-literal=client-secret='<github-app-client-secret>'
+```
+
+```yaml
+gateway:
+  enabled: true
+  replicas: 1
+  baseDomain: agents.example.com
+  publicURL: https://agents.example.com
+  auth:
+    mode: github
+    session:
+      existingSecret: nvt-gateway-session
+      cookieDomain: .agents.example.com
+    github:
+      credentials:
+        existingSecret: nvt-gateway-github
+    authorization:
+      default: deny
+      rules:
+        - id: agent-owner
+          effect: allow
+          owner: true
+```
+
+The flow uses state and PKCE, calls GitHub's current-user endpoint, and retains
+only issuer `https://github.com`, decimal numeric user ID as subject, and login
+as display data. The access token is discarded after lookup. GitHub Enterprise
+Server deployments can configure the issuer, authorization, token, and user
+URLs explicitly. GitHub and OIDC principals are never guessed or linked across
+issuers; any future account correlation requires an external explicit mapping.
 
 ## Ansattporten example
 

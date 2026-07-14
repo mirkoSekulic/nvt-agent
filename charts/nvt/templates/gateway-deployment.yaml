@@ -1,11 +1,16 @@
 {{- if .Values.gateway.enabled }}
-{{- if eq .Values.gateway.auth.mode "oidc" }}
+{{- if not (has .Values.gateway.auth.mode (list "none" "oidc" "github")) }}
+{{- fail "gateway.auth.mode must be one of none, oidc, or github" }}
+{{- end }}
+{{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "github") }}
 {{- if gt (int .Values.gateway.replicas) 1 }}
-{{- fail "gateway.replicas must be 1 when gateway.auth.mode=oidc until shared sessions exist" }}
+{{- fail "gateway.replicas must be 1 when gateway authentication is enabled until shared sessions exist" }}
 {{- end }}
 {{- if not .Values.gateway.auth.session.existingSecret }}
-{{- fail "gateway.auth.session.existingSecret is required when gateway.auth.mode=oidc" }}
+{{- fail "gateway.auth.session.existingSecret is required when gateway authentication is enabled" }}
 {{- end }}
+{{- end }}
+{{- if eq .Values.gateway.auth.mode "oidc" }}
 {{- if not .Values.gateway.auth.oidc.clientSecret.existingSecret }}
 {{- fail "gateway.auth.oidc.clientSecret.existingSecret is required when gateway.auth.mode=oidc" }}
 {{- end }}
@@ -14,6 +19,11 @@
 {{- end }}
 {{- if not .Values.gateway.auth.oidc.clientID }}
 {{- fail "gateway.auth.oidc.clientID is required when gateway.auth.mode=oidc" }}
+{{- end }}
+{{- end }}
+{{- if eq .Values.gateway.auth.mode "github" }}
+{{- if not .Values.gateway.auth.github.credentials.existingSecret }}
+{{- fail "gateway.auth.github.credentials.existingSecret is required when gateway.auth.mode=github" }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -52,7 +62,7 @@ spec:
                   fieldPath: metadata.namespace
             - name: NVT_GATEWAY_AUTH_MODE
               value: {{ .Values.gateway.auth.mode | quote }}
-            {{- if eq .Values.gateway.auth.mode "oidc" }}
+            {{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "github") }}
             - name: NVT_GATEWAY_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
@@ -66,6 +76,10 @@ spec:
               value: {{ .Values.gateway.auth.session.maxAgeSeconds | quote }}
             - name: NVT_GATEWAY_SESSION_COOKIE_SECURE
               value: {{ .Values.gateway.auth.session.secure | quote }}
+            - name: NVT_GATEWAY_AUTHORIZATION
+              value: {{ .Values.gateway.auth.authorization | toJson | quote }}
+            {{- end }}
+            {{- if eq .Values.gateway.auth.mode "oidc" }}
             - name: NVT_GATEWAY_OIDC_ISSUER_URL
               value: {{ .Values.gateway.auth.oidc.issuerURL | quote }}
             - name: NVT_GATEWAY_OIDC_CLIENT_ID
@@ -87,8 +101,28 @@ spec:
               value: {{ .Values.gateway.auth.oidc.extraAuthParams | toJson | quote }}
             - name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS
               value: {{ .Values.gateway.auth.oidc.authorizationDetails | quote }}
-            - name: NVT_GATEWAY_AUTHORIZATION
-              value: {{ .Values.gateway.auth.authorization | toJson | quote }}
+            {{- end }}
+            {{- if eq .Values.gateway.auth.mode "github" }}
+            - name: NVT_GATEWAY_GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.auth.github.credentials.existingSecret | quote }}
+                  key: {{ .Values.gateway.auth.github.credentials.clientIDKey | quote }}
+            - name: NVT_GATEWAY_GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.auth.github.credentials.existingSecret | quote }}
+                  key: {{ .Values.gateway.auth.github.credentials.clientSecretKey | quote }}
+            - name: NVT_GATEWAY_GITHUB_CALLBACK_PATH
+              value: {{ .Values.gateway.auth.github.callbackPath | quote }}
+            - name: NVT_GATEWAY_GITHUB_ISSUER
+              value: {{ .Values.gateway.auth.github.issuer | quote }}
+            - name: NVT_GATEWAY_GITHUB_AUTHORIZATION_URL
+              value: {{ .Values.gateway.auth.github.authorizationURL | quote }}
+            - name: NVT_GATEWAY_GITHUB_TOKEN_URL
+              value: {{ .Values.gateway.auth.github.tokenURL | quote }}
+            - name: NVT_GATEWAY_GITHUB_USER_URL
+              value: {{ .Values.gateway.auth.github.userURL | quote }}
             {{- end }}
           ports:
             - name: http
