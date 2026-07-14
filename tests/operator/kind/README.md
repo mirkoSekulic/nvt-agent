@@ -34,11 +34,12 @@ For enforced egress, the completion smoke uses the credential-less
 termination-message lifecycle path. Its acceptance scan checks provider,
 broker, egress, callback, service-account, and CA-key non-possession across Pod
 specs, environments, process arguments, readable files, mounts, and logs.
-For `profile-auth`, two small in-cluster clients use explicit projected
-ServiceAccount token volumes. The case proves the real TokenReview path accepts
-the allowlisted identity and `nvt-operator` audience, rejects a wrong audience
-and an unlisted ServiceAccount, and rejects producer-supplied profile/provider
-or security configuration.
+For `profile-auth`, the GitHub comments producer admission fixture uses explicit
+projected ServiceAccount token volumes and its production profiled request
+builder. The case proves the real TokenReview path accepts the allowlisted
+identity and `nvt-operator` audience, snapshots the numeric GitHub principal,
+rejects a wrong audience and an unlisted ServiceAccount, and rejects
+producer-supplied profile/provider or security configuration.
 
 Use kind mode for the full cluster smoke:
 

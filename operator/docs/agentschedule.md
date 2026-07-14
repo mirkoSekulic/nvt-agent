@@ -67,6 +67,15 @@ Requested-by annotations, principal display names, and request content are not
 authentication. Missing, malformed, failed, wrong-audience, and unauthorized
 credentials fail closed.
 
+The GitHub comments producer uses this contract with
+`submission.mode: scheduleAdmission` and `submission.admissionMode: profiled`.
+It reports issuer `https://github.com`, the immutable numeric GitHub user ID as
+`subject`, and the login as display-only metadata. Its projected token is read
+for every request and uses audience `nvt-operator`; the schedule must list the
+producer ServiceAccount username in `allowedProducers`. Most deployments need
+only `defaultProfile`. Add exact issuer/subject rules only when different
+principals must resolve to different execution profiles.
+
 ### Immutable resolution
 
 The operator resolves once, builds the complete `AgentRun`, generates its final
@@ -119,6 +128,5 @@ capacity, `401` for failed profiled authentication, `403` for unauthorized
 producer/profile denial, `400` for malformed or invalid requests/config, and
 `404` for a missing schedule.
 
-This PR intentionally has no external resolver, profile choices, repository
-templating, producer migration, gateway creator-only authorization, or
-runtime/broker/egress/agentd changes.
+There is no external resolver, producer-selectable profile choice, repository
+templating, or gateway creator-only authorization in this version.

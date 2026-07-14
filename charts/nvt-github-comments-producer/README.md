@@ -66,6 +66,7 @@ operatorCallbackBaseURL: http://nvt-operator:8082
 
 submission:
   mode: scheduleAdmission
+  admissionMode: legacy
   admissionBaseURL: http://nvt-operator:8082
   scheduleName: default
 
@@ -146,6 +147,66 @@ The static broker config owns GitHub App providers, capabilities, and secrets.
 Producer-created AgentRuns request only broker grants through
 `agentRun.brokerGrants`, while runtime plugins use broker-backed credentials.
 Do not put GitHub provider secrets in chart values or committed examples.
+
+The example above is the backward-compatible legacy mode: the producer sends a
+complete AgentRun, so `agentRun` and `agentConfig` remain producer-owned. For an
+operator-owned profiled schedule, use:
+
+```yaml
+# Producer Helm values (release name nvt-github-comments-producer, namespace nvt)
+submission:
+  mode: scheduleAdmission
+  admissionMode: profiled
+  admissionBaseURL: http://nvt-operator:8082
+  admissionTokenFile: /var/run/secrets/nvt-operator/token
+  tokenExpirationSeconds: 3600
+  scheduleNamespace: nvt
+  scheduleName: default
+```
+
+and create the schedule policy separately:
+
+```yaml
+apiVersion: nvt.dev/v1alpha1
+kind: AgentSchedule
+metadata:
+  name: default
+  namespace: nvt
+spec:
+  allowedProducers:
+    - system:serviceaccount:nvt:nvt-github-comments-producer
+  template:
+    image: nvt-agent-runtime:latest
+    workspace: {mode: Ephemeral}
+    agent:
+      config:
+        plugins: []
+  profiles:
+    - name: default
+      runtime: {type: codex, autonomy: trusted-local}
+      agentRuntimeConfig:
+        command: codex
+        proxy: {provider: codex-main}
+      egress: mediated
+      broker:
+        grants:
+          - provider: codex-main
+            repositories: [example/*]
+            materialization: header-inject
+            egressHosts: [chatgpt.com]
+  profileSelection:
+    defaultProfile: default
+    onNoMatch: useDefault
+```
+
+The producer sends the immutable numeric GitHub user ID as the authorization
+subject and never sends a profile/provider choice. The default profile is
+enough for normal deployments. Exact `issuer` + `subject` rules are optional
+for multi-profile routing; GitHub login/display name never authorizes a profile.
+The chart projects only an audience-`nvt-operator` token in profiled mode,
+disables the default automount for schedule admission, and rereads the token on
+each request. Legacy schedules must keep `admissionMode: legacy`; there is no
+automatic fallback between modes.
 
 The producer injects an `event-webhook` after-agent plugin for each generated
 AgentRun unless `agentConfig.plugins` already contains `event-webhook`. The

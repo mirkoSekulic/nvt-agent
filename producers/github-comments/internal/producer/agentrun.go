@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,15 +125,43 @@ func (s AgentRunSubmitter) submitDirect(
 	return true, identity.Key, nil
 }
 
-type scheduleAdmissionRequest struct {
+const githubPrincipalIssuer = "https://github.com"
+
+type legacyScheduleAdmissionRequest struct {
 	Work     scheduleAdmissionWork `json:"work"`
 	AgentRun nvtv1alpha1.AgentRun  `json:"agentRun"`
 }
+
+// scheduleAdmissionRequest retains the legacy test and migration contract name.
+type scheduleAdmissionRequest = legacyScheduleAdmissionRequest
 
 type scheduleAdmissionWork struct {
 	ID    string `json:"id"`
 	Title string `json:"title,omitempty"`
 	URL   string `json:"url,omitempty"`
+}
+
+type profiledScheduleAdmissionRequest struct {
+	Work  profiledScheduleAdmissionWork  `json:"work"`
+	Input profiledScheduleAdmissionInput `json:"input"`
+}
+
+type profiledScheduleAdmissionWork struct {
+	ID         string                     `json:"id"`
+	Title      string                     `json:"title"`
+	URL        string                     `json:"url"`
+	Repository string                     `json:"repository"`
+	Principal  profiledAdmissionPrincipal `json:"principal"`
+}
+
+type profiledAdmissionPrincipal struct {
+	Issuer      string `json:"issuer"`
+	Subject     string `json:"subject"`
+	DisplayName string `json:"displayName"`
+}
+
+type profiledScheduleAdmissionInput struct {
+	Prompt string `json:"prompt"`
 }
 
 type scheduleAdmissionResponse struct {
@@ -154,17 +184,9 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 	command Command,
 	identity agentRunIdentity,
 ) (bool, string, error) {
-	run, err := s.buildAgentRun(repo, issue, comments, commandComment, command, identity)
+	payload, token, err := s.scheduleAdmissionPayload(repo, issue, comments, commandComment, command, identity)
 	if err != nil {
 		return false, "", err
-	}
-	payload := scheduleAdmissionRequest{
-		Work: scheduleAdmissionWork{
-			ID:    identity.Key,
-			Title: issue.Title,
-			URL:   sourceURLForCommand(issue, commandComment),
-		},
-		AgentRun: *run,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -175,6 +197,9 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 		return false, "", fmt.Errorf("build schedule admission request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	response, err := s.httpClient.Do(request)
 	if err != nil {
@@ -214,6 +239,67 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 	}
 }
 
+func (s AgentRunSubmitter) scheduleAdmissionPayload(
+	repo Repository,
+	issue GitHubIssue,
+	comments []GitHubIssueComment,
+	commandComment GitHubIssueComment,
+	command Command,
+	identity agentRunIdentity,
+) (any, string, error) {
+	if s.admissionMode() == AdmissionModeProfiled {
+		if commandComment.User.ID <= 0 {
+			return nil, "", errors.New("profiled admission requires a valid GitHub author identity")
+		}
+		token, err := readAdmissionToken(s.config.Submission.AdmissionTokenFile)
+		if err != nil {
+			return nil, "", err
+		}
+		return profiledScheduleAdmissionRequest{
+			Work: profiledScheduleAdmissionWork{
+				ID:         identity.Key,
+				Title:      issue.Title,
+				URL:        sourceURLForCommand(issue, commandComment),
+				Repository: repo.Owner + "/" + repo.Name,
+				Principal: profiledAdmissionPrincipal{
+					Issuer:      githubPrincipalIssuer,
+					Subject:     strconv.FormatInt(commandComment.User.ID, 10),
+					DisplayName: commandComment.User.Login,
+				},
+			},
+			Input: profiledScheduleAdmissionInput{
+				Prompt: buildPrompt(repo, issue, comments, commandComment, command),
+			},
+		}, token, nil
+	}
+
+	run, err := s.buildAgentRun(repo, issue, comments, commandComment, command, identity)
+	if err != nil {
+		return nil, "", err
+	}
+	return legacyScheduleAdmissionRequest{
+		Work: scheduleAdmissionWork{
+			ID:    identity.Key,
+			Title: issue.Title,
+			URL:   sourceURLForCommand(issue, commandComment),
+		},
+		AgentRun: *run,
+	}, "", nil
+}
+
+func readAdmissionToken(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", errors.New("read profiled admission token")
+	}
+	token := strings.TrimSpace(string(data))
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" || strings.ContainsAny(token, " \t\r\n") {
+		return "", errors.New("invalid profiled admission token")
+	}
+	return token, nil
+}
+
 func (s AgentRunSubmitter) hasExistingIdempotencyKey(ctx context.Context, key string) (bool, error) {
 	var runs nvtv1alpha1.AgentRunList
 	if err := s.client.List(ctx, &runs, ctrlclient.InNamespace(s.config.AgentRun.Namespace)); err != nil {
@@ -246,39 +332,7 @@ func (s AgentRunSubmitter) buildAgentRun(
 	if err != nil {
 		return nil, err
 	}
-	issueComments := make([]IssueComment, 0, len(comments))
-	for _, comment := range comments {
-		issueComments = append(issueComments, IssueComment{
-			ID:        comment.ID,
-			Body:      comment.Body,
-			UserLogin: comment.User.Login,
-			HTMLURL:   comment.HTMLURL,
-			CreatedAt: formatOptionalTime(comment.CreatedAt),
-			UpdatedAt: formatOptionalTime(comment.UpdatedAt),
-		})
-	}
-	prompt := BuildPrompt(PromptInput{
-		Owner: repo.Owner,
-		Repo:  repo.Name,
-		Issue: Issue{
-			Number:  issue.Number,
-			URL:     issue.URL,
-			Title:   issue.Title,
-			Body:    issue.Body,
-			HTMLURL: issue.HTMLURL,
-		},
-		Comments: issueComments,
-		CommandComment: IssueComment{
-			ID:        commandComment.ID,
-			Body:      commandComment.Body,
-			UserLogin: commandComment.User.Login,
-			HTMLURL:   commandComment.HTMLURL,
-			CreatedAt: formatOptionalTime(commandComment.CreatedAt),
-			UpdatedAt: formatOptionalTime(commandComment.UpdatedAt),
-		},
-		Sender:                 commandComment.User.Login,
-		AdditionalInstructions: command.AdditionalInstructions,
-	})
+	prompt := buildPrompt(repo, issue, comments, commandComment, command)
 	run := &nvtv1alpha1.AgentRun{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: nvtv1alpha1.GroupVersion.String(),
@@ -336,11 +390,60 @@ func (s AgentRunSubmitter) buildAgentRun(
 	return run, nil
 }
 
+func buildPrompt(
+	repo Repository,
+	issue GitHubIssue,
+	comments []GitHubIssueComment,
+	commandComment GitHubIssueComment,
+	command Command,
+) string {
+	issueComments := make([]IssueComment, 0, len(comments))
+	for _, comment := range comments {
+		issueComments = append(issueComments, IssueComment{
+			ID:        comment.ID,
+			Body:      comment.Body,
+			UserLogin: comment.User.Login,
+			HTMLURL:   comment.HTMLURL,
+			CreatedAt: formatOptionalTime(comment.CreatedAt),
+			UpdatedAt: formatOptionalTime(comment.UpdatedAt),
+		})
+	}
+	return BuildPrompt(PromptInput{
+		Owner: repo.Owner,
+		Repo:  repo.Name,
+		Issue: Issue{
+			Number:  issue.Number,
+			URL:     issue.URL,
+			Title:   issue.Title,
+			Body:    issue.Body,
+			HTMLURL: issue.HTMLURL,
+		},
+		Comments: issueComments,
+		CommandComment: IssueComment{
+			ID:        commandComment.ID,
+			Body:      commandComment.Body,
+			UserLogin: commandComment.User.Login,
+			HTMLURL:   commandComment.HTMLURL,
+			CreatedAt: formatOptionalTime(commandComment.CreatedAt),
+			UpdatedAt: formatOptionalTime(commandComment.UpdatedAt),
+		},
+		Sender:                 commandComment.User.Login,
+		AdditionalInstructions: command.AdditionalInstructions,
+	})
+}
+
 func (s AgentRunSubmitter) submissionMode() SubmissionMode {
 	if s.config.Submission.Mode == "" {
 		return SubmissionModeDirect
 	}
 	return s.config.Submission.Mode
+}
+
+func (s AgentRunSubmitter) admissionMode() AdmissionMode {
+	if s.config.Submission.AdmissionMode == "" {
+		return AdmissionModeLegacy
+	}
+	return s.config.Submission.AdmissionMode
 }
 
 func (s AgentRunSubmitter) scheduleAdmissionURL() string {
