@@ -34,7 +34,12 @@ type Config struct {
 	PublicURL         string
 	ListenAddr        string
 	DefaultTargetPort int
+	Routing           RoutingConfig
 	Auth              AuthConfig
+}
+
+type RoutingConfig struct {
+	Mode string
 }
 
 type AuthConfig struct {
@@ -77,16 +82,50 @@ type GitHubConfig struct {
 }
 
 func (c Config) Validate() error {
-	if strings.TrimSpace(c.BaseDomain) == "" {
-		return fmt.Errorf("baseDomain is required")
-	}
-	if strings.Contains(c.BaseDomain, "://") {
-		return fmt.Errorf("baseDomain must be a host name, got %q", c.BaseDomain)
+	routingMode := c.routingMode()
+	switch routingMode {
+	case routingModeSubdomain:
+		if strings.TrimSpace(c.BaseDomain) == "" {
+			return fmt.Errorf("baseDomain is required when routing.mode=subdomain")
+		}
+		if strings.Contains(c.BaseDomain, "://") {
+			return fmt.Errorf("baseDomain must be a host name, got %q", c.BaseDomain)
+		}
+	case routingModePath:
+	default:
+		return fmt.Errorf("routing.mode must be %q or %q", routingModeSubdomain, routingModePath)
 	}
 	if c.PublicURL != "" {
 		parsed, err := url.Parse(c.PublicURL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return fmt.Errorf("publicURL must be an absolute URL without path, query, or fragment")
+		validRootPath := err == nil && (parsed.Path == "" || (routingMode == routingModePath && parsed.Path == "/"))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || !validRootPath || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("publicURL must be an absolute origin URL without credentials, non-root path, query, or fragment")
+		}
+	}
+	if routingMode == routingModePath {
+		parsed, err := url.Parse(c.PublicURL)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("publicURL must be an absolute HTTPS origin URL when routing.mode=path")
+		}
+		if (c.Auth.Mode == authModeOIDC || c.Auth.Mode == authModeGitHub) && !c.Auth.Session.Secure {
+			return fmt.Errorf("auth.session.secure must be true when routing.mode=path")
+		}
+		if c.Auth.Session.CookieDomain != "" {
+			return fmt.Errorf("auth.session.cookieDomain must be empty when routing.mode=path")
+		}
+		oidcCallbackPath := c.Auth.OIDC.CallbackPath
+		if oidcCallbackPath == "" {
+			oidcCallbackPath = defaultCallbackPath
+		}
+		githubCallbackPath := c.Auth.GitHub.CallbackPath
+		if githubCallbackPath == "" {
+			githubCallbackPath = defaultCallbackPath
+		}
+		if !validOAuthCallbackPath(oidcCallbackPath) {
+			return fmt.Errorf("auth.oidc.callbackPath must be an unambiguous path below /oauth2/ when routing.mode=path")
+		}
+		if !validOAuthCallbackPath(githubCallbackPath) {
+			return fmt.Errorf("auth.github.callbackPath must be an unambiguous path below /oauth2/ when routing.mode=path")
 		}
 	}
 	if c.ListenAddr == "" {
@@ -113,6 +152,13 @@ func (c Config) Validate() error {
 		return fmt.Errorf("unsupported auth.mode %q", c.Auth.Mode)
 	}
 	return nil
+}
+
+func (c Config) routingMode() string {
+	if c.Routing.Mode == "" {
+		return routingModeSubdomain
+	}
+	return c.Routing.Mode
 }
 
 func (c AuthConfig) validateCommonAuthenticated() error {
@@ -206,9 +252,16 @@ type route struct {
 }
 
 func NewServer(config Config, client ctrlclient.Client, namespace string) (*Server, error) {
+	if config.Routing.Mode == "" {
+		config.Routing.Mode = routingModeSubdomain
+	}
 	if config.Auth.Mode == "" {
 		config.Auth.Mode = authModeNone
 	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	config.PublicURL = strings.TrimRight(config.PublicURL, "/")
 	auth, err := NewAuthenticator(context.Background(), config)
 	if err != nil {
 		return nil, err
@@ -217,16 +270,26 @@ func NewServer(config Config, client ctrlclient.Client, namespace string) (*Serv
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.config.routingMode() == routingModePath {
+		if _, ok := unambiguousPath(r.URL); !ok {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	if r.URL.Path == "/healthz" {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+	if s.config.routingMode() == routingModePath && !requestMatchesPublicOrigin(r, s.config.PublicURL) {
+		http.NotFound(w, r)
 		return
 	}
 	if s.auth != nil && s.auth.HandlePublic(w, r) {
 		return
 	}
 
-	route := ParseHost(r.Host, s.config.BaseDomain)
+	route := s.parseRoute(r)
 	switch route.kind {
 	case routeDashboard:
 		principal, ok := s.authenticate(w, r)
@@ -243,6 +306,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) parseRoute(r *http.Request) route {
+	if s.config.routingMode() == routingModePath {
+		return ParsePath(r.URL)
+	}
+	return ParseHost(r.Host, s.config.BaseDomain)
 }
 
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*Principal, bool) {
@@ -273,7 +343,7 @@ func (s *Server) serveAuthorizedAgentRun(w http.ResponseWriter, r *http.Request,
 		http.NotFound(w, r)
 		return
 	}
-	s.proxyResolvedAgentRun(w, r, run)
+	s.proxyResolvedAgentRun(w, r, run, accessKey)
 }
 
 func ParseHost(host, baseDomain string) route {
@@ -309,10 +379,10 @@ func (s *Server) proxyAgentRun(w http.ResponseWriter, r *http.Request, accessKey
 		http.Error(w, "resolve AgentRun target", http.StatusInternalServerError)
 		return
 	}
-	s.proxyResolvedAgentRun(w, r, run)
+	s.proxyResolvedAgentRun(w, r, run, accessKey)
 }
 
-func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, run nvtv1alpha1.AgentRun) {
+func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, run nvtv1alpha1.AgentRun, accessKey string) {
 	target, err := s.resolveTargetForRun(r.Context(), run)
 	if err == errNoRunningPod {
 		http.Error(w, "AgentRun has no ready running pod with a pod IP", http.StatusServiceUnavailable)
@@ -325,12 +395,30 @@ func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, r
 
 	targetURL := &url.URL{Scheme: "http", Host: net.JoinHostPort(target.PodIP, strconv.Itoa(target.Port))}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	ownedCookies := gatewayCookieNames(s.config.Auth.Session.CookieName)
+	responseCookiePath := ""
+	if s.config.routingMode() == routingModePath {
+		responseCookiePath = pathCookiePrefix(accessKey)
+	}
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
+		filterUpstreamRequestCookies(req.Header, ownedCookies)
+		removeForwardingHeaders(req.Header)
+		if s.config.routingMode() == routingModePath {
+			stripPathAccessKey(req.URL, accessKey)
+			publicOrigin, _ := url.Parse(s.config.PublicURL)
+			req.Header.Set("X-Forwarded-Host", publicOrigin.Host)
+			req.Header.Set("X-Forwarded-Proto", publicOrigin.Scheme)
+			req.Header.Set("X-Forwarded-Port", publicForwardedPort(publicOrigin))
+		}
 		req.Host = targetURL.Host
 		req.URL.Scheme = targetURL.Scheme
 		req.URL.Host = targetURL.Host
+	}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		filterUpstreamResponseCookies(response, ownedCookies, responseCookiePath)
+		return nil
 	}
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 		http.Error(rw, "proxy AgentRun session", http.StatusBadGateway)
@@ -427,6 +515,9 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 		if key == "" {
 			continue
 		}
+		if s.config.routingMode() == routingModePath && (!validAccessKey(key) || reservedGatewayPath(key)) {
+			continue
+		}
 		if principal != nil && !EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run).Allowed {
 			continue
 		}
@@ -435,13 +526,17 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 			http.Error(w, "list AgentRun pods", http.StatusInternalServerError)
 			return
 		}
+		openURL := s.openURL(r, key, routable)
+		if routable && openURL == "" {
+			continue
+		}
 		items = append(items, dashboardItem{
 			DisplayName: displayName(run),
 			Phase:       string(run.Status.Phase),
 			RequestedBy: run.Annotations[RequestedByAnnotation],
 			CreatedAt:   run.CreationTimestamp.Time,
 			SourceURL:   run.Annotations[SourceURLAnnotation],
-			OpenURL:     openURL(r, key, s.config.BaseDomain, routable),
+			OpenURL:     openURL,
 			Routable:    routable,
 		})
 	}
@@ -476,9 +571,15 @@ func displayName(run nvtv1alpha1.AgentRun) string {
 	return run.Name
 }
 
-func openURL(r *http.Request, key, baseDomain string, routable bool) string {
+func (s *Server) openURL(r *http.Request, key string, routable bool) string {
 	if !routable {
 		return ""
+	}
+	if s.config.routingMode() == routingModePath {
+		if !validAccessKey(key) || reservedGatewayPath(key) {
+			return ""
+		}
+		return s.config.PublicURL + "/" + url.PathEscape(key) + "/"
 	}
 	scheme := "http"
 	if r.TLS != nil {
@@ -488,7 +589,7 @@ func openURL(r *http.Request, key, baseDomain string, routable bool) string {
 	if _, rawPort, err := net.SplitHostPort(r.Host); err == nil {
 		port = ":" + rawPort
 	}
-	return fmt.Sprintf("%s://%s.%s%s/", scheme, key, baseDomain, port)
+	return fmt.Sprintf("%s://%s.%s%s/", scheme, key, s.config.BaseDomain, port)
 }
 
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{

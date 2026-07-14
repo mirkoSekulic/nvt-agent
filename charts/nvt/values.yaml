@@ -65,6 +65,8 @@ gateway:
   replicas: 1
   baseDomain: agents.localhost
   publicURL: ""
+  routing:
+    mode: subdomain
   port: 8080
   defaultTargetPort: 4090
   auth:

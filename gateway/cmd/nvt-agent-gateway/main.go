@@ -26,6 +26,7 @@ func main() {
 	var authorizationRaw string
 	flag.StringVar(&cfg.BaseDomain, "base-domain", envString("NVT_GATEWAY_BASE_DOMAIN", "agents.localhost"), "base DNS domain for AgentRun access")
 	flag.StringVar(&cfg.PublicURL, "public-url", envString("NVT_GATEWAY_PUBLIC_URL", ""), "externally visible base URL for dashboard and OAuth callbacks")
+	flag.StringVar(&cfg.Routing.Mode, "routing-mode", envString("NVT_GATEWAY_ROUTING_MODE", "subdomain"), "routing mode: subdomain or path")
 	flag.StringVar(&cfg.ListenAddr, "listen-addr", envString("NVT_GATEWAY_LISTEN_ADDR", ":8080"), "HTTP listen address")
 	flag.IntVar(&cfg.DefaultTargetPort, "default-target-port", envInt("NVT_GATEWAY_DEFAULT_TARGET_PORT", 4090), "default AgentRun code-server target port")
 	flag.StringVar(&cfg.Auth.Mode, "auth-mode", envString("NVT_GATEWAY_AUTH_MODE", "none"), "auth mode: none, oidc, or github")
@@ -76,7 +77,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("create gateway server: %v", err)
 	}
-	log.Printf("nvt-agent-gateway listening on %s for base domain %s in namespace %s", cfg.ListenAddr, cfg.BaseDomain, namespace)
+	log.Printf("nvt-agent-gateway listening on %s with routing mode %s in namespace %s", cfg.ListenAddr, cfg.Routing.Mode, namespace)
 	if err := http.ListenAndServe(cfg.ListenAddr, server); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("serve gateway: %v", err)
 	}

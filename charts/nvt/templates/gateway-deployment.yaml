@@ -1,4 +1,29 @@
 {{- if .Values.gateway.enabled }}
+{{- if not (has .Values.gateway.routing.mode (list "subdomain" "path")) }}
+{{- fail "gateway.routing.mode must be one of subdomain or path" }}
+{{- end }}
+{{- if and (eq .Values.gateway.routing.mode "subdomain") (not .Values.gateway.baseDomain) }}
+{{- fail "gateway.baseDomain is required when gateway.routing.mode=subdomain" }}
+{{- end }}
+{{- if eq .Values.gateway.routing.mode "path" }}
+{{- if not .Values.gateway.publicURL }}
+{{- fail "gateway.publicURL is required when gateway.routing.mode=path" }}
+{{- end }}
+{{- if not (regexMatch `^https://[^/@?#]+(?::[0-9]+)?/?$` .Values.gateway.publicURL) }}
+{{- fail "gateway.publicURL must be an absolute HTTPS origin URL when gateway.routing.mode=path" }}
+{{- end }}
+{{- if and (ne .Values.gateway.auth.mode "none") (not .Values.gateway.auth.session.secure) }}
+{{- fail "gateway.auth.session.secure must be true when gateway.routing.mode=path" }}
+{{- end }}
+{{- if .Values.gateway.auth.session.cookieDomain }}
+{{- fail "gateway.auth.session.cookieDomain must be empty when gateway.routing.mode=path" }}
+{{- end }}
+{{- range $name, $callback := dict "oidc" .Values.gateway.auth.oidc.callbackPath "github" .Values.gateway.auth.github.callbackPath }}
+{{- if or (not (hasPrefix "/oauth2/" $callback)) (ne (clean $callback) $callback) (contains "%" $callback) (contains "?" $callback) (contains "#" $callback) }}
+{{- fail (printf "gateway.auth.%s.callbackPath must be an unambiguous path below /oauth2/ when gateway.routing.mode=path" $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if not (has .Values.gateway.auth.mode (list "none" "oidc" "github")) }}
 {{- fail "gateway.auth.mode must be one of none, oidc, or github" }}
 {{- end }}
@@ -50,6 +75,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --base-domain={{ .Values.gateway.baseDomain }}
+            - --routing-mode={{ .Values.gateway.routing.mode }}
             {{- if .Values.gateway.publicURL }}
             - --public-url={{ .Values.gateway.publicURL }}
             {{- end }}
@@ -131,14 +157,22 @@ spec:
             httpGet:
               path: /healthz
               port: {{ .Values.gateway.port }}
+              {{- if eq .Values.gateway.routing.mode "subdomain" }}
               httpHeaders:
                 - name: Host
                   value: {{ .Values.gateway.baseDomain | quote }}
+              {{- end }}
           readinessProbe:
             httpGet:
+              {{- if eq .Values.gateway.routing.mode "path" }}
+              path: /healthz
+              {{- else }}
               path: /
+              {{- end }}
               port: {{ .Values.gateway.port }}
+              {{- if eq .Values.gateway.routing.mode "subdomain" }}
               httpHeaders:
                 - name: Host
                   value: {{ .Values.gateway.baseDomain | quote }}
+              {{- end }}
 {{- end }}
