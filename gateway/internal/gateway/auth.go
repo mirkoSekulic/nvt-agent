@@ -458,6 +458,9 @@ func (a *Authenticator) clearCookie(w http.ResponseWriter, name string) {
 }
 
 func (a *Authenticator) safeReturnURL(r *http.Request) string {
+	if a.config.routingMode() == routingModePath {
+		return a.publicBaseURL(r) + r.URL.RequestURI()
+	}
 	return a.requestBaseURL(r) + r.URL.RequestURI()
 }
 
@@ -482,6 +485,9 @@ func (a *Authenticator) publicBaseURL(r *http.Request) string {
 }
 
 func (a *Authenticator) requestBaseURL(r *http.Request) string {
+	if a.config.routingMode() == routingModePath {
+		return strings.TrimRight(a.config.PublicURL, "/")
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -508,6 +514,24 @@ func (a *Authenticator) validateReturnURL(raw string, r *http.Request) (string, 
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", false
+	}
+	if a.config.routingMode() == routingModePath {
+		if parsed.Fragment != "" || parsed.User != nil {
+			return "", false
+		}
+		if parsed.IsAbs() {
+			publicOrigin, err := url.Parse(a.config.PublicURL)
+			if err != nil || !strings.EqualFold(parsed.Scheme, publicOrigin.Scheme) || !strings.EqualFold(parsed.Host, publicOrigin.Host) {
+				return "", false
+			}
+		} else if parsed.Host != "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+			return "", false
+		}
+		route := ParsePath(parsed)
+		if route.kind != routeDashboard && route.kind != routeAgentRun {
+			return "", false
+		}
+		return parsed.String(), true
 	}
 	if parsed.IsAbs() {
 		host := strings.ToLower(strings.TrimSuffix(stripPort(parsed.Host), "."))

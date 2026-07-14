@@ -9,6 +9,41 @@ defaults to deny whenever authentication is enabled.
 `auth.mode=none` remains the default and preserves unrestricted access to all
 routable AgentRuns, including legacy runs.
 
+## Routing modes
+
+`routing.mode=subdomain` is the default and preserves the original routing
+contract: the dashboard is served at `https://<baseDomain>/` and an AgentRun at
+`https://<access-key>.<baseDomain>/`. `baseDomain` remains required in this
+mode.
+
+`routing.mode=path` serves a dedicated configured origin instead:
+
+- `https://agents.altinn.studio/` is the dashboard;
+- `https://agents.altinn.studio/<access-key>/` is an AgentRun session;
+- `/healthz` and all `/oauth2/*` paths are reserved for the gateway.
+
+Path mode requires `publicURL` to be an HTTPS origin with no non-root path,
+query, fragment, or embedded credentials. Requests must carry that configured
+origin's Host header. Forwarded host/proto headers do not influence routing,
+links, callbacks, or return URLs. OAuth return URLs are restricted to the same
+origin and a valid dashboard or AgentRun route.
+
+The gateway removes exactly `/<access-key>` before proxying while preserving
+the remainder path, query string, and WebSocket upgrade. This behavior was
+verified with the runtime image's code-server 4.128.0: code-server rejects an
+unmodified arbitrary prefix, while its root HTML emits relative asset,
+service-worker, callback, proxy, and WebSocket paths. Re-run the real binary
+proof with:
+
+```sh
+gateway/scripts/code-server-path-smoke.sh
+```
+
+The proof loads the initial redirect and workbench HTML, fetches a referenced
+versioned JavaScript asset, and completes a WebSocket upgrade through the
+access-key route. The runtime currently resolves code-server at image build
+time, so record the resolved version when repeating this proof.
+
 Do not use SSN, `pid`, or fødselsnummer claims for authorization. Prefer
 organization, group, resource, or entitlement claims. The gateway rejects
 sensitive claim paths and logs only the decision, rule id, agent access key, and
@@ -77,6 +112,10 @@ as display data. The access token is discarded after lookup. GitHub Enterprise
 Server deployments can configure the issuer, authorization, token, and user
 URLs explicitly. GitHub and OIDC principals are never guessed or linked across
 issuers; any future account correlation requires an external explicit mapping.
+
+In path mode, leave `session.cookieDomain` empty for a host-only cookie on the
+dedicated gateway origin. Secure session cookies are mandatory in path mode;
+do not broaden the cookie to `.altinn.studio`.
 
 ## Ansattporten example
 

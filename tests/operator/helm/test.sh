@@ -16,6 +16,8 @@ GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-fail
 GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
 GATEWAY_GITHUB_RENDER="${WORKDIR}/gateway-github.yaml"
 GATEWAY_GITHUB_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-github-missing-secret-failure.txt"
+GATEWAY_PATH_RENDER="${WORKDIR}/gateway-path.yaml"
+GATEWAY_PATH_FAILURE="${WORKDIR}/gateway-path-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
 BROKER_TLS_DISABLED_RENDER="${WORKDIR}/broker-tls-disabled.yaml"
@@ -78,6 +80,12 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.authorization.rules[0].effect=allow \
   --set gateway.auth.authorization.rules[0].owner=true \
   > "${GATEWAY_GITHUB_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.routing.mode=path \
+  --set gateway.publicURL=https://agents.altinn.studio \
+  --set gateway.baseDomain= \
+  > "${GATEWAY_PATH_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.envSecretName=nvt-broker-env > "${BROKER_SECRET_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.tls.enabled=false > "${BROKER_TLS_DISABLED_RENDER}"
@@ -439,6 +447,7 @@ require_resource_namespace "${GATEWAY_RENDER}" Deployment nvt-agent-gateway cust
 require_resource_namespace "${GATEWAY_RENDER}" Service nvt-agent-gateway custom-ns
 grep -q 'type: ClusterIP' "${GATEWAY_RENDER}"
 grep -q -- '--base-domain=agents.localhost' "${GATEWAY_RENDER}"
+grep -q -- '--routing-mode=subdomain' "${GATEWAY_RENDER}"
 grep -q -- '--listen-addr=:8091' "${GATEWAY_RENDER}"
 grep -q 'containerPort: 8091' "${GATEWAY_RENDER}"
 grep -q 'targetPort: 8091' "${GATEWAY_RENDER}"
@@ -453,6 +462,30 @@ if grep -q 'secretKeyRef:' "${GATEWAY_RENDER}"; then
   echo "gateway auth.mode=none must not render auth Secret refs" >&2
   exit 1
 fi
+
+require_resource "${GATEWAY_PATH_RENDER}" Deployment nvt-agent-gateway
+require_resource "${GATEWAY_PATH_RENDER}" Service nvt-agent-gateway
+grep -q -- '--routing-mode=path' "${GATEWAY_PATH_RENDER}"
+grep -q -- '--public-url=https://agents.altinn.studio' "${GATEWAY_PATH_RENDER}"
+grep -q 'type: ClusterIP' "${GATEWAY_PATH_RENDER}"
+if grep -q 'httpHeaders:' "${GATEWAY_PATH_RENDER}"; then
+  echo "gateway path mode probes must not require a synthetic Host header" >&2
+  exit 1
+fi
+if [ "$(grep -c 'path: /healthz' "${GATEWAY_PATH_RENDER}")" -lt 2 ]; then
+  echo "gateway path mode liveness and readiness must use /healthz" >&2
+  exit 1
+fi
+for invalid_args in \
+  '--set gateway.routing.mode=unknown' \
+  '--set gateway.routing.mode=path' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=http://agents.altinn.studio' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/base'; do
+  if helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true ${invalid_args} > /dev/null 2> "${GATEWAY_PATH_FAILURE}"; then
+    echo "expected invalid gateway routing config to fail: ${invalid_args}" >&2
+    exit 1
+  fi
+done
 
 grep -q 'name: NVT_GATEWAY_AUTH_MODE' "${GATEWAY_OIDC_RENDER}"
 grep -q 'value: "oidc"' "${GATEWAY_OIDC_RENDER}"

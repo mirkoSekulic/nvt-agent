@@ -273,6 +273,41 @@ requested-by annotations are ignored. See the [gateway
 README](../../gateway/README.md) for GitHub Enterprise endpoint overrides and
 trust details.
 
+### Path routing
+
+Subdomain routing remains the default. A dedicated origin covered by an
+existing certificate can instead route sessions below opaque access-key paths:
+
+```yaml
+gateway:
+  enabled: true
+  routing:
+    mode: path
+  publicURL: https://agents.altinn.studio
+  # baseDomain is not used for request routing in path mode.
+  baseDomain: ""
+  auth:
+    mode: github
+    session:
+      existingSecret: nvt-gateway-session
+      cookieDomain: "" # host-only; do not use .altinn.studio
+      secure: true
+    github:
+      credentials:
+        existingSecret: nvt-gateway-github
+    authorization:
+      default: deny
+      rules:
+        - id: agent-owner
+          effect: allow
+          owner: true
+```
+
+This renders the dashboard at `https://agents.altinn.studio/` and sessions at
+`https://agents.altinn.studio/<access-key>/`. `publicURL` must be an HTTPS root
+origin. The Service remains `ClusterIP`; DNS, certificates, and external load
+balancer routing are deployment-owned and are not created by this chart.
+
 ## Validation
 
 ```sh
