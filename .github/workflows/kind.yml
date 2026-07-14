@@ -40,6 +40,7 @@ jobs:
           - mediated-egress
           - enforced-egress
           - transparent-egress
+          - profile-auth
     env:
       CREATE_CLUSTER: 1
       DELETE_CLUSTER: 1
@@ -103,6 +104,7 @@ jobs:
           - quota-egress
           - revocation
           - parallel-lifecycle
+          - profile-auth
     env:
       CREATE_CLUSTER: 1
       DELETE_CLUSTER: 1

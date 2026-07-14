@@ -351,6 +351,76 @@ func TestProfiledAdmissionSnapshotsConfigurationAndLifecycle(t *testing.T) {
 	}
 }
 
+func TestProfiledEnforcedZeroSecretLifecycleComposition(t *testing.T) {
+	setTLSBrokerEnv(t)
+	schedule := testProfiledAgentSchedule()
+	profile := &schedule.Spec.Profiles[0]
+	profile.Egress = nvtv1alpha1.AgentRunEgressMediated
+	profile.EgressEnforcement = true
+	profile.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "codex-default", Repositories: []string{"example/repo"},
+		Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+		EgressHosts:     []string{"api.example.test"},
+	}}}
+
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "enforced-lifecycle", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := fixture.run(t, decoded.AgentRun.Name)
+
+	if !AgentRunLiteralZeroSecret(&run) || run.Spec.ProfileProvenance.SelectedProfile != "codex-default" ||
+		len(run.Spec.Broker.Grants) != 1 || run.Spec.Broker.Grants[0].Provider != "codex-default" {
+		t.Fatalf("profiled enforced run lost selected security configuration: %#v", run.Spec)
+	}
+	storedConfig := map[string]any{}
+	if err := json.Unmarshal(run.Spec.Agent.Config.Raw, &storedConfig); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range storedConfig["plugins"].([]any) {
+		if raw.(map[string]any)["name"] == "event-webhook" {
+			t.Fatalf("enforced profile stored legacy event-webhook callback: %#v", storedConfig)
+		}
+	}
+
+	rendered, err := RenderAgentConfigYAML(&run)
+	if err != nil {
+		t.Fatalf("render enforced profiled config: %v", err)
+	}
+	renderedConfig := map[string]any{}
+	if err := yaml.Unmarshal([]byte(rendered), &renderedConfig); err != nil {
+		t.Fatalf("decode rendered config: %v", err)
+	}
+	plugins := renderedConfig["plugins"].([]any)
+	var reporter map[string]any
+	for _, raw := range plugins {
+		plugin := raw.(map[string]any)
+		switch plugin["name"] {
+		case "event-webhook":
+			t.Fatalf("enforced profile rendered legacy event-webhook callback: %#v", plugins)
+		case lifecycleReporterPlugin:
+			reporter = plugin
+		}
+	}
+	if reporter == nil {
+		t.Fatalf("enforced lifecycle reporter missing: %#v", plugins)
+	}
+	reporterConfig := reporter["config"].(map[string]any)
+	if fmt.Sprint(reporterConfig["completeOn"]) != "[plugin.work.completed]" ||
+		fmt.Sprint(reporterConfig["failOn"]) != "[plugin.work.failed]" ||
+		reporterConfig["terminationMessagePath"] != "/dev/termination-log" {
+		t.Fatalf("enforced lifecycle filters changed: %#v", reporterConfig)
+	}
+	runtimeConfig := renderedConfig["runtime"].(map[string]any)
+	proxy := runtimeConfig["proxy"].(map[string]any)
+	egress := renderedConfig["egress"].(map[string]any)
+	grants := egress["grants"].([]any)
+	if proxy["provider"] != "codex-default" || egress["enforcement"] != true || len(grants) != 1 ||
+		grants[0].(map[string]any)["provider"] != "codex-default" {
+		t.Fatalf("enforced rendering changed profile proxy/grants: %#v", renderedConfig)
+	}
+}
+
 func TestProfiledAdmissionSanitizesPrincipalAndProviderErrors(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
 	schedule.Spec.Profiles[0].Broker.Grants[0].Provider = "provider-canary-secret"
