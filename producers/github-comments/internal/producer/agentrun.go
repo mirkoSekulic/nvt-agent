@@ -4,6 +4,7 @@ package producer
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -294,8 +295,25 @@ func readAdmissionToken(path string) (string, error) {
 	}
 	token := strings.TrimSpace(string(data))
 	parts := strings.Split(token, ".")
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" || strings.ContainsAny(token, " \t\r\n") {
+	if len(parts) != 3 || strings.ContainsAny(token, " \t\r\n") {
 		return "", errors.New("invalid profiled admission token")
+	}
+	decoded := make([][]byte, len(parts))
+	for index, part := range parts {
+		if part == "" {
+			return "", errors.New("invalid profiled admission token")
+		}
+		value, decodeErr := base64.RawURLEncoding.DecodeString(part)
+		if decodeErr != nil || len(value) == 0 {
+			return "", errors.New("invalid profiled admission token")
+		}
+		decoded[index] = value
+	}
+	for _, claims := range decoded[:2] {
+		var object map[string]any
+		if json.Unmarshal(claims, &object) != nil || object == nil {
+			return "", errors.New("invalid profiled admission token")
+		}
 	}
 	return token, nil
 }

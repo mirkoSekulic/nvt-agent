@@ -21,17 +21,17 @@ func main() {
 	url := mustEnv("ADMISSION_URL")
 	switch mustEnv("MODE") {
 	case "allowed":
-		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 11, true)
-		expectProducerAdmission(url, "/var/run/nvt-tokens/wrong-audience", 12, false)
+		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 11, http.StatusCreated)
+		expectProducerAdmission(url, "/var/run/nvt-tokens/wrong-audience", 12, http.StatusUnauthorized)
 		expectInjectedRequestRejected(url, "/var/run/nvt-tokens/correct")
 	case "unlisted":
-		expectProducerAdmission(url, "/var/run/nvt-token/token", 13, false)
+		expectProducerAdmission(url, "/var/run/nvt-token/token", 13, http.StatusForbidden)
 	default:
 		fatalf("unsupported MODE")
 	}
 }
 
-func expectProducerAdmission(url, tokenFile string, issueNumber int, wantSuccess bool) {
+func expectProducerAdmission(url, tokenFile string, issueNumber, wantStatus int) {
 	baseURL, namespace, schedule := splitAdmissionURL(url)
 	cfg := producer.Config{
 		Submission: producer.SubmissionConfig{
@@ -43,7 +43,9 @@ func expectProducerAdmission(url, tokenFile string, issueNumber int, wantSuccess
 			ScheduleName:       schedule,
 		},
 	}
-	submitter := producer.NewAgentRunSubmitterWithHTTP(nil, client, cfg)
+	recorder := &statusRecordingTransport{next: http.DefaultTransport}
+	httpClient := &http.Client{Transport: recorder, Timeout: 30 * time.Second}
+	submitter := producer.NewAgentRunSubmitterWithHTTP(nil, httpClient, cfg)
 	created, _, err := submitter.Submit(
 		context.Background(),
 		producer.Repository{Owner: "fixture", Name: "profile-auth"},
@@ -61,12 +63,28 @@ func expectProducerAdmission(url, tokenFile string, issueNumber int, wantSuccess
 		},
 		producer.Command{Prefix: "/nvtagent", AdditionalInstructions: "verify profile auth"},
 	)
-	if wantSuccess && (err != nil || !created) {
+	if recorder.status != wantStatus {
+		fatalf("profiled producer admission status=%d want=%d", recorder.status, wantStatus)
+	}
+	if wantStatus == http.StatusCreated && (err != nil || !created) {
 		fatalf("profiled producer admission failed: created=%v err=%v", created, err)
 	}
-	if !wantSuccess && err == nil {
+	if wantStatus != http.StatusCreated && err == nil {
 		fatalf("profiled producer admission unexpectedly succeeded")
 	}
+}
+
+type statusRecordingTransport struct {
+	next   http.RoundTripper
+	status int
+}
+
+func (t *statusRecordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.next.RoundTrip(request)
+	if response != nil {
+		t.status = response.StatusCode
+	}
+	return response, err
 }
 
 func splitAdmissionURL(value string) (string, string, string) {

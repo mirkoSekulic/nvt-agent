@@ -132,10 +132,10 @@ func TestSubmitScheduleAdmissionPostsAdmissionRequest(t *testing.T) {
 }
 
 func TestSubmitProfiledScheduleAdmissionSendsOnlyWorkPrincipalAndPrompt(t *testing.T) {
-	tokenFile := writeTestAdmissionToken(t, "first.header.signature")
+	tokenFile := writeTestAdmissionToken(t, testAdmissionToken("c2lnMQ"))
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if authorization := request.Header.Get("Authorization"); authorization != "Bearer first.header.signature" {
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer "+testAdmissionToken("c2lnMQ") {
 			t.Fatalf("Authorization = %q", authorization)
 		}
 		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
@@ -187,7 +187,9 @@ func TestSubmitProfiledScheduleAdmissionSendsOnlyWorkPrincipalAndPrompt(t *testi
 }
 
 func TestProfiledAdmissionSubjectDoesNotDependOnLoginAndTokenRotates(t *testing.T) {
-	tokenFile := writeTestAdmissionToken(t, "one.header.signature")
+	firstToken := testAdmissionToken("c2lnMQ")
+	secondToken := testAdmissionToken("c2lnMg")
+	tokenFile := writeTestAdmissionToken(t, firstToken)
 	var authorizations []string
 	var subjects []string
 	var displayNames []string
@@ -206,7 +208,7 @@ func TestProfiledAdmissionSubjectDoesNotDependOnLoginAndTokenRotates(t *testing.
 	submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
 	for index, login := range []string{"old-login", "new-login"} {
 		if index == 1 {
-			if err := os.WriteFile(tokenFile, []byte("two.header.signature\n"), 0o600); err != nil {
+			if err := os.WriteFile(tokenFile, []byte(secondToken+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -221,13 +223,13 @@ func TestProfiledAdmissionSubjectDoesNotDependOnLoginAndTokenRotates(t *testing.
 	if !reflect.DeepEqual(subjects, []string{"99", "99"}) || !reflect.DeepEqual(displayNames, []string{"old-login", "new-login"}) {
 		t.Fatalf("subjects=%v displayNames=%v", subjects, displayNames)
 	}
-	if !reflect.DeepEqual(authorizations, []string{"Bearer one.header.signature", "Bearer two.header.signature"}) {
+	if !reflect.DeepEqual(authorizations, []string{"Bearer " + firstToken, "Bearer " + secondToken}) {
 		t.Fatalf("Authorization headers = %#v", authorizations)
 	}
 }
 
 func TestProfiledAdmissionInvalidIdentityAndTokenFailBeforeHTTP(t *testing.T) {
-	secret := "canary.header.secret"
+	secret := testAdmissionToken("Y2FuYXJ5")
 	tokenFile := writeTestAdmissionToken(t, secret)
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -248,6 +250,9 @@ func TestProfiledAdmissionInvalidIdentityAndTokenFailBeforeHTTP(t *testing.T) {
 		{name: "unreadable token", authorID: 1, tokenPath: t.TempDir()},
 		{name: "empty token", authorID: 1, tokenPath: writeTestAdmissionToken(t, "")},
 		{name: "malformed token", authorID: 1, tokenPath: writeTestAdmissionToken(t, secret+" extra")},
+		{name: "invalid base64url punctuation", authorID: 1, tokenPath: writeTestAdmissionToken(t, "eyJhbGciOiJSUzI1NiJ9.e30.c2ln!")},
+		{name: "padded base64url", authorID: 1, tokenPath: writeTestAdmissionToken(t, "eyJhbGciOiJSUzI1NiJ9.e30=.c2ln")},
+		{name: "non-JSON claims", authorID: 1, tokenPath: writeTestAdmissionToken(t, "aGVhZA.e30.c2ln")},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -270,7 +275,7 @@ func TestProfiledAdmissionInvalidIdentityAndTokenFailBeforeHTTP(t *testing.T) {
 func TestProfiledAdmissionNeverFallsBackToLegacy(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			tokenFile := writeTestAdmissionToken(t, "test.header.signature")
+			tokenFile := writeTestAdmissionToken(t, testAdmissionToken("c2ln"))
 			requests := 0
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 				requests++
@@ -720,6 +725,10 @@ func writeTestAdmissionToken(t *testing.T, token string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func testAdmissionToken(signature string) string {
+	return "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJudnQtb3BlcmF0b3IifQ." + signature
 }
 
 func sortedMapKeys(values map[string]any) []string {
