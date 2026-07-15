@@ -349,7 +349,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	var preparedFiles []preparedPlaceholderFile
-	if AgentRunLiteralZeroSecret(&agentRun) && existingPod == nil {
+	if AgentRunLiteralZeroSecret(&agentRun) {
 		preparedFiles, err = r.preparePlaceholderFiles(ctx, &agentRun)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -648,14 +648,16 @@ func (r *AgentRunReconciler) preparePlaceholderFiles(ctx context.Context, agentR
 	configKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentConfigMapName(agentRun.Name)}
 	if err := r.Get(ctx, configKey, existing); err == nil {
 		if metav1.IsControlledBy(existing, agentRun) && existing.Annotations[agentConfigPlaceholderCacheAnnotation] == cacheKey {
-			files, loadErr := loadPreparedPlaceholderFiles(existing.Data[preparedPlaceholderFilesKey])
-			if loadErr != nil {
-				return nil, fmt.Errorf("load cached prepared placeholder files from ConfigMap %s/%s: %w", existing.Namespace, existing.Name, loadErr)
+			if raw := existing.Data[preparedPlaceholderFilesKey]; strings.TrimSpace(raw) != "" {
+				files, loadErr := loadPreparedPlaceholderFiles(raw)
+				if loadErr != nil {
+					return nil, fmt.Errorf("load cached prepared placeholder files from ConfigMap %s/%s: %w", existing.Namespace, existing.Name, loadErr)
+				}
+				if len(files) == 0 {
+					return nil, fmt.Errorf("cached AgentRun config ConfigMap %s/%s contains no prepared placeholder files", existing.Namespace, existing.Name)
+				}
+				return files, nil
 			}
-			if len(files) == 0 {
-				return nil, fmt.Errorf("cached AgentRun config ConfigMap %s/%s is missing prepared placeholder files", existing.Namespace, existing.Name)
-			}
-			return files, nil
 		}
 	} else if !errors.IsNotFound(err) {
 		return nil, fmt.Errorf("get AgentRun config ConfigMap for placeholder cache: %w", err)

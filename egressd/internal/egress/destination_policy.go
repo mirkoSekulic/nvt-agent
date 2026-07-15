@@ -61,32 +61,49 @@ func (p destinationPolicy) allowed(address netip.Addr) bool {
 	return true
 }
 
-func resolveAllowedAddress(ctx context.Context, resolver IPResolver, policy destinationPolicy, host string) (netip.Addr, error) {
+func resolveAllowedAddresses(ctx context.Context, resolver IPResolver, policy destinationPolicy, host string) ([]netip.Addr, error) {
 	if literal, err := netip.ParseAddr(host); err == nil {
 		literal = literal.Unmap()
 		if !policy.allowed(literal) {
-			return netip.Addr{}, fmt.Errorf("destination address is denied")
+			return nil, fmt.Errorf("destination address is denied")
 		}
-		return literal, nil
+		return []netip.Addr{literal}, nil
 	}
 	addresses, err := resolver.LookupNetIP(ctx, "ip", host)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("resolve destination: %w", err)
+		return nil, fmt.Errorf("resolve destination: %w", err)
 	}
 	if len(addresses) == 0 {
-		return netip.Addr{}, fmt.Errorf("resolve destination: no addresses")
+		return nil, fmt.Errorf("resolve destination: no addresses")
 	}
-	var selected netip.Addr
+	validated := make([]netip.Addr, 0, len(addresses))
+	seen := make(map[netip.Addr]struct{}, len(addresses))
 	for _, candidate := range addresses {
 		candidate = candidate.Unmap()
 		if !policy.allowed(candidate) {
-			return netip.Addr{}, fmt.Errorf("destination resolution contains denied address")
+			return nil, fmt.Errorf("destination resolution contains denied address")
 		}
-		if !selected.IsValid() {
-			selected = candidate
+		if _, exists := seen[candidate]; !exists {
+			seen[candidate] = struct{}{}
+			validated = append(validated, candidate)
 		}
 	}
-	return selected, nil
+	// Kubernetes kind and many production clusters are IPv4-only even when
+	// public DNS returns IPv6 first. Preserve resolver order within each family
+	// while preferring IPv4, then let the caller fall back across the complete
+	// validated set without another DNS lookup.
+	ordered := make([]netip.Addr, 0, len(validated))
+	for _, candidate := range validated {
+		if candidate.Is4() {
+			ordered = append(ordered, candidate)
+		}
+	}
+	for _, candidate := range validated {
+		if !candidate.Is4() {
+			ordered = append(ordered, candidate)
+		}
+	}
+	return ordered, nil
 }
 
 var _ IPResolver = (*net.Resolver)(nil)

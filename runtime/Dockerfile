@@ -7,7 +7,13 @@ ENV NVT_STATE_DIR=/root/.nvt-agent
 ENV CODE_SERVER_PORT=4090
 ENV PATH=/root/.local/bin:/root/bin:/root/.local/share/mise/shims:$PATH
 
-RUN apt-get update \
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec \
+    sed -i \
+      -e 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g' \
+      -e 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' \
+      -e 's|http://security.ubuntu.com|https://security.ubuntu.com|g' \
+      {} + \
+  && apt-get update \
   && apt-get install -y --no-install-recommends \
     python3-yaml \
     ca-certificates \

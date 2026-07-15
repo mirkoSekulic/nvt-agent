@@ -459,6 +459,22 @@ func TestExecutionProfileDeepCopyIsolation(t *testing.T) {
 	}
 }
 
+func TestAgentRunBrokerGrantDeepCopyPreservesEmptySlices(t *testing.T) {
+	grant := nvtv1alpha1.AgentRunBrokerGrant{
+		Provider:     "codex-main",
+		Repositories: []string{},
+		EgressHosts:  []string{},
+	}
+
+	copy := grant.DeepCopy()
+	if copy.Repositories == nil {
+		t.Fatal("deep copy changed explicit empty repositories into nil")
+	}
+	if copy.EgressHosts == nil {
+		t.Fatal("deep copy changed explicit empty egress hosts into nil")
+	}
+}
+
 func TestAgentRunProfileProvenanceCRDSchema(t *testing.T) {
 	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
 	if err != nil {
