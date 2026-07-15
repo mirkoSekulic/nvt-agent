@@ -1,0 +1,82 @@
+{{- if .Values.producer.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nvt.producerFullname" . }}
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.producerLabels" . | nindent 4 }}
+data:
+  config.yaml: |
+    commandPrefixes:
+      {{- toYaml .Values.producer.commandPrefixes | nindent 6 }}
+    allowedAuthors:
+      {{- toYaml .Values.producer.allowedAuthors | nindent 6 }}
+    pollInterval: {{ .Values.producer.pollInterval | quote }}
+    operatorCallbackBaseURL: {{ .Values.producer.operatorCallbackBaseURL | quote }}
+    submission:
+      mode: {{ .Values.producer.submission.mode | quote }}
+      admissionMode: {{ .Values.producer.submission.admissionMode | quote }}
+      admissionBaseURL: {{ .Values.producer.submission.admissionBaseURL | quote }}
+      {{- if eq .Values.producer.submission.admissionMode "profiled" }}
+      admissionTokenFile: {{ .Values.producer.submission.admissionTokenFile | quote }}
+      {{- end }}
+      scheduleNamespace: {{ default (include "nvt.producerAgentRunNamespace" .) .Values.producer.submission.scheduleNamespace | quote }}
+      scheduleName: {{ .Values.producer.submission.scheduleName | quote }}
+    idempotency:
+      scope: {{ .Values.producer.idempotency.scope | quote }}
+    state:
+      sqlitePath: {{ .Values.producer.state.sqlitePath | quote }}
+    repositories:
+      {{- toYaml .Values.producer.repositories | nindent 6 }}
+    githubApp:
+      appID: {{ .Values.producer.githubApp.appID }}
+      installationID: {{ .Values.producer.githubApp.installationID }}
+      privateKeyPath: {{ include "nvt.producerPrivateKeyPath" . | quote }}
+    agentRun:
+      namespace: {{ include "nvt.producerAgentRunNamespace" . | quote }}
+      runtimeImage: {{ default (include "nvt.runtimeImage" .) .Values.producer.agentRun.runtimeImage | quote }}
+      runtimeType: {{ .Values.producer.agentRun.runtimeType | quote }}
+      runtimeAutonomy: {{ .Values.producer.agentRun.runtimeAutonomy | quote }}
+      workspaceMode: {{ .Values.producer.agentRun.workspaceMode | quote }}
+      {{- with .Values.producer.agentRun.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.producer.agentRun.runtimeAuthSecret }}
+      runtimeAuthSecret: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.producer.agentRun.runtimeAuthMountPath }}
+      runtimeAuthMountPath: {{ . | quote }}
+      {{- end }}
+      {{- $ttl := dict }}
+      {{- if kindIs "map" .Values.producer.agentRun.ttl }}
+      {{- $ttl = .Values.producer.agentRun.ttl }}
+      {{- end }}
+      {{- $activeDeadlineSeconds := get $ttl "activeDeadlineSeconds" }}
+      {{- $completedTTLSeconds := get $ttl "completedTTLSeconds" }}
+      {{- $failedTTLSeconds := get $ttl "failedTTLSeconds" }}
+      {{- $runRetentionSeconds := get $ttl "runRetentionSeconds" }}
+      {{- $hasActiveDeadlineSeconds := and (hasKey $ttl "activeDeadlineSeconds") (ne $activeDeadlineSeconds nil) }}
+      {{- $hasCompletedTTLSeconds := and (hasKey $ttl "completedTTLSeconds") (ne $completedTTLSeconds nil) }}
+      {{- $hasFailedTTLSeconds := and (hasKey $ttl "failedTTLSeconds") (ne $failedTTLSeconds nil) }}
+      {{- $hasRunRetentionSeconds := and (hasKey $ttl "runRetentionSeconds") (ne $runRetentionSeconds nil) }}
+      {{- if or $hasActiveDeadlineSeconds $hasCompletedTTLSeconds $hasFailedTTLSeconds $hasRunRetentionSeconds }}
+      ttl:
+        {{- if $hasActiveDeadlineSeconds }}
+        activeDeadlineSeconds: {{ int64 $activeDeadlineSeconds }}
+        {{- end }}
+        {{- if $hasCompletedTTLSeconds }}
+        completedTTLSeconds: {{ int64 $completedTTLSeconds }}
+        {{- end }}
+        {{- if $hasFailedTTLSeconds }}
+        failedTTLSeconds: {{ int64 $failedTTLSeconds }}
+        {{- end }}
+        {{- if $hasRunRetentionSeconds }}
+        runRetentionSeconds: {{ int64 $runRetentionSeconds }}
+        {{- end }}
+      {{- end }}
+      brokerGrants:
+        {{- toYaml .Values.producer.agentRun.brokerGrants | nindent 8 }}
+    agentConfig:
+      {{- toYaml .Values.producer.agentConfig | nindent 6 }}
+{{- end }}

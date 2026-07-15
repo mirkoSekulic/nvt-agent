@@ -167,7 +167,7 @@ These Secrets are separate on purpose:
 - `operator-codex-auth-secret` creates the Codex runtime auth Secret consumed
   by AgentRun Pods through `spec.runtimeAuth.secretName`.
 - `github-comments-producer-secret` creates the GitHub App private key Secret
-  consumed by `charts/nvt-github-comments-producer`.
+  consumed by the optional `producer` resources in `charts/nvt`.
 - `broker-env-secret` creates the broker env Secret consumed by the core
   `charts/nvt` broker deployment through `broker.envSecretName`.
 

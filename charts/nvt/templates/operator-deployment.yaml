@@ -18,8 +18,8 @@ spec:
       serviceAccountName: nvt-operator
       containers:
         - name: manager
-          image: {{ .Values.operator.image | quote }}
-          imagePullPolicy: IfNotPresent
+          image: {{ include "nvt.image" (dict "root" . "image" .Values.operator.image) | quote }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
           args:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
@@ -30,9 +30,9 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: NVT_EGRESSD_IMAGE
-              value: {{ .Values.egress.egressdImage | quote }}
+              value: {{ include "nvt.image" (dict "root" . "image" .Values.egress.egressd.image) | quote }}
             - name: NVT_CAPTURED_IMAGE
-              value: {{ .Values.egress.capturedImage | quote }}
+              value: {{ include "nvt.image" (dict "root" . "image" .Values.egress.captured.image) | quote }}
             - name: NVT_NETWORK_POLICY_CAPABLE
               value: {{ .Values.egress.networkPolicyCapable | quote }}
             - name: NVT_EGRESS_DENY_CIDRS

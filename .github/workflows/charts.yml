@@ -1,103 +1,72 @@
-name: charts
+name: coordinated release
 
 on:
   pull_request:
     paths:
-      - "charts/nvt/**"
-      - "charts/nvt-github-comments-producer/**"
+      - "charts/**"
       - ".github/workflows/charts.yml"
       - ".github/scripts/chart-version-exists.sh"
+      - ".github/scripts/release-*.sh"
+      - "tests/operator/helm/**"
   push:
     branches:
       - main
     paths:
       - "charts/nvt/**"
-      - "charts/nvt-github-comments-producer/**"
-      - ".github/workflows/charts.yml"
-      - ".github/scripts/chart-version-exists.sh"
   workflow_dispatch:
-    inputs:
-      chart:
-        description: Chart to publish (use all for the initial publication)
-        required: true
-        default: all
-        type: choice
-        options:
-          - all
-          - nvt
-          - nvt-github-comments-producer
 
 permissions:
   contents: read
   packages: read
 
 concurrency:
-  group: charts-${{ github.ref }}
+  group: nvt-coordinated-release
   cancel-in-progress: false
 
 jobs:
   validate:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
-      - name: Validate changed chart versions and packages
+      - name: Validate coordinated chart release
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-
-          chart_version() {
-            awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "$1/Chart.yaml"
-          }
-
+          eval "$(bash .github/scripts/release-metadata.sh charts/nvt "${HEAD_SHA}")"
           merge_base="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
-          changed=0
-          mkdir -p dist
-          for chart in charts/nvt charts/nvt-github-comments-producer; do
-            if git diff --quiet "${merge_base}" "${HEAD_SHA}" -- "${chart}"; then
-              continue
-            fi
-            changed=1
-            chart_name="${chart#charts/}"
-            version="$(chart_version "${chart}")"
-            previous_version="$(git show "${merge_base}:${chart}/Chart.yaml" 2>/dev/null | awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }')"
-            if [[ -z "${version}" ]]; then
-              echo "::error file=${chart}/Chart.yaml::missing chart version"
-              exit 1
-            fi
-            if [[ "${version}" == "${previous_version}" ]]; then
-              echo "::error file=${chart}/Chart.yaml::${chart} changed without a chart version bump (${version})"
+          if ! git diff --quiet "${merge_base}" "${HEAD_SHA}" -- charts/nvt; then
+            previous_version="$(git show "${merge_base}:charts/nvt/Chart.yaml" | awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }')"
+            if [[ "${VERSION}" == "${previous_version}" ]]; then
+              echo "::error file=charts/nvt/Chart.yaml::charts/nvt changed without a chart version bump (${VERSION})"
               exit 1
             fi
             if bash .github/scripts/chart-version-exists.sh \
-              "${GITHUB_REPOSITORY_OWNER}" "${chart_name}" "${version}"; then
-              echo "::error file=${chart}/Chart.yaml::chart version ${version} is already published"
+              "${GITHUB_REPOSITORY_OWNER}" nvt "${VERSION}"; then
+              echo "::error file=charts/nvt/Chart.yaml::chart version ${VERSION} is already published"
               exit 1
             else
               status=$?
-              if [[ "${status}" != "1" ]]; then
-                exit "${status}"
-              fi
+              [[ "${status}" == "1" ]] || exit "${status}"
             fi
-            helm lint "${chart}"
-            helm package "${chart}" --destination dist
-          done
-
-          if [[ "${changed}" == "0" ]]; then
-            echo "No chart content changed; nothing to validate."
           fi
+          helm lint charts/nvt
+          mkdir -p dist
+          helm package charts/nvt --app-version "${RELEASE_TAG}" --destination dist
+          bash .github/scripts/release-scripts-test.sh
+          bash tests/operator/helm/test.sh
 
   publish:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -106,69 +75,71 @@ jobs:
         with:
           fetch-depth: 0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+      - name: Derive the coordinated release identity
+        run: |
+          set -euo pipefail
+          bash .github/scripts/release-metadata.sh charts/nvt "${GITHUB_SHA}" >>"${GITHUB_ENV}"
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: |
-          echo "${GHCR_TOKEN}" | helm registry login ghcr.io \
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io \
             --username "${GITHUB_ACTOR}" \
             --password-stdin
-      - name: Package and publish new chart versions
+          printf '%s' "${GHCR_TOKEN}" | helm registry login ghcr.io \
+            --username "${GITHUB_ACTOR}" \
+            --password-stdin
+      - name: Preflight chart version immutability
         env:
           GH_TOKEN: ${{ github.token }}
-          REQUESTED_CHART: ${{ inputs.chart }}
         run: |
           set -euo pipefail
-
-          chart_version() {
-            awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "$1/Chart.yaml"
-          }
-
-          chart_selected() {
-            local chart_name="$1"
-            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-              [[ "${REQUESTED_CHART}" == "all" || "${REQUESTED_CHART}" == "${chart_name}" ]]
-              return
-            fi
-            return 0
-          }
-
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          repository="ghcr.io/${owner}/helm"
-          mkdir -p dist
-          publish_charts=()
-
-          for chart_name in nvt nvt-github-comments-producer; do
-            if ! chart_selected "${chart_name}"; then
-              continue
-            fi
-            chart="charts/${chart_name}"
-            version="$(chart_version "${chart}")"
-            if [[ -z "${version}" ]]; then
-              echo "::error file=${chart}/Chart.yaml::missing chart version"
+          if bash .github/scripts/chart-version-exists.sh "${owner}" nvt "${VERSION}"; then
+            mkdir -p preflight/dist preflight/expected preflight/published
+            helm package charts/nvt --app-version "${RELEASE_TAG}" --destination preflight/dist
+            tar -xzf "preflight/dist/nvt-${VERSION}.tgz" -C preflight/expected
+            helm pull "oci://ghcr.io/${owner}/helm/nvt" --version "${VERSION}" --untar --untardir preflight/published
+            if ! diff -ru preflight/expected/nvt preflight/published/nvt; then
+              echo "::error::conflicting immutable Helm chart version nvt:${VERSION}"
               exit 1
             fi
-            if bash .github/scripts/chart-version-exists.sh \
-              "${owner}" "${chart_name}" "${version}"; then
-              echo "Chart ${chart_name}:${version} is already published; skipping."
-              continue
-            else
-              status=$?
-              if [[ "${status}" != "1" ]]; then
-                exit "${status}"
-              fi
-            fi
-            helm lint "${chart}"
-            helm package "${chart}" --destination dist
-            publish_charts+=("${chart_name}")
-          done
+          else
+            status=$?
+            [[ "${status}" == "1" ]] || exit "${status}"
+          fi
+      - name: Publish and verify coordinated images
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          bash .github/scripts/release-images.sh \
+            "${owner}" "${RELEASE_TAG}" "${REVISION}" "https://github.com/${GITHUB_REPOSITORY}"
+      - name: Publish the chart last
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          repository="ghcr.io/${owner}/helm"
+          mkdir -p dist expected published
+          helm lint charts/nvt
+          helm package charts/nvt --app-version "${RELEASE_TAG}" --destination dist
+          package="dist/nvt-${VERSION}.tgz"
 
-          if [[ "${#publish_charts[@]}" == "0" ]]; then
-            echo "All selected chart versions are already published."
+          if bash .github/scripts/chart-version-exists.sh "${owner}" nvt "${VERSION}"; then
+            tar -xzf "${package}" -C expected
+            helm pull "oci://${repository}/nvt" --version "${VERSION}" --untar --untardir published
+            if ! diff -ru expected/nvt published/nvt; then
+              echo "::error::conflicting immutable Helm chart version nvt:${VERSION}"
+              exit 1
+            fi
+            echo "Verified existing nvt:${VERSION}; chart publication is already complete."
             exit 0
+          else
+            status=$?
+            [[ "${status}" == "1" ]] || exit "${status}"
           fi
 
-          for chart_name in "${publish_charts[@]}"; do
-            version="$(chart_version "charts/${chart_name}")"
-            helm push "dist/${chart_name}-${version}.tgz" "oci://${repository}"
-          done
+          # release-images.sh has already verified all seven exact manifests.
+          helm push "${package}" "oci://${repository}"

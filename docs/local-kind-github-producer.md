@@ -52,41 +52,37 @@ agentSchedule:
   maxParallelism: 1
 ```
 
-Create `values.github-comments.yaml` for the producer:
+Create `values.github-comments.yaml` for the producer block in the main chart:
 
 ```yaml
-allowedAuthors: [YOUR_GITHUB_LOGIN]
-repositories:
-  - owner: OWNER
-    name: REPO
-
-githubApp:
-  appID: 123456
-  installationID: 12345678
-  existingSecret: nvt-github-app
-
-submission:
-  mode: scheduleAdmission
-  admissionBaseURL: http://nvt-operator:8082
-  scheduleName: default
-
-idempotency:
-  scope: comment
-
-agentRun:
-  namespace: nvt
-  runtimeImage: nvt-agent-runtime:latest
-  runtimeType: codex
-  runtimeAutonomy: trusted-local
-  runtimeAuthSecret: codex-auth
-  brokerGrants:
-    - provider: github-main-app
-      repositories: [OWNER/REPO]
+producer:
+  allowedAuthors: [YOUR_GITHUB_LOGIN]
+  repositories:
+    - owner: OWNER
+      name: REPO
+  githubApp:
+    appID: 123456
+    installationID: 12345678
+    existingSecret: nvt-github-app
+  submission:
+    mode: scheduleAdmission
+    admissionBaseURL: http://nvt-operator:8082
+    scheduleName: default
+  idempotency:
+    scope: comment
+  agentRun:
+    namespace: nvt
+    runtimeImage: nvt-agent-runtime:latest
+    runtimeType: codex
+    runtimeAutonomy: trusted-local
+    runtimeAuthSecret: codex-auth
+    brokerGrants:
+      - provider: github-main-app
+        repositories: [OWNER/REPO]
 ```
 
-Add runtime plugins under `agentConfig` as needed. The complete supported
-values and checkout/watcher example live in the
-[producer chart README](../charts/nvt-github-comments-producer/README.md).
+Add runtime plugins under `producer.agentConfig` as needed. The complete
+supported values live in [`charts/nvt/values.yaml`](../charts/nvt/values.yaml).
 
 Use `idempotency.scope: comment` for repeated local tests. Production-like
 issue scope permits one active PR-creation intent per issue.

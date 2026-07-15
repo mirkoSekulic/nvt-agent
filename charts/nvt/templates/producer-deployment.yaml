@@ -1,0 +1,105 @@
+{{- if .Values.producer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nvt.producerFullname" . }}
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.producerLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.producer.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nvt.producerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nvt.producerSelectorLabels" . | nindent 8 }}
+        {{- with .Values.producer.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.producer.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nvt.producerServiceAccountName" . }}
+      {{- if ne .Values.producer.submission.mode "direct" }}
+      automountServiceAccountToken: false
+      {{- end }}
+      {{- if and (eq .Values.producer.submission.mode "scheduleAdmission") (eq .Values.producer.submission.admissionMode "profiled") }}
+      {{- $expiration := int .Values.producer.submission.tokenExpirationSeconds }}
+      {{- if or (lt $expiration 600) (gt $expiration 86400) }}
+      {{- fail "producer.submission.tokenExpirationSeconds must be between 600 and 86400" }}
+      {{- end }}
+      securityContext:
+        fsGroup: 65532
+      {{- end }}
+      {{- with .Values.producer.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: github-comments-producer
+          image: {{ include "nvt.image" (dict "root" . "image" .Values.producer.image) | quote }}
+          imagePullPolicy: {{ .Values.producer.image.pullPolicy }}
+          args:
+            - --config=/etc/nvt-github-comments/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nvt-github-comments
+              readOnly: true
+            - name: github-app
+              mountPath: {{ .Values.producer.githubApp.privateKeyMountPath | quote }}
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/nvt-github-comments
+            {{- if and (eq .Values.producer.submission.mode "scheduleAdmission") (eq .Values.producer.submission.admissionMode "profiled") }}
+            - name: operator-admission-token
+              mountPath: {{ dir .Values.producer.submission.admissionTokenFile | quote }}
+              readOnly: true
+            {{- end }}
+          {{- with .Values.producer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.producer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.producer.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.producer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "nvt.producerFullname" . }}
+        - name: github-app
+          secret:
+            secretName: {{ .Values.producer.githubApp.existingSecret | quote }}
+            items:
+              - key: {{ .Values.producer.githubApp.privateKeyKey | quote }}
+                path: {{ .Values.producer.githubApp.privateKeyKey | quote }}
+        - name: state
+          {{- if .Values.producer.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "nvt.producerStateClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if and (eq .Values.producer.submission.mode "scheduleAdmission") (eq .Values.producer.submission.admissionMode "profiled") }}
+        - name: operator-admission-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: nvt-operator
+                  expirationSeconds: {{ int .Values.producer.submission.tokenExpirationSeconds }}
+                  path: {{ base .Values.producer.submission.admissionTokenFile | quote }}
+        {{- end }}
+{{- end }}

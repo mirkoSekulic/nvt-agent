@@ -31,6 +31,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/part-of: nvt
 {{- end -}}
 
+{{- define "nvt.image" -}}
+{{- printf "%s:%s" .image.repository (default .root.Chart.AppVersion .image.tag) -}}
+{{- end -}}
+
+{{- define "nvt.runtimeImage" -}}
+{{- include "nvt.image" (dict "root" . "image" .Values.runtime.image) -}}
+{{- end -}}
+
 {{- define "nvt.brokerLabels" -}}
 {{ include "nvt.labels" . }}
 app.kubernetes.io/name: nvt-broker
@@ -65,6 +73,50 @@ app.kubernetes.io/component: gateway
 {{ include "nvt.selectorLabels" . }}
 app.kubernetes.io/name: nvt-agent-gateway
 app.kubernetes.io/component: gateway
+{{- end -}}
+
+{{- define "nvt.producerName" -}}
+{{- default "github-comments-producer" .Values.producer.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "nvt.producerFullname" -}}
+{{- if .Values.producer.fullnameOverride -}}
+{{- .Values.producer.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" (include "nvt.fullname" .) (include "nvt.producerName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "nvt.producerLabels" -}}
+{{ include "nvt.labels" . }}
+app.kubernetes.io/name: {{ include "nvt.producerName" . }}
+app.kubernetes.io/component: github-comments-producer
+{{- end -}}
+
+{{- define "nvt.producerSelectorLabels" -}}
+{{ include "nvt.selectorLabels" . }}
+app.kubernetes.io/name: {{ include "nvt.producerName" . }}
+app.kubernetes.io/component: github-comments-producer
+{{- end -}}
+
+{{- define "nvt.producerServiceAccountName" -}}
+{{- if .Values.producer.serviceAccount.create -}}
+{{- default (include "nvt.producerFullname" .) .Values.producer.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.producer.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "nvt.producerAgentRunNamespace" -}}
+{{- default (include "nvt.namespace" .) .Values.producer.agentRun.namespace -}}
+{{- end -}}
+
+{{- define "nvt.producerStateClaimName" -}}
+{{- default (printf "%s-state" (include "nvt.producerFullname" .)) .Values.producer.persistence.existingClaim -}}
+{{- end -}}
+
+{{- define "nvt.producerPrivateKeyPath" -}}
+{{- printf "%s/%s" (.Values.producer.githubApp.privateKeyMountPath | trimSuffix "/") .Values.producer.githubApp.privateKeyKey -}}
 {{- end -}}
 
 {{- /*

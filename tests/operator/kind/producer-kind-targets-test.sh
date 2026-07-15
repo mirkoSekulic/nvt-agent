@@ -43,7 +43,7 @@ EXPECTED_CLUSTER="poc-cluster"
 export TOOL_LOG EXPECTED_CLUSTER
 
 VALUES_FILE="${WORKDIR}/values.github-comments.yaml"
-printf 'repositories: []\n' >"${VALUES_FILE}"
+printf 'producer:\n  repositories: []\n' >"${VALUES_FILE}"
 
 PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-build PRODUCER_IMAGE=custom-producer:test >"${WORKDIR}/build.out"
 grep -q -- 'docker build -f producers/github-comments/Dockerfile -t custom-producer:test .' "${TOOL_LOG}"
@@ -73,12 +73,12 @@ grep -q -- 'kind load docker-image custom-gateway:test --name poc-cluster' "${TO
 : >"${TOOL_LOG}"
 PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-install \
   PRODUCER_RELEASE=producer-test \
-  PRODUCER_CHART=charts/nvt-github-comments-producer \
+  PRODUCER_CHART=charts/nvt \
   PRODUCER_VALUES="${VALUES_FILE}" \
   NAMESPACE=producer-ns \
   KUBECTL_CONTEXT=kind-poc-cluster \
   ROLLOUT_TIMEOUT=12s >"${WORKDIR}/install.out"
-grep -q -- 'helm upgrade --install producer-test charts/nvt-github-comments-producer --kube-context kind-poc-cluster -n producer-ns --create-namespace -f '"${VALUES_FILE}"' --wait --timeout 12s' "${TOOL_LOG}"
+grep -q -- 'helm upgrade --install producer-test charts/nvt --kube-context kind-poc-cluster -n producer-ns --create-namespace --reuse-values --set producer.enabled=true -f '"${VALUES_FILE}"' --wait --timeout 12s' "${TOOL_LOG}"
 
 if PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-install \
   PRODUCER_VALUES="${WORKDIR}/missing.yaml" >"${WORKDIR}/missing.out" 2>"${WORKDIR}/missing.err"; then
@@ -107,7 +107,7 @@ PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" -n operator-kind-install \
   GATEWAY_IMAGE=dry-gateway:test >"${WORKDIR}/dry-operator-gateway-install.out"
 grep -q -- 'docker build -f gateway/Dockerfile -t "dry-gateway:test" .' "${WORKDIR}/dry-operator-gateway-install.out"
 grep -q -- 'kind load docker-image "dry-gateway:test" --name "nvt-smoke"' "${WORKDIR}/dry-operator-gateway-install.out"
-grep -q -- '--set gateway.enabled=true --set gateway.image=dry-gateway:test' "${WORKDIR}/dry-operator-gateway-install.out"
+grep -q -- '--set gateway.enabled=true --set gateway.image.repository=dry-gateway --set gateway.image.tag=test' "${WORKDIR}/dry-operator-gateway-install.out"
 grep -q 'rollout status deployment/nvt-agent-gateway' "${WORKDIR}/dry-operator-gateway-install.out"
 
 echo "producer kind Make targets test passed"

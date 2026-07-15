@@ -1,7 +1,7 @@
 # nvt Helm Chart
 
 The chart installs the AgentRun and AgentSchedule CRDs, operator, broker, and
-optional browser gateway.
+optional browser gateway and GitHub comments producer.
 
 ```sh
 helm upgrade --install nvt ./charts/nvt \
@@ -11,6 +11,51 @@ helm upgrade --install nvt ./charts/nvt \
 
 Provider credentials are supplied through existing Secrets, never literal
 chart values.
+
+## Coordinated images
+
+The published chart's `appVersion` is the immutable image tag for its tested
+platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
+uses `0.2.0-943d5ba` for runtime, broker, egressd, captured, operator, gateway,
+and producer images. Empty component tags default to `Chart.AppVersion`;
+repository, tag, and pull policy remain independently overridable.
+
+All default repositories are under `ghcr.io/mirkosekulic`. The chart is
+published only after all seven exact image manifests exist in GHCR.
+
+## GitHub comments producer
+
+The producer is integrated under `producer` and disabled by default. It keeps
+the former chart's configuration surface, including direct and schedule
+admission, legacy/profiled admission, projected TokenReview credentials,
+persistence, ServiceAccount/RBAC, GitHub App Secret references, AgentRun
+settings, TTL, grants, runtime auth, and arbitrary agent configuration.
+
+```yaml
+producer:
+  enabled: true
+  repositories:
+    - owner: example
+      name: repository
+  githubApp:
+    appID: 123456
+    installationID: 12345678
+    existingSecret: nvt-github-app
+  submission:
+    mode: scheduleAdmission
+    admissionMode: profiled
+    scheduleName: default
+  persistence:
+    enabled: true
+    size: 1Gi
+```
+
+Create `nvt-github-app` out of band with the configured private-key key; the
+chart never accepts or renders private-key material. In profiled mode, list the
+rendered producer ServiceAccount username in `agentSchedule.allowedProducers`.
+The chart projects only a rotating `nvt-operator` audience token. The default
+producer AgentRun runtime image is the coordinated `runtime.image`; set
+`producer.agentRun.runtimeImage` only for an intentional override.
 
 ## Broker TLS
 
@@ -79,8 +124,14 @@ Direct mode remains the default:
 
 ```yaml
 egress:
-  egressdImage: nvt-egressd:latest
-  capturedImage: nvt-captured:latest
+  egressd:
+    image:
+      repository: ghcr.io/mirkosekulic/nvt-egressd
+      tag: "" # Chart.AppVersion
+  captured:
+    image:
+      repository: ghcr.io/mirkosekulic/nvt-captured
+      tag: "" # Chart.AppVersion
   defaultMode: direct
   networkPolicyCapable: false
   allowedTCPPorts: [80, 443]
