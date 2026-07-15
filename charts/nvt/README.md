@@ -330,7 +330,12 @@ This is a generic claim-source example, not GitHub-specific gateway policy.
 Each configured endpoint receives the temporary OAuth bearer token, must use
 HTTPS, and must be on `allowedHosts`; redirects and failures deny login. Only
 the selected non-sensitive value is retained. Required OAuth permissions and
-organization approval belong to provider/client configuration.
+organization approval belong to provider/client configuration. For the GitHub
+example, the GitHub App needs organization **Members: read**, must be installed
+and approved for the Altinn organization by an organization owner, and must be
+authorized by each user. It needs no repository permissions. Active membership
+returns `state: active`; pending, unaffiliated, blocked, or unapproved access
+fails admission closed.
 
 Authorization may read verified claims from `id_token`, `userinfo`, or a JWT
 `access_token`. Sensitive identity claims such as SSN or pid are rejected as

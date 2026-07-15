@@ -144,17 +144,23 @@ gateway:
           owner: true
 ```
 
-The OAuth permissions and any provider-side organization approval needed to
-call a configured endpoint are identity-provider configuration concerns. Claim
-sources cannot add arbitrary headers, disable TLS verification, follow
-redirects, or derive their endpoint from a browser request.
+For this GitHub example, configure the GitHub App with organization
+**Members: read** permission and have an Altinn organization owner install and
+approve the app for that organization. Each user must also authorize the app.
+GitHub then returns `state: active` only for an active member; pending membership
+does not match, while an unaffiliated user or blocked/unapproved app produces a
+failed source request and login is denied. No repository permission is needed.
+Other providers have their own permission/approval requirements. Claim sources
+cannot add arbitrary headers, disable TLS verification, follow redirects, or
+derive their endpoint from a browser request.
 
 ## GitHub login
 
 Create a dedicated GitHub App for human gateway login. Configure its callback
 URL as `https://<gateway-host>/oauth2/github/callback`; it needs no repository
-permissions, repository scopes, webhook subscriptions, or installation access
-for this profile-only identity lookup. Store both OAuth credentials in a
+permissions, repository scopes, or webhook subscriptions for profile identity
+lookup. A membership claim source does require the organization permission and
+installation/approval described above. Store both OAuth credentials in a
 Kubernetes Secret:
 
 ```sh
