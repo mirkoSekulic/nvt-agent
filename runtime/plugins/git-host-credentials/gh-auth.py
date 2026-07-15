@@ -5,7 +5,14 @@ import subprocess
 import sys
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from git_host_credentials import credential_kind, load_config, normalize_repo, resolve_provider, token
+from git_host_credentials import (
+    credential_kind,
+    load_config,
+    normalize_repo,
+    resolve_provider,
+    runtime_env_value,
+    token,
+)
 
 PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 
@@ -91,11 +98,11 @@ def proxy_url_for_provider(proxy_url, provider_name):
 
 
 def mediated_env(provider, repo):
-    proxy_url = os.environ.get("NVT_EGRESS_FORWARD_PROXY_URL")
+    proxy_url = runtime_env_value("NVT_EGRESS_FORWARD_PROXY_URL")
     if not proxy_url:
         fail(f"provider {provider['name']} is mediated but NVT_EGRESS_FORWARD_PROXY_URL is not set")
     proxy_url = proxy_url_for_provider(proxy_url, provider["broker-provider"])
-    placeholder = os.environ.get("NVT_EGRESS_PLACEHOLDER") or PLACEHOLDER
+    placeholder = runtime_env_value("NVT_EGRESS_PLACEHOLDER") or PLACEHOLDER
     env = os.environ.copy()
     env["GH_TOKEN"] = placeholder
     for key in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):

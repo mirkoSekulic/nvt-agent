@@ -11,6 +11,7 @@ from github_watcher_lib import (
     github_request,
     list_value,
     load_config,
+    mediated_egress_enabled,
     parse_time,
     plugin_state_dir,
     prompt_agent,
@@ -290,7 +291,10 @@ def run_loop():
 
 
 def doctor():
-    if shutil.which("git-host-credential") is None:
+    if mediated_egress_enabled():
+        if shutil.which("gh-auth") is None:
+            fail("gh-auth not found on PATH")
+    elif shutil.which("git-host-credential") is None:
         fail("git-host-credential not found on PATH")
     if shutil.which("agentdctl") is None:
         fail("agentdctl not found on PATH")

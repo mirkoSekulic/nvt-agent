@@ -315,6 +315,50 @@ providers:
 	}
 }
 
+func TestGhAuthMediatedProviderReadsRuntimeEnvFile(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("gh", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "${GH_TOKEN:-}" != "runtime-placeholder" ]; then
+  echo "unexpected GH_TOKEN=${GH_TOKEN:-}" >&2
+  exit 1
+fi
+if [ "${HTTPS_PROXY:-}" != "http://github-main-app:x@127.0.0.1:8470" ]; then
+  echo "unexpected HTTPS_PROXY=${HTTPS_PROXY:-}" >&2
+  exit 1
+fi
+printf '%s\n' "$*"
+`)
+	config := f.writePluginConfig("git-host-credentials.yaml", `
+providers:
+  - name: github-main
+    type: broker
+    broker-provider: github-main-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*
+`)
+	envDir := filepath.Join(f.home, ".nvt-agent")
+	if err := os.MkdirAll(envDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(envDir, "env"), []byte(`export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"
+export NVT_EGRESS_PLACEHOLDER="runtime-placeholder"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	output := f.runWithEnv(
+		ghAuthBin(f.root),
+		true,
+		[]string{"NVT_PLUGIN_CONFIG=" + config},
+		"--provider", "github-main", "api", "repos/my-user/project",
+	)
+	if strings.TrimSpace(output) != "api repos/my-user/project" {
+		t.Fatalf("unexpected gh output:\n%s", output)
+	}
+}
+
 func TestGhAuthMediatedProviderRequiresManagedProxyURL(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("gh", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")

@@ -16,6 +16,7 @@ import yaml
 DEFAULT_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]
 FAILURE_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
 PASSING_CONCLUSIONS = {"success", "skipped", "neutral"}
+MEDIATED_REQUEST_TIMEOUT_SECONDS = 120
 
 
 def fail(message):
@@ -339,6 +340,52 @@ def token_for_provider(provider, target):
     return token
 
 
+def mediated_egress_enabled():
+    return os.environ.get("NVT_EGRESS_MODE", "").strip().lower() == "mediated"
+
+
+def mediated_request(path, provider, query=None, paginate=False):
+    query_string = f"?{urlencode(query)}" if query else ""
+    command = [
+        "gh-auth",
+        "--provider",
+        provider,
+        "api",
+        "--method",
+        "GET",
+        f"{path.lstrip('/')}{query_string}",
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--header",
+        "X-GitHub-Api-Version: 2022-11-28",
+    ]
+    if paginate:
+        command.extend(["--paginate", "--slurp"])
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=MEDIATED_REQUEST_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as error:
+        raise WatchError(f"gh-auth not found: {error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise WatchError("mediated GitHub request timed out") from error
+    if result.returncode != 0:
+        raise WatchError(f"mediated GitHub request failed: {result.stderr.strip() or result.stdout.strip()}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise WatchError(f"mediated GitHub response was not valid JSON: {error}") from error
+    if not paginate:
+        return payload
+    if not isinstance(payload, list) or not all(isinstance(page, list) for page in payload):
+        raise WatchError("mediated paginated GitHub response was not a list of pages")
+    return [item for page in payload for item in page]
+
+
 def broker_request(path, provider, query=None, paginate=False, broker=None):
     broker = broker or {}
     broker_provider = broker.get("provider") or provider
@@ -380,6 +427,8 @@ def broker_request(path, provider, query=None, paginate=False, broker=None):
 
 
 def github_request(path, provider, query=None, broker=None, paginate=False):
+    if mediated_egress_enabled():
+        return mediated_request(path, provider, query, paginate)
     if broker and broker.get("enabled"):
         return broker_request(path, provider, query, paginate, broker)
     target = github_target_from_path(path)

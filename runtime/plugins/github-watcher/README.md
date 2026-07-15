@@ -3,14 +3,19 @@
 `github-watcher` watches GitHub pull requests and turns selected PR activity
 into `agentd` events and optional prompts.
 
-It is a long-running `after-agent` plugin. In broker mode it reads GitHub through
-`brokerctl http request`, so the watcher does not receive a GitHub token for API
-reads. Direct mode remains available as a local/dev fallback and gets tokens from
-`git-host-credentials`:
+It is a long-running `after-agent` plugin. In mediated mode it delegates GitHub
+API reads to the exported `gh-auth` tool. `gh-auth` sends only the inert
+placeholder through the provider-selected egress proxy; egressd injects the real
+credential outside the agent. Direct mode remains available as a local/dev
+fallback and gets tokens from `git-host-credentials`:
 
 ```sh
 git-host-credential token --provider <provider>
 ```
+
+Mediated mode requires the `git-host-credentials` plugin so its exported
+`gh-auth` tool and exact provider mapping are available before the watcher
+starts.
 
 The watcher supports both static PRs from `agent.yaml` and dynamic registrations
 through the exported `github-watch` command. Dynamic registrations are persisted
@@ -110,10 +115,11 @@ comments, reviews, and checks.
 `labels` are metadata carried into published events and prompt text. They do not
 filter GitHub labels in v1.
 
-When `broker.enabled` is true, read-only GitHub API calls are executed through
-`brokerctl http request`. The watcher does not receive the GitHub App private
-key or installation token for those API reads. Direct mode remains available as
-a local/dev fallback.
+When `NVT_EGRESS_MODE=mediated`, read-only GitHub API calls use `gh-auth` and the
+watch's exact `provider`; the watcher never calls `brokerctl` or receives a real
+credential. Outside mediated mode, `broker.enabled` retains the compatibility
+path through `brokerctl http request`. Direct token mode remains available as a
+local/dev fallback.
 
 ## Dynamic Registration
 
@@ -262,10 +268,12 @@ and easier to maintain than listing every trusted username.
 In direct mode, this plugin receives GitHub API access through in-container
 provider tokens from `git-host-credentials`. That is local/dev behavior.
 
-In broker mode, read-only GitHub API calls go through `brokerctl http request`.
-That keeps the GitHub App private key and derived API token inside the broker
-for those reads. Token mode may still be used by Git credential helpers for
-operations that require a token, such as Git push.
+In mediated mode, read-only GitHub API calls go through `gh-auth` and egressd.
+The watcher gets only the inert placeholder; the GitHub App private key and
+derived API token remain in the broker. The provider name is carried as a
+non-secret proxy capability hint, so multiple GitHub providers for the same host
+remain deterministic. The legacy broker HTTP and token modes remain available
+outside mediated mode for compatibility and local development.
 
 The production operator direction is for GitHub credentials and egress to be
 broker-mediated so the autonomous agent container does not hold raw GitHub App
