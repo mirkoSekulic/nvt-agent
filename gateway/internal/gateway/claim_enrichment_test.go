@@ -67,6 +67,25 @@ func TestClaimEnrichmentRejectsOutputCollision(t *testing.T) {
 	}
 }
 
+func TestClaimEnrichmentRejectsBearerAsSelectedValue(t *testing.T) {
+	const tokenCanary = "selected-bearer-token-canary"
+	for _, body := range []string{
+		`{"state":"` + tokenCanary + `"}`,
+		`{"state":"prefix-` + tokenCanary + `-suffix"}`,
+		`{"state":["active","` + tokenCanary + `"]}`,
+	} {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		auth := claimTestAuthenticator(server)
+		_, err := auth.enrichClaims(context.Background(), tokenCanary, nil)
+		server.Close()
+		if err == nil || strings.Contains(err.Error(), tokenCanary) {
+			t.Fatalf("selected bearer err=%v", err)
+		}
+	}
+}
+
 func TestClaimEnrichmentConfigRejectsUnsafeSources(t *testing.T) {
 	valid := ClaimEnrichmentConfig{
 		AllowedHosts: []string{"api.example.com"},

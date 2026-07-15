@@ -1,4 +1,5 @@
 {{- if .Values.gateway.enabled }}
+{{- $admissionConfigured := ne (toJson .Values.gateway.auth.admission) "null" }}
 {{- if not (has .Values.gateway.routing.mode (list "subdomain" "path")) }}
 {{- fail "gateway.routing.mode must be one of subdomain or path" }}
 {{- end }}
@@ -27,7 +28,7 @@
 {{- if not (has .Values.gateway.auth.mode (list "none" "oidc" "github")) }}
 {{- fail "gateway.auth.mode must be one of none, oidc, or github" }}
 {{- end }}
-{{- if and (eq .Values.gateway.auth.mode "none") (or .Values.gateway.auth.admission (gt (len .Values.gateway.auth.claimEnrichment.sources) 0) (gt (len .Values.gateway.auth.claimEnrichment.allowedHosts) 0)) }}
+{{- if and (eq .Values.gateway.auth.mode "none") (or $admissionConfigured (gt (len .Values.gateway.auth.claimEnrichment.sources) 0) (gt (len .Values.gateway.auth.claimEnrichment.allowedHosts) 0)) }}
 {{- fail "gateway.auth.admission and gateway.auth.claimEnrichment require authentication" }}
 {{- end }}
 {{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "github") }}
@@ -37,11 +38,12 @@
 {{- if not .Values.gateway.auth.session.existingSecret }}
 {{- fail "gateway.auth.session.existingSecret is required when gateway authentication is enabled" }}
 {{- end }}
-{{- with .Values.gateway.auth.admission }}
-{{- if and .default (ne .default "deny") }}
+{{- if $admissionConfigured }}
+{{- $admission := .Values.gateway.auth.admission }}
+{{- if and $admission.default (ne $admission.default "deny") }}
 {{- fail "gateway.auth.admission.default must be deny" }}
 {{- end }}
-{{- range $index, $rule := .rules }}
+{{- range $index, $rule := $admission.rules }}
 {{- if $rule.owner }}
 {{- fail (printf "gateway.auth.admission.rules[%d].owner is invalid because login admission has no AgentRun" $index) }}
 {{- end }}
@@ -134,9 +136,9 @@ spec:
               value: {{ .Values.gateway.auth.session.secure | quote }}
             - name: NVT_GATEWAY_AUTHORIZATION
               value: {{ .Values.gateway.auth.authorization | toJson | quote }}
-            {{- with .Values.gateway.auth.admission }}
+            {{- if $admissionConfigured }}
             - name: NVT_GATEWAY_ADMISSION
-              value: {{ . | toJson | quote }}
+              value: {{ .Values.gateway.auth.admission | toJson | quote }}
             {{- end }}
             - name: NVT_GATEWAY_CLAIM_ENRICHMENT
               value: {{ .Values.gateway.auth.claimEnrichment | toJson | quote }}

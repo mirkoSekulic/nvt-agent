@@ -192,7 +192,24 @@ func (a *Authenticator) fetchEnrichedClaim(ctx context.Context, accessToken stri
 	if !ok {
 		return nil, errors.New("OAuth claim source value has an unsupported shape")
 	}
+	if enrichedClaimContainsToken(value, accessToken) {
+		return nil, errors.New("OAuth claim source value is invalid")
+	}
 	return value, nil
+}
+
+func enrichedClaimContainsToken(value any, accessToken string) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.Contains(typed, accessToken)
+	case []any:
+		for _, item := range typed {
+			if enrichedClaimContainsToken(item, accessToken) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func normalizeEnrichedClaim(value any) (any, bool) {

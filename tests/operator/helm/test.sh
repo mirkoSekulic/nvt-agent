@@ -18,6 +18,7 @@ GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-fail
 GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
 GATEWAY_GITHUB_RENDER="${WORKDIR}/gateway-github.yaml"
 GATEWAY_ADMISSION_RENDER="${WORKDIR}/gateway-admission.yaml"
+GATEWAY_EMPTY_ADMISSION_RENDER="${WORKDIR}/gateway-empty-admission.yaml"
 GATEWAY_ADMISSION_FAILURE="${WORKDIR}/gateway-admission-failure.txt"
 GATEWAY_GITHUB_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-github-missing-secret-failure.txt"
 GATEWAY_PATH_RENDER="${WORKDIR}/gateway-path.yaml"
@@ -107,6 +108,13 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.authorization.rules[0].effect=allow \
   --set gateway.auth.authorization.rules[0].owner=true \
   > "${GATEWAY_ADMISSION_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=github \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+  --set-json 'gateway.auth.admission={}' \
+  > "${GATEWAY_EMPTY_ADMISSION_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set gateway.routing.mode=path \
@@ -661,6 +669,8 @@ grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"allowedHosts\":[\"api.github.com\"]' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"endpoint\":\"https://api.github.com/user/memberships/orgs/Altinn\"' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"owner\":true' "${GATEWAY_ADMISSION_RENDER}"
+grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_EMPTY_ADMISSION_RENDER}"
+grep -q 'value: "{}"' "${GATEWAY_EMPTY_ADMISSION_RENDER}"
 
 for invalid_args in \
   '--set gateway.auth.admission.rules[0].id=owner --set gateway.auth.admission.rules[0].effect=allow --set gateway.auth.admission.rules[0].owner=true' \
@@ -682,6 +692,16 @@ if helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.admission.default=deny \
   > /dev/null 2> "${GATEWAY_ADMISSION_FAILURE}"; then
   echo "expected gateway admission with auth.mode=none to fail" >&2
+  exit 1
+fi
+grep -q 'gateway.auth.admission and gateway.auth.claimEnrichment require authentication' "${GATEWAY_ADMISSION_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=none \
+  --set-json 'gateway.auth.admission={}' \
+  > /dev/null 2> "${GATEWAY_ADMISSION_FAILURE}"; then
+  echo "expected empty gateway admission with auth.mode=none to fail" >&2
   exit 1
 fi
 grep -q 'gateway.auth.admission and gateway.auth.claimEnrichment require authentication' "${GATEWAY_ADMISSION_FAILURE}"

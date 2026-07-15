@@ -157,6 +157,35 @@ func TestClaimEnrichmentFailureCreatesNoSession(t *testing.T) {
 	}
 }
 
+func TestClaimEndpointCannotPersistOAuthBearerInSession(t *testing.T) {
+	const tokenCanary = "session-token-canary"
+	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		selected := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		_, _ = fmt.Fprintf(w, `{"state":%q}`, selected)
+	}))
+	t.Cleanup(claimServer.Close)
+	fixture := newGitHubOAuthFixture(t, tokenCanary, `{"id":42,"login":"member"}`)
+	config := githubTestConfig(fixture.URL)
+	config.Auth.Admission = memberAdmission()
+	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
+	server := mustNewServer(t, config, fakeClient(t))
+	server.auth.httpClient = noRedirectClient(claimServer.Client())
+	var logs bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(oldOutput) })
+
+	response := completeGitHubLogin(t, server)
+	if response.Code != http.StatusUnauthorized || len(server.auth.sessions) != 0 {
+		t.Fatalf("reflected bearer status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
+	}
+	for _, exposed := range []string{response.Body.String(), response.Header().Get("Set-Cookie"), logs.String(), fmt.Sprintf("%#v", server.auth.sessions)} {
+		if strings.Contains(exposed, tokenCanary) {
+			t.Fatalf("reflected bearer escaped: %q", exposed)
+		}
+	}
+}
+
 func TestOAuthAdaptersShareEnrichmentAndAdmissionBoundary(t *testing.T) {
 	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"state":"active"}`))
