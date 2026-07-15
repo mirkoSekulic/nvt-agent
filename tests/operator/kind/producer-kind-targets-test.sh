@@ -42,7 +42,7 @@ TOOL_LOG="${WORKDIR}/tools.log"
 EXPECTED_CLUSTER="poc-cluster"
 export TOOL_LOG EXPECTED_CLUSTER
 
-VALUES_FILE="${WORKDIR}/values.github-comments.yaml"
+VALUES_FILE="${WORKDIR}/values.nvt-local.yaml"
 printf 'producer:\n  repositories: []\n' >"${VALUES_FILE}"
 
 PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-build PRODUCER_IMAGE=custom-producer:test >"${WORKDIR}/build.out"
@@ -87,7 +87,12 @@ if PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-install \
   printf 'expected missing producer values file to fail\n' >&2
   exit 1
 fi
-grep -q 'PRODUCER_VALUES file does not exist' "${WORKDIR}/missing.err"
+grep -q 'complete consolidated chart values file does not exist' "${WORKDIR}/missing.err"
+grep -q 'values.nvt-local.yaml' "${WORKDIR}/missing.err"
+
+PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" -n producer-kind-install >"${WORKDIR}/dry-default-install.out"
+grep -q 'values.nvt-local.yaml' "${WORKDIR}/dry-default-install.out"
+grep -q -- '--reset-values' "${WORKDIR}/dry-default-install.out"
 
 : >"${TOOL_LOG}"
 PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" -n producer-build \

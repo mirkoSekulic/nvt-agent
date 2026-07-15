@@ -17,7 +17,7 @@ GATEWAY_IMAGE ?= nvt-agent-gateway:latest
 EGRESSD_IMAGE ?= nvt-egressd:latest
 CAPTURED_IMAGE ?= nvt-captured:latest
 ECHO_IMAGE ?= nvt-smoke-echo:latest
-PRODUCER_VALUES ?= values.github-comments.yaml
+PRODUCER_VALUES ?= values.nvt-local.yaml
 PRODUCER_RELEASE ?= nvt
 PRODUCER_CHART ?= charts/nvt
 CREATE_CLUSTER ?= 1
@@ -148,7 +148,7 @@ producer-kind-load: operator-kind-cluster producer-build
 	kind load docker-image "$(PRODUCER_IMAGE)" --name "$(CLUSTER)"
 
 producer-kind-install:
-	@test -f "$(PRODUCER_VALUES)" || (echo "[producer-kind-setup] ERROR: PRODUCER_VALUES file does not exist: $(PRODUCER_VALUES). Create a local values file, for example values.github-comments.yaml, or pass PRODUCER_VALUES=<path>." >&2; exit 1)
+	@test -f "$(PRODUCER_VALUES)" || (echo "[producer-kind-setup] ERROR: complete consolidated chart values file does not exist: $(PRODUCER_VALUES). Create values.nvt-local.yaml as documented, or pass PRODUCER_VALUES=<path-to-complete-nvt-values>." >&2; exit 1)
 	@printf '[producer-kind-setup] installing producer chart %s into namespace %s using %s\n' "$(PRODUCER_RELEASE)" "$(NAMESPACE)" "$(PRODUCER_VALUES)"
 	helm upgrade --install "$(PRODUCER_RELEASE)" "$(PRODUCER_CHART)" \
 		--kube-context "$(KUBECTL_CONTEXT)" \
