@@ -85,6 +85,70 @@ are filtered with the same policy; inaccessible run metadata is not rendered.
 Each rule must contain exactly one of `authenticated`, `owner`,
 `claimPath`+`values`, or `where`.
 
+## Login admission and OAuth claim enrichment
+
+Authentication, login admission, and AgentRun authorization are independent
+gates:
+
+1. the configured adapter authenticates a principal;
+2. optional `auth.admission` decides whether that principal may receive a
+   gateway session;
+3. `auth.authorization` still decides which AgentRuns that session may see or
+   open.
+
+When admission is absent, successful authentication creates a session exactly
+as before. When it is configured, its default is deny and a principal must
+match one allow rule before any session is stored or session cookie is issued.
+Admission supports `authenticated`, `claimPath`+`values`, and `where`; `owner`
+is invalid because no AgentRun exists at login time.
+
+Resource authorization rules retain allow/OR semantics. Do not add a broad
+organization claim rule beside `owner: true` to simulate login admission: that
+would authorize every matching organization member to every AgentRun. Put the
+organization requirement in `admission` and keep `owner` in `authorization`.
+
+OAuth adapters can enrich their normalized principal through declarative claim
+sources before admission. Every source is a bounded HTTPS GET carrying the
+temporary OAuth bearer token. Its host must be explicitly allowed, redirects
+are rejected, and only the selected non-sensitive JSON value is retained under
+a new safe top-level claim. Source failures, missing/ambiguous values, output
+collisions, malformed or oversized responses, and timeouts fail login closed.
+Access tokens and raw responses are never stored in sessions or cookies.
+
+This provider-neutral configuration expresses GitHub organization membership
+without GitHub-specific authorization logic in the gateway:
+
+```yaml
+gateway:
+  auth:
+    mode: github
+    claimEnrichment:
+      allowedHosts:
+        - api.github.com
+      sources:
+        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
+          outputClaim: organization_membership
+          valuePath: state
+    admission:
+      default: deny
+      rules:
+        - id: allowed-organization
+          effect: allow
+          claimPath: organization_membership
+          values: [active]
+    authorization:
+      default: deny
+      rules:
+        - id: agent-owner
+          effect: allow
+          owner: true
+```
+
+The OAuth permissions and any provider-side organization approval needed to
+call a configured endpoint are identity-provider configuration concerns. Claim
+sources cannot add arbitrary headers, disable TLS verification, follow
+redirects, or derive their endpoint from a browser request.
+
 ## GitHub login
 
 Create a dedicated GitHub App for human gateway login. Configure its callback

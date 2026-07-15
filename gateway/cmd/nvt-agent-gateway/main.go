@@ -24,6 +24,8 @@ func main() {
 	var cfg gateway.Config
 	var kubeconfig string
 	var authorizationRaw string
+	var admissionRaw string
+	var claimEnrichmentRaw string
 	flag.StringVar(&cfg.BaseDomain, "base-domain", envString("NVT_GATEWAY_BASE_DOMAIN", "agents.localhost"), "base DNS domain for AgentRun access")
 	flag.StringVar(&cfg.PublicURL, "public-url", envString("NVT_GATEWAY_PUBLIC_URL", ""), "externally visible base URL for dashboard and OAuth callbacks")
 	flag.StringVar(&cfg.Routing.Mode, "routing-mode", envString("NVT_GATEWAY_ROUTING_MODE", "subdomain"), "routing mode: subdomain or path")
@@ -51,6 +53,8 @@ func main() {
 	flag.StringVar(&cfg.Auth.GitHub.TokenURL, "github-token-url", envString("NVT_GATEWAY_GITHUB_TOKEN_URL", ""), "GitHub OAuth token endpoint")
 	flag.StringVar(&cfg.Auth.GitHub.UserURL, "github-user-url", envString("NVT_GATEWAY_GITHUB_USER_URL", ""), "GitHub current-user endpoint")
 	flag.StringVar(&authorizationRaw, "authorization", envString("NVT_GATEWAY_AUTHORIZATION", ""), "gateway authorization policy JSON")
+	flag.StringVar(&admissionRaw, "admission", envString("NVT_GATEWAY_ADMISSION", ""), "gateway login admission policy JSON")
+	flag.StringVar(&claimEnrichmentRaw, "claim-enrichment", envString("NVT_GATEWAY_CLAIM_ENRICHMENT", ""), "gateway OAuth claim enrichment JSON")
 	flag.StringVar(&kubeconfig, "kubeconfig", envString("KUBECONFIG", ""), "path to kubeconfig, optional")
 	flag.Parse()
 
@@ -65,6 +69,16 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 	cfg.Auth.Authorization = authorization
+	admission, err := gateway.ParseAdmissionConfig(admissionRaw)
+	if err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
+	cfg.Auth.Admission = admission
+	claimEnrichment, err := gateway.ParseClaimEnrichmentConfig(claimEnrichmentRaw)
+	if err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
+	cfg.Auth.ClaimEnrichment = claimEnrichment
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}

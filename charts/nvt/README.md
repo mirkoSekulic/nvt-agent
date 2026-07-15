@@ -292,6 +292,46 @@ Authentication does not imply authorization. OIDC defaults to deny until a
 rule allows the user. Session state is process-local, so OIDC mode currently
 requires one gateway replica.
 
+Optional `gateway.auth.admission` is a separate default-deny login gate applied
+after authentication and before session creation. `gateway.auth.authorization`
+remains the per-AgentRun gate. Resource allow rules are ORed, so a broad group
+or organization rule must not be combined with `owner: true` as a substitute
+for admission: use the organization rule in admission and keep owner matching
+in authorization.
+
+Both OAuth-backed modes can populate selected admission claims through generic
+bounded HTTPS sources:
+
+```yaml
+gateway:
+  auth:
+    claimEnrichment:
+      allowedHosts: [api.github.com]
+      sources:
+        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
+          outputClaim: organization_membership
+          valuePath: state
+    admission:
+      default: deny
+      rules:
+        - id: allowed-organization
+          effect: allow
+          claimPath: organization_membership
+          values: [active]
+    authorization:
+      default: deny
+      rules:
+        - id: agent-owner
+          effect: allow
+          owner: true
+```
+
+This is a generic claim-source example, not GitHub-specific gateway policy.
+Each configured endpoint receives the temporary OAuth bearer token, must use
+HTTPS, and must be on `allowedHosts`; redirects and failures deny login. Only
+the selected non-sensitive value is retained. Required OAuth permissions and
+organization approval belong to provider/client configuration.
+
 Authorization may read verified claims from `id_token`, `userinfo`, or a JWT
 `access_token`. Sensitive identity claims such as SSN or pid are rejected as
 authorization keys.

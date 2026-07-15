@@ -27,12 +27,42 @@
 {{- if not (has .Values.gateway.auth.mode (list "none" "oidc" "github")) }}
 {{- fail "gateway.auth.mode must be one of none, oidc, or github" }}
 {{- end }}
+{{- if and (eq .Values.gateway.auth.mode "none") (or .Values.gateway.auth.admission (gt (len .Values.gateway.auth.claimEnrichment.sources) 0) (gt (len .Values.gateway.auth.claimEnrichment.allowedHosts) 0)) }}
+{{- fail "gateway.auth.admission and gateway.auth.claimEnrichment require authentication" }}
+{{- end }}
 {{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "github") }}
 {{- if gt (int .Values.gateway.replicas) 1 }}
 {{- fail "gateway.replicas must be 1 when gateway authentication is enabled until shared sessions exist" }}
 {{- end }}
 {{- if not .Values.gateway.auth.session.existingSecret }}
 {{- fail "gateway.auth.session.existingSecret is required when gateway authentication is enabled" }}
+{{- end }}
+{{- with .Values.gateway.auth.admission }}
+{{- if and .default (ne .default "deny") }}
+{{- fail "gateway.auth.admission.default must be deny" }}
+{{- end }}
+{{- range $index, $rule := .rules }}
+{{- if $rule.owner }}
+{{- fail (printf "gateway.auth.admission.rules[%d].owner is invalid because login admission has no AgentRun" $index) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if gt (len .Values.gateway.auth.claimEnrichment.sources) 8 }}
+{{- fail "gateway.auth.claimEnrichment.sources must contain at most 8 entries" }}
+{{- end }}
+{{- if and (gt (len .Values.gateway.auth.claimEnrichment.sources) 0) (eq (len .Values.gateway.auth.claimEnrichment.allowedHosts) 0) }}
+{{- fail "gateway.auth.claimEnrichment.allowedHosts is required when sources are configured" }}
+{{- end }}
+{{- range $index, $source := .Values.gateway.auth.claimEnrichment.sources }}
+{{- if not (regexMatch `^https://[^/@?#]+(?::[0-9]+)?(?:/[^?#]*)?$` $source.endpoint) }}
+{{- fail (printf "gateway.auth.claimEnrichment.sources[%d].endpoint must be an absolute HTTPS URL without credentials, query, or fragment" $index) }}
+{{- end }}
+{{- if not (regexMatch `^[a-z][a-z0-9_]{0,63}$` $source.outputClaim) }}
+{{- fail (printf "gateway.auth.claimEnrichment.sources[%d].outputClaim must be a safe top-level claim name" $index) }}
+{{- end }}
+{{- if not $source.valuePath }}
+{{- fail (printf "gateway.auth.claimEnrichment.sources[%d].valuePath is required" $index) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if eq .Values.gateway.auth.mode "oidc" }}
@@ -104,6 +134,12 @@ spec:
               value: {{ .Values.gateway.auth.session.secure | quote }}
             - name: NVT_GATEWAY_AUTHORIZATION
               value: {{ .Values.gateway.auth.authorization | toJson | quote }}
+            {{- with .Values.gateway.auth.admission }}
+            - name: NVT_GATEWAY_ADMISSION
+              value: {{ . | toJson | quote }}
+            {{- end }}
+            - name: NVT_GATEWAY_CLAIM_ENRICHMENT
+              value: {{ .Values.gateway.auth.claimEnrichment | toJson | quote }}
             {{- end }}
             {{- if eq .Values.gateway.auth.mode "oidc" }}
             - name: NVT_GATEWAY_OIDC_ISSUER_URL

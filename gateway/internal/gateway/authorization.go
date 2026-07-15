@@ -78,48 +78,58 @@ func (c AuthorizationConfig) validate() error {
 		return fmt.Errorf("auth.authorization.claimSource must be one of %q, %q, or %q", claimSourceIDToken, claimSourceAccessToken, claimSourceUserInfo)
 	}
 	for index, rule := range c.Rules {
-		if strings.TrimSpace(rule.ID) == "" {
-			return fmt.Errorf("auth.authorization.rules[%d].id is required", index)
+		if err := validateAuthorizationRule("auth.authorization", index, rule, true); err != nil {
+			return err
 		}
-		if rule.Effect != authorizationEffectAllow {
-			return fmt.Errorf("auth.authorization.rules[%d].effect must be %q", index, authorizationEffectAllow)
+	}
+	return nil
+}
+
+func validateAuthorizationRule(prefix string, index int, rule AuthorizationRule, allowOwner bool) error {
+	if strings.TrimSpace(rule.ID) == "" {
+		return fmt.Errorf("%s.rules[%d].id is required", prefix, index)
+	}
+	if rule.Effect != authorizationEffectAllow {
+		return fmt.Errorf("%s.rules[%d].effect must be %q", prefix, index, authorizationEffectAllow)
+	}
+	if rule.Owner && !allowOwner {
+		return fmt.Errorf("%s.rules[%d].owner is invalid because login admission has no AgentRun", prefix, index)
+	}
+	hasSimple := rule.ClaimPath != "" || len(rule.Values) > 0
+	hasWhere := rule.Where.Array != "" || len(rule.Where.All) > 0
+	predicateCount := 0
+	for _, present := range []bool{rule.Authenticated, rule.Owner, hasSimple, hasWhere} {
+		if present {
+			predicateCount++
 		}
-		hasSimple := rule.ClaimPath != "" || len(rule.Values) > 0
-		hasWhere := rule.Where.Array != "" || len(rule.Where.All) > 0
-		predicateCount := 0
-		for _, present := range []bool{rule.Authenticated, rule.Owner, hasSimple, hasWhere} {
-			if present {
-				predicateCount++
-			}
+	}
+	if predicateCount != 1 {
+		return fmt.Errorf("%s.rules[%d] must define exactly one of authenticated, owner, claimPath+values, or where.array+all", prefix, index)
+	}
+	if rule.Authenticated || rule.Owner {
+		return nil
+	}
+	if hasSimple {
+		if rule.ClaimPath == "" || len(rule.Values) == 0 {
+			return fmt.Errorf("%s.rules[%d] requires claimPath and values", prefix, index)
 		}
-		if predicateCount != 1 {
-			return fmt.Errorf("auth.authorization.rules[%d] must define exactly one of authenticated, owner, claimPath+values, or where.array+all", index)
+		if isSensitiveClaimPath(rule.ClaimPath) {
+			return fmt.Errorf("%s.rules[%d].claimPath must not use pid, SSN, or fødselsnummer", prefix, index)
 		}
-		if rule.Authenticated || rule.Owner {
-			continue
+		return nil
+	}
+	if rule.Where.Array == "" || len(rule.Where.All) == 0 {
+		return fmt.Errorf("%s.rules[%d] requires where.array and where.all", prefix, index)
+	}
+	if isSensitiveClaimPath(rule.Where.Array) {
+		return fmt.Errorf("%s.rules[%d].where.array must not use pid, SSN, or fødselsnummer", prefix, index)
+	}
+	for conditionIndex, condition := range rule.Where.All {
+		if condition.ClaimPath == "" || len(condition.Values) == 0 {
+			return fmt.Errorf("%s.rules[%d].where.all[%d] requires claimPath and values", prefix, index, conditionIndex)
 		}
-		if hasSimple {
-			if rule.ClaimPath == "" || len(rule.Values) == 0 {
-				return fmt.Errorf("auth.authorization.rules[%d] requires claimPath and values", index)
-			}
-			if isSensitiveClaimPath(rule.ClaimPath) {
-				return fmt.Errorf("auth.authorization.rules[%d].claimPath must not use pid, SSN, or fødselsnummer", index)
-			}
-			continue
-		}
-		if rule.Where.Array == "" || len(rule.Where.All) == 0 {
-			return fmt.Errorf("auth.authorization.rules[%d] requires where.array and where.all", index)
-		}
-		if isSensitiveClaimPath(rule.Where.Array) {
-			return fmt.Errorf("auth.authorization.rules[%d].where.array must not use pid, SSN, or fødselsnummer", index)
-		}
-		for conditionIndex, condition := range rule.Where.All {
-			if condition.ClaimPath == "" || len(condition.Values) == 0 {
-				return fmt.Errorf("auth.authorization.rules[%d].where.all[%d] requires claimPath and values", index, conditionIndex)
-			}
-			if isSensitiveClaimPath(condition.ClaimPath) {
-				return fmt.Errorf("auth.authorization.rules[%d].where.all[%d].claimPath must not use pid, SSN, or fødselsnummer", index, conditionIndex)
-			}
+		if isSensitiveClaimPath(condition.ClaimPath) {
+			return fmt.Errorf("%s.rules[%d].where.all[%d].claimPath must not use pid, SSN, or fødselsnummer", prefix, index, conditionIndex)
 		}
 	}
 	return nil

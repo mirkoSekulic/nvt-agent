@@ -127,6 +127,14 @@ gateway:
       authorizationURL: https://github.com/login/oauth/authorize
       tokenURL: https://github.com/login/oauth/access_token
       userURL: https://api.github.com/user
+    # Optional. When set, authenticated principals must match one allow rule
+    # before a gateway session is created. AgentRun authorization remains a
+    # separate second gate.
+    admission: null
+    # Provider-neutral bounded OAuth claim lookups performed before admission.
+    claimEnrichment:
+      allowedHosts: []
+      sources: []
     authorization:
       default: deny
       claimSource: id_token
