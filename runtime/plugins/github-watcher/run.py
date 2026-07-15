@@ -11,6 +11,7 @@ from github_watcher_lib import (
     github_request,
     list_value,
     load_config,
+    mediated_egress_enabled,
     parse_time,
     plugin_state_dir,
     prompt_agent,
@@ -30,7 +31,7 @@ from github_watcher_lib import (
 
 
 def fetch_comments(watch):
-    if watch.get("broker", {}).get("enabled"):
+    if mediated_egress_enabled() or watch.get("broker", {}).get("enabled"):
         return github_request(
             f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
             watch["provider"],
@@ -54,7 +55,7 @@ def fetch_comments(watch):
 
 
 def fetch_reviews(watch):
-    if watch.get("broker", {}).get("enabled"):
+    if mediated_egress_enabled() or watch.get("broker", {}).get("enabled"):
         return github_request(
             f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
             watch["provider"],
@@ -290,7 +291,10 @@ def run_loop():
 
 
 def doctor():
-    if shutil.which("git-host-credential") is None:
+    if mediated_egress_enabled():
+        if shutil.which("gh-auth") is None:
+            fail("gh-auth not found on PATH")
+    elif shutil.which("git-host-credential") is None:
         fail("git-host-credential not found on PATH")
     if shutil.which("agentdctl") is None:
         fail("agentdctl not found on PATH")

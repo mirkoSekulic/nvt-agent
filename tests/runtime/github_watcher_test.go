@@ -494,6 +494,115 @@ if requests != [("https://api.github.com/repos/my-user/my-repo/issues/123/commen
 	}
 }
 
+func TestGithubWatcherMediatedClosedPRUsesGhAuthAndRemovesRegistration(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", `
+default-provider: github-main
+broker:
+  enabled: true
+  provider: github-main-app
+`)
+	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/my-repo","number":123,"provider":"github-main","closed":{"enabled":true,"remove":true,"publish":true,"prompt":false}}]`)
+
+	ghAuthLog := filepath.Join(f.home, "gh-auth.log")
+	brokerctlCalled := filepath.Join(f.home, "brokerctl-called")
+	agentdctlLog := filepath.Join(f.home, "agentdctl.log")
+	f.writeBin("gh-auth", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" >> %s
+printf '%%s\n' '{"state":"closed","merged":false,"head":{"sha":"abc"},"html_url":"https://github.com/my-user/my-repo/pull/123","closed_at":"2026-07-15T15:00:00Z","merged_at":null}'
+`, quoteYAML(ghAuthLog)))
+	f.writeBin("brokerctl", fmt.Sprintf(`#!/usr/bin/env bash
+touch %s
+exit 99
+`, quoteYAML(brokerctlCalled)))
+	f.writeBin("git-host-credential", "#!/usr/bin/env bash\nexit 98\n")
+	f.writeBin("agentdctl", fmt.Sprintf(`#!/usr/bin/env bash
+printf '%%s\n' "$*" >> %s
+`, quoteYAML(agentdctlLog)))
+
+	f.runWithEnv(
+		githubWatcherRunBin(f.root),
+		true,
+		[]string{"NVT_PLUGIN_CONFIG=" + config, "NVT_EGRESS_MODE=mediated"},
+		"once",
+	)
+
+	if _, err := os.Stat(brokerctlCalled); err == nil {
+		t.Fatal("mediated watcher called brokerctl")
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(ghAuthLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--provider github-main api --method GET repos/my-user/my-repo/pulls/123") {
+		t.Fatalf("unexpected gh-auth args:\n%s", args)
+	}
+	events, err := os.ReadFile(agentdctlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(events), "publish plugin.github.pr.closed") {
+		t.Fatalf("close event was not published:\n%s", events)
+	}
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
+	if len(registry["prs"]) != 0 {
+		t.Fatalf("closed mediated watch was not removed: %#v", registry)
+	}
+}
+
+func TestGithubWatcherMediatedPaginationUsesExplicitPageRequests(t *testing.T) {
+	f := newFixture(t)
+	ghAuthLog := filepath.Join(f.home, "gh-auth.log")
+	ghAuthState := filepath.Join(f.home, "gh-auth.state")
+	f.writeBin("gh-auth", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" >> %s
+if [[ ! -f %s ]]; then
+  touch %s
+  python3 -c 'import json; print(json.dumps([{"id": i} for i in range(100)]))'
+else
+  printf '%%s\n' '[{"id":100}]'
+fi
+`, quoteYAML(ghAuthLog), quoteYAML(ghAuthState), quoteYAML(ghAuthState)))
+	script := fmt.Sprintf(`
+import importlib.util
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
+
+payload = lib.github_request(
+    "/repos/my-user/my-repo/issues/123/comments",
+    "github-main",
+    {"per_page": 100},
+    {"enabled": True, "provider": "github-main-app"},
+    paginate=True,
+)
+if len(payload) != 101 or payload[-1] != {"id": 100}:
+    raise SystemExit(f"unexpected paginated payload: {payload}")
+`, quoteYAML(f.root))
+
+	f.runWithEnv("python3", true, []string{"NVT_EGRESS_MODE=mediated"}, "-c", script)
+	args, err := os.ReadFile(ghAuthLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "comments?per_page=100&page=1") ||
+		!strings.Contains(string(args), "comments?per_page=100&page=2") ||
+		strings.Contains(string(args), "--paginate") || strings.Contains(string(args), "--slurp") {
+		t.Fatalf("unexpected paginated gh-auth args:\n%s", args)
+	}
+}
+
 func TestGithubWatcherPaginatesCommentsAndReviews(t *testing.T) {
 	f := newFixture(t)
 	script := fmt.Sprintf(`
