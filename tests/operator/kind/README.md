@@ -167,7 +167,7 @@ These Secrets are separate on purpose:
 - `operator-codex-auth-secret` creates the Codex runtime auth Secret consumed
   by AgentRun Pods through `spec.runtimeAuth.secretName`.
 - `github-comments-producer-secret` creates the GitHub App private key Secret
-  consumed by `charts/nvt-github-comments-producer`.
+  consumed by the optional `producer` resources in `charts/nvt`.
 - `broker-env-secret` creates the broker env Secret consumed by the core
   `charts/nvt` broker deployment through `broker.envSecretName`.
 
@@ -179,14 +179,19 @@ With local values prepared, build, load, and install the GitHub comments
 producer into the kind cluster:
 
 ```sh
-make producer-kind-setup PRODUCER_VALUES=values.github-comments.yaml
+make producer-kind-setup PRODUCER_VALUES=values.nvt-local.yaml
 ```
 
 `producer-kind-setup` runs `producer-kind-load` and `producer-kind-install`.
 It does not create Secrets because the producer private key and broker env file
-paths are user-provided. The local `values.github-comments.yaml` file should be
-uncommitted and include the target repository, GitHub App IDs, allowed author,
-broker grants, real Codex yolo runtime config, and runtime plugins.
+paths are user-provided. `producer-kind-install` deliberately uses
+`--reset-values` to prevent incompatible 0.1 image values from surviving a 0.2
+upgrade of the consolidated `nvt` release. The local `values.nvt-local.yaml`
+file must therefore be a complete, uncommitted values file for the whole chart,
+including broker, operator, gateway/profile settings as applicable, as well as
+the target repository, GitHub App IDs, allowed author, broker grants, real Codex
+yolo runtime config, and runtime plugins. Do not supply a producer-only values
+file because reset-values would remove the rest of the release configuration.
 
 Full local POC setup sequence:
 
@@ -195,7 +200,7 @@ make operator-kind-setup CREATE_CLUSTER=1
 make operator-codex-auth-secret
 make github-comments-producer-secret GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
 make broker-env-secret BROKER_ENV_FILE=.broker/env
-make producer-kind-setup PRODUCER_VALUES=values.github-comments.yaml
+make producer-kind-setup PRODUCER_VALUES=values.nvt-local.yaml
 ```
 
 ## Cases

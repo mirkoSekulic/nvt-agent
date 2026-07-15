@@ -1,16 +1,97 @@
 # nvt Helm Chart
 
 The chart installs the AgentRun and AgentSchedule CRDs, operator, broker, and
-optional browser gateway.
+optional browser gateway and GitHub comments producer.
+
+For deployments, install the published OCI chart shown in
+[`charts/README.md`](../README.md). A source checkout cannot know the release
+commit used to publish images. If source rendering is required, supply one
+exact published tag explicitly:
 
 ```sh
-helm upgrade --install nvt ./charts/nvt \
-  --namespace nvt \
-  --create-namespace
+helm template nvt ./charts/nvt \
+  --set-string global.imageTag=0.2.0-943d5ba
 ```
+
+Do not install the source chart without `global.imageTag` or component-specific
+tags: its development `Chart.AppVersion` is not a published image identity.
 
 Provider credentials are supplied through existing Secrets, never literal
 chart values.
+
+## Coordinated images
+
+The published chart's `appVersion` is the immutable image tag for its tested
+platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
+uses `0.2.0-943d5ba` for runtime, broker, egressd, captured, operator, gateway,
+and producer images. Empty component tags default to `Chart.AppVersion`;
+repository, tag, and pull policy remain independently overridable.
+
+All default repositories are under `ghcr.io/mirkosekulic`. The chart is
+published only after all seven manifests exist and can be fetched anonymously
+with an isolated credential-free Docker configuration. The release reuses an
+existing image tag only when its OCI source, full revision, and version labels
+match. GHCR package writers are trusted: matching labels establish coordinated
+release metadata, not byte-for-byte content identity against copied labels.
+
+## Upgrading image values from 0.1
+
+Version 0.2 replaces scalar image values with repository/tag/pullPolicy maps.
+Migrate saved values before upgrading:
+
+```yaml
+# 0.1 (no longer accepted)
+operator:
+  image: nvt-operator:latest
+
+# 0.2
+operator:
+  image:
+    repository: ghcr.io/mirkosekulic/nvt-operator
+    tag: 0.2.0-943d5ba
+    pullPolicy: IfNotPresent
+```
+
+The same shape applies to runtime, broker, gateway, producer, egressd, and
+captured. A legacy scalar fails rendering with an explicit migration error.
+Do not use `--reuse-values` across this boundary; migrate the values file or
+reset stored values before the 0.2 upgrade. `make producer-kind-install` uses
+`--reset-values` and treats `PRODUCER_VALUES` as a complete consolidated-chart
+values file for this reason.
+
+## GitHub comments producer
+
+The producer is integrated under `producer` and disabled by default. It keeps
+the former chart's configuration surface, including direct and schedule
+admission, legacy/profiled admission, projected TokenReview credentials,
+persistence, ServiceAccount/RBAC, GitHub App Secret references, AgentRun
+settings, TTL, grants, runtime auth, and arbitrary agent configuration.
+
+```yaml
+producer:
+  enabled: true
+  repositories:
+    - owner: example
+      name: repository
+  githubApp:
+    appID: 123456
+    installationID: 12345678
+    existingSecret: nvt-github-app
+  submission:
+    mode: scheduleAdmission
+    admissionMode: profiled
+    scheduleName: default
+  persistence:
+    enabled: true
+    size: 1Gi
+```
+
+Create `nvt-github-app` out of band with the configured private-key key; the
+chart never accepts or renders private-key material. In profiled mode, list the
+rendered producer ServiceAccount username in `agentSchedule.allowedProducers`.
+The chart projects only a rotating `nvt-operator` audience token. The default
+producer AgentRun runtime image is the coordinated `runtime.image`; set
+`producer.agentRun.runtimeImage` only for an intentional override.
 
 ## Broker TLS
 
@@ -79,8 +160,14 @@ Direct mode remains the default:
 
 ```yaml
 egress:
-  egressdImage: nvt-egressd:latest
-  capturedImage: nvt-captured:latest
+  egressd:
+    image:
+      repository: ghcr.io/mirkosekulic/nvt-egressd
+      tag: "" # Chart.AppVersion
+  captured:
+    image:
+      repository: ghcr.io/mirkosekulic/nvt-captured
+      tag: "" # Chart.AppVersion
   defaultMode: direct
   networkPolicyCapable: false
   allowedTCPPorts: [80, 443]

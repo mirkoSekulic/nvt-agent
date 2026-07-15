@@ -1,0 +1,34 @@
+{{- if and .Values.producer.enabled .Values.producer.rbac.create (eq .Values.producer.submission.mode "direct") }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "nvt.producerFullname" . }}
+  namespace: {{ include "nvt.producerAgentRunNamespace" . | quote }}
+  labels:
+    {{- include "nvt.producerLabels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - nvt.dev
+    resources:
+      - agentruns
+    verbs:
+      - get
+      - list
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "nvt.producerFullname" . }}
+  namespace: {{ include "nvt.producerAgentRunNamespace" . | quote }}
+  labels:
+    {{- include "nvt.producerLabels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nvt.producerServiceAccountName" . }}
+    namespace: {{ include "nvt.namespace" . | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "nvt.producerFullname" . }}
+{{- end }}

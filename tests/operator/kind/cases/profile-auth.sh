@@ -32,6 +32,8 @@ case_kind_setup() {
     -n "${NAMESPACE}" \
     --create-namespace \
     --timeout "${ROLLOUT_TIMEOUT}" \
+    --set operator.image.repository=nvt-operator \
+    --set operator.image.tag=latest \
     --set agentSchedule.maxParallelism=4
   kubectl_smoke rollout status deployment/nvt-operator -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
 }

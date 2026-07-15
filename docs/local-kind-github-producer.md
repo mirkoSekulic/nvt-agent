@@ -23,7 +23,7 @@ Keep private keys, auth files, and local values outside Git. Common
 
 ## Values
 
-Create `values.nvt-local.yaml` for the core chart:
+Create one complete `values.nvt-local.yaml` for the consolidated chart:
 
 ```yaml
 broker:
@@ -50,43 +50,35 @@ agentSchedule:
   enabled: true
   name: default
   maxParallelism: 1
+
+producer:
+  allowedAuthors: [YOUR_GITHUB_LOGIN]
+  repositories:
+    - owner: OWNER
+      name: REPO
+  githubApp:
+    appID: 123456
+    installationID: 12345678
+    existingSecret: nvt-github-app
+  submission:
+    mode: scheduleAdmission
+    admissionBaseURL: http://nvt-operator:8082
+    scheduleName: default
+  idempotency:
+    scope: comment
+  agentRun:
+    namespace: nvt
+    runtimeImage: nvt-agent-runtime:latest
+    runtimeType: codex
+    runtimeAutonomy: trusted-local
+    runtimeAuthSecret: codex-auth
+    brokerGrants:
+      - provider: github-main-app
+        repositories: [OWNER/REPO]
 ```
 
-Create `values.github-comments.yaml` for the producer:
-
-```yaml
-allowedAuthors: [YOUR_GITHUB_LOGIN]
-repositories:
-  - owner: OWNER
-    name: REPO
-
-githubApp:
-  appID: 123456
-  installationID: 12345678
-  existingSecret: nvt-github-app
-
-submission:
-  mode: scheduleAdmission
-  admissionBaseURL: http://nvt-operator:8082
-  scheduleName: default
-
-idempotency:
-  scope: comment
-
-agentRun:
-  namespace: nvt
-  runtimeImage: nvt-agent-runtime:latest
-  runtimeType: codex
-  runtimeAutonomy: trusted-local
-  runtimeAuthSecret: codex-auth
-  brokerGrants:
-    - provider: github-main-app
-      repositories: [OWNER/REPO]
-```
-
-Add runtime plugins under `agentConfig` as needed. The complete supported
-values and checkout/watcher example live in the
-[producer chart README](../charts/nvt-github-comments-producer/README.md).
+Add runtime plugins under `producer.agentConfig` as needed. The complete
+supported values live in [`charts/nvt/values.yaml`](../charts/nvt/values.yaml).
 
 Use `idempotency.scope: comment` for repeated local tests. Production-like
 issue scope permits one active PR-creation intent per issue.
@@ -129,8 +121,12 @@ make operator-kind-setup \
 make producer-kind-setup \
   CLUSTER=nvt-smoke \
   NAMESPACE=nvt \
-  PRODUCER_VALUES=values.github-comments.yaml
+  PRODUCER_VALUES=values.nvt-local.yaml
 ```
+
+The specialized producer target deliberately resets stored Helm values before
+applying this complete file, so incompatible 0.1 scalar image values cannot be
+silently reused.
 
 ## Trigger And Observe
 

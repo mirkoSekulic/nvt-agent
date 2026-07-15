@@ -73,7 +73,7 @@ jobs:
             dockerfile: tests/fixtures/echo/Dockerfile
             image: nvt-smoke-echo:test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Build ${{ matrix.name }} image
         run: docker build -t "${{ matrix.image }}" -f "${{ matrix.dockerfile }}" .
       - name: Run runtime git credentials smoke

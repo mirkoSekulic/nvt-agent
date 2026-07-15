@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
-PRODUCER_CHART="${ROOT}/charts/nvt-github-comments-producer"
+CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
+CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
+TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
@@ -39,6 +41,11 @@ PRODUCER_EXISTING_SA_RENDER="${WORKDIR}/producer-existing-sa.yaml"
 PRODUCER_CROSS_NAMESPACE_RENDER="${WORKDIR}/producer-cross-namespace.yaml"
 PRODUCER_NULL_TTL_RENDER="${WORKDIR}/producer-null-ttl.yaml"
 PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
+ALL_IMAGES_RENDER="${WORKDIR}/all-images.yaml"
+PACKAGED_RELEASE_RENDER="${WORKDIR}/packaged-release.yaml"
+SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
+COMPONENT_TAG_RENDER="${WORKDIR}/component-tag.yaml"
+LEGACY_IMAGE_FAILURE="${WORKDIR}/legacy-image-failure.txt"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
@@ -106,18 +113,25 @@ helm template nvt "${CHART}" -n custom-ns \
   > "${BROKER_SEED_RENDER}"
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns > "${PRODUCER_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set submission.mode=direct > "${PRODUCER_DIRECT_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns \
-  --set submission.admissionMode=profiled \
-  --set submission.tokenExpirationSeconds=1800 \
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true > "${PRODUCER_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.submission.mode=direct > "${PRODUCER_DIRECT_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.submission.admissionMode=profiled \
+  --set producer.submission.tokenExpirationSeconds=1800 \
   > "${PRODUCER_PROFILED_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.existingClaim=existing-state > "${PRODUCER_EXISTING_CLAIM_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set persistence.enabled=false > "${PRODUCER_EMPTYDIR_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set serviceAccount.create=false --set serviceAccount.name=existing-sa --set rbac.create=false > "${PRODUCER_EXISTING_SA_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n producer-ns --set agentRun.namespace=nvt > "${PRODUCER_CROSS_NAMESPACE_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set agentRun.ttl=null > "${PRODUCER_NULL_TTL_RENDER}"
-helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns --set agentRun.ttl.completedTTLSeconds=null --set agentRun.ttl.failedTTLSeconds=null --set agentRun.ttl.runRetentionSeconds=null > "${PRODUCER_EMPTY_TTL_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.persistence.existingClaim=existing-state > "${PRODUCER_EXISTING_CLAIM_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.persistence.enabled=false > "${PRODUCER_EMPTYDIR_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.serviceAccount.create=false --set producer.serviceAccount.name=existing-sa --set producer.rbac.create=false > "${PRODUCER_EXISTING_SA_RENDER}"
+helm template nvt "${CHART}" -n producer-ns --set producer.enabled=true --set producer.agentRun.namespace=nvt > "${PRODUCER_CROSS_NAMESPACE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.agentRun.ttl=null > "${PRODUCER_NULL_TTL_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.agentRun.ttl.completedTTLSeconds=null --set producer.agentRun.ttl.failedTTLSeconds=null --set producer.agentRun.ttl.runRetentionSeconds=null > "${PRODUCER_EMPTY_TTL_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${ALL_IMAGES_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true \
+  --set-string global.imageTag="${TEST_RELEASE_TAG}" >"${SOURCE_GLOBAL_TAG_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set-string global.imageTag="${TEST_RELEASE_TAG}" \
+  --set-string operator.image.tag=operator-override >"${COMPONENT_TAG_RENDER}"
+helm package "${CHART}" --app-version "${TEST_RELEASE_TAG}" --destination "${WORKDIR}" >/dev/null
+helm template nvt "${WORKDIR}/nvt-${CHART_VERSION}.tgz" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${PACKAGED_RELEASE_RENDER}"
 bash -n "${ROOT}/scripts/operator-codex-auth-secret.sh"
 bash -n "${ROOT}/scripts/github-comments-producer-secret.sh"
 bash -n "${ROOT}/scripts/broker-env-secret.sh"
@@ -432,6 +446,60 @@ missing_resource "${DEFAULT_RENDER}" Namespace nvt
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Service nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
+missing_resource "${DEFAULT_RENDER}" Deployment nvt-github-comments-producer
+missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-github-comments-producer
+
+for image in \
+  nvt-agent-runtime \
+  nvt-broker \
+  nvt-egressd \
+  nvt-captured \
+  nvt-operator \
+  nvt-agent-gateway \
+  nvt-github-comments-producer; do
+  grep -q "ghcr.io/mirkosekulic/${image}:${CHART_APP_VERSION}" "${ALL_IMAGES_RENDER}" || {
+    echo "coordinated default image missing from render: ${image}" >&2
+    exit 1
+  }
+done
+grep -q 'ghcr.io/mirkosekulic/nvt-operator:operator-override' "${COMPONENT_TAG_RENDER}"
+for image in \
+  nvt-agent-runtime \
+  nvt-broker \
+  nvt-egressd \
+  nvt-captured \
+  nvt-operator \
+  nvt-agent-gateway \
+  nvt-github-comments-producer; do
+  grep -q "ghcr.io/mirkosekulic/${image}:${TEST_RELEASE_TAG}" "${SOURCE_GLOBAL_TAG_RENDER}" || {
+    echo "global.imageTag did not coordinate source-chart image: ${image}" >&2
+    exit 1
+  }
+done
+for image in \
+  nvt-agent-runtime \
+  nvt-broker \
+  nvt-egressd \
+  nvt-captured \
+  nvt-operator \
+  nvt-agent-gateway \
+  nvt-github-comments-producer; do
+  grep -q "ghcr.io/mirkosekulic/${image}:${TEST_RELEASE_TAG}" "${PACKAGED_RELEASE_RENDER}" || {
+    echo "published chart appVersion did not coordinate image: ${image}" >&2
+    exit 1
+  }
+done
+if grep -Eq 'image:.*:latest|image:[[:space:]]*"?nvt-' "${ALL_IMAGES_RENDER}"; then
+  echo "coordinated chart rendered a latest or local-only deployment image" >&2
+  exit 1
+fi
+if helm template nvt "${CHART}" -n custom-ns \
+  --set-string operator.image=nvt-operator:latest \
+  > /dev/null 2>"${LEGACY_IMAGE_FAILURE}"; then
+  echo "legacy scalar image value was accepted" >&2
+  exit 1
+fi
+grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 0.1 scalar image values before upgrading' "${LEGACY_IMAGE_FAILURE}"
 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
@@ -843,14 +911,14 @@ grep -q 'audience: nvt-operator' "${PRODUCER_PROFILED_RENDER}"
 grep -q 'expirationSeconds: 1800' "${PRODUCER_PROFILED_RENDER}"
 grep -q 'path: "token"' "${PRODUCER_PROFILED_RENDER}"
 grep -q 'defaultMode: 0440' "${PRODUCER_PROFILED_RENDER}"
-if helm template nvt-github-comments-producer "${PRODUCER_CHART}" -n custom-ns \
-  --set submission.admissionMode=profiled \
-  --set submission.tokenExpirationSeconds=599 \
+if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.submission.admissionMode=profiled \
+  --set producer.submission.tokenExpirationSeconds=599 \
   > /dev/null 2> "${PRODUCER_PROFILED_EXPIRATION_FAILURE}"; then
   echo "expected too-short projected token expiration to fail rendering" >&2
   exit 1
 fi
-grep -q 'submission.tokenExpirationSeconds must be between 600 and 86400' "${PRODUCER_PROFILED_EXPIRATION_FAILURE}"
+grep -q 'producer.submission.tokenExpirationSeconds must be between 600 and 86400' "${PRODUCER_PROFILED_EXPIRATION_FAILURE}"
 if grep -Eq 'privateKey:|privateKeyBase64:|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' "${PRODUCER_RENDER}"; then
   echo "producer chart must not render GitHub App private key material" >&2
   exit 1

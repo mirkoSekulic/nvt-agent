@@ -1,0 +1,22 @@
+{{- if and .Values.producer.enabled .Values.producer.persistence.enabled (not .Values.producer.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "nvt.producerStateClaimName" . }}
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.producerLabels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.producer.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.producer.persistence.size | quote }}
+  {{- if .Values.producer.persistence.storageClass }}
+  {{- if eq .Values.producer.persistence.storageClass "-" }}
+  storageClassName: ""
+  {{- else }}
+  storageClassName: {{ .Values.producer.persistence.storageClass | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}
