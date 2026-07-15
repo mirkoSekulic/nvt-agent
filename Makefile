@@ -154,7 +154,10 @@ producer-kind-install:
 		--kube-context "$(KUBECTL_CONTEXT)" \
 		-n "$(NAMESPACE)" \
 		--create-namespace \
-		--reuse-values \
+		--reset-values \
+		$(OPERATOR_KIND_LOCAL_IMAGE_ARGS) \
+		--set producer.image.repository=$(word 1,$(subst :, ,$(PRODUCER_IMAGE))) \
+		--set producer.image.tag=$(word 2,$(subst :, ,$(PRODUCER_IMAGE))) \
 		--set producer.enabled=true \
 		-f "$(PRODUCER_VALUES)" \
 		--wait \

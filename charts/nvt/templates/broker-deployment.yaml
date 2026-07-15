@@ -34,7 +34,7 @@ spec:
       {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
       initContainers:
         - name: seed-broker-state
-          image: {{ include "nvt.image" (dict "root" . "image" .Values.broker.image) | quote }}
+          image: {{ include "nvt.image" (dict "root" . "name" "broker.image" "image" .Values.broker.image) | quote }}
           imagePullPolicy: {{ .Values.broker.image.pullPolicy }}
           command:
             - sh
@@ -59,7 +59,7 @@ spec:
       {{- end }}
       containers:
         - name: broker
-          image: {{ include "nvt.image" (dict "root" . "image" .Values.broker.image) | quote }}
+          image: {{ include "nvt.image" (dict "root" . "name" "broker.image" "image" .Values.broker.image) | quote }}
           imagePullPolicy: {{ .Values.broker.image.pullPolicy }}
           ports:
             - name: http

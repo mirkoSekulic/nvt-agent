@@ -41,7 +41,7 @@ spec:
       {{- end }}
       containers:
         - name: github-comments-producer
-          image: {{ include "nvt.image" (dict "root" . "image" .Values.producer.image) | quote }}
+          image: {{ include "nvt.image" (dict "root" . "name" "producer.image" "image" .Values.producer.image) | quote }}
           imagePullPolicy: {{ .Values.producer.image.pullPolicy }}
           args:
             - --config=/etc/nvt-github-comments/config.yaml

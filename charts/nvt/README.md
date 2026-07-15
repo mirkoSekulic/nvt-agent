@@ -3,11 +3,18 @@
 The chart installs the AgentRun and AgentSchedule CRDs, operator, broker, and
 optional browser gateway and GitHub comments producer.
 
+For deployments, install the published OCI chart shown in
+[`charts/README.md`](../README.md). A source checkout cannot know the release
+commit used to publish images. If source rendering is required, supply one
+exact published tag explicitly:
+
 ```sh
-helm upgrade --install nvt ./charts/nvt \
-  --namespace nvt \
-  --create-namespace
+helm template nvt ./charts/nvt \
+  --set-string global.imageTag=0.2.0-943d5ba
 ```
+
+Do not install the source chart without `global.imageTag` or component-specific
+tags: its development `Chart.AppVersion` is not a published image identity.
 
 Provider credentials are supplied through existing Secrets, never literal
 chart values.
@@ -21,7 +28,36 @@ and producer images. Empty component tags default to `Chart.AppVersion`;
 repository, tag, and pull policy remain independently overridable.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all seven exact image manifests exist in GHCR.
+published only after all seven manifests exist and can be fetched anonymously
+with an isolated credential-free Docker configuration. The release reuses an
+existing image tag only when its OCI source, full revision, and version labels
+match. GHCR package writers are trusted: matching labels establish coordinated
+release metadata, not byte-for-byte content identity against copied labels.
+
+## Upgrading image values from 0.1
+
+Version 0.2 replaces scalar image values with repository/tag/pullPolicy maps.
+Migrate saved values before upgrading:
+
+```yaml
+# 0.1 (no longer accepted)
+operator:
+  image: nvt-operator:latest
+
+# 0.2
+operator:
+  image:
+    repository: ghcr.io/mirkosekulic/nvt-operator
+    tag: 0.2.0-943d5ba
+    pullPolicy: IfNotPresent
+```
+
+The same shape applies to runtime, broker, gateway, producer, egressd, and
+captured. A legacy scalar fails rendering with an explicit migration error.
+Do not use `--reuse-values` across this boundary; migrate the values file or
+reset stored values before the 0.2 upgrade. `make producer-kind-install` uses
+`--reset-values` and treats `PRODUCER_VALUES` as a complete consolidated-chart
+values file for this reason.
 
 ## GitHub comments producer
 

@@ -2,6 +2,11 @@ namespace:
   name: ""
   create: false
 
+global:
+  # Required when installing this source checkout without component tag
+  # overrides. Published OCI packages set Chart.AppVersion to this value.
+  imageTag: ""
+
 runtime:
   image:
     repository: ghcr.io/mirkosekulic/nvt-agent-runtime

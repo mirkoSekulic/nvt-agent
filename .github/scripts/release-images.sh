@@ -6,9 +6,9 @@ if [[ "$#" != "4" ]]; then
   exit 2
 fi
 
-owner="${1,,}"
+owner="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 release_tag="$2"
-revision="${3,,}"
+revision="$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')"
 source_url="$4"
 
 if [[ ! "${owner}" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
@@ -29,7 +29,7 @@ images=(
   "nvt-github-comments-producer|producers/github-comments/Dockerfile"
 )
 
-verify_existing() {
+verify_release_metadata() {
   local image="$1"
   local error_file found_revision found_source found_version status
   error_file="$(mktemp)"
@@ -55,13 +55,13 @@ verify_existing() {
     echo "conflicting immutable image tag: ${image}" >&2
     exit 2
   fi
-  echo "Verified existing ${image}."
+  echo "Verified coordinated release metadata for existing ${image}."
 }
 
 for entry in "${images[@]}"; do
   IFS='|' read -r name dockerfile <<<"${entry}"
   image="ghcr.io/${owner}/${name}:${release_tag}"
-  if verify_existing "${image}"; then
+  if verify_release_metadata "${image}"; then
     continue
   fi
   docker build \
@@ -71,9 +71,9 @@ for entry in "${images[@]}"; do
     --tag "${image}" \
     --file "${dockerfile}" \
     .
-  # Recheck after the build. Repository-level workflow concurrency prevents
-  # coordinated runs from racing; this catches an externally-created tag.
-  if verify_existing "${image}"; then
+  # Recheck after the build. Version-scoped workflow concurrency prevents
+  # duplicate releases from racing; this catches an externally-created tag.
+  if verify_release_metadata "${image}"; then
     continue
   fi
   docker push "${image}"
@@ -84,7 +84,7 @@ for entry in "${images[@]}"; do
   image="ghcr.io/${owner}/${name}:${release_tag}"
   verified=0
   for _ in $(seq 1 10); do
-    if verify_existing "${image}" >/dev/null; then
+    if verify_release_metadata "${image}" >/dev/null; then
       verified=1
       break
     fi
@@ -96,4 +96,4 @@ for entry in "${images[@]}"; do
   }
 done
 
-echo "Verified all seven coordinated image manifests."
+echo "Verified all seven image manifests and coordinated release metadata labels."

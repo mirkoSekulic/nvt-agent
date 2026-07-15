@@ -7,7 +7,7 @@ if [[ "$#" != "2" ]]; then
 fi
 
 chart="$1"
-revision="${2,,}"
+revision="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
 version="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${chart}/Chart.yaml")"
 
 # OCI/Docker tags cannot preserve SemVer build metadata verbatim, so release

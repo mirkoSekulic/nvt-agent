@@ -19,10 +19,6 @@ permissions:
   contents: read
   packages: read
 
-concurrency:
-  group: nvt-coordinated-release
-  cancel-in-progress: false
-
 jobs:
   validate:
     if: github.event_name == 'pull_request'
@@ -63,22 +59,49 @@ jobs:
           bash .github/scripts/release-scripts-test.sh
           bash tests/operator/helm/test.sh
 
-  publish:
+  release_metadata:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      revision: ${{ steps.release.outputs.revision }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - id: release
+        name: Derive the coordinated release identity
+        run: |
+          set -euo pipefail
+          eval "$(bash .github/scripts/release-metadata.sh charts/nvt "${GITHUB_SHA}")"
+          printf 'version=%s\n' "${VERSION}" >>"${GITHUB_OUTPUT}"
+          printf 'revision=%s\n' "${REVISION}" >>"${GITHUB_OUTPUT}"
+          printf 'release_tag=%s\n' "${RELEASE_TAG}" >>"${GITHUB_OUTPUT}"
+
+  publish:
+    needs: release_metadata
+    if: needs.release_metadata.result == 'success'
+    runs-on: ubuntu-latest
     timeout-minutes: 90
+    concurrency:
+      # Distinct chart versions use distinct groups and therefore cannot evict
+      # one another from GitHub's single-pending default queue. Duplicate
+      # attempts for one immutable version remain serialized.
+      group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
+    env:
+      VERSION: ${{ needs.release_metadata.outputs.version }}
+      REVISION: ${{ needs.release_metadata.outputs.revision }}
+      RELEASE_TAG: ${{ needs.release_metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
-      - name: Derive the coordinated release identity
-        run: |
-          set -euo pipefail
-          bash .github/scripts/release-metadata.sh charts/nvt "${GITHUB_SHA}" >>"${GITHUB_ENV}"
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ github.token }}
@@ -115,6 +138,11 @@ jobs:
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           bash .github/scripts/release-images.sh \
             "${owner}" "${RELEASE_TAG}" "${REVISION}" "https://github.com/${GITHUB_REPOSITORY}"
+      - name: Verify anonymous image pullability
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          bash .github/scripts/verify-public-images.sh "${owner}" "${RELEASE_TAG}"
       - name: Publish the chart last
         env:
           GH_TOKEN: ${{ github.token }}
@@ -141,5 +169,6 @@ jobs:
             [[ "${status}" == "1" ]] || exit "${status}"
           fi
 
-          # release-images.sh has already verified all seven exact manifests.
+          # The image steps have verified coordinated metadata and anonymous
+          # manifest access for all seven release tags.
           helm push "${package}" "oci://${repository}"

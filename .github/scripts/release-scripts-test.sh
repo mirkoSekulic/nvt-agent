@@ -27,6 +27,10 @@ set -euo pipefail
 printf 'docker %s\n' "$*" >>"${DOCKER_LOG}"
 case "$1 $2" in
   "manifest inspect")
+    if [[ "${REQUIRE_ANONYMOUS:-0}" == "1" ]]; then
+      [[ -n "${DOCKER_CONFIG:-}" && "${DOCKER_CONFIG}" != "${AUTHENTICATED_DOCKER_CONFIG}" ]]
+      grep -qx '{"auths":{}}' "${DOCKER_CONFIG}/config.json"
+    fi
     ref="$3"
     if [[ ! -f "${MANIFEST_DIR}/${ref//\//_}" ]]; then
       echo "manifest unknown" >&2
@@ -67,9 +71,33 @@ fi
 : >"${DOCKER_LOG}"
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
 if grep -Eq '^docker (build|push) ' "${DOCKER_LOG}"; then
-  echo "exact partial-release artifacts were republished" >&2
+  echo "metadata-matching partial-release artifacts were republished" >&2
   exit 1
 fi
+
+# Existing package writers are trusted. Matching OCI source/revision/version
+# metadata is the recovery boundary; copied labels do not prove byte identity.
+# The fake registry deliberately exposes no content digest, and reuse succeeds.
+export FAKE_UNOBSERVED_CONTENT=changed-by-trusted-writer
+
+mkdir -p "${WORKDIR}/authenticated-docker"
+printf '{"auths":{"ghcr.io":{"auth":"not-a-real-credential"}}}\n' >"${WORKDIR}/authenticated-docker/config.json"
+export DOCKER_CONFIG="${WORKDIR}/authenticated-docker"
+export AUTHENTICATED_DOCKER_CONFIG="${DOCKER_CONFIG}"
+export REQUIRE_ANONYMOUS=1
+: >"${DOCKER_LOG}"
+NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \
+  bash "${ROOT}/.github/scripts/verify-public-images.sh" mirkoSekulic "${FAKE_VERSION}"
+[[ "$(grep -c '^docker manifest inspect ' "${DOCKER_LOG}")" == "7" ]]
+
+rm -f "${MANIFEST_DIR}/ghcr.io_mirkosekulic_nvt-agent-runtime:${FAKE_VERSION}"
+if NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \
+  bash "${ROOT}/.github/scripts/verify-public-images.sh" mirkoSekulic "${FAKE_VERSION}" >/dev/null 2>"${WORKDIR}/public.err"; then
+  echo "missing anonymous image was accepted" >&2
+  exit 1
+fi
+grep -q 'image is not anonymously readable' "${WORKDIR}/public.err"
+unset REQUIRE_ANONYMOUS DOCKER_CONFIG
 
 export FAKE_REVISION=1111111111111111111111111111111111111111
 if bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}" >/dev/null 2>"${WORKDIR}/conflict.err"; then
@@ -77,5 +105,12 @@ if bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION
   exit 1
 fi
 grep -q 'conflicting immutable image tag' "${WORKDIR}/conflict.err"
+
+workflow="${ROOT}/.github/workflows/charts.yml"
+grep -Fq 'group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}' "${workflow}"
+grep -A6 '^  publish:' "${workflow}" | grep -q 'needs: release_metadata'
+anonymous_line="$(grep -n 'name: Verify anonymous image pullability' "${workflow}" | cut -d: -f1)"
+chart_line="$(grep -n 'name: Publish the chart last' "${workflow}" | cut -d: -f1)"
+[[ "${anonymous_line}" -lt "${chart_line}" ]]
 
 echo "coordinated release script test passed"

@@ -71,7 +71,7 @@ spec:
       serviceAccountName: nvt-agent-gateway
       containers:
         - name: gateway
-          image: {{ include "nvt.image" (dict "root" . "image" .Values.gateway.image) | quote }}
+          image: {{ include "nvt.image" (dict "root" . "name" "gateway.image" "image" .Values.gateway.image) | quote }}
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           args:
             - --base-domain={{ .Values.gateway.baseDomain }}

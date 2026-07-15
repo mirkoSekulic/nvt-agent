@@ -74,11 +74,13 @@ grep -q -- 'kind load docker-image custom-gateway:test --name poc-cluster' "${TO
 PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-install \
   PRODUCER_RELEASE=producer-test \
   PRODUCER_CHART=charts/nvt \
+  PRODUCER_IMAGE=custom-producer:test \
   PRODUCER_VALUES="${VALUES_FILE}" \
   NAMESPACE=producer-ns \
   KUBECTL_CONTEXT=kind-poc-cluster \
   ROLLOUT_TIMEOUT=12s >"${WORKDIR}/install.out"
-grep -q -- 'helm upgrade --install producer-test charts/nvt --kube-context kind-poc-cluster -n producer-ns --create-namespace --reuse-values --set producer.enabled=true -f '"${VALUES_FILE}"' --wait --timeout 12s' "${TOOL_LOG}"
+grep -q -- '--reset-values --set runtime.image.repository=nvt-agent-runtime --set runtime.image.tag=latest' "${TOOL_LOG}"
+grep -q -- '--set producer.image.repository=custom-producer --set producer.image.tag=test --set producer.enabled=true -f '"${VALUES_FILE}"' --wait --timeout 12s' "${TOOL_LOG}"
 
 if PATH="${BIN_DIR}:${PATH}" make -C "${ROOT}" producer-kind-install \
   PRODUCER_VALUES="${WORKDIR}/missing.yaml" >"${WORKDIR}/missing.out" 2>"${WORKDIR}/missing.err"; then

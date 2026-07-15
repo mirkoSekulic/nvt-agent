@@ -43,6 +43,9 @@ PRODUCER_NULL_TTL_RENDER="${WORKDIR}/producer-null-ttl.yaml"
 PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
 ALL_IMAGES_RENDER="${WORKDIR}/all-images.yaml"
 PACKAGED_RELEASE_RENDER="${WORKDIR}/packaged-release.yaml"
+SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
+COMPONENT_TAG_RENDER="${WORKDIR}/component-tag.yaml"
+LEGACY_IMAGE_FAILURE="${WORKDIR}/legacy-image-failure.txt"
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
@@ -123,6 +126,10 @@ helm template nvt "${CHART}" -n producer-ns --set producer.enabled=true --set pr
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.agentRun.ttl=null > "${PRODUCER_NULL_TTL_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.agentRun.ttl.completedTTLSeconds=null --set producer.agentRun.ttl.failedTTLSeconds=null --set producer.agentRun.ttl.runRetentionSeconds=null > "${PRODUCER_EMPTY_TTL_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${ALL_IMAGES_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true \
+  --set-string global.imageTag="${TEST_RELEASE_TAG}" >"${SOURCE_GLOBAL_TAG_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set-string global.imageTag="${TEST_RELEASE_TAG}" \
+  --set-string operator.image.tag=operator-override >"${COMPONENT_TAG_RENDER}"
 helm package "${CHART}" --app-version "${TEST_RELEASE_TAG}" --destination "${WORKDIR}" >/dev/null
 helm template nvt "${WORKDIR}/nvt-${CHART_VERSION}.tgz" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${PACKAGED_RELEASE_RENDER}"
 bash -n "${ROOT}/scripts/operator-codex-auth-secret.sh"
@@ -455,6 +462,20 @@ for image in \
     exit 1
   }
 done
+grep -q 'ghcr.io/mirkosekulic/nvt-operator:operator-override' "${COMPONENT_TAG_RENDER}"
+for image in \
+  nvt-agent-runtime \
+  nvt-broker \
+  nvt-egressd \
+  nvt-captured \
+  nvt-operator \
+  nvt-agent-gateway \
+  nvt-github-comments-producer; do
+  grep -q "ghcr.io/mirkosekulic/${image}:${TEST_RELEASE_TAG}" "${SOURCE_GLOBAL_TAG_RENDER}" || {
+    echo "global.imageTag did not coordinate source-chart image: ${image}" >&2
+    exit 1
+  }
+done
 for image in \
   nvt-agent-runtime \
   nvt-broker \
@@ -472,6 +493,13 @@ if grep -Eq 'image:.*:latest|image:[[:space:]]*"?nvt-' "${ALL_IMAGES_RENDER}"; t
   echo "coordinated chart rendered a latest or local-only deployment image" >&2
   exit 1
 fi
+if helm template nvt "${CHART}" -n custom-ns \
+  --set-string operator.image=nvt-operator:latest \
+  > /dev/null 2>"${LEGACY_IMAGE_FAILURE}"; then
+  echo "legacy scalar image value was accepted" >&2
+  exit 1
+fi
+grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 0.1 scalar image values before upgrading' "${LEGACY_IMAGE_FAILURE}"
 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"

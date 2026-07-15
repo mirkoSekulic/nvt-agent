@@ -23,7 +23,7 @@ Keep private keys, auth files, and local values outside Git. Common
 
 ## Values
 
-Create `values.nvt-local.yaml` for the core chart:
+Create one complete `values.nvt-local.yaml` for the consolidated chart:
 
 ```yaml
 broker:
@@ -50,11 +50,7 @@ agentSchedule:
   enabled: true
   name: default
   maxParallelism: 1
-```
 
-Create `values.github-comments.yaml` for the producer block in the main chart:
-
-```yaml
 producer:
   allowedAuthors: [YOUR_GITHUB_LOGIN]
   repositories:
@@ -125,8 +121,12 @@ make operator-kind-setup \
 make producer-kind-setup \
   CLUSTER=nvt-smoke \
   NAMESPACE=nvt \
-  PRODUCER_VALUES=values.github-comments.yaml
+  PRODUCER_VALUES=values.nvt-local.yaml
 ```
+
+The specialized producer target deliberately resets stored Helm values before
+applying this complete file, so incompatible 0.1 scalar image values cannot be
+silently reused.
 
 ## Trigger And Observe
 

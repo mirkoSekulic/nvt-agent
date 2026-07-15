@@ -32,11 +32,34 @@ app.kubernetes.io/part-of: nvt
 {{- end -}}
 
 {{- define "nvt.image" -}}
-{{- printf "%s:%s" .image.repository (default .root.Chart.AppVersion .image.tag) -}}
+{{- if not (kindIs "map" .image) -}}
+{{- fail (printf "%s must use the 0.2 repository/tag/pullPolicy map; migrate 0.1 scalar image values before upgrading" .name) -}}
+{{- end -}}
+{{- $defaultTag := default .root.Chart.AppVersion .root.Values.global.imageTag -}}
+{{- printf "%s:%s" .image.repository (default $defaultTag .image.tag) -}}
+{{- end -}}
+
+{{- define "nvt.validateImageValues" -}}
+{{- $images := list
+  (dict "name" "runtime.image" "value" .Values.runtime.image)
+  (dict "name" "egress.egressd.image" "value" .Values.egress.egressd.image)
+  (dict "name" "egress.captured.image" "value" .Values.egress.captured.image)
+  (dict "name" "broker.image" "value" .Values.broker.image)
+  (dict "name" "operator.image" "value" .Values.operator.image)
+  (dict "name" "gateway.image" "value" .Values.gateway.image)
+  (dict "name" "producer.image" "value" .Values.producer.image) -}}
+{{- range $image := $images -}}
+{{- if not (kindIs "map" $image.value) -}}
+{{- fail (printf "%s must use the 0.2 repository/tag/pullPolicy map; migrate 0.1 scalar image values before upgrading" $image.name) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.global.imageTag (not (regexMatch `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$` .Values.global.imageTag)) -}}
+{{- fail "global.imageTag must be a valid immutable container tag" -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "nvt.runtimeImage" -}}
-{{- include "nvt.image" (dict "root" . "image" .Values.runtime.image) -}}
+{{- include "nvt.image" (dict "root" . "name" "runtime.image" "image" .Values.runtime.image) -}}
 {{- end -}}
 
 {{- define "nvt.brokerLabels" -}}
