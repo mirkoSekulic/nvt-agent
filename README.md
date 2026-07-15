@@ -157,6 +157,8 @@ See [Runtime plugins](runtime/plugins/README.md) and the contracts under
 
 ## Documentation
 
+Local mediated producer flow verified.
+
 - [Documentation map](docs/README.md)
 - [Local development agent](docs/local-development-agent.md)
 - [Codex authentication](docs/codex-auth.md)
