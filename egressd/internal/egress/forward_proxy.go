@@ -101,13 +101,13 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseTunnel()
 
-	address, err := p.resolveTarget(r.Context(), target)
+	addresses, err := p.resolveTarget(r.Context(), target)
 	if err != nil {
 		p.writeDecision(target.host, target.port, "deny", "destination_denied")
 		http.Error(w, "CONNECT destination denied", http.StatusForbidden)
 		return
 	}
-	upstream, err := p.dial(r.Context(), net.JoinHostPort(address.String(), strconv.Itoa(target.port)))
+	upstream, err := p.dialResolvedAddresses(r.Context(), addresses, strconv.Itoa(target.port))
 	if err != nil {
 		p.writeDecision(target.host, target.port, "deny", "upstream_unreachable")
 		http.Error(w, "CONNECT upstream unreachable", http.StatusBadGateway)
@@ -313,11 +313,7 @@ func (p *ForwardProxy) injectRouteTransport(route ForwardProxyInjectRoute) http.
 		if err != nil {
 			return nil, fmt.Errorf("parse inject route destination: %w", err)
 		}
-		resolved, err := resolveAllowedAddress(ctx, p.resolver(), p.destinationPolicy, host)
-		if err != nil {
-			return nil, err
-		}
-		return p.dial(ctx, net.JoinHostPort(resolved.String(), port))
+		return p.dialResolvedTarget(ctx, host, port)
 	}
 	return clone
 }
@@ -427,9 +423,36 @@ func (p *ForwardProxy) resolver() IPResolver {
 	return net.DefaultResolver
 }
 
-func (p *ForwardProxy) resolveTarget(ctx context.Context, target connectTarget) (netip.Addr, error) {
+func (p *ForwardProxy) dialResolvedTarget(ctx context.Context, host, port string) (net.Conn, error) {
 	p.init()
-	return resolveAllowedAddress(ctx, p.resolver(), p.destinationPolicy, target.host)
+	addresses, err := resolveAllowedAddresses(ctx, p.resolver(), p.destinationPolicy, host)
+	if err != nil {
+		return nil, err
+	}
+	return p.dialResolvedAddresses(ctx, addresses, port)
+}
+
+func (p *ForwardProxy) resolveTarget(ctx context.Context, target connectTarget) ([]netip.Addr, error) {
+	p.init()
+	return resolveAllowedAddresses(ctx, p.resolver(), p.destinationPolicy, target.host)
+}
+
+func (p *ForwardProxy) dialResolvedAddresses(ctx context.Context, addresses []netip.Addr, port string) (net.Conn, error) {
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("dial resolved destination: no validated addresses")
+	}
+	var lastErr error
+	for _, address := range addresses {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("dial resolved destination: %w", err)
+		}
+		connection, dialErr := p.dial(ctx, net.JoinHostPort(address.String(), port))
+		if dialErr == nil {
+			return connection, nil
+		}
+		lastErr = dialErr
+	}
+	return nil, fmt.Errorf("dial resolved destination: %w", lastErr)
 }
 
 func (p *ForwardProxy) dial(ctx context.Context, address string) (net.Conn, error) {

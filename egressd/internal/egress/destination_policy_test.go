@@ -61,11 +61,78 @@ func TestResolveAllowedAddressRejectsAnyDeniedCandidate(t *testing.T) {
 		netip.MustParseAddr("93.184.216.34"),
 		netip.MustParseAddr("169.254.169.254"),
 	}}
-	if _, err := resolveAllowedAddress(context.Background(), resolver, policy, "mixed.example"); err == nil {
+	if _, err := resolveAllowedAddresses(context.Background(), resolver, policy, "mixed.example"); err == nil {
 		t.Fatal("mixed public/private DNS answer must fail closed")
 	}
 	if resolver.calls != 1 {
 		t.Fatalf("resolver calls = %d, want exactly one", resolver.calls)
+	}
+}
+
+func TestForwardProxyPrefersIPv4AndFallsBackAcrossValidatedAddresses(t *testing.T) {
+	resolver := &staticResolver{addresses: []netip.Addr{
+		netip.MustParseAddr("2606:4700:4700::1111"),
+		netip.MustParseAddr("93.184.216.34"),
+		netip.MustParseAddr("93.184.216.35"),
+	}}
+	dialed := []string{}
+	proxy := &ForwardProxy{
+		Resolver: resolver,
+		DialContext: func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialed = append(dialed, address)
+			if address == "93.184.216.35:80" {
+				client, peer := net.Pipe()
+				_ = peer.Close()
+				return client, nil
+			}
+			return nil, errors.New("fixture address unavailable")
+		},
+	}
+	policy, err := newDestinationPolicy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy.destinationPolicy = policy
+	connection, err := proxy.dialResolvedTarget(context.Background(), "packages.example", "80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Close()
+	if got, want := strings.Join(dialed, ","), "93.184.216.34:80,93.184.216.35:80"; got != want {
+		t.Fatalf("dial order = %q, want %q", got, want)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver calls = %d, want one", resolver.calls)
+	}
+}
+
+func TestForwardProxyRejectsEmptyResolvedAddressSet(t *testing.T) {
+	proxy := &ForwardProxy{}
+	if _, err := proxy.dialResolvedAddresses(context.Background(), nil, "443"); err == nil || !strings.Contains(err.Error(), "no validated addresses") {
+		t.Fatalf("empty address error = %v, want explicit rejection", err)
+	}
+}
+
+func TestForwardProxyStopsFallbackDialingWhenContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	dials := 0
+	proxy := &ForwardProxy{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			dials++
+			cancel()
+			return nil, errors.New("fixture address unavailable")
+		},
+	}
+	addresses := []netip.Addr{
+		netip.MustParseAddr("93.184.216.34"),
+		netip.MustParseAddr("93.184.216.35"),
+	}
+	_, err := proxy.dialResolvedAddresses(ctx, addresses, "443")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dial error = %v, want context cancellation", err)
+	}
+	if dials != 1 {
+		t.Fatalf("dial attempts = %d, want one", dials)
 	}
 }
 

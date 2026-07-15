@@ -2499,15 +2499,66 @@ func TestLiteralZeroSecretPlaceholderPreparationIsCachedAcrossReconciles(t *test
 		Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
 
-	for pass := 0; pass < 2; pass++ {
-		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
-		if err != nil {
-			t.Fatalf("reconcile pass %d: %v", pass+1, err)
-		}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	desiredPod, err := DesiredAgentPod(agentRun, scheme)
+	if err != nil {
+		t.Fatalf("render existing agent Pod: %v", err)
+	}
+	if err := k8sClient.Create(ctx, desiredPod); err != nil {
+		t.Fatalf("create existing agent Pod: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile with existing agent Pod: %v", err)
 	}
 
 	if brokerRequests != 1 {
 		t.Fatalf("expected placeholder preparation to be cached across reconciles, got %d broker requests", brokerRequests)
+	}
+	configMap := getAgentConfigMap(ctx, t, k8sClient, agentRun)
+	if configMap.Data[preparedPlaceholderFilesKey] == "" || !strings.Contains(configMap.Data[agentConfigKey], "$HOME/.codex/auth.json") {
+		t.Fatalf("existing agent Pod reconcile removed prepared placeholder files: %#v", configMap.Data)
+	}
+}
+
+func TestLiteralZeroSecretMissingPlaceholderCacheIsRebuilt(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := enforcedAgentRun()
+	agentRun.Spec.Broker.Grants = append(agentRun.Spec.Broker.Grants, nvtv1alpha1.AgentRunBrokerGrant{
+		Provider:        "codex-main",
+		Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+	})
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("agent-token"))
+	configMap, err := DesiredAgentConfigMap(agentRun, scheme)
+	if err != nil {
+		t.Fatalf("render stale agent config: %v", err)
+	}
+	configMap.Annotations = map[string]string{agentConfigPlaceholderCacheAnnotation: agentConfigPlaceholderCacheKey(agentRun)}
+	brokerRequests := 0
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		brokerRequests++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"files": []map[string]any{{
+				"path":    ".codex/auth.json",
+				"content": "{\n  \"access_token\": \"NVT-PLACEHOLDER-NOT-A-KEY\"\n}\n",
+				"mode":    "0600",
+			}},
+		})
+	}))
+	t.Cleanup(broker.Close)
+	t.Setenv("NVT_BROKER_URL", broker.URL)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agentRun, brokerSecret, configMap).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
+
+	files, err := reconciler.preparePlaceholderFiles(ctx, agentRun)
+	if err != nil {
+		t.Fatalf("rebuild missing placeholder cache: %v", err)
+	}
+	if brokerRequests != 1 || len(files) != 1 || files[0].Path != ".codex/auth.json" {
+		t.Fatalf("missing placeholder cache was not rebuilt: requests=%d files=%#v", brokerRequests, files)
 	}
 }
 

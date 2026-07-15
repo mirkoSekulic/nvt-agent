@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -255,6 +256,7 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		URL:        admission.Work.URL,
 		Repository: admission.Work.Repository,
 	}, h.scheme); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "prepare scheduled AgentRun", "schedule", client.ObjectKeyFromObject(schedule))
 		http.Error(response, "prepare AgentRun failed\n", http.StatusInternalServerError)
 		return
 	}
@@ -268,6 +270,7 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		}
 	}
 	if err := h.client.Create(ctx, &run); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "create scheduled AgentRun", "schedule", client.ObjectKeyFromObject(schedule), "agentrun", client.ObjectKeyFromObject(&run))
 		http.Error(response, "create AgentRun failed\n", http.StatusInternalServerError)
 		return
 	}

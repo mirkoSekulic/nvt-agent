@@ -351,8 +351,12 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 
 	out := new(AgentRunBrokerGrant)
 	*out = *in
-	out.Repositories = append([]string(nil), in.Repositories...)
-	out.EgressHosts = append([]string(nil), in.EgressHosts...)
+	if in.Repositories != nil {
+		out.Repositories = append([]string{}, in.Repositories...)
+	}
+	if in.EgressHosts != nil {
+		out.EgressHosts = append([]string{}, in.EgressHosts...)
+	}
 	if in.Permissions != nil {
 		out.Permissions = make(map[string]string, len(in.Permissions))
 		for key, value := range in.Permissions {
