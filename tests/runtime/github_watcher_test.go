@@ -554,14 +554,20 @@ printf '%%s\n' "$*" >> %s
 	}
 }
 
-func TestGithubWatcherMediatedPaginationUsesGhAuthSlurp(t *testing.T) {
+func TestGithubWatcherMediatedPaginationUsesExplicitPageRequests(t *testing.T) {
 	f := newFixture(t)
 	ghAuthLog := filepath.Join(f.home, "gh-auth.log")
+	ghAuthState := filepath.Join(f.home, "gh-auth.state")
 	f.writeBin("gh-auth", fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
-printf '%%s\n' "$*" > %s
-printf '%%s\n' '[[{"id":1}],[{"id":2}]]'
-`, quoteYAML(ghAuthLog)))
+printf '%%s\n' "$*" >> %s
+if [[ ! -f %s ]]; then
+  touch %s
+  python3 -c 'import json; print(json.dumps([{"id": i} for i in range(100)]))'
+else
+  printf '%%s\n' '[{"id":100}]'
+fi
+`, quoteYAML(ghAuthLog), quoteYAML(ghAuthState), quoteYAML(ghAuthState)))
 	script := fmt.Sprintf(`
 import importlib.util
 import pathlib
@@ -581,7 +587,7 @@ payload = lib.github_request(
     {"enabled": True, "provider": "github-main-app"},
     paginate=True,
 )
-if payload != [{"id": 1}, {"id": 2}]:
+if len(payload) != 101 or payload[-1] != {"id": 100}:
     raise SystemExit(f"unexpected paginated payload: {payload}")
 `, quoteYAML(f.root))
 
@@ -590,8 +596,9 @@ if payload != [{"id": 1}, {"id": 2}]:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "--provider github-main api --method GET repos/my-user/my-repo/issues/123/comments?per_page=100") ||
-		!strings.Contains(string(args), "--paginate --slurp") {
+	if !strings.Contains(string(args), "comments?per_page=100&page=1") ||
+		!strings.Contains(string(args), "comments?per_page=100&page=2") ||
+		strings.Contains(string(args), "--paginate") || strings.Contains(string(args), "--slurp") {
 		t.Fatalf("unexpected paginated gh-auth args:\n%s", args)
 	}
 }

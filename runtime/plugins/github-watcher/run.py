@@ -31,7 +31,7 @@ from github_watcher_lib import (
 
 
 def fetch_comments(watch):
-    if watch.get("broker", {}).get("enabled"):
+    if mediated_egress_enabled() or watch.get("broker", {}).get("enabled"):
         return github_request(
             f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
             watch["provider"],
@@ -55,7 +55,7 @@ def fetch_comments(watch):
 
 
 def fetch_reviews(watch):
-    if watch.get("broker", {}).get("enabled"):
+    if mediated_egress_enabled() or watch.get("broker", {}).get("enabled"):
         return github_request(
             f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
             watch["provider"],

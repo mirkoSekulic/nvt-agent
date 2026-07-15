@@ -344,7 +344,7 @@ def mediated_egress_enabled():
     return os.environ.get("NVT_EGRESS_MODE", "").strip().lower() == "mediated"
 
 
-def mediated_request(path, provider, query=None, paginate=False):
+def _mediated_request_page(path, provider, query, timeout):
     query_string = f"?{urlencode(query)}" if query else ""
     command = [
         "gh-auth",
@@ -359,15 +359,13 @@ def mediated_request(path, provider, query=None, paginate=False):
         "--header",
         "X-GitHub-Api-Version: 2022-11-28",
     ]
-    if paginate:
-        command.extend(["--paginate", "--slurp"])
     try:
         result = subprocess.run(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=MEDIATED_REQUEST_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except FileNotFoundError as error:
         raise WatchError(f"gh-auth not found: {error}") from error
@@ -379,11 +377,36 @@ def mediated_request(path, provider, query=None, paginate=False):
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise WatchError(f"mediated GitHub response was not valid JSON: {error}") from error
+    return payload
+
+
+def mediated_request(path, provider, query=None, paginate=False):
     if not paginate:
-        return payload
-    if not isinstance(payload, list) or not all(isinstance(page, list) for page in payload):
-        raise WatchError("mediated paginated GitHub response was not a list of pages")
-    return [item for page in payload for item in page]
+        return _mediated_request_page(path, provider, query, MEDIATED_REQUEST_TIMEOUT_SECONDS)
+
+    page_query = dict(query or {})
+    try:
+        page = int(page_query.get("page", 1))
+        per_page = int(page_query.get("per_page", 30))
+    except (TypeError, ValueError) as error:
+        raise WatchError("mediated GitHub pagination requires integer page values") from error
+    if page < 1 or per_page < 1 or per_page > 100:
+        raise WatchError("mediated GitHub pagination values are out of range")
+
+    deadline = time.monotonic() + MEDIATED_REQUEST_TIMEOUT_SECONDS
+    items = []
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise WatchError("mediated GitHub request timed out")
+        page_query["page"] = page
+        page_items = _mediated_request_page(path, provider, page_query, remaining)
+        if not isinstance(page_items, list):
+            raise WatchError("mediated paginated GitHub response page was not a list")
+        items.extend(page_items)
+        if len(page_items) < per_page:
+            return items
+        page += 1
 
 
 def broker_request(path, provider, query=None, paginate=False, broker=None):
