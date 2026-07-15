@@ -438,8 +438,14 @@ func (p *ForwardProxy) resolveTarget(ctx context.Context, target connectTarget) 
 }
 
 func (p *ForwardProxy) dialResolvedAddresses(ctx context.Context, addresses []netip.Addr, port string) (net.Conn, error) {
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("dial resolved destination: no validated addresses")
+	}
 	var lastErr error
 	for _, address := range addresses {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("dial resolved destination: %w", err)
+		}
 		connection, dialErr := p.dial(ctx, net.JoinHostPort(address.String(), port))
 		if dialErr == nil {
 			return connection, nil

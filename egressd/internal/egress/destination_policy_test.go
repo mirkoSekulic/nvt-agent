@@ -106,6 +106,36 @@ func TestForwardProxyPrefersIPv4AndFallsBackAcrossValidatedAddresses(t *testing.
 	}
 }
 
+func TestForwardProxyRejectsEmptyResolvedAddressSet(t *testing.T) {
+	proxy := &ForwardProxy{}
+	if _, err := proxy.dialResolvedAddresses(context.Background(), nil, "443"); err == nil || !strings.Contains(err.Error(), "no validated addresses") {
+		t.Fatalf("empty address error = %v, want explicit rejection", err)
+	}
+}
+
+func TestForwardProxyStopsFallbackDialingWhenContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	dials := 0
+	proxy := &ForwardProxy{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			dials++
+			cancel()
+			return nil, errors.New("fixture address unavailable")
+		},
+	}
+	addresses := []netip.Addr{
+		netip.MustParseAddr("93.184.216.34"),
+		netip.MustParseAddr("93.184.216.35"),
+	}
+	_, err := proxy.dialResolvedAddresses(ctx, addresses, "443")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dial error = %v, want context cancellation", err)
+	}
+	if dials != 1 {
+		t.Fatalf("dial attempts = %d, want one", dials)
+	}
+}
+
 func TestForwardProxyResolvesOnceAndDialsValidatedAddress(t *testing.T) {
 	resolver := &staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}
 	var dialed string
