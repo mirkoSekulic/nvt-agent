@@ -3905,6 +3905,208 @@ func TestReconcileCompletedRunAfterTTLDeletesPod(t *testing.T) {
 	assertAgentPodMissing(ctx, t, k8sClient, agentRun)
 }
 
+func TestReconcileCompletedRunOperationalCleanupTimingAndScope(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+
+	t.Run("before TTL retains every resource", func(t *testing.T) {
+		finishedAt := metav1.Date(2026, 5, 31, 11, 59, 30, 0, time.UTC)
+		agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+		agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+		k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+
+		result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if result.RequeueAfter != 30*time.Second {
+			t.Fatalf("requeue = %s, want 30s", result.RequeueAfter)
+		}
+		assertTerminalOperationalResources(t, ctx, k8sClient, resources, true)
+		assertTerminalBrokerEntries(t, ctx, k8sClient, agentRun, true)
+	})
+
+	t.Run("after TTL removes operations and retains metadata", func(t *testing.T) {
+		finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+		agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+		agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+		k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		assertTerminalOperationalResources(t, ctx, k8sClient, resources, false)
+		assertTerminalBrokerEntries(t, ctx, k8sClient, agentRun, false)
+		assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseCompleted)
+
+		// A later terminal reconcile is idempotent and cannot recreate resources.
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+			t.Fatalf("idempotent reconcile: %v", err)
+		}
+		assertTerminalOperationalResources(t, ctx, k8sClient, resources, false)
+	})
+}
+
+func TestReconcileFailedAndDeadlineExceededOperationalCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		phase nvtv1alpha1.AgentRunPhase
+		ttl   *int64
+	}{
+		{name: "failed after TTL", phase: nvtv1alpha1.AgentRunPhaseFailed, ttl: ptrTo[int64](60)},
+		{name: "deadline exceeded immediately", phase: nvtv1alpha1.AgentRunPhaseDeadlineExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+			agentRun := terminalAgentRun(test.phase, finishedAt)
+			agentRun.Spec.TTL.FailedTTLSeconds = test.ttl
+			k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, false)
+
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			assertTerminalOperationalResources(t, ctx, k8sClient, resources, false)
+			assertTerminalBrokerEntries(t, ctx, k8sClient, agentRun, false)
+			assertAgentRunPhase(ctx, t, k8sClient, agentRun, test.phase)
+		})
+	}
+}
+
+func TestReconcileActiveDeadlineImmediatelyCleansAllOperationalResources(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	startedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := activeDeadlineAgentRun(startedAt, ptrTo[int64](60))
+	k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+	if err := k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: AgentPodName(agentRun.Name), Namespace: agentRun.Namespace}}); err != nil {
+		t.Fatal(err)
+	}
+	validPod, err := DesiredAgentPod(agentRun, reconciler.Scheme)
+	if err != nil {
+		t.Fatalf("render active Pod: %v", err)
+	}
+	if err := k8sClient.Create(ctx, validPod); err != nil {
+		t.Fatalf("replace active Pod fixture: %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseDeadlineExceeded)
+	assertTerminalOperationalResources(t, ctx, k8sClient, resources, false)
+	assertTerminalBrokerEntries(t, ctx, k8sClient, agentRun, false)
+}
+
+func TestReconcileTerminalCleanupEphemeralRunHasNoWorkspacePVC(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, false)
+
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: WorkspacePVCName(agentRun.Name)}, &corev1.PersistentVolumeClaim{}); !errors.IsNotFound(err) {
+		t.Fatalf("ephemeral run unexpectedly has workspace PVC: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	assertTerminalOperationalResources(t, ctx, k8sClient, resources, false)
+	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseCompleted)
+}
+
+func TestReconcileTerminalCleanupRejectsForeignObjectButContinues(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+
+	foreign := &corev1.ConfigMap{}
+	key := types.NamespacedName{Namespace: agentRun.Namespace, Name: AgentConfigMapName(agentRun.Name)}
+	if err := k8sClient.Get(ctx, key, foreign); err != nil {
+		t.Fatal(err)
+	}
+	foreign.OwnerReferences = nil
+	if err := k8sClient.Update(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "agent config ConfigMap") || !strings.Contains(err.Error(), "not controlled") {
+		t.Fatalf("error = %v, want foreign ownership failure", err)
+	}
+	if err := k8sClient.Get(ctx, key, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("foreign ConfigMap was deleted: %v", err)
+	}
+	for _, object := range resources {
+		if object.GetName() == key.Name {
+			continue
+		}
+		assertTerminalOperationalResources(t, ctx, k8sClient, []client.Object{object}, false)
+	}
+	assertTerminalBrokerEntries(t, ctx, k8sClient, agentRun, false)
+}
+
+func TestReconcileTerminalCleanupRetriesPartialDeletionAndNotFound(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	baseClient, _, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+	failingClient := &failDeleteOnceClient{
+		Client: baseClient,
+		key:    client.ObjectKey{Namespace: agentRun.Namespace, Name: CallbackTokenSecretName(agentRun.Name)},
+	}
+	reconciler := &AgentRunReconciler{Client: failingClient, Scheme: testScheme(t), Now: func() metav1.Time { return now }}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err == nil || !strings.Contains(err.Error(), "injected delete failure") {
+		t.Fatalf("first reconcile error = %v", err)
+	}
+	if err := baseClient.Get(ctx, failingClient.key, &corev1.Secret{}); err != nil {
+		t.Fatalf("failed resource was not retained for retry: %v", err)
+	}
+	if err := baseClient.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}, &corev1.Secret{}); !errors.IsNotFound(err) {
+		t.Fatalf("cleanup stopped after partial failure: %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("retry reconcile: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("NotFound idempotency reconcile: %v", err)
+	}
+	assertTerminalOperationalResources(t, ctx, baseClient, resources, false)
+	assertTerminalBrokerEntries(t, ctx, baseClient, agentRun, false)
+}
+
+func TestReconcileTerminalCleanupContinuesWhenBrokerRevocationFails(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	baseClient, _, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+	failingClient := &failBrokerUpdateOnceClient{Client: baseClient}
+	reconciler := &AgentRunReconciler{Client: failingClient, Scheme: testScheme(t), Now: func() metav1.Time { return now }}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err == nil || !strings.Contains(err.Error(), "injected broker update failure") {
+		t.Fatalf("first reconcile error = %v", err)
+	}
+	assertTerminalOperationalResources(t, ctx, baseClient, resources, false)
+	assertTerminalBrokerEntries(t, ctx, baseClient, agentRun, true)
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("broker retry reconcile: %v", err)
+	}
+	assertTerminalBrokerEntries(t, ctx, baseClient, agentRun, false)
+}
+
 func TestReconcileFailedRunBeforeTTLKeepsPodAndRequeues(t *testing.T) {
 	ctx := context.Background()
 	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
@@ -4501,6 +4703,130 @@ func terminalCleanupFixture(
 	}
 
 	return k8sClient, reconciler
+}
+
+func terminalOperationalCleanupFixture(
+	t *testing.T,
+	agentRun *nvtv1alpha1.AgentRun,
+	now metav1.Time,
+	persistent bool,
+) (client.Client, *AgentRunReconciler, []client.Object) {
+	t.Helper()
+	if persistent {
+		size := resource.MustParse("5Gi")
+		agentRun.Spec.Workspace = nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspacePersistent, Size: &size}
+	}
+
+	scheme := testScheme(t)
+	owner := *metav1.NewControllerRef(agentRun, nvtv1alpha1.GroupVersion.WithKind("AgentRun"))
+	metadata := func(name string) metav1.ObjectMeta {
+		return metav1.ObjectMeta{Name: name, Namespace: agentRun.Namespace, OwnerReferences: []metav1.OwnerReference{owner}}
+	}
+	resources := []client.Object{
+		&corev1.Pod{ObjectMeta: metadata(AgentPodName(agentRun.Name))},
+		&corev1.Pod{ObjectMeta: metadata(EgressdPodName(agentRun.Name))},
+		&corev1.Service{ObjectMeta: metadata(EgressdServiceName(agentRun.Name))},
+		&networkingv1.NetworkPolicy{ObjectMeta: metadata(AgentNetworkPolicyName(agentRun.Name))},
+		&networkingv1.NetworkPolicy{ObjectMeta: metadata(EgressdNetworkPolicyName(agentRun.Name))},
+		&corev1.ConfigMap{ObjectMeta: metadata(AgentConfigMapName(agentRun.Name))},
+		&corev1.ConfigMap{ObjectMeta: metadata(EgressdConfigMapName(agentRun.Name))},
+		&corev1.ConfigMap{ObjectMeta: metadata(EgressCAConfigMapName(agentRun.Name))},
+		&corev1.Secret{ObjectMeta: metadata(BrokerTokenSecretName(agentRun.Name))},
+		&corev1.Secret{ObjectMeta: metadata(EgressTokenSecretName(agentRun.Name))},
+		&corev1.Secret{ObjectMeta: metadata(CallbackTokenSecretName(agentRun.Name))},
+		&corev1.Secret{ObjectMeta: metadata(EgressCASecretName(agentRun.Name))},
+	}
+	if persistent {
+		resources = append(resources, &corev1.PersistentVolumeClaim{ObjectMeta: metadata(WorkspacePVCName(agentRun.Name))})
+	}
+
+	renderedPolicy, err := RenderBrokerAgentsYAML(brokerAgentsPolicy{Agents: []brokerAgentEntry{
+		{ID: AgentRunBrokerID(agentRun.Namespace, agentRun.Name), TokenSHA256: validTestTokenHash("agent"), Grants: []brokerAgentGrantEntry{}},
+		{ID: AgentRunEgressBrokerID(agentRun.Namespace, agentRun.Name), TokenSHA256: validTestTokenHash("egress"), Role: "egress", PairedAgent: AgentRunBrokerID(agentRun.Namespace, agentRun.Name), Grants: []brokerAgentGrantEntry{}},
+		{ID: AgentRunBrokerID(agentRun.Namespace, "unrelated"), TokenSHA256: validTestTokenHash("unrelated"), Grants: []brokerAgentGrantEntry{}},
+	}})
+	if err != nil {
+		t.Fatalf("render terminal broker fixture: %v", err)
+	}
+	brokerConfig := testBrokerAgentsConfigMap(agentRun.Namespace)
+	brokerConfig.Data[brokerAgentsConfigKey] = renderedPolicy
+	objects := append([]client.Object{agentRun, brokerConfig}, resources...)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(objects...).
+		Build()
+	persistAgentRunStatus(context.Background(), t, k8sClient, agentRun)
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, Now: func() metav1.Time { return now }}
+	return k8sClient, reconciler, resources
+}
+
+func assertTerminalOperationalResources(t *testing.T, ctx context.Context, reader client.Reader, resources []client.Object, present bool) {
+	t.Helper()
+	for _, expected := range resources {
+		actual := expected.DeepCopyObject().(client.Object)
+		err := reader.Get(ctx, client.ObjectKeyFromObject(expected), actual)
+		if present && err != nil {
+			t.Fatalf("expected %T %s/%s to remain: %v", expected, expected.GetNamespace(), expected.GetName(), err)
+		}
+		if !present && !errors.IsNotFound(err) {
+			t.Fatalf("expected %T %s/%s to be deleted, got %v", expected, expected.GetNamespace(), expected.GetName(), err)
+		}
+	}
+}
+
+func assertTerminalBrokerEntries(t *testing.T, ctx context.Context, reader client.Reader, agentRun *nvtv1alpha1.AgentRun, present bool) {
+	t.Helper()
+	configMap := &corev1.ConfigMap{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: brokerAgentsConfigMapName}, configMap); err != nil {
+		t.Fatal(err)
+	}
+	policy := mustParseBrokerAgentsPolicy(t, configMap.Data[brokerAgentsConfigKey])
+	foundAgent := false
+	foundEgress := false
+	foundUnrelated := false
+	for _, entry := range policy.Agents {
+		switch entry.ID {
+		case AgentRunBrokerID(agentRun.Namespace, agentRun.Name):
+			foundAgent = true
+		case AgentRunEgressBrokerID(agentRun.Namespace, agentRun.Name):
+			foundEgress = true
+		case AgentRunBrokerID(agentRun.Namespace, "unrelated"):
+			foundUnrelated = true
+		}
+	}
+	if foundAgent != present || foundEgress != present || !foundUnrelated {
+		t.Fatalf("broker entries agent=%t egress=%t unrelated=%t, want run entries present=%t: %#v", foundAgent, foundEgress, foundUnrelated, present, policy.Agents)
+	}
+}
+
+type failDeleteOnceClient struct {
+	client.Client
+	key    client.ObjectKey
+	failed bool
+}
+
+func (c *failDeleteOnceClient) Delete(ctx context.Context, object client.Object, options ...client.DeleteOption) error {
+	if !c.failed && client.ObjectKeyFromObject(object) == c.key {
+		c.failed = true
+		return fmt.Errorf("injected delete failure")
+	}
+	return c.Client.Delete(ctx, object, options...)
+}
+
+type failBrokerUpdateOnceClient struct {
+	client.Client
+	failed bool
+}
+
+func (c *failBrokerUpdateOnceClient) Update(ctx context.Context, object client.Object, options ...client.UpdateOption) error {
+	if !c.failed && object.GetName() == brokerAgentsConfigMapName {
+		if _, ok := object.(*corev1.ConfigMap); ok {
+			c.failed = true
+			return fmt.Errorf("injected broker update failure")
+		}
+	}
+	return c.Client.Update(ctx, object, options...)
 }
 
 func persistAgentRunStatus(ctx context.Context, t *testing.T, k8sClient client.Client, agentRun *nvtv1alpha1.AgentRun) {
