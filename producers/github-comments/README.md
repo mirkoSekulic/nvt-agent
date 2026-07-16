@@ -196,11 +196,15 @@ Polling state is stored in SQLite at `state.sqlitePath`. The producer stores one
 The agent prompt asks Codex to register created PRs with:
 
 ```sh
-github-watch register --repo OWNER/REPO --number PR_NUMBER --provider github-main
+github-watch register --repo OWNER/REPO --number PR_NUMBER
 ```
 
 The `github-watcher` plugin must be enabled in `agentConfig` so that command is
-available and PR merge/close events are published.
+available and PR merge/close events are published. The mediated configuration
+above selects the provider once through the plugin's outer `egress.provider`,
+so registrations must not add `--provider`. That flag remains available for
+direct/local watcher configurations that intentionally select an in-agent
+credential provider.
 
 ## Local Run
 

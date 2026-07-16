@@ -62,8 +62,7 @@ func BuildPrompt(input PromptInput) string {
 		"Read the issue and comments, create a new branch from the repository default branch,",
 		"implement the requested fix, run relevant tests, commit the change, push the branch,",
 		"open a pull request linked to the issue, comment on the issue with the PR link,",
-		"and register the PR with `github-watch register --repo OWNER/REPO --number PR_NUMBER` if that command is available;",
-		"add `--provider PROVIDER` if the watcher config does not define a default provider.\n",
+		"and register the PR with `github-watch register --repo OWNER/REPO --number PR_NUMBER` if that command is available.\n",
 	}, " "))
 	return b.String()
 }

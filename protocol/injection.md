@@ -257,8 +257,14 @@ plugins:
 ```
 
 For mediated proxy transports, the generic lifecycle launcher and exported-tool
-wrapper resolve the corresponding provider-scoped URL and set standard proxy
-environment variables before the plugin code runs. The declaration must match
+wrapper resolve the corresponding provider-scoped URL and set `HTTPS_PROXY`
+and its lowercase variant before the plugin code runs. `HTTP_PROXY` and
+`ALL_PROXY` are removed at that scoped boundary because egressd's explicit
+injection listener is CONNECT-only; provider injection is an authenticated
+HTTPS contract. The launcher also exposes the selected non-secret name as
+`NVT_PLUGIN_EGRESS_PROVIDER`; controlled plugin clients may use its presence to
+avoid legacy direct credential materialization during migration, but it conveys
+no topology or authority. The declaration must match
 exactly one injection-eligible (`header-inject` or `placeholder-file`) grant or
 launch fails. It contains no credential and
 does not authorize the provider by itself. Direct mode and plugins without the

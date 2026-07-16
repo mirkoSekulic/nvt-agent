@@ -42,11 +42,13 @@ func TestBuildPromptIncludesStructuredIssueCommentsAndTask(t *testing.T) {
 		"create a new branch",
 		"open a pull request linked to the issue",
 		"github-watch register --repo OWNER/REPO --number PR_NUMBER",
-		"add `--provider PROVIDER` if the watcher config does not define a default provider",
 	}
 	for _, needle := range required {
 		if !strings.Contains(prompt, needle) {
 			t.Fatalf("prompt missing %q:\n%s", needle, prompt)
 		}
+	}
+	if strings.Contains(prompt, "--provider") {
+		t.Fatalf("producer prompt must not select a watcher credential provider:\n%s", prompt)
 	}
 }

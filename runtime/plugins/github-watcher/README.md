@@ -3,13 +3,13 @@
 `github-watcher` watches GitHub pull requests and turns selected PR activity
 into `agentd` events and optional prompts.
 
-It is a long-running `after-agent` plugin. It always makes ordinary GitHub API
-requests. A generic `plugin.egress.provider` declaration gives its process an
+It is a long-running `after-agent` plugin. Its generic mediated path makes
+ordinary GitHub API requests. A generic `plugin.egress.provider` declaration gives its process an
 exact provider-scoped proxy in mediated deployments, where egressd injects the
 real credential outside the agent. The watcher does not inspect egress mode,
-construct proxy URLs, or invoke `gh-auth`/`brokerctl`. Direct mode remains a
-local/dev fallback and gets a token only when a direct provider is explicitly
-configured:
+construct proxy URLs, or invoke a token helper in that generic path. Direct mode
+remains a local/dev fallback and gets a token only when a direct provider is
+explicitly configured:
 
 ```sh
 git-host-credential token --provider <provider>
@@ -110,8 +110,12 @@ filter GitHub labels in v1.
 For local direct use, omit `egress` and configure `default-provider` or a
 per-watch `provider`; the watcher then asks `git-host-credential` for that
 explicit credential. In mediated use, omit those direct credential fields and
-set only the outer `egress.provider`. The removed `broker` request fields fail
-with a migration message rather than selecting a second transport.
+set only the outer `egress.provider`. Existing `broker.enabled/provider`
+configuration remains supported as a deprecated explicit compatibility
+transport when generic plugin egress is not configured. When generic plugin
+egress is active, old persisted per-watch provider and broker fields are ignored
+for requests so migration cannot attempt to materialize a token in the agent.
+New mediated configurations should not add the compatibility broker fields.
 
 ## Dynamic Registration
 
@@ -124,7 +128,6 @@ Register a PR non-interactively:
 github-watch register \
   --repo my-user/my-repo \
   --number 123 \
-  --provider fork-app \
   --label frontend \
   --label high-priority
 ```
@@ -149,8 +152,8 @@ github-watch remove --repo my-user/my-repo --number 123
 
 Dynamic registrations use the same defaults as static config:
 
-- `--provider` falls back to `default-provider`; both are optional for generic
-  process-level mediation
+- `--provider` falls back to `default-provider`; both are direct/local
+  credential selectors and are unnecessary for generic process-level mediation
 - comments, reviews, and checks are enabled by default
 - comments and reviews prompt by default for dynamic registrations
 - failed check transitions prompt by default

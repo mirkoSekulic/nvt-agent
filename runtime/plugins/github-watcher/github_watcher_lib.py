@@ -205,10 +205,19 @@ def normalize_watch(raw, defaults, source):
         "reviews": normalize_discussion_config(reviews, f"{source}.reviews", True),
         "checks": normalize_checks_config(checks, f"{source}.checks"),
         "closed": normalize_closed_config(closed, defaults.get("closed"), f"{source}.closed"),
+        "broker": normalize_broker_config(raw.get("broker"), defaults.get("broker"), f"{source}.broker"),
     }
-    if raw.get("broker") is not None or defaults.get("broker") is not None:
-        fail("broker request configuration is removed; use plugin.egress.provider")
     return normalized
+
+
+def normalize_broker_config(raw, default, field):
+    config = object_value(default, "broker")
+    override = object_value(raw, field)
+    merged = {**config, **override}
+    return {
+        "enabled": bool_value(merged.get("enabled"), f"{field}.enabled", False),
+        "provider": string_value(merged.get("provider"), f"{field}.provider"),
+    }
 
 
 def normalize_discussion_config(config, field, default_enabled):
@@ -329,6 +338,52 @@ def token_for_provider(provider, target):
     return token
 
 
+def broker_request(path, provider, query=None, paginate=False, broker=None):
+    broker = broker or {}
+    broker_provider = broker.get("provider") or provider
+    if not broker_provider:
+        raise WatchError("broker request provider is not configured")
+    query_string = f"?{urlencode(query)}" if query else ""
+    command = [
+        "brokerctl",
+        "http",
+        "request",
+        "--provider",
+        broker_provider,
+        "--method",
+        "GET",
+        "--url",
+        f"https://api.github.com{path}{query_string}",
+        "--header",
+        "Accept:application/vnd.github+json",
+    ]
+    if paginate:
+        command.append("--paginate")
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as error:
+        raise WatchError("broker request helper is unavailable") from error
+    if result.returncode != 0:
+        raise WatchError("broker request failed")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise WatchError("broker response was not valid JSON") from error
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        raise WatchError("broker request failed")
+    status = payload.get("status")
+    if not isinstance(status, int) or status < 200 or status >= 300:
+        raise WatchError(f"GitHub API request failed through broker: status={status}")
+    try:
+        return json.loads(payload.get("body") or "null")
+    except json.JSONDecodeError as error:
+        raise WatchError("GitHub API broker response body was not valid JSON") from error
+
+
+def plugin_egress_active():
+    return bool(os.environ.get("NVT_PLUGIN_EGRESS_PROVIDER", "").strip())
+
+
 def _request_page(path, provider, query, timeout):
     target = github_target_from_path(path)
     query_string = f"?{urlencode(query)}" if query else ""
@@ -351,7 +406,17 @@ def _request_page(path, provider, query, timeout):
         raise WatchError("GitHub API response was not valid JSON") from error
 
 
-def github_request(path, provider=None, query=None, paginate=False):
+def github_request(path, provider=None, query=None, broker=None, paginate=False):
+    # Generic process-scoped egress owns authentication. Legacy persisted watch
+    # providers are direct credential selectors and must not trigger token
+    # materialization in this mode.
+    if plugin_egress_active():
+        provider = None
+        broker = None
+    elif broker and broker.get("enabled"):
+        return broker_request(path, provider, query, paginate, broker)
+    elif not provider:
+        raise WatchError("direct credential provider is not configured")
     if not paginate:
         return _request_page(path, provider, query, REQUEST_TIMEOUT_SECONDS)
     page_query = dict(query or {})

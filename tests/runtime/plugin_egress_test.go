@@ -18,9 +18,9 @@ func TestPluginEgressScopesLifecycleProcessesAndExportedTools(t *testing.T) {
 	secondOut := filepath.Join(f.home, "second-env")
 	tool := f.writeTool("egress-tool", `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n%s\n%s\n' "${HTTPS_PROXY:-}" "${NO_PROXY:-}" "${NVT_EGRESS_BROKER_TOKEN:-}" 
+printf '%s\n%s\n%s\n%s\n%s\n%s\n' "${HTTPS_PROXY:-}" "${HTTP_PROXY:-}" "${ALL_PROXY:-}" "${NO_PROXY:-}" "${NVT_PLUGIN_EGRESS_PROVIDER:-}" "${NVT_EGRESS_BROKER_TOKEN:-}"
 `)
-	first := f.writeTool("first-plugin", "#!/usr/bin/env bash\nprintf '%s\\n' \"${HTTPS_PROXY:-}\" > "+shellQuote(firstOut)+"\n")
+	first := f.writeTool("first-plugin", "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s\\n' \"${HTTPS_PROXY:-}\" \"${HTTP_PROXY:-}\" \"${ALL_PROXY:-}\" \"${NVT_PLUGIN_EGRESS_PROVIDER:-}\" > "+shellQuote(firstOut)+"\n")
 	second := f.writeTool("second-plugin", "#!/usr/bin/env bash\nprintf '%s\\n' \"${HTTPS_PROXY:-}\" > "+shellQuote(secondOut)+"\n")
 	config := f.writeAgentConfig(fmt.Sprintf(`
 plugins:
@@ -45,10 +45,12 @@ plugins:
 		"NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN=http://github-main@127.0.0.1:8470",
 		"NVT_EGRESS_FORWARD_PROXY_URL_COMPANY_OAUTH=http://company%2Foauth@127.0.0.1:8470",
 		"NVT_EGRESS_BROKER_TOKEN=agent-egress-secret-canary",
+		"HTTP_PROXY=http://incompatible-mediated-listener:8470",
+		"ALL_PROXY=http://incompatible-mediated-listener:8470",
 	}
 	f.runWithEnv(exportPluginToolsBin(f.root), true, env, config)
 	f.runWithEnv(runPluginsBin(f.root), true, env, "after-agent", config)
-	if got := strings.TrimSpace(mustReadFile(t, firstOut)); got != "http://github-main@127.0.0.1:8470" {
+	if got := strings.TrimSpace(mustReadFile(t, firstOut)); got != "http://github-main@127.0.0.1:8470|||github-main" {
 		t.Fatalf("first plugin proxy = %q", got)
 	}
 	if got := strings.TrimSpace(mustReadFile(t, secondOut)); got != "http://company%2Foauth@127.0.0.1:8470" {
@@ -57,6 +59,8 @@ plugins:
 	output := f.runWithEnv("egress-http-tool", true, env)
 	if !strings.Contains(output, "http://github-main@127.0.0.1:8470") ||
 		!strings.Contains(output, "localhost,127.0.0.1,::1") ||
+		!strings.Contains(output, "github-main") ||
+		strings.Contains(output, "incompatible-mediated-listener") ||
 		strings.Contains(output, "agent-egress-secret-canary") {
 		t.Fatalf("unexpected exported tool environment:\n%s", output)
 	}

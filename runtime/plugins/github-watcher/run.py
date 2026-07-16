@@ -33,6 +33,7 @@ def fetch_comments(watch):
         f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
         watch["provider"],
         {"per_page": 100, "sort": "updated", "direction": "asc"},
+        watch.get("broker"),
         paginate=True,
     )
 
@@ -42,12 +43,17 @@ def fetch_reviews(watch):
         f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
         watch["provider"],
         {"per_page": 100},
+        watch.get("broker"),
         paginate=True,
     )
 
 
 def fetch_pull(watch):
-    return github_request(f"/repos/{watch['repo']}/pulls/{watch['number']}", watch["provider"])
+    return github_request(
+        f"/repos/{watch['repo']}/pulls/{watch['number']}",
+        watch["provider"],
+        broker=watch.get("broker"),
+    )
 
 
 def fetch_check_runs(watch, sha):
@@ -55,6 +61,7 @@ def fetch_check_runs(watch, sha):
         f"/repos/{watch['repo']}/commits/{sha}/check-runs",
         watch["provider"],
         {"per_page": 100},
+        watch.get("broker"),
     ).get("check_runs", [])
 
 

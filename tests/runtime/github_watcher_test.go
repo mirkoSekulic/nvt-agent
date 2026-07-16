@@ -152,7 +152,7 @@ func TestGithubWatchRegisterPersistsCloseDefaultsAndFlags(t *testing.T) {
 	}
 }
 
-func TestGithubWatchRejectsRemovedBrokerConfig(t *testing.T) {
+func TestGithubWatchRegisterPreservesLegacyBrokerConfig(t *testing.T) {
 	f := newFixture(t)
 	config := f.writePluginConfig("github-watcher.yaml", `
 default-provider: fork-app
@@ -162,17 +162,58 @@ broker:
 `)
 	env := []string{"NVT_PLUGIN_CONFIG=" + config}
 
-	output := f.runWithEnv(
+	f.runWithEnv(
 		githubWatchBin(f.root),
-		false,
+		true,
 		env,
 		"register",
 		"--repo", "my-user/my-repo",
 		"--number", "123",
 	)
 
-	if !strings.Contains(output, "broker request configuration is removed; use plugin.egress.provider") {
-		t.Fatalf("unexpected migration failure:\n%s", output)
+	var registry map[string][]map[string]any
+	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
+	broker, ok := registry["prs"][0]["broker"].(map[string]any)
+	if !ok || broker["enabled"] != true || broker["provider"] != "broker-fork-app" {
+		t.Fatalf("legacy broker config was not preserved: %#v", registry)
+	}
+}
+
+func TestGithubWatcherLegacyBrokerRequestStillWorks(t *testing.T) {
+	f := newFixture(t)
+	logPath := filepath.Join(f.home, "brokerctl.log")
+	f.writeBin("brokerctl", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" > %s
+printf '%%s\n' '{"ok":true,"status":200,"headers":{},"body":"[{\"id\":1}]"}'
+`, quoteYAML(logPath)))
+	script := fmt.Sprintf(`
+import importlib.util
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
+
+payload = lib.github_request(
+    "/repos/my-user/my-repo/issues/123/comments",
+    "legacy-direct",
+    {"per_page": 100},
+    {"enabled": True, "provider": "legacy-broker"},
+    paginate=True,
+)
+if payload != [{"id": 1}]:
+    raise SystemExit(f"unexpected payload: {payload}")
+`, quoteYAML(f.root))
+	f.runCommand("python3", true, "-c", script)
+	args := mustReadFile(t, logPath)
+	if !strings.Contains(args, "http request --provider legacy-broker") ||
+		!strings.Contains(args, "--paginate") {
+		t.Fatalf("legacy broker transport was not used: %s", args)
 	}
 }
 
@@ -487,7 +528,7 @@ if requests != [("https://api.github.com/repos/my-user/my-repo/issues/123/commen
 	}
 }
 
-func TestGithubWatcherOrdinaryRequestNeedsNoCredentialHelper(t *testing.T) {
+func TestGithubWatcherGenericEgressIgnoresPersistedDirectAndBrokerSelectors(t *testing.T) {
 	f := newFixture(t)
 	script := fmt.Sprintf(`
 import importlib.util
@@ -512,12 +553,16 @@ def fake_urlopen(request, timeout):
     return Response()
 
 lib.urlopen = fake_urlopen
-if lib.github_request("/repos/my-user/my-repo/pulls/123") != {"ok": True}:
+if lib.github_request(
+    "/repos/my-user/my-repo/pulls/123",
+    "persisted-direct-provider",
+    broker={"enabled": True, "provider": "legacy-broker-provider"},
+) != {"ok": True}:
     raise SystemExit("unexpected response")
 if any(key.lower() == "authorization" for key in seen[0]):
     raise SystemExit(f"ordinary request carried credentials: {seen}")
 `, quoteYAML(f.root))
-	f.runCommand("python3", true, "-c", script)
+	f.runWithEnv("python3", true, []string{"NVT_PLUGIN_EGRESS_PROVIDER=github-main"}, "-c", script)
 }
 
 func TestGithubWatcherOrdinaryPagination(t *testing.T) {
@@ -553,7 +598,7 @@ if len(payload) != 101 or payload[-1] != {"id": 100}:
 if len(calls) != 2 or "&page=1" not in calls[0] or "&page=2" not in calls[1]:
     raise SystemExit(f"unexpected pagination: {calls}")
 `, quoteYAML(f.root))
-	f.runCommand("python3", true, "-c", script)
+	f.runWithEnv("python3", true, []string{"NVT_PLUGIN_EGRESS_PROVIDER=github-main"}, "-c", script)
 }
 
 func TestGithubWatcherErrorsDoNotExposeResponseBody(t *testing.T) {
@@ -584,7 +629,7 @@ except lib.WatchError as error:
 else:
     raise SystemExit("request unexpectedly succeeded")
 `, quoteYAML(f.root), quoteYAML(canary), quoteYAML(canary))
-	f.runCommand("python3", true, "-c", script)
+	f.runWithEnv("python3", true, []string{"NVT_PLUGIN_EGRESS_PROVIDER=github-main"}, "-c", script)
 }
 
 func writeGithubWatcherRegistry(t *testing.T, f *fixture, prsJSON string) {

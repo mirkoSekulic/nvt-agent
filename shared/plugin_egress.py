@@ -11,7 +11,8 @@ class PluginEgressError(ValueError):
 
 
 _PROVIDER_RE = re.compile(r"^[!-~]{1,128}$")
-_PROXY_NAMES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+_HTTPS_PROXY_NAMES = ("HTTPS_PROXY", "https_proxy")
+_PLAIN_PROXY_NAMES = ("HTTP_PROXY", "ALL_PROXY", "http_proxy", "all_proxy")
 _LOCAL_NO_PROXY = "localhost,127.0.0.1,::1"
 
 
@@ -119,13 +120,14 @@ def environment(plugin, base_env=None):
     if parts.password not in {None, "", "x"}:
         raise PluginEgressError("provider-scoped mediated proxy contains unexpected userinfo")
 
-    names = _PROXY_NAMES
-    if transport == "transparent":
-        names = ("HTTPS_PROXY", "https_proxy")
-        for name in ("HTTP_PROXY", "ALL_PROXY", "http_proxy", "all_proxy"):
-            env.pop(name, None)
-    for name in names:
+    # The provider-scoped listener supports HTTPS CONNECT only. Keep plain HTTP
+    # out of that listener rather than implying an authentication policy for
+    # cleartext requests.
+    for name in _PLAIN_PROXY_NAMES:
+        env.pop(name, None)
+    for name in _HTTPS_PROXY_NAMES:
         env[name] = proxy_url
+    env["NVT_PLUGIN_EGRESS_PROVIDER"] = selected
     env["NO_PROXY"] = _LOCAL_NO_PROXY
     env["no_proxy"] = _LOCAL_NO_PROXY
     return env

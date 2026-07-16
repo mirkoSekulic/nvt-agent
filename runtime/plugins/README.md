@@ -74,7 +74,7 @@ NVT_PLUGIN_CONFIG
 NVT_WORKSPACE
 ```
 
-Plugins whose lifecycle process or exported tools make authenticated HTTP(S)
+Plugins whose lifecycle process or exported tools make authenticated HTTPS
 requests can select a broker provider without implementing mediation logic:
 
 ```yaml
@@ -86,7 +86,8 @@ plugins:
 ```
 
 In mediated forward-proxy or transparent transport, the generic launcher and
-tool wrapper supply the provider-scoped standard proxy environment. The plugin
+tool wrapper supply the provider-scoped `HTTPS_PROXY` environment. Plain HTTP
+is deliberately not sent to egressd's CONNECT-only injection listener. The plugin
 makes an ordinary request; it does not inspect the run's egress mode, construct
 an egress URL, call `brokerctl`, or carry a placeholder header. The provider
 must be an exact injection-eligible mediated grant. Direct mode leaves networking unchanged,

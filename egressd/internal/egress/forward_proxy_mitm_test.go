@@ -179,9 +179,20 @@ func TestForwardProxyMITMOrdinaryClientNeedsNoPlaceholder(t *testing.T) {
 	}
 }
 
-func TestGenericPluginLifecycleOrdinaryHTTPReceivesInjectedCredential(t *testing.T) {
+func TestGenericPluginLifecycleMigratesWatcherProviderToOrdinaryHTTPS(t *testing.T) {
 	broker := newFakeBroker(t)
 	upstream := newFakeUpstream(t)
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("plain HTTP request carried authorization: %q", r.Header.Get("Authorization"))
+		}
+		_, _ = io.WriteString(w, `{"plain":true}`)
+	}))
+	t.Cleanup(plain.Close)
+	plainURL, err := url.Parse(plain.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	proxy, ca := newMITMProxy(t, broker, ForwardProxyInjectRoute{
 		Host: "api.github.com", Capability: "github-main",
 		Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true,
@@ -208,13 +219,47 @@ func TestGenericPluginLifecycleOrdinaryHTTPReceivesInjectedCredential(t *testing
 		t.Fatal(err)
 	}
 	plugin := filepath.Join(home, "ordinary-http-plugin.py")
-	if err := os.WriteFile(plugin, []byte(`#!/usr/bin/env python3
-import json
+	pluginScript := fmt.Sprintf(`#!/usr/bin/env python3
+import importlib.util
+import pathlib
+import socket
+import sys
 from urllib.request import urlopen
-with urlopen("https://api.github.com/repos/example/project", timeout=5) as response:
-    if json.loads(response.read()) != {"ok": True}:
-        raise SystemExit("unexpected response")
-`), 0o755); err != nil {
+
+module_path = pathlib.Path(%q) / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+watcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(watcher)
+
+# Model an existing watcher config/registry entry. Generic process egress must
+# ignore both legacy direct and broker selectors and make an ordinary request.
+watch = watcher.normalize_watch(
+    {"repo": "example/project", "number": 1, "provider": "legacy-direct"},
+    {"default-provider": "legacy-default", "broker": {"enabled": True, "provider": "legacy-broker"}},
+    "registry.prs[0]",
+)
+result = watcher.github_request(
+    "/repos/example/project/pulls/1",
+    watch["provider"],
+    broker=watch["broker"],
+)
+if result != {"ok": True}:
+    raise SystemExit("unexpected response")
+
+# Plain HTTP stays outside the CONNECT-only provider injection listener. Map a
+# fixture hostname locally so an inherited HTTP_PROXY would make this fail.
+real_getaddrinfo = socket.getaddrinfo
+def fixture_getaddrinfo(host, port, *args, **kwargs):
+    if host == "plain.example":
+        host = "127.0.0.1"
+    return real_getaddrinfo(host, port, *args, **kwargs)
+socket.getaddrinfo = fixture_getaddrinfo
+with urlopen(%q, timeout=5) as response:
+    if response.read() != b'{"plain":true}':
+        raise SystemExit("unexpected plain HTTP response")
+`, root, "http://plain.example:"+plainURL.Port()+"/plain")
+	if err := os.WriteFile(plugin, []byte(pluginScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	config := filepath.Join(home, "agent.yaml")
@@ -243,6 +288,8 @@ with urlopen("https://api.github.com/repos/example/project", timeout=5) as respo
 		"NVT_STATE_DIR="+state,
 		"NVT_EGRESS_MODE=mediated",
 		"NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN="+proxyURL,
+		"HTTP_PROXY="+proxyURL,
+		"ALL_PROXY="+proxyURL,
 		"SSL_CERT_FILE="+caFile,
 	)
 	if output, err := command.CombinedOutput(); err != nil {
