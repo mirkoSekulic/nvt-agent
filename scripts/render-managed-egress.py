@@ -32,7 +32,6 @@ def managed_block(agents_file, name):
         "  mode: mediated",
         "  transport: transparent",
         "  placeholder: NVT-PLACEHOLDER-NOT-A-KEY",
-        "  forward-proxy: true",
         "  forward-proxy-url: http://127.0.0.1:15002",
         "  grants:",
     ]

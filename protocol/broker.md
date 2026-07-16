@@ -19,8 +19,7 @@ security contract are specified in [broker-provider.md](broker-provider.md).
 ## Transport
 
 V1 uses HTTP JSON. `brokerctl` hides the transport so later deployments can use
-a Unix socket, sidecar, mTLS service, or service mesh without changing plugin
-commands.
+a Unix socket, mTLS service, or service mesh without changing plugin commands.
 
 Default local bind:
 

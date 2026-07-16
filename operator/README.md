@@ -20,7 +20,7 @@ flowchart LR
     S --> R[AgentRun]
     R --> O[Operator]
     O --> A[Agent Pod]
-    O --> E[Optional egressd Pod]
+    O --> E[Optional egress service]
     O --> N[Services and NetworkPolicies]
     O --> X[Status and cleanup]
 ```

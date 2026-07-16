@@ -75,20 +75,15 @@ type AgentRunSpec struct {
 	RuntimeClassName          *string              `json:"runtimeClassName,omitempty"`
 	Egress                    AgentRunEgressMode   `json:"egress,omitempty"`
 	EgressAllowInsecureBroker bool                 `json:"egressAllowInsecureBroker,omitempty"`
-	// EgressEnforcement opts a mediated run into network-enforced egress:
-	// egressd moves to its own Pod and CNI-enforced NetworkPolicies fence the
-	// agent Pod so it cannot reach arbitrary hosts
-	// (docs/transparent-egress-architecture.md). Requires egress: mediated and a
-	// NetworkPolicy-enforcing CNI; same-Pod remains the default mediated shape.
+	// EgressEnforcement requests network-enforced mediated egress. The operator
+	// must fence direct workload egress so permitted traffic traverses the
+	// configured egress endpoint (docs/transparent-egress-architecture.md).
+	// Requires egress: mediated and a NetworkPolicy-enforcing CNI.
 	EgressEnforcement bool `json:"egressEnforcement,omitempty"`
-	// EgressForwardProxy opts a mediated+enforced run into forward-proxy mode:
-	// the agent's HTTP(S)_PROXY points at egressd, which TLS-terminates CONNECT
-	// under the per-agent CA and injects the broker credential, so unmodified
-	// tools that honor proxy env are mediated with zero per-tool config
-	// (docs/transparent-egress-architecture.md). Requires egressEnforcement.
-	EgressForwardProxy bool `json:"egressForwardProxy,omitempty"`
+	// EgressForwardProxy is a deprecated migration tombstone. Any presence is
+	// rejected; use EgressTransport. It does not select behavior.
+	EgressForwardProxy *bool `json:"egressForwardProxy,omitempty"`
 	// EgressTransport selects redirect, forward-proxy, or transparent routing.
-	// EgressForwardProxy remains a compatibility input during migration.
 	EgressTransport   AgentRunEgressTransport    `json:"egressTransport,omitempty"`
 	Workspace         AgentRunWorkspace          `json:"workspace"`
 	Broker            *AgentRunBroker            `json:"broker,omitempty"`
@@ -285,6 +280,10 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
+	}
+	if in.EgressForwardProxy != nil {
+		out.EgressForwardProxy = new(bool)
+		*out.EgressForwardProxy = *in.EgressForwardProxy
 	}
 	if in.RuntimeAuth != nil {
 		out.RuntimeAuth = in.RuntimeAuth.DeepCopy()

@@ -3,13 +3,13 @@
 ## Purpose
 
 Transparent mediated egress routes an AgentRun's permitted internet-bound TCP
-traffic through its paired `egressd` Pod while keeping provider credentials
-outside the Agent Pod.
+traffic through its paired `egressd` endpoint while keeping provider
+credentials outside the untrusted workload.
 
 The enforceable invariant is:
 
 > Every permitted internet-bound TCP connection traverses the paired
-> `egressd` Pod; attempted bypasses are dropped by the CNI.
+> `egressd` service; attempted bypasses are dropped by the CNI.
 
 This is narrower than "every packet traverses egressd." Loopback, cluster DNS,
 and explicitly approved control-plane traffic are excluded. UDP is not
@@ -19,7 +19,7 @@ currently proxied.
 
 ```mermaid
 flowchart LR
-    subgraph U[Untrusted Agent Pod]
+    subgraph U[Untrusted workload]
         A[Agent and tools]
         D[Docker-in-Docker]
         C[captured]
@@ -28,7 +28,7 @@ flowchart LR
     end
 
     subgraph T[Trusted runtime services]
-        E[Paired egressd Pod]
+        E[Paired egressd service]
         B[Broker]
     end
 
@@ -37,14 +37,14 @@ flowchart LR
     E -->|TLS with injected credential| X[External service]
 ```
 
-- **Agent Pod:** untrusted. It may contain source code, inert placeholders,
+- **Agent workload:** untrusted. It may contain source code, inert placeholders,
   public CA certificates, and route metadata, but not provider credentials or
   the interception CA private key.
-- **`captured`:** credential-less transport plumbing in the Agent Pod. It is
+- **`captured`:** credential-less transport plumbing for workload traffic. It is
   not a security boundary.
-- **`egressd`:** trusted per-run service in a separate Pod when enforcement is
-  enabled. It terminates only configured TLS destinations and injects only
-  broker-approved material.
+- **`egressd`:** trusted per-run egress service. It terminates only configured
+  TLS destinations and injects only broker-approved material. Its deployment
+  placement is owned by the operator or local renderer, not this contract.
 - **Broker:** trusted credential, refresh, grant, quota, revocation, and audit
   authority.
 - **CNI:** the bypass-prevention boundary. It must enforce NetworkPolicy.
@@ -64,19 +64,26 @@ spec:
 | --- | --- |
 | `egress: direct` | Existing direct networking and direct credential compatibility |
 | `egress: mediated` | Broker-backed materialization and egressd routing |
-| `egressEnforcement: true` | Separate egressd Pod plus CNI NetworkPolicies |
+| `egressEnforcement: true` | CNI-enforced guarantee that workload egress traverses the paired egress service |
 | `egressTransport: redirect` | Tool-specific base URL or redirect configuration |
 | `egressTransport: forward-proxy` | `HTTP(S)_PROXY` for proxy-aware tools |
 | `egressTransport: transparent` | iptables capture for ordinary TCP clients |
 
-`spec.egressForwardProxy` remains a compatibility input for forward-proxy
-transport. New configurations should use `spec.egressTransport`.
+The pre-1.0 `spec.egressForwardProxy` compatibility behavior has been removed.
+Migrate `egressForwardProxy: true` to `egressTransport: forward-proxy`; use
+`egressTransport: redirect` for the old false/default behavior. A temporary API
+tombstone retains the field name only to reject either legacy value; it never
+selects behavior.
+
+Runtime configuration likewise uses `egress.transport` as its sole selector.
+The legacy `egress.forward-proxy` key is rejected even when set to `false`;
+`forward-proxy-url` remains the endpoint setting for proxy-based transports.
 
 ## Traffic Capture
 
-All containers in the Agent Pod share one network namespace. A one-shot
-`net-init` container with only `NET_ADMIN` installs IPv4 and IPv6 NAT rules
-after Docker-in-Docker has initialized its chains.
+The transparent renderer installs IPv4 and IPv6 NAT rules in the workload
+network namespace after Docker-in-Docker has initialized its chains. The setup
+step receives only `NET_ADMIN`.
 
 Conceptually:
 
@@ -92,7 +99,7 @@ PREROUTING:
 The `captured` process recovers the original destination with
 `SO_ORIGINAL_DST`. It inspects a bounded TLS ClientHello or HTTP preface to
 recover the hostname when available, then opens a CONNECT tunnel to the paired
-egressd Service. It does not terminate TLS, inspect application payloads, or
+egress endpoint. It does not terminate TLS, inspect application payloads, or
 hold credentials.
 
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
@@ -131,7 +138,8 @@ that agent. No credential values are logged.
 
 The broker-to-egressd connection uses TLS because this is the internal leg that
 carries real material. The interception CA private key is stored in a per-run
-Secret and mounted only into the trusted egressd Pod, never the Agent Pod.
+Secret and made available only to the trusted egress service, never the
+untrusted workload.
 
 ## Bypass Prevention
 
@@ -139,22 +147,22 @@ iptables provides routing, not the final security boundary. A privileged
 workload could alter local rules. Kubernetes enforcement therefore adds two
 level-reconciled NetworkPolicies:
 
-### Agent Pod
+### Untrusted workload
 
 Allows only:
 
 - cluster DNS;
-- the run's paired egressd Pod and declared listener ports;
+- the run's paired egress endpoint and declared listener ports;
 - narrowly configured control-plane endpoints when required.
 
 There is no internet CIDR rule. If local capture is removed, direct internet
 traffic is denied by the CNI.
 
-### Egressd Pod
+### Egress service
 
 Allows:
 
-- ingress from its paired Agent Pod;
+- ingress from its paired workload;
 - broker and DNS access;
 - approved external TCP ports;
 - explicitly labelled test fixtures when insecure upstreams are enabled for

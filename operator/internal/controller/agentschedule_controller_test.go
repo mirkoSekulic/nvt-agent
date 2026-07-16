@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +68,7 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read AgentSchedule CRD: %v", err)
 	}
+	assertStrictCRDSchema(t, data)
 	chartData, err := os.ReadFile("../../../charts/nvt/crds/nvt.dev_agentschedules.yaml")
 	if err != nil || !bytes.Equal(data, chartData) {
 		t.Fatalf("generated and Helm AgentSchedule CRDs differ: %v", err)
@@ -84,6 +87,19 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	}
 	if crdPath(t, properties, "profiles", "items", "properties", "agentRuntimeConfig", "x-kubernetes-preserve-unknown-fields") != true {
 		t.Fatalf("expected profile runtime config preservation schema, got %#v", properties["profiles"])
+	}
+	profileProperties := crdPath(t, properties, "profiles", "items", "properties").(map[string]any)
+	legacy := crdPath(t, profileProperties, "egressForwardProxy").(map[string]any)
+	if legacy["type"] != "boolean" || !strings.Contains(fmt.Sprint(legacy["description"]), "Deprecated:") {
+		t.Fatalf("legacy profile egressForwardProxy must remain only as a deprecated tombstone: %#v", legacy)
+	}
+	validations := crdPath(t, properties, "profiles", "items", "x-kubernetes-validations").([]any)
+	if !hasCRDValidation(validations, "!has(self.egressForwardProxy)", "use egressTransport") {
+		t.Fatalf("missing profile rejection CEL for legacy egressForwardProxy: %#v", validations)
+	}
+	transport := crdPath(t, profileProperties, "egressTransport").(map[string]any)
+	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
+		t.Fatalf("expected profile egressTransport to be the sole transport selector, got %#v", transport)
 	}
 	if crdPath(t, properties, "profileSelection", "properties", "onNoMatch", "type") != "string" {
 		t.Fatalf("expected profileSelection.onNoMatch schema, got %#v", properties["profileSelection"])
@@ -374,6 +390,22 @@ func TestLegacyScheduleAdmissionRejectsInvalidPersistentWorkspaceBeforeCreate(t 
 			if len(runs.Items) != 0 {
 				t.Fatalf("invalid admission created AgentRuns: %#v", runs.Items)
 			}
+		})
+	}
+}
+
+func TestLegacyScheduleAdmissionRejectsRemovedEgressForwardProxy(t *testing.T) {
+	for _, value := range []bool{true, false} {
+		t.Run(fmt.Sprintf("value-%t", value), func(t *testing.T) {
+			fixture := scheduleAdmissionFixture(t, testAgentSchedule())
+			response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t,
+				"legacy-egress-selector", "", map[string]any{"spec": map[string]any{"egressForwardProxy": value}}))
+			var decoded scheduleAdmissionResponse
+			decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+			if decoded.Scheduled || !strings.Contains(decoded.Reason, "egressForwardProxy is removed; use spec.egressTransport") {
+				t.Fatalf("legacy value %t was not rejected explicitly: %#v", value, decoded)
+			}
+			assertScheduledRunCount(t, k8sClient, fixture.schedule, 0)
 		})
 	}
 }

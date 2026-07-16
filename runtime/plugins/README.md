@@ -185,7 +185,7 @@ where raw provider secrets, including GitHub App private keys, are provided to
 the agent container through env or mounted files. Those secrets should be scoped
 to the smallest possible set of repos and permissions. This is not the
 production boundary for autonomous agents. The intended operator mode is for a
-broker sidecar/service to hold raw secrets, enforce capability policy, and let
+broker service to hold raw secrets, enforce capability policy, and let
 `git-host-credentials` act as a broker client rather than a key holder.
 
 `checkout-repos` supports fork workflows with optional `upstream`. If provided

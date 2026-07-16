@@ -35,6 +35,8 @@ spec:
                 - workspace
                 - agent
               x-kubernetes-validations:
+                - rule: "!has(self.egressForwardProxy)"
+                  message: spec.egressForwardProxy is removed; use spec.egressTransport
                 - rule: "has(self.profileProvenance) == has(oldSelf.profileProvenance) && (!has(self.profileProvenance) || self.profileProvenance == oldSelf.profileProvenance)"
                   message: spec.profileProvenance is immutable
                 - rule: "self.workspace == oldSelf.workspace"
@@ -92,7 +94,7 @@ spec:
                   default: false
                 egressForwardProxy:
                   type: boolean
-                  default: false
+                  description: 'Deprecated: migration tombstone; any presence is rejected. Use egressTransport.'
                 egressTransport:
                   type: string
                   enum:

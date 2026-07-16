@@ -240,6 +240,19 @@ func TestProfileConfigurationValidation(t *testing.T) {
 	}
 }
 
+func TestProfileConfigurationRejectsRemovedEgressForwardProxy(t *testing.T) {
+	for _, value := range []bool{true, false} {
+		t.Run(fmt.Sprintf("value-%t", value), func(t *testing.T) {
+			schedule := testProfiledAgentSchedule()
+			schedule.Spec.Profiles[0].EgressForwardProxy = ptrTo(value)
+			_, err := validateExecutionProfileSchedule(schedule)
+			if err == nil || !strings.Contains(err.Error(), "egressForwardProxy is removed; use egressTransport") {
+				t.Fatalf("legacy profile value %t was not rejected explicitly: %v", value, err)
+			}
+		})
+	}
+}
+
 func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 	for _, extra := range []map[string]any{
 		{"agentRun": map[string]any{"spec": map[string]any{"broker": map[string]any{}}}},

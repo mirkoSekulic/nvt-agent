@@ -111,7 +111,7 @@ spec = {
     "image": "nvt-agent-runtime:latest",
     "egress": "mediated",
     "egressEnforcement": True,
-    "egressForwardProxy": True,
+    "egressTransport": "forward-proxy",
     "workspace": {"mode": "Ephemeral"},
     "broker": {"grants": [{
         "provider": "codex-main",

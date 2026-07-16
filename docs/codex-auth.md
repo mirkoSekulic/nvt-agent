@@ -64,8 +64,8 @@ tests run in CI; see [CI coverage](ci-coverage.md).
 
 Mediation protects credentials only when direct egress is also fenced. In
 Kubernetes, use mediated mode with enforcement and transparent transport. The
-Agent Pod NetworkPolicy then allows external traffic only through its paired
-`egressd` Pod. Local Compose demonstrates mediation and non-possession but is
+workload NetworkPolicy then allows external traffic only through its paired
+`egressd` service. Local Compose demonstrates mediation and non-possession but is
 not an equivalent hostile-workload boundary because privileged local
 containers share and can modify the network namespace.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Forward-proxy smoke (docs/transparent-egress-architecture.md): a
-# mediated + enforced run with spec.egressForwardProxy reaches an allowlisted
+# mediated + enforced run with spec.egressTransport: forward-proxy reaches an allowlisted
 # upstream through HTTPS_PROXY with no base-url override — egressd TLS-terminates
 # the CONNECT under the per-agent CA, injects the broker credential, and
 # re-originates to the pinned upstream. A non-allowlisted host is refused at
@@ -121,7 +121,7 @@ spec = {
     "image": "nvt-agent-runtime:latest",
     "egress": "mediated",
     "egressEnforcement": True,
-    "egressForwardProxy": True,
+    "egressTransport": "forward-proxy",
     "workspace": {"mode": "Ephemeral"},
     "broker": {"grants": [grant]},
     "agent": {
@@ -162,7 +162,7 @@ with open(sys.argv[1], "r", encoding="utf-8") as file:
     spec = json.load(file)["agentRun"]["spec"]
 assert spec["egress"] == "mediated"
 assert spec["egressEnforcement"] is True
-assert spec["egressForwardProxy"] is True
+assert spec["egressTransport"] == "forward-proxy"
 PY
 }
 
@@ -197,7 +197,7 @@ submit_valid_admission() {
 
 case_run() {
   # Forward-proxy without enforcement is rejected at admission, naming the field.
-  submit_rejected_admission "no-enforcement" "egressForwardProxy"
+  submit_rejected_admission "no-enforcement" "egressTransport"
 
   submit_valid_admission valid
   wait_for_phase_any "${RUN_NAME}-valid" "${RUN_TIMEOUT_SECONDS}" Running

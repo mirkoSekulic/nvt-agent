@@ -169,6 +169,15 @@ def proxy_url_for_provider(proxy_url, provider):
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def egress_transport(egress):
+    if "forward-proxy" in egress:
+        raise SystemExit("egress.forward-proxy is removed; use egress.transport")
+    transport = egress.get("transport") or "redirect"
+    if transport not in {"redirect", "forward-proxy", "transparent"}:
+        raise SystemExit("egress.transport must be redirect, forward-proxy, or transparent")
+    return transport
+
+
 def runtime_proxy_provider(runtime):
     proxy = runtime.get("proxy")
     if proxy is None:
@@ -183,7 +192,7 @@ def runtime_proxy_provider(runtime):
 
 def apply_runtime_proxy(runtime, egress, command):
     provider = runtime_proxy_provider(runtime)
-    forward_proxy = mediated_mode(egress) and bool(egress.get("forward-proxy"))
+    forward_proxy = mediated_mode(egress) and egress_transport(egress) in {"forward-proxy", "transparent"}
     if provider is not None and not forward_proxy:
         raise SystemExit("runtime.proxy.provider requires mediated forward-proxy egress")
     if not command:
@@ -415,12 +424,8 @@ def apply_mediated_egress(egress):
     deadline = broker_wait_deadline()
     https_provider = None
     enforced = bool(egress.get("enforcement"))
-    forward_proxy = bool(egress.get("forward-proxy"))
-    transport_mode = egress.get("transport") or ("forward-proxy" if forward_proxy else "redirect")
-    if transport_mode not in {"redirect", "forward-proxy", "transparent"}:
-        raise SystemExit("egress.transport must be redirect, forward-proxy, or transparent")
-    if transport_mode == "transparent" and not forward_proxy:
-        raise SystemExit("egress.transport transparent requires forward-proxy routing")
+    transport_mode = egress_transport(egress)
+    forward_proxy = transport_mode in {"forward-proxy", "transparent"}
     for index, grant in enumerate(grants):
         if not isinstance(grant, dict):
             raise SystemExit(f"egress.grants[{index}] must be an object")
@@ -486,8 +491,6 @@ def apply_mediated_egress(egress):
         "placeholder": PLACEHOLDER,
         "grants": grants,
     }
-    if forward_proxy:
-        metadata["forward_proxy"] = True
     target.write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -804,6 +807,10 @@ def main():
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
     command = optional_string(runtime.get("command"), "runtime.command")
     effective_command = command or "codex"
+
+    # Validate the selector before making any runtime changes, including for a
+    # direct config carrying the removed compatibility key.
+    egress_transport(egress)
 
     setup_tmux_config()
     apply_preseed_files(preseed)

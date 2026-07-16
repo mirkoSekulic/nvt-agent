@@ -681,7 +681,7 @@ func TestMediatedEgressDenied(t *testing.T) {
 // TestBootstrapForwardProxyInstallsCATrust pins forward-proxy bootstrap: in
 // forward-proxy mode (no https base-url to trigger it) the CA trust store is
 // still installed system-wide so proxy-env HTTPS clients trust the MITM leaf,
-// and egress.json records forward_proxy.
+// and egress.json records the selected transport without a legacy boolean.
 func TestBootstrapForwardProxyInstallsCATrust(t *testing.T) {
 	f := newFixture(t)
 	updateLog := filepath.Join(f.home, "update-ca-certificates.log")
@@ -703,7 +703,7 @@ printf '%s\n' '{"ok":true,"files":[{"path":".codex/auth.json","content":"{\"acce
 egress:
   mode: mediated
   enforcement: true
-  forward-proxy: true
+  transport: forward-proxy
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
   grants:
     - provider: codex-main
@@ -753,8 +753,8 @@ code-server:
 		t.Fatalf("runtime proxy env must not include provider userinfo:\n%s", envFile)
 	}
 	meta := mustReadFile(t, filepath.Join(f.home, ".nvt-agent", "egress.json"))
-	if !strings.Contains(meta, `"forward_proxy": true`) {
-		t.Fatalf("egress.json missing forward_proxy marker:\n%s", meta)
+	if !strings.Contains(meta, `"transport": "forward-proxy"`) || strings.Contains(meta, `"forward_proxy"`) {
+		t.Fatalf("egress.json must use transport as its sole selector:\n%s", meta)
 	}
 }
 
@@ -767,7 +767,7 @@ func TestBootstrapForwardProxyRequiresRuntimeProxyProvider(t *testing.T) {
 egress:
   mode: mediated
   enforcement: true
-  forward-proxy: true
+  transport: forward-proxy
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
   grants:
     - provider: claude-auth-mirko
@@ -804,7 +804,7 @@ func TestBootstrapForwardProxyRequiresRuntimeProxyProviderForImplicitCommand(t *
 egress:
   mode: mediated
   enforcement: true
-  forward-proxy: true
+  transport: forward-proxy
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
   grants:
     - provider: claude-auth-mirko
@@ -841,7 +841,7 @@ func TestBootstrapForwardProxyHeaderInjectGrantSupportsRuntimeProxyProvider(t *t
 egress:
   mode: mediated
   enforcement: true
-  forward-proxy: true
+  transport: forward-proxy
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
   grants:
     - provider: static-bearer-main
@@ -888,7 +888,6 @@ egress:
   mode: mediated
   transport: transparent
   enforcement: true
-  forward-proxy: true
   forward-proxy-url: http://127.0.0.1:15002
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
   grants:
@@ -924,6 +923,32 @@ code-server:
 		if !strings.Contains(envFile, want) {
 			t.Fatalf("transparent proxy env missing %q:\n%s", want, envFile)
 		}
+	}
+}
+
+func TestBootstrapRejectsRemovedForwardProxySelector(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			f := newFixture(t)
+			config := f.writeAgentConfig(`
+egress:
+  mode: direct
+  forward-proxy: ` + value + `
+runtime: {}
+tools: {packages: [], mise: [], additional-paths: [], shell: []}
+code-server: {extensions: []}
+`)
+			output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+				"HOME=" + f.home,
+				"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}, config)
+			if !strings.Contains(output, "egress.forward-proxy is removed; use egress.transport") {
+				t.Fatalf("legacy value %s did not fail with migration guidance:\n%s", value, output)
+			}
+			if _, err := os.Stat(filepath.Join(f.home, ".nvt-agent")); !os.IsNotExist(err) {
+				t.Fatalf("legacy selector changed runtime state before rejection: %v", err)
+			}
+		})
 	}
 }
 

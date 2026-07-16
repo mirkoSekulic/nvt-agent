@@ -129,7 +129,7 @@ flowchart TD
     S[AgentSchedule] --> O[Operator admission]
     O --> R[AgentRun CR]
     R --> AP[Agent Pod]
-    R --> EP[Trusted egress Pod]
+    R --> EP[Trusted egress service]
     R --> NP[NetworkPolicies]
     R --> SV[Services and gateway route]
     AP --> EP
