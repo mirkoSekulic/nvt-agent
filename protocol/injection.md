@@ -207,6 +207,11 @@ address) is composed by runtime bootstrap, not returned by the broker.
 
 ### Explicit forward-proxy capability selection
 
+Runtime configuration selects this behavior with `egress.transport: forward-proxy`
+(or `transparent` for captured traffic). The removed
+`egress.forward-proxy` boolean is rejected on presence; it is not a fallback
+selector. `egress.forward-proxy-url` remains the endpoint contract.
+
 Forward-proxy MITM may have several mediated providers for the same upstream
 host, for example multiple GitHub Apps on `api.github.com`, or multiple Codex
 or Claude sessions on their shared service hosts. Host-only selection is

@@ -42,15 +42,18 @@ type AgentScheduleTemplate struct {
 // AgentScheduleExecutionProfile is one operator-owned execution identity and
 // its complete runtime/broker/egress security configuration.
 type AgentScheduleExecutionProfile struct {
-	Name                      string                  `json:"name"`
-	Runtime                   AgentRunRuntime         `json:"runtime"`
-	RuntimeAuth               *AgentRunRuntimeAuth    `json:"runtimeAuth,omitempty"`
-	AgentRuntimeConfig        apiextensionsv1.JSON    `json:"agentRuntimeConfig"`
-	Egress                    AgentRunEgressMode      `json:"egress"`
-	EgressAllowInsecureBroker bool                    `json:"egressAllowInsecureBroker,omitempty"`
-	EgressEnforcement         bool                    `json:"egressEnforcement,omitempty"`
-	EgressTransport           AgentRunEgressTransport `json:"egressTransport,omitempty"`
-	Broker                    *AgentRunBroker         `json:"broker,omitempty"`
+	Name                      string               `json:"name"`
+	Runtime                   AgentRunRuntime      `json:"runtime"`
+	RuntimeAuth               *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
+	AgentRuntimeConfig        apiextensionsv1.JSON `json:"agentRuntimeConfig"`
+	Egress                    AgentRunEgressMode   `json:"egress"`
+	EgressAllowInsecureBroker bool                 `json:"egressAllowInsecureBroker,omitempty"`
+	EgressEnforcement         bool                 `json:"egressEnforcement,omitempty"`
+	// EgressForwardProxy is a deprecated migration tombstone. Any presence is
+	// rejected; use EgressTransport. It does not select behavior.
+	EgressForwardProxy *bool                   `json:"egressForwardProxy,omitempty"`
+	EgressTransport    AgentRunEgressTransport `json:"egressTransport,omitempty"`
+	Broker             *AgentRunBroker         `json:"broker,omitempty"`
 }
 
 // AgentScheduleProfileSelection defines deterministic static principal routing.
@@ -175,6 +178,10 @@ func (in *AgentScheduleExecutionProfile) DeepCopy() *AgentScheduleExecutionProfi
 	}
 	out := new(AgentScheduleExecutionProfile)
 	*out = *in
+	if in.EgressForwardProxy != nil {
+		out.EgressForwardProxy = new(bool)
+		*out.EgressForwardProxy = *in.EgressForwardProxy
+	}
 	if in.RuntimeAuth != nil {
 		out.RuntimeAuth = in.RuntimeAuth.DeepCopy()
 	}

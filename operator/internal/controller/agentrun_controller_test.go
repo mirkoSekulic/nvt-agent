@@ -850,6 +850,31 @@ func TestDirectAgentRunPodDoesNotRenderMediatedSidecar(t *testing.T) {
 	}
 }
 
+func TestRemovedEgressForwardProxyIsRejectedBeforeReconcile(t *testing.T) {
+	for _, value := range []bool{true, false} {
+		t.Run(fmt.Sprintf("value-%t", value), func(t *testing.T) {
+			ctx := context.Background()
+			run := testAgentRun()
+			run.Spec.EgressForwardProxy = ptrTo(value)
+			k8sClient := fake.NewClientBuilder().WithScheme(testScheme(t)).
+				WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+				WithObjects(run).Build()
+			reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: testScheme(t)}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err == nil ||
+				!strings.Contains(err.Error(), "egressForwardProxy is removed; use spec.egressTransport") {
+				t.Fatalf("legacy value %t was not rejected explicitly: %v", value, err)
+			}
+			pods := &corev1.PodList{}
+			if err := k8sClient.List(ctx, pods, client.InNamespace(run.Namespace)); err != nil {
+				t.Fatal(err)
+			}
+			if len(pods.Items) != 0 {
+				t.Fatalf("legacy value %t created a Pod: %#v", value, pods.Items)
+			}
+		})
+	}
+}
+
 func TestEgressTransportAloneSelectsRuntimeTransport(t *testing.T) {
 	t.Setenv("NVT_NETWORK_POLICY_CAPABLE", "true")
 	redirect := multiGrantMediatedAgentRun()
@@ -883,6 +908,9 @@ func TestEgressTransportAloneSelectsRuntimeTransport(t *testing.T) {
 			egress := config["egress"].(map[string]any)
 			if got := egress["transport"]; got != string(test.want) {
 				t.Fatalf("generated transport = %#v, want %q", got, test.want)
+			}
+			if _, exists := egress["forward-proxy"]; exists {
+				t.Fatalf("generated runtime config retained legacy forward-proxy selector: %#v", egress)
 			}
 			encoded, err := json.Marshal(config)
 			if err != nil {
@@ -3792,8 +3820,15 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if crdPath(t, spec, "egressEnforcement", "default") != false {
 		t.Fatalf("expected egressEnforcement default false, got %#v", crdPath(t, spec, "egressEnforcement"))
 	}
-	if _, exists := spec["egressForwardProxy"]; exists {
-		t.Fatalf("legacy egressForwardProxy must not remain in the public schema: %#v", spec["egressForwardProxy"])
+	legacy := crdPath(t, spec, "egressForwardProxy").(map[string]any)
+	if legacy["type"] != "boolean" || legacy["deprecated"] != true {
+		t.Fatalf("legacy egressForwardProxy must remain only as a deprecated tombstone: %#v", legacy)
+	}
+	validations := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema",
+		"properties", "spec", "x-kubernetes-validations").([]any)
+	if !hasCRDValidation(validations, "!has(self.egressForwardProxy)", "use spec.egressTransport") {
+		t.Fatalf("missing rejection CEL for legacy egressForwardProxy: %#v", validations)
 	}
 	transport := crdPath(t, spec, "egressTransport").(map[string]any)
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
@@ -5199,6 +5234,16 @@ func crdPath(t *testing.T, value any, path ...any) any {
 		}
 	}
 	return current
+}
+
+func hasCRDValidation(validations []any, rule, messageFragment string) bool {
+	for _, raw := range validations {
+		validation, ok := raw.(map[string]any)
+		if ok && validation["rule"] == rule && strings.Contains(fmt.Sprint(validation["message"]), messageFragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func assertAgentRunPhase(

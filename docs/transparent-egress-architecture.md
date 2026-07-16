@@ -69,9 +69,15 @@ spec:
 | `egressTransport: forward-proxy` | `HTTP(S)_PROXY` for proxy-aware tools |
 | `egressTransport: transparent` | iptables capture for ordinary TCP clients |
 
-The pre-1.0 compatibility field `spec.egressForwardProxy` has been removed.
+The pre-1.0 `spec.egressForwardProxy` compatibility behavior has been removed.
 Migrate `egressForwardProxy: true` to `egressTransport: forward-proxy`; use
-`egressTransport: redirect` for the old false/default behavior.
+`egressTransport: redirect` for the old false/default behavior. A temporary API
+tombstone retains the field name only to reject either legacy value; it never
+selects behavior.
+
+Runtime configuration likewise uses `egress.transport` as its sole selector.
+The legacy `egress.forward-proxy` key is rejected even when set to `false`;
+`forward-proxy-url` remains the endpoint setting for proxy-based transports.
 
 ## Traffic Capture
 

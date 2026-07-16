@@ -80,6 +80,9 @@ type AgentRunSpec struct {
 	// configured egress endpoint (docs/transparent-egress-architecture.md).
 	// Requires egress: mediated and a NetworkPolicy-enforcing CNI.
 	EgressEnforcement bool `json:"egressEnforcement,omitempty"`
+	// EgressForwardProxy is a deprecated migration tombstone. Any presence is
+	// rejected; use EgressTransport. It does not select behavior.
+	EgressForwardProxy *bool `json:"egressForwardProxy,omitempty"`
 	// EgressTransport selects redirect, forward-proxy, or transparent routing.
 	EgressTransport   AgentRunEgressTransport    `json:"egressTransport,omitempty"`
 	Workspace         AgentRunWorkspace          `json:"workspace"`
@@ -277,6 +280,10 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
+	}
+	if in.EgressForwardProxy != nil {
+		out.EgressForwardProxy = new(bool)
+		*out.EgressForwardProxy = *in.EgressForwardProxy
 	}
 	if in.RuntimeAuth != nil {
 		out.RuntimeAuth = in.RuntimeAuth.DeepCopy()

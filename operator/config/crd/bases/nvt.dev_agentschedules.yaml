@@ -118,6 +118,9 @@ spec:
                   minItems: 1
                   items:
                     type: object
+                    x-kubernetes-validations:
+                      - rule: "!has(self.egressForwardProxy)"
+                        message: egressForwardProxy is removed; use egressTransport
                     required:
                       - name
                       - runtime
@@ -174,6 +177,10 @@ spec:
                       egressEnforcement:
                         type: boolean
                         default: false
+                      egressForwardProxy:
+                        type: boolean
+                        deprecated: true
+                        description: Deprecated migration tombstone; any presence is rejected. Use egressTransport.
                       egressTransport:
                         type: string
                         enum:

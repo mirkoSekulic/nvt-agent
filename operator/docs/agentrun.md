@@ -98,8 +98,10 @@ egressTransport: transparent
 
 Pre-1.0 migration: replace `egressForwardProxy: true` with
 `egressTransport: forward-proxy`. Remove `egressForwardProxy: false` or use
-`egressTransport: redirect` explicitly. The removed boolean is no longer part
-of the CRD; migrate stored manifests before installing the updated CRD.
+`egressTransport: redirect` explicitly. A deprecated pointer tombstone remains
+temporarily in the CRD only so either legacy value is rejected with migration
+guidance instead of being pruned. It has no behavior and may be removed in a
+later pre-1.0 release; migrate stored manifests before installing this CRD.
 
 See [Transparent mediated egress](../../docs/transparent-egress-architecture.md).
 

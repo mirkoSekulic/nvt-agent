@@ -96,6 +96,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 	profiles := make(map[string]nvtv1alpha1.AgentScheduleExecutionProfile, len(schedule.Spec.Profiles))
 	for i := range schedule.Spec.Profiles {
 		profile := schedule.Spec.Profiles[i]
+		if profile.EgressForwardProxy != nil {
+			return nil, fmt.Errorf("spec.profiles[%d].egressForwardProxy is removed; use egressTransport", i)
+		}
 		if strings.TrimSpace(profile.Name) == "" || strings.TrimSpace(profile.Runtime.Type) == "" ||
 			strings.TrimSpace(profile.Runtime.Autonomy) == "" || profile.Egress == "" {
 			return nil, errInvalidExecutionProfileConfiguration

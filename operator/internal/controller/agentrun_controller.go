@@ -267,6 +267,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, nil
 	}
+	if !IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		if err := ValidateRemovedEgressForwardProxy(&agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	if controllerutil.AddFinalizer(&agentRun, agentRunFinalizer) {
 		if err := r.Update(ctx, &agentRun); err != nil {
@@ -3562,6 +3567,9 @@ func AgentRunGrantMaterialization(grant nvtv1alpha1.AgentRunBrokerGrant) nvtv1al
 }
 
 func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
+	if err := ValidateRemovedEgressForwardProxy(agentRun); err != nil {
+		return err
+	}
 	if err := ValidateBrokerTLSConfig(); err != nil {
 		return err
 	}
@@ -3706,6 +3714,16 @@ func agentRunHasGitGrant(agentRun *nvtv1alpha1.AgentRun) bool {
 		}
 	}
 	return false
+}
+
+// ValidateRemovedEgressForwardProxy rejects the pre-1.0 compatibility field.
+// The pointer exists only so API decoding and CRD validation can distinguish
+// omission from explicit false; it never selects egress behavior.
+func ValidateRemovedEgressForwardProxy(agentRun *nvtv1alpha1.AgentRun) error {
+	if agentRun.Spec.EgressForwardProxy != nil {
+		return fmt.Errorf("spec.egressForwardProxy is removed; use spec.egressTransport")
+	}
+	return nil
 }
 
 func validEgressHost(value string) bool {
@@ -4118,9 +4136,8 @@ func InjectMediatedEgressConfig(config map[string]any, agentRun *nvtv1alpha1.Age
 		egress["operator-prepared"] = true
 	}
 	if forwardProxy {
-		// Signals bootstrap to install the CA trust store for proxy-env HTTPS
-		// clients (the MITM leaf must be trusted system-wide).
-		egress["forward-proxy"] = true
+		// Supply the endpoint for proxy-based transports. The transport field is
+		// the sole behavior selector; the MITM leaf is trusted system-wide.
 		proxyURL := fmt.Sprintf("http://%s:%d", EgressdServiceName(agentRun.Name), egressForwardProxyPort)
 		if AgentRunEgressTransport(agentRun) == nvtv1alpha1.AgentRunEgressTransportTransparent {
 			// Keep proxy-aware tools on the credential-less local transport too.

@@ -1215,7 +1215,6 @@ func TestAgentInitMediatedRendersMultiRouteWithGitCA(t *testing.T) {
 		"egress:",
 		"  mode: mediated",
 		"  transport: transparent",
-		"  forward-proxy: true",
 		"  forward-proxy-url: http://127.0.0.1:15002",
 		"    - provider: codex-main",
 		"      materialization: placeholder-file",
@@ -1279,6 +1278,7 @@ user-owned: keep-me
 egress:
   mode: mediated
   placeholder: NVT-PLACEHOLDER-NOT-A-KEY
+  # Pre-transport managed content must be replaced, not interpreted.
   forward-proxy: true
   forward-proxy-url: http://127.0.0.1:8470
   grants:
@@ -1316,6 +1316,9 @@ code-server: {extensions: []}
 		if !strings.Contains(config, want) {
 			t.Fatalf("migrated config missing %q:\n%s", want, config)
 		}
+	}
+	if strings.Contains(config, "\n  forward-proxy:") {
+		t.Fatalf("managed migration retained the removed selector:\n%s", config)
 	}
 	if strings.Contains(config, "forward-proxy-url: http://127.0.0.1:8470") || strings.Count(config, "BEGIN nvt-managed egress") != 1 {
 		t.Fatalf("managed migration was not idempotent:\n%s", config)

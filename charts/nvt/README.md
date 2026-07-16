@@ -257,8 +257,9 @@ Forward-proxy transport remains available for clients that honor
 `HTTP(S)_PROXY`. For the pre-1.0 migration, replace
 `spec.egressForwardProxy: true` with `spec.egressTransport: forward-proxy`;
 remove a false legacy field or select `redirect` explicitly. The consolidated
-CRD no longer declares the legacy field, so migrate stored manifests before
-upgrading the chart.
+CRD retains a deprecated rejection-only tombstone so either legacy value fails
+loudly instead of being pruned. The tombstone has no behavior and may be removed
+in a later pre-1.0 release; migrate stored manifests before upgrading the chart.
 
 `allowInsecureUpstreams` permits explicitly marked plain-HTTP fixtures for
 hermetic tests. Leave it false in real deployments; plaintext would expose an
