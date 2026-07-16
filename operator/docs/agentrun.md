@@ -127,17 +127,19 @@ its `/var/lib/docker` remains disposable. An init container creates the
 directories and applies ownership for uid/gid 0 or 1000 before the agent starts.
 
 The claim is reused across agent Pod deletion/replacement and controller
-restarts. The operator creates the consuming Pod while a valid claim is Pending,
-so both `Immediate` and `WaitForFirstConsumer` StorageClasses are supported.
-`WorkspaceReady` remains false until the claim becomes `Bound`. Workspace mode,
-size, and storage class are immutable for an existing run; expansion and shrink
-are not supported in v1, and the controller never deletes/recreates a drifted
-live claim.
+restarts while the run is active. The operator creates the consuming Pod while
+a valid claim is Pending, so both `Immediate` and `WaitForFirstConsumer`
+StorageClasses are supported. `WorkspaceReady` remains false until the claim
+becomes `Bound`. Workspace mode, size, and storage class are immutable for an
+existing run; expansion and shrink are not supported in v1, and the controller
+never deletes/recreates a drifted live claim.
 
-Deleting (including TTL-cleaning) the `AgentRun` makes Kubernetes garbage
-collection delete the owned PVC. Physical volume cleanup still follows the
-StorageClass reclaim policy; use `reclaimPolicy: Delete` for lifecycle-scoped
-storage.
+The PVC lifetime ends when terminal operational cleanup becomes due, not when
+an active Pod crashes or is replaced. The operator requests claim deletion at
+that point; Kubernetes PVC protection may keep it terminating until the Pod has
+unmounted it. Deleting the `AgentRun` sooner also makes garbage collection
+delete its owned PVC. Physical volume cleanup still follows the StorageClass
+reclaim policy; use `reclaimPolicy: Delete` for lifecycle-scoped storage.
 
 Persistent storage is not a security-material store. Broker/callback/egress
 tokens, runtime-auth projections, generated configuration, and egress CA
@@ -220,10 +222,20 @@ ttl:
   runRetentionSeconds: 2592000
 ```
 
-- Active deadline marks a running workload `DeadlineExceeded` and removes its
-  Pod.
-- Completed and failed TTLs control terminal Pod cleanup.
-- Run retention controls deletion of the terminal AgentRun object.
+- Active deadline marks a running workload `DeadlineExceeded` and immediately
+  performs terminal operational cleanup.
+- Completed and failed TTLs control when terminal operational cleanup occurs.
+  Until that deadline, run-scoped resources are retained. Cleanup removes the
+  agent and enforced egressd Pods, persistent workspace PVC, per-run Service,
+  NetworkPolicies, ConfigMaps, and Secrets, and revokes both run identities
+  from the broker agents policy. Broker access is revoked and both Pod
+  deletions are requested first; the NetworkPolicies and all remaining
+  resources stay in place until both Pods are confirmed gone, preserving the
+  egress fence throughout asynchronous Kubernetes termination.
+- Run retention controls deletion of only the lightweight terminal `AgentRun`
+  metadata after operational cleanup. `runRetentionSeconds: 0` retains that
+  metadata indefinitely without retaining workloads, credentials, policy, or
+  storage after their completed/failed cleanup deadline.
 
 ## Status
 
