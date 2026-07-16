@@ -156,7 +156,7 @@ broker:
     existingClaim: ""
 ```
 
-Optionally seed an empty state directory once from an existing Secret:
+Optionally reconcile credential seeds from an existing Kubernetes Secret:
 
 ```yaml
 broker:
@@ -166,8 +166,34 @@ broker:
     seedTargetDir: codex
 ```
 
-Seeding never overwrites existing broker state. This protects refreshed and
-rotated credentials from stale Secret contents.
+The Secret is a generic read-only source directory; NVT has no dependency on
+the system that materializes it. Every top-level Secret key maps to the same
+filename under `/state/<seedTargetDir>` and is tracked independently by a
+durable source digest on the PVC. Provider configuration still selects the
+canonical file explicitly; filenames are never inferred by provider type.
+
+The first source value is imported as mode `0600`. Broker-side rotation may
+then change that canonical file without the unchanged source overwriting it.
+When Kubernetes atomically projects changed Secret keys, the broker lifecycle
+supervisor pins and validates one complete projected generation, makes readiness
+false, terminates and reaps the broker and its provider process group,
+atomically imports the new value and marker, and starts the broker again in the
+same Pod. No Helm change, rollout, `kubectl exec`, PVC edit, or Kubernetes API
+permission is required. Removing a Secret key never deletes canonical state.
+
+On migration from the old one-shot seed behavior, an existing canonical file
+without a marker is preserved and the current source digest is adopted. This
+prevents a stale seed from overwriting a credential already rotated by the
+broker. Invalid, escaping, non-regular, symlinked, or oversized source entries
+hold the broker unready without replacing its last usable canonical file; fix
+the source Secret to recover automatically. Kubernetes' projected `..data`
+symlinks are the only accepted source-file symlink form.
+
+Replacement retains at most one mode-`0600` recovery record per changed file
+until every configured provider accepts its local state through the
+provider-owned readiness contract, then removes it. The chart keeps a single
+broker replica and `Recreate` strategy so there is still exactly one writer for
+provider state.
 
 ## Agent Egress
 

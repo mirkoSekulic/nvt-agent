@@ -31,6 +31,7 @@ BROKER_PERSISTENCE_RENDER="${WORKDIR}/broker-persistence.yaml"
 BROKER_EXISTING_CLAIM_RENDER="${WORKDIR}/broker-existing-claim.yaml"
 BROKER_SEED_RENDER="${WORKDIR}/broker-seed.yaml"
 BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE="${WORKDIR}/broker-seed-without-persistence-failure.txt"
+BROKER_SEED_TARGET_FAILURE="${WORKDIR}/broker-seed-target-failure.txt"
 NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
@@ -961,6 +962,10 @@ grep -q 'name: "nvt-broker-env"' "${BROKER_SECRET_RENDER}"
 
 missing_resource "${DEFAULT_RENDER}" PersistentVolumeClaim nvt-broker-state
 grep -q 'emptyDir: {}' "${DEFAULT_RENDER}"
+if grep -q 'seed_supervisor.py\|NVT_BROKER_SEED_DIR\|name: broker-state-seed' "${DEFAULT_RENDER}"; then
+  echo "default broker rendering must preserve the unsupervised local/ephemeral path" >&2
+  exit 1
+fi
 
 require_resource "${BROKER_PERSISTENCE_RENDER}" PersistentVolumeClaim nvt-broker-state
 require_resource_namespace "${BROKER_PERSISTENCE_RENDER}" PersistentVolumeClaim nvt-broker-state custom-ns
@@ -976,11 +981,19 @@ missing_resource "${BROKER_EXISTING_CLAIM_RENDER}" PersistentVolumeClaim nvt-bro
 grep -q 'claimName: "existing-broker-state"' "${BROKER_EXISTING_CLAIM_RENDER}"
 
 require_resource "${BROKER_SEED_RENDER}" PersistentVolumeClaim nvt-broker-state
-grep -q 'name: seed-broker-state' "${BROKER_SEED_RENDER}"
 grep -q 'secretName: "codex-auth"' "${BROKER_SEED_RENDER}"
-grep -q 'target="/state/codex"' "${BROKER_SEED_RENDER}"
-grep -q 'already exists and is non-empty; leaving existing state unchanged' "${BROKER_SEED_RENDER}"
-grep -q 'cp -p "${path}" "${target}/$(basename "${path}")"' "${BROKER_SEED_RENDER}"
+grep -q '/opt/nvt-broker/broker/seed_supervisor.py' "${BROKER_SEED_RENDER}"
+grep -q 'name: NVT_BROKER_SEED_DIR' "${BROKER_SEED_RENDER}"
+grep -q 'name: NVT_BROKER_SEED_TARGET_DIR' "${BROKER_SEED_RENDER}"
+grep -q 'value: "codex"' "${BROKER_SEED_RENDER}"
+grep -q 'defaultMode: 0400' "${BROKER_SEED_RENDER}"
+grep -q 'readinessProbe:' "${BROKER_SEED_RENDER}"
+grep -q 'path: /ready' "${BROKER_SEED_RENDER}"
+grep -q 'scheme: HTTPS' "${BROKER_SEED_RENDER}"
+if grep -q 'name: seed-broker-state' "${BROKER_SEED_RENDER}"; then
+  echo "broker seed reconciliation must not remain a one-shot init container" >&2
+  exit 1
+fi
 
 if helm template nvt "${CHART}" -n custom-ns \
   --set broker.persistence.seedSecretName=codex-auth \
@@ -989,6 +1002,16 @@ if helm template nvt "${CHART}" -n custom-ns \
   exit 1
 fi
 grep -q "broker.persistence.seedSecretName requires broker.persistence.enabled=true" "${BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  --set broker.persistence.enabled=true \
+  --set broker.persistence.seedSecretName=codex-auth \
+  --set-string broker.persistence.seedTargetDir=../escape \
+  > /dev/null 2> "${BROKER_SEED_TARGET_FAILURE}"; then
+  echo "expected unsafe broker seed target to fail rendering" >&2
+  exit 1
+fi
+grep -q "broker.persistence.seedTargetDir must be a normalized relative path without traversal" "${BROKER_SEED_TARGET_FAILURE}"
 
 require_resource_namespace "${NAMESPACE_OVERRIDE_RENDER}" Deployment nvt-operator nvt
 require_resource_namespace "${NAMESPACE_OVERRIDE_RENDER}" AgentSchedule default nvt

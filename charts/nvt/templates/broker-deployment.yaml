@@ -2,6 +2,9 @@
 {{- if and .Values.broker.persistence.seedSecretName (not .Values.broker.persistence.enabled) }}
 {{- fail "broker.persistence.seedSecretName requires broker.persistence.enabled=true" }}
 {{- end }}
+{{- if and .Values.broker.persistence.seedSecretName (or (not (regexMatch `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$` .Values.broker.persistence.seedTargetDir)) (hasPrefix "/" .Values.broker.persistence.seedTargetDir) (contains ".." .Values.broker.persistence.seedTargetDir) (contains `\` .Values.broker.persistence.seedTargetDir)) }}
+{{- fail "broker.persistence.seedTargetDir must be a normalized relative path without traversal" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,36 +34,16 @@ spec:
       labels:
         {{- include "nvt.brokerSelectorLabels" . | nindent 8 }}
     spec:
-      {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
-      initContainers:
-        - name: seed-broker-state
-          image: {{ include "nvt.image" (dict "root" . "name" "broker.image" "image" .Values.broker.image) | quote }}
-          imagePullPolicy: {{ .Values.broker.image.pullPolicy }}
-          command:
-            - sh
-            - -ec
-            - |
-              target="/state/{{ .Values.broker.persistence.seedTargetDir }}"
-              if [ -d "${target}" ] && [ -n "$(find "${target}" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-                echo "broker state seed target already exists and is non-empty; leaving existing state unchanged"
-                exit 0
-              fi
-              mkdir -p "${target}"
-              for path in /seed/*; do
-                [ -e "${path}" ] || continue
-                cp -p "${path}" "${target}/$(basename "${path}")"
-              done
-          volumeMounts:
-            - name: broker-state
-              mountPath: /state
-            - name: broker-state-seed
-              mountPath: /seed
-              readOnly: true
-      {{- end }}
       containers:
         - name: broker
           image: {{ include "nvt.image" (dict "root" . "name" "broker.image" "image" .Values.broker.image) | quote }}
           imagePullPolicy: {{ .Values.broker.image.pullPolicy }}
+          {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
+          command:
+            - /opt/nvt-broker/broker/seed_supervisor.py
+            - --
+            - /opt/nvt-broker/broker/brokerd.py
+          {{- end }}
           ports:
             - name: http
               containerPort: 7347
@@ -73,6 +56,14 @@ spec:
               value: /config/agents.yaml
             - name: NVT_BROKER_AUDIT_LOG
               value: /state/audit.jsonl
+            {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
+            - name: NVT_BROKER_SEED_DIR
+              value: /seed
+            - name: NVT_BROKER_STATE_DIR
+              value: /state
+            - name: NVT_BROKER_SEED_TARGET_DIR
+              value: {{ .Values.broker.persistence.seedTargetDir | quote }}
+            {{- end }}
             {{- if .Values.broker.tls.enabled }}
             - name: NVT_BROKER_TLS_CERT
               value: /tls/tls.crt
@@ -90,11 +81,26 @@ spec:
               readOnly: true
             - name: broker-state
               mountPath: /state
+            {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
+            - name: broker-state-seed
+              mountPath: /seed
+              readOnly: true
+            {{- end }}
             {{- if .Values.broker.tls.enabled }}
             - name: broker-tls
               mountPath: /tls
               readOnly: true
             {{- end }}
+          {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+              scheme: {{ ternary "HTTPS" "HTTP" .Values.broker.tls.enabled }}
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 1
+          {{- end }}
       volumes:
         {{- if .Values.broker.tls.enabled }}
         - name: broker-tls
@@ -125,5 +131,6 @@ spec:
         - name: broker-state-seed
           secret:
             secretName: {{ .Values.broker.persistence.seedSecretName | quote }}
+            defaultMode: 0400
         {{- end }}
 {{- end }}

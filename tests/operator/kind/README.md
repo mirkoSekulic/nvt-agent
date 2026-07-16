@@ -12,6 +12,7 @@ tests/operator/kind/
   cases/
     parallel-lifecycle.sh # current smoke case
     mediated-egress.sh    # mediated routing and admission smoke
+    broker-seed.sh        # mounted Secret generation reconciliation
 ```
 
 ## Modes
@@ -40,6 +41,10 @@ builder. The case proves the real TokenReview path accepts the allowlisted
 identity and `nvt-operator` audience, snapshots the numeric GitHub principal,
 rejects a wrong audience and an unlisted ServiceAccount, and rejects
 producer-supplied profile/provider or security configuration.
+For `broker-seed`, the case updates an ordinary mounted Kubernetes Secret and
+uses read-only PVC verifier Jobs to observe the new canonical generation. It
+also pins that the broker Pod UID and container restart count remain unchanged,
+so no rollout, manual restart, exec, or PVC edit participates in recovery.
 
 Use kind mode for the full cluster smoke:
 
@@ -212,6 +217,7 @@ KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=mediated-egress make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=profile-auth make operator-kind-smoke
+KIND_SMOKE_MODE=render KIND_SMOKE_CASE=broker-seed make operator-kind-smoke
 ```
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,

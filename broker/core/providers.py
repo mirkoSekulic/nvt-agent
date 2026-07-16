@@ -22,6 +22,12 @@ class InProcessProviderAdapter(ProviderAdapter):
     def close(self):
         return None
 
+    def validate_state(self):
+        validate = getattr(self._provider, "validate_state", None)
+        if callable(validate):
+            validate()
+        return True
+
     @property
     def name(self):
         return self._name

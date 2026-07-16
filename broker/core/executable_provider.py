@@ -123,6 +123,12 @@ class ExecutableProviderAdapter(ProviderAdapter):
     def external(self):
         return True
 
+    def validate_state(self):
+        # Executable providers own validation at initialize time. Runtime
+        # degradation invalidates acceptance until their supervisor has
+        # successfully initialized a replacement generation.
+        return self.ready
+
     @property
     def _process(self):
         """Compatibility for focused lifecycle tests; process ownership is generation-scoped."""

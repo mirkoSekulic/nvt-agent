@@ -41,6 +41,7 @@ jobs:
           - enforced-egress
           - transparent-egress
           - profile-auth
+          - broker-seed
     env:
       CREATE_CLUSTER: 1
       DELETE_CLUSTER: 1
@@ -105,6 +106,7 @@ jobs:
           - revocation
           - parallel-lifecycle
           - profile-auth
+          - broker-seed
     env:
       CREATE_CLUSTER: 1
       DELETE_CLUSTER: 1

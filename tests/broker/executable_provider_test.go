@@ -213,6 +213,16 @@ func (f *executableBrokerFixture) health() map[string]any {
 	return result
 }
 
+func (f *executableBrokerFixture) readinessStatus() int {
+	f.t.Helper()
+	resp, err := http.Get(f.url + "/ready")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
 func TestExecutableProviderRealBrokerEndpointsAndCoreEnforcement(t *testing.T) {
 	f := newExecutableBrokerFixture(t)
 	status, token := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "github.com/example/repo"})
@@ -354,11 +364,17 @@ func TestExecutableProviderDuplicateInvalidatesGeneration(t *testing.T) {
 	if health := f.health(); health["status"] != "degraded" {
 		t.Fatalf("duplicate generation was not degraded: %#v", health)
 	}
+	if status := f.readinessStatus(); status != http.StatusServiceUnavailable {
+		t.Fatalf("degraded executable provider was accepted as ready: %d", status)
+	}
 	waitFor(t, 3*time.Second, func() bool {
 		data, err := os.ReadFile(f.state + "-direct.initializations")
 		return err == nil && strings.TrimSpace(string(data)) >= "2"
 	})
 	waitFor(t, 3*time.Second, func() bool { return f.health()["status"] == "healthy" })
+	if status := f.readinessStatus(); status != http.StatusOK {
+		t.Fatalf("recovered executable provider did not become ready: %d", status)
+	}
 	status, body := f.post(f.agent, "/v1/token", map[string]any{"provider": "fixture-direct", "target": "recovered"})
 	if status != 200 || body["token"] != executableCanary {
 		t.Fatalf("fresh generation did not recover: status=%d body=%#v", status, body)
