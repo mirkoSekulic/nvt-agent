@@ -540,6 +540,65 @@ print("OK")
 	}
 }
 
+func TestBrokerReadinessDoesNotWaitForCodexRefreshLock(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import base64
+import json
+import os
+import tempfile
+import threading
+from pathlib import Path
+
+from broker.core.providers import InProcessProviderAdapter
+from broker.core.server import Broker
+from broker.plugins.codex_oauth.provider import CodexOAuthProvider
+
+def jwt():
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode()).decode().rstrip("=")
+    return "header." + payload + ".signature"
+
+with tempfile.TemporaryDirectory() as root_name:
+    root = Path(root_name)
+    auth_file = root / "auth.json"
+    auth_file.write_text(json.dumps({"tokens": {
+        "access_token": jwt(),
+        "refresh_token": "readiness-refresh-canary",
+    }}), encoding="utf-8")
+    provider = CodexOAuthProvider({
+        "name": "codex-main",
+        "config": {"auth-file": str(auth_file)},
+    })
+    broker = Broker.__new__(Broker)
+    broker.providers = {"codex-main": InProcessProviderAdapter(provider)}
+
+    result = []
+    provider.lock.acquire()
+    try:
+        worker = threading.Thread(target=lambda: result.append(broker.readiness()))
+        worker.start()
+        worker.join(timeout=0.25)
+        responsive_while_refresh_locked = not worker.is_alive()
+    finally:
+        provider.lock.release()
+    worker.join(timeout=1)
+    assert responsive_while_refresh_locked, "readiness waited for the Codex refresh lock"
+    assert result == [{"ok": True, "status": "ready"}]
+
+    malformed = root / "malformed"
+    malformed.write_text(json.dumps({"tokens": {
+        "access_token": "malformed-readiness-canary",
+        "refresh_token": "replacement-refresh-canary",
+    }}), encoding="utf-8")
+    os.replace(malformed, auth_file)
+    assert broker.readiness() == {"ok": False, "status": "unready"}
+
+print("OK")
+`)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("Codex readiness lock regression failed: %v\n%s", err, out)
+	}
+}
+
 func TestBrokerSeedSupervisorReapsStubbornProcessGroupBeforeImport(t *testing.T) {
 	out, err := runBrokerPython(t, `
 import os

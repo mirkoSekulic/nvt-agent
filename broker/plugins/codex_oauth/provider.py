@@ -340,9 +340,11 @@ class CodexOAuthProvider:
 
     def validate_state(self):
         """Validate local custody without refreshing or contacting upstream."""
-        with self.lock:
-            auth = self._read_auth()
-            self._jwt_exp(self._token(auth, "access_token"))
+        # Refresh persists with atomic os.replace, so an unlocked reader sees
+        # either the complete previous file or the complete replacement. Do
+        # not let a slow upstream refresh hold the broker readiness endpoint.
+        auth = self._read_auth()
+        self._jwt_exp(self._token(auth, "access_token"))
         return True
 
     def _token(self, auth, key):
