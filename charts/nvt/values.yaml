@@ -67,6 +67,9 @@ broker:
     size: 1Gi
     storageClassName: ""
     existingClaim: ""
+    # Optional read-only Kubernetes Secret source. Each top-level key is
+    # reconciled independently into seedTargetDir on the PVC. A changed key
+    # restarts the broker child inside the existing Pod after an atomic import.
     seedSecretName: ""
     seedTargetDir: codex
   config:

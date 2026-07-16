@@ -12,7 +12,7 @@ COPY shared /opt/nvt-broker/shared
 
 WORKDIR /opt/nvt-broker
 
-RUN chmod +x /opt/nvt-broker/broker/brokerd.py
+RUN chmod +x /opt/nvt-broker/broker/brokerd.py /opt/nvt-broker/broker/seed_supervisor.py
 
 EXPOSE 7347
 ENTRYPOINT ["/opt/nvt-broker/broker/brokerd.py"]

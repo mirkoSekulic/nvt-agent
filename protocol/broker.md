@@ -310,6 +310,24 @@ core intersects that ceiling with the authenticated agent grant and passes the
 effective repository scope into the provider per request. Empty grants and empty
 intersections deny.
 
+## Durable Broker Seed Reconciliation
+
+Production deployments may mount a generic read-only seed directory beside
+broker-owned writable state. Each source filename has an independent durable
+imported-source digest on the broker PVC. An unchanged source never overwrites
+provider-rotated canonical state; a changed source is imported once; source
+deletion never deletes canonical state. Existing canonical files with no marker
+are preserved while the current source digest is adopted.
+
+Seed replacement is outside the HTTP protocol but inside the trusted broker
+lifecycle boundary. The sole broker writer is stopped and reaped before any
+canonical replacement, readiness is false during the transition, canonical
+files and markers are atomically written, and the broker resumes automatically.
+A bounded mode-`0600` recovery record protects the previous canonical value
+until the restarted broker accepts the replacement. The mechanism is filename-
+and provider-agnostic and has no Kubernetes API or external secret-manager
+contract.
+
 ## Codex OAuth Provider Rules
 
 The `codex-oauth` provider is a file-bundle provider. It keeps the canonical
