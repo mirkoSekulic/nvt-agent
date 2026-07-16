@@ -15,6 +15,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +119,141 @@ func TestForwardProxyMITMInjectsRealToken(t *testing.T) {
 	}
 	if record.path != "/v1/responses?stream=true" {
 		t.Fatalf("upstream path = %q, want the preserved request path", record.path)
+	}
+}
+
+func TestForwardProxyMITMOrdinaryClientNeedsNoPlaceholder(t *testing.T) {
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	ca, err := NewCAWithUpstreams(nil, []string{"api.github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := &ForwardProxy{
+		Config: ForwardProxyConfig{Listen: "unused", InjectRoutes: []ForwardProxyInjectRoute{
+			{Host: "api.github.com", Capability: "github-main", Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true},
+			{Host: "api.github.com", Capability: "github-alt", Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true},
+		}},
+		CA: ca, Broker: &BrokerClient{URL: broker.server.URL, Token: "egress-role-token", Client: broker.server.Client()},
+		Transport: http.DefaultTransport,
+		Resolver:  &staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
+	}
+	server := httptest.NewServer(fp)
+	t.Cleanup(server.Close)
+
+	for _, capability := range []string{"github-main", "github-alt"} {
+		proxyURL, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proxyURL.User = url.User(capability)
+		client := &http.Client{Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool(t, ca)},
+		}}
+		request, err := http.NewRequest(http.MethodGet, "https://api.github.com/repos/example/project", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("ordinary request through %s: %v", capability, err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("ordinary request through %s status = %d", capability, response.StatusCode)
+		}
+	}
+
+	record := upstream.last(t)
+	if got := record.header.Get("Authorization"); got != "Bearer "+realToken {
+		t.Fatalf("upstream Authorization = %q", got)
+	}
+	if strings.Contains(fmt.Sprint(record.header), Placeholder) {
+		t.Fatal("ordinary client sent the placeholder")
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if len(broker.requests) != 2 || broker.requests[0]["capability"] != "github-main" || broker.requests[1]["capability"] != "github-alt" {
+		t.Fatalf("provider selections were not exact: %#v", broker.requests)
+	}
+}
+
+func TestGenericPluginLifecycleOrdinaryHTTPReceivesInjectedCredential(t *testing.T) {
+	broker := newFakeBroker(t)
+	upstream := newFakeUpstream(t)
+	proxy, ca := newMITMProxy(t, broker, ForwardProxyInjectRoute{
+		Host: "api.github.com", Capability: "github-main",
+		Upstream: proxyAddress(t, upstream.server), AllowInsecureUpstream: true,
+	}, "api.github.com")
+
+	_, file, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("resolve repository root")
+	}
+	root, err := filepath.Abs(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	state := filepath.Join(home, "state")
+	if err := os.MkdirAll(filepath.Join(home, ".nvt-agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(home, "ca.crt")
+	if err := os.WriteFile(caFile, ca.CertPEM(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugin := filepath.Join(home, "ordinary-http-plugin.py")
+	if err := os.WriteFile(plugin, []byte(`#!/usr/bin/env python3
+import json
+from urllib.request import urlopen
+with urlopen("https://api.github.com/repos/example/project", timeout=5) as response:
+    if json.loads(response.read()) != {"ok": True}:
+        raise SystemExit("unexpected response")
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(home, "agent.yaml")
+	configYAML := fmt.Sprintf(`plugins:
+  - name: ordinary-http
+    source: custom
+    command: %q
+    egress:
+      provider: github-main
+`, plugin)
+	if err := os.WriteFile(config, []byte(configYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"mode":"mediated","transport":"forward-proxy","grants":[{"provider":"github-main","materialization":"header-inject"}]}`
+	if err := os.WriteFile(filepath.Join(state, "egress.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyURL := "http://github-main@" + proxyAddress(t, proxy)
+	if err := os.WriteFile(filepath.Join(home, ".nvt-agent", "env"), []byte("export NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN="+proxyURL+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command("python3", filepath.Join(root, "runtime", "core", "run-plugins.py"), "after-agent", config)
+	command.Env = append(os.Environ(),
+		"HOME="+home,
+		"NVT_STATE_DIR="+state,
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN="+proxyURL,
+		"SSL_CERT_FILE="+caFile,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generic plugin request failed: %v\n%s", err, output)
+	}
+	record := upstream.last(t)
+	if record.header.Get("Authorization") != "Bearer "+realToken {
+		t.Fatalf("plugin upstream Authorization = %q", record.header.Get("Authorization"))
+	}
+	if strings.Contains(fmt.Sprint(record.header), Placeholder) {
+		t.Fatal("plugin sent a placeholder upstream")
 	}
 }
 

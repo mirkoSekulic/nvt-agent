@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import shutil
 import sys
 import time
 
@@ -11,7 +10,6 @@ from github_watcher_lib import (
     github_request,
     list_value,
     load_config,
-    mediated_egress_enabled,
     parse_time,
     plugin_state_dir,
     prompt_agent,
@@ -31,55 +29,25 @@ from github_watcher_lib import (
 
 
 def fetch_comments(watch):
-    if mediated_egress_enabled() or watch.get("broker", {}).get("enabled"):
-        return github_request(
-            f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
-            watch["provider"],
-            {"per_page": 100, "sort": "updated", "direction": "asc"},
-            watch.get("broker"),
-            paginate=True,
-        )
-    comments = []
-    page = 1
-    while True:
-        items = github_request(
-            f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
-            watch["provider"],
-            {"per_page": 100, "page": page, "sort": "updated", "direction": "asc"},
-            watch.get("broker"),
-        )
-        comments.extend(items)
-        if len(items) < 100:
-            return comments
-        page += 1
+    return github_request(
+        f"/repos/{watch['repo']}/issues/{watch['number']}/comments",
+        watch["provider"],
+        {"per_page": 100, "sort": "updated", "direction": "asc"},
+        paginate=True,
+    )
 
 
 def fetch_reviews(watch):
-    if mediated_egress_enabled() or watch.get("broker", {}).get("enabled"):
-        return github_request(
-            f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
-            watch["provider"],
-            {"per_page": 100},
-            watch.get("broker"),
-            paginate=True,
-        )
-    reviews = []
-    page = 1
-    while True:
-        items = github_request(
-            f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
-            watch["provider"],
-            {"per_page": 100, "page": page},
-            watch.get("broker"),
-        )
-        reviews.extend(items)
-        if len(items) < 100:
-            return reviews
-        page += 1
+    return github_request(
+        f"/repos/{watch['repo']}/pulls/{watch['number']}/reviews",
+        watch["provider"],
+        {"per_page": 100},
+        paginate=True,
+    )
 
 
 def fetch_pull(watch):
-    return github_request(f"/repos/{watch['repo']}/pulls/{watch['number']}", watch["provider"], broker=watch.get("broker"))
+    return github_request(f"/repos/{watch['repo']}/pulls/{watch['number']}", watch["provider"])
 
 
 def fetch_check_runs(watch, sha):
@@ -87,7 +55,6 @@ def fetch_check_runs(watch, sha):
         f"/repos/{watch['repo']}/commits/{sha}/check-runs",
         watch["provider"],
         {"per_page": 100},
-        watch.get("broker"),
     ).get("check_runs", [])
 
 
@@ -291,18 +258,13 @@ def run_loop():
 
 
 def doctor():
-    if mediated_egress_enabled():
-        if shutil.which("gh-auth") is None:
-            fail("gh-auth not found on PATH")
-    elif shutil.which("git-host-credential") is None:
-        fail("git-host-credential not found on PATH")
+    import shutil
     if shutil.which("agentdctl") is None:
         fail("agentdctl not found on PATH")
     config = load_config()
     static = static_watches(config)
-    for watch in static:
-        if not string_value(watch.get("provider"), "provider"):
-            fail(f"{watch['repo']}#{watch['number']} has no provider")
+    if any(watch.get("provider") for watch in static) and shutil.which("git-host-credential") is None:
+        fail("git-host-credential not found on PATH")
     print(f"github-watcher: {len(static)} static PR watch(es) look valid")
 
 

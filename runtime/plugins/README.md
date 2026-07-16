@@ -74,6 +74,25 @@ NVT_PLUGIN_CONFIG
 NVT_WORKSPACE
 ```
 
+Plugins whose lifecycle process or exported tools make authenticated HTTP(S)
+requests can select a broker provider without implementing mediation logic:
+
+```yaml
+plugins:
+  - name: example-http-plugin
+    source: builtin
+    egress:
+      provider: company-oauth
+```
+
+In mediated forward-proxy or transparent transport, the generic launcher and
+tool wrapper supply the provider-scoped standard proxy environment. The plugin
+makes an ordinary request; it does not inspect the run's egress mode, construct
+an egress URL, call `brokerctl`, or carry a placeholder header. The provider
+must be an exact injection-eligible mediated grant. Direct mode leaves networking unchanged,
+and omitting `egress` leaves all modes unchanged. Loopback callbacks remain in
+`NO_PROXY`.
+
 Exported tools are public inside the agent container: the agent, terminal users,
 and other plugins can call them. Do not export tools that require raw long-lived
 secrets in their plugin config. Secret-bearing operations should go through
@@ -176,9 +195,10 @@ does not call `gh auth login` and does not persist credentials in the GitHub CLI
 config. If `--provider` is omitted, it resolves a provider from `--repo`, the
 current git remote, or `default-provider`.
 For mediated providers, `GH_TOKEN` is only the inert NVT placeholder and
-`gh-auth` forces GitHub traffic through egressd using
-`NVT_EGRESS_FORWARD_PROXY_URL`; the real credential is injected outside the
-agent.
+`gh-auth` uses the same generic provider-scoped environment resolver as plugin
+wrappers. This compatibility command remains because interactive `gh` calls
+select a provider per invocation; the watcher itself no longer uses it as an
+HTTP transport.
 
 Security note: `git-host-credentials` currently supports local/dev operation
 where raw provider secrets, including GitHub App private keys, are provided to

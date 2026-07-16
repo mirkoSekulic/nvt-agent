@@ -110,11 +110,10 @@ agentConfig:
       source: builtin
       when: after-agent
       restart: always
+      egress:
+        provider: github-main-app
       config:
-        default-provider: github-main
-        broker:
-          enabled: true
-          provider: github-main-app
+        poll-seconds: 60
 ```
 
 The producer uses this idempotency key as the schedule admission `work.id`:

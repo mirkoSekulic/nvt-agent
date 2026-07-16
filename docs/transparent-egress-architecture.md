@@ -104,15 +104,19 @@ hold credentials.
 
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
-the same hostname. Generic HTTP proxy variables remain unset in transparent
-mode so normal HTTP also follows the transparent TCP path.
+the same hostname. Workload-wide generic HTTP proxy variables remain unset in
+transparent mode so normal HTTP follows the transparent TCP path; a plugin with
+an explicit provider receives only the scoped HTTPS proxy needed to carry that
+selector.
 
 ## Provider Selection
 
 Hostname alone is not a credential selector. Multiple GitHub Apps, Codex
 accounts, or Claude accounts may share one upstream host.
 
-- Tool wrappers and runtime configuration select a broker provider explicitly.
+- Runtime configuration and the generic `plugins[].egress.provider` contract
+  select a broker provider explicitly. Lifecycle processes and exported tools
+  receive the same provider-scoped proxy environment at their launch boundary.
 - The selector is carried as non-secret routing metadata to egressd.
 - Missing or ambiguous selection fails closed.
 - `captured` never guesses a provider from host order or available grants.

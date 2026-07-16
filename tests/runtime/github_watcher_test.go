@@ -152,7 +152,7 @@ func TestGithubWatchRegisterPersistsCloseDefaultsAndFlags(t *testing.T) {
 	}
 }
 
-func TestGithubWatchRegisterInheritsBrokerConfig(t *testing.T) {
+func TestGithubWatchRejectsRemovedBrokerConfig(t *testing.T) {
 	f := newFixture(t)
 	config := f.writePluginConfig("github-watcher.yaml", `
 default-provider: fork-app
@@ -162,24 +162,17 @@ broker:
 `)
 	env := []string{"NVT_PLUGIN_CONFIG=" + config}
 
-	f.runWithEnv(
+	output := f.runWithEnv(
 		githubWatchBin(f.root),
-		true,
+		false,
 		env,
 		"register",
 		"--repo", "my-user/my-repo",
 		"--number", "123",
 	)
 
-	registryPath := filepath.Join(f.state, "plugins", "github-watcher", "registry.json")
-	var registry map[string][]map[string]any
-	decodeJSONFile(t, registryPath, &registry)
-	broker, ok := registry["prs"][0]["broker"].(map[string]any)
-	if !ok {
-		t.Fatalf("registration missing broker config: %#v", registry["prs"][0])
-	}
-	if broker["enabled"] != true || broker["provider"] != "broker-fork-app" {
-		t.Fatalf("registration did not inherit broker config: %#v", broker)
+	if !strings.Contains(output, "broker request configuration is removed; use plugin.egress.provider") {
+		t.Fatalf("unexpected migration failure:\n%s", output)
 	}
 }
 
@@ -494,80 +487,8 @@ if requests != [("https://api.github.com/repos/my-user/my-repo/issues/123/commen
 	}
 }
 
-func TestGithubWatcherMediatedClosedPRUsesGhAuthAndRemovesRegistration(t *testing.T) {
+func TestGithubWatcherOrdinaryRequestNeedsNoCredentialHelper(t *testing.T) {
 	f := newFixture(t)
-	config := f.writePluginConfig("github-watcher.yaml", `
-default-provider: github-main
-broker:
-  enabled: true
-  provider: github-main-app
-`)
-	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/my-repo","number":123,"provider":"github-main","closed":{"enabled":true,"remove":true,"publish":true,"prompt":false}}]`)
-
-	ghAuthLog := filepath.Join(f.home, "gh-auth.log")
-	brokerctlCalled := filepath.Join(f.home, "brokerctl-called")
-	agentdctlLog := filepath.Join(f.home, "agentdctl.log")
-	f.writeBin("gh-auth", fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-printf '%%s\n' "$*" >> %s
-printf '%%s\n' '{"state":"closed","merged":false,"head":{"sha":"abc"},"html_url":"https://github.com/my-user/my-repo/pull/123","closed_at":"2026-07-15T15:00:00Z","merged_at":null}'
-`, quoteYAML(ghAuthLog)))
-	f.writeBin("brokerctl", fmt.Sprintf(`#!/usr/bin/env bash
-touch %s
-exit 99
-`, quoteYAML(brokerctlCalled)))
-	f.writeBin("git-host-credential", "#!/usr/bin/env bash\nexit 98\n")
-	f.writeBin("agentdctl", fmt.Sprintf(`#!/usr/bin/env bash
-printf '%%s\n' "$*" >> %s
-`, quoteYAML(agentdctlLog)))
-
-	f.runWithEnv(
-		githubWatcherRunBin(f.root),
-		true,
-		[]string{"NVT_PLUGIN_CONFIG=" + config, "NVT_EGRESS_MODE=mediated"},
-		"once",
-	)
-
-	if _, err := os.Stat(brokerctlCalled); err == nil {
-		t.Fatal("mediated watcher called brokerctl")
-	} else if !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	args, err := os.ReadFile(ghAuthLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(args), "--provider github-main api --method GET repos/my-user/my-repo/pulls/123") {
-		t.Fatalf("unexpected gh-auth args:\n%s", args)
-	}
-	events, err := os.ReadFile(agentdctlLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(events), "publish plugin.github.pr.closed") {
-		t.Fatalf("close event was not published:\n%s", events)
-	}
-	var registry map[string][]map[string]any
-	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "registry.json"), &registry)
-	if len(registry["prs"]) != 0 {
-		t.Fatalf("closed mediated watch was not removed: %#v", registry)
-	}
-}
-
-func TestGithubWatcherMediatedPaginationUsesExplicitPageRequests(t *testing.T) {
-	f := newFixture(t)
-	ghAuthLog := filepath.Join(f.home, "gh-auth.log")
-	ghAuthState := filepath.Join(f.home, "gh-auth.state")
-	f.writeBin("gh-auth", fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-printf '%%s\n' "$*" >> %s
-if [[ ! -f %s ]]; then
-  touch %s
-  python3 -c 'import json; print(json.dumps([{"id": i} for i in range(100)]))'
-else
-  printf '%%s\n' '[{"id":100}]'
-fi
-`, quoteYAML(ghAuthLog), quoteYAML(ghAuthState), quoteYAML(ghAuthState)))
 	script := fmt.Sprintf(`
 import importlib.util
 import pathlib
@@ -580,233 +501,90 @@ spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
 lib = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lib)
 
-payload = lib.github_request(
-    "/repos/my-user/my-repo/issues/123/comments",
-    "github-main",
-    {"per_page": 100},
-    {"enabled": True, "provider": "github-main-app"},
-    paginate=True,
-)
-if len(payload) != 101 or payload[-1] != {"id": 100}:
-    raise SystemExit(f"unexpected paginated payload: {payload}")
-`, quoteYAML(f.root))
+class Response:
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+    def read(self): return b'{"ok":true}'
 
-	f.runWithEnv("python3", true, []string{"NVT_EGRESS_MODE=mediated"}, "-c", script)
-	args, err := os.ReadFile(ghAuthLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(args), "comments?per_page=100&page=1") ||
-		!strings.Contains(string(args), "comments?per_page=100&page=2") ||
-		strings.Contains(string(args), "--paginate") || strings.Contains(string(args), "--slurp") {
-		t.Fatalf("unexpected paginated gh-auth args:\n%s", args)
-	}
+seen = []
+def fake_urlopen(request, timeout):
+    seen.append(dict(request.header_items()))
+    return Response()
+
+lib.urlopen = fake_urlopen
+if lib.github_request("/repos/my-user/my-repo/pulls/123") != {"ok": True}:
+    raise SystemExit("unexpected response")
+if any(key.lower() == "authorization" for key in seen[0]):
+    raise SystemExit(f"ordinary request carried credentials: {seen}")
+`, quoteYAML(f.root))
+	f.runCommand("python3", true, "-c", script)
 }
 
-func TestGithubWatcherPaginatesCommentsAndReviews(t *testing.T) {
+func TestGithubWatcherOrdinaryPagination(t *testing.T) {
 	f := newFixture(t)
 	script := fmt.Sprintf(`
 import importlib.util
+import json
 import pathlib
 import sys
 
 root = pathlib.Path(%s)
-module_path = root / "runtime" / "plugins" / "github-watcher" / "run.py"
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
 sys.path.insert(0, str(module_path.parent))
-spec = importlib.util.spec_from_file_location("github_watcher_run", module_path)
-watcher = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(watcher)
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
 
 calls = []
+class Response:
+    def __init__(self, value): self.value = value
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+    def read(self): return json.dumps(self.value).encode()
 
-def fake_request(path, provider, query, broker=None, paginate=False):
-    calls.append((path, query["page"]))
-    if path.endswith("/comments"):
-        return [{}] * 100 if query["page"] == 1 else [{"id": "last-comment"}]
-    if path.endswith("/reviews"):
-        return [{}] * 100 if query["page"] == 1 else [{"id": "last-review"}]
-    raise SystemExit(f"unexpected path {path}")
+def fake_urlopen(request, timeout):
+    calls.append(request.full_url)
+    return Response([{"id": i} for i in range(100)] if "&page=1" in request.full_url else [{"id": 100}])
 
-watcher.github_request = fake_request
-watch = {"repo": "my-user/my-repo", "number": 123, "provider": "fork-app"}
-
-comments = watcher.fetch_comments(watch)
-reviews = watcher.fetch_reviews(watch)
-if len(comments) != 101 or comments[-1].get("id") != "last-comment":
-    raise SystemExit(f"comments were not paginated: {len(comments)}")
-if len(reviews) != 101 or reviews[-1].get("id") != "last-review":
-    raise SystemExit(f"reviews were not paginated: {len(reviews)}")
-if calls != [
-    ("/repos/my-user/my-repo/issues/123/comments", 1),
-    ("/repos/my-user/my-repo/issues/123/comments", 2),
-    ("/repos/my-user/my-repo/pulls/123/reviews", 1),
-    ("/repos/my-user/my-repo/pulls/123/reviews", 2),
-]:
-    raise SystemExit(f"unexpected pagination calls: {calls}")
+lib.urlopen = fake_urlopen
+payload = lib.github_request("/repos/my-user/my-repo/issues/123/comments", None, {"per_page": 100}, paginate=True)
+if len(payload) != 101 or payload[-1] != {"id": 100}:
+    raise SystemExit(f"unexpected payload: {payload}")
+if len(calls) != 2 or "&page=1" not in calls[0] or "&page=2" not in calls[1]:
+    raise SystemExit(f"unexpected pagination: {calls}")
 `, quoteYAML(f.root))
-
 	f.runCommand("python3", true, "-c", script)
 }
 
-func TestGithubWatcherCanFetchCommentsThroughBroker(t *testing.T) {
+func TestGithubWatcherErrorsDoNotExposeResponseBody(t *testing.T) {
 	f := newFixture(t)
-	logPath := filepath.Join(f.home, "brokerctl.log")
-	f.writeBin("brokerctl", fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-printf '%%s\n' "$*" > %s
-printf '%%s\n' '{"ok":true,"status":200,"headers":{},"body":"[{\"id\":1,\"updated_at\":\"2026-05-26T10:00:00Z\"}]"}'
-`, quoteYAML(logPath)))
+	const canary = "WATCHER-RESPONSE-SECRET-CANARY"
 	script := fmt.Sprintf(`
 import importlib.util
+import io
 import pathlib
 import sys
+from urllib.error import HTTPError
 
 root = pathlib.Path(%s)
-module_path = root / "runtime" / "plugins" / "github-watcher" / "run.py"
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
 sys.path.insert(0, str(module_path.parent))
-spec = importlib.util.spec_from_file_location("github_watcher_run", module_path)
-watcher = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(watcher)
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
 
-watch = {
-    "repo": "my-user/my-repo",
-    "number": 123,
-    "provider": "direct-provider",
-    "broker": {"enabled": True, "provider": "broker-provider"},
-}
-comments = watcher.fetch_comments(watch)
-if len(comments) != 1 or comments[0]["id"] != 1:
-    raise SystemExit(f"unexpected comments: {comments}")
-`, quoteYAML(f.root))
-
+def fake_urlopen(request, timeout):
+    raise HTTPError(request.full_url, 403, "denied", {}, io.BytesIO(%s.encode()))
+lib.urlopen = fake_urlopen
+try:
+    lib.github_request("/repos/my-user/my-repo/pulls/123")
+except lib.WatchError as error:
+    if %s in str(error) or "status=403" not in str(error):
+        raise SystemExit(f"unsafe error: {error}")
+else:
+    raise SystemExit("request unexpectedly succeeded")
+`, quoteYAML(f.root), quoteYAML(canary), quoteYAML(canary))
 	f.runCommand("python3", true, "-c", script)
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := string(data)
-	if !strings.Contains(args, "--provider broker-provider") ||
-		!strings.Contains(args, "--paginate") ||
-		!strings.Contains(args, "https://api.github.com/repos/my-user/my-repo/issues/123/comments") {
-		t.Fatalf("unexpected brokerctl args:\n%s", args)
-	}
-}
-
-func TestGithubWatcherBrokerHTTPFailureDoesNotTerminateOnce(t *testing.T) {
-	f := newFixture(t)
-	config := f.writePluginConfig("github-watcher.yaml", `
-default-provider: direct-provider
-broker:
-  enabled: true
-  provider: broker-provider
-prs:
-  - repo: my-user/failing
-    number: 123
-    comments:
-      enabled: true
-    reviews:
-      enabled: false
-    checks:
-      enabled: false
-    closed:
-      enabled: false
-`)
-	f.writeBin("brokerctl", `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' '{"ok":true,"status":404,"headers":{},"body":"{\"message\":\"Not Found\"}"}'
-`)
-
-	output := f.runWithEnv(githubWatcherRunBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "once")
-	if !strings.Contains(output, "github-watcher: my-user/failing#123 failed: GitHub API request failed through broker: status=404") {
-		t.Fatalf("watch failure was not logged:\n%s", output)
-	}
-}
-
-func TestGithubWatcherContinuesAfterFailedWatch(t *testing.T) {
-	f := newFixture(t)
-	config := f.writePluginConfig("github-watcher.yaml", `
-default-provider: direct-provider
-broker:
-  enabled: true
-  provider: broker-provider
-prs:
-  - repo: my-user/failing
-    number: 123
-    comments:
-      enabled: true
-    reviews:
-      enabled: false
-    checks:
-      enabled: false
-    closed:
-      enabled: false
-  - repo: my-user/passing
-    number: 456
-    comments:
-      enabled: true
-    reviews:
-      enabled: false
-    checks:
-      enabled: false
-    closed:
-      enabled: false
-`)
-	f.writeBin("brokerctl", `#!/usr/bin/env bash
-set -euo pipefail
-case "$*" in
-  *my-user/failing*)
-    printf '%s\n' '{"ok":true,"status":404,"headers":{},"body":"{\"message\":\"Not Found\"}"}'
-    ;;
-  *my-user/passing*)
-    printf '%s\n' '{"ok":true,"status":200,"headers":{},"body":"[{\"id\":1,\"updated_at\":\"2026-05-28T10:00:00Z\",\"created_at\":\"2026-05-28T10:00:00Z\",\"author_association\":\"COLLABORATOR\",\"user\":{\"login\":\"reviewer\"},\"body\":\"existing comment\"}]"}'
-    ;;
-  *)
-    echo "unexpected brokerctl args: $*" >&2
-    exit 1
-    ;;
-esac
-`)
-
-	output := f.runWithEnv(githubWatcherRunBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "once")
-	if !strings.Contains(output, "github-watcher: my-user/failing#123 failed: GitHub API request failed through broker: status=404") {
-		t.Fatalf("failed watch was not logged:\n%s", output)
-	}
-
-	var seen map[string]any
-	decodeJSONFile(t, filepath.Join(f.state, "plugins", "github-watcher", "seen.json"), &seen)
-	if seen["my-user/passing#456:comments"] == nil {
-		t.Fatalf("second watch did not update seen state: %#v", seen)
-	}
-}
-
-func TestGithubWatcherMalformedBrokerJSONDoesNotTerminateOnce(t *testing.T) {
-	f := newFixture(t)
-	config := f.writePluginConfig("github-watcher.yaml", `
-default-provider: direct-provider
-broker:
-  enabled: true
-  provider: broker-provider
-prs:
-  - repo: my-user/failing
-    number: 123
-    comments:
-      enabled: true
-    reviews:
-      enabled: false
-    checks:
-      enabled: false
-    closed:
-      enabled: false
-`)
-	f.writeBin("brokerctl", `#!/usr/bin/env bash
-set -euo pipefail
-printf 'not json\n'
-`)
-
-	output := f.runWithEnv(githubWatcherRunBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "once")
-	if !strings.Contains(output, "github-watcher: my-user/failing#123 failed: broker response was not valid JSON") {
-		t.Fatalf("malformed broker response was not logged:\n%s", output)
-	}
 }
 
 func writeGithubWatcherRegistry(t *testing.T, f *fixture, prsJSON string) {
