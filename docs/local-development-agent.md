@@ -211,6 +211,10 @@ Ports 4090 and 2375 are reserved.
 
 ## Cleanup
 
+If the configured tmux agent session disappears, the main agent container exits
+non-zero. Docker Compose does not automatically stop the agent's support
+containers; use `agent-down` to remove the complete local stack.
+
 ```sh
 make agent-down NAME=$AGENT
 make agent-rm NAME=$AGENT FORCE=1

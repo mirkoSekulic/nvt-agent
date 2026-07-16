@@ -30,6 +30,7 @@ PROTECTED_NAMES = {
     "run-plugins",
     "start-agent-session",
     "start-code-server",
+    "supervise-agent-session",
     "write-agent-instructions",
 }
 

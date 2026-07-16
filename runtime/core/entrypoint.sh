@@ -51,12 +51,28 @@ run-plugins before-agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 agentd &
 start-code-server
 start-agent-session
-run-plugins after-agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}" &
 
 # Kubernetes lifecycle reporting writes /dev/termination-log and signals PID
-# 1. Reap the keepalive promptly so kubelet can observe the message and the
-# operator can complete the owning AgentRun without a callback bearer token.
-tail -f /dev/null &
-keepalive_pid=$!
-trap 'kill "${keepalive_pid}" 2>/dev/null || true; wait "${keepalive_pid}" 2>/dev/null || true; exit 0' TERM INT
-wait "${keepalive_pid}"
+# 1. Forward intentional shutdown to the session supervisor and reap it so
+# kubelet observes a clean exit. Unexpected session loss exits non-zero.
+supervisor_pid=""
+intentional_shutdown() {
+  trap '' TERM INT
+  if [ -n "$supervisor_pid" ]; then
+    kill -TERM "$supervisor_pid" 2>/dev/null || true
+    wait "$supervisor_pid" 2>/dev/null || true
+  fi
+  exit 0
+}
+trap intentional_shutdown TERM INT
+
+run-plugins after-agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}" &
+supervise-agent-session &
+supervisor_pid=$!
+if wait "$supervisor_pid"; then
+  supervisor_status=0
+else
+  supervisor_status=$?
+fi
+supervisor_pid=""
+exit "$supervisor_status"
