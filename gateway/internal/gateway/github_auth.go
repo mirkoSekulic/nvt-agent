@@ -33,9 +33,11 @@ func (a *Authenticator) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "missing access token", http.StatusBadGateway)
 		return
 	}
+	defer func() {
+		token.AccessToken = ""
+		token.RefreshToken = ""
+	}()
 	user, err := a.fetchGitHubUser(r, token.AccessToken)
-	token.AccessToken = ""
-	token.RefreshToken = ""
 	if err != nil {
 		http.Error(w, "load GitHub user", http.StatusUnauthorized)
 		return
@@ -50,7 +52,7 @@ func (a *Authenticator) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 		DisplayName: user.Login,
 		Claims:      map[string]any{"login": user.Login},
 	}
-	a.finishLogin(w, r, loginState, principal)
+	a.finishOAuthLogin(w, r, loginState, token, principal)
 }
 
 func (a *Authenticator) fetchGitHubUser(r *http.Request, accessToken string) (githubUser, error) {

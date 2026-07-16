@@ -43,11 +43,13 @@ type RoutingConfig struct {
 }
 
 type AuthConfig struct {
-	Mode          string
-	Session       SessionConfig
-	OIDC          OIDCConfig
-	GitHub        GitHubConfig
-	Authorization AuthorizationConfig
+	Mode            string
+	Session         SessionConfig
+	OIDC            OIDCConfig
+	GitHub          GitHubConfig
+	Admission       *AdmissionConfig
+	ClaimEnrichment ClaimEnrichmentConfig
+	Authorization   AuthorizationConfig
 }
 
 type SessionConfig struct {
@@ -140,6 +142,9 @@ func (c Config) Validate() error {
 	}
 	switch authMode {
 	case authModeNone:
+		if c.Auth.Admission != nil || len(c.Auth.ClaimEnrichment.Sources) > 0 || len(c.Auth.ClaimEnrichment.AllowedHosts) > 0 {
+			return fmt.Errorf("auth.admission and auth.claimEnrichment require authentication")
+		}
 	case authModeOIDC:
 		if err := c.Auth.validateOIDC(); err != nil {
 			return err
@@ -168,7 +173,15 @@ func (c AuthConfig) validateCommonAuthenticated() error {
 	if _, err := sessionSecretBytes(c.Session.Secret); err != nil {
 		return err
 	}
-	return c.Authorization.validate()
+	if err := c.Authorization.validate(); err != nil {
+		return err
+	}
+	if c.Admission != nil {
+		if err := c.Admission.validate(); err != nil {
+			return err
+		}
+	}
+	return c.ClaimEnrichment.validate()
 }
 
 func (c AuthConfig) validateOIDC() error {

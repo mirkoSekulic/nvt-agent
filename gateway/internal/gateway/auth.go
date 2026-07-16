@@ -35,16 +35,17 @@ const (
 )
 
 type Authenticator struct {
-	config        Config
-	cookieCodec   *securecookie.SecureCookie
-	oauthConfig   *oauth2.Config
-	verifier      *oidc.IDTokenVerifier
-	tokenVerifier *oidc.IDTokenVerifier
-	provider      *oidc.Provider
-	httpClient    *http.Client
-	sessions      map[string]storedSession
-	mu            sync.Mutex
-	now           func() time.Time
+	config             Config
+	cookieCodec        *securecookie.SecureCookie
+	oauthConfig        *oauth2.Config
+	verifier           *oidc.IDTokenVerifier
+	tokenVerifier      *oidc.IDTokenVerifier
+	provider           *oidc.Provider
+	httpClient         *http.Client
+	claimSourceTimeout time.Duration
+	sessions           map[string]storedSession
+	mu                 sync.Mutex
+	now                func() time.Time
 }
 
 type sessionCookie struct {
@@ -275,6 +276,10 @@ func (a *Authenticator) handleOIDCCallback(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "exchange code", http.StatusBadGateway)
 		return
 	}
+	defer func() {
+		token.AccessToken = ""
+		token.RefreshToken = ""
+	}()
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
 		http.Error(w, "missing id_token", http.StatusBadGateway)
@@ -312,7 +317,23 @@ func (a *Authenticator) handleOIDCCallback(w http.ResponseWriter, r *http.Reques
 	if displayName == "" {
 		displayName, _ = idClaims["preferred_username"].(string)
 	}
-	a.finishLogin(w, r, loginState, Principal{Issuer: issuer, Subject: idToken.Subject, DisplayName: displayName, Claims: stripSensitiveClaims(claims)})
+	a.finishOAuthLogin(w, r, loginState, token, Principal{Issuer: issuer, Subject: idToken.Subject, DisplayName: displayName, Claims: claims})
+}
+
+// finishOAuthLogin is the shared post-authentication boundary for every OAuth
+// adapter. Configured claim enrichment and login admission happen here before
+// any session is stored or cookie is issued.
+func (a *Authenticator) finishOAuthLogin(w http.ResponseWriter, r *http.Request, loginState loginStateCookieValue, token *oauth2.Token, principal Principal) {
+	claims, err := a.enrichClaims(r.Context(), token.AccessToken, principal.Claims)
+	token.AccessToken = ""
+	token.RefreshToken = ""
+	if err != nil {
+		a.clearCookie(w, loginStateCookie)
+		http.Error(w, "login unavailable", http.StatusUnauthorized)
+		return
+	}
+	principal.Claims = claims
+	a.finishLogin(w, r, loginState, principal)
 }
 
 func (a *Authenticator) finishLogin(w http.ResponseWriter, r *http.Request, loginState loginStateCookieValue, principal Principal) {
@@ -321,6 +342,15 @@ func (a *Authenticator) finishLogin(w http.ResponseWriter, r *http.Request, logi
 		return
 	}
 	principal.Claims = stripSensitiveClaims(principal.Claims)
+	if a.config.Auth.Admission != nil {
+		decision := EvaluateAdmission(*a.config.Auth.Admission, principal)
+		logAdmissionDecision(decision, principal)
+		if !decision.Allowed {
+			a.clearCookie(w, loginStateCookie)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 	sessionID := randomToken()
 	expiresAt := a.now().Add(time.Duration(a.config.Auth.Session.MaxAgeSeconds) * time.Second).Unix()
 	a.storeSession(sessionID, storedSession{Principal: principal, ExpiresAt: expiresAt})

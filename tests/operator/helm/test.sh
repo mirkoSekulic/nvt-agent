@@ -17,6 +17,9 @@ GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
 GATEWAY_GITHUB_RENDER="${WORKDIR}/gateway-github.yaml"
+GATEWAY_ADMISSION_RENDER="${WORKDIR}/gateway-admission.yaml"
+GATEWAY_EMPTY_ADMISSION_RENDER="${WORKDIR}/gateway-empty-admission.yaml"
+GATEWAY_ADMISSION_FAILURE="${WORKDIR}/gateway-admission-failure.txt"
 GATEWAY_GITHUB_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-github-missing-secret-failure.txt"
 GATEWAY_PATH_RENDER="${WORKDIR}/gateway-path.yaml"
 GATEWAY_PATH_FAILURE="${WORKDIR}/gateway-path-failure.txt"
@@ -87,6 +90,32 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.authorization.rules[0].effect=allow \
   --set gateway.auth.authorization.rules[0].owner=true \
   > "${GATEWAY_GITHUB_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=github \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.session.maxAgeSeconds=3600 \
+  --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+  --set gateway.auth.claimEnrichment.allowedHosts[0]=api.github.com \
+  --set gateway.auth.claimEnrichment.sources[0].endpoint=https://api.github.com/user/memberships/orgs/Altinn \
+  --set gateway.auth.claimEnrichment.sources[0].outputClaim=organization_membership \
+  --set gateway.auth.claimEnrichment.sources[0].valuePath=state \
+  --set gateway.auth.admission.default=deny \
+  --set gateway.auth.admission.rules[0].id=allowed-organization \
+  --set gateway.auth.admission.rules[0].effect=allow \
+  --set gateway.auth.admission.rules[0].claimPath=organization_membership \
+  --set gateway.auth.admission.rules[0].values[0]=active \
+  --set gateway.auth.authorization.rules[0].id=agent-owner \
+  --set gateway.auth.authorization.rules[0].effect=allow \
+  --set gateway.auth.authorization.rules[0].owner=true \
+  > "${GATEWAY_ADMISSION_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=github \
+  --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+  --set-json 'gateway.auth.admission={}' \
+  > "${GATEWAY_EMPTY_ADMISSION_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set gateway.routing.mode=path \
@@ -616,6 +645,11 @@ grep -q 'value: "https://github.com/login/oauth/authorize"' "${GATEWAY_GITHUB_RE
 grep -q 'value: "https://github.com/login/oauth/access_token"' "${GATEWAY_GITHUB_RENDER}"
 grep -q 'value: "https://api.github.com/user"' "${GATEWAY_GITHUB_RENDER}"
 grep -Fq '\"owner\":true' "${GATEWAY_GITHUB_RENDER}"
+if grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_GITHUB_RENDER}"; then
+  echo "unset gateway admission must preserve the existing session behavior" >&2
+  exit 1
+fi
+grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_GITHUB_RENDER}"
 if grep -Eq 'value:.*(github-client-id|github-client-secret)' "${GATEWAY_GITHUB_RENDER}"; then
   echo "gateway GitHub OAuth credentials must only come from Secret refs" >&2
   exit 1
@@ -629,6 +663,50 @@ if helm template nvt "${CHART}" -n custom-ns \
   exit 1
 fi
 grep -q "gateway.auth.github.credentials.existingSecret is required when gateway.auth.mode=github" "${GATEWAY_GITHUB_MISSING_SECRET_FAILURE}"
+
+grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_ADMISSION_RENDER}"
+grep -A1 'name: NVT_GATEWAY_SESSION_MAX_AGE_SECONDS' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "3600"'
+grep -Fq '\"claimPath\":\"organization_membership\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"allowedHosts\":[\"api.github.com\"]' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"endpoint\":\"https://api.github.com/user/memberships/orgs/Altinn\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"owner\":true' "${GATEWAY_ADMISSION_RENDER}"
+grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_EMPTY_ADMISSION_RENDER}"
+grep -q 'value: "{}"' "${GATEWAY_EMPTY_ADMISSION_RENDER}"
+
+for invalid_args in \
+  '--set gateway.auth.admission.rules[0].id=owner --set gateway.auth.admission.rules[0].effect=allow --set gateway.auth.admission.rules[0].owner=true' \
+  '--set gateway.auth.claimEnrichment.allowedHosts[0]=api.example.com --set gateway.auth.claimEnrichment.sources[0].endpoint=http://api.example.com/member --set gateway.auth.claimEnrichment.sources[0].outputClaim=membership --set gateway.auth.claimEnrichment.sources[0].valuePath=state'; do
+  if helm template nvt "${CHART}" -n custom-ns \
+    --set gateway.enabled=true \
+    --set gateway.auth.mode=github \
+    --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+    --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+    ${invalid_args} > /dev/null 2> "${GATEWAY_ADMISSION_FAILURE}"; then
+    echo "expected invalid gateway admission/enrichment config to fail: ${invalid_args}" >&2
+    exit 1
+  fi
+done
+
+if helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=none \
+  --set gateway.auth.admission.default=deny \
+  > /dev/null 2> "${GATEWAY_ADMISSION_FAILURE}"; then
+  echo "expected gateway admission with auth.mode=none to fail" >&2
+  exit 1
+fi
+grep -q 'gateway.auth.admission and gateway.auth.claimEnrichment require authentication' "${GATEWAY_ADMISSION_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.auth.mode=none \
+  --set-json 'gateway.auth.admission={}' \
+  > /dev/null 2> "${GATEWAY_ADMISSION_FAILURE}"; then
+  echo "expected empty gateway admission with auth.mode=none to fail" >&2
+  exit 1
+fi
+grep -q 'gateway.auth.admission and gateway.auth.claimEnrichment require authentication' "${GATEWAY_ADMISSION_FAILURE}"
 
 require_file "${CHART}/crds/nvt.dev_agentruns.yaml"
 require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"

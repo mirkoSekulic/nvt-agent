@@ -85,12 +85,94 @@ are filtered with the same policy; inaccessible run metadata is not rendered.
 Each rule must contain exactly one of `authenticated`, `owner`,
 `claimPath`+`values`, or `where`.
 
+## Login admission and OAuth claim enrichment
+
+Authentication, login admission, and AgentRun authorization are independent
+gates:
+
+1. the configured adapter authenticates a principal;
+2. optional `auth.admission` decides whether that principal may receive a
+   gateway session;
+3. `auth.authorization` still decides which AgentRuns that session may see or
+   open.
+
+When admission is absent, successful authentication creates a session exactly
+as before. When it is configured, its default is deny and a principal must
+match one allow rule before any session is stored or session cookie is issued.
+Admission supports `authenticated`, `claimPath`+`values`, and `where`; `owner`
+is invalid because no AgentRun exists at login time.
+
+Resource authorization rules retain allow/OR semantics. Do not add a broad
+organization claim rule beside `owner: true` to simulate login admission: that
+would authorize every matching organization member to every AgentRun. Put the
+organization requirement in `admission` and keep `owner` in `authorization`.
+
+OAuth adapters can enrich their normalized principal through declarative claim
+sources before admission. Every source is a bounded HTTPS GET carrying the
+temporary OAuth bearer token. Its host must be explicitly allowed, redirects
+are rejected, and only the selected non-sensitive JSON value is retained under
+a new safe top-level claim. Source failures, missing/ambiguous values, output
+collisions, malformed or oversized responses, and timeouts fail login closed.
+Access tokens and raw responses are never stored in sessions or cookies.
+
+This provider-neutral configuration expresses GitHub organization membership
+without GitHub-specific authorization logic in the gateway:
+
+```yaml
+gateway:
+  auth:
+    mode: github
+    session:
+      # Membership is checked at login, so use a bounded revocation window.
+      maxAgeSeconds: 3600
+    claimEnrichment:
+      allowedHosts:
+        - api.github.com
+      sources:
+        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
+          outputClaim: organization_membership
+          valuePath: state
+    admission:
+      default: deny
+      rules:
+        - id: allowed-organization
+          effect: allow
+          claimPath: organization_membership
+          values: [active]
+    authorization:
+      default: deny
+      rules:
+        - id: agent-owner
+          effect: allow
+          owner: true
+```
+
+For this GitHub example, configure the GitHub App with organization
+**Members: read** permission and have an Altinn organization owner install and
+approve the app for that organization. Each user must also authorize the app.
+GitHub then returns `state: active` only for an active member; pending membership
+does not match, while an unaffiliated user or blocked/unapproved app produces a
+failed source request and login is denied. No repository permission is needed.
+Other providers have their own permission/approval requirements. Claim sources
+cannot add arbitrary headers, disable TLS verification, follow redirects, or
+derive their endpoint from a browser request.
+
+Enriched admission claims are a login-time snapshot. They are stored in the
+server-side session and are not re-fetched on each dashboard or AgentRun
+request; the temporary OAuth token is discarded. Removing a user from an
+organization therefore blocks new logins immediately, while an existing
+session remains valid until `auth.session.maxAgeSeconds` expires or the session
+is otherwise invalidated (including a gateway restart). For security-sensitive
+production deployments, configure a shorter explicit lifetime such as the
+one-hour (`3600`) value above instead of relying on the 24-hour default.
+
 ## GitHub login
 
 Create a dedicated GitHub App for human gateway login. Configure its callback
 URL as `https://<gateway-host>/oauth2/github/callback`; it needs no repository
-permissions, repository scopes, webhook subscriptions, or installation access
-for this profile-only identity lookup. Store both OAuth credentials in a
+permissions, repository scopes, or webhook subscriptions for profile identity
+lookup. A membership claim source does require the organization permission and
+installation/approval described above. Store both OAuth credentials in a
 Kubernetes Secret:
 
 ```sh

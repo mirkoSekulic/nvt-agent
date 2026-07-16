@@ -292,6 +292,62 @@ Authentication does not imply authorization. OIDC defaults to deny until a
 rule allows the user. Session state is process-local, so OIDC mode currently
 requires one gateway replica.
 
+Optional `gateway.auth.admission` is a separate default-deny login gate applied
+after authentication and before session creation. `gateway.auth.authorization`
+remains the per-AgentRun gate. Resource allow rules are ORed, so a broad group
+or organization rule must not be combined with `owner: true` as a substitute
+for admission: use the organization rule in admission and keep owner matching
+in authorization.
+
+Both OAuth-backed modes can populate selected admission claims through generic
+bounded HTTPS sources:
+
+```yaml
+gateway:
+  auth:
+    session:
+      # Membership is a login-time snapshot; bound the revocation window.
+      maxAgeSeconds: 3600
+    claimEnrichment:
+      allowedHosts: [api.github.com]
+      sources:
+        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
+          outputClaim: organization_membership
+          valuePath: state
+    admission:
+      default: deny
+      rules:
+        - id: allowed-organization
+          effect: allow
+          claimPath: organization_membership
+          values: [active]
+    authorization:
+      default: deny
+      rules:
+        - id: agent-owner
+          effect: allow
+          owner: true
+```
+
+This is a generic claim-source example, not GitHub-specific gateway policy.
+Each configured endpoint receives the temporary OAuth bearer token, must use
+HTTPS, and must be on `allowedHosts`; redirects and failures deny login. Only
+the selected non-sensitive value is retained. Required OAuth permissions and
+organization approval belong to provider/client configuration. For the GitHub
+example, the GitHub App needs organization **Members: read**, must be installed
+and approved for the Altinn organization by an organization owner, and must be
+authorized by each user. It needs no repository permissions. Active membership
+returns `state: active`; pending, unaffiliated, blocked, or unapproved access
+fails admission closed.
+
+Claim enrichment runs only during OAuth login. The selected claims are kept in
+the server-side session and are not refreshed on every request; OAuth tokens
+are discarded. Organization removal affects new logins immediately, but an
+existing session remains valid until `gateway.auth.session.maxAgeSeconds`
+expires or session state is invalidated, including by a gateway restart. Use an
+explicit shorter lifetime such as `3600` (one hour) for security-sensitive
+production deployments rather than the 24-hour default.
+
 Authorization may read verified claims from `id_token`, `userinfo`, or a JWT
 `access_token`. Sensitive identity claims such as SSN or pid are rejected as
 authorization keys.
