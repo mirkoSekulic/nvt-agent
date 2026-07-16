@@ -89,12 +89,17 @@ egressEnforcement: true
 egressTransport: transparent
 ```
 
-- `egressEnforcement` creates a separate egressd Pod and per-run
-  NetworkPolicies. It requires mediated mode and a policy-enforcing CNI.
+- `egressEnforcement` requests a CNI-enforced guarantee that workload egress
+  traverses the paired egress service. It requires mediated mode and a
+  policy-enforcing CNI; deployment placement is operator-owned.
 - `egressTransport` is `redirect`, `forward-proxy`, or `transparent`.
   Forward-proxy and transparent require enforcement.
-- `egressForwardProxy` remains a compatibility alias for forward-proxy.
 - `egressAllowInsecureBroker` permits local plaintext broker traffic only.
+
+Pre-1.0 migration: replace `egressForwardProxy: true` with
+`egressTransport: forward-proxy`. Remove `egressForwardProxy: false` or use
+`egressTransport: redirect` explicitly. The removed boolean is no longer part
+of the CRD; migrate stored manifests before installing the updated CRD.
 
 See [Transparent mediated egress](../../docs/transparent-egress-architecture.md).
 

@@ -6,9 +6,9 @@ This protocol delivers credential **non-possession**: for mediated grants, no
 provider credential — API key, OAuth access/refresh token, installation token —
 is ever available to the agent container. Credentials are injected into
 outbound requests by `egressd`, a trusted reverse proxy that fetches injectable
-material from `brokerd` under an identity the agent does not hold. Depending on
-the selected mode, egressd runs beside the agent for local compatibility or in
-a separately fenced Pod for Kubernetes enforcement.
+material from `brokerd` under an identity the agent does not hold. The protocol
+uses only the configured egress endpoint; deployment placement is outside this
+contract.
 
 ```text
 agent    holds no credentials; sends placeholder-bearing requests toward egressd

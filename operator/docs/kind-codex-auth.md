@@ -89,8 +89,8 @@ spec:
 The Secret is mounted read-only into a copy init container, copied into a
 writable `emptyDir`, and the writable home is mounted into the agent container
 at `/root/.codex`. This lets Codex update state, history, caches, and SQLite
-sidecar files under `~/.codex`. Runtime auth is not mounted into the
-Docker-in-Docker sidecar and is separate from broker Secrets.
+auxiliary files under `~/.codex`. Runtime auth is not mounted into the
+Docker-in-Docker daemon service and is separate from broker Secrets.
 
 See `operator/examples/agentrun-codex-kind.yaml` for a minimal local kind
 example.

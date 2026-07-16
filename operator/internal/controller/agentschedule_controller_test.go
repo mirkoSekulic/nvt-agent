@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -84,6 +85,14 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	}
 	if crdPath(t, properties, "profiles", "items", "properties", "agentRuntimeConfig", "x-kubernetes-preserve-unknown-fields") != true {
 		t.Fatalf("expected profile runtime config preservation schema, got %#v", properties["profiles"])
+	}
+	profileProperties := crdPath(t, properties, "profiles", "items", "properties").(map[string]any)
+	if _, exists := profileProperties["egressForwardProxy"]; exists {
+		t.Fatalf("legacy profile egressForwardProxy must not remain in the public schema: %#v", profileProperties["egressForwardProxy"])
+	}
+	transport := crdPath(t, profileProperties, "egressTransport").(map[string]any)
+	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
+		t.Fatalf("expected profile egressTransport to be the sole transport selector, got %#v", transport)
 	}
 	if crdPath(t, properties, "profileSelection", "properties", "onNoMatch", "type") != "string" {
 		t.Fatalf("expected profileSelection.onNoMatch schema, got %#v", properties["profileSelection"])

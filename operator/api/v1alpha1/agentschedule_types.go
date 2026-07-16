@@ -49,7 +49,6 @@ type AgentScheduleExecutionProfile struct {
 	Egress                    AgentRunEgressMode      `json:"egress"`
 	EgressAllowInsecureBroker bool                    `json:"egressAllowInsecureBroker,omitempty"`
 	EgressEnforcement         bool                    `json:"egressEnforcement,omitempty"`
-	EgressForwardProxy        bool                    `json:"egressForwardProxy,omitempty"`
 	EgressTransport           AgentRunEgressTransport `json:"egressTransport,omitempty"`
 	Broker                    *AgentRunBroker         `json:"broker,omitempty"`
 }

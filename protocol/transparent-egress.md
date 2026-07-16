@@ -9,7 +9,7 @@
   bounded SNI or HTTP Host when available, and emits an ordinary
   `CONNECT host:port` request. It does not add a provenance or authorization
   marker.
-- No header sent by the Agent Pod proves that traffic was transparently
+- No header sent by the untrusted workload proves that traffic was transparently
   captured. The agent can forge every request header and can reach its paired
   egressd listener directly.
 
@@ -30,15 +30,15 @@ policy. TLS credential injection therefore requires readable SNI. Fragmented
 ClientHello records and ECH can take the opaque path and fail provider
 authentication, but cannot cause a credential route to be guessed.
 
-## Literal zero-secret Agent Pod
+## Literal zero-secret workload
 
 For enforced mediated runs, the operator resolves broker-owned inert
-placeholder files before creating the Agent Pod and embeds them as ordinary
+placeholder files before creating the workload and embeds them as ordinary
 preseed entries. Route hosts and git flags come from the admitted AgentRun
 grant. Runtime bootstrap treats `egress.operator-prepared: true` as a strict
 contract: it never falls back to `brokerctl` for routing or placeholder files.
 
-The Agent Pod disables Kubernetes service-account projection and carries no
+The workload disables Kubernetes service-account projection and carries no
 broker, callback, egress, provider, or private-CA credential. Its NetworkPolicy
 allows DNS and its paired egressd only. Egressd retains the paired egress
 broker identity and CA key.

@@ -850,6 +850,65 @@ func TestDirectAgentRunPodDoesNotRenderMediatedSidecar(t *testing.T) {
 	}
 }
 
+func TestEgressTransportAloneSelectsRuntimeTransport(t *testing.T) {
+	t.Setenv("NVT_NETWORK_POLICY_CAPABLE", "true")
+	redirect := multiGrantMediatedAgentRun()
+	redirect.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportRedirect
+	forwardProxy := forwardProxyAgentRun()
+	transparent := forwardProxyAgentRun()
+	transparent.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
+
+	tests := []struct {
+		name         string
+		run          *nvtv1alpha1.AgentRun
+		want         nvtv1alpha1.AgentRunEgressTransport
+		forwardProxy bool
+	}{
+		{name: "redirect", run: redirect, want: nvtv1alpha1.AgentRunEgressTransportRedirect},
+		{name: "forward proxy", run: forwardProxy, want: nvtv1alpha1.AgentRunEgressTransportForwardProxy, forwardProxy: true},
+		{name: "transparent", run: transparent, want: nvtv1alpha1.AgentRunEgressTransportTransparent, forwardProxy: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateAgentRunEgressMode(test.run); err != nil {
+				t.Fatalf("transport-only AgentRun rejected: %v", err)
+			}
+			if got := AgentRunEgressTransport(test.run); got != test.want {
+				t.Fatalf("transport = %q, want %q", got, test.want)
+			}
+			if got := AgentRunEgressForwardProxy(test.run); got != test.forwardProxy {
+				t.Fatalf("forward-proxy behavior = %v, want %v", got, test.forwardProxy)
+			}
+			config := InjectMediatedEgressConfig(map[string]any{}, test.run)
+			egress := config["egress"].(map[string]any)
+			if got := egress["transport"]; got != string(test.want) {
+				t.Fatalf("generated transport = %#v, want %q", got, test.want)
+			}
+			encoded, err := json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{"sidecar", "same-pod", "own-pod", "placement"} {
+				if strings.Contains(strings.ToLower(string(encoded)), forbidden) {
+					t.Fatalf("generated runtime config contains deployment-topology term %q: %s", forbidden, encoded)
+				}
+			}
+		})
+	}
+
+	direct := testAgentRun()
+	if got := AgentRunEgressTransport(direct); got != nvtv1alpha1.AgentRunEgressTransportRedirect {
+		t.Fatalf("direct default transport changed: %q", got)
+	}
+	rendered, err := RenderAgentConfigYAML(direct)
+	if err != nil {
+		t.Fatalf("render direct config: %v", err)
+	}
+	if strings.Contains(rendered, "\negress:") {
+		t.Fatalf("direct mode unexpectedly gained mediated runtime config:\n%s", rendered)
+	}
+}
+
 func TestMediatedAgentRunRendersEgressdWithoutEgressTokenInAgent(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
@@ -889,7 +948,7 @@ func TestReconcileWritesPlaceholderFileBrokerPolicy(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
 	agentRun.Spec.EgressEnforcement = true
-	agentRun.Spec.EgressForwardProxy = true
+	agentRun.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportForwardProxy
 	agentRun.Spec.EgressAllowInsecureBroker = true
 	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{
 		Grants: []nvtv1alpha1.AgentRunBrokerGrant{
@@ -3733,6 +3792,13 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if crdPath(t, spec, "egressEnforcement", "default") != false {
 		t.Fatalf("expected egressEnforcement default false, got %#v", crdPath(t, spec, "egressEnforcement"))
 	}
+	if _, exists := spec["egressForwardProxy"]; exists {
+		t.Fatalf("legacy egressForwardProxy must not remain in the public schema: %#v", spec["egressForwardProxy"])
+	}
+	transport := crdPath(t, spec, "egressTransport").(map[string]any)
+	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
+		t.Fatalf("expected egressTransport to be the sole transport selector, got %#v", transport)
+	}
 	materialization := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "materialization").(map[string]any)
 	if materialization["default"] != "file-bundle" {
 		t.Fatalf("expected materialization default file-bundle, got %#v", materialization)
@@ -5553,7 +5619,7 @@ func forwardProxyAgentRun() *nvtv1alpha1.AgentRun {
 	agentRun := testAgentRun()
 	agentRun.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
 	agentRun.Spec.EgressEnforcement = true
-	agentRun.Spec.EgressForwardProxy = true
+	agentRun.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportForwardProxy
 	agentRun.Spec.EgressAllowInsecureBroker = true
 	agentRun.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
 		Provider: "codex-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
@@ -5566,7 +5632,6 @@ func transparentAgentRun(t *testing.T) *nvtv1alpha1.AgentRun {
 	t.Helper()
 	t.Setenv("NVT_NETWORK_POLICY_CAPABLE", "true")
 	run := forwardProxyAgentRun()
-	run.Spec.EgressForwardProxy = false
 	run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
 	return run
 }
@@ -5746,7 +5811,6 @@ func TestDirectAndNonEnforcedMediatedKeepLegacyBearerCompatibility(t *testing.T)
 func TestTransparentAdmissionRequiresDeploymentCapability(t *testing.T) {
 	t.Setenv("NVT_NETWORK_POLICY_CAPABLE", "false")
 	run := forwardProxyAgentRun()
-	run.Spec.EgressForwardProxy = false
 	run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
 	if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "NetworkPolicy-capable") {
 		t.Fatalf("transparent admission should fail before Pod creation: %v", err)
@@ -5832,7 +5896,7 @@ func TestValidateForwardProxyAdmission(t *testing.T) {
 
 	noEnforce := forwardProxyAgentRun()
 	noEnforce.Spec.EgressEnforcement = false
-	if err := ValidateAgentRunEgressMode(noEnforce); err == nil || !strings.Contains(err.Error(), "egressForwardProxy requires spec.egressEnforcement") {
+	if err := ValidateAgentRunEgressMode(noEnforce); err == nil || !strings.Contains(err.Error(), "egressTransport forward-proxy requires spec.egress mediated and spec.egressEnforcement") {
 		t.Fatalf("forward-proxy without enforcement must be rejected, got %v", err)
 	}
 

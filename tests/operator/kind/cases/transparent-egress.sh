@@ -70,7 +70,6 @@ variant, path = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8") as f:
     payload = json.load(f)
 spec = payload["agentRun"]["spec"]
-spec.pop("egressForwardProxy", None)
 spec["egressTransport"] = "transparent"
 payload["work"]["id"] = payload["agentRun"]["metadata"]["name"] = payload["agentRun"]["metadata"]["name"].rsplit("-", 1)[0] + "-" + variant
 if variant == "no-enforcement":
@@ -91,7 +90,6 @@ import json, sys
 spec=json.load(open(sys.argv[1], encoding="utf-8"))["agentRun"]["spec"]
 assert spec["egressTransport"] == "transparent"
 assert spec["egressEnforcement"] is True
-assert "egressForwardProxy" not in spec
 PY
 }
 

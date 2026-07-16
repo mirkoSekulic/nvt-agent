@@ -130,7 +130,7 @@ Prefer `type: broker` for secret-bearing providers. Local `token-env` and
 `headers` providers keep raw secrets in the agent container and should be
 treated as local/dev fallback.
 
-Production operator mode should move raw secrets into a broker sidecar/service.
+Production operator mode should move raw secrets into a broker service.
 In that model this plugin becomes a broker client and exported tools receive
 only scoped, short-lived credentials or broker-mediated responses.
 

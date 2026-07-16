@@ -90,9 +90,6 @@ spec:
                 egressEnforcement:
                   type: boolean
                   default: false
-                egressForwardProxy:
-                  type: boolean
-                  default: false
                 egressTransport:
                   type: string
                   enum:

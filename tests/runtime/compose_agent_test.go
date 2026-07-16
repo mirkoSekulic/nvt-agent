@@ -345,6 +345,11 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 			t.Fatalf("AGENTS.md missing %q\n%s", fragment, instructions)
 		}
 	}
+	for _, forbidden := range []string{"Docker sidecar", "egress sidecar", "same-Pod egress"} {
+		if strings.Contains(instructions, forbidden) {
+			t.Fatalf("generated AGENTS.md exposes deployment topology %q\n%s", forbidden, instructions)
+		}
+	}
 }
 
 func TestWriteAgentInstructionsIncludesGitHubPRWorkflowWhenToolsAreAvailable(t *testing.T) {

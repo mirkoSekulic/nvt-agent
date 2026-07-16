@@ -189,7 +189,6 @@ func buildProfiledAgentRun(
 			Egress:                    profile.Egress,
 			EgressAllowInsecureBroker: profile.EgressAllowInsecureBroker,
 			EgressEnforcement:         profile.EgressEnforcement,
-			EgressForwardProxy:        profile.EgressForwardProxy,
 			EgressTransport:           profile.EgressTransport,
 			Workspace:                 *template.Workspace.DeepCopy(),
 			Broker:                    profile.Broker.DeepCopy(),

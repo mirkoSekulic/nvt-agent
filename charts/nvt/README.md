@@ -243,18 +243,22 @@ spec:
   egressTransport: transparent
 ```
 
-The operator creates a separate paired egressd Pod, per-run NetworkPolicies, a
-credential-less captured sidecar, and a one-shot NET_ADMIN routing init
-container. Normal outbound TCP, including DinD traffic, is redirected through
-captured and egressd. The Agent Pod has no direct internet egress rule.
+The operator creates a paired egress endpoint, per-run NetworkPolicies, a
+credential-less capture relay, and one-shot NET_ADMIN routing initialization.
+Normal outbound TCP, including DinD traffic, is redirected through captured and
+egressd. The untrusted workload has no direct internet egress rule. Deployment
+placement is an operator implementation detail, not an AgentRun contract.
 
 `networkPolicyCapable=true` is an operator assertion, not CNI installation.
 Set it only when the cluster CNI enforces NetworkPolicy. The enforced kind
 smoke uses Calico because default kind networking does not prove the boundary.
 
 Forward-proxy transport remains available for clients that honor
-`HTTP(S)_PROXY`. `spec.egressForwardProxy` is a compatibility input; new
-resources use `spec.egressTransport: forward-proxy`.
+`HTTP(S)_PROXY`. For the pre-1.0 migration, replace
+`spec.egressForwardProxy: true` with `spec.egressTransport: forward-proxy`;
+remove a false legacy field or select `redirect` explicitly. The consolidated
+CRD no longer declares the legacy field, so migrate stored manifests before
+upgrading the chart.
 
 `allowInsecureUpstreams` permits explicitly marked plain-HTTP fixtures for
 hermetic tests. Leave it false in real deployments; plaintext would expose an

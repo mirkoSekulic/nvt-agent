@@ -871,7 +871,6 @@ func agentConfigPlaceholderCacheKey(agentRun *nvtv1alpha1.AgentRun) string {
 			"mode":        string(AgentRunEgressMode(agentRun)),
 			"enforcement": agentRun.Spec.EgressEnforcement,
 			"transport":   string(AgentRunEgressTransport(agentRun)),
-			"forward":     agentRun.Spec.EgressForwardProxy,
 		},
 		"grants": normalizePlaceholderCacheGrants(agentRun),
 	}
@@ -1556,9 +1555,6 @@ func AgentRunEgressForwardProxy(agentRun *nvtv1alpha1.AgentRun) bool {
 func AgentRunEgressTransport(agentRun *nvtv1alpha1.AgentRun) nvtv1alpha1.AgentRunEgressTransport {
 	if agentRun.Spec.EgressTransport != "" {
 		return agentRun.Spec.EgressTransport
-	}
-	if agentRun.Spec.EgressForwardProxy {
-		return nvtv1alpha1.AgentRunEgressTransportForwardProxy
 	}
 	return nvtv1alpha1.AgentRunEgressTransportRedirect
 }
@@ -3582,9 +3578,6 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	if agentRun.Spec.EgressEnforcement && mode != nvtv1alpha1.AgentRunEgressMediated {
 		return fmt.Errorf("spec.egressEnforcement requires spec.egress mediated, got %q", mode)
 	}
-	if agentRun.Spec.EgressForwardProxy && !agentRun.Spec.EgressEnforcement {
-		return fmt.Errorf("spec.egressForwardProxy requires spec.egressEnforcement")
-	}
 	transport := AgentRunEgressTransport(agentRun)
 	switch transport {
 	case nvtv1alpha1.AgentRunEgressTransportRedirect,
@@ -3592,9 +3585,6 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		nvtv1alpha1.AgentRunEgressTransportTransparent:
 	default:
 		return fmt.Errorf("spec.egressTransport must be redirect, forward-proxy, or transparent, got %q", transport)
-	}
-	if agentRun.Spec.EgressTransport != "" && agentRun.Spec.EgressForwardProxy && transport != nvtv1alpha1.AgentRunEgressTransportForwardProxy {
-		return fmt.Errorf("spec.egressTransport conflicts with compatibility field spec.egressForwardProxy")
 	}
 	if transport != nvtv1alpha1.AgentRunEgressTransportRedirect && (!agentRun.Spec.EgressEnforcement || mode != nvtv1alpha1.AgentRunEgressMediated) {
 		return fmt.Errorf("spec.egressTransport %s requires spec.egress mediated and spec.egressEnforcement", transport)
@@ -3676,7 +3666,7 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		// header-inject grant specifically.
 		injects := forwardProxyInjects(agentRun)
 		if len(injects) == 0 {
-			return fmt.Errorf("spec.egressForwardProxy requires at least one header-inject or placeholder-file broker grant with egressHosts")
+			return fmt.Errorf("spec.egressTransport %s requires at least one header-inject or placeholder-file broker grant with egressHosts", transport)
 		}
 		// Mirror egressd's inject-route rules at admission so a config egressd
 		// would reject at boot fails loudly here instead of CrashLooping a
