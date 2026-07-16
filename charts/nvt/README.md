@@ -174,8 +174,9 @@ canonical file explicitly; filenames are never inferred by provider type.
 
 The first source value is imported as mode `0600`. Broker-side rotation may
 then change that canonical file without the unchanged source overwriting it.
-When Kubernetes atomically projects a changed Secret key, the broker lifecycle
-supervisor makes readiness false, terminates and reaps the sole broker writer,
+When Kubernetes atomically projects changed Secret keys, the broker lifecycle
+supervisor pins and validates one complete projected generation, makes readiness
+false, terminates and reaps the broker and its provider process group,
 atomically imports the new value and marker, and starts the broker again in the
 same Pod. No Helm change, rollout, `kubectl exec`, PVC edit, or Kubernetes API
 permission is required. Removing a Secret key never deletes canonical state.
@@ -189,9 +190,10 @@ the source Secret to recover automatically. Kubernetes' projected `..data`
 symlinks are the only accepted source-file symlink form.
 
 Replacement retains at most one mode-`0600` recovery record per changed file
-until the restarted broker answers its health endpoint, then removes it. The chart keeps a
-single broker replica and `Recreate` strategy so there is still exactly one
-writer for provider state.
+until every configured provider accepts its local state through the
+provider-owned readiness contract, then removes it. The chart keeps a single
+broker replica and `Recreate` strategy so there is still exactly one writer for
+provider state.
 
 ## Agent Egress
 

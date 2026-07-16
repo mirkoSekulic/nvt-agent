@@ -988,6 +988,7 @@ grep -q 'name: NVT_BROKER_SEED_TARGET_DIR' "${BROKER_SEED_RENDER}"
 grep -q 'value: "codex"' "${BROKER_SEED_RENDER}"
 grep -q 'defaultMode: 0400' "${BROKER_SEED_RENDER}"
 grep -q 'readinessProbe:' "${BROKER_SEED_RENDER}"
+grep -q 'path: /ready' "${BROKER_SEED_RENDER}"
 grep -q 'scheme: HTTPS' "${BROKER_SEED_RENDER}"
 if grep -q 'name: seed-broker-state' "${BROKER_SEED_RENDER}"; then
   echo "broker seed reconciliation must not remain a one-shot init container" >&2

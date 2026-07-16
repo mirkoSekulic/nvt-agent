@@ -58,6 +58,18 @@ class Broker:
             "providers": {"configured": configured, "ready": ready, "unavailable": unavailable},
         }
 
+    def readiness(self):
+        """Provider-owned acceptance readiness without upstream operations."""
+        for provider in self.providers.values():
+            try:
+                if not provider.ready or not provider.validate_state():
+                    return {"ok": False, "status": "unready"}
+            except Exception:
+                # Credential parsers may carry sanitized provider errors, but
+                # readiness deliberately exposes neither their text nor state.
+                return {"ok": False, "status": "unready"}
+        return {"ok": True, "status": "ready"}
+
     def provider(self, name):
         provider = self.providers.get(name)
         if provider is None:
@@ -484,6 +496,10 @@ def make_handler(broker):
         def do_GET(self):
             if self.path == "/health":
                 self.write_json(200, broker.health())
+                return
+            if self.path == "/ready":
+                readiness = broker.readiness()
+                self.write_json(200 if readiness["ok"] else 503, readiness)
                 return
             self.write_json(404, {"ok": False, "error": "not-found"})
 

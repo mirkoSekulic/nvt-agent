@@ -40,7 +40,8 @@ Authorization: Bearer <NVT_BROKER_TOKEN>
 ```
 
 The broker stores only `sha256:<hash>` values in its live-reloaded agents
-config. `/health` is token-free; capability endpoints require a valid token.
+config. `/health` and `/ready` are token-free; capability endpoints require a
+valid token.
 
 ## Endpoints
 
@@ -51,6 +52,15 @@ Returns:
 ```json
 {"ok":true,"status":"ready"}
 ```
+
+### GET /ready
+
+Returns HTTP 200 only when every configured provider has accepted its local
+configured state. Embedded providers own format validation and must not contact
+upstreams or refresh credentials from this probe; executable providers must
+have a successfully initialized live generation. Failures return a generic
+HTTP 503 without provider names, configuration, or credential diagnostics.
+Seed replacement uses this stricter endpoint before discarding recovery state.
 
 ### POST /v1/http/request
 
@@ -319,14 +329,17 @@ provider-rotated canonical state; a changed source is imported once; source
 deletion never deletes canonical state. Existing canonical files with no marker
 are preserved while the current source digest is adopted.
 
-Seed replacement is outside the HTTP protocol but inside the trusted broker
-lifecycle boundary. The sole broker writer is stopped and reaped before any
-canonical replacement, readiness is false during the transition, canonical
+Seed replacement is outside the credential API but inside the trusted broker
+lifecycle boundary. The broker process group, including executable providers,
+is stopped and reaped before any canonical replacement, readiness is false
+during the transition, canonical
 files and markers are atomically written, and the broker resumes automatically.
 A bounded mode-`0600` recovery record protects the previous canonical value
-until the restarted broker accepts the replacement. The mechanism is filename-
-and provider-agnostic and has no Kubernetes API or external secret-manager
-contract.
+until every configured provider accepts the replacement through `/ready`.
+Projected volumes are read from one pinned `..data` generation; a generation
+movement during scanning is retried without stopping the healthy broker. The
+mechanism is filename- and provider-agnostic and has no Kubernetes API or
+external secret-manager contract.
 
 ## Codex OAuth Provider Rules
 

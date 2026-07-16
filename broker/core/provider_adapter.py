@@ -20,6 +20,9 @@ class ProviderAdapter(ABC):
     def close(self): ...
 
     @abstractmethod
+    def validate_state(self): ...
+
+    @abstractmethod
     def supports(self, capability): ...
 
     @property

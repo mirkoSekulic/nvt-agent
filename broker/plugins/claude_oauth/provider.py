@@ -319,6 +319,13 @@ class ClaudeOAuthProvider:
             raise ProviderError("credentials-invalid", "Claude credentials missing claudeAiOauth object", 502)
         return data, oauth
 
+    def validate_state(self):
+        """Validate local custody without refreshing or contacting upstream."""
+        _data, oauth = self._read_credentials()
+        self._access_token(oauth)
+        self._refresh_token(oauth)
+        return True
+
     def _access_token(self, oauth):
         token = oauth.get("accessToken")
         if not isinstance(token, str) or not token:

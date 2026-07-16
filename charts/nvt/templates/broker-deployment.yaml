@@ -94,7 +94,7 @@ spec:
           {{- if and .Values.broker.persistence.enabled .Values.broker.persistence.seedSecretName }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
               scheme: {{ ternary "HTTPS" "HTTP" .Values.broker.tls.enabled }}
             periodSeconds: 1

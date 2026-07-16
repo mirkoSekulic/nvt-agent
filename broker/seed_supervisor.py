@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import ctypes
 import hashlib
 import http.client
 import json
@@ -26,6 +27,10 @@ PROJECTED_VERSION_RE = re.compile(r"^\.\.[0-9]{4}_[0-9]{2}_[0-9]{2}_[0-9_]+(?:\.
 
 class SeedError(Exception):
     """A sanitized seed-boundary failure."""
+
+
+class SeedTransientError(SeedError):
+    """A projected-volume generation changed while it was being scanned."""
 
 
 def _safe_name(name):
@@ -183,6 +188,107 @@ class SeedReconciler:
                 raise SeedError("seed-state-invalid")
         return current
 
+    def _projected_generation(self, root):
+        data_link = self.seed_dir / "..data"
+        target_name = None
+        try:
+            status = os.lstat(data_link)
+            if not stat.S_ISLNK(status.st_mode):
+                raise SeedError("seed-directory-invalid")
+            target_name = os.readlink(data_link)
+            if not PROJECTED_VERSION_RE.fullmatch(target_name):
+                raise SeedError("seed-directory-invalid")
+            generation = self.seed_dir / target_name
+            generation_status = os.lstat(generation)
+            if not stat.S_ISDIR(generation_status.st_mode) or stat.S_ISLNK(generation_status.st_mode):
+                raise SeedError("seed-directory-invalid")
+            resolved = generation.resolve(strict=True)
+            if not _is_within(resolved, root):
+                raise SeedError("seed-directory-invalid")
+            return target_name, resolved
+        except SeedError:
+            raise
+        except OSError as error:
+            if target_name is not None:
+                try:
+                    if os.readlink(data_link) == target_name:
+                        raise SeedError("seed-directory-invalid") from error
+                except SeedError:
+                    raise
+                except OSError:
+                    pass
+            raise SeedTransientError("seed-projection-changing") from error
+
+    def _projection_changed(self, target_name):
+        try:
+            return os.readlink(self.seed_dir / "..data") != target_name
+        except OSError:
+            return True
+
+    def _projected_source_files(self, root):
+        target_name, generation = self._projected_generation(root)
+        files = {}
+        try:
+            generation_entries = list(os.scandir(generation))
+            for entry in generation_entries:
+                if entry.name.startswith("..") or not _safe_name(entry.name):
+                    raise SeedError("seed-file-invalid")
+                path = generation / entry.name
+                status = os.lstat(path)
+                if not stat.S_ISREG(status.st_mode) or stat.S_ISLNK(status.st_mode):
+                    raise SeedError("seed-file-invalid")
+                content = _read_regular(path, MAX_SEED_BYTES, "seed-file-invalid")
+                files[entry.name] = {
+                    "content": content,
+                    "digest": hashlib.sha256(content).hexdigest(),
+                }
+        except SeedError:
+            if self._projection_changed(target_name):
+                raise SeedTransientError("seed-projection-changing")
+            raise
+        except OSError as error:
+            if self._projection_changed(target_name):
+                raise SeedTransientError("seed-projection-changing") from error
+            raise SeedError("seed-file-invalid") from error
+
+        try:
+            entries = list(os.scandir(self.seed_dir))
+        except OSError as error:
+            if self._projection_changed(target_name):
+                raise SeedTransientError("seed-projection-changing") from error
+            raise SeedError("seed-directory-invalid") from error
+        public_names = set()
+        for entry in entries:
+            if entry.name.startswith(".."):
+                # Old immutable timestamp directories may disappear at any
+                # point. Only the once-pinned active generation is relevant.
+                if entry.name in ("..data", "..data_tmp") or PROJECTED_VERSION_RE.fullmatch(entry.name):
+                    continue
+                raise SeedError("seed-file-invalid")
+            if not _safe_name(entry.name):
+                raise SeedError("seed-file-invalid")
+            path = self.seed_dir / entry.name
+            try:
+                status = os.lstat(path)
+                if not stat.S_ISLNK(status.st_mode) or os.readlink(path) != f"..data/{entry.name}":
+                    raise SeedError("seed-symlink-invalid")
+            except SeedError:
+                raise
+            except OSError as error:
+                if self._projection_changed(target_name):
+                    raise SeedTransientError("seed-projection-changing") from error
+                raise SeedError("seed-symlink-invalid") from error
+            public_names.add(entry.name)
+
+        if self._projection_changed(target_name):
+            raise SeedTransientError("seed-projection-changing")
+        if set(files) - public_names:
+            raise SeedError("seed-symlink-invalid")
+        if public_names - set(files):
+            # Kubernetes removes stale public links after switching ..data.
+            raise SeedTransientError("seed-projection-changing")
+        return files
+
     def _source_files(self):
         try:
             seed_status = os.lstat(self.seed_dir)
@@ -195,46 +301,24 @@ class SeedReconciler:
         except OSError as error:
             raise SeedError("seed-directory-invalid") from error
 
+        if any(entry.name == "..data" for entry in entries):
+            return self._projected_source_files(root)
+
         files = {}
         for entry in entries:
             if entry.name.startswith(".."):
-                # Kubernetes projected volumes manage ..data, a brief
-                # ..data_tmp link, and timestamped directories. Validate those
-                # structures rather than treating arbitrary hidden entries as
-                # ignorable source keys.
-                internal = self.seed_dir / entry.name
-                try:
-                    internal_status = os.lstat(internal)
-                    if entry.name in ("..data", "..data_tmp"):
-                        if not stat.S_ISLNK(internal_status.st_mode):
-                            raise SeedError("seed-directory-invalid")
-                        resolved = internal.resolve(strict=True)
-                        if not _is_within(resolved, root) or not resolved.is_dir():
-                            raise SeedError("seed-directory-invalid")
-                    elif PROJECTED_VERSION_RE.fullmatch(entry.name):
-                        if not stat.S_ISDIR(internal_status.st_mode) or stat.S_ISLNK(internal_status.st_mode):
-                            raise SeedError("seed-directory-invalid")
-                    else:
-                        raise SeedError("seed-file-invalid")
-                except SeedError:
-                    raise
-                except OSError as error:
-                    raise SeedError("seed-directory-invalid") from error
-                continue
+                if entry.name == "..data_tmp":
+                    raise SeedTransientError("seed-projection-changing")
+                raise SeedError("seed-file-invalid")
             if not _safe_name(entry.name):
                 raise SeedError("seed-file-invalid")
             path = self.seed_dir / entry.name
             try:
                 status = os.lstat(path)
-                if stat.S_ISLNK(status.st_mode):
-                    # A projected Secret key is exactly key -> ..data/key.
-                    if os.readlink(path) != f"..data/{entry.name}":
-                        raise SeedError("seed-symlink-invalid")
-                    readable = path.resolve(strict=True)
-                    if not _is_within(readable, root):
-                        raise SeedError("seed-symlink-invalid")
-                elif stat.S_ISREG(status.st_mode):
+                if stat.S_ISREG(status.st_mode):
                     readable = path
+                elif stat.S_ISLNK(status.st_mode):
+                    raise SeedError("seed-symlink-invalid")
                 else:
                     raise SeedError("seed-file-invalid")
                 content = _read_regular(readable, MAX_SEED_BYTES, "seed-file-invalid")
@@ -432,12 +516,14 @@ class SeedReconciler:
 
 
 class BrokerSupervisor:
-    def __init__(self, reconciler, command, poll_seconds=1.0, ready_seconds=15.0):
+    def __init__(self, reconciler, command, poll_seconds=1.0, ready_seconds=15.0, stop_seconds=5.0):
         self.reconciler = reconciler
         self.command = command
         self.poll_seconds = poll_seconds
         self.ready_seconds = ready_seconds
+        self.stop_seconds = stop_seconds
         self.child = None
+        self.child_pgid = None
         self.stopping = False
         self.blocked_fingerprint = None
         self.last_notice = None
@@ -448,19 +534,79 @@ class BrokerSupervisor:
             self.last_notice = message
 
     def _start(self):
-        self.child = subprocess.Popen(self.command)
+        self.child = subprocess.Popen(self.command, start_new_session=True)
+        self.child_pgid = self.child.pid
+
+    @staticmethod
+    def _enable_subreaper():
+        if not sys.platform.startswith("linux"):
+            return
+        # Adopt descendants when brokerd is force-killed so its executable
+        # providers can be reaped instead of becoming unmanaged zombies.
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+            raise SeedError("broker-supervision-failed")
+
+    @staticmethod
+    def _group_exists(pgid):
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError as error:
+            raise SeedError("broker-stop-failed") from error
+
+    @staticmethod
+    def _signal_group(pgid, signum):
+        if pgid <= 1 or pgid == os.getpgrp():
+            raise SeedError("broker-stop-failed")
+        try:
+            os.killpg(pgid, signum)
+        except ProcessLookupError:
+            return
+        except OSError as error:
+            raise SeedError("broker-stop-failed") from error
+
+    @staticmethod
+    def _reap_adopted_group(pgid):
+        while True:
+            try:
+                waited, _status = os.waitpid(-pgid, os.WNOHANG)
+            except ChildProcessError:
+                return
+            except OSError as error:
+                raise SeedError("broker-stop-failed") from error
+            if waited == 0:
+                return
 
     def _stop(self):
         child = self.child
+        pgid = self.child_pgid
         self.child = None
-        if child is None or child.poll() is not None:
+        self.child_pgid = None
+        if child is None or pgid is None:
             return
-        child.terminate()
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait(timeout=2)
+        if self._group_exists(pgid):
+            self._signal_group(pgid, signal.SIGTERM)
+        deadline = time.monotonic() + self.stop_seconds
+        while time.monotonic() < deadline:
+            child.poll()
+            if child.returncode is not None:
+                self._reap_adopted_group(pgid)
+            if not self._group_exists(pgid):
+                return
+            time.sleep(0.02)
+        self._signal_group(pgid, signal.SIGKILL)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            child.poll()
+            if child.returncode is not None:
+                self._reap_adopted_group(pgid)
+            if not self._group_exists(pgid):
+                return
+            time.sleep(0.02)
+        raise SeedError("broker-stop-failed")
 
     @staticmethod
     def _ready_address():
@@ -492,7 +638,7 @@ class BrokerSupervisor:
                     )
                 else:
                     connection = http.client.HTTPConnection(host, port, timeout=0.2)
-                connection.request("GET", "/health")
+                connection.request("GET", "/ready")
                 response = connection.getresponse()
                 response.read(4096)
                 if response.status == 200:
@@ -511,6 +657,7 @@ class BrokerSupervisor:
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         try:
+            self._enable_subreaper()
             self.reconciler.recover_incomplete()
         except SeedError:
             self._notice("recovery state is invalid; broker held unready")
@@ -518,9 +665,15 @@ class BrokerSupervisor:
 
         while not self.stopping:
             if self.child is not None and self.child.poll() is not None:
-                return self.child.returncode or 1
+                return_code = self.child.returncode or 1
+                self._stop()
+                return return_code
             try:
                 actions, fingerprint = self.reconciler.plan()
+            except SeedTransientError:
+                self._notice("seed projection changed during scan; retrying")
+                time.sleep(self.poll_seconds)
+                continue
             except SeedError:
                 self._stop()
                 self._notice("seed input is invalid; broker held unready")

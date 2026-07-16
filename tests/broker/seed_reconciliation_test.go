@@ -110,7 +110,8 @@ import os
 import tempfile
 from pathlib import Path
 
-from broker.seed_supervisor import MAX_SEED_BYTES, SeedError, SeedReconciler
+import broker.seed_supervisor as seed_supervisor
+from broker.seed_supervisor import MAX_SEED_BYTES, SeedError, SeedReconciler, SeedTransientError
 
 def rejected(callback):
     try:
@@ -143,17 +144,73 @@ with tempfile.TemporaryDirectory() as seed_name, tempfile.TemporaryDirectory() a
     version_a = seed / "..2026_07_16_00_00_00.000000001"
     version_a.mkdir()
     (version_a / "auth.json").write_bytes(b"projected-A")
+    (version_a / "other.json").write_bytes(b"other-A")
     (seed / "..data").symlink_to(version_a.name)
     (seed / "auth.json").symlink_to("..data/auth.json")
+    (seed / "other.json").symlink_to("..data/other.json")
     reconciler = SeedReconciler(seed, state, "credentials")
     actions, _ = reconciler.plan()
     recovery = reconciler.apply(actions)
     reconciler.accept(recovery)
     assert (state / "credentials" / "auth.json").read_bytes() == b"projected-A"
+    assert (state / "credentials" / "other.json").read_bytes() == b"other-A"
 
     version_c = seed / "..2026_07_16_00_00_01.000000002"
     version_c.mkdir()
     (version_c / "auth.json").write_bytes(b"projected-C")
+    (version_c / "other.json").write_bytes(b"other-C")
+
+    # Force ..data to move after one pinned-generation read. The scan must be
+    # rejected as transient and must never apply an old/new mixture.
+    original_read = seed_supervisor._read_regular
+    moved = False
+    def moving_read(path, limit, code):
+        global moved
+        content = original_read(path, limit, code)
+        if path.parent == version_a and not moved:
+            moved = True
+            moving_link = seed / "..data-moving"
+            moving_link.symlink_to(version_c.name)
+            os.replace(moving_link, seed / "..data")
+        return content
+    seed_supervisor._read_regular = moving_read
+    try:
+        try:
+            reconciler.plan()
+        except SeedTransientError:
+            pass
+        else:
+            raise AssertionError("mixed projected generation was accepted")
+    finally:
+        seed_supervisor._read_regular = original_read
+    assert (state / "credentials" / "auth.json").read_bytes() == b"projected-A"
+    assert (state / "credentials" / "other.json").read_bytes() == b"other-A"
+
+    # Removing an obsolete timestamp directory during the active generation
+    # scan is harmless and must not invalidate the pinned snapshot.
+    obsolete = seed / "..2026_07_15_23_59_59.000000000"
+    obsolete.mkdir()
+    (obsolete / "old.json").write_bytes(b"old")
+    removed = False
+    def cleanup_read(path, limit, code):
+        global removed
+        content = original_read(path, limit, code)
+        if path.parent == version_c and not removed:
+            removed = True
+            (obsolete / "old.json").unlink()
+            obsolete.rmdir()
+        return content
+    seed_supervisor._read_regular = cleanup_read
+    try:
+        actions, _ = reconciler.plan()
+    finally:
+        seed_supervisor._read_regular = original_read
+    recovery = reconciler.apply(actions)
+    reconciler.accept(recovery)
+    assert (state / "credentials" / "auth.json").read_bytes() == b"projected-C"
+    assert (state / "credentials" / "other.json").read_bytes() == b"other-C"
+
+    # Replacing ..data normally produces one complete next-generation import.
     temporary_link = seed / "..data-next"
     temporary_link.symlink_to(version_c.name)
     os.replace(temporary_link, seed / "..data")
@@ -325,8 +382,16 @@ server.close()
         next_link = seed / "..data-next"
         next_link.symlink_to(version_e.name)
         os.replace(next_link, seed / "..data")
-        wait_for(lambda: canonical.read_text() == source_e and listening(port), "corrected source did not recover automatically")
+        try:
+            wait_for(lambda: canonical.read_text() == source_e and listening(port), "corrected source did not recover automatically")
+        except AssertionError as error:
+            raise AssertionError(f"{error}; supervisor={process.poll()} starts={len(starts.read_text().splitlines())} canonical_match={canonical.read_text() == source_e} listening={listening(port)}")
 
+        version_empty = seed / "..2026_07_16_00_00_04.000000005"
+        version_empty.mkdir()
+        next_link = seed / "..data-next"
+        next_link.symlink_to(version_empty.name)
+        os.replace(next_link, seed / "..data")
         (seed / "auth.json").unlink()
         time.sleep(0.15)
         assert canonical.read_text() == source_e
@@ -343,5 +408,233 @@ print("OK")
 `)
 	if err != nil || !strings.Contains(out, "OK") {
 		t.Fatalf("seed supervisor lifecycle test failed: %v\n%s", err, out)
+	}
+}
+
+func TestBrokerSeedAcceptanceUsesRealProviderValidation(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import base64
+import http.client
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+def wait_for(predicate, message, timeout=8):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError(message)
+
+def listening(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.05):
+            return True
+    except OSError:
+        return False
+
+def ready(port):
+    connection = None
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.1)
+        connection.request("GET", "/ready")
+        response = connection.getresponse()
+        response.read()
+        return response.status == 200
+    except OSError:
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+def jwt(exp, marker):
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "marker": marker}).encode()).decode().rstrip("=")
+    return "header." + payload + ".signature"
+
+def replace(path, content):
+    temporary = path.parent.parent / (path.name + ".replacement")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+with tempfile.TemporaryDirectory() as root_name:
+    root = Path(root_name)
+    seed = root / "seed"
+    state = root / "state"
+    seed.mkdir()
+    state.mkdir()
+    codex_path = state / "credentials" / "codex.json"
+    claude_path = state / "credentials" / "claude.json"
+    initial_codex = json.dumps({"tokens": {"access_token": jwt(4102444800, "initial"), "refresh_token": "codex-refresh-canary-A"}})
+    initial_claude = json.dumps({"claudeAiOauth": {"accessToken": "claude-access-canary-A", "refreshToken": "claude-refresh-canary-A", "expiresAt": 4102444800000}})
+    (seed / "codex.json").write_text(initial_codex, encoding="utf-8")
+    (seed / "claude.json").write_text(initial_claude, encoding="utf-8")
+    config = root / "broker.json"
+    config.write_text(json.dumps({"providers": [
+        {"name": "codex-main", "plugin": "codex-oauth", "config": {"auth-file": str(codex_path)}, "allow": {"repositories": ["example/*"]}},
+        {"name": "claude-main", "plugin": "claude-oauth", "config": {"credentials-file": str(claude_path)}, "allow": {"repositories": ["example/*"]}},
+    ]}), encoding="utf-8")
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    env = os.environ.copy()
+    env.update({
+        "NVT_BROKER_CONFIG": str(config),
+        "NVT_BROKER_AUDIT_LOG": str(root / "audit.jsonl"),
+        "NVT_BROKER_BIND": f"127.0.0.1:{port}",
+        "NVT_BROKER_SEED_DIR": str(seed),
+        "NVT_BROKER_STATE_DIR": str(state),
+        "NVT_BROKER_SEED_TARGET_DIR": "credentials",
+        "NVT_BROKER_SEED_POLL_SECONDS": "0.02",
+        "NVT_BROKER_SEED_READY_SECONDS": "0.3",
+    })
+    process = subprocess.Popen(
+        [sys.executable, "broker/seed_supervisor.py", "--", sys.executable, "broker/brokerd.py"],
+        cwd=os.environ["PYTHONPATH"].split(os.pathsep)[0], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        wait_for(lambda: ready(port), "valid provider state did not become ready")
+        codex_marker = (state / ".nvt-seed-imports" / "credentials" / "codex.json").read_bytes()
+        claude_marker = (state / ".nvt-seed-imports" / "credentials" / "claude.json").read_bytes()
+
+        malformed_codex = json.dumps({"tokens": {"access_token": "malformed-codex-access-canary", "refresh_token": "malformed-codex-refresh-canary"}})
+        replace(seed / "codex.json", malformed_codex)
+        codex_recovery = state / ".nvt-seed-recovery" / "credentials" / "codex.json"
+        wait_for(codex_recovery.exists, "malformed Codex replacement was not attempted")
+        wait_for(lambda: not codex_recovery.exists() and codex_path.read_text() == initial_codex and not listening(port), "malformed Codex replacement was accepted or not rolled back")
+        assert (state / ".nvt-seed-imports" / "credentials" / "codex.json").read_bytes() == codex_marker
+
+        valid_codex = json.dumps({"tokens": {"access_token": jwt(4102444800, "replacement"), "refresh_token": "codex-refresh-canary-C"}})
+        replace(seed / "codex.json", valid_codex)
+        wait_for(lambda: codex_path.read_text() == valid_codex and ready(port), "corrected Codex replacement did not recover")
+
+        malformed_claude = json.dumps({"claudeAiOauth": {"accessToken": "malformed-claude-access-canary"}})
+        replace(seed / "claude.json", malformed_claude)
+        claude_recovery = state / ".nvt-seed-recovery" / "credentials" / "claude.json"
+        wait_for(claude_recovery.exists, "malformed Claude replacement was not attempted")
+        wait_for(lambda: not claude_recovery.exists() and claude_path.read_text() == initial_claude and not listening(port), "malformed Claude replacement was accepted or not rolled back")
+        assert (state / ".nvt-seed-imports" / "credentials" / "claude.json").read_bytes() == claude_marker
+
+        valid_claude = json.dumps({"claudeAiOauth": {"accessToken": "claude-access-canary-C", "refreshToken": "claude-refresh-canary-C", "expiresAt": 4102444800000}})
+        replace(seed / "claude.json", valid_claude)
+        wait_for(lambda: claude_path.read_text() == valid_claude and ready(port), "corrected Claude replacement did not recover")
+    finally:
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=5)
+    combined = stdout + stderr
+    for canary in ("codex-refresh-canary-A", "malformed-codex-access-canary", "malformed-codex-refresh-canary", "claude-access-canary-A", "claude-refresh-canary-A", "malformed-claude-access-canary"):
+        assert canary not in combined, combined
+    assert process.returncode == 0, combined
+
+print("OK")
+`)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("real provider seed acceptance test failed: %v\n%s", err, out)
+	}
+}
+
+func TestBrokerSeedSupervisorReapsStubbornProcessGroupBeforeImport(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+def wait_for(predicate, message, timeout=8):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError(message)
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+with tempfile.TemporaryDirectory() as root_name:
+    root = Path(root_name)
+    seed = root / "seed"
+    state = root / "state"
+    seed.mkdir()
+    state.mkdir()
+    pids = root / "descendant-pids"
+    fake = root / "stubborn-broker.py"
+    fake.write_text(r'''
+import os, signal, socket, subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import os,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], 'a').write(str(os.getpid())+'\\n'); time.sleep(3600)", os.environ["DESCENDANT_PIDS"]])
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+host, port = os.environ["NVT_BROKER_BIND"].rsplit(":", 1)
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind((host, int(port)))
+server.listen()
+while True:
+    connection, _ = server.accept()
+    connection.recv(4096)
+    connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+    connection.close()
+''', encoding="utf-8")
+    runner = root / "runner.py"
+    runner.write_text(r'''
+import os, sys
+from broker.seed_supervisor import BrokerSupervisor, SeedReconciler
+reconciler = SeedReconciler(os.environ["NVT_BROKER_SEED_DIR"], os.environ["NVT_BROKER_STATE_DIR"], "credentials")
+supervisor = BrokerSupervisor(reconciler, [sys.executable, os.environ["FAKE_BROKER"]], poll_seconds=0.02, ready_seconds=1, stop_seconds=0.1)
+raise SystemExit(supervisor.run())
+''', encoding="utf-8")
+    (seed / "auth.json").write_text("source-A", encoding="utf-8")
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    env = os.environ.copy()
+    env.update({
+        "NVT_BROKER_BIND": f"127.0.0.1:{port}",
+        "NVT_BROKER_SEED_DIR": str(seed),
+        "NVT_BROKER_STATE_DIR": str(state),
+        "NVT_BROKER_SEED_TARGET_DIR": "credentials",
+        "NVT_BROKER_SEED_POLL_SECONDS": "0.02",
+        "NVT_BROKER_SEED_READY_SECONDS": "1",
+        "DESCENDANT_PIDS": str(pids),
+        "FAKE_BROKER": str(fake),
+    })
+    process = subprocess.Popen(
+        [sys.executable, str(runner)],
+        cwd=os.environ["PYTHONPATH"].split(os.pathsep)[0], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        canonical = state / "credentials" / "auth.json"
+        wait_for(lambda: canonical.exists() and canonical.read_text() == "source-A" and pids.exists() and pids.read_text().strip(), "stubborn broker did not start")
+        original_descendant = int(pids.read_text().splitlines()[0])
+        replacement = root / "replacement"
+        replacement.write_text("source-C", encoding="utf-8")
+        os.replace(replacement, seed / "auth.json")
+        wait_for(lambda: canonical.read_text() == "source-C", "replacement was not imported")
+        assert not alive(original_descendant), "stubborn descendant survived canonical import"
+        wait_for(lambda: len(pids.read_text().splitlines()) >= 2, "broker did not resume after process-group reap")
+    finally:
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 0, stdout + stderr
+
+print("OK")
+`)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("process-group reap test failed: %v\n%s", err, out)
 	}
 }
