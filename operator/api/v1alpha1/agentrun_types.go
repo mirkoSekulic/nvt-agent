@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -37,6 +38,9 @@ const (
 	// the edge. Like header-inject, it is a zero-possession mediated mode.
 	AgentRunGrantPlaceholderFile AgentRunGrantMaterialization = "placeholder-file"
 
+	AgentRunWorkspaceEphemeral  AgentRunWorkspaceMode = "Ephemeral"
+	AgentRunWorkspacePersistent AgentRunWorkspaceMode = "Persistent"
+
 	// AgentRunUserRoot is the default: the agent container runs as root, HOME
 	// is /root, exactly as today.
 	AgentRunUserRoot AgentRunRuntimeUser = "root"
@@ -48,6 +52,7 @@ const (
 
 // AgentRunRuntimeUser selects the container user for the agent.
 type AgentRunRuntimeUser string
+type AgentRunWorkspaceMode string
 
 // AgentRun represents one disposable nvt agent execution.
 //
@@ -128,7 +133,9 @@ type AgentRunRuntimeAuth struct {
 
 // AgentRunWorkspace defines the workspace provisioning mode.
 type AgentRunWorkspace struct {
-	Mode string `json:"mode"`
+	Mode             AgentRunWorkspaceMode `json:"mode,omitempty"`
+	Size             *resource.Quantity    `json:"size,omitempty"`
+	StorageClassName string                `json:"storageClassName,omitempty"`
 }
 
 // AgentRunBroker defines external credential grants requested for the run.
@@ -282,6 +289,7 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.RuntimeAuth != nil {
 		out.RuntimeAuth = in.RuntimeAuth.DeepCopy()
 	}
+	out.Workspace = *in.Workspace.DeepCopy()
 	if in.Broker != nil {
 		out.Broker = in.Broker.DeepCopy()
 	}
@@ -297,6 +305,20 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	}
 	if in.ProfileProvenance != nil {
 		out.ProfileProvenance = in.ProfileProvenance.DeepCopy()
+	}
+	return out
+}
+
+// DeepCopy returns a copy of the AgentRunWorkspace.
+func (in *AgentRunWorkspace) DeepCopy() *AgentRunWorkspace {
+	if in == nil {
+		return nil
+	}
+	out := new(AgentRunWorkspace)
+	*out = *in
+	if in.Size != nil {
+		quantity := in.Size.DeepCopy()
+		out.Size = &quantity
 	}
 	return out
 }

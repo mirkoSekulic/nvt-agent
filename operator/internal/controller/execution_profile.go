@@ -71,7 +71,7 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 		return nil, errInvalidExecutionProfileConfiguration
 	}
 	template := schedule.Spec.Template
-	if strings.TrimSpace(template.Image) == "" || strings.TrimSpace(template.Workspace.Mode) == "" {
+	if strings.TrimSpace(template.Image) == "" {
 		return nil, errInvalidExecutionProfileConfiguration
 	}
 	common, err := jsonObject(template.Agent.Config)
@@ -191,7 +191,7 @@ func buildProfiledAgentRun(
 			EgressEnforcement:         profile.EgressEnforcement,
 			EgressForwardProxy:        profile.EgressForwardProxy,
 			EgressTransport:           profile.EgressTransport,
-			Workspace:                 template.Workspace,
+			Workspace:                 *template.Workspace.DeepCopy(),
 			Broker:                    profile.Broker.DeepCopy(),
 			Agent:                     nvtv1alpha1.AgentRunAgent{Config: apiextensionsv1.JSON{Raw: rawConfig}},
 			Lifecycle:                 template.Lifecycle.DeepCopy(),

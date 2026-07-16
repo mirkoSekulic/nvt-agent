@@ -207,6 +207,10 @@ producer:
     runtimeAuthSecret: ""
     runtimeAuthMountPath: ""
     workspaceMode: Ephemeral
+    # Required when workspaceMode is Persistent.
+    workspaceSize: ""
+    # Empty uses the cluster default StorageClass.
+    workspaceStorageClassName: ""
     brokerGrants: []
     ttl:
       activeDeadlineSeconds: null

@@ -1,4 +1,18 @@
 {{- if .Values.producer.enabled }}
+{{- $workspaceMode := .Values.producer.agentRun.workspaceMode | default "Ephemeral" }}
+{{- if not (has $workspaceMode (list "Ephemeral" "Persistent")) }}
+{{- fail "producer.agentRun.workspaceMode must be Ephemeral or Persistent" }}
+{{- end }}
+{{- if eq $workspaceMode "Persistent" }}
+{{- if empty .Values.producer.agentRun.workspaceSize }}
+{{- fail "producer.agentRun.workspaceSize is required when workspaceMode is Persistent" }}
+{{- end }}
+{{- if gt (len .Values.producer.agentRun.brokerGrants) 0 }}
+{{- fail "producer.agentRun.workspaceMode Persistent is incompatible with legacy file-bundle brokerGrants" }}
+{{- end }}
+{{- else if or (not (empty .Values.producer.agentRun.workspaceSize)) (not (empty .Values.producer.agentRun.workspaceStorageClassName)) }}
+{{- fail "producer.agentRun.workspaceSize and workspaceStorageClassName require workspaceMode Persistent" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -38,7 +52,13 @@ data:
       runtimeImage: {{ default (include "nvt.runtimeImage" .) .Values.producer.agentRun.runtimeImage | quote }}
       runtimeType: {{ .Values.producer.agentRun.runtimeType | quote }}
       runtimeAutonomy: {{ .Values.producer.agentRun.runtimeAutonomy | quote }}
-      workspaceMode: {{ .Values.producer.agentRun.workspaceMode | quote }}
+      workspaceMode: {{ $workspaceMode | quote }}
+      {{- with .Values.producer.agentRun.workspaceSize }}
+      workspaceSize: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.producer.agentRun.workspaceStorageClassName }}
+      workspaceStorageClassName: {{ . | quote }}
+      {{- end }}
       {{- with .Values.producer.agentRun.runtimeClassName }}
       runtimeClassName: {{ . | quote }}
       {{- end }}

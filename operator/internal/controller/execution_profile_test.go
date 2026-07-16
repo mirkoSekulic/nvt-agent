@@ -14,6 +14,7 @@ import (
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -149,6 +150,28 @@ func TestProfiledScheduleNoMatchPolicies(t *testing.T) {
 	decodeAdmissionResponse(t, denied, http.StatusForbidden, &decoded)
 	if decoded.Reason != "profile-selection-denied" || strings.Contains(denied.Body.String(), "canary") {
 		t.Fatalf("unsafe or unexpected denial: %q", denied.Body.String())
+	}
+}
+
+func TestProfiledScheduleRejectsPersistentFileBundleBeforeCreate(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	size := resource.MustParse("5Gi")
+	schedule.Spec.Template.Workspace = nvtv1alpha1.AgentRunWorkspace{
+		Mode: nvtv1alpha1.AgentRunWorkspacePersistent, Size: &size, StorageClassName: "managed-csi",
+	}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "persistent-file-bundle", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+	if decoded.Scheduled || decoded.Reason != "invalid-execution-profile-configuration" || strings.Contains(response.Body.String(), "github") {
+		t.Fatalf("unsafe or unexpected response: %q", response.Body.String())
+	}
+	runs := &nvtv1alpha1.AgentRunList{}
+	if err := fixture.client.List(context.Background(), runs, client.InNamespace(schedule.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs.Items) != 0 {
+		t.Fatalf("invalid profile created AgentRuns: %#v", runs.Items)
 	}
 }
 
@@ -500,7 +523,13 @@ func TestAgentRunProfileProvenanceCRDSchema(t *testing.T) {
 		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
 		"spec", "x-kubernetes-validations",
 	).([]any)
-	if len(validations) != 1 || !strings.Contains(validations[0].(map[string]any)["rule"].(string), "oldSelf.profileProvenance") {
+	foundProvenanceImmutability := false
+	for _, validation := range validations {
+		if strings.Contains(validation.(map[string]any)["rule"].(string), "oldSelf.profileProvenance") {
+			foundProvenanceImmutability = true
+		}
+	}
+	if !foundProvenanceImmutability {
 		t.Fatalf("profile provenance immutability rule missing: %#v", validations)
 	}
 }

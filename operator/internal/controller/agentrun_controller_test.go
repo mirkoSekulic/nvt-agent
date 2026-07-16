@@ -19,6 +19,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -223,6 +225,348 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 		configVolume.ConfigMap.Items[0].Key != agentConfigKey ||
 		configVolume.ConfigMap.Items[0].Path != agentConfigKey {
 		t.Fatalf("expected agent.yaml ConfigMap item, got %#v", configVolume.ConfigMap.Items)
+	}
+}
+
+func TestWorkspaceValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace nvtv1alpha1.AgentRunWorkspace
+		wantError string
+	}{
+		{name: "omitted defaults ephemeral"},
+		{name: "explicit ephemeral", workspace: nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspaceEphemeral}},
+		{name: "persistent", workspace: persistentWorkspace("20Gi", "managed-csi")},
+		{name: "unknown mode", workspace: nvtv1alpha1.AgentRunWorkspace{Mode: "Shared"}, wantError: "Ephemeral or Persistent"},
+		{name: "missing size", workspace: nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspacePersistent}, wantError: "positive"},
+		{name: "zero size", workspace: persistentWorkspace("0", ""), wantError: "positive"},
+		{name: "ephemeral size", workspace: persistentWorkspace("1Gi", ""), wantError: ""},
+		{name: "unnormalized class", workspace: persistentWorkspace("1Gi", " managed-csi"), wantError: "normalized"},
+		{name: "invalid class", workspace: persistentWorkspace("1Gi", "Managed_CSI"), wantError: "DNS subdomain"},
+	}
+	// Convert the dedicated ephemeral-size case after constructing a quantity.
+	tests[6].workspace.Mode = nvtv1alpha1.AgentRunWorkspaceEphemeral
+	tests[6].wantError = "require mode Persistent"
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := testAgentRun()
+			run.Spec.Workspace = test.workspace
+			err := ValidateAgentRunWorkspace(run)
+			if test.wantError == "" && err != nil {
+				t.Fatalf("validate workspace: %v", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("error = %v, want substring %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestPersistentWorkspaceDeepCopyDoesNotAliasQuantity(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("5Gi", "")
+	copy := run.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	copy.Spec.Workspace.Size.Add(resource.MustParse("1Gi"))
+	if run.Spec.Workspace.Size.Cmp(resource.MustParse("5Gi")) != 0 || copy.Spec.Workspace.Size.Cmp(resource.MustParse("6Gi")) != 0 {
+		t.Fatalf("workspace quantity was aliased: original=%s copy=%s", run.Spec.Workspace.Size, copy.Spec.Workspace.Size)
+	}
+}
+
+func TestEphemeralWorkspaceCreatesNoPVC(t *testing.T) {
+	for _, mode := range []nvtv1alpha1.AgentRunWorkspaceMode{"", nvtv1alpha1.AgentRunWorkspaceEphemeral} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			scheme := testScheme(t)
+			run := testAgentRun()
+			run.Spec.Workspace.Mode = mode
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+				WithObjects(run, testBrokerAgentsConfigMap(run.Namespace)).Build()
+			reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			claims := &corev1.PersistentVolumeClaimList{}
+			if err := k8sClient.List(ctx, claims, client.InNamespace(run.Namespace)); err != nil {
+				t.Fatalf("list PVCs: %v", err)
+			}
+			if len(claims.Items) != 0 {
+				t.Fatalf("ephemeral run created PVCs: %#v", claims.Items)
+			}
+			pod := getAgentPod(ctx, t, k8sClient, run)
+			volume := requireVolume(t, pod, workspaceVolumeName)
+			if volume.EmptyDir == nil || volume.PersistentVolumeClaim != nil {
+				t.Fatalf("ephemeral workspace shape changed: %#v", volume.VolumeSource)
+			}
+		})
+	}
+}
+
+func TestDesiredPersistentWorkspacePVC(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("20Gi", "managed-csi")
+	claim, err := DesiredWorkspacePVC(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired PVC: %v", err)
+	}
+	if claim.Name != WorkspacePVCName(run.Name) || claim.Namespace != run.Namespace {
+		t.Fatalf("unexpected PVC identity: %s/%s", claim.Namespace, claim.Name)
+	}
+	assertOwnedByAgentRun(t, claim.OwnerReferences, run)
+	if !reflect.DeepEqual(claim.Spec.AccessModes, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}) {
+		t.Fatalf("access modes = %#v", claim.Spec.AccessModes)
+	}
+	if claim.Spec.VolumeMode == nil || *claim.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
+		t.Fatalf("volume mode = %#v", claim.Spec.VolumeMode)
+	}
+	if claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != "managed-csi" {
+		t.Fatalf("storage class = %#v", claim.Spec.StorageClassName)
+	}
+	if got := claim.Spec.Resources.Requests[corev1.ResourceStorage]; got.Cmp(resource.MustParse("20Gi")) != 0 {
+		t.Fatalf("storage request = %s", got.String())
+	}
+}
+
+func TestDesiredAgentPodPersistentWorkspaceAndHome(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		user     nvtv1alpha1.AgentRunRuntimeUser
+		home     string
+		ownerArg string
+	}{
+		{name: "root", home: "/root", ownerArg: "0:0"},
+		{name: "non-root", user: nvtv1alpha1.AgentRunUserNonRoot, home: agentNonRootHome, ownerArg: "1000:1000"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run := testAgentRun()
+			run.Spec.Runtime.User = test.user
+			run.Spec.Workspace = persistentWorkspace("5Gi", "")
+			pod, err := DesiredAgentPod(run, testScheme(t))
+			if err != nil {
+				t.Fatalf("desired Pod: %v", err)
+			}
+			volume := requireVolume(t, *pod, workspaceVolumeName)
+			if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != WorkspacePVCName(run.Name) {
+				t.Fatalf("workspace volume = %#v", volume.VolumeSource)
+			}
+			agent := requireContainer(t, *pod, "agent")
+			assertVolumeMountAt(t, agent, workspaceVolumeName, workspaceMountPath, persistentWorkspaceSubPath, false)
+			assertVolumeMountAt(t, agent, workspaceVolumeName, test.home, persistentHomeSubPath, false)
+			dind := requireInitContainer(t, *pod, "docker")
+			assertVolumeMount(t, dind, workspaceVolumeName, workspaceMountPath, persistentWorkspaceSubPath, false)
+			initializer := requireInitContainer(t, *pod, "persistent-storage-init")
+			assertVolumeMount(t, initializer, workspaceVolumeName, persistentStorageInitMountPath, "", false)
+			command := strings.Join(append(initializer.Command, initializer.Args...), " ")
+			for _, expected := range []string{"mkdir -p", "/workspace", "/home", "chown " + test.ownerArg, "chmod 0770", "chmod 0700"} {
+				if !strings.Contains(command, expected) {
+					t.Fatalf("initializer command %q missing %q", command, expected)
+				}
+			}
+		})
+	}
+}
+
+func TestPersistentWorkspaceKeepsSecurityMaterialOnSeparateVolumes(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("5Gi", "")
+	run.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	run.Spec.EgressEnforcement = true
+	run.Spec.EgressAllowInsecureBroker = true
+	run.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"api.example.test:443"},
+	}}}
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired Pod: %v", err)
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == workspaceVolumeName {
+			continue
+		}
+		if volume.PersistentVolumeClaim != nil {
+			t.Fatalf("security/config volume %q unexpectedly uses persistent claim: %#v", volume.Name, volume.VolumeSource)
+		}
+	}
+	agent := requireContainer(t, *pod, "agent")
+	assertVolumeMount(t, agent, "agent-config", agentConfigVolumeDir, "", true)
+	assertVolumeMount(t, agent, egressCAVolumeName, egressCAMountPath, "", true)
+	if findEnvVar(agent, brokerTokenKey) != nil {
+		t.Fatalf("literal-zero-secret agent unexpectedly received broker token: %#v", agent.Env)
+	}
+}
+
+func TestPersistentHomeCannotOverrideRefreshedRuntimeAuth(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("5Gi", "")
+	run.Spec.RuntimeAuth = &nvtv1alpha1.AgentRunRuntimeAuth{SecretName: "current-codex-auth"}
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("desired Pod: %v", err)
+	}
+	agent := requireContainer(t, *pod, "agent")
+	assertVolumeMountAt(t, agent, workspaceVolumeName, "/root", persistentHomeSubPath, false)
+	assertVolumeMount(t, agent, runtimeAuthHomeName, "/root/.codex", "", false)
+	authSource := requireVolume(t, *pod, runtimeAuthSourceName)
+	if authSource.Secret == nil || authSource.Secret.SecretName != "current-codex-auth" {
+		t.Fatalf("runtime auth source = %#v", authSource.VolumeSource)
+	}
+	if requireVolume(t, *pod, runtimeAuthHomeName).EmptyDir == nil {
+		t.Fatal("runtime auth home must remain a fresh emptyDir overlay")
+	}
+	if len(pod.Spec.InitContainers) < 2 || pod.Spec.InitContainers[0].Name != "persistent-storage-init" || pod.Spec.InitContainers[1].Name != "runtime-auth-copy" {
+		t.Fatalf("storage/auth initialization order = %#v", pod.Spec.InitContainers)
+	}
+}
+
+func TestReconcilePersistentWorkspaceSupportsWaitForFirstConsumerAndReusesPVC(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("5Gi", "managed-csi")
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}, &corev1.PersistentVolumeClaim{}).
+		WithObjects(run, testBrokerAgentsConfigMap(run.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)})
+	if err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	if result.RequeueAfter != workspacePVCReadyRequeue {
+		t.Fatalf("requeue = %s", result.RequeueAfter)
+	}
+	updatedRun := &nvtv1alpha1.AgentRun{}
+	if err := k8sClient.Get(ctx, clientKey(run), updatedRun); err != nil {
+		t.Fatal(err)
+	}
+	pending := meta.FindStatusCondition(updatedRun.Status.Conditions, ConditionWorkspaceReady)
+	if updatedRun.Status.Phase != nvtv1alpha1.AgentRunPhasePending || pending == nil || pending.Status != metav1.ConditionFalse || pending.Reason != "WorkspacePending" {
+		t.Fatalf("pending workspace status not surfaced: %#v", updatedRun.Status)
+	}
+	claim := getWorkspacePVC(ctx, t, k8sClient, run)
+	pod := getAgentPod(ctx, t, k8sClient, run)
+	volume := requireVolume(t, pod, workspaceVolumeName)
+	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != claim.Name {
+		t.Fatalf("Pending WaitForFirstConsumer claim is not referenced by Pod: %#v", volume.VolumeSource)
+	}
+	claim.Annotations = map[string]string{"test.nvt.dev/preserved": "true"}
+	if err := k8sClient.Update(ctx, claim); err != nil {
+		t.Fatalf("mark PVC: %v", err)
+	}
+	claim = getWorkspacePVC(ctx, t, k8sClient, run)
+	claim.Status.Phase = corev1.ClaimBound
+	if err := k8sClient.Status().Update(ctx, claim); err != nil {
+		t.Fatalf("bind PVC: %v", err)
+	}
+	if result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatalf("bound reconcile: %v", err)
+	} else if result.RequeueAfter == workspacePVCReadyRequeue {
+		t.Fatalf("bound PVC was still treated as pending: %#v", getWorkspacePVC(ctx, t, k8sClient, run).Status)
+	}
+	if err := k8sClient.Delete(ctx, &pod); err != nil {
+		t.Fatalf("delete agent Pod: %v", err)
+	}
+	// A fresh reconciler models an operator restart; it must reuse the claim.
+	reconciler = &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatalf("replacement reconcile: %v", err)
+	}
+	reused := getWorkspacePVC(ctx, t, k8sClient, run)
+	if reused.Annotations["test.nvt.dev/preserved"] != "true" {
+		t.Fatalf("PVC was replaced or lost its marker: %#v", reused.Annotations)
+	}
+	replacement := getAgentPod(ctx, t, k8sClient, run)
+	volume = requireVolume(t, replacement, workspaceVolumeName)
+	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != reused.Name {
+		t.Fatalf("replacement Pod does not reuse claim: %#v", volume.VolumeSource)
+	}
+	if err := k8sClient.Get(ctx, clientKey(run), updatedRun); err != nil {
+		t.Fatal(err)
+	}
+	ready := meta.FindStatusCondition(updatedRun.Status.Conditions, ConditionWorkspaceReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("bound workspace readiness not surfaced: %#v", updatedRun.Status.Conditions)
+	}
+}
+
+func TestReconcileRecreatesMissingPersistentClaimBeforeReplacementPod(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("5Gi", "")
+	claim, err := DesiredWorkspacePVC(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim.Status.Phase = corev1.ClaimBound
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}, &corev1.PersistentVolumeClaim{}).
+		WithObjects(run, claim, testBrokerAgentsConfigMap(run.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+	if err := k8sClient.Delete(ctx, claim); err != nil {
+		t.Fatalf("delete PVC: %v", err)
+	}
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != workspacePVCReadyRequeue {
+		t.Fatalf("requeue = %s", result.RequeueAfter)
+	}
+	_ = getWorkspacePVC(ctx, t, k8sClient, run)
+	replacement := getAgentPod(ctx, t, k8sClient, run)
+	volume := requireVolume(t, replacement, workspaceVolumeName)
+	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != WorkspacePVCName(run.Name) {
+		t.Fatalf("replacement Pod does not reference recreated Pending PVC: %#v", volume.VolumeSource)
+	}
+}
+
+func TestReconcilePersistentWorkspaceRejectsOwnershipAndSpecDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*corev1.PersistentVolumeClaim)
+		want   string
+	}{
+		{name: "foreign owner", mutate: func(claim *corev1.PersistentVolumeClaim) { claim.OwnerReferences = nil }, want: "not controlled"},
+		{name: "size drift", mutate: func(claim *corev1.PersistentVolumeClaim) {
+			claim.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("6Gi")
+		}, want: "size differs"},
+		{name: "lost claim", mutate: func(claim *corev1.PersistentVolumeClaim) { claim.Status.Phase = corev1.ClaimLost }, want: "is Lost"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := testScheme(t)
+			run := testAgentRun()
+			run.Spec.Workspace = persistentWorkspace("5Gi", "managed-csi")
+			claim, err := DesiredWorkspacePVC(run, scheme)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim.Status.Phase = corev1.ClaimBound
+			test.mutate(claim)
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&nvtv1alpha1.AgentRun{}, &corev1.PersistentVolumeClaim{}).
+				WithObjects(run, claim, testBrokerAgentsConfigMap(run.Namespace)).Build()
+			reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+			pod := &corev1.Pod{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, pod); !errors.IsNotFound(err) {
+				t.Fatalf("invalid workspace created Pod: %#v, get error=%v", pod, err)
+			}
+		})
+	}
+}
+
+func TestPersistentWorkspaceRejectsFileBundleCredentials(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("5Gi", "")
+	run.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{Provider: "token-main"}}}
+	err := ValidateAgentRunWorkspace(run)
+	if err == nil || !strings.Contains(err.Error(), "file-bundle") {
+		t.Fatalf("error = %v, want file-bundle persistence rejection", err)
 	}
 }
 
@@ -3277,6 +3621,38 @@ func TestAgentRunCRDSchemaIncludesPromptText(t *testing.T) {
 	}
 }
 
+func TestAgentRunCRDSchemaIncludesPersistentWorkspace(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatalf("read AgentRun CRD: %v", err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("parse AgentRun CRD: %v", err)
+	}
+	workspace, ok := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
+		"spec", "properties", "workspace",
+	).(map[string]any)
+	if !ok {
+		t.Fatalf("workspace schema = %#v", workspace)
+	}
+	mode := crdPath(t, workspace, "properties", "mode").(map[string]any)
+	if mode["default"] != "Ephemeral" || !reflect.DeepEqual(mode["enum"], []any{"Ephemeral", "Persistent"}) {
+		t.Fatalf("workspace mode schema = %#v", mode)
+	}
+	if crdPath(t, workspace, "properties", "size", "x-kubernetes-int-or-string") != true {
+		t.Fatal("workspace size must use Kubernetes quantity schema")
+	}
+	if crdPath(t, workspace, "properties", "storageClassName", "type") != "string" {
+		t.Fatal("workspace storageClassName must be a string")
+	}
+	validations, ok := workspace["x-kubernetes-validations"].([]any)
+	if !ok || len(validations) < 2 {
+		t.Fatalf("workspace validations = %#v", workspace["x-kubernetes-validations"])
+	}
+}
+
 func TestAgentRunCRDSchemaIncludesRuntimeAuthSecretName(t *testing.T) {
 	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
 	if err != nil {
@@ -4046,6 +4422,24 @@ func testAgentRun() *nvtv1alpha1.AgentRun {
 	}
 }
 
+func persistentWorkspace(size, storageClass string) nvtv1alpha1.AgentRunWorkspace {
+	quantity := resource.MustParse(size)
+	return nvtv1alpha1.AgentRunWorkspace{
+		Mode:             nvtv1alpha1.AgentRunWorkspacePersistent,
+		Size:             &quantity,
+		StorageClassName: storageClass,
+	}
+}
+
+func getWorkspacePVC(ctx context.Context, t *testing.T, k8sClient client.Client, agentRun *nvtv1alpha1.AgentRun) *corev1.PersistentVolumeClaim {
+	t.Helper()
+	claim := &corev1.PersistentVolumeClaim{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: agentRun.Namespace, Name: WorkspacePVCName(agentRun.Name)}, claim); err != nil {
+		t.Fatalf("get workspace PVC: %v", err)
+	}
+	return claim
+}
+
 func terminalAgentRun(phase nvtv1alpha1.AgentRunPhase, finishedAt metav1.Time) *nvtv1alpha1.AgentRun {
 	return terminalAgentRunWithRunRetention(phase, finishedAt, ptrTo[int64](0))
 }
@@ -4490,6 +4884,19 @@ func assertVolumeMount(t *testing.T, container corev1.Container, name, mountPath
 		}
 	}
 	t.Fatalf("volume mount %q not found in %#v", name, container.VolumeMounts)
+}
+
+func assertVolumeMountAt(t *testing.T, container corev1.Container, name, mountPath, subPath string, readOnly bool) {
+	t.Helper()
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == name && mount.MountPath == mountPath {
+			if mount.SubPath != subPath || mount.ReadOnly != readOnly {
+				t.Fatalf("unexpected volume mount %q at %q: %#v", name, mountPath, mount)
+			}
+			return
+		}
+	}
+	t.Fatalf("volume mount %q at %q not found in %#v", name, mountPath, container.VolumeMounts)
 }
 
 func assertNoVolumeMount(t *testing.T, container corev1.Container, name string) {

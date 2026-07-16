@@ -155,6 +155,7 @@ func (in *AgentScheduleTemplate) DeepCopy() *AgentScheduleTemplate {
 	}
 	out := new(AgentScheduleTemplate)
 	*out = *in
+	out.Workspace = *in.Workspace.DeepCopy()
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName

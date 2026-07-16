@@ -1,6 +1,11 @@
 package producer
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+)
 
 func TestConfigDefaultOperatorCallbackBaseURL(t *testing.T) {
 	cfg := Config{
@@ -122,6 +127,54 @@ func TestConfigRejectsNegativeAgentRunTTL(t *testing.T) {
 	want := "agentRun.ttl.completedTTLSeconds must be greater than or equal to 0"
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestConfigPersistentWorkspace(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.AgentRun.WorkspaceMode = "Persistent"
+	cfg.AgentRun.WorkspaceSize = "20Gi"
+	cfg.AgentRun.WorkspaceStorageClassName = "managed-csi"
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatalf("validate persistent workspace: %v", err)
+	}
+	workspace, err := configuredAgentRunWorkspace(cfg.AgentRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Size == nil || workspace.Size.Cmp(resource.MustParse("20Gi")) != 0 || workspace.StorageClassName != "managed-csi" {
+		t.Fatalf("workspace = %#v", workspace)
+	}
+}
+
+func TestConfigRejectsInvalidWorkspaceCombinations(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*AgentRunConfig)
+		want   string
+	}{
+		{name: "unknown mode", mutate: func(config *AgentRunConfig) { config.WorkspaceMode = "Shared" }, want: "must be Ephemeral or Persistent"},
+		{name: "persistent missing size", mutate: func(config *AgentRunConfig) { config.WorkspaceMode = "Persistent" }, want: "workspaceSize is required"},
+		{name: "malformed size", mutate: func(config *AgentRunConfig) { config.WorkspaceMode, config.WorkspaceSize = "Persistent", "twenty" }, want: "positive Kubernetes resource quantity"},
+		{name: "zero size", mutate: func(config *AgentRunConfig) { config.WorkspaceMode, config.WorkspaceSize = "Persistent", "0" }, want: "positive Kubernetes resource quantity"},
+		{name: "ephemeral size", mutate: func(config *AgentRunConfig) { config.WorkspaceMode, config.WorkspaceSize = "Ephemeral", "1Gi" }, want: "require workspaceMode Persistent"},
+		{name: "invalid storage class", mutate: func(config *AgentRunConfig) {
+			config.WorkspaceMode, config.WorkspaceSize, config.WorkspaceStorageClassName = "Persistent", "1Gi", " Managed_CSI"
+		}, want: "normalized DNS subdomain"},
+		{name: "legacy broker grant", mutate: func(config *AgentRunConfig) {
+			config.WorkspaceMode, config.WorkspaceSize = "Persistent", "1Gi"
+			config.BrokerGrants = []BrokerGrant{{Provider: "github-main"}}
+		}, want: "file-bundle brokerGrants"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			test.mutate(&cfg.AgentRun)
+			err := cfg.ApplyDefaultsAndValidate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want substring %q", err, test.want)
+			}
+		})
 	}
 }
 
