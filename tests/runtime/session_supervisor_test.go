@@ -58,7 +58,7 @@ func TestAgentSessionSupervisorTerminationMessageWinsSessionLossRace(t *testing.
 	cmd, output := harness.start(t)
 	waitForFile(t, harness.observed, time.Second)
 
-	if err := os.WriteFile(harness.termination, []byte("lifecycle complete\n"), 0o600); err != nil {
+	if err := os.WriteFile(harness.termination, []byte(`{"nvtLifecycleEvent":"plugin.smoke.completed","outcome":"completed"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(harness.sessionState); err != nil {
@@ -69,6 +69,97 @@ func TestAgentSessionSupervisorTerminationMessageWinsSessionLossRace(t *testing.
 	}
 	if strings.Contains(output.String(), "disappeared") {
 		t.Fatalf("lifecycle completion was misclassified as session loss:\n%s", output.String())
+	}
+}
+
+func TestAgentSessionSupervisorRejectsInvalidTerminationMessages(t *testing.T) {
+	tests := map[string][]byte{
+		"empty":     {},
+		"malformed": []byte(`{"nvtLifecycleEvent":`),
+		"unrelated": []byte(`{"message":"complete"}`),
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			harness := newSessionSupervisorHarness(t)
+			cmd, output := harness.start(t)
+			waitForFile(t, harness.observed, time.Second)
+
+			if err := os.WriteFile(harness.termination, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(harness.sessionState); err != nil {
+				t.Fatal(err)
+			}
+			err := waitForSupervisor(t, cmd, 2*time.Second)
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+				t.Fatalf("exit error = %v, output:\n%s", err, output.String())
+			}
+			if !strings.Contains(output.String(), "tmux session test-agent disappeared") {
+				t.Fatalf("invalid termination message hid session loss:\n%s", output.String())
+			}
+		})
+	}
+}
+
+func TestAgentSessionSupervisorDetectsRealTmuxSessionLoss(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is unavailable; real session supervision integration test skipped")
+	}
+
+	root := repoRoot(t)
+	tmuxDir := t.TempDir()
+	session := "nvt-supervisor-" + strings.ReplaceAll(t.Name(), "/", "-")
+	env := mergedEnv([]string{"TMUX_TMPDIR=" + tmuxDir})
+	newSession := exec.Command(tmux, "new-session", "-d", "-s", session, "sleep 30")
+	newSession.Env = env
+	if output, err := newSession.CombinedOutput(); err != nil {
+		t.Fatalf("create real tmux session: %v\n%s", err, output)
+	}
+	t.Cleanup(func() {
+		killSession := exec.Command(tmux, "kill-session", "-t", session)
+		killSession.Env = env
+		_ = killSession.Run()
+	})
+
+	cmd := exec.Command("bash", filepath.Join(root, "runtime", "core", "supervise-agent-session.sh"))
+	cmd.Env = mergedEnv([]string{
+		"TMUX_TMPDIR=" + tmuxDir,
+		"AGENT_SESSION=" + session,
+		"NVT_AGENT_SESSION_SUPERVISOR_INTERVAL_SECONDS=0.03",
+		"NVT_TERMINATION_MESSAGE_PATH=" + filepath.Join(t.TempDir(), "termination-log"),
+	})
+	output := &bytes.Buffer{}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	time.Sleep(100 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("supervisor exited before real tmux session was killed: %v\n%s", err, output.String())
+	}
+
+	killSession := exec.Command(tmux, "kill-session", "-t", session)
+	killSession.Env = env
+	if killOutput, err := killSession.CombinedOutput(); err != nil {
+		t.Fatalf("kill real tmux session: %v\n%s", err, killOutput)
+	}
+	started := time.Now()
+	err = waitForSupervisor(t, cmd, 2*time.Second)
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		t.Fatalf("exit error = %v, output:\n%s", err, output.String())
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("real tmux session loss took %s to terminate", elapsed)
 	}
 }
 

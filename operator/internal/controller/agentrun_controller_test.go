@@ -3847,7 +3847,10 @@ func TestSyncAgentRunStatusFromPodDoesNotDowngradeCompleted(t *testing.T) {
 	agentRun.Status.Reason = "Completed by lifecycle event plugin.agent.signal.done"
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: AgentPodName(agentRun.Name)},
-		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{
+			{Name: roleLabelAgent, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}},
+			{Name: roleLabelEgressd, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		}},
 	}
 
 	changed := SyncAgentRunStatusFromPod(agentRun, pod, metav1.Now())
@@ -3864,6 +3867,95 @@ func TestSyncAgentRunStatusFromPodDoesNotDowngradeCompleted(t *testing.T) {
 	if !agentRun.Status.FinishedAt.Equal(&finishedAt) ||
 		agentRun.Status.Reason != "Completed by lifecycle event plugin.agent.signal.done" {
 		t.Fatalf("terminal status details changed: %#v", agentRun.Status)
+	}
+}
+
+func TestSyncAgentRunStatusFromPodFailsWhenAgentContainerTerminates(t *testing.T) {
+	now := metav1.NewTime(time.Unix(123, 0))
+	agentRun := testAgentRun()
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: AgentPodName(agentRun.Name)},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{
+			{Name: roleLabelAgent, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: "untrusted diagnostic"}}},
+			{Name: roleLabelEgressd, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		}},
+	}
+
+	if !SyncAgentRunStatusFromPod(agentRun, pod, now) {
+		t.Fatal("expected terminated agent container to update AgentRun status")
+	}
+	if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed {
+		t.Fatalf("expected Failed phase, got %q", agentRun.Status.Phase)
+	}
+	if agentRun.Status.FinishedAt == nil || !agentRun.Status.FinishedAt.Equal(&now) {
+		t.Fatalf("expected finishedAt %s, got %#v", now, agentRun.Status.FinishedAt)
+	}
+	if agentRun.Status.Reason != unexpectedAgentExitReason || strings.Contains(agentRun.Status.Reason, "untrusted") {
+		t.Fatalf("unexpected or unsanitized reason %q", agentRun.Status.Reason)
+	}
+}
+
+func TestSyncAgentRunLifecycleFromPodTerminationWinsAgentContainerFailure(t *testing.T) {
+	tests := []struct {
+		name           string
+		event          string
+		expectedPhase  nvtv1alpha1.AgentRunPhase
+		expectedReason string
+	}{
+		{name: "completed", event: "plugin.smoke.completed", expectedPhase: nvtv1alpha1.AgentRunPhaseCompleted, expectedReason: "Completed by lifecycle event plugin.smoke.completed"},
+		{name: "failed", event: "plugin.smoke.failed", expectedPhase: nvtv1alpha1.AgentRunPhaseFailed, expectedReason: "Failed by lifecycle event plugin.smoke.failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := metav1.NewTime(time.Unix(123, 0))
+			agentRun := transparentAgentRun(t)
+			agentRun.Spec.Lifecycle = &nvtv1alpha1.AgentRunLifecycle{
+				CompleteOn: []string{"plugin.smoke.completed"},
+				FailOn:     []string{"plugin.smoke.failed"},
+			}
+			agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: AgentPodName(agentRun.Name)},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: roleLabelAgent,
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 1,
+						Message:  fmt.Sprintf(`{"nvtLifecycleEvent":%q,"outcome":%q}`, test.event, test.name),
+					}},
+				}}},
+			}
+
+			if !SyncAgentRunLifecycleFromPodTermination(agentRun, pod, now) {
+				t.Fatal("expected lifecycle transition")
+			}
+			SyncAgentRunStatusFromPod(agentRun, pod, now)
+			if agentRun.Status.Phase != test.expectedPhase || agentRun.Status.Reason != test.expectedReason {
+				t.Fatalf("lifecycle transition was overwritten: %#v", agentRun.Status)
+			}
+		})
+	}
+}
+
+func TestSyncAgentRunStatusFromPodIgnoresRunningAgentAndTerminatedEgressd(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
+	agentRun.Status.PodName = AgentPodName(agentRun.Name)
+	startedAt := metav1.Now()
+	agentRun.Status.StartedAt = &startedAt
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: AgentPodName(agentRun.Name)},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{
+			{Name: roleLabelAgent, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			{Name: roleLabelEgressd, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}},
+		}},
+	}
+
+	if SyncAgentRunStatusFromPod(agentRun, pod, metav1.Now()) {
+		t.Fatal("running agent container unexpectedly changed AgentRun status")
+	}
+	if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseRunning || agentRun.Status.FinishedAt != nil {
+		t.Fatalf("running agent was marked terminal: %#v", agentRun.Status)
 	}
 }
 

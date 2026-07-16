@@ -129,6 +129,7 @@ const (
 	completedLifecycleReason         = "Completed by lifecycle event "
 	failedLifecycleReason            = "Failed by lifecycle event "
 	activeDeadlineReason             = "Active deadline exceeded"
+	unexpectedAgentExitReason        = "Agent container terminated unexpectedly"
 	generatedTokenByteLength         = 32
 	defaultRunRetentionSeconds       = 30 * 24 * 60 * 60
 )
@@ -4386,6 +4387,15 @@ func SyncAgentRunStatusFromPod(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod, 
 	}
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return changed
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != roleLabelAgent || status.State.Terminated == nil {
+			continue
+		}
+		agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseFailed
+		agentRun.Status.FinishedAt = &now
+		agentRun.Status.Reason = unexpectedAgentExitReason
+		return true
 	}
 
 	switch pod.Status.Phase {
