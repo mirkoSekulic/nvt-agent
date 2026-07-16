@@ -3804,6 +3804,7 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read AgentRun CRD: %v", err)
 	}
+	assertStrictCRDSchema(t, data)
 	var crd map[string]any
 	if err := yaml.Unmarshal(data, &crd); err != nil {
 		t.Fatalf("parse AgentRun CRD: %v", err)
@@ -3821,7 +3822,7 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 		t.Fatalf("expected egressEnforcement default false, got %#v", crdPath(t, spec, "egressEnforcement"))
 	}
 	legacy := crdPath(t, spec, "egressForwardProxy").(map[string]any)
-	if legacy["type"] != "boolean" || legacy["deprecated"] != true {
+	if legacy["type"] != "boolean" || !strings.Contains(fmt.Sprint(legacy["description"]), "Deprecated:") {
 		t.Fatalf("legacy egressForwardProxy must remain only as a deprecated tombstone: %#v", legacy)
 	}
 	validations := crdPath(t, crd,
@@ -5244,6 +5245,14 @@ func hasCRDValidation(validations []any, rule, messageFragment string) bool {
 		}
 	}
 	return false
+}
+
+func assertStrictCRDSchema(t *testing.T, data []byte) {
+	t.Helper()
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.UnmarshalStrict(data, &crd); err != nil {
+		t.Fatalf("CRD contains a field unsupported by Kubernetes: %v", err)
+	}
 }
 
 func assertAgentRunPhase(

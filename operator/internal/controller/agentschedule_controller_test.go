@@ -68,6 +68,7 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read AgentSchedule CRD: %v", err)
 	}
+	assertStrictCRDSchema(t, data)
 	chartData, err := os.ReadFile("../../../charts/nvt/crds/nvt.dev_agentschedules.yaml")
 	if err != nil || !bytes.Equal(data, chartData) {
 		t.Fatalf("generated and Helm AgentSchedule CRDs differ: %v", err)
@@ -89,7 +90,7 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	}
 	profileProperties := crdPath(t, properties, "profiles", "items", "properties").(map[string]any)
 	legacy := crdPath(t, profileProperties, "egressForwardProxy").(map[string]any)
-	if legacy["type"] != "boolean" || legacy["deprecated"] != true {
+	if legacy["type"] != "boolean" || !strings.Contains(fmt.Sprint(legacy["description"]), "Deprecated:") {
 		t.Fatalf("legacy profile egressForwardProxy must remain only as a deprecated tombstone: %#v", legacy)
 	}
 	validations := crdPath(t, properties, "profiles", "items", "x-kubernetes-validations").([]any)

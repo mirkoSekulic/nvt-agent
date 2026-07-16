@@ -94,8 +94,7 @@ spec:
                   default: false
                 egressForwardProxy:
                   type: boolean
-                  deprecated: true
-                  description: Deprecated migration tombstone; any presence is rejected. Use egressTransport.
+                  description: 'Deprecated: migration tombstone; any presence is rejected. Use egressTransport.'
                 egressTransport:
                   type: string
                   enum:
