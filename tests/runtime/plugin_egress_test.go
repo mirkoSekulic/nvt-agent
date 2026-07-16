@@ -89,6 +89,148 @@ func TestPluginEgressAbsentAndDirectModesAreUnchanged(t *testing.T) {
 	}
 }
 
+func TestPluginEgressScopesDoctorAndHealthCommands(t *testing.T) {
+	f := newFixture(t)
+	f.writePluginEgressRuntime("github-main", "company/oauth")
+	firstDoctor := filepath.Join(f.home, "first-doctor")
+	firstHealth := filepath.Join(f.home, "first-health")
+	secondDoctor := filepath.Join(f.home, "second-doctor")
+	secondHealth := filepath.Join(f.home, "second-health")
+	command := func(name, output string) string {
+		return f.writeTool(name, "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s\\n' \"${HTTPS_PROXY:-}\" \"${HTTP_PROXY:-}\" \"${NVT_PLUGIN_EGRESS_PROVIDER:-}\" \"${NVT_EGRESS_BROKER_TOKEN:-}\" \"${NVT_PLUGIN_NAME:-}\" > "+shellQuote(output)+"\n")
+	}
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: first
+    source: custom
+    command: /bin/true
+    egress: {provider: github-main}
+    doctor: {command: %s}
+    health: {readiness: true, command: %s}
+  - name: second
+    source: custom
+    command: /bin/true
+    egress: {provider: company/oauth}
+    doctor: {command: %s}
+    health: {readiness: true, command: %s}
+`, quoteYAML(command("first-doctor-command", firstDoctor)), quoteYAML(command("first-health-command", firstHealth)), quoteYAML(command("second-doctor-command", secondDoctor)), quoteYAML(command("second-health-command", secondHealth))))
+	for _, name := range []string{"first", "second"} {
+		dir := filepath.Join(f.state, "plugins", name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"ready":true,"status":"running"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := []string{
+		"NVT_AGENT_CONFIG_FILE=" + config,
+		"NVT_EGRESS_MODE=mediated",
+		"AGENT_SESSION=nvt-missing-session",
+		"CODE_SERVER_PORT=1",
+		"NVT_AGENTD_SOCKET=/nonexistent",
+		"NVT_EGRESS_BROKER_TOKEN=doctor-health-secret-canary",
+		"HTTP_PROXY=http://must-not-propagate:8470",
+		"NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN=http://github-main@127.0.0.1:8470",
+		"NVT_EGRESS_FORWARD_PROXY_URL_COMPANY_OAUTH=http://company%2Foauth@127.0.0.1:8470",
+	}
+	for _, name := range []string{"first", "second"} {
+		f.runWithEnv("python3", true, env, filepath.Join(f.root, "runtime", "core", "doctor.py"), "--plugin", name)
+	}
+	f.runWithEnv("python3", false, env, filepath.Join(f.root, "runtime", "core", "health.py"), "--json")
+
+	want := map[string]string{
+		firstDoctor:  "http://github-main@127.0.0.1:8470||github-main||first",
+		firstHealth:  "http://github-main@127.0.0.1:8470||github-main||first",
+		secondDoctor: "http://company%2Foauth@127.0.0.1:8470||company/oauth||second",
+		secondHealth: "http://company%2Foauth@127.0.0.1:8470||company/oauth||second",
+	}
+	for path, expected := range want {
+		if got := strings.TrimSpace(mustReadFile(t, path)); got != expected {
+			t.Fatalf("scoped command %s = %q, want %q", filepath.Base(path), got, expected)
+		}
+	}
+}
+
+func TestPluginEgressDoctorAndHealthPreserveDirectAndNoEgress(t *testing.T) {
+	f := newFixture(t)
+	directOut := filepath.Join(f.home, "direct-doctor")
+	directHealthOut := filepath.Join(f.home, "direct-health")
+	plainDoctorOut := filepath.Join(f.home, "plain-doctor")
+	plainOut := filepath.Join(f.home, "plain-health")
+	directCommand := f.writeTool("direct-doctor-command", "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"${HTTPS_PROXY:-}\" \"${NVT_PLUGIN_EGRESS_PROVIDER:-}\" > "+shellQuote(directOut)+"\n")
+	directHealthCommand := f.writeTool("direct-health-command", "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"${HTTPS_PROXY:-}\" \"${NVT_PLUGIN_EGRESS_PROVIDER:-}\" > "+shellQuote(directHealthOut)+"\n")
+	plainDoctorCommand := f.writeTool("plain-doctor-command", "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"${HTTPS_PROXY:-}\" \"${NVT_PLUGIN_EGRESS_PROVIDER:-}\" > "+shellQuote(plainDoctorOut)+"\n")
+	plainCommand := f.writeTool("plain-health-command", "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"${HTTPS_PROXY:-}\" \"${NVT_PLUGIN_EGRESS_PROVIDER:-}\" > "+shellQuote(plainOut)+"\n")
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: direct
+    source: custom
+    egress: {provider: github-main}
+    doctor: {command: %s}
+    health: {readiness: true, command: %s}
+  - name: plain
+    source: custom
+    doctor: {command: %s}
+    health: {readiness: true, command: %s}
+`, quoteYAML(directCommand), quoteYAML(directHealthCommand), quoteYAML(plainDoctorCommand), quoteYAML(plainCommand)))
+	for _, name := range []string{"direct", "plain"} {
+		dir := filepath.Join(f.state, "plugins", name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"ready":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := []string{"NVT_AGENT_CONFIG_FILE=" + config, "NVT_EGRESS_MODE=direct", "HTTPS_PROXY=http://ambient-direct:8080", "AGENT_SESSION=nvt-missing-session", "CODE_SERVER_PORT=1", "NVT_AGENTD_SOCKET=/nonexistent"}
+	f.runWithEnv("python3", true, env, filepath.Join(f.root, "runtime", "core", "doctor.py"), "--plugin", "direct")
+	f.runWithEnv("python3", true, env, filepath.Join(f.root, "runtime", "core", "doctor.py"), "--plugin", "plain")
+	f.runWithEnv("python3", false, env, filepath.Join(f.root, "runtime", "core", "health.py"), "--json")
+	for _, path := range []string{directOut, directHealthOut, plainDoctorOut, plainOut} {
+		if got := strings.TrimSpace(mustReadFile(t, path)); got != "http://ambient-direct:8080|" {
+			t.Fatalf("direct/no-egress command changed: %s = %q", filepath.Base(path), got)
+		}
+	}
+}
+
+func TestPluginEgressDoctorAndHealthFailBeforeInvalidCommand(t *testing.T) {
+	f := newFixture(t)
+	f.writePluginEgressRuntime("github-main")
+	doctorMarker := filepath.Join(f.home, "doctor-ran")
+	healthMarker := filepath.Join(f.home, "health-ran")
+	doctor := f.writeTool("invalid-doctor", "#!/usr/bin/env bash\ntouch "+shellQuote(doctorMarker)+"\n")
+	health := f.writeTool("invalid-health", "#!/usr/bin/env bash\ntouch "+shellQuote(healthMarker)+"\n")
+	config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: invalid
+    source: custom
+    egress: {provider: missing-provider}
+    doctor: {command: %s}
+    health: {readiness: true, command: %s}
+`, quoteYAML(doctor), quoteYAML(health)))
+	dir := filepath.Join(f.state, "plugins", "invalid")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"ready":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"NVT_AGENT_CONFIG_FILE=" + config, "NVT_EGRESS_MODE=mediated", "NVT_EGRESS_BROKER_TOKEN=doctor-health-secret-canary", "AGENT_SESSION=nvt-missing-session", "CODE_SERVER_PORT=1", "NVT_AGENTD_SOCKET=/nonexistent"}
+	doctorOutput := f.runWithEnv("python3", false, env, filepath.Join(f.root, "runtime", "core", "doctor.py"), "--plugin", "invalid")
+	healthOutput := f.runWithEnv("python3", false, env, filepath.Join(f.root, "runtime", "core", "health.py"), "--json")
+	for _, output := range []string{doctorOutput, healthOutput} {
+		if !strings.Contains(output, "plugin egress configuration is invalid") || strings.Contains(output, "doctor-health-secret-canary") {
+			t.Fatalf("unsafe or missing egress failure:\n%s", output)
+		}
+	}
+	for _, marker := range []string{doctorMarker, healthMarker} {
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("invalid scoped command ran: %s (%v)", marker, err)
+		}
+	}
+}
+
 func TestPluginEgressFailsBeforeLaunchForInvalidMediatedSelection(t *testing.T) {
 	f := newFixture(t)
 	marker := filepath.Join(f.home, "ran")

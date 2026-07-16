@@ -12,6 +12,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, "/usr/local/lib/nvt-agent")
 from shared.git_source import GitSourceError, acquire, resolve_executable, resolve_file
+from shared.plugin_egress import PluginEgressError, environment as plugin_egress_environment
 
 
 BUILTIN_PLUGIN_DIR = Path("/usr/local/lib/nvt-agent/plugins")
@@ -254,7 +255,10 @@ def run_plugin_doctor(plugin):
 
     config = object_value(plugin.get("config"), "plugin.config")
     plugin_config = write_plugin_config(name, config)
-    env = os.environ.copy()
+    try:
+        env = plugin_egress_environment(plugin, os.environ)
+    except PluginEgressError as error:
+        return [fail(f"plugin.{name}", f"plugin egress configuration is invalid: {error}")]
     env["NVT_PLUGIN_NAME"] = name
     env["NVT_PLUGIN_CONFIG"] = str(plugin_config)
 

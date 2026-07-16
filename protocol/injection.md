@@ -270,6 +270,13 @@ launch fails. It contains no credential and
 does not authorize the provider by itself. Direct mode and plugins without the
 declaration retain their existing environment.
 
+Provider-scoped proxy environment names normalize non-alphanumeric runs to `_`
+and uppercase the result. All configured mediated provider names must therefore
+have distinct normalized forms: names such as `github-main`, `github.main`, and
+`github_main` cannot coexist in one agent configuration. Bootstrap rejects a
+collision before exporting provider-scoped endpoints; it never overwrites or
+selects one implicitly.
+
 Controlled HTTP clients make ordinary requests without an Authorization
 placeholder. The selector on the CONNECT identifies the configured route and
 egressd obtains the headers from the broker. Placeholder headers and files

@@ -94,6 +94,10 @@ must be an exact injection-eligible mediated grant. Direct mode leaves networkin
 and omitting `egress` leaves all modes unchanged. Loopback callbacks remain in
 `NO_PROXY`.
 
+Provider names must remain unique after uppercase environment normalization
+(punctuation runs become `_`). Bootstrap rejects colliding names before plugin
+launch rather than making one valid provider unreachable.
+
 Exported tools are public inside the agent container: the agent, terminal users,
 and other plugins can call them. Do not export tools that require raw long-lived
 secrets in their plugin config. Secret-bearing operations should go through

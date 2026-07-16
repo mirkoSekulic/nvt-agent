@@ -155,6 +155,23 @@ def env_suffix(value):
     return suffix
 
 
+def validate_provider_env_suffixes(grants):
+    providers_by_suffix = {}
+    for index, grant in enumerate(grants):
+        if not isinstance(grant, dict):
+            raise SystemExit(f"egress.grants[{index}] must be an object")
+        provider = grant.get("provider")
+        if not isinstance(provider, str) or not provider:
+            raise SystemExit(f"egress.grants[{index}].provider must be a non-empty string")
+        suffix = env_suffix(provider)
+        previous = providers_by_suffix.get(suffix)
+        if previous is not None and previous != provider:
+            raise SystemExit(
+                "egress provider names collide after environment normalization; rename one provider"
+            )
+        providers_by_suffix[suffix] = provider
+
+
 def proxy_url_for_provider(proxy_url, provider):
     parts = urlsplit(proxy_url)
     if not parts.scheme or not parts.hostname:
@@ -414,7 +431,6 @@ def apply_git_redirect(provider, grant, hosts):
 
 
 def apply_mediated_egress(egress):
-    scrub_git_state()
     placeholder = egress.get("placeholder") or PLACEHOLDER
     if placeholder != PLACEHOLDER:
         raise SystemExit("egress.placeholder must use the documented NVT placeholder")
@@ -426,6 +442,9 @@ def apply_mediated_egress(egress):
     enforced = bool(egress.get("enforcement"))
     transport_mode = egress_transport(egress)
     forward_proxy = transport_mode in {"forward-proxy", "transparent"}
+    if forward_proxy:
+        validate_provider_env_suffixes(grants)
+    scrub_git_state()
     for index, grant in enumerate(grants):
         if not isinstance(grant, dict):
             raise SystemExit(f"egress.grants[{index}] must be an object")
