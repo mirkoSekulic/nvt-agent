@@ -500,7 +500,13 @@ func TestAgentRunProfileProvenanceCRDSchema(t *testing.T) {
 		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
 		"spec", "x-kubernetes-validations",
 	).([]any)
-	if len(validations) != 1 || !strings.Contains(validations[0].(map[string]any)["rule"].(string), "oldSelf.profileProvenance") {
+	foundProvenanceImmutability := false
+	for _, validation := range validations {
+		if strings.Contains(validation.(map[string]any)["rule"].(string), "oldSelf.profileProvenance") {
+			foundProvenanceImmutability = true
+		}
+	}
+	if !foundProvenanceImmutability {
 		t.Fatalf("profile provenance immutability rule missing: %#v", validations)
 	}
 }

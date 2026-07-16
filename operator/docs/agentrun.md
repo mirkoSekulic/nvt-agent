@@ -100,7 +100,7 @@ See [Transparent mediated egress](../../docs/transparent-egress-architecture.md)
 
 ## Workspace
 
-v1 supports only:
+Ephemeral storage remains the default (including when `mode` is omitted):
 
 ```yaml
 workspace:
@@ -109,6 +109,42 @@ workspace:
 
 The operator uses `emptyDir`. Data survives container restart in the same Pod
 but not Pod deletion or replacement.
+
+Persistent storage is opt-in:
+
+```yaml
+workspace:
+  mode: Persistent
+  size: 20Gi
+  storageClassName: managed-csi # optional; cluster default when omitted
+```
+
+The operator creates one `ReadWriteOnce` filesystem PVC owned by the
+`AgentRun`. The same claim provides separate `workspace` and `home`
+subdirectories at `/workspace` and the complete agent home (`/root`, or
+`/home/agent` for non-root runs). DinD shares the persistent workspace, while
+its `/var/lib/docker` remains disposable. An init container creates the
+directories and applies ownership for uid/gid 0 or 1000 before the agent starts.
+
+The claim is reused across agent Pod deletion/replacement and controller
+restarts. The operator waits for it to become `Bound` and reports
+`WorkspaceReady`; use a StorageClass that binds independently of Pod scheduling
+(normally `volumeBindingMode: Immediate`). Workspace mode, size, and storage
+class are immutable for an existing run; expansion and shrink are not supported
+in v1, and the controller never deletes/recreates a drifted live claim.
+
+Deleting (including TTL-cleaning) the `AgentRun` makes Kubernetes garbage
+collection delete the owned PVC. Physical volume cleanup still follows the
+StorageClass reclaim policy; use `reclaimPolicy: Delete` for lifecycle-scoped
+storage.
+
+Persistent storage is not a security-material store. Broker/callback/egress
+tokens, runtime-auth projections, generated configuration, and egress CA
+material remain separate ephemeral, Secret, or ConfigMap mounts and are
+refreshed for each Pod. Persistent runs reject `file-bundle` broker grants
+because those materialize usable credentials inside the container; use
+mediated zero-possession grants instead. The image-backed root filesystem
+outside the selected home remains disposable.
 
 ## Broker Grants
 
@@ -201,10 +237,10 @@ status:
 ```
 
 Phases are `Pending`, `Running`, `Completed`, `Failed`, and
-`DeadlineExceeded`. Enforced runs expose provisioning conditions including
-`BrokerPolicyReady`, `EgressdCreated`, `EgressdReady`, and
-`EgressCAPublished`; the agent Pod is not created before its trust and policy
-prerequisites are ready.
+`DeadlineExceeded`. Persistent runs expose `WorkspaceReady`. Enforced runs
+expose provisioning conditions including `BrokerPolicyReady`,
+`EgressdCreated`, `EgressdReady`, and `EgressCAPublished`; the agent Pod is not
+created before its storage, trust, and policy prerequisites are ready.
 
 The CRD schema under `operator/config/crd/bases/` is authoritative for exact
 validation and defaults.

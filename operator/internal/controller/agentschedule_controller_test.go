@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,6 +40,14 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	copied.Status.LastAcceptedAt.Time = copied.Status.LastAcceptedAt.Time.Add(1)
 	if schedule.Status.LastAcceptedAt.Equal(copied.Status.LastAcceptedAt) {
 		t.Fatal("expected status timestamp to be deep-copied")
+	}
+	workspaceSize := resource.MustParse("5Gi")
+	schedule.Spec.Template = &nvtv1alpha1.AgentScheduleTemplate{}
+	schedule.Spec.Template.Workspace = nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspacePersistent, Size: &workspaceSize}
+	copied = schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
+	copied.Spec.Template.Workspace.Size.Add(resource.MustParse("1Gi"))
+	if schedule.Spec.Template.Workspace.Size.Cmp(resource.MustParse("5Gi")) != 0 {
+		t.Fatal("expected template workspace quantity to be deep-copied")
 	}
 	if _, _, err := scheme.ObjectKinds(&nvtv1alpha1.AgentScheduleList{}); err != nil {
 		t.Fatalf("AgentScheduleList not registered in scheme: %v", err)
@@ -81,6 +90,12 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	}
 	if crdPath(t, properties, "allowedProducers", "items", "type") != "string" {
 		t.Fatalf("expected allowedProducers string schema, got %#v", properties["allowedProducers"])
+	}
+	workspace := crdPath(t, properties, "template", "properties", "workspace").(map[string]any)
+	if crdPath(t, workspace, "properties", "mode", "default") != "Ephemeral" ||
+		crdPath(t, workspace, "properties", "size", "x-kubernetes-int-or-string") != true ||
+		crdPath(t, workspace, "properties", "storageClassName", "type") != "string" {
+		t.Fatalf("expected persistent template workspace schema, got %#v", workspace)
 	}
 	status := crdPath(t, crd,
 		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",

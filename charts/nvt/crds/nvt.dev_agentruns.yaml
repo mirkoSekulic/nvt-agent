@@ -37,6 +37,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "has(self.profileProvenance) == has(oldSelf.profileProvenance) && (!has(self.profileProvenance) || self.profileProvenance == oldSelf.profileProvenance)"
                   message: spec.profileProvenance is immutable
+                - rule: "self.workspace == oldSelf.workspace"
+                  message: spec.workspace is immutable
               properties:
                 runtime:
                   type: object
@@ -99,13 +101,28 @@ spec:
                     - transparent
                 workspace:
                   type: object
-                  required:
-                    - mode
+                  x-kubernetes-validations:
+                    - rule: "self.mode == 'Persistent' ? has(self.size) : !has(self.size) && !has(self.storageClassName)"
+                      message: size is required for Persistent mode and size/storageClassName are forbidden for Ephemeral mode
+                    - rule: "!has(self.size) || quantity(string(self.size)).isGreaterThan(quantity('0'))"
+                      message: size must be a positive Kubernetes resource quantity
                   properties:
                     mode:
                       type: string
+                      default: Ephemeral
                       enum:
                         - Ephemeral
+                        - Persistent
+                    size:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      pattern: '^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([eE](\+|-)?[0-9]+)|[numkKMGTPCE]i?)?$'
+                      x-kubernetes-int-or-string: true
+                    storageClassName:
+                      type: string
+                      maxLength: 253
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
                 broker:
                   type: object
                   properties:
