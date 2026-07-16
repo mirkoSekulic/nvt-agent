@@ -93,6 +93,21 @@ The chart projects only a rotating `nvt-operator` audience token. The default
 producer AgentRun runtime image is the coordinated `runtime.image`; set
 `producer.agentRun.runtimeImage` only for an intentional override.
 
+Legacy/direct producer payloads can opt into AgentRun-scoped persistence:
+
+```yaml
+producer:
+  agentRun:
+    workspaceMode: Persistent
+    workspaceSize: 20Gi
+    workspaceStorageClassName: managed-csi # optional
+```
+
+Ephemeral remains the default. Persistent mode requires a positive Kubernetes
+quantity and cannot be combined with the legacy producer's file-bundle broker
+grants. Profiled admission does not send these fields; configure persistence in
+the operator-owned `AgentSchedule.spec.template.workspace` instead.
+
 ## Broker TLS
 
 Broker TLS is enabled by default:

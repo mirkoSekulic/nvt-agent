@@ -127,11 +127,12 @@ its `/var/lib/docker` remains disposable. An init container creates the
 directories and applies ownership for uid/gid 0 or 1000 before the agent starts.
 
 The claim is reused across agent Pod deletion/replacement and controller
-restarts. The operator waits for it to become `Bound` and reports
-`WorkspaceReady`; use a StorageClass that binds independently of Pod scheduling
-(normally `volumeBindingMode: Immediate`). Workspace mode, size, and storage
-class are immutable for an existing run; expansion and shrink are not supported
-in v1, and the controller never deletes/recreates a drifted live claim.
+restarts. The operator creates the consuming Pod while a valid claim is Pending,
+so both `Immediate` and `WaitForFirstConsumer` StorageClasses are supported.
+`WorkspaceReady` remains false until the claim becomes `Bound`. Workspace mode,
+size, and storage class are immutable for an existing run; expansion and shrink
+are not supported in v1, and the controller never deletes/recreates a drifted
+live claim.
 
 Deleting (including TTL-cleaning) the `AgentRun` makes Kubernetes garbage
 collection delete the owned PVC. Physical volume cleanup still follows the

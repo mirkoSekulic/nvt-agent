@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 )
 
@@ -89,16 +93,18 @@ type SubmissionConfig struct {
 }
 
 type AgentRunConfig struct {
-	Namespace            string        `json:"namespace"`
-	RuntimeImage         string        `json:"runtimeImage"`
-	RuntimeType          string        `json:"runtimeType,omitempty"`
-	RuntimeAutonomy      string        `json:"runtimeAutonomy,omitempty"`
-	RuntimeClassName     string        `json:"runtimeClassName,omitempty"`
-	RuntimeAuthSecret    string        `json:"runtimeAuthSecret,omitempty"`
-	RuntimeAuthMountPath string        `json:"runtimeAuthMountPath,omitempty"`
-	WorkspaceMode        string        `json:"workspaceMode,omitempty"`
-	BrokerGrants         []BrokerGrant `json:"brokerGrants,omitempty"`
-	TTL                  AgentRunTTL   `json:"ttl,omitempty"`
+	Namespace                 string        `json:"namespace"`
+	RuntimeImage              string        `json:"runtimeImage"`
+	RuntimeType               string        `json:"runtimeType,omitempty"`
+	RuntimeAutonomy           string        `json:"runtimeAutonomy,omitempty"`
+	RuntimeClassName          string        `json:"runtimeClassName,omitempty"`
+	RuntimeAuthSecret         string        `json:"runtimeAuthSecret,omitempty"`
+	RuntimeAuthMountPath      string        `json:"runtimeAuthMountPath,omitempty"`
+	WorkspaceMode             string        `json:"workspaceMode,omitempty"`
+	WorkspaceSize             string        `json:"workspaceSize,omitempty"`
+	WorkspaceStorageClassName string        `json:"workspaceStorageClassName,omitempty"`
+	BrokerGrants              []BrokerGrant `json:"brokerGrants,omitempty"`
+	TTL                       AgentRunTTL   `json:"ttl,omitempty"`
 }
 
 type AgentRunTTL struct {
@@ -199,6 +205,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.AgentRun.WorkspaceMode == "" {
 		c.AgentRun.WorkspaceMode = defaultWorkspaceMode
 	}
+	if _, err := configuredAgentRunWorkspace(c.AgentRun); err != nil {
+		return err
+	}
 	if len(c.Repositories) == 0 {
 		return errors.New("repositories is required")
 	}
@@ -272,6 +281,42 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		return err
 	}
 	return nil
+}
+
+func configuredAgentRunWorkspace(config AgentRunConfig) (nvtv1alpha1.AgentRunWorkspace, error) {
+	mode := config.WorkspaceMode
+	if mode == "" {
+		mode = defaultWorkspaceMode
+	}
+	workspace := nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspaceMode(mode)}
+	switch workspace.Mode {
+	case nvtv1alpha1.AgentRunWorkspaceEphemeral:
+		if config.WorkspaceSize != "" || config.WorkspaceStorageClassName != "" {
+			return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceSize and workspaceStorageClassName require workspaceMode Persistent")
+		}
+	case nvtv1alpha1.AgentRunWorkspacePersistent:
+		if config.WorkspaceSize == "" {
+			return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceSize is required when workspaceMode is Persistent")
+		}
+		quantity, err := resource.ParseQuantity(config.WorkspaceSize)
+		if err != nil || quantity.Sign() <= 0 {
+			return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceSize must be a positive Kubernetes resource quantity")
+		}
+		workspace.Size = &quantity
+		if config.WorkspaceStorageClassName != "" {
+			if strings.TrimSpace(config.WorkspaceStorageClassName) != config.WorkspaceStorageClassName ||
+				len(utilvalidation.IsDNS1123Subdomain(config.WorkspaceStorageClassName)) != 0 {
+				return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceStorageClassName must be a normalized DNS subdomain")
+			}
+			workspace.StorageClassName = config.WorkspaceStorageClassName
+		}
+		if len(config.BrokerGrants) != 0 {
+			return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceMode Persistent is incompatible with legacy file-bundle brokerGrants")
+		}
+	default:
+		return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceMode must be Ephemeral or Persistent")
+	}
+	return workspace, nil
 }
 
 func validateNonNegativeInt64(value *int64, field string) error {

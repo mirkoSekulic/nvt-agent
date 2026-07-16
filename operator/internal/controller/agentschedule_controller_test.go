@@ -334,6 +334,50 @@ func TestScheduleAdmissionRejectsMissingWorkID(t *testing.T) {
 	}
 }
 
+func TestLegacyScheduleAdmissionRejectsInvalidPersistentWorkspaceBeforeCreate(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workspace map[string]any
+		broker    map[string]any
+		want      string
+	}{
+		{
+			name:      "missing size",
+			workspace: map[string]any{"mode": "Persistent"},
+			want:      "spec.workspace.size must be a positive Kubernetes resource quantity",
+		},
+		{
+			name:      "file bundle",
+			workspace: map[string]any{"mode": "Persistent", "size": "5Gi"},
+			broker: map[string]any{"grants": []any{map[string]any{
+				"provider": "github-main", "repositories": []any{"example/*"}, "materialization": "file-bundle",
+			}}},
+			want: "persistent workspace is incompatible with broker grant github-main materialization file-bundle",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := scheduleAdmissionFixture(t, testAgentSchedule())
+			spec := map[string]any{"workspace": test.workspace}
+			if test.broker != nil {
+				spec["broker"] = test.broker
+			}
+			response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t, "invalid-workspace", "", map[string]any{"spec": spec}))
+			var decoded scheduleAdmissionResponse
+			decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+			if decoded.Scheduled || !strings.Contains(decoded.Reason, test.want) {
+				t.Fatalf("response = %#v, want reason %q", decoded, test.want)
+			}
+			runs := &nvtv1alpha1.AgentRunList{}
+			if err := k8sClient.List(context.Background(), runs, client.InNamespace(fixture.schedule.Namespace)); err != nil {
+				t.Fatal(err)
+			}
+			if len(runs.Items) != 0 {
+				t.Fatalf("invalid admission created AgentRuns: %#v", runs.Items)
+			}
+		})
+	}
+}
+
 func TestScheduleAdmissionConcurrentRequestsCannotExceedMaxParallelism(t *testing.T) {
 	schedule := testAgentSchedule()
 	schedule.Spec.MaxParallelism = 1

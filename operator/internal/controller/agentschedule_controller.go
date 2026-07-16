@@ -189,6 +189,9 @@ func PrepareScheduledAgentRun(
 	if err := ValidateAgentRunEgressMode(run); err != nil {
 		return err
 	}
+	if err := ValidateAgentRunWorkspace(run); err != nil {
+		return err
+	}
 	return nil
 }
 

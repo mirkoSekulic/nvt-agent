@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -735,6 +736,18 @@ func buildTestAgentRun(t *testing.T, cfg Config) *nvtv1alpha1.AgentRun {
 		t.Fatal(err)
 	}
 	return run
+}
+
+func TestBuildAgentRunIncludesPersistentWorkspace(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.AgentRun.WorkspaceMode = "Persistent"
+	cfg.AgentRun.WorkspaceSize = "20Gi"
+	cfg.AgentRun.WorkspaceStorageClassName = "managed-csi"
+	run := buildTestAgentRun(t, cfg)
+	if run.Spec.Workspace.Mode != nvtv1alpha1.AgentRunWorkspacePersistent || run.Spec.Workspace.Size == nil ||
+		run.Spec.Workspace.Size.Cmp(resource.MustParse("20Gi")) != 0 || run.Spec.Workspace.StorageClassName != "managed-csi" {
+		t.Fatalf("workspace = %#v", run.Spec.Workspace)
+	}
 }
 
 func scheduleAdmissionSubmitterForStatus(t *testing.T, status int, body string) AgentRunSubmitter {

@@ -44,6 +44,9 @@ PRODUCER_EXISTING_SA_RENDER="${WORKDIR}/producer-existing-sa.yaml"
 PRODUCER_CROSS_NAMESPACE_RENDER="${WORKDIR}/producer-cross-namespace.yaml"
 PRODUCER_NULL_TTL_RENDER="${WORKDIR}/producer-null-ttl.yaml"
 PRODUCER_EMPTY_TTL_RENDER="${WORKDIR}/producer-empty-ttl.yaml"
+PRODUCER_PERSISTENT_RENDER="${WORKDIR}/producer-persistent.yaml"
+PRODUCER_PERSISTENT_MISSING_SIZE_FAILURE="${WORKDIR}/producer-persistent-missing-size-failure.txt"
+PRODUCER_EPHEMERAL_STORAGE_FAILURE="${WORKDIR}/producer-ephemeral-storage-failure.txt"
 ALL_IMAGES_RENDER="${WORKDIR}/all-images.yaml"
 PACKAGED_RELEASE_RENDER="${WORKDIR}/packaged-release.yaml"
 SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
@@ -174,6 +177,11 @@ helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set prod
 helm template nvt "${CHART}" -n producer-ns --set producer.enabled=true --set producer.agentRun.namespace=nvt > "${PRODUCER_CROSS_NAMESPACE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.agentRun.ttl=null > "${PRODUCER_NULL_TTL_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.agentRun.ttl.completedTTLSeconds=null --set producer.agentRun.ttl.failedTTLSeconds=null --set producer.agentRun.ttl.runRetentionSeconds=null > "${PRODUCER_EMPTY_TTL_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.agentRun.workspaceMode=Persistent \
+  --set-string producer.agentRun.workspaceSize=20Gi \
+  --set producer.agentRun.workspaceStorageClassName=managed-csi \
+  > "${PRODUCER_PERSISTENT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${ALL_IMAGES_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true \
   --set-string global.imageTag="${TEST_RELEASE_TAG}" >"${SOURCE_GLOBAL_TAG_RENDER}"
@@ -1018,6 +1026,28 @@ grep -q 'privateKeyPath: "/var/run/secrets/github-app/private-key.pem"' "${PRODU
 grep -q 'secretName: "nvt-github-app"' "${PRODUCER_RENDER}"
 grep -q 'mountPath: "/var/run/secrets/github-app"' "${PRODUCER_RENDER}"
 grep -q 'claimName: nvt-github-comments-producer-state' "${PRODUCER_RENDER}"
+grep -q 'workspaceMode: "Ephemeral"' "${PRODUCER_RENDER}"
+if grep -Eq 'workspace(Size|StorageClassName):' "${PRODUCER_RENDER}"; then
+  echo "ephemeral producer config must omit persistent workspace fields" >&2
+  exit 1
+fi
+grep -q 'workspaceMode: "Persistent"' "${PRODUCER_PERSISTENT_RENDER}"
+grep -q 'workspaceSize: "20Gi"' "${PRODUCER_PERSISTENT_RENDER}"
+grep -q 'workspaceStorageClassName: "managed-csi"' "${PRODUCER_PERSISTENT_RENDER}"
+if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.agentRun.workspaceMode=Persistent \
+  > /dev/null 2> "${PRODUCER_PERSISTENT_MISSING_SIZE_FAILURE}"; then
+  echo "expected Persistent producer workspace without size to fail rendering" >&2
+  exit 1
+fi
+grep -q 'producer.agentRun.workspaceSize is required when workspaceMode is Persistent' "${PRODUCER_PERSISTENT_MISSING_SIZE_FAILURE}"
+if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set-string producer.agentRun.workspaceSize=20Gi \
+  > /dev/null 2> "${PRODUCER_EPHEMERAL_STORAGE_FAILURE}"; then
+  echo "expected Ephemeral producer workspace with size to fail rendering" >&2
+  exit 1
+fi
+grep -q 'producer.agentRun.workspaceSize and workspaceStorageClassName require workspaceMode Persistent' "${PRODUCER_EPHEMERAL_STORAGE_FAILURE}"
 grep -q 'resources:' "${PRODUCER_RENDER}"
 grep -q 'automountServiceAccountToken: false' "${PRODUCER_RENDER}"
 if grep -q 'operator-admission-token' "${PRODUCER_RENDER}"; then

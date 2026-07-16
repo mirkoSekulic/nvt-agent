@@ -305,9 +305,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if InitializeAgentRunStatus(&agentRun) {
 		conditionsChanged = true
 	}
-	workspaceResult, workspaceReady, workspaceChanged, err := r.reconcileWorkspacePVC(ctx, &agentRun)
+	workspaceResult, workspaceReferenceable, workspaceChanged, err := r.reconcileWorkspacePVC(ctx, &agentRun)
 	conditionsChanged = conditionsChanged || workspaceChanged
-	if err != nil || !workspaceReady {
+	if err != nil || !workspaceReferenceable {
 		if conditionsChanged {
 			if statusErr := r.Status().Update(ctx, &agentRun); statusErr != nil {
 				return ctrl.Result{}, fmt.Errorf("update AgentRun workspace status: %w", statusErr)
@@ -434,7 +434,14 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if deadlineExceeded || err != nil {
 		return deadlineResult, err
 	}
-	return deadlineResult, nil
+	return earliestRequeue(deadlineResult, workspaceResult), nil
+}
+
+func earliestRequeue(first, second ctrl.Result) ctrl.Result {
+	if second.RequeueAfter > 0 && (first.RequeueAfter == 0 || second.RequeueAfter < first.RequeueAfter) {
+		first.RequeueAfter = second.RequeueAfter
+	}
+	return first
 }
 
 // SetupWithManager registers the AgentRun controller with the manager.
@@ -2667,7 +2674,9 @@ func (r *AgentRunReconciler) reconcileWorkspacePVC(ctx context.Context, agentRun
 			return ctrl.Result{}, false, false, fmt.Errorf("create workspace PVC: %w", err)
 		}
 		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspacePending", "waiting for persistent workspace claim to bind")
-		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, false, changed, nil
+		// The claim now exists and is safe for a consuming Pod to reference.
+		// This is required for WaitForFirstConsumer StorageClasses to provision.
+		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, changed, nil
 	}
 	if err != nil {
 		return ctrl.Result{}, false, false, fmt.Errorf("get workspace PVC: %w", err)
@@ -2703,7 +2712,7 @@ func (r *AgentRunReconciler) reconcileWorkspacePVC(ctx context.Context, agentRun
 	}
 	if claim.Status.Phase != corev1.ClaimBound {
 		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspacePending", "waiting for persistent workspace claim to bind")
-		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, false, changed, nil
+		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, changed, nil
 	}
 	changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionTrue, "WorkspaceReady", "persistent workspace claim is bound")
 	return ctrl.Result{}, true, changed, nil

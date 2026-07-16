@@ -418,7 +418,7 @@ func TestPersistentHomeCannotOverrideRefreshedRuntimeAuth(t *testing.T) {
 	}
 }
 
-func TestReconcilePersistentWorkspaceWaitsForAndReusesPVC(t *testing.T) {
+func TestReconcilePersistentWorkspaceSupportsWaitForFirstConsumerAndReusesPVC(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 	run := testAgentRun()
@@ -439,10 +439,16 @@ func TestReconcilePersistentWorkspaceWaitsForAndReusesPVC(t *testing.T) {
 	if err := k8sClient.Get(ctx, clientKey(run), updatedRun); err != nil {
 		t.Fatal(err)
 	}
-	if updatedRun.Status.Phase != nvtv1alpha1.AgentRunPhasePending || meta.FindStatusCondition(updatedRun.Status.Conditions, ConditionWorkspaceReady) == nil {
+	pending := meta.FindStatusCondition(updatedRun.Status.Conditions, ConditionWorkspaceReady)
+	if updatedRun.Status.Phase != nvtv1alpha1.AgentRunPhasePending || pending == nil || pending.Status != metav1.ConditionFalse || pending.Reason != "WorkspacePending" {
 		t.Fatalf("pending workspace status not surfaced: %#v", updatedRun.Status)
 	}
 	claim := getWorkspacePVC(ctx, t, k8sClient, run)
+	pod := getAgentPod(ctx, t, k8sClient, run)
+	volume := requireVolume(t, pod, workspaceVolumeName)
+	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != claim.Name {
+		t.Fatalf("Pending WaitForFirstConsumer claim is not referenced by Pod: %#v", volume.VolumeSource)
+	}
 	claim.Annotations = map[string]string{"test.nvt.dev/preserved": "true"}
 	if err := k8sClient.Update(ctx, claim); err != nil {
 		t.Fatalf("mark PVC: %v", err)
@@ -452,15 +458,11 @@ func TestReconcilePersistentWorkspaceWaitsForAndReusesPVC(t *testing.T) {
 	if err := k8sClient.Status().Update(ctx, claim); err != nil {
 		t.Fatalf("bind PVC: %v", err)
 	}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &corev1.Pod{}); !errors.IsNotFound(err) {
-		t.Fatalf("Pod must not exist before PVC binds, got %v", err)
-	}
 	if result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
 		t.Fatalf("bound reconcile: %v", err)
 	} else if result.RequeueAfter == workspacePVCReadyRequeue {
 		t.Fatalf("bound PVC was still treated as pending: %#v", getWorkspacePVC(ctx, t, k8sClient, run).Status)
 	}
-	pod := getAgentPod(ctx, t, k8sClient, run)
 	if err := k8sClient.Delete(ctx, &pod); err != nil {
 		t.Fatalf("delete agent Pod: %v", err)
 	}
@@ -474,7 +476,7 @@ func TestReconcilePersistentWorkspaceWaitsForAndReusesPVC(t *testing.T) {
 		t.Fatalf("PVC was replaced or lost its marker: %#v", reused.Annotations)
 	}
 	replacement := getAgentPod(ctx, t, k8sClient, run)
-	volume := requireVolume(t, replacement, workspaceVolumeName)
+	volume = requireVolume(t, replacement, workspaceVolumeName)
 	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != reused.Name {
 		t.Fatalf("replacement Pod does not reuse claim: %#v", volume.VolumeSource)
 	}
@@ -499,7 +501,7 @@ func TestReconcileRecreatesMissingPersistentClaimBeforeReplacementPod(t *testing
 	claim.Status.Phase = corev1.ClaimBound
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}, &corev1.PersistentVolumeClaim{}).
-		WithObjects(run, claim).Build()
+		WithObjects(run, claim, testBrokerAgentsConfigMap(run.Namespace)).Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
 	if err := k8sClient.Delete(ctx, claim); err != nil {
 		t.Fatalf("delete PVC: %v", err)
@@ -512,8 +514,10 @@ func TestReconcileRecreatesMissingPersistentClaimBeforeReplacementPod(t *testing
 		t.Fatalf("requeue = %s", result.RequeueAfter)
 	}
 	_ = getWorkspacePVC(ctx, t, k8sClient, run)
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, &corev1.Pod{}); !errors.IsNotFound(err) {
-		t.Fatalf("replacement Pod created before replacement PVC bound: %v", err)
+	replacement := getAgentPod(ctx, t, k8sClient, run)
+	volume := requireVolume(t, replacement, workspaceVolumeName)
+	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != WorkspacePVCName(run.Name) {
+		t.Fatalf("replacement Pod does not reference recreated Pending PVC: %#v", volume.VolumeSource)
 	}
 }
 
@@ -527,6 +531,7 @@ func TestReconcilePersistentWorkspaceRejectsOwnershipAndSpecDrift(t *testing.T) 
 		{name: "size drift", mutate: func(claim *corev1.PersistentVolumeClaim) {
 			claim.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("6Gi")
 		}, want: "size differs"},
+		{name: "lost claim", mutate: func(claim *corev1.PersistentVolumeClaim) { claim.Status.Phase = corev1.ClaimLost }, want: "is Lost"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -541,11 +546,15 @@ func TestReconcilePersistentWorkspaceRejectsOwnershipAndSpecDrift(t *testing.T) 
 			test.mutate(claim)
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&nvtv1alpha1.AgentRun{}, &corev1.PersistentVolumeClaim{}).
-				WithObjects(run, claim).Build()
+				WithObjects(run, claim, testBrokerAgentsConfigMap(run.Namespace)).Build()
 			reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
-			_, _, _, err = reconciler.reconcileWorkspacePVC(ctx, run)
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+			pod := &corev1.Pod{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: AgentPodName(run.Name)}, pod); !errors.IsNotFound(err) {
+				t.Fatalf("invalid workspace created Pod: %#v, get error=%v", pod, err)
 			}
 		})
 	}

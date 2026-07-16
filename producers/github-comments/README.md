@@ -57,6 +57,10 @@ agentRun:
   runtimeType: codex
   runtimeAutonomy: trusted-local
   workspaceMode: Ephemeral
+  # Persistent mode additionally requires workspaceSize; the class is optional.
+  # workspaceMode: Persistent
+  # workspaceSize: 20Gi
+  # workspaceStorageClassName: managed-csi
   runtimeAuthSecret: codex-auth
   brokerGrants:
     - provider: github-main-app

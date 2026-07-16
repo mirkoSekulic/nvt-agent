@@ -389,6 +389,10 @@ func (s AgentRunSubmitter) buildAgentRun(
 	command Command,
 	identity agentRunIdentity,
 ) (*nvtv1alpha1.AgentRun, error) {
+	workspace, err := configuredAgentRunWorkspace(s.config.AgentRun)
+	if err != nil {
+		return nil, err
+	}
 	agentConfigMap, err := AgentConfigWithEventWebhook(
 		s.config.AgentConfig,
 		s.operatorCallbackURL(s.config.AgentRun.Namespace, identity.Name),
@@ -419,12 +423,10 @@ func (s AgentRunSubmitter) buildAgentRun(
 				Type:     s.config.AgentRun.RuntimeType,
 				Autonomy: s.config.AgentRun.RuntimeAutonomy,
 			},
-			Image: s.config.AgentRun.RuntimeImage,
-			Workspace: nvtv1alpha1.AgentRunWorkspace{
-				Mode: nvtv1alpha1.AgentRunWorkspaceMode(s.config.AgentRun.WorkspaceMode),
-			},
-			Prompt: &nvtv1alpha1.AgentRunPrompt{Text: prompt},
-			Agent:  nvtv1alpha1.AgentRunAgent{Config: agentConfig},
+			Image:     s.config.AgentRun.RuntimeImage,
+			Workspace: workspace,
+			Prompt:    &nvtv1alpha1.AgentRunPrompt{Text: prompt},
+			Agent:     nvtv1alpha1.AgentRunAgent{Config: agentConfig},
 			Lifecycle: &nvtv1alpha1.AgentRunLifecycle{
 				CompleteOn: []string{
 					"plugin.github.pr.merged",
