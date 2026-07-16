@@ -19,19 +19,19 @@
 {{- if .Values.gateway.auth.session.cookieDomain }}
 {{- fail "gateway.auth.session.cookieDomain must be empty when gateway.routing.mode=path" }}
 {{- end }}
-{{- range $name, $callback := dict "oidc" .Values.gateway.auth.oidc.callbackPath "github" .Values.gateway.auth.github.callbackPath }}
+{{- range $name, $callback := dict "oidc" .Values.gateway.auth.oidc.callbackPath "oauth2" .Values.gateway.auth.oauth2.callbackPath }}
 {{- if or (not (hasPrefix "/oauth2/" $callback)) (ne (clean $callback) $callback) (contains "%" $callback) (contains "?" $callback) (contains "#" $callback) }}
 {{- fail (printf "gateway.auth.%s.callbackPath must be an unambiguous path below /oauth2/ when gateway.routing.mode=path" $name) }}
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if not (has .Values.gateway.auth.mode (list "none" "oidc" "github")) }}
-{{- fail "gateway.auth.mode must be one of none, oidc, or github" }}
+{{- if not (has .Values.gateway.auth.mode (list "none" "oidc" "oauth2")) }}
+{{- fail "gateway.auth.mode must be one of none, oidc, or oauth2" }}
 {{- end }}
 {{- if and (eq .Values.gateway.auth.mode "none") (or $admissionConfigured (gt (len .Values.gateway.auth.claimEnrichment.sources) 0) (gt (len .Values.gateway.auth.claimEnrichment.allowedHosts) 0)) }}
 {{- fail "gateway.auth.admission and gateway.auth.claimEnrichment require authentication" }}
 {{- end }}
-{{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "github") }}
+{{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "oauth2") }}
 {{- if gt (int .Values.gateway.replicas) 1 }}
 {{- fail "gateway.replicas must be 1 when gateway authentication is enabled until shared sessions exist" }}
 {{- end }}
@@ -78,9 +78,60 @@
 {{- fail "gateway.auth.oidc.clientID is required when gateway.auth.mode=oidc" }}
 {{- end }}
 {{- end }}
-{{- if eq .Values.gateway.auth.mode "github" }}
-{{- if not .Values.gateway.auth.github.credentials.existingSecret }}
-{{- fail "gateway.auth.github.credentials.existingSecret is required when gateway.auth.mode=github" }}
+{{- if eq .Values.gateway.auth.mode "oauth2" }}
+{{- if not .Values.gateway.auth.oauth2.credentials.existingSecret }}
+{{- fail "gateway.auth.oauth2.credentials.existingSecret is required when gateway.auth.mode=oauth2" }}
+{{- end }}
+{{- if not (has .Values.gateway.auth.oauth2.clientAuthMethod (list "client_secret_post" "client_secret_basic")) }}
+{{- fail "gateway.auth.oauth2.clientAuthMethod must be client_secret_post or client_secret_basic" }}
+{{- end }}
+{{- $oauth2Callback := .Values.gateway.auth.oauth2.callbackPath }}
+{{- if or (not (hasPrefix "/" $oauth2Callback)) (hasPrefix "//" $oauth2Callback) (ne (clean $oauth2Callback) $oauth2Callback) (contains "%" $oauth2Callback) (contains "?" $oauth2Callback) (contains "#" $oauth2Callback) (contains "\\" $oauth2Callback) }}
+{{- fail "gateway.auth.oauth2.callbackPath must be an absolute unambiguous path without query or fragment" }}
+{{- end }}
+{{- if gt (len .Values.gateway.auth.oauth2.scopes) 32 }}
+{{- fail "gateway.auth.oauth2.scopes must contain at most 32 entries" }}
+{{- end }}
+{{- range $index, $scope := .Values.gateway.auth.oauth2.scopes }}
+{{- if not (regexMatch `^[^[:space:][:cntrl:]]{1,128}$` $scope) }}
+{{- fail (printf "gateway.auth.oauth2.scopes[%d] must be a non-empty bounded OAuth2 scope" $index) }}
+{{- end }}
+{{- end }}
+{{- range $field, $value := dict "issuer" .Values.gateway.auth.oauth2.issuer "authorizationURL" .Values.gateway.auth.oauth2.authorizationURL "tokenURL" .Values.gateway.auth.oauth2.tokenURL "identity.endpoint" .Values.gateway.auth.oauth2.identity.endpoint }}
+{{- if not $value }}
+{{- fail (printf "gateway.auth.oauth2.%s is required when gateway.auth.mode=oauth2" $field) }}
+{{- end }}
+{{- if not (regexMatch `^https://[^/@?#]+(?::[0-9]+)?(?:/[^?#]*)?$` $value) }}
+{{- fail (printf "gateway.auth.oauth2.%s must be an absolute HTTPS URL without credentials, query, or fragment" $field) }}
+{{- end }}
+{{- end }}
+{{- if eq (len .Values.gateway.auth.oauth2.identity.allowedHosts) 0 }}
+{{- fail "gateway.auth.oauth2.identity.allowedHosts is required when gateway.auth.mode=oauth2" }}
+{{- end }}
+{{- range $index, $host := .Values.gateway.auth.oauth2.identity.allowedHosts }}
+{{- if not (regexMatch `^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$` $host) }}
+{{- fail (printf "gateway.auth.oauth2.identity.allowedHosts[%d] must be a normalized lowercase DNS hostname or IPv4 address without a port" $index) }}
+{{- end }}
+{{- end }}
+{{- $identityHostAllowed := false }}
+{{- range $host := .Values.gateway.auth.oauth2.identity.allowedHosts }}
+{{- if regexMatch (printf `^https://%s(?::[0-9]+)?(?:/|$)` (regexQuoteMeta $host)) $.Values.gateway.auth.oauth2.identity.endpoint }}
+{{- $identityHostAllowed = true }}
+{{- end }}
+{{- end }}
+{{- if not $identityHostAllowed }}
+{{- fail "gateway.auth.oauth2.identity.endpoint host is not allowed" }}
+{{- end }}
+{{- if not .Values.gateway.auth.oauth2.identity.subjectPath }}
+{{- fail "gateway.auth.oauth2.identity.subjectPath is required when gateway.auth.mode=oauth2" }}
+{{- end }}
+{{- range $field, $path := dict "subjectPath" .Values.gateway.auth.oauth2.identity.subjectPath "displayNamePath" .Values.gateway.auth.oauth2.identity.displayNamePath }}
+{{- if and $path (not (regexMatch `^[A-Za-z_][A-Za-z0-9_-]*(?:\[\])?(?:\.[A-Za-z_][A-Za-z0-9_-]*(?:\[\])?)*$` $path)) }}
+{{- fail (printf "gateway.auth.oauth2.identity.%s must be a safe JSON path" $field) }}
+{{- end }}
+{{- if and $path (regexMatch `(?i)(token|secret|password|credential|authorization)` $path) }}
+{{- fail (printf "gateway.auth.oauth2.identity.%s must be a non-sensitive JSON path" $field) }}
+{{- end }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -120,7 +171,7 @@ spec:
                   fieldPath: metadata.namespace
             - name: NVT_GATEWAY_AUTH_MODE
               value: {{ .Values.gateway.auth.mode | quote }}
-            {{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "github") }}
+            {{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "oauth2") }}
             - name: NVT_GATEWAY_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
@@ -166,27 +217,37 @@ spec:
             - name: NVT_GATEWAY_OIDC_AUTHORIZATION_DETAILS
               value: {{ .Values.gateway.auth.oidc.authorizationDetails | quote }}
             {{- end }}
-            {{- if eq .Values.gateway.auth.mode "github" }}
-            - name: NVT_GATEWAY_GITHUB_CLIENT_ID
+            {{- if eq .Values.gateway.auth.mode "oauth2" }}
+            - name: NVT_GATEWAY_OAUTH2_CLIENT_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.gateway.auth.github.credentials.existingSecret | quote }}
-                  key: {{ .Values.gateway.auth.github.credentials.clientIDKey | quote }}
-            - name: NVT_GATEWAY_GITHUB_CLIENT_SECRET
+                  name: {{ .Values.gateway.auth.oauth2.credentials.existingSecret | quote }}
+                  key: {{ .Values.gateway.auth.oauth2.credentials.clientIDKey | quote }}
+            - name: NVT_GATEWAY_OAUTH2_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.gateway.auth.github.credentials.existingSecret | quote }}
-                  key: {{ .Values.gateway.auth.github.credentials.clientSecretKey | quote }}
-            - name: NVT_GATEWAY_GITHUB_CALLBACK_PATH
-              value: {{ .Values.gateway.auth.github.callbackPath | quote }}
-            - name: NVT_GATEWAY_GITHUB_ISSUER
-              value: {{ .Values.gateway.auth.github.issuer | quote }}
-            - name: NVT_GATEWAY_GITHUB_AUTHORIZATION_URL
-              value: {{ .Values.gateway.auth.github.authorizationURL | quote }}
-            - name: NVT_GATEWAY_GITHUB_TOKEN_URL
-              value: {{ .Values.gateway.auth.github.tokenURL | quote }}
-            - name: NVT_GATEWAY_GITHUB_USER_URL
-              value: {{ .Values.gateway.auth.github.userURL | quote }}
+                  name: {{ .Values.gateway.auth.oauth2.credentials.existingSecret | quote }}
+                  key: {{ .Values.gateway.auth.oauth2.credentials.clientSecretKey | quote }}
+            - name: NVT_GATEWAY_OAUTH2_CALLBACK_PATH
+              value: {{ .Values.gateway.auth.oauth2.callbackPath | quote }}
+            - name: NVT_GATEWAY_OAUTH2_ISSUER
+              value: {{ .Values.gateway.auth.oauth2.issuer | quote }}
+            - name: NVT_GATEWAY_OAUTH2_AUTHORIZATION_URL
+              value: {{ .Values.gateway.auth.oauth2.authorizationURL | quote }}
+            - name: NVT_GATEWAY_OAUTH2_TOKEN_URL
+              value: {{ .Values.gateway.auth.oauth2.tokenURL | quote }}
+            - name: NVT_GATEWAY_OAUTH2_SCOPES
+              value: {{ join "," .Values.gateway.auth.oauth2.scopes | quote }}
+            - name: NVT_GATEWAY_OAUTH2_CLIENT_AUTH_METHOD
+              value: {{ .Values.gateway.auth.oauth2.clientAuthMethod | quote }}
+            - name: NVT_GATEWAY_OAUTH2_IDENTITY_ENDPOINT
+              value: {{ .Values.gateway.auth.oauth2.identity.endpoint | quote }}
+            - name: NVT_GATEWAY_OAUTH2_IDENTITY_ALLOWED_HOSTS
+              value: {{ join "," .Values.gateway.auth.oauth2.identity.allowedHosts | quote }}
+            - name: NVT_GATEWAY_OAUTH2_IDENTITY_SUBJECT_PATH
+              value: {{ .Values.gateway.auth.oauth2.identity.subjectPath | quote }}
+            - name: NVT_GATEWAY_OAUTH2_IDENTITY_DISPLAY_NAME_PATH
+              value: {{ .Values.gateway.auth.oauth2.identity.displayNamePath | quote }}
             {{- end }}
           ports:
             - name: http

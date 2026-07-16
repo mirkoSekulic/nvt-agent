@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,7 +47,7 @@ type AuthConfig struct {
 	Mode            string
 	Session         SessionConfig
 	OIDC            OIDCConfig
-	GitHub          GitHubConfig
+	OAuth2          OAuth2Config
 	Admission       *AdmissionConfig
 	ClaimEnrichment ClaimEnrichmentConfig
 	Authorization   AuthorizationConfig
@@ -73,14 +74,23 @@ type OIDCConfig struct {
 	ClientAuthMethod     string
 }
 
-type GitHubConfig struct {
+type OAuth2Config struct {
 	ClientID         string
 	ClientSecret     string
 	CallbackPath     string
 	Issuer           string
 	AuthorizationURL string
 	TokenURL         string
-	UserURL          string
+	Scopes           []string
+	ClientAuthMethod string
+	Identity         OAuth2IdentityConfig
+}
+
+type OAuth2IdentityConfig struct {
+	Endpoint        string
+	AllowedHosts    []string
+	SubjectPath     string
+	DisplayNamePath string
 }
 
 func (c Config) Validate() error {
@@ -109,7 +119,7 @@ func (c Config) Validate() error {
 		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return fmt.Errorf("publicURL must be an absolute HTTPS origin URL when routing.mode=path")
 		}
-		if (c.Auth.Mode == authModeOIDC || c.Auth.Mode == authModeGitHub) && !c.Auth.Session.Secure {
+		if (c.Auth.Mode == authModeOIDC || c.Auth.Mode == authModeOAuth2) && !c.Auth.Session.Secure {
 			return fmt.Errorf("auth.session.secure must be true when routing.mode=path")
 		}
 		if c.Auth.Session.CookieDomain != "" {
@@ -119,15 +129,15 @@ func (c Config) Validate() error {
 		if oidcCallbackPath == "" {
 			oidcCallbackPath = defaultCallbackPath
 		}
-		githubCallbackPath := c.Auth.GitHub.CallbackPath
-		if githubCallbackPath == "" {
-			githubCallbackPath = defaultCallbackPath
+		oauth2CallbackPath := c.Auth.OAuth2.CallbackPath
+		if oauth2CallbackPath == "" {
+			oauth2CallbackPath = defaultCallbackPath
 		}
 		if !validOAuthCallbackPath(oidcCallbackPath) {
 			return fmt.Errorf("auth.oidc.callbackPath must be an unambiguous path below /oauth2/ when routing.mode=path")
 		}
-		if !validOAuthCallbackPath(githubCallbackPath) {
-			return fmt.Errorf("auth.github.callbackPath must be an unambiguous path below /oauth2/ when routing.mode=path")
+		if !validOAuthCallbackPath(oauth2CallbackPath) {
+			return fmt.Errorf("auth.oauth2.callbackPath must be an unambiguous path below /oauth2/ when routing.mode=path")
 		}
 	}
 	if c.ListenAddr == "" {
@@ -149,8 +159,8 @@ func (c Config) Validate() error {
 		if err := c.Auth.validateOIDC(); err != nil {
 			return err
 		}
-	case authModeGitHub:
-		if err := c.Auth.validateGitHub(); err != nil {
+	case authModeOAuth2:
+		if err := c.Auth.validateOAuth2(); err != nil {
 			return err
 		}
 	default:
@@ -203,34 +213,93 @@ func (c AuthConfig) validateOIDC() error {
 	return nil
 }
 
-func (c AuthConfig) validateGitHub() error {
+func (c AuthConfig) validateOAuth2() error {
 	if err := c.validateCommonAuthenticated(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(c.GitHub.ClientID) == "" {
-		return fmt.Errorf("auth.github.clientID is required when auth.mode=github")
+	if strings.TrimSpace(c.OAuth2.ClientID) == "" {
+		return fmt.Errorf("auth.oauth2.clientID is required when auth.mode=oauth2")
 	}
-	if strings.TrimSpace(c.GitHub.ClientSecret) == "" {
-		return fmt.Errorf("auth.github.clientSecret is required when auth.mode=github")
+	if strings.TrimSpace(c.OAuth2.ClientSecret) == "" {
+		return fmt.Errorf("auth.oauth2.clientSecret is required when auth.mode=oauth2")
 	}
-	github := c.GitHub
-	applyGitHubDefaults(&github)
-	if !strings.HasPrefix(github.CallbackPath, "/") || strings.HasPrefix(github.CallbackPath, "//") || strings.ContainsAny(github.CallbackPath, "?#") {
-		return fmt.Errorf("auth.github.callbackPath must be an absolute path without query or fragment")
+	if len(c.OAuth2.Scopes) > 32 {
+		return fmt.Errorf("auth.oauth2.scopes must contain at most 32 entries")
 	}
-	for field, value := range map[string]string{
-		"issuer": github.Issuer, "authorizationURL": github.AuthorizationURL,
-		"tokenURL": github.TokenURL, "userURL": github.UserURL,
+	for index, scope := range c.OAuth2.Scopes {
+		if scope == "" || len(scope) > 128 || strings.TrimSpace(scope) != scope || strings.ContainsAny(scope, "\x00\r\n\t ") {
+			return fmt.Errorf("auth.oauth2.scopes[%d] must be a non-empty bounded OAuth2 scope", index)
+		}
+	}
+	clientAuthMethod := c.OAuth2.ClientAuthMethod
+	if clientAuthMethod == "" {
+		clientAuthMethod = oauth2ClientSecretPost
+	}
+	if clientAuthMethod != oauth2ClientSecretPost && clientAuthMethod != oauth2ClientSecretBasic {
+		return fmt.Errorf("auth.oauth2.clientAuthMethod must be %q or %q", oauth2ClientSecretPost, oauth2ClientSecretBasic)
+	}
+	callbackPath := c.OAuth2.CallbackPath
+	if callbackPath == "" {
+		callbackPath = defaultCallbackPath
+	}
+	if !strings.HasPrefix(callbackPath, "/") || strings.HasPrefix(callbackPath, "//") || strings.ContainsAny(callbackPath, "?#%\\") || path.Clean(callbackPath) != callbackPath {
+		return fmt.Errorf("auth.oauth2.callbackPath must be an absolute unambiguous path without query or fragment")
+	}
+	if len(c.OAuth2.Identity.AllowedHosts) == 0 {
+		return fmt.Errorf("auth.oauth2.identity.allowedHosts is required")
+	}
+	if len(c.OAuth2.Identity.AllowedHosts) > maxClaimSourceHosts {
+		return fmt.Errorf("auth.oauth2.identity.allowedHosts must contain at most %d entries", maxClaimSourceHosts)
+	}
+	allowed := map[string]struct{}{}
+	for index, host := range c.OAuth2.Identity.AllowedHosts {
+		if !validClaimSourceHost(host) {
+			return fmt.Errorf("auth.oauth2.identity.allowedHosts[%d] must be a normalized lowercase DNS hostname or IP address without a port", index)
+		}
+		if _, exists := allowed[host]; exists {
+			return fmt.Errorf("auth.oauth2.identity.allowedHosts[%d] is duplicated", index)
+		}
+		allowed[host] = struct{}{}
+	}
+	for _, endpoint := range []struct {
+		field string
+		value string
+	}{
+		{field: "issuer", value: c.OAuth2.Issuer},
+		{field: "authorizationURL", value: c.OAuth2.AuthorizationURL},
+		{field: "tokenURL", value: c.OAuth2.TokenURL},
+		{field: "identity.endpoint", value: c.OAuth2.Identity.Endpoint},
 	} {
+		field, value := endpoint.field, endpoint.value
 		parsed, err := url.Parse(value)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
-			return fmt.Errorf("auth.github.%s must be an absolute HTTP(S) URL", field)
+			return fmt.Errorf("auth.oauth2.%s must be an absolute HTTP(S) URL without credentials, query, or fragment", field)
 		}
 		if field == "issuer" && parsed.Scheme != "https" {
-			return fmt.Errorf("auth.github.issuer must use HTTPS")
+			return fmt.Errorf("auth.oauth2.issuer must use HTTPS")
 		}
 		if field != "issuer" && parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
-			return fmt.Errorf("auth.github.%s must use HTTPS except for loopback tests", field)
+			return fmt.Errorf("auth.oauth2.%s must use HTTPS except for loopback tests", field)
+		}
+		if field == "identity.endpoint" {
+			if _, ok := allowed[strings.ToLower(parsed.Hostname())]; !ok {
+				return fmt.Errorf("auth.oauth2.identity.endpoint host is not allowed")
+			}
+		}
+	}
+	for _, identityPath := range []struct {
+		field string
+		path  string
+	}{
+		{field: "subjectPath", path: c.OAuth2.Identity.SubjectPath},
+		{field: "displayNamePath", path: c.OAuth2.Identity.DisplayNamePath},
+	} {
+		field, path := identityPath.field, identityPath.path
+		if field == "displayNamePath" && path == "" {
+			continue
+		}
+		if !claimPathPattern.MatchString(path) || isSensitiveEnrichmentPath(path) {
+			return fmt.Errorf("auth.oauth2.identity.%s must be a safe non-sensitive JSON path", field)
 		}
 	}
 	return nil

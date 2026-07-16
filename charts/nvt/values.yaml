@@ -117,16 +117,22 @@ gateway:
       validIssuer: ""
       extraAuthParams: {}
       authorizationDetails: ""
-    github:
+    oauth2:
       credentials:
         existingSecret: ""
         clientIDKey: client-id
         clientSecretKey: client-secret
-      callbackPath: /oauth2/github/callback
-      issuer: https://github.com
-      authorizationURL: https://github.com/login/oauth/authorize
-      tokenURL: https://github.com/login/oauth/access_token
-      userURL: https://api.github.com/user
+      callbackPath: /oauth2/callback
+      issuer: ""
+      authorizationURL: ""
+      tokenURL: ""
+      scopes: []
+      clientAuthMethod: client_secret_post
+      identity:
+        endpoint: ""
+        allowedHosts: []
+        subjectPath: ""
+        displayNamePath: ""
     # Optional. When set, authenticated principals must match one allow rule
     # before a gateway session is created. AgentRun authorization remains a
     # separate second gate.

@@ -16,11 +16,11 @@ GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
-GATEWAY_GITHUB_RENDER="${WORKDIR}/gateway-github.yaml"
+GATEWAY_OAUTH2_RENDER="${WORKDIR}/gateway-oauth2.yaml"
 GATEWAY_ADMISSION_RENDER="${WORKDIR}/gateway-admission.yaml"
 GATEWAY_EMPTY_ADMISSION_RENDER="${WORKDIR}/gateway-empty-admission.yaml"
 GATEWAY_ADMISSION_FAILURE="${WORKDIR}/gateway-admission-failure.txt"
-GATEWAY_GITHUB_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-github-missing-secret-failure.txt"
+GATEWAY_OAUTH2_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oauth2-missing-secret-failure.txt"
 GATEWAY_PATH_RENDER="${WORKDIR}/gateway-path.yaml"
 GATEWAY_PATH_FAILURE="${WORKDIR}/gateway-path-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
@@ -49,6 +49,18 @@ PACKAGED_RELEASE_RENDER="${WORKDIR}/packaged-release.yaml"
 SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
 COMPONENT_TAG_RENDER="${WORKDIR}/component-tag.yaml"
 LEGACY_IMAGE_FAILURE="${WORKDIR}/legacy-image-failure.txt"
+OAUTH2_ARGS=(
+  --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2
+  --set gateway.auth.oauth2.credentials.clientIDKey=oauth2-client-id
+  --set gateway.auth.oauth2.credentials.clientSecretKey=oauth2-client-secret
+  --set gateway.auth.oauth2.issuer=https://identity.example.test
+  --set gateway.auth.oauth2.authorizationURL=https://identity.example.test/authorize
+  --set gateway.auth.oauth2.tokenURL=https://identity.example.test/token
+  --set gateway.auth.oauth2.identity.endpoint=https://api.identity.example.test/user
+  --set gateway.auth.oauth2.identity.allowedHosts[0]=api.identity.example.test
+  --set gateway.auth.oauth2.identity.subjectPath=id
+  --set gateway.auth.oauth2.identity.displayNamePath=login
+)
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
@@ -81,21 +93,28 @@ helm template nvt "${CHART}" -n custom-ns \
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set gateway.publicURL=https://agents.example.com \
-  --set gateway.auth.mode=github \
+  --set gateway.auth.mode=oauth2 \
+  "${OAUTH2_ARGS[@]}" \
   --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
-  --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
-  --set gateway.auth.github.credentials.clientIDKey=github-client-id \
-  --set gateway.auth.github.credentials.clientSecretKey=github-client-secret \
+  --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2 \
+  --set gateway.auth.oauth2.credentials.clientIDKey=oauth2-client-id \
+  --set gateway.auth.oauth2.credentials.clientSecretKey=oauth2-client-secret \
   --set gateway.auth.authorization.rules[0].id=agent-owner \
   --set gateway.auth.authorization.rules[0].effect=allow \
   --set gateway.auth.authorization.rules[0].owner=true \
-  > "${GATEWAY_GITHUB_RENDER}"
+  > "${GATEWAY_OAUTH2_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
-  --set gateway.auth.mode=github \
+  --set gateway.auth.mode=oauth2 \
+  "${OAUTH2_ARGS[@]}" \
   --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
   --set gateway.auth.session.maxAgeSeconds=3600 \
-  --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+  --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2 \
+  --set gateway.auth.oauth2.issuer=https://github.com \
+  --set gateway.auth.oauth2.authorizationURL=https://github.com/login/oauth/authorize \
+  --set gateway.auth.oauth2.tokenURL=https://github.com/login/oauth/access_token \
+  --set gateway.auth.oauth2.identity.endpoint=https://api.github.com/user \
+  --set gateway.auth.oauth2.identity.allowedHosts[0]=api.github.com \
   --set gateway.auth.claimEnrichment.allowedHosts[0]=api.github.com \
   --set gateway.auth.claimEnrichment.sources[0].endpoint=https://api.github.com/user/memberships/orgs/Altinn \
   --set gateway.auth.claimEnrichment.sources[0].outputClaim=organization_membership \
@@ -111,9 +130,10 @@ helm template nvt "${CHART}" -n custom-ns \
   > "${GATEWAY_ADMISSION_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
-  --set gateway.auth.mode=github \
+  --set gateway.auth.mode=oauth2 \
+  "${OAUTH2_ARGS[@]}" \
   --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
-  --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+  --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2 \
   --set-json 'gateway.auth.admission={}' \
   > "${GATEWAY_EMPTY_ADMISSION_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
@@ -574,15 +594,16 @@ if [ "$(grep -c 'path: /healthz' "${GATEWAY_PATH_RENDER}")" -lt 2 ]; then
   exit 1
 fi
 for invalid_args in \
+  '--set gateway.auth.mode=github' \
   '--set gateway.routing.mode=unknown' \
   '--set gateway.routing.mode=path' \
   '--set gateway.routing.mode=path --set gateway.publicURL=http://agents.altinn.studio' \
   '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/base' \
   '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.session.cookieDomain=.altinn.studio' \
   '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oidc.callbackPath=/callback' \
-  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.github.callbackPath=/oauth2/../callback' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oauth2.callbackPath=/oauth2/../callback' \
   '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oidc.callbackPath=/oauth2%2Fcallback' \
-  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.github.callbackPath=/oauth2/%63allback'; do
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oauth2.callbackPath=/oauth2/%63allback'; do
   if helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true ${invalid_args} > /dev/null 2> "${GATEWAY_PATH_FAILURE}"; then
     echo "expected invalid gateway routing config to fail: ${invalid_args}" >&2
     exit 1
@@ -633,41 +654,70 @@ if helm template nvt "${CHART}" -n custom-ns \
 fi
 grep -q "gateway.auth.session.existingSecret is required when gateway authentication is enabled" "${GATEWAY_OIDC_MISSING_SECRET_FAILURE}"
 
-grep -q 'value: "github"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'name: NVT_GATEWAY_GITHUB_CLIENT_ID' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'name: "nvt-agent-gateway-github"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'key: "github-client-id"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'name: NVT_GATEWAY_GITHUB_CLIENT_SECRET' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'key: "github-client-secret"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'value: "/oauth2/github/callback"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'value: "https://github.com"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'value: "https://github.com/login/oauth/authorize"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'value: "https://github.com/login/oauth/access_token"' "${GATEWAY_GITHUB_RENDER}"
-grep -q 'value: "https://api.github.com/user"' "${GATEWAY_GITHUB_RENDER}"
-grep -Fq '\"owner\":true' "${GATEWAY_GITHUB_RENDER}"
-if grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_GITHUB_RENDER}"; then
+grep -q 'value: "oauth2"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'name: NVT_GATEWAY_OAUTH2_CLIENT_ID' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'name: "nvt-agent-gateway-oauth2"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'key: "oauth2-client-id"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'name: NVT_GATEWAY_OAUTH2_CLIENT_SECRET' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'key: "oauth2-client-secret"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'value: "/oauth2/callback"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'value: "https://identity.example.test"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'value: "https://identity.example.test/authorize"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'value: "https://identity.example.test/token"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'value: "https://api.identity.example.test/user"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'name: NVT_GATEWAY_OAUTH2_IDENTITY_ALLOWED_HOSTS' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'value: "api.identity.example.test"' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'name: NVT_GATEWAY_OAUTH2_CLIENT_AUTH_METHOD' "${GATEWAY_OAUTH2_RENDER}"
+grep -q 'value: "client_secret_post"' "${GATEWAY_OAUTH2_RENDER}"
+grep -Fq '\"owner\":true' "${GATEWAY_OAUTH2_RENDER}"
+if grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_OAUTH2_RENDER}"; then
   echo "unset gateway admission must preserve the existing session behavior" >&2
   exit 1
 fi
-grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_GITHUB_RENDER}"
-if grep -Eq 'value:.*(github-client-id|github-client-secret)' "${GATEWAY_GITHUB_RENDER}"; then
-  echo "gateway GitHub OAuth credentials must only come from Secret refs" >&2
+grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_OAUTH2_RENDER}"
+if grep -Eq 'value:.*(oauth2-client-id|oauth2-client-secret)' "${GATEWAY_OAUTH2_RENDER}"; then
+  echo "gateway OAuth2 credentials must only come from Secret refs" >&2
   exit 1
 fi
 if helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
-  --set gateway.auth.mode=github \
+  --set gateway.auth.mode=oauth2 \
+  "${OAUTH2_ARGS[@]}" \
+  --set gateway.auth.oauth2.credentials.existingSecret= \
   --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
-  > /dev/null 2> "${GATEWAY_GITHUB_MISSING_SECRET_FAILURE}"; then
-  echo "expected gateway github missing credential Secret to fail rendering" >&2
+  > /dev/null 2> "${GATEWAY_OAUTH2_MISSING_SECRET_FAILURE}"; then
+  echo "expected gateway oauth2 missing credential Secret to fail rendering" >&2
   exit 1
 fi
-grep -q "gateway.auth.github.credentials.existingSecret is required when gateway.auth.mode=github" "${GATEWAY_GITHUB_MISSING_SECRET_FAILURE}"
+grep -q "gateway.auth.oauth2.credentials.existingSecret is required when gateway.auth.mode=oauth2" "${GATEWAY_OAUTH2_MISSING_SECRET_FAILURE}"
+
+for invalid_args in \
+  '--set gateway.auth.oauth2.clientAuthMethod=auto' \
+  '--set gateway.auth.oauth2.callbackPath=/oauth2/../callback' \
+  '--set gateway.auth.oauth2.callbackPath=/oauth2/%63allback' \
+  '--set gateway.auth.oauth2.issuer=http://identity.example.test' \
+  '--set gateway.auth.oauth2.identity.endpoint=https://user:secret@api.identity.example.test/user' \
+  '--set gateway.auth.oauth2.identity.endpoint=https://other.example.test/user' \
+  '--set gateway.auth.oauth2.identity.allowedHosts[0]=API.IDENTITY.EXAMPLE.TEST' \
+  '--set gateway.auth.oauth2.identity.subjectPath=access_token' \
+  '--set gateway.auth.oauth2.identity.subjectPath=identities.*.id'; do
+  if helm template nvt "${CHART}" -n custom-ns \
+    --set gateway.enabled=true \
+    --set gateway.auth.mode=oauth2 \
+    "${OAUTH2_ARGS[@]}" \
+    --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+    ${invalid_args} > /dev/null 2> "${GATEWAY_OAUTH2_MISSING_SECRET_FAILURE}"; then
+    echo "expected invalid generic OAuth2 config to fail: ${invalid_args}" >&2
+    exit 1
+  fi
+done
 
 grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_SESSION_MAX_AGE_SECONDS' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "3600"'
 grep -Fq '\"claimPath\":\"organization_membership\"' "${GATEWAY_ADMISSION_RENDER}"
 grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_ADMISSION_RENDER}"
+grep -A1 'name: NVT_GATEWAY_OAUTH2_ISSUER' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://github.com"'
+grep -A1 'name: NVT_GATEWAY_OAUTH2_IDENTITY_ENDPOINT' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://api.github.com/user"'
 grep -Fq '\"allowedHosts\":[\"api.github.com\"]' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"endpoint\":\"https://api.github.com/user/memberships/orgs/Altinn\"' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"owner\":true' "${GATEWAY_ADMISSION_RENDER}"
@@ -679,9 +729,10 @@ for invalid_args in \
   '--set gateway.auth.claimEnrichment.allowedHosts[0]=api.example.com --set gateway.auth.claimEnrichment.sources[0].endpoint=http://api.example.com/member --set gateway.auth.claimEnrichment.sources[0].outputClaim=membership --set gateway.auth.claimEnrichment.sources[0].valuePath=state'; do
   if helm template nvt "${CHART}" -n custom-ns \
     --set gateway.enabled=true \
-    --set gateway.auth.mode=github \
+    --set gateway.auth.mode=oauth2 \
+  "${OAUTH2_ARGS[@]}" \
     --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
-    --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
+    --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2 \
     ${invalid_args} > /dev/null 2> "${GATEWAY_ADMISSION_FAILURE}"; then
     echo "expected invalid gateway admission/enrichment config to fail: ${invalid_args}" >&2
     exit 1

@@ -20,32 +20,31 @@ import (
 )
 
 const (
-	authModeNone          = "none"
-	authModeOIDC          = "oidc"
-	authModeGitHub        = "github"
-	oidcClientSecretPost  = "client_secret_post"
-	defaultSessionCookie  = "nvt_agent_gateway"
-	defaultCallbackPath   = "/oauth2/callback"
-	defaultGitHubIssuer   = "https://github.com"
-	defaultGitHubAuthURL  = "https://github.com/login/oauth/authorize"
-	defaultGitHubTokenURL = "https://github.com/login/oauth/access_token"
-	defaultGitHubUserURL  = "https://api.github.com/user"
-	defaultSessionMaxAge  = 24 * 60 * 60
-	loginStateCookie      = "nvt_agent_gateway_login"
+	authModeNone            = "none"
+	authModeOIDC            = "oidc"
+	authModeOAuth2          = "oauth2"
+	oidcClientSecretPost    = "client_secret_post"
+	oauth2ClientSecretPost  = "client_secret_post"
+	oauth2ClientSecretBasic = "client_secret_basic"
+	defaultSessionCookie    = "nvt_agent_gateway"
+	defaultCallbackPath     = "/oauth2/callback"
+	defaultSessionMaxAge    = 24 * 60 * 60
+	loginStateCookie        = "nvt_agent_gateway_login"
 )
 
 type Authenticator struct {
-	config             Config
-	cookieCodec        *securecookie.SecureCookie
-	oauthConfig        *oauth2.Config
-	verifier           *oidc.IDTokenVerifier
-	tokenVerifier      *oidc.IDTokenVerifier
-	provider           *oidc.Provider
-	httpClient         *http.Client
-	claimSourceTimeout time.Duration
-	sessions           map[string]storedSession
-	mu                 sync.Mutex
-	now                func() time.Time
+	config                Config
+	cookieCodec           *securecookie.SecureCookie
+	oauthConfig           *oauth2.Config
+	verifier              *oidc.IDTokenVerifier
+	tokenVerifier         *oidc.IDTokenVerifier
+	provider              *oidc.Provider
+	httpClient            *http.Client
+	claimSourceTimeout    time.Duration
+	oauth2IdentityTimeout time.Duration
+	sessions              map[string]storedSession
+	mu                    sync.Mutex
+	now                   func() time.Time
 }
 
 type sessionCookie struct {
@@ -70,7 +69,7 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 	if config.Auth.Mode == "" || config.Auth.Mode == authModeNone {
 		return nil, nil
 	}
-	if config.Auth.Mode != authModeOIDC && config.Auth.Mode != authModeGitHub {
+	if config.Auth.Mode != authModeOIDC && config.Auth.Mode != authModeOAuth2 {
 		return nil, fmt.Errorf("unsupported auth.mode %q", config.Auth.Mode)
 	}
 	if config.Auth.Session.CookieName == "" {
@@ -90,7 +89,7 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 			config.Auth.OIDC.ClientAuthMethod = oidcClientSecretPost
 		}
 	} else {
-		applyGitHubDefaults(&config.Auth.GitHub)
+		applyOAuth2Defaults(&config.Auth.OAuth2)
 	}
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -111,10 +110,15 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 		},
 		now: time.Now,
 	}
-	if config.Auth.Mode == authModeGitHub {
+	if config.Auth.Mode == authModeOAuth2 {
+		authStyle := oauth2.AuthStyleInParams
+		if config.Auth.OAuth2.ClientAuthMethod == oauth2ClientSecretBasic {
+			authStyle = oauth2.AuthStyleInHeader
+		}
 		authenticator.oauthConfig = &oauth2.Config{
-			ClientID: config.Auth.GitHub.ClientID, ClientSecret: config.Auth.GitHub.ClientSecret,
-			Endpoint: oauth2.Endpoint{AuthURL: config.Auth.GitHub.AuthorizationURL, TokenURL: config.Auth.GitHub.TokenURL, AuthStyle: oauth2.AuthStyleInParams},
+			ClientID: config.Auth.OAuth2.ClientID, ClientSecret: config.Auth.OAuth2.ClientSecret,
+			Endpoint: oauth2.Endpoint{AuthURL: config.Auth.OAuth2.AuthorizationURL, TokenURL: config.Auth.OAuth2.TokenURL, AuthStyle: authStyle},
+			Scopes:   config.Auth.OAuth2.Scopes,
 		}
 		return authenticator, nil
 	}
@@ -135,23 +139,13 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 	return authenticator, nil
 }
 
-func applyGitHubDefaults(config *GitHubConfig) {
+func applyOAuth2Defaults(config *OAuth2Config) {
 	if config.CallbackPath == "" {
 		config.CallbackPath = defaultCallbackPath
 	}
-	if config.Issuer == "" {
-		config.Issuer = defaultGitHubIssuer
-	} else {
-		config.Issuer = strings.TrimRight(config.Issuer, "/")
-	}
-	if config.AuthorizationURL == "" {
-		config.AuthorizationURL = defaultGitHubAuthURL
-	}
-	if config.TokenURL == "" {
-		config.TokenURL = defaultGitHubTokenURL
-	}
-	if config.UserURL == "" {
-		config.UserURL = defaultGitHubUserURL
+	config.Issuer = strings.TrimRight(config.Issuer, "/")
+	if config.ClientAuthMethod == "" {
+		config.ClientAuthMethod = oauth2ClientSecretPost
 	}
 }
 
@@ -258,8 +252,8 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
-	if a.config.Auth.Mode == authModeGitHub {
-		a.handleGitHubCallback(w, r, loginState)
+	if a.config.Auth.Mode == authModeOAuth2 {
+		a.handleOAuth2Callback(w, r, loginState)
 		return
 	}
 	a.handleOIDCCallback(w, r, loginState)
@@ -501,8 +495,8 @@ func (a *Authenticator) oauthConfigForRequest(r *http.Request) *oauth2.Config {
 }
 
 func (a *Authenticator) callbackPath() string {
-	if a.config.Auth.Mode == authModeGitHub {
-		return a.config.Auth.GitHub.CallbackPath
+	if a.config.Auth.Mode == authModeOAuth2 {
+		return a.config.Auth.OAuth2.CallbackPath
 	}
 	return a.config.Auth.OIDC.CallbackPath
 }

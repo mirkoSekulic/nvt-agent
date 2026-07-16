@@ -305,9 +305,23 @@ bounded HTTPS sources:
 ```yaml
 gateway:
   auth:
+    mode: oauth2
     session:
       # Membership is a login-time snapshot; bound the revocation window.
       maxAgeSeconds: 3600
+    oauth2:
+      credentials:
+        existingSecret: nvt-gateway-github
+      issuer: https://github.com
+      authorizationURL: https://github.com/login/oauth/authorize
+      tokenURL: https://github.com/login/oauth/access_token
+      scopes: []
+      clientAuthMethod: client_secret_post
+      identity:
+        endpoint: https://api.github.com/user
+        allowedHosts: [api.github.com]
+        subjectPath: id
+        displayNamePath: login
     claimEnrichment:
       allowedHosts: [api.github.com]
       sources:
@@ -377,12 +391,12 @@ gateway:
 All `where.all` conditions must match the same array element. See the
 [gateway README](../../gateway/README.md) for callback and session behavior.
 
-### GitHub owner login
+### Generic OAuth2 owner login
 
-Direct GitHub OAuth2 login uses a dedicated GitHub App and the same generic
-authorization engine. Put its client ID and secret in one existing Secret; the
-chart never renders credential values into a ConfigMap or Pod environment
-literal:
+The generic OAuth2 adapter supports providers without OIDC. GitHub is one
+configuration example; no provider or organization behavior is built into the
+gateway. Put the client ID and secret in one existing Secret. The chart never
+renders credential values into a ConfigMap or Pod environment literal:
 
 ```yaml
 gateway:
@@ -391,15 +405,25 @@ gateway:
   baseDomain: agents.example.com
   publicURL: https://agents.example.com
   auth:
-    mode: github
+    mode: oauth2
     session:
       existingSecret: nvt-gateway-session
       cookieDomain: .agents.example.com
-    github:
+    oauth2:
       credentials:
         existingSecret: nvt-gateway-github
         clientIDKey: client-id
         clientSecretKey: client-secret
+      issuer: https://github.com
+      authorizationURL: https://github.com/login/oauth/authorize
+      tokenURL: https://github.com/login/oauth/access_token
+      scopes: []
+      clientAuthMethod: client_secret_post
+      identity:
+        endpoint: https://api.github.com/user
+        allowedHosts: [api.github.com]
+        subjectPath: id
+        displayNamePath: login
     authorization:
       default: deny
       rules:
@@ -408,13 +432,26 @@ gateway:
           owner: true
 ```
 
-Register `https://agents.example.com/oauth2/github/callback` as the GitHub App
+Register `https://agents.example.com/oauth2/callback` as the GitHub App
 callback. No repository permission or scope is needed for the current-user
 identity lookup. Owner matching uses only exact normalized issuer and immutable
 subject from `AgentRun.spec.profileProvenance.principal`; login/display name and
 requested-by annotations are ignored. See the [gateway
-README](../../gateway/README.md) for GitHub Enterprise endpoint overrides and
-trust details.
+README](../../gateway/README.md) for the OAuth2 trust boundary and the exact
+0.3 `github.*` to 0.4 `oauth2.*` migration.
+
+OAuth2 does not provide OIDC's cryptographically verified issuer/ID-token
+identity contract. Trusted operator configuration defines the issuer namespace
+and identity endpoint; prefer OIDC when available.
+
+Chart 0.4 removes the provider-specific 0.3 surface. Change
+`gateway.auth.mode: github` to `oauth2`, move `gateway.auth.github.credentials`,
+`callbackPath`, `issuer`, `authorizationURL`, and `tokenURL` beneath
+`gateway.auth.oauth2`, and replace `github.userURL` with
+`oauth2.identity.endpoint`. Add the endpoint's exact `allowedHosts` entry plus
+`subjectPath` and optional `displayNamePath`. Existing Secret names and key
+names may be retained. Old values fail validation; there is no automatic
+fallback.
 
 ### Path routing
 
@@ -431,14 +468,23 @@ gateway:
   # baseDomain is not used for request routing in path mode.
   baseDomain: ""
   auth:
-    mode: github
+    mode: oauth2
     session:
       existingSecret: nvt-gateway-session
       cookieDomain: "" # host-only; do not use .altinn.studio
       secure: true
-    github:
+    oauth2:
       credentials:
         existingSecret: nvt-gateway-github
+      issuer: https://github.com
+      authorizationURL: https://github.com/login/oauth/authorize
+      tokenURL: https://github.com/login/oauth/access_token
+      clientAuthMethod: client_secret_post
+      identity:
+        endpoint: https://api.github.com/user
+        allowedHosts: [api.github.com]
+        subjectPath: id
+        displayNamePath: login
     authorization:
       default: deny
       rules:
@@ -459,7 +505,7 @@ provide browser-origin isolation. Prefer subdomain mode for stronger per-agent
 origin isolation. If path mode is required, dedicate a complete origin such as
 `agents.altinn.studio`; never configure a path such as
 `dev.altinn.studio/agents`. Path mode requires an empty `cookieDomain`, Secure
-gateway cookies, and OIDC/GitHub callbacks below the reserved `/oauth2/`
+gateway cookies, and OIDC/OAuth2 callbacks below the reserved `/oauth2/`
 namespace.
 
 ## Validation

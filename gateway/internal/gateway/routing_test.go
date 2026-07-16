@@ -49,12 +49,12 @@ func TestPathRoutingConfigValidation(t *testing.T) {
 		{name: "userinfo", mutate: func(config *Config) { config.PublicURL = "https://user@agents.altinn.studio" }},
 		{name: "cookie domain", mutate: func(config *Config) { config.Auth.Session.CookieDomain = ".altinn.studio" }},
 		{name: "OIDC callback outside namespace", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/callback" }},
-		{name: "GitHub callback outside namespace", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/callback" }},
+		{name: "OAuth2 callback outside namespace", mutate: func(config *Config) { config.Auth.OAuth2.CallbackPath = "/callback" }},
 		{name: "encoded callback separator", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/oauth2%2fcallback" }},
-		{name: "encoded callback character", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/%63allback" }},
-		{name: "callback dot segment", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/../callback" }},
+		{name: "encoded callback character", mutate: func(config *Config) { config.Auth.OAuth2.CallbackPath = "/oauth2/%63allback" }},
+		{name: "callback dot segment", mutate: func(config *Config) { config.Auth.OAuth2.CallbackPath = "/oauth2/../callback" }},
 		{name: "callback query", mutate: func(config *Config) { config.Auth.OIDC.CallbackPath = "/oauth2/callback?next=bad" }},
-		{name: "callback fragment", mutate: func(config *Config) { config.Auth.GitHub.CallbackPath = "/oauth2/callback#bad" }},
+		{name: "callback fragment", mutate: func(config *Config) { config.Auth.OAuth2.CallbackPath = "/oauth2/callback#bad" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			config := validPath
@@ -72,7 +72,7 @@ func TestPathRoutingConfigValidation(t *testing.T) {
 	subdomainCompatibility := validSubdomain
 	subdomainCompatibility.Auth.Session.CookieDomain = ".agents.localhost"
 	subdomainCompatibility.Auth.OIDC.CallbackPath = "/custom-oidc-callback"
-	subdomainCompatibility.Auth.GitHub.CallbackPath = "/custom-github-callback"
+	subdomainCompatibility.Auth.OAuth2.CallbackPath = "/custom-oauth2-callback"
 	if err := subdomainCompatibility.Validate(); err != nil {
 		t.Fatalf("subdomain compatibility config: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestPathModeDashboardLinkAndNestedProxy(t *testing.T) {
 
 func TestPathModeOwnerDenialMatchesMissingAndAuthenticationPrecedesLookup(t *testing.T) {
 	run := ownedAgentRun("run-1", "opaque-key", "https://github.com", "42", "owner")
-	config := pathTestConfig(authModeGitHub)
+	config := pathTestConfig(authModeOAuth2)
 	config.Auth = authenticatedTestConfig().Auth
 	config.Auth.Session.Secure = true
 	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "agent-owner", Effect: authorizationEffectAllow, Owner: true}}
@@ -184,14 +184,15 @@ func TestPathModeOwnerDenialMatchesMissingAndAuthenticationPrecedesLookup(t *tes
 }
 
 func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
-	fixture := newGitHubOAuthFixture(t, "access-token", `{"id":42,"login":"owner"}`)
-	config := pathTestConfig(authModeGitHub)
+	fixture := newOAuth2Fixture(t, "access-token", `{"id":42,"login":"owner"}`)
+	config := pathTestConfig(authModeOAuth2)
 	config.Auth = authenticatedTestConfig().Auth
 	config.Auth.Session.Secure = true
-	config.Auth.GitHub.CallbackPath = "/oauth2/github/callback"
-	config.Auth.GitHub.AuthorizationURL = fixture.URL + "/authorize"
-	config.Auth.GitHub.TokenURL = fixture.URL + "/token"
-	config.Auth.GitHub.UserURL = fixture.URL + "/user"
+	config.Auth.OAuth2.CallbackPath = "/oauth2/callback"
+	config.Auth.OAuth2.AuthorizationURL = fixture.URL + "/authorize"
+	config.Auth.OAuth2.TokenURL = fixture.URL + "/token"
+	parsedFixtureURL, _ := url.Parse(fixture.URL)
+	config.Auth.OAuth2.Identity = OAuth2IdentityConfig{Endpoint: fixture.URL + "/user", AllowedHosts: []string{parsedFixtureURL.Hostname()}, SubjectPath: "id", DisplayNamePath: "login"}
 	server := mustNewServer(t, config, fakeClient(t))
 
 	request := httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/opaque-key/editor?folder=repo", nil)
@@ -216,11 +217,11 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 	if err != nil || providerAuthorizeURL.Query().Get("state") == "" {
 		t.Fatalf("provider authorization redirect=%q err=%v", loginResponse.Header().Get("Location"), err)
 	}
-	if got := providerAuthorizeURL.Query().Get("redirect_uri"); got != "https://agents.altinn.studio/oauth2/github/callback" {
+	if got := providerAuthorizeURL.Query().Get("redirect_uri"); got != "https://agents.altinn.studio/oauth2/callback" {
 		t.Fatalf("OAuth redirect_uri=%q", got)
 	}
 	callbackRequest := httptest.NewRequest(http.MethodGet,
-		"https://agents.altinn.studio/oauth2/github/callback?state="+url.QueryEscape(providerAuthorizeURL.Query().Get("state"))+"&code=test", nil)
+		"https://agents.altinn.studio/oauth2/callback?state="+url.QueryEscape(providerAuthorizeURL.Query().Get("state"))+"&code=test", nil)
 	callbackRequest.AddCookie(cookieNamed(t, loginResponse, loginStateCookie))
 	callbackResponse := httptest.NewRecorder()
 	server.ServeHTTP(callbackResponse, callbackRequest)
