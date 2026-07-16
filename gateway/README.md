@@ -1,7 +1,7 @@
 # nvt-agent gateway
 
 The gateway routes browser access to running agent sessions and can protect the
-dashboard and session routes with OIDC or direct GitHub OAuth2. Authentication
+dashboard and session routes with OIDC or a generic OAuth2 identity adapter. Authentication
 adapters produce the same normalized principal (`issuer`, immutable `subject`,
 optional display name, sanitized claims). Authorization is separate and
 defaults to deny whenever authentication is enabled.
@@ -31,7 +31,7 @@ query, fragment, or embedded credentials. Requests must carry that configured
 origin's Host header. Forwarded host/proto headers do not influence routing,
 links, callbacks, or return URLs. OAuth return URLs are restricted to the same
 origin and a valid dashboard or AgentRun route.
-OIDC and GitHub callback paths must be unambiguous children of `/oauth2/` in
+OIDC and OAuth2 callback paths must be unambiguous children of `/oauth2/` in
 path mode so they cannot collide with routing identifiers.
 
 The gateway removes exactly `/<access-key>` before proxying while preserving
@@ -116,15 +116,28 @@ collisions, malformed or oversized responses, and timeouts fail login closed.
 Access tokens and raw responses are never stored in sessions or cookies.
 
 This provider-neutral configuration expresses GitHub organization membership
-without GitHub-specific authorization logic in the gateway:
+entirely as operator configuration:
 
 ```yaml
 gateway:
   auth:
-    mode: github
+    mode: oauth2
     session:
       # Membership is checked at login, so use a bounded revocation window.
       maxAgeSeconds: 3600
+    oauth2:
+      credentials:
+        existingSecret: nvt-gateway-github
+      issuer: https://github.com
+      authorizationURL: https://github.com/login/oauth/authorize
+      tokenURL: https://github.com/login/oauth/access_token
+      scopes: []
+      clientAuthMethod: client_secret_post
+      identity:
+        endpoint: https://api.github.com/user
+        allowedHosts: [api.github.com]
+        subjectPath: id
+        displayNamePath: login
     claimEnrichment:
       allowedHosts:
         - api.github.com
@@ -166,14 +179,20 @@ is otherwise invalidated (including a gateway restart). For security-sensitive
 production deployments, configure a shorter explicit lifetime such as the
 one-hour (`3600`) value above instead of relying on the 24-hour default.
 
-## GitHub login
+## Generic OAuth2 login
 
-Create a dedicated GitHub App for human gateway login. Configure its callback
-URL as `https://<gateway-host>/oauth2/github/callback`; it needs no repository
+Use `auth.mode=oauth2` when a provider offers authorization-code OAuth2 but not
+OIDC. The trusted gateway configuration defines the issuer namespace and the
+identity endpoint used to obtain one immutable subject; unlike OIDC, OAuth2
+alone does not cryptographically establish an issuer/ID-token identity
+contract. Prefer OIDC when the provider supports it.
+
+For GitHub, create a dedicated GitHub App for human login. Configure its
+callback URL as `https://<gateway-host>/oauth2/callback`; it needs no repository
 permissions, repository scopes, or webhook subscriptions for profile identity
 lookup. A membership claim source does require the organization permission and
-installation/approval described above. Store both OAuth credentials in a
-Kubernetes Secret:
+installation/approval described above. Store both credentials in a Kubernetes
+Secret:
 
 ```sh
 kubectl -n nvt create secret generic nvt-gateway-github \
@@ -188,13 +207,23 @@ gateway:
   baseDomain: agents.example.com
   publicURL: https://agents.example.com
   auth:
-    mode: github
+    mode: oauth2
     session:
       existingSecret: nvt-gateway-session
       cookieDomain: .agents.example.com
-    github:
+    oauth2:
       credentials:
         existingSecret: nvt-gateway-github
+      issuer: https://github.com
+      authorizationURL: https://github.com/login/oauth/authorize
+      tokenURL: https://github.com/login/oauth/access_token
+      scopes: []
+      clientAuthMethod: client_secret_post
+      identity:
+        endpoint: https://api.github.com/user
+        allowedHosts: [api.github.com]
+        subjectPath: id
+        displayNamePath: login
     authorization:
       default: deny
       rules:
@@ -203,12 +232,37 @@ gateway:
           owner: true
 ```
 
-The flow uses state and PKCE, calls GitHub's current-user endpoint, and retains
-only issuer `https://github.com`, decimal numeric user ID as subject, and login
-as display data. The access token is discarded after lookup. GitHub Enterprise
-Server deployments can configure the issuer, authorization, token, and user
-URLs explicitly. GitHub and OIDC principals are never guessed or linked across
-issuers; any future account correlation requires an external explicit mapping.
+The generic flow uses state and PKCE, supports `client_secret_post` and
+`client_secret_basic`, performs one bounded redirect-free HTTPS identity GET,
+and retains only the configured issuer, canonical string/integer subject, and
+optional display name. Access and refresh tokens and the raw identity response
+are discarded before session creation. The identity endpoint host must be
+explicitly allowlisted. Principals from different issuers are never guessed or
+linked; any account correlation requires an external explicit mapping.
+
+### Migration from chart 0.3
+
+Chart 0.4 removes `auth.mode=github` and `auth.github.*`. Migrate saved values
+to `auth.mode=oauth2` and the explicit `auth.oauth2.*` fields shown above. The
+old GitHub defaults are intentionally configuration now: issuer,
+authorization/token URLs, identity endpoint, host allowlist, and JSON paths
+must all be declared. Rename the credentials block but the referenced Secret
+and its `client-id`/`client-secret` keys may remain unchanged. There is no
+automatic compatibility fallback.
+
+| Chart 0.3 | Chart 0.4 |
+| --- | --- |
+| `auth.mode: github` | `auth.mode: oauth2` |
+| `auth.github.credentials` | `auth.oauth2.credentials` |
+| `auth.github.callbackPath` | `auth.oauth2.callbackPath` |
+| `auth.github.issuer` | `auth.oauth2.issuer` |
+| `auth.github.authorizationURL` | `auth.oauth2.authorizationURL` |
+| `auth.github.tokenURL` | `auth.oauth2.tokenURL` |
+| `auth.github.userURL` | `auth.oauth2.identity.endpoint` |
+
+Also set `auth.oauth2.clientAuthMethod`,
+`auth.oauth2.identity.allowedHosts`, `subjectPath`, and optional
+`displayNamePath`; these replace the removed adapter's implicit behavior.
 
 In path mode, `session.cookieDomain` must be empty so the gateway cookie is
 host-only on the dedicated origin. Secure session cookies are mandatory; do

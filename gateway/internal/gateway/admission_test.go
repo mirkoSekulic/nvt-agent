@@ -23,9 +23,9 @@ import (
 )
 
 func TestLoginAdmissionUnsetPreservesAuthenticatedSession(t *testing.T) {
-	fixture := newGitHubOAuthFixture(t, "access-token", `{"id":42,"login":"owner"}`)
-	server := mustNewServer(t, githubTestConfig(fixture.URL), fakeClient(t))
-	response := completeGitHubLogin(t, server)
+	fixture := newOAuth2Fixture(t, "access-token", `{"id":42,"login":"owner"}`)
+	server := mustNewServer(t, oauth2TestConfig(fixture.URL), fakeClient(t))
+	response := completeOAuth2Login(t, server)
 	if response.Code != http.StatusFound || len(server.auth.sessions) != 1 {
 		t.Fatalf("unset admission status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
 	}
@@ -34,6 +34,7 @@ func TestLoginAdmissionUnsetPreservesAuthenticatedSession(t *testing.T) {
 func TestLoginAdmissionAllowsMemberAndResourceAuthorizationStillApplies(t *testing.T) {
 	const tokenCanary = "oauth-access-token-canary"
 	const bodyCanary = "enrichment-response-body-canary"
+	const identityBodyCanary = "identity-response-body-canary"
 	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+tokenCanary {
 			t.Errorf("claim source authorization=%q", got)
@@ -41,8 +42,8 @@ func TestLoginAdmissionAllowsMemberAndResourceAuthorizationStillApplies(t *testi
 		_, _ = fmt.Fprintf(w, `{"state":"active","unused":%q}`, bodyCanary)
 	}))
 	t.Cleanup(claimServer.Close)
-	fixture := newGitHubOAuthFixture(t, tokenCanary, `{"id":42,"login":"member"}`)
-	config := githubTestConfig(fixture.URL)
+	fixture := newOAuth2Fixture(t, tokenCanary, `{"id":42,"login":"member","unused":"`+identityBodyCanary+`"}`)
+	config := oauth2TestConfig(fixture.URL)
 	config.Auth.Admission = memberAdmission()
 	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
 	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}
@@ -68,7 +69,7 @@ func TestLoginAdmissionAllowsMemberAndResourceAuthorizationStillApplies(t *testi
 	oldOutput := log.Writer()
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(oldOutput) })
-	callback := completeGitHubLogin(t, server)
+	callback := completeOAuth2Login(t, server)
 	if callback.Code != http.StatusFound || len(server.auth.sessions) != 1 {
 		t.Fatalf("member login status=%d sessions=%d body=%q", callback.Code, len(server.auth.sessions), callback.Body.String())
 	}
@@ -93,7 +94,7 @@ func TestLoginAdmissionAllowsMemberAndResourceAuthorizationStillApplies(t *testi
 		t.Fatalf("owned proxy status=%d body=%q", ownedResponse.Code, ownedResponse.Body.String())
 	}
 	for _, exposed := range []string{callback.Body.String(), callback.Header().Get("Location"), sessionCookie.String(), logs.String(), fmt.Sprintf("%#v", stored.Principal.Claims), response.Body.String(), proxiedHeaders} {
-		if strings.Contains(exposed, tokenCanary) || strings.Contains(exposed, bodyCanary) {
+		if strings.Contains(exposed, tokenCanary) || strings.Contains(exposed, bodyCanary) || strings.Contains(exposed, identityBodyCanary) {
 			t.Fatalf("login exposed canary: %q", exposed)
 		}
 	}
@@ -104,8 +105,8 @@ func TestLoginAdmissionDeniesNonMemberBeforeSessionEvenWhenPrincipalOwnsRun(t *t
 		_, _ = w.Write([]byte(`{"state":"pending"}`))
 	}))
 	t.Cleanup(claimServer.Close)
-	fixture := newGitHubOAuthFixture(t, "access-token", `{"id":42,"login":"owner"}`)
-	config := githubTestConfig(fixture.URL)
+	fixture := newOAuth2Fixture(t, "access-token", `{"id":42,"login":"owner"}`)
+	config := oauth2TestConfig(fixture.URL)
 	config.Auth.Admission = memberAdmission()
 	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
 	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}
@@ -113,7 +114,7 @@ func TestLoginAdmissionDeniesNonMemberBeforeSessionEvenWhenPrincipalOwnsRun(t *t
 	server := mustNewServer(t, config, fakeClient(t, &run))
 	server.auth.httpClient = noRedirectClient(claimServer.Client())
 
-	response := completeGitHubLogin(t, server)
+	response := completeOAuth2Login(t, server)
 	if response.Code != http.StatusUnauthorized || response.Body.String() != "unauthorized\n" || len(server.auth.sessions) != 0 {
 		t.Fatalf("non-member status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
 	}
@@ -139,13 +140,13 @@ func TestClaimEnrichmentFailureCreatesNoSession(t *testing.T) {
 		http.Error(w, "failed-enrichment-response-canary", http.StatusForbidden)
 	}))
 	t.Cleanup(claimServer.Close)
-	fixture := newGitHubOAuthFixture(t, tokenCanary, `{"id":42,"login":"member"}`)
-	config := githubTestConfig(fixture.URL)
+	fixture := newOAuth2Fixture(t, tokenCanary, `{"id":42,"login":"member"}`)
+	config := oauth2TestConfig(fixture.URL)
 	config.Auth.Admission = memberAdmission()
 	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
 	server := mustNewServer(t, config, fakeClient(t))
 	server.auth.httpClient = noRedirectClient(claimServer.Client())
-	response := completeGitHubLogin(t, server)
+	response := completeOAuth2Login(t, server)
 	if response.Code != http.StatusUnauthorized || response.Body.String() != "login unavailable\n" || len(server.auth.sessions) != 0 {
 		t.Fatalf("failed enrichment status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
 	}
@@ -164,8 +165,8 @@ func TestClaimEndpointCannotPersistOAuthBearerInSession(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `{"state":%q}`, selected)
 	}))
 	t.Cleanup(claimServer.Close)
-	fixture := newGitHubOAuthFixture(t, tokenCanary, `{"id":42,"login":"member"}`)
-	config := githubTestConfig(fixture.URL)
+	fixture := newOAuth2Fixture(t, tokenCanary, `{"id":42,"login":"member"}`)
+	config := oauth2TestConfig(fixture.URL)
 	config.Auth.Admission = memberAdmission()
 	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
 	server := mustNewServer(t, config, fakeClient(t))
@@ -175,7 +176,7 @@ func TestClaimEndpointCannotPersistOAuthBearerInSession(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(oldOutput) })
 
-	response := completeGitHubLogin(t, server)
+	response := completeOAuth2Login(t, server)
 	if response.Code != http.StatusUnauthorized || len(server.auth.sessions) != 0 {
 		t.Fatalf("reflected bearer status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
 	}
@@ -248,7 +249,7 @@ func TestAdmissionAndClaimSourceParsingIsStrict(t *testing.T) {
 	}
 }
 
-func completeGitHubLogin(t *testing.T, server *Server) *httptest.ResponseRecorder {
+func completeOAuth2Login(t *testing.T, server *Server) *httptest.ResponseRecorder {
 	t.Helper()
 	login := httptest.NewRecorder()
 	server.ServeHTTP(login, httptest.NewRequest(http.MethodGet, "http://agents.localhost/oauth2/login", nil))
@@ -257,7 +258,7 @@ func completeGitHubLogin(t *testing.T, server *Server) *httptest.ResponseRecorde
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet,
-		"http://agents.localhost/oauth2/github/callback?state="+url.QueryEscape(authorizeURL.Query().Get("state"))+"&code=test", nil)
+		"http://agents.localhost/oauth2/callback?state="+url.QueryEscape(authorizeURL.Query().Get("state"))+"&code=test", nil)
 	request.AddCookie(cookieNamed(t, login, loginStateCookie))
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)

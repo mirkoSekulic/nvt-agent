@@ -26,7 +26,7 @@ func TestProxyIsolatesGatewayCookiesAndScopesAgentCookies(t *testing.T) {
 	run.Spec.ProfileProvenance = &nvtv1alpha1.AgentRunProfileProvenance{Principal: &nvtv1alpha1.AgentRunPrincipal{
 		Issuer: "https://github.com", Subject: "42", DisplayName: "owner",
 	}}
-	config := pathTestConfig(authModeGitHub)
+	config := pathTestConfig(authModeOAuth2)
 	config.Auth = authenticatedTestConfig().Auth
 	config.Auth.Session.Secure = true
 	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "agent-owner", Effect: authorizationEffectAllow, Owner: true}}

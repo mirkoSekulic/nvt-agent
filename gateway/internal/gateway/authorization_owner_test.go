@@ -150,9 +150,14 @@ func authenticatedTestConfig() Config {
 	return Config{
 		BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090,
 		Auth: AuthConfig{
-			Mode:    authModeGitHub,
+			Mode:    authModeOAuth2,
 			Session: SessionConfig{Secret: "0123456789abcdef0123456789abcdef", CookieName: defaultSessionCookie, MaxAgeSeconds: defaultSessionMaxAge},
-			GitHub:  GitHubConfig{ClientID: "client", ClientSecret: "secret"},
+			OAuth2: OAuth2Config{
+				ClientID: "client", ClientSecret: "secret", CallbackPath: defaultCallbackPath,
+				Issuer: "https://identity.example", AuthorizationURL: "https://oauth.example/authorize", TokenURL: "https://oauth.example/token",
+				ClientAuthMethod: oauth2ClientSecretPost,
+				Identity:         OAuth2IdentityConfig{Endpoint: "https://oauth.example/identity", AllowedHosts: []string{"oauth.example"}, SubjectPath: "id", DisplayNamePath: "login"},
+			},
 		},
 	}
 }
