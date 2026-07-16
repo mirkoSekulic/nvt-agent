@@ -264,9 +264,11 @@ injection listener is CONNECT-only; provider injection is an authenticated
 HTTPS contract. The launcher also exposes the selected non-secret name as
 `NVT_PLUGIN_EGRESS_PROVIDER`; controlled plugin clients may use its presence to
 avoid legacy direct credential materialization during migration, but it conveys
-no topology or authority. The declaration must match
-exactly one injection-eligible (`header-inject` or `placeholder-file`) grant or
-launch fails. It contains no credential and
+no topology or authority. The declaration must name an exact provider
+capability backed by one or more grants with the same injection-eligible
+materialization (`header-inject` or `placeholder-file`). Repeated grants may
+aggregate repository scope; zero matches, conflicting modes, or any ineligible
+entry fail before launch. The declaration contains no credential and
 does not authorize the provider by itself. Direct mode and plugins without the
 declaration retain their existing environment.
 

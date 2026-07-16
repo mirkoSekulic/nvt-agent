@@ -93,15 +93,22 @@ def environment(plugin, base_env=None):
 
     home = env.get("HOME", str(Path.home()))
     state_dir = env.get("NVT_STATE_DIR", str(Path(home) / ".nvt-agent"))
-    transport, grants = _metadata(state_dir)
+    _transport, grants = _metadata(state_dir)
     matches = [
         grant for grant in grants
         if isinstance(grant, dict)
         and grant.get("provider") == selected
-        and grant.get("materialization") in {"header-inject", "placeholder-file"}
     ]
-    if len(matches) != 1:
-        raise PluginEgressError("plugin.egress.provider is not an exact injection-eligible mediated grant")
+    if not matches:
+        raise PluginEgressError("plugin.egress.provider is not a granted mediated capability")
+    materializations = set()
+    for grant in matches:
+        materialization = grant.get("materialization", "file-bundle")
+        if materialization not in {"header-inject", "placeholder-file"}:
+            raise PluginEgressError("plugin.egress.provider has an ineligible mediated materialization")
+        materializations.add(materialization)
+    if len(materializations) != 1:
+        raise PluginEgressError("plugin.egress.provider has conflicting mediated materializations")
 
     # This identity belongs only to trusted egress infrastructure. It is not
     # expected in an agent environment, but never propagate it across a plugin

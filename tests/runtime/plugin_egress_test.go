@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestPluginEgressScopesLifecycleProcessesAndExportedTools(t *testing.T) {
+func TestPluginEgressAggregatedGrantsScopeLifecycleProcessesAndExportedTools(t *testing.T) {
 	f := newFixture(t)
 	f.writePluginEgressRuntime("github-main", "company/oauth")
 	f.writeBin("plugin-egress-exec", "#!/usr/bin/env bash\nexec python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "plugin-egress-exec.py"))+" \"$@\"\n")
@@ -89,7 +89,7 @@ func TestPluginEgressAbsentAndDirectModesAreUnchanged(t *testing.T) {
 	}
 }
 
-func TestPluginEgressScopesDoctorAndHealthCommands(t *testing.T) {
+func TestPluginEgressAggregatedGrantsScopeDoctorAndHealthCommands(t *testing.T) {
 	f := newFixture(t)
 	f.writePluginEgressRuntime("github-main", "company/oauth")
 	firstDoctor := filepath.Join(f.home, "first-doctor")
@@ -238,7 +238,7 @@ func TestPluginEgressFailsBeforeLaunchForInvalidMediatedSelection(t *testing.T) 
 	config := f.writeAgentConfig(fmt.Sprintf("plugins:\n  - name: invalid\n    source: custom\n    command: %s\n    egress: {provider: missing-provider}\n", quoteYAML(command)))
 	f.writePluginEgressRuntime("github-main")
 	output := f.runWithEnv(runPluginsBin(f.root), false, []string{"NVT_EGRESS_MODE=mediated"}, "after-agent", config)
-	if !strings.Contains(output, "not an exact injection-eligible mediated grant") {
+	if !strings.Contains(output, "not a granted mediated capability") {
 		t.Fatalf("unexpected selection failure:\n%s", output)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -273,6 +273,84 @@ func TestPluginEgressRejectsMissingScopedProxyAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestPluginEgressRejectsInvalidRepeatedGrantsAtEveryBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		grants string
+		want   string
+	}{
+		{
+			name:   "zero-matches",
+			grants: `[{"provider":"other","materialization":"header-inject"}]`,
+			want:   "not a granted mediated capability",
+		},
+		{
+			name:   "conflicting-repeated",
+			grants: `[{"provider":"selected","materialization":"header-inject"},{"provider":"selected","materialization":"placeholder-file"}]`,
+			want:   "conflicting mediated materializations",
+		},
+		{
+			name:   "ineligible-repeated",
+			grants: `[{"provider":"selected","materialization":"header-inject"},{"provider":"selected","materialization":"file-bundle"}]`,
+			want:   "ineligible mediated materialization",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.writePluginEgressRuntime("selected")
+			metadata := fmt.Sprintf(`{"mode":"mediated","transport":"forward-proxy","grants":%s}`, tc.grants)
+			if err := os.WriteFile(filepath.Join(f.state, "egress.json"), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(f.home, "command-ran")
+			command := f.writeTool("must-not-run", "#!/usr/bin/env bash\ntouch "+shellQuote(marker)+"\n")
+			config := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: invalid
+    source: custom
+    command: %s
+    egress: {provider: selected}
+    doctor: {command: %s}
+    health: {readiness: true, command: %s}
+    exports:
+      tools:
+        - name: invalid-egress-tool
+          command: %s
+`, quoteYAML(command), quoteYAML(command), quoteYAML(command), quoteYAML(command)))
+			dir := filepath.Join(f.state, "plugins", "invalid")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"ready":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := []string{
+				"NVT_AGENT_CONFIG_FILE=" + config,
+				"NVT_EGRESS_MODE=mediated",
+				"NVT_EGRESS_BROKER_TOKEN=repeated-grant-secret-canary",
+				"NVT_EGRESS_FORWARD_PROXY_URL_SELECTED=http://selected@127.0.0.1:8470",
+				"AGENT_SESSION=nvt-missing-session",
+				"CODE_SERVER_PORT=1",
+				"NVT_AGENTD_SOCKET=/nonexistent",
+			}
+			outputs := []string{
+				f.runWithEnv(exportPluginToolsBin(f.root), false, env, config),
+				f.runWithEnv(runPluginsBin(f.root), false, env, "after-agent", config),
+				f.runWithEnv("python3", false, env, filepath.Join(f.root, "runtime", "core", "doctor.py"), "--plugin", "invalid"),
+				f.runWithEnv("python3", false, env, filepath.Join(f.root, "runtime", "core", "health.py"), "--json"),
+			}
+			for _, output := range outputs {
+				if !strings.Contains(output, tc.want) || strings.Contains(output, "repeated-grant-secret-canary") {
+					t.Fatalf("unsafe or missing %s failure:\n%s", tc.name, output)
+				}
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("invalid repeated grant command ran: %v", err)
+			}
+		})
+	}
+}
+
 func (f *fixture) writePluginEgressRuntime(providers ...string) {
 	f.t.Helper()
 	if err := os.MkdirAll(filepath.Join(f.home, ".nvt-agent"), 0o700); err != nil {
@@ -281,7 +359,10 @@ func (f *fixture) writePluginEgressRuntime(providers ...string) {
 	grants := make([]string, 0, len(providers))
 	env := ""
 	for _, provider := range providers {
-		grants = append(grants, fmt.Sprintf(`{"provider":%q,"materialization":"header-inject"}`, provider))
+		grants = append(grants, fmt.Sprintf(`{"provider":%q,"materialization":"header-inject","repositories":["example/one"]}`, provider))
+		if provider == "github-main" {
+			grants = append(grants, fmt.Sprintf(`{"provider":%q,"materialization":"header-inject","repositories":["example/two"]}`, provider))
+		}
 		suffix := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_", "_", "_").Replace(provider))
 		env += fmt.Sprintf("export NVT_EGRESS_FORWARD_PROXY_URL_%s=%q\n", suffix, "http://"+url.PathEscape(provider)+"@127.0.0.1:8470")
 	}

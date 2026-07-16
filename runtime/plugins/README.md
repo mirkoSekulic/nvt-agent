@@ -89,10 +89,11 @@ In mediated forward-proxy or transparent transport, the generic launcher and
 tool wrapper supply the provider-scoped `HTTPS_PROXY` environment. Plain HTTP
 is deliberately not sent to egressd's CONNECT-only injection listener. The plugin
 makes an ordinary request; it does not inspect the run's egress mode, construct
-an egress URL, call `brokerctl`, or carry a placeholder header. The provider
-must be an exact injection-eligible mediated grant. Direct mode leaves networking unchanged,
-and omitting `egress` leaves all modes unchanged. Loopback callbacks remain in
-`NO_PROXY`.
+an egress URL, call `brokerctl`, or carry a placeholder header. The exact
+provider capability may be backed by multiple repository-aggregating grants,
+but every entry must use the same injection-eligible materialization. Direct
+mode leaves networking unchanged, and omitting `egress` leaves all modes
+unchanged. Loopback callbacks remain in `NO_PROXY`.
 
 Provider names must remain unique after uppercase environment normalization
 (punctuation runs become `_`). Bootstrap rejects colliding names before plugin
