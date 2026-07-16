@@ -397,6 +397,7 @@ func TestWriteAgentInstructionsAppendsLocalWorkspaceInstructions(t *testing.T) {
 	required := []string{
 		"This file is generated at container startup.",
 		"Local override instructions are read from `" + localInstructions + "`",
+		"Deleting that session ends the main container and fails an active Kubernetes AgentRun.",
 		"## Local Workspace Instructions",
 		"Prefer focused PRs for this workspace.",
 	}

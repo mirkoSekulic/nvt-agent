@@ -30,6 +30,7 @@ $user_line
 - Local override instructions are read from \`$local_instructions\` when the
   file exists.
 - The main terminal agent runs in tmux session \`${AGENT_SESSION:-agent}\`.
+- Deleting that session ends the main container and fails an active Kubernetes AgentRun.
 - code-server runs inside the container on port \`${CODE_SERVER_PORT:-4090}\`.
 - Custom plugins are mounted at \`/custom-plugins\`.
 - Builtin runtime plugins are installed under \`/usr/local/lib/nvt-agent/plugins\`.

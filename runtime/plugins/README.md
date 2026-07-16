@@ -490,6 +490,17 @@ Docker uses it through the image `HEALTHCHECK`. In Docker Compose this marks the
 container `healthy` or `unhealthy`; it does not restart the container by itself.
 The same command can later be used by a Kubernetes `readinessProbe`.
 
+After startup has established the configured tmux agent session, PID 1 also
+supervises that session. If it disappears unexpectedly, the main agent
+container exits non-zero instead of remaining alive but unhealthy. Kubernetes
+AgentRun Pods use `restartPolicy: Never`, so the existing operator status and
+TTL path records the run as failed; the runtime does not create a replacement
+session. An intentional lifecycle-reporting `TERM` exits cleanly instead.
+
+In local Compose, this stops only the main agent container. Its Docker,
+egress, capture, and other support containers may continue running until
+`make agent-down NAME=<name>`.
+
 By default, plugins do not affect readiness. Add `health.readiness: true` when a
 plugin should block agent readiness:
 
