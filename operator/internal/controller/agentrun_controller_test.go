@@ -4107,6 +4107,110 @@ func TestReconcileTerminalCleanupContinuesWhenBrokerRevocationFails(t *testing.T
 	assertTerminalBrokerEntries(t, ctx, baseClient, agentRun, false)
 }
 
+func TestReconcileTerminalCleanupKeepsFenceUntilDeletingPodsDisappear(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	baseClient, _, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+	delayedClient := &delayedPodDeleteClient{Client: baseClient, deleting: map[client.ObjectKey]bool{}, attempts: map[client.ObjectKey]int{}}
+	reconciler := &AgentRunReconciler{Client: delayedClient, Scheme: testScheme(t), Now: func() metav1.Time { return now }}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err != nil {
+		t.Fatalf("delayed deletion reconcile: %v", err)
+	}
+	if result.RequeueAfter != terminalResourceCleanupRequeue {
+		t.Fatalf("requeue = %s, want %s", result.RequeueAfter, terminalResourceCleanupRequeue)
+	}
+	for _, name := range []string{AgentPodName(agentRun.Name), EgressdPodName(agentRun.Name)} {
+		key := client.ObjectKey{Namespace: agentRun.Namespace, Name: name}
+		pod := &corev1.Pod{}
+		if err := delayedClient.Get(ctx, key, pod); err != nil {
+			t.Fatalf("get terminating Pod %s: %v", name, err)
+		}
+		if pod.DeletionTimestamp.IsZero() || delayedClient.attempts[key] != 1 {
+			t.Fatalf("Pod %s deletion state timestamp=%v attempts=%d", name, pod.DeletionTimestamp, delayedClient.attempts[key])
+		}
+	}
+	assertTerminalOperationalResources(t, ctx, delayedClient, nonPodOperationalResources(resources), true)
+	assertTerminalBrokerEntries(t, ctx, delayedClient, agentRun, false)
+
+	for _, name := range []string{AgentPodName(agentRun.Name), EgressdPodName(agentRun.Name)} {
+		if err := baseClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: agentRun.Namespace, Name: name}}); err != nil {
+			t.Fatalf("simulate kubelet removal of %s: %v", name, err)
+		}
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("post-termination reconcile: %v", err)
+	}
+	assertTerminalOperationalResources(t, ctx, baseClient, resources, false)
+}
+
+func TestReconcileTerminalCleanupPodDeleteFailureKeepsFenceAndAttemptsPeer(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	baseClient, _, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+	agentKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}
+	egressdKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: EgressdPodName(agentRun.Name)}
+	failingClient := &failPodDeleteOnceClient{Client: baseClient, key: agentKey, attempts: map[client.ObjectKey]int{}}
+	reconciler := &AgentRunReconciler{Client: failingClient, Scheme: testScheme(t), Now: func() metav1.Time { return now }}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "injected Pod delete failure") {
+		t.Fatalf("first reconcile error = %v", err)
+	}
+	if result.RequeueAfter != terminalResourceCleanupRequeue || failingClient.attempts[agentKey] != 1 || failingClient.attempts[egressdKey] != 1 {
+		t.Fatalf("result=%#v attempts=%#v", result, failingClient.attempts)
+	}
+	if err := baseClient.Get(ctx, agentKey, &corev1.Pod{}); err != nil {
+		t.Fatalf("failed agent Pod deletion did not retain Pod: %v", err)
+	}
+	if err := baseClient.Get(ctx, egressdKey, &corev1.Pod{}); !errors.IsNotFound(err) {
+		t.Fatalf("peer egressd Pod deletion was not attempted: %v", err)
+	}
+	assertTerminalOperationalResources(t, ctx, baseClient, nonPodOperationalResources(resources), true)
+	assertTerminalBrokerEntries(t, ctx, baseClient, agentRun, false)
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("retry reconcile: %v", err)
+	}
+	assertTerminalOperationalResources(t, ctx, baseClient, resources, false)
+}
+
+func TestReconcileTerminalCleanupForeignPodLeavesCompleteFence(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	finishedAt := metav1.Date(2026, 5, 31, 11, 58, 0, 0, time.UTC)
+	agentRun := terminalAgentRun(nvtv1alpha1.AgentRunPhaseCompleted, finishedAt)
+	agentRun.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
+
+	agentKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}
+	foreign := &corev1.Pod{}
+	if err := k8sClient.Get(ctx, agentKey, foreign); err != nil {
+		t.Fatal(err)
+	}
+	foreign.OwnerReferences = nil
+	if err := k8sClient.Update(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "agent Pod") || !strings.Contains(err.Error(), "not controlled") {
+		t.Fatalf("error = %v, want foreign Pod ownership failure", err)
+	}
+	if result.RequeueAfter != terminalResourceCleanupRequeue {
+		t.Fatalf("requeue = %s", result.RequeueAfter)
+	}
+	assertTerminalOperationalResources(t, ctx, k8sClient, resources, true)
+	assertTerminalBrokerEntries(t, ctx, k8sClient, agentRun, false)
+}
+
 func TestReconcileFailedRunBeforeTTLKeepsPodAndRequeues(t *testing.T) {
 	ctx := context.Background()
 	now := metav1.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
@@ -4526,7 +4630,8 @@ func TestReconcileZeroRunRetentionKeepsTerminalAgentRunForever(t *testing.T) {
 	now := metav1.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
 	finishedAt := metav1.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	agentRun := terminalAgentRunWithRunRetention(nvtv1alpha1.AgentRunPhaseFailed, finishedAt, ptrTo[int64](0))
-	k8sClient, reconciler := terminalCleanupFixture(t, agentRun, now, false)
+	agentRun.Spec.TTL.FailedTTLSeconds = ptrTo[int64](60)
+	k8sClient, reconciler, resources := terminalOperationalCleanupFixture(t, agentRun, now, true)
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
 	if err != nil {
@@ -4537,6 +4642,8 @@ func TestReconcileZeroRunRetentionKeepsTerminalAgentRunForever(t *testing.T) {
 		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
 	}
 	assertAgentRunPhase(ctx, t, k8sClient, agentRun, nvtv1alpha1.AgentRunPhaseFailed)
+	assertTerminalOperationalResources(t, ctx, k8sClient, resources, false)
+	assertTerminalBrokerEntries(t, ctx, k8sClient, agentRun, false)
 }
 
 func TestReconcilePositiveRunRetentionDeletesExpiredTerminalAgentRun(t *testing.T) {
@@ -4775,6 +4882,16 @@ func assertTerminalOperationalResources(t *testing.T, ctx context.Context, reade
 	}
 }
 
+func nonPodOperationalResources(resources []client.Object) []client.Object {
+	filtered := make([]client.Object, 0, len(resources))
+	for _, object := range resources {
+		if _, isPod := object.(*corev1.Pod); !isPod {
+			filtered = append(filtered, object)
+		}
+	}
+	return filtered
+}
+
 func assertTerminalBrokerEntries(t *testing.T, ctx context.Context, reader client.Reader, agentRun *nvtv1alpha1.AgentRun, present bool) {
 	t.Helper()
 	configMap := &corev1.ConfigMap{}
@@ -4827,6 +4944,52 @@ func (c *failBrokerUpdateOnceClient) Update(ctx context.Context, object client.O
 		}
 	}
 	return c.Client.Update(ctx, object, options...)
+}
+
+type delayedPodDeleteClient struct {
+	client.Client
+	deleting map[client.ObjectKey]bool
+	attempts map[client.ObjectKey]int
+}
+
+func (c *delayedPodDeleteClient) Delete(ctx context.Context, object client.Object, options ...client.DeleteOption) error {
+	if _, isPod := object.(*corev1.Pod); isPod {
+		key := client.ObjectKeyFromObject(object)
+		c.deleting[key] = true
+		c.attempts[key]++
+		return nil
+	}
+	return c.Client.Delete(ctx, object, options...)
+}
+
+func (c *delayedPodDeleteClient) Get(ctx context.Context, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, object, options...); err != nil {
+		return err
+	}
+	if pod, isPod := object.(*corev1.Pod); isPod && c.deleting[key] {
+		deletionTimestamp := metav1.Now()
+		pod.DeletionTimestamp = &deletionTimestamp
+	}
+	return nil
+}
+
+type failPodDeleteOnceClient struct {
+	client.Client
+	key      client.ObjectKey
+	attempts map[client.ObjectKey]int
+	failed   bool
+}
+
+func (c *failPodDeleteOnceClient) Delete(ctx context.Context, object client.Object, options ...client.DeleteOption) error {
+	if _, isPod := object.(*corev1.Pod); isPod {
+		key := client.ObjectKeyFromObject(object)
+		c.attempts[key]++
+		if key == c.key && !c.failed {
+			c.failed = true
+			return fmt.Errorf("injected Pod delete failure")
+		}
+	}
+	return c.Client.Delete(ctx, object, options...)
 }
 
 func persistAgentRunStatus(ctx context.Context, t *testing.T, k8sClient client.Client, agentRun *nvtv1alpha1.AgentRun) {

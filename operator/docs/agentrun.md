@@ -228,7 +228,10 @@ ttl:
   Until that deadline, run-scoped resources are retained. Cleanup removes the
   agent and enforced egressd Pods, persistent workspace PVC, per-run Service,
   NetworkPolicies, ConfigMaps, and Secrets, and revokes both run identities
-  from the broker agents policy.
+  from the broker agents policy. Broker access is revoked and both Pod
+  deletions are requested first; the NetworkPolicies and all remaining
+  resources stay in place until both Pods are confirmed gone, preserving the
+  egress fence throughout asynchronous Kubernetes termination.
 - Run retention controls deletion of only the lightweight terminal `AgentRun`
   metadata after operational cleanup. `runRetentionSeconds: 0` retains that
   metadata indefinitely without retaining workloads, credentials, policy, or

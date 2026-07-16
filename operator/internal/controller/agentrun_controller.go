@@ -76,6 +76,7 @@ const (
 	persistentWorkspaceSubPath            = "workspace"
 	persistentHomeSubPath                 = "home"
 	workspacePVCReadyRequeue              = 2 * time.Second
+	terminalResourceCleanupRequeue        = 2 * time.Second
 	initialPromptPlugin                   = "initial-prompt"
 	lifecycleReporterPlugin               = "lifecycle-termination"
 	agentPodSecurityStateAnnotation       = "nvt.dev/pod-security-state"
@@ -501,8 +502,9 @@ func isBrokerAgentsConfigMap(object client.Object) bool {
 
 func (r *AgentRunReconciler) reconcileTerminalResourceCleanup(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, error) {
 	if agentRun.Status.Phase == nvtv1alpha1.AgentRunPhaseDeadlineExceeded {
-		if err := r.deleteTerminalOperationalResources(ctx, agentRun); err != nil {
-			return ctrl.Result{}, err
+		complete, err := r.deleteTerminalOperationalResources(ctx, agentRun)
+		if err != nil || !complete {
+			return ctrl.Result{RequeueAfter: terminalResourceCleanupRequeue}, err
 		}
 		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
@@ -515,8 +517,9 @@ func (r *AgentRunReconciler) reconcileTerminalResourceCleanup(ctx context.Contex
 		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
 
-	if err := r.deleteTerminalOperationalResources(ctx, agentRun); err != nil {
-		return ctrl.Result{}, err
+	complete, err := r.deleteTerminalOperationalResources(ctx, agentRun)
+	if err != nil || !complete {
+		return ctrl.Result{RequeueAfter: terminalResourceCleanupRequeue}, err
 	}
 
 	return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
@@ -559,10 +562,52 @@ func (r *AgentRunReconciler) reconcileActiveDeadline(ctx context.Context, agentR
 	return result, true, err
 }
 
-func (r *AgentRunReconciler) deleteTerminalOperationalResources(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+func (r *AgentRunReconciler) deleteTerminalOperationalResources(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (bool, error) {
 	cleanupErrors := []error{}
 	if err := r.removeBrokerAgentsPolicyEntry(ctx, agentRun); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("revoke terminal AgentRun broker policy: %w", err))
+	}
+
+	agentPod, agentPodErr := r.getOwnedTerminalPod(ctx, agentRun, AgentPodName(agentRun.Name), "terminal AgentRun agent Pod")
+	if agentPodErr != nil {
+		cleanupErrors = append(cleanupErrors, agentPodErr)
+	}
+	egressdPod, egressdPodErr := r.getOwnedTerminalPod(ctx, agentRun, EgressdPodName(agentRun.Name), "terminal AgentRun egressd Pod")
+	if egressdPodErr != nil {
+		cleanupErrors = append(cleanupErrors, egressdPodErr)
+	}
+	// Ownership must be known before deleting either Pod. A foreign same-name
+	// Pod leaves the complete workload and its network fence untouched.
+	if agentPodErr != nil || egressdPodErr != nil {
+		return false, utilerrors.NewAggregate(cleanupErrors)
+	}
+	podDeleteFailed := false
+	for _, pod := range []struct {
+		object      *corev1.Pod
+		description string
+	}{
+		{object: agentPod, description: "terminal AgentRun agent Pod"},
+		{object: egressdPod, description: "terminal AgentRun egressd Pod"},
+	} {
+		if pod.object == nil || !pod.object.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if err := r.deleteOwnedObject(ctx, pod.object, pod.description); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+			podDeleteFailed = true
+		}
+	}
+
+	agentPod, agentPodErr = r.getOwnedTerminalPod(ctx, agentRun, AgentPodName(agentRun.Name), "terminal AgentRun agent Pod")
+	if agentPodErr != nil {
+		cleanupErrors = append(cleanupErrors, agentPodErr)
+	}
+	egressdPod, egressdPodErr = r.getOwnedTerminalPod(ctx, agentRun, EgressdPodName(agentRun.Name), "terminal AgentRun egressd Pod")
+	if egressdPodErr != nil {
+		cleanupErrors = append(cleanupErrors, egressdPodErr)
+	}
+	if podDeleteFailed || agentPod != nil || egressdPod != nil || agentPodErr != nil || egressdPodErr != nil {
+		return false, utilerrors.NewAggregate(cleanupErrors)
 	}
 
 	resources := []struct {
@@ -570,8 +615,6 @@ func (r *AgentRunReconciler) deleteTerminalOperationalResources(ctx context.Cont
 		name        string
 		description string
 	}{
-		{object: &corev1.Pod{}, name: AgentPodName(agentRun.Name), description: "terminal AgentRun agent Pod"},
-		{object: &corev1.Pod{}, name: EgressdPodName(agentRun.Name), description: "terminal AgentRun egressd Pod"},
 		{object: &corev1.PersistentVolumeClaim{}, name: WorkspacePVCName(agentRun.Name), description: "terminal AgentRun workspace PVC"},
 		{object: &corev1.Service{}, name: EgressdServiceName(agentRun.Name), description: "terminal AgentRun egressd Service"},
 		{object: &networkingv1.NetworkPolicy{}, name: AgentNetworkPolicyName(agentRun.Name), description: "terminal AgentRun agent NetworkPolicy"},
@@ -590,7 +633,26 @@ func (r *AgentRunReconciler) deleteTerminalOperationalResources(ctx context.Cont
 		}
 	}
 
-	return utilerrors.NewAggregate(cleanupErrors)
+	return true, utilerrors.NewAggregate(cleanupErrors)
+}
+
+func (r *AgentRunReconciler) getOwnedTerminalPod(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	name string,
+	description string,
+) (*corev1.Pod, error) {
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: name}, pod); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get %s for cleanup: %w", description, err)
+	}
+	if !metav1.IsControlledBy(pod, agentRun) {
+		return nil, fmt.Errorf("%s %s/%s exists but is not controlled by AgentRun %s", description, pod.Namespace, pod.Name, agentRun.Name)
+	}
+	return pod, nil
 }
 
 func (r *AgentRunReconciler) deleteOwnedAgentPod(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, description string) error {
@@ -626,6 +688,10 @@ func (r *AgentRunReconciler) deleteOwnedObjectByName(
 	if !metav1.IsControlledBy(object, agentRun) {
 		return fmt.Errorf("%s %s/%s exists but is not controlled by AgentRun %s", description, object.GetNamespace(), object.GetName(), agentRun.Name)
 	}
+	return r.deleteOwnedObject(ctx, object, description)
+}
+
+func (r *AgentRunReconciler) deleteOwnedObject(ctx context.Context, object client.Object, description string) error {
 	deleteOptions := []client.DeleteOption{}
 	if uid := object.GetUID(); uid != "" {
 		deleteOptions = append(deleteOptions, client.Preconditions{UID: &uid})
