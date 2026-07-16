@@ -421,7 +421,7 @@ func (s AgentRunSubmitter) buildAgentRun(
 			},
 			Image: s.config.AgentRun.RuntimeImage,
 			Workspace: nvtv1alpha1.AgentRunWorkspace{
-				Mode: s.config.AgentRun.WorkspaceMode,
+				Mode: nvtv1alpha1.AgentRunWorkspaceMode(s.config.AgentRun.WorkspaceMode),
 			},
 			Prompt: &nvtv1alpha1.AgentRunPrompt{Text: prompt},
 			Agent:  nvtv1alpha1.AgentRunAgent{Config: agentConfig},
