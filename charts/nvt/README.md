@@ -305,6 +305,9 @@ bounded HTTPS sources:
 ```yaml
 gateway:
   auth:
+    session:
+      # Membership is a login-time snapshot; bound the revocation window.
+      maxAgeSeconds: 3600
     claimEnrichment:
       allowedHosts: [api.github.com]
       sources:
@@ -336,6 +339,14 @@ and approved for the Altinn organization by an organization owner, and must be
 authorized by each user. It needs no repository permissions. Active membership
 returns `state: active`; pending, unaffiliated, blocked, or unapproved access
 fails admission closed.
+
+Claim enrichment runs only during OAuth login. The selected claims are kept in
+the server-side session and are not refreshed on every request; OAuth tokens
+are discarded. Organization removal affects new logins immediately, but an
+existing session remains valid until `gateway.auth.session.maxAgeSeconds`
+expires or session state is invalidated, including by a gateway restart. Use an
+explicit shorter lifetime such as `3600` (one hour) for security-sensitive
+production deployments rather than the 24-hour default.
 
 Authorization may read verified claims from `id_token`, `userinfo`, or a JWT
 `access_token`. Sensitive identity claims such as SSN or pid are rejected as

@@ -94,6 +94,7 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set gateway.auth.mode=github \
   --set gateway.auth.session.existingSecret=nvt-agent-gateway-session \
+  --set gateway.auth.session.maxAgeSeconds=3600 \
   --set gateway.auth.github.credentials.existingSecret=nvt-agent-gateway-github \
   --set gateway.auth.claimEnrichment.allowedHosts[0]=api.github.com \
   --set gateway.auth.claimEnrichment.sources[0].endpoint=https://api.github.com/user/memberships/orgs/Altinn \
@@ -664,6 +665,7 @@ fi
 grep -q "gateway.auth.github.credentials.existingSecret is required when gateway.auth.mode=github" "${GATEWAY_GITHUB_MISSING_SECRET_FAILURE}"
 
 grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_ADMISSION_RENDER}"
+grep -A1 'name: NVT_GATEWAY_SESSION_MAX_AGE_SECONDS' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "3600"'
 grep -Fq '\"claimPath\":\"organization_membership\"' "${GATEWAY_ADMISSION_RENDER}"
 grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"allowedHosts\":[\"api.github.com\"]' "${GATEWAY_ADMISSION_RENDER}"

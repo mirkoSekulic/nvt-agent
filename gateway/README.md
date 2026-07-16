@@ -122,6 +122,9 @@ without GitHub-specific authorization logic in the gateway:
 gateway:
   auth:
     mode: github
+    session:
+      # Membership is checked at login, so use a bounded revocation window.
+      maxAgeSeconds: 3600
     claimEnrichment:
       allowedHosts:
         - api.github.com
@@ -153,6 +156,15 @@ failed source request and login is denied. No repository permission is needed.
 Other providers have their own permission/approval requirements. Claim sources
 cannot add arbitrary headers, disable TLS verification, follow redirects, or
 derive their endpoint from a browser request.
+
+Enriched admission claims are a login-time snapshot. They are stored in the
+server-side session and are not re-fetched on each dashboard or AgentRun
+request; the temporary OAuth token is discarded. Removing a user from an
+organization therefore blocks new logins immediately, while an existing
+session remains valid until `auth.session.maxAgeSeconds` expires or the session
+is otherwise invalidated (including a gateway restart). For security-sensitive
+production deployments, configure a shorter explicit lifetime such as the
+one-hour (`3600`) value above instead of relying on the 24-hour default.
 
 ## GitHub login
 
