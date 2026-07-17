@@ -59,8 +59,10 @@ func TestLoginAdmissionAllowsMemberAndResourceAuthorizationStillApplies(t *testi
 	ownedRun := ownedAgentRun("owned", "owned-key", "https://github.enterprise.test", "42", "member")
 	ownedRun.Annotations[AccessPortAnnotation] = strconv.Itoa(upstreamPort)
 	ownedPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "nvt", Name: "owned-agent", Labels: map[string]string{AgentRunPodLabel: "owned"}},
-		Status:     readyPodStatus(upstreamURL.Hostname()),
+		ObjectMeta: metav1.ObjectMeta{Namespace: "nvt", Name: "owned-agent", Labels: map[string]string{
+			AgentRunPodLabel: "owned", AgentRunRoleLabel: AgentRunRoleAgent,
+		}},
+		Status: readyPodStatus(upstreamURL.Hostname()),
 	}
 	server := mustNewServer(t, config, fakeClient(t, &otherRun, &ownedRun, ownedPod))
 	server.auth.httpClient = noRedirectClient(claimServer.Client())

@@ -742,7 +742,7 @@ code-server:
 	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"`) {
 		t.Fatalf("forward proxy URL not exported for mediated tools:\n%s", envFile)
 	}
-	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN="http://codex-main@127.0.0.1:8470"`) {
+	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN="http://codex-main:x@127.0.0.1:8470"`) {
 		t.Fatalf("provider-selected forward proxy URL not exported for mediated tools:\n%s", envFile)
 	}
 	if !strings.Contains(envFile, `export HTTPS_PROXY="http://127.0.0.1:8470"`) ||
@@ -912,7 +912,7 @@ code-server:
 	if !strings.Contains(envFile, `export HTTPS_PROXY="http://127.0.0.1:8470"`) {
 		t.Fatalf("runtime proxy env not bound for header-inject grant:\n%s", envFile)
 	}
-	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_STATIC_BEARER_MAIN="http://static-bearer-main@127.0.0.1:8470"`) {
+	if !strings.Contains(envFile, `export NVT_EGRESS_FORWARD_PROXY_URL_STATIC_BEARER_MAIN="http://static-bearer-main:x@127.0.0.1:8470"`) {
 		t.Fatalf("provider-selected proxy URL not exported for tools:\n%s", envFile)
 	}
 }

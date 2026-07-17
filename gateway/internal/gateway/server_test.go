@@ -62,8 +62,22 @@ func TestResolveTarget(t *testing.T) {
 		&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "nvt",
+				Name:      "run-1-egressd",
+				Labels: map[string]string{
+					AgentRunPodLabel:  "run-1",
+					AgentRunRoleLabel: "egressd",
+				},
+			},
+			Status: readyPodStatus("10.0.0.8"),
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "nvt",
 				Name:      "run-1-agent",
-				Labels:    map[string]string{AgentRunPodLabel: "run-1"},
+				Labels: map[string]string{
+					AgentRunPodLabel:  "run-1",
+					AgentRunRoleLabel: AgentRunRoleAgent,
+				},
 			},
 			Status: readyPodStatus("10.0.0.9"),
 		},
@@ -91,7 +105,10 @@ func TestResolveTargetNoRunningPod(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "nvt",
 				Name:      "run-1-agent",
-				Labels:    map[string]string{AgentRunPodLabel: "run-1"},
+				Labels: map[string]string{
+					AgentRunPodLabel:  "run-1",
+					AgentRunRoleLabel: AgentRunRoleAgent,
+				},
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.9"},
 		},
@@ -124,7 +141,10 @@ func TestDashboardListsAgentRuns(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "nvt",
 				Name:      "run-1-agent",
-				Labels:    map[string]string{AgentRunPodLabel: "run-1"},
+				Labels: map[string]string{
+					AgentRunPodLabel:  "run-1",
+					AgentRunRoleLabel: AgentRunRoleAgent,
+				},
 			},
 			Status: readyPodStatus("10.0.0.9"),
 		},

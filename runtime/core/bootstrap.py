@@ -182,7 +182,10 @@ def proxy_url_for_provider(proxy_url, provider):
     netloc = host
     if parts.port is not None:
         netloc = f"{netloc}:{parts.port}"
-    netloc = f"{quote(provider, safe='')}@{netloc}"
+    # A fixed, inert password makes HTTP clients emit Proxy-Authorization
+    # without prompting. Egressd consumes the username as the non-secret
+    # provider selector and ignores the password.
+    netloc = f"{quote(provider, safe='')}:x@{netloc}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
