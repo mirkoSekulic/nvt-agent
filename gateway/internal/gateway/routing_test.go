@@ -15,6 +15,7 @@ import (
 	"time"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"golang.org/x/oauth2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -26,6 +27,11 @@ func TestPathRoutingConfigValidation(t *testing.T) {
 	}
 	if err := validPath.Validate(); err != nil {
 		t.Fatalf("valid path config: %v", err)
+	}
+	prefixedPath := validPath
+	prefixedPath.PublicURL = "https://staging.altinn.studio/agents"
+	if err := prefixedPath.Validate(); err != nil {
+		t.Fatalf("valid prefixed path config: %v", err)
 	}
 	validSubdomain := Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}
 	if err := validSubdomain.Validate(); err != nil {
@@ -43,7 +49,11 @@ func TestPathRoutingConfigValidation(t *testing.T) {
 		{name: "unknown mode", mutate: func(config *Config) { config.Routing.Mode = "other" }},
 		{name: "missing public URL", mutate: func(config *Config) { config.PublicURL = "" }},
 		{name: "non HTTPS", mutate: func(config *Config) { config.PublicURL = "http://agents.altinn.studio" }},
-		{name: "non root path", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/base" }},
+		{name: "trailing base slash", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/base/" }},
+		{name: "duplicate slash", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/base//nested" }},
+		{name: "dot segment", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/base/../nested" }},
+		{name: "encoded segment", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/%61gents" }},
+		{name: "backslash", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/agents\\nested" }},
 		{name: "query", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio?next=bad" }},
 		{name: "fragment", mutate: func(config *Config) { config.PublicURL = "https://agents.altinn.studio/#bad" }},
 		{name: "userinfo", mutate: func(config *Config) { config.PublicURL = "https://user@agents.altinn.studio" }},
@@ -115,6 +125,33 @@ func TestParsePathCanonicalRouting(t *testing.T) {
 	}
 }
 
+func TestParsePathAtBaseRequiresCanonicalSegmentBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		url  *url.URL
+		kind routeKind
+		key  string
+	}{
+		{name: "dashboard", url: &url.URL{Path: "/agents/"}, kind: routeDashboard},
+		{name: "agent", url: &url.URL{Path: "/agents/opaque-key/asset"}, kind: routeAgentRun, key: "opaque-key"},
+		{name: "missing dashboard slash", url: &url.URL{Path: "/agents"}, kind: routeNotFound},
+		{name: "prefix confusion", url: &url.URL{Path: "/agents2/"}, kind: routeNotFound},
+		{name: "encoded prefix", url: &url.URL{Path: "/agents/key/", RawPath: "/%61gents/key/"}, kind: routeNotFound},
+		{name: "encoded slash", url: &url.URL{Path: "/agents/key/other", RawPath: "/agents/key%2fother"}, kind: routeNotFound},
+		{name: "encoded backslash", url: &url.URL{Path: "/agents/key\\other/", RawPath: "/agents/key%5cother/"}, kind: routeNotFound},
+		{name: "dot segment", url: &url.URL{Path: "/agents/key/../other", RawPath: "/agents/key/%2e%2e/other"}, kind: routeNotFound},
+		{name: "double slash", url: &url.URL{Path: "/agents//key/"}, kind: routeNotFound},
+		{name: "raw mismatch", url: &url.URL{Path: "/agents/key/", RawPath: "/agents/other/"}, kind: routeNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := ParsePathAtBase(test.url, "/agents")
+			if got.kind != test.kind || got.accessKey != test.key {
+				t.Fatalf("ParsePathAtBase(%#v)=%#v, want kind=%v key=%q", test.url, got, test.kind, test.key)
+			}
+		})
+	}
+}
+
 func TestPathModeDashboardLinkAndNestedProxy(t *testing.T) {
 	requestURI := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,14 +160,16 @@ func TestPathModeDashboardLinkAndNestedProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 	run, pod := pathRoutableAgentRun(t, upstream.URL, "opaque-key")
-	server := mustNewServer(t, pathTestConfig(authModeNone), fakeClient(t, &run, &pod))
+	config := pathTestConfig(authModeNone)
+	config.PublicURL = "https://staging.altinn.studio/agents"
+	server := mustNewServer(t, config, fakeClient(t, &run, &pod))
 
 	dashboard := httptest.NewRecorder()
-	dashboardRequest := httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/", nil)
+	dashboardRequest := httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/", nil)
 	dashboardRequest.Header.Set("X-Forwarded-Host", "evil.example")
 	dashboardRequest.Header.Set("X-Forwarded-Proto", "http")
 	server.ServeHTTP(dashboard, dashboardRequest)
-	if dashboard.Code != http.StatusOK || !strings.Contains(dashboard.Body.String(), `href="https://agents.altinn.studio/opaque-key/"`) {
+	if dashboard.Code != http.StatusOK || !strings.Contains(dashboard.Body.String(), `href="https://staging.altinn.studio/agents/opaque-key/"`) {
 		t.Fatalf("dashboard status=%d body=%s", dashboard.Code, dashboard.Body.String())
 	}
 	if strings.Contains(dashboard.Body.String(), "evil.example") {
@@ -138,7 +177,7 @@ func TestPathModeDashboardLinkAndNestedProxy(t *testing.T) {
 	}
 
 	proxyResponse := httptest.NewRecorder()
-	server.ServeHTTP(proxyResponse, httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/opaque-key/static/out.js?theme=dark&n=1", nil))
+	server.ServeHTTP(proxyResponse, httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/opaque-key/static/out.js?theme=dark&n=1", nil))
 	if proxyResponse.Code != http.StatusOK || proxyResponse.Body.String() != "proxied" {
 		t.Fatalf("proxy status=%d body=%q", proxyResponse.Code, proxyResponse.Body.String())
 	}
@@ -147,16 +186,60 @@ func TestPathModeDashboardLinkAndNestedProxy(t *testing.T) {
 	}
 }
 
+func TestRootPathModeRemainsBackwardCompatible(t *testing.T) {
+	run := nvtv1alpha1.AgentRun{ObjectMeta: metav1.ObjectMeta{Namespace: "nvt", Name: "run", Annotations: map[string]string{
+		AccessKeyAnnotation: "opaque-key", DisplayNameAnnotation: "Root run",
+	}}}
+	server := mustNewServer(t, pathTestConfig(authModeNone), fakeClient(t, &run))
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("root dashboard status=%d body=%q", response.Code, response.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/", nil)
+	if got := server.openURL(request, "opaque-key", true); got != "https://agents.altinn.studio/opaque-key/" {
+		t.Fatalf("root path-mode agent URL=%q", got)
+	}
+}
+
+func TestPrefixedPathModeRejectsRoutesOutsideCanonicalMount(t *testing.T) {
+	config := pathTestConfig(authModeNone)
+	config.PublicURL = "https://staging.altinn.studio/agents"
+	server := mustNewServer(t, config, fakeClient(t))
+	for _, rawURL := range []string{
+		"https://staging.altinn.studio/agents",
+		"https://staging.altinn.studio/agents2/",
+		"https://staging.altinn.studio/agents//key/",
+		"https://staging.altinn.studio/%61gents/",
+		"https://staging.altinn.studio/agents/key%2fother/",
+		"https://staging.altinn.studio/agents/key%5cother/",
+		"https://staging.altinn.studio/agents/key/%2e%2e/other",
+		"https://staging.altinn.studio/agents/oauth2/%63allback",
+	} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, rawURL, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("ambiguous route %q status=%d body=%q", rawURL, response.Code, response.Body.String())
+		}
+	}
+	health := httptest.NewRecorder()
+	server.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "http://gateway.nvt.svc/healthz", nil))
+	if health.Code != http.StatusOK || health.Body.String() != "ok\n" {
+		t.Fatalf("internal health status=%d body=%q", health.Code, health.Body.String())
+	}
+}
+
 func TestPathModeOwnerDenialMatchesMissingAndAuthenticationPrecedesLookup(t *testing.T) {
 	run := ownedAgentRun("run-1", "opaque-key", "https://github.com", "42", "owner")
 	config := pathTestConfig(authModeOAuth2)
+	config.PublicURL = "https://staging.altinn.studio/agents"
 	config.Auth = authenticatedTestConfig().Auth
 	config.Auth.Session.Secure = true
 	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "agent-owner", Effect: authorizationEffectAllow, Owner: true}}
 	server := mustNewServer(t, config, fakeClient(t, &run))
 
-	for _, path := range []string{"/opaque-key/", "/missing-key/"} {
-		request := httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio"+path, nil)
+	for _, path := range []string{"/agents/opaque-key/", "/agents/missing-key/"} {
+		request := httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio"+path, nil)
 		request.Header.Set("Accept", "application/json")
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, request)
@@ -166,18 +249,18 @@ func TestPathModeOwnerDenialMatchesMissingAndAuthenticationPrecedesLookup(t *tes
 	}
 
 	requestFor := func(path, subject string) *httptest.ResponseRecorder {
-		request := httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio"+path, nil)
+		request := httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio"+path, nil)
 		setTestPrincipalSession(t, server, request, Principal{Issuer: "https://github.com", Subject: subject})
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, request)
 		return response
 	}
-	denied := requestFor("/opaque-key/", "99")
-	missing := requestFor("/missing-key/", "99")
+	denied := requestFor("/agents/opaque-key/", "99")
+	missing := requestFor("/agents/missing-key/", "99")
 	if denied.Code != http.StatusNotFound || denied.Code != missing.Code || denied.Body.String() != missing.Body.String() {
 		t.Fatalf("denied=(%d,%q) missing=(%d,%q)", denied.Code, denied.Body.String(), missing.Code, missing.Body.String())
 	}
-	allowed := requestFor("/opaque-key/", "42")
+	allowed := requestFor("/agents/opaque-key/", "42")
 	if allowed.Code != http.StatusServiceUnavailable {
 		t.Fatalf("owner status=%d body=%q", allowed.Code, allowed.Body.String())
 	}
@@ -186,6 +269,7 @@ func TestPathModeOwnerDenialMatchesMissingAndAuthenticationPrecedesLookup(t *tes
 func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 	fixture := newOAuth2Fixture(t, "access-token", `{"id":42,"login":"owner"}`)
 	config := pathTestConfig(authModeOAuth2)
+	config.PublicURL = "https://staging.altinn.studio/agents"
 	config.Auth = authenticatedTestConfig().Auth
 	config.Auth.Session.Secure = true
 	config.Auth.OAuth2.CallbackPath = "/oauth2/callback"
@@ -195,7 +279,7 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 	config.Auth.OAuth2.Identity = OAuth2IdentityConfig{Endpoint: fixture.URL + "/user", AllowedHosts: []string{parsedFixtureURL.Hostname()}, SubjectPath: "id", DisplayNamePath: "login"}
 	server := mustNewServer(t, config, fakeClient(t))
 
-	request := httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/opaque-key/editor?folder=repo", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/opaque-key/editor?folder=repo", nil)
 	request.Header.Set("X-Forwarded-Host", "evil.example")
 	request.Header.Set("X-Forwarded-Proto", "http")
 	response := httptest.NewRecorder()
@@ -204,48 +288,53 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 		t.Fatalf("authentication redirect status=%d body=%q", response.Code, response.Body.String())
 	}
 	loginURL, err := url.Parse(response.Header().Get("Location"))
-	if err != nil || loginURL.Scheme != "https" || loginURL.Host != "agents.altinn.studio" || loginURL.Path != "/oauth2/login" {
+	if err != nil || loginURL.Scheme != "https" || loginURL.Host != "staging.altinn.studio" || loginURL.Path != "/agents/oauth2/login" {
 		t.Fatalf("login redirect=%q err=%v", response.Header().Get("Location"), err)
 	}
-	if got := loginURL.Query().Get("return_url"); got != "https://agents.altinn.studio/opaque-key/editor?folder=repo" {
+	if got := loginURL.Query().Get("return_url"); got != "https://staging.altinn.studio/agents/opaque-key/editor?folder=repo" {
 		t.Fatalf("return_url=%q", got)
 	}
 	loginRequest := httptest.NewRequest(http.MethodGet, loginURL.String(), nil)
 	loginResponse := httptest.NewRecorder()
 	server.ServeHTTP(loginResponse, loginRequest)
+	if stateCookie := cookieNamed(t, loginResponse, loginStateCookie); stateCookie.Path != "/agents/" {
+		t.Fatalf("login-state cookie path=%q", stateCookie.Path)
+	}
 	providerAuthorizeURL, err := url.Parse(loginResponse.Header().Get("Location"))
 	if err != nil || providerAuthorizeURL.Query().Get("state") == "" {
 		t.Fatalf("provider authorization redirect=%q err=%v", loginResponse.Header().Get("Location"), err)
 	}
-	if got := providerAuthorizeURL.Query().Get("redirect_uri"); got != "https://agents.altinn.studio/oauth2/callback" {
+	if got := providerAuthorizeURL.Query().Get("redirect_uri"); got != "https://staging.altinn.studio/agents/oauth2/callback" {
 		t.Fatalf("OAuth redirect_uri=%q", got)
 	}
 	callbackRequest := httptest.NewRequest(http.MethodGet,
-		"https://agents.altinn.studio/oauth2/callback?state="+url.QueryEscape(providerAuthorizeURL.Query().Get("state"))+"&code=test", nil)
+		"https://staging.altinn.studio/agents/oauth2/callback?state="+url.QueryEscape(providerAuthorizeURL.Query().Get("state"))+"&code=test", nil)
 	callbackRequest.AddCookie(cookieNamed(t, loginResponse, loginStateCookie))
 	callbackResponse := httptest.NewRecorder()
 	server.ServeHTTP(callbackResponse, callbackRequest)
-	if callbackResponse.Code != http.StatusFound || callbackResponse.Header().Get("Location") != "https://agents.altinn.studio/opaque-key/editor?folder=repo" {
+	if callbackResponse.Code != http.StatusFound || callbackResponse.Header().Get("Location") != "https://staging.altinn.studio/agents/opaque-key/editor?folder=repo" {
 		t.Fatalf("callback status=%d location=%q body=%q", callbackResponse.Code, callbackResponse.Header().Get("Location"), callbackResponse.Body.String())
 	}
 	sessionCookie := cookieNamed(t, callbackResponse, defaultSessionCookie)
-	if sessionCookie.Domain != "" || !sessionCookie.Secure {
-		t.Fatalf("path-mode session cookie domain=%q secure=%v", sessionCookie.Domain, sessionCookie.Secure)
+	if sessionCookie.Domain != "" || !sessionCookie.Secure || sessionCookie.Path != "/agents/" {
+		t.Fatalf("path-mode session cookie domain=%q path=%q secure=%v", sessionCookie.Domain, sessionCookie.Path, sessionCookie.Secure)
 	}
 
 	for _, test := range []struct {
 		raw  string
 		want bool
 	}{
-		{raw: "/", want: true},
-		{raw: "/opaque-key/editor?folder=repo", want: true},
-		{raw: "https://agents.altinn.studio/opaque-key/", want: true},
-		{raw: "https://evil.example/opaque-key/"},
-		{raw: "http://agents.altinn.studio/opaque-key/"},
-		{raw: "//evil.example/opaque-key/"},
-		{raw: "/key%2fother/"},
-		{raw: "/oauth2/login"},
-		{raw: "/key/../other"},
+		{raw: "/agents/", want: true},
+		{raw: "/agents/opaque-key/editor?folder=repo", want: true},
+		{raw: "https://staging.altinn.studio/agents/opaque-key/", want: true},
+		{raw: "https://evil.example/agents/opaque-key/"},
+		{raw: "http://staging.altinn.studio/agents/opaque-key/"},
+		{raw: "//evil.example/agents/opaque-key/"},
+		{raw: "/opaque-key/"},
+		{raw: "/agents2/opaque-key/"},
+		{raw: "/agents/key%2fother/"},
+		{raw: "/agents/oauth2/login"},
+		{raw: "/agents/key/../other"},
 	} {
 		if _, got := server.auth.validateReturnURL(test.raw, request); got != test.want {
 			t.Fatalf("validateReturnURL(%q)=%v, want %v", test.raw, got, test.want)
@@ -253,24 +342,45 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 	}
 
 	logout := httptest.NewRecorder()
-	server.ServeHTTP(logout, httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/oauth2/logout", nil))
-	if logout.Code != http.StatusFound || logout.Header().Get("Location") != "/" {
+	server.ServeHTTP(logout, httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/oauth2/logout", nil))
+	if logout.Code != http.StatusFound || logout.Header().Get("Location") != "/agents/" {
 		t.Fatalf("logout status=%d location=%q", logout.Code, logout.Header().Get("Location"))
 	}
 	unknownOAuth := httptest.NewRecorder()
-	server.ServeHTTP(unknownOAuth, httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/oauth2/not-gateway-owned", nil))
+	server.ServeHTTP(unknownOAuth, httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/oauth2/not-gateway-owned", nil))
 	if unknownOAuth.Code != http.StatusNotFound {
 		t.Fatalf("reserved OAuth path status=%d", unknownOAuth.Code)
 	}
 	ambiguousOAuth := httptest.NewRecorder()
-	server.ServeHTTP(ambiguousOAuth, httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/oauth2%2flogin", nil))
+	server.ServeHTTP(ambiguousOAuth, httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/oauth2%2flogin", nil))
 	if ambiguousOAuth.Code != http.StatusNotFound {
 		t.Fatalf("encoded OAuth separator status=%d", ambiguousOAuth.Code)
 	}
 	wrongOrigin := httptest.NewRecorder()
-	server.ServeHTTP(wrongOrigin, httptest.NewRequest(http.MethodGet, "https://internal.invalid/oauth2/login", nil))
+	server.ServeHTTP(wrongOrigin, httptest.NewRequest(http.MethodGet, "https://internal.invalid/agents/oauth2/login", nil))
 	if wrongOrigin.Code != http.StatusNotFound {
 		t.Fatalf("wrong-origin OAuth request status=%d", wrongOrigin.Code)
+	}
+}
+
+func TestPrefixedPathModeBuildsOIDCAndOAuth2CallbacksOnce(t *testing.T) {
+	for _, mode := range []string{authModeOIDC, authModeOAuth2} {
+		t.Run(mode, func(t *testing.T) {
+			config := pathTestConfig(mode)
+			config.PublicURL = "https://staging.altinn.studio/agents"
+			config = config.withParsedPublicURL()
+			config.Auth.OIDC.CallbackPath = "/oauth2/oidc-callback"
+			config.Auth.OAuth2.CallbackPath = "/oauth2/oauth-callback"
+			authenticator := &Authenticator{config: config, oauthConfig: &oauth2.Config{}}
+			got := authenticator.oauthConfigForRequest(httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/", nil)).RedirectURL
+			want := "https://staging.altinn.studio/agents/oauth2/oidc-callback"
+			if mode == authModeOAuth2 {
+				want = "https://staging.altinn.studio/agents/oauth2/oauth-callback"
+			}
+			if got != want {
+				t.Fatalf("redirect URL=%q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -308,7 +418,9 @@ func TestPathModeWebSocketUpgradeStripsOnlyRoutingPrefix(t *testing.T) {
 	}))
 	defer upstream.Close()
 	run, pod := pathRoutableAgentRun(t, upstream.URL, "opaque-key")
-	server := mustNewServer(t, pathTestConfig(authModeNone), fakeClient(t, &run, &pod))
+	config := pathTestConfig(authModeNone)
+	config.PublicURL = "https://staging.altinn.studio/agents"
+	server := mustNewServer(t, config, fakeClient(t, &run, &pod))
 	gatewayServer := httptest.NewServer(server)
 	defer gatewayServer.Close()
 
@@ -318,7 +430,7 @@ func TestPathModeWebSocketUpgradeStripsOnlyRoutingPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
-	_, _ = fmt.Fprintf(connection, "GET /opaque-key/websocket?reconnect=1 HTTP/1.1\r\nHost: agents.altinn.studio\r\nOrigin: https://agents.altinn.studio\r\nCookie: nvt_agent_gateway=session-canary; nvt_agent_gateway_login=login-canary; agent-ws=kept\r\nForwarded: host=evil.example;proto=http\r\nX-Forwarded-Host: evil.example\r\nX-Forwarded-Proto: http\r\nX-Forwarded-Port: 9999\r\nX-Forwarded-Prefix: /evil\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	_, _ = fmt.Fprintf(connection, "GET /agents/opaque-key/websocket?reconnect=1 HTTP/1.1\r\nHost: staging.altinn.studio\r\nOrigin: https://staging.altinn.studio\r\nCookie: nvt_agent_gateway=session-canary; nvt_agent_gateway_login=login-canary; agent-ws=kept\r\nForwarded: host=evil.example;proto=http\r\nX-Forwarded-Host: evil.example\r\nX-Forwarded-Proto: http\r\nX-Forwarded-Port: 9999\r\nX-Forwarded-Prefix: /evil\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 	response, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodGet})
 	if err != nil {
 		t.Fatal(err)
@@ -328,11 +440,11 @@ func TestPathModeWebSocketUpgradeStripsOnlyRoutingPrefix(t *testing.T) {
 		t.Fatalf("upgrade status=%d", response.StatusCode)
 	}
 	got := <-upstreamCall
-	if got.path != "/websocket?reconnect=1" || got.cookie != "agent-ws=kept" || got.forwarded != "" || got.forwardedHost != "agents.altinn.studio" || got.forwardedProto != "https" || got.forwardedPort != "443" || got.forwardedPrefix != "" || got.origin != "https://agents.altinn.studio" {
+	if got.path != "/websocket?reconnect=1" || got.cookie != "agent-ws=kept" || got.forwarded != "" || got.forwardedHost != "staging.altinn.studio" || got.forwardedProto != "https" || got.forwardedPort != "443" || got.forwardedPrefix != "/agents/opaque-key" || got.origin != "https://staging.altinn.studio" {
 		t.Fatalf("upstream WebSocket request=%#v", got)
 	}
 	setCookies := response.Header.Values("Set-Cookie")
-	if len(setCookies) != 1 || !strings.Contains(setCookies[0], "agent-ws=kept") || !strings.Contains(setCookies[0], "Path=/opaque-key/") || strings.Contains(strings.ToLower(setCookies[0]), "domain=") || strings.Contains(strings.Join(setCookies, "\n"), defaultSessionCookie) {
+	if len(setCookies) != 1 || !strings.Contains(setCookies[0], "agent-ws=kept") || !strings.Contains(setCookies[0], "Path=/agents/opaque-key/") || strings.Contains(strings.ToLower(setCookies[0]), "domain=") || strings.Contains(strings.Join(setCookies, "\n"), defaultSessionCookie) {
 		t.Fatalf("WebSocket Set-Cookie filtering=%q", setCookies)
 	}
 }
@@ -343,14 +455,16 @@ func TestRealCodeServerPathMode(t *testing.T) {
 		t.Skip("set NVT_GATEWAY_CODE_SERVER_SMOKE_URL to run the real code-server path proof")
 	}
 	run, pod := pathRoutableAgentRun(t, upstreamURL, "opaque-key")
-	server := mustNewServer(t, pathTestConfig(authModeNone), fakeClient(t, &run, &pod))
+	config := pathTestConfig(authModeNone)
+	config.PublicURL = "https://staging.altinn.studio/agents"
+	server := mustNewServer(t, config, fakeClient(t, &run, &pod))
 
 	requestGateway := func(rawURL string) *httptest.ResponseRecorder {
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, rawURL, nil))
 		return response
 	}
-	initialURL, _ := url.Parse("https://agents.altinn.studio/opaque-key/")
+	initialURL, _ := url.Parse("https://staging.altinn.studio/agents/opaque-key/")
 	initial := requestGateway(initialURL.String())
 	if initial.Code != http.StatusFound {
 		t.Fatalf("initial code-server response status=%d body=%q", initial.Code, initial.Body.String())
@@ -385,7 +499,7 @@ func TestRealCodeServerPathMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
-	_, _ = fmt.Fprintf(connection, "GET /opaque-key/ HTTP/1.1\r\nHost: agents.altinn.studio\r\nOrigin: https://agents.altinn.studio\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdC1jb2RlLXNlcnZlcg==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	_, _ = fmt.Fprintf(connection, "GET /agents/opaque-key/ HTTP/1.1\r\nHost: staging.altinn.studio\r\nOrigin: https://staging.altinn.studio\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdC1jb2RlLXNlcnZlcg==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 	websocketResponse, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodGet})
 	if err != nil {
 		t.Fatal(err)

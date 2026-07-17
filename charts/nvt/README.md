@@ -501,16 +501,15 @@ fallback.
 
 ### Path routing
 
-Subdomain routing remains the default. A dedicated origin covered by an
-existing certificate can instead route sessions below access-key routing
-identifier paths:
+Subdomain routing remains the default. Path mode can route the complete gateway
+at an HTTPS origin root or below one canonical base path:
 
 ```yaml
 gateway:
   enabled: true
   routing:
     mode: path
-  publicURL: https://agents.altinn.studio
+  publicURL: https://staging.altinn.studio/agents
   # baseDomain is not used for request routing in path mode.
   baseDomain: ""
   auth:
@@ -539,20 +538,25 @@ gateway:
           owner: true
 ```
 
-This renders the dashboard at `https://agents.altinn.studio/` and sessions at
-`https://agents.altinn.studio/<access-key>/`. `publicURL` must be an HTTPS root
-origin. The Service remains `ClusterIP`; DNS, certificates, and external load
-balancer routing are deployment-owned and are not created by this chart.
+This renders the dashboard at `https://staging.altinn.studio/agents/`, sessions
+at `https://staging.altinn.studio/agents/<access-key>/`, and the default OAuth
+callback at `https://staging.altinn.studio/agents/oauth2/callback`.
+`callbackPath` remains gateway-relative (`/oauth2/callback`); do not repeat the
+base path there. A root `publicURL` remains supported. The Service stays
+`ClusterIP`; DNS, certificates, and external routing are deployment-owned. The
+load balancer must preserve the `/agents` prefix and WebSocket upgrades rather
+than stripping or rewriting the prefix.
 
 The access key is a routing identifier derived from the AgentRun name today,
 not a secret or authorization mechanism. Path-routed agents share browser
 storage and same-origin request reachability, so owner authorization does not
 provide browser-origin isolation. Prefer subdomain mode for stronger per-agent
-origin isolation. If path mode is required, dedicate a complete origin such as
-`agents.altinn.studio`; never configure a path such as
-`dev.altinn.studio/agents`. Path mode requires an empty `cookieDomain`, Secure
-gateway cookies, and OIDC/OAuth2 callbacks below the reserved `/oauth2/`
-namespace.
+origin isolation. A dedicated origin is preferred, but a shared-origin base
+path is supported when deployment constraints require it; owner authorization
+does not isolate browser storage or same-origin requests from other
+applications on that origin. Path mode requires an empty `cookieDomain`,
+Secure gateway cookies, and gateway-relative OIDC/OAuth2 callbacks below the
+reserved `/oauth2/` namespace.
 
 ## Validation
 

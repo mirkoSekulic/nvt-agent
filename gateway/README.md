@@ -16,27 +16,42 @@ contract: the dashboard is served at `https://<baseDomain>/` and an AgentRun at
 `https://<access-key>.<baseDomain>/`. `baseDomain` remains required in this
 mode.
 
-`routing.mode=path` serves a dedicated configured origin instead:
+`routing.mode=path` serves either a configured origin root or a native base
+path below an existing origin:
 
 - `https://agents.altinn.studio/` is the dashboard;
 - `https://agents.altinn.studio/<access-key>/` is an AgentRun session;
-- `/healthz` and all `/oauth2/*` paths are reserved for the gateway.
+- `https://staging.altinn.studio/agents/` is a prefixed dashboard;
+- `https://staging.altinn.studio/agents/<access-key>/` is a prefixed session;
+- `/healthz` remains the internal Service probe, while OAuth paths are reserved
+  below the configured base path.
 
 The access key is a routing identifier, not a secret or authorization factor;
 the operator currently derives it from the AgentRun name. Authorization must
 always come from the configured gateway policy.
 
-Path mode requires `publicURL` to be an HTTPS origin with no non-root path,
-query, fragment, or embedded credentials. Requests must carry that configured
-origin's Host header. Forwarded host/proto headers do not influence routing,
-links, callbacks, or return URLs. OAuth return URLs are restricted to the same
-origin and a valid dashboard or AgentRun route.
+Path mode requires `publicURL` to be HTTPS with no query, fragment, embedded
+credentials, escaping, dot segments, or duplicate slashes. Configure non-root
+base paths without a trailing slash; a root-origin trailing slash remains
+accepted and is normalized for backward compatibility.
+Configure either an origin such as `https://agents.example.com` or one
+canonical base path such as `https://staging.altinn.studio/agents`. Requests
+must carry that configured origin's Host header. Forwarded host/proto/prefix
+headers do not influence routing, links, callbacks, or return URLs. OAuth
+return URLs are restricted to the same origin and a valid dashboard or
+AgentRun route below the base path.
 OIDC and OAuth2 callback paths must be unambiguous children of `/oauth2/` in
-path mode so they cannot collide with routing identifiers.
+path mode so they cannot collide with routing identifiers. Callback paths are
+gateway-relative: with `publicURL: https://staging.altinn.studio/agents` and
+`callbackPath: /oauth2/callback`, register
+`https://staging.altinn.studio/agents/oauth2/callback` at the identity provider.
+The external load balancer must forward the whole configured prefix unchanged
+and preserve WebSocket upgrades; no prefix-stripping rewrite is required or
+supported by the gateway contract.
 
-The gateway removes exactly `/<access-key>` before proxying while preserving
-the remainder path, query string, and WebSocket upgrade. This behavior was
-verified with the runtime image's code-server 4.128.0: code-server rejects an
+The gateway removes exactly `<base-path>/<access-key>` before proxying while
+preserving the remainder path, query string, and WebSocket upgrade. This behavior was
+verified with the runtime image's code-server 4.129.0: code-server rejects an
 unmodified arbitrary prefix, while its root HTML emits relative asset,
 service-worker, callback, proxy, and WebSocket paths. Re-run the real binary
 proof with:
@@ -50,14 +65,16 @@ versioned JavaScript asset, and completes a WebSocket upgrade through the
 access-key route. The runtime currently resolves code-server at image build
 time, so record the resolved version when repeating this proof.
 
-Path-routed agents share one browser origin. Consequently they also share the
+Path-routed agents share one browser origin, including when the gateway is
+mounted below a broader application origin. Consequently they also share the
 origin's browser storage boundary and can make same-origin requests to other
 paths on that origin. Owner authorization controls gateway requests but is not
 browser-origin isolation. Subdomain mode provides stronger per-agent origin
 isolation and remains preferred where the certificate and external router can
-support it. When path mode is necessary, use a dedicated origin such as
-`agents.altinn.studio`; never mount it below a broader application origin such
-as `dev.altinn.studio/agents`.
+support it. A dedicated origin remains safer; mounting below a shared origin
+is supported when deployment constraints require it, but owner authorization
+does not provide browser-origin isolation from other applications on that
+origin.
 
 Do not use SSN, `pid`, or fødselsnummer claims for authorization. Prefer
 organization, group, resource, or entitlement claims. The gateway rejects
@@ -265,10 +282,11 @@ Also set `auth.oauth2.clientAuthMethod`,
 `displayNamePath`; these replace the removed adapter's implicit behavior.
 
 In path mode, `session.cookieDomain` must be empty so the gateway cookie is
-host-only on the dedicated origin. Secure session cookies are mandatory; do
-not broaden the cookie to `.altinn.studio`. Gateway cookies are removed before
-proxying to an AgentRun and agent responses cannot set or overwrite them.
-Remaining agent cookies are forced to the selected access-key path.
+host-only, and its Path is scoped to the configured gateway base path. Secure
+session cookies are mandatory; do not broaden the cookie to `.altinn.studio`.
+Gateway cookies are removed before proxying to an AgentRun and agent responses
+cannot set or overwrite them. Remaining agent cookies are forced to the
+selected base-path/access-key path.
 
 ## Ansattporten example
 

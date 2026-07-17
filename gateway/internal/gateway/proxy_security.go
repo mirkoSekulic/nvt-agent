@@ -66,8 +66,8 @@ func filterUpstreamResponseCookies(response *http.Response, owned map[string]str
 	}
 }
 
-func pathCookiePrefix(accessKey string) string {
-	return "/" + url.PathEscape(accessKey) + "/"
+func pathCookiePrefix(basePath, accessKey string) string {
+	return basePath + "/" + url.PathEscape(accessKey) + "/"
 }
 
 func validCookieName(name string) bool {

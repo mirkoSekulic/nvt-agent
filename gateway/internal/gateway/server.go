@@ -39,6 +39,9 @@ type Config struct {
 	DefaultTargetPort int
 	Routing           RoutingConfig
 	Auth              AuthConfig
+	basePathValue     string
+	publicOriginValue string
+	publicURLParsed   bool
 }
 
 type RoutingConfig struct {
@@ -110,16 +113,16 @@ func (c Config) Validate() error {
 		return fmt.Errorf("routing.mode must be %q or %q", routingModeSubdomain, routingModePath)
 	}
 	if c.PublicURL != "" {
-		parsed, err := url.Parse(c.PublicURL)
-		validRootPath := err == nil && (parsed.Path == "" || (routingMode == routingModePath && parsed.Path == "/"))
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || !validRootPath || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return fmt.Errorf("publicURL must be an absolute origin URL without credentials, non-root path, query, or fragment")
+		_, basePath, err := publicURLParts(c.PublicURL)
+		rawParsed, rawErr := url.Parse(c.PublicURL)
+		if err != nil || rawErr != nil || (routingMode == routingModeSubdomain && (basePath != "" || rawParsed.Path != "")) {
+			return fmt.Errorf("publicURL must be an absolute root URL without credentials, query, fragment, or non-canonical escaping when routing.mode=subdomain")
 		}
 	}
 	if routingMode == routingModePath {
-		parsed, err := url.Parse(c.PublicURL)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return fmt.Errorf("publicURL must be an absolute HTTPS origin URL when routing.mode=path")
+		parsed, _, err := publicURLParts(c.PublicURL)
+		if err != nil || parsed.Scheme != "https" {
+			return fmt.Errorf("publicURL must be an absolute HTTPS URL with a canonical optional base path when routing.mode=path")
 		}
 		if (c.Auth.Mode == authModeOIDC || c.Auth.Mode == authModeOAuth2) && !c.Auth.Session.Secure {
 			return fmt.Errorf("auth.session.secure must be true when routing.mode=path")
@@ -176,6 +179,53 @@ func (c Config) routingMode() string {
 		return routingModeSubdomain
 	}
 	return c.Routing.Mode
+}
+
+func (c Config) basePath() string {
+	if c.routingMode() != routingModePath {
+		return ""
+	}
+	if c.publicURLParsed {
+		return c.basePathValue
+	}
+	_, basePath, err := publicURLParts(c.PublicURL)
+	if err != nil {
+		return ""
+	}
+	return basePath
+}
+
+func (c Config) publicOrigin() string {
+	if c.publicURLParsed {
+		return c.publicOriginValue
+	}
+	parsed, _, err := publicURLParts(c.PublicURL)
+	if err != nil {
+		return ""
+	}
+	parsed.Path = ""
+	return parsed.String()
+}
+
+func (c Config) mountedPath(relative string) string {
+	return c.basePath() + relative
+}
+
+func (c Config) withParsedPublicURL() Config {
+	if c.publicURLParsed || c.PublicURL == "" {
+		return c
+	}
+	parsed, basePath, err := publicURLParts(c.PublicURL)
+	if err != nil {
+		return c
+	}
+	origin := *parsed
+	origin.Path = ""
+	c.PublicURL = parsed.String()
+	c.basePathValue = basePath
+	c.publicOriginValue = origin.String()
+	c.publicURLParsed = true
+	return c
 }
 
 func (c AuthConfig) validateCommonAuthenticated() error {
@@ -345,7 +395,7 @@ func NewServer(config Config, client ctrlclient.Client, namespace string) (*Serv
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	config.PublicURL = strings.TrimRight(config.PublicURL, "/")
+	config = config.withParsedPublicURL()
 	auth, err := NewAuthenticator(context.Background(), config)
 	if err != nil {
 		return nil, err
@@ -364,6 +414,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 		return
+	}
+	if s.config.routingMode() == routingModePath {
+		mountedPath, mountedEscapedPath, ok := pathBelowBase(r.URL, s.config.basePath())
+		if !ok || (strings.HasPrefix(mountedPath, "/oauth2/") && mountedEscapedPath != mountedPath) {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	if s.config.routingMode() == routingModePath && !requestMatchesPublicOrigin(r, s.config.PublicURL) {
 		http.NotFound(w, r)
@@ -394,7 +451,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) parseRoute(r *http.Request) route {
 	if s.config.routingMode() == routingModePath {
-		return ParsePath(r.URL)
+		return ParsePathAtBase(r.URL, s.config.basePath())
 	}
 	return ParseHost(r.Host, s.config.BaseDomain)
 }
@@ -482,7 +539,7 @@ func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, r
 	ownedCookies := gatewayCookieNames(s.config.Auth.Session.CookieName)
 	responseCookiePath := ""
 	if s.config.routingMode() == routingModePath {
-		responseCookiePath = pathCookiePrefix(accessKey)
+		responseCookiePath = pathCookiePrefix(s.config.basePath(), accessKey)
 	}
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -490,11 +547,12 @@ func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, r
 		filterUpstreamRequestCookies(req.Header, ownedCookies)
 		removeForwardingHeaders(req.Header)
 		if s.config.routingMode() == routingModePath {
-			stripPathAccessKey(req.URL, accessKey)
+			stripPathRoutePrefix(req.URL, s.config.basePath(), accessKey)
 			publicOrigin, _ := url.Parse(s.config.PublicURL)
 			req.Header.Set("X-Forwarded-Host", publicOrigin.Host)
 			req.Header.Set("X-Forwarded-Proto", publicOrigin.Scheme)
 			req.Header.Set("X-Forwarded-Port", publicForwardedPort(publicOrigin))
+			req.Header.Set("X-Forwarded-Prefix", s.config.basePath()+"/"+url.PathEscape(accessKey))
 		}
 		req.Host = targetURL.Host
 		req.URL.Scheme = targetURL.Scheme
