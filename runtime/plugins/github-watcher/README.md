@@ -3,19 +3,17 @@
 `github-watcher` watches GitHub pull requests and turns selected PR activity
 into `agentd` events and optional prompts.
 
-It is a long-running `after-agent` plugin. In mediated mode it delegates GitHub
-API reads to the exported `gh-auth` tool. `gh-auth` sends only the inert
-placeholder through the provider-selected egress proxy; egressd injects the real
-credential outside the agent. Direct mode remains available as a local/dev
-fallback and gets tokens from `git-host-credentials`:
+It is a long-running `after-agent` plugin. Its generic mediated path makes
+ordinary GitHub API requests. A generic `plugin.egress.provider` declaration gives its process an
+exact provider-scoped proxy in mediated deployments, where egressd injects the
+real credential outside the agent. The watcher does not inspect egress mode,
+construct proxy URLs, or invoke a token helper in that generic path. Direct mode
+remains a local/dev fallback and gets a token only when a direct provider is
+explicitly configured:
 
 ```sh
 git-host-credential token --provider <provider>
 ```
-
-Mediated mode requires the `git-host-credentials` plugin so its exported
-`gh-auth` tool and exact provider mapping are available before the watcher
-starts.
 
 The watcher supports both static PRs from `agent.yaml` and dynamic registrations
 through the exported `github-watch` command. Dynamic registrations are persisted
@@ -49,20 +47,14 @@ plugins:
     source: builtin
     when: after-agent
     restart: always
+    egress:
+      provider: github-main-app
     config:
-      default-provider: fork-app
       poll-seconds: 60
-      broker:
-        enabled: true
-        provider: fork-app
 
       prs:
         - repo: my-user/my-repo
           number: 123
-          provider: fork-app # optional, falls back to default-provider
-          broker:
-            enabled: true
-            provider: fork-app # optional, falls back to top-level broker provider or watch provider
           labels:
             - frontend
             - high-priority
@@ -115,11 +107,15 @@ comments, reviews, and checks.
 `labels` are metadata carried into published events and prompt text. They do not
 filter GitHub labels in v1.
 
-When `NVT_EGRESS_MODE=mediated`, read-only GitHub API calls use `gh-auth` and the
-watch's exact `provider`; the watcher never calls `brokerctl` or receives a real
-credential. Outside mediated mode, `broker.enabled` retains the compatibility
-path through `brokerctl http request`. Direct token mode remains available as a
-local/dev fallback.
+For local direct use, omit `egress` and configure `default-provider` or a
+per-watch `provider`; the watcher then asks `git-host-credential` for that
+explicit credential. In mediated use, omit those direct credential fields and
+set only the outer `egress.provider`. Existing `broker.enabled/provider`
+configuration remains supported as a deprecated explicit compatibility
+transport when generic plugin egress is not configured. When generic plugin
+egress is active, old persisted per-watch provider and broker fields are ignored
+for requests so migration cannot attempt to materialize a token in the agent.
+New mediated configurations should not add the compatibility broker fields.
 
 ## Dynamic Registration
 
@@ -132,7 +128,6 @@ Register a PR non-interactively:
 github-watch register \
   --repo my-user/my-repo \
   --number 123 \
-  --provider fork-app \
   --label frontend \
   --label high-priority
 ```
@@ -157,7 +152,8 @@ github-watch remove --repo my-user/my-repo --number 123
 
 Dynamic registrations use the same defaults as static config:
 
-- `--provider` falls back to `default-provider`
+- `--provider` falls back to `default-provider`; both are direct/local
+  credential selectors and are unnecessary for generic process-level mediation
 - comments, reviews, and checks are enabled by default
 - comments and reviews prompt by default for dynamic registrations
 - failed check transitions prompt by default
@@ -268,12 +264,12 @@ and easier to maintain than listing every trusted username.
 In direct mode, this plugin receives GitHub API access through in-container
 provider tokens from `git-host-credentials`. That is local/dev behavior.
 
-In mediated mode, read-only GitHub API calls go through `gh-auth` and egressd.
-The watcher gets only the inert placeholder; the GitHub App private key and
-derived API token remain in the broker. The provider name is carried as a
-non-secret proxy capability hint, so multiple GitHub providers for the same host
-remain deterministic. The legacy broker HTTP and token modes remain available
-outside mediated mode for compatibility and local development.
+In mediated mode, read-only GitHub API calls use the generic process proxy and
+egressd. The watcher sends no token or placeholder. The GitHub App private key
+and derived API token remain in the broker. The provider name is carried as a
+non-secret proxy capability hint, so separate watcher plugin processes can use
+different providers for the same host without guessing. Direct token mode is
+retained for local development when an explicit direct provider is configured.
 
 The production operator direction is for GitHub credentials and egress to be
 broker-mediated so the autonomous agent container does not hold raw GitHub App

@@ -12,6 +12,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, "/usr/local/lib/nvt-agent")
 from shared.git_source import GitSourceError, acquire, resolve_executable, resolve_file
+from shared.plugin_egress import PluginEgressError, environment as plugin_egress_environment, provider as plugin_egress_provider
 
 
 BUILTIN_PLUGIN_DIR = Path("/usr/local/lib/nvt-agent/plugins")
@@ -26,6 +27,7 @@ PROTECTED_NAMES = {
     "entrypoint",
     "export-plugin-tools",
     "health",
+    "plugin-egress-exec",
     "prompt-agent",
     "run-plugins",
     "start-agent-session",
@@ -197,7 +199,7 @@ def shell_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
-def render_wrapper(tool_name, command, plugin_name_value, config_path):
+def render_wrapper(tool_name, command, plugin_name_value, config_path, egress_provider):
     path = bin_dir() / tool_name
     content = "\n".join([
         "#!/usr/bin/env bash",
@@ -206,7 +208,10 @@ def render_wrapper(tool_name, command, plugin_name_value, config_path):
         f"export NVT_PLUGIN_NAME={shell_quote(plugin_name_value)}",
         f"export NVT_PLUGIN_CONFIG={shell_quote(config_path)}",
         f"export NVT_WORKSPACE={shell_quote(workspace())}",
-        f"exec {shell_quote(command)} \"$@\"",
+        (
+            f"exec plugin-egress-exec --provider {shell_quote(egress_provider)} {shell_quote(command)} \"$@\""
+            if egress_provider else f"exec {shell_quote(command)} \"$@\""
+        ),
         "",
     ])
     with path.open("w", encoding="utf-8") as file:
@@ -221,6 +226,11 @@ def export_tools(config_path):
 
     for plugin in load_plugins(config_path):
         name = plugin_name(plugin)
+        try:
+            egress_provider = plugin_egress_provider(plugin)
+            plugin_egress_environment(plugin, os.environ)
+        except PluginEgressError as error:
+            fail(str(error))
         config_path_for_plugin = plugin_config_path(name, object_value(plugin.get("config"), "plugin.config"))
 
         for index, tool in enumerate(plugin_exports(plugin)):
@@ -241,7 +251,7 @@ def export_tools(config_path):
                     fail(f"plugin {name} exported tool is invalid: {error}")
             else:
                 command_path = validate_command(command, tool_name)
-            render_wrapper(tool_name, command_path, name, config_path_for_plugin)
+            render_wrapper(tool_name, command_path, name, config_path_for_plugin, egress_provider)
             exported.append({
                 "name": tool_name,
                 "plugin": name,

@@ -795,6 +795,45 @@ code-server:
 	}
 }
 
+func TestBootstrapRejectsCollidingProviderProxyEnvironmentNames(t *testing.T) {
+	f := newFixture(t)
+	config := f.writeAgentConfig(`
+egress:
+  mode: mediated
+  transport: forward-proxy
+  grants:
+    - provider: github-main
+      materialization: header-inject
+    - provider: github.main
+      materialization: header-inject
+runtime:
+  command: bash
+  proxy:
+    provider: github-main
+tools:
+  packages: []
+  mise: []
+  additional-paths: []
+  shell: []
+code-server:
+  extensions: []
+`)
+	output := f.runWithEnv(bootstrapBin(f.root), false, []string{
+		"HOME=" + f.home,
+		"PATH=" + f.pathPrefix + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_EGRESS_MODE=mediated",
+	}, config)
+	if !strings.Contains(output, "egress provider names collide after environment normalization") {
+		t.Fatalf("colliding provider names did not fail loudly:\n%s", output)
+	}
+	envPath := filepath.Join(f.home, ".nvt-agent", "env")
+	if data, err := os.ReadFile(envPath); err == nil && strings.Contains(string(data), "NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN") {
+		t.Fatalf("colliding provider endpoint was exported before rejection:\n%s", data)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 func TestBootstrapForwardProxyRequiresRuntimeProxyProviderForImplicitCommand(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("update-ca-certificates", "#!/usr/bin/env bash\nexit 0\n")

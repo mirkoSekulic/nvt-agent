@@ -13,6 +13,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, "/usr/local/lib/nvt-agent")
 from shared.git_source import GitSourceError, acquire, resolve_executable, resolve_file
+from shared.plugin_egress import PluginEgressError, environment as plugin_egress_environment, provider as plugin_egress_provider
 
 
 BUILTIN_PLUGIN_DIR = Path("/usr/local/lib/nvt-agent/plugins")
@@ -241,7 +242,10 @@ def run_plugin(plugin, state, attempt):
         return
     config_path = write_plugin_config(name, object_value(plugin.get("config"), "plugin.config"))
 
-    env = os.environ.copy()
+    try:
+        env = plugin_egress_environment(plugin, os.environ)
+    except PluginEgressError as error:
+        fail(str(error))
     env["NVT_PLUGIN_NAME"] = name
     env["NVT_PLUGIN_CONFIG"] = str(config_path)
 
@@ -375,6 +379,11 @@ def main():
         for plugin in load_plugins(config_path):
             if not isinstance(plugin, dict):
                 fail("plugins entries must be YAML objects")
+            try:
+                plugin_egress_provider(plugin)
+                plugin_egress_environment(plugin, os.environ)
+            except PluginEgressError as error:
+                fail(str(error))
             if plugin_when(plugin) == when:
                 run_with_lifecycle(plugin)
         return
@@ -383,6 +392,11 @@ def main():
     for plugin in load_plugins(config_path):
         if not isinstance(plugin, dict):
             fail("plugins entries must be YAML objects")
+        try:
+            plugin_egress_provider(plugin)
+            plugin_egress_environment(plugin, os.environ)
+        except PluginEgressError as error:
+            fail(str(error))
         if plugin_when(plugin) == when:
             plugins_to_run.append(plugin)
 

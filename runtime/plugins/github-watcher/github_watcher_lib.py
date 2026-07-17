@@ -16,7 +16,7 @@ import yaml
 DEFAULT_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]
 FAILURE_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
 PASSING_CONCLUSIONS = {"success", "skipped", "neutral"}
-MEDIATED_REQUEST_TIMEOUT_SECONDS = 120
+REQUEST_TIMEOUT_SECONDS = 120
 
 
 def fail(message):
@@ -207,8 +207,6 @@ def normalize_watch(raw, defaults, source):
         "closed": normalize_closed_config(closed, defaults.get("closed"), f"{source}.closed"),
         "broker": normalize_broker_config(raw.get("broker"), defaults.get("broker"), f"{source}.broker"),
     }
-    if not normalized["provider"]:
-        fail(f"{source}.provider is required unless default-provider is configured")
     return normalized
 
 
@@ -285,7 +283,7 @@ def normalize_closed_config(config, default, field):
 def static_watches(config):
     defaults = {
         "default-provider": string_value(config.get("default-provider"), "default-provider"),
-        "broker": object_value(config.get("broker"), "broker"),
+        "broker": config.get("broker"),
         "closed": {"enabled": True, "remove": False, "publish": True, "prompt": False},
     }
     watches = []
@@ -299,7 +297,7 @@ def static_watches(config):
 def dynamic_watches(config):
     defaults = {
         "default-provider": string_value(config.get("default-provider"), "default-provider"),
-        "broker": object_value(config.get("broker"), "broker"),
+        "broker": config.get("broker"),
         "closed": {"enabled": True, "remove": True, "publish": True, "prompt": False},
     }
     data = read_json(registry_path(), {"prs": []})
@@ -340,78 +338,11 @@ def token_for_provider(provider, target):
     return token
 
 
-def mediated_egress_enabled():
-    return os.environ.get("NVT_EGRESS_MODE", "").strip().lower() == "mediated"
-
-
-def _mediated_request_page(path, provider, query, timeout):
-    query_string = f"?{urlencode(query)}" if query else ""
-    command = [
-        "gh-auth",
-        "--provider",
-        provider,
-        "api",
-        "--method",
-        "GET",
-        f"{path.lstrip('/')}{query_string}",
-        "--header",
-        "Accept: application/vnd.github+json",
-        "--header",
-        "X-GitHub-Api-Version: 2022-11-28",
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError as error:
-        raise WatchError(f"gh-auth not found: {error}") from error
-    except subprocess.TimeoutExpired as error:
-        raise WatchError("mediated GitHub request timed out") from error
-    if result.returncode != 0:
-        raise WatchError(f"mediated GitHub request failed: {result.stderr.strip() or result.stdout.strip()}")
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise WatchError(f"mediated GitHub response was not valid JSON: {error}") from error
-    return payload
-
-
-def mediated_request(path, provider, query=None, paginate=False):
-    if not paginate:
-        return _mediated_request_page(path, provider, query, MEDIATED_REQUEST_TIMEOUT_SECONDS)
-
-    page_query = dict(query or {})
-    try:
-        page = int(page_query.get("page", 1))
-        per_page = int(page_query.get("per_page", 30))
-    except (TypeError, ValueError) as error:
-        raise WatchError("mediated GitHub pagination requires integer page values") from error
-    if page < 1 or per_page < 1 or per_page > 100:
-        raise WatchError("mediated GitHub pagination values are out of range")
-
-    deadline = time.monotonic() + MEDIATED_REQUEST_TIMEOUT_SECONDS
-    items = []
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise WatchError("mediated GitHub request timed out")
-        page_query["page"] = page
-        page_items = _mediated_request_page(path, provider, page_query, remaining)
-        if not isinstance(page_items, list):
-            raise WatchError("mediated paginated GitHub response page was not a list")
-        items.extend(page_items)
-        if len(page_items) < per_page:
-            return items
-        page += 1
-
-
 def broker_request(path, provider, query=None, paginate=False, broker=None):
     broker = broker or {}
     broker_provider = broker.get("provider") or provider
+    if not broker_provider:
+        raise WatchError("broker request provider is not configured")
     query_string = f"?{urlencode(query)}" if query else ""
     command = [
         "brokerctl",
@@ -431,52 +362,86 @@ def broker_request(path, provider, query=None, paginate=False, broker=None):
     try:
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except FileNotFoundError as error:
-        raise WatchError(f"brokerctl not found: {error}") from error
+        raise WatchError("broker request helper is unavailable") from error
     if result.returncode != 0:
-        raise WatchError(f"broker request failed: {result.stderr.strip() or result.stdout.strip()}")
+        raise WatchError("broker request failed")
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as error:
-        raise WatchError(f"broker response was not valid JSON: {error}") from error
-    if not payload.get("ok"):
-        raise WatchError(f"broker request failed: {payload.get('error') or payload}")
+        raise WatchError("broker response was not valid JSON") from error
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        raise WatchError("broker request failed")
     status = payload.get("status")
     if not isinstance(status, int) or status < 200 or status >= 300:
-        raise WatchError(f"GitHub API request failed through broker: status={status} body={payload.get('body', '')}")
+        raise WatchError(f"GitHub API request failed through broker: status={status}")
     try:
         return json.loads(payload.get("body") or "null")
     except json.JSONDecodeError as error:
-        raise WatchError(f"GitHub API broker response body was not valid JSON: {error}") from error
+        raise WatchError("GitHub API broker response body was not valid JSON") from error
 
 
-def github_request(path, provider, query=None, broker=None, paginate=False):
-    if mediated_egress_enabled():
-        return mediated_request(path, provider, query, paginate)
-    if broker and broker.get("enabled"):
-        return broker_request(path, provider, query, paginate, broker)
+def plugin_egress_active():
+    return bool(os.environ.get("NVT_PLUGIN_EGRESS_PROVIDER", "").strip())
+
+
+def _request_page(path, provider, query, timeout):
     target = github_target_from_path(path)
     query_string = f"?{urlencode(query)}" if query else ""
-    request = Request(
-        f"https://api.github.com{path}{query_string}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token_for_provider(provider, target)}",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "nvt-agent-github-watcher",
-        },
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "nvt-agent-github-watcher",
+    }
+    if provider:
+        headers["Authorization"] = f"Bearer {token_for_provider(provider, target)}"
+    request = Request(f"https://api.github.com{path}{query_string}", headers=headers)
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        raise WatchError(f"GitHub API request failed: {error.code} {error.reason}: {body}") from error
+        raise WatchError(f"GitHub API request failed: status={error.code}") from error
     except URLError as error:
-        raise WatchError(f"GitHub API request failed: {error.reason}") from error
+        raise WatchError("GitHub API request failed: network error") from error
     except json.JSONDecodeError as error:
-        raise WatchError(f"GitHub API response was not valid JSON: {error}") from error
+        raise WatchError("GitHub API response was not valid JSON") from error
 
 
+def github_request(path, provider=None, query=None, broker=None, paginate=False):
+    # Generic process-scoped egress owns authentication. Legacy persisted watch
+    # providers are direct credential selectors and must not trigger token
+    # materialization in this mode.
+    if plugin_egress_active():
+        provider = None
+        broker = None
+    elif broker and broker.get("enabled"):
+        return broker_request(path, provider, query, paginate, broker)
+    elif not provider:
+        raise WatchError("direct credential provider is not configured")
+    if not paginate:
+        return _request_page(path, provider, query, REQUEST_TIMEOUT_SECONDS)
+    page_query = dict(query or {})
+    try:
+        page = int(page_query.get("page", 1))
+        per_page = int(page_query.get("per_page", 30))
+    except (TypeError, ValueError) as error:
+        raise WatchError("GitHub pagination requires integer page values") from error
+    if page < 1 or per_page < 1 or per_page > 100:
+        raise WatchError("GitHub pagination values are out of range")
+
+    deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+    items = []
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise WatchError("GitHub API request timed out")
+        page_query["page"] = page
+        page_items = _request_page(path, provider, page_query, remaining)
+        if not isinstance(page_items, list):
+            raise WatchError("paginated GitHub response page was not a list")
+        items.extend(page_items)
+        if len(page_items) < per_page:
+            return items
+        page += 1
 def github_target_from_path(path):
     parts = path.split("/")
     if len(parts) < 4 or parts[1] != "repos" or not parts[2] or not parts[3]:

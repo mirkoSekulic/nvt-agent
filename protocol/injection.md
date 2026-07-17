@@ -11,7 +11,8 @@ uses only the configured egress endpoint; deployment placement is outside this
 contract.
 
 ```text
-agent    holds no credentials; sends placeholder-bearing requests toward egressd
+agent    holds no credentials; sends ordinary or placeholder-bearing requests
+         toward egressd
 egressd  trusted service; fetches injectable headers, injects, re-originates TLS
 brokerd  policy, refresh, audit; releases injectable material to egress
          identities only
@@ -245,6 +246,44 @@ NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN=http://codex-main@egressd:8473
 Tool wrappers or preseeded runtime profiles that explicitly reference a broker
 provider should use the provider-scoped URL. The plain URL remains valid when a
 CONNECT host maps to a single inject route.
+
+Runtime plugins declare the same selector at the generic plugin boundary:
+
+```yaml
+plugins:
+  - name: example-http-plugin
+    egress:
+      provider: github-main-app
+```
+
+For mediated proxy transports, the generic lifecycle launcher and exported-tool
+wrapper resolve the corresponding provider-scoped URL and set `HTTPS_PROXY`
+and its lowercase variant before the plugin code runs. `HTTP_PROXY` and
+`ALL_PROXY` are removed at that scoped boundary because egressd's explicit
+injection listener is CONNECT-only; provider injection is an authenticated
+HTTPS contract. The launcher also exposes the selected non-secret name as
+`NVT_PLUGIN_EGRESS_PROVIDER`; controlled plugin clients may use its presence to
+avoid legacy direct credential materialization during migration, but it conveys
+no topology or authority. The declaration must name an exact provider
+capability backed by one or more grants with the same injection-eligible
+materialization (`header-inject` or `placeholder-file`). Repeated grants may
+aggregate repository scope; zero matches, conflicting modes, or any ineligible
+entry fail before launch. The declaration contains no credential and
+does not authorize the provider by itself. Direct mode and plugins without the
+declaration retain their existing environment.
+
+Provider-scoped proxy environment names normalize non-alphanumeric runs to `_`
+and uppercase the result. All configured mediated provider names must therefore
+have distinct normalized forms: names such as `github-main`, `github.main`, and
+`github_main` cannot coexist in one agent configuration. Bootstrap rejects a
+collision before exporting provider-scoped endpoints; it never overwrites or
+selects one implicitly.
+
+Controlled HTTP clients make ordinary requests without an Authorization
+placeholder. The selector on the CONNECT identifies the configured route and
+egressd obtains the headers from the broker. Placeholder headers and files
+remain for unmodifiable clients that require credential-shaped local input;
+there is no request-body, query-string, or arbitrary-value substitution.
 
 When `runtime.command` is used with mediated forward-proxy egress, runtime
 bootstrap requires:

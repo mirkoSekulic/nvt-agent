@@ -233,6 +233,7 @@ providers:
 
 func TestGitHostCredentialMediatedProxyReadsRuntimeEnvFile(t *testing.T) {
 	f := newFixture(t)
+	f.writePluginEgressRuntime("github-main-app")
 	config := f.writePluginConfig("git-host-credentials.yaml", `
 providers:
   - name: fork-app-mediated
@@ -242,23 +243,15 @@ providers:
     match:
       - github.com/my-user/*
 `)
-	envDir := filepath.Join(f.home, ".nvt-agent")
-	if err := os.MkdirAll(envDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(envDir, "env"), []byte(`export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	output := f.runWithEnv(gitHostCredentialBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config}, "mediated-proxy", "--provider", "fork-app-mediated")
-	if strings.TrimSpace(output) != "http://github-main-app:x@127.0.0.1:8470" {
+	output := f.runWithEnv(gitHostCredentialBin(f.root), true, []string{"NVT_PLUGIN_CONFIG=" + config, "NVT_EGRESS_MODE=mediated", "NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN_APP=http://github-main-app@127.0.0.1:8470"}, "mediated-proxy", "--provider", "fork-app-mediated")
+	if strings.TrimSpace(output) != "http://github-main-app@127.0.0.1:8470" {
 		t.Fatalf("unexpected mediated proxy URL: %q", output)
 	}
 }
 
 func TestGhAuthWrapsMediatedProviderWithPlaceholderAndProxy(t *testing.T) {
 	f := newFixture(t)
+	f.writePluginEgressRuntime("fork-app")
 	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
 	f.writeBin("gh", `#!/usr/bin/env bash
 set -euo pipefail
@@ -278,7 +271,7 @@ if [ "${GITHUB_ENTERPRISE_TOKEN+x}" = "x" ]; then
   echo "GITHUB_ENTERPRISE_TOKEN must be unset" >&2
   exit 1
 fi
-if [ "${HTTPS_PROXY:-}" != "http://fork-app:x@127.0.0.1:8470" ]; then
+if [ "${HTTPS_PROXY:-}" != "http://fork-app@127.0.0.1:8470" ]; then
   echo "unexpected HTTPS_PROXY=${HTTPS_PROXY:-}" >&2
   exit 1
 fi
@@ -301,7 +294,8 @@ providers:
 `)
 	env := []string{
 		"NVT_PLUGIN_CONFIG=" + config,
-		"NVT_EGRESS_FORWARD_PROXY_URL=http://127.0.0.1:8470",
+		"NVT_EGRESS_MODE=mediated",
+		"NVT_EGRESS_FORWARD_PROXY_URL_FORK_APP=http://fork-app@127.0.0.1:8470",
 		"NVT_EGRESS_PLACEHOLDER=NVT-PLACEHOLDER-NOT-A-KEY",
 		"NO_PROXY=localhost,*,github.com,.github.com,api.github.com,example.test",
 		"GITHUB_TOKEN=must-not-survive",
@@ -317,13 +311,14 @@ providers:
 
 func TestGhAuthMediatedProviderReadsRuntimeEnvFile(t *testing.T) {
 	f := newFixture(t)
+	f.writePluginEgressRuntime("github-main-app")
 	f.writeBin("gh", `#!/usr/bin/env bash
 set -euo pipefail
 if [ "${GH_TOKEN:-}" != "runtime-placeholder" ]; then
   echo "unexpected GH_TOKEN=${GH_TOKEN:-}" >&2
   exit 1
 fi
-if [ "${HTTPS_PROXY:-}" != "http://github-main-app:x@127.0.0.1:8470" ]; then
+if [ "${HTTPS_PROXY:-}" != "http://github-main-app@127.0.0.1:8470" ]; then
   echo "unexpected HTTPS_PROXY=${HTTPS_PROXY:-}" >&2
   exit 1
 fi
@@ -342,8 +337,7 @@ providers:
 	if err := os.MkdirAll(envDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(envDir, "env"), []byte(`export NVT_EGRESS_FORWARD_PROXY_URL="http://127.0.0.1:8470"
-export NVT_EGRESS_PLACEHOLDER="runtime-placeholder"
+	if err := os.WriteFile(filepath.Join(envDir, "env"), []byte(mustReadFile(t, filepath.Join(envDir, "env"))+`export NVT_EGRESS_PLACEHOLDER="runtime-placeholder"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +345,7 @@ export NVT_EGRESS_PLACEHOLDER="runtime-placeholder"
 	output := f.runWithEnv(
 		ghAuthBin(f.root),
 		true,
-		[]string{"NVT_PLUGIN_CONFIG=" + config},
+		[]string{"NVT_PLUGIN_CONFIG=" + config, "NVT_EGRESS_MODE=mediated", "NVT_EGRESS_FORWARD_PROXY_URL_GITHUB_MAIN_APP=http://github-main-app@127.0.0.1:8470", "NVT_EGRESS_PLACEHOLDER=runtime-placeholder"},
 		"--provider", "github-main", "api", "repos/my-user/project",
 	)
 	if strings.TrimSpace(output) != "api repos/my-user/project" {
@@ -373,13 +367,13 @@ providers:
 `)
 	env := []string{
 		"NVT_PLUGIN_CONFIG=" + config,
-		"NVT_EGRESS_FORWARD_PROXY_URL=",
+		"NVT_EGRESS_MODE=mediated",
 		"HTTPS_PROXY=http://ambient-proxy.invalid:8080",
 		"https_proxy=http://ambient-proxy.invalid:8080",
 	}
 
 	output := f.runWithEnv(ghAuthBin(f.root), false, env, "pr", "view", "--repo", "my-user/project")
-	if !strings.Contains(output, "NVT_EGRESS_FORWARD_PROXY_URL is not set") {
+	if !strings.Contains(output, "mediated plugin egress metadata is unavailable") {
 		t.Fatalf("unexpected missing proxy failure:\n%s", output)
 	}
 }

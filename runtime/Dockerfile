@@ -53,6 +53,7 @@ COPY runtime/core/nvt-as-root /usr/local/bin/nvt-as-root
 COPY runtime/core/bootstrap.py /usr/local/bin/bootstrap
 COPY runtime/core/run-plugins.py /usr/local/bin/run-plugins
 COPY runtime/core/export-plugin-tools.py /usr/local/bin/export-plugin-tools
+COPY runtime/core/plugin-egress-exec.py /usr/local/bin/plugin-egress-exec
 COPY shared /usr/local/lib/nvt-agent/shared
 COPY runtime/core/health.py /usr/local/bin/health
 COPY runtime/core/doctor.py /usr/local/bin/doctor
@@ -74,6 +75,7 @@ RUN chmod +x \
   /usr/local/bin/bootstrap \
   /usr/local/bin/run-plugins \
   /usr/local/bin/export-plugin-tools \
+  /usr/local/bin/plugin-egress-exec \
   /usr/local/bin/health \
   /usr/local/bin/doctor \
   /usr/local/bin/agent-capture \

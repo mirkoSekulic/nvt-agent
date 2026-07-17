@@ -113,7 +113,7 @@ When `--provider` is omitted, `gh-auth` resolves from `--repo`, the current
 `origin` remote, or `default-provider`.
 
 For `credential-kind: mediated`, `gh-auth` sets `GH_TOKEN` to the inert NVT
-placeholder and forces GitHub traffic through `NVT_EGRESS_FORWARD_PROXY_URL`.
+placeholder and uses the generic plugin provider-scoped proxy resolver.
 It also encodes the selected `broker-provider` as the proxy username, with a
 fixed dummy proxy password so HTTP clients reliably send `Proxy-Authorization`
 on `CONNECT`. The username is a non-secret capability selector: egressd consumes

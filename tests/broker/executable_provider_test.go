@@ -254,6 +254,23 @@ func TestExecutableProviderRealBrokerEndpointsAndCoreEnforcement(t *testing.T) {
 	}
 }
 
+func TestExecutableProviderUsesTheSameNamedInjectionContract(t *testing.T) {
+	f := newExecutableBrokerFixture(t)
+	status, body := f.post(f.egress, "/v1/injection/headers", map[string]any{
+		"capability": "fixture-inject",
+		"host":       "api.example.test",
+		"method":     "GET",
+		"path":       "/ordinary-plugin-request",
+	})
+	if status != http.StatusOK || body["ok"] != true {
+		t.Fatalf("executable provider injection failed: status=%d body=%#v", status, body)
+	}
+	headers, ok := body["headers"].(map[string]any)
+	if !ok || headers["authorization"] != "Bearer "+executableCanary {
+		t.Fatalf("executable provider did not supply its named injection result: %#v", body)
+	}
+}
+
 func TestExecutableProviderOutOfOrderAndSafeDeclaredError(t *testing.T) {
 	f := newExecutableBrokerFixture(t)
 	type result struct {
