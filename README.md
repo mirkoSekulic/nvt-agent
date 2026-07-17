@@ -166,6 +166,7 @@ See [Runtime plugins](runtime/plugins/README.md) and the contracts under
 - [Helm charts and versioning](charts/README.md)
 - [`agentd` protocol](protocol/agentd.md)
 - [Broker protocol](protocol/broker.md)
+- Full mediated producer canary verified.
 
 ## Project Status
 
