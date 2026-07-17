@@ -94,6 +94,7 @@ func NewAuthenticator(ctx context.Context, config Config) (*Authenticator, error
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	config = config.withParsedPublicURL()
 	secret, err := sessionSecretBytes(config.Auth.Session.Secret)
 	if err != nil {
 		return nil, err
@@ -164,13 +165,13 @@ func sessionSecretBytes(raw string) ([]byte, error) {
 
 func (a *Authenticator) HandlePublic(w http.ResponseWriter, r *http.Request) bool {
 	switch r.URL.Path {
-	case "/oauth2/login":
+	case a.mountedPath("/oauth2/login"):
 		a.handleLogin(w, r)
-	case a.callbackPath():
+	case a.mountedPath(a.callbackPath()):
 		a.handleCallback(w, r)
-	case "/oauth2/logout":
+	case a.mountedPath("/oauth2/logout"):
 		a.clearCookies(w)
-		http.Redirect(w, r, "/", http.StatusFound)
+		http.Redirect(w, r, a.mountedPath("/"), http.StatusFound)
 	default:
 		return false
 	}
@@ -454,7 +455,7 @@ func (a *Authenticator) setCookie(w http.ResponseWriter, name string, value any,
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    encoded,
-		Path:     "/",
+		Path:     a.cookiePath(),
 		Domain:   a.config.Auth.Session.CookieDomain,
 		MaxAge:   maxAge,
 		HttpOnly: true,
@@ -472,7 +473,7 @@ func (a *Authenticator) clearCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",
-		Path:     "/",
+		Path:     a.cookiePath(),
 		Domain:   a.config.Auth.Session.CookieDomain,
 		MaxAge:   -1,
 		HttpOnly: true,
@@ -483,7 +484,7 @@ func (a *Authenticator) clearCookie(w http.ResponseWriter, name string) {
 
 func (a *Authenticator) safeReturnURL(r *http.Request) string {
 	if a.config.routingMode() == routingModePath {
-		return a.publicBaseURL(r) + r.URL.RequestURI()
+		return a.config.publicOrigin() + r.URL.RequestURI()
 	}
 	return a.requestBaseURL(r) + r.URL.RequestURI()
 }
@@ -506,6 +507,20 @@ func (a *Authenticator) publicBaseURL(r *http.Request) string {
 		return strings.TrimRight(a.config.PublicURL, "/")
 	}
 	return a.requestBaseURL(r)
+}
+
+func (a *Authenticator) mountedPath(relative string) string {
+	if a.config.routingMode() != routingModePath {
+		return relative
+	}
+	return a.config.mountedPath(relative)
+}
+
+func (a *Authenticator) cookiePath() string {
+	if a.config.routingMode() != routingModePath || a.config.basePath() == "" {
+		return "/"
+	}
+	return a.config.basePath() + "/"
 }
 
 func (a *Authenticator) requestBaseURL(r *http.Request) string {
@@ -533,7 +548,7 @@ func forwardedHeaderValue(raw string) string {
 
 func (a *Authenticator) validateReturnURL(raw string, r *http.Request) (string, bool) {
 	if raw == "" {
-		return "/", true
+		return a.mountedPath("/"), true
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
@@ -551,7 +566,7 @@ func (a *Authenticator) validateReturnURL(raw string, r *http.Request) (string, 
 		} else if parsed.Host != "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
 			return "", false
 		}
-		route := ParsePath(parsed)
+		route := ParsePathAtBase(parsed, a.config.basePath())
 		if route.kind != routeDashboard && route.kind != routeAgentRun {
 			return "", false
 		}

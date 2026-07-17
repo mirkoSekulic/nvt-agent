@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,7 +15,11 @@ const (
 )
 
 func ParsePath(requestURL *url.URL) route {
-	path, ok := unambiguousPath(requestURL)
+	return ParsePathAtBase(requestURL, "")
+}
+
+func ParsePathAtBase(requestURL *url.URL, basePath string) route {
+	path, escapedPath, ok := pathBelowBase(requestURL, basePath)
 	if !ok {
 		return route{kind: routeNotFound}
 	}
@@ -37,7 +42,29 @@ func ParsePath(requestURL *url.URL) route {
 	if !validAccessKey(key) || reservedGatewayPath(key) {
 		return route{kind: routeNotFound}
 	}
+	if escapedPath != "" {
+		keyPrefix := "/" + key
+		if escapedPath != keyPrefix && !strings.HasPrefix(escapedPath, keyPrefix+"/") {
+			return route{kind: routeNotFound}
+		}
+	}
 	return route{kind: routeAgentRun, accessKey: key}
+}
+
+func pathBelowBase(requestURL *url.URL, basePath string) (string, string, bool) {
+	path, ok := unambiguousPath(requestURL)
+	if !ok {
+		return "", "", false
+	}
+	escapedPath := requestURL.EscapedPath()
+	if basePath == "" {
+		return path, escapedPath, true
+	}
+	prefix := basePath + "/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasPrefix(escapedPath, prefix) {
+		return "", "", false
+	}
+	return "/" + strings.TrimPrefix(path, prefix), "/" + strings.TrimPrefix(escapedPath, prefix), true
 }
 
 func unambiguousPath(requestURL *url.URL) (string, bool) {
@@ -62,16 +89,15 @@ func unambiguousPath(requestURL *url.URL) (string, bool) {
 	return path, true
 }
 
-func stripPathAccessKey(requestURL *url.URL, accessKey string) {
-	prefix := "/" + accessKey
+func stripPathRoutePrefix(requestURL *url.URL, basePath, accessKey string) {
+	prefix := basePath + "/" + accessKey
 	requestURL.Path = strings.TrimPrefix(requestURL.Path, prefix)
 	if requestURL.Path == "" {
 		requestURL.Path = "/"
 	}
 	if requestURL.RawPath != "" {
-		if separator := strings.Index(requestURL.RawPath[1:], "/"); separator >= 0 {
-			requestURL.RawPath = requestURL.RawPath[separator+1:]
-		} else {
+		requestURL.RawPath = strings.TrimPrefix(requestURL.RawPath, prefix)
+		if requestURL.RawPath == "" {
 			requestURL.RawPath = "/"
 		}
 	}
@@ -104,6 +130,44 @@ func requestMatchesPublicOrigin(r *http.Request, publicURL string) bool {
 		return false
 	}
 	return strings.EqualFold(r.Host, publicOrigin.Host)
+}
+
+func publicURLParts(raw string) (*url.URL, string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return nil, "", fmt.Errorf("must be an absolute URL without credentials, query, or fragment")
+	}
+	if strings.Contains(raw, "\\") || strings.Contains(parsed.Path, "\\") || strings.Contains(parsed.EscapedPath(), "%") {
+		return nil, "", fmt.Errorf("path must use canonical unescaped segments")
+	}
+	basePath := parsed.Path
+	if basePath == "/" {
+		basePath = ""
+	} else if basePath != "" {
+		if !strings.HasPrefix(basePath, "/") || strings.HasSuffix(basePath, "/") || strings.Contains(basePath, "//") {
+			return nil, "", fmt.Errorf("path must be canonical without a trailing or duplicate slash")
+		}
+		for _, segment := range strings.Split(strings.TrimPrefix(basePath, "/"), "/") {
+			if segment == "" || segment == "." || segment == ".." {
+				return nil, "", fmt.Errorf("path must not contain empty or dot segments")
+			}
+			for _, character := range segment {
+				if !canonicalBasePathCharacter(character) {
+					return nil, "", fmt.Errorf("path contains a non-canonical character")
+				}
+			}
+		}
+	}
+	parsed.Path = basePath
+	parsed.RawPath = ""
+	return parsed, basePath, nil
+}
+
+func canonicalBasePathCharacter(character rune) bool {
+	return character >= 'a' && character <= 'z' ||
+		character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9' ||
+		strings.ContainsRune("._~-", character)
 }
 
 func removeForwardingHeaders(header http.Header) {

@@ -10,8 +10,8 @@
 {{- if not .Values.gateway.publicURL }}
 {{- fail "gateway.publicURL is required when gateway.routing.mode=path" }}
 {{- end }}
-{{- if not (regexMatch `^https://[^/@?#]+(?::[0-9]+)?/?$` .Values.gateway.publicURL) }}
-{{- fail "gateway.publicURL must be an absolute HTTPS origin URL when gateway.routing.mode=path" }}
+{{- if or (not (regexMatch `^https://[^/@?#]+(?::[0-9]+)?(?:/|/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?$` .Values.gateway.publicURL)) (regexMatch `/(?:\.|\.\.)(?:/|$)` .Values.gateway.publicURL) (contains "\\" .Values.gateway.publicURL) (regexMatch `[[:space:]]` .Values.gateway.publicURL) }}
+{{- fail "gateway.publicURL must be an absolute HTTPS URL with a canonical optional base path when gateway.routing.mode=path" }}
 {{- end }}
 {{- if and (ne .Values.gateway.auth.mode "none") (not .Values.gateway.auth.session.secure) }}
 {{- fail "gateway.auth.session.secure must be true when gateway.routing.mode=path" }}

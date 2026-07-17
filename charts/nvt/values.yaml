@@ -92,6 +92,8 @@ gateway:
     pullPolicy: IfNotPresent
   replicas: 1
   baseDomain: agents.localhost
+  # In path mode this may be an HTTPS origin or one canonical base path,
+  # for example https://staging.altinn.studio/agents (without a trailing slash).
   publicURL: ""
   routing:
     mode: subdomain

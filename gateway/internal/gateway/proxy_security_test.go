@@ -27,12 +27,13 @@ func TestProxyIsolatesGatewayCookiesAndScopesAgentCookies(t *testing.T) {
 		Issuer: "https://github.com", Subject: "42", DisplayName: "owner",
 	}}
 	config := pathTestConfig(authModeOAuth2)
+	config.PublicURL = "https://staging.altinn.studio/agents"
 	config.Auth = authenticatedTestConfig().Auth
 	config.Auth.Session.Secure = true
 	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "agent-owner", Effect: authorizationEffectAllow, Owner: true}}
 	server := mustNewServer(t, config, fakeClient(t, &run, &pod))
 
-	request := httptest.NewRequest(http.MethodGet, "https://agents.altinn.studio/routing-key/", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/routing-key/", nil)
 	sessionCookie := setTestPrincipalSession(t, server, request, Principal{Issuer: "https://github.com", Subject: "42"})
 	request.AddCookie(&http.Cookie{Name: loginStateCookie, Value: loginCanary})
 	request.AddCookie(&http.Cookie{Name: "agent-preference", Value: "kept"})
@@ -56,7 +57,7 @@ func TestProxyIsolatesGatewayCookiesAndScopesAgentCookies(t *testing.T) {
 	if len(setCookies) != 1 {
 		t.Fatalf("filtered Set-Cookie headers=%q", setCookies)
 	}
-	if !strings.HasPrefix(setCookies[0], "agent-theme=dark") || !strings.Contains(setCookies[0], "Path=/routing-key/") || strings.Contains(strings.ToLower(setCookies[0]), "domain=") {
+	if !strings.HasPrefix(setCookies[0], "agent-theme=dark") || !strings.Contains(setCookies[0], "Path=/agents/routing-key/") || strings.Contains(strings.ToLower(setCookies[0]), "domain=") {
 		t.Fatalf("agent cookie was not host-only and path-scoped: %q", setCookies[0])
 	}
 	for _, forbidden := range []string{defaultSessionCookie, loginStateCookie, "agent-overwrite", "malformed", "__Host-agent"} {

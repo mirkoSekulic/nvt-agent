@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
+if [[ "${CHART_VERSION}" != "0.8.2" || "${CHART_APP_VERSION}" != "0.8.2" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.2, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+  exit 1
+fi
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
@@ -143,7 +147,7 @@ helm template nvt "${CHART}" -n custom-ns \
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set gateway.routing.mode=path \
-  --set gateway.publicURL=https://agents.altinn.studio \
+  --set gateway.publicURL=https://staging.altinn.studio/agents \
   --set gateway.baseDomain= \
   > "${GATEWAY_PATH_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set broker.enabled=false > "${BROKER_DISABLED_RENDER}"
@@ -593,7 +597,7 @@ fi
 require_resource "${GATEWAY_PATH_RENDER}" Deployment nvt-agent-gateway
 require_resource "${GATEWAY_PATH_RENDER}" Service nvt-agent-gateway
 grep -q -- '--routing-mode=path' "${GATEWAY_PATH_RENDER}"
-grep -q -- '--public-url=https://agents.altinn.studio' "${GATEWAY_PATH_RENDER}"
+grep -q -- '--public-url=https://staging.altinn.studio/agents' "${GATEWAY_PATH_RENDER}"
 grep -q 'type: ClusterIP' "${GATEWAY_PATH_RENDER}"
 if grep -q 'httpHeaders:' "${GATEWAY_PATH_RENDER}"; then
   echo "gateway path mode probes must not require a synthetic Host header" >&2
@@ -608,7 +612,10 @@ for invalid_args in \
   '--set gateway.routing.mode=unknown' \
   '--set gateway.routing.mode=path' \
   '--set gateway.routing.mode=path --set gateway.publicURL=http://agents.altinn.studio' \
-  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/base' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/base/' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/base//nested' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/%61gents' \
+  '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio/agents?next=bad' \
   '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.session.cookieDomain=.altinn.studio' \
   '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oidc.callbackPath=/callback' \
   '--set gateway.routing.mode=path --set gateway.publicURL=https://agents.altinn.studio --set gateway.auth.oauth2.callbackPath=/oauth2/../callback' \
