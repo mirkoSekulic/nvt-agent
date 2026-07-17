@@ -426,8 +426,10 @@ func pathRoutableAgentRun(t *testing.T, upstreamURL, key string) (nvtv1alpha1.Ag
 		},
 	}}
 	pod := corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "nvt", Name: "path-pod", Labels: map[string]string{AgentRunPodLabel: run.Name}},
-		Status:     readyPodStatus(parsed.Hostname()),
+		ObjectMeta: metav1.ObjectMeta{Namespace: "nvt", Name: "path-pod", Labels: map[string]string{
+			AgentRunPodLabel: run.Name, AgentRunRoleLabel: AgentRunRoleAgent,
+		}},
+		Status: readyPodStatus(parsed.Hostname()),
 	}
 	return run, pod
 }

@@ -224,7 +224,7 @@ The supported selector is HTTP proxy Basic auth where the username is the
 broker provider name, e.g. a proxy URL shaped like:
 
 ```text
-http://github-altinn-app@egressd:8473
+http://github-altinn-app:x@egressd:8473
 ```
 
 The password is ignored. The selector is consumed by `egressd` and never
@@ -240,7 +240,7 @@ variants:
 
 ```text
 NVT_EGRESS_FORWARD_PROXY_URL=http://egressd:8473
-NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN=http://codex-main@egressd:8473
+NVT_EGRESS_FORWARD_PROXY_URL_CODEX_MAIN=http://codex-main:x@egressd:8473
 ```
 
 Tool wrappers or preseeded runtime profiles that explicitly reference a broker

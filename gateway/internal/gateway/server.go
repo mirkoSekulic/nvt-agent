@@ -27,7 +27,9 @@ const (
 	RequestedByAnnotation = "nvt.dev/requested-by"
 	AccessPortAnnotation  = "nvt.dev/access-port"
 
-	AgentRunPodLabel = "nvt.dev/agentrun"
+	AgentRunPodLabel  = "nvt.dev/agentrun"
+	AgentRunRoleLabel = "nvt.dev/role"
+	AgentRunRoleAgent = "agent"
 )
 
 type Config struct {
@@ -550,7 +552,10 @@ func (s *Server) resolveAgentRun(ctx context.Context, accessKey string) (nvtv1al
 
 func (s *Server) runningPodForAgentRun(ctx context.Context, agentRunName string) (corev1.Pod, bool, error) {
 	var pods corev1.PodList
-	if err := s.client.List(ctx, &pods, ctrlclient.InNamespace(s.namespace), ctrlclient.MatchingLabels{AgentRunPodLabel: agentRunName}); err != nil {
+	if err := s.client.List(ctx, &pods, ctrlclient.InNamespace(s.namespace), ctrlclient.MatchingLabels{
+		AgentRunPodLabel:  agentRunName,
+		AgentRunRoleLabel: AgentRunRoleAgent,
+	}); err != nil {
 		return corev1.Pod{}, false, fmt.Errorf("list AgentRun pods: %w", err)
 	}
 	sort.Slice(pods.Items, func(i, j int) bool {
