@@ -81,13 +81,12 @@ Known defaults are `/root/.codex` and `/root/.claude`. Runtime auth is a direct
 compatibility path and is not mounted into DinD. Mediated providers use broker
 custody and placeholders instead.
 
-`image` selects the runtime image. `runtimeClassName` optionally selects a
-runtime handler and therefore the node/runtime environment. `tolerations`
-optionally permits only the generated agent Pod to schedule onto matching
-tainted nodes. For example, a RuntimeClass can select an isolated node pool
-while a toleration permits scheduling onto that pool; neither field removes a
-taint or selects nodes by itself. The separate egress service Pod and platform
-Deployments do not inherit AgentRun tolerations.
+`image` selects the runtime image. `runtimeClassName` requests a runtime handler;
+the cluster's RuntimeClass scheduling configuration may select the node/runtime
+environment. `tolerations` optionally permits only the generated agent Pod to
+schedule onto matching tainted nodes, but a toleration does not select a node or
+remove the taint. The separate egress service Pod and platform Deployments do
+not inherit AgentRun tolerations.
 
 ## Egress
 

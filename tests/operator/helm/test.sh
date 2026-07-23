@@ -9,6 +9,12 @@ if [[ "${CHART_VERSION}" != "0.8.4" || "${CHART_APP_VERSION}" != "0.8.4" ]]; the
   echo "expected coordinated chart version and appVersion 0.8.4, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
+if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
+  echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
+  exit 1
+fi
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.4' "${CHART}/README.md"
+grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
