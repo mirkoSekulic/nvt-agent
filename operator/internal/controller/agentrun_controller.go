@@ -3227,6 +3227,7 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 		},
 		Spec: corev1.PodSpec{
 			RuntimeClassName: agentRun.Spec.RuntimeClassName,
+			Tolerations:      copyTolerations(agentRun.Spec.Tolerations),
 			RestartPolicy:    corev1.RestartPolicyNever,
 			InitContainers:   initContainers,
 			Containers:       containers,

@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,12 +70,14 @@ type AgentRun struct {
 //
 //nolint:govet // Field order follows the CRD schema for readability.
 type AgentRunSpec struct {
-	Runtime                   AgentRunRuntime      `json:"runtime"`
-	RuntimeAuth               *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
-	Image                     string               `json:"image"`
-	RuntimeClassName          *string              `json:"runtimeClassName,omitempty"`
-	Egress                    AgentRunEgressMode   `json:"egress,omitempty"`
-	EgressAllowInsecureBroker bool                 `json:"egressAllowInsecureBroker,omitempty"`
+	Runtime          AgentRunRuntime      `json:"runtime"`
+	RuntimeAuth      *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
+	Image            string               `json:"image"`
+	RuntimeClassName *string              `json:"runtimeClassName,omitempty"`
+	// Tolerations applies only to the dynamically generated agent Pod.
+	Tolerations               []corev1.Toleration `json:"tolerations,omitempty"`
+	Egress                    AgentRunEgressMode  `json:"egress,omitempty"`
+	EgressAllowInsecureBroker bool                `json:"egressAllowInsecureBroker,omitempty"`
 	// EgressEnforcement requests network-enforced mediated egress. The operator
 	// must fence direct workload egress so permitted traffic traverses the
 	// configured egress endpoint (docs/transparent-egress-architecture.md).
@@ -280,6 +283,12 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
+	}
+	if in.Tolerations != nil {
+		out.Tolerations = make([]corev1.Toleration, len(in.Tolerations))
+		for i := range in.Tolerations {
+			in.Tolerations[i].DeepCopyInto(&out.Tolerations[i])
+		}
 	}
 	if in.EgressForwardProxy != nil {
 		out.EgressForwardProxy = new(bool)

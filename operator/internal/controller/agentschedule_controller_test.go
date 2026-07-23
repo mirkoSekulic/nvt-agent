@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,10 +47,31 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	workspaceSize := resource.MustParse("5Gi")
 	schedule.Spec.Template = &nvtv1alpha1.AgentScheduleTemplate{}
 	schedule.Spec.Template.Workspace = nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspacePersistent, Size: &workspaceSize}
+	tolerationSeconds := int64(90)
+	schedule.Spec.Template.Tolerations = []corev1.Toleration{{
+		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent",
+		Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &tolerationSeconds,
+	}}
 	copied = schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	copied.Spec.Template.Workspace.Size.Add(resource.MustParse("1Gi"))
+	copied.Spec.Template.Tolerations[0].Key = "changed"
+	*copied.Spec.Template.Tolerations[0].TolerationSeconds = 1
 	if schedule.Spec.Template.Workspace.Size.Cmp(resource.MustParse("5Gi")) != 0 {
 		t.Fatal("expected template workspace quantity to be deep-copied")
+	}
+	if schedule.Spec.Template.Tolerations[0].Key != "purpose" || *schedule.Spec.Template.Tolerations[0].TolerationSeconds != tolerationSeconds {
+		t.Fatal("expected template tolerations to be deep-copied")
+	}
+	raw, err := json.Marshal(schedule)
+	if err != nil {
+		t.Fatalf("marshal schedule: %v", err)
+	}
+	var roundTripped nvtv1alpha1.AgentSchedule
+	if err := json.Unmarshal(raw, &roundTripped); err != nil {
+		t.Fatalf("unmarshal schedule: %v", err)
+	}
+	if !reflect.DeepEqual(roundTripped.Spec.Template.Tolerations, schedule.Spec.Template.Tolerations) {
+		t.Fatalf("tolerations changed across API round trip: %#v", roundTripped.Spec.Template.Tolerations)
 	}
 	if _, _, err := scheme.ObjectKinds(&nvtv1alpha1.AgentScheduleList{}); err != nil {
 		t.Fatalf("AgentScheduleList not registered in scheme: %v", err)
@@ -112,6 +134,10 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 		crdPath(t, workspace, "properties", "size", "x-kubernetes-int-or-string") != true ||
 		crdPath(t, workspace, "properties", "storageClassName", "type") != "string" {
 		t.Fatalf("expected persistent template workspace schema, got %#v", workspace)
+	}
+	tolerations := crdPath(t, properties, "template", "properties", "tolerations").(map[string]any)
+	if tolerations["type"] != "array" || crdPath(t, tolerations, "items", "properties", "effect", "type") != "string" {
+		t.Fatalf("template tolerations schema incomplete: %#v", tolerations)
 	}
 	status := crdPath(t, crd,
 		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",

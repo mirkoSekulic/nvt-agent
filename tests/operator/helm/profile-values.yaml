@@ -1,6 +1,12 @@
 agentSchedule:
   template:
     image: runtime:test
+    runtimeClassName: kata-vm-isolation
+    tolerations:
+      - key: purpose
+        operator: Equal
+        value: nvt-agent
+        effect: NoSchedule
     workspace:
       mode: Ephemeral
     agent:

@@ -18,6 +18,11 @@ spec:
     user: non-root
   image: nvt-agent-runtime:latest
   runtimeClassName: kata-vm-isolation
+  tolerations:
+    - key: purpose
+      operator: Equal
+      value: nvt-agent
+      effect: NoSchedule
   egress: mediated
   egressEnforcement: true
   egressTransport: transparent
@@ -76,8 +81,12 @@ Known defaults are `/root/.codex` and `/root/.claude`. Runtime auth is a direct
 compatibility path and is not mounted into DinD. Mediated providers use broker
 custody and placeholders instead.
 
-`image` selects the runtime image. `runtimeClassName` optionally selects a
-hardened runtime such as Kata Containers.
+`image` selects the runtime image. `runtimeClassName` requests a runtime handler;
+the cluster's RuntimeClass scheduling configuration may select the node/runtime
+environment. `tolerations` optionally permits only the generated agent Pod to
+schedule onto matching tainted nodes, but a toleration does not select a node or
+remove the taint. The separate egress service Pod and platform Deployments do
+not inherit AgentRun tolerations.
 
 ## Egress
 
