@@ -148,6 +148,9 @@ type AgentRunBroker struct {
 type AgentRunBrokerGrant struct {
 	Provider     string   `json:"provider"`
 	Repositories []string `json:"repositories"`
+	// Preparations requests bounded, non-secret provider metadata that the
+	// trusted operator resolves before creating the agent Pod.
+	Preparations []AgentRunBrokerPreparation `json:"preparations,omitempty"`
 	// Materialization selects how the credential reaches the run: file-bundle
 	// (direct only; writes usable material into the container), header-inject
 	// or placeholder-file (both mediated-only, zero-possession — the real
@@ -174,6 +177,20 @@ type AgentRunBrokerGrant struct {
 	// restart resets it — so it is a soft resource guard, not a security
 	// boundary (protocol/injection.md).
 	Quota *AgentRunGrantQuota `json:"quota,omitempty"`
+}
+
+// AgentRunBrokerPreparationOperation is a bounded non-secret provider operation.
+// +kubebuilder:validation:Enum=identity
+type AgentRunBrokerPreparationOperation string
+
+const (
+	// AgentRunBrokerPreparationIdentity resolves provider-owned commit identity metadata.
+	AgentRunBrokerPreparationIdentity AgentRunBrokerPreparationOperation = "identity"
+)
+
+// AgentRunBrokerPreparation requests one non-secret provider metadata operation.
+type AgentRunBrokerPreparation struct {
+	Operation AgentRunBrokerPreparationOperation `json:"operation"`
 }
 
 // AgentRunGrantQuota bounds a grant's egress.
@@ -387,6 +404,9 @@ func (in *AgentRunBrokerGrant) DeepCopy() *AgentRunBrokerGrant {
 	*out = *in
 	if in.Repositories != nil {
 		out.Repositories = append([]string{}, in.Repositories...)
+	}
+	if in.Preparations != nil {
+		out.Preparations = append([]AgentRunBrokerPreparation{}, in.Preparations...)
 	}
 	if in.EgressHosts != nil {
 		out.EgressHosts = append([]string{}, in.EgressHosts...)

@@ -182,11 +182,24 @@ providers:
     credential-kind: mediated
     match:
       - github.com/my-user/*
-    operator-prepared-identity:
-      broker-provider: github-main-app
-      name: Staging App Bot
-      email: 123456789+staging-app[bot]@users.noreply.github.com
 `)
+	metadata := f.writePluginConfig("prepared-provider-metadata.json", `{
+  "version": 1,
+  "providers": {
+    "other-provider": {
+      "identity": {
+        "name": "Other Bot",
+        "email": "other@example.test"
+      }
+    },
+    "github-main-app": {
+      "identity": {
+        "name": "Staging App Bot",
+        "email": "123456789+staging-app[bot]@users.noreply.github.com"
+      }
+    }
+  }
+}`)
 	f.writeBin("git-host-credential", fmt.Sprintf(`#!/usr/bin/env bash
 exec env NVT_PLUGIN_CONFIG=%s python3 %s "$@"
 `, shellQuote(hostConfig), shellQuote(filepath.Join(f.root, "runtime", "plugins", "git-host-credentials", "git-host-credential.py"))))
@@ -197,7 +210,7 @@ credentials:
     identity:
       mode: provider
 `)
-	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+	env := []string{"NVT_PLUGIN_CONFIG=" + config, "NVT_PREPARED_PROVIDER_METADATA_FILE=" + metadata, "NVT_BROKER_TOKEN="}
 
 	output := f.runWithEnv(gitCredentialsRunBin(f.root), true, env, "configure-repo", repo)
 	if strings.Contains(output, "secret-response-canary") {
@@ -218,20 +231,13 @@ func TestGitHostCredentialMediatedProviderRequiresValidPreparedIdentity(t *testi
 	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
 	tests := []struct {
 		name     string
-		prepared string
+		metadata string
 		want     string
 	}{
-		{name: "missing", want: "was not prepared by the operator"},
-		{name: "mapping mismatch", prepared: `
-    operator-prepared-identity:
-      broker-provider: other-provider
-      name: Safe Bot
-      email: safe@example.test`, want: "does not match broker-provider"},
-		{name: "malformed", prepared: `
-    operator-prepared-identity:
-      broker-provider: github-main-app
-      name: " bad"
-      email: safe@example.test`, want: "is invalid"},
+		{name: "missing", want: "metadata is unavailable"},
+		{name: "mapping mismatch", metadata: `{"version":1,"providers":{"other-provider":{"identity":{"name":"Safe Bot","email":"safe@example.test"}}}}`, want: "missing or mismatched"},
+		{name: "operation missing", metadata: `{"version":1,"providers":{"github-main-app":{}}}`, want: "missing or mismatched"},
+		{name: "malformed", metadata: `{"version":1,"providers":{"github-main-app":{"identity":{"name":" bad","email":"safe@example.test"}}}}`, want: "is invalid"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -242,8 +248,14 @@ providers:
     broker-provider: github-main-app
     credential-kind: mediated
     match:
-      - github.com/my-user/*`+test.prepared+"\n")
-			output := f.runWithEnv(gitHostCredentialBin(f.root), false, []string{"NVT_PLUGIN_CONFIG=" + config, "NVT_BROKER_TOKEN="}, "identity", "--provider", "fork-app-mediated", "--target", "github.com/my-user/project")
+      - github.com/my-user/*
+`)
+			env := []string{"NVT_PLUGIN_CONFIG=" + config, "NVT_BROKER_TOKEN="}
+			if test.metadata != "" {
+				metadata := f.writePluginConfig("prepared-provider-metadata-"+strings.ReplaceAll(test.name, " ", "-")+".json", test.metadata)
+				env = append(env, "NVT_PREPARED_PROVIDER_METADATA_FILE="+metadata)
+			}
+			output := f.runWithEnv(gitHostCredentialBin(f.root), false, env, "identity", "--provider", "fork-app-mediated", "--target", "github.com/my-user/project")
 			if !strings.Contains(output, test.want) || strings.Contains(output, "should-not-run") {
 				t.Fatalf("unexpected fail-closed output:\n%s", output)
 			}

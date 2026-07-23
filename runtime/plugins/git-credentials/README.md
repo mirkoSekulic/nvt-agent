@@ -82,12 +82,13 @@ identity:
 
 `identity.mode: provider` is intended for providers that can report a real
 commit identity, currently broker-backed GitHub App providers. In an enforced
-mediated AgentRun, the trusted operator resolves that provider-bound metadata
-before the agent Pod starts and places only `name` and `email` in the rendered
-git-host provider configuration. The agent does not receive a broker token and
-cannot fetch credentials. Missing, unsupported, or stale provider metadata is a
-startup error; there is no repository guessing, fallback provider, or implicit
-downgrade to explicit identity.
+mediated AgentRun, request `preparations: [{operation: identity}]` on the exact
+broker grant. The trusted operator resolves that provider-bound metadata before
+the agent Pod starts and publishes only `name` and `email` through the generic
+prepared-provider-metadata document. The agent does not receive a broker token
+and cannot fetch credentials. Missing, unsupported, or stale provider metadata
+is a startup error; there is no repository guessing, fallback provider, or
+implicit downgrade to explicit identity.
 
 ## Runtime Behavior
 

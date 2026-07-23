@@ -290,8 +290,8 @@ The target-less form still requires the exact AgentRun bearer identity and an
 effective grant for that provider. It asks the provider for provider-bound,
 non-secret commit metadata under the complete granted repository ceiling. It
 does not vend a token, headers, files, or any credential-fetching capability,
-and it is intended for the operator to snapshot into a fully mediated agent's
-rendered plugin configuration. Providers with target-dependent identity fail
+and it is intended for the operator to snapshot through the versioned
+[prepared provider metadata](prepared-provider-metadata.md) contract. Providers with target-dependent identity fail
 explicitly; broker core never guesses a repository, provider, or fallback.
 
 Response:

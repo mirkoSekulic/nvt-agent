@@ -596,6 +596,7 @@ grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'key: purpose'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'operator: Equal'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'value: nvt-agent'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'effect: NoSchedule'
+grep -A3 'preparations:' "${PROFILE_RENDER}" | grep -q 'operation: identity'
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_EMPTY_IMAGE_RENDER}"
 grep -q 'image: registry.example/runtime:override' "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"
@@ -826,6 +827,8 @@ require_file "${CHART}/crds/nvt.dev_agentruns.yaml"
 require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentruns.yaml" "${CHART}/crds/nvt.dev_agentruns.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentschedules.yaml" "${CHART}/crds/nvt.dev_agentschedules.yaml"
+grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentruns.yaml" | grep -q -- '- identity'
+grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentschedules.yaml" | grep -q -- '- identity'
 
 rendered_secret_names() {
   local file="$1"

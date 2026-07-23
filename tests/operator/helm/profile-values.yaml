@@ -34,6 +34,8 @@ agentSchedule:
           - provider: codex-main
             repositories: [example/*]
             materialization: file-bundle
+            preparations:
+              - operation: identity
   profileSelection:
     defaultProfile: default-codex
     onNoMatch: useDefault

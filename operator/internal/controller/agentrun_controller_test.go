@@ -3066,33 +3066,16 @@ func mediatedProviderIdentityAgentRun() *nvtv1alpha1.AgentRun {
 		Repositories:    []string{"my-user/project"},
 		EgressHosts:     []string{"github.com:443"},
 		Git:             true,
+		Preparations: []nvtv1alpha1.AgentRunBrokerPreparation{{
+			Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity,
+		}},
 	}}}
 	run.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{
   "plugins": [
     {
-      "name": "git-host-credentials",
+      "name": "arbitrary-language-plugin",
       "config": {
-        "providers": [
-          {
-            "name": "fork-mediated",
-            "type": "broker",
-            "broker-provider": "github-main-app",
-            "credential-kind": "mediated",
-            "match": ["github.com/my-user/*"]
-          }
-        ]
-      }
-    },
-    {
-      "name": "git-credentials",
-      "config": {
-        "credentials": [
-          {
-            "match": "https://github.com/my-user/project",
-            "provider": "fork-mediated",
-            "identity": {"mode": "provider"}
-          }
-        ]
+        "opaque-setting": "must-remain-unchanged"
       }
     }
   ]
@@ -3142,16 +3125,41 @@ func TestLiteralZeroSecretPreparesProviderIdentityWithoutAgentCredentialCapabili
 	if requests != 1 {
 		t.Fatalf("unchanged provider identity was not cached: %d requests", requests)
 	}
+	changedGrant := agentRun.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	changedGrant.Spec.Broker.Grants[0].Repositories = []string{"my-user/other-project"}
+	if _, err := reconciler.prepareProviderMetadata(ctx, changedGrant); err != nil {
+		t.Fatalf("reprepare changed grant metadata: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("changed preparation grant reused stale metadata cache: %d requests", requests)
+	}
 	configMap := getAgentConfigMap(ctx, t, k8sClient, agentRun)
 	rendered := configMap.Data[agentConfigKey]
-	for _, expected := range []string{"operator-prepared-identity:", "broker-provider: github-main-app", "name: Staging App Bot", "email: 123456789+staging-app[bot]@users.noreply.github.com"} {
-		if !strings.Contains(rendered, expected) {
-			t.Fatalf("prepared identity missing %q:\n%s", expected, rendered)
-		}
+	if strings.Contains(rendered, "operator-prepared-identity") || !strings.Contains(rendered, "opaque-setting: must-remain-unchanged") {
+		t.Fatalf("operator rewrote plugin-specific configuration:\n%s", rendered)
+	}
+	var renderedConfig map[string]any
+	if err := yaml.Unmarshal([]byte(rendered), &renderedConfig); err != nil {
+		t.Fatal(err)
+	}
+	plugins := renderedConfig["plugins"].([]any)
+	opaqueConfig := plugins[0].(map[string]any)["config"].(map[string]any)
+	if !reflect.DeepEqual(opaqueConfig, map[string]any{"opaque-setting": "must-remain-unchanged"}) {
+		t.Fatalf("arbitrary plugin config changed: %#v", opaqueConfig)
+	}
+	metadata, err := loadPreparedProviderMetadata(configMap.Data[preparedProviderMetadataKey], []requestedProviderPreparation{{
+		Provider: "github-main-app", Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity,
+	}})
+	if err != nil {
+		t.Fatalf("load prepared provider metadata: %v", err)
+	}
+	identity := metadata.Providers["github-main-app"].Identity
+	if identity == nil || identity.Name != "Staging App Bot" || identity.Email != "123456789+staging-app[bot]@users.noreply.github.com" {
+		t.Fatalf("unexpected prepared provider metadata: %#v", metadata)
 	}
 	for _, forbidden := range []string{"NVT_BROKER_TOKEN", "NVT_EGRESS_BROKER_TOKEN", "secret-response-canary"} {
-		if strings.Contains(rendered, forbidden) {
-			t.Fatalf("agent config contains credential capability %q:\n%s", forbidden, rendered)
+		if strings.Contains(rendered, forbidden) || strings.Contains(configMap.Data[preparedProviderMetadataKey], forbidden) {
+			t.Fatalf("agent configuration contains credential capability %q", forbidden)
 		}
 	}
 	pod, err := DesiredAgentPod(agentRun, scheme)
@@ -3159,35 +3167,50 @@ func TestLiteralZeroSecretPreparesProviderIdentityWithoutAgentCredentialCapabili
 		t.Fatal(err)
 	}
 	agent := pod.Spec.Containers[0]
+	metadataEnv := false
 	for _, env := range agent.Env {
 		if strings.Contains(env.Name, "BROKER_TOKEN") || env.Name == "NVT_EGRESS_BROKER_TOKEN" || env.ValueFrom != nil {
 			t.Fatalf("agent received credential-bearing environment: %#v", env)
 		}
+		if env.Name == preparedProviderMetadataEnv && env.Value == preparedProviderMetadataPath {
+			metadataEnv = true
+		}
 	}
+	if !metadataEnv {
+		t.Fatalf("agent did not receive generic prepared metadata path: %#v", agent.Env)
+	}
+	metadataProjected := false
 	for _, volume := range pod.Spec.Volumes {
 		if volume.Secret != nil && (volume.Secret.SecretName == BrokerTokenSecretName(agentRun.Name) || volume.Secret.SecretName == EgressTokenSecretName(agentRun.Name)) {
 			t.Fatalf("agent Pod projects broker/egress identity: %#v", volume)
+		}
+		if volume.Name == "agent-config" && volume.ConfigMap != nil {
+			for _, item := range volume.ConfigMap.Items {
+				if item.Key == preparedProviderMetadataKey && item.Path == preparedProviderMetadataKey {
+					metadataProjected = true
+				}
+			}
+		}
+	}
+	if !metadataProjected {
+		t.Fatalf("agent Pod did not project generic metadata document: %#v", pod.Spec.Volumes)
+	}
+	podJSON, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"operator-only-token", "secret-response-canary", "NVT_BROKER_TOKEN", "NVT_EGRESS_BROKER_TOKEN"} {
+		if strings.Contains(string(podJSON), forbidden) {
+			t.Fatalf("agent Pod contains credential material or capability %q", forbidden)
 		}
 	}
 }
 
 func TestProviderIdentityPreparationFailsClosedForMissingMappingAndMalformedBrokerResult(t *testing.T) {
 	agentRun := mediatedProviderIdentityAgentRun()
-	var config map[string]any
-	if err := json.Unmarshal(agentRun.Spec.Agent.Config.Raw, &config); err != nil {
-		t.Fatal(err)
-	}
-	plugins := config["plugins"].([]any)
-	hostPlugin := plugins[0].(map[string]any)
-	hostConfig := hostPlugin["config"].(map[string]any)
-	hostConfig["providers"] = []any{}
-	raw, err := json.Marshal(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentRun.Spec.Agent.Config.Raw = raw
-	if _, err := requestedMediatedProviderIdentities(agentRun); err == nil || !strings.Contains(err.Error(), "not an exact mediated broker provider") {
-		t.Fatalf("missing exact provider mapping did not fail loudly: %v", err)
+	agentRun.Spec.Broker.Grants[0].Preparations[0].Operation = "token"
+	if _, err := requestedProviderPreparations(agentRun); err == nil || !strings.Contains(err.Error(), "must be identity") {
+		t.Fatalf("unsupported preparation did not fail loudly: %v", err)
 	}
 
 	ctx := context.Background()
@@ -3201,9 +3224,127 @@ func TestProviderIdentityPreparationFailsClosedForMissingMappingAndMalformedBrok
 	t.Setenv("NVT_BROKER_URL", broker.URL)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agentRun, brokerSecret).Build()
 	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
-	_, err = reconciler.prepareProviderIdentities(ctx, agentRun)
+	_, err := reconciler.prepareProviderMetadata(ctx, agentRun)
 	if err == nil || !strings.Contains(err.Error(), "broker returned an invalid response") || strings.Contains(err.Error(), "secret-response-canary") {
 		t.Fatalf("malformed broker result was not sanitized: %v", err)
+	}
+}
+
+func TestUnsupportedProviderPreparationFailsBeforeAgentPod(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := mediatedProviderIdentityAgentRun()
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": false, "error": "identity-not-supported", "message": "secret-response-canary",
+		})
+	}))
+	t.Cleanup(broker.Close)
+	t.Setenv("NVT_BROKER_URL", broker.URL)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)})
+	if err == nil || !strings.Contains(err.Error(), "identity-not-supported") || strings.Contains(err.Error(), "secret-response-canary") {
+		t.Fatalf("unsupported preparation was not sanitized: %v", err)
+	}
+	pod := &corev1.Pod{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentPodName(agentRun.Name)}, pod); !errors.IsNotFound(err) {
+		t.Fatalf("agent Pod exists after failed preparation: err=%v pod=%#v", err, pod)
+	}
+}
+
+func TestProviderMetadataPreparationsMapMultipleProvidersExactly(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := mediatedProviderIdentityAgentRun()
+	agentRun.Spec.Broker.Grants = append(agentRun.Spec.Broker.Grants, nvtv1alpha1.AgentRunBrokerGrant{
+		Provider: "company-app", Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+		Repositories: []string{"example/repo"}, EgressHosts: []string{"example.test:443"},
+		Preparations: []nvtv1alpha1.AgentRunBrokerPreparation{{Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity}},
+	})
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("operator-only-token"))
+	seen := map[string]int{}
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var payload map[string]string
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		provider := payload["provider"]
+		seen[provider]++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "name": provider + " Bot", "email": provider + "@example.test",
+		})
+	}))
+	t.Cleanup(broker.Close)
+	t.Setenv("NVT_BROKER_URL", broker.URL)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agentRun, brokerSecret).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
+
+	metadata, err := reconciler.prepareProviderMetadata(ctx, agentRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.Providers) != 2 || seen["company-app"] != 1 || seen["github-main-app"] != 1 {
+		t.Fatalf("preparations did not map exactly: metadata=%#v requests=%#v", metadata, seen)
+	}
+	for _, provider := range []string{"company-app", "github-main-app"} {
+		identity := metadata.Providers[provider].Identity
+		if identity == nil || identity.Name != provider+" Bot" || identity.Email != provider+"@example.test" {
+			t.Fatalf("provider %s collided: %#v", provider, identity)
+		}
+	}
+}
+
+func TestPreparedProviderMetadataCacheRejectsMalformedOrStaleDocuments(t *testing.T) {
+	requested := []requestedProviderPreparation{{Provider: "github-main-app", Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity}}
+	tests := []string{
+		`{"version":1,"providers":{"other-provider":{"identity":{"name":"Safe Bot","email":"safe@example.test"}}}}`,
+		`{"version":1,"providers":{"github-main-app":{"identity":{"name":" bad","email":"safe@example.test"}}}}`,
+		`{"version":1,"providers":{"github-main-app":{"identity":{"name":"Safe Bot","email":"safe@example.test"}}}} trailing`,
+	}
+	for _, raw := range tests {
+		if _, err := loadPreparedProviderMetadata(raw, requested); err == nil {
+			t.Fatalf("malformed or stale metadata was accepted: %s", raw)
+		}
+	}
+}
+
+func TestProviderPreparationValidationAndOmittedPodBehavior(t *testing.T) {
+	scheme := testScheme(t)
+	omitted := testAgentRun()
+	pod, err := DesiredAgentPod(omitted, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == preparedProviderMetadataEnv {
+			t.Fatalf("run without preparations received metadata path: %#v", env)
+		}
+	}
+	for _, item := range pod.Spec.Volumes[1].ConfigMap.Items {
+		if item.Key == preparedProviderMetadataKey {
+			t.Fatalf("run without preparations projected metadata: %#v", item)
+		}
+	}
+
+	invalid := testAgentRun()
+	invalid.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider: "identity-main", Repositories: []string{"example/repo"}, Materialization: nvtv1alpha1.AgentRunGrantFileBundle,
+	}}}
+	invalid.Spec.Broker.Grants[0].Preparations = []nvtv1alpha1.AgentRunBrokerPreparation{{Operation: "headers"}}
+	if err := ValidateAgentRunEgressMode(invalid); err == nil || !strings.Contains(err.Error(), "must be identity") {
+		t.Fatalf("unsupported preparation was not rejected: %v", err)
+	}
+	duplicate := testAgentRun()
+	duplicate.Spec.Broker = invalid.Spec.Broker.DeepCopy()
+	duplicate.Spec.Broker.Grants[0].Preparations = []nvtv1alpha1.AgentRunBrokerPreparation{
+		{Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity},
+		{Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity},
+	}
+	if err := ValidateAgentRunEgressMode(duplicate); err == nil || !strings.Contains(err.Error(), "is duplicated") {
+		t.Fatalf("duplicate preparation was not rejected: %v", err)
 	}
 }
 
@@ -4063,6 +4204,24 @@ func TestAgentRunCRDSchemaIncludesTolerations(t *testing.T) {
 	).(map[string]any)
 	if tolerations["type"] != "array" || crdPath(t, tolerations, "items", "properties", "tolerationSeconds", "format") != "int64" {
 		t.Fatalf("AgentRun tolerations schema incomplete: %#v", tolerations)
+	}
+}
+
+func TestAgentRunCRDSchemaBoundsProviderPreparations(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatal(err)
+	}
+	operation := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties", "spec", "properties",
+		"broker", "properties", "grants", "items", "properties", "preparations", "items", "properties", "operation",
+	).(map[string]any)
+	if operation["type"] != "string" || !reflect.DeepEqual(operation["enum"], []any{"identity"}) {
+		t.Fatalf("provider preparation operation is not bounded: %#v", operation)
 	}
 }
 

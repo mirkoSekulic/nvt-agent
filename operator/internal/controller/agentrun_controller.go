@@ -55,7 +55,9 @@ import (
 const (
 	agentConfigKey                        = "agent.yaml"
 	preparedPlaceholderFilesKey           = "prepared-placeholder-files.json"
-	preparedProviderIdentitiesKey         = "prepared-provider-identities.json"
+	preparedProviderMetadataKey           = "prepared-provider-metadata.json"
+	preparedProviderMetadataPath          = agentConfigVolumeDir + "/" + preparedProviderMetadataKey
+	preparedProviderMetadataEnv           = "NVT_PREPARED_PROVIDER_METADATA_FILE"
 	agentConfigMountPath                  = "/nvt-agent/agent.yaml"
 	agentConfigVolumeDir                  = "/nvt-agent"
 	runtimeAuthSourcePath                 = "/nvt-agent/runtime-auth-source"
@@ -81,7 +83,7 @@ const (
 	lifecycleReporterPlugin               = "lifecycle-termination"
 	agentPodSecurityStateAnnotation       = "nvt.dev/pod-security-state"
 	agentConfigPlaceholderCacheAnnotation = "nvt.dev/placeholder-cache-key"
-	providerIdentityCacheAnnotation       = "nvt.dev/provider-identity-cache-key"
+	providerMetadataCacheAnnotation       = "nvt.dev/provider-metadata-cache-key"
 
 	// Non-root runtime user (opt-in via spec.runtime.user: non-root). The
 	// image ships an `agent` user at this uid/gid with HOME=agentNonRootHome.
@@ -205,11 +207,23 @@ type preparedPlaceholderFile struct {
 	Mode    string `json:"mode"`
 }
 
+type preparedProviderMetadata struct {
+	Version   int                                   `json:"version"`
+	Providers map[string]preparedProviderOperations `json:"providers"`
+}
+
+type preparedProviderOperations struct {
+	Identity *preparedProviderIdentity `json:"identity,omitempty"`
+}
+
 type preparedProviderIdentity struct {
-	Provider       string `json:"provider"`
-	BrokerProvider string `json:"broker-provider"`
-	Name           string `json:"name"`
-	Email          string `json:"email"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+type requestedProviderPreparation struct {
+	Provider  string
+	Operation nvtv1alpha1.AgentRunBrokerPreparationOperation
 }
 
 type placeholderFilesResponse struct {
@@ -393,18 +407,17 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	var preparedFiles []preparedPlaceholderFile
-	var preparedIdentities []preparedProviderIdentity
 	if AgentRunLiteralZeroSecret(&agentRun) {
 		preparedFiles, err = r.preparePlaceholderFiles(ctx, &agentRun)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		preparedIdentities, err = r.prepareProviderIdentities(ctx, &agentRun)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
 	}
-	if err := r.reconcileAgentConfigMap(ctx, &agentRun, preparedFiles, preparedIdentities); err != nil {
+	preparedMetadata, err := r.prepareProviderMetadata(ctx, &agentRun)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileAgentConfigMap(ctx, &agentRun, preparedFiles, preparedMetadata); err != nil {
 		return ctrl.Result{}, err
 	}
 	if enforced {
@@ -756,7 +769,7 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(
 	ctx context.Context,
 	agentRun *nvtv1alpha1.AgentRun,
 	preparedFiles []preparedPlaceholderFile,
-	preparedIdentities []preparedProviderIdentity,
+	preparedMetadata *preparedProviderMetadata,
 ) error {
 	desired, err := DesiredAgentConfigMap(agentRun, r.Scheme)
 	if err != nil {
@@ -773,33 +786,29 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(
 			}
 			desired.Data[preparedPlaceholderFilesKey] = string(encodedPreparedFiles)
 		}
-		if len(preparedIdentities) > 0 {
-			encoded, marshalErr := json.Marshal(preparedIdentities)
-			if marshalErr != nil {
-				return fmt.Errorf("marshal prepared provider identities: %w", marshalErr)
-			}
-			if desired.Data == nil {
-				desired.Data = map[string]string{}
-			}
-			desired.Data[preparedProviderIdentitiesKey] = string(encoded)
-		}
 		if desired.Annotations == nil {
 			desired.Annotations = map[string]string{}
 		}
 		desired.Annotations[agentConfigPlaceholderCacheAnnotation] = agentConfigPlaceholderCacheKey(agentRun)
-		if len(preparedIdentities) > 0 {
-			desired.Annotations[providerIdentityCacheAnnotation] = agentConfigPlaceholderCacheKey(agentRun)
-		}
 		rendered, renderErr := InjectPreparedPlaceholderFiles(desired.Data[agentConfigKey], preparedFiles)
 		if renderErr != nil {
 			return renderErr
 		}
 		desired.Data[agentConfigKey] = rendered
-		rendered, renderErr = InjectPreparedProviderIdentities(desired.Data[agentConfigKey], preparedIdentities)
-		if renderErr != nil {
-			return renderErr
+	}
+	if preparedMetadata != nil {
+		encoded, marshalErr := json.Marshal(preparedMetadata)
+		if marshalErr != nil {
+			return fmt.Errorf("marshal prepared provider metadata: %w", marshalErr)
 		}
-		desired.Data[agentConfigKey] = rendered
+		if desired.Data == nil {
+			desired.Data = map[string]string{}
+		}
+		if desired.Annotations == nil {
+			desired.Annotations = map[string]string{}
+		}
+		desired.Data[preparedProviderMetadataKey] = string(encoded)
+		desired.Annotations[providerMetadataCacheAnnotation] = providerMetadataCacheKey(agentRun)
 	}
 
 	configMap := &corev1.ConfigMap{
@@ -913,20 +922,20 @@ func (r *AgentRunReconciler) preparePlaceholderFiles(ctx context.Context, agentR
 	return prepared, nil
 }
 
-func (r *AgentRunReconciler) prepareProviderIdentities(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) ([]preparedProviderIdentity, error) {
-	requested, err := requestedMediatedProviderIdentities(agentRun)
+func (r *AgentRunReconciler) prepareProviderMetadata(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (*preparedProviderMetadata, error) {
+	requested, err := requestedProviderPreparations(agentRun)
 	if err != nil || len(requested) == 0 {
 		return nil, err
 	}
-	cacheKey := agentConfigPlaceholderCacheKey(agentRun)
+	cacheKey := providerMetadataCacheKey(agentRun)
 	existing := &corev1.ConfigMap{}
 	configKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentConfigMapName(agentRun.Name)}
 	if err := r.Get(ctx, configKey, existing); err == nil {
-		if metav1.IsControlledBy(existing, agentRun) && existing.Annotations[providerIdentityCacheAnnotation] == cacheKey {
-			if raw := existing.Data[preparedProviderIdentitiesKey]; strings.TrimSpace(raw) != "" {
-				prepared, loadErr := loadPreparedProviderIdentities(raw, requested)
+		if metav1.IsControlledBy(existing, agentRun) && existing.Annotations[providerMetadataCacheAnnotation] == cacheKey {
+			if raw := existing.Data[preparedProviderMetadataKey]; strings.TrimSpace(raw) != "" {
+				prepared, loadErr := loadPreparedProviderMetadata(raw, requested)
 				if loadErr != nil {
-					return nil, fmt.Errorf("load cached prepared provider identities from ConfigMap %s/%s: %w", existing.Namespace, existing.Name, loadErr)
+					return nil, fmt.Errorf("load cached prepared provider metadata from ConfigMap %s/%s: %w", existing.Namespace, existing.Name, loadErr)
 				}
 				return prepared, nil
 			}
@@ -950,15 +959,15 @@ func (r *AgentRunReconciler) prepareProviderIdentities(ctx context.Context, agen
 	}
 	prepCtx, cancel := context.WithTimeout(ctx, placeholderPreparationTimeout())
 	defer cancel()
-	prepared := make([]preparedProviderIdentity, 0, len(requested))
-	for _, identity := range requested {
-		payload, marshalErr := json.Marshal(map[string]string{"provider": identity.BrokerProvider})
+	prepared := &preparedProviderMetadata{Version: 1, Providers: map[string]preparedProviderOperations{}}
+	for _, preparation := range requested {
+		payload, marshalErr := json.Marshal(map[string]string{"provider": preparation.Provider})
 		if marshalErr != nil {
-			return nil, fmt.Errorf("marshal provider identity preparation request: %w", marshalErr)
+			return nil, fmt.Errorf("marshal provider metadata preparation request: %w", marshalErr)
 		}
 		request, requestErr := http.NewRequestWithContext(prepCtx, http.MethodPost, strings.TrimRight(BrokerURL(), "/")+"/v1/identity", bytes.NewReader(payload))
 		if requestErr != nil {
-			return nil, fmt.Errorf("create provider identity preparation request: %w", requestErr)
+			return nil, fmt.Errorf("create provider metadata preparation request: %w", requestErr)
 		}
 		request.Header.Set("Authorization", "Bearer "+string(token))
 		request.Header.Set("Content-Type", "application/json")
@@ -975,107 +984,44 @@ func (r *AgentRunReconciler) prepareProviderIdentities(ctx context.Context, agen
 		if response.StatusCode < 200 || response.StatusCode >= 300 || !decoded.OK {
 			return nil, fmt.Errorf("prepare provider commit identity: broker denied request (%s)", safeBrokerErrorReason(decoded.Error))
 		}
-		identity.Name = decoded.Name
-		identity.Email = decoded.Email
+		identity := preparedProviderIdentity{Name: decoded.Name, Email: decoded.Email}
 		if err := validatePreparedProviderIdentity(identity); err != nil {
 			return nil, fmt.Errorf("prepare provider commit identity: broker returned invalid metadata")
 		}
-		prepared = append(prepared, identity)
+		operations := prepared.Providers[preparation.Provider]
+		operations.Identity = &identity
+		prepared.Providers[preparation.Provider] = operations
 	}
 	return prepared, nil
 }
 
-func requestedMediatedProviderIdentities(agentRun *nvtv1alpha1.AgentRun) ([]preparedProviderIdentity, error) {
-	config := map[string]any{}
-	if err := yaml.Unmarshal(agentRun.Spec.Agent.Config.Raw, &config); err != nil {
-		return nil, fmt.Errorf("prepare provider commit identity: parse agent config: %w", err)
-	}
-	plugins, err := agentConfigPlugins(config)
-	if err != nil {
-		return nil, err
-	}
-	hostProviders := map[string]preparedProviderIdentity{}
-	hostPluginSeen := false
-	requestedNames := []string{}
-	for _, rawPlugin := range plugins {
-		plugin, ok := rawPlugin.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("prepare provider commit identity: plugins entries must be objects")
-		}
-		name, _ := plugin["name"].(string)
-		pluginConfig, _ := plugin["config"].(map[string]any)
-		switch name {
-		case "git-host-credentials":
-			if hostPluginSeen {
-				return nil, fmt.Errorf("prepare provider commit identity: git-host-credentials must be configured exactly once")
-			}
-			hostPluginSeen = true
-			rawProviders, _ := pluginConfig["providers"].([]any)
-			for _, rawProvider := range rawProviders {
-				provider, ok := rawProvider.(map[string]any)
-				if !ok {
-					return nil, fmt.Errorf("prepare provider commit identity: git-host-credentials providers must be objects")
-				}
-				providerName, _ := provider["name"].(string)
-				if providerName == "" {
-					continue
-				}
-				if _, exists := provider["operator-prepared-identity"]; exists {
-					return nil, fmt.Errorf("prepare provider commit identity: operator-prepared-identity is reserved")
-				}
-				if provider["type"] != "broker" || provider["credential-kind"] != "mediated" {
-					continue
-				}
-				brokerProvider, _ := provider["broker-provider"].(string)
-				if brokerProvider == "" {
-					brokerProvider, _ = provider["provider"].(string)
-				}
-				if brokerProvider == "" {
-					return nil, fmt.Errorf("prepare provider commit identity: mediated broker provider %s has no broker-provider", providerName)
-				}
-				if _, duplicate := hostProviders[providerName]; duplicate {
-					return nil, fmt.Errorf("prepare provider commit identity: duplicate git host provider %s", providerName)
-				}
-				hostProviders[providerName] = preparedProviderIdentity{Provider: providerName, BrokerProvider: brokerProvider}
-			}
-		case "git-credentials":
-			rawCredentials, _ := pluginConfig["credentials"].([]any)
-			for _, rawCredential := range rawCredentials {
-				credential, ok := rawCredential.(map[string]any)
-				if !ok {
-					continue
-				}
-				identity, _ := credential["identity"].(map[string]any)
-				if identity["mode"] != "provider" {
-					continue
-				}
-				providerName, _ := credential["provider"].(string)
-				if providerName == "" {
-					return nil, fmt.Errorf("prepare provider commit identity: provider identity rule has no provider")
-				}
-				requestedNames = append(requestedNames, providerName)
-			}
-		}
-	}
+func requestedProviderPreparations(agentRun *nvtv1alpha1.AgentRun) ([]requestedProviderPreparation, error) {
+	requested := []requestedProviderPreparation{}
 	seen := map[string]bool{}
-	requested := []preparedProviderIdentity{}
-	for _, providerName := range requestedNames {
-		if seen[providerName] {
-			continue
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		for _, preparation := range grant.Preparations {
+			if preparation.Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity {
+				return nil, fmt.Errorf("broker grant %s preparation operation must be identity, got %q", grant.Provider, preparation.Operation)
+			}
+			key := grant.Provider + "\x00" + string(preparation.Operation)
+			if seen[key] {
+				return nil, fmt.Errorf("broker grant preparation %s/%s is duplicated", grant.Provider, preparation.Operation)
+			}
+			seen[key] = true
+			requested = append(requested, requestedProviderPreparation{Provider: grant.Provider, Operation: preparation.Operation})
 		}
-		seen[providerName] = true
-		provider, mediated := hostProviders[providerName]
-		if !mediated {
-			return nil, fmt.Errorf("prepare provider commit identity: provider %s is not an exact mediated broker provider", providerName)
-		}
-		requested = append(requested, provider)
 	}
-	sort.Slice(requested, func(i, j int) bool { return requested[i].Provider < requested[j].Provider })
+	sort.Slice(requested, func(i, j int) bool {
+		if requested[i].Provider == requested[j].Provider {
+			return requested[i].Operation < requested[j].Operation
+		}
+		return requested[i].Provider < requested[j].Provider
+	})
 	return requested, nil
 }
 
 func validatePreparedProviderIdentity(identity preparedProviderIdentity) error {
-	for _, value := range []string{identity.Provider, identity.BrokerProvider, identity.Name, identity.Email} {
+	for _, value := range []string{identity.Name, identity.Email} {
 		if value == "" || value != strings.TrimSpace(value) || len(value) > 512 {
 			return fmt.Errorf("prepared provider identity contains an empty, unnormalized, or oversized field")
 		}
@@ -1088,23 +1034,42 @@ func validatePreparedProviderIdentity(identity preparedProviderIdentity) error {
 	return nil
 }
 
-func loadPreparedProviderIdentities(raw string, requested []preparedProviderIdentity) ([]preparedProviderIdentity, error) {
-	prepared := []preparedProviderIdentity{}
-	if err := json.Unmarshal([]byte(raw), &prepared); err != nil {
-		return nil, fmt.Errorf("decode prepared provider identities JSON: %w", err)
+func loadPreparedProviderMetadata(raw string, requested []requestedProviderPreparation) (*preparedProviderMetadata, error) {
+	prepared := &preparedProviderMetadata{}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(prepared); err != nil {
+		return nil, fmt.Errorf("decode prepared provider metadata JSON: %w", err)
 	}
-	if len(prepared) != len(requested) {
-		return nil, fmt.Errorf("prepared provider identity cache does not match requested providers")
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("decode prepared provider metadata JSON: trailing data")
 	}
-	for index := range prepared {
-		if err := validatePreparedProviderIdentity(prepared[index]); err != nil {
-			return nil, err
+	if prepared.Version != 1 || len(prepared.Providers) != len(requested) {
+		return nil, fmt.Errorf("prepared provider metadata cache does not match requested preparations")
+	}
+	for _, request := range requested {
+		operations, exists := prepared.Providers[request.Provider]
+		if !exists || request.Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity || operations.Identity == nil {
+			return nil, fmt.Errorf("prepared provider metadata cache does not match requested preparations")
 		}
-		if prepared[index].Provider != requested[index].Provider || prepared[index].BrokerProvider != requested[index].BrokerProvider {
-			return nil, fmt.Errorf("prepared provider identity cache does not match requested providers")
+		if err := validatePreparedProviderIdentity(*operations.Identity); err != nil {
+			return nil, err
 		}
 	}
 	return prepared, nil
+}
+
+func providerMetadataCacheKey(agentRun *nvtv1alpha1.AgentRun) string {
+	grants := []nvtv1alpha1.AgentRunBrokerGrant{}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		grants = append(grants, *grant.DeepCopy())
+	}
+	rendered, err := json.Marshal(grants)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(rendered)
+	return hex.EncodeToString(digest[:])
 }
 
 func safeBrokerErrorReason(value string) string {
@@ -1463,70 +1428,6 @@ func InjectPreparedPlaceholderFiles(rendered string, files []preparedPlaceholder
 	output, err := yaml.Marshal(config)
 	if err != nil {
 		return "", fmt.Errorf("render prepared placeholder files: %w", err)
-	}
-	return string(output), nil
-}
-
-func InjectPreparedProviderIdentities(rendered string, identities []preparedProviderIdentity) (string, error) {
-	if len(identities) == 0 {
-		return rendered, nil
-	}
-	config := map[string]any{}
-	if err := yaml.Unmarshal([]byte(rendered), &config); err != nil {
-		return "", fmt.Errorf("inject prepared provider identities: %w", err)
-	}
-	plugins, err := agentConfigPlugins(config)
-	if err != nil {
-		return "", err
-	}
-	byProvider := map[string]preparedProviderIdentity{}
-	for _, identity := range identities {
-		if err := validatePreparedProviderIdentity(identity); err != nil {
-			return "", err
-		}
-		byProvider[identity.Provider] = identity
-	}
-	injected := map[string]bool{}
-	for _, rawPlugin := range plugins {
-		plugin, ok := rawPlugin.(map[string]any)
-		if !ok || plugin["name"] != "git-host-credentials" {
-			continue
-		}
-		pluginConfig, _ := plugin["config"].(map[string]any)
-		providers, _ := pluginConfig["providers"].([]any)
-		for _, rawProvider := range providers {
-			provider, ok := rawProvider.(map[string]any)
-			if !ok {
-				continue
-			}
-			providerName, _ := provider["name"].(string)
-			identity, exists := byProvider[providerName]
-			if !exists {
-				continue
-			}
-			brokerProvider, _ := provider["broker-provider"].(string)
-			if brokerProvider == "" {
-				brokerProvider, _ = provider["provider"].(string)
-			}
-			if provider["type"] != "broker" || provider["credential-kind"] != "mediated" || brokerProvider != identity.BrokerProvider {
-				return "", fmt.Errorf("inject prepared provider identity: provider mapping changed")
-			}
-			provider["operator-prepared-identity"] = map[string]any{
-				"broker-provider": identity.BrokerProvider,
-				"name":            identity.Name,
-				"email":           identity.Email,
-			}
-			injected[providerName] = true
-		}
-	}
-	for provider := range byProvider {
-		if !injected[provider] {
-			return "", fmt.Errorf("inject prepared provider identity: requested provider is missing")
-		}
-	}
-	output, err := yaml.Marshal(config)
-	if err != nil {
-		return "", fmt.Errorf("render prepared provider identities: %w", err)
 	}
 	return string(output), nil
 }
@@ -3216,6 +3117,11 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			},
 		},
 	}
+	if agentRunHasProviderPreparations(agentRun) {
+		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
+			Key: preparedProviderMetadataKey, Path: preparedProviderMetadataKey,
+		})
+	}
 	hasGitGrant := agentRunHasGitGrant(agentRun)
 	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
 		volumes = append(volumes, corev1.Volume{
@@ -3442,6 +3348,9 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 		{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
 		{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
 		{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
+	}
+	if agentRunHasProviderPreparations(agentRun) {
+		agentEnv = append(agentEnv, corev1.EnvVar{Name: preparedProviderMetadataEnv, Value: preparedProviderMetadataPath})
 	}
 	if !AgentRunLiteralZeroSecret(agentRun) {
 		agentEnv = append(agentEnv,
@@ -3926,6 +3835,7 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("spec.egressTransport transparent requires a NetworkPolicy-capable deployment")
 	}
 	headerInjectGrants := 0
+	preparations := map[string]bool{}
 	if mode == nvtv1alpha1.AgentRunEgressMediated {
 		if agentRun.Spec.RuntimeAuth != nil {
 			return fmt.Errorf("egress mediated is incompatible with spec.runtimeAuth")
@@ -3935,6 +3845,16 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		}
 	}
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		for _, preparation := range grant.Preparations {
+			if preparation.Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity {
+				return fmt.Errorf("broker grant %s preparation operation must be identity, got %q", grant.Provider, preparation.Operation)
+			}
+			key := grant.Provider + "\x00" + string(preparation.Operation)
+			if preparations[key] {
+				return fmt.Errorf("broker grant preparation %s/%s is duplicated", grant.Provider, preparation.Operation)
+			}
+			preparations[key] = true
+		}
 		materialization := AgentRunGrantMaterialization(grant)
 		switch materialization {
 		case nvtv1alpha1.AgentRunGrantFileBundle, nvtv1alpha1.AgentRunGrantHeaderInject, nvtv1alpha1.AgentRunGrantPlaceholderFile:
@@ -4028,6 +3948,15 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
 	}
 	return nil
+}
+
+func agentRunHasProviderPreparations(agentRun *nvtv1alpha1.AgentRun) bool {
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if len(grant.Preparations) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // agentRunHasGitGrant reports whether any header-inject grant is git-typed,

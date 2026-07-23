@@ -89,11 +89,13 @@ and header export; it is a provider resolver, identity source, and source of the
 provider-scoped egress proxy URL used by Git. The real credential is injected by
 egressd after broker authorization, outside the agent container.
 
-For `identity.mode: provider` rules in enforced mediated AgentRuns, the operator
-also prepares the provider's non-secret commit name/email through the broker
-before creating the agent Pod. `operator-prepared-identity` is a reserved,
-operator-owned field; users must not set it. Direct/local runs retain the
-target-bearing `brokerctl identity` path.
+For `identity.mode: provider` rules in enforced mediated AgentRuns, declare an
+`identity` preparation on the exact AgentRun broker grant. The plugin reads the
+provider's non-secret commit name/email from the generic
+`NVT_PREPARED_PROVIDER_METADATA_FILE` document; the operator never parses or
+rewrites this plugin's configuration. Direct/local runs retain the target-bearing
+`brokerctl identity` path. See the language-neutral
+[prepared provider metadata contract](../../../protocol/prepared-provider-metadata.md).
 
 ```yaml
 type: broker

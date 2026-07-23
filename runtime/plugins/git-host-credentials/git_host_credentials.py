@@ -22,6 +22,8 @@ from shared.plugin_egress import PluginEgressError, environment as plugin_egress
 
 
 CACHE_FILE = Path.home() / ".nvt-agent" / "git-host-credentials" / "cache.json"
+PREPARED_METADATA_ENV = "NVT_PREPARED_PROVIDER_METADATA_FILE"
+PREPARED_METADATA_MAX_BYTES = 64 * 1024
 
 
 def fail(message):
@@ -364,16 +366,29 @@ def broker_identity(provider, target):
     return {"name": name, "email": email}
 
 
-def operator_prepared_identity(provider):
-    prepared = provider.get("operator-prepared-identity")
-    if prepared is None:
-        return None
-    if provider.get("type") != "broker" or credential_kind(provider) != "mediated":
-        fail(f"provider {provider_name(provider)} operator-prepared-identity is only valid for mediated broker providers")
-    if not isinstance(prepared, dict) or set(prepared) != {"broker-provider", "name", "email"}:
-        fail(f"provider {provider_name(provider)} operator-prepared-identity is invalid")
-    if prepared.get("broker-provider") != broker_provider_name(provider):
-        fail(f"provider {provider_name(provider)} operator-prepared-identity does not match broker-provider")
+def prepared_provider_identity(provider):
+    broker_provider = broker_provider_name(provider)
+    metadata_path = os.environ.get(PREPARED_METADATA_ENV)
+    if not metadata_path:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is unavailable")
+    try:
+        with Path(metadata_path).open("rb") as file:
+            raw = file.read(PREPARED_METADATA_MAX_BYTES + 1)
+    except OSError:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is unavailable")
+    if len(raw) > PREPARED_METADATA_MAX_BYTES:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
+    if not isinstance(document, dict) or set(document) != {"version", "providers"} or document.get("version") != 1:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
+    providers = document.get("providers")
+    operations = providers.get(broker_provider) if isinstance(providers, dict) else None
+    prepared = operations.get("identity") if isinstance(operations, dict) and set(operations) == {"identity"} else None
+    if not isinstance(prepared, dict) or set(prepared) != {"name", "email"}:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is missing or mismatched")
     output = {}
     for key in ("name", "email"):
         value = prepared.get(key)
@@ -384,7 +399,7 @@ def operator_prepared_identity(provider):
             or len(value.encode("utf-8")) > 512
             or any(ord(character) < 32 or ord(character) == 127 for character in value)
         ):
-            fail(f"provider {provider_name(provider)} operator-prepared-identity is invalid")
+            fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
         output[key] = value
     return output
 
@@ -455,11 +470,7 @@ def identity(provider, target=None):
         return github_app_identity(provider)
     if kind == "broker":
         if credential_kind(provider) == "mediated":
-            prepared = operator_prepared_identity(provider)
-            if prepared is not None:
-                return prepared
-            if not os.environ.get("NVT_BROKER_TOKEN"):
-                fail(f"provider {provider_name(provider)} mediated commit identity was not prepared by the operator")
+            return prepared_provider_identity(provider)
         return broker_identity(provider, target)
     fail(f"provider {provider_name(provider)} does not support commit identity; use identity.mode=explicit")
 
@@ -498,7 +509,6 @@ def validate_provider(provider):
             fail("brokerctl not found on PATH")
         string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
         credential_kind(provider)
-        operator_prepared_identity(provider)
     elif kind == "headers":
         headers(provider)
     else:

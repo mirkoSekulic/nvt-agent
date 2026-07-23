@@ -253,6 +253,17 @@ spec:
                                   items:
                                     type: string
                                     minLength: 1
+                                preparations:
+                                  type: array
+                                  items:
+                                    type: object
+                                    required:
+                                      - operation
+                                    properties:
+                                      operation:
+                                        type: string
+                                        enum:
+                                          - identity
                                 materialization:
                                   type: string
                                   default: file-bundle

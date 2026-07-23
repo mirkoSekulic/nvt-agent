@@ -36,6 +36,8 @@ spec:
       - provider: github-main-app
         materialization: header-inject
         repositories: [mirkoSekulic/nvt-agent]
+        preparations:
+          - operation: identity
         egressHosts: [github.com:443, api.github.com:443]
         git: true
         permissions:
@@ -58,6 +60,13 @@ spec:
     failedTTLSeconds: 3600
     runRetentionSeconds: 2592000
 ```
+
+`preparations` is an explicit provider-metadata request. Version 1 supports
+only the non-secret `identity` operation. The operator resolves it before Pod
+creation and mounts the generic, read-only document described in
+[`protocol/prepared-provider-metadata.md`](../../protocol/prepared-provider-metadata.md).
+It does not inspect or modify runtime plugin configuration. Omit preparations
+to preserve the existing behavior and receive no metadata file or path variable.
 
 ## Runtime
 
@@ -186,6 +195,8 @@ broker:
     - provider: github-main-app
       materialization: header-inject
       repositories: [owner/repo]
+      preparations:
+        - operation: identity
       egressHosts: [github.com:443]
       git: true
       permissions:
@@ -196,6 +207,8 @@ broker:
 
 - `provider` names a statically configured broker provider.
 - `repositories` narrows its repository scope.
+- `preparations` explicitly requests bounded non-secret provider metadata;
+  version 1 permits only `operation: identity`.
 - `materialization` is `file-bundle` for direct mode or `header-inject` /
   `placeholder-file` for mediated mode. Admission rejects mixed modes.
 - `egressHosts` binds valid upstream host:port destinations.
