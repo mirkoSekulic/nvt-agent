@@ -73,7 +73,7 @@ spec:
                         minLength: 1
                       workflows:
                         type: array
-                        uniqueItems: true
+                        x-kubernetes-list-type: set
                         items:
                           type: string
                           minLength: 1

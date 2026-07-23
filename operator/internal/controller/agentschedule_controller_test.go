@@ -128,8 +128,11 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 		t.Fatalf("expected bounded workflow profile schema, got %#v", properties["workflowProfiles"])
 	}
 	if crdPath(t, properties, "producerPolicies", "items", "properties", "identity", "type") != "string" ||
-		crdPath(t, properties, "producerPolicies", "items", "properties", "workflows", "uniqueItems") != true {
+		crdPath(t, properties, "producerPolicies", "items", "properties", "workflows", "x-kubernetes-list-type") != "set" {
 		t.Fatalf("expected typed producer policy schema, got %#v", properties["producerPolicies"])
+	}
+	if strings.Contains(string(data), "uniqueItems:") {
+		t.Fatal("AgentSchedule CRD uses unsupported quadratic uniqueItems validation")
 	}
 	profileProperties := crdPath(t, properties, "profiles", "items", "properties").(map[string]any)
 	legacy := crdPath(t, profileProperties, "egressForwardProxy").(map[string]any)

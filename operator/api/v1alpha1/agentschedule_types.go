@@ -82,7 +82,8 @@ type AgentScheduleWorkflowProfile struct {
 // AgentScheduleProducerPolicy authorizes one authenticated Kubernetes caller
 // to request an exact set of workflow profiles.
 type AgentScheduleProducerPolicy struct {
-	Identity        string   `json:"identity"`
+	Identity string `json:"identity"`
+	// +listType=set
 	Workflows       []string `json:"workflows,omitempty"`
 	DefaultWorkflow string   `json:"defaultWorkflow,omitempty"`
 }
