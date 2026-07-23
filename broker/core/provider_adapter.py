@@ -53,6 +53,9 @@ class ProviderAdapter(ABC):
     def identity_for_repo(self, repo, effective_repositories): ...
 
     @abstractmethod
+    def identity_for_grant(self, effective_repositories): ...
+
+    @abstractmethod
     def headers_for_repo(self, repo, effective_repositories): ...
 
     @abstractmethod

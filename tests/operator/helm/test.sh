@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.10" || "${CHART_APP_VERSION}" != "0.8.10" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.10, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.11" || "${CHART_APP_VERSION}" != "0.8.11" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.11, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.10' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.11' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -587,6 +587,7 @@ grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 
 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
+grep -q 'provider: github-main-app' "${PROFILE_RENDER}"
 grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
 grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
 grep -q 'runtimeClassName: kata-vm-isolation' "${PROFILE_RENDER}"
@@ -596,6 +597,7 @@ grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'key: purpose'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'operator: Equal'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'value: nvt-agent'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'effect: NoSchedule'
+grep -A3 'preparations:' "${PROFILE_RENDER}" | grep -q 'operation: identity'
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_EMPTY_IMAGE_RENDER}"
 grep -q 'image: registry.example/runtime:override' "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"
@@ -826,6 +828,8 @@ require_file "${CHART}/crds/nvt.dev_agentruns.yaml"
 require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentruns.yaml" "${CHART}/crds/nvt.dev_agentruns.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentschedules.yaml" "${CHART}/crds/nvt.dev_agentschedules.yaml"
+grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentruns.yaml" | grep -q -- '- identity'
+grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentschedules.yaml" | grep -q -- '- identity'
 
 rendered_secret_names() {
   local file="$1"

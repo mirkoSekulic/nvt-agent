@@ -233,10 +233,9 @@ class GithubAppProvider:
             with self.opener.open(request, timeout=30) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
-            text = error.read().decode("utf-8", errors="replace")
-            raise ProviderError("identity-lookup-failed", f"GitHub identity request failed: {error.code} {error.reason}: {text}", 502)
+            raise ProviderError("identity-lookup-failed", "GitHub identity request failed", 502)
         except URLError as error:
-            raise ProviderError("identity-lookup-failed", f"GitHub identity request failed: {error.reason}", 502)
+            raise ProviderError("identity-lookup-failed", "GitHub identity request failed", 502)
 
     def _load_identity(self):
         jwt = self._jwt()
@@ -256,6 +255,11 @@ class GithubAppProvider:
 
     def identity_for_repo(self, repo, effective_repositories):
         self._ensure_repo_allowed(repo, effective_repositories)
+        return self.identity_for_grant(effective_repositories)
+
+    def identity_for_grant(self, effective_repositories):
+        if not effective_repositories:
+            raise ProviderError("provider-not-granted", status=403)
         with self.identity_lock:
             if self.identity_cache is None:
                 self.identity_cache = self._load_identity()

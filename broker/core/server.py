@@ -32,6 +32,7 @@ PATH_CLASS_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 # Documented zero-entropy placeholder from protocol/injection.md. It is the
 # only credential-shaped value allowed inside a mediated agent container.
 INJECTION_PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
+MAX_IDENTITY_FIELD_BYTES = 512
 
 
 class Broker:
@@ -152,20 +153,28 @@ class Broker:
     def identity(self, request_id, payload, authorization):
         agent = self.authenticate_role(authorization, "agent")
         provider_name = string_field(payload, "provider")
-        target = string_field(payload, "target")
         provider = self.provider(provider_name)
         if getattr(provider, "external", False) and not provider.supports("identity"):
             raise ProviderError("identity-not-supported", f"provider {provider_name} does not support identity", 403)
-        repo = provider.normalize_target(target)
         effective_repositories = self.agents.effective_repositories(agent, provider_name)
-        identity = provider.identity_for_repo(repo, effective_repositories)
+        if "target" not in payload:
+            identity = provider.identity_for_grant(effective_repositories)
+            audit_fields = {}
+        else:
+            target = payload.get("target")
+            if not isinstance(target, str) or not target:
+                raise ProviderError("target-invalid")
+            repo = provider.normalize_target(target)
+            identity = provider.identity_for_repo(repo, effective_repositories)
+            audit_fields = {"target": provider.target_from_repo(repo)}
+        identity = validate_commit_identity(identity)
         self.audit.write(
             request_id=request_id,
             agent=agent["id"],
             provider=provider_name,
             operation="identity",
-            target=provider.target_from_repo(repo),
             allowed=True,
+            **audit_fields,
         )
         return {"ok": True, **identity}
 
@@ -472,6 +481,24 @@ def string_field(payload, key):
     if not isinstance(value, str) or not value:
         raise ProviderError(f"{key}-required")
     return value
+
+
+def validate_commit_identity(identity):
+    if not isinstance(identity, dict):
+        raise ProviderError("identity-invalid", "provider returned invalid commit identity metadata", 502)
+    output = {}
+    for key in ("name", "email"):
+        value = identity.get(key)
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or len(value.encode("utf-8")) > MAX_IDENTITY_FIELD_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ProviderError("identity-invalid", "provider returned invalid commit identity metadata", 502)
+        output[key] = value
+    return output
 
 
 def capped_files_expiry(provider_expires_at, bundle_ttl_seconds):

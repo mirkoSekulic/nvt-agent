@@ -794,6 +794,30 @@ func (f *brokerFixture) brokerctlWithToken(token string, args ...string) (map[st
 	return payload, string(output), status
 }
 
+func (f *brokerFixture) post(path string, body map[string]any, token string) (map[string]any, int) {
+	f.t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, f.url+path, bytes.NewReader(payload))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer response.Body.Close()
+	decoded := map[string]any{}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		f.t.Fatal(err)
+	}
+	return decoded, response.StatusCode
+}
+
 func TestHealth(t *testing.T) {
 	f := newBrokerFixture(t)
 	payload, _, status := f.brokerctlWithToken("", "health")
@@ -917,6 +941,9 @@ func TestEmptyAndMismatchedGrantsDeny(t *testing.T) {
 	f.writeAgents(map[string]agentGrant{
 		"frontend": {Token: f.token, Grants: map[string][]string{}},
 	})
+	if err := os.Chtimes(f.agents, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	payload, _, status := f.brokerctl("http", "request", "--provider", "fork-app", "--method", "GET", "--url", f.fake.server.URL+"/repos/my-user/my-repo/pulls/123")
 	if status == 0 || payload["error"] != "provider-not-granted" {
 		t.Fatalf("expected provider-not-granted for empty grants, status=%d payload=%#v", status, payload)
@@ -1151,6 +1178,60 @@ func TestIdentityDeniedOutsideAgentGrant(t *testing.T) {
 	payload, _, status := f.brokerctl("identity", "--provider", "fork-app", "--target", "github.com/my-user/other-repo")
 	if status == 0 || payload["error"] != "repo-not-allowed" {
 		t.Fatalf("expected identity repo denial, status=%d payload=%#v", status, payload)
+	}
+}
+
+func TestProviderScopedIdentityPreparationUsesExactGrant(t *testing.T) {
+	f := newBrokerFixture(t)
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {
+			Token: f.token,
+			Grants: map[string][]string{
+				"fork-app": {"my-user/*"},
+			},
+		},
+	})
+	payload, status := f.post("/v1/identity", map[string]any{"provider": "fork-app"}, f.token)
+	if status != http.StatusOK || payload["name"] != "local-agent[bot]" ||
+		payload["email"] != "987654321+local-agent[bot]@users.noreply.github.com" {
+		t.Fatalf("provider-scoped identity failed: status=%d payload=%#v", status, payload)
+	}
+	payload, status = f.post("/v1/identity", map[string]any{"provider": "fork-app", "target": nil}, f.token)
+	if status != http.StatusBadRequest || payload["error"] != "target-invalid" {
+		t.Fatalf("explicit null target did not fail closed: status=%d payload=%#v", status, payload)
+	}
+
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {Token: f.token, Grants: map[string][]string{}},
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		payload, status = f.post("/v1/identity", map[string]any{"provider": "fork-app"}, f.token)
+		if payload["error"] == "provider-not-granted" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status != http.StatusBadRequest || payload["error"] != "provider-not-granted" {
+		t.Fatalf("missing provider grant did not fail closed: status=%d payload=%#v", status, payload)
+	}
+
+	f.writeAgents(map[string]agentGrant{
+		"frontend": {Token: f.token, Grants: map[string][]string{"pat-provider": {"my-user/*"}}},
+	})
+	if err := os.Chtimes(f.agents, time.Now().Add(2*time.Second), time.Now().Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		payload, status = f.post("/v1/identity", map[string]any{"provider": "pat-provider"}, f.token)
+		if payload["error"] != "provider-not-granted" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status != http.StatusBadRequest || payload["error"] != "identity-not-supported" {
+		t.Fatalf("unsupported provider identity did not fail closed: status=%d payload=%#v", status, payload)
 	}
 }
 

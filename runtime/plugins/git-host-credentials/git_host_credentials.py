@@ -22,6 +22,8 @@ from shared.plugin_egress import PluginEgressError, environment as plugin_egress
 
 
 CACHE_FILE = Path.home() / ".nvt-agent" / "git-host-credentials" / "cache.json"
+PREPARED_METADATA_ENV = "NVT_PREPARED_PROVIDER_METADATA_FILE"
+PREPARED_METADATA_MAX_BYTES = 64 * 1024
 
 
 def fail(message):
@@ -364,6 +366,44 @@ def broker_identity(provider, target):
     return {"name": name, "email": email}
 
 
+def prepared_provider_identity(provider):
+    broker_provider = broker_provider_name(provider)
+    metadata_path = os.environ.get(PREPARED_METADATA_ENV)
+    if not metadata_path:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is unavailable")
+    try:
+        with Path(metadata_path).open("rb") as file:
+            raw = file.read(PREPARED_METADATA_MAX_BYTES + 1)
+    except OSError:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is unavailable")
+    if len(raw) > PREPARED_METADATA_MAX_BYTES:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
+    if not isinstance(document, dict) or set(document) != {"version", "providers"} or document.get("version") != 1:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
+    providers = document.get("providers")
+    operations = providers.get(broker_provider) if isinstance(providers, dict) else None
+    prepared = operations.get("identity") if isinstance(operations, dict) and set(operations) == {"identity"} else None
+    if not isinstance(prepared, dict) or set(prepared) != {"name", "email"}:
+        fail(f"provider {provider_name(provider)} mediated commit identity metadata is missing or mismatched")
+    output = {}
+    for key in ("name", "email"):
+        value = prepared.get(key)
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or len(value.encode("utf-8")) > 512
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            fail(f"provider {provider_name(provider)} mediated commit identity metadata is invalid")
+        output[key] = value
+    return output
+
+
 def broker_headers(provider, target):
     broker_provider = broker_provider_name(provider)
     if not target:
@@ -429,6 +469,8 @@ def identity(provider, target=None):
     if kind == "github-app":
         return github_app_identity(provider)
     if kind == "broker":
+        if credential_kind(provider) == "mediated" and PREPARED_METADATA_ENV in os.environ:
+            return prepared_provider_identity(provider)
         return broker_identity(provider, target)
     fail(f"provider {provider_name(provider)} does not support commit identity; use identity.mode=explicit")
 

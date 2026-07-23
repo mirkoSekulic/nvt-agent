@@ -103,6 +103,9 @@ class Agents:
     def grant(self, agent, provider_name):
         return {"materialization": self.materialization}
 
+    def effective_repositories(self, agent, provider_name):
+        return ["owner/repo"]
+
 broker = Broker.__new__(Broker)
 broker.providers = {"empty": empty}
 broker.agents = Agents()
@@ -112,6 +115,8 @@ def placeholder_files():
     return broker.placeholder_files("request", {"provider": "empty"}, "token")
 
 checks = [
+    (lambda: broker.identity("request", {"provider": "empty"}, "token"),
+     "identity-not-supported", "identity-not-supported", 400),
     (lambda: broker.files("request", {"provider": "empty"}, "token"),
      "files-not-supported", "provider empty does not support file bundles", 400),
     (placeholder_files,
@@ -127,6 +132,21 @@ for call, reason, message, status in checks:
             raise SystemExit(f"unsupported error changed: {(error.reason, error.message, error.status)!r}")
     else:
         raise SystemExit(f"missing unsupported error: {reason}")
+
+full_provider.identity_for_grant = lambda repositories: {
+    "name": "secret-response-canary\n",
+    "email": "safe@example.test",
+}
+broker.providers = {"full": full}
+try:
+    broker.identity("request", {"provider": "full"}, "token")
+except ProviderError as error:
+    if (error.reason, error.message, error.status) != (
+        "identity-invalid", "provider returned invalid commit identity metadata", 502
+    ) or "secret-response-canary" in error.message:
+        raise SystemExit(f"malformed identity error was not sanitized: {error.message!r}")
+else:
+    raise SystemExit("malformed provider identity was accepted")
 
 print("OK")
 `)

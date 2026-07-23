@@ -196,6 +196,15 @@ class ExecutableProviderAdapter(ProviderAdapter):
         self._bounded_string(result["email"], "identity result email", MAX_TEXT_LENGTH)
         return result
 
+    def identity_for_grant(self, effective_repositories):
+        self._ensure_capability("identity")
+        result = self._request("identity", {"effective_repositories": effective_repositories})
+        result = self._object(result, "identity result")
+        self._require_keys(result, {"name", "email"}, "identity result")
+        self._bounded_string(result["name"], "identity result name", MAX_TEXT_LENGTH)
+        self._bounded_string(result["email"], "identity result email", MAX_TEXT_LENGTH)
+        return result
+
     def headers_for_repo(self, repo, effective_repositories):
         self._ensure_capability("headers")
         result = self._operation_for_target("headers", repo, effective_repositories)

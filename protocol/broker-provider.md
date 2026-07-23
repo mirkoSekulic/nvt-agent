@@ -143,7 +143,9 @@ The only capability strings are `http.request`, `token`, `identity`, `headers`,
 values fail initialization. Metadata defaults are an empty `injection_hosts`
 list, false `injection_git`, and null `bundle_ttl_seconds`; a non-null TTL is a
 positive integer. Injection metadata requires `injection.headers`. Providers
-declaring `token`, `identity`, or `headers` must implement `target.normalize`.
+declaring `token`, `identity`, or `headers` must implement `target.normalize`
+for target-bearing operations. Identity operations may additionally receive the
+target-less provider-scoped form described below.
 Each injection host must be a unique normalized lowercase DNS hostname: labels
 contain only `a-z`, `0-9`, and interior hyphens, with no scheme, path, wildcard,
 port, trailing dot, uppercase characters, or IPv4/IPv6 literals.
@@ -164,7 +166,11 @@ the sole audit writer; provider-generated audit records are not supported.
   `{status,headers,body,audit_target}`. `audit_target` is the sanitized target
   core records for this request.
 - `token`: `{target,effective_repositories}` → `{token,expires_at}`.
-- `identity`: `{target,effective_repositories}` → `{name,email}`.
+- `identity`: `{effective_repositories}` or
+  `{target,effective_repositories}` → `{name,email}`. The target-less form is
+  provider-scoped commit metadata for trusted preparation and must validate the
+  complete effective grant. Providers may reject that form with the stable
+  `identity-not-supported` error when their identity is target-dependent.
 - `headers`: `{target,effective_repositories}` → `{headers}`.
 - `files`: `{agent_id,request_id}` → `{files,expires_at}`.
 - `placeholder-files`: `{agent_id,request_id,grant}` →

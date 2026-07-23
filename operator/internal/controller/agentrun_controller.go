@@ -55,6 +55,9 @@ import (
 const (
 	agentConfigKey                        = "agent.yaml"
 	preparedPlaceholderFilesKey           = "prepared-placeholder-files.json"
+	preparedProviderMetadataKey           = "prepared-provider-metadata.json"
+	preparedProviderMetadataPath          = agentConfigVolumeDir + "/" + preparedProviderMetadataKey
+	preparedProviderMetadataEnv           = "NVT_PREPARED_PROVIDER_METADATA_FILE"
 	agentConfigMountPath                  = "/nvt-agent/agent.yaml"
 	agentConfigVolumeDir                  = "/nvt-agent"
 	runtimeAuthSourcePath                 = "/nvt-agent/runtime-auth-source"
@@ -80,6 +83,7 @@ const (
 	lifecycleReporterPlugin               = "lifecycle-termination"
 	agentPodSecurityStateAnnotation       = "nvt.dev/pod-security-state"
 	agentConfigPlaceholderCacheAnnotation = "nvt.dev/placeholder-cache-key"
+	providerMetadataCacheAnnotation       = "nvt.dev/provider-metadata-cache-key"
 
 	// Non-root runtime user (opt-in via spec.runtime.user: non-root). The
 	// image ships an `agent` user at this uid/gid with HOME=agentNonRootHome.
@@ -203,11 +207,38 @@ type preparedPlaceholderFile struct {
 	Mode    string `json:"mode"`
 }
 
+type preparedProviderMetadata struct {
+	Version   int                                   `json:"version"`
+	Providers map[string]preparedProviderOperations `json:"providers"`
+}
+
+type preparedProviderOperations struct {
+	Identity *preparedProviderIdentity `json:"identity,omitempty"`
+}
+
+type preparedProviderIdentity struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+type requestedProviderPreparation struct {
+	Provider  string
+	Operation nvtv1alpha1.AgentRunBrokerPreparationOperation
+}
+
 type placeholderFilesResponse struct {
 	OK      bool                      `json:"ok"`
 	Files   []preparedPlaceholderFile `json:"files"`
 	Error   string                    `json:"error"`
 	Message string                    `json:"message"`
+}
+
+type providerIdentityResponse struct {
+	OK      bool   `json:"ok"`
+	Name    string `json:"name"`
+	Email   string `json:"email"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
 }
 
 type podCredentialProjectionState struct {
@@ -382,7 +413,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.reconcileAgentConfigMap(ctx, &agentRun, preparedFiles); err != nil {
+	preparedMetadata, err := r.prepareProviderMetadata(ctx, &agentRun)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileAgentConfigMap(ctx, &agentRun, preparedFiles, preparedMetadata); err != nil {
 		return ctrl.Result{}, err
 	}
 	if enforced {
@@ -730,7 +765,12 @@ func (r *AgentRunReconciler) now() metav1.Time {
 	return metav1.Now()
 }
 
-func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentRun *nvtv1alpha1.AgentRun, preparedFiles []preparedPlaceholderFile) error {
+func (r *AgentRunReconciler) reconcileAgentConfigMap(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	preparedFiles []preparedPlaceholderFile,
+	preparedMetadata *preparedProviderMetadata,
+) error {
 	desired, err := DesiredAgentConfigMap(agentRun, r.Scheme)
 	if err != nil {
 		return err
@@ -755,6 +795,20 @@ func (r *AgentRunReconciler) reconcileAgentConfigMap(ctx context.Context, agentR
 			return renderErr
 		}
 		desired.Data[agentConfigKey] = rendered
+	}
+	if preparedMetadata != nil {
+		encoded, marshalErr := json.Marshal(preparedMetadata)
+		if marshalErr != nil {
+			return fmt.Errorf("marshal prepared provider metadata: %w", marshalErr)
+		}
+		if desired.Data == nil {
+			desired.Data = map[string]string{}
+		}
+		if desired.Annotations == nil {
+			desired.Annotations = map[string]string{}
+		}
+		desired.Data[preparedProviderMetadataKey] = string(encoded)
+		desired.Annotations[providerMetadataCacheAnnotation] = providerMetadataCacheKey(agentRun)
 	}
 
 	configMap := &corev1.ConfigMap{
@@ -815,7 +869,7 @@ func (r *AgentRunReconciler) preparePlaceholderFiles(ctx context.Context, agentR
 	if len(token) == 0 {
 		return nil, fmt.Errorf("control-plane broker token Secret %s/%s is missing %s", secretKey.Namespace, secretKey.Name, brokerTokenKey)
 	}
-	httpClient, err := r.placeholderHTTPClient(ctx, agentRun.Namespace)
+	httpClient, err := r.brokerPreparationHTTPClient(ctx, agentRun.Namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -866,6 +920,168 @@ func (r *AgentRunReconciler) preparePlaceholderFiles(ctx context.Context, agentR
 		}
 	}
 	return prepared, nil
+}
+
+func (r *AgentRunReconciler) prepareProviderMetadata(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (*preparedProviderMetadata, error) {
+	requested, err := requestedProviderPreparations(agentRun)
+	if err != nil || len(requested) == 0 {
+		return nil, err
+	}
+	cacheKey := providerMetadataCacheKey(agentRun)
+	existing := &corev1.ConfigMap{}
+	configKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: AgentConfigMapName(agentRun.Name)}
+	if err := r.Get(ctx, configKey, existing); err == nil {
+		if metav1.IsControlledBy(existing, agentRun) && existing.Annotations[providerMetadataCacheAnnotation] == cacheKey {
+			if raw := existing.Data[preparedProviderMetadataKey]; strings.TrimSpace(raw) != "" {
+				prepared, loadErr := loadPreparedProviderMetadata(raw, requested)
+				if loadErr != nil {
+					return nil, fmt.Errorf("load cached prepared provider metadata from ConfigMap %s/%s: %w", existing.Namespace, existing.Name, loadErr)
+				}
+				return prepared, nil
+			}
+		}
+	} else if !errors.IsNotFound(err) {
+		return nil, fmt.Errorf("get AgentRun config ConfigMap for provider identity cache: %w", err)
+	}
+
+	secret := &corev1.Secret{}
+	secretKey := client.ObjectKey{Namespace: agentRun.Namespace, Name: BrokerTokenSecretName(agentRun.Name)}
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		return nil, fmt.Errorf("get control-plane broker token for provider identity preparation: %w", err)
+	}
+	token := secret.Data[brokerTokenKey]
+	if len(token) == 0 {
+		return nil, fmt.Errorf("control-plane broker token Secret %s/%s is missing %s", secretKey.Namespace, secretKey.Name, brokerTokenKey)
+	}
+	httpClient, err := r.brokerPreparationHTTPClient(ctx, agentRun.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	prepCtx, cancel := context.WithTimeout(ctx, placeholderPreparationTimeout())
+	defer cancel()
+	prepared := &preparedProviderMetadata{Version: 1, Providers: map[string]preparedProviderOperations{}}
+	for _, preparation := range requested {
+		payload, marshalErr := json.Marshal(map[string]string{"provider": preparation.Provider})
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal provider metadata preparation request: %w", marshalErr)
+		}
+		request, requestErr := http.NewRequestWithContext(prepCtx, http.MethodPost, strings.TrimRight(BrokerURL(), "/")+"/v1/identity", bytes.NewReader(payload))
+		if requestErr != nil {
+			return nil, fmt.Errorf("create provider metadata preparation request: %w", requestErr)
+		}
+		request.Header.Set("Authorization", "Bearer "+string(token))
+		request.Header.Set("Content-Type", "application/json")
+		response, requestErr := httpClient.Do(request)
+		if requestErr != nil {
+			return nil, fmt.Errorf("prepare provider commit identity: broker request failed")
+		}
+		var decoded providerIdentityResponse
+		responseBytes, readErr := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+		response.Body.Close()
+		if readErr != nil || len(responseBytes) > 64<<10 || json.Unmarshal(responseBytes, &decoded) != nil {
+			return nil, fmt.Errorf("prepare provider commit identity: broker returned an invalid response")
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 || !decoded.OK {
+			return nil, fmt.Errorf("prepare provider commit identity: broker denied request (%s)", safeBrokerErrorReason(decoded.Error))
+		}
+		identity := preparedProviderIdentity{Name: decoded.Name, Email: decoded.Email}
+		if err := validatePreparedProviderIdentity(identity); err != nil {
+			return nil, fmt.Errorf("prepare provider commit identity: broker returned invalid metadata")
+		}
+		operations := prepared.Providers[preparation.Provider]
+		operations.Identity = &identity
+		prepared.Providers[preparation.Provider] = operations
+	}
+	return prepared, nil
+}
+
+func requestedProviderPreparations(agentRun *nvtv1alpha1.AgentRun) ([]requestedProviderPreparation, error) {
+	requested := []requestedProviderPreparation{}
+	seen := map[string]bool{}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		for _, preparation := range grant.Preparations {
+			if preparation.Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity {
+				return nil, fmt.Errorf("broker grant %s preparation operation must be identity, got %q", grant.Provider, preparation.Operation)
+			}
+			key := grant.Provider + "\x00" + string(preparation.Operation)
+			if seen[key] {
+				return nil, fmt.Errorf("broker grant preparation %s/%s is duplicated", grant.Provider, preparation.Operation)
+			}
+			seen[key] = true
+			requested = append(requested, requestedProviderPreparation{Provider: grant.Provider, Operation: preparation.Operation})
+		}
+	}
+	sort.Slice(requested, func(i, j int) bool {
+		if requested[i].Provider == requested[j].Provider {
+			return requested[i].Operation < requested[j].Operation
+		}
+		return requested[i].Provider < requested[j].Provider
+	})
+	return requested, nil
+}
+
+func validatePreparedProviderIdentity(identity preparedProviderIdentity) error {
+	for _, value := range []string{identity.Name, identity.Email} {
+		if value == "" || value != strings.TrimSpace(value) || len(value) > 512 {
+			return fmt.Errorf("prepared provider identity contains an empty, unnormalized, or oversized field")
+		}
+		for _, character := range value {
+			if character < 32 || character == 127 {
+				return fmt.Errorf("prepared provider identity contains a control character")
+			}
+		}
+	}
+	return nil
+}
+
+func loadPreparedProviderMetadata(raw string, requested []requestedProviderPreparation) (*preparedProviderMetadata, error) {
+	prepared := &preparedProviderMetadata{}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(prepared); err != nil {
+		return nil, fmt.Errorf("decode prepared provider metadata JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("decode prepared provider metadata JSON: trailing data")
+	}
+	if prepared.Version != 1 || len(prepared.Providers) != len(requested) {
+		return nil, fmt.Errorf("prepared provider metadata cache does not match requested preparations")
+	}
+	for _, request := range requested {
+		operations, exists := prepared.Providers[request.Provider]
+		if !exists || request.Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity || operations.Identity == nil {
+			return nil, fmt.Errorf("prepared provider metadata cache does not match requested preparations")
+		}
+		if err := validatePreparedProviderIdentity(*operations.Identity); err != nil {
+			return nil, err
+		}
+	}
+	return prepared, nil
+}
+
+func providerMetadataCacheKey(agentRun *nvtv1alpha1.AgentRun) string {
+	grants := []nvtv1alpha1.AgentRunBrokerGrant{}
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		grants = append(grants, *grant.DeepCopy())
+	}
+	rendered, err := json.Marshal(grants)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(rendered)
+	return hex.EncodeToString(digest[:])
+}
+
+func safeBrokerErrorReason(value string) string {
+	if value == "" || len(value) > 64 {
+		return "provider-identity-unavailable"
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || strings.ContainsRune("._-", character)) {
+			return "provider-identity-unavailable"
+		}
+	}
+	return value
 }
 
 func agentConfigPlaceholderCacheKey(agentRun *nvtv1alpha1.AgentRun) string {
@@ -1141,7 +1357,7 @@ func credentialVolumeMountState(volumeMounts []corev1.VolumeMount, credentialVol
 	return state
 }
 
-func (r *AgentRunReconciler) placeholderHTTPClient(ctx context.Context, namespace string) (*http.Client, error) {
+func (r *AgentRunReconciler) brokerPreparationHTTPClient(ctx context.Context, namespace string) (*http.Client, error) {
 	if r.BrokerHTTPClient != nil {
 		return r.BrokerHTTPClient, nil
 	}
@@ -1151,7 +1367,7 @@ func (r *AgentRunReconciler) placeholderHTTPClient(ctx context.Context, namespac
 	}
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, clientKeyFor(namespace, BrokerCASecretName()), secret); err != nil {
-		return nil, fmt.Errorf("get broker CA Secret for operator placeholder preparation: %w", err)
+		return nil, fmt.Errorf("get broker CA Secret for operator preparation: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(secret.Data[brokerCAKey]) {
@@ -2901,6 +3117,11 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			},
 		},
 	}
+	if agentRunHasProviderPreparations(agentRun) {
+		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
+			Key: preparedProviderMetadataKey, Path: preparedProviderMetadataKey,
+		})
+	}
 	hasGitGrant := agentRunHasGitGrant(agentRun)
 	if !projectionOnly && brokerCADistributed() && !AgentRunLiteralZeroSecret(agentRun) {
 		volumes = append(volumes, corev1.Volume{
@@ -3127,6 +3348,9 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 		{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
 		{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
 		{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
+	}
+	if agentRunHasProviderPreparations(agentRun) {
+		agentEnv = append(agentEnv, corev1.EnvVar{Name: preparedProviderMetadataEnv, Value: preparedProviderMetadataPath})
 	}
 	if !AgentRunLiteralZeroSecret(agentRun) {
 		agentEnv = append(agentEnv,
@@ -3611,6 +3835,7 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("spec.egressTransport transparent requires a NetworkPolicy-capable deployment")
 	}
 	headerInjectGrants := 0
+	preparations := map[string]bool{}
 	if mode == nvtv1alpha1.AgentRunEgressMediated {
 		if agentRun.Spec.RuntimeAuth != nil {
 			return fmt.Errorf("egress mediated is incompatible with spec.runtimeAuth")
@@ -3620,6 +3845,16 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		}
 	}
 	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		for _, preparation := range grant.Preparations {
+			if preparation.Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity {
+				return fmt.Errorf("broker grant %s preparation operation must be identity, got %q", grant.Provider, preparation.Operation)
+			}
+			key := grant.Provider + "\x00" + string(preparation.Operation)
+			if preparations[key] {
+				return fmt.Errorf("broker grant preparation %s/%s is duplicated", grant.Provider, preparation.Operation)
+			}
+			preparations[key] = true
+		}
 		materialization := AgentRunGrantMaterialization(grant)
 		switch materialization {
 		case nvtv1alpha1.AgentRunGrantFileBundle, nvtv1alpha1.AgentRunGrantHeaderInject, nvtv1alpha1.AgentRunGrantPlaceholderFile:
@@ -3713,6 +3948,15 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
 	}
 	return nil
+}
+
+func agentRunHasProviderPreparations(agentRun *nvtv1alpha1.AgentRun) bool {
+	for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
+		if len(grant.Preparations) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // agentRunHasGitGrant reports whether any header-inject grant is git-typed,

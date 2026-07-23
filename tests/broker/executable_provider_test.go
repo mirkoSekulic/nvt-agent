@@ -237,6 +237,10 @@ func TestExecutableProviderRealBrokerEndpointsAndCoreEnforcement(t *testing.T) {
 	if status != 200 || !strings.Contains(fmt.Sprint(injected["headers"]), executableCanary) {
 		t.Fatalf("injection endpoint: status=%d body=%#v", status, injected)
 	}
+	status, identity := f.post(f.agent, "/v1/identity", map[string]any{"provider": "fixture-direct"})
+	if status != 200 || identity["name"] != "Fixture Bot" || identity["email"] != "fixture@example.test" {
+		t.Fatalf("provider-scoped executable identity: status=%d body=%#v", status, identity)
+	}
 
 	status, denied := f.post(f.agent, "/v1/files", map[string]any{"provider": "fixture-inject"})
 	if status != 403 || denied["error"] != "materialization-mismatch" {

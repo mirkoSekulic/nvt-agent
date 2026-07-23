@@ -1,4 +1,5 @@
 from broker.core.config import provider_entries, provider_plugin_entries
+from broker.core.errors import ProviderError
 from broker.core.executable_provider import ExecutableProviderAdapter
 from broker.core.provider_adapter import ProviderAdapter
 from broker.plugins.registry import BUILTIN_PROVIDERS
@@ -67,6 +68,12 @@ class InProcessProviderAdapter(ProviderAdapter):
 
     def identity_for_repo(self, repo, effective_repositories):
         return self._provider.identity_for_repo(repo, effective_repositories)
+
+    def identity_for_grant(self, effective_repositories):
+        operation = getattr(self._provider, "identity_for_grant", None)
+        if not callable(operation):
+            raise ProviderError("identity-not-supported")
+        return operation(effective_repositories)
 
     def headers_for_repo(self, repo, effective_repositories):
         return self._provider.headers_for_repo(repo, effective_repositories)

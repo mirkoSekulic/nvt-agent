@@ -499,16 +499,19 @@ func TestProfiledAdmissionSanitizesPrincipalAndProviderErrors(t *testing.T) {
 
 func TestExecutionProfileDeepCopyIsolation(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
+	schedule.Spec.Profiles[0].Broker.Grants[0].Preparations = []nvtv1alpha1.AgentRunBrokerPreparation{{Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity}}
 	tolerationSeconds := int64(30)
 	schedule.Spec.Template.Tolerations = []corev1.Toleration{{Key: "dedicated", TolerationSeconds: &tolerationSeconds}}
 	copy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	copy.Spec.Profiles[0].Broker.Grants[0].Repositories[0] = "changed/repo"
+	copy.Spec.Profiles[0].Broker.Grants[0].Preparations[0].Operation = "changed"
 	copy.Spec.ProfileSelection.Rules[0].Subject = "changed"
 	copy.Spec.AllowedProducers[0] = "changed"
 	copy.Spec.Template.Lifecycle.CompleteOn[0] = "changed"
 	copy.Spec.Template.Tolerations[0].Key = "changed"
 	*copy.Spec.Template.Tolerations[0].TolerationSeconds = 1
 	if schedule.Spec.Profiles[0].Broker.Grants[0].Repositories[0] == "changed/repo" ||
+		schedule.Spec.Profiles[0].Broker.Grants[0].Preparations[0].Operation == "changed" ||
 		schedule.Spec.ProfileSelection.Rules[0].Subject == "changed" || schedule.Spec.AllowedProducers[0] == "changed" ||
 		schedule.Spec.Template.Lifecycle.CompleteOn[0] == "changed" ||
 		schedule.Spec.Template.Tolerations[0].Key == "changed" || *schedule.Spec.Template.Tolerations[0].TolerationSeconds == 1 {
@@ -532,11 +535,48 @@ func TestExecutionProfileDeepCopyIsolation(t *testing.T) {
 	}
 }
 
+func TestProfiledScheduleSnapshotsProviderPreparations(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.Profiles[0].Broker.Grants[0].Preparations = []nvtv1alpha1.AgentRunBrokerPreparation{{Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity}}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "prepared-profile", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := fixture.run(t, decoded.AgentRun.Name)
+	if got := run.Spec.Broker.Grants[0].Preparations; len(got) != 1 || got[0].Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity {
+		t.Fatalf("profile preparation was not snapshotted: %#v", got)
+	}
+	schedule.Spec.Profiles[0].Broker.Grants[0].Preparations[0].Operation = "changed"
+	if run.Spec.Broker.Grants[0].Preparations[0].Operation != nvtv1alpha1.AgentRunBrokerPreparationIdentity {
+		t.Fatal("resolved preparation aliases the schedule profile")
+	}
+}
+
+func TestProfiledScheduleRejectsInvalidProviderPreparation(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.Profiles[0].Broker.Grants[0].Preparations = []nvtv1alpha1.AgentRunBrokerPreparation{{Operation: "token"}}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "invalid-preparation", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+	if decoded.Reason != "invalid-execution-profile-configuration" {
+		t.Fatalf("unexpected invalid preparation response: %#v", decoded)
+	}
+	runs := &nvtv1alpha1.AgentRunList{}
+	if err := fixture.client.List(context.Background(), runs, client.InNamespace(schedule.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs.Items) != 0 {
+		t.Fatalf("invalid preparation created AgentRuns: %#v", runs.Items)
+	}
+}
+
 func TestAgentRunBrokerGrantDeepCopyPreservesEmptySlices(t *testing.T) {
 	grant := nvtv1alpha1.AgentRunBrokerGrant{
 		Provider:     "codex-main",
 		Repositories: []string{},
 		EgressHosts:  []string{},
+		Preparations: []nvtv1alpha1.AgentRunBrokerPreparation{},
 	}
 
 	copy := grant.DeepCopy()
@@ -545,6 +585,9 @@ func TestAgentRunBrokerGrantDeepCopyPreservesEmptySlices(t *testing.T) {
 	}
 	if copy.EgressHosts == nil {
 		t.Fatal("deep copy changed explicit empty egress hosts into nil")
+	}
+	if copy.Preparations == nil {
+		t.Fatal("deep copy changed explicit empty preparations into nil")
 	}
 }
 

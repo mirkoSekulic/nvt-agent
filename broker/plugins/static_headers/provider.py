@@ -73,3 +73,6 @@ class StaticHeadersProvider:
 
     def identity_for_repo(self, repo, effective_repositories):
         raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
+
+    def identity_for_grant(self, effective_repositories):
+        raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
