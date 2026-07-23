@@ -10,6 +10,9 @@ spec:
   template:
     image: nvt-agent-runtime:latest
     runtimeClassName: kata-vm-isolation
+    resources:
+      requests: {cpu: "2", memory: 8Gi}
+      limits: {cpu: "2", memory: 8Gi}
     tolerations:
       - key: purpose
         operator: Equal

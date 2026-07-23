@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.5`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.6`; otherwise the API server will prune or reject
 the new scheduling fields.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
@@ -42,11 +42,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.5 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.6 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.5 --namespace nvt --create-namespace
+  --version 0.8.6 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -268,6 +268,9 @@ Scheduling fields in the shared template are passed to the generated agent Pod:
 agentSchedule:
   template:
     runtimeClassName: kata-vm-isolation
+    resources:
+      requests: {cpu: "2", memory: 8Gi}
+      limits: {cpu: "2", memory: 8Gi}
     tolerations:
       - key: purpose
         operator: Equal
@@ -279,6 +282,9 @@ RuntimeClass scheduling may select the runtime/node environment. A toleration
 permits the agent Pod to schedule onto a matching tainted pool, but does not
 select a node or remove the taint. These are generic Kubernetes values. They do
 not move the separate egress service Pod or any nvt platform Deployment.
+`resources` is applied to the agent container. On AKS Pod Sandboxing, the CPU
+and memory limits determine the Kata Pod VM allocation; set requests equal to
+limits when predictable VM capacity is required.
 
 When `agentSchedule.template` is non-empty, an absent or empty `image` defaults
 to the coordinated runtime image (`runtime.image` with the published chart's

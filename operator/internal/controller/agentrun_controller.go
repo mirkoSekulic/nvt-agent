@@ -3151,6 +3151,7 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 			Name:            "agent",
 			Image:           agentRun.Spec.Image,
 			ImagePullPolicy: corev1.PullIfNotPresent,
+			Resources:       *agentRun.Spec.Resources.DeepCopy(),
 			WorkingDir:      workspaceMountPath,
 			Env:             agentEnv,
 			VolumeMounts:    agentVolumeMounts,

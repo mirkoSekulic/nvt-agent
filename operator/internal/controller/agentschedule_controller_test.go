@@ -47,6 +47,9 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	workspaceSize := resource.MustParse("5Gi")
 	schedule.Spec.Template = &nvtv1alpha1.AgentScheduleTemplate{}
 	schedule.Spec.Template.Workspace = nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspacePersistent, Size: &workspaceSize}
+	schedule.Spec.Template.Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")},
+	}
 	tolerationSeconds := int64(90)
 	schedule.Spec.Template.Tolerations = []corev1.Toleration{{
 		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent",
@@ -54,10 +57,14 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	}}
 	copied = schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	copied.Spec.Template.Workspace.Size.Add(resource.MustParse("1Gi"))
+	copied.Spec.Template.Resources.Limits[corev1.ResourceMemory] = resource.MustParse("1Gi")
 	copied.Spec.Template.Tolerations[0].Key = "changed"
 	*copied.Spec.Template.Tolerations[0].TolerationSeconds = 1
 	if schedule.Spec.Template.Workspace.Size.Cmp(resource.MustParse("5Gi")) != 0 {
 		t.Fatal("expected template workspace quantity to be deep-copied")
+	}
+	if schedule.Spec.Template.Resources.Limits.Memory().Cmp(resource.MustParse("8Gi")) != 0 {
+		t.Fatal("expected template resources to be deep-copied")
 	}
 	if schedule.Spec.Template.Tolerations[0].Key != "purpose" || *schedule.Spec.Template.Tolerations[0].TolerationSeconds != tolerationSeconds {
 		t.Fatal("expected template tolerations to be deep-copied")

@@ -34,6 +34,8 @@ type AgentScheduleSpec struct {
 type AgentScheduleTemplate struct {
 	Image            string  `json:"image"`
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+	// Resources is snapshotted into the generated AgentRun and applied to its agent container.
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 	// Tolerations is snapshotted into the generated AgentRun and applies only to its agent Pod.
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 	Workspace   AgentRunWorkspace   `json:"workspace"`
@@ -165,6 +167,7 @@ func (in *AgentScheduleTemplate) DeepCopy() *AgentScheduleTemplate {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
 	}
+	out.Resources = *in.Resources.DeepCopy()
 	if in.Tolerations != nil {
 		out.Tolerations = make([]corev1.Toleration, len(in.Tolerations))
 		for i := range in.Tolerations {

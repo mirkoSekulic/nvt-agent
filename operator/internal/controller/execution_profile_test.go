@@ -108,6 +108,10 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	runtimeClassName := "kata-vm-isolation"
 	tolerationSeconds := int64(60)
 	schedule.Spec.Template.RuntimeClassName = &runtimeClassName
+	schedule.Spec.Template.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
+	}
 	schedule.Spec.Template.Tolerations = []corev1.Toleration{{
 		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent",
 		Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &tolerationSeconds,
@@ -120,12 +124,17 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	defaultRun := fixture.run(t, defaultDecoded.AgentRun.Name)
 	assertResolvedProfile(t, &defaultRun, "codex-default", "codex-default", "codex-default")
 	if defaultRun.Spec.RuntimeClassName == nil || *defaultRun.Spec.RuntimeClassName != runtimeClassName ||
+		!reflect.DeepEqual(defaultRun.Spec.Resources, schedule.Spec.Template.Resources) ||
 		!reflect.DeepEqual(defaultRun.Spec.Tolerations, schedule.Spec.Template.Tolerations) {
 		t.Fatalf("shared scheduling fields were not propagated: %#v", defaultRun.Spec)
 	}
 	defaultRun.Spec.Tolerations[0].TolerationSeconds = ptrTo(int64(1))
+	defaultRun.Spec.Resources.Limits[corev1.ResourceMemory] = resource.MustParse("1Gi")
 	if *schedule.Spec.Template.Tolerations[0].TolerationSeconds != tolerationSeconds {
 		t.Fatal("resolved AgentRun tolerations alias the AgentSchedule template")
+	}
+	if schedule.Spec.Template.Resources.Limits.Memory().Cmp(resource.MustParse("8Gi")) != 0 {
+		t.Fatal("resolved AgentRun resources alias the AgentSchedule template")
 	}
 	if defaultRun.Spec.ProfileProvenance.Principal != nil {
 		t.Fatalf("default admission unexpectedly recorded a principal: %#v", defaultRun.Spec.ProfileProvenance)

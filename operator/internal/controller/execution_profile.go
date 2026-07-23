@@ -190,6 +190,7 @@ func buildProfiledAgentRun(
 			RuntimeAuth:               profile.RuntimeAuth.DeepCopy(),
 			Image:                     template.Image,
 			RuntimeClassName:          copyStringPointer(template.RuntimeClassName),
+			Resources:                 *template.Resources.DeepCopy(),
 			Tolerations:               copyTolerations(template.Tolerations),
 			Egress:                    profile.Egress,
 			EgressAllowInsecureBroker: profile.EgressAllowInsecureBroker,

@@ -2,6 +2,13 @@ agentSchedule:
   template:
     image: runtime:test
     runtimeClassName: kata-vm-isolation
+    resources:
+      requests:
+        cpu: "2"
+        memory: 8Gi
+      limits:
+        cpu: "2"
+        memory: 8Gi
     tolerations:
       - key: purpose
         operator: Equal

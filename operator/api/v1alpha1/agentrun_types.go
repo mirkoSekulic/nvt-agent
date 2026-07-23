@@ -74,6 +74,9 @@ type AgentRunSpec struct {
 	RuntimeAuth      *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
 	Image            string               `json:"image"`
 	RuntimeClassName *string              `json:"runtimeClassName,omitempty"`
+	// Resources controls the agent container. For VM-backed runtimes such as
+	// Kata, its limits also determine the Pod VM CPU and memory allocation.
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 	// Tolerations applies only to the dynamically generated agent Pod.
 	Tolerations               []corev1.Toleration `json:"tolerations,omitempty"`
 	Egress                    AgentRunEgressMode  `json:"egress,omitempty"`
@@ -284,6 +287,7 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
 	}
+	out.Resources = *in.Resources.DeepCopy()
 	if in.Tolerations != nil {
 		out.Tolerations = make([]corev1.Toleration, len(in.Tolerations))
 		for i := range in.Tolerations {
