@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.2" || "${CHART_APP_VERSION}" != "0.8.2" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.2, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.3" || "${CHART_APP_VERSION}" != "0.8.3" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.3, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
@@ -15,6 +15,11 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 
 DEFAULT_RENDER="${WORKDIR}/default.yaml"
 PROFILE_RENDER="${WORKDIR}/profile.yaml"
+SCHEDULE_DEFAULT_IMAGE_RENDER="${WORKDIR}/schedule-default-image.yaml"
+SCHEDULE_EMPTY_IMAGE_RENDER="${WORKDIR}/schedule-empty-image.yaml"
+SCHEDULE_OVERRIDE_IMAGE_RENDER="${WORKDIR}/schedule-override-image.yaml"
+SCHEDULE_LEGACY_RENDER="${WORKDIR}/schedule-legacy.yaml"
+PACKAGED_SCHEDULE_RENDER="${WORKDIR}/packaged-schedule.yaml"
 EGRESS_POLICY_RENDER="${WORKDIR}/egress-policy.yaml"
 GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
@@ -72,6 +77,14 @@ OAUTH2_ARGS=(
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
+  --set agentSchedule.template.workspace.mode=Ephemeral > "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
+  --set agentSchedule.template.workspace.mode=Ephemeral \
+  --set-string agentSchedule.template.image= > "${SCHEDULE_EMPTY_IMAGE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
+  --set-string agentSchedule.template.image=registry.example/runtime:override > "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml > "${SCHEDULE_LEGACY_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set 'egress.allowedTCPPorts={80,8443}' \
   --set 'egress.denyCIDRs={10.240.0.0/16,fd00:1234::/48}' \
@@ -194,6 +207,8 @@ helm template nvt "${CHART}" -n custom-ns --set-string global.imageTag="${TEST_R
   --set-string operator.image.tag=operator-override >"${COMPONENT_TAG_RENDER}"
 helm package "${CHART}" --app-version "${TEST_RELEASE_TAG}" --destination "${WORKDIR}" >/dev/null
 helm template nvt "${WORKDIR}/nvt-${CHART_VERSION}.tgz" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${PACKAGED_RELEASE_RENDER}"
+helm template nvt "${WORKDIR}/nvt-${CHART_VERSION}.tgz" -n custom-ns -s templates/agentschedule.yaml \
+  --set agentSchedule.template.workspace.mode=Ephemeral > "${PACKAGED_SCHEDULE_RENDER}"
 bash -n "${ROOT}/scripts/operator-codex-auth-secret.sh"
 bash -n "${ROOT}/scripts/github-comments-producer-secret.sh"
 bash -n "${ROOT}/scripts/broker-env-secret.sh"
@@ -568,6 +583,24 @@ grep -q 'name: default-codex' "${PROFILE_RENDER}"
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
 grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
 grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
+grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
+grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_EMPTY_IMAGE_RENDER}"
+grep -q 'image: registry.example/runtime:override' "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"
+for render in "${SCHEDULE_DEFAULT_IMAGE_RENDER}" "${SCHEDULE_EMPTY_IMAGE_RENDER}" "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"; do
+  if [[ "$(grep -c '^[[:space:]]\{4\}image:' "${render}")" != "1" ]]; then
+    echo "AgentSchedule template must render exactly one image in ${render}" >&2
+    exit 1
+  fi
+done
+if grep -q 'ghcr.io/mirkosekulic/nvt-agent-runtime:' "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"; then
+  echo "explicit AgentSchedule template image was not preserved" >&2
+  exit 1
+fi
+if grep -q '^[[:space:]]*template:' "${SCHEDULE_LEGACY_RENDER}"; then
+  echo "empty legacy AgentSchedule template must remain omitted" >&2
+  exit 1
+fi
+grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${TEST_RELEASE_TAG}" "${PACKAGED_SCHEDULE_RENDER}"
 
 require_resource "${GATEWAY_RENDER}" Deployment nvt-agent-gateway
 require_resource "${GATEWAY_RENDER}" Service nvt-agent-gateway

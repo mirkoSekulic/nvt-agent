@@ -10,8 +10,12 @@ spec:
   maxParallelism: {{ .Values.agentSchedule.maxParallelism }}
   suspend: {{ .Values.agentSchedule.suspend }}
   {{- with .Values.agentSchedule.template }}
+  {{- $template := deepCopy . }}
+  {{- if not (get $template "image") }}
+  {{- $_ := set $template "image" (include "nvt.runtimeImage" $) }}
+  {{- end }}
   template:
-    {{- toYaml . | nindent 4 }}
+    {{- toYaml $template | nindent 4 }}
   {{- end }}
   {{- with .Values.agentSchedule.profiles }}
   profiles:
