@@ -20,6 +20,24 @@ func TestInitialPromptWaitsForPostLaunchSessionReadiness(t *testing.T) {
 		t.Skip("tmux is unavailable; post-launch initial-prompt integration test skipped")
 	}
 	f := newFixture(t)
+	// start-agent-session.sh deliberately invokes the image-installed
+	// /usr/local/bin/start-agent-session-exec inside tmux. The host conformance
+	// job does not install runtime image binaries, so replace only the final
+	// new-session command with a stable target while delegating every tmux
+	// operation to the real binary. This keeps the launcher wait, real tmux,
+	// marker, agentd, and after-agent paths under test without a host-image
+	// dependency.
+	tmuxWrapperUsed := filepath.Join(f.home, "tmux-wrapper-new-session")
+	f.writeBin("tmux", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "new-session" ]; then
+  touch %s
+  args=("$@")
+  args[$((${#args[@]} - 1))]="sleep 30"
+  exec %s "${args[@]}"
+fi
+exec %s "$@"
+`, shellQuote(tmuxWrapperUsed), shellQuote(tmux), shellQuote(tmux)))
 	tmuxDir := filepath.Join(f.home, "tmux")
 	if err := os.MkdirAll(tmuxDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -87,6 +105,9 @@ func TestInitialPromptWaitsForPostLaunchSessionReadiness(t *testing.T) {
 	}
 	if _, err := os.Stat(readyMarker); err != nil {
 		t.Fatalf("launcher did not publish post-launch readiness marker: %v", err)
+	}
+	if _, err := os.Stat(tmuxWrapperUsed); err != nil {
+		t.Fatalf("launcher did not use the hermetic tmux target: %v", err)
 	}
 
 	sentinel := "post-launch-readiness-" + strings.ReplaceAll(t.Name(), "/", "-")
