@@ -145,8 +145,9 @@ type scheduleAdmissionWork struct {
 }
 
 type profiledScheduleAdmissionRequest struct {
-	Work  profiledScheduleAdmissionWork  `json:"work"`
-	Input profiledScheduleAdmissionInput `json:"input"`
+	Workflow string                         `json:"workflow,omitempty"`
+	Work     profiledScheduleAdmissionWork  `json:"work"`
+	Input    profiledScheduleAdmissionInput `json:"input"`
 }
 
 type profiledScheduleAdmissionWork struct {
@@ -282,6 +283,7 @@ func safeScheduleAdmissionReason(body []byte) string {
 		"schedule-suspended",
 		"max-parallelism-reached",
 		"profile-selection-denied",
+		"workflow-selection-denied",
 		"invalid-execution-profile-configuration",
 		"response-encode-failed":
 		return decoded.Reason
@@ -307,6 +309,7 @@ func (s AgentRunSubmitter) scheduleAdmissionPayload(
 			return nil, "", err
 		}
 		return profiledScheduleAdmissionRequest{
+			Workflow: s.config.Submission.Workflow,
 			Work: profiledScheduleAdmissionWork{
 				ID:         identity.Key,
 				Title:      issue.Title,

@@ -33,6 +33,7 @@ type agentScheduleAdmissionHandler struct {
 }
 
 type scheduleAdmissionRequest struct {
+	Workflow string                  `json:"workflow,omitempty"`
 	Work     scheduleAdmissionWork   `json:"work"`
 	Input    *scheduleAdmissionInput `json:"input,omitempty"`
 	AgentRun *nvtv1alpha1.AgentRun   `json:"agentRun,omitempty"`
@@ -128,6 +129,7 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 
 	profiled := ScheduleUsesExecutionProfiles(schedule)
 	producer := ""
+	var resolvedWorkflow *ResolvedWorkflowProfile
 	if profiled {
 		token, ok := bearerToken(request.Header.Get("Authorization"))
 		if !ok || h.authenticator == nil {
@@ -139,12 +141,31 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 			http.Error(response, "producer authentication failed\n", http.StatusUnauthorized)
 			return
 		}
-		if !containsString(schedule.Spec.AllowedProducers, producer) {
-			http.Error(response, "producer is not allowed\n", http.StatusForbidden)
+		if err := validateProfiledAdmissionShape(rawAdmission); err != nil {
+			http.Error(response, "profiled admission accepts only work and input plus optional workflow\n", http.StatusBadRequest)
 			return
 		}
-		if err := validateProfiledAdmissionShape(rawAdmission); err != nil {
-			http.Error(response, "profiled admission accepts only work and input\n", http.StatusBadRequest)
+		if _, present := rawAdmission["workflow"]; present &&
+			(strings.TrimSpace(admission.Workflow) == "" || admission.Workflow != strings.TrimSpace(admission.Workflow)) {
+			http.Error(response, "invalid workflow selection\n", http.StatusBadRequest)
+			return
+		}
+		resolvedWorkflow, err = resolveWorkflowForProducer(schedule, producer, admission.Workflow)
+		switch {
+		case errors.Is(err, errProducerNotAllowed):
+			http.Error(response, "producer is not allowed\n", http.StatusForbidden)
+			return
+		case errors.Is(err, errWorkflowSelectionDenied):
+			h.recordRejected(ctx, schedule, "workflow-selection-denied")
+			writeScheduleAdmissionJSON(response, http.StatusForbidden, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "workflow-selection-denied",
+			})
+			return
+		case err != nil:
+			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
 			return
 		}
 	}
@@ -216,7 +237,7 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		if admission.Input != nil {
 			prompt = admission.Input.Prompt
 		}
-		profiledRun, buildErr := buildProfiledAgentRun(schedule, resolved, producer, principal, prompt)
+		profiledRun, buildErr := buildProfiledAgentRun(schedule, resolved, producer, principal, resolvedWorkflow, prompt)
 		if buildErr != nil {
 			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
@@ -325,7 +346,7 @@ func admissionPrincipal(input *scheduleAdmissionPrincipal) *nvtv1alpha1.AgentRun
 }
 
 func validateProfiledAdmissionShape(raw map[string]json.RawMessage) error {
-	if err := validateJSONKeys(raw, "work", "input"); err != nil {
+	if err := validateJSONKeys(raw, "workflow", "work", "input"); err != nil {
 		return err
 	}
 	work, err := rawJSONObject(raw["work"])

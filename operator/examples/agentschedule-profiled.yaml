@@ -5,8 +5,6 @@ metadata:
   namespace: nvt
 spec:
   maxParallelism: 5
-  allowedProducers:
-    - system:serviceaccount:nvt:nvt-github-comments-producer
   template:
     image: nvt-agent-runtime:latest
     runtimeClassName: kata-vm-isolation
@@ -68,3 +66,14 @@ spec:
       - issuer: https://github.com
         subject: "12345678"
         profile: claude-john
+  workflowProfiles:
+    - name: implement-pr
+      workspaceInstructions: |
+        Implement the change and create a pull request.
+    - name: review-pr
+      workspaceInstructions: |
+        Review the pull request and report findings first.
+  producerPolicies:
+    - identity: system:serviceaccount:nvt:nvt-github-comments-producer
+      workflows: [implement-pr, review-pr]
+      defaultWorkflow: implement-pr

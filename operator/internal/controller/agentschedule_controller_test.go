@@ -123,6 +123,14 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if fmt.Sprint(crdPath(t, properties, "template", "properties", "agent", "properties", "workspaceInstructions", "maxLength")) != "65536" {
 		t.Fatalf("expected bounded AgentRun template workspace instructions schema, got %#v", properties["template"])
 	}
+	if fmt.Sprint(crdPath(t, properties, "workflowProfiles", "items", "properties", "workspaceInstructions", "maxLength")) != "65536" ||
+		crdPath(t, properties, "workflowProfiles", "items", "properties", "name", "maxLength") == nil {
+		t.Fatalf("expected bounded workflow profile schema, got %#v", properties["workflowProfiles"])
+	}
+	if crdPath(t, properties, "producerPolicies", "items", "properties", "identity", "type") != "string" ||
+		crdPath(t, properties, "producerPolicies", "items", "properties", "workflows", "uniqueItems") != true {
+		t.Fatalf("expected typed producer policy schema, got %#v", properties["producerPolicies"])
+	}
 	profileProperties := crdPath(t, properties, "profiles", "items", "properties").(map[string]any)
 	legacy := crdPath(t, profileProperties, "egressForwardProxy").(map[string]any)
 	if legacy["type"] != "boolean" || !strings.Contains(fmt.Sprint(legacy["description"]), "Deprecated:") {

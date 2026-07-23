@@ -252,6 +252,9 @@ spec:
                     workspaceInstructions:
                       type: string
                       maxLength: 65536
+                    workflowInstructions:
+                      type: string
+                      maxLength: 65536
                 lifecycle:
                   type: object
                   properties:
@@ -302,6 +305,9 @@ spec:
                       type: integer
                       format: int64
                     selectedProfile:
+                      type: string
+                      minLength: 1
+                    selectedWorkflow:
                       type: string
                       minLength: 1
                     principal:

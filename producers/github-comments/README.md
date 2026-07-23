@@ -133,7 +133,8 @@ are retried on a later poll by leaving the repository cursor unchanged.
   `agentRun` configured by `agentRun` and `agentConfig`, and the target schedule
   must be a legacy schedule.
 - `profiled` sends only work metadata, the generated prompt, and GitHub
-  principal facts. It never sends a profile, runtime, image, proxy/provider,
+  principal facts, plus an optional static `submission.workflow` name. It never
+  sends instruction text, an execution profile, runtime, image, proxy/provider,
   broker grant, egress policy, tool, or plugin setting. The operator-owned
   `AgentSchedule` resolves all of those fields.
 
@@ -151,7 +152,13 @@ submission:
   admissionTokenFile: /var/run/secrets/nvt-operator/token
   scheduleNamespace: nvt
   scheduleName: default
+  workflow: review-pr # optional; must be allowed for this ServiceAccount
 ```
+
+When `workflow` is empty or omitted, the producer preserves the previous
+payload exactly and the schedule may apply that producer policy's default. The
+workflow name is a non-secret routing choice only; all instruction text and
+workflow authorization remain administrator-owned in AgentSchedule.
 
 The projected ServiceAccount token must have audience `nvt-operator`. It is
 read for every request so Kubernetes rotation works without a restart.

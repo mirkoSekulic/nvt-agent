@@ -187,6 +187,38 @@ func TestSubmitProfiledScheduleAdmissionSendsOnlyWorkPrincipalAndPrompt(t *testi
 	}
 }
 
+func TestSubmitProfiledScheduleAdmissionEmitsOnlyConfiguredWorkflowName(t *testing.T) {
+	tokenFile := writeTestAdmissionToken(t, testAdmissionToken("d29ya2Zsb3c"))
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true}`))
+	}))
+	defer server.Close()
+
+	submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+	submitter.config.Submission.Workflow = "review-pr"
+	created, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 8, Title: "Review widget"}, nil,
+		GitHubIssueComment{ID: 102, Body: "/nvtagent review", User: GitHubUser{Login: "alice", ID: 424242}},
+		Command{Prefix: "/nvtagent", AdditionalInstructions: "review"})
+	if err != nil || !created {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	if !reflect.DeepEqual(sortedMapKeys(got), []string{"input", "work", "workflow"}) || got["workflow"] != "review-pr" {
+		t.Fatalf("unexpected workflow payload: %#v", got)
+	}
+	encoded := string(mustJSON(t, got))
+	for _, forbidden := range []string{"workspaceInstructions", "profile", "provider", "broker", "runtime", "egress"} {
+		if strings.Contains(encoded, `"`+forbidden+`"`) {
+			t.Fatalf("workflow payload contains forbidden field %q: %s", forbidden, encoded)
+		}
+	}
+}
+
 func TestProfiledAdmissionSubjectDoesNotDependOnLoginAndTokenRotates(t *testing.T) {
 	firstToken := testAdmissionToken("c2lnMQ")
 	secondToken := testAdmissionToken("c2lnMg")
@@ -314,6 +346,7 @@ func TestProfiledAdmissionResponseErrorsAreBoundedStatusAwareAndSanitized(t *tes
 		{name: "plain text unauthorized", status: http.StatusUnauthorized, body: bodyCanary, wantError: "HTTP 401", unexpected: "decode schedule admission response"},
 		{name: "plain text forbidden", status: http.StatusForbidden, body: bodyCanary, wantError: "HTTP 403", unexpected: "decode schedule admission response"},
 		{name: "structured safe reason", status: http.StatusBadRequest, body: `{"scheduled":false,"reason":"profile-selection-denied"}`, wantError: `HTTP 400 reason "profile-selection-denied"`},
+		{name: "structured workflow denial", status: http.StatusForbidden, body: `{"scheduled":false,"reason":"workflow-selection-denied"}`, wantError: `HTTP 403 reason "workflow-selection-denied"`},
 		{name: "structured unsafe reason hidden", status: http.StatusInternalServerError, body: `{"scheduled":false,"reason":"response-body-canary-credential"}`, wantError: "HTTP 500", unexpected: bodyCanary},
 		{name: "malformed created contract", status: http.StatusCreated, body: bodyCanary, wantError: "decode schedule admission response"},
 		{name: "malformed accepted contract", status: http.StatusAccepted, body: bodyCanary, wantError: "decode schedule admission response"},

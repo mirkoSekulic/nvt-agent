@@ -413,12 +413,16 @@ func TestWriteAgentInstructionsAppendsLocalWorkspaceInstructions(t *testing.T) {
 	}
 }
 
-func TestWriteAgentInstructionsComposesProfileThenLocalInstructions(t *testing.T) {
+func TestWriteAgentInstructionsComposesProfileWorkflowThenLocalInstructions(t *testing.T) {
 	f := newFixture(t)
 	script := filepath.Join(f.root, "runtime", "core", "write-agent-instructions.sh")
 	profileInstructions := filepath.Join(t.TempDir(), "profile.md")
+	workflowInstructions := filepath.Join(t.TempDir(), "workflow.md")
 	localInstructions := filepath.Join(f.workspace, "AGENTS.local.md")
 	if err := os.WriteFile(profileInstructions, []byte("Profile workflow guidance.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowInstructions, []byte("Selected workflow guidance.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(localInstructions, []byte("Local workspace guidance.\n"), 0o644); err != nil {
@@ -427,6 +431,12 @@ func TestWriteAgentInstructionsComposesProfileThenLocalInstructions(t *testing.T
 
 	f.runWithEnv("bash "+shellQuote(script), true, []string{
 		"NVT_AGENT_PROFILE_INSTRUCTIONS_FILE=" + profileInstructions,
+		"NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE=" + workflowInstructions,
+	})
+	// Startup regenerates AGENTS.md; running it again must not duplicate layers.
+	f.runWithEnv("bash "+shellQuote(script), true, []string{
+		"NVT_AGENT_PROFILE_INSTRUCTIONS_FILE=" + profileInstructions,
+		"NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE=" + workflowInstructions,
 	})
 	data, err := os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
 	if err != nil {
@@ -435,11 +445,18 @@ func TestWriteAgentInstructionsComposesProfileThenLocalInstructions(t *testing.T
 	generated := string(data)
 	core := strings.Index(generated, "## Runtime Context")
 	profile := strings.Index(generated, "## Profile Workspace Instructions")
+	workflow := strings.Index(generated, "## Workflow Workspace Instructions")
 	local := strings.Index(generated, "## Local Workspace Instructions")
-	if core < 0 || profile <= core || local <= profile ||
+	if core < 0 || profile <= core || workflow <= profile || local <= workflow ||
 		!strings.Contains(generated, "Profile workflow guidance.") ||
+		!strings.Contains(generated, "Selected workflow guidance.") ||
 		!strings.Contains(generated, "Local workspace guidance.") {
 		t.Fatalf("unexpected instruction composition:\n%s", generated)
+	}
+	for _, heading := range []string{"## Profile Workspace Instructions", "## Workflow Workspace Instructions", "## Local Workspace Instructions"} {
+		if strings.Count(generated, heading) != 1 {
+			t.Fatalf("repeated startup duplicated %q:\n%s", heading, generated)
+		}
 	}
 }
 
@@ -456,6 +473,7 @@ func TestWriteAgentInstructionsSkipsMissingEmptyAndDuplicateFiles(t *testing.T) 
 	}
 	f.runWithEnv("bash "+shellQuote(script), true, []string{
 		"NVT_AGENT_PROFILE_INSTRUCTIONS_FILE=" + shared,
+		"NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE=" + alias,
 		"NVT_AGENT_LOCAL_INSTRUCTIONS=" + alias,
 	})
 	data, err := os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
@@ -465,6 +483,7 @@ func TestWriteAgentInstructionsSkipsMissingEmptyAndDuplicateFiles(t *testing.T) 
 	generated := string(data)
 	if strings.Count(generated, "One shared instruction layer.") != 1 ||
 		strings.Count(generated, "## Profile Workspace Instructions") != 1 ||
+		strings.Contains(generated, "## Workflow Workspace Instructions") ||
 		strings.Contains(generated, "## Local Workspace Instructions") {
 		t.Fatalf("duplicate instruction paths were appended more than once:\n%s", generated)
 	}
@@ -475,6 +494,7 @@ func TestWriteAgentInstructionsSkipsMissingEmptyAndDuplicateFiles(t *testing.T) 
 	}
 	f.runWithEnv("bash "+shellQuote(script), true, []string{
 		"NVT_AGENT_PROFILE_INSTRUCTIONS_FILE=" + empty,
+		"NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE=" + filepath.Join(t.TempDir(), "missing-workflow.md"),
 		"NVT_AGENT_LOCAL_INSTRUCTIONS=" + filepath.Join(t.TempDir(), "missing.md"),
 	})
 	data, err = os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
@@ -482,8 +502,29 @@ func TestWriteAgentInstructionsSkipsMissingEmptyAndDuplicateFiles(t *testing.T) 
 		t.Fatal(err)
 	}
 	generated = string(data)
-	if strings.Contains(generated, "## Profile Workspace Instructions") || strings.Contains(generated, "## Local Workspace Instructions") {
+	if strings.Contains(generated, "## Profile Workspace Instructions") ||
+		strings.Contains(generated, "## Workflow Workspace Instructions") ||
+		strings.Contains(generated, "## Local Workspace Instructions") {
 		t.Fatalf("missing or empty files created instruction sections:\n%s", generated)
+	}
+
+	workflowOnly := filepath.Join(t.TempDir(), "workflow-only.md")
+	if err := os.WriteFile(workflowOnly, []byte("Workflow-only guidance.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.runWithEnv("bash "+shellQuote(script), true, []string{
+		"NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE=" + workflowOnly,
+		"NVT_AGENT_LOCAL_INSTRUCTIONS=" + filepath.Join(t.TempDir(), "missing-local.md"),
+	})
+	data, err = os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated = string(data)
+	if strings.Contains(generated, "## Profile Workspace Instructions") ||
+		!strings.Contains(generated, "## Workflow Workspace Instructions") ||
+		strings.Contains(generated, "## Local Workspace Instructions") {
+		t.Fatalf("workflow-only composition was incorrect:\n%s", generated)
 	}
 }
 
