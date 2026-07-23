@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.10`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.11`; otherwise the API server will prune or reject
 the new scheduling fields.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
@@ -42,11 +42,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.10 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.11 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.10 --namespace nvt --create-namespace
+  --version 0.8.11 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being

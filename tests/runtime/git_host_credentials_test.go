@@ -164,6 +164,93 @@ providers:
 	}
 }
 
+func TestGitCredentialsMediatedProviderUsesPreparedIdentityWithoutBrokerToken(t *testing.T) {
+	f := newFixture(t)
+	repo := f.initRepo("project")
+	f.runCommand("git", true, "-C", repo, "remote", "add", "origin", "https://github.com/my-user/project.git")
+	marker := filepath.Join(f.home, "brokerctl-ran")
+	f.writeBin("brokerctl", fmt.Sprintf(`#!/usr/bin/env bash
+printf 'unexpected' > %s
+echo 'secret-response-canary' >&2
+exit 1
+`, shellQuote(marker)))
+	hostConfig := f.writePluginConfig("git-host-credentials-prepared.yaml", `
+providers:
+  - name: fork-app-mediated
+    type: broker
+    broker-provider: github-main-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*
+    operator-prepared-identity:
+      broker-provider: github-main-app
+      name: Staging App Bot
+      email: 123456789+staging-app[bot]@users.noreply.github.com
+`)
+	f.writeBin("git-host-credential", fmt.Sprintf(`#!/usr/bin/env bash
+exec env NVT_PLUGIN_CONFIG=%s python3 %s "$@"
+`, shellQuote(hostConfig), shellQuote(filepath.Join(f.root, "runtime", "plugins", "git-host-credentials", "git-host-credential.py"))))
+	config := f.writePluginConfig("git-credentials-prepared.yaml", `
+credentials:
+  - match: https://github.com/my-user/
+    provider: fork-app-mediated
+    identity:
+      mode: provider
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config}
+
+	output := f.runWithEnv(gitCredentialsRunBin(f.root), true, env, "configure-repo", repo)
+	if strings.Contains(output, "secret-response-canary") {
+		t.Fatalf("credential canary leaked: %s", output)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("brokerctl ran without an agent broker token: %v", err)
+	}
+	name := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.name"))
+	email := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.email"))
+	if name != "Staging App Bot" || email != "123456789+staging-app[bot]@users.noreply.github.com" {
+		t.Fatalf("unexpected prepared identity name=%q email=%q", name, email)
+	}
+}
+
+func TestGitHostCredentialMediatedProviderRequiresValidPreparedIdentity(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
+	tests := []struct {
+		name     string
+		prepared string
+		want     string
+	}{
+		{name: "missing", want: "was not prepared by the operator"},
+		{name: "mapping mismatch", prepared: `
+    operator-prepared-identity:
+      broker-provider: other-provider
+      name: Safe Bot
+      email: safe@example.test`, want: "does not match broker-provider"},
+		{name: "malformed", prepared: `
+    operator-prepared-identity:
+      broker-provider: github-main-app
+      name: " bad"
+      email: safe@example.test`, want: "is invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := f.writePluginConfig("git-host-credentials-"+strings.ReplaceAll(test.name, " ", "-")+".yaml", `
+providers:
+  - name: fork-app-mediated
+    type: broker
+    broker-provider: github-main-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*`+test.prepared+"\n")
+			output := f.runWithEnv(gitHostCredentialBin(f.root), false, []string{"NVT_PLUGIN_CONFIG=" + config, "NVT_BROKER_TOKEN="}, "identity", "--provider", "fork-app-mediated", "--target", "github.com/my-user/project")
+			if !strings.Contains(output, test.want) || strings.Contains(output, "should-not-run") {
+				t.Fatalf("unexpected fail-closed output:\n%s", output)
+			}
+		})
+	}
+}
+
 func TestGitHostCredentialBrokerProviderDelegatesHeadersToBrokerctl(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("brokerctl", `#!/usr/bin/env bash

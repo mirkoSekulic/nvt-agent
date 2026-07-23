@@ -364,6 +364,31 @@ def broker_identity(provider, target):
     return {"name": name, "email": email}
 
 
+def operator_prepared_identity(provider):
+    prepared = provider.get("operator-prepared-identity")
+    if prepared is None:
+        return None
+    if provider.get("type") != "broker" or credential_kind(provider) != "mediated":
+        fail(f"provider {provider_name(provider)} operator-prepared-identity is only valid for mediated broker providers")
+    if not isinstance(prepared, dict) or set(prepared) != {"broker-provider", "name", "email"}:
+        fail(f"provider {provider_name(provider)} operator-prepared-identity is invalid")
+    if prepared.get("broker-provider") != broker_provider_name(provider):
+        fail(f"provider {provider_name(provider)} operator-prepared-identity does not match broker-provider")
+    output = {}
+    for key in ("name", "email"):
+        value = prepared.get(key)
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or len(value.encode("utf-8")) > 512
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            fail(f"provider {provider_name(provider)} operator-prepared-identity is invalid")
+        output[key] = value
+    return output
+
+
 def broker_headers(provider, target):
     broker_provider = broker_provider_name(provider)
     if not target:
@@ -429,6 +454,12 @@ def identity(provider, target=None):
     if kind == "github-app":
         return github_app_identity(provider)
     if kind == "broker":
+        if credential_kind(provider) == "mediated":
+            prepared = operator_prepared_identity(provider)
+            if prepared is not None:
+                return prepared
+            if not os.environ.get("NVT_BROKER_TOKEN"):
+                fail(f"provider {provider_name(provider)} mediated commit identity was not prepared by the operator")
         return broker_identity(provider, target)
     fail(f"provider {provider_name(provider)} does not support commit identity; use identity.mode=explicit")
 
@@ -467,6 +498,7 @@ def validate_provider(provider):
             fail("brokerctl not found on PATH")
         string_value(provider.get("broker-provider") or provider.get("provider"), f"provider {provider_name(provider)} broker-provider", required=True)
         credential_kind(provider)
+        operator_prepared_identity(provider)
     elif kind == "headers":
         headers(provider)
     else:

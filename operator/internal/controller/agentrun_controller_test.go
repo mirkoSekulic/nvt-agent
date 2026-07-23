@@ -3058,6 +3058,155 @@ func TestLiteralZeroSecretMissingPlaceholderCacheIsRebuilt(t *testing.T) {
 	}
 }
 
+func mediatedProviderIdentityAgentRun() *nvtv1alpha1.AgentRun {
+	run := enforcedAgentRun()
+	run.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+		Provider:        "github-main-app",
+		Materialization: nvtv1alpha1.AgentRunGrantHeaderInject,
+		Repositories:    []string{"my-user/project"},
+		EgressHosts:     []string{"github.com:443"},
+		Git:             true,
+	}}}
+	run.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{
+  "plugins": [
+    {
+      "name": "git-host-credentials",
+      "config": {
+        "providers": [
+          {
+            "name": "fork-mediated",
+            "type": "broker",
+            "broker-provider": "github-main-app",
+            "credential-kind": "mediated",
+            "match": ["github.com/my-user/*"]
+          }
+        ]
+      }
+    },
+    {
+      "name": "git-credentials",
+      "config": {
+        "credentials": [
+          {
+            "match": "https://github.com/my-user/project",
+            "provider": "fork-mediated",
+            "identity": {"mode": "provider"}
+          }
+        ]
+      }
+    }
+  ]
+}`)}
+	return run
+}
+
+func TestLiteralZeroSecretPreparesProviderIdentityWithoutAgentCredentialCapability(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun := mediatedProviderIdentityAgentRun()
+	requests := 0
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.URL.Path != "/v1/identity" || !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
+			t.Fatalf("unexpected preparation request: %s", request.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["provider"] != "github-main-app" || payload["target"] != nil || len(payload) != 1 {
+			t.Fatalf("operator guessed or sent extra identity context: %#v", payload)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "name": "Staging App Bot", "email": "123456789+staging-app[bot]@users.noreply.github.com",
+		})
+	}))
+	t.Cleanup(broker.Close)
+	t.Setenv("NVT_BROKER_URL", broker.URL)
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(agentRun, testBrokerAgentsConfigMap(agentRun.Namespace)).
+		Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile provider identity: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected one exact provider identity request, got %d", requests)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(agentRun)}); err != nil {
+		t.Fatalf("reconcile cached provider identity: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("unchanged provider identity was not cached: %d requests", requests)
+	}
+	configMap := getAgentConfigMap(ctx, t, k8sClient, agentRun)
+	rendered := configMap.Data[agentConfigKey]
+	for _, expected := range []string{"operator-prepared-identity:", "broker-provider: github-main-app", "name: Staging App Bot", "email: 123456789+staging-app[bot]@users.noreply.github.com"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("prepared identity missing %q:\n%s", expected, rendered)
+		}
+	}
+	for _, forbidden := range []string{"NVT_BROKER_TOKEN", "NVT_EGRESS_BROKER_TOKEN", "secret-response-canary"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("agent config contains credential capability %q:\n%s", forbidden, rendered)
+		}
+	}
+	pod, err := DesiredAgentPod(agentRun, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := pod.Spec.Containers[0]
+	for _, env := range agent.Env {
+		if strings.Contains(env.Name, "BROKER_TOKEN") || env.Name == "NVT_EGRESS_BROKER_TOKEN" || env.ValueFrom != nil {
+			t.Fatalf("agent received credential-bearing environment: %#v", env)
+		}
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Secret != nil && (volume.Secret.SecretName == BrokerTokenSecretName(agentRun.Name) || volume.Secret.SecretName == EgressTokenSecretName(agentRun.Name)) {
+			t.Fatalf("agent Pod projects broker/egress identity: %#v", volume)
+		}
+	}
+}
+
+func TestProviderIdentityPreparationFailsClosedForMissingMappingAndMalformedBrokerResult(t *testing.T) {
+	agentRun := mediatedProviderIdentityAgentRun()
+	var config map[string]any
+	if err := json.Unmarshal(agentRun.Spec.Agent.Config.Raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	plugins := config["plugins"].([]any)
+	hostPlugin := plugins[0].(map[string]any)
+	hostConfig := hostPlugin["config"].(map[string]any)
+	hostConfig["providers"] = []any{}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRun.Spec.Agent.Config.Raw = raw
+	if _, err := requestedMediatedProviderIdentities(agentRun); err == nil || !strings.Contains(err.Error(), "not an exact mediated broker provider") {
+		t.Fatalf("missing exact provider mapping did not fail loudly: %v", err)
+	}
+
+	ctx := context.Background()
+	scheme := testScheme(t)
+	agentRun = mediatedProviderIdentityAgentRun()
+	brokerSecret := mustDesiredTokenSecret(t, agentRun, scheme, BrokerTokenSecretName(agentRun.Name), brokerTokenKey, []byte("operator-only-token"))
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"name":"secret-response-canary`))
+	}))
+	t.Cleanup(broker.Close)
+	t.Setenv("NVT_BROKER_URL", broker.URL)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agentRun, brokerSecret).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme, BrokerHTTPClient: broker.Client()}
+	_, err = reconciler.prepareProviderIdentities(ctx, agentRun)
+	if err == nil || !strings.Contains(err.Error(), "broker returned an invalid response") || strings.Contains(err.Error(), "secret-response-canary") {
+		t.Fatalf("malformed broker result was not sanitized: %v", err)
+	}
+}
+
 func TestAgentRunMaxConcurrentReconcilesUsesMultipleWorkers(t *testing.T) {
 	if got := agentRunMaxConcurrentReconciles(); got < 2 {
 		t.Fatalf("expected multiple reconcile workers, got %d", got)

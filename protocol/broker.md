@@ -280,6 +280,20 @@ Request:
 
 Requires `Authorization: Bearer ...`.
 
+Trusted control-plane preparation may omit `target`:
+
+```json
+{"provider":"fork-app"}
+```
+
+The target-less form still requires the exact AgentRun bearer identity and an
+effective grant for that provider. It asks the provider for provider-bound,
+non-secret commit metadata under the complete granted repository ceiling. It
+does not vend a token, headers, files, or any credential-fetching capability,
+and it is intended for the operator to snapshot into a fully mediated agent's
+rendered plugin configuration. Providers with target-dependent identity fail
+explicitly; broker core never guesses a repository, provider, or fallback.
+
 Response:
 
 ```json
@@ -292,9 +306,10 @@ Response:
 
 For GitHub App providers, the broker fetches app metadata with the App JWT,
 then fetches the bot user account. The email prefix is the bot user's numeric
-id, not the App id and not the installation id. The target is used for
-authorization; the identity itself is provider/app-level and cached by the
-provider process.
+id, not the App id and not the installation id. When present, the target is
+used for repository authorization. The target-less preparation form authorizes
+the provider against the complete effective grant. The identity itself is
+provider/app-level and cached by the provider process.
 
 ## GitHub App Provider Rules
 

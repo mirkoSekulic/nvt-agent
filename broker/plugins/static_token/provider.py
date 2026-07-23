@@ -152,6 +152,9 @@ class StaticTokenProvider:
     def identity_for_repo(self, repo, effective_repositories):
         raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
 
+    def identity_for_grant(self, effective_repositories):
+        raise ProviderError("identity-not-supported", f"provider {self.name} does not support commit identity; use identity.mode=explicit")
+
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant=None):
         if self.injection_basic_username is not None:
             encoded = base64.b64encode(f"{self.injection_basic_username}:{self.token}".encode("utf-8")).decode("ascii")
