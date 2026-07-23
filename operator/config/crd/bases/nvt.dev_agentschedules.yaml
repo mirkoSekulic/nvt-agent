@@ -133,6 +133,9 @@ spec:
                         config:
                           type: object
                           x-kubernetes-preserve-unknown-fields: true
+                        workspaceInstructions:
+                          type: string
+                          maxLength: 65536
                     lifecycle:
                       type: object
                       properties:
@@ -214,6 +217,9 @@ spec:
                       agentRuntimeConfig:
                         type: object
                         x-kubernetes-preserve-unknown-fields: true
+                      workspaceInstructions:
+                        type: string
+                        maxLength: 65536
                       egress:
                         type: string
                         enum:

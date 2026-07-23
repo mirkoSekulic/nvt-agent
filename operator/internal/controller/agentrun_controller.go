@@ -58,6 +58,9 @@ const (
 	preparedProviderMetadataKey           = "prepared-provider-metadata.json"
 	preparedProviderMetadataPath          = agentConfigVolumeDir + "/" + preparedProviderMetadataKey
 	preparedProviderMetadataEnv           = "NVT_PREPARED_PROVIDER_METADATA_FILE"
+	profileWorkspaceInstructionsKey       = "profile-workspace-instructions.md"
+	profileWorkspaceInstructionsPath      = agentConfigVolumeDir + "/" + profileWorkspaceInstructionsKey
+	profileWorkspaceInstructionsEnv       = "NVT_AGENT_PROFILE_INSTRUCTIONS_FILE"
 	agentConfigMountPath                  = "/nvt-agent/agent.yaml"
 	agentConfigVolumeDir                  = "/nvt-agent"
 	runtimeAuthSourcePath                 = "/nvt-agent/runtime-auth-source"
@@ -299,6 +302,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if !IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		if err := ValidateRemovedEgressForwardProxy(&agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := ValidateAgentRunWorkspaceInstructions(&agentRun); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -2709,6 +2715,9 @@ func DesiredTokenSecret(
 
 // DesiredAgentConfigMap renders the AgentRun agent config into its owned ConfigMap.
 func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.ConfigMap, error) {
+	if err := ValidateAgentRunWorkspaceInstructions(agentRun); err != nil {
+		return nil, err
+	}
 	rendered, err := RenderAgentConfigYAML(agentRun)
 	if err != nil {
 		return nil, err
@@ -2723,6 +2732,9 @@ func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 		Data: map[string]string{
 			agentConfigKey: rendered,
 		},
+	}
+	if agentRun.Spec.Agent.WorkspaceInstructions != "" {
+		configMap.Data[profileWorkspaceInstructionsKey] = agentRun.Spec.Agent.WorkspaceInstructions
 	}
 	if err := controllerutil.SetControllerReference(agentRun, configMap, scheme); err != nil {
 		return nil, fmt.Errorf("set AgentRun config ConfigMap owner: %w", err)
@@ -2911,6 +2923,15 @@ func AgentRunWorkspaceMode(agentRun *nvtv1alpha1.AgentRun) nvtv1alpha1.AgentRunW
 	return agentRun.Spec.Workspace.Mode
 }
 
+// ValidateAgentRunWorkspaceInstructions enforces the bounded, non-secret
+// guidance contract without including its contents in diagnostics.
+func ValidateAgentRunWorkspaceInstructions(agentRun *nvtv1alpha1.AgentRun) error {
+	if len(agentRun.Spec.Agent.WorkspaceInstructions) > maxWorkspaceInstructionsBytes {
+		return fmt.Errorf("spec.agent.workspaceInstructions must be at most %d bytes", maxWorkspaceInstructionsBytes)
+	}
+	return nil
+}
+
 // ValidateAgentRunWorkspace validates the intentionally narrow storage API.
 // Persistent storage is incompatible with file-bundle grants: those grants
 // materialize usable credentials in the container and must never survive a Pod.
@@ -3081,6 +3102,9 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 	if err := ValidateAgentRunWorkspace(agentRun); err != nil {
 		return nil, err
 	}
+	if err := ValidateAgentRunWorkspaceInstructions(agentRun); err != nil {
+		return nil, err
+	}
 	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
 	if err != nil {
 		return nil, err
@@ -3120,6 +3144,11 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 	if agentRunHasProviderPreparations(agentRun) {
 		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
 			Key: preparedProviderMetadataKey, Path: preparedProviderMetadataKey,
+		})
+	}
+	if agentRun.Spec.Agent.WorkspaceInstructions != "" {
+		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
+			Key: profileWorkspaceInstructionsKey, Path: profileWorkspaceInstructionsKey,
 		})
 	}
 	hasGitGrant := agentRunHasGitGrant(agentRun)
@@ -3351,6 +3380,11 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 	}
 	if agentRunHasProviderPreparations(agentRun) {
 		agentEnv = append(agentEnv, corev1.EnvVar{Name: preparedProviderMetadataEnv, Value: preparedProviderMetadataPath})
+	}
+	if agentRun.Spec.Agent.WorkspaceInstructions != "" {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name: profileWorkspaceInstructionsEnv, Value: profileWorkspaceInstructionsPath,
+		})
 	}
 	if !AgentRunLiteralZeroSecret(agentRun) {
 		agentEnv = append(agentEnv,

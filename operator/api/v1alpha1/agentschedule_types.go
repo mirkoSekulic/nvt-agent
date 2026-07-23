@@ -47,13 +47,17 @@ type AgentScheduleTemplate struct {
 // AgentScheduleExecutionProfile is one operator-owned execution identity and
 // its complete runtime/broker/egress security configuration.
 type AgentScheduleExecutionProfile struct {
-	Name                      string               `json:"name"`
-	Runtime                   AgentRunRuntime      `json:"runtime"`
-	RuntimeAuth               *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
-	AgentRuntimeConfig        apiextensionsv1.JSON `json:"agentRuntimeConfig"`
-	Egress                    AgentRunEgressMode   `json:"egress"`
-	EgressAllowInsecureBroker bool                 `json:"egressAllowInsecureBroker,omitempty"`
-	EgressEnforcement         bool                 `json:"egressEnforcement,omitempty"`
+	Name               string               `json:"name"`
+	Runtime            AgentRunRuntime      `json:"runtime"`
+	RuntimeAuth        *AgentRunRuntimeAuth `json:"runtimeAuth,omitempty"`
+	AgentRuntimeConfig apiextensionsv1.JSON `json:"agentRuntimeConfig"`
+	// WorkspaceInstructions is administrator-owned guidance snapshotted into
+	// each AgentRun selected from this profile.
+	// +kubebuilder:validation:MaxLength=65536
+	WorkspaceInstructions     string             `json:"workspaceInstructions,omitempty"`
+	Egress                    AgentRunEgressMode `json:"egress"`
+	EgressAllowInsecureBroker bool               `json:"egressAllowInsecureBroker,omitempty"`
+	EgressEnforcement         bool               `json:"egressEnforcement,omitempty"`
 	// EgressForwardProxy is a deprecated migration tombstone. Any presence is
 	// rejected; use EgressTransport. It does not select behavior.
 	EgressForwardProxy *bool                   `json:"egressForwardProxy,omitempty"`

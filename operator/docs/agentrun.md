@@ -46,6 +46,8 @@ spec:
   prompt:
     text: Implement the issue and create a pull request.
   agent:
+    workspaceInstructions: |
+      Follow the repository contribution guide.
     config:
       runtime:
         command: codex
@@ -67,6 +69,14 @@ creation and mounts the generic, read-only document described in
 [`protocol/prepared-provider-metadata.md`](../../protocol/prepared-provider-metadata.md).
 It does not inspect or modify runtime plugin configuration. Omit preparations
 to preserve the existing behavior and receive no metadata file or path variable.
+
+`agent.workspaceInstructions` is optional administrator-provided guidance. The
+operator projects it through the read-only agent configuration volume and the
+runtime appends it to generated `AGENTS.md` before any local
+`AGENTS.local.md`. It cannot replace platform guidance and is not a security
+boundary. Do not put credentials or sensitive values in it: the agent can read
+the content. Profiled schedules snapshot this field from the selected execution
+profile; producers cannot submit an override.
 
 ## Runtime
 

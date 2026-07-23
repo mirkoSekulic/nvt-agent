@@ -266,6 +266,21 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		})
 		return
 	}
+	if err := ValidateAgentRunWorkspaceInstructions(&run); err != nil {
+		if profiled {
+			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
+			return
+		}
+		reason := err.Error()
+		h.recordRejected(ctx, schedule, reason)
+		writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+			Scheduled: false, Reason: reason,
+		})
+		return
+	}
 	if err := PrepareScheduledAgentRun(schedule, &run, scheduleAdmissionWorkMetadata{
 		ID:         workID,
 		Title:      admission.Work.Title,

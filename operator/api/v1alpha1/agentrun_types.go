@@ -208,6 +208,11 @@ type AgentRunPrompt struct {
 // AgentRunAgent contains agent-specific configuration.
 type AgentRunAgent struct {
 	Config apiextensionsv1.JSON `json:"config"`
+	// WorkspaceInstructions is administrator-provided guidance appended to the
+	// generated workspace AGENTS.md. It is readable by the untrusted agent and
+	// must not contain credentials or other sensitive values.
+	// +kubebuilder:validation:MaxLength=65536
+	WorkspaceInstructions string `json:"workspaceInstructions,omitempty"`
 }
 
 // AgentRunLifecycle defines event names that complete or fail a run.

@@ -3206,6 +3206,74 @@ func TestLiteralZeroSecretPreparesProviderIdentityWithoutAgentCredentialCapabili
 	}
 }
 
+func TestProfileWorkspaceInstructionsProjection(t *testing.T) {
+	scheme := testScheme(t)
+	run := testAgentRun()
+	run.Spec.Agent.WorkspaceInstructions = "# Team workflow\n\nPreserve this Markdown exactly.\n"
+
+	configMap, err := DesiredAgentConfigMap(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configMap.Data[profileWorkspaceInstructionsKey]; got != run.Spec.Agent.WorkspaceInstructions {
+		t.Fatalf("projected instructions = %q", got)
+	}
+	pod, err := DesiredAgentPod(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundItem := false
+	for _, item := range pod.Spec.Volumes[1].ConfigMap.Items {
+		if item.Key == profileWorkspaceInstructionsKey && item.Path == profileWorkspaceInstructionsKey {
+			foundItem = true
+		}
+	}
+	foundEnv := false
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == profileWorkspaceInstructionsEnv && env.Value == profileWorkspaceInstructionsPath {
+			foundEnv = true
+		}
+	}
+	if !foundItem || !foundEnv || !pod.Spec.Containers[0].VolumeMounts[1].ReadOnly {
+		t.Fatalf("instructions projection is incomplete: item=%t env=%t pod=%#v", foundItem, foundEnv, pod.Spec)
+	}
+	podJSON, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(podJSON), "Preserve this Markdown exactly") {
+		t.Fatal("workspace instruction content was duplicated into the Pod spec")
+	}
+
+	run.Spec.Agent.WorkspaceInstructions = ""
+	configMap, err = DesiredAgentConfigMap(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod, err = DesiredAgentPod(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := configMap.Data[profileWorkspaceInstructionsKey]; exists {
+		t.Fatal("empty workspace instructions created a ConfigMap item")
+	}
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == profileWorkspaceInstructionsEnv {
+			t.Fatal("empty workspace instructions created an environment variable")
+		}
+	}
+	for _, item := range pod.Spec.Volumes[1].ConfigMap.Items {
+		if item.Key == profileWorkspaceInstructionsKey {
+			t.Fatal("empty workspace instructions created a projected item")
+		}
+	}
+
+	run.Spec.Agent.WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes) + "secret-canary"
+	if _, err := DesiredAgentConfigMap(run, scheme); err == nil || strings.Contains(err.Error(), "secret-canary") {
+		t.Fatalf("oversized instructions did not fail with a sanitized error: %v", err)
+	}
+}
+
 func TestProviderIdentityPreparationFailsClosedForMissingMappingAndMalformedBrokerResult(t *testing.T) {
 	agentRun := mediatedProviderIdentityAgentRun()
 	agentRun.Spec.Broker.Grants[0].Preparations[0].Operation = "token"
@@ -4154,6 +4222,23 @@ func TestAgentRunCRDSchemaIncludesPromptText(t *testing.T) {
 	textType := crdPath(t, prompt, "properties", "text", "type")
 	if textType != "string" {
 		t.Fatalf("expected spec.prompt.text string schema, got %#v", textType)
+	}
+}
+
+func TestAgentRunCRDSchemaBoundsWorkspaceInstructions(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatal(err)
+	}
+	if got := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
+		"spec", "properties", "agent", "properties", "workspaceInstructions", "maxLength",
+	); fmt.Sprint(got) != "65536" {
+		t.Fatalf("workspaceInstructions maxLength = %#v", got)
 	}
 }
 

@@ -36,6 +36,9 @@ spec:
         command: codex
         proxy:
           provider: codex-main
+      workspaceInstructions: |
+        Follow the repository contribution guide.
+        Run the project checks before opening a pull request.
       egress: mediated
       broker:
         grants:

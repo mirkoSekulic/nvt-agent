@@ -105,6 +105,13 @@ func TestKubernetesTokenReviewProducerAuthenticator(t *testing.T) {
 
 func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
+	profileInstructions := "Prefer repository-local checks.\n\n- Keep commits focused.\n"
+	schedule.Spec.Profiles[0].WorkspaceInstructions = profileInstructions
+	scheduleCopy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
+	scheduleCopy.Spec.Profiles[0].WorkspaceInstructions = "copy changed"
+	if schedule.Spec.Profiles[0].WorkspaceInstructions != profileInstructions {
+		t.Fatal("AgentSchedule profile workspace instructions were not deep-copied")
+	}
 	runtimeClassName := "kata-vm-isolation"
 	tolerationSeconds := int64(60)
 	schedule.Spec.Template.RuntimeClassName = &runtimeClassName
@@ -123,6 +130,13 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	decodeAdmissionResponse(t, defaultResponse, http.StatusCreated, &defaultDecoded)
 	defaultRun := fixture.run(t, defaultDecoded.AgentRun.Name)
 	assertResolvedProfile(t, &defaultRun, "codex-default", "codex-default", "codex-default")
+	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
+		t.Fatalf("workspace instructions were not snapshotted exactly: %q", defaultRun.Spec.Agent.WorkspaceInstructions)
+	}
+	schedule.Spec.Profiles[0].WorkspaceInstructions = "changed after admission"
+	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
+		t.Fatal("resolved AgentRun workspace instructions alias the AgentSchedule profile")
+	}
 	if defaultRun.Spec.RuntimeClassName == nil || *defaultRun.Spec.RuntimeClassName != runtimeClassName ||
 		!reflect.DeepEqual(defaultRun.Spec.Resources, schedule.Spec.Template.Resources) ||
 		!reflect.DeepEqual(defaultRun.Spec.Tolerations, schedule.Spec.Template.Tolerations) {
@@ -240,6 +254,18 @@ func TestProfileConfigurationValidation(t *testing.T) {
 			},
 		},
 		{
+			name: "template workspace instructions",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Template.Agent.WorkspaceInstructions = "producer-owned template instructions"
+			},
+		},
+		{
+			name: "oversized profile workspace instructions",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Profiles[0].WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes+1)
+			},
+		},
+		{
 			name: "invalid onNoMatch",
 			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
 				schedule.Spec.ProfileSelection.OnNoMatch = "guess"
@@ -294,6 +320,15 @@ func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "only work and input") {
 			t.Fatalf("producer security field accepted: status=%d body=%q", response.Code, response.Body.String())
 		}
+	}
+
+	body := profiledAdmissionPayload("instruction-override", nil, map[string]any{
+		"prompt": "work", "workspaceInstructions": "producer override",
+	})
+	fixture := newProfileAdmissionFixture(t, testProfiledAgentSchedule())
+	response := fixture.serve(t, mustJSON(t, body), "Bearer projected-token")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "only work and input") {
+		t.Fatalf("producer workspace instructions accepted: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 

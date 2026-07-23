@@ -4,6 +4,7 @@ set -euo pipefail
 workspace="${NVT_WORKSPACE:-/workspace}"
 target="$workspace/AGENTS.md"
 local_instructions="${NVT_AGENT_LOCAL_INSTRUCTIONS:-$workspace/AGENTS.local.md}"
+profile_instructions="${NVT_AGENT_PROFILE_INSTRUCTIONS_FILE:-}"
 
 mkdir -p "$workspace"
 
@@ -170,10 +171,31 @@ escapes inside ordinary quoted shell strings.
 EOF
 fi
 
+canonical_path() {
+  readlink -f -- "$1" 2>/dev/null || printf '%s\n' "$1"
+}
+
+profile_path=""
+if [ -n "$profile_instructions" ] && [ -s "$profile_instructions" ]; then
+  profile_path="$(canonical_path "$profile_instructions")"
+  target_path="$(canonical_path "$target")"
+  if [ "$profile_path" != "$target_path" ]; then
+    {
+      printf '\n## Profile Workspace Instructions\n\n'
+      cat "$profile_instructions"
+      printf '\n'
+    } >> "$target"
+  fi
+fi
+
 if [ -s "$local_instructions" ]; then
-  {
-    printf '\n## Local Workspace Instructions\n\n'
-    cat "$local_instructions"
-    printf '\n'
-  } >> "$target"
+  local_path="$(canonical_path "$local_instructions")"
+  target_path="$(canonical_path "$target")"
+  if [ "$local_path" != "$profile_path" ] && [ "$local_path" != "$target_path" ]; then
+    {
+      printf '\n## Local Workspace Instructions\n\n'
+      cat "$local_instructions"
+      printf '\n'
+    } >> "$target"
+  fi
 fi
