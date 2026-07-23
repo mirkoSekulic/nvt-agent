@@ -21,6 +21,13 @@ fi
 
 mkdir -p "$HOME/.nvt-agent" "$NVT_STATE_DIR" "${NVT_WORKSPACE:-/workspace}"
 
+# The default agentd socket lives under /run, which is root-owned. Prepare its
+# parent for the selected runtime user before agentd starts. nvt-as-root is a
+# passthrough for root and uses the image's passwordless sudo in non-root mode.
+agentd_socket="${NVT_AGENTD_SOCKET:-/run/nvt-agent/agentd.sock}"
+agentd_runtime_dir="$(dirname "$agentd_socket")"
+nvt-as-root install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$agentd_runtime_dir"
+
 export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.local/share/mise}"
 export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/shims:${PATH}"
 

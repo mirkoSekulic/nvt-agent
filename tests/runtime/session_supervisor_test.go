@@ -214,9 +214,11 @@ func TestEntrypointIntentionalTERMForwardsToAndReapsSupervisor(t *testing.T) {
 	f := newFixture(t)
 	started := filepath.Join(f.home, "entrypoint-supervisor-started")
 	terminated := filepath.Join(f.home, "entrypoint-supervisor-terminated")
+	agentdSocket := filepath.Join(f.home, "run", "nvt-agent", "agentd.sock")
 	for _, command := range []string{"bootstrap", "export-plugin-tools", "write-agent-instructions", "run-plugins", "agentd", "start-code-server", "start-agent-session"} {
 		f.writeBin(command, "#!/usr/bin/env bash\nexit 0\n")
 	}
+	f.writeBin("sudo", "#!/usr/bin/env bash\nexec \"$@\"\n")
 	f.writeBin("supervise-agent-session", `#!/usr/bin/env bash
 set -u
 trap 'touch "$NVT_TEST_SUPERVISOR_TERMINATED"; exit 0' TERM INT
@@ -231,6 +233,7 @@ done
 		"NVT_TEST_SUPERVISOR_STARTED="+started,
 		"NVT_TEST_SUPERVISOR_TERMINATED="+terminated,
 		"NVT_AGENT_CONFIG_FILE="+filepath.Join(f.home, "agent.yaml"),
+		"NVT_AGENTD_SOCKET="+agentdSocket,
 	))
 	output := &bytes.Buffer{}
 	cmd.Stdout = output
@@ -238,7 +241,18 @@ done
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitForFile(t, started, time.Second)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("entrypoint did not start supervisor:\n%s", output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +261,13 @@ done
 	}
 	if _, err := os.Stat(terminated); err != nil {
 		t.Fatalf("entrypoint did not terminate and reap supervisor: %v", err)
+	}
+	runtimeDirInfo, err := os.Stat(filepath.Dir(agentdSocket))
+	if err != nil {
+		t.Fatalf("entrypoint did not prepare agentd runtime directory: %v", err)
+	}
+	if got := runtimeDirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("agentd runtime directory mode = %04o, want 0700", got)
 	}
 }
 
