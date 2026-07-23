@@ -18,6 +18,11 @@ spec:
     user: non-root
   image: nvt-agent-runtime:latest
   runtimeClassName: kata-vm-isolation
+  tolerations:
+    - key: purpose
+      operator: Equal
+      value: nvt-agent
+      effect: NoSchedule
   egress: mediated
   egressEnforcement: true
   egressTransport: transparent
@@ -77,7 +82,12 @@ compatibility path and is not mounted into DinD. Mediated providers use broker
 custody and placeholders instead.
 
 `image` selects the runtime image. `runtimeClassName` optionally selects a
-hardened runtime such as Kata Containers.
+runtime handler and therefore the node/runtime environment. `tolerations`
+optionally permits only the generated agent Pod to schedule onto matching
+tainted nodes. For example, a RuntimeClass can select an isolated node pool
+while a toleration permits scheduling onto that pool; neither field removes a
+taint or selects nodes by itself. The separate egress service Pod and platform
+Deployments do not inherit AgentRun tolerations.
 
 ## Egress
 

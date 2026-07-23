@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -189,6 +190,7 @@ func buildProfiledAgentRun(
 			RuntimeAuth:               profile.RuntimeAuth.DeepCopy(),
 			Image:                     template.Image,
 			RuntimeClassName:          copyStringPointer(template.RuntimeClassName),
+			Tolerations:               copyTolerations(template.Tolerations),
 			Egress:                    profile.Egress,
 			EgressAllowInsecureBroker: profile.EgressAllowInsecureBroker,
 			EgressEnforcement:         profile.EgressEnforcement,
@@ -286,4 +288,15 @@ func copyStringPointer(value *string) *string {
 	}
 	copy := *value
 	return &copy
+}
+
+func copyTolerations(values []corev1.Toleration) []corev1.Toleration {
+	if values == nil {
+		return nil
+	}
+	result := make([]corev1.Toleration, len(values))
+	for i := range values {
+		values[i].DeepCopyInto(&result[i])
+	}
+	return result
 }

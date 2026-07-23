@@ -229,6 +229,24 @@ preserve legacy full-`AgentRun` admission. Profiled admission requires a
 projected ServiceAccount token with audience `nvt-operator`; see the
 [AgentSchedule contract](../../operator/docs/agentschedule.md).
 
+Scheduling fields in the shared template are passed to the generated agent Pod:
+
+```yaml
+agentSchedule:
+  template:
+    runtimeClassName: kata-vm-isolation
+    tolerations:
+      - key: purpose
+        operator: Equal
+        value: nvt-agent
+        effect: NoSchedule
+```
+
+The RuntimeClass selects the runtime/node environment; the toleration permits
+the agent Pod to schedule onto a matching tainted pool. These are generic
+Kubernetes values. They do not move the separate egress service Pod or any nvt
+platform Deployment.
+
 When `agentSchedule.template` is non-empty, an absent or empty `image` defaults
 to the coordinated runtime image (`runtime.image` with the published chart's
 immutable `appVersion`). Set `agentSchedule.template.image` explicitly to

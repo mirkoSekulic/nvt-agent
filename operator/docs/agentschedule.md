@@ -12,9 +12,11 @@ may submit work. See
 [`operator/examples/agentschedule-profiled.yaml`](../examples/agentschedule-profiled.yaml)
 for a complete resource.
 
-The common `template` owns the runtime image, RuntimeClass, workspace, shared
-agent config (packages, tools, and plugins), lifecycle defaults, and TTL. It
-does not contain a prompt or top-level `agent.config.runtime` key.
+The common `template` owns the runtime image, RuntimeClass, optional agent-Pod
+tolerations, workspace, shared agent config (packages, tools, and plugins),
+lifecycle defaults, and TTL. RuntimeClass selects a runtime/node environment;
+tolerations permit the generated agent Pod to schedule onto matching tainted
+nodes. It does not contain a prompt or top-level `agent.config.runtime` key.
 
 Each `profiles[]` entry owns runtime type/auth, the complete top-level agent
 runtime configuration (including exact `runtime.proxy.provider`), egress mode

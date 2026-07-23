@@ -9,6 +9,12 @@ spec:
     - system:serviceaccount:nvt:nvt-github-comments-producer
   template:
     image: nvt-agent-runtime:latest
+    runtimeClassName: kata-vm-isolation
+    tolerations:
+      - key: purpose
+        operator: Equal
+        value: nvt-agent
+        effect: NoSchedule
     workspace:
       mode: Ephemeral
     agent:

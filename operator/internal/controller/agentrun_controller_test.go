@@ -129,6 +129,11 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	agentRun := testAgentRun()
 	runtimeClassName := "kata-vm-isolation"
 	agentRun.Spec.RuntimeClassName = &runtimeClassName
+	tolerationSeconds := int64(120)
+	agentRun.Spec.Tolerations = []corev1.Toleration{{
+		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent",
+		Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &tolerationSeconds,
+	}}
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
@@ -158,6 +163,13 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	}
 	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != runtimeClassName {
 		t.Fatalf("expected runtimeClassName %q, got %#v", runtimeClassName, pod.Spec.RuntimeClassName)
+	}
+	if !reflect.DeepEqual(pod.Spec.Tolerations, agentRun.Spec.Tolerations) {
+		t.Fatalf("expected agent tolerations %#v, got %#v", agentRun.Spec.Tolerations, pod.Spec.Tolerations)
+	}
+	pod.Spec.Tolerations[0].TolerationSeconds = ptrTo(int64(1))
+	if *agentRun.Spec.Tolerations[0].TolerationSeconds != tolerationSeconds {
+		t.Fatal("desired Pod tolerations alias AgentRun API storage")
 	}
 	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %q", pod.Spec.RestartPolicy)
@@ -225,6 +237,41 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 		configVolume.ConfigMap.Items[0].Key != agentConfigKey ||
 		configVolume.ConfigMap.Items[0].Path != agentConfigKey {
 		t.Fatalf("expected agent.yaml ConfigMap item, got %#v", configVolume.ConfigMap.Items)
+	}
+}
+
+func TestDesiredAgentPodOmittedTolerationsRemainNil(t *testing.T) {
+	run := testAgentRun()
+	if AgentRunEgressMode(run) != nvtv1alpha1.AgentRunEgressDirect || run.Spec.Tolerations != nil {
+		t.Fatalf("invalid direct-mode fixture: %#v", run.Spec)
+	}
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("build direct agent Pod: %v", err)
+	}
+	if pod.Spec.Tolerations != nil {
+		t.Fatalf("omitted tolerations defaulted unexpectedly: %#v", pod.Spec.Tolerations)
+	}
+}
+
+func TestAgentTolerationsDoNotMoveSeparateEgressdPod(t *testing.T) {
+	run := transparentAgentRun(t)
+	run.Spec.Tolerations = []corev1.Toleration{{
+		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent", Effect: corev1.TaintEffectNoSchedule,
+	}}
+	agentPod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("build agent Pod: %v", err)
+	}
+	if !reflect.DeepEqual(agentPod.Spec.Tolerations, run.Spec.Tolerations) {
+		t.Fatalf("agent Pod tolerations=%#v, want %#v", agentPod.Spec.Tolerations, run.Spec.Tolerations)
+	}
+	egressdPod, err := DesiredEgressdPod(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("build separate egressd Pod: %v", err)
+	}
+	if egressdPod.Spec.Tolerations != nil {
+		t.Fatalf("separate egressd Pod inherited agent tolerations: %#v", egressdPod.Spec.Tolerations)
 	}
 }
 
@@ -3737,6 +3784,24 @@ func TestAgentRunCRDSchemaIncludesPersistentWorkspace(t *testing.T) {
 	validations, ok := workspace["x-kubernetes-validations"].([]any)
 	if !ok || len(validations) < 2 {
 		t.Fatalf("workspace validations = %#v", workspace["x-kubernetes-validations"])
+	}
+}
+
+func TestAgentRunCRDSchemaIncludesTolerations(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatal(err)
+	}
+	tolerations := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
+		"spec", "properties", "tolerations",
+	).(map[string]any)
+	if tolerations["type"] != "array" || crdPath(t, tolerations, "items", "properties", "tolerationSeconds", "format") != "int64" {
+		t.Fatalf("AgentRun tolerations schema incomplete: %#v", tolerations)
 	}
 }
 

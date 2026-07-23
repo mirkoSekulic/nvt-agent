@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.3" || "${CHART_APP_VERSION}" != "0.8.3" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.3, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.4" || "${CHART_APP_VERSION}" != "0.8.4" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.4, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
@@ -583,6 +583,11 @@ grep -q 'name: default-codex' "${PROFILE_RENDER}"
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
 grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
 grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
+grep -q 'runtimeClassName: kata-vm-isolation' "${PROFILE_RENDER}"
+grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'key: purpose'
+grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'operator: Equal'
+grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'value: nvt-agent'
+grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'effect: NoSchedule'
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_EMPTY_IMAGE_RENDER}"
 grep -q 'image: registry.example/runtime:override' "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"

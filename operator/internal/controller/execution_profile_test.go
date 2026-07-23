@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -103,6 +105,13 @@ func TestKubernetesTokenReviewProducerAuthenticator(t *testing.T) {
 
 func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
+	runtimeClassName := "kata-vm-isolation"
+	tolerationSeconds := int64(60)
+	schedule.Spec.Template.RuntimeClassName = &runtimeClassName
+	schedule.Spec.Template.Tolerations = []corev1.Toleration{{
+		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent",
+		Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &tolerationSeconds,
+	}}
 	fixture := newProfileAdmissionFixture(t, schedule)
 
 	defaultResponse := fixture.serve(t, profiledAdmissionBody(t, "default-work", nil, nil), "Bearer projected-token")
@@ -110,6 +119,14 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	decodeAdmissionResponse(t, defaultResponse, http.StatusCreated, &defaultDecoded)
 	defaultRun := fixture.run(t, defaultDecoded.AgentRun.Name)
 	assertResolvedProfile(t, &defaultRun, "codex-default", "codex-default", "codex-default")
+	if defaultRun.Spec.RuntimeClassName == nil || *defaultRun.Spec.RuntimeClassName != runtimeClassName ||
+		!reflect.DeepEqual(defaultRun.Spec.Tolerations, schedule.Spec.Template.Tolerations) {
+		t.Fatalf("shared scheduling fields were not propagated: %#v", defaultRun.Spec)
+	}
+	defaultRun.Spec.Tolerations[0].TolerationSeconds = ptrTo(int64(1))
+	if *schedule.Spec.Template.Tolerations[0].TolerationSeconds != tolerationSeconds {
+		t.Fatal("resolved AgentRun tolerations alias the AgentSchedule template")
+	}
 	if defaultRun.Spec.ProfileProvenance.Principal != nil {
 		t.Fatalf("default admission unexpectedly recorded a principal: %#v", defaultRun.Spec.ProfileProvenance)
 	}
@@ -473,25 +490,36 @@ func TestProfiledAdmissionSanitizesPrincipalAndProviderErrors(t *testing.T) {
 
 func TestExecutionProfileDeepCopyIsolation(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
+	tolerationSeconds := int64(30)
+	schedule.Spec.Template.Tolerations = []corev1.Toleration{{Key: "dedicated", TolerationSeconds: &tolerationSeconds}}
 	copy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	copy.Spec.Profiles[0].Broker.Grants[0].Repositories[0] = "changed/repo"
 	copy.Spec.ProfileSelection.Rules[0].Subject = "changed"
 	copy.Spec.AllowedProducers[0] = "changed"
 	copy.Spec.Template.Lifecycle.CompleteOn[0] = "changed"
+	copy.Spec.Template.Tolerations[0].Key = "changed"
+	*copy.Spec.Template.Tolerations[0].TolerationSeconds = 1
 	if schedule.Spec.Profiles[0].Broker.Grants[0].Repositories[0] == "changed/repo" ||
 		schedule.Spec.ProfileSelection.Rules[0].Subject == "changed" || schedule.Spec.AllowedProducers[0] == "changed" ||
-		schedule.Spec.Template.Lifecycle.CompleteOn[0] == "changed" {
+		schedule.Spec.Template.Lifecycle.CompleteOn[0] == "changed" ||
+		schedule.Spec.Template.Tolerations[0].Key == "changed" || *schedule.Spec.Template.Tolerations[0].TolerationSeconds == 1 {
 		t.Fatal("AgentSchedule deepcopy shares profiled fields")
 	}
 
 	run := testAgentRun()
+	run.Spec.Tolerations = []corev1.Toleration{{Key: "dedicated", TolerationSeconds: &tolerationSeconds}}
 	run.Spec.ProfileProvenance = &nvtv1alpha1.AgentRunProfileProvenance{
 		AuthenticatedProducer: "producer", Principal: &nvtv1alpha1.AgentRunPrincipal{Issuer: "issuer", Subject: "subject"},
 	}
 	runCopy := run.DeepCopyObject().(*nvtv1alpha1.AgentRun)
 	runCopy.Spec.ProfileProvenance.Principal.Subject = "changed"
+	runCopy.Spec.Tolerations[0].Key = "changed"
+	*runCopy.Spec.Tolerations[0].TolerationSeconds = 1
 	if run.Spec.ProfileProvenance.Principal.Subject == "changed" {
 		t.Fatal("AgentRun provenance deepcopy shares principal")
+	}
+	if run.Spec.Tolerations[0].Key == "changed" || *run.Spec.Tolerations[0].TolerationSeconds == 1 {
+		t.Fatal("AgentRun deepcopy shares tolerations")
 	}
 }
 
@@ -508,6 +536,39 @@ func TestAgentRunBrokerGrantDeepCopyPreservesEmptySlices(t *testing.T) {
 	}
 	if copy.EgressHosts == nil {
 		t.Fatal("deep copy changed explicit empty egress hosts into nil")
+	}
+}
+
+func TestTolerationDeepCopyPreservesNilAndExplicitEmpty(t *testing.T) {
+	run := testAgentRun()
+	if run.DeepCopyObject().(*nvtv1alpha1.AgentRun).Spec.Tolerations != nil {
+		t.Fatal("deep copy changed nil AgentRun tolerations into an empty slice")
+	}
+	run.Spec.Tolerations = []corev1.Toleration{}
+	if copied := run.DeepCopyObject().(*nvtv1alpha1.AgentRun).Spec.Tolerations; copied == nil || len(copied) != 0 {
+		t.Fatalf("deep copy did not preserve explicit-empty AgentRun tolerations: %#v", copied)
+	}
+	tolerationSeconds := int64(45)
+	run.Spec.Tolerations = []corev1.Toleration{{
+		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent",
+		Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &tolerationSeconds,
+	}}
+	raw, err := json.Marshal(run)
+	if err != nil {
+		t.Fatalf("marshal AgentRun: %v", err)
+	}
+	var roundTripped nvtv1alpha1.AgentRun
+	if err := json.Unmarshal(raw, &roundTripped); err != nil {
+		t.Fatalf("unmarshal AgentRun: %v", err)
+	}
+	if !reflect.DeepEqual(roundTripped.Spec.Tolerations, run.Spec.Tolerations) {
+		t.Fatalf("AgentRun tolerations changed across API round trip: %#v", roundTripped.Spec.Tolerations)
+	}
+
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.Template.Tolerations = []corev1.Toleration{}
+	if copied := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule).Spec.Template.Tolerations; copied == nil || len(copied) != 0 {
+		t.Fatalf("deep copy did not preserve explicit-empty schedule tolerations: %#v", copied)
 	}
 }
 

@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,12 +32,14 @@ type AgentScheduleSpec struct {
 // every profiled admission. Prompt is supplied per request; runtime, egress,
 // broker, and the top-level agent runtime config are profile-owned.
 type AgentScheduleTemplate struct {
-	Image            string             `json:"image"`
-	RuntimeClassName *string            `json:"runtimeClassName,omitempty"`
-	Workspace        AgentRunWorkspace  `json:"workspace"`
-	Agent            AgentRunAgent      `json:"agent"`
-	Lifecycle        *AgentRunLifecycle `json:"lifecycle,omitempty"`
-	TTL              *AgentRunTTL       `json:"ttl,omitempty"`
+	Image            string  `json:"image"`
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+	// Tolerations is snapshotted into the generated AgentRun and applies only to its agent Pod.
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	Workspace   AgentRunWorkspace   `json:"workspace"`
+	Agent       AgentRunAgent       `json:"agent"`
+	Lifecycle   *AgentRunLifecycle  `json:"lifecycle,omitempty"`
+	TTL         *AgentRunTTL        `json:"ttl,omitempty"`
 }
 
 // AgentScheduleExecutionProfile is one operator-owned execution identity and
@@ -161,6 +164,12 @@ func (in *AgentScheduleTemplate) DeepCopy() *AgentScheduleTemplate {
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
+	}
+	if in.Tolerations != nil {
+		out.Tolerations = make([]corev1.Toleration, len(in.Tolerations))
+		for i := range in.Tolerations {
+			in.Tolerations[i].DeepCopyInto(&out.Tolerations[i])
+		}
 	}
 	out.Agent.Config = *in.Agent.Config.DeepCopy()
 	if in.Lifecycle != nil {
