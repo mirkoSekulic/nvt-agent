@@ -337,7 +337,7 @@ def boom(*a, **k):
 env._refresh = boom
 
 # Near-expiry valid: mediated injection serves the current token, no refresh.
-headers, _exp, _strip = env.injection_headers("api.anthropic.com", "POST", "/v1/messages", "agent", None, "rid")
+headers, _exp, _strip, _append = env.injection_headers("api.anthropic.com", "POST", "/v1/messages", "agent", None, "rid")
 assert headers["authorization"] == "Bearer env-access", headers
 
 # Expired: mediated injection fails closed (no refresh), direct files vends it.

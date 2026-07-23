@@ -27,6 +27,7 @@ type fakeBroker struct {
 	calls     int
 	fail      bool
 	expiresAt string
+	append    map[string]string
 	requests  []map[string]string
 }
 
@@ -57,6 +58,7 @@ func (b *fakeBroker) handle(w http.ResponseWriter, r *http.Request) {
 	b.requests = append(b.requests, payload)
 	fail := b.fail
 	expiresAt := b.expiresAt
+	appendHeaders := b.append
 	b.mu.Unlock()
 	if fail {
 		w.WriteHeader(http.StatusBadGateway)
@@ -66,6 +68,7 @@ func (b *fakeBroker) handle(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{
 		"ok":                    true,
 		"headers":               map[string]string{"authorization": "Bearer " + realToken},
+		"append_headers":        appendHeaders,
 		"strip_request_headers": []string{"authorization"},
 	}
 	if expiresAt != "" {
@@ -85,6 +88,12 @@ func (b *fakeBroker) setExpiresAt(value string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.expiresAt = value
+}
+
+func (b *fakeBroker) setAppendHeaders(value map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.append = value
 }
 
 func (b *fakeBroker) callCount() int {
@@ -324,6 +333,62 @@ func TestPlaceholderStrippedFromAnyHeader(t *testing.T) {
 	record := upstream.last(t)
 	if record.header.Get("X-Api-Key") != "" {
 		t.Fatal("placeholder-bearing header forwarded to upstream")
+	}
+}
+
+// TestAppendHeadersPreserveClientFeatureValues pins additive injection for
+// provider feature negotiation: client-declared betas survive, broker-required
+// values are appended once, and credential replacement remains unchanged.
+func TestAppendHeadersPreserveClientFeatureValues(t *testing.T) {
+	broker := newFakeBroker(t)
+	broker.setAppendHeaders(map[string]string{
+		"anthropic-beta": "oauth-2025-04-20,prompt-caching-scope-2026-01-05",
+	})
+	upstream := newFakeUpstream(t)
+	proxy := newTestProxy(t, broker, upstream)
+
+	request, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+Placeholder)
+	request.Header.Set("Anthropic-Beta", "prompt-caching-scope-2026-01-05,prompt-caching-evict-2026-05-12")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from upstream, got %d", response.StatusCode)
+	}
+
+	record := upstream.last(t)
+	if got := record.header.Get("Anthropic-Beta"); got != "prompt-caching-scope-2026-01-05,prompt-caching-evict-2026-05-12,oauth-2025-04-20" {
+		t.Fatalf("upstream anthropic-beta = %q", got)
+	}
+	if got := record.header.Get("Authorization"); got != "Bearer "+realToken {
+		t.Fatalf("upstream authorization = %q", got)
+	}
+}
+
+func TestOverlappingAppendHeaderFailsClosed(t *testing.T) {
+	broker := newFakeBroker(t)
+	broker.setAppendHeaders(map[string]string{"Authorization": "not-allowed"})
+	upstream := newFakeUpstream(t)
+	proxy := newTestProxy(t, broker, upstream)
+
+	response, err := http.Get(proxy.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", response.StatusCode)
+	}
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	if len(upstream.records) != 0 {
+		t.Fatal("request reached upstream with ambiguous injection material")
 	}
 }
 

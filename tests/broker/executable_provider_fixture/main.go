@@ -179,7 +179,16 @@ func (s *server) handle(req request) {
 	case "placeholder-files":
 		s.success(req.ID, map[string]any{"files": []map[string]string{{"path": ".fixture/auth.json", "content": "placeholder", "mode": "0600"}}, "hosts": []string{"api.example.test"}, "expires_at": nil})
 	case "injection.headers":
-		s.success(req.ID, map[string]any{"headers": map[string]string{"authorization": "Bearer " + s.secret}, "expires_at": nil, "strip_request_headers": []string{"authorization"}})
+		appendHeaders := map[string]string{"x-fixture-feature": "required"}
+		if path, _ := req.Params["path"].(string); path == "/overlap" {
+			appendHeaders = map[string]string{"Authorization": "not-allowed"}
+		}
+		s.success(req.ID, map[string]any{
+			"headers":               map[string]string{"authorization": "Bearer " + s.secret},
+			"append_headers":        appendHeaders,
+			"expires_at":            nil,
+			"strip_request_headers": []string{"authorization"},
+		})
 	default:
 		s.failure(req.ID, "method-not-found", 404, "unsupported provider method")
 	}

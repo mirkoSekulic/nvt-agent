@@ -304,7 +304,18 @@ class Broker:
         provider, hosts = self._injection_provider(capability)
         if host not in hosts:
             raise ProviderError("host-not-allowed", f"host {host} is not allowed for {capability}", 403)
-        headers, expires_at, strip = provider.injection_headers(host, method, path, paired["id"], self.audit, request_id, grant)
+        headers, expires_at, strip, append_headers = provider.injection_headers(
+            host, method, path, paired["id"], self.audit, request_id, grant
+        )
+        replaced = {name.lower() for name in headers}
+        appended = {name.lower() for name in append_headers}
+        stripped = {name.lower() for name in strip}
+        if replaced & appended or stripped & appended:
+            raise ProviderError(
+                "injection-headers-invalid",
+                "provider returned overlapping replacement, append, or strip headers",
+                502,
+            )
         self.audit.write(
             request_id=request_id,
             agent=identity["id"],
@@ -317,7 +328,13 @@ class Broker:
             allowed=True,
             expires_at=expires_at,
         )
-        return {"ok": True, "headers": headers, "expires_at": expires_at, "strip_request_headers": strip}
+        return {
+            "ok": True,
+            "headers": headers,
+            "append_headers": append_headers,
+            "expires_at": expires_at,
+            "strip_request_headers": strip,
+        }
 
     def injection_routing(self, request_id, payload, authorization):
         identity = self.agents.authenticate(authorization)

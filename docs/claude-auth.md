@@ -60,6 +60,12 @@ Seed this file by logging in with Claude Code in a trusted environment. The
 credential is import material for the broker; mediated agents never receive a
 usable copy.
 
+Claude Code selects additional `anthropic-beta` feature tokens as its request
+schema evolves. The broker declares the OAuth token above, and egressd appends
+it to the client-supplied beta list instead of replacing that list. Keep
+credentials in replacement headers; append-only headers are for non-secret
+feature negotiation only.
+
 `credentials-env` is also supported, but it cannot persist refresh-token
 rotation. Use it only when another system continuously replaces the credential.
 Production OAuth refresh should use `credentials-file`.

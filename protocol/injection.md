@@ -137,6 +137,7 @@ Response:
   "headers": {
     "authorization": "Bearer ..."
   },
+  "append_headers": {},
   "expires_at": "2026-07-05T12:00:00Z",
   "strip_request_headers": ["authorization"]
 }
@@ -153,6 +154,14 @@ Rules:
   `:port` from its pinned upstream before asking; the port applies only to
   the dial target.
 - Response header names are lowercased.
+- `headers` replaces caller-supplied values and is the only map used for
+  credentials. `append_headers` is optional and is limited to non-secret,
+  comma-separated feature-negotiation values that must compose with values
+  selected by the client. `egressd` preserves the client tokens, appends the
+  provider tokens, and removes duplicates.
+- A header name may not appear in both maps or in both `append_headers` and
+  `strip_request_headers`. The broker and `egressd` reject ambiguous material
+  before contacting the upstream.
 - `expires_at` is the cache ceiling. `egressd` must not serve cached material
   past it and must not fall back to stale material when a refetch fails
   (fail closed).

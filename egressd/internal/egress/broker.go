@@ -9,12 +9,13 @@ import (
 	"time"
 )
 
-// Material is one injectable-header response from the broker. Header values
-// are credentials: Material must never be logged or serialized.
+// Material is one injectable-header response from the broker. It may contain
+// credentials, so Material must never be logged or serialized.
 type Material struct {
-	Headers   map[string]string
-	Strip     []string
-	ExpiresAt time.Time // zero when the broker reported no expiry
+	Headers       map[string]string
+	AppendHeaders map[string]string
+	Strip         []string
+	ExpiresAt     time.Time // zero when the broker reported no expiry
 }
 
 // BrokerClient calls brokerd's injection endpoint under the egress-role
@@ -36,6 +37,7 @@ type injectionResponse struct {
 	OK                  bool              `json:"ok"`
 	Error               string            `json:"error"`
 	Headers             map[string]string `json:"headers"`
+	AppendHeaders       map[string]string `json:"append_headers"`
 	ExpiresAt           string            `json:"expires_at"`
 	StripRequestHeaders []string          `json:"strip_request_headers"`
 }
@@ -73,7 +75,14 @@ func (b *BrokerClient) FetchHeaders(ctx context.Context, capability, host, metho
 		// never a header value; safe to wrap.
 		return nil, fmt.Errorf("broker denied injection: %s", decoded.Error)
 	}
-	material := &Material{Headers: decoded.Headers, Strip: decoded.StripRequestHeaders}
+	if overlappingHeaderNames(decoded.Headers, decoded.AppendHeaders, decoded.StripRequestHeaders) {
+		return nil, fmt.Errorf("broker returned overlapping replacement, append, or strip headers")
+	}
+	material := &Material{
+		Headers:       decoded.Headers,
+		AppendHeaders: decoded.AppendHeaders,
+		Strip:         decoded.StripRequestHeaders,
+	}
 	if decoded.ExpiresAt != "" {
 		expires, parseErr := time.Parse(time.RFC3339, decoded.ExpiresAt)
 		if parseErr != nil {
@@ -82,6 +91,22 @@ func (b *BrokerClient) FetchHeaders(ctx context.Context, capability, host, metho
 		material.ExpiresAt = expires
 	}
 	return material, nil
+}
+
+func overlappingHeaderNames(headers, appendHeaders map[string]string, strip []string) bool {
+	restricted := make(map[string]struct{}, len(headers)+len(strip))
+	for name := range headers {
+		restricted[http.CanonicalHeaderKey(name)] = struct{}{}
+	}
+	for _, name := range strip {
+		restricted[http.CanonicalHeaderKey(name)] = struct{}{}
+	}
+	for name := range appendHeaders {
+		if _, exists := restricted[http.CanonicalHeaderKey(name)]; exists {
+			return true
+		}
+	}
+	return false
 }
 
 // ReportRequests posts a batch of per-request audit entries to the broker.

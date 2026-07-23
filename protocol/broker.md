@@ -430,9 +430,10 @@ custody and exposes the same three materialization surfaces:
   guarded so a copied value that is too long or JWT-shaped is refused
   (`placeholder-claim-unsafe`) rather than smuggled into the placeholder.
 - **mediated / edge injection** (`/v1/injection/headers`): returns
-  `authorization: Bearer <access token>` plus any configured
-  `injection-extra-headers`, with all injected names listed in
-  `strip_request_headers`. Only the paired `egress` identity may fetch it.
+  `authorization: Bearer <access token>` as a replacement header. Configured
+  `injection-extra-headers` are returned as non-secret append-only feature
+  headers, allowing Claude Code's version-specific `anthropic-beta` values to
+  survive. Only the paired `egress` identity may fetch it.
 
 Rules:
 
@@ -448,7 +449,9 @@ Rules:
 - `placeholder-file.hosts` must be a subset of `injection-hosts`, so the
   materialized host bindings can never drift from what the edge can inject for.
 - `injection-extra-headers` may not override `authorization` and may not
-  contain the injection placeholder.
+  contain the injection placeholder. For `claude-oauth`, these values must be
+  comma-separated feature-negotiation tokens, not credentials; egressd
+  preserves client values and appends/deduplicates the configured values.
 - The API-key authentication path (`x-api-key`) does **not** need this provider:
   a generic `token` provider with `injection-header: x-api-key` and an
   `injection-extra-headers` `anthropic-version` already injects an Anthropic API
@@ -660,10 +663,11 @@ providers:
 ```
 
 The `token`, `codex-oauth`, and `claude-oauth` plugins support injection. For
-`codex-oauth` and `claude-oauth`, injected material is
+`codex-oauth` and `claude-oauth`, replacement material is
 `authorization: Bearer <access token>` using the same broker-side refresh flow
-as file vending. `claude-oauth` also returns any configured
-`injection-extra-headers` (e.g. `anthropic-beta`). Audit entries use the
+as file vending. `claude-oauth` returns configured
+`injection-extra-headers` (e.g. `anthropic-beta`) as append-only non-secret
+feature tokens so client-selected values remain intact. Audit entries use the
 `injection.*` operation prefix. Grants must carry `materialization:
 header-inject` **or** `materialization:
 placeholder-file` (both are zero-possession; see `protocol/injection.md` for the

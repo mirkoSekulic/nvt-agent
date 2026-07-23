@@ -269,6 +269,23 @@ func TestExecutableProviderUsesTheSameNamedInjectionContract(t *testing.T) {
 	if !ok || headers["authorization"] != "Bearer "+executableCanary {
 		t.Fatalf("executable provider did not supply its named injection result: %#v", body)
 	}
+	appendHeaders, ok := body["append_headers"].(map[string]any)
+	if !ok || appendHeaders["x-fixture-feature"] != "required" {
+		t.Fatalf("executable provider did not supply append-only headers: %#v", body)
+	}
+}
+
+func TestInjectionRejectsOverlappingAppendHeaders(t *testing.T) {
+	f := newExecutableBrokerFixture(t)
+	status, body := f.post(f.egress, "/v1/injection/headers", map[string]any{
+		"capability": "fixture-inject",
+		"host":       "api.example.test",
+		"method":     "GET",
+		"path":       "/overlap",
+	})
+	if status != http.StatusBadGateway || body["error"] != "injection-headers-invalid" {
+		t.Fatalf("overlapping injection headers must fail closed: status=%d body=%#v", status, body)
+	}
 }
 
 func TestExecutableProviderOutOfOrderAndSafeDeclaredError(t *testing.T) {

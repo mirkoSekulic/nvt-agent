@@ -170,7 +170,10 @@ the sole audit writer; provider-generated audit records are not supported.
 - `placeholder-files`: `{agent_id,request_id,grant}` →
   `{files,hosts,expires_at}`.
 - `injection.headers`: `{host,method,path,agent_id,request_id,grant}` →
-  `{headers,expires_at,strip_request_headers}`.
+  `{headers,expires_at,strip_request_headers,append_headers?}`.
+  `append_headers` contains only non-secret, comma-separated feature tokens;
+  credential headers belong in `headers`. Providers that do not need additive
+  composition may omit it.
 - `shutdown`: `{}` → any JSON result. The broker bounds this request, then
   terminates and reaps the child if it does not exit.
 
