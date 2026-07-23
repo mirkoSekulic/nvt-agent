@@ -3571,7 +3571,7 @@ func TestRenderAgentConfigYAMLRejectsMalformedConfig(t *testing.T) {
 	}
 }
 
-func TestRenderAgentConfigYAMLInjectsInitialPromptPlugin(t *testing.T) {
+func TestRenderAgentConfigYAMLInjectsRuntimeInitialPrompt(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: "Start this run.\nThen report back."}
 
@@ -3581,27 +3581,45 @@ func TestRenderAgentConfigYAMLInjectsInitialPromptPlugin(t *testing.T) {
 	}
 
 	config := parseAgentConfigYAML(t, rendered)
-	plugins, ok := config["plugins"].([]any)
-	if !ok || len(plugins) != 2 {
-		t.Fatalf("expected two plugins, got %#v\n%s", config["plugins"], rendered)
-	}
-	plugin, ok := plugins[0].(map[string]any)
+	runtimeConfig, ok := config["runtime"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected injected plugin object, got %#v", plugins[0])
+		t.Fatalf("expected runtime config, got %#v\n%s", config["runtime"], rendered)
 	}
-	if plugin["name"] != "initial-prompt" ||
-		plugin["source"] != "builtin" ||
-		plugin["when"] != "after-agent" ||
-		plugin["restart"] != "never" {
-		t.Fatalf("unexpected injected plugin: %#v", plugin)
+	initialPrompt, ok := runtimeConfig["initial-prompt"].(map[string]any)
+	if !ok || initialPrompt["delivery"] != "argument" || initialPrompt["text"] != agentRun.Spec.Prompt.Text {
+		t.Fatalf("unexpected runtime initial prompt: %#v", runtimeConfig["initial-prompt"])
 	}
-	configValue, ok := plugin["config"].(map[string]any)
-	if !ok || configValue["text"] != agentRun.Spec.Prompt.Text {
-		t.Fatalf("unexpected injected config: %#v", plugin["config"])
+	if !reflect.DeepEqual(runtimeConfig["args"], []any{"--sandbox", "danger-full-access", "--ask-for-approval", "never"}) {
+		t.Fatalf("initial prompt changed runtime autonomy args: %#v", runtimeConfig["args"])
 	}
-	existingPlugin, ok := plugins[1].(map[string]any)
+	plugins, ok := config["plugins"].([]any)
+	if !ok || len(plugins) != 1 {
+		t.Fatalf("expected existing plugin to remain unchanged, got %#v\n%s", config["plugins"], rendered)
+	}
+	existingPlugin, ok := plugins[0].(map[string]any)
 	if !ok || existingPlugin["name"] != "checkout-repos" {
-		t.Fatalf("expected existing plugin after injected plugin, got %#v", plugins[1])
+		t.Fatalf("expected existing plugin to remain, got %#v", plugins[0])
+	}
+}
+
+func TestRenderAgentConfigYAMLInitialPromptPreservesClaudeAutonomyArgs(t *testing.T) {
+	agentRun := testAgentRun()
+	agentRun.Spec.Runtime = nvtv1alpha1.AgentRunRuntime{Type: "claude", Autonomy: "trusted-local"}
+	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: "Start with this task."}
+
+	rendered, err := RenderAgentConfigYAML(agentRun)
+	if err != nil {
+		t.Fatalf("render AgentRun agent config: %v", err)
+	}
+
+	config := parseAgentConfigYAML(t, rendered)
+	runtimeConfig := config["runtime"].(map[string]any)
+	if runtimeConfig["command"] != "claude" || !reflect.DeepEqual(runtimeConfig["args"], []any{"--dangerously-skip-permissions"}) {
+		t.Fatalf("initial prompt changed Claude launch config: %#v", runtimeConfig)
+	}
+	initialPrompt := runtimeConfig["initial-prompt"].(map[string]any)
+	if initialPrompt["delivery"] != "argument" || initialPrompt["text"] != agentRun.Spec.Prompt.Text {
+		t.Fatalf("unexpected Claude initial prompt: %#v", initialPrompt)
 	}
 }
 
@@ -3678,7 +3696,7 @@ func TestDesiredAgentPodUsesRuntimeHealthReadinessProbe(t *testing.T) {
 	}
 }
 
-func TestRenderAgentConfigYAMLInjectsInitialPromptPluginWhenPluginsMissing(t *testing.T) {
+func TestRenderAgentConfigYAMLInjectsRuntimeInitialPromptWhenPluginsMissing(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{"codeServer": {"enabled": true}}`)}
 	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: "Run without configured plugins."}
@@ -3689,9 +3707,12 @@ func TestRenderAgentConfigYAMLInjectsInitialPromptPluginWhenPluginsMissing(t *te
 	}
 
 	config := parseAgentConfigYAML(t, rendered)
-	plugins, ok := config["plugins"].([]any)
-	if !ok || len(plugins) != 1 {
-		t.Fatalf("expected injected plugin list, got %#v\n%s", config["plugins"], rendered)
+	runtimeConfig, ok := config["runtime"].(map[string]any)
+	if !ok || runtimeConfig["initial-prompt"] == nil {
+		t.Fatalf("expected runtime initial prompt, got %#v\n%s", config["runtime"], rendered)
+	}
+	if _, exists := config["plugins"]; exists {
+		t.Fatalf("initial prompt unexpectedly added a plugin: %#v", config["plugins"])
 	}
 	if config["codeServer"] == nil {
 		t.Fatalf("expected existing config keys to be preserved, got %#v", config)
@@ -3802,23 +3823,23 @@ func TestRenderAgentConfigYAMLEmptyPromptRendersUnchanged(t *testing.T) {
 	}
 }
 
-func TestRenderAgentConfigYAMLRejectsInitialPromptPluginConflict(t *testing.T) {
+func TestRenderAgentConfigYAMLRejectsRuntimeInitialPromptConflict(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{
-		"plugins": [
-			{
-				"name": "initial-prompt",
-				"source": "builtin"
+		"runtime": {
+			"initial-prompt": {
+				"delivery": "argument",
+				"text": "configured"
 			}
-		]
+		}
 	}`)}
 	agentRun.Spec.Prompt = &nvtv1alpha1.AgentRunPrompt{Text: "ambiguous"}
 
 	_, err := RenderAgentConfigYAML(agentRun)
 	if err == nil {
-		t.Fatal("expected initial-prompt conflict to fail")
+		t.Fatal("expected runtime initial-prompt conflict to fail")
 	}
-	if !strings.Contains(err.Error(), `already contains plugin "initial-prompt"`) {
+	if !strings.Contains(err.Error(), "runtime.initial-prompt is already configured") {
 		t.Fatalf("expected clear conflict error, got %v", err)
 	}
 }

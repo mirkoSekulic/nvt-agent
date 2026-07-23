@@ -77,7 +77,6 @@ const (
 	persistentHomeSubPath                 = "home"
 	workspacePVCReadyRequeue              = 2 * time.Second
 	terminalResourceCleanupRequeue        = 2 * time.Second
-	initialPromptPlugin                   = "initial-prompt"
 	lifecycleReporterPlugin               = "lifecycle-termination"
 	agentPodSecurityStateAnnotation       = "nvt.dev/pod-security-state"
 	agentConfigPlaceholderCacheAnnotation = "nvt.dev/placeholder-cache-key"
@@ -4035,7 +4034,7 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		}
 		renderedConfig = InjectRuntimePreseed(renderedConfig, agentRun)
 		if promptText != "" {
-			renderedConfig, err = InjectInitialPromptPlugin(renderedConfig, promptText)
+			renderedConfig, err = InjectRuntimeInitialPrompt(renderedConfig, promptText)
 			if err != nil {
 				return "", err
 			}
@@ -4288,33 +4287,26 @@ func AgentRunPromptText(agentRun *nvtv1alpha1.AgentRun) string {
 	return agentRun.Spec.Prompt.Text
 }
 
-// InjectInitialPromptPlugin prepends the runtime plugin that delivers AgentRun prompt text.
-func InjectInitialPromptPlugin(config map[string]any, promptText string) (map[string]any, error) {
-	plugins, err := agentConfigPlugins(config)
-	if err != nil {
-		return nil, err
+// InjectRuntimeInitialPrompt maps the typed AgentRun prompt onto the generic
+// runtime launch contract. Bootstrap appends the text as the final command
+// argument; it does not need to know which interactive agent implements that
+// contract.
+func InjectRuntimeInitialPrompt(config map[string]any, promptText string) (map[string]any, error) {
+	runtimeConfig, ok := config["runtime"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("render AgentRun agent config: runtime must be an object")
 	}
-	for _, plugin := range plugins {
-		pluginMap, ok := plugin.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("render AgentRun agent config: plugins entries must be objects")
-		}
-		if pluginMap["name"] == initialPromptPlugin {
-			return nil, fmt.Errorf("render AgentRun agent config: spec.prompt.text cannot be used when spec.agent.config.plugins already contains plugin %q", initialPromptPlugin)
-		}
+	if _, exists := runtimeConfig["initial-prompt"]; exists {
+		return nil, fmt.Errorf("render AgentRun agent config: spec.prompt.text cannot be used when agent.config.runtime.initial-prompt is already configured")
 	}
 
-	injected := map[string]any{
-		"name":    initialPromptPlugin,
-		"source":  "builtin",
-		"when":    "after-agent",
-		"restart": "never",
-		"config": map[string]any{
-			"text": promptText,
-		},
+	runtimeConfig = cloneStringAnyMap(runtimeConfig)
+	runtimeConfig["initial-prompt"] = map[string]any{
+		"delivery": "argument",
+		"text":     promptText,
 	}
 	updatedConfig := cloneStringAnyMap(config)
-	updatedConfig["plugins"] = append([]any{injected}, plugins...)
+	updatedConfig["runtime"] = runtimeConfig
 	return updatedConfig, nil
 }
 
