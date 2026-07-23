@@ -463,6 +463,10 @@ does not grant them broker trust or create a sandbox boundary.
 
 ## Prompting The Agent
 
+An AgentRun's initial prompt is part of the generic runtime launch contract and
+is passed as the final command argument. The plugin prompt path below is only
+for later work sent to an already-running session.
+
 Plugins should use `prompt-agent` to send work to the running Codex or Claude
 Code session:
 

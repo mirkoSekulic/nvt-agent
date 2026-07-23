@@ -95,7 +95,6 @@ RUN chmod +x \
   /usr/local/lib/nvt-agent/plugins/git-host-credentials/gh-auth.py \
   /usr/local/lib/nvt-agent/plugins/event-webhook/run.py \
   /usr/local/lib/nvt-agent/plugins/lifecycle-termination/run.py \
-  /usr/local/lib/nvt-agent/plugins/initial-prompt/run.py \
   /usr/local/lib/nvt-agent/plugins/smoke-complete/run.py \
   /usr/local/lib/nvt-agent/plugins/github-watcher/run.py \
   /usr/local/lib/nvt-agent/plugins/github-watcher/github-watch.py \

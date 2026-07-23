@@ -212,8 +212,13 @@ cache expiry.
 ## Prompt And Agent Config
 
 `prompt.text` is an optional convenience for disposable runs. The operator
-renders it as the builtin `initial-prompt` plugin. If the embedded config
-already declares that plugin, rendering fails to avoid ambiguity.
+renders it through the generic `runtime.initial-prompt` launch contract with
+`delivery: argument`. Bootstrap appends the text after `runtime.args`, so
+autonomy flags remain unchanged. The default Codex and Claude commands start a
+long-lived interactive session with that first prompt; an explicit command or
+wrapper retains its own lifecycle and must accept the final prompt argument. If
+the embedded config already declares `runtime.initial-prompt`, rendering fails
+to avoid ambiguity.
 
 `agent.config` is the normal agent YAML object. Unknown fields are preserved so
 plugin configuration can remain implementation-swappable. Runtime tools,

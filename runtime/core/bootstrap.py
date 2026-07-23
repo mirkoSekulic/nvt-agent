@@ -240,7 +240,27 @@ def apply_runtime_proxy(runtime, egress, command):
         persist_env_var(name, proxy_url)
 
 
-def persist_agent_command(command, args):
+def runtime_initial_prompt(runtime):
+    config = runtime.get("initial-prompt")
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        raise SystemExit("runtime.initial-prompt must be a YAML object")
+    unknown = sorted(set(config) - {"delivery", "text"})
+    if unknown:
+        raise SystemExit(f"runtime.initial-prompt has unsupported fields: {', '.join(unknown)}")
+    delivery = optional_string(config.get("delivery"), "runtime.initial-prompt.delivery")
+    if delivery != "argument":
+        raise SystemExit("runtime.initial-prompt.delivery must be argument")
+    text = optional_string(config.get("text"), "runtime.initial-prompt.text")
+    if not text or not text.strip():
+        raise SystemExit("runtime.initial-prompt.text must be a non-empty string")
+    return text
+
+
+def persist_agent_command(command, args, initial_prompt=None):
+    if initial_prompt is not None:
+        args = [*args, initial_prompt]
     target = Path.home() / ".nvt-agent" / "agent-command.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({"command": command, "args": args}, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -828,6 +848,9 @@ def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
     command = optional_string(runtime.get("command"), "runtime.command")
+    initial_prompt = runtime_initial_prompt(runtime)
+    if initial_prompt is not None and not command:
+        raise SystemExit("runtime.command is required when runtime.initial-prompt is configured")
     effective_command = command or "codex"
 
     # Validate the selector before making any runtime changes, including for a
@@ -847,7 +870,7 @@ def main():
         # agent-command.json so runtime.args are passed without shell parsing.
         persist_env_var("AGENT_COMMAND", command)
         args = optional_string_list(runtime.get("args"), "runtime.args")
-        persist_agent_command(command, args)
+        persist_agent_command(command, args, initial_prompt)
     setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_packages(configured_packages(tools))
