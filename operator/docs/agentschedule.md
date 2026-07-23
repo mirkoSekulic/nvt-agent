@@ -21,9 +21,25 @@ does not contain a prompt or top-level `agent.config.runtime` key.
 
 Each `profiles[]` entry owns runtime type/auth, the complete top-level agent
 runtime configuration (including exact `runtime.proxy.provider`), egress mode
-and enforcement, and broker providers/grants. The operator inserts
+and enforcement, broker providers/grants, and optional `workspaceInstructions`.
+The operator inserts
 `profile.agentRuntimeConfig` as `AgentRun.spec.agent.config.runtime`. This is an
 explicit replacement boundary, not an arbitrary merge patch.
+
+`workspaceInstructions` is administrator-owned, reusable workflow guidance.
+The selected value is snapshotted into the resolved AgentRun and appended to
+the generated workspace `AGENTS.md`; it never replaces nvt's platform guidance.
+The value is bounded to 64 KiB. It is configuration, not a security boundary,
+and must not contain credentials or sensitive values because the untrusted
+agent can read it. Producers cannot submit or override this field.
+
+```yaml
+profiles:
+  - name: codex-default
+    workspaceInstructions: |
+      Follow the repository contribution guide.
+      Run the project checks before opening a pull request.
+```
 
 `profileSelection.rules` match exact `issuer` plus immutable `subject` values.
 `displayName` is stored for audit/display only and never participates in
@@ -53,7 +69,8 @@ Profiled requests contain only work metadata and prompt input:
 The principal may be absent when `onNoMatch: useDefault` names a valid default.
 Unknown and missing principals follow `onNoMatch` exactly. Any top-level field
 other than `work` or `input`, including `agentRun`, profile, broker, grant,
-provider, proxy, or egress configuration, is rejected rather than ignored.
+provider, proxy, egress, or workspace instruction configuration, is rejected
+rather than ignored. `input` accepts only `prompt`.
 
 ### Producer authentication
 

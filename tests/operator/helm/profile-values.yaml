@@ -28,6 +28,9 @@ agentSchedule:
         command: codex
         proxy:
           provider: codex-main
+      workspaceInstructions: |
+        Follow the administrator-owned repository workflow.
+        Keep changes focused and run repository checks.
       egress: mediated
       egressEnforcement: true
       egressTransport: forward-proxy

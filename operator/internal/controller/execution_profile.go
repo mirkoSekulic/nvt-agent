@@ -17,6 +17,8 @@ var (
 	errExecutionProfileSelectionDenied      = errors.New("execution profile selection denied")
 )
 
+const maxWorkspaceInstructionsBytes = 64 * 1024
+
 // ResolvedExecutionProfile is the single immutable profile selected for a request.
 type ResolvedExecutionProfile struct {
 	Profile nvtv1alpha1.AgentScheduleExecutionProfile
@@ -82,6 +84,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 	if _, ownsRuntime := common["runtime"]; ownsRuntime {
 		return nil, errInvalidExecutionProfileConfiguration
 	}
+	if template.Agent.WorkspaceInstructions != "" {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
 
 	allowed := map[string]struct{}{}
 	for _, producer := range schedule.Spec.AllowedProducers {
@@ -108,6 +113,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 			return nil, errInvalidExecutionProfileConfiguration
 		}
 		if _, err := jsonObject(profile.AgentRuntimeConfig); err != nil {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if len(profile.WorkspaceInstructions) > maxWorkspaceInstructionsBytes {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
 		profiles[profile.Name] = profile
@@ -198,9 +206,12 @@ func buildProfiledAgentRun(
 			EgressTransport:           profile.EgressTransport,
 			Workspace:                 *template.Workspace.DeepCopy(),
 			Broker:                    profile.Broker.DeepCopy(),
-			Agent:                     nvtv1alpha1.AgentRunAgent{Config: apiextensionsv1.JSON{Raw: rawConfig}},
-			Lifecycle:                 template.Lifecycle.DeepCopy(),
-			TTL:                       template.TTL.DeepCopy(),
+			Agent: nvtv1alpha1.AgentRunAgent{
+				Config:                apiextensionsv1.JSON{Raw: rawConfig},
+				WorkspaceInstructions: profile.WorkspaceInstructions,
+			},
+			Lifecycle: template.Lifecycle.DeepCopy(),
+			TTL:       template.TTL.DeepCopy(),
 			ProfileProvenance: &nvtv1alpha1.AgentRunProfileProvenance{
 				AuthenticatedProducer: producer,
 				ScheduleName:          schedule.Name,

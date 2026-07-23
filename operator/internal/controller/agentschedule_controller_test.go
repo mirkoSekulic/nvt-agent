@@ -117,6 +117,12 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if crdPath(t, properties, "profiles", "items", "properties", "agentRuntimeConfig", "x-kubernetes-preserve-unknown-fields") != true {
 		t.Fatalf("expected profile runtime config preservation schema, got %#v", properties["profiles"])
 	}
+	if fmt.Sprint(crdPath(t, properties, "profiles", "items", "properties", "workspaceInstructions", "maxLength")) != "65536" {
+		t.Fatalf("expected bounded profile workspace instructions schema, got %#v", properties["profiles"])
+	}
+	if fmt.Sprint(crdPath(t, properties, "template", "properties", "agent", "properties", "workspaceInstructions", "maxLength")) != "65536" {
+		t.Fatalf("expected bounded AgentRun template workspace instructions schema, got %#v", properties["template"])
+	}
 	profileProperties := crdPath(t, properties, "profiles", "items", "properties").(map[string]any)
 	legacy := crdPath(t, profileProperties, "egressForwardProxy").(map[string]any)
 	if legacy["type"] != "boolean" || !strings.Contains(fmt.Sprint(legacy["description"]), "Deprecated:") {

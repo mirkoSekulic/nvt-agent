@@ -24,8 +24,9 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.11`; otherwise the API server will prune or reject
-new AgentRun and execution-profile fields such as broker grant preparations.
+of, upgrading to chart `0.8.12`; otherwise the API server will prune or reject
+new AgentRun and execution-profile fields such as broker grant preparations or
+profile workspace instructions.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -42,11 +43,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.11 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.12 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.11 --namespace nvt --create-namespace
+  --version 0.8.12 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -291,6 +292,23 @@ to the coordinated runtime image (`runtime.image` with the published chart's
 immutable `appVersion`). Set `agentSchedule.template.image` explicitly to
 preserve an intentional override. An empty template remains omitted for legacy
 schedule admission.
+
+Execution profiles may append reusable administrator-owned workspace guidance:
+
+```yaml
+agentSchedule:
+  profiles:
+    - name: codex-default
+      workspaceInstructions: |
+        Follow the repository contribution guide.
+        Run the project checks before opening a pull request.
+```
+
+The selected text is snapshotted into the AgentRun and appended to generated
+platform guidance before local `AGENTS.local.md`; it never replaces either
+layer. Producers cannot submit or override it. This is configuration, not a
+security boundary, and it must not contain credentials or sensitive values
+because the untrusted agent can read it. The value is bounded to 64 KiB.
 
 ### Enforced Transparent Mode
 
