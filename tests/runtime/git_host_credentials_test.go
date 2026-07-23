@@ -226,6 +226,58 @@ credentials:
 	}
 }
 
+func TestGitCredentialsLocalMediatedProviderUsesTargetBearingBrokerIdentity(t *testing.T) {
+	f := newFixture(t)
+	repo := f.initRepo("local-mediated-project")
+	f.runCommand("git", true, "-C", repo, "remote", "add", "origin", "https://github.com/my-user/project.git")
+	marker := filepath.Join(f.home, "brokerctl-identity-ran")
+	f.writeBin("brokerctl", fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "identity" ] &&
+   [ "$2" = "--provider" ] && [ "$3" = "github-main-app" ] &&
+   [ "$4" = "--target" ] && [ "$5" = "github.com/my-user/project" ]; then
+  printf 'called' > %s
+  echo '{"ok":true,"name":"Local App Bot","email":"12345+local-app[bot]@users.noreply.github.com"}'
+  exit 0
+fi
+echo "unexpected brokerctl args" >&2
+exit 1
+`, shellQuote(marker)))
+	hostConfig := f.writePluginConfig("git-host-credentials-local-mediated.yaml", `
+providers:
+  - name: fork-app-mediated
+    type: broker
+    broker-provider: github-main-app
+    credential-kind: mediated
+    match:
+      - github.com/my-user/*
+`)
+	f.writeBin("git-host-credential", fmt.Sprintf(`#!/usr/bin/env bash
+exec env NVT_PLUGIN_CONFIG=%s python3 %s "$@"
+`, shellQuote(hostConfig), shellQuote(filepath.Join(f.root, "runtime", "plugins", "git-host-credentials", "git-host-credential.py"))))
+	config := f.writePluginConfig("git-credentials-local-mediated.yaml", `
+credentials:
+  - match: https://github.com/my-user/
+    provider: fork-app-mediated
+    identity:
+      mode: provider
+`)
+	env := []string{"NVT_PLUGIN_CONFIG=" + config, "NVT_BROKER_TOKEN=local-control-token"}
+	command := "env -u NVT_PREPARED_PROVIDER_METADATA_FILE " + gitCredentialsRunBin(f.root)
+	output := f.runWithEnv(command, true, env, "configure-repo", repo)
+	if strings.Contains(output, "local-control-token") {
+		t.Fatalf("local broker token leaked: %s", output)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("target-bearing broker identity was not invoked: %v", err)
+	}
+	name := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.name"))
+	email := strings.TrimSpace(f.runCommand("git", true, "-C", repo, "config", "--local", "--get", "user.email"))
+	if name != "Local App Bot" || email != "12345+local-app[bot]@users.noreply.github.com" {
+		t.Fatalf("unexpected local mediated identity name=%q email=%q", name, email)
+	}
+}
+
 func TestGitHostCredentialMediatedProviderRequiresValidPreparedIdentity(t *testing.T) {
 	f := newFixture(t)
 	f.writeBin("brokerctl", "#!/usr/bin/env bash\necho should-not-run >&2\nexit 1\n")
@@ -234,7 +286,7 @@ func TestGitHostCredentialMediatedProviderRequiresValidPreparedIdentity(t *testi
 		metadata string
 		want     string
 	}{
-		{name: "missing", want: "metadata is unavailable"},
+		{name: "missing file", want: "metadata is unavailable"},
 		{name: "mapping mismatch", metadata: `{"version":1,"providers":{"other-provider":{"identity":{"name":"Safe Bot","email":"safe@example.test"}}}}`, want: "missing or mismatched"},
 		{name: "operation missing", metadata: `{"version":1,"providers":{"github-main-app":{}}}`, want: "missing or mismatched"},
 		{name: "malformed", metadata: `{"version":1,"providers":{"github-main-app":{"identity":{"name":" bad","email":"safe@example.test"}}}}`, want: "is invalid"},
@@ -254,6 +306,8 @@ providers:
 			if test.metadata != "" {
 				metadata := f.writePluginConfig("prepared-provider-metadata-"+strings.ReplaceAll(test.name, " ", "-")+".json", test.metadata)
 				env = append(env, "NVT_PREPARED_PROVIDER_METADATA_FILE="+metadata)
+			} else {
+				env = append(env, "NVT_PREPARED_PROVIDER_METADATA_FILE="+filepath.Join(f.home, "missing-prepared-provider-metadata.json"))
 			}
 			output := f.runWithEnv(gitHostCredentialBin(f.root), false, env, "identity", "--provider", "fork-app-mediated", "--target", "github.com/my-user/project")
 			if !strings.Contains(output, test.want) || strings.Contains(output, "should-not-run") {

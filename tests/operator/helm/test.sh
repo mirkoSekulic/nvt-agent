@@ -587,6 +587,7 @@ grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 
 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
+grep -q 'provider: github-main-app' "${PROFILE_RENDER}"
 grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
 grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
 grep -q 'runtimeClassName: kata-vm-isolation' "${PROFILE_RENDER}"

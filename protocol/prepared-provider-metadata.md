@@ -46,7 +46,11 @@ name/email strings, and fail closed when an entry is absent or malformed.
 The document never contains broker tokens, provider credentials, request
 headers, placeholder files, or upstream response bodies. The environment
 variable exposes only its path. Runs with no preparations receive neither the
-document nor the environment variable. Cache validity is tied to the exact
+document nor the environment variable. Presence of the variable explicitly
+selects prepared consumption: consumers must fail closed on a missing or
+malformed exact entry and must not fall back. Its absence leaves local/direct
+target-bearing broker identity behavior unchanged; enforced agents still have
+no broker token with which to use that path. Cache validity is tied to the exact
 prepared grant configuration, so a changed provider, repository ceiling,
 materialization, permission, or preparation is resolved again before startup.
 

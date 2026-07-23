@@ -93,8 +93,11 @@ For `identity.mode: provider` rules in enforced mediated AgentRuns, declare an
 `identity` preparation on the exact AgentRun broker grant. The plugin reads the
 provider's non-secret commit name/email from the generic
 `NVT_PREPARED_PROVIDER_METADATA_FILE` document; the operator never parses or
-rewrites this plugin's configuration. Direct/local runs retain the target-bearing
-`brokerctl identity` path. See the language-neutral
+rewrites this plugin's configuration. Presence of that environment variable
+selects prepared mode; a malformed or mismatched configured file fails closed
+without fallback. When it is absent, local/Compose runs retain the target-bearing
+`brokerctl identity` path. Enforced Kubernetes agents cannot turn that fallback
+into credential access because they receive no broker token. See the language-neutral
 [prepared provider metadata contract](../../../protocol/prepared-provider-metadata.md).
 
 ```yaml
