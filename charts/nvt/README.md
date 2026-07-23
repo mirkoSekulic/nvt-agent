@@ -229,6 +229,12 @@ preserve legacy full-`AgentRun` admission. Profiled admission requires a
 projected ServiceAccount token with audience `nvt-operator`; see the
 [AgentSchedule contract](../../operator/docs/agentschedule.md).
 
+When `agentSchedule.template` is non-empty, an absent or empty `image` defaults
+to the coordinated runtime image (`runtime.image` with the published chart's
+immutable `appVersion`). Set `agentSchedule.template.image` explicitly to
+preserve an intentional override. An empty template remains omitted for legacy
+schedule admission.
+
 ### Enforced Transparent Mode
 
 ```yaml
