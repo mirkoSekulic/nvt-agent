@@ -674,6 +674,22 @@ def apply_placeholder_files(egress):
             write_placeholder_file(target, content, mode, home)
 
 
+def seed_claude_state(command):
+    if Path(command).name != "claude":
+        return
+    target = Path.home() / ".claude.json"
+    if target.exists():
+        print(f"bootstrap: claude state file {target} already exists", flush=True)
+        return
+    state = {
+        "hasCompletedOnboarding": True,
+        "theme": "dark",
+        "projects": {str(workspace()): {"hasTrustDialogAccepted": True}},
+    }
+    write_placeholder_file(target, json.dumps(state, indent=2, sort_keys=True) + "\n", 0o600, Path.home())
+    print(f"bootstrap: seeded claude state file {target}", flush=True)
+
+
 def apply_additional_paths(paths):
     for path in reversed(paths):
         prepend_path(expand_path(path))
@@ -842,6 +858,7 @@ def main():
     # Placeholder-file materialization is independent of egress mode: it writes
     # inert placeholder auth files whether or not mediated routing is applied.
     apply_placeholder_files(egress)
+    seed_claude_state(effective_command)
     if command:
         # Kept for older helper scripts and diagnostics; start-agent-session uses
         # agent-command.json so runtime.args are passed without shell parsing.

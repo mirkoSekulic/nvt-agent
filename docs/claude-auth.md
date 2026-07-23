@@ -121,6 +121,16 @@ For enforced Kubernetes workloads, combine mediated mode with transparent
 transport. This prevents tools from bypassing egressd while allowing ordinary
 non-injection traffic as policy-approved blind tunnels.
 
+## First-Run State
+
+A credentials file alone does not start a session: Claude Code first runs an
+interactive first-run wizard (onboarding, login method, workspace trust) that a
+headless session can never answer. When `runtime.command` is `claude`,
+bootstrap seeds `~/.claude.json` with onboarding completed and the workspace
+trusted so the session starts directly. An existing `~/.claude.json` is left
+untouched; this seeding is independent of egress mode and of the credentials
+file.
+
 ## Refresh
 
 Before injection or direct file vending, the broker refreshes when `expiresAt`
