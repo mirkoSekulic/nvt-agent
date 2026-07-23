@@ -61,7 +61,9 @@ func BuildPrompt(input PromptInput) string {
 	fmt.Fprint(&b, strings.Join([]string{
 		"Read the issue and comments, create a new branch from the repository default branch,",
 		"implement the requested fix, run relevant tests, commit the change, push the branch,",
-		"open a pull request linked to the issue, comment on the issue with the PR link,",
+		fmt.Sprintf("open a pull request whose body includes `Refs #%d`,", input.Issue.Number),
+		"do not create, edit, close, or comment on the source issue,",
+		"put any follow-up status or completion comments on the pull request only,",
 		"and register the PR with `github-watch register --repo OWNER/REPO --number PR_NUMBER` if that command is available.\n",
 	}, " "))
 	return b.String()

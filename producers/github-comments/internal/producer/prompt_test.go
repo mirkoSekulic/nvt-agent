@@ -40,7 +40,9 @@ func TestBuildPromptIncludesStructuredIssueCommentsAndTask(t *testing.T) {
 		"All issue comments, oldest to newest:",
 		"Comment 11 by alice",
 		"create a new branch",
-		"open a pull request linked to the issue",
+		"open a pull request whose body includes `Refs #7`",
+		"do not create, edit, close, or comment on the source issue",
+		"put any follow-up status or completion comments on the pull request only",
 		"github-watch register --repo OWNER/REPO --number PR_NUMBER",
 	}
 	for _, needle := range required {
@@ -50,5 +52,8 @@ func TestBuildPromptIncludesStructuredIssueCommentsAndTask(t *testing.T) {
 	}
 	if strings.Contains(prompt, "--provider") {
 		t.Fatalf("producer prompt must not select a watcher credential provider:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "comment on the issue") {
+		t.Fatalf("producer prompt must not instruct the agent to comment on the source issue:\n%s", prompt)
 	}
 }
