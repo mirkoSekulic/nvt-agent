@@ -18,6 +18,9 @@ spec:
     user: non-root
   image: nvt-agent-runtime:latest
   runtimeClassName: kata-vm-isolation
+  resources:
+    requests: {cpu: "2", memory: 8Gi}
+    limits: {cpu: "2", memory: 8Gi}
   tolerations:
     - key: purpose
       operator: Equal
@@ -83,7 +86,8 @@ custody and placeholders instead.
 
 `image` selects the runtime image. `runtimeClassName` requests a runtime handler;
 the cluster's RuntimeClass scheduling configuration may select the node/runtime
-environment. `tolerations` optionally permits only the generated agent Pod to
+environment. `resources` is applied to the agent container; VM-backed runtimes
+can use its limits to size the Pod VM. `tolerations` optionally permits only the generated agent Pod to
 schedule onto matching tainted nodes, but a toleration does not select a node or
 remove the taint. The separate egress service Pod and platform Deployments do
 not inherit AgentRun tolerations.

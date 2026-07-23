@@ -129,6 +129,10 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	agentRun := testAgentRun()
 	runtimeClassName := "kata-vm-isolation"
 	agentRun.Spec.RuntimeClassName = &runtimeClassName
+	agentRun.Spec.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
+	}
 	tolerationSeconds := int64(120)
 	agentRun.Spec.Tolerations = []corev1.Toleration{{
 		Key: "purpose", Operator: corev1.TolerationOpEqual, Value: "nvt-agent",
@@ -176,6 +180,13 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	}
 
 	agentContainer := requireContainer(t, pod, "agent")
+	if !reflect.DeepEqual(agentContainer.Resources, agentRun.Spec.Resources) {
+		t.Fatalf("expected agent resources %#v, got %#v", agentRun.Spec.Resources, agentContainer.Resources)
+	}
+	agentContainer.Resources.Limits[corev1.ResourceMemory] = resource.MustParse("1Gi")
+	if agentRun.Spec.Resources.Limits.Memory().Cmp(resource.MustParse("8Gi")) != 0 {
+		t.Fatal("desired Pod resources alias AgentRun API storage")
+	}
 	if agentContainer.Image != agentRun.Spec.Image {
 		t.Fatalf("expected agent image %q, got %q", agentRun.Spec.Image, agentContainer.Image)
 	}
@@ -312,10 +323,17 @@ func TestWorkspaceValidation(t *testing.T) {
 func TestPersistentWorkspaceDeepCopyDoesNotAliasQuantity(t *testing.T) {
 	run := testAgentRun()
 	run.Spec.Workspace = persistentWorkspace("5Gi", "")
+	run.Spec.Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")},
+	}
 	copy := run.DeepCopyObject().(*nvtv1alpha1.AgentRun)
 	copy.Spec.Workspace.Size.Add(resource.MustParse("1Gi"))
+	copy.Spec.Resources.Limits[corev1.ResourceMemory] = resource.MustParse("1Gi")
 	if run.Spec.Workspace.Size.Cmp(resource.MustParse("5Gi")) != 0 || copy.Spec.Workspace.Size.Cmp(resource.MustParse("6Gi")) != 0 {
 		t.Fatalf("workspace quantity was aliased: original=%s copy=%s", run.Spec.Workspace.Size, copy.Spec.Workspace.Size)
+	}
+	if run.Spec.Resources.Limits.Memory().Cmp(resource.MustParse("8Gi")) != 0 {
+		t.Fatal("resource requirements were aliased")
 	}
 }
 
