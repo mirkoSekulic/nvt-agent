@@ -28,10 +28,13 @@ Fields:
 - `message`: prompt text.
 
 Before acknowledging the request as queued, `agentd` waits for the configured
-tmux session to exist continuously for a bounded startup grace. This generic
-gate prevents prompt events and injection while the session target is still in
-its initial startup window; it does not inspect provider-specific terminal
-output. If readiness is not reached within the bounded wait, the request fails
+tmux session and a launcher-owned generation marker. The launcher publishes the
+marker only after its fast-exit stability check completes; `agentd` then starts
+a separate bounded, continuous-session startup grace. This generic gate
+prevents prompt events and injection while the session target is still in its
+initial startup window; it does not inspect provider-specific terminal output.
+The request wait includes scheduling/poll margin beyond the maximum configured
+grace. If readiness is not reached within that bounded wait, the request fails
 without a prompt ID or queued/injected event, allowing an idempotent caller to
 retry.
 

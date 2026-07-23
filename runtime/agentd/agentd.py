@@ -17,20 +17,30 @@ RESERVED_EVENT_PREFIXES = ("agentd.", "health.", "prompt.", "session.")
 DEFAULT_SESSION_STARTUP_GRACE_SECONDS = 5.0
 MAX_SESSION_STARTUP_GRACE_SECONDS = 30.0
 MIN_SESSION_READY_WAIT_SECONDS = 1.0
+SESSION_READY_WAIT_MARGIN_RATIO = 0.2
 SESSION_MONITOR_INTERVAL_SECONDS = 0.1
 
 
 class Agentd:
-    def __init__(self, socket_path, state_dir, session, prompt_buffer, session_startup_grace_seconds):
+    def __init__(
+        self,
+        socket_path,
+        state_dir,
+        session,
+        prompt_buffer,
+        session_startup_grace_seconds,
+        session_ready_marker,
+    ):
         self.socket_path = Path(socket_path)
         self.state_dir = Path(state_dir)
         self.session = session
         self.prompt_buffer = prompt_buffer
         self.session_startup_grace_seconds = session_startup_grace_seconds
-        self.session_ready_wait_seconds = max(
+        self.session_ready_wait_seconds = session_startup_grace_seconds + max(
             MIN_SESSION_READY_WAIT_SECONDS,
-            min(MAX_SESSION_STARTUP_GRACE_SECONDS, session_startup_grace_seconds * 2),
+            session_startup_grace_seconds * SESSION_READY_WAIT_MARGIN_RATIO,
         )
+        self.session_ready_marker = Path(session_ready_marker)
         self.queue = queue.Queue()
         self.enqueue_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -154,14 +164,19 @@ class Agentd:
 
     def monitor_session_readiness(self):
         observed_at = None
+        observed_generation = None
         while not self.stop_event.is_set():
-            if tmux_session_exists(self.session):
-                if observed_at is None:
+            generation = file_generation(self.session_ready_marker)
+            if tmux_session_exists(self.session) and generation is not None:
+                if generation != observed_generation:
+                    observed_generation = generation
                     observed_at = time.monotonic()
+                    self.session_ready_event.clear()
                 if time.monotonic() - observed_at >= self.session_startup_grace_seconds:
                     self.session_ready_event.set()
             else:
                 observed_at = None
+                observed_generation = None
                 self.session_ready_event.clear()
             self.stop_event.wait(SESSION_MONITOR_INTERVAL_SECONDS)
 
@@ -233,6 +248,16 @@ def tmux_session_exists(session):
     return result.returncode == 0
 
 
+def file_generation(path):
+    try:
+        stat = path.stat()
+    except (FileNotFoundError, OSError):
+        return None
+    if not path.is_file():
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
 def bounded_startup_grace(value):
     try:
         parsed = float(value)
@@ -266,6 +291,7 @@ def main():
     parser.add_argument("--state-dir", default=os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
     parser.add_argument("--session", default=os.environ.get("AGENT_SESSION", "agent"))
     parser.add_argument("--prompt-buffer", default=os.environ.get("AGENT_PROMPT_BUFFER", "agent-prompt"))
+    parser.add_argument("--session-ready-marker", default=os.environ.get("NVT_AGENT_SESSION_READY_MARKER"))
     parser.add_argument(
         "--session-startup-grace-seconds",
         type=bounded_startup_grace,
@@ -274,6 +300,7 @@ def main():
         ),
     )
     args = parser.parse_args()
+    session_ready_marker = args.session_ready_marker or str(Path(args.state_dir) / "agentd" / "session-launched")
 
     agentd = Agentd(
         args.socket,
@@ -281,6 +308,7 @@ def main():
         args.session,
         args.prompt_buffer,
         args.session_startup_grace_seconds,
+        session_ready_marker,
     )
 
     def handle_signal(_signum, _frame):

@@ -23,6 +23,7 @@ type fixture struct {
 	socket       string
 	state        string
 	session      string
+	readyMarker  string
 	startupGrace string
 	cmd          *exec.Cmd
 }
@@ -47,6 +48,22 @@ func TestHealthAndStatus(t *testing.T) {
 	assertNumber(t, status, "uptime_seconds")
 	if status["session"] != f.session {
 		t.Fatalf("expected session %q, got %#v", f.session, status["session"])
+	}
+}
+
+func TestMaximumSessionStartupGraceHasCallerMargin(t *testing.T) {
+	root := repoRoot(t)
+	temp := t.TempDir()
+	script := `import runpy,sys
+m=runpy.run_path(sys.argv[1])
+a=m["Agentd"](sys.argv[2],sys.argv[3],"test","buffer",30,sys.argv[4])
+assert a.session_ready_wait_seconds > 30, a.session_ready_wait_seconds
+`
+	cmd := exec.Command("python3", "-c", script,
+		filepath.Join(root, "runtime", "agentd", "agentd.py"),
+		filepath.Join(temp, "agentd.sock"), temp, filepath.Join(temp, "session-launched"))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("maximum startup grace has no caller margin: %v\n%s", err, output)
 	}
 }
 
@@ -116,6 +133,7 @@ func TestPromptWaitsForContinuouslyReadySession(t *testing.T) {
 		t.Fatalf("start delayed tmux target: %v\n%s", err, output)
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", f.session).Run() })
+	writeSessionReadyMarker(t, f.readyMarker)
 
 	sentinel := "nvt-agentd-delayed-ready-" + uniqueID()
 	response := make(chan map[string]any, 1)
@@ -487,11 +505,13 @@ func startFixtureWithGrace(t *testing.T, startTmux bool, startupGrace string) *f
 		socket:       filepath.Join(temp, "agentd.sock"),
 		state:        filepath.Join(temp, "state"),
 		session:      "nvt-agentd-" + uniqueID(),
+		readyMarker:  filepath.Join(temp, "state", "agentd", "session-launched"),
 		startupGrace: startupGrace,
 	}
 
 	if startTmux {
 		startTmuxCat(t, f.session)
+		writeSessionReadyMarker(t, f.readyMarker)
 		t.Cleanup(func() {
 			_ = exec.Command("tmux", "kill-session", "-t", f.session).Run()
 		})
@@ -528,8 +548,19 @@ func (f *fixture) env() []string {
 		"NVT_AGENTD_SOCKET=" + f.socket,
 		"NVT_STATE_DIR=" + f.state,
 		"AGENT_SESSION=" + f.session,
+		"NVT_AGENT_SESSION_READY_MARKER=" + f.readyMarker,
 		"NVT_AGENT_SESSION_STARTUP_GRACE_SECONDS=" + f.startupGrace,
 		"TERM=screen",
+	}
+}
+
+func writeSessionReadyMarker(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("launched\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
