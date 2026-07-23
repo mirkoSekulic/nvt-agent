@@ -29,5 +29,14 @@ Delivery failures from `agentdctl prompt` are retried for a short bounded
 period to tolerate agent startup races. Config validation failures and a missing
 `agentdctl` executable fail immediately.
 
+`agentd` accepts a prompt only after the configured tmux session has existed
+continuously for a bounded startup grace (five seconds by default). This is a
+runtime-agnostic readiness gate: it avoids treating early tmux session creation
+as proof that the interactive target can already receive input, but it cannot
+observe a CLI-specific acknowledgement. The grace can be bounded between zero
+and 30 seconds with `NVT_AGENT_SESSION_STARTUP_GRACE_SECONDS`. No queued or
+injected event is emitted before the gate passes, and this plugin records its
+digest only after the queue request succeeds.
+
 AgentRun-generated configs can inject this plugin from `spec.prompt.text`.
 Normal local agents are unaffected unless they explicitly configure this plugin.

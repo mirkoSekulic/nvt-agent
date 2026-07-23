@@ -14,16 +14,28 @@ from pathlib import Path
 
 
 RESERVED_EVENT_PREFIXES = ("agentd.", "health.", "prompt.", "session.")
+DEFAULT_SESSION_STARTUP_GRACE_SECONDS = 5.0
+MAX_SESSION_STARTUP_GRACE_SECONDS = 30.0
+MIN_SESSION_READY_WAIT_SECONDS = 1.0
+SESSION_MONITOR_INTERVAL_SECONDS = 0.1
 
 
 class Agentd:
-    def __init__(self, socket_path, state_dir, session, prompt_buffer):
+    def __init__(self, socket_path, state_dir, session, prompt_buffer, session_startup_grace_seconds):
         self.socket_path = Path(socket_path)
         self.state_dir = Path(state_dir)
         self.session = session
         self.prompt_buffer = prompt_buffer
+        self.session_startup_grace_seconds = session_startup_grace_seconds
+        self.session_ready_wait_seconds = max(
+            MIN_SESSION_READY_WAIT_SECONDS,
+            min(MAX_SESSION_STARTUP_GRACE_SECONDS, session_startup_grace_seconds * 2),
+        )
         self.queue = queue.Queue()
+        self.enqueue_lock = threading.Lock()
         self.stop_event = threading.Event()
+        self.session_ready_event = threading.Event()
+        self.session_monitor = threading.Thread(target=self.monitor_session_readiness, daemon=True)
         self.started_at = time.time()
         self.last_error = None
         self.worker = threading.Thread(target=self.prompt_worker, daemon=True)
@@ -56,6 +68,7 @@ class Agentd:
         os.chmod(self.socket_path, 0o600)
         self.server_socket.listen(50)
         self.server_socket.settimeout(0.25)
+        self.session_monitor.start()
         self.worker.start()
         self.log_event("agentd.started", socket=str(self.socket_path), session=self.session)
 
@@ -124,17 +137,33 @@ class Agentd:
         source = string_value(request.get("source"), "source", default="unknown")
         message = string_value(request.get("message"), "message", required=True)
         external = bool(request.get("external", False))
-        prompt_id = f"prm_{uuid.uuid4().hex}"
-        item = {
-            "id": prompt_id,
-            "source": source,
-            "external": external,
-            "message": message,
-            "created_at": time.time(),
-        }
-        self.queue.put(item)
-        self.log_event("prompt.queued", prompt_id=prompt_id, source=source, external=external)
+        with self.enqueue_lock:
+            if not self.session_ready_event.wait(timeout=self.session_ready_wait_seconds):
+                raise RuntimeError("agent session did not become input-ready within the bounded startup window")
+            prompt_id = f"prm_{uuid.uuid4().hex}"
+            item = {
+                "id": prompt_id,
+                "source": source,
+                "external": external,
+                "message": message,
+                "created_at": time.time(),
+            }
+            self.queue.put(item)
+            self.log_event("prompt.queued", prompt_id=prompt_id, source=source, external=external)
         return {"ok": True, "id": prompt_id, "status": "queued"}
+
+    def monitor_session_readiness(self):
+        observed_at = None
+        while not self.stop_event.is_set():
+            if tmux_session_exists(self.session):
+                if observed_at is None:
+                    observed_at = time.monotonic()
+                if time.monotonic() - observed_at >= self.session_startup_grace_seconds:
+                    self.session_ready_event.set()
+            else:
+                observed_at = None
+                self.session_ready_event.clear()
+            self.stop_event.wait(SESSION_MONITOR_INTERVAL_SECONDS)
 
     def publish_event(self, request):
         source = string_value(request.get("source"), "source", required=True)
@@ -204,6 +233,18 @@ def tmux_session_exists(session):
     return result.returncode == 0
 
 
+def bounded_startup_grace(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("session startup grace must be a number") from error
+    if parsed < 0 or parsed > MAX_SESSION_STARTUP_GRACE_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"session startup grace must be between 0 and {MAX_SESSION_STARTUP_GRACE_SECONDS:g} seconds"
+        )
+    return parsed
+
+
 def format_prompt(item):
     if not item["external"]:
         return item["message"]
@@ -225,9 +266,22 @@ def main():
     parser.add_argument("--state-dir", default=os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
     parser.add_argument("--session", default=os.environ.get("AGENT_SESSION", "agent"))
     parser.add_argument("--prompt-buffer", default=os.environ.get("AGENT_PROMPT_BUFFER", "agent-prompt"))
+    parser.add_argument(
+        "--session-startup-grace-seconds",
+        type=bounded_startup_grace,
+        default=bounded_startup_grace(
+            os.environ.get("NVT_AGENT_SESSION_STARTUP_GRACE_SECONDS", DEFAULT_SESSION_STARTUP_GRACE_SECONDS)
+        ),
+    )
     args = parser.parse_args()
 
-    agentd = Agentd(args.socket, args.state_dir, args.session, args.prompt_buffer)
+    agentd = Agentd(
+        args.socket,
+        args.state_dir,
+        args.session,
+        args.prompt_buffer,
+        args.session_startup_grace_seconds,
+    )
 
     def handle_signal(_signum, _frame):
         agentd.stop()

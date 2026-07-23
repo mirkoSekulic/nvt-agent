@@ -514,7 +514,10 @@ health --json
 
 Docker uses it through the image `HEALTHCHECK`. In Docker Compose this marks the
 container `healthy` or `unhealthy`; it does not restart the container by itself.
-The same command can later be used by a Kubernetes `readinessProbe`.
+Kubernetes AgentRun Pods use the same command as the agent-container readiness
+probe, so the gateway does not route a session until code-server, agentd, the
+tmux agent session, and readiness-blocking plugins are ready. It is not a
+liveness probe and does not restart a slow bootstrap.
 
 After startup has established the configured tmux agent session, PID 1 also
 supervises that session. If it disappears unexpectedly, the main agent

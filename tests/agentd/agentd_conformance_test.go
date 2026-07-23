@@ -18,12 +18,13 @@ import (
 )
 
 type fixture struct {
-	t       *testing.T
-	root    string
-	socket  string
-	state   string
-	session string
-	cmd     *exec.Cmd
+	t            *testing.T
+	root         string
+	socket       string
+	state        string
+	session      string
+	startupGrace string
+	cmd          *exec.Cmd
 }
 
 // These tests intentionally avoid t.Parallel because agentd talks to the
@@ -103,6 +104,65 @@ func TestPromptInjectionExternalTrueAndFIFO(t *testing.T) {
 	if strings.Index(pane, first) > strings.Index(pane, second) {
 		t.Fatalf("expected FIFO prompt order:\n%s", pane)
 	}
+}
+
+func TestPromptWaitsForContinuouslyReadySession(t *testing.T) {
+	f := startFixtureWithGrace(t, false, "0.8")
+	readyMarker := filepath.Join(f.state, "target-ready")
+	command := fmt.Sprintf("sleep 0.1; touch %s; exec cat", shellQuote(readyMarker))
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", f.session, "sh", "-c", command)
+	cmd.Env = append(os.Environ(), "TERM=screen")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("start delayed tmux target: %v\n%s", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", f.session).Run() })
+
+	sentinel := "nvt-agentd-delayed-ready-" + uniqueID()
+	response := make(chan map[string]any, 1)
+	requestError := make(chan error, 1)
+	go func() {
+		result, err := f.tryRequest(map[string]any{
+			"type":     "prompt",
+			"source":   "test",
+			"external": false,
+			"message":  sentinel,
+		})
+		if err != nil {
+			requestError <- err
+			return
+		}
+		response <- result
+	}()
+
+	waitFor(t, 2*time.Second, func() bool {
+		_, err := os.Stat(readyMarker)
+		return err == nil
+	})
+	select {
+	case result := <-response:
+		t.Fatalf("prompt was accepted before the continuous startup grace: %#v", result)
+	case err := <-requestError:
+		t.Fatalf("prompt request failed before startup grace: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	for _, event := range readEvents(t, f.eventsPath()) {
+		if event["event"] == "prompt.queued" || event["event"] == "prompt.injected" {
+			t.Fatalf("prompt event emitted before readiness gate: %#v", event)
+		}
+	}
+
+	select {
+	case result := <-response:
+		assertOK(t, result)
+	case err := <-requestError:
+		t.Fatalf("prompt request failed after startup grace: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt was not accepted after the bounded startup grace")
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(capturePane(t, f.session), sentinel) &&
+			countEvents(t, f.eventsPath(), "prompt.injected") == 1
+	})
 }
 
 func TestPromptMissingMessageFails(t *testing.T) {
@@ -198,20 +258,19 @@ func TestPromptFailureWhenTmuxSessionMissing(t *testing.T) {
 	f := startFixture(t, false)
 	sentinel := "nvt-agentd-missing-session-" + uniqueID()
 
-	assertOK(t, f.request(map[string]any{
+	response := f.request(map[string]any{
 		"type":     "prompt",
 		"source":   "plugin:smoke",
 		"external": false,
 		"message":  sentinel,
-	}))
-
-	waitFor(t, 3*time.Second, func() bool {
-		return countEvents(t, f.eventsPath(), "prompt.failed") > 0
 	})
-	status := f.request(map[string]any{"type": "status"})
-	assertOK(t, status)
-	if status["last_error"] == nil || status["last_error"] == "" {
-		t.Fatalf("expected last_error after failed prompt, got %#v", status)
+	if response["ok"] != false || !strings.Contains(fmt.Sprint(response["error"]), "bounded startup window") {
+		t.Fatalf("expected bounded readiness failure, got %#v", response)
+	}
+	for _, event := range readEvents(t, f.eventsPath()) {
+		if event["event"] == "prompt.queued" || event["event"] == "prompt.injected" || event["event"] == "prompt.failed" {
+			t.Fatalf("missing session must not create a prompt record: %#v", event)
+		}
 	}
 }
 
@@ -411,6 +470,10 @@ func TestSignalPublishesAdvisoryAgentSignal(t *testing.T) {
 }
 
 func startFixture(t *testing.T, startTmux bool) *fixture {
+	return startFixtureWithGrace(t, startTmux, "0")
+}
+
+func startFixtureWithGrace(t *testing.T, startTmux bool, startupGrace string) *fixture {
 	t.Helper()
 	root := repoRoot(t)
 	temp, err := os.MkdirTemp("", "nvt-agentd-*")
@@ -419,11 +482,12 @@ func startFixture(t *testing.T, startTmux bool) *fixture {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(temp) })
 	f := &fixture{
-		t:       t,
-		root:    root,
-		socket:  filepath.Join(temp, "agentd.sock"),
-		state:   filepath.Join(temp, "state"),
-		session: "nvt-agentd-" + uniqueID(),
+		t:            t,
+		root:         root,
+		socket:       filepath.Join(temp, "agentd.sock"),
+		state:        filepath.Join(temp, "state"),
+		session:      "nvt-agentd-" + uniqueID(),
+		startupGrace: startupGrace,
 	}
 
 	if startTmux {
@@ -464,6 +528,7 @@ func (f *fixture) env() []string {
 		"NVT_AGENTD_SOCKET=" + f.socket,
 		"NVT_STATE_DIR=" + f.state,
 		"AGENT_SESSION=" + f.session,
+		"NVT_AGENT_SESSION_STARTUP_GRACE_SECONDS=" + f.startupGrace,
 		"TERM=screen",
 	}
 }
