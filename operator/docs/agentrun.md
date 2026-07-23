@@ -71,6 +71,15 @@ runtime:
 `non-root` runs as uid/gid 1000 with `HOME=/home/agent` and passwordless sudo.
 Root remains the compatibility default.
 
+The operator translates the typed runtime selection into the generic command
+contract consumed by runtime bootstrap. `trusted-local` adds
+`--sandbox danger-full-access --ask-for-approval never` for Codex and
+`--dangerously-skip-permissions` for Claude; `interactive` adds no autonomy
+arguments. An explicitly configured `agent.config.runtime.args` list is a
+complete override and is preserved exactly, so the operator never appends
+potentially contradictory defaults. An explicit non-empty
+`agent.config.runtime.command` is likewise preserved.
+
 Optional `runtimeAuth` copies files from a same-namespace Secret into a
 writable runtime home:
 

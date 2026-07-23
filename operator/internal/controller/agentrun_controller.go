@@ -3155,6 +3155,15 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 			WorkingDir:      workspaceMountPath,
 			Env:             agentEnv,
 			VolumeMounts:    agentVolumeMounts,
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{
+					Command: []string{"/usr/local/bin/health"},
+				}},
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+				TimeoutSeconds:      2,
+				FailureThreshold:    12,
+			},
 		},
 	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated {
@@ -4013,15 +4022,19 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 
 	if promptText := AgentRunPromptText(agentRun); promptText != "" ||
 		AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated ||
-		AgentRunNeedsRuntimePreseed(agentRun) {
+		AgentRunNeedsRuntimeRendering(agentRun) {
 		config := map[string]any{}
 		if err := yaml.Unmarshal(rawConfig, &config); err != nil {
 			return "", fmt.Errorf("render AgentRun agent config: %w", err)
 		}
 		renderedConfig := config
+		var err error
+		renderedConfig, err = InjectAgentRunRuntimeConfig(renderedConfig, agentRun)
+		if err != nil {
+			return "", err
+		}
 		renderedConfig = InjectRuntimePreseed(renderedConfig, agentRun)
 		if promptText != "" {
-			var err error
 			renderedConfig, err = InjectInitialPromptPlugin(renderedConfig, promptText)
 			if err != nil {
 				return "", err
@@ -4050,6 +4063,63 @@ func RenderAgentConfigYAML(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	}
 
 	return string(rendered), nil
+}
+
+func AgentRunNeedsRuntimeRendering(agentRun *nvtv1alpha1.AgentRun) bool {
+	return agentRun.Spec.Runtime.Type != "" || agentRun.Spec.Runtime.Autonomy != ""
+}
+
+// InjectAgentRunRuntimeConfig translates the typed runtime selection into the
+// generic runtime command contract consumed by bootstrap. Explicit runtime.args
+// are an intentional complete override and are preserved byte-for-byte; when
+// args are omitted, the operator supplies the established autonomy defaults.
+func InjectAgentRunRuntimeConfig(config map[string]any, agentRun *nvtv1alpha1.AgentRun) (map[string]any, error) {
+	runtimeConfig, exists := config["runtime"].(map[string]any)
+	if !exists {
+		if config["runtime"] != nil {
+			return nil, fmt.Errorf("render AgentRun agent config: runtime must be an object")
+		}
+		runtimeConfig = map[string]any{}
+	}
+	runtimeConfig = cloneStringAnyMap(runtimeConfig)
+	runtimeType := agentRun.Spec.Runtime.Type
+	if runtimeType != "codex" && runtimeType != "claude" {
+		return nil, fmt.Errorf("render AgentRun agent config: unsupported spec.runtime.type %q", runtimeType)
+	}
+	if command, present := runtimeConfig["command"]; present {
+		if value, ok := command.(string); !ok || strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("render AgentRun agent config: runtime.command must be a non-empty string")
+		}
+	} else {
+		runtimeConfig["command"] = runtimeType
+	}
+	if rawArgs, explicit := runtimeConfig["args"]; explicit {
+		args, ok := rawArgs.([]any)
+		if !ok {
+			return nil, fmt.Errorf("render AgentRun agent config: runtime.args must be a list of strings")
+		}
+		for _, rawArg := range args {
+			if _, ok := rawArg.(string); !ok {
+				return nil, fmt.Errorf("render AgentRun agent config: runtime.args must be a list of strings")
+			}
+		}
+	} else {
+		switch agentRun.Spec.Runtime.Autonomy {
+		case "trusted-local":
+			if runtimeType == "codex" {
+				runtimeConfig["args"] = []any{"--sandbox", "danger-full-access", "--ask-for-approval", "never"}
+			} else {
+				runtimeConfig["args"] = []any{"--dangerously-skip-permissions"}
+			}
+		case "interactive":
+			runtimeConfig["args"] = []any{}
+		default:
+			return nil, fmt.Errorf("render AgentRun agent config: unsupported spec.runtime.autonomy %q", agentRun.Spec.Runtime.Autonomy)
+		}
+	}
+	updated := cloneStringAnyMap(config)
+	updated["runtime"] = runtimeConfig
+	return updated, nil
 }
 
 func AgentRunNeedsRuntimePreseed(agentRun *nvtv1alpha1.AgentRun) bool {

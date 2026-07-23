@@ -1497,6 +1497,55 @@ runtime:
 	}
 }
 
+func TestBootstrapPersistsRenderedRuntimeCommandArguments(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+	}{
+		{
+			name:    "codex trusted local",
+			command: "codex",
+			args:    []string{"--sandbox", "danger-full-access", "--ask-for-approval", "never"},
+		},
+		{
+			name:    "claude trusted local",
+			command: "claude",
+			args:    []string{"--dangerously-skip-permissions"},
+		},
+		{
+			name:    "interactive",
+			command: "codex",
+			args:    []string{},
+		},
+		{
+			name:    "explicit override",
+			command: "custom-codex-wrapper",
+			args:    []string{"--model", "gpt-test", "--ask-for-approval", "on-request"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t)
+			encodedArgs, err := json.Marshal(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := f.writeAgentConfig("runtime:\n  command: " + test.command + "\n  args: " + string(encodedArgs) + "\n")
+			f.runWithEnv("python3 "+shellQuote(filepath.Join(f.root, "runtime", "core", "bootstrap.py")), true, nil, config)
+
+			var actual struct {
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+			}
+			decodeJSONFile(t, filepath.Join(f.home, ".nvt-agent", "agent-command.json"), &actual)
+			if actual.Command != test.command || !reflect.DeepEqual(actual.Args, test.args) {
+				t.Fatalf("unexpected agent command: %#v", actual)
+			}
+		})
+	}
+}
+
 // TestBootstrapRejectsInvalidRuntimeUser pins the runtime.user validation.
 func TestBootstrapRejectsInvalidRuntimeUser(t *testing.T) {
 	f := newFixture(t)

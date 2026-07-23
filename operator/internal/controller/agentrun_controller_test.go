@@ -3605,6 +3605,79 @@ func TestRenderAgentConfigYAMLInjectsInitialPromptPlugin(t *testing.T) {
 	}
 }
 
+func TestRenderAgentConfigYAMLAppliesRuntimeAutonomy(t *testing.T) {
+	tests := []struct {
+		name     string
+		runtime  nvtv1alpha1.AgentRunRuntime
+		config   string
+		command  string
+		wantArgs []any
+	}{
+		{
+			name:     "codex trusted local",
+			runtime:  nvtv1alpha1.AgentRunRuntime{Type: "codex", Autonomy: "trusted-local"},
+			config:   `{}`,
+			command:  "codex",
+			wantArgs: []any{"--sandbox", "danger-full-access", "--ask-for-approval", "never"},
+		},
+		{
+			name:     "claude trusted local",
+			runtime:  nvtv1alpha1.AgentRunRuntime{Type: "claude", Autonomy: "trusted-local"},
+			config:   `{"runtime":{"command":"claude"}}`,
+			command:  "claude",
+			wantArgs: []any{"--dangerously-skip-permissions"},
+		},
+		{
+			name:     "interactive",
+			runtime:  nvtv1alpha1.AgentRunRuntime{Type: "codex", Autonomy: "interactive"},
+			config:   `{"runtime":{"command":"codex"}}`,
+			command:  "codex",
+			wantArgs: []any{},
+		},
+		{
+			name:     "explicit args are complete override",
+			runtime:  nvtv1alpha1.AgentRunRuntime{Type: "codex", Autonomy: "trusted-local"},
+			config:   `{"runtime":{"command":"custom-codex-wrapper","args":["--model","gpt-test","--ask-for-approval","on-request"]}}`,
+			command:  "custom-codex-wrapper",
+			wantArgs: []any{"--model", "gpt-test", "--ask-for-approval", "on-request"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agentRun := testAgentRun()
+			agentRun.Spec.Runtime = test.runtime
+			agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(test.config)}
+			rendered, err := RenderAgentConfigYAML(agentRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := parseAgentConfigYAML(t, rendered)
+			runtimeConfig, ok := config["runtime"].(map[string]any)
+			if !ok || runtimeConfig["command"] != test.command || !reflect.DeepEqual(runtimeConfig["args"], test.wantArgs) {
+				t.Fatalf("unexpected runtime config: %#v\n%s", runtimeConfig, rendered)
+			}
+		})
+	}
+}
+
+func TestDesiredAgentPodUsesRuntimeHealthReadinessProbe(t *testing.T) {
+	pod, err := DesiredAgentPod(testAgentRun(), testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := pod.Spec.Containers[0]
+	probe := agent.ReadinessProbe
+	if probe == nil || probe.Exec == nil || !reflect.DeepEqual(probe.Exec.Command, []string{"/usr/local/bin/health"}) {
+		t.Fatalf("agent readiness probe does not use runtime health: %#v", probe)
+	}
+	if probe.InitialDelaySeconds != 5 || probe.PeriodSeconds != 5 || probe.TimeoutSeconds != 2 || probe.FailureThreshold != 12 {
+		t.Fatalf("unexpected bounded readiness timing: %#v", probe)
+	}
+	if agent.LivenessProbe != nil || pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatalf("readiness must not restart a slow or failed agent: liveness=%#v restart=%s", agent.LivenessProbe, pod.Spec.RestartPolicy)
+	}
+}
+
 func TestRenderAgentConfigYAMLInjectsInitialPromptPluginWhenPluginsMissing(t *testing.T) {
 	agentRun := testAgentRun()
 	agentRun.Spec.Agent.Config = apiextensionsv1.JSON{Raw: []byte(`{"codeServer": {"enabled": true}}`)}

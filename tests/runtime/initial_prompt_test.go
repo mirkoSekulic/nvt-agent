@@ -1,14 +1,143 @@
 package runtime_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
+
+func TestInitialPromptWaitsForPostLaunchSessionReadiness(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is unavailable; post-launch initial-prompt integration test skipped")
+	}
+	f := newFixture(t)
+	tmuxDir := filepath.Join(f.home, "tmux")
+	if err := os.MkdirAll(tmuxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	session := "nvt-initial-prompt-" + strings.ReplaceAll(t.Name(), "/", "-")
+	socket := filepath.Join(f.home, "agentd.sock")
+	readyMarker := filepath.Join(f.state, "agentd", "session-launched")
+	env := append(f.env(),
+		"TMUX_TMPDIR="+tmuxDir,
+		"AGENT_SESSION="+session,
+		"NVT_AGENTD_SOCKET="+socket,
+		"NVT_AGENT_SESSION_READY_MARKER="+readyMarker,
+		"NVT_AGENT_SESSION_STARTUP_GRACE_SECONDS=0.8",
+	)
+
+	envPath := filepath.Join(f.home, ".nvt-agent", "env")
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envPath, []byte(
+		"export NVT_WORKSPACE="+shellQuote(f.workspace)+"\n"+
+			"export PATH="+shellQuote(f.pathPrefix+string(os.PathListSeparator)+os.Getenv("PATH"))+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commandPath := filepath.Join(f.home, ".nvt-agent", "agent-command.json")
+	if err := os.WriteFile(commandPath, []byte(`{"command":"sleep","args":["30"]}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.writeBin("agentdctl", "#!/usr/bin/env bash\nexec python3 "+shellQuote(filepath.Join(f.root, "runtime", "agentd", "agentdctl.py"))+" \"$@\"\n")
+
+	agentd := exec.Command("python3", filepath.Join(f.root, "runtime", "agentd", "agentd.py"))
+	agentd.Env = mergedEnv(env)
+	agentdOutput := &bytes.Buffer{}
+	agentd.Stdout = agentdOutput
+	agentd.Stderr = agentdOutput
+	if err := agentd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if agentd.ProcessState == nil {
+			_ = agentd.Process.Signal(syscall.SIGTERM)
+			done := make(chan error, 1)
+			go func() { done <- agentd.Wait() }()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				_ = agentd.Process.Kill()
+				<-done
+			}
+		}
+		kill := exec.Command(tmux, "kill-session", "-t", session)
+		kill.Env = mergedEnv(env)
+		_ = kill.Run()
+	})
+	waitForFile(t, socket, 3*time.Second)
+
+	launcherStarted := time.Now()
+	launcher := commandWithEnv("bash "+shellQuote(filepath.Join(f.root, "runtime", "core", "start-agent-session.sh")), env)
+	if output, err := launcher.CombinedOutput(); err != nil {
+		t.Fatalf("start agent session: %v\n%s", err, output)
+	}
+	if elapsed := time.Since(launcherStarted); elapsed < 4500*time.Millisecond {
+		t.Fatalf("launcher did not exercise its existing five-second stability check: %s", elapsed)
+	}
+	if _, err := os.Stat(readyMarker); err != nil {
+		t.Fatalf("launcher did not publish post-launch readiness marker: %v", err)
+	}
+
+	sentinel := "post-launch-readiness-" + strings.ReplaceAll(t.Name(), "/", "-")
+	agentConfig := f.writeAgentConfig(fmt.Sprintf(`
+plugins:
+  - name: initial-prompt
+    source: custom
+    command: %s
+    when: after-agent
+    restart: never
+    config:
+      text: %s
+`, quoteYAML(initialPromptRunBin(f.root)), quoteYAML(sentinel)))
+	afterAgent := commandWithEnv(runPluginsBin(f.root), env, "after-agent", agentConfig)
+	afterOutput := &bytes.Buffer{}
+	afterAgent.Stdout = afterOutput
+	afterAgent.Stderr = afterOutput
+	if err := afterAgent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- afterAgent.Wait() }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("after-agent prompt bypassed the post-launch grace: %v\n%s", err, afterOutput.String())
+	case <-time.After(250 * time.Millisecond):
+	}
+	if events, err := os.ReadFile(filepath.Join(f.state, "agentd", "events.jsonl")); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(events), `"event":"prompt.queued"`) || strings.Contains(string(events), `"event":"prompt.injected"`) {
+		t.Fatalf("prompt event emitted before post-launch grace:\n%s", events)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("after-agent initial prompt failed: %v\n%s", err, afterOutput.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("after-agent initial prompt did not complete after post-launch grace\n%s", afterOutput.String())
+	}
+	events, err := os.ReadFile(filepath.Join(f.state, "agentd", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(events), `"event":"prompt.injected"`) {
+		t.Fatalf("prompt was not injected after post-launch grace:\n%s", events)
+	}
+	assertInitialPromptHash(t, f, sentinel)
+}
 
 func TestInitialPromptSendsPromptThroughAgentdctl(t *testing.T) {
 	f := newFixture(t)
