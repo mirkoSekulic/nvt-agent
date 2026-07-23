@@ -231,11 +231,18 @@ class ExecutableProviderAdapter(ProviderAdapter):
             "request_id": request_id, "grant": grant,
         })
         result = self._object(result, "injection.headers result")
-        self._require_keys(result, {"headers", "expires_at", "strip_request_headers"}, "injection.headers result")
+        self._require_keys(
+            result,
+            {"headers", "expires_at", "strip_request_headers"},
+            "injection.headers result",
+            optional={"append_headers"},
+        )
         self._string_map(result["headers"], "injection.headers result headers")
+        append_headers = result.get("append_headers", {})
+        self._string_map(append_headers, "injection.headers result append_headers")
         self._optional_string(result["expires_at"], "injection.headers result expires_at")
         self._string_list(result["strip_request_headers"], "injection.headers result strip_request_headers")
-        return result["headers"], result["expires_at"], result["strip_request_headers"]
+        return result["headers"], result["expires_at"], result["strip_request_headers"], append_headers
 
     def close(self):
         with self._lock:

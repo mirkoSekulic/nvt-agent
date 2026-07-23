@@ -789,12 +789,13 @@ class ClaudeOAuthProvider:
             agent_id, audit, request_id, "injection"
         )
         headers = {"authorization": f"Bearer {access_token}"}
-        headers.update(self.injection_extra_headers)
-        # Every injected name is stripped from the incoming request so the
-        # agent's placeholder version is removed before injection.
-        strip = list(headers.keys())
+        # Claude Code supplies version-specific feature betas. Preserve those
+        # client values and append the broker-required OAuth beta instead of
+        # replacing the complete anthropic-beta header.
+        append_headers = dict(self.injection_extra_headers)
+        strip = ["authorization"]
         expires_at = rfc3339(exp) if exp is not None else None
-        return headers, expires_at, strip
+        return headers, expires_at, strip, append_headers
 
     # --- manual refresh probe (broker-side operator tool) -------------------
 

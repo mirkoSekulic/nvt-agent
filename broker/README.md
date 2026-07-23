@@ -131,7 +131,9 @@ providers:
 `9d1c250a-e61b-44d9-88ed-5944d1962f5e`, the default `refresh-scope`, and
 `User-Agent: axios/1.15.2`. Refresh does not send `anthropic-beta`; that
 header belongs under `injection-extra-headers` when an injected API request
-requires it.
+requires it. Claude Code may send additional version-specific beta tokens;
+egressd preserves those client values and appends/deduplicates the configured
+non-secret feature tokens.
 These values are not user/subscription secrets and can be overridden with
 `token-url`, `client-id` / `client-id-env`, `refresh-scope` /
 `refresh-scope-env`, and `user-agent` if

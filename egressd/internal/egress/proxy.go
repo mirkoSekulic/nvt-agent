@@ -211,11 +211,35 @@ func (p *Proxy) buildOutbound(r *http.Request, material *Material) (*http.Reques
 	for name, value := range material.Headers {
 		outbound.Header.Set(name, value)
 	}
+	for name, value := range material.AppendHeaders {
+		appendHeaderTokens(outbound.Header, name, value)
+	}
 	if isUpgradeRequest(r) {
 		copyUpgradeHeaders(outbound.Header, r.Header)
 	}
 	outbound.Host = p.Route.Upstream
 	return outbound, nil
+}
+
+func appendHeaderTokens(header http.Header, name, value string) {
+	values := append([]string(nil), header.Values(name)...)
+	values = append(values, value)
+	seen := make(map[string]struct{})
+	tokens := make([]string, 0, len(values))
+	for _, current := range values {
+		for _, raw := range strings.Split(current, ",") {
+			token := strings.TrimSpace(raw)
+			if token == "" {
+				continue
+			}
+			if _, exists := seen[token]; exists {
+				continue
+			}
+			seen[token] = struct{}{}
+			tokens = append(tokens, token)
+		}
+	}
+	header.Set(name, strings.Join(tokens, ","))
 }
 
 func (p *Proxy) serveUpgrade(w http.ResponseWriter, r *http.Request, outbound *http.Request) {

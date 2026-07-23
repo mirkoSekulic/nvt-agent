@@ -78,7 +78,11 @@ class InProcessProviderAdapter(ProviderAdapter):
         return self._provider.placeholder_files(agent_id, audit, request_id, grant)
 
     def injection_headers(self, host, method, path, agent_id, audit, request_id, grant):
-        return self._provider.injection_headers(host, method, path, agent_id, audit, request_id, grant)
+        result = self._provider.injection_headers(host, method, path, agent_id, audit, request_id, grant)
+        if len(result) == 3:
+            headers, expires_at, strip = result
+            return headers, expires_at, strip, {}
+        return result
 
 
 def load_providers(config) -> dict[str, ProviderAdapter]:

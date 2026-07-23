@@ -161,8 +161,8 @@ func TestClaudeInjectionIsEgressIdentityScoped(t *testing.T) {
 		"path":       "/v1/messages",
 	}
 
-	// Paired egress: real Bearer token plus configured extra header, both
-	// stripped from the incoming request.
+	// Paired egress: replace the credential, but append the configured
+	// non-secret feature header without stripping Claude Code's own betas.
 	status, body := f.postJSONWithToken("frontend-egress-token", "/v1/injection/headers", req)
 	if status != http.StatusOK || body["ok"] != true {
 		t.Fatalf("paired egress must obtain injection headers: status=%d body=%v", status, body)
@@ -171,15 +171,19 @@ func TestClaudeInjectionIsEgressIdentityScoped(t *testing.T) {
 	if headers["authorization"] != "Bearer real-claude-access-token-secret" {
 		t.Fatalf("expected the real Bearer access token, got %v", headers["authorization"])
 	}
-	if headers["anthropic-beta"] != "oauth-2025-04-20" {
-		t.Fatalf("expected the configured anthropic-beta extra header, got %v", headers["anthropic-beta"])
+	if _, exists := headers["anthropic-beta"]; exists {
+		t.Fatalf("anthropic-beta must not use replacement semantics: %v", headers)
+	}
+	appendHeaders := body["append_headers"].(map[string]any)
+	if appendHeaders["anthropic-beta"] != "oauth-2025-04-20" {
+		t.Fatalf("expected the configured anthropic-beta append header, got %v", appendHeaders["anthropic-beta"])
 	}
 	strip := map[string]bool{}
 	for _, name := range body["strip_request_headers"].([]any) {
 		strip[name.(string)] = true
 	}
-	if !strip["authorization"] || !strip["anthropic-beta"] {
-		t.Fatalf("every injected header must be stripped, got %v", body["strip_request_headers"])
+	if !strip["authorization"] || strip["anthropic-beta"] {
+		t.Fatalf("only replacement headers may be stripped, got %v", body["strip_request_headers"])
 	}
 
 	mcpReq := map[string]any{
