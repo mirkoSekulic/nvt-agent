@@ -170,5 +170,5 @@ jobs:
           fi
 
           # The image steps have verified coordinated metadata and anonymous
-          # manifest access for all seven release tags.
+          # manifest access for all eight release tags.
           helm push "${package}" "oci://${repository}"

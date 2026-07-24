@@ -33,6 +33,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -84,6 +85,11 @@ const (
 	persistentStorageInitMountPath        = "/nvt-agent/persistent-storage"
 	persistentWorkspaceSubPath            = "workspace"
 	persistentHomeSubPath                 = "home"
+	dindStorageVolumeName                 = "docker-storage"
+	dindStorageMountPath                  = "/var/lib/nvt-dind"
+	dindDataRoot                          = "/var/lib/docker"
+	dindEntrypoint                        = "/usr/local/bin/nvt-dind-entrypoint"
+	dindReady                             = "/usr/local/bin/nvt-dind-ready"
 	workspacePVCReadyRequeue              = 2 * time.Second
 	terminalResourceCleanupRequeue        = 2 * time.Second
 	lifecycleReporterPlugin               = "lifecycle-termination"
@@ -130,6 +136,12 @@ const (
 	egressTokenKey                   = "NVT_EGRESS_BROKER_TOKEN"
 	defaultEgressdImage              = "nvt-egressd:latest"
 	defaultCapturedImage             = "nvt-captured:latest"
+	defaultDindImage                 = "nvt-dind:latest"
+	minimumDockerPVCSizeBytes  int64 = 1024 * 1024 * 1024
+	defaultDockerPVCSizeBytes  int64 = 20 * 1024 * 1024 * 1024
+	maximumDockerPVCSizeBytes  int64 = 1024 * 1024 * 1024 * 1024
+	dindImageCapacityPercent         = 90
+	dindStartupBudgetSeconds         = 15 * 60
 	capturedTransparentPort          = 15001
 	capturedExplicitPort             = 15002
 	capturedUID                int64 = 65532
@@ -355,7 +367,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if InitializeAgentRunStatus(&agentRun) {
 		conditionsChanged = true
 	}
-	workspaceResult, workspaceReferenceable, workspaceChanged, err := r.reconcileWorkspacePVC(ctx, &agentRun)
+	workspaceResult, workspaceReferenceable, workspaceBound, workspaceChanged, err := r.reconcileWorkspacePVC(ctx, &agentRun)
 	conditionsChanged = conditionsChanged || workspaceChanged
 	if err != nil || !workspaceReferenceable {
 		if conditionsChanged {
@@ -364,6 +376,31 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 		}
 		return workspaceResult, err
+	}
+	if AgentRunWorkspaceMode(&agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent {
+		if existingPod != nil && !podUsesDockerPVC(existingPod, DockerPVCName(agentRun.Name)) {
+			// Pods created before the dedicated Docker claim contract are
+			// create-once workloads. Preserve the live session and do not create
+			// an unreferenced WaitForFirstConsumer claim. The next normal Pod
+			// replacement takes the regular path below and consumes the claim.
+			if err := r.reconcileLegacyDockerStorageMigration(ctx, &agentRun); err != nil {
+				return ctrl.Result{}, err
+			}
+		} else {
+			dockerResult, dockerReferenceable, dockerChanged, dockerErr := r.reconcileDockerPVC(ctx, &agentRun, workspaceBound)
+			conditionsChanged = conditionsChanged || dockerChanged
+			if dockerErr != nil || !dockerReferenceable {
+				if conditionsChanged {
+					if statusErr := r.Status().Update(ctx, &agentRun); statusErr != nil {
+						return ctrl.Result{}, fmt.Errorf("update AgentRun persistent storage status: %w", statusErr)
+					}
+				}
+				return dockerResult, dockerErr
+			}
+			if dockerResult.RequeueAfter > workspaceResult.RequeueAfter {
+				workspaceResult = dockerResult
+			}
+		}
 	}
 
 	if err := r.reconcileBrokerTokenSecret(ctx, &agentRun); err != nil {
@@ -668,6 +705,7 @@ func (r *AgentRunReconciler) deleteTerminalOperationalResources(ctx context.Cont
 		description string
 	}{
 		{object: &corev1.PersistentVolumeClaim{}, name: WorkspacePVCName(agentRun.Name), description: "terminal AgentRun workspace PVC"},
+		{object: &corev1.PersistentVolumeClaim{}, name: DockerPVCName(agentRun.Name), description: "terminal AgentRun Docker PVC"},
 		{object: &corev1.Service{}, name: EgressdServiceName(agentRun.Name), description: "terminal AgentRun egressd Service"},
 		{object: &networkingv1.NetworkPolicy{}, name: AgentNetworkPolicyName(agentRun.Name), description: "terminal AgentRun agent NetworkPolicy"},
 		{object: &networkingv1.NetworkPolicy{}, name: EgressdNetworkPolicyName(agentRun.Name), description: "terminal AgentRun egressd NetworkPolicy"},
@@ -2954,8 +2992,8 @@ func ValidateAgentRunWorkspace(agentRun *nvtv1alpha1.AgentRun) error {
 	workspace := agentRun.Spec.Workspace
 	switch AgentRunWorkspaceMode(agentRun) {
 	case nvtv1alpha1.AgentRunWorkspaceEphemeral:
-		if workspace.Size != nil || workspace.StorageClassName != "" {
-			return fmt.Errorf("spec.workspace size and storageClassName require mode Persistent")
+		if workspace.Size != nil || workspace.DockerSize != nil || workspace.StorageClassName != "" {
+			return fmt.Errorf("spec.workspace size, dockerSize, and storageClassName require mode Persistent")
 		}
 	case nvtv1alpha1.AgentRunWorkspacePersistent:
 		if workspace.Size == nil || workspace.Size.Sign() <= 0 {
@@ -2968,6 +3006,9 @@ func ValidateAgentRunWorkspace(agentRun *nvtv1alpha1.AgentRun) error {
 			if problems := utilvalidation.IsDNS1123Subdomain(workspace.StorageClassName); len(problems) != 0 {
 				return fmt.Errorf("spec.workspace.storageClassName must be a valid DNS subdomain")
 			}
+		}
+		if workspace.DockerSize != nil && (workspace.DockerSize.Value() < minimumDockerPVCSizeBytes || workspace.DockerSize.Value() > maximumDockerPVCSizeBytes) {
+			return fmt.Errorf("spec.workspace.dockerSize must be between 1Gi and 1Ti")
 		}
 		for _, grant := range AgentRunBrokerGrants(agentRun.Spec.Broker) {
 			if AgentRunGrantMaterialization(grant) == nvtv1alpha1.AgentRunGrantFileBundle {
@@ -2983,6 +3024,12 @@ func ValidateAgentRunWorkspace(agentRun *nvtv1alpha1.AgentRun) error {
 // WorkspacePVCName is the stable claim name for one persistent AgentRun.
 func WorkspacePVCName(agentRunName string) string {
 	return agentRunName + "-workspace"
+}
+
+// DockerPVCName is the stable claim name for one persistent AgentRun's
+// sidecar-only Docker data. It is deliberately separate from workspace/home.
+func DockerPVCName(agentRunName string) string {
+	return agentRunName + "-docker"
 }
 
 // DesiredWorkspacePVC renders the single lifecycle-scoped persistent claim.
@@ -3017,41 +3064,135 @@ func DesiredWorkspacePVC(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme)
 	return claim, nil
 }
 
-func (r *AgentRunReconciler) reconcileWorkspacePVC(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, bool, bool, error) {
+// DesiredDockerPVC renders the dedicated lifecycle-scoped Docker claim. The
+// requested capacity is an enforced outer quota; the inner image reserves
+// additional filesystem headroom below this value.
+func DesiredDockerPVC(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme) (*corev1.PersistentVolumeClaim, error) {
+	if err := ValidateAgentRunWorkspace(agentRun); err != nil {
+		return nil, err
+	}
+	if AgentRunWorkspaceMode(agentRun) != nvtv1alpha1.AgentRunWorkspacePersistent {
+		return nil, fmt.Errorf("persistent Docker PVC requested for non-persistent AgentRun")
+	}
+	volumeMode := corev1.PersistentVolumeFilesystem
+	size := dockerPVCSize(agentRun)
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DockerPVCName(agentRun.Name),
+			Namespace: agentRun.Namespace,
+			Labels:    agentRunLabels(agentRun.Name),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			VolumeMode:  &volumeMode,
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: size,
+			}},
+		},
+	}
+	if agentRun.Spec.Workspace.StorageClassName != "" {
+		claim.Spec.StorageClassName = ptrTo(agentRun.Spec.Workspace.StorageClassName)
+	}
+	if err := controllerutil.SetControllerReference(agentRun, claim, scheme); err != nil {
+		return nil, fmt.Errorf("set Docker PVC owner: %w", err)
+	}
+	return claim, nil
+}
+
+func (r *AgentRunReconciler) reconcileWorkspacePVC(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (ctrl.Result, bool, bool, bool, error) {
 	if err := ValidateAgentRunWorkspace(agentRun); err != nil {
 		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "InvalidWorkspace", err.Error())
-		return ctrl.Result{}, false, changed, err
+		return ctrl.Result{}, false, false, changed, err
 	}
 	if AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspaceEphemeral {
-		return ctrl.Result{}, true, false, nil
+		return ctrl.Result{}, true, true, false, nil
 	}
 
 	desired, err := DesiredWorkspacePVC(agentRun, r.Scheme)
 	if err != nil {
-		return ctrl.Result{}, false, false, err
+		return ctrl.Result{}, false, false, false, err
 	}
 	claim := &corev1.PersistentVolumeClaim{}
 	key := client.ObjectKeyFromObject(desired)
 	err = r.Get(ctx, key, claim)
 	if errors.IsNotFound(err) {
 		if err := r.Create(ctx, desired); err != nil {
-			return ctrl.Result{}, false, false, fmt.Errorf("create workspace PVC: %w", err)
+			return ctrl.Result{}, false, false, false, fmt.Errorf("create workspace PVC: %w", err)
 		}
 		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspacePending", "waiting for persistent workspace claim to bind")
 		// The claim now exists and is safe for a consuming Pod to reference.
 		// This is required for WaitForFirstConsumer StorageClasses to provision.
-		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, changed, nil
+		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, false, changed, nil
 	}
 	if err != nil {
-		return ctrl.Result{}, false, false, fmt.Errorf("get workspace PVC: %w", err)
+		return ctrl.Result{}, false, false, false, fmt.Errorf("get workspace PVC: %w", err)
 	}
 	if !metav1.IsControlledBy(claim, agentRun) {
 		err := fmt.Errorf("workspace PVC %s/%s exists but is not controlled by AgentRun %s", claim.Namespace, claim.Name, agentRun.Name)
 		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspaceOwnershipConflict", err.Error())
-		return ctrl.Result{}, false, changed, err
+		return ctrl.Result{}, false, false, changed, err
 	}
 	if err := validateWorkspacePVCSpec(claim, desired); err != nil {
 		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspaceSpecConflict", err.Error())
+		return ctrl.Result{}, false, false, changed, err
+	}
+	labelsChanged := false
+	if claim.Labels == nil {
+		claim.Labels = map[string]string{}
+	}
+	for key, value := range desired.Labels {
+		if claim.Labels[key] != value {
+			claim.Labels[key] = value
+			labelsChanged = true
+		}
+	}
+	if labelsChanged {
+		if err := r.Update(ctx, claim); err != nil {
+			return ctrl.Result{}, false, false, false, fmt.Errorf("update workspace PVC labels: %w", err)
+		}
+	}
+	if claim.Status.Phase == corev1.ClaimLost {
+		err := fmt.Errorf("workspace PVC %s/%s is Lost and will not be replaced automatically", claim.Namespace, claim.Name)
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspaceLost", err.Error())
+		return ctrl.Result{}, false, false, changed, err
+	}
+	if claim.Status.Phase != corev1.ClaimBound {
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspacePending", "waiting for persistent workspace claim to bind")
+		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, false, changed, nil
+	}
+	changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionTrue, "WorkspaceReady", "persistent workspace claim is bound")
+	return ctrl.Result{}, true, true, changed, nil
+}
+
+func (r *AgentRunReconciler) reconcileDockerPVC(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	workspaceBound bool,
+) (ctrl.Result, bool, bool, error) {
+	desired, err := DesiredDockerPVC(agentRun, r.Scheme)
+	if err != nil {
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "InvalidDockerStorage", err.Error())
+		return ctrl.Result{}, false, changed, err
+	}
+	claim := &corev1.PersistentVolumeClaim{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(desired), claim)
+	if errors.IsNotFound(err) {
+		if err := r.Create(ctx, desired); err != nil {
+			return ctrl.Result{}, false, false, fmt.Errorf("create Docker PVC: %w", err)
+		}
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspacePending", "waiting for persistent workspace and Docker claims to bind")
+		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, changed, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, false, false, fmt.Errorf("get Docker PVC: %w", err)
+	}
+	if !metav1.IsControlledBy(claim, agentRun) {
+		err := fmt.Errorf("Docker PVC %s/%s exists but is not controlled by AgentRun %s", claim.Namespace, claim.Name, agentRun.Name)
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "DockerStorageOwnershipConflict", err.Error())
+		return ctrl.Result{}, false, changed, err
+	}
+	if err := validateDockerPVCSpec(claim, desired); err != nil {
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "DockerStorageSpecConflict", err.Error())
 		return ctrl.Result{}, false, changed, err
 	}
 	labelsChanged := false
@@ -3066,20 +3207,72 @@ func (r *AgentRunReconciler) reconcileWorkspacePVC(ctx context.Context, agentRun
 	}
 	if labelsChanged {
 		if err := r.Update(ctx, claim); err != nil {
-			return ctrl.Result{}, false, false, fmt.Errorf("update workspace PVC labels: %w", err)
+			return ctrl.Result{}, false, false, fmt.Errorf("update Docker PVC labels: %w", err)
 		}
 	}
+	if !claim.DeletionTimestamp.IsZero() {
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "DockerStorageDeleting", "waiting for the previous Docker claim to finish deletion")
+		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, false, changed, nil
+	}
 	if claim.Status.Phase == corev1.ClaimLost {
-		err := fmt.Errorf("workspace PVC %s/%s is Lost and will not be replaced automatically", claim.Namespace, claim.Name)
-		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspaceLost", err.Error())
+		err := fmt.Errorf("Docker PVC %s/%s is Lost and will not be replaced automatically", claim.Namespace, claim.Name)
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "DockerStorageLost", err.Error())
 		return ctrl.Result{}, false, changed, err
 	}
 	if claim.Status.Phase != corev1.ClaimBound {
-		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspacePending", "waiting for persistent workspace claim to bind")
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "WorkspacePending", "waiting for persistent workspace and Docker claims to bind")
 		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, changed, nil
 	}
-	changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionTrue, "WorkspaceReady", "persistent workspace claim is bound")
-	return ctrl.Result{}, true, changed, nil
+	if workspaceBound {
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionTrue, "WorkspaceReady", "persistent workspace and Docker claims are bound")
+		return ctrl.Result{}, true, changed, nil
+	}
+	return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, false, nil
+}
+
+// reconcileLegacyDockerStorageMigration preserves an already-running Pod that
+// predates the dedicated Docker PVC. A Pending claim cannot bind without a
+// consumer under WaitForFirstConsumer, so remove only that owned, validated,
+// unused claim. A Bound claim is retained for the next supported Pod
+// replacement. No claim is created until a Pod that references it is needed.
+func (r *AgentRunReconciler) reconcileLegacyDockerStorageMigration(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	desired, err := DesiredDockerPVC(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	claim := &corev1.PersistentVolumeClaim{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(desired), claim)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get legacy-migration Docker PVC: %w", err)
+	}
+	if !metav1.IsControlledBy(claim, agentRun) {
+		return fmt.Errorf("Docker PVC %s/%s exists but is not controlled by AgentRun %s", claim.Namespace, claim.Name, agentRun.Name)
+	}
+	if err := validateDockerPVCSpec(claim, desired); err != nil {
+		return err
+	}
+	if claim.Status.Phase == corev1.ClaimLost {
+		return fmt.Errorf("Docker PVC %s/%s is Lost and will not be replaced automatically", claim.Namespace, claim.Name)
+	}
+	if claim.Status.Phase == corev1.ClaimBound || !claim.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if err := r.Delete(ctx, claim); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete unreferenced legacy-migration Docker PVC: %w", err)
+	}
+	return nil
+}
+
+func podUsesDockerPVC(pod *corev1.Pod, claimName string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == dindStorageVolumeName && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claimName {
+			return true
+		}
+	}
+	return false
 }
 
 func validateWorkspacePVCSpec(actual, desired *corev1.PersistentVolumeClaim) error {
@@ -3099,6 +3292,24 @@ func validateWorkspacePVCSpec(actual, desired *corev1.PersistentVolumeClaim) err
 	desiredSize := desired.Spec.Resources.Requests[corev1.ResourceStorage]
 	if actualSize.Cmp(desiredSize) != 0 {
 		return fmt.Errorf("workspace PVC %s/%s size differs from immutable spec.workspace.size", actual.Namespace, actual.Name)
+	}
+	return nil
+}
+
+func validateDockerPVCSpec(actual, desired *corev1.PersistentVolumeClaim) error {
+	if !reflect.DeepEqual(actual.Spec.AccessModes, desired.Spec.AccessModes) ||
+		!reflect.DeepEqual(actual.Spec.VolumeMode, desired.Spec.VolumeMode) ||
+		actual.Spec.Selector != nil || actual.Spec.DataSource != nil || actual.Spec.DataSourceRef != nil ||
+		len(actual.Spec.Resources.Limits) != 0 || len(actual.Spec.Resources.Requests) != 1 {
+		return fmt.Errorf("Docker PVC %s/%s has immutable storage settings that differ from spec.workspace", actual.Namespace, actual.Name)
+	}
+	if desired.Spec.StorageClassName != nil && !reflect.DeepEqual(actual.Spec.StorageClassName, desired.Spec.StorageClassName) {
+		return fmt.Errorf("Docker PVC %s/%s has immutable storage settings that differ from spec.workspace", actual.Namespace, actual.Name)
+	}
+	actualSize := actual.Spec.Resources.Requests[corev1.ResourceStorage]
+	desiredSize := desired.Spec.Resources.Requests[corev1.ResourceStorage]
+	if actualSize.Cmp(desiredSize) != 0 {
+		return fmt.Errorf("Docker PVC %s/%s size differs from immutable spec.workspace.dockerSize", actual.Namespace, actual.Name)
 	}
 	return nil
 }
@@ -3124,6 +3335,10 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 		return nil, err
 	}
 	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
+	if err != nil {
+		return nil, err
+	}
+	dindPullPolicy, err := DindImagePullPolicy()
 	if err != nil {
 		return nil, err
 	}
@@ -3159,6 +3374,14 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			},
 		},
 	}
+	dindStorageLimit := dockerPVCSize(agentRun)
+	dindStorageVolumeSource := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &dindStorageLimit}}
+	if AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent {
+		dindStorageVolumeSource = corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			ClaimName: DockerPVCName(agentRun.Name),
+		}}
+	}
+	volumes = append(volumes, corev1.Volume{Name: dindStorageVolumeName, VolumeSource: dindStorageVolumeSource})
 	if agentRunHasProviderPreparations(agentRun) {
 		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
 			Key: preparedProviderMetadataKey, Path: preparedProviderMetadataKey,
@@ -3316,11 +3539,16 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			},
 		})
 	}
+	dindVolumeMounts := []corev1.VolumeMount{
+		{Name: workspaceVolumeName, MountPath: workspaceMountPath, SubPath: workspaceSubPath(agentRun)},
+		{Name: dindStorageVolumeName, MountPath: dindStorageMountPath},
+	}
 	initContainers = append(initContainers, corev1.Container{
-		Name:          "docker",
-		Image:         "docker:27-dind",
-		RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
-		Command:       []string{"dockerd"},
+		Name:            "docker",
+		Image:           DindImage(),
+		ImagePullPolicy: dindPullPolicy,
+		RestartPolicy:   ptrTo(corev1.ContainerRestartPolicyAlways),
+		Command:         []string{dindEntrypoint},
 		Args: []string{
 			"--host=unix:///var/run/docker.sock",
 			"--host=tcp://127.0.0.1:2375",
@@ -3328,20 +3556,23 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 		},
 		Env: []corev1.EnvVar{
 			{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+			{Name: "NVT_DIND_BACKING_DIR", Value: dindStorageMountPath},
+			{Name: "NVT_DIND_DATA_ROOT", Value: dindDataRoot},
+			{Name: "NVT_DIND_IMAGE_SIZE_BYTES", Value: strconv.FormatInt(dindImageSizeBytes(agentRun), 10)},
+			{Name: "NVT_DIND_PERSISTENT_STORAGE", Value: strconv.FormatBool(AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent)},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			Privileged: ptrTo(true),
 		},
 		StartupProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
+				Exec: &corev1.ExecAction{Command: []string{dindReady}},
 			},
-			PeriodSeconds:    2,
-			FailureThreshold: 30,
+			PeriodSeconds:    5,
+			TimeoutSeconds:   2,
+			FailureThreshold: dindStartupBudgetSeconds / 5,
 		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: workspaceVolumeName, MountPath: workspaceMountPath, SubPath: workspaceSubPath(agentRun)},
-		},
+		VolumeMounts: dindVolumeMounts,
 	})
 	if AgentRunEgressTransparent(agentRun) {
 		const rules = `set -eu
@@ -3651,6 +3882,41 @@ func CapturedImage() string {
 		return image
 	}
 	return defaultCapturedImage
+}
+
+func DindImage() string {
+	if image := strings.TrimSpace(os.Getenv("NVT_DIND_IMAGE")); image != "" {
+		return image
+	}
+	return defaultDindImage
+}
+
+func DindImagePullPolicy() (corev1.PullPolicy, error) {
+	value := strings.TrimSpace(os.Getenv("NVT_DIND_IMAGE_PULL_POLICY"))
+	if value == "" {
+		return corev1.PullIfNotPresent, nil
+	}
+	switch corev1.PullPolicy(value) {
+	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		return corev1.PullPolicy(value), nil
+	default:
+		return "", fmt.Errorf("NVT_DIND_IMAGE_PULL_POLICY must be Always, IfNotPresent, or Never")
+	}
+}
+
+func dockerPVCSize(agentRun *nvtv1alpha1.AgentRun) resource.Quantity {
+	if agentRun.Spec.Workspace.DockerSize != nil {
+		return agentRun.Spec.Workspace.DockerSize.DeepCopy()
+	}
+	return *resource.NewQuantity(defaultDockerPVCSizeBytes, resource.BinarySI)
+}
+
+func dindImageSizeBytes(agentRun *nvtv1alpha1.AgentRun) int64 {
+	// The loopback filesystem deliberately advertises less capacity than its
+	// dedicated outer PVC. This leaves enforced headroom for the outer
+	// filesystem's allocation and metadata rather than thin-overcommitting it.
+	size := dockerPVCSize(agentRun)
+	return size.Value() * dindImageCapacityPercent / 100
 }
 
 func NetworkPolicyCapable() bool {

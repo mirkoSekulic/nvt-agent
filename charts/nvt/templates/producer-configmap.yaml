@@ -10,8 +10,8 @@
 {{- if gt (len .Values.producer.agentRun.brokerGrants) 0 }}
 {{- fail "producer.agentRun.workspaceMode Persistent is incompatible with legacy file-bundle brokerGrants" }}
 {{- end }}
-{{- else if or (not (empty .Values.producer.agentRun.workspaceSize)) (not (empty .Values.producer.agentRun.workspaceStorageClassName)) }}
-{{- fail "producer.agentRun.workspaceSize and workspaceStorageClassName require workspaceMode Persistent" }}
+{{- else if or (not (empty .Values.producer.agentRun.workspaceSize)) (not (empty .Values.producer.agentRun.workspaceDockerSize)) (not (empty .Values.producer.agentRun.workspaceStorageClassName)) }}
+{{- fail "producer.agentRun.workspaceSize, workspaceDockerSize, and workspaceStorageClassName require workspaceMode Persistent" }}
 {{- end }}
 {{- with .Values.producer.submission.workflow }}
 {{- if not (and (eq $.Values.producer.submission.mode "scheduleAdmission") (eq $.Values.producer.submission.admissionMode "profiled")) }}
@@ -66,6 +66,9 @@ data:
       workspaceMode: {{ $workspaceMode | quote }}
       {{- with .Values.producer.agentRun.workspaceSize }}
       workspaceSize: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.producer.agentRun.workspaceDockerSize }}
+      workspaceDockerSize: {{ . | quote }}
       {{- end }}
       {{- with .Values.producer.agentRun.workspaceStorageClassName }}
       workspaceStorageClassName: {{ . | quote }}

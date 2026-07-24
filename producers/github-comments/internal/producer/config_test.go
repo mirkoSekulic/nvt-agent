@@ -195,6 +195,13 @@ func TestConfigRejectsInvalidWorkspaceCombinations(t *testing.T) {
 		{name: "malformed size", mutate: func(config *AgentRunConfig) { config.WorkspaceMode, config.WorkspaceSize = "Persistent", "twenty" }, want: "positive Kubernetes resource quantity"},
 		{name: "zero size", mutate: func(config *AgentRunConfig) { config.WorkspaceMode, config.WorkspaceSize = "Persistent", "0" }, want: "positive Kubernetes resource quantity"},
 		{name: "ephemeral size", mutate: func(config *AgentRunConfig) { config.WorkspaceMode, config.WorkspaceSize = "Ephemeral", "1Gi" }, want: "require workspaceMode Persistent"},
+		{name: "ephemeral Docker size", mutate: func(config *AgentRunConfig) { config.WorkspaceDockerSize = "20Gi" }, want: "require workspaceMode Persistent"},
+		{name: "small Docker size", mutate: func(config *AgentRunConfig) {
+			config.WorkspaceMode, config.WorkspaceSize, config.WorkspaceDockerSize = "Persistent", "5Gi", "512Mi"
+		}, want: "between 1Gi and 1Ti"},
+		{name: "large Docker size", mutate: func(config *AgentRunConfig) {
+			config.WorkspaceMode, config.WorkspaceSize, config.WorkspaceDockerSize = "Persistent", "5Gi", "2Ti"
+		}, want: "between 1Gi and 1Ti"},
 		{name: "invalid storage class", mutate: func(config *AgentRunConfig) {
 			config.WorkspaceMode, config.WorkspaceSize, config.WorkspaceStorageClassName = "Persistent", "1Gi", " Managed_CSI"
 		}, want: "normalized DNS subdomain"},

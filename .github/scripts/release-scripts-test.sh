@@ -61,8 +61,8 @@ export FAKE_SOURCE=https://github.com/mirkoSekulic/nvt-agent
 export FAKE_VERSION=0.2.0-943d5ba
 
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
-[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "7" ]]
-[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "7" ]]
+[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "8" ]]
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "8" ]]
 if grep -q 'nvt-smoke-echo' "${DOCKER_LOG}"; then
   echo "fixture image entered the production release" >&2
   exit 1
@@ -88,7 +88,7 @@ export REQUIRE_ANONYMOUS=1
 : >"${DOCKER_LOG}"
 NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \
   bash "${ROOT}/.github/scripts/verify-public-images.sh" mirkoSekulic "${FAKE_VERSION}"
-[[ "$(grep -c '^docker manifest inspect ' "${DOCKER_LOG}")" == "7" ]]
+[[ "$(grep -c '^docker manifest inspect ' "${DOCKER_LOG}")" == "8" ]]
 
 rm -f "${MANIFEST_DIR}/ghcr.io_mirkosekulic_nvt-agent-runtime:${FAKE_VERSION}"
 if NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \

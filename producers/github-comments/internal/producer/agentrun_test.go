@@ -775,10 +775,12 @@ func TestBuildAgentRunIncludesPersistentWorkspace(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.AgentRun.WorkspaceMode = "Persistent"
 	cfg.AgentRun.WorkspaceSize = "20Gi"
+	cfg.AgentRun.WorkspaceDockerSize = "30Gi"
 	cfg.AgentRun.WorkspaceStorageClassName = "managed-csi"
 	run := buildTestAgentRun(t, cfg)
 	if run.Spec.Workspace.Mode != nvtv1alpha1.AgentRunWorkspacePersistent || run.Spec.Workspace.Size == nil ||
-		run.Spec.Workspace.Size.Cmp(resource.MustParse("20Gi")) != 0 || run.Spec.Workspace.StorageClassName != "managed-csi" {
+		run.Spec.Workspace.Size.Cmp(resource.MustParse("20Gi")) != 0 || run.Spec.Workspace.DockerSize == nil ||
+		run.Spec.Workspace.DockerSize.Cmp(resource.MustParse("30Gi")) != 0 || run.Spec.Workspace.StorageClassName != "managed-csi" {
 		t.Fatalf("workspace = %#v", run.Spec.Workspace)
 	}
 }

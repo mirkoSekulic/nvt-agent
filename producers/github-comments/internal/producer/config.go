@@ -105,6 +105,7 @@ type AgentRunConfig struct {
 	RuntimeAuthMountPath      string        `json:"runtimeAuthMountPath,omitempty"`
 	WorkspaceMode             string        `json:"workspaceMode,omitempty"`
 	WorkspaceSize             string        `json:"workspaceSize,omitempty"`
+	WorkspaceDockerSize       string        `json:"workspaceDockerSize,omitempty"`
 	WorkspaceStorageClassName string        `json:"workspaceStorageClassName,omitempty"`
 	BrokerGrants              []BrokerGrant `json:"brokerGrants,omitempty"`
 	TTL                       AgentRunTTL   `json:"ttl,omitempty"`
@@ -302,8 +303,8 @@ func configuredAgentRunWorkspace(config AgentRunConfig) (nvtv1alpha1.AgentRunWor
 	workspace := nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspaceMode(mode)}
 	switch workspace.Mode {
 	case nvtv1alpha1.AgentRunWorkspaceEphemeral:
-		if config.WorkspaceSize != "" || config.WorkspaceStorageClassName != "" {
-			return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceSize and workspaceStorageClassName require workspaceMode Persistent")
+		if config.WorkspaceSize != "" || config.WorkspaceDockerSize != "" || config.WorkspaceStorageClassName != "" {
+			return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceSize, workspaceDockerSize, and workspaceStorageClassName require workspaceMode Persistent")
 		}
 	case nvtv1alpha1.AgentRunWorkspacePersistent:
 		if config.WorkspaceSize == "" {
@@ -314,6 +315,15 @@ func configuredAgentRunWorkspace(config AgentRunConfig) (nvtv1alpha1.AgentRunWor
 			return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceSize must be a positive Kubernetes resource quantity")
 		}
 		workspace.Size = &quantity
+		if config.WorkspaceDockerSize != "" {
+			dockerQuantity, err := resource.ParseQuantity(config.WorkspaceDockerSize)
+			minimum := resource.MustParse("1Gi")
+			maximum := resource.MustParse("1Ti")
+			if err != nil || dockerQuantity.Cmp(minimum) < 0 || dockerQuantity.Cmp(maximum) > 0 {
+				return nvtv1alpha1.AgentRunWorkspace{}, errors.New("agentRun.workspaceDockerSize must be a Kubernetes resource quantity between 1Gi and 1Ti")
+			}
+			workspace.DockerSize = &dockerQuantity
+		}
 		if config.WorkspaceStorageClassName != "" {
 			if strings.TrimSpace(config.WorkspaceStorageClassName) != config.WorkspaceStorageClassName ||
 				len(utilvalidation.IsDNS1123Subdomain(config.WorkspaceStorageClassName)) != 0 {

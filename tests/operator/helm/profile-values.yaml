@@ -15,7 +15,10 @@ agentSchedule:
         value: nvt-agent
         effect: NoSchedule
     workspace:
-      mode: Ephemeral
+      mode: Persistent
+      size: 20Gi
+      dockerSize: 30Gi
+      storageClassName: managed-csi
     agent:
       config:
         plugins: []

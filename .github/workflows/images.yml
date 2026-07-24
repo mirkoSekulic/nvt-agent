@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "runtime/**"
+      - "dind/**"
       - "broker/**"
       - "egressd/**"
       - "captured/**"
@@ -20,6 +21,7 @@ on:
   pull_request:
     paths:
       - "runtime/**"
+      - "dind/**"
       - "broker/**"
       - "egressd/**"
       - "captured/**"
@@ -51,6 +53,10 @@ jobs:
             dockerfile: runtime/Dockerfile
             image: nvt-agent:test
             smoke: true
+          - name: dind
+            dockerfile: dind/Dockerfile
+            image: nvt-dind:test
+            test: dind/test.sh
           - name: broker
             dockerfile: broker/Dockerfile
             image: nvt-broker:test
@@ -79,3 +85,6 @@ jobs:
       - name: Run runtime git credentials smoke
         if: matrix.smoke
         run: bash tests/runtime/git_credentials_smoke.sh "${{ matrix.image }}"
+      - name: Run ${{ matrix.name }} script tests
+        if: matrix.test
+        run: bash "${{ matrix.test }}"

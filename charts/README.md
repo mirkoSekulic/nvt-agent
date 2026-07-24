@@ -25,7 +25,7 @@ published producer chart.
 
 Chart versions are immutable. Pull-request validation requires a SemVer bump
 whenever `charts/nvt` changes and rejects versions already present in GHCR.
-The coordinated release builds or verifies all seven production image tags
+The coordinated release builds or verifies all eight production image tags
 from the same commit, proves that every manifest is anonymously readable, and
 publishes the chart last. Existing tags are reused when their coordinated OCI
 source/revision/version metadata matches. Package writers are trusted; those

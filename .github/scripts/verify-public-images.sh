@@ -16,6 +16,7 @@ fi
 
 images=(
   nvt-agent-runtime
+  nvt-dind
   nvt-broker
   nvt-egressd
   nvt-captured
@@ -46,4 +47,4 @@ for name in "${images[@]}"; do
   fi
 done
 
-echo "Verified anonymous manifest access for all seven release images."
+echo "Verified anonymous manifest access for all eight release images."

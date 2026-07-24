@@ -150,9 +150,12 @@ type AgentRunRuntimeAuth struct {
 
 // AgentRunWorkspace defines the workspace provisioning mode.
 type AgentRunWorkspace struct {
-	Mode             AgentRunWorkspaceMode `json:"mode,omitempty"`
-	Size             *resource.Quantity    `json:"size,omitempty"`
-	StorageClassName string                `json:"storageClassName,omitempty"`
+	Mode AgentRunWorkspaceMode `json:"mode,omitempty"`
+	Size *resource.Quantity    `json:"size,omitempty"`
+	// DockerSize requests the dedicated, sidecar-only Docker data claim for a
+	// persistent AgentRun. Omitted defaults to a bounded operator value.
+	DockerSize       *resource.Quantity `json:"dockerSize,omitempty"`
+	StorageClassName string             `json:"storageClassName,omitempty"`
 }
 
 // AgentRunBroker defines external credential grants requested for the run.
@@ -394,6 +397,10 @@ func (in *AgentRunWorkspace) DeepCopy() *AgentRunWorkspace {
 	if in.Size != nil {
 		quantity := in.Size.DeepCopy()
 		out.Size = &quantity
+	}
+	if in.DockerSize != nil {
+		quantity := in.DockerSize.DeepCopy()
+		out.DockerSize = &quantity
 	}
 	return out
 }

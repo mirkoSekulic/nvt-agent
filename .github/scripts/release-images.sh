@@ -21,6 +21,7 @@ fi
 
 images=(
   "nvt-agent-runtime|runtime/Dockerfile"
+  "nvt-dind|dind/Dockerfile"
   "nvt-broker|broker/Dockerfile"
   "nvt-egressd|egressd/Dockerfile"
   "nvt-captured|captured/Dockerfile"
@@ -96,4 +97,4 @@ for entry in "${images[@]}"; do
   }
 done
 
-echo "Verified all seven image manifests and coordinated release metadata labels."
+echo "Verified all eight image manifests and coordinated release metadata labels."

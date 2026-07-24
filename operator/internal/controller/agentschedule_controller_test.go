@@ -45,8 +45,11 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 		t.Fatal("expected status timestamp to be deep-copied")
 	}
 	workspaceSize := resource.MustParse("5Gi")
+	dockerSize := resource.MustParse("20Gi")
 	schedule.Spec.Template = &nvtv1alpha1.AgentScheduleTemplate{}
-	schedule.Spec.Template.Workspace = nvtv1alpha1.AgentRunWorkspace{Mode: nvtv1alpha1.AgentRunWorkspacePersistent, Size: &workspaceSize}
+	schedule.Spec.Template.Workspace = nvtv1alpha1.AgentRunWorkspace{
+		Mode: nvtv1alpha1.AgentRunWorkspacePersistent, Size: &workspaceSize, DockerSize: &dockerSize,
+	}
 	schedule.Spec.Template.Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")},
 	}
@@ -57,11 +60,15 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	}}
 	copied = schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	copied.Spec.Template.Workspace.Size.Add(resource.MustParse("1Gi"))
+	copied.Spec.Template.Workspace.DockerSize.Add(resource.MustParse("1Gi"))
 	copied.Spec.Template.Resources.Limits[corev1.ResourceMemory] = resource.MustParse("1Gi")
 	copied.Spec.Template.Tolerations[0].Key = "changed"
 	*copied.Spec.Template.Tolerations[0].TolerationSeconds = 1
 	if schedule.Spec.Template.Workspace.Size.Cmp(resource.MustParse("5Gi")) != 0 {
 		t.Fatal("expected template workspace quantity to be deep-copied")
+	}
+	if schedule.Spec.Template.Workspace.DockerSize.Cmp(resource.MustParse("20Gi")) != 0 {
+		t.Fatal("expected template Docker quantity to be deep-copied")
 	}
 	if schedule.Spec.Template.Resources.Limits.Memory().Cmp(resource.MustParse("8Gi")) != 0 {
 		t.Fatal("expected template resources to be deep-copied")
@@ -162,8 +169,14 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	workspace := crdPath(t, properties, "template", "properties", "workspace").(map[string]any)
 	if crdPath(t, workspace, "properties", "mode", "default") != "Ephemeral" ||
 		crdPath(t, workspace, "properties", "size", "x-kubernetes-int-or-string") != true ||
+		crdPath(t, workspace, "properties", "dockerSize", "x-kubernetes-int-or-string") != true ||
 		crdPath(t, workspace, "properties", "storageClassName", "type") != "string" {
 		t.Fatalf("expected persistent template workspace schema, got %#v", workspace)
+	}
+	workspaceValidations := crdPath(t, workspace, "x-kubernetes-validations").([]any)
+	if !hasCRDValidation(workspaceValidations, "self.mode == 'Persistent' ? has(self.size) : !has(self.size) && !has(self.dockerSize) && !has(self.storageClassName)", "forbidden for Ephemeral") ||
+		!hasCRDValidation(workspaceValidations, "!has(self.dockerSize) || !quantity(string(self.dockerSize)).isGreaterThan(quantity('1Ti'))", "at most 1Ti") {
+		t.Fatalf("expected bounded template Docker storage schema, got %#v", workspaceValidations)
 	}
 	tolerations := crdPath(t, properties, "template", "properties", "tolerations").(map[string]any)
 	if tolerations["type"] != "array" || crdPath(t, tolerations, "items", "properties", "effect", "type") != "string" {

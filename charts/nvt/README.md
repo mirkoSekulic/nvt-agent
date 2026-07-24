@@ -24,9 +24,10 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.14`; otherwise the API server will prune or reject
-new AgentRun and schedule fields such as container capabilities, broker grant
-preparations, profile workspace instructions, or workflow producer policies.
+of, upgrading to chart `0.8.15`; otherwise the API server will prune or reject
+new AgentRun and schedule fields such as container capabilities, dedicated
+Docker storage size, broker grant preparations, profile workspace instructions,
+or workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -43,11 +44,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.14 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.15 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.14 --namespace nvt --create-namespace
+  --version 0.8.15 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -57,12 +58,16 @@ installed.
 
 The published chart's `appVersion` is the immutable image tag for its tested
 platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
-uses `0.2.0-943d5ba` for runtime, broker, egressd, captured, operator, gateway,
-and producer images. Empty component tags default to `Chart.AppVersion`;
+uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
+gateway, and producer images. Empty component tags default to `Chart.AppVersion`;
 repository, tag, and pull policy remain independently overridable.
 
+`dind.image` is the coordinated Docker sidecar image. It contains the ext4 and
+loop-device tools used only when an AgentRun's Docker data root is backed by
+Kata virtiofs; it performs no per-run package installation.
+
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all seven manifests exist and can be fetched anonymously
+published only after all eight manifests exist and can be fetched anonymously
 with an isolated credential-free Docker configuration. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
 match. GHCR package writers are trusted: matching labels establish coordinated
@@ -137,13 +142,24 @@ producer:
   agentRun:
     workspaceMode: Persistent
     workspaceSize: 20Gi
+    workspaceDockerSize: 30Gi # optional dedicated Docker PVC; defaults to 20Gi
     workspaceStorageClassName: managed-csi # optional
 ```
 
 Ephemeral remains the default. Persistent mode requires a positive Kubernetes
 quantity and cannot be combined with the legacy producer's file-bundle broker
-grants. Profiled admission does not send these fields; configure persistence in
-the operator-owned `AgentSchedule.spec.template.workspace` instead.
+grants. Its optional Docker size must be between 1 GiB and 1 TiB; the operator
+creates a separate sidecar-only Docker claim so workspace/home use cannot
+consume the Docker quota. Profiled admission does not send these fields;
+configure `size`, optional `dockerSize`, and `storageClassName` in the
+operator-owned `AgentSchedule.spec.template.workspace` instead.
+
+Persistent AgentRuns use the dedicated Docker claim on every container
+runtime, not only Kata/virtiofs. During an upgrade, an already-running
+pre-0.8.15 persistent Pod is preserved until its next normal replacement; the
+operator does not create an unreferenced `WaitForFirstConsumer` Docker claim.
+That replacement creates and consumes the claim, and Docker persistence begins
+from then on.
 
 ## Broker TLS
 
@@ -276,6 +292,11 @@ agentSchedule:
     resources:
       requests: {cpu: "2", memory: 8Gi}
       limits: {cpu: "2", memory: 8Gi}
+    workspace:
+      mode: Persistent
+      size: 20Gi
+      dockerSize: 30Gi
+      storageClassName: managed-csi
     tolerations:
       - key: purpose
         operator: Equal
