@@ -41,6 +41,26 @@ profiles:
       Run the project checks before opening a pull request.
 ```
 
+Profiles may also opt the untrusted Kubernetes/OCI agent container into valid
+Linux capabilities without exposing a raw security context:
+
+```yaml
+profiles:
+  - name: debug-codex
+    runtime:
+      type: codex
+      autonomy: trusted-local
+      container:
+        capabilities:
+          add: [SYS_PTRACE]
+    # remaining profile-owned runtime, egress, and broker fields omitted
+```
+
+The capability request is snapshotted with the selected execution profile.
+Producer work, workflow selection, prompts, and agent input cannot add or
+override it. See the AgentRun documentation for the container-only portability
+and security limits.
+
 For new deployments that need producer-selectable workflows, keep execution
 credentials in `profiles` and define guidance independently:
 

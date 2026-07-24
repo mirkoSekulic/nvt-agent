@@ -24,6 +24,10 @@ agentSchedule:
       runtime:
         type: codex
         autonomy: trusted-local
+        container:
+          capabilities:
+            add:
+              - SYS_PTRACE
       agentRuntimeConfig:
         command: codex
         proxy:

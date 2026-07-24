@@ -125,6 +125,21 @@ type AgentRunRuntime struct {
 	// User selects the container user: root (default, unchanged) or non-root
 	// (uid/gid 1000, HOME=/home/agent, passwordless sudo).
 	User AgentRunRuntimeUser `json:"user,omitempty"`
+	// Container contains OCI/Kubernetes agent-container process controls. A
+	// backend that cannot honor these controls must reject them explicitly.
+	Container *AgentRunRuntimeContainer `json:"container,omitempty"`
+}
+
+// AgentRunRuntimeContainer contains controls specific to the OCI agent container.
+type AgentRunRuntimeContainer struct {
+	Capabilities *AgentRunRuntimeCapabilities `json:"capabilities,omitempty"`
+}
+
+// AgentRunRuntimeCapabilities selects Linux capabilities added to the agent container.
+type AgentRunRuntimeCapabilities struct {
+	// Add uses Linux UAPI capability names without the CAP_ prefix.
+	// +listType=set
+	Add []corev1.Capability `json:"add,omitempty"`
 }
 
 // AgentRunRuntimeAuth references runtime-specific auth material from a Kubernetes Secret.
@@ -310,6 +325,7 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 
 	out := new(AgentRunSpec)
 	*out = *in
+	out.Runtime = *in.Runtime.DeepCopy()
 	if in.RuntimeClassName != nil {
 		out.RuntimeClassName = new(string)
 		*out.RuntimeClassName = *in.RuntimeClassName
@@ -344,6 +360,25 @@ func (in *AgentRunSpec) DeepCopy() *AgentRunSpec {
 	}
 	if in.ProfileProvenance != nil {
 		out.ProfileProvenance = in.ProfileProvenance.DeepCopy()
+	}
+	return out
+}
+
+// DeepCopy returns a copy of AgentRunRuntime.
+func (in *AgentRunRuntime) DeepCopy() *AgentRunRuntime {
+	if in == nil {
+		return nil
+	}
+	out := new(AgentRunRuntime)
+	*out = *in
+	if in.Container != nil {
+		out.Container = &AgentRunRuntimeContainer{}
+		if in.Container.Capabilities != nil {
+			out.Container.Capabilities = &AgentRunRuntimeCapabilities{}
+			if in.Container.Capabilities.Add != nil {
+				out.Container.Capabilities.Add = append([]corev1.Capability(nil), in.Container.Capabilities.Add...)
+			}
+		}
 	}
 	return out
 }

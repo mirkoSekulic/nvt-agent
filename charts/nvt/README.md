@@ -24,9 +24,9 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.13`; otherwise the API server will prune or reject
-new AgentRun and schedule fields such as broker grant preparations, profile
-workspace instructions, or workflow producer policies.
+of, upgrading to chart `0.8.14`; otherwise the API server will prune or reject
+new AgentRun and schedule fields such as container capabilities, broker grant
+preparations, profile workspace instructions, or workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -43,11 +43,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.13 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.14 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.13 --namespace nvt --create-namespace
+  --version 0.8.14 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -313,6 +313,28 @@ platform guidance before local `AGENTS.local.md`; it never replaces either
 layer. Producers cannot submit or override it. This is configuration, not a
 security boundary, and it must not contain credentials or sensitive values
 because the untrusted agent can read it. The value is bounded to 64 KiB.
+
+The same profile-owned runtime block can request Linux capabilities for only
+the untrusted Kubernetes/OCI agent container:
+
+```yaml
+agentSchedule:
+  profiles:
+    - name: debug-codex
+      runtime:
+        type: codex
+        autonomy: trusted-local
+        container:
+          capabilities:
+            add: [SYS_PTRACE]
+      # agentRuntimeConfig, egress, and broker fields omitted
+```
+
+This is an opt-in container process control, not a generic VM abstraction or a
+raw Kubernetes security-context escape hatch. A future backend that cannot
+honor it must reject it. Kubernetes policy and the runtime remain authoritative.
+Capabilities such as `NET_ADMIN` and `SYS_ADMIN` can weaken mediated-egress and
+other isolation guarantees when an administrator explicitly grants them.
 
 Workflow profiles decouple reusable guidance from execution/auth profiles and
 authorize selection by the TokenReview-authenticated producer identity:

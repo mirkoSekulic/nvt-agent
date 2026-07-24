@@ -237,6 +237,23 @@ AgentSchedule admission -> mediated AgentRun -> egressd sidecar present ->
 egress broker token mounted only into egressd -> mismatch admissions rejected
 ```
 
+The `capabilities` case creates an AgentRun with agent-container `SYS_PTRACE`,
+starts a separate process, and proves `PTRACE_ATTACH` can attach to that already
+running process. It also asserts that the capability appears on only the agent
+container. CI runs it on standard Kind. To run the identical check on a
+Kubernetes cluster whose Kind nodes provide Kata, select its RuntimeClass:
+
+```sh
+KIND_SMOKE_CASE=capabilities \
+CAPABILITIES_RUNTIME_CLASS=kata-vm-isolation \
+CREATE_CLUSTER=0 CLUSTER=my-kata-kind \
+make operator-kind-smoke
+```
+
+The repository CI runners do not provide a Kata runtime, so a successful
+standard Kind run is not evidence that a particular Kata installation permits
+the capability; that runtime must be tested explicitly with the command above.
+
 Future cases can be added under `tests/operator/kind/cases/`, for example:
 
 - `single-lifecycle.sh`

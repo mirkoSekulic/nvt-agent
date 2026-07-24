@@ -117,6 +117,12 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if crdPath(t, properties, "profiles", "items", "properties", "agentRuntimeConfig", "x-kubernetes-preserve-unknown-fields") != true {
 		t.Fatalf("expected profile runtime config preservation schema, got %#v", properties["profiles"])
 	}
+	profileCapabilities := crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties",
+		"container", "properties", "capabilities", "properties", "add").(map[string]any)
+	if profileCapabilities["x-kubernetes-list-type"] != "set" ||
+		!containsAny(crdPath(t, profileCapabilities, "items", "enum").([]any), "SYS_PTRACE") {
+		t.Fatalf("expected typed profile container capabilities, got %#v", profileCapabilities)
+	}
 	if fmt.Sprint(crdPath(t, properties, "profiles", "items", "properties", "workspaceInstructions", "maxLength")) != "65536" {
 		t.Fatalf("expected bounded profile workspace instructions schema, got %#v", properties["profiles"])
 	}
@@ -458,6 +464,23 @@ func TestLegacyScheduleAdmissionRejectsRemovedEgressForwardProxy(t *testing.T) {
 			assertScheduledRunCount(t, k8sClient, fixture.schedule, 0)
 		})
 	}
+}
+
+func TestLegacyProducerCannotConfigureRuntimeContainerCapabilities(t *testing.T) {
+	fixture := scheduleAdmissionFixture(t, testAgentSchedule())
+	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t,
+		"legacy-capabilities", "", map[string]any{"spec": map[string]any{
+			"runtime": map[string]any{
+				"type": "codex", "autonomy": "trusted-local",
+				"container": map[string]any{"capabilities": map[string]any{"add": []any{"SYS_PTRACE"}}},
+			},
+		}}))
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+	if decoded.Scheduled || !strings.Contains(decoded.Reason, "use an execution profile") {
+		t.Fatalf("legacy producer capability request was accepted: %#v", decoded)
+	}
+	assertScheduledRunCount(t, k8sClient, fixture.schedule, 0)
 }
 
 func TestScheduleAdmissionConcurrentRequestsCannotExceedMaxParallelism(t *testing.T) {

@@ -192,6 +192,9 @@ func PrepareScheduledAgentRun(
 	if err := ValidateAgentRunWorkspace(run); err != nil {
 		return err
 	}
+	if err := ValidateAgentRunRuntimeCapabilities(run); err != nil {
+		return err
+	}
 	return nil
 }
 

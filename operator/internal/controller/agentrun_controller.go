@@ -307,6 +307,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := ValidateRemovedEgressForwardProxy(&agentRun); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := ValidateAgentRunRuntimeCapabilities(&agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := ValidateAgentRunWorkspaceInstructions(&agentRun); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -2721,6 +2724,9 @@ func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 	if err := ValidateAgentRunWorkspaceInstructions(agentRun); err != nil {
 		return nil, err
 	}
+	if err := ValidateAgentRunRuntimeCapabilities(agentRun); err != nil {
+		return nil, err
+	}
 	rendered, err := RenderAgentConfigYAML(agentRun)
 	if err != nil {
 		return nil, err
@@ -3114,6 +3120,9 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 	if err := ValidateAgentRunWorkspaceInstructions(agentRun); err != nil {
 		return nil, err
 	}
+	if err := ValidateAgentRunRuntimeCapabilities(agentRun); err != nil {
+		return nil, err
+	}
 	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
 	if err != nil {
 		return nil, err
@@ -3463,6 +3472,12 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 			corev1.EnvVar{Name: "HOME", Value: agentNonRootHome},
 			corev1.EnvVar{Name: "NVT_STATE_DIR", Value: agentNonRootHome + "/.nvt-agent"},
 		)
+	}
+	if capabilities := agentRuntimeCapabilities(agentRun); len(capabilities) != 0 {
+		if containers[0].SecurityContext == nil {
+			containers[0].SecurityContext = &corev1.SecurityContext{}
+		}
+		containers[0].SecurityContext.Capabilities = &corev1.Capabilities{Add: capabilities}
 	}
 	if AgentRunEgressMode(agentRun) == nvtv1alpha1.AgentRunEgressMediated && !enforced {
 		egressdVolumeMounts := []corev1.VolumeMount{
