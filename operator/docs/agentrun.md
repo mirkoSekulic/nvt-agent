@@ -162,6 +162,7 @@ net-init, DinD, or platform containers.
 egress: mediated
 egressEnforcement: true
 egressTransport: transparent
+egressMaxConcurrentTunnels: 512 # optional; default 256
 ```
 
 - `egressEnforcement` requests a CNI-enforced guarantee that workload egress
@@ -169,6 +170,9 @@ egressTransport: transparent
   policy-enforcing CNI; deployment placement is operator-owned.
 - `egressTransport` is `redirect`, `forward-proxy`, or `transparent`.
   Forward-proxy and transparent require enforcement.
+- `egressMaxConcurrentTunnels` optionally bounds simultaneous CONNECT tunnels
+  for those proxy transports (1–4096). Omit it for the 256-tunnel default;
+  egressd applies bounded burst queueing rather than an unbounded backlog.
 - `egressAllowInsecureBroker` permits local plaintext broker traffic only.
 
 Pre-1.0 migration: replace `egressForwardProxy: true` with

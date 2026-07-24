@@ -21,20 +21,29 @@ services:
       NVT_EGRESS_PROXY: egressd:8473
     depends_on: [egressd, netns]
   net-init:
-    image: docker:27-dind
+    image: nvt-dind:latest
     network_mode: service:netns
     user: "0:0"
     cap_add: [NET_ADMIN]
     depends_on: [captured]
-    command:
+    entrypoint:
       - sh
       - -ec
+    command:
       - |
         iptables -t nat -N NVT_CAPTURE
         iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
         iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+        iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN
+        iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN
         iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
         iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+        iptables -t nat -N NVT_DIND
+        nft add rule ip nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
+        nft add rule ip nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
+        iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+        iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
+        iptables -t nat -I PREROUTING 1 -j NVT_DIND
   tester:
     image: docker:27-dind
     network_mode: service:netns

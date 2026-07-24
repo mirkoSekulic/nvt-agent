@@ -75,6 +75,15 @@ python3 "$script_dir/render-agent-expose.py" \
   --agent-host "$AGENT_HOST" \
   --output "$expose_compose_file"
 
+if [ "$egress_mode" = "mediated" ]; then
+  dind_image="${DIND_IMAGE:-nvt-dind:latest}"
+  export DIND_IMAGE="$dind_image"
+  if ! docker image inspect "$dind_image" >/dev/null 2>&1; then
+    echo "required DinD image $dind_image is missing; build it with: make dind-build DIND_IMAGE=$dind_image" >&2
+    exit 1
+  fi
+fi
+
 if ! docker network inspect agents-proxy >/dev/null 2>&1; then
   docker network create agents-proxy >/dev/null
 fi

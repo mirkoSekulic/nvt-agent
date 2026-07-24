@@ -42,9 +42,15 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"NVT_CAPTURED_TRANSPARENT_LISTEN: \"[::]:15001\"",
 		"NVT_EGRESS_PROXY: egressd:8470",
 		"net-init:",
+		"image: ${DIND_IMAGE:-nvt-dind:latest}",
 		"NET_ADMIN",
 		"NVT_CAPTURE_EXCLUDE_HOSTS: broker",
 		"for ip in $$exclude_v4; do iptables -t nat -A NVT_CAPTURE",
+		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
+		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
+		"iptables -t nat -A NVT_DIND -i br-+ -p tcp",
+		"nft add rule ip nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
+		"nft add rule ip6 nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
 		"ip6tables -t nat",
 		"profiles:",
 		"- mediated",
@@ -1418,10 +1424,13 @@ code-server: {extensions: []}
 	dockerLog := filepath.Join(binDir, "docker.calls")
 	mustWriteExecutable(t, filepath.Join(binDir, "docker"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> "+shellQuote(dockerLog)+"\nexit 0\n")
 
-	for range 2 {
+	for attempt := range 2 {
 		cmd := exec.Command("bash", filepath.Join(root, "scripts", "agent-up.sh"), "--name", name)
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if attempt == 1 {
+			cmd.Env = append(cmd.Env, "DIND_IMAGE=registry.example/nvt-dind:local")
+		}
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("agent-up migration failed: %v\n%s", err, output)
 		}
@@ -1454,8 +1463,26 @@ code-server: {extensions: []}
 	if len(egressd.ForwardProxy.InjectRoutes) != 1 || egressd.ForwardProxy.InjectRoutes[0]["require_capability_hint"] != true {
 		t.Fatalf("git route migration did not require an explicit provider hint: %#v", egressd.ForwardProxy.InjectRoutes)
 	}
-	if calls := mustReadFile(t, dockerLog); !strings.Contains(calls, "compose") || !strings.Contains(calls, "up -d") {
+	if calls := mustReadFile(t, dockerLog); !strings.Contains(calls, "compose") || !strings.Contains(calls, "up -d") ||
+		!strings.Contains(calls, "image inspect nvt-dind:latest") ||
+		!strings.Contains(calls, "image inspect registry.example/nvt-dind:local") {
 		t.Fatalf("agent-up did not continue to Compose after migration:\n%s", calls)
+	}
+
+	if err := os.WriteFile(dockerLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteExecutable(t, filepath.Join(binDir, "docker"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> "+shellQuote(dockerLog)+"\nif [[ \"$1 $2\" == \"image inspect\" ]]; then exit 1; fi\nexit 0\n")
+	missing := exec.Command("bash", filepath.Join(root, "scripts", "agent-up.sh"), "--name", name)
+	missing.Dir = root
+	missing.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output, err := missing.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "required DinD image nvt-dind:latest is missing") ||
+		!strings.Contains(string(output), "make dind-build DIND_IMAGE=nvt-dind:latest") {
+		t.Fatalf("missing DinD image did not fail with build guidance: err=%v output=%s", err, output)
+	}
+	if calls := mustReadFile(t, dockerLog); strings.Contains(calls, "compose") || strings.Contains(calls, "network inspect") {
+		t.Fatalf("agent-up continued after missing DinD image:\n%s", calls)
 	}
 
 	unmarked := filepath.Join(t.TempDir(), "agent.yaml")
@@ -1468,6 +1495,17 @@ code-server: {extensions: []}
 	}
 	if after := mustReadFile(t, unmarked); after != before {
 		t.Fatalf("agent-up renderer changed user-authored config:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestLocalBuildDocumentationIncludesDindImage(t *testing.T) {
+	root := repoRoot(t)
+	const command = "make runtime-build dind-build broker-build egressd-build captured-build"
+	for _, path := range []string{"README.md", filepath.Join("docs", "local-development-agent.md")} {
+		contents := mustReadFile(t, filepath.Join(root, path))
+		if !strings.Contains(contents, command) {
+			t.Fatalf("%s does not build the required local DinD image", path)
+		}
 	}
 }
 

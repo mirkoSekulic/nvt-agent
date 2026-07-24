@@ -172,6 +172,34 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	}
 }
 
+func TestProfiledScheduleSnapshotsForwardProxyTunnelCapacity(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	profile := &schedule.Spec.Profiles[0]
+	profile.Egress = nvtv1alpha1.AgentRunEgressMediated
+	profile.EgressAllowInsecureBroker = true
+	profile.EgressEnforcement = true
+	profile.EgressTransport = nvtv1alpha1.AgentRunEgressTransportForwardProxy
+	profile.EgressMaxConcurrentTunnels = 512
+	profile.Broker.Grants[0].Materialization = nvtv1alpha1.AgentRunGrantPlaceholderFile
+	profile.Broker.Grants[0].EgressHosts = []string{"chatgpt.com"}
+
+	resolved, err := (StaticExecutionProfileResolver{}).Resolve(schedule, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := buildProfiledAgentRun(schedule, resolved, "system:serviceaccount:nvt:producer", nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Spec.EgressMaxConcurrentTunnels != 512 {
+		t.Fatalf("tunnel capacity was not snapshotted: %d", run.Spec.EgressMaxConcurrentTunnels)
+	}
+	profile.EgressMaxConcurrentTunnels = 1024
+	if run.Spec.EgressMaxConcurrentTunnels != 512 {
+		t.Fatal("resolved tunnel capacity changed after schedule mutation")
+	}
+}
+
 func TestProfiledScheduleNoMatchPolicies(t *testing.T) {
 	unknown := &scheduleAdmissionPrincipal{Issuer: "issuer-canary", Subject: "subject-canary", DisplayName: "display-canary"}
 
@@ -414,6 +442,29 @@ func TestProfileConfigurationValidation(t *testing.T) {
 			name: "oversized profile workspace instructions",
 			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
 				schedule.Spec.Profiles[0].WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes+1)
+			},
+		},
+		{
+			name: "excessive tunnel capacity",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 4097
+			},
+		},
+		{
+			name: "tunnel capacity on direct default redirect",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 256
+			},
+		},
+		{
+			name: "tunnel capacity on mediated redirect",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				profile := &schedule.Spec.Profiles[0]
+				profile.Egress = nvtv1alpha1.AgentRunEgressMediated
+				profile.EgressAllowInsecureBroker = true
+				profile.EgressEnforcement = true
+				profile.EgressTransport = nvtv1alpha1.AgentRunEgressTransportRedirect
+				profile.EgressMaxConcurrentTunnels = 256
 			},
 		},
 		{

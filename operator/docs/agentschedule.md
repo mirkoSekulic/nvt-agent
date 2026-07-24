@@ -62,6 +62,11 @@ Producer work, workflow selection, prompts, and agent input cannot add or
 override it. See the AgentRun documentation for the container-only portability
 and security limits.
 
+Forward-proxy and transparent execution profiles may set the generic
+`egressMaxConcurrentTunnels` bound from 1 through 4096. It is snapshotted into
+the AgentRun with the other profile-owned egress settings. Omission uses
+egressd's default of 256 active tunnels with bounded burst queueing.
+
 For new deployments that need producer-selectable workflows, keep execution
 credentials in `profiles` and define guidance independently:
 

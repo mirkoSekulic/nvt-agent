@@ -90,14 +90,19 @@ type AgentRunSpec struct {
 	// rejected; use EgressTransport. It does not select behavior.
 	EgressForwardProxy *bool `json:"egressForwardProxy,omitempty"`
 	// EgressTransport selects redirect, forward-proxy, or transparent routing.
-	EgressTransport   AgentRunEgressTransport    `json:"egressTransport,omitempty"`
-	Workspace         AgentRunWorkspace          `json:"workspace"`
-	Broker            *AgentRunBroker            `json:"broker,omitempty"`
-	Prompt            *AgentRunPrompt            `json:"prompt,omitempty"`
-	Agent             AgentRunAgent              `json:"agent"`
-	Lifecycle         *AgentRunLifecycle         `json:"lifecycle,omitempty"`
-	TTL               *AgentRunTTL               `json:"ttl,omitempty"`
-	ProfileProvenance *AgentRunProfileProvenance `json:"profileProvenance,omitempty"`
+	EgressTransport AgentRunEgressTransport `json:"egressTransport,omitempty"`
+	// EgressMaxConcurrentTunnels bounds simultaneous CONNECT tunnels in
+	// forward-proxy and transparent transports. Omit to use the egressd default.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	EgressMaxConcurrentTunnels int32                      `json:"egressMaxConcurrentTunnels,omitempty"`
+	Workspace                  AgentRunWorkspace          `json:"workspace"`
+	Broker                     *AgentRunBroker            `json:"broker,omitempty"`
+	Prompt                     *AgentRunPrompt            `json:"prompt,omitempty"`
+	Agent                      AgentRunAgent              `json:"agent"`
+	Lifecycle                  *AgentRunLifecycle         `json:"lifecycle,omitempty"`
+	TTL                        *AgentRunTTL               `json:"ttl,omitempty"`
+	ProfileProvenance          *AgentRunProfileProvenance `json:"profileProvenance,omitempty"`
 }
 
 // AgentRunProfileProvenance is the immutable record of a profiled schedule resolution.

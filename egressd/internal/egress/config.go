@@ -21,6 +21,8 @@ import (
 // before injection; it must never reach an upstream.
 const Placeholder = "NVT-PLACEHOLDER-NOT-A-KEY"
 
+const maxForwardProxyConcurrentTunnels = 4096
+
 // Route maps one local listener to one capability and upstream host.
 type Route struct {
 	// Listen is the local address, e.g. "127.0.0.1:8471".
@@ -345,8 +347,8 @@ func (c *ForwardProxyConfig) Validate() error {
 			return fmt.Errorf("allow_ports contains invalid port %d", port)
 		}
 	}
-	if c.MaxConcurrentTunnels < 0 {
-		return fmt.Errorf("max_concurrent_tunnels must be non-negative")
+	if c.MaxConcurrentTunnels < 0 || c.MaxConcurrentTunnels > maxForwardProxyConcurrentTunnels {
+		return fmt.Errorf("max_concurrent_tunnels must be between 1 and %d when set", maxForwardProxyConcurrentTunnels)
 	}
 	if c.TunnelIdleTimeoutSeconds < 0 {
 		return fmt.Errorf("tunnel_idle_timeout_seconds must be non-negative")

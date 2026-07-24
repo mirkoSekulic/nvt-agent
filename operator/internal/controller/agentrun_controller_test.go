@@ -4919,9 +4919,16 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if !hasCRDValidation(validations, "!has(self.egressForwardProxy)", "use spec.egressTransport") {
 		t.Fatalf("missing rejection CEL for legacy egressForwardProxy: %#v", validations)
 	}
+	if !hasCRDValidation(validations, "!has(self.egressMaxConcurrentTunnels) || (has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])", "requires spec.egressTransport") {
+		t.Fatalf("missing transport CEL for tunnel capacity: %#v", validations)
+	}
 	transport := crdPath(t, spec, "egressTransport").(map[string]any)
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
 		t.Fatalf("expected egressTransport to be the sole transport selector, got %#v", transport)
+	}
+	tunnelCapacity := crdPath(t, spec, "egressMaxConcurrentTunnels").(map[string]any)
+	if fmt.Sprint(tunnelCapacity["minimum"]) != "1" || fmt.Sprint(tunnelCapacity["maximum"]) != "4096" {
+		t.Fatalf("expected bounded tunnel capacity schema, got %#v", tunnelCapacity)
 	}
 	materialization := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "materialization").(map[string]any)
 	if materialization["default"] != "file-bundle" {
@@ -6851,6 +6858,27 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	if !strings.Contains(netInit.Args[0], "iptables") || !strings.Contains(netInit.Args[0], "ip6tables") || !strings.Contains(netInit.Args[0], "docker0") {
 		t.Fatalf("net-init rules incomplete: %q", netInit.Args)
 	}
+	for _, rule := range []string{
+		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
+		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
+		"iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT",
+		"iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
+		"nft add rule ip nat NVT_DIND iifname \"docker0\" fib daddr oifname \"docker0\" counter return",
+		"nft add rule ip nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
+		"ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
+		"ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
+		"nft add rule ip6 nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
+	} {
+		if !strings.Contains(netInit.Args[0], rule) {
+			t.Fatalf("net-init missing dynamic bridge rule %q: %q", rule, netInit.Args[0])
+		}
+	}
+	if netInit.Image != DindImage() {
+		t.Fatalf("net-init image = %q, want coordinated DinD image %q", netInit.Image, DindImage())
+	}
+	if netInit.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("net-init pull policy = %q", netInit.ImagePullPolicy)
+	}
 	if strings.Contains(netInit.Args[0], "NVT_CAPTURE_EXCLUDE_CIDRS") || !strings.Contains(netInit.Args[0], "getent ahosts") {
 		t.Fatalf("net-init must resolve only narrow control-plane exceptions: %q", netInit.Args)
 	}
@@ -7075,6 +7103,24 @@ func TestValidateForwardProxyAdmission(t *testing.T) {
 	if err := ValidateAgentRunEgressMode(forwardProxyAgentRun()); err != nil {
 		t.Fatalf("forward-proxy placeholder-file run must be admitted, got %v", err)
 	}
+	tooLarge := forwardProxyAgentRun()
+	tooLarge.Spec.EgressMaxConcurrentTunnels = 4097
+	if err := ValidateAgentRunEgressMode(tooLarge); err == nil || !strings.Contains(err.Error(), "between 1 and 4096") {
+		t.Fatalf("excessive tunnel capacity must be rejected, got %v", err)
+	}
+	for name, run := range map[string]*nvtv1alpha1.AgentRun{
+		"direct default redirect": testAgentRun(),
+		"mediated redirect": func() *nvtv1alpha1.AgentRun {
+			run := forwardProxyAgentRun()
+			run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportRedirect
+			return run
+		}(),
+	} {
+		run.Spec.EgressMaxConcurrentTunnels = 256
+		if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "requires spec.egressTransport") {
+			t.Fatalf("%s tunnel capacity must be rejected, got %v", name, err)
+		}
+	}
 
 	noEnforce := forwardProxyAgentRun()
 	noEnforce.Spec.EgressEnforcement = false
@@ -7092,19 +7138,29 @@ func TestValidateForwardProxyAdmission(t *testing.T) {
 // TestRenderForwardProxyEgressdConfig pins the egressd config: a forward_proxy
 // block with an inject route per egressHost, no redirect routes, and the CA.
 func TestRenderForwardProxyEgressdConfig(t *testing.T) {
-	rendered, err := RenderEgressdConfigJSON(forwardProxyAgentRun())
+	run := forwardProxyAgentRun()
+	defaultRendered, err := RenderEgressdConfigJSON(run)
+	if err != nil {
+		t.Fatalf("render default: %v", err)
+	}
+	if strings.Contains(defaultRendered, "max_concurrent_tunnels") {
+		t.Fatalf("omitted AgentRun capacity must preserve the egressd default: %s", defaultRendered)
+	}
+	run.Spec.EgressMaxConcurrentTunnels = 512
+	rendered, err := RenderEgressdConfigJSON(run)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	var config struct {
 		Routes       []map[string]any `json:"routes"`
 		ForwardProxy *struct {
-			Listen              string           `json:"listen"`
-			TransparentMode     bool             `json:"transparent_mode"`
-			AllowUnmatchedHosts bool             `json:"allow_unmatched_hosts"`
-			AllowPorts          []int            `json:"allow_ports"`
-			DenyCIDRs           []string         `json:"deny_cidrs"`
-			InjectRoutes        []map[string]any `json:"inject_routes"`
+			Listen               string           `json:"listen"`
+			TransparentMode      bool             `json:"transparent_mode"`
+			AllowUnmatchedHosts  bool             `json:"allow_unmatched_hosts"`
+			AllowPorts           []int            `json:"allow_ports"`
+			DenyCIDRs            []string         `json:"deny_cidrs"`
+			MaxConcurrentTunnels int32            `json:"max_concurrent_tunnels"`
+			InjectRoutes         []map[string]any `json:"inject_routes"`
 		} `json:"forward_proxy"`
 		CA *struct {
 			CertFile string `json:"cert_file"`
@@ -7118,6 +7174,9 @@ func TestRenderForwardProxyEgressdConfig(t *testing.T) {
 	}
 	if config.ForwardProxy == nil || len(config.ForwardProxy.InjectRoutes) != 2 {
 		t.Fatalf("expected two inject routes, got %#v", config.ForwardProxy)
+	}
+	if config.ForwardProxy.MaxConcurrentTunnels != 512 {
+		t.Fatalf("forward proxy tunnel capacity = %d, want 512", config.ForwardProxy.MaxConcurrentTunnels)
 	}
 	if !config.ForwardProxy.AllowUnmatchedHosts {
 		t.Fatalf("forward-proxy mode must blind-tunnel unmatched hosts: %#v", config.ForwardProxy)

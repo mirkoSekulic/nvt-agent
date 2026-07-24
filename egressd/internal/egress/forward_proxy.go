@@ -14,12 +14,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	dialTimeout                             = 10 * time.Second
-	defaultForwardProxyMaxConcurrentTunnels = 64
+	defaultForwardProxyMaxConcurrentTunnels = 256
+	defaultForwardProxyTunnelQueueTimeout   = 5 * time.Second
 	defaultForwardProxyTunnelIdleTimeout    = 60 * time.Second
 	forwardProxyMITMReadHeaderTimeout       = 30 * time.Second
 )
@@ -46,11 +48,19 @@ type ForwardProxy struct {
 	CA        *CA
 	Broker    *BrokerClient
 	Transport http.RoundTripper
+	// TunnelQueueTimeout is a test seam. Production uses the bounded default.
+	TunnelQueueTimeout time.Duration
 
 	once              sync.Once
 	allowHosts        map[string]bool
 	allowPorts        map[int]bool
 	tunnelSlots       chan struct{}
+	tunnelQueueSlots  chan struct{}
+	activeTunnels     atomic.Int64
+	queuedTunnels     atomic.Int64
+	admittedTunnels   atomic.Uint64
+	timedOutTunnels   atomic.Uint64
+	rejectedTunnels   atomic.Uint64
 	injectProxies     map[string][]injectProxy
 	destinationPolicy destinationPolicy
 }
@@ -85,7 +95,7 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if found {
-		p.serveMITM(w, target, proxy)
+		p.serveMITM(r.Context(), w, target, proxy)
 		return
 	}
 	if !p.allowed(target) {
@@ -93,10 +103,10 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
 		return
 	}
-	releaseTunnel, ok := p.acquireTunnel()
-	if !ok {
-		p.writeDecision(target.host, target.port, "deny", "tunnel_limit_exceeded")
-		http.Error(w, "CONNECT tunnel limit exceeded", http.StatusServiceUnavailable)
+	releaseTunnel, errorClass := p.acquireTunnel(r.Context())
+	if releaseTunnel == nil {
+		p.writeDecision(target.host, target.port, "deny", errorClass)
+		http.Error(w, "CONNECT tunnel capacity unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer releaseTunnel()
@@ -142,7 +152,7 @@ func (p *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // pinning, quota, audit, and streaming exactly as a redirect route. The agent
 // trusts the CA, so the minted leaf validates; the real upstream never sees the
 // placeholder and the decrypted request cannot redirect off the pinned host.
-func (p *ForwardProxy) serveMITM(w http.ResponseWriter, target connectTarget, proxy *Proxy) {
+func (p *ForwardProxy) serveMITM(ctx context.Context, w http.ResponseWriter, target connectTarget, proxy *Proxy) {
 	if p.CA == nil {
 		p.writeDecision(target.host, target.port, "deny", "mitm_unconfigured")
 		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
@@ -153,10 +163,10 @@ func (p *ForwardProxy) serveMITM(w http.ResponseWriter, target connectTarget, pr
 		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
 		return
 	}
-	releaseTunnel, ok := p.acquireTunnel()
-	if !ok {
-		p.writeDecision(target.host, target.port, "deny", "tunnel_limit_exceeded")
-		http.Error(w, "CONNECT tunnel limit exceeded", http.StatusServiceUnavailable)
+	releaseTunnel, errorClass := p.acquireTunnel(ctx)
+	if releaseTunnel == nil {
+		p.writeDecision(target.host, target.port, "deny", errorClass)
+		http.Error(w, "CONNECT tunnel capacity unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer releaseTunnel()
@@ -238,14 +248,97 @@ func (p *ForwardProxy) allowed(target connectTarget) bool {
 	return (p.Config.AllowUnmatchedHosts || p.allowHosts[target.host]) && p.allowPorts[target.port]
 }
 
-func (p *ForwardProxy) acquireTunnel() (func(), bool) {
+func (p *ForwardProxy) acquireTunnel(ctx context.Context) (func(), string) {
 	p.init()
+	if ctx.Err() != nil {
+		p.rejectedTunnels.Add(1)
+		p.logTunnelCapacity("cancelled")
+		return nil, "tunnel_queue_cancelled"
+	}
 	select {
 	case p.tunnelSlots <- struct{}{}:
-		return func() { <-p.tunnelSlots }, true
+		return p.tunnelAdmitted(false), ""
 	default:
-		return nil, false
 	}
+
+	select {
+	case p.tunnelQueueSlots <- struct{}{}:
+		p.queuedTunnels.Add(1)
+		p.logTunnelCapacity("queued")
+	default:
+		p.rejectedTunnels.Add(1)
+		p.logTunnelCapacity("queue_full")
+		return nil, "tunnel_queue_full"
+	}
+
+	queued := true
+	leaveQueue := func() {
+		if !queued {
+			return
+		}
+		queued = false
+		<-p.tunnelQueueSlots
+		p.queuedTunnels.Add(-1)
+	}
+	timer := time.NewTimer(p.effectiveTunnelQueueTimeout())
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		leaveQueue()
+	}()
+	select {
+	case p.tunnelSlots <- struct{}{}:
+		leaveQueue()
+		return p.tunnelAdmitted(true), ""
+	case <-timer.C:
+		p.timedOutTunnels.Add(1)
+		p.rejectedTunnels.Add(1)
+		leaveQueue()
+		p.logTunnelCapacity("timed_out")
+		return nil, "tunnel_queue_timeout"
+	case <-ctx.Done():
+		p.rejectedTunnels.Add(1)
+		leaveQueue()
+		p.logTunnelCapacity("cancelled")
+		return nil, "tunnel_queue_cancelled"
+	}
+}
+
+func (p *ForwardProxy) tunnelAdmitted(waited bool) func() {
+	p.activeTunnels.Add(1)
+	p.admittedTunnels.Add(1)
+	if waited {
+		p.logTunnelCapacity("admitted_after_wait")
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-p.tunnelSlots
+			p.activeTunnels.Add(-1)
+		})
+	}
+}
+
+func (p *ForwardProxy) effectiveTunnelQueueTimeout() time.Duration {
+	if p.TunnelQueueTimeout > 0 {
+		return p.TunnelQueueTimeout
+	}
+	return defaultForwardProxyTunnelQueueTimeout
+}
+
+func (p *ForwardProxy) logTunnelCapacity(outcome string) {
+	p.logf("event=tunnel_capacity outcome=%s active=%d queued=%d admitted=%d timed_out=%d rejected=%d",
+		outcome,
+		p.activeTunnels.Load(),
+		p.queuedTunnels.Load(),
+		p.admittedTunnels.Load(),
+		p.timedOutTunnels.Load(),
+		p.rejectedTunnels.Load(),
+	)
 }
 
 func (p *ForwardProxy) init() {
@@ -264,6 +357,7 @@ func (p *ForwardProxy) init() {
 			p.allowPorts[port] = true
 		}
 		p.tunnelSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
+		p.tunnelQueueSlots = make(chan struct{}, p.Config.effectiveMaxConcurrentTunnels())
 		p.injectProxies = map[string][]injectProxy{}
 		p.destinationPolicy, _ = newDestinationPolicy(p.Config.DenyCIDRs)
 		for _, route := range p.Config.InjectRoutes {

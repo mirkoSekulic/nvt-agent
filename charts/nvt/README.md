@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.18`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.19`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, dedicated
 Docker storage size, broker grant preparations, profile workspace instructions,
 or workflow producer policies.
@@ -44,11 +44,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.18 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.19 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.18 --namespace nvt --create-namespace
+  --version 0.8.19 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -395,6 +395,8 @@ spec:
   egress: mediated
   egressEnforcement: true
   egressTransport: transparent
+  # Optional; omitted uses egressd's package-manager-oriented default of 256.
+  egressMaxConcurrentTunnels: 512
 ```
 
 The operator creates a paired egress endpoint, per-run NetworkPolicies, a
@@ -402,6 +404,15 @@ credential-less capture relay, and one-shot NET_ADMIN routing initialization.
 Normal outbound TCP, including DinD traffic, is redirected through captured and
 egressd. The untrusted workload has no direct internet egress rule. Deployment
 placement is an operator implementation detail, not an AgentRun contract.
+Locally published DinD services remain reachable from the agent through Docker
+bridge interfaces, including Compose bridges created after Pod initialization;
+connections originating in DinD containers still enter PREROUTING capture.
+
+`egressMaxConcurrentTunnels` is an optional profile-owned bound for simultaneous
+CONNECT tunnels in forward-proxy and transparent transports (1–4096). egressd
+queues at most the same number of additional requests for a bounded five-second
+burst window, then rejects sustained overload explicitly. Omit the field to use
+the default 256-tunnel active bound.
 
 `networkPolicyCapable=true` is an operator assertion, not CNI installation.
 Set it only when the cluster CNI enforces NetworkPolicy. The enforced kind

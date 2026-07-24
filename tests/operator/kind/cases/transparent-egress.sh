@@ -97,6 +97,18 @@ agent_exec() {
   kubectl_smoke exec "$1-agent" -n "${NAMESPACE}" -c agent -- "${@:2}"
 }
 
+wait_for_published_service() {
+  local run="$1" port="$2" expected="$3" body="" attempt
+  for attempt in $(seq 1 50); do
+    body="$(agent_exec "${run}" curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:${port}/" 2>/dev/null || true)"
+    if [[ "${body}" == "${expected}" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  die "agent could not reach expected response from DinD-published port ${port}"
+}
+
 case_run() {
   submit_rejected_admission no-enforcement egressTransport
   submit_valid_admission valid
@@ -133,7 +145,40 @@ case_run() {
   agent_exec "${run}" bash -lc 'timeout 10 bash -c "exec 3<>/dev/tcp/example.com/443; exec 3>&-"'
 
   # A child container in DinD traverses PREROUTING capture as well.
-  agent_exec "${run}" docker run --rm docker:27-dind wget -q -T 15 -O- https://example.com >/dev/null
+  agent_exec "${run}" docker run --rm busybox:1.36 wget -q -T 15 -O- https://example.com >/dev/null
+
+  # Pod-side traffic to Docker-published services must stay local. Exercise
+  # both Docker's default bridge and a Compose-style bridge created after
+  # net-init; the latter proves interface-prefix matching is not a startup
+  # snapshot. The agent and containers share this Pod network namespace.
+  agent_exec "${run}" docker run -d --rm --name nvt-local-default \
+    -p 127.0.0.1:18080:18080 busybox:1.36 \
+    sh -ec 'mkdir -p /tmp/www; echo default-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
+  wait_for_published_service "${run}" 18080 default-bridge-ok
+  agent_exec "${run}" docker network create nvt_issue143_default >/dev/null
+  agent_exec "${run}" docker run -d --rm --name nvt-local-compose \
+    --network nvt_issue143_default -p 127.0.0.1:18081:18080 busybox:1.36 \
+    sh -ec 'mkdir -p /tmp/www; echo compose-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
+  wait_for_published_service "${run}" 18081 compose-bridge-ok
+
+  # bridge-nf-call-iptables may send same-bridge frames through PREROUTING.
+  # The FIB exception must preserve this local container-to-container path
+  # without exempting routed traffic that leaves the bridge.
+  local peer_body
+  peer_body="$(agent_exec "${run}" docker run --rm --network nvt_issue143_default busybox:1.36 \
+    wget -q -T 10 -O- http://nvt-local-compose:18080/)"
+  [[ "${peer_body}" == "compose-bridge-ok" ]] || die "same-bridge container traffic was captured or misrouted"
+
+  # Routed traffic from that exact dynamic bridge must still enter captured.
+  agent_exec "${run}" docker run --rm --network nvt_issue143_default busybox:1.36 \
+    wget -q -T 15 -O- https://example.com >/dev/null
+
+  # The local OUTPUT bypass does not apply to DinD-originated connections:
+  # they enter PREROUTING and remain subject to destination denial.
+  if agent_exec "${run}" docker run --rm --network nvt_issue143_default busybox:1.36 \
+    wget -q -T 5 -O- http://169.254.169.254/; then
+    die "DinD container bypassed metadata destination denial"
+  fi
 
   # Private and metadata destinations are denied by egressd even through the
   # explicit local listener.

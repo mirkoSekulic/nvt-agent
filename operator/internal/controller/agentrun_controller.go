@@ -2840,12 +2840,13 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		RequireCapabilityHint bool   `json:"require_capability_hint,omitempty"`
 	}
 	type egressdForwardProxy struct {
-		Listen              string                     `json:"listen"`
-		TransparentMode     bool                       `json:"transparent_mode,omitempty"`
-		AllowUnmatchedHosts bool                       `json:"allow_unmatched_hosts"`
-		AllowPorts          []int                      `json:"allow_ports"`
-		DenyCIDRs           []string                   `json:"deny_cidrs,omitempty"`
-		InjectRoutes        []egressdForwardProxyRoute `json:"inject_routes"`
+		Listen               string                     `json:"listen"`
+		TransparentMode      bool                       `json:"transparent_mode,omitempty"`
+		AllowUnmatchedHosts  bool                       `json:"allow_unmatched_hosts"`
+		AllowPorts           []int                      `json:"allow_ports"`
+		MaxConcurrentTunnels int32                      `json:"max_concurrent_tunnels,omitempty"`
+		DenyCIDRs            []string                   `json:"deny_cidrs,omitempty"`
+		InjectRoutes         []egressdForwardProxyRoute `json:"inject_routes"`
 	}
 	type egressdConfig struct {
 		BrokerURL           string               `json:"broker_url"`
@@ -2927,12 +2928,13 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 			})
 		}
 		config.ForwardProxy = &egressdForwardProxy{
-			Listen:              fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
-			TransparentMode:     AgentRunEgressTransparent(agentRun),
-			AllowUnmatchedHosts: true,
-			AllowPorts:          externalPorts,
-			DenyCIDRs:           denyCIDRs,
-			InjectRoutes:        fpRoutes,
+			Listen:               fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
+			TransparentMode:      AgentRunEgressTransparent(agentRun),
+			AllowUnmatchedHosts:  true,
+			AllowPorts:           externalPorts,
+			MaxConcurrentTunnels: agentRun.Spec.EgressMaxConcurrentTunnels,
+			DenyCIDRs:            denyCIDRs,
+			InjectRoutes:         fpRoutes,
 		}
 	}
 	if brokerCADistributed() {
@@ -3587,27 +3589,42 @@ iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
 iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
 for ip in $exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$ip/32" -j RETURN; done
 iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+# Pod-side connections to locally published DinD services leave through a
+# Docker bridge after docker-proxy/DNAT. Interface-prefix matching covers
+# Compose bridges created after this init container has exited. Container-
+# originated traffic enters PREROUTING instead and remains captured below.
+iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN
+iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN
 iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
 for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
+nft add rule ip nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
+nft add rule ip nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
 iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
 ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
 ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_CAPTURE -d "$ip/128" -j RETURN; done
 ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+ip6tables -t nat -A NVT_CAPTURE -o docker0 -j RETURN
+ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN
 ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
+nft add rule ip6 nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
+nft add rule ip6 nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
 		initContainers = append(initContainers, corev1.Container{
-			Name:    "net-init",
-			Image:   "docker:27-dind",
-			Command: []string{"sh", "-c"},
-			Args:    []string{rules},
+			Name:            "net-init",
+			Image:           DindImage(),
+			ImagePullPolicy: dindPullPolicy,
+			Command:         []string{"sh", "-c"},
+			Args:            []string{rules},
 			Env: []corev1.EnvVar{{
 				Name: "NVT_CAPTURE_EXCLUDE_HOSTS",
 				Value: strings.Join([]string{
@@ -4155,6 +4172,14 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("spec.egressEnforcement requires spec.egress mediated, got %q", mode)
 	}
 	transport := AgentRunEgressTransport(agentRun)
+	if err := validateEgressMaxConcurrentTunnels(agentRun.Spec.EgressMaxConcurrentTunnels); err != nil {
+		return err
+	}
+	if agentRun.Spec.EgressMaxConcurrentTunnels != 0 &&
+		transport != nvtv1alpha1.AgentRunEgressTransportForwardProxy &&
+		transport != nvtv1alpha1.AgentRunEgressTransportTransparent {
+		return fmt.Errorf("spec.egressMaxConcurrentTunnels requires spec.egressTransport forward-proxy or transparent")
+	}
 	switch transport {
 	case nvtv1alpha1.AgentRunEgressTransportRedirect,
 		nvtv1alpha1.AgentRunEgressTransportForwardProxy,
@@ -4280,6 +4305,13 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		// placeholder-file grants are materialized but not routed without the
 		// forward proxy.
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
+	}
+	return nil
+}
+
+func validateEgressMaxConcurrentTunnels(value int32) error {
+	if value < 0 || value > 4096 {
+		return fmt.Errorf("spec.egressMaxConcurrentTunnels must be between 1 and 4096 when set, got %d", value)
 	}
 	return nil
 }
