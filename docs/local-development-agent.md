@@ -68,12 +68,16 @@ Provider `allow` is the maximum ceiling. Each agent grant narrows it further.
 ## Build And Start
 
 ```sh
-make runtime-build broker-build egressd-build captured-build
+make runtime-build dind-build broker-build egressd-build captured-build
 make infra-up
 make agent-init NAME=$AGENT
 make agent-grant NAME=$AGENT PROVIDER=$PROVIDER REPO=$REPO
 make agent-up NAME=$AGENT
 ```
+
+Mediated startup requires the local DinD image used by net-init. Override its
+name with `DIND_IMAGE`; `agent-up` fails with build guidance instead of trying
+to pull a missing local image.
 
 `agent-init` creates `.agents/$AGENT/agent.yaml`, environment, workspace,
 state, and a unique broker identity. The broker stores only its token hash.

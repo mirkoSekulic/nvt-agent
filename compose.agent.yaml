@@ -69,7 +69,7 @@ services:
         condition: service_started
 
   net-init:
-    image: nvt-dind:latest
+    image: ${DIND_IMAGE:-nvt-dind:latest}
     profiles:
       - mediated
     network_mode: service:docker

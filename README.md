@@ -83,7 +83,7 @@ Containers.
 Requirements: Docker with Compose, Make, and a browser.
 
 ```sh
-make runtime-build broker-build egressd-build captured-build
+make runtime-build dind-build broker-build egressd-build captured-build
 make infra-up
 
 make agent-init NAME=demo
