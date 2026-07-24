@@ -90,6 +90,9 @@ type SubmissionConfig struct {
 	AdmissionTokenFile string         `json:"admissionTokenFile,omitempty"`
 	ScheduleNamespace  string         `json:"scheduleNamespace,omitempty"`
 	ScheduleName       string         `json:"scheduleName,omitempty"`
+	// Workflow is an optional static, non-secret workflow profile name for
+	// profiled schedule admission.
+	Workflow string `json:"workflow,omitempty"`
 }
 
 type AgentRunConfig struct {
@@ -237,6 +240,14 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	}
 	if c.Submission.AdmissionMode == AdmissionModeProfiled && c.Submission.Mode != SubmissionModeScheduleAdmission {
 		return errors.New("submission.admissionMode profiled requires submission.mode scheduleAdmission")
+	}
+	if c.Submission.Workflow != "" {
+		if c.Submission.Mode != SubmissionModeScheduleAdmission || c.Submission.AdmissionMode != AdmissionModeProfiled {
+			return errors.New("submission.workflow requires profiled scheduleAdmission mode")
+		}
+		if len(utilvalidation.IsDNS1123Label(c.Submission.Workflow)) != 0 {
+			return errors.New("submission.workflow must be a normalized DNS label")
+		}
 	}
 	if c.GitHubApp.AppID == 0 {
 		return errors.New("githubApp.appID is required")

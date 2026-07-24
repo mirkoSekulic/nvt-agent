@@ -61,6 +61,9 @@ const (
 	profileWorkspaceInstructionsKey       = "profile-workspace-instructions.md"
 	profileWorkspaceInstructionsPath      = agentConfigVolumeDir + "/" + profileWorkspaceInstructionsKey
 	profileWorkspaceInstructionsEnv       = "NVT_AGENT_PROFILE_INSTRUCTIONS_FILE"
+	workflowWorkspaceInstructionsKey      = "workflow-workspace-instructions.md"
+	workflowWorkspaceInstructionsPath     = agentConfigVolumeDir + "/" + workflowWorkspaceInstructionsKey
+	workflowWorkspaceInstructionsEnv      = "NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE"
 	agentConfigMountPath                  = "/nvt-agent/agent.yaml"
 	agentConfigVolumeDir                  = "/nvt-agent"
 	runtimeAuthSourcePath                 = "/nvt-agent/runtime-auth-source"
@@ -2736,6 +2739,9 @@ func DesiredAgentConfigMap(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Schem
 	if agentRun.Spec.Agent.WorkspaceInstructions != "" {
 		configMap.Data[profileWorkspaceInstructionsKey] = agentRun.Spec.Agent.WorkspaceInstructions
 	}
+	if agentRun.Spec.Agent.WorkflowInstructions != "" {
+		configMap.Data[workflowWorkspaceInstructionsKey] = agentRun.Spec.Agent.WorkflowInstructions
+	}
 	if err := controllerutil.SetControllerReference(agentRun, configMap, scheme); err != nil {
 		return nil, fmt.Errorf("set AgentRun config ConfigMap owner: %w", err)
 	}
@@ -2928,6 +2934,9 @@ func AgentRunWorkspaceMode(agentRun *nvtv1alpha1.AgentRun) nvtv1alpha1.AgentRunW
 func ValidateAgentRunWorkspaceInstructions(agentRun *nvtv1alpha1.AgentRun) error {
 	if len(agentRun.Spec.Agent.WorkspaceInstructions) > maxWorkspaceInstructionsBytes {
 		return fmt.Errorf("spec.agent.workspaceInstructions must be at most %d bytes", maxWorkspaceInstructionsBytes)
+	}
+	if len(agentRun.Spec.Agent.WorkflowInstructions) > maxWorkspaceInstructionsBytes {
+		return fmt.Errorf("spec.agent.workflowInstructions must be at most %d bytes", maxWorkspaceInstructionsBytes)
 	}
 	return nil
 }
@@ -3149,6 +3158,11 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 	if agentRun.Spec.Agent.WorkspaceInstructions != "" {
 		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
 			Key: profileWorkspaceInstructionsKey, Path: profileWorkspaceInstructionsKey,
+		})
+	}
+	if agentRun.Spec.Agent.WorkflowInstructions != "" {
+		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
+			Key: workflowWorkspaceInstructionsKey, Path: workflowWorkspaceInstructionsKey,
 		})
 	}
 	hasGitGrant := agentRunHasGitGrant(agentRun)
@@ -3384,6 +3398,11 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 	if agentRun.Spec.Agent.WorkspaceInstructions != "" {
 		agentEnv = append(agentEnv, corev1.EnvVar{
 			Name: profileWorkspaceInstructionsEnv, Value: profileWorkspaceInstructionsPath,
+		})
+	}
+	if agentRun.Spec.Agent.WorkflowInstructions != "" {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name: workflowWorkspaceInstructionsEnv, Value: workflowWorkspaceInstructionsPath,
 		})
 	}
 	if !AgentRunLiteralZeroSecret(agentRun) {

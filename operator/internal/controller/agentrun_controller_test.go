@@ -3210,6 +3210,7 @@ func TestProfileWorkspaceInstructionsProjection(t *testing.T) {
 	scheme := testScheme(t)
 	run := testAgentRun()
 	run.Spec.Agent.WorkspaceInstructions = "# Team workflow\n\nPreserve this Markdown exactly.\n"
+	run.Spec.Agent.WorkflowInstructions = "# Requested workflow\n\nReview before editing.\n"
 
 	configMap, err := DesiredAgentConfigMap(run, scheme)
 	if err != nil {
@@ -3218,34 +3219,47 @@ func TestProfileWorkspaceInstructionsProjection(t *testing.T) {
 	if got := configMap.Data[profileWorkspaceInstructionsKey]; got != run.Spec.Agent.WorkspaceInstructions {
 		t.Fatalf("projected instructions = %q", got)
 	}
+	if got := configMap.Data[workflowWorkspaceInstructionsKey]; got != run.Spec.Agent.WorkflowInstructions {
+		t.Fatalf("projected workflow instructions = %q", got)
+	}
 	pod, err := DesiredAgentPod(run, scheme)
 	if err != nil {
 		t.Fatal(err)
 	}
 	foundItem := false
+	foundWorkflowItem := false
 	for _, item := range pod.Spec.Volumes[1].ConfigMap.Items {
 		if item.Key == profileWorkspaceInstructionsKey && item.Path == profileWorkspaceInstructionsKey {
 			foundItem = true
 		}
+		if item.Key == workflowWorkspaceInstructionsKey && item.Path == workflowWorkspaceInstructionsKey {
+			foundWorkflowItem = true
+		}
 	}
 	foundEnv := false
+	foundWorkflowEnv := false
 	for _, env := range pod.Spec.Containers[0].Env {
 		if env.Name == profileWorkspaceInstructionsEnv && env.Value == profileWorkspaceInstructionsPath {
 			foundEnv = true
 		}
+		if env.Name == workflowWorkspaceInstructionsEnv && env.Value == workflowWorkspaceInstructionsPath {
+			foundWorkflowEnv = true
+		}
 	}
-	if !foundItem || !foundEnv || !pod.Spec.Containers[0].VolumeMounts[1].ReadOnly {
-		t.Fatalf("instructions projection is incomplete: item=%t env=%t pod=%#v", foundItem, foundEnv, pod.Spec)
+	if !foundItem || !foundWorkflowItem || !foundEnv || !foundWorkflowEnv || !pod.Spec.Containers[0].VolumeMounts[1].ReadOnly {
+		t.Fatalf("instructions projection is incomplete: profileItem=%t workflowItem=%t profileEnv=%t workflowEnv=%t pod=%#v",
+			foundItem, foundWorkflowItem, foundEnv, foundWorkflowEnv, pod.Spec)
 	}
 	podJSON, err := json.Marshal(pod)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(podJSON), "Preserve this Markdown exactly") {
+	if strings.Contains(string(podJSON), "Preserve this Markdown exactly") || strings.Contains(string(podJSON), "Review before editing") {
 		t.Fatal("workspace instruction content was duplicated into the Pod spec")
 	}
 
 	run.Spec.Agent.WorkspaceInstructions = ""
+	run.Spec.Agent.WorkflowInstructions = ""
 	configMap, err = DesiredAgentConfigMap(run, scheme)
 	if err != nil {
 		t.Fatal(err)
@@ -3257,13 +3271,16 @@ func TestProfileWorkspaceInstructionsProjection(t *testing.T) {
 	if _, exists := configMap.Data[profileWorkspaceInstructionsKey]; exists {
 		t.Fatal("empty workspace instructions created a ConfigMap item")
 	}
+	if _, exists := configMap.Data[workflowWorkspaceInstructionsKey]; exists {
+		t.Fatal("empty workflow instructions created a ConfigMap item")
+	}
 	for _, env := range pod.Spec.Containers[0].Env {
-		if env.Name == profileWorkspaceInstructionsEnv {
+		if env.Name == profileWorkspaceInstructionsEnv || env.Name == workflowWorkspaceInstructionsEnv {
 			t.Fatal("empty workspace instructions created an environment variable")
 		}
 	}
 	for _, item := range pod.Spec.Volumes[1].ConfigMap.Items {
-		if item.Key == profileWorkspaceInstructionsKey {
+		if item.Key == profileWorkspaceInstructionsKey || item.Key == workflowWorkspaceInstructionsKey {
 			t.Fatal("empty workspace instructions created a projected item")
 		}
 	}
@@ -3271,6 +3288,11 @@ func TestProfileWorkspaceInstructionsProjection(t *testing.T) {
 	run.Spec.Agent.WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes) + "secret-canary"
 	if _, err := DesiredAgentConfigMap(run, scheme); err == nil || strings.Contains(err.Error(), "secret-canary") {
 		t.Fatalf("oversized instructions did not fail with a sanitized error: %v", err)
+	}
+	run.Spec.Agent.WorkspaceInstructions = ""
+	run.Spec.Agent.WorkflowInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes) + "secret-canary"
+	if _, err := DesiredAgentConfigMap(run, scheme); err == nil || strings.Contains(err.Error(), "secret-canary") {
+		t.Fatalf("oversized workflow instructions did not fail with a sanitized error: %v", err)
 	}
 }
 
@@ -4239,6 +4261,12 @@ func TestAgentRunCRDSchemaBoundsWorkspaceInstructions(t *testing.T) {
 		"spec", "properties", "agent", "properties", "workspaceInstructions", "maxLength",
 	); fmt.Sprint(got) != "65536" {
 		t.Fatalf("workspaceInstructions maxLength = %#v", got)
+	}
+	if got := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties",
+		"spec", "properties", "agent", "properties", "workflowInstructions", "maxLength",
+	); fmt.Sprint(got) != "65536" {
+		t.Fatalf("workflowInstructions maxLength = %#v", got)
 	}
 }
 

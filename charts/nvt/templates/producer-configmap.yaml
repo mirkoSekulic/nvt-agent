@@ -13,6 +13,14 @@
 {{- else if or (not (empty .Values.producer.agentRun.workspaceSize)) (not (empty .Values.producer.agentRun.workspaceStorageClassName)) }}
 {{- fail "producer.agentRun.workspaceSize and workspaceStorageClassName require workspaceMode Persistent" }}
 {{- end }}
+{{- with .Values.producer.submission.workflow }}
+{{- if not (and (eq $.Values.producer.submission.mode "scheduleAdmission") (eq $.Values.producer.submission.admissionMode "profiled")) }}
+{{- fail "producer.submission.workflow requires profiled scheduleAdmission mode" }}
+{{- end }}
+{{- if or (gt (len .) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .)) }}
+{{- fail "producer.submission.workflow must be a normalized DNS label" }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -37,6 +45,9 @@ data:
       {{- end }}
       scheduleNamespace: {{ default (include "nvt.producerAgentRunNamespace" .) .Values.producer.submission.scheduleNamespace | quote }}
       scheduleName: {{ .Values.producer.submission.scheduleName | quote }}
+      {{- with .Values.producer.submission.workflow }}
+      workflow: {{ . | quote }}
+      {{- end }}
     idempotency:
       scope: {{ .Values.producer.idempotency.scope | quote }}
     state:

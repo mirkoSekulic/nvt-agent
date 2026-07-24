@@ -7,8 +7,8 @@ The operator core remains producer-agnostic.
 ## Profiled schedules
 
 A profiled schedule owns a typed common template, named execution profiles,
-static principal selection, and the exact Kubernetes producer identities that
-may submit work. See
+static principal selection, optional workflow profiles, and the exact
+Kubernetes producer identities that may submit work. See
 [`operator/examples/agentschedule-profiled.yaml`](../examples/agentschedule-profiled.yaml)
 for a complete resource.
 
@@ -41,16 +41,41 @@ profiles:
       Run the project checks before opening a pull request.
 ```
 
+For new deployments that need producer-selectable workflows, keep execution
+credentials in `profiles` and define guidance independently:
+
+```yaml
+workflowProfiles:
+  - name: implement-pr
+    workspaceInstructions: |
+      Implement the change and create a pull request.
+  - name: review-pr
+    workspaceInstructions: |
+      Review the pull request and report findings first.
+producerPolicies:
+  - identity: system:serviceaccount:nvt:nvt-github-comments-producer
+    workflows: [implement-pr, review-pr]
+    defaultWorkflow: implement-pr
+```
+
+TokenReview establishes `identity`; it is never read from admission JSON. A
+requested workflow is exact-matched against that policy. When omitted, the
+policy's optional default is used. Workflow selection is independent of
+principal-based execution-profile selection and cannot change runtime, auth,
+provider, broker, or egress configuration.
+
 `profileSelection.rules` match exact `issuer` plus immutable `subject` values.
 `displayName` is stored for audit/display only and never participates in
 selection. Duplicate selectors/profile names, missing references, invalid
 `onNoMatch`, and unusable selection paths fail closed. There are no
 producer-selectable profile names, candidates, or fallbacks.
 
-Profiled requests contain only work metadata and prompt input:
+Profiled requests contain only an optional workflow name, work metadata, and
+prompt input:
 
 ```json
 {
+  "workflow": "review-pr",
   "work": {
     "id": "github:example/repo:issue:123",
     "title": "Fix the failing test",
@@ -68,19 +93,23 @@ Profiled requests contain only work metadata and prompt input:
 
 The principal may be absent when `onNoMatch: useDefault` names a valid default.
 Unknown and missing principals follow `onNoMatch` exactly. Any top-level field
-other than `work` or `input`, including `agentRun`, profile, broker, grant,
+other than `workflow`, `work`, or `input`, including `agentRun`, profile, broker, grant,
 provider, proxy, egress, or workspace instruction configuration, is rejected
-rather than ignored. `input` accepts only `prompt`.
+rather than ignored. The only additional top-level field is the optional,
+non-secret `workflow` name. `input` accepts only `prompt`.
 
 ### Producer authentication
 
 Profiled admission requires a projected Kubernetes ServiceAccount bearer token
 with audience `nvt-operator`. The operator validates it with TokenReview and
-exact-matches the authenticated username against `spec.allowedProducers`:
+exact-matches the authenticated username against schedule-owned authorization.
+Workflow-enabled schedules use typed `spec.producerPolicies`:
 
 ```yaml
-allowedProducers:
-  - system:serviceaccount:nvt:nvt-github-comments-producer
+producerPolicies:
+  - identity: system:serviceaccount:nvt:nvt-github-comments-producer
+    workflows: [implement-pr, review-pr]
+    defaultWorkflow: implement-pr
 ```
 
 Requested-by annotations, principal display names, and request content are not
@@ -92,16 +121,30 @@ The GitHub comments producer uses this contract with
 It reports issuer `https://github.com`, the immutable numeric GitHub user ID as
 `subject`, and the login as display-only metadata. Its projected token is read
 for every request and uses audience `nvt-operator`; the schedule must list the
-producer ServiceAccount username in `allowedProducers`. Most deployments need
-only `defaultProfile`. Add exact issuer/subject rules only when different
-principals must resolve to different execution profiles.
+producer ServiceAccount username in `producerPolicies` when workflows are
+enabled. `submission.workflow` may set one static allowlisted workflow name;
+when absent, the producer emits no workflow field. Most deployments need only
+`defaultProfile`. Add exact issuer/subject rules only when different principals
+must resolve to different execution profiles.
+
+### Producer policy migration
+
+The original `allowedProducers: []string` field remains supported unchanged for
+schedules without workflow configuration. To enable workflows, replace that
+list with `producerPolicies` and add `workflowProfiles`. The two authorization
+forms cannot be mixed. This additive typed migration avoids a string-or-object
+union and keeps stored schedules valid until administrators opt in.
 
 ### Immutable resolution
 
 The operator resolves once, builds the complete `AgentRun`, generates its final
 name, injects lifecycle callback configuration, and creates it. The stored run
 contains the resolved configuration and `spec.profileProvenance`: authenticated
-producer, schedule identity/generation, selected profile, and principal.
+producer, schedule identity/generation, selected execution profile, selected
+workflow when present, and principal. Profile and workflow instruction text are
+stored separately in the AgentRun snapshot. The runtime appends generated
+platform guidance, execution-profile guidance, workflow guidance, then local
+workspace guidance, in that order.
 Subsequent schedule edits do not change existing runs. Structured provenance is
 authoritative; labels and annotations are display data only.
 
@@ -112,8 +155,9 @@ merged.
 
 ## Legacy migration mode
 
-A schedule with none of `template`, `profiles`, `profileSelection`, or
-`allowedProducers` keeps the existing full-`AgentRun` request contract. It
+A schedule with none of `template`, `profiles`, `profileSelection`,
+`workflowProfiles`, `producerPolicies`, or `allowedProducers` keeps the existing
+full-`AgentRun` request contract. It
 remains unauthenticated for compatibility in this PR and must stay
 cluster-internal:
 

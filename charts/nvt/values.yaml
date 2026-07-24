@@ -164,6 +164,8 @@ agentSchedule:
   template: {}
   profiles: []
   profileSelection: {}
+  workflowProfiles: []
+  producerPolicies: []
   allowedProducers: []
 
 producer:
@@ -191,6 +193,8 @@ producer:
     tokenExpirationSeconds: 3600
     scheduleNamespace: ""
     scheduleName: default
+    # Optional static workflow profile name for profiled schedule admission.
+    workflow: ""
   idempotency:
     scope: issue
   repositories: []

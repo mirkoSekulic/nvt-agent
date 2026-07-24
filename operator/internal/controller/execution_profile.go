@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
@@ -15,6 +16,8 @@ import (
 var (
 	errInvalidExecutionProfileConfiguration = errors.New("invalid execution profile configuration")
 	errExecutionProfileSelectionDenied      = errors.New("execution profile selection denied")
+	errProducerNotAllowed                   = errors.New("producer is not allowed")
+	errWorkflowSelectionDenied              = errors.New("workflow selection denied")
 )
 
 const maxWorkspaceInstructionsBytes = 64 * 1024
@@ -22,6 +25,18 @@ const maxWorkspaceInstructionsBytes = 64 * 1024
 // ResolvedExecutionProfile is the single immutable profile selected for a request.
 type ResolvedExecutionProfile struct {
 	Profile nvtv1alpha1.AgentScheduleExecutionProfile
+}
+
+// ResolvedWorkflowProfile is the independently authorized workflow snapshot.
+type ResolvedWorkflowProfile struct {
+	Name                  string
+	WorkspaceInstructions string
+}
+
+type validatedWorkflowConfiguration struct {
+	legacyAllowed map[string]struct{}
+	profiles      map[string]nvtv1alpha1.AgentScheduleWorkflowProfile
+	policies      map[string]nvtv1alpha1.AgentScheduleProducerPolicy
 }
 
 // ExecutionProfileResolver resolves one profile without consulting producer-controlled fields.
@@ -35,7 +50,8 @@ type StaticExecutionProfileResolver struct{}
 // ScheduleUsesExecutionProfiles reports whether any profiled-mode configuration is present.
 func ScheduleUsesExecutionProfiles(schedule *nvtv1alpha1.AgentSchedule) bool {
 	return schedule.Spec.Template != nil || len(schedule.Spec.Profiles) != 0 ||
-		schedule.Spec.ProfileSelection != nil || len(schedule.Spec.AllowedProducers) != 0
+		schedule.Spec.ProfileSelection != nil || len(schedule.Spec.AllowedProducers) != 0 ||
+		len(schedule.Spec.WorkflowProfiles) != 0 || len(schedule.Spec.ProducerPolicies) != 0
 }
 
 func (StaticExecutionProfileResolver) Resolve(
@@ -70,7 +86,7 @@ func (StaticExecutionProfileResolver) Resolve(
 
 func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[string]nvtv1alpha1.AgentScheduleExecutionProfile, error) {
 	if schedule.Spec.Template == nil || len(schedule.Spec.Profiles) == 0 ||
-		schedule.Spec.ProfileSelection == nil || len(schedule.Spec.AllowedProducers) == 0 {
+		schedule.Spec.ProfileSelection == nil {
 		return nil, errInvalidExecutionProfileConfiguration
 	}
 	template := schedule.Spec.Template
@@ -84,19 +100,12 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 	if _, ownsRuntime := common["runtime"]; ownsRuntime {
 		return nil, errInvalidExecutionProfileConfiguration
 	}
-	if template.Agent.WorkspaceInstructions != "" {
+	if template.Agent.WorkspaceInstructions != "" || template.Agent.WorkflowInstructions != "" {
 		return nil, errInvalidExecutionProfileConfiguration
 	}
 
-	allowed := map[string]struct{}{}
-	for _, producer := range schedule.Spec.AllowedProducers {
-		if strings.TrimSpace(producer) == "" {
-			return nil, errInvalidExecutionProfileConfiguration
-		}
-		if _, duplicate := allowed[producer]; duplicate {
-			return nil, errInvalidExecutionProfileConfiguration
-		}
-		allowed[producer] = struct{}{}
+	if _, err := validateWorkflowConfiguration(schedule); err != nil {
+		return nil, err
 	}
 
 	profiles := make(map[string]nvtv1alpha1.AgentScheduleExecutionProfile, len(schedule.Spec.Profiles))
@@ -157,6 +166,113 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 	return profiles, nil
 }
 
+func validateWorkflowConfiguration(schedule *nvtv1alpha1.AgentSchedule) (*validatedWorkflowConfiguration, error) {
+	configuration := &validatedWorkflowConfiguration{}
+	workflowMode := len(schedule.Spec.WorkflowProfiles) != 0 || len(schedule.Spec.ProducerPolicies) != 0
+	if !workflowMode {
+		if len(schedule.Spec.AllowedProducers) == 0 {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		configuration.legacyAllowed = make(map[string]struct{}, len(schedule.Spec.AllowedProducers))
+		for _, producer := range schedule.Spec.AllowedProducers {
+			if strings.TrimSpace(producer) == "" || producer != strings.TrimSpace(producer) {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			if _, duplicate := configuration.legacyAllowed[producer]; duplicate {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			configuration.legacyAllowed[producer] = struct{}{}
+		}
+		return configuration, nil
+	}
+
+	if len(schedule.Spec.AllowedProducers) != 0 || len(schedule.Spec.WorkflowProfiles) == 0 || len(schedule.Spec.ProducerPolicies) == 0 {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
+	configuration.profiles = make(map[string]nvtv1alpha1.AgentScheduleWorkflowProfile, len(schedule.Spec.WorkflowProfiles))
+	for _, profile := range schedule.Spec.WorkflowProfiles {
+		if len(utilvalidation.IsDNS1123Label(profile.Name)) != 0 || len(profile.WorkspaceInstructions) > maxWorkspaceInstructionsBytes {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if _, duplicate := configuration.profiles[profile.Name]; duplicate {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		configuration.profiles[profile.Name] = profile
+	}
+	configuration.policies = make(map[string]nvtv1alpha1.AgentScheduleProducerPolicy, len(schedule.Spec.ProducerPolicies))
+	for _, policy := range schedule.Spec.ProducerPolicies {
+		if strings.TrimSpace(policy.Identity) == "" || policy.Identity != strings.TrimSpace(policy.Identity) {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if _, duplicate := configuration.policies[policy.Identity]; duplicate {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		allowed := make(map[string]struct{}, len(policy.Workflows))
+		for _, workflow := range policy.Workflows {
+			if _, exists := configuration.profiles[workflow]; !exists {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			if _, duplicate := allowed[workflow]; duplicate {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			allowed[workflow] = struct{}{}
+		}
+		if policy.DefaultWorkflow != "" {
+			if _, allowedDefault := allowed[policy.DefaultWorkflow]; !allowedDefault {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+		}
+		configuration.policies[policy.Identity] = policy
+	}
+	return configuration, nil
+}
+
+func resolveWorkflowForProducer(
+	schedule *nvtv1alpha1.AgentSchedule,
+	producer string,
+	requested string,
+) (*ResolvedWorkflowProfile, error) {
+	configuration, err := validateWorkflowConfiguration(schedule)
+	if err != nil {
+		return nil, err
+	}
+	if configuration.legacyAllowed != nil {
+		if _, allowed := configuration.legacyAllowed[producer]; !allowed {
+			return nil, errProducerNotAllowed
+		}
+		if requested != "" {
+			return nil, errWorkflowSelectionDenied
+		}
+		return nil, nil
+	}
+	policy, allowed := configuration.policies[producer]
+	if !allowed {
+		return nil, errProducerNotAllowed
+	}
+	selected := requested
+	if selected == "" {
+		selected = policy.DefaultWorkflow
+	}
+	if selected == "" {
+		return nil, nil
+	}
+	allowedWorkflow := false
+	for _, workflow := range policy.Workflows {
+		if workflow == selected {
+			allowedWorkflow = true
+			break
+		}
+	}
+	if !allowedWorkflow {
+		return nil, errWorkflowSelectionDenied
+	}
+	profile, exists := configuration.profiles[selected]
+	if !exists {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
+	return &ResolvedWorkflowProfile{Name: profile.Name, WorkspaceInstructions: profile.WorkspaceInstructions}, nil
+}
+
 func jsonObject(value apiextensionsv1.JSON) (map[string]any, error) {
 	raw := value.Raw
 	if len(raw) == 0 {
@@ -174,6 +290,7 @@ func buildProfiledAgentRun(
 	resolved *ResolvedExecutionProfile,
 	producer string,
 	principal *nvtv1alpha1.AgentRunPrincipal,
+	workflow *ResolvedWorkflowProfile,
 	prompt string,
 ) (*nvtv1alpha1.AgentRun, error) {
 	template := schedule.Spec.Template
@@ -192,6 +309,12 @@ func buildProfiledAgentRun(
 		return nil, errInvalidExecutionProfileConfiguration
 	}
 
+	selectedWorkflow := ""
+	workflowInstructions := ""
+	if workflow != nil {
+		selectedWorkflow = workflow.Name
+		workflowInstructions = workflow.WorkspaceInstructions
+	}
 	run := &nvtv1alpha1.AgentRun{
 		Spec: nvtv1alpha1.AgentRunSpec{
 			Runtime:                   profile.Runtime,
@@ -209,6 +332,7 @@ func buildProfiledAgentRun(
 			Agent: nvtv1alpha1.AgentRunAgent{
 				Config:                apiextensionsv1.JSON{Raw: rawConfig},
 				WorkspaceInstructions: profile.WorkspaceInstructions,
+				WorkflowInstructions:  workflowInstructions,
 			},
 			Lifecycle: template.Lifecycle.DeepCopy(),
 			TTL:       template.TTL.DeepCopy(),
@@ -218,6 +342,7 @@ func buildProfiledAgentRun(
 				ScheduleUID:           string(schedule.UID),
 				ScheduleGeneration:    schedule.Generation,
 				SelectedProfile:       profile.Name,
+				SelectedWorkflow:      selectedWorkflow,
 				Principal:             copyPrincipal(principal),
 			},
 		},

@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.12" || "${CHART_APP_VERSION}" != "0.8.12" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.12, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.13" || "${CHART_APP_VERSION}" != "0.8.13" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.13, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.12' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.13' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -193,6 +193,7 @@ helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true > "${PRODU
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.submission.mode=direct > "${PRODUCER_DIRECT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
   --set producer.submission.admissionMode=profiled \
+  --set producer.submission.workflow=review-pr \
   --set producer.submission.tokenExpirationSeconds=1800 \
   > "${PRODUCER_PROFILED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.persistence.existingClaim=existing-state > "${PRODUCER_EXISTING_CLAIM_RENDER}"
@@ -590,6 +591,11 @@ grep -q 'provider: codex-main' "${PROFILE_RENDER}"
 grep -q 'provider: github-main-app' "${PROFILE_RENDER}"
 grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
 grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
+grep -q 'name: implement-pr' "${PROFILE_RENDER}"
+grep -q 'name: review-pr' "${PROFILE_RENDER}"
+grep -q 'defaultWorkflow: implement-pr' "${PROFILE_RENDER}"
+grep -A3 'workflows:' "${PROFILE_RENDER}" | grep -q 'implement-pr'
+grep -A3 'workflows:' "${PROFILE_RENDER}" | grep -q 'review-pr'
 grep -q 'runtimeClassName: kata-vm-isolation' "${PROFILE_RENDER}"
 grep -A6 'resources:' "${PROFILE_RENDER}" | grep -q 'cpu: "2"'
 grep -A6 'resources:' "${PROFILE_RENDER}" | grep -q 'memory: 8Gi'
@@ -1146,6 +1152,7 @@ if grep -q 'automountServiceAccountToken: false' "${PRODUCER_DIRECT_RENDER}"; th
   exit 1
 fi
 grep -q 'admissionMode: "profiled"' "${PRODUCER_PROFILED_RENDER}"
+grep -q 'workflow: "review-pr"' "${PRODUCER_PROFILED_RENDER}"
 grep -q 'admissionTokenFile: "/var/run/secrets/nvt-operator/token"' "${PRODUCER_PROFILED_RENDER}"
 grep -q 'automountServiceAccountToken: false' "${PRODUCER_PROFILED_RENDER}"
 grep -q 'mountPath: "/var/run/secrets/nvt-operator"' "${PRODUCER_PROFILED_RENDER}"
@@ -1161,6 +1168,37 @@ if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
   exit 1
 fi
 grep -q 'producer.submission.tokenExpirationSeconds must be between 600 and 86400' "${PRODUCER_PROFILED_EXPIRATION_FAILURE}"
+if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.submission.workflow=review-pr \
+  > /dev/null 2> "${WORKDIR}/producer-workflow-mode-failure.txt"; then
+  echo "expected producer workflow outside profiled mode to fail rendering" >&2
+  exit 1
+fi
+grep -q 'producer.submission.workflow requires profiled scheduleAdmission mode' "${WORKDIR}/producer-workflow-mode-failure.txt"
+if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.submission.admissionMode=profiled \
+  --set-string producer.submission.workflow='Review PR' \
+  > /dev/null 2> "${WORKDIR}/producer-workflow-name-failure.txt"; then
+  echo "expected non-normalized producer workflow to fail rendering" >&2
+  exit 1
+fi
+grep -q 'producer.submission.workflow must be a normalized DNS label' "${WORKDIR}/producer-workflow-name-failure.txt"
+if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.submission.admissionMode=profiled \
+  --set-string producer.submission.workflow="$(printf 'a%.0s' {1..64})" \
+  > /dev/null 2> "${WORKDIR}/producer-workflow-length-failure.txt"; then
+  echo "expected oversized producer workflow name to fail rendering" >&2
+  exit 1
+fi
+grep -q 'producer.submission.workflow must be a normalized DNS label' "${WORKDIR}/producer-workflow-length-failure.txt"
+if helm template nvt "${CHART}" -n custom-ns \
+  --set agentSchedule.workflowProfiles[0].name=review-pr \
+  --set agentSchedule.allowedProducers[0]=system:serviceaccount:nvt:legacy \
+  > /dev/null 2> "${WORKDIR}/schedule-workflow-migration-failure.txt"; then
+  echo "expected mixed workflow and legacy producer authorization to fail rendering" >&2
+  exit 1
+fi
+grep -q 'workflow-enabled agentSchedule requires workflowProfiles and producerPolicies and cannot use legacy allowedProducers' "${WORKDIR}/schedule-workflow-migration-failure.txt"
 if grep -Eq 'privateKey:|privateKeyBase64:|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' "${PRODUCER_RENDER}"; then
   echo "producer chart must not render GitHub App private key material" >&2
   exit 1

@@ -51,5 +51,14 @@ agentSchedule:
     defaultProfile: default-codex
     onNoMatch: useDefault
     rules: []
-  allowedProducers:
-    - system:serviceaccount:custom-ns:producer
+  workflowProfiles:
+    - name: implement-pr
+      workspaceInstructions: |
+        Implement the change and create a pull request.
+    - name: review-pr
+      workspaceInstructions: |
+        Review the pull request and report findings first.
+  producerPolicies:
+    - identity: system:serviceaccount:custom-ns:producer
+      workflows: [implement-pr, review-pr]
+      defaultWorkflow: implement-pr

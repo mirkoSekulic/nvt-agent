@@ -24,9 +24,9 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.12`; otherwise the API server will prune or reject
-new AgentRun and execution-profile fields such as broker grant preparations or
-profile workspace instructions.
+of, upgrading to chart `0.8.13`; otherwise the API server will prune or reject
+new AgentRun and schedule fields such as broker grant preparations, profile
+workspace instructions, or workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -43,11 +43,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.12 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.13 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.12 --namespace nvt --create-namespace
+  --version 0.8.13 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -115,14 +115,17 @@ producer:
     mode: scheduleAdmission
     admissionMode: profiled
     scheduleName: default
+    workflow: implement-pr # optional static workflow profile name
   persistence:
     enabled: true
     size: 1Gi
 ```
 
 Create `nvt-github-app` out of band with the configured private-key key; the
-chart never accepts or renders private-key material. In profiled mode, list the
-rendered producer ServiceAccount username in `agentSchedule.allowedProducers`.
+chart never accepts or renders private-key material. In profiled mode without
+workflows, list the rendered producer ServiceAccount username in the
+compatibility `agentSchedule.allowedProducers` list. With workflow profiles,
+use the typed `agentSchedule.producerPolicies` field shown below.
 The chart projects only a rotating `nvt-operator` audience token. The default
 producer AgentRun runtime image is the coordinated `runtime.image`; set
 `producer.agentRun.runtimeImage` only for an intentional override.
@@ -257,8 +260,9 @@ CRD default, which is direct.
 
 ## Execution profiles
 
-`agentSchedule.template`, `profiles`, `profileSelection`, and
-`allowedProducers` configure operator-owned execution profiles. Empty values
+`agentSchedule.template`, `profiles`, `profileSelection`, and either the legacy
+`allowedProducers` list or typed workflow `producerPolicies` configure profiled
+admission. Empty values
 preserve legacy full-`AgentRun` admission. Profiled admission requires a
 projected ServiceAccount token with audience `nvt-operator`; see the
 [AgentSchedule contract](../../operator/docs/agentschedule.md).
@@ -309,6 +313,32 @@ platform guidance before local `AGENTS.local.md`; it never replaces either
 layer. Producers cannot submit or override it. This is configuration, not a
 security boundary, and it must not contain credentials or sensitive values
 because the untrusted agent can read it. The value is bounded to 64 KiB.
+
+Workflow profiles decouple reusable guidance from execution/auth profiles and
+authorize selection by the TokenReview-authenticated producer identity:
+
+```yaml
+agentSchedule:
+  workflowProfiles:
+    - name: implement-pr
+      workspaceInstructions: |
+        Implement the change and create a pull request.
+    - name: review-pr
+      workspaceInstructions: |
+        Review the pull request and report findings first.
+  producerPolicies:
+    - identity: system:serviceaccount:nvt:nvt-github-comments-producer
+      workflows: [implement-pr, review-pr]
+      defaultWorkflow: implement-pr
+```
+
+The original string `allowedProducers` list remains supported for schedules
+without workflow configuration. Enabling workflows requires replacing it with
+`producerPolicies`; the chart and operator reject mixing the two forms. The
+optional producer `submission.workflow` sends only a static workflow name, not
+instruction text or execution-profile/provider selection. AgentRun snapshots
+keep execution-profile and workflow instructions distinct, and the runtime
+orders platform, profile, workflow, then local guidance.
 
 ### Enforced Transparent Mode
 

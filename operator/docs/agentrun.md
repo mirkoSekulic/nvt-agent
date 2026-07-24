@@ -48,6 +48,8 @@ spec:
   agent:
     workspaceInstructions: |
       Follow the repository contribution guide.
+    workflowInstructions: |
+      Review the pull request and report findings first.
     config:
       runtime:
         command: codex
@@ -77,6 +79,13 @@ runtime appends it to generated `AGENTS.md` before any local
 boundary. Do not put credentials or sensitive values in it: the agent can read
 the content. Profiled schedules snapshot this field from the selected execution
 profile; producers cannot submit an override.
+
+`agent.workflowInstructions` is the distinct snapshot of an independently
+authorized workflow profile. When present, the operator projects a separate
+fixed read-only file. Runtime composition order is generated platform guidance,
+execution-profile guidance, workflow guidance, then local workspace guidance.
+The same 64 KiB, non-secret, agent-readable constraints apply. The selected
+workflow name is recorded separately in immutable `profileProvenance`.
 
 ## Runtime
 

@@ -47,7 +47,7 @@ func TestConfigDefaultSubmissionScheduleAdmission(t *testing.T) {
 		cfg.Submission.AdmissionMode != AdmissionModeLegacy ||
 		cfg.Submission.AdmissionBaseURL != defaultOperatorCallbackBaseURL ||
 		cfg.Submission.ScheduleNamespace != "nvt" ||
-		cfg.Submission.ScheduleName != defaultScheduleName {
+		cfg.Submission.ScheduleName != defaultScheduleName || cfg.Submission.Workflow != "" {
 		t.Fatalf("unexpected submission defaults: %#v", cfg.Submission)
 	}
 }
@@ -64,6 +64,43 @@ func TestConfigAcceptsProfiledAdmissionWithoutAgentRunSecurityConfig(t *testing.
 	}
 	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConfigAcceptsStaticProfiledWorkflow(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.AgentRun = AgentRunConfig{}
+	cfg.Submission = SubmissionConfig{
+		Mode: SubmissionModeScheduleAdmission, AdmissionMode: AdmissionModeProfiled,
+		AdmissionTokenFile: "/var/run/secrets/nvt-operator/token", ScheduleNamespace: "nvt", ScheduleName: "default",
+		Workflow: "review-pr",
+	}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigRejectsInvalidStaticWorkflow(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workflow  string
+		mode      SubmissionMode
+		admission AdmissionMode
+	}{
+		{name: "legacy", workflow: "review-pr", mode: SubmissionModeScheduleAdmission, admission: AdmissionModeLegacy},
+		{name: "direct", workflow: "review-pr", mode: SubmissionModeDirect, admission: AdmissionModeLegacy},
+		{name: "not normalized", workflow: "Review PR", mode: SubmissionModeScheduleAdmission, admission: AdmissionModeProfiled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Submission = SubmissionConfig{
+				Mode: test.mode, AdmissionMode: test.admission, AdmissionTokenFile: "/token",
+				ScheduleNamespace: "nvt", ScheduleName: "default", Workflow: test.workflow,
+			}
+			if err := cfg.ApplyDefaultsAndValidate(); err == nil {
+				t.Fatal("expected invalid static workflow configuration")
+			}
+		})
 	}
 }
 

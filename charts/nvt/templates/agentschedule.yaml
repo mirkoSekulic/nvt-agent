@@ -1,4 +1,8 @@
 {{- if .Values.agentSchedule.enabled }}
+{{- $workflowMode := or (gt (len .Values.agentSchedule.workflowProfiles) 0) (gt (len .Values.agentSchedule.producerPolicies) 0) }}
+{{- if and $workflowMode (or (eq (len .Values.agentSchedule.workflowProfiles) 0) (eq (len .Values.agentSchedule.producerPolicies) 0) (gt (len .Values.agentSchedule.allowedProducers) 0)) }}
+{{- fail "workflow-enabled agentSchedule requires workflowProfiles and producerPolicies and cannot use legacy allowedProducers" }}
+{{- end }}
 apiVersion: nvt.dev/v1alpha1
 kind: AgentSchedule
 metadata:
@@ -23,6 +27,14 @@ spec:
   {{- end }}
   {{- with .Values.agentSchedule.profileSelection }}
   profileSelection:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.agentSchedule.workflowProfiles }}
+  workflowProfiles:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.agentSchedule.producerPolicies }}
+  producerPolicies:
     {{- toYaml . | nindent 4 }}
   {{- end }}
   {{- with .Values.agentSchedule.allowedProducers }}

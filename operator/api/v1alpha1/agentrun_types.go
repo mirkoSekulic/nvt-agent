@@ -107,6 +107,7 @@ type AgentRunProfileProvenance struct {
 	ScheduleUID           string             `json:"scheduleUID"`
 	ScheduleGeneration    int64              `json:"scheduleGeneration"`
 	SelectedProfile       string             `json:"selectedProfile"`
+	SelectedWorkflow      string             `json:"selectedWorkflow,omitempty"`
 	Principal             *AgentRunPrincipal `json:"principal,omitempty"`
 }
 
@@ -213,6 +214,10 @@ type AgentRunAgent struct {
 	// must not contain credentials or other sensitive values.
 	// +kubebuilder:validation:MaxLength=65536
 	WorkspaceInstructions string `json:"workspaceInstructions,omitempty"`
+	// WorkflowInstructions is independently authorized workflow guidance
+	// appended after profile guidance. It is readable by the untrusted agent.
+	// +kubebuilder:validation:MaxLength=65536
+	WorkflowInstructions string `json:"workflowInstructions,omitempty"`
 }
 
 // AgentRunLifecycle defines event names that complete or fail a run.

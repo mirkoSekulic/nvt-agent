@@ -5,6 +5,7 @@ workspace="${NVT_WORKSPACE:-/workspace}"
 target="$workspace/AGENTS.md"
 local_instructions="${NVT_AGENT_LOCAL_INSTRUCTIONS:-$workspace/AGENTS.local.md}"
 profile_instructions="${NVT_AGENT_PROFILE_INSTRUCTIONS_FILE:-}"
+workflow_instructions="${NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE:-}"
 
 mkdir -p "$workspace"
 
@@ -188,10 +189,23 @@ if [ -n "$profile_instructions" ] && [ -s "$profile_instructions" ]; then
   fi
 fi
 
+workflow_path=""
+if [ -n "$workflow_instructions" ] && [ -s "$workflow_instructions" ]; then
+  workflow_path="$(canonical_path "$workflow_instructions")"
+  target_path="$(canonical_path "$target")"
+  if [ "$workflow_path" != "$profile_path" ] && [ "$workflow_path" != "$target_path" ]; then
+    {
+      printf '\n## Workflow Workspace Instructions\n\n'
+      cat "$workflow_instructions"
+      printf '\n'
+    } >> "$target"
+  fi
+fi
+
 if [ -s "$local_instructions" ]; then
   local_path="$(canonical_path "$local_instructions")"
   target_path="$(canonical_path "$target")"
-  if [ "$local_path" != "$profile_path" ] && [ "$local_path" != "$target_path" ]; then
+  if [ "$local_path" != "$profile_path" ] && [ "$local_path" != "$workflow_path" ] && [ "$local_path" != "$target_path" ]; then
     {
       printf '\n## Local Workspace Instructions\n\n'
       cat "$local_instructions"

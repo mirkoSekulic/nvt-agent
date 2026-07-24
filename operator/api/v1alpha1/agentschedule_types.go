@@ -25,7 +25,11 @@ type AgentScheduleSpec struct {
 	Template         *AgentScheduleTemplate          `json:"template,omitempty"`
 	Profiles         []AgentScheduleExecutionProfile `json:"profiles,omitempty"`
 	ProfileSelection *AgentScheduleProfileSelection  `json:"profileSelection,omitempty"`
-	AllowedProducers []string                        `json:"allowedProducers,omitempty"`
+	WorkflowProfiles []AgentScheduleWorkflowProfile  `json:"workflowProfiles,omitempty"`
+	ProducerPolicies []AgentScheduleProducerPolicy   `json:"producerPolicies,omitempty"`
+	// AllowedProducers is the compatibility allowlist for schedules without
+	// workflow profiles. Workflow-enabled schedules use ProducerPolicies.
+	AllowedProducers []string `json:"allowedProducers,omitempty"`
 }
 
 // AgentScheduleTemplate contains the non-security-sensitive fields shared by
@@ -63,6 +67,25 @@ type AgentScheduleExecutionProfile struct {
 	EgressForwardProxy *bool                   `json:"egressForwardProxy,omitempty"`
 	EgressTransport    AgentRunEgressTransport `json:"egressTransport,omitempty"`
 	Broker             *AgentRunBroker         `json:"broker,omitempty"`
+}
+
+// AgentScheduleWorkflowProfile is reusable, administrator-owned workflow guidance.
+type AgentScheduleWorkflowProfile struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// WorkspaceInstructions is readable by the untrusted agent and must not
+	// contain credentials or sensitive values.
+	// +kubebuilder:validation:MaxLength=65536
+	WorkspaceInstructions string `json:"workspaceInstructions,omitempty"`
+}
+
+// AgentScheduleProducerPolicy authorizes one authenticated Kubernetes caller
+// to request an exact set of workflow profiles.
+type AgentScheduleProducerPolicy struct {
+	Identity string `json:"identity"`
+	// +listType=set
+	Workflows       []string `json:"workflows,omitempty"`
+	DefaultWorkflow string   `json:"defaultWorkflow,omitempty"`
 }
 
 // AgentScheduleProfileSelection defines deterministic static principal routing.
@@ -155,6 +178,20 @@ func (in *AgentScheduleSpec) DeepCopy() *AgentScheduleSpec {
 	}
 	if in.ProfileSelection != nil {
 		out.ProfileSelection = in.ProfileSelection.DeepCopy()
+	}
+	if in.WorkflowProfiles != nil {
+		out.WorkflowProfiles = make([]AgentScheduleWorkflowProfile, len(in.WorkflowProfiles))
+		copy(out.WorkflowProfiles, in.WorkflowProfiles)
+	}
+	if in.ProducerPolicies != nil {
+		out.ProducerPolicies = make([]AgentScheduleProducerPolicy, len(in.ProducerPolicies))
+		for i := range in.ProducerPolicies {
+			out.ProducerPolicies[i] = in.ProducerPolicies[i]
+			if in.ProducerPolicies[i].Workflows != nil {
+				out.ProducerPolicies[i].Workflows = make([]string, len(in.ProducerPolicies[i].Workflows))
+				copy(out.ProducerPolicies[i].Workflows, in.ProducerPolicies[i].Workflows)
+			}
+		}
 	}
 	out.AllowedProducers = append([]string(nil), in.AllowedProducers...)
 	return out

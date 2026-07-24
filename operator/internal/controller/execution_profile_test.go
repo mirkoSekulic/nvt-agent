@@ -133,6 +133,9 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatalf("workspace instructions were not snapshotted exactly: %q", defaultRun.Spec.Agent.WorkspaceInstructions)
 	}
+	if defaultRun.Spec.Agent.WorkflowInstructions != "" || defaultRun.Spec.ProfileProvenance.SelectedWorkflow != "" {
+		t.Fatalf("legacy producer allowlist unexpectedly added workflow state: %#v", defaultRun.Spec)
+	}
 	schedule.Spec.Profiles[0].WorkspaceInstructions = "changed after admission"
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatal("resolved AgentRun workspace instructions alias the AgentSchedule profile")
@@ -190,6 +193,148 @@ func TestProfiledScheduleNoMatchPolicies(t *testing.T) {
 	decodeAdmissionResponse(t, denied, http.StatusForbidden, &decoded)
 	if decoded.Reason != "profile-selection-denied" || strings.Contains(denied.Body.String(), "canary") {
 		t.Fatalf("unsafe or unexpected denial: %q", denied.Body.String())
+	}
+}
+
+func TestWorkflowProfilesAreAuthorizedIndependentlyFromExecutionProfiles(t *testing.T) {
+	schedule := testWorkflowProfiledAgentSchedule()
+	schedule.Spec.Profiles[0].WorkspaceInstructions = "Execution profile guidance.\n"
+	copy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
+	copy.Spec.WorkflowProfiles[0].WorkspaceInstructions = "copy changed"
+	copy.Spec.ProducerPolicies[0].Workflows[0] = "copy-changed"
+	if schedule.Spec.WorkflowProfiles[0].WorkspaceInstructions != "Implement and create a pull request.\n" ||
+		schedule.Spec.ProducerPolicies[0].Workflows[0] != "implement-pr" {
+		t.Fatal("workflow profiles or producer policies were not deep-copied")
+	}
+	empty := testProfiledAgentSchedule()
+	empty.Spec.WorkflowProfiles = []nvtv1alpha1.AgentScheduleWorkflowProfile{}
+	empty.Spec.ProducerPolicies = []nvtv1alpha1.AgentScheduleProducerPolicy{{Identity: "producer", Workflows: []string{}}}
+	emptyCopy := empty.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
+	if emptyCopy.Spec.WorkflowProfiles == nil || emptyCopy.Spec.ProducerPolicies[0].Workflows == nil {
+		t.Fatal("workflow deep copy changed explicit-empty slices to nil")
+	}
+	fixture := newProfileAdmissionFixture(t, schedule)
+
+	requests := []struct {
+		workID       string
+		workflow     string
+		wantWorkflow string
+		wantText     string
+	}{
+		{workID: "workflow-default", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n"},
+		{workID: "workflow-review", workflow: "review-pr", wantWorkflow: "review-pr", wantText: "Review and report findings first.\n"},
+		{workID: "workflow-implement", workflow: "implement-pr", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n"},
+	}
+	var runs []nvtv1alpha1.AgentRun
+	for _, request := range requests {
+		body := profiledAdmissionPayload(request.workID, nil, nil)
+		if request.workflow != "" {
+			body["workflow"] = request.workflow
+		}
+		response := fixture.serve(t, mustJSON(t, body), "Bearer projected-token")
+		var decoded scheduleAdmissionResponse
+		decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+		run := fixture.run(t, decoded.AgentRun.Name)
+		if run.Spec.ProfileProvenance.SelectedProfile != "codex-default" ||
+			run.Spec.ProfileProvenance.SelectedWorkflow != request.wantWorkflow ||
+			run.Spec.Agent.WorkspaceInstructions != "Execution profile guidance.\n" ||
+			run.Spec.Agent.WorkflowInstructions != request.wantText {
+			t.Fatalf("independent workflow resolution failed: %#v", run.Spec)
+		}
+		runs = append(runs, run)
+	}
+
+	schedule.Spec.WorkflowProfiles[0].WorkspaceInstructions = "mutated"
+	schedule.Spec.ProducerPolicies[0].DefaultWorkflow = "review-pr"
+	if runs[0].Spec.Agent.WorkflowInstructions != "Implement and create a pull request.\n" ||
+		runs[0].Spec.ProfileProvenance.SelectedWorkflow != "implement-pr" {
+		t.Fatal("resolved workflow snapshot changed after schedule mutation")
+	}
+
+	second := testWorkflowProfiledAgentSchedule()
+	secondFixture := newProfileAdmissionFixture(t, second)
+	secondFixture.authenticator = successfulTokenReviewAuthenticator("system:serviceaccount:nvt:review-producer")
+	response := secondFixture.serve(t, profiledAdmissionBody(t, "second-producer", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := secondFixture.run(t, decoded.AgentRun.Name)
+	if run.Spec.ProfileProvenance.SelectedProfile != "codex-default" ||
+		run.Spec.ProfileProvenance.SelectedWorkflow != "review-pr" {
+		t.Fatalf("second producer did not reuse execution profile with its workflow: %#v", run.Spec.ProfileProvenance)
+	}
+}
+
+func TestWorkflowSelectionAndConfigurationFailClosed(t *testing.T) {
+	for _, workflow := range []string{"unknown", " review-pr", ""} {
+		schedule := testWorkflowProfiledAgentSchedule()
+		fixture := newProfileAdmissionFixture(t, schedule)
+		body := profiledAdmissionPayload("denied-"+strings.ReplaceAll(workflow, " ", "-"), nil, nil)
+		body["workflow"] = workflow
+		response := fixture.serve(t, mustJSON(t, body), "Bearer projected-token")
+		if response.Code != http.StatusForbidden && response.Code != http.StatusBadRequest {
+			t.Fatalf("workflow %q status=%d body=%q", workflow, response.Code, response.Body.String())
+		}
+		runs := &nvtv1alpha1.AgentRunList{}
+		if err := fixture.client.List(context.Background(), runs, client.InNamespace(schedule.Namespace)); err != nil || len(runs.Items) != 0 {
+			t.Fatalf("denied workflow created runs: err=%v runs=%#v", err, runs.Items)
+		}
+	}
+
+	unauthorized := testWorkflowProfiledAgentSchedule()
+	fixture := newProfileAdmissionFixture(t, unauthorized)
+	fixture.authenticator = successfulTokenReviewAuthenticator("system:serviceaccount:nvt:spoofed-producer")
+	response := fixture.serve(t, profiledAdmissionBody(t, "spoofed-producer", nil, nil), "Bearer projected-token")
+	if response.Code != http.StatusForbidden || strings.Contains(response.Body.String(), "spoofed-producer") {
+		t.Fatalf("producer authorization was not sanitized: status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*nvtv1alpha1.AgentSchedule)
+	}{
+		{name: "duplicate workflow", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.WorkflowProfiles = append(s.Spec.WorkflowProfiles, s.Spec.WorkflowProfiles[0])
+		}},
+		{name: "duplicate producer", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.ProducerPolicies = append(s.Spec.ProducerPolicies, s.Spec.ProducerPolicies[0])
+		}},
+		{name: "duplicate allowed workflow", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.ProducerPolicies[0].Workflows = append(s.Spec.ProducerPolicies[0].Workflows, "review-pr")
+		}},
+		{name: "unknown workflow reference", mutate: func(s *nvtv1alpha1.AgentSchedule) { s.Spec.ProducerPolicies[0].Workflows[0] = "missing" }},
+		{name: "invalid default", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.ProducerPolicies[0].DefaultWorkflow = "review-pr"
+			s.Spec.ProducerPolicies[0].Workflows = []string{"implement-pr"}
+		}},
+		{name: "oversized instructions", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.WorkflowProfiles[0].WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes+1)
+		}},
+		{name: "mixed legacy allowlist", mutate: func(s *nvtv1alpha1.AgentSchedule) {
+			s.Spec.AllowedProducers = []string{"system:serviceaccount:nvt:legacy"}
+		}},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			schedule := testWorkflowProfiledAgentSchedule()
+			test.mutate(schedule)
+			if _, err := validateExecutionProfileSchedule(schedule); !errors.Is(err, errInvalidExecutionProfileConfiguration) {
+				t.Fatalf("invalid workflow configuration accepted: %v", err)
+			}
+		})
+	}
+
+	invalid := testWorkflowProfiledAgentSchedule()
+	invalid.Spec.WorkflowProfiles[0].WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes) + "instruction-secret-canary"
+	invalidFixture := newProfileAdmissionFixture(t, invalid)
+	invalidResponse := invalidFixture.serve(t, profiledAdmissionBody(t, "invalid-workflow-config", nil, nil), "Bearer projected-token")
+	if invalidResponse.Code != http.StatusBadRequest ||
+		!strings.Contains(invalidResponse.Body.String(), "invalid-execution-profile-configuration") ||
+		strings.Contains(invalidResponse.Body.String(), "instruction-secret-canary") {
+		t.Fatalf("invalid workflow configuration response was unsafe: status=%d body=%q", invalidResponse.Code, invalidResponse.Body.String())
+	}
+	invalidRuns := &nvtv1alpha1.AgentRunList{}
+	if err := invalidFixture.client.List(context.Background(), invalidRuns, client.InNamespace(invalid.Namespace)); err != nil || len(invalidRuns.Items) != 0 {
+		t.Fatalf("invalid workflow configuration created runs: err=%v runs=%#v", err, invalidRuns.Items)
 	}
 }
 
@@ -260,6 +405,12 @@ func TestProfileConfigurationValidation(t *testing.T) {
 			},
 		},
 		{
+			name: "template workflow instructions",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Template.Agent.WorkflowInstructions = "template workflow instructions"
+			},
+		},
+		{
 			name: "oversized profile workspace instructions",
 			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
 				schedule.Spec.Profiles[0].WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes+1)
@@ -310,6 +461,8 @@ func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 		{"agentRun": map[string]any{"spec": map[string]any{"broker": map[string]any{}}}},
 		{"broker": map[string]any{"grants": []any{}}},
 		{"profile": "claude-john"},
+		{"producer": "system:serviceaccount:nvt:spoofed"},
+		{"workspaceInstructions": "producer instructions"},
 	} {
 		body := profiledAdmissionPayload("security-fields", nil, nil)
 		for key, value := range extra {
@@ -677,7 +830,8 @@ func TestAgentRunProfileProvenanceCRDSchema(t *testing.T) {
 		"spec", "properties", "profileProvenance", "properties",
 	).(map[string]any)
 	if crdPath(t, provenance, "authenticatedProducer", "type") != "string" ||
-		crdPath(t, provenance, "principal", "properties", "subject", "type") != "string" {
+		crdPath(t, provenance, "principal", "properties", "subject", "type") != "string" ||
+		crdPath(t, provenance, "selectedWorkflow", "type") != "string" {
 		t.Fatalf("profile provenance schema incomplete: %#v", provenance)
 	}
 	validations := crdPath(t, crd,
@@ -710,10 +864,35 @@ func newProfileAdmissionFixture(t *testing.T, schedule *nvtv1alpha1.AgentSchedul
 		WithStatusSubresource(&nvtv1alpha1.AgentSchedule{}, &nvtv1alpha1.AgentRun{}).
 		WithObjects(schedule).
 		Build()
+	identity := ""
+	if len(schedule.Spec.AllowedProducers) != 0 {
+		identity = schedule.Spec.AllowedProducers[0]
+	} else if len(schedule.Spec.ProducerPolicies) != 0 {
+		identity = schedule.Spec.ProducerPolicies[0].Identity
+	}
 	return &profileAdmissionFixture{
 		client: k8sClient, schedule: schedule, scheme: scheme,
-		authenticator: fakeScheduleProducerAuthenticator{identity: schedule.Spec.AllowedProducers[0]},
+		authenticator: fakeScheduleProducerAuthenticator{identity: identity},
 	}
+}
+
+func testWorkflowProfiledAgentSchedule() *nvtv1alpha1.AgentSchedule {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.AllowedProducers = nil
+	schedule.Spec.WorkflowProfiles = []nvtv1alpha1.AgentScheduleWorkflowProfile{
+		{Name: "implement-pr", WorkspaceInstructions: "Implement and create a pull request.\n"},
+		{Name: "review-pr", WorkspaceInstructions: "Review and report findings first.\n"},
+	}
+	schedule.Spec.ProducerPolicies = []nvtv1alpha1.AgentScheduleProducerPolicy{
+		{
+			Identity: "system:serviceaccount:nvt:nvt-github-comments-producer", Workflows: []string{"implement-pr", "review-pr"},
+			DefaultWorkflow: "implement-pr",
+		},
+		{
+			Identity: "system:serviceaccount:nvt:review-producer", Workflows: []string{"review-pr"}, DefaultWorkflow: "review-pr",
+		},
+	}
+	return schedule
 }
 
 func (f *profileAdmissionFixture) serve(t *testing.T, body, authorization string) *httptest.ResponseRecorder {
