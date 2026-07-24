@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.16`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.17`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, dedicated
 Docker storage size, broker grant preparations, profile workspace instructions,
 or workflow producer policies.
@@ -44,11 +44,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.16 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.17 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.16 --namespace nvt --create-namespace
+  --version 0.8.17 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being

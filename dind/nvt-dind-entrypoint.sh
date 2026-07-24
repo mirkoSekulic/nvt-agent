@@ -61,7 +61,22 @@ fi
 chmod 0600 "${image}"
 
 ensure_loop_devices() {
-  if losetup -f >/dev/null 2>&1; then
+  if free_loop_device="$(losetup -f 2>/dev/null)"; then
+    loop_name="${free_loop_device##*/}"
+    loop_index="${loop_name#loop}"
+    case "${loop_name}" in
+      loop*) ;;
+      *) fail "invalid free loop device reported by the kernel" ;;
+    esac
+    case "${loop_index}" in
+      ''|*[!0-9]*) fail "invalid free loop device reported by the kernel" ;;
+    esac
+    if [ ! -e "${device_dir}/${loop_name}" ]; then
+      mkdir -p "${device_dir}"
+      mknod "${device_dir}/${loop_name}" b 7 "${loop_index}" ||
+        fail "could not recreate the discovered loop device inside the guest"
+    fi
+    losetup -f >/dev/null 2>&1 || fail "the discovered loop device is unusable inside the guest"
     return
   fi
   mkdir -p "${device_dir}"
