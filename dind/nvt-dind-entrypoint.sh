@@ -62,6 +62,9 @@ chmod 0600 "${image}"
 
 ensure_loop_devices() {
   if free_loop_device="$(losetup -f 2>/dev/null)"; then
+    case "${free_loop_device}" in
+      *' (lost)') free_loop_device="${free_loop_device% (lost)}" ;;
+    esac
     loop_name="${free_loop_device##*/}"
     loop_index="${loop_name#loop}"
     case "${loop_name}" in
