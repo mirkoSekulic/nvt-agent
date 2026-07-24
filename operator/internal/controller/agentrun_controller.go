@@ -932,23 +932,16 @@ func (r *AgentRunReconciler) preparePlaceholderFiles(ctx context.Context, agentR
 		if err != nil {
 			return nil, fmt.Errorf("marshal placeholder request for %s: %w", provider, err)
 		}
-		request, err := http.NewRequestWithContext(prepCtx, http.MethodPost, strings.TrimRight(BrokerURL(), "/")+"/v1/placeholder-files", bytes.NewReader(payload))
+		status, responseBytes, err := brokerPreparationRequest(prepCtx, httpClient, strings.TrimRight(BrokerURL(), "/")+"/v1/placeholder-files", string(token), payload)
 		if err != nil {
-			return nil, fmt.Errorf("create placeholder request for %s: %w", provider, err)
-		}
-		request.Header.Set("Authorization", "Bearer "+string(token))
-		request.Header.Set("Content-Type", "application/json")
-		response, err := httpClient.Do(request)
-		if err != nil {
-			return nil, fmt.Errorf("prepare inert placeholder files for %s: %w", provider, err)
+			return nil, fmt.Errorf("prepare inert placeholder files for %s: broker request failed", provider)
 		}
 		var decoded placeholderFilesResponse
-		decodeErr := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded)
-		response.Body.Close()
+		decodeErr := json.Unmarshal(responseBytes, &decoded)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("decode placeholder response for %s: %w", provider, decodeErr)
 		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 || !decoded.OK {
+		if status < 200 || status >= 300 || !decoded.OK {
 			reason := decoded.Error
 			if decoded.Message != "" {
 				reason = decoded.Message
@@ -1015,23 +1008,15 @@ func (r *AgentRunReconciler) prepareProviderMetadata(ctx context.Context, agentR
 		if marshalErr != nil {
 			return nil, fmt.Errorf("marshal provider metadata preparation request: %w", marshalErr)
 		}
-		request, requestErr := http.NewRequestWithContext(prepCtx, http.MethodPost, strings.TrimRight(BrokerURL(), "/")+"/v1/identity", bytes.NewReader(payload))
-		if requestErr != nil {
-			return nil, fmt.Errorf("create provider metadata preparation request: %w", requestErr)
-		}
-		request.Header.Set("Authorization", "Bearer "+string(token))
-		request.Header.Set("Content-Type", "application/json")
-		response, requestErr := httpClient.Do(request)
+		status, responseBytes, requestErr := brokerPreparationRequest(prepCtx, httpClient, strings.TrimRight(BrokerURL(), "/")+"/v1/identity", string(token), payload)
 		if requestErr != nil {
 			return nil, fmt.Errorf("prepare provider commit identity: broker request failed")
 		}
 		var decoded providerIdentityResponse
-		responseBytes, readErr := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
-		response.Body.Close()
-		if readErr != nil || len(responseBytes) > 64<<10 || json.Unmarshal(responseBytes, &decoded) != nil {
+		if len(responseBytes) > 64<<10 || json.Unmarshal(responseBytes, &decoded) != nil {
 			return nil, fmt.Errorf("prepare provider commit identity: broker returned an invalid response")
 		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 || !decoded.OK {
+		if status < 200 || status >= 300 || !decoded.OK {
 			return nil, fmt.Errorf("prepare provider commit identity: broker denied request (%s)", safeBrokerErrorReason(decoded.Error))
 		}
 		identity := preparedProviderIdentity{Name: decoded.Name, Email: decoded.Email}
@@ -1154,6 +1139,46 @@ func agentConfigPlaceholderCacheKey(agentRun *nvtv1alpha1.AgentRun) string {
 
 func placeholderPreparationTimeout() time.Duration {
 	return 4 * time.Second
+}
+
+// brokerPreparationRequest tolerates only the short projection race where the
+// broker has not observed its freshly-written agent policy yet. Permanent
+// authorization failures are returned immediately; the bearer token and body
+// are never included in errors.
+func brokerPreparationRequest(ctx context.Context, client *http.Client, url, token string, payload []byte) (int, []byte, error) {
+	deadline := time.Now().Add(placeholderPreparationTimeout())
+	for attempt := 0; ; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return 0, nil, err
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			return 0, nil, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+		response.Body.Close()
+		if readErr != nil {
+			return response.StatusCode, nil, readErr
+		}
+		if response.StatusCode != http.StatusUnauthorized || attempt >= 7 || time.Now().After(deadline) {
+			return response.StatusCode, body, nil
+		}
+		var reason struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &reason) != nil || reason.Error != "unauthorized" || reason.Message != "invalid broker bearer token" {
+			return response.StatusCode, body, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func normalizePlaceholderCacheGrants(agentRun *nvtv1alpha1.AgentRun) []map[string]any {
@@ -3577,6 +3602,7 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 		VolumeMounts: dindVolumeMounts,
 	})
 	if AgentRunEgressTransparent(agentRun) {
+		const dockerNetworkCIDR = "172.30.0.0/15"
 		const rules = `set -eu
 exclude_v4=""
 exclude_v6=""
@@ -3599,8 +3625,7 @@ iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
 for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
-nft add rule ip nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
-nft add rule ip nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
+	iptables -t nat -A NVT_DIND -d "$NVT_DIND_NETWORK_CIDR" -j RETURN
 iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
@@ -3614,8 +3639,7 @@ ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
-nft add rule ip6 nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
-nft add rule ip6 nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
+	# Docker's managed pool is IPv4; IPv6 remains captured by the redirect.
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
@@ -3631,7 +3655,7 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 					EgressdServiceName(agentRun.Name),
 					"kubernetes.default.svc", "kube-dns.kube-system.svc",
 				}, " "),
-			}},
+			}, {Name: "NVT_DIND_NETWORK_CIDR", Value: dockerNetworkCIDR}},
 			SecurityContext: &corev1.SecurityContext{
 				RunAsUser:                ptrTo(int64(0)),
 				AllowPrivilegeEscalation: ptrTo(false),

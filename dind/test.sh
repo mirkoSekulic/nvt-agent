@@ -159,7 +159,7 @@ run_entrypoint() {
 new_fixture non-virtiofs
 export FAKE_FS_TYPE=ext4
 run_entrypoint
-grep -q '^dockerd --host=tcp://127.0.0.1:2375 --tls=false$' "${FAKE_LOG}"
+grep -q '^dockerd --bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24 --host=tcp://127.0.0.1:2375 --tls=false$' "${FAKE_LOG}"
 if grep -Eq '^(truncate|mkfs\.ext4|losetup|e2fsck|mount) ' "${FAKE_LOG}"; then
   echo "non-virtiofs startup changed Docker storage" >&2
   exit 1
@@ -218,7 +218,7 @@ grep -q '^losetup -d /dev/loop0$' "${FAKE_LOG}"
 mount_line="$(grep -n '^mount -t ext4 -o noatime /dev/loop0 ' "${FAKE_LOG}" | cut -d: -f1)"
 detach_line="$(grep -n '^losetup -d /dev/loop0$' "${FAKE_LOG}" | cut -d: -f1)"
 [[ "${mount_line}" -lt "${detach_line}" ]]
-grep -q '^dockerd --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2$' "${FAKE_LOG}"
+grep -q '^dockerd --bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24 --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2$' "${FAKE_LOG}"
 grep -qx overlay2 "${FIXTURE}/run/required-storage-driver"
 
 new_fixture missing-discovered-loop-node

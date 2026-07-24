@@ -96,20 +96,19 @@ OUTPUT:
   redirect remaining TCP to captured:15001
 
 PREROUTING:
-  allow destinations whose route resolves back to a local Docker bridge
+  allow destinations in the managed Docker pool (172.30.0.0/15)
   redirect TCP arriving from docker0 or any br-* bridge to captured:15001
 ```
 
-The `br-*` interface-prefix rules are evaluated for every connection, so
-Compose bridges created after net-init are covered without periodically
-rewriting the rules. The OUTPUT exception is limited to traffic routed toward
-local Docker bridges (including docker-proxy's connection to a published
-container). DinD-container traffic enters PREROUTING. A route/FIB lookup returns
-before capture only when the destination resolves back to `docker0` or a
-`br-*` interface, so local container services remain usable. Destinations
-routed away from Docker bridges remain captured before any external egress.
-The coordinated DinD image supplies the `nft` FIB classifier used by net-init;
-custom DinD image overrides must preserve that tool and contract.
+The coordinated DinD image configures Docker with the explicit managed pool
+`172.30.0.0/15`: `172.30.0.0/24` is the default bridge and dynamic networks
+come from `172.31.0.0/16`. Net-init returns only that bounded pool before the
+redirect, so bridges created after startup remain covered without a kernel FIB
+expression. Traffic outside the pool, including private, metadata, and
+control-plane destinations, remains captured and subject to the existing
+egress policy. Custom Docker subnets outside this managed pool are unsupported
+unless a future validated configuration explicitly extends the contract; they
+must not be silently exempted.
 
 Forward-proxy and transparent transports default to 256 active CONNECT
 tunnels. A profile may set `egressMaxConcurrentTunnels` from 1 through 4096.

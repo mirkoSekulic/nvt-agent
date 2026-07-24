@@ -45,15 +45,7 @@ bridge_request() {
 }
 
 rule_packets() {
-  local pattern="$1"
-  docker exec "${DAEMON}" nft list chain ip nat NVT_DIND | awk -v pattern="${pattern}" '
-    index($0, pattern) {
-      for (i = 1; i <= NF; i++) {
-        if ($i == "packets") { value = $(i + 1) }
-      }
-    }
-    END { if (value != "") print value }
-  '
+  docker exec "${DAEMON}" iptables -t nat -L NVT_DIND -v -n | awk '/REDIRECT.*15001/ {sum += $1} END {print sum + 0}'
 }
 
 # Prove the baseline before installing capture rules.
@@ -71,8 +63,7 @@ docker exec "${DAEMON}" sh -ec '
   test -e /proc/sys/net/bridge/bridge-nf-call-iptables
   sysctl -w net.bridge.bridge-nf-call-iptables=1 >/dev/null
   iptables -t nat -N NVT_DIND
-  nft add rule ip nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
-  nft add rule ip nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
+  iptables -t nat -A NVT_DIND -d 172.30.0.0/15 -m comment --comment nvt-local-docker -j RETURN
   iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
   iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
   iptables -t nat -I PREROUTING 1 -j NVT_DIND
@@ -82,7 +73,7 @@ docker exec "${DAEMON}" sh -ec '
 [[ "$(bridge_request nvt_before nvt_before_server)" == "bridge-ok" ]]
 start_fixture nvt_after nvt_after_server
 [[ "$(bridge_request nvt_after nvt_after_server)" == "bridge-ok" ]]
-local_packets="$(rule_packets 'fib daddr oifname "br-*"')"
+local_packets="$(iptables -t nat -L NVT_DIND -v -n | awk '/nvt-local-docker/ {print $1; exit}')"
 [[ "${local_packets:-0}" -gt 0 ]]
 
 # Routed traffic from the exact post-init bridge must hit the redirect. There
