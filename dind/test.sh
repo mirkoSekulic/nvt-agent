@@ -15,7 +15,12 @@ set -euo pipefail
 printf 'findmnt %s\n' "$*" >>"${FAKE_LOG}"
 [[ "${FAKE_FINDMNT_FAIL:-0}" != 1 ]] || exit 1
 if [[ -f "${FAKE_MOUNT_MARKER}" ]]; then
-  printf 'ext4\n'
+  if [[ " $* " == *" SOURCE,FSTYPE "* ]]; then
+    # Model a Kubernetes/Docker volume overmounted by the ext4 loop device.
+    printf '/dev/pvc ext4\n/dev/loop0 ext4\n'
+  else
+    printf 'ext4\n'
+  fi
 else
   printf '%s\n' "${FAKE_FS_TYPE:-ext4}"
 fi
@@ -39,6 +44,9 @@ cat >"${BIN}/losetup" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'losetup %s\n' "$*" >>"${FAKE_LOG}"
+for arg in "$@"; do
+  [[ "${arg}" != "--autoclear" ]] || exit 2
+done
 case "${1:-}" in
   -f)
     if [[ "${FAKE_NEED_LOOP_NODES:-0}" == 1 && ! -f "${FAKE_DEVICE_DIR}/loop-control" ]]; then
@@ -56,6 +64,7 @@ case "${1:-}" in
     printf '/dev/loop0\n'
     ;;
   -d)
+    [[ "${FAKE_LOOP_DETACH_FAIL:-0}" != 1 ]] || exit 1
     rm -f "${FAKE_ASSOCIATED_MARKER}"
     ;;
   *) exit 2 ;;
@@ -81,7 +90,9 @@ cat >"${BIN}/mount" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'mount %s\n' "$*" >>"${FAKE_LOG}"
-[[ "${FAKE_MOUNT_FAIL:-0}" != 1 ]]
+if [[ "${FAKE_MOUNT_FAIL:-0}" == 1 ]]; then
+  exit 1
+fi
 : >"${FAKE_MOUNT_MARKER}"
 FAKE
 
@@ -121,6 +132,7 @@ new_fixture() {
   export FAKE_DEVICE_DIR="${FIXTURE}/dev"
   : >"${FAKE_LOG}"
   unset FAKE_FINDMNT_FAIL FAKE_MKFS_FAIL FAKE_MOUNT_FAIL FAKE_FSCK_STATUS FAKE_FSCK_DELAY FAKE_NEED_LOOP_NODES FAKE_DOCKER_DRIVER
+  unset FAKE_LOOP_DETACH_FAIL
   unset FAKE_PERSISTENT_STORAGE
 }
 
@@ -191,7 +203,12 @@ run_entrypoint
 grep -q '^truncate -s 1073741824 .*\.creating$' "${FAKE_LOG}"
 grep -q '^mkfs.ext4 -q -F .*\.creating$' "${FAKE_LOG}"
 grep -q '^mknod .*/loop-control c 10 237$' "${FAKE_LOG}"
+grep -q '^losetup --find --show .*/docker-data\.ext4$' "${FAKE_LOG}"
 grep -q '^mount -t ext4 -o noatime /dev/loop0 .*/data$' "${FAKE_LOG}"
+grep -q '^losetup -d /dev/loop0$' "${FAKE_LOG}"
+mount_line="$(grep -n '^mount -t ext4 -o noatime /dev/loop0 ' "${FAKE_LOG}" | cut -d: -f1)"
+detach_line="$(grep -n '^losetup -d /dev/loop0$' "${FAKE_LOG}" | cut -d: -f1)"
+[[ "${mount_line}" -lt "${detach_line}" ]]
 grep -q '^dockerd --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2$' "${FAKE_LOG}"
 grep -qx overlay2 "${FIXTURE}/run/required-storage-driver"
 
@@ -277,6 +294,19 @@ if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
 fi
 grep -q 'could not mount the Docker backing filesystem' "${FIXTURE}/stderr"
 grep -qx 'do-not-destroy' "${FIXTURE}/backing/docker-data.ext4"
+! grep -q '^dockerd ' "${FAKE_LOG}"
+
+new_fixture detach-failure
+export FAKE_FS_TYPE=virtiofs
+printf 'do-not-destroy' >"${FIXTURE}/backing/docker-data.ext4"
+export FAKE_LOOP_DETACH_FAIL=1
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "Docker startup continued without loop-device cleanup" >&2
+  exit 1
+fi
+grep -q 'could not mark the Docker loop device for automatic cleanup' "${FIXTURE}/stderr"
+grep -qx 'do-not-destroy' "${FIXTURE}/backing/docker-data.ext4"
+grep -q '^umount .*/data$' "${FAKE_LOG}"
 ! grep -q '^dockerd ' "${FAKE_LOG}"
 
 new_fixture driver-check

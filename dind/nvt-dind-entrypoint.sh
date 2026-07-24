@@ -86,7 +86,7 @@ new_loop=0
 if [ -n "${associated}" ]; then
   loop_device="${associated}"
 else
-  loop_device="$(losetup --find --show --autoclear "${image}")" || fail "could not attach the Docker backing image"
+  loop_device="$(losetup --find --show "${image}")" || fail "could not attach the Docker backing image"
   new_loop=1
 fi
 
@@ -106,11 +106,20 @@ if ! mount -t ext4 -o noatime "${loop_device}" "${data_root}"; then
   [ "${new_loop}" = 0 ] || losetup -d "${loop_device}" >/dev/null 2>&1 || true
   fail "could not mount the Docker backing filesystem"
 fi
-mounted_type="$(findmnt -n -o FSTYPE --target "${data_root}" 2>/dev/null || true)"
-if [ "${mounted_type}" != "ext4" ]; then
+mounted_source_type="$(findmnt -rn -o SOURCE,FSTYPE --mountpoint "${data_root}" 2>/dev/null | tail -n 1 || true)"
+if [ "${mounted_source_type}" != "${loop_device} ext4" ]; then
   umount "${data_root}" >/dev/null 2>&1 || true
   [ "${new_loop}" = 0 ] || losetup -d "${loop_device}" >/dev/null 2>&1 || true
-  fail "Docker data root is not backed by ext4 after mount"
+  fail "Docker data root is not backed by the expected ext4 loop device after mount"
+fi
+
+# util-linux losetup has no --autoclear attach option. Detaching a busy loop
+# device marks it for lazy destruction: the mounted filesystem remains usable,
+# and the kernel releases the device when the container mount disappears.
+if ! losetup -d "${loop_device}"; then
+  umount "${data_root}" >/dev/null 2>&1 || true
+  losetup -d "${loop_device}" >/dev/null 2>&1 || true
+  fail "could not mark the Docker loop device for automatic cleanup"
 fi
 
 printf '%s\n' overlay2 >"${required_driver_file}"
