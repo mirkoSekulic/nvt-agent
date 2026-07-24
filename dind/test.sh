@@ -52,7 +52,11 @@ case "${1:-}" in
     if [[ "${FAKE_NEED_LOOP_NODES:-0}" == 1 && ! -f "${FAKE_DEVICE_DIR}/loop-control" ]]; then
       exit 1
     fi
-    printf '/dev/loop0\n'
+    if [[ "${FAKE_REPORT_LOST_LOOP:-0}" == 1 ]]; then
+      printf '/dev/loop0 (lost)\n'
+    else
+      printf '/dev/loop0\n'
+    fi
     ;;
   -j)
     if [[ -f "${FAKE_ASSOCIATED_MARKER}" ]]; then
@@ -136,6 +140,7 @@ new_fixture() {
   : >"${FAKE_LOG}"
   unset FAKE_FINDMNT_FAIL FAKE_MKFS_FAIL FAKE_MOUNT_FAIL FAKE_FSCK_STATUS FAKE_FSCK_DELAY FAKE_NEED_LOOP_NODES FAKE_DOCKER_DRIVER
   unset FAKE_REQUIRE_DISCOVERED_LOOP_NODE
+  unset FAKE_REPORT_LOST_LOOP
   unset FAKE_LOOP_DETACH_FAIL
   unset FAKE_PERSISTENT_STORAGE
 }
@@ -219,6 +224,7 @@ grep -qx overlay2 "${FIXTURE}/run/required-storage-driver"
 new_fixture missing-discovered-loop-node
 export FAKE_FS_TYPE=virtiofs
 export FAKE_REQUIRE_DISCOVERED_LOOP_NODE=1
+export FAKE_REPORT_LOST_LOOP=1
 run_entrypoint
 grep -q '^mknod .*/loop0 b 7 0$' "${FAKE_LOG}"
 grep -q '^losetup --find --show .*/docker-data\.ext4$' "${FAKE_LOG}"
