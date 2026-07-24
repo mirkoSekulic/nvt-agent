@@ -54,8 +54,8 @@ start_fixture nvt_before nvt_before_server
 docker exec "${DAEMON}" docker run --rm --network nvt_before busybox:1.36 \
   wget -q -T 10 -O /dev/null http://example.com/
 
-# This is the production rule order. FIB output-interface classification is
-# available in nat PREROUTING even though physdev bridge metadata is not.
+# This is the production rule order: the managed Docker pool is returned
+# before all bridge-originated traffic reaches the captured redirect.
 docker exec "${DAEMON}" sh -ec '
   if [ ! -e /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
     modprobe br_netfilter
@@ -73,7 +73,7 @@ docker exec "${DAEMON}" sh -ec '
 [[ "$(bridge_request nvt_before nvt_before_server)" == "bridge-ok" ]]
 start_fixture nvt_after nvt_after_server
 [[ "$(bridge_request nvt_after nvt_after_server)" == "bridge-ok" ]]
-local_packets="$(iptables -t nat -L NVT_DIND -v -n | awk '/nvt-local-docker/ {print $1; exit}')"
+local_packets="$(docker exec "${DAEMON}" iptables -t nat -L NVT_DIND -v -n | awk '/nvt-local-docker/ {print $1; exit}')"
 [[ "${local_packets:-0}" -gt 0 ]]
 
 # Routed traffic from the exact post-init bridge must hit the redirect. There
