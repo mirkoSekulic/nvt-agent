@@ -9,7 +9,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker run -d --privileged --name "${DAEMON}" "${IMAGE}" --tls=false >/dev/null
+docker run -d --privileged --name "${DAEMON}" \
+  -v /lib/modules:/lib/modules:ro "${IMAGE}" --tls=false >/dev/null
 for _ in $(seq 1 30); do
   if docker exec "${DAEMON}" docker info >/dev/null 2>&1; then
     break
@@ -63,6 +64,10 @@ docker exec "${DAEMON}" docker run --rm --network nvt_before busybox:1.36 \
 # This is the production rule order. FIB output-interface classification is
 # available in nat PREROUTING even though physdev bridge metadata is not.
 docker exec "${DAEMON}" sh -ec '
+  if [ ! -e /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
+    modprobe br_netfilter
+  fi
+  test -e /proc/sys/net/bridge/bridge-nf-call-iptables
   sysctl -w net.bridge.bridge-nf-call-iptables=1 >/dev/null
   iptables -t nat -N NVT_DIND
   nft add rule ip nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
