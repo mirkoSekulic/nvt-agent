@@ -60,6 +60,9 @@ case "${1:-}" in
     fi
     ;;
   --find)
+    if [[ "${FAKE_REQUIRE_DISCOVERED_LOOP_NODE:-0}" == 1 && ! -f "${FAKE_DEVICE_DIR}/loop0" ]]; then
+      exit 1
+    fi
     : >"${FAKE_ASSOCIATED_MARKER}"
     printf '/dev/loop0\n'
     ;;
@@ -132,6 +135,7 @@ new_fixture() {
   export FAKE_DEVICE_DIR="${FIXTURE}/dev"
   : >"${FAKE_LOG}"
   unset FAKE_FINDMNT_FAIL FAKE_MKFS_FAIL FAKE_MOUNT_FAIL FAKE_FSCK_STATUS FAKE_FSCK_DELAY FAKE_NEED_LOOP_NODES FAKE_DOCKER_DRIVER
+  unset FAKE_REQUIRE_DISCOVERED_LOOP_NODE
   unset FAKE_LOOP_DETACH_FAIL
   unset FAKE_PERSISTENT_STORAGE
 }
@@ -211,6 +215,14 @@ detach_line="$(grep -n '^losetup -d /dev/loop0$' "${FAKE_LOG}" | cut -d: -f1)"
 [[ "${mount_line}" -lt "${detach_line}" ]]
 grep -q '^dockerd --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2$' "${FAKE_LOG}"
 grep -qx overlay2 "${FIXTURE}/run/required-storage-driver"
+
+new_fixture missing-discovered-loop-node
+export FAKE_FS_TYPE=virtiofs
+export FAKE_REQUIRE_DISCOVERED_LOOP_NODE=1
+run_entrypoint
+grep -q '^mknod .*/loop0 b 7 0$' "${FAKE_LOG}"
+grep -q '^losetup --find --show .*/docker-data\.ext4$' "${FAKE_LOG}"
+grep -q '^dockerd .*--storage-driver=overlay2$' "${FAKE_LOG}"
 
 new_fixture existing-image
 export FAKE_FS_TYPE=virtiofs
