@@ -127,6 +127,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 		if len(profile.WorkspaceInstructions) > maxWorkspaceInstructionsBytes {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
+		if err := validateRuntimeCapabilities(profile.Runtime); err != nil {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
 		profiles[profile.Name] = profile
 	}
 
@@ -317,7 +320,7 @@ func buildProfiledAgentRun(
 	}
 	run := &nvtv1alpha1.AgentRun{
 		Spec: nvtv1alpha1.AgentRunSpec{
-			Runtime:                   profile.Runtime,
+			Runtime:                   *profile.Runtime.DeepCopy(),
 			RuntimeAuth:               profile.RuntimeAuth.DeepCopy(),
 			Image:                     template.Image,
 			RuntimeClassName:          copyStringPointer(template.RuntimeClassName),

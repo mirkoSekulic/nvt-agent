@@ -459,6 +459,9 @@ func TestProfileConfigurationRejectsRemovedEgressForwardProxy(t *testing.T) {
 func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 	for _, extra := range []map[string]any{
 		{"agentRun": map[string]any{"spec": map[string]any{"broker": map[string]any{}}}},
+		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
+			"container": map[string]any{"capabilities": map[string]any{"add": []any{"SYS_PTRACE"}}},
+		}}}},
 		{"broker": map[string]any{"grants": []any{}}},
 		{"profile": "claude-john"},
 		{"producer": "system:serviceaccount:nvt:spoofed"},
@@ -598,6 +601,61 @@ func TestProfiledAdmissionSnapshotsConfigurationAndLifecycle(t *testing.T) {
 	if unchanged.Spec.Runtime.Type != "codex" || unchanged.Spec.Broker.Grants[0].Provider != "codex-default" ||
 		!bytes.Equal(unchanged.Spec.Agent.Config.Raw, run.Spec.Agent.Config.Raw) {
 		t.Fatalf("existing run changed after schedule mutation: %#v", unchanged.Spec)
+	}
+}
+
+func TestProfiledAdmissionSnapshotsContainerCapabilities(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.Profiles[0].Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+		Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: []corev1.Capability{"SYS_PTRACE"}},
+	}
+	scheduleCopy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
+	scheduleCopy.Spec.Profiles[0].Runtime.Container.Capabilities.Add[0] = "NET_ADMIN"
+	if schedule.Spec.Profiles[0].Runtime.Container.Capabilities.Add[0] != "SYS_PTRACE" {
+		t.Fatal("AgentSchedule capability configuration was not deep-copied")
+	}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "capabilities", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := fixture.run(t, decoded.AgentRun.Name)
+	if run.Spec.Runtime.Container == nil || run.Spec.Runtime.Container.Capabilities == nil ||
+		!reflect.DeepEqual(run.Spec.Runtime.Container.Capabilities.Add, []corev1.Capability{"SYS_PTRACE"}) {
+		t.Fatalf("profile capabilities were not snapshotted: %#v", run.Spec.Runtime)
+	}
+	raw, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped nvtv1alpha1.AgentRun
+	if err := json.Unmarshal(raw, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(roundTripped.Spec.Runtime.Container, run.Spec.Runtime.Container) {
+		t.Fatalf("capability configuration did not round-trip: %#v", roundTripped.Spec.Runtime.Container)
+	}
+	schedule.Spec.Profiles[0].Runtime.Container.Capabilities.Add[0] = "NET_ADMIN"
+	if run.Spec.Runtime.Container.Capabilities.Add[0] != "SYS_PTRACE" {
+		t.Fatal("resolved AgentRun aliases profile capability configuration")
+	}
+}
+
+func TestProfiledCapabilityConfigurationFailsClosed(t *testing.T) {
+	for _, add := range [][]corev1.Capability{{"NOT_A_CAPABILITY"}, {"SYS_PTRACE", "SYS_PTRACE"}} {
+		schedule := testProfiledAgentSchedule()
+		schedule.Spec.Profiles[0].Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+			Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: add},
+		}
+		fixture := newProfileAdmissionFixture(t, schedule)
+		response := fixture.serve(t, profiledAdmissionBody(t, "invalid-capability", nil, nil), "Bearer projected-token")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid-execution-profile-configuration") ||
+			strings.Contains(response.Body.String(), string(add[0])) {
+			t.Fatalf("invalid capability response was not sanitized: status=%d body=%q", response.Code, response.Body.String())
+		}
+		runs := &nvtv1alpha1.AgentRunList{}
+		if err := fixture.client.List(context.Background(), runs, client.InNamespace(schedule.Namespace)); err != nil || len(runs.Items) != 0 {
+			t.Fatalf("invalid capability configuration created runs: err=%v runs=%#v", err, runs.Items)
+		}
 	}
 }
 

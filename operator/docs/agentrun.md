@@ -129,6 +129,31 @@ schedule onto matching tainted nodes, but a toleration does not select a node or
 remove the taint. The separate egress service Pod and platform Deployments do
 not inherit AgentRun tolerations.
 
+`runtime.container.capabilities.add` optionally adds valid Linux capabilities
+to the untrusted Kubernetes/OCI `agent` container only:
+
+```yaml
+runtime:
+  type: codex
+  autonomy: trusted-local
+  user: root
+  container:
+    capabilities:
+      add: [SYS_PTRACE]
+```
+
+Names use the Linux UAPI form without the `CAP_` prefix. Duplicate, malformed,
+and unknown names are rejected before Pod creation. This is deliberately not a
+generic VM contract: a future backend that cannot honor the container control
+must reject it explicitly rather than silently ignore it. Kubernetes admission
+policy and the selected runtime decide whether a valid capability is permitted.
+
+Capabilities expand the authority of untrusted agent code. Powerful values
+such as `NET_ADMIN` or `SYS_ADMIN` can weaken isolation and mediated-egress
+guarantees even though they are administrator-owned and opt-in. No capability
+is added by default, and the setting never applies to egressd, captured,
+net-init, DinD, or platform containers.
+
 ## Egress
 
 `egress` is `direct` or `mediated`; omitted means direct.

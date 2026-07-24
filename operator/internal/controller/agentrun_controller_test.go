@@ -654,6 +654,135 @@ func TestDesiredAgentPodDefaultUserIsRootUnchanged(t *testing.T) {
 	}
 }
 
+func TestDesiredAgentPodAddsCapabilitiesOnlyToAgentAndComposesWithUser(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		user nvtv1alpha1.AgentRunRuntimeUser
+	}{
+		{name: "root"},
+		{name: "non-root", user: nvtv1alpha1.AgentRunUserNonRoot},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run := testAgentRun()
+			run.Spec.Runtime.User = test.user
+			run.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+				Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: []corev1.Capability{"SYS_PTRACE", "NET_ADMIN"}},
+			}
+			run.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+			run.Spec.EgressAllowInsecureBroker = true
+			run.Spec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
+				Provider: "api-main", Materialization: nvtv1alpha1.AgentRunGrantPlaceholderFile,
+				EgressHosts: []string{"api.example.test:443"},
+			}}}
+
+			pod, err := DesiredAgentPod(run, testScheme(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent := requireContainer(t, *pod, "agent")
+			if agent.SecurityContext == nil || agent.SecurityContext.Capabilities == nil ||
+				!reflect.DeepEqual(agent.SecurityContext.Capabilities.Add, []corev1.Capability{"SYS_PTRACE", "NET_ADMIN"}) {
+				t.Fatalf("agent capabilities = %#v", agent.SecurityContext)
+			}
+			if test.user == nvtv1alpha1.AgentRunUserNonRoot {
+				if agent.SecurityContext.RunAsUser == nil || *agent.SecurityContext.RunAsUser != agentNonRootUID ||
+					agent.SecurityContext.RunAsGroup == nil || *agent.SecurityContext.RunAsGroup != agentNonRootGID {
+					t.Fatalf("non-root user/group were lost: %#v", agent.SecurityContext)
+				}
+			} else if agent.SecurityContext.RunAsUser != nil || agent.SecurityContext.RunAsGroup != nil {
+				t.Fatalf("root capability request added user overrides: %#v", agent.SecurityContext)
+			}
+			for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
+				if container.Name == "agent" || container.SecurityContext == nil || container.SecurityContext.Capabilities == nil {
+					continue
+				}
+				for _, added := range container.SecurityContext.Capabilities.Add {
+					if added == "SYS_PTRACE" {
+						t.Fatalf("agent capability leaked to container %q: %#v", container.Name, container.SecurityContext)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestAgentRunRuntimeCapabilitiesValidationAndDeepCopy(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+		Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: []corev1.Capability{"SYS_PTRACE"}},
+	}
+	copy := run.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	copy.Spec.Runtime.Container.Capabilities.Add[0] = "NET_ADMIN"
+	if run.Spec.Runtime.Container.Capabilities.Add[0] != "SYS_PTRACE" {
+		t.Fatal("runtime capabilities were not deep-copied")
+	}
+	empty := testAgentRun()
+	empty.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+		Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: []corev1.Capability{}},
+	}
+	emptyCopy := empty.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	if emptyCopy.Spec.Runtime.Container.Capabilities.Add == nil || len(emptyCopy.Spec.Runtime.Container.Capabilities.Add) != 0 {
+		t.Fatalf("explicit-empty capability list was not preserved: %#v", emptyCopy.Spec.Runtime.Container.Capabilities.Add)
+	}
+	for _, test := range []struct {
+		name string
+		add  []corev1.Capability
+	}{
+		{name: "unknown", add: []corev1.Capability{"CAP_SYS_PTRACE"}},
+		{name: "malformed lowercase", add: []corev1.Capability{"sys_ptrace"}},
+		{name: "duplicate", add: []corev1.Capability{"SYS_PTRACE", "SYS_PTRACE"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := testAgentRun()
+			invalid.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+				Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: test.add},
+			}
+			if err := ValidateAgentRunRuntimeCapabilities(invalid); err == nil {
+				t.Fatal("invalid capability list was accepted")
+			}
+			if _, err := DesiredAgentPod(invalid, testScheme(t)); err == nil {
+				t.Fatal("invalid capability list reached Pod rendering")
+			}
+		})
+	}
+}
+
+func TestAgentCapabilityDoesNotReachTransparentOrEgressContainers(t *testing.T) {
+	run := transparentAgentRun(t)
+	run.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+		Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: []corev1.Capability{"SYS_PTRACE"}},
+	}
+	agentPod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, container := range append(append([]corev1.Container(nil), agentPod.Spec.InitContainers...), agentPod.Spec.Containers...) {
+		if container.Name == "agent" {
+			continue
+		}
+		assertContainerLacksCapability(t, container, "SYS_PTRACE")
+	}
+	egressdPod, err := DesiredEgressdPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, container := range egressdPod.Spec.Containers {
+		assertContainerLacksCapability(t, container, "SYS_PTRACE")
+	}
+}
+
+func assertContainerLacksCapability(t *testing.T, container corev1.Container, capability corev1.Capability) {
+	t.Helper()
+	if container.SecurityContext == nil || container.SecurityContext.Capabilities == nil {
+		return
+	}
+	for _, added := range container.SecurityContext.Capabilities.Add {
+		if added == capability {
+			t.Fatalf("capability %q leaked to container %q: %#v", capability, container.Name, container.SecurityContext)
+		}
+	}
+}
+
 // TestDesiredAgentPodNonRootUser pins the opt-in non-root shape: uid/gid 1000,
 // HOME + state under /home/agent, pod fsGroup 1000, and the codex auth path +
 // group-writable seed under /home/agent.
@@ -4320,6 +4449,74 @@ func TestAgentRunCRDSchemaIncludesTolerations(t *testing.T) {
 	}
 }
 
+func TestAgentRunCRDSchemaIncludesContainerCapabilities(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatal(err)
+	}
+	add := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties", "spec", "properties",
+		"runtime", "properties", "container", "properties", "capabilities", "properties", "add",
+	).(map[string]any)
+	values := crdPath(t, add, "items", "enum").([]any)
+	if add["x-kubernetes-list-type"] != "set" || !containsAny(values, "SYS_PTRACE") || !containsAny(values, "CHECKPOINT_RESTORE") {
+		t.Fatalf("AgentRun container capability schema incomplete: %#v", add)
+	}
+}
+
+func TestAuthoritativeCRDCapabilityEnumsMatchRuntimeRegistry(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		keys []any
+	}{
+		{
+			name: "AgentRun",
+			path: "../../config/crd/bases/nvt.dev_agentruns.yaml",
+			keys: []any{"spec", "properties", "runtime", "properties", "container", "properties", "capabilities", "properties", "add"},
+		},
+		{
+			name: "AgentSchedule",
+			path: "../../config/crd/bases/nvt.dev_agentschedules.yaml",
+			keys: []any{"spec", "properties", "profiles", "items", "properties", "runtime", "properties", "container", "properties", "capabilities", "properties", "add"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := os.ReadFile(test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var crd map[string]any
+			if err := yaml.Unmarshal(data, &crd); err != nil {
+				t.Fatal(err)
+			}
+			path := []any{"spec", "versions", 0, "schema", "openAPIV3Schema", "properties"}
+			path = append(path, test.keys...)
+			add := crdPath(t, crd, path...).(map[string]any)
+			got := make(map[corev1.Capability]struct{})
+			for _, value := range crdPath(t, add, "items", "enum").([]any) {
+				name, ok := value.(string)
+				if !ok {
+					t.Fatalf("capability enum contains non-string value %#v", value)
+				}
+				capability := corev1.Capability(name)
+				if _, duplicate := got[capability]; duplicate {
+					t.Fatalf("capability enum contains duplicate %q", capability)
+				}
+				got[capability] = struct{}{}
+			}
+			if !reflect.DeepEqual(got, linuxCapabilityNames) {
+				t.Fatalf("%s capability enum differs from runtime registry: got=%v want=%v", test.name, got, linuxCapabilityNames)
+			}
+		})
+	}
+}
+
 func TestAgentRunCRDSchemaBoundsProviderPreparations(t *testing.T) {
 	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
 	if err != nil {
@@ -5839,6 +6036,15 @@ func hasCRDValidation(validations []any, rule, messageFragment string) bool {
 	for _, raw := range validations {
 		validation, ok := raw.(map[string]any)
 		if ok && validation["rule"] == rule && strings.Contains(fmt.Sprint(validation["message"]), messageFragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAny(values []any, expected any) bool {
+	for _, value := range values {
+		if value == expected {
 			return true
 		}
 	}

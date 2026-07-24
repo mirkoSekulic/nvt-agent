@@ -231,6 +231,7 @@ func (in *AgentScheduleExecutionProfile) DeepCopy() *AgentScheduleExecutionProfi
 	}
 	out := new(AgentScheduleExecutionProfile)
 	*out = *in
+	out.Runtime = *in.Runtime.DeepCopy()
 	if in.EgressForwardProxy != nil {
 		out.EgressForwardProxy = new(bool)
 		*out.EgressForwardProxy = *in.EgressForwardProxy
