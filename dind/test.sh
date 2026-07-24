@@ -73,6 +73,7 @@ cat >"${BIN}/e2fsck" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'e2fsck %s\n' "$*" >>"${FAKE_LOG}"
+sleep "${FAKE_FSCK_DELAY:-0}"
 exit "${FAKE_FSCK_STATUS:-0}"
 FAKE
 
@@ -119,7 +120,7 @@ new_fixture() {
   export FAKE_ASSOCIATED_MARKER="${FIXTURE}/associated"
   export FAKE_DEVICE_DIR="${FIXTURE}/dev"
   : >"${FAKE_LOG}"
-  unset FAKE_FINDMNT_FAIL FAKE_MKFS_FAIL FAKE_MOUNT_FAIL FAKE_FSCK_STATUS FAKE_NEED_LOOP_NODES FAKE_DOCKER_DRIVER
+  unset FAKE_FINDMNT_FAIL FAKE_MKFS_FAIL FAKE_MOUNT_FAIL FAKE_FSCK_STATUS FAKE_FSCK_DELAY FAKE_NEED_LOOP_NODES FAKE_DOCKER_DRIVER
 }
 
 run_entrypoint() {
@@ -173,6 +174,20 @@ if grep -Eq '^(truncate|mkfs\.ext4) ' "${FAKE_LOG}"; then
   exit 1
 fi
 grep -qx 'existing-canonical-image' "${FIXTURE}/backing/docker-data.ext4"
+
+new_fixture delayed-recovery
+export FAKE_FS_TYPE=virtiofs
+export FAKE_FSCK_DELAY=1
+printf 'existing-canonical-image' >"${FIXTURE}/backing/docker-data.ext4"
+run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr" &
+recovery_pid=$!
+sleep 0.2
+if grep -q '^dockerd ' "${FAKE_LOG}"; then
+  echo "dockerd started before delayed filesystem recovery completed" >&2
+  exit 1
+fi
+wait "${recovery_pid}"
+grep -q '^dockerd .*--storage-driver=overlay2$' "${FAKE_LOG}"
 
 new_fixture partial-image
 export FAKE_FS_TYPE=virtiofs
@@ -246,5 +261,7 @@ PATH="${BIN}:${PATH}" NVT_DIND_RUN_DIR="${FIXTURE}/run" "${READY}"
 rm -f "${FIXTURE}/run/required-storage-driver"
 export FAKE_DOCKER_DRIVER=vfs
 PATH="${BIN}:${PATH}" NVT_DIND_RUN_DIR="${FIXTURE}/run" "${READY}"
+
+bash "${ROOT}/tests/operator/kata/test.sh"
 
 echo "nvt-dind storage setup test passed"

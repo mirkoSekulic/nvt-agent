@@ -25,8 +25,9 @@ Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
 of, upgrading to chart `0.8.15`; otherwise the API server will prune or reject
-new AgentRun and schedule fields such as container capabilities, broker grant
-preparations, profile workspace instructions, or workflow producer policies.
+new AgentRun and schedule fields such as container capabilities, dedicated
+Docker storage size, broker grant preparations, profile workspace instructions,
+or workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -141,13 +142,17 @@ producer:
   agentRun:
     workspaceMode: Persistent
     workspaceSize: 20Gi
+    workspaceDockerSize: 30Gi # optional dedicated Docker PVC; defaults to 20Gi
     workspaceStorageClassName: managed-csi # optional
 ```
 
 Ephemeral remains the default. Persistent mode requires a positive Kubernetes
 quantity and cannot be combined with the legacy producer's file-bundle broker
-grants. Profiled admission does not send these fields; configure persistence in
-the operator-owned `AgentSchedule.spec.template.workspace` instead.
+grants. Its optional Docker size must be between 1 GiB and 1 TiB; the operator
+creates a separate sidecar-only Docker claim so workspace/home use cannot
+consume the Docker quota. Profiled admission does not send these fields;
+configure `size`, optional `dockerSize`, and `storageClassName` in the
+operator-owned `AgentSchedule.spec.template.workspace` instead.
 
 ## Broker TLS
 
@@ -280,6 +285,11 @@ agentSchedule:
     resources:
       requests: {cpu: "2", memory: 8Gi}
       limits: {cpu: "2", memory: 8Gi}
+    workspace:
+      mode: Persistent
+      size: 20Gi
+      dockerSize: 30Gi
+      storageClassName: managed-csi
     tolerations:
       - key: purpose
         operator: Equal

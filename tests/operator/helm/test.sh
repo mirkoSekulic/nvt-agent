@@ -205,6 +205,7 @@ helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set prod
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
   --set producer.agentRun.workspaceMode=Persistent \
   --set-string producer.agentRun.workspaceSize=20Gi \
+  --set-string producer.agentRun.workspaceDockerSize=30Gi \
   --set producer.agentRun.workspaceStorageClassName=managed-csi \
   > "${PRODUCER_PERSISTENT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${ALL_IMAGES_RENDER}"
@@ -550,6 +551,7 @@ for image in \
   }
 done
 grep -A1 'name: NVT_DIND_IMAGE' "${ALL_IMAGES_RENDER}" | grep -q "ghcr.io/mirkosekulic/nvt-dind:${CHART_APP_VERSION}"
+grep -A1 'name: NVT_DIND_IMAGE_PULL_POLICY' "${ALL_IMAGES_RENDER}" | grep -q 'IfNotPresent'
 grep -q 'ghcr.io/mirkosekulic/nvt-operator:operator-override' "${COMPONENT_TAG_RENDER}"
 grep -q 'ghcr.io/mirkosekulic/nvt-dind:dind-override' "${COMPONENT_TAG_RENDER}"
 for image in \
@@ -610,6 +612,10 @@ grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'key: purpose'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'operator: Equal'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'value: nvt-agent'
 grep -A5 'tolerations:' "${PROFILE_RENDER}" | grep -q 'effect: NoSchedule'
+grep -A5 'workspace:' "${PROFILE_RENDER}" | grep -q 'mode: Persistent'
+grep -A5 'workspace:' "${PROFILE_RENDER}" | grep -q 'size: 20Gi'
+grep -A5 'workspace:' "${PROFILE_RENDER}" | grep -q 'dockerSize: 30Gi'
+grep -A5 'workspace:' "${PROFILE_RENDER}" | grep -q 'storageClassName: managed-csi'
 grep -A3 'preparations:' "${PROFILE_RENDER}" | grep -q 'operation: identity'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Follow the administrator-owned repository workflow.'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Keep changes focused and run repository checks.'
@@ -1122,12 +1128,13 @@ grep -q 'secretName: "nvt-github-app"' "${PRODUCER_RENDER}"
 grep -q 'mountPath: "/var/run/secrets/github-app"' "${PRODUCER_RENDER}"
 grep -q 'claimName: nvt-github-comments-producer-state' "${PRODUCER_RENDER}"
 grep -q 'workspaceMode: "Ephemeral"' "${PRODUCER_RENDER}"
-if grep -Eq 'workspace(Size|StorageClassName):' "${PRODUCER_RENDER}"; then
+if grep -Eq 'workspace(Size|DockerSize|StorageClassName):' "${PRODUCER_RENDER}"; then
   echo "ephemeral producer config must omit persistent workspace fields" >&2
   exit 1
 fi
 grep -q 'workspaceMode: "Persistent"' "${PRODUCER_PERSISTENT_RENDER}"
 grep -q 'workspaceSize: "20Gi"' "${PRODUCER_PERSISTENT_RENDER}"
+grep -q 'workspaceDockerSize: "30Gi"' "${PRODUCER_PERSISTENT_RENDER}"
 grep -q 'workspaceStorageClassName: "managed-csi"' "${PRODUCER_PERSISTENT_RENDER}"
 if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
   --set producer.agentRun.workspaceMode=Persistent \
@@ -1142,7 +1149,7 @@ if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
   echo "expected Ephemeral producer workspace with size to fail rendering" >&2
   exit 1
 fi
-grep -q 'producer.agentRun.workspaceSize and workspaceStorageClassName require workspaceMode Persistent' "${PRODUCER_EPHEMERAL_STORAGE_FAILURE}"
+grep -q 'producer.agentRun.workspaceSize, workspaceDockerSize, and workspaceStorageClassName require workspaceMode Persistent' "${PRODUCER_EPHEMERAL_STORAGE_FAILURE}"
 grep -q 'resources:' "${PRODUCER_RENDER}"
 grep -q 'automountServiceAccountToken: false' "${PRODUCER_RENDER}"
 if grep -q 'operator-admission-token' "${PRODUCER_RENDER}"; then

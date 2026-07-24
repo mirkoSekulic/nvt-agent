@@ -198,14 +198,16 @@ Persistent storage is opt-in:
 workspace:
   mode: Persistent
   size: 20Gi
+  dockerSize: 30Gi # optional; dedicated Docker claim, defaults to 20Gi
   storageClassName: managed-csi # optional; cluster default when omitted
 ```
 
-The operator creates one `ReadWriteOnce` filesystem PVC owned by the
-`AgentRun`. The same claim provides separate `workspace`, `home`, and
-sidecar-only `docker` subdirectories. The agent sees `/workspace` and its
-complete home (`/root`, or `/home/agent` for non-root runs), but it cannot mount
-or directly access the Docker backing directory. An init container creates the
+The operator creates two `ReadWriteOnce` filesystem PVCs owned by the
+`AgentRun`: the requested workspace claim and a dedicated sidecar-only Docker
+claim. The workspace claim provides separate `workspace` and `home`
+subdirectories. The agent sees `/workspace` and its complete home (`/root`, or
+`/home/agent` for non-root runs), but it cannot mount or directly access the
+Docker claim or backing image. An init container creates the workspace/home
 directories and applies ownership for uid/gid 0 or 1000 before the agent starts.
 
 The privileged Docker sidecar detects the filesystem under `/var/lib/docker`.
@@ -216,26 +218,30 @@ starts. Filesystem and loop tools are baked into the coordinated `nvt-dind`
 image; startup never installs them from the network. A malformed, partial, or
 unmountable existing image fails closed and is never reformatted.
 
-Ephemeral runs keep the backing image in a sidecar-only `emptyDir`, so Pod
-replacement discards Docker data. Persistent runs keep it in the AgentRun PVC,
-so Pod or sidecar replacement reuses the same ext4 image without `mkfs`. The
-logical image size follows the requested PVC size, bounded between 64 MiB and
-1 TiB; ephemeral runs use a bounded 20 GiB image. On non-virtiofs filesystems,
-the entrypoint leaves the existing Docker storage behavior unchanged.
+Ephemeral runs keep the backing image in a sidecar-only `emptyDir` with a 20
+GiB size limit, so Pod replacement discards Docker data. Persistent runs keep
+it in the dedicated Docker PVC, so Pod or sidecar replacement reuses the same
+ext4 image without `mkfs`. `workspace.dockerSize` requests that claim between 1
+GiB and 1 TiB and defaults to 20 GiB when omitted. The inner ext4 image uses
+90% of its outer allocation, leaving enforced outer-filesystem
+allocation/metadata headroom instead of advertising the full outer quota. The
+Docker claim uses the same optional `storageClassName` as the workspace claim.
+On non-virtiofs filesystems, the entrypoint leaves the existing Docker storage
+behavior unchanged.
 
-The claim is reused across agent Pod deletion/replacement and controller
+Both claims are reused across agent Pod deletion/replacement and controller
 restarts while the run is active. The operator creates the consuming Pod while
-a valid claim is Pending, so both `Immediate` and `WaitForFirstConsumer`
-StorageClasses are supported. `WorkspaceReady` remains false until the claim
-becomes `Bound`. Workspace mode, size, and storage class are immutable for an
-existing run; expansion and shrink are not supported in v1, and the controller
-never deletes/recreates a drifted live claim.
+valid claims are Pending, so both `Immediate` and `WaitForFirstConsumer`
+StorageClasses are supported. `WorkspaceReady` remains false until both claims
+become `Bound`. Workspace mode, size, Docker size, and storage class are
+immutable for an existing run; expansion and shrink are not supported in v1,
+and the controller never deletes/recreates a drifted live claim.
 
-The PVC lifetime ends when terminal operational cleanup becomes due, not when
+Both PVC lifetimes end when terminal operational cleanup becomes due, not when
 an active Pod crashes or is replaced. The operator requests claim deletion at
-that point; Kubernetes PVC protection may keep it terminating until the Pod has
-unmounted it. Deleting the `AgentRun` sooner also makes garbage collection
-delete its owned PVC. Physical volume cleanup still follows the StorageClass
+that point; Kubernetes PVC protection may keep them terminating until the Pod
+has unmounted them. Deleting the `AgentRun` sooner also makes garbage collection
+delete both owned PVCs. Physical volume cleanup still follows the StorageClass
 reclaim policy; use `reclaimPolicy: Delete` for lifecycle-scoped storage.
 
 Loop-device, filesystem, mount, and Docker daemon privileges remain confined

@@ -224,6 +224,8 @@ producer:
     workspaceMode: Ephemeral
     # Required when workspaceMode is Persistent.
     workspaceSize: ""
+    # Optional dedicated Docker PVC size (1Gi-1Ti); empty uses 20Gi.
+    workspaceDockerSize: ""
     # Empty uses the cluster default StorageClass.
     workspaceStorageClassName: ""
     brokerGrants: []
