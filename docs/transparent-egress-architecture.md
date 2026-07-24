@@ -58,6 +58,8 @@ spec:
   egress: mediated
   egressEnforcement: true
   egressTransport: transparent
+  # Optional active CONNECT bound; default 256, allowed range 1-4096.
+  egressMaxConcurrentTunnels: 512
 ```
 
 | Setting | Behavior |
@@ -90,11 +92,27 @@ Conceptually:
 ```text
 OUTPUT:
   allow loopback and capture-process traffic
+  allow Pod-side traffic leaving through docker0 or any br-* bridge
   redirect remaining TCP to captured:15001
 
 PREROUTING:
-  redirect TCP arriving from the DinD bridge to captured:15001
+  redirect TCP arriving from docker0 or any br-* bridge to captured:15001
 ```
+
+The `br-*` interface-prefix rules are evaluated for every connection, so
+Compose bridges created after net-init are covered without periodically
+rewriting the rules. The OUTPUT exception is limited to traffic routed toward
+local Docker bridges (including docker-proxy's connection to a published
+container). DinD-container traffic enters PREROUTING and therefore remains
+captured before any external egress.
+
+Forward-proxy and transparent transports default to 256 active CONNECT
+tunnels. A profile may set `egressMaxConcurrentTunnels` from 1 through 4096.
+When all active slots are occupied, egressd queues at most the configured
+number of requests for five seconds; a released slot admits a waiting request,
+while sustained overload and cancellation fail explicitly without unbounded
+goroutines or sockets. Capacity logs report only non-secret active, queued,
+admitted, timed-out, and rejected counts.
 
 The `captured` process recovers the original destination with
 `SO_ORIGINAL_DST`. It inspects a bounded TLS ClientHello or HTTP preface to

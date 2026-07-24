@@ -6855,6 +6855,18 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	if !strings.Contains(netInit.Args[0], "iptables") || !strings.Contains(netInit.Args[0], "ip6tables") || !strings.Contains(netInit.Args[0], "docker0") {
 		t.Fatalf("net-init rules incomplete: %q", netInit.Args)
 	}
+	for _, rule := range []string{
+		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
+		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
+		"iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT",
+		"iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
+		"ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
+		"ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
+	} {
+		if !strings.Contains(netInit.Args[0], rule) {
+			t.Fatalf("net-init missing dynamic bridge rule %q: %q", rule, netInit.Args[0])
+		}
+	}
 	if strings.Contains(netInit.Args[0], "NVT_CAPTURE_EXCLUDE_CIDRS") || !strings.Contains(netInit.Args[0], "getent ahosts") {
 		t.Fatalf("net-init must resolve only narrow control-plane exceptions: %q", netInit.Args)
 	}

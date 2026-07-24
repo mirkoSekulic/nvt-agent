@@ -135,6 +135,28 @@ case_run() {
   # A child container in DinD traverses PREROUTING capture as well.
   agent_exec "${run}" docker run --rm docker:27-dind wget -q -T 15 -O- https://example.com >/dev/null
 
+  # Pod-side traffic to Docker-published services must stay local. Exercise
+  # both Docker's default bridge and a Compose-style bridge created after
+  # net-init; the latter proves interface-prefix matching is not a startup
+  # snapshot. The agent and containers share this Pod network namespace.
+  agent_exec "${run}" docker run -d --rm --name nvt-local-default \
+    -p 127.0.0.1:18080:18080 docker:27-dind \
+    sh -ec 'mkdir -p /tmp/www; echo default-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
+  agent_exec "${run}" curl --fail -sS --max-time 10 http://127.0.0.1:18080/ | grep -qx default-bridge-ok || \
+    die "agent could not reach a DinD-published default-bridge service"
+  agent_exec "${run}" docker network create nvt_issue143_default >/dev/null
+  agent_exec "${run}" docker run -d --rm --name nvt-local-compose \
+    --network nvt_issue143_default -p 127.0.0.1:18081:18080 docker:27-dind \
+    sh -ec 'mkdir -p /tmp/www; echo compose-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
+  agent_exec "${run}" curl --fail -sS --max-time 10 http://127.0.0.1:18081/ | grep -qx compose-bridge-ok || \
+    die "agent could not reach a DinD-published dynamic-bridge service"
+
+  # The local OUTPUT bypass does not apply to DinD-originated connections:
+  # they enter PREROUTING and remain subject to destination denial.
+  if agent_exec "${run}" docker run --rm docker:27-dind wget -q -T 5 -O- http://169.254.169.254/; then
+    die "DinD container bypassed metadata destination denial"
+  fi
+
   # Private and metadata destinations are denied by egressd even through the
   # explicit local listener.
   for target in 10.0.0.1 169.254.169.254; do

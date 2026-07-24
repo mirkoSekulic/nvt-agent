@@ -3589,21 +3589,31 @@ iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
 iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
 for ip in $exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$ip/32" -j RETURN; done
 iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+# Pod-side connections to locally published DinD services leave through a
+# Docker bridge after docker-proxy/DNAT. Interface-prefix matching covers
+# Compose bridges created after this init container has exited. Container-
+# originated traffic enters PREROUTING instead and remains captured below.
+iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN
+iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN
 iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
 for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
 iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
 ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
 ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_CAPTURE -d "$ip/128" -j RETURN; done
 ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
+ip6tables -t nat -A NVT_CAPTURE -o docker0 -j RETURN
+ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN
 ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
 		initContainers = append(initContainers, corev1.Container{
 			Name:    "net-init",
