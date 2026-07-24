@@ -49,9 +49,10 @@ rule_packets() {
   docker exec "${DAEMON}" nft list chain ip nat NVT_DIND | awk -v pattern="${pattern}" '
     index($0, pattern) {
       for (i = 1; i <= NF; i++) {
-        if ($i == "packets") { print $(i + 1); exit }
+        if ($i == "packets") { value = $(i + 1) }
       }
     }
+    END { if (value != "") print value }
   '
 }
 
