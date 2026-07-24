@@ -97,6 +97,18 @@ agent_exec() {
   kubectl_smoke exec "$1-agent" -n "${NAMESPACE}" -c agent -- "${@:2}"
 }
 
+wait_for_published_service() {
+  local run="$1" port="$2" expected="$3" body="" attempt
+  for attempt in $(seq 1 50); do
+    body="$(agent_exec "${run}" curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:${port}/" 2>/dev/null || true)"
+    if [[ "${body}" == "${expected}" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  die "agent could not reach expected response from DinD-published port ${port}"
+}
+
 case_run() {
   submit_rejected_admission no-enforcement egressTransport
   submit_valid_admission valid
@@ -142,14 +154,12 @@ case_run() {
   agent_exec "${run}" docker run -d --rm --name nvt-local-default \
     -p 127.0.0.1:18080:18080 docker:27-dind \
     sh -ec 'mkdir -p /tmp/www; echo default-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
-  agent_exec "${run}" curl --fail -sS --max-time 10 http://127.0.0.1:18080/ | grep -qx default-bridge-ok || \
-    die "agent could not reach a DinD-published default-bridge service"
+  wait_for_published_service "${run}" 18080 default-bridge-ok
   agent_exec "${run}" docker network create nvt_issue143_default >/dev/null
   agent_exec "${run}" docker run -d --rm --name nvt-local-compose \
     --network nvt_issue143_default -p 127.0.0.1:18081:18080 docker:27-dind \
     sh -ec 'mkdir -p /tmp/www; echo compose-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
-  agent_exec "${run}" curl --fail -sS --max-time 10 http://127.0.0.1:18081/ | grep -qx compose-bridge-ok || \
-    die "agent could not reach a DinD-published dynamic-bridge service"
+  wait_for_published_service "${run}" 18081 compose-bridge-ok
 
   # The local OUTPUT bypass does not apply to DinD-originated connections:
   # they enter PREROUTING and remain subject to destination denial.
