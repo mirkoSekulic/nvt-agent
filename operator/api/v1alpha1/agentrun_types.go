@@ -376,7 +376,8 @@ func (in *AgentRunRuntime) DeepCopy() *AgentRunRuntime {
 		if in.Container.Capabilities != nil {
 			out.Container.Capabilities = &AgentRunRuntimeCapabilities{}
 			if in.Container.Capabilities.Add != nil {
-				out.Container.Capabilities.Add = append([]corev1.Capability(nil), in.Container.Capabilities.Add...)
+				out.Container.Capabilities.Add = make([]corev1.Capability, len(in.Container.Capabilities.Add))
+				copy(out.Container.Capabilities.Add, in.Container.Capabilities.Add)
 			}
 		}
 	}

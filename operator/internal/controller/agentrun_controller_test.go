@@ -716,6 +716,14 @@ func TestAgentRunRuntimeCapabilitiesValidationAndDeepCopy(t *testing.T) {
 	if run.Spec.Runtime.Container.Capabilities.Add[0] != "SYS_PTRACE" {
 		t.Fatal("runtime capabilities were not deep-copied")
 	}
+	empty := testAgentRun()
+	empty.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
+		Capabilities: &nvtv1alpha1.AgentRunRuntimeCapabilities{Add: []corev1.Capability{}},
+	}
+	emptyCopy := empty.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	if emptyCopy.Spec.Runtime.Container.Capabilities.Add == nil || len(emptyCopy.Spec.Runtime.Container.Capabilities.Add) != 0 {
+		t.Fatalf("explicit-empty capability list was not preserved: %#v", emptyCopy.Spec.Runtime.Container.Capabilities.Add)
+	}
 	for _, test := range []struct {
 		name string
 		add  []corev1.Capability
@@ -4457,6 +4465,55 @@ func TestAgentRunCRDSchemaIncludesContainerCapabilities(t *testing.T) {
 	values := crdPath(t, add, "items", "enum").([]any)
 	if add["x-kubernetes-list-type"] != "set" || !containsAny(values, "SYS_PTRACE") || !containsAny(values, "CHECKPOINT_RESTORE") {
 		t.Fatalf("AgentRun container capability schema incomplete: %#v", add)
+	}
+}
+
+func TestAuthoritativeCRDCapabilityEnumsMatchRuntimeRegistry(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		keys []any
+	}{
+		{
+			name: "AgentRun",
+			path: "../../config/crd/bases/nvt.dev_agentruns.yaml",
+			keys: []any{"spec", "properties", "runtime", "properties", "container", "properties", "capabilities", "properties", "add"},
+		},
+		{
+			name: "AgentSchedule",
+			path: "../../config/crd/bases/nvt.dev_agentschedules.yaml",
+			keys: []any{"spec", "properties", "profiles", "items", "properties", "runtime", "properties", "container", "properties", "capabilities", "properties", "add"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := os.ReadFile(test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var crd map[string]any
+			if err := yaml.Unmarshal(data, &crd); err != nil {
+				t.Fatal(err)
+			}
+			path := []any{"spec", "versions", 0, "schema", "openAPIV3Schema", "properties"}
+			path = append(path, test.keys...)
+			add := crdPath(t, crd, path...).(map[string]any)
+			got := make(map[corev1.Capability]struct{})
+			for _, value := range crdPath(t, add, "items", "enum").([]any) {
+				name, ok := value.(string)
+				if !ok {
+					t.Fatalf("capability enum contains non-string value %#v", value)
+				}
+				capability := corev1.Capability(name)
+				if _, duplicate := got[capability]; duplicate {
+					t.Fatalf("capability enum contains duplicate %q", capability)
+				}
+				got[capability] = struct{}{}
+			}
+			if !reflect.DeepEqual(got, linuxCapabilityNames) {
+				t.Fatalf("%s capability enum differs from runtime registry: got=%v want=%v", test.name, got, linuxCapabilityNames)
+			}
+		})
 	}
 }
 
