@@ -12,7 +12,7 @@ KATA_DIND_RUNTIME_CLASS=kata-vm-isolation \
 KATA_DIND_STORAGE_CLASS=managed-csi \
 KATA_DIND_DOCKER_SIZE=30Gi \
 KATA_DIND_TOLERATIONS_JSON='[{"key":"purpose","operator":"Equal","value":"nvt-agent","effect":"NoSchedule"}]' \
-KATA_DIND_RUNTIME_IMAGE=ghcr.io/mirkosekulic/nvt-agent-runtime:0.8.15-<release-sha> \
+KATA_DIND_RUNTIME_IMAGE=ghcr.io/mirkosekulic/nvt-agent-runtime:0.8.16-<release-sha> \
 bash tests/operator/kata/dind-overlay2-smoke.sh
 ```
 
