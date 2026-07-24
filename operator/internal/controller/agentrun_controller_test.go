@@ -4923,6 +4923,10 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
 		t.Fatalf("expected egressTransport to be the sole transport selector, got %#v", transport)
 	}
+	tunnelCapacity := crdPath(t, spec, "egressMaxConcurrentTunnels").(map[string]any)
+	if fmt.Sprint(tunnelCapacity["minimum"]) != "1" || fmt.Sprint(tunnelCapacity["maximum"]) != "4096" {
+		t.Fatalf("expected bounded tunnel capacity schema, got %#v", tunnelCapacity)
+	}
 	materialization := crdPath(t, spec, "broker", "properties", "grants", "items", "properties", "materialization").(map[string]any)
 	if materialization["default"] != "file-bundle" {
 		t.Fatalf("expected materialization default file-bundle, got %#v", materialization)
@@ -7075,6 +7079,11 @@ func TestValidateForwardProxyAdmission(t *testing.T) {
 	if err := ValidateAgentRunEgressMode(forwardProxyAgentRun()); err != nil {
 		t.Fatalf("forward-proxy placeholder-file run must be admitted, got %v", err)
 	}
+	tooLarge := forwardProxyAgentRun()
+	tooLarge.Spec.EgressMaxConcurrentTunnels = 4097
+	if err := ValidateAgentRunEgressMode(tooLarge); err == nil || !strings.Contains(err.Error(), "between 1 and 4096") {
+		t.Fatalf("excessive tunnel capacity must be rejected, got %v", err)
+	}
 
 	noEnforce := forwardProxyAgentRun()
 	noEnforce.Spec.EgressEnforcement = false
@@ -7092,19 +7101,29 @@ func TestValidateForwardProxyAdmission(t *testing.T) {
 // TestRenderForwardProxyEgressdConfig pins the egressd config: a forward_proxy
 // block with an inject route per egressHost, no redirect routes, and the CA.
 func TestRenderForwardProxyEgressdConfig(t *testing.T) {
-	rendered, err := RenderEgressdConfigJSON(forwardProxyAgentRun())
+	run := forwardProxyAgentRun()
+	defaultRendered, err := RenderEgressdConfigJSON(run)
+	if err != nil {
+		t.Fatalf("render default: %v", err)
+	}
+	if strings.Contains(defaultRendered, "max_concurrent_tunnels") {
+		t.Fatalf("omitted AgentRun capacity must preserve the egressd default: %s", defaultRendered)
+	}
+	run.Spec.EgressMaxConcurrentTunnels = 512
+	rendered, err := RenderEgressdConfigJSON(run)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	var config struct {
 		Routes       []map[string]any `json:"routes"`
 		ForwardProxy *struct {
-			Listen              string           `json:"listen"`
-			TransparentMode     bool             `json:"transparent_mode"`
-			AllowUnmatchedHosts bool             `json:"allow_unmatched_hosts"`
-			AllowPorts          []int            `json:"allow_ports"`
-			DenyCIDRs           []string         `json:"deny_cidrs"`
-			InjectRoutes        []map[string]any `json:"inject_routes"`
+			Listen               string           `json:"listen"`
+			TransparentMode      bool             `json:"transparent_mode"`
+			AllowUnmatchedHosts  bool             `json:"allow_unmatched_hosts"`
+			AllowPorts           []int            `json:"allow_ports"`
+			DenyCIDRs            []string         `json:"deny_cidrs"`
+			MaxConcurrentTunnels int32            `json:"max_concurrent_tunnels"`
+			InjectRoutes         []map[string]any `json:"inject_routes"`
 		} `json:"forward_proxy"`
 		CA *struct {
 			CertFile string `json:"cert_file"`
@@ -7118,6 +7137,9 @@ func TestRenderForwardProxyEgressdConfig(t *testing.T) {
 	}
 	if config.ForwardProxy == nil || len(config.ForwardProxy.InjectRoutes) != 2 {
 		t.Fatalf("expected two inject routes, got %#v", config.ForwardProxy)
+	}
+	if config.ForwardProxy.MaxConcurrentTunnels != 512 {
+		t.Fatalf("forward proxy tunnel capacity = %d, want 512", config.ForwardProxy.MaxConcurrentTunnels)
 	}
 	if !config.ForwardProxy.AllowUnmatchedHosts {
 		t.Fatalf("forward-proxy mode must blind-tunnel unmatched hosts: %#v", config.ForwardProxy)

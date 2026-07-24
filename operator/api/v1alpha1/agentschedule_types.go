@@ -66,7 +66,12 @@ type AgentScheduleExecutionProfile struct {
 	// rejected; use EgressTransport. It does not select behavior.
 	EgressForwardProxy *bool                   `json:"egressForwardProxy,omitempty"`
 	EgressTransport    AgentRunEgressTransport `json:"egressTransport,omitempty"`
-	Broker             *AgentRunBroker         `json:"broker,omitempty"`
+	// EgressMaxConcurrentTunnels bounds simultaneous CONNECT tunnels in
+	// forward-proxy and transparent transports. Omit to use the egressd default.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	EgressMaxConcurrentTunnels int32           `json:"egressMaxConcurrentTunnels,omitempty"`
+	Broker                     *AgentRunBroker `json:"broker,omitempty"`
 }
 
 // AgentScheduleWorkflowProfile is reusable, administrator-owned workflow guidance.

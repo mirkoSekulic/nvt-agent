@@ -41,6 +41,7 @@ agentSchedule:
       egress: mediated
       egressEnforcement: true
       egressTransport: forward-proxy
+      egressMaxConcurrentTunnels: 512
       broker:
         grants:
           - provider: codex-main

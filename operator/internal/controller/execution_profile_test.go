@@ -105,6 +105,7 @@ func TestKubernetesTokenReviewProducerAuthenticator(t *testing.T) {
 
 func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
+	schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 512
 	profileInstructions := "Prefer repository-local checks.\n\n- Keep commits focused.\n"
 	schedule.Spec.Profiles[0].WorkspaceInstructions = profileInstructions
 	scheduleCopy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
@@ -133,12 +134,19 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatalf("workspace instructions were not snapshotted exactly: %q", defaultRun.Spec.Agent.WorkspaceInstructions)
 	}
+	if defaultRun.Spec.EgressMaxConcurrentTunnels != 512 {
+		t.Fatalf("tunnel capacity was not snapshotted from the execution profile: %d", defaultRun.Spec.EgressMaxConcurrentTunnels)
+	}
 	if defaultRun.Spec.Agent.WorkflowInstructions != "" || defaultRun.Spec.ProfileProvenance.SelectedWorkflow != "" {
 		t.Fatalf("legacy producer allowlist unexpectedly added workflow state: %#v", defaultRun.Spec)
 	}
 	schedule.Spec.Profiles[0].WorkspaceInstructions = "changed after admission"
+	schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 1024
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatal("resolved AgentRun workspace instructions alias the AgentSchedule profile")
+	}
+	if defaultRun.Spec.EgressMaxConcurrentTunnels != 512 {
+		t.Fatal("resolved tunnel capacity changed after schedule mutation")
 	}
 	if defaultRun.Spec.RuntimeClassName == nil || *defaultRun.Spec.RuntimeClassName != runtimeClassName ||
 		!reflect.DeepEqual(defaultRun.Spec.Resources, schedule.Spec.Template.Resources) ||
@@ -414,6 +422,12 @@ func TestProfileConfigurationValidation(t *testing.T) {
 			name: "oversized profile workspace instructions",
 			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
 				schedule.Spec.Profiles[0].WorkspaceInstructions = strings.Repeat("x", maxWorkspaceInstructionsBytes+1)
+			},
+		},
+		{
+			name: "excessive tunnel capacity",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 4097
 			},
 		},
 		{

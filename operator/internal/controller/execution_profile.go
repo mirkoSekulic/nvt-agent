@@ -127,6 +127,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 		if len(profile.WorkspaceInstructions) > maxWorkspaceInstructionsBytes {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
+		if err := validateEgressMaxConcurrentTunnels(profile.EgressMaxConcurrentTunnels); err != nil {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
 		if err := validateRuntimeCapabilities(profile.Runtime); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
@@ -320,18 +323,19 @@ func buildProfiledAgentRun(
 	}
 	run := &nvtv1alpha1.AgentRun{
 		Spec: nvtv1alpha1.AgentRunSpec{
-			Runtime:                   *profile.Runtime.DeepCopy(),
-			RuntimeAuth:               profile.RuntimeAuth.DeepCopy(),
-			Image:                     template.Image,
-			RuntimeClassName:          copyStringPointer(template.RuntimeClassName),
-			Resources:                 *template.Resources.DeepCopy(),
-			Tolerations:               copyTolerations(template.Tolerations),
-			Egress:                    profile.Egress,
-			EgressAllowInsecureBroker: profile.EgressAllowInsecureBroker,
-			EgressEnforcement:         profile.EgressEnforcement,
-			EgressTransport:           profile.EgressTransport,
-			Workspace:                 *template.Workspace.DeepCopy(),
-			Broker:                    profile.Broker.DeepCopy(),
+			Runtime:                    *profile.Runtime.DeepCopy(),
+			RuntimeAuth:                profile.RuntimeAuth.DeepCopy(),
+			Image:                      template.Image,
+			RuntimeClassName:           copyStringPointer(template.RuntimeClassName),
+			Resources:                  *template.Resources.DeepCopy(),
+			Tolerations:                copyTolerations(template.Tolerations),
+			Egress:                     profile.Egress,
+			EgressAllowInsecureBroker:  profile.EgressAllowInsecureBroker,
+			EgressEnforcement:          profile.EgressEnforcement,
+			EgressTransport:            profile.EgressTransport,
+			EgressMaxConcurrentTunnels: profile.EgressMaxConcurrentTunnels,
+			Workspace:                  *template.Workspace.DeepCopy(),
+			Broker:                     profile.Broker.DeepCopy(),
 			Agent: nvtv1alpha1.AgentRunAgent{
 				Config:                apiextensionsv1.JSON{Raw: rawConfig},
 				WorkspaceInstructions: profile.WorkspaceInstructions,

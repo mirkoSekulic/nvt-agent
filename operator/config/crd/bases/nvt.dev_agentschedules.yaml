@@ -346,6 +346,11 @@ spec:
                           - redirect
                           - forward-proxy
                           - transparent
+                      egressMaxConcurrentTunnels:
+                        type: integer
+                        format: int32
+                        minimum: 1
+                        maximum: 4096
                       broker:
                         type: object
                         properties:

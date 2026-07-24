@@ -160,6 +160,10 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
 		t.Fatalf("expected profile egressTransport to be the sole transport selector, got %#v", transport)
 	}
+	tunnelCapacity := crdPath(t, profileProperties, "egressMaxConcurrentTunnels").(map[string]any)
+	if fmt.Sprint(tunnelCapacity["minimum"]) != "1" || fmt.Sprint(tunnelCapacity["maximum"]) != "4096" {
+		t.Fatalf("expected bounded profile tunnel capacity schema, got %#v", tunnelCapacity)
+	}
 	if crdPath(t, properties, "profileSelection", "properties", "onNoMatch", "type") != "string" {
 		t.Fatalf("expected profileSelection.onNoMatch schema, got %#v", properties["profileSelection"])
 	}

@@ -2840,12 +2840,13 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 		RequireCapabilityHint bool   `json:"require_capability_hint,omitempty"`
 	}
 	type egressdForwardProxy struct {
-		Listen              string                     `json:"listen"`
-		TransparentMode     bool                       `json:"transparent_mode,omitempty"`
-		AllowUnmatchedHosts bool                       `json:"allow_unmatched_hosts"`
-		AllowPorts          []int                      `json:"allow_ports"`
-		DenyCIDRs           []string                   `json:"deny_cidrs,omitempty"`
-		InjectRoutes        []egressdForwardProxyRoute `json:"inject_routes"`
+		Listen               string                     `json:"listen"`
+		TransparentMode      bool                       `json:"transparent_mode,omitempty"`
+		AllowUnmatchedHosts  bool                       `json:"allow_unmatched_hosts"`
+		AllowPorts           []int                      `json:"allow_ports"`
+		MaxConcurrentTunnels int32                      `json:"max_concurrent_tunnels,omitempty"`
+		DenyCIDRs            []string                   `json:"deny_cidrs,omitempty"`
+		InjectRoutes         []egressdForwardProxyRoute `json:"inject_routes"`
 	}
 	type egressdConfig struct {
 		BrokerURL           string               `json:"broker_url"`
@@ -2927,12 +2928,13 @@ func RenderEgressdConfigJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 			})
 		}
 		config.ForwardProxy = &egressdForwardProxy{
-			Listen:              fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
-			TransparentMode:     AgentRunEgressTransparent(agentRun),
-			AllowUnmatchedHosts: true,
-			AllowPorts:          externalPorts,
-			DenyCIDRs:           denyCIDRs,
-			InjectRoutes:        fpRoutes,
+			Listen:               fmt.Sprintf("0.0.0.0:%d", egressForwardProxyPort),
+			TransparentMode:      AgentRunEgressTransparent(agentRun),
+			AllowUnmatchedHosts:  true,
+			AllowPorts:           externalPorts,
+			MaxConcurrentTunnels: agentRun.Spec.EgressMaxConcurrentTunnels,
+			DenyCIDRs:            denyCIDRs,
+			InjectRoutes:         fpRoutes,
 		}
 	}
 	if brokerCADistributed() {
@@ -4155,6 +4157,9 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		return fmt.Errorf("spec.egressEnforcement requires spec.egress mediated, got %q", mode)
 	}
 	transport := AgentRunEgressTransport(agentRun)
+	if err := validateEgressMaxConcurrentTunnels(agentRun.Spec.EgressMaxConcurrentTunnels); err != nil {
+		return err
+	}
 	switch transport {
 	case nvtv1alpha1.AgentRunEgressTransportRedirect,
 		nvtv1alpha1.AgentRunEgressTransportForwardProxy,
@@ -4280,6 +4285,13 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 		// placeholder-file grants are materialized but not routed without the
 		// forward proxy.
 		return fmt.Errorf("egress mediated requires at least one header-inject broker grant with egressHosts")
+	}
+	return nil
+}
+
+func validateEgressMaxConcurrentTunnels(value int32) error {
+	if value < 0 || value > 4096 {
+		return fmt.Errorf("spec.egressMaxConcurrentTunnels must be between 1 and 4096 when set, got %d", value)
 	}
 	return nil
 }
