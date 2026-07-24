@@ -133,6 +133,10 @@ jobs:
             [[ "${status}" == "1" ]] || exit "${status}"
           fi
       - name: Publish and verify coordinated images
+        env:
+          # Keep the whole release under one immutable-version lock while
+          # allowing independent image builds/pushes to share the runner.
+          NVT_RELEASE_IMAGE_PARALLELISM: "4"
         run: |
           set -euo pipefail
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
