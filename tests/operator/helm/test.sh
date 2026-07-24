@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.14" || "${CHART_APP_VERSION}" != "0.8.14" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.14, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.15" || "${CHART_APP_VERSION}" != "0.8.15" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.15, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.14' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.15' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -211,7 +211,8 @@ helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gate
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set gateway.enabled=true \
   --set-string global.imageTag="${TEST_RELEASE_TAG}" >"${SOURCE_GLOBAL_TAG_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set-string global.imageTag="${TEST_RELEASE_TAG}" \
-  --set-string operator.image.tag=operator-override >"${COMPONENT_TAG_RENDER}"
+  --set-string operator.image.tag=operator-override \
+  --set-string dind.image.tag=dind-override >"${COMPONENT_TAG_RENDER}"
 helm package "${CHART}" --app-version "${TEST_RELEASE_TAG}" --destination "${WORKDIR}" >/dev/null
 helm template nvt "${WORKDIR}/nvt-${CHART_VERSION}.tgz" -n custom-ns --set producer.enabled=true --set gateway.enabled=true > "${PACKAGED_RELEASE_RENDER}"
 helm template nvt "${WORKDIR}/nvt-${CHART_VERSION}.tgz" -n custom-ns -s templates/agentschedule.yaml \
@@ -536,6 +537,7 @@ missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-github-comments-producer
 
 for image in \
   nvt-agent-runtime \
+  nvt-dind \
   nvt-broker \
   nvt-egressd \
   nvt-captured \
@@ -547,9 +549,12 @@ for image in \
     exit 1
   }
 done
+grep -A1 'name: NVT_DIND_IMAGE' "${ALL_IMAGES_RENDER}" | grep -q "ghcr.io/mirkosekulic/nvt-dind:${CHART_APP_VERSION}"
 grep -q 'ghcr.io/mirkosekulic/nvt-operator:operator-override' "${COMPONENT_TAG_RENDER}"
+grep -q 'ghcr.io/mirkosekulic/nvt-dind:dind-override' "${COMPONENT_TAG_RENDER}"
 for image in \
   nvt-agent-runtime \
+  nvt-dind \
   nvt-broker \
   nvt-egressd \
   nvt-captured \
@@ -563,6 +568,7 @@ for image in \
 done
 for image in \
   nvt-agent-runtime \
+  nvt-dind \
   nvt-broker \
   nvt-egressd \
   nvt-captured \

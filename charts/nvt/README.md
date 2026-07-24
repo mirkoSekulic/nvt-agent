@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.14`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.15`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, broker grant
 preparations, profile workspace instructions, or workflow producer policies.
 
@@ -43,11 +43,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.14 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.15 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.14 --namespace nvt --create-namespace
+  --version 0.8.15 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -57,12 +57,16 @@ installed.
 
 The published chart's `appVersion` is the immutable image tag for its tested
 platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
-uses `0.2.0-943d5ba` for runtime, broker, egressd, captured, operator, gateway,
-and producer images. Empty component tags default to `Chart.AppVersion`;
+uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
+gateway, and producer images. Empty component tags default to `Chart.AppVersion`;
 repository, tag, and pull policy remain independently overridable.
 
+`dind.image` is the coordinated Docker sidecar image. It contains the ext4 and
+loop-device tools used only when an AgentRun's Docker data root is backed by
+Kata virtiofs; it performs no per-run package installation.
+
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all seven manifests exist and can be fetched anonymously
+published only after all eight manifests exist and can be fetched anonymously
 with an isolated credential-free Docker configuration. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
 match. GHCR package writers are trusted: matching labels establish coordinated

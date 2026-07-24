@@ -13,6 +13,12 @@ runtime:
     tag: ""
     pullPolicy: IfNotPresent
 
+dind:
+  image:
+    repository: ghcr.io/mirkosekulic/nvt-dind
+    tag: ""
+    pullPolicy: IfNotPresent
+
 egress:
   egressd:
     image:

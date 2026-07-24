@@ -42,6 +42,7 @@ app.kubernetes.io/part-of: nvt
 {{- define "nvt.validateImageValues" -}}
 {{- $images := list
   (dict "name" "runtime.image" "value" .Values.runtime.image)
+  (dict "name" "dind.image" "value" .Values.dind.image)
   (dict "name" "egress.egressd.image" "value" .Values.egress.egressd.image)
   (dict "name" "egress.captured.image" "value" .Values.egress.captured.image)
   (dict "name" "broker.image" "value" .Values.broker.image)
@@ -60,6 +61,10 @@ app.kubernetes.io/part-of: nvt
 
 {{- define "nvt.runtimeImage" -}}
 {{- include "nvt.image" (dict "root" . "name" "runtime.image" "image" .Values.runtime.image) -}}
+{{- end -}}
+
+{{- define "nvt.dindImage" -}}
+{{- include "nvt.image" (dict "root" . "name" "dind.image" "image" .Values.dind.image) -}}
 {{- end -}}
 
 {{- define "nvt.brokerLabels" -}}

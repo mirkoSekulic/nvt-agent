@@ -84,6 +84,12 @@ const (
 	persistentStorageInitMountPath        = "/nvt-agent/persistent-storage"
 	persistentWorkspaceSubPath            = "workspace"
 	persistentHomeSubPath                 = "home"
+	persistentDockerSubPath               = "docker"
+	dindStorageVolumeName                 = "docker-storage"
+	dindStorageMountPath                  = "/var/lib/nvt-dind"
+	dindDataRoot                          = "/var/lib/docker"
+	dindEntrypoint                        = "/usr/local/bin/nvt-dind-entrypoint"
+	dindReady                             = "/usr/local/bin/nvt-dind-ready"
 	workspacePVCReadyRequeue              = 2 * time.Second
 	terminalResourceCleanupRequeue        = 2 * time.Second
 	lifecycleReporterPlugin               = "lifecycle-termination"
@@ -130,6 +136,10 @@ const (
 	egressTokenKey                   = "NVT_EGRESS_BROKER_TOKEN"
 	defaultEgressdImage              = "nvt-egressd:latest"
 	defaultCapturedImage             = "nvt-captured:latest"
+	defaultDindImage                 = "nvt-dind:latest"
+	minimumDindImageSizeBytes  int64 = 64 * 1024 * 1024
+	defaultDindImageSizeBytes  int64 = 20 * 1024 * 1024 * 1024
+	maximumDindImageSizeBytes  int64 = 1024 * 1024 * 1024 * 1024
 	capturedTransparentPort          = 15001
 	capturedExplicitPort             = 15002
 	capturedUID                int64 = 65532
@@ -3159,6 +3169,14 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			},
 		},
 	}
+	if AgentRunWorkspaceMode(agentRun) != nvtv1alpha1.AgentRunWorkspacePersistent {
+		volumes = append(volumes, corev1.Volume{
+			Name: dindStorageVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
 	if agentRunHasProviderPreparations(agentRun) {
 		volumes[1].ConfigMap.Items = append(volumes[1].ConfigMap.Items, corev1.KeyToPath{
 			Key: preparedProviderMetadataKey, Path: preparedProviderMetadataKey,
@@ -3268,8 +3286,8 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			Image:   "docker:27-dind",
 			Command: []string{"sh", "-c"},
 			Args: []string{fmt.Sprintf(
-				"set -eu; mkdir -p %[1]s/%[2]s %[1]s/%[3]s; chown %[4]s %[1]s/%[2]s %[1]s/%[3]s; chmod 0770 %[1]s/%[2]s; chmod 0700 %[1]s/%[3]s",
-				persistentStorageInitMountPath, persistentWorkspaceSubPath, persistentHomeSubPath, owner,
+				"set -eu; mkdir -p %[1]s/%[2]s %[1]s/%[3]s %[1]s/%[4]s; chown %[5]s %[1]s/%[2]s %[1]s/%[3]s; chown 0:0 %[1]s/%[4]s; chmod 0770 %[1]s/%[2]s; chmod 0700 %[1]s/%[3]s %[1]s/%[4]s",
+				persistentStorageInitMountPath, persistentWorkspaceSubPath, persistentHomeSubPath, persistentDockerSubPath, owner,
 			)},
 			SecurityContext: &corev1.SecurityContext{
 				RunAsUser:  ptrTo(int64(0)),
@@ -3316,11 +3334,24 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			},
 		})
 	}
+	dindVolumeMounts := []corev1.VolumeMount{
+		{Name: workspaceVolumeName, MountPath: workspaceMountPath, SubPath: workspaceSubPath(agentRun)},
+	}
+	if AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent {
+		dindVolumeMounts = append(dindVolumeMounts, corev1.VolumeMount{
+			Name: workspaceVolumeName, MountPath: dindStorageMountPath, SubPath: persistentDockerSubPath,
+		})
+	} else {
+		dindVolumeMounts = append(dindVolumeMounts, corev1.VolumeMount{
+			Name: dindStorageVolumeName, MountPath: dindStorageMountPath,
+		})
+	}
 	initContainers = append(initContainers, corev1.Container{
-		Name:          "docker",
-		Image:         "docker:27-dind",
-		RestartPolicy: ptrTo(corev1.ContainerRestartPolicyAlways),
-		Command:       []string{"dockerd"},
+		Name:            "docker",
+		Image:           DindImage(),
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		RestartPolicy:   ptrTo(corev1.ContainerRestartPolicyAlways),
+		Command:         []string{dindEntrypoint},
 		Args: []string{
 			"--host=unix:///var/run/docker.sock",
 			"--host=tcp://127.0.0.1:2375",
@@ -3328,20 +3359,21 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 		},
 		Env: []corev1.EnvVar{
 			{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+			{Name: "NVT_DIND_BACKING_DIR", Value: dindStorageMountPath},
+			{Name: "NVT_DIND_DATA_ROOT", Value: dindDataRoot},
+			{Name: "NVT_DIND_IMAGE_SIZE_BYTES", Value: strconv.FormatInt(dindImageSizeBytes(agentRun), 10)},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			Privileged: ptrTo(true),
 		},
 		StartupProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{Command: []string{"docker", "info"}},
+				Exec: &corev1.ExecAction{Command: []string{dindReady}},
 			},
 			PeriodSeconds:    2,
 			FailureThreshold: 30,
 		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: workspaceVolumeName, MountPath: workspaceMountPath, SubPath: workspaceSubPath(agentRun)},
-		},
+		VolumeMounts: dindVolumeMounts,
 	})
 	if AgentRunEgressTransparent(agentRun) {
 		const rules = `set -eu
@@ -3651,6 +3683,27 @@ func CapturedImage() string {
 		return image
 	}
 	return defaultCapturedImage
+}
+
+func DindImage() string {
+	if image := strings.TrimSpace(os.Getenv("NVT_DIND_IMAGE")); image != "" {
+		return image
+	}
+	return defaultDindImage
+}
+
+func dindImageSizeBytes(agentRun *nvtv1alpha1.AgentRun) int64 {
+	if AgentRunWorkspaceMode(agentRun) != nvtv1alpha1.AgentRunWorkspacePersistent || agentRun.Spec.Workspace.Size == nil {
+		return defaultDindImageSizeBytes
+	}
+	size := agentRun.Spec.Workspace.Size.Value()
+	if size < minimumDindImageSizeBytes {
+		return minimumDindImageSizeBytes
+	}
+	if size > maximumDindImageSizeBytes {
+		return maximumDindImageSizeBytes
+	}
+	return size
 }
 
 func NetworkPolicyCapable() bool {

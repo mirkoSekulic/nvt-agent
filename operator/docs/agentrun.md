@@ -202,11 +202,26 @@ workspace:
 ```
 
 The operator creates one `ReadWriteOnce` filesystem PVC owned by the
-`AgentRun`. The same claim provides separate `workspace` and `home`
-subdirectories at `/workspace` and the complete agent home (`/root`, or
-`/home/agent` for non-root runs). DinD shares the persistent workspace, while
-its `/var/lib/docker` remains disposable. An init container creates the
+`AgentRun`. The same claim provides separate `workspace`, `home`, and
+sidecar-only `docker` subdirectories. The agent sees `/workspace` and its
+complete home (`/root`, or `/home/agent` for non-root runs), but it cannot mount
+or directly access the Docker backing directory. An init container creates the
 directories and applies ownership for uid/gid 0 or 1000 before the agent starts.
+
+The privileged Docker sidecar detects the filesystem under `/var/lib/docker`.
+When Kata exposes it through `virtiofs`, the sidecar creates or reuses a sparse
+ext4 image in its private backing directory, checks it, mounts it with a loop
+device and `noatime`, and requires Docker's `overlay2` driver before the agent
+starts. Filesystem and loop tools are baked into the coordinated `nvt-dind`
+image; startup never installs them from the network. A malformed, partial, or
+unmountable existing image fails closed and is never reformatted.
+
+Ephemeral runs keep the backing image in a sidecar-only `emptyDir`, so Pod
+replacement discards Docker data. Persistent runs keep it in the AgentRun PVC,
+so Pod or sidecar replacement reuses the same ext4 image without `mkfs`. The
+logical image size follows the requested PVC size, bounded between 64 MiB and
+1 TiB; ephemeral runs use a bounded 20 GiB image. On non-virtiofs filesystems,
+the entrypoint leaves the existing Docker storage behavior unchanged.
 
 The claim is reused across agent Pod deletion/replacement and controller
 restarts while the run is active. The operator creates the consuming Pod while
@@ -222,6 +237,10 @@ that point; Kubernetes PVC protection may keep it terminating until the Pod has
 unmounted it. Deleting the `AgentRun` sooner also makes garbage collection
 delete its owned PVC. Physical volume cleanup still follows the StorageClass
 reclaim policy; use `reclaimPolicy: Delete` for lifecycle-scoped storage.
+
+Loop-device, filesystem, mount, and Docker daemon privileges remain confined
+to the Docker sidecar. The agent receives no privilege, Linux capability, raw
+backing-image mount, or node Docker socket from this feature.
 
 Persistent storage is not a security-material store. Broker/callback/egress
 tokens, runtime-auth projections, generated configuration, and egress CA

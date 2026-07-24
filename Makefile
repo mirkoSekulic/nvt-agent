@@ -16,6 +16,7 @@ PRODUCER_IMAGE ?= nvt-github-comments-producer:latest
 GATEWAY_IMAGE ?= nvt-agent-gateway:latest
 EGRESSD_IMAGE ?= nvt-egressd:latest
 CAPTURED_IMAGE ?= nvt-captured:latest
+DIND_IMAGE ?= nvt-dind:latest
 ECHO_IMAGE ?= nvt-smoke-echo:latest
 PRODUCER_VALUES ?= values.nvt-local.yaml
 PRODUCER_RELEASE ?= nvt
@@ -27,7 +28,7 @@ KIND_CLUSTER_CONFIG ?=
 CALICO_VERSION ?= v3.28.2
 CALICO_MANIFEST ?= https://raw.githubusercontent.com/projectcalico/calico/$(CALICO_VERSION)/manifests/calico.yaml
 OPERATOR_KIND_HELM_ARGS ?=
-OPERATOR_KIND_LOCAL_IMAGE_ARGS := --set runtime.image.repository=nvt-agent-runtime --set runtime.image.tag=latest --set broker.image.repository=nvt-broker --set broker.image.tag=latest --set egress.egressd.image.repository=$(word 1,$(subst :, ,$(EGRESSD_IMAGE))) --set egress.egressd.image.tag=$(word 2,$(subst :, ,$(EGRESSD_IMAGE))) --set egress.captured.image.repository=$(word 1,$(subst :, ,$(CAPTURED_IMAGE))) --set egress.captured.image.tag=$(word 2,$(subst :, ,$(CAPTURED_IMAGE))) --set operator.image.repository=nvt-operator --set operator.image.tag=latest
+OPERATOR_KIND_LOCAL_IMAGE_ARGS := --set runtime.image.repository=nvt-agent-runtime --set runtime.image.tag=latest --set dind.image.repository=$(word 1,$(subst :, ,$(DIND_IMAGE))) --set dind.image.tag=$(word 2,$(subst :, ,$(DIND_IMAGE))) --set broker.image.repository=nvt-broker --set broker.image.tag=latest --set egress.egressd.image.repository=$(word 1,$(subst :, ,$(EGRESSD_IMAGE))) --set egress.egressd.image.tag=$(word 2,$(subst :, ,$(EGRESSD_IMAGE))) --set egress.captured.image.repository=$(word 1,$(subst :, ,$(CAPTURED_IMAGE))) --set egress.captured.image.tag=$(word 2,$(subst :, ,$(CAPTURED_IMAGE))) --set operator.image.repository=nvt-operator --set operator.image.tag=latest
 OPERATOR_KIND_GATEWAY ?= 0
 
 ifeq ($(OPERATOR_KIND_GATEWAY),1)
@@ -35,10 +36,13 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image.repository=$(word 1,$(subst :, ,$(GATEWAY_IMAGE))) --set gateway.image.tag=$(word 2,$(subst :, ,$(GATEWAY_IMAGE)))
 endif
 
-.PHONY: runtime-build broker-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret phase6-real-codex-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build dind-build broker-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret phase6-real-codex-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
+
+dind-build:
+	docker build -f dind/Dockerfile -t "$(DIND_IMAGE)" .
 
 broker-build:
 	bash scripts/broker-build.sh
@@ -103,9 +107,10 @@ operator-kind-cluster-enforced:
 	fi
 	kubectl --context "$(KUBECTL_CONTEXT)" rollout status daemonset/calico-node -n kube-system --timeout="$(ROLLOUT_TIMEOUT)"
 
-operator-kind-images: operator-kind-cluster runtime-build broker-build egressd-build captured-build operator-build
+operator-kind-images: operator-kind-cluster runtime-build dind-build broker-build egressd-build captured-build operator-build
 	@printf '[operator-kind-setup] loading local images into kind cluster %s\n' "$(CLUSTER)"
 	kind load docker-image nvt-agent-runtime:latest --name "$(CLUSTER)"
+	kind load docker-image "$(DIND_IMAGE)" --name "$(CLUSTER)"
 	kind load docker-image nvt-broker:latest --name "$(CLUSTER)"
 	kind load docker-image "$(EGRESSD_IMAGE)" --name "$(CLUSTER)"
 	kind load docker-image "$(CAPTURED_IMAGE)" --name "$(CLUSTER)"

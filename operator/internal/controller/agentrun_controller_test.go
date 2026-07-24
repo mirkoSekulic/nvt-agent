@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -211,31 +212,61 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	assertVolumeMount(t, agentContainer, "workspace", workspaceMountPath, "", false)
 
 	dindContainer := requireInitContainer(t, pod, "docker")
-	if dindContainer.Image != "docker:27-dind" {
-		t.Fatalf("expected DinD image docker:27-dind, got %q", dindContainer.Image)
+	if dindContainer.Image != defaultDindImage || dindContainer.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("unexpected coordinated DinD image: %#v", dindContainer)
 	}
 	if dindContainer.RestartPolicy == nil || *dindContainer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("expected DinD init sidecar restartPolicy Always, got %#v", dindContainer.RestartPolicy)
 	}
 	if strings.Join(append(dindContainer.Command, dindContainer.Args...), " ") !=
-		"dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --tls=false" {
+		dindEntrypoint+" --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --tls=false" {
 		t.Fatalf("unexpected DinD command/args: command=%#v args=%#v", dindContainer.Command, dindContainer.Args)
 	}
 	if dindContainer.StartupProbe == nil ||
 		dindContainer.StartupProbe.Exec == nil ||
-		strings.Join(dindContainer.StartupProbe.Exec.Command, " ") != "docker info" {
-		t.Fatalf("expected DinD startupProbe to run docker info, got %#v", dindContainer.StartupProbe)
+		strings.Join(dindContainer.StartupProbe.Exec.Command, " ") != dindReady {
+		t.Fatalf("expected DinD startupProbe to enforce storage readiness, got %#v", dindContainer.StartupProbe)
 	}
 	if dindContainer.SecurityContext == nil || dindContainer.SecurityContext.Privileged == nil || !*dindContainer.SecurityContext.Privileged {
 		t.Fatalf("expected privileged DinD sidecar, got %#v", dindContainer.SecurityContext)
 	}
 	assertVolumeMount(t, dindContainer, "workspace", workspaceMountPath, "", false)
+	assertVolumeMount(t, dindContainer, dindStorageVolumeName, dindStorageMountPath, "", false)
 	assertNoVolumeMount(t, dindContainer, runtimeAuthSourceName)
 	assertNoVolumeMount(t, dindContainer, runtimeAuthHomeName)
+	if envValue(dindContainer, "NVT_DIND_IMAGE_SIZE_BYTES") != strconv.FormatInt(defaultDindImageSizeBytes, 10) {
+		t.Fatalf("unexpected ephemeral Docker image size: %#v", dindContainer.Env)
+	}
+	assertNoVolumeMount(t, agentContainer, dindStorageVolumeName)
+	assertNoVolumeMountPath(t, agentContainer, dindStorageMountPath)
+	if agentContainer.SecurityContext != nil && agentContainer.SecurityContext.Capabilities != nil && len(agentContainer.SecurityContext.Capabilities.Add) != 0 {
+		t.Fatalf("Docker storage added capabilities to the agent: %#v", agentContainer.SecurityContext)
+	}
+	for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		privileged := container.SecurityContext != nil && container.SecurityContext.Privileged != nil && *container.SecurityContext.Privileged
+		if container.Name == "docker" {
+			if !privileged {
+				t.Fatal("Docker sidecar is not privileged")
+			}
+			continue
+		}
+		if privileged {
+			t.Fatalf("non-Docker container %q became privileged", container.Name)
+		}
+	}
 
 	workspaceVolume := requireVolume(t, pod, "workspace")
 	if workspaceVolume.EmptyDir == nil {
 		t.Fatalf("expected workspace emptyDir volume, got %#v", workspaceVolume.VolumeSource)
+	}
+	dindStorageVolume := requireVolume(t, pod, dindStorageVolumeName)
+	if dindStorageVolume.EmptyDir == nil || dindStorageVolume.HostPath != nil {
+		t.Fatalf("ephemeral Docker storage must be a sidecar-only emptyDir: %#v", dindStorageVolume.VolumeSource)
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.HostPath != nil {
+			t.Fatalf("AgentRun Pod must not mount a node path for Docker: %#v", volume)
+		}
 	}
 	configVolume := requireVolume(t, pod, "agent-config")
 	if configVolume.ConfigMap == nil {
@@ -392,6 +423,28 @@ func TestDesiredPersistentWorkspacePVC(t *testing.T) {
 	}
 }
 
+func TestDindImageOverrideAndBoundedBackingSize(t *testing.T) {
+	t.Setenv("NVT_DIND_IMAGE", "registry.example/nvt-dind:release")
+	if got := DindImage(); got != "registry.example/nvt-dind:release" {
+		t.Fatalf("DinD image override = %q", got)
+	}
+
+	ephemeral := testAgentRun()
+	if got := dindImageSizeBytes(ephemeral); got != defaultDindImageSizeBytes {
+		t.Fatalf("ephemeral DinD image size = %d", got)
+	}
+	small := testAgentRun()
+	small.Spec.Workspace = persistentWorkspace("32Mi", "")
+	if got := dindImageSizeBytes(small); got != minimumDindImageSizeBytes {
+		t.Fatalf("small persistent DinD image size = %d", got)
+	}
+	large := testAgentRun()
+	large.Spec.Workspace = persistentWorkspace("2Ti", "")
+	if got := dindImageSizeBytes(large); got != maximumDindImageSizeBytes {
+		t.Fatalf("large persistent DinD image size = %d", got)
+	}
+}
+
 func TestDesiredAgentPodPersistentWorkspaceAndHome(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -414,15 +467,26 @@ func TestDesiredAgentPodPersistentWorkspaceAndHome(t *testing.T) {
 			if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != WorkspacePVCName(run.Name) {
 				t.Fatalf("workspace volume = %#v", volume.VolumeSource)
 			}
+			for _, podVolume := range pod.Spec.Volumes {
+				if podVolume.HostPath != nil {
+					t.Fatalf("persistent Docker storage must not use hostPath: %#v", podVolume)
+				}
+			}
 			agent := requireContainer(t, *pod, "agent")
 			assertVolumeMountAt(t, agent, workspaceVolumeName, workspaceMountPath, persistentWorkspaceSubPath, false)
 			assertVolumeMountAt(t, agent, workspaceVolumeName, test.home, persistentHomeSubPath, false)
 			dind := requireInitContainer(t, *pod, "docker")
 			assertVolumeMount(t, dind, workspaceVolumeName, workspaceMountPath, persistentWorkspaceSubPath, false)
+			assertVolumeMountAt(t, dind, workspaceVolumeName, dindStorageMountPath, persistentDockerSubPath, false)
+			assertNoVolumeMount(t, agent, dindStorageVolumeName)
+			assertNoVolumeMountPath(t, agent, dindStorageMountPath)
+			if envValue(dind, "NVT_DIND_IMAGE_SIZE_BYTES") != strconv.FormatInt(5*1024*1024*1024, 10) {
+				t.Fatalf("persistent Docker image size does not follow the claim: %#v", dind.Env)
+			}
 			initializer := requireInitContainer(t, *pod, "persistent-storage-init")
 			assertVolumeMount(t, initializer, workspaceVolumeName, persistentStorageInitMountPath, "", false)
 			command := strings.Join(append(initializer.Command, initializer.Args...), " ")
-			for _, expected := range []string{"mkdir -p", "/workspace", "/home", "chown " + test.ownerArg, "chmod 0770", "chmod 0700"} {
+			for _, expected := range []string{"mkdir -p", "/workspace", "/home", "/docker", "chown " + test.ownerArg, "chown 0:0", "chmod 0770", "chmod 0700"} {
 				if !strings.Contains(command, expected) {
 					t.Fatalf("initializer command %q missing %q", command, expected)
 				}
@@ -544,6 +608,11 @@ func TestReconcilePersistentWorkspaceSupportsWaitForFirstConsumerAndReusesPVC(t 
 	volume = requireVolume(t, replacement, workspaceVolumeName)
 	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != reused.Name {
 		t.Fatalf("replacement Pod does not reuse claim: %#v", volume.VolumeSource)
+	}
+	replacementDind := requireInitContainer(t, replacement, "docker")
+	assertVolumeMountAt(t, replacementDind, workspaceVolumeName, dindStorageMountPath, persistentDockerSubPath, false)
+	if envValue(replacementDind, "NVT_DIND_IMAGE_SIZE_BYTES") != strconv.FormatInt(5*1024*1024*1024, 10) {
+		t.Fatalf("replacement Pod changed persistent Docker backing contract: %#v", replacementDind.Env)
 	}
 	if err := k8sClient.Get(ctx, clientKey(run), updatedRun); err != nil {
 		t.Fatal(err)
@@ -6410,6 +6479,15 @@ func assertNoVolumeMount(t *testing.T, container corev1.Container, name string) 
 	for _, mount := range container.VolumeMounts {
 		if mount.Name == name {
 			t.Fatalf("unexpected volume mount %q in %#v", name, container.VolumeMounts)
+		}
+	}
+}
+
+func assertNoVolumeMountPath(t *testing.T, container corev1.Container, mountPath string) {
+	t.Helper()
+	for _, mount := range container.VolumeMounts {
+		if mount.MountPath == mountPath {
+			t.Fatalf("container %q unexpectedly mounts %q: %#v", container.Name, mountPath, mount)
 		}
 	}
 }
