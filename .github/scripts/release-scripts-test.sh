@@ -44,7 +44,36 @@ case "$1 $2" in
     else printf '%s\n' "${FAKE_VERSION}"; fi
     ;;
   "pull --quiet") ;;
-  "build --label") ;;
+  "build --label")
+    ref=""
+    previous=""
+    for argument in "$@"; do
+      if [[ "${previous}" == "--tag" ]]; then
+        ref="${argument}"
+        break
+      fi
+      previous="${argument}"
+    done
+    [[ -n "${ref}" ]]
+    if [[ -n "${FAIL_BUILD_MATCH:-}" && "${ref}" == *"${FAIL_BUILD_MATCH}"* ]]; then
+      echo "injected image build failure" >&2
+      exit 1
+    fi
+    if [[ "${REQUIRE_PARALLEL:-0}" == "1" ]]; then
+      marker="${PARALLEL_DIR}/${ref//[\/:]/_}"
+      : >"${marker}"
+      for _ in $(seq 1 100); do
+        active="$(find "${PARALLEL_DIR}" -type f ! -name witnessed | wc -l | tr -d ' ')"
+        if [[ "${active}" -ge "${EXPECTED_PARALLEL}" ]]; then
+          : >"${PARALLEL_DIR}/witnessed"
+        fi
+        [[ -f "${PARALLEL_DIR}/witnessed" ]] && break
+        sleep 0.01
+      done
+      [[ -f "${PARALLEL_DIR}/witnessed" ]]
+      rm -f "${marker}"
+    fi
+    ;;
   "push "*)
     ref="$2"
     : >"${MANIFEST_DIR}/${ref//\//_}"
@@ -59,14 +88,20 @@ export MANIFEST_DIR="${WORKDIR}/manifests"
 export FAKE_REVISION="${SHA}"
 export FAKE_SOURCE=https://github.com/mirkoSekulic/nvt-agent
 export FAKE_VERSION=0.2.0-943d5ba
+export PARALLEL_DIR="${WORKDIR}/parallel"
+export EXPECTED_PARALLEL=4
+export REQUIRE_PARALLEL=1
+mkdir -p "${PARALLEL_DIR}"
 
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
+[[ -f "${PARALLEL_DIR}/witnessed" ]]
 [[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "8" ]]
 [[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "8" ]]
 if grep -q 'nvt-smoke-echo' "${DOCKER_LOG}"; then
   echo "fixture image entered the production release" >&2
   exit 1
 fi
+unset REQUIRE_PARALLEL
 
 : >"${DOCKER_LOG}"
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
@@ -74,6 +109,38 @@ if grep -Eq '^docker (build|push) ' "${DOCKER_LOG}"; then
   echo "metadata-matching partial-release artifacts were republished" >&2
   exit 1
 fi
+
+# A failed worker fails the release only after its peer workers are reaped.
+# Their successful pushes form a safe partial publication; a rerun verifies
+# and skips those exact tags, then publishes only the missing images.
+export FAKE_VERSION=0.2.1-943d5ba
+export FAIL_BUILD_MATCH=nvt-egressd
+: >"${DOCKER_LOG}"
+if bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}" >"${WORKDIR}/worker.out" 2>"${WORKDIR}/worker.err"; then
+  echo "parallel image worker failure was accepted" >&2
+  exit 1
+fi
+grep -q 'coordinated image worker failed' "${WORKDIR}/worker.err"
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "3" ]]
+
+unset FAIL_BUILD_MATCH
+: >"${DOCKER_LOG}"
+bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
+[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "5" ]]
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "5" ]]
+: >"${DOCKER_LOG}"
+bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
+if grep -Eq '^docker (build|push) ' "${DOCKER_LOG}"; then
+  echo "recovered partial-release artifacts were republished" >&2
+  exit 1
+fi
+
+if NVT_RELEASE_IMAGE_PARALLELISM=0 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}" >/dev/null 2>&1; then
+  echo "invalid release image parallelism was accepted" >&2
+  exit 1
+fi
+
+export FAKE_VERSION=0.2.0-943d5ba
 
 # Existing package writers are trusted. Matching OCI source/revision/version
 # metadata is the recovery boundary; copied labels do not prove byte identity.
@@ -109,6 +176,7 @@ grep -q 'conflicting immutable image tag' "${WORKDIR}/conflict.err"
 workflow="${ROOT}/.github/workflows/charts.yml"
 grep -Fq 'group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}' "${workflow}"
 grep -A6 '^  publish:' "${workflow}" | grep -q 'needs: release_metadata'
+grep -A7 'name: Publish and verify coordinated images' "${workflow}" | grep -q 'NVT_RELEASE_IMAGE_PARALLELISM: "4"'
 anonymous_line="$(grep -n 'name: Verify anonymous image pullability' "${workflow}" | cut -d: -f1)"
 chart_line="$(grep -n 'name: Publish the chart last' "${workflow}" | cut -d: -f1)"
 [[ "${anonymous_line}" -lt "${chart_line}" ]]
