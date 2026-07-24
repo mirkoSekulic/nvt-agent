@@ -3599,7 +3599,8 @@ iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
 for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
-iptables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN
+nft add rule ip nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
+nft add rule ip nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
 iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
@@ -3613,15 +3614,17 @@ ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
-ip6tables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN
+nft add rule ip6 nat NVT_DIND iifname "docker0" fib daddr oifname "docker0" counter return
+nft add rule ip6 nat NVT_DIND iifname "br-*" fib daddr oifname "br-*" counter return
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
 		initContainers = append(initContainers, corev1.Container{
-			Name:    "net-init",
-			Image:   "docker:27-dind",
-			Command: []string{"sh", "-c"},
-			Args:    []string{rules},
+			Name:            "net-init",
+			Image:           DindImage(),
+			ImagePullPolicy: dindPullPolicy,
+			Command:         []string{"sh", "-c"},
+			Args:            []string{rules},
 			Env: []corev1.EnvVar{{
 				Name: "NVT_CAPTURE_EXCLUDE_HOSTS",
 				Value: strings.Join([]string{

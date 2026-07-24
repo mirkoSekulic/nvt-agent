@@ -9,7 +9,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-make -C "${ROOT}" egressd-build captured-build
+make -C "${ROOT}" dind-build egressd-build captured-build
 docker compose -p "${PROJECT}" -f "${ROOT}/tests/runtime/transparent-compose.yaml" up -d
 tester_id="$(docker compose -p "${PROJECT}" -f "${ROOT}/tests/runtime/transparent-compose.yaml" ps -q tester)"
 
@@ -36,3 +36,4 @@ docker logs "${tester_id}"
 [[ "${status}" == "0" ]]
 
 echo "Compose proves functional/best-effort transparent routing and provider-secret non-possession; it is not a CNI enforcement proof."
+bash "${ROOT}/tests/runtime/dind-bridge-capture-smoke.sh"

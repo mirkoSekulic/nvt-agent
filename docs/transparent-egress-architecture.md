@@ -96,7 +96,7 @@ OUTPUT:
   redirect remaining TCP to captured:15001
 
 PREROUTING:
-  allow frames bridged locally between containers on the same Docker bridge
+  allow destinations whose route resolves back to a local Docker bridge
   redirect TCP arriving from docker0 or any br-* bridge to captured:15001
 ```
 
@@ -104,10 +104,12 @@ The `br-*` interface-prefix rules are evaluated for every connection, so
 Compose bridges created after net-init are covered without periodically
 rewriting the rules. The OUTPUT exception is limited to traffic routed toward
 local Docker bridges (including docker-proxy's connection to a published
-container). DinD-container traffic enters PREROUTING. Frames that the kernel
-marks as locally bridged return before capture so same-bridge services remain
-usable; routed traffic leaving that bridge is not marked as bridged and remains
-captured before any external egress.
+container). DinD-container traffic enters PREROUTING. A route/FIB lookup returns
+before capture only when the destination resolves back to `docker0` or a
+`br-*` interface, so local container services remain usable. Destinations
+routed away from Docker bridges remain captured before any external egress.
+The coordinated DinD image supplies the `nft` FIB classifier used by net-init;
+custom DinD image overrides must preserve that tool and contract.
 
 Forward-proxy and transparent transports default to 256 active CONNECT
 tunnels. A profile may set `egressMaxConcurrentTunnels` from 1 through 4096.

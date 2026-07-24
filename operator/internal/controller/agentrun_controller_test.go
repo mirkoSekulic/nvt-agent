@@ -6863,14 +6863,21 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT",
 		"iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
-		"iptables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN",
+		"nft add rule ip nat NVT_DIND iifname \"docker0\" fib daddr oifname \"docker0\" counter return",
+		"nft add rule ip nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
 		"ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
-		"ip6tables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN",
+		"nft add rule ip6 nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
 	} {
 		if !strings.Contains(netInit.Args[0], rule) {
 			t.Fatalf("net-init missing dynamic bridge rule %q: %q", rule, netInit.Args[0])
 		}
+	}
+	if netInit.Image != DindImage() {
+		t.Fatalf("net-init image = %q, want coordinated DinD image %q", netInit.Image, DindImage())
+	}
+	if netInit.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("net-init pull policy = %q", netInit.ImagePullPolicy)
 	}
 	if strings.Contains(netInit.Args[0], "NVT_CAPTURE_EXCLUDE_CIDRS") || !strings.Contains(netInit.Args[0], "getent ahosts") {
 		t.Fatalf("net-init must resolve only narrow control-plane exceptions: %q", netInit.Args)
