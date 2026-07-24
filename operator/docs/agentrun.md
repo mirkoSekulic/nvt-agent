@@ -226,8 +226,11 @@ GiB and 1 TiB and defaults to 20 GiB when omitted. The inner ext4 image uses
 90% of its outer allocation, leaving enforced outer-filesystem
 allocation/metadata headroom instead of advertising the full outer quota. The
 Docker claim uses the same optional `storageClassName` as the workspace claim.
-On non-virtiofs filesystems, the entrypoint leaves the existing Docker storage
-behavior unchanged.
+Persistent runs use the durable ext4 image on every container runtime,
+including non-virtiofs runtimes, so Docker state actually survives Pod
+replacement. Ephemeral non-virtiofs runs retain Docker's native data-root
+behavior; ephemeral virtiofs runs use the image only to provide the xattrs
+required by `overlay2`.
 
 Both claims are reused across agent Pod deletion/replacement and controller
 restarts while the run is active. The operator creates the consuming Pod while
@@ -236,6 +239,14 @@ StorageClasses are supported. `WorkspaceReady` remains false until both claims
 become `Bound`. Workspace mode, size, Docker size, and storage class are
 immutable for an existing run; expansion and shrink are not supported in v1,
 and the controller never deletes/recreates a drifted live claim.
+
+When upgrading an active persistent run created before the dedicated Docker
+claim existed, the operator preserves its create-once Pod and current
+non-persistent Docker daemon until the Pod is replaced normally. It does not
+create an unreferenced `WaitForFirstConsumer` claim. If an earlier controller
+already created such a Pending owned claim, the operator removes it rather
+than polling forever. The next normal Pod replacement creates and consumes the
+dedicated claim before startup; Docker persistence begins with that replacement.
 
 Both PVC lifetimes end when terminal operational cleanup becomes due, not when
 an active Pod crashes or is replaced. The operator requests claim deletion at

@@ -378,18 +378,28 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return workspaceResult, err
 	}
 	if AgentRunWorkspaceMode(&agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent {
-		dockerResult, dockerReferenceable, dockerChanged, dockerErr := r.reconcileDockerPVC(ctx, &agentRun, workspaceBound)
-		conditionsChanged = conditionsChanged || dockerChanged
-		if dockerErr != nil || !dockerReferenceable {
-			if conditionsChanged {
-				if statusErr := r.Status().Update(ctx, &agentRun); statusErr != nil {
-					return ctrl.Result{}, fmt.Errorf("update AgentRun persistent storage status: %w", statusErr)
-				}
+		if existingPod != nil && !podUsesDockerPVC(existingPod, DockerPVCName(agentRun.Name)) {
+			// Pods created before the dedicated Docker claim contract are
+			// create-once workloads. Preserve the live session and do not create
+			// an unreferenced WaitForFirstConsumer claim. The next normal Pod
+			// replacement takes the regular path below and consumes the claim.
+			if err := r.reconcileLegacyDockerStorageMigration(ctx, &agentRun); err != nil {
+				return ctrl.Result{}, err
 			}
-			return dockerResult, dockerErr
-		}
-		if dockerResult.RequeueAfter > workspaceResult.RequeueAfter {
-			workspaceResult = dockerResult
+		} else {
+			dockerResult, dockerReferenceable, dockerChanged, dockerErr := r.reconcileDockerPVC(ctx, &agentRun, workspaceBound)
+			conditionsChanged = conditionsChanged || dockerChanged
+			if dockerErr != nil || !dockerReferenceable {
+				if conditionsChanged {
+					if statusErr := r.Status().Update(ctx, &agentRun); statusErr != nil {
+						return ctrl.Result{}, fmt.Errorf("update AgentRun persistent storage status: %w", statusErr)
+					}
+				}
+				return dockerResult, dockerErr
+			}
+			if dockerResult.RequeueAfter > workspaceResult.RequeueAfter {
+				workspaceResult = dockerResult
+			}
 		}
 	}
 
@@ -3200,6 +3210,10 @@ func (r *AgentRunReconciler) reconcileDockerPVC(
 			return ctrl.Result{}, false, false, fmt.Errorf("update Docker PVC labels: %w", err)
 		}
 	}
+	if !claim.DeletionTimestamp.IsZero() {
+		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "DockerStorageDeleting", "waiting for the previous Docker claim to finish deletion")
+		return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, false, changed, nil
+	}
 	if claim.Status.Phase == corev1.ClaimLost {
 		err := fmt.Errorf("Docker PVC %s/%s is Lost and will not be replaced automatically", claim.Namespace, claim.Name)
 		changed := r.setRunCondition(agentRun, ConditionWorkspaceReady, metav1.ConditionFalse, "DockerStorageLost", err.Error())
@@ -3214,6 +3228,51 @@ func (r *AgentRunReconciler) reconcileDockerPVC(
 		return ctrl.Result{}, true, changed, nil
 	}
 	return ctrl.Result{RequeueAfter: workspacePVCReadyRequeue}, true, false, nil
+}
+
+// reconcileLegacyDockerStorageMigration preserves an already-running Pod that
+// predates the dedicated Docker PVC. A Pending claim cannot bind without a
+// consumer under WaitForFirstConsumer, so remove only that owned, validated,
+// unused claim. A Bound claim is retained for the next supported Pod
+// replacement. No claim is created until a Pod that references it is needed.
+func (r *AgentRunReconciler) reconcileLegacyDockerStorageMigration(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) error {
+	desired, err := DesiredDockerPVC(agentRun, r.Scheme)
+	if err != nil {
+		return err
+	}
+	claim := &corev1.PersistentVolumeClaim{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(desired), claim)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get legacy-migration Docker PVC: %w", err)
+	}
+	if !metav1.IsControlledBy(claim, agentRun) {
+		return fmt.Errorf("Docker PVC %s/%s exists but is not controlled by AgentRun %s", claim.Namespace, claim.Name, agentRun.Name)
+	}
+	if err := validateDockerPVCSpec(claim, desired); err != nil {
+		return err
+	}
+	if claim.Status.Phase == corev1.ClaimLost {
+		return fmt.Errorf("Docker PVC %s/%s is Lost and will not be replaced automatically", claim.Namespace, claim.Name)
+	}
+	if claim.Status.Phase == corev1.ClaimBound || !claim.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if err := r.Delete(ctx, claim); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete unreferenced legacy-migration Docker PVC: %w", err)
+	}
+	return nil
+}
+
+func podUsesDockerPVC(pod *corev1.Pod, claimName string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == dindStorageVolumeName && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claimName {
+			return true
+		}
+	}
+	return false
 }
 
 func validateWorkspacePVCSpec(actual, desired *corev1.PersistentVolumeClaim) error {
@@ -3500,6 +3559,7 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			{Name: "NVT_DIND_BACKING_DIR", Value: dindStorageMountPath},
 			{Name: "NVT_DIND_DATA_ROOT", Value: dindDataRoot},
 			{Name: "NVT_DIND_IMAGE_SIZE_BYTES", Value: strconv.FormatInt(dindImageSizeBytes(agentRun), 10)},
+			{Name: "NVT_DIND_PERSISTENT_STORAGE", Value: strconv.FormatBool(AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent)},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			Privileged: ptrTo(true),

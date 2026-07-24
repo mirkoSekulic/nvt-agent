@@ -6,6 +6,7 @@ backing_dir="${NVT_DIND_BACKING_DIR:-/var/lib/nvt-dind}"
 run_dir="${NVT_DIND_RUN_DIR:-/run/nvt-dind}"
 device_dir="${NVT_DIND_DEVICE_DIR:-/dev}"
 image_size_bytes="${NVT_DIND_IMAGE_SIZE_BYTES:-21474836480}"
+persistent_storage="${NVT_DIND_PERSISTENT_STORAGE:-false}"
 image="${backing_dir}/docker-data.ext4"
 creating="${backing_dir}/.docker-data.ext4.creating"
 required_driver_file="${run_dir}/required-storage-driver"
@@ -21,7 +22,16 @@ rm -f "${required_driver_file}"
 if ! filesystem_type="$(findmnt -n -o FSTYPE --target "${data_root}" 2>/dev/null)" || [ -z "${filesystem_type}" ]; then
   fail "could not detect the filesystem backing the Docker data root"
 fi
-if [ "${filesystem_type}" != "virtiofs" ]; then
+case "${persistent_storage}" in
+  true|false) ;;
+  *) fail "persistent storage intent must be true or false" ;;
+esac
+
+# Persistent AgentRuns always keep Docker state in the dedicated durable
+# backing mount, independent of the filesystem used by the container runtime.
+# Ephemeral non-virtiofs runs retain Docker's native data-root behavior; only
+# ephemeral virtiofs needs the xattr-capable loopback workaround.
+if [ "${persistent_storage}" = false ] && [ "${filesystem_type}" != "virtiofs" ]; then
   exec dockerd "$@"
 fi
 

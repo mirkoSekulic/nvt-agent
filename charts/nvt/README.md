@@ -154,6 +154,13 @@ consume the Docker quota. Profiled admission does not send these fields;
 configure `size`, optional `dockerSize`, and `storageClassName` in the
 operator-owned `AgentSchedule.spec.template.workspace` instead.
 
+Persistent AgentRuns use the dedicated Docker claim on every container
+runtime, not only Kata/virtiofs. During an upgrade, an already-running
+pre-0.8.15 persistent Pod is preserved until its next normal replacement; the
+operator does not create an unreferenced `WaitForFirstConsumer` Docker claim.
+That replacement creates and consumes the claim, and Docker persistence begins
+from then on.
+
 ## Broker TLS
 
 Broker TLS is enabled by default:

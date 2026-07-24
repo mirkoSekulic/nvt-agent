@@ -121,6 +121,7 @@ new_fixture() {
   export FAKE_DEVICE_DIR="${FIXTURE}/dev"
   : >"${FAKE_LOG}"
   unset FAKE_FINDMNT_FAIL FAKE_MKFS_FAIL FAKE_MOUNT_FAIL FAKE_FSCK_STATUS FAKE_FSCK_DELAY FAKE_NEED_LOOP_NODES FAKE_DOCKER_DRIVER
+  unset FAKE_PERSISTENT_STORAGE
 }
 
 run_entrypoint() {
@@ -130,6 +131,7 @@ run_entrypoint() {
     NVT_DIND_RUN_DIR="${FIXTURE}/run" \
     NVT_DIND_DEVICE_DIR="${FIXTURE}/dev" \
     NVT_DIND_IMAGE_SIZE_BYTES=1073741824 \
+    NVT_DIND_PERSISTENT_STORAGE="${FAKE_PERSISTENT_STORAGE:-false}" \
     "${ENTRYPOINT}" --host=tcp://127.0.0.1:2375 --tls=false
 }
 
@@ -141,6 +143,35 @@ if grep -Eq '^(truncate|mkfs\.ext4|losetup|e2fsck|mount) ' "${FAKE_LOG}"; then
   echo "non-virtiofs startup changed Docker storage" >&2
   exit 1
 fi
+
+new_fixture non-virtiofs-persistent-reuse
+export FAKE_FS_TYPE=ext4
+export FAKE_PERSISTENT_STORAGE=true
+run_entrypoint
+grep -q '^mkfs.ext4 -q -F .*\.creating$' "${FAKE_LOG}"
+grep -q '^mount -t ext4 -o noatime /dev/loop0 .*/data$' "${FAKE_LOG}"
+grep -q '^dockerd .*--storage-driver=overlay2$' "${FAKE_LOG}"
+printf 'persistent-docker-state' >"${FIXTURE}/backing/docker-data.ext4"
+rm -f "${FAKE_MOUNT_MARKER}" "${FAKE_ASSOCIATED_MARKER}"
+: >"${FAKE_LOG}"
+run_entrypoint
+grep -q '^e2fsck -p /dev/loop0$' "${FAKE_LOG}"
+if grep -Eq '^(truncate|mkfs\.ext4) ' "${FAKE_LOG}"; then
+  echo "persistent non-virtiofs Docker storage was reformatted on restart" >&2
+  exit 1
+fi
+grep -qx persistent-docker-state "${FIXTURE}/backing/docker-data.ext4"
+grep -q '^dockerd .*--storage-driver=overlay2$' "${FAKE_LOG}"
+
+new_fixture invalid-persistence-intent
+export FAKE_FS_TYPE=ext4
+export FAKE_PERSISTENT_STORAGE=maybe
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "invalid persistent storage intent was accepted" >&2
+  exit 1
+fi
+grep -q 'persistent storage intent must be true or false' "${FIXTURE}/stderr"
+! grep -q '^dockerd ' "${FAKE_LOG}"
 
 new_fixture detection-failure
 export FAKE_FINDMNT_FAIL=1

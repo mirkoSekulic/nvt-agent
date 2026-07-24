@@ -241,6 +241,9 @@ func TestReconcileCreatesAgentPod(t *testing.T) {
 	if envValue(dindContainer, "NVT_DIND_IMAGE_SIZE_BYTES") != strconv.FormatInt(defaultDockerPVCSizeBytes*dindImageCapacityPercent/100, 10) {
 		t.Fatalf("unexpected ephemeral Docker image size: %#v", dindContainer.Env)
 	}
+	if envValue(dindContainer, "NVT_DIND_PERSISTENT_STORAGE") != "false" {
+		t.Fatalf("ephemeral Pod did not declare ephemeral Docker storage: %#v", dindContainer.Env)
+	}
 	assertNoVolumeMount(t, agentContainer, dindStorageVolumeName)
 	assertNoVolumeMountPath(t, agentContainer, dindStorageMountPath)
 	if agentContainer.SecurityContext != nil && agentContainer.SecurityContext.Capabilities != nil && len(agentContainer.SecurityContext.Capabilities.Add) != 0 {
@@ -702,12 +705,85 @@ func TestReconcilePersistentWorkspaceSupportsWaitForFirstConsumerAndReusesPVC(t 
 	if envValue(replacementDind, "NVT_DIND_IMAGE_SIZE_BYTES") != strconv.FormatInt(defaultDockerPVCSizeBytes*dindImageCapacityPercent/100, 10) {
 		t.Fatalf("replacement Pod changed persistent Docker backing contract: %#v", replacementDind.Env)
 	}
+	if envValue(replacementDind, "NVT_DIND_PERSISTENT_STORAGE") != "true" {
+		t.Fatalf("persistent replacement Pod did not require durable Docker storage: %#v", replacementDind.Env)
+	}
 	if err := k8sClient.Get(ctx, clientKey(run), updatedRun); err != nil {
 		t.Fatal(err)
 	}
 	ready := meta.FindStatusCondition(updatedRun.Status.Conditions, ConditionWorkspaceReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue {
 		t.Fatalf("bound workspace readiness not surfaced: %#v", updatedRun.Status.Conditions)
+	}
+}
+
+func TestReconcileLegacyPersistentPodDefersDockerClaimUntilReplacement(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	run := testAgentRun()
+	run.Spec.Workspace = persistentWorkspace("5Gi", "managed-csi")
+	workspaceClaim, err := DesiredWorkspacePVC(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceClaim.Status.Phase = corev1.ClaimBound
+	dockerClaim, err := DesiredDockerPVC(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model the unreferenced WaitForFirstConsumer claim created by the first
+	// implementation while a pre-upgrade create-once Pod was still running.
+	dockerClaim.Status.Phase = corev1.ClaimPending
+	legacyPod, err := DesiredAgentPod(run, scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyVolumeFound := false
+	for index := range legacyPod.Spec.Volumes {
+		if legacyPod.Spec.Volumes[index].Name == dindStorageVolumeName {
+			legacyPod.Spec.Volumes[index].VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+			legacyVolumeFound = true
+			break
+		}
+	}
+	if !legacyVolumeFound {
+		t.Fatal("desired Pod has no Docker storage volume")
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentRun{}, &corev1.PersistentVolumeClaim{}).
+		WithObjects(run, workspaceClaim, dockerClaim, legacyPod, testBrokerAgentsConfigMap(run.Namespace)).Build()
+	reconciler := &AgentRunReconciler{Client: k8sClient, Scheme: scheme}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)})
+	if err != nil {
+		t.Fatalf("legacy Pod reconcile: %v", err)
+	}
+	if result.RequeueAfter == workspacePVCReadyRequeue {
+		t.Fatalf("legacy Pod entered a hot Pending-claim reconcile loop: %#v", result)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: DockerPVCName(run.Name)}, &corev1.PersistentVolumeClaim{}); !errors.IsNotFound(err) {
+		t.Fatalf("unreferenced Pending Docker claim was retained: %v", err)
+	}
+	preservedPod := getAgentPod(ctx, t, k8sClient, run)
+	if volume := requireVolume(t, preservedPod, dindStorageVolumeName); volume.EmptyDir == nil {
+		t.Fatalf("running legacy Pod was replaced or rewritten: %#v", volume.VolumeSource)
+	}
+
+	if err := k8sClient.Delete(ctx, &preservedPod); err != nil {
+		t.Fatalf("delete legacy Pod: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: clientKey(run)}); err != nil {
+		t.Fatalf("replacement reconcile: %v", err)
+	}
+	replacementClaim := getDockerPVC(ctx, t, k8sClient, run)
+	replacementPod := getAgentPod(ctx, t, k8sClient, run)
+	volume := requireVolume(t, replacementPod, dindStorageVolumeName)
+	if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName != replacementClaim.Name {
+		t.Fatalf("replacement Pod did not adopt durable Docker storage: %#v", volume.VolumeSource)
+	}
+	if envValue(requireInitContainer(t, replacementPod, "docker"), "NVT_DIND_PERSISTENT_STORAGE") != "true" {
+		t.Fatalf("replacement DinD did not declare persistent storage intent")
 	}
 }
 
