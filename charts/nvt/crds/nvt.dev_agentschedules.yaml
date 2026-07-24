@@ -225,6 +225,8 @@ spec:
                     x-kubernetes-validations:
                       - rule: "!has(self.egressForwardProxy)"
                         message: egressForwardProxy is removed; use egressTransport
+                      - rule: "!has(self.egressMaxConcurrentTunnels) || (has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])"
+                        message: egressMaxConcurrentTunnels requires egressTransport forward-proxy or transparent
                     required:
                       - name
                       - runtime

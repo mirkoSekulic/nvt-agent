@@ -48,6 +48,7 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"iptables -t nat -A NVT_DIND -i br-+ -p tcp",
+		"iptables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN",
 		"ip6tables -t nat",
 		"profiles:",
 		"- mediated",

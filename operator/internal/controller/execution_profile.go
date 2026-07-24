@@ -130,6 +130,11 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 		if err := validateEgressMaxConcurrentTunnels(profile.EgressMaxConcurrentTunnels); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
+		if profile.EgressMaxConcurrentTunnels != 0 &&
+			profile.EgressTransport != nvtv1alpha1.AgentRunEgressTransportForwardProxy &&
+			profile.EgressTransport != nvtv1alpha1.AgentRunEgressTransportTransparent {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
 		if err := validateRuntimeCapabilities(profile.Runtime); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
 		}

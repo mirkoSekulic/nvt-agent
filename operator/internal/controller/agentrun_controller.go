@@ -3599,6 +3599,7 @@ iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
 for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
+iptables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN
 iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
@@ -3612,6 +3613,7 @@ ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
+ip6tables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND`
@@ -4169,6 +4171,11 @@ func ValidateAgentRunEgressMode(agentRun *nvtv1alpha1.AgentRun) error {
 	transport := AgentRunEgressTransport(agentRun)
 	if err := validateEgressMaxConcurrentTunnels(agentRun.Spec.EgressMaxConcurrentTunnels); err != nil {
 		return err
+	}
+	if agentRun.Spec.EgressMaxConcurrentTunnels != 0 &&
+		transport != nvtv1alpha1.AgentRunEgressTransportForwardProxy &&
+		transport != nvtv1alpha1.AgentRunEgressTransportTransparent {
+		return fmt.Errorf("spec.egressMaxConcurrentTunnels requires spec.egressTransport forward-proxy or transparent")
 	}
 	switch transport {
 	case nvtv1alpha1.AgentRunEgressTransportRedirect,

@@ -4919,6 +4919,9 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if !hasCRDValidation(validations, "!has(self.egressForwardProxy)", "use spec.egressTransport") {
 		t.Fatalf("missing rejection CEL for legacy egressForwardProxy: %#v", validations)
 	}
+	if !hasCRDValidation(validations, "!has(self.egressMaxConcurrentTunnels) || (has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])", "requires spec.egressTransport") {
+		t.Fatalf("missing transport CEL for tunnel capacity: %#v", validations)
+	}
 	transport := crdPath(t, spec, "egressTransport").(map[string]any)
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
 		t.Fatalf("expected egressTransport to be the sole transport selector, got %#v", transport)
@@ -6860,8 +6863,10 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT",
 		"iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
+		"iptables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN",
 		"ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
+		"ip6tables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN",
 	} {
 		if !strings.Contains(netInit.Args[0], rule) {
 			t.Fatalf("net-init missing dynamic bridge rule %q: %q", rule, netInit.Args[0])
@@ -7095,6 +7100,19 @@ func TestValidateForwardProxyAdmission(t *testing.T) {
 	tooLarge.Spec.EgressMaxConcurrentTunnels = 4097
 	if err := ValidateAgentRunEgressMode(tooLarge); err == nil || !strings.Contains(err.Error(), "between 1 and 4096") {
 		t.Fatalf("excessive tunnel capacity must be rejected, got %v", err)
+	}
+	for name, run := range map[string]*nvtv1alpha1.AgentRun{
+		"direct default redirect": testAgentRun(),
+		"mediated redirect": func() *nvtv1alpha1.AgentRun {
+			run := forwardProxyAgentRun()
+			run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportRedirect
+			return run
+		}(),
+	} {
+		run.Spec.EgressMaxConcurrentTunnels = 256
+		if err := ValidateAgentRunEgressMode(run); err == nil || !strings.Contains(err.Error(), "requires spec.egressTransport") {
+			t.Fatalf("%s tunnel capacity must be rejected, got %v", name, err)
+		}
 	}
 
 	noEnforce := forwardProxyAgentRun()

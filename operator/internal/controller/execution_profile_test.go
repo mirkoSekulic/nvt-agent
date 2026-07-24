@@ -105,7 +105,6 @@ func TestKubernetesTokenReviewProducerAuthenticator(t *testing.T) {
 
 func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
-	schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 512
 	profileInstructions := "Prefer repository-local checks.\n\n- Keep commits focused.\n"
 	schedule.Spec.Profiles[0].WorkspaceInstructions = profileInstructions
 	scheduleCopy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
@@ -134,19 +133,12 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatalf("workspace instructions were not snapshotted exactly: %q", defaultRun.Spec.Agent.WorkspaceInstructions)
 	}
-	if defaultRun.Spec.EgressMaxConcurrentTunnels != 512 {
-		t.Fatalf("tunnel capacity was not snapshotted from the execution profile: %d", defaultRun.Spec.EgressMaxConcurrentTunnels)
-	}
 	if defaultRun.Spec.Agent.WorkflowInstructions != "" || defaultRun.Spec.ProfileProvenance.SelectedWorkflow != "" {
 		t.Fatalf("legacy producer allowlist unexpectedly added workflow state: %#v", defaultRun.Spec)
 	}
 	schedule.Spec.Profiles[0].WorkspaceInstructions = "changed after admission"
-	schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 1024
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatal("resolved AgentRun workspace instructions alias the AgentSchedule profile")
-	}
-	if defaultRun.Spec.EgressMaxConcurrentTunnels != 512 {
-		t.Fatal("resolved tunnel capacity changed after schedule mutation")
 	}
 	if defaultRun.Spec.RuntimeClassName == nil || *defaultRun.Spec.RuntimeClassName != runtimeClassName ||
 		!reflect.DeepEqual(defaultRun.Spec.Resources, schedule.Spec.Template.Resources) ||
@@ -177,6 +169,34 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 		if run.Spec.ProfileProvenance.Principal.DisplayName != display {
 			t.Fatalf("display provenance=%q, want %q", run.Spec.ProfileProvenance.Principal.DisplayName, display)
 		}
+	}
+}
+
+func TestProfiledScheduleSnapshotsForwardProxyTunnelCapacity(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	profile := &schedule.Spec.Profiles[0]
+	profile.Egress = nvtv1alpha1.AgentRunEgressMediated
+	profile.EgressAllowInsecureBroker = true
+	profile.EgressEnforcement = true
+	profile.EgressTransport = nvtv1alpha1.AgentRunEgressTransportForwardProxy
+	profile.EgressMaxConcurrentTunnels = 512
+	profile.Broker.Grants[0].Materialization = nvtv1alpha1.AgentRunGrantPlaceholderFile
+	profile.Broker.Grants[0].EgressHosts = []string{"chatgpt.com"}
+
+	resolved, err := (StaticExecutionProfileResolver{}).Resolve(schedule, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := buildProfiledAgentRun(schedule, resolved, "system:serviceaccount:nvt:producer", nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Spec.EgressMaxConcurrentTunnels != 512 {
+		t.Fatalf("tunnel capacity was not snapshotted: %d", run.Spec.EgressMaxConcurrentTunnels)
+	}
+	profile.EgressMaxConcurrentTunnels = 1024
+	if run.Spec.EgressMaxConcurrentTunnels != 512 {
+		t.Fatal("resolved tunnel capacity changed after schedule mutation")
 	}
 }
 
@@ -428,6 +448,23 @@ func TestProfileConfigurationValidation(t *testing.T) {
 			name: "excessive tunnel capacity",
 			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
 				schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 4097
+			},
+		},
+		{
+			name: "tunnel capacity on direct default redirect",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				schedule.Spec.Profiles[0].EgressMaxConcurrentTunnels = 256
+			},
+		},
+		{
+			name: "tunnel capacity on mediated redirect",
+			mutate: func(schedule *nvtv1alpha1.AgentSchedule) {
+				profile := &schedule.Spec.Profiles[0]
+				profile.Egress = nvtv1alpha1.AgentRunEgressMediated
+				profile.EgressAllowInsecureBroker = true
+				profile.EgressEnforcement = true
+				profile.EgressTransport = nvtv1alpha1.AgentRunEgressTransportRedirect
+				profile.EgressMaxConcurrentTunnels = 256
 			},
 		},
 		{

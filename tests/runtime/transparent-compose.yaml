@@ -38,6 +38,7 @@ services:
         iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
         iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
         iptables -t nat -N NVT_DIND
+        iptables -t nat -A NVT_DIND -m physdev --physdev-is-bridged -j RETURN
         iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
         iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
         iptables -t nat -I PREROUTING 1 -j NVT_DIND

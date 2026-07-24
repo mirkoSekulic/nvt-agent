@@ -161,9 +161,22 @@ case_run() {
     sh -ec 'mkdir -p /tmp/www; echo compose-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
   wait_for_published_service "${run}" 18081 compose-bridge-ok
 
+  # bridge-nf-call-iptables may send same-bridge frames through PREROUTING.
+  # The physdev exception must preserve this local container-to-container
+  # path without exempting routed traffic that leaves the bridge.
+  local peer_body
+  peer_body="$(agent_exec "${run}" docker run --rm --network nvt_issue143_default docker:27-dind \
+    wget -q -T 10 -O- http://nvt-local-compose:18080/)"
+  [[ "${peer_body}" == "compose-bridge-ok" ]] || die "same-bridge container traffic was captured or misrouted"
+
+  # Routed traffic from that exact dynamic bridge must still enter captured.
+  agent_exec "${run}" docker run --rm --network nvt_issue143_default docker:27-dind \
+    wget -q -T 15 -O- https://example.com >/dev/null
+
   # The local OUTPUT bypass does not apply to DinD-originated connections:
   # they enter PREROUTING and remain subject to destination denial.
-  if agent_exec "${run}" docker run --rm docker:27-dind wget -q -T 5 -O- http://169.254.169.254/; then
+  if agent_exec "${run}" docker run --rm --network nvt_issue143_default docker:27-dind \
+    wget -q -T 5 -O- http://169.254.169.254/; then
     die "DinD container bypassed metadata destination denial"
   fi
 

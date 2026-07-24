@@ -89,31 +89,39 @@ func proxyAddress(t *testing.T, server *httptest.Server) string {
 
 func sendRawProxyRequest(t *testing.T, proxy, request string) (net.Conn, string) {
 	t.Helper()
-	conn, err := net.Dial("tcp", proxy)
+	conn, status, err := sendRawProxyRequestResult(proxy, request)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return conn, status
+}
+
+func sendRawProxyRequestResult(proxy, request string) (net.Conn, string, error) {
+	conn, err := net.Dial("tcp", proxy)
+	if err != nil {
+		return nil, "", err
+	}
 	if _, err := io.WriteString(conn, request); err != nil {
 		_ = conn.Close()
-		t.Fatal(err)
+		return nil, "", err
 	}
 	reader := bufio.NewReader(conn)
 	status, err := reader.ReadString('\n')
 	if err != nil {
 		_ = conn.Close()
-		t.Fatal(err)
+		return nil, "", err
 	}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			_ = conn.Close()
-			t.Fatal(err)
+			return nil, "", err
 		}
 		if line == "\r\n" {
 			break
 		}
 	}
-	return conn, status
+	return conn, status, nil
 }
 
 func TestForwardProxyAllowedConnectEstablishesBlindTunnel(t *testing.T) {
@@ -434,6 +442,143 @@ func TestForwardProxyConcurrentTunnelLimitWaitsThenFailsClosed(t *testing.T) {
 	}
 	if strings.Contains(got, canary) || strings.Contains(strings.ToLower(got), "authorization") {
 		t.Fatalf("tunnel limit log contains sensitive input: %q", got)
+	}
+}
+
+func TestForwardProxyDefaultTransparentCapacityBurstEndToEnd(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, defaultForwardProxyMaxConcurrentTunnels+1)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			accepted <- conn
+		}
+	}()
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	forwardProxy := &ForwardProxy{
+		Config: ForwardProxyConfig{
+			TransparentMode: true,
+			AllowHosts:      []string{"fixture.external"},
+			AllowPorts:      []int{port},
+		},
+		TunnelQueueTimeout: 200 * time.Millisecond,
+		Logger:             log.New(&logs, "", 0),
+		Resolver:           &staticResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
+		},
+	}
+	server := httptest.NewServer(forwardProxy)
+	t.Cleanup(server.Close)
+	proxy := proxyAddress(t, server)
+	request := fmt.Sprintf("CONNECT fixture.external:%d HTTP/1.1\r\nHost: fixture.external:%d\r\n\r\n", port, port)
+
+	clients := make([]net.Conn, 0, defaultForwardProxyMaxConcurrentTunnels)
+	upstreams := make([]net.Conn, 0, defaultForwardProxyMaxConcurrentTunnels)
+	t.Cleanup(func() {
+		for _, conn := range clients {
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}
+		for _, conn := range upstreams {
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}
+	})
+	for i := 0; i < defaultForwardProxyMaxConcurrentTunnels; i++ {
+		client, status := sendRawProxyRequest(t, proxy, request)
+		if !strings.Contains(status, "200") {
+			t.Fatalf("CONNECT %d/%d status = %q", i+1, defaultForwardProxyMaxConcurrentTunnels, status)
+		}
+		clients = append(clients, client)
+		select {
+		case upstream := <-accepted:
+			upstreams = append(upstreams, upstream)
+		case <-time.After(time.Second):
+			t.Fatalf("upstream did not accept tunnel %d", i+1)
+		}
+	}
+	if forwardProxy.activeTunnels.Load() != defaultForwardProxyMaxConcurrentTunnels {
+		t.Fatalf("default active tunnels = %d, want %d", forwardProxy.activeTunnels.Load(), defaultForwardProxyMaxConcurrentTunnels)
+	}
+
+	type rawResult struct {
+		conn   net.Conn
+		status string
+		err    error
+	}
+	waiting := make(chan rawResult, 1)
+	go func() {
+		conn, status, requestErr := sendRawProxyRequestResult(proxy, request)
+		waiting <- rawResult{conn: conn, status: status, err: requestErr}
+	}()
+	waitForAtomicValue(t, &forwardProxy.queuedTunnels, 1)
+	_ = clients[0].Close()
+	_ = upstreams[0].Close()
+	clients[0], upstreams[0] = nil, nil
+	select {
+	case result := <-waiting:
+		if result.err != nil || !strings.Contains(result.status, "200") {
+			t.Fatalf("short burst was not admitted after release: status=%q err=%v", result.status, result.err)
+		}
+		clients[0] = result.conn
+	case <-time.After(time.Second):
+		t.Fatal("short burst did not resume after slot release")
+	}
+	select {
+	case upstreams[0] = <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not accept admitted burst tunnel")
+	}
+
+	cancelled, err := net.Dial("tcp", proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(cancelled, request); err != nil {
+		t.Fatal(err)
+	}
+	waitForAtomicValue(t, &forwardProxy.queuedTunnels, 1)
+	rejectedBefore := forwardProxy.rejectedTunnels.Load()
+	_ = cancelled.Close()
+	waitForAtomicValue(t, &forwardProxy.queuedTunnels, 0)
+	if forwardProxy.rejectedTunnels.Load() <= rejectedBefore {
+		t.Fatal("cancelled transparent request was not rejected and released")
+	}
+
+	started := time.Now()
+	timedOut, status := sendRawProxyRequest(t, proxy, request)
+	_ = timedOut.Close()
+	if !strings.Contains(status, "503") {
+		t.Fatalf("sustained overload status = %q, want 503", status)
+	}
+	if elapsed := time.Since(started); elapsed < 150*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("bounded overload wait = %s", elapsed)
+	}
+	gotLogs := logs.String()
+	if !strings.Contains(gotLogs, "outcome=admitted_after_wait") ||
+		!strings.Contains(gotLogs, "outcome=cancelled") ||
+		!strings.Contains(gotLogs, "outcome=timed_out") ||
+		!strings.Contains(gotLogs, "error_class=tunnel_queue_timeout") {
+		t.Fatalf("missing transparent burst telemetry: %q", gotLogs)
 	}
 }
 

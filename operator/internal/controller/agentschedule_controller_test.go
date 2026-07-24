@@ -156,6 +156,9 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	if !hasCRDValidation(validations, "!has(self.egressForwardProxy)", "use egressTransport") {
 		t.Fatalf("missing profile rejection CEL for legacy egressForwardProxy: %#v", validations)
 	}
+	if !hasCRDValidation(validations, "!has(self.egressMaxConcurrentTunnels) || (has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])", "requires egressTransport") {
+		t.Fatalf("missing profile transport CEL for tunnel capacity: %#v", validations)
+	}
 	transport := crdPath(t, profileProperties, "egressTransport").(map[string]any)
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
 		t.Fatalf("expected profile egressTransport to be the sole transport selector, got %#v", transport)
