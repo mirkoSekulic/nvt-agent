@@ -1032,6 +1032,67 @@ func TestAgentRunRuntimeCapabilitiesValidationAndDeepCopy(t *testing.T) {
 	}
 }
 
+func TestAgentRunDockerKernelLogDevicePodRendering(t *testing.T) {
+	enabled := testAgentRun()
+	enabled.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: true}
+	copied := enabled.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	copied.Spec.Runtime.Docker.KernelLogDevice = false
+	if !enabled.Spec.Runtime.Docker.KernelLogDevice {
+		t.Fatal("kernel log device intent was not deep-copied")
+	}
+
+	pod, err := DesiredAgentPod(enabled, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(requireInitContainer(t, *pod, "docker"), "NVT_DIND_KERNEL_LOG_DEVICE"); got != "true" {
+		t.Fatalf("DinD kernel log device environment = %q, want \"true\"", got)
+	}
+	for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		if container.Name != "docker" && envValue(container, "NVT_DIND_KERNEL_LOG_DEVICE") != "" {
+			t.Fatalf("kernel log device intent leaked to %q", container.Name)
+		}
+	}
+
+	// Omitted and explicitly-disabled runs must render exactly as before.
+	for name, run := range map[string]*nvtv1alpha1.AgentRun{
+		"omitted":  testAgentRun(),
+		"disabled": testAgentRun(),
+	} {
+		if name == "disabled" {
+			run.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: false}
+		}
+		defaultPod, err := DesiredAgentPod(run, testScheme(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, container := range append(append([]corev1.Container(nil), defaultPod.Spec.InitContainers...), defaultPod.Spec.Containers...) {
+			if findEnvVar(container, "NVT_DIND_KERNEL_LOG_DEVICE") != nil {
+				t.Fatalf("%s run declared the kernel log device on %q", name, container.Name)
+			}
+		}
+		if AgentRunDockerKernelLogDevice(run) {
+			t.Fatalf("%s run reported the kernel log device as enabled", name)
+		}
+	}
+
+	// The opt-in must not change privilege, RuntimeClass, or mounts.
+	baseline, err := DesiredAgentPod(testAgentRun(), testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineDind := requireInitContainer(t, *baseline, "docker")
+	enabledDind := requireInitContainer(t, *pod, "docker")
+	if !reflect.DeepEqual(baselineDind.SecurityContext, enabledDind.SecurityContext) ||
+		!reflect.DeepEqual(baselineDind.VolumeMounts, enabledDind.VolumeMounts) ||
+		!reflect.DeepEqual(baseline.Spec.RuntimeClassName, pod.Spec.RuntimeClassName) {
+		t.Fatal("kernel log device opt-in changed sidecar privilege, mounts, or RuntimeClass")
+	}
+	if len(enabledDind.Env) != len(baselineDind.Env)+1 {
+		t.Fatalf("kernel log device opt-in changed unrelated environment: %#v", enabledDind.Env)
+	}
+}
+
 func TestAgentRunRequiredDockerNetworksValidationDeepCopyAndPodRendering(t *testing.T) {
 	run := testAgentRun()
 	run.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{
@@ -4840,6 +4901,13 @@ func TestAgentRunCRDSchemaIncludesRequiredDockerNetworks(t *testing.T) {
 	if fmt.Sprint(networks["maxItems"]) != "16" || networks["x-kubernetes-list-type"] != "map" ||
 		fmt.Sprint(crdPath(t, networks, "items", "properties", "subnet", "pattern")) != `^172\.31\.[0-9]{1,3}\.0/24$` {
 		t.Fatalf("AgentRun required Docker network schema incomplete: %#v", networks)
+	}
+	docker := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties", "spec", "properties",
+		"runtime", "properties", "docker", "properties",
+	).(map[string]any)
+	if crdPath(t, docker, "kernelLogDevice", "type") != "boolean" {
+		t.Fatalf("AgentRun kernel log device schema incomplete: %#v", docker["kernelLogDevice"])
 	}
 }
 

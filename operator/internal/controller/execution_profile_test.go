@@ -529,6 +529,9 @@ func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
 			"docker": map[string]any{"requiredNetworks": []any{map[string]any{"name": "kind", "subnet": "172.31.250.0/24"}}},
 		}}}},
+		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
+			"docker": map[string]any{"kernelLogDevice": true},
+		}}}},
 		{"broker": map[string]any{"grants": []any{}}},
 		{"profile": "claude-john"},
 		{"producer": "system:serviceaccount:nvt:spoofed"},
@@ -704,6 +707,55 @@ func TestProfiledAdmissionSnapshotsContainerCapabilities(t *testing.T) {
 	schedule.Spec.Profiles[0].Runtime.Container.Capabilities.Add[0] = "NET_ADMIN"
 	if run.Spec.Runtime.Container.Capabilities.Add[0] != "SYS_PTRACE" {
 		t.Fatal("resolved AgentRun aliases profile capability configuration")
+	}
+}
+
+func TestProfiledAdmissionSnapshotsDockerKernelLogDevice(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.Profiles[0].Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: true}
+	scheduleCopy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
+	scheduleCopy.Spec.Profiles[0].Runtime.Docker.KernelLogDevice = false
+	if !schedule.Spec.Profiles[0].Runtime.Docker.KernelLogDevice {
+		t.Fatal("AgentSchedule kernel log device configuration was not deep-copied")
+	}
+
+	fixture := newProfileAdmissionFixture(t, schedule)
+	response := fixture.serve(t, profiledAdmissionBody(t, "kernel-log-device", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	run := fixture.run(t, decoded.AgentRun.Name)
+	if run.Spec.Runtime.Docker == nil || !run.Spec.Runtime.Docker.KernelLogDevice {
+		t.Fatalf("profile kernel log device was not snapshotted: %#v", run.Spec.Runtime)
+	}
+
+	raw, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped nvtv1alpha1.AgentRun
+	if err := json.Unmarshal(raw, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(roundTripped.Spec.Runtime.Docker, run.Spec.Runtime.Docker) {
+		t.Fatalf("kernel log device configuration did not round-trip: %#v", roundTripped.Spec.Runtime.Docker)
+	}
+
+	// Omitting the setting must leave the snapshot byte-for-byte unchanged.
+	omitted := testProfiledAgentSchedule()
+	omittedFixture := newProfileAdmissionFixture(t, omitted)
+	omittedResponse := omittedFixture.serve(t, profiledAdmissionBody(t, "kernel-log-default", nil, nil), "Bearer projected-token")
+	var omittedDecoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, omittedResponse, http.StatusCreated, &omittedDecoded)
+	omittedRun := omittedFixture.run(t, omittedDecoded.AgentRun.Name)
+	if omittedRun.Spec.Runtime.Docker != nil && omittedRun.Spec.Runtime.Docker.KernelLogDevice {
+		t.Fatalf("omitted kernel log device defaulted to enabled: %#v", omittedRun.Spec.Runtime.Docker)
+	}
+	encodedRuntime, err := json.Marshal(omittedRun.Spec.Runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedRuntime), "kernelLogDevice") {
+		t.Fatalf("omitted kernel log device was serialized: %s", encodedRuntime)
 	}
 }
 

@@ -176,6 +176,36 @@ unused required network removed by that command is therefore restored
 synchronously before the next command. An incompatible same-name network
 fails loudly and is never deleted or rewritten.
 
+`runtime.docker.kernelLogDevice` is an administrator-owned, opt-in boolean that
+makes the kernel-log character device (major 1, minor 11) available inside the
+Docker sidecar:
+
+```yaml
+runtime:
+  type: codex
+  autonomy: trusted-local
+  docker:
+    kernelLogDevice: true
+```
+
+Some nested privileged workloads, such as in-container system managers, refuse
+to start without `/dev/kmsg`. When the setting is true the sidecar creates the
+device with restrictive permissions before Docker starts, accepts an existing
+correct character device, and fails closed on a symlink, a regular file, a
+directory, or a wrong device number. A real device node is required because
+nested privileged containers inherit the sidecar's device node; a symlink is
+not inherited. The intent reaches only the Docker sidecar. The agent container,
+`agentd`, the runtime core, and plugins never receive it, and no privilege,
+capability, RuntimeClass, mount, or egress behavior changes.
+
+> **Security boundary.** The kernel log is a host-level information source.
+> Outside a microVM-backed RuntimeClass the Docker sidecar shares the node
+> kernel, so exposing `/dev/kmsg` can reveal the Kubernetes node kernel log to
+> nested privileged workloads. Enable it only in an administrator-approved
+> microVM execution profile, such as a Kata `RuntimeClass`, where the kernel
+> log belongs to the disposable guest. The setting is omitted by default and
+> omitting it leaves Docker sidecar behavior unchanged.
+
 The wrapper and reconciler must address the same daemon. Set `DOCKER_HOST` or
 `DOCKER_CONTEXT` in the process environment when selecting a non-default
 daemon. While required networks are configured, per-command daemon, context,

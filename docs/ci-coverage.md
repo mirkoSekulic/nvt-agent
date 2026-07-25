@@ -107,6 +107,10 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 - `tests/runtime/git_credentials_smoke.sh` → `images.yml / build` (runtime
   matrix entry)
+- `dind/test.sh` → `images.yml / build` (dind matrix entry). It runs
+  `dind/kernel-log-device-smoke.sh` against the built image when
+  `NVT_DIND_TEST_IMAGE` is set, which that job does; the hermetic fixtures run
+  either way.
 
 ### kind workflow case files
 

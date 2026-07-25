@@ -57,6 +57,16 @@ func validateRuntimeDockerNetworks(runtime nvtv1alpha1.AgentRunRuntime) error {
 	return nil
 }
 
+// AgentRunDockerKernelLogDevice reports the administrator-owned, profile-owned
+// intent to expose the kernel-log character device to the Docker sidecar. It is
+// opt-in and defaults to false, so omitting it preserves existing behavior.
+func AgentRunDockerKernelLogDevice(agentRun *nvtv1alpha1.AgentRun) bool {
+	if agentRun == nil || agentRun.Spec.Runtime.Docker == nil {
+		return false
+	}
+	return agentRun.Spec.Runtime.Docker.KernelLogDevice
+}
+
 func requiredDockerNetworksJSON(agentRun *nvtv1alpha1.AgentRun) (string, error) {
 	if err := ValidateAgentRunDockerNetworks(agentRun); err != nil {
 		return "", err

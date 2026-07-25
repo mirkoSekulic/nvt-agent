@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.22`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.23`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, dedicated Docker storage size, broker grant preparations,
 profile workspace instructions, or workflow producer policies.
@@ -44,11 +44,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.22 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.23 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.22 --namespace nvt --create-namespace
+  --version 0.8.23 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -333,6 +333,31 @@ remove the contract. Subnets must be unique and inside the managed
 `172.31.0.0/16` pool;
 IPv6, dual-stack, malformed, and incompatible existing networks fail closed.
 Omitting the field preserves existing Docker behavior.
+
+Profiles can also opt in to the kernel-log device for nested workloads that
+require it:
+
+```yaml
+agentSchedule:
+  profiles:
+    - name: nested-cluster
+      runtime:
+        docker:
+          kernelLogDevice: true
+```
+
+`runtime.docker.kernelLogDevice` makes the kernel-log character device
+(major 1, minor 11) available inside the Docker sidecar, which some nested
+privileged workloads require in order to start. It is profile-owned, never
+producer-selectable, reaches only the Docker sidecar, and adds no privilege,
+capability, RuntimeClass, mount, or egress change. The setting is omitted by
+default and omitting it preserves existing Docker sidecar behavior exactly.
+
+The kernel log is a host-level information source. Outside a microVM-backed
+RuntimeClass the Docker sidecar shares the node kernel, so enabling this can
+expose the Kubernetes node kernel log to nested privileged workloads. Enable it
+only in an administrator-approved microVM execution profile, such as a Kata
+`RuntimeClass`, where the kernel log belongs to the disposable guest.
 
 Execution profiles may append reusable administrator-owned workspace guidance:
 

@@ -32,6 +32,7 @@ agentSchedule:
             add:
               - SYS_PTRACE
         docker:
+          kernelLogDevice: true
           requiredNetworks:
             - name: kind
               subnet: 172.31.250.0/24

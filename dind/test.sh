@@ -126,6 +126,20 @@ printf 'dockerd-entrypoint.sh %s\n' "$*" >>"${FAKE_LOG}"
 exec "$@"
 FAKE
 
+# Character-device fixtures cannot be created without privileges, so the kernel
+# log device inspection is faked only when a test asks for it. Every other
+# lookup, including the real symlink/regular-file/directory fixtures, goes to
+# the real stat.
+cat >"${BIN}/stat" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FAKE_KMSG_STAT:-}" && "${*: -1}" == "${FAKE_DEVICE_DIR}/kmsg" ]]; then
+  printf '%s\n' "${FAKE_KMSG_STAT}"
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+FAKE
+
 cat >"${BIN}/docker" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -153,6 +167,8 @@ new_fixture() {
   unset FAKE_REPORT_LOST_LOOP
   unset FAKE_LOOP_DETACH_FAIL
   unset FAKE_PERSISTENT_STORAGE
+  unset FAKE_KERNEL_LOG_DEVICE
+  unset FAKE_KMSG_STAT
 }
 
 run_entrypoint() {
@@ -164,6 +180,7 @@ run_entrypoint() {
     NVT_DIND_IMAGE_SIZE_BYTES=1073741824 \
     NVT_DIND_PERSISTENT_STORAGE="${FAKE_PERSISTENT_STORAGE:-false}" \
     NVT_DIND_TRANSPARENT="${FAKE_DIND_TRANSPARENT:-false}" \
+    NVT_DIND_KERNEL_LOG_DEVICE="${FAKE_KERNEL_LOG_DEVICE:-false}" \
     "${ENTRYPOINT}" --host=tcp://127.0.0.1:2375 --tls=false
 }
 
@@ -198,6 +215,104 @@ if grep -Eq '^(truncate|mkfs\.ext4|losetup|e2fsck|mount) ' "${FAKE_LOG}"; then
   echo "non-virtiofs startup changed Docker storage" >&2
   exit 1
 fi
+
+# The kernel log device is administrator-owned and opt-in. When it is off the
+# device tree must be untouched; nested privileged workloads that need
+# /dev/kmsg only get it when a profile asks for it.
+new_fixture kernel-log-device-off
+export FAKE_FS_TYPE=ext4
+run_entrypoint
+assert_vendor_handoff '--host=tcp://127.0.0.1:2375 --tls=false'
+if [[ -e "${FIXTURE}/dev/kmsg" ]]; then
+  echo "kernel log device was created while the option was off" >&2
+  exit 1
+fi
+if grep -q '^mknod .*/kmsg' "${FAKE_LOG}"; then
+  echo "kernel log device was prepared while the option was off" >&2
+  exit 1
+fi
+
+new_fixture kernel-log-device-created
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+run_entrypoint
+if ! grep -qx "mknod ${FIXTURE}/dev/kmsg c 1 11" "${FAKE_LOG}"; then
+  echo "kernel log character device 1:11 was not created before Docker started" >&2
+  exit 1
+fi
+[[ -e "${FIXTURE}/dev/kmsg" ]]
+mknod_line="$(grep -n '^mknod .*/kmsg c 1 11$' "${FAKE_LOG}" | cut -d: -f1)"
+handoff_line="$(grep -n '^dockerd-entrypoint\.sh ' "${FAKE_LOG}" | head -n 1 | cut -d: -f1)"
+[[ "${mknod_line}" -lt "${handoff_line}" ]]
+assert_vendor_handoff '--host=tcp://127.0.0.1:2375 --tls=false'
+
+new_fixture kernel-log-device-existing-valid
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+export FAKE_KMSG_STAT='character special file 1 b'
+run_entrypoint
+if grep -q '^mknod .*/kmsg' "${FAKE_LOG}"; then
+  echo "existing kernel log device was recreated" >&2
+  exit 1
+fi
+assert_vendor_handoff '--host=tcp://127.0.0.1:2375 --tls=false'
+
+new_fixture kernel-log-device-wrong-number
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+export FAKE_KMSG_STAT='character special file 1 5'
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "kernel log device with the wrong device number was accepted" >&2
+  exit 1
+fi
+grep -q 'not character device 1:11' "${FIXTURE}/stderr"
+assert_docker_not_started
+
+new_fixture kernel-log-device-symlink
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+ln -s /dev/null "${FIXTURE}/dev/kmsg"
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "symlinked kernel log path was accepted" >&2
+  exit 1
+fi
+grep -q 'kernel log path is a symbolic link' "${FIXTURE}/stderr"
+[[ -L "${FIXTURE}/dev/kmsg" ]]
+assert_docker_not_started
+
+new_fixture kernel-log-device-regular-file
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+printf 'not-a-device' >"${FIXTURE}/dev/kmsg"
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "regular kernel log file was accepted" >&2
+  exit 1
+fi
+grep -q 'kernel log path is not a character device' "${FIXTURE}/stderr"
+grep -qx not-a-device "${FIXTURE}/dev/kmsg"
+assert_docker_not_started
+
+new_fixture kernel-log-device-directory
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+mkdir -p "${FIXTURE}/dev/kmsg"
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "kernel log directory was accepted" >&2
+  exit 1
+fi
+grep -q 'kernel log path is not a character device' "${FIXTURE}/stderr"
+[[ -d "${FIXTURE}/dev/kmsg" ]]
+assert_docker_not_started
+
+new_fixture kernel-log-device-invalid-intent
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=maybe
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "invalid kernel log device intent was accepted" >&2
+  exit 1
+fi
+grep -q 'kernel log device intent must be true or false' "${FIXTURE}/stderr"
+assert_docker_not_started
 
 new_fixture non-virtiofs-persistent-reuse
 export FAKE_FS_TYPE=ext4
@@ -397,5 +512,13 @@ if validate_cidrs 'fd00:1234::/129' >/dev/null 2>&1; then
   exit 1
 fi
 echo "nvt-dind CIDR validation test passed"
+
+# The hermetic fixtures above fake mknod. Prove the real device contract against
+# a built image when one is available.
+if [[ -n "${NVT_DIND_TEST_IMAGE:-}" ]]; then
+  bash "${ROOT}/dind/kernel-log-device-smoke.sh"
+else
+  echo "nvt-dind kernel log device integration smoke skipped (set NVT_DIND_TEST_IMAGE to a built image)"
+fi
 
 echo "nvt-dind storage setup test passed"

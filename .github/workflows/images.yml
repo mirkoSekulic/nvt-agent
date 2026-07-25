@@ -87,4 +87,6 @@ jobs:
         run: bash tests/runtime/git_credentials_smoke.sh "${{ matrix.image }}"
       - name: Run ${{ matrix.name }} script tests
         if: matrix.test
+        env:
+          NVT_DIND_TEST_IMAGE: ${{ matrix.image }}
         run: bash "${{ matrix.test }}"

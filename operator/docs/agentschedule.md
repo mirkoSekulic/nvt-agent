@@ -88,6 +88,26 @@ supplied by producer admission. It is reconciled at the Docker CLI boundary,
 including after pruning. Only canonical IPv4 `/24` networks inside the managed
 pool are supported; IPv6 and dual-stack requests fail closed.
 
+`runtime.docker.kernelLogDevice` is a separate opt-in boolean for nested
+workloads that require the kernel-log device:
+
+```yaml
+profiles:
+  - name: nested-cluster
+    runtime:
+      type: codex
+      autonomy: trusted-local
+      docker:
+        kernelLogDevice: true
+    # remaining profile-owned fields omitted
+```
+
+It is profile-owned, deep-copied into the AgentRun, never producer-selectable,
+and omitted by default. Read the security boundary in
+[agentrun.md](agentrun.md) before enabling it: outside a microVM-backed
+RuntimeClass it can expose the Kubernetes node kernel log to nested privileged
+workloads.
+
 For new deployments that need producer-selectable workflows, keep execution
 credentials in `profiles` and define guidance independently:
 

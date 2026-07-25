@@ -158,6 +158,13 @@ type AgentRunRuntimeDocker struct {
 	// +listType=map
 	// +listMapKey=name
 	RequiredNetworks []AgentRunDockerNetwork `json:"requiredNetworks,omitempty"`
+	// KernelLogDevice makes the kernel-log character device (major 1, minor 11)
+	// available inside the Docker sidecar, so nested privileged workloads that
+	// require /dev/kmsg can start. It is administrator-owned, opt-in, and
+	// omitted by default. Outside a microVM-backed RuntimeClass this can expose
+	// the Kubernetes node kernel log to nested privileged workloads; enable it
+	// only in an administrator-approved microVM execution profile.
+	KernelLogDevice bool `json:"kernelLogDevice,omitempty"`
 }
 
 // AgentRunDockerNetwork is one required IPv4 Docker bridge network.
@@ -413,11 +420,13 @@ func (in *AgentRunRuntime) DeepCopy() *AgentRunRuntime {
 		}
 	}
 	if in.Docker != nil {
-		out.Docker = &AgentRunRuntimeDocker{}
+		docker := *in.Docker
+		docker.RequiredNetworks = nil
 		if in.Docker.RequiredNetworks != nil {
-			out.Docker.RequiredNetworks = make([]AgentRunDockerNetwork, len(in.Docker.RequiredNetworks))
-			copy(out.Docker.RequiredNetworks, in.Docker.RequiredNetworks)
+			docker.RequiredNetworks = make([]AgentRunDockerNetwork, len(in.Docker.RequiredNetworks))
+			copy(docker.RequiredNetworks, in.Docker.RequiredNetworks)
 		}
+		out.Docker = &docker
 	}
 	return out
 }

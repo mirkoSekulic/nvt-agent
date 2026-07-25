@@ -39,6 +39,41 @@ case "${persistent_storage}" in
   *) fail "persistent storage intent must be true or false" ;;
 esac
 
+# Nested privileged workloads that read the kernel log need a real kernel-log
+# character device in this sidecar; nested privileged containers inherit the
+# device node, and a symlink is not inherited. The intent is administrator-owned
+# and opt-in, so the device tree is left untouched when it is off. Exposing the
+# kernel log outside a microVM-backed RuntimeClass can reveal the Kubernetes
+# node kernel log to nested privileged workloads.
+kernel_log_device="${NVT_DIND_KERNEL_LOG_DEVICE:-false}"
+case "${kernel_log_device}" in
+  true|false) ;;
+  *) fail "kernel log device intent must be true or false" ;;
+esac
+
+ensure_kernel_log_device() {
+  kmsg_path="${device_dir}/kmsg"
+  # The kernel log device is character device major 1, minor 11. GNU stat
+  # reports both numbers in hex, so minor 11 prints as "b". stat does not
+  # follow symlinks, so a dangling link is reported as a link rather than as a
+  # missing path.
+  if kmsg_kind="$(stat -c '%F %t %T' "${kmsg_path}" 2>/dev/null)"; then
+    case "${kmsg_kind}" in
+      "character special file 1 b") return ;;
+      "character special file"*) fail "existing kernel log device is not character device 1:11" ;;
+      "symbolic link"*) fail "existing kernel log path is a symbolic link" ;;
+      *) fail "existing kernel log path is not a character device" ;;
+    esac
+  fi
+  mkdir -p "${device_dir}"
+  (umask 077; mknod "${kmsg_path}" c 1 11) || fail "could not create the kernel log device"
+  chmod 0600 "${kmsg_path}" || fail "could not restrict the kernel log device"
+}
+
+if [ "${kernel_log_device}" = true ]; then
+  ensure_kernel_log_device
+fi
+
 # Persistent AgentRuns always keep Docker state in the dedicated durable
 # backing mount, independent of the filesystem used by the container runtime.
 # Ephemeral non-virtiofs runs retain Docker's native data-root behavior; only

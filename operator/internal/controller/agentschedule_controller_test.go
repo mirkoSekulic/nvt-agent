@@ -136,6 +136,11 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 		fmt.Sprint(crdPath(t, profileNetworks, "items", "properties", "subnet", "pattern")) != `^172\.31\.[0-9]{1,3}\.0/24$` {
 		t.Fatalf("expected typed profile Docker networks, got %#v", profileNetworks)
 	}
+	profileDocker := crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties",
+		"docker", "properties").(map[string]any)
+	if crdPath(t, profileDocker, "kernelLogDevice", "type") != "boolean" {
+		t.Fatalf("expected boolean profile kernel log device schema, got %#v", profileDocker["kernelLogDevice"])
+	}
 	if fmt.Sprint(crdPath(t, properties, "profiles", "items", "properties", "workspaceInstructions", "maxLength")) != "65536" {
 		t.Fatalf("expected bounded profile workspace instructions schema, got %#v", properties["profiles"])
 	}
