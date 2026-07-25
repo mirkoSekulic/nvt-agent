@@ -125,8 +125,9 @@ for _ in $(seq 1 20); do
 done
 [[ "$(routed_bridge_request nvt_routed nvt_routed_server 192.0.2.154)" == "routed-bridge-ok" ]]
 
-# The same bridge classification is consumed by IPv6 PREROUTING without a
-# destination-range exception.
+# Separately routed IPv6 traffic between peers on the same bridge remains L2
+# and therefore bypasses inet PREROUTING. Host-directed IPv6 traffic is tested
+# below and must enter normal ip6tables PREROUTING capture.
 docker exec "${DAEMON}" docker network create --ipv6 --subnet fd00:31::/64 nvt_routed_v6 >/dev/null
 docker exec "${DAEMON}" docker run -d --privileged --name nvt_routed_server_v6 --network nvt_routed_v6 \
   busybox:1.36 sh -ec 'ip -6 addr add 2001:db8:154::2/128 dev lo; mkdir -p /tmp/www; echo routed-v6-ok >/tmp/www/index.html; exec httpd -f -p 8080 -h /tmp/www' >/dev/null
