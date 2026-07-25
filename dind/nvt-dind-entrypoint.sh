@@ -31,7 +31,10 @@ esac
 # backing mount, independent of the filesystem used by the container runtime.
 # Ephemeral non-virtiofs runs retain Docker's native data-root behavior; only
 # ephemeral virtiofs needs the xattr-capable loopback workaround.
-docker_network_args="--bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24"
+docker_network_args=""
+if [ "${NVT_DIND_TRANSPARENT:-false}" = true ]; then
+  docker_network_args="--bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24"
+fi
 if [ "${persistent_storage}" = false ] && [ "${filesystem_type}" != "virtiofs" ]; then
   exec dockerd ${docker_network_args} "$@"
 fi

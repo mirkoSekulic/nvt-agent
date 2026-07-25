@@ -110,6 +110,13 @@ egress policy. Custom Docker subnets outside this managed pool are unsupported
 unless a future validated configuration explicitly extends the contract; they
 must not be silently exempted.
 
+Deployments must reserve `172.30.0.0/15` so it does not overlap Pod, Service,
+control-plane, broker, metadata, excluded, or denied destination ranges. The
+operator cannot safely infer all cluster routes from inside an AgentRun
+network namespace; such an overlap is a deployment configuration error and
+must be rejected during network configuration review before transparent Docker
+networking is enabled.
+
 Forward-proxy and transparent transports default to 256 active CONNECT
 tunnels. A profile may set `egressMaxConcurrentTunnels` from 1 through 4096.
 When all active slots are occupied, egressd queues at most the configured

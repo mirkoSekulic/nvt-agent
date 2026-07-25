@@ -126,10 +126,8 @@ services:
     privileged: true
     environment:
       DOCKER_TLS_CERTDIR: ""
+      NVT_DIND_TRANSPARENT: ${NVT_EGRESS_MODE:-}
     command:
-      - --bip=172.30.0.1/24
-      - --default-address-pool
-      - base=172.31.0.0/16,size=24
       - --host=unix:///var/run/docker.sock
       - --host=tcp://127.0.0.1:2375
       - --tls=false

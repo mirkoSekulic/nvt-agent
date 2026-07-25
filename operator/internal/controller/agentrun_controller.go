@@ -932,7 +932,7 @@ func (r *AgentRunReconciler) preparePlaceholderFiles(ctx context.Context, agentR
 		if err != nil {
 			return nil, fmt.Errorf("marshal placeholder request for %s: %w", provider, err)
 		}
-		status, responseBytes, err := brokerPreparationRequest(prepCtx, httpClient, strings.TrimRight(BrokerURL(), "/")+"/v1/placeholder-files", string(token), payload)
+		status, responseBytes, err := brokerPreparationRequest(prepCtx, httpClient, strings.TrimRight(BrokerURL(), "/")+"/v1/placeholder-files", string(token), payload, 1<<20)
 		if err != nil {
 			return nil, fmt.Errorf("prepare inert placeholder files for %s: broker request failed", provider)
 		}
@@ -1008,7 +1008,7 @@ func (r *AgentRunReconciler) prepareProviderMetadata(ctx context.Context, agentR
 		if marshalErr != nil {
 			return nil, fmt.Errorf("marshal provider metadata preparation request: %w", marshalErr)
 		}
-		status, responseBytes, requestErr := brokerPreparationRequest(prepCtx, httpClient, strings.TrimRight(BrokerURL(), "/")+"/v1/identity", string(token), payload)
+		status, responseBytes, requestErr := brokerPreparationRequest(prepCtx, httpClient, strings.TrimRight(BrokerURL(), "/")+"/v1/identity", string(token), payload, 64<<10)
 		if requestErr != nil {
 			return nil, fmt.Errorf("prepare provider commit identity: broker request failed")
 		}
@@ -1141,12 +1141,15 @@ func placeholderPreparationTimeout() time.Duration {
 	return 4 * time.Second
 }
 
+var brokerPreparationRetryInterval = 100 * time.Millisecond
+var brokerPreparationRetryWindow = 5 * time.Second
+
 // brokerPreparationRequest tolerates only the short projection race where the
 // broker has not observed its freshly-written agent policy yet. Permanent
 // authorization failures are returned immediately; the bearer token and body
 // are never included in errors.
-func brokerPreparationRequest(ctx context.Context, client *http.Client, url, token string, payload []byte) (int, []byte, error) {
-	deadline := time.Now().Add(placeholderPreparationTimeout())
+func brokerPreparationRequest(ctx context.Context, client *http.Client, url, token string, payload []byte, maxBody int64) (int, []byte, error) {
+	deadline := time.Now().Add(brokerPreparationRetryWindow)
 	for attempt := 0; ; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		if err != nil {
@@ -1158,7 +1161,7 @@ func brokerPreparationRequest(ctx context.Context, client *http.Client, url, tok
 		if err != nil {
 			return 0, nil, err
 		}
-		body, readErr := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
 		response.Body.Close()
 		if readErr != nil {
 			return response.StatusCode, nil, readErr
@@ -1176,7 +1179,7 @@ func brokerPreparationRequest(ctx context.Context, client *http.Client, url, tok
 		select {
 		case <-ctx.Done():
 			return 0, nil, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(brokerPreparationRetryInterval):
 		}
 	}
 }
@@ -3587,6 +3590,7 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			{Name: "NVT_DIND_DATA_ROOT", Value: dindDataRoot},
 			{Name: "NVT_DIND_IMAGE_SIZE_BYTES", Value: strconv.FormatInt(dindImageSizeBytes(agentRun), 10)},
 			{Name: "NVT_DIND_PERSISTENT_STORAGE", Value: strconv.FormatBool(AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent)},
+			{Name: "NVT_DIND_TRANSPARENT", Value: strconv.FormatBool(AgentRunEgressTransparent(agentRun))},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			Privileged: ptrTo(true),

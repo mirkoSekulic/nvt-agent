@@ -153,13 +153,14 @@ run_entrypoint() {
     NVT_DIND_DEVICE_DIR="${FIXTURE}/dev" \
     NVT_DIND_IMAGE_SIZE_BYTES=1073741824 \
     NVT_DIND_PERSISTENT_STORAGE="${FAKE_PERSISTENT_STORAGE:-false}" \
+    NVT_DIND_TRANSPARENT="${FAKE_DIND_TRANSPARENT:-false}" \
     "${ENTRYPOINT}" --host=tcp://127.0.0.1:2375 --tls=false
 }
 
 new_fixture non-virtiofs
 export FAKE_FS_TYPE=ext4
 run_entrypoint
-grep -q '^dockerd --bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24 --host=tcp://127.0.0.1:2375 --tls=false$' "${FAKE_LOG}"
+grep -q '^dockerd --host=tcp://127.0.0.1:2375 --tls=false$' "${FAKE_LOG}"
 if grep -Eq '^(truncate|mkfs\.ext4|losetup|e2fsck|mount) ' "${FAKE_LOG}"; then
   echo "non-virtiofs startup changed Docker storage" >&2
   exit 1
@@ -205,6 +206,7 @@ grep -q 'could not detect the filesystem backing the Docker data root' "${FIXTUR
 
 new_fixture new-image
 export FAKE_FS_TYPE=virtiofs
+export FAKE_DIND_TRANSPARENT=true
 export FAKE_NEED_LOOP_NODES=1
 run_entrypoint
 [[ -f "${FIXTURE}/backing/docker-data.ext4" ]]
