@@ -25,6 +25,9 @@ except (FileNotFoundError, json.JSONDecodeError):
 args = sys.argv[1:]
 with open(log_file, "a") as out:
     out.write(" ".join(args) + "\n")
+command = args
+if command[:2] == ["--log-level", "debug"]:
+    command = command[2:]
 if args[:2] == ["network", "inspect"]:
     name = args[2]
     if name not in state:
@@ -39,7 +42,7 @@ elif args[:2] == ["network", "create"]:
                    "Options": {"com.docker.network.bridge.enable_ip_masquerade": "true"}}
     json.dump(state, open(state_file, "w"))
     print(name)
-elif args[:2] == ["system", "prune"]:
+elif command[:2] == ["system", "prune"]:
     json.dump({}, open(state_file, "w"))
 elif args == ["version"]:
     print("fake Docker")
@@ -56,7 +59,7 @@ else:
 		"FAKE_DOCKER_LOG="+log,
 	)
 	wrapper := filepath.Join(root, "runtime/core/docker-wrapper.sh")
-	for _, args := range [][]string{{"version"}, {"system", "prune"}} {
+	for _, args := range [][]string{{"version"}, {"--log-level", "debug", "system", "prune"}} {
 		command := exec.Command(wrapper, args...)
 		command.Env = env
 		if output, err := command.CombinedOutput(); err != nil {
@@ -88,15 +91,51 @@ else:
 	}
 }
 
+func TestDockerWrapperRejectsPerCommandDaemonOverrides(t *testing.T) {
+	root := repoRoot(t)
+	temp := t.TempDir()
+	log := filepath.Join(temp, "docker.log")
+	fake := filepath.Join(temp, "docker-real")
+	ensure := filepath.Join(temp, "ensure")
+	mustWriteExecutable(t, fake, "#!/bin/sh\nprintf 'docker:%s\\n' \"$*\" >>\"$FAKE_DOCKER_LOG\"\n")
+	mustWriteExecutable(t, ensure, "#!/bin/sh\nprintf 'ensure\\n' >>\"$FAKE_DOCKER_LOG\"\n")
+	env := append(os.Environ(),
+		`NVT_DOCKER_REQUIRED_NETWORKS=[{"name":"kind","subnet":"172.31.250.0/24"}]`,
+		"NVT_DOCKER_REAL_BIN="+fake,
+		"NVT_DOCKER_ENSURE_BIN="+ensure,
+		"FAKE_DOCKER_LOG="+log,
+	)
+	wrapper := filepath.Join(root, "runtime/core/docker-wrapper.sh")
+	for _, args := range [][]string{
+		{"--context", "default", "version"},
+		{"--context=default", "version"},
+		{"-H", "tcp://127.0.0.1:2375", "version"},
+		{"-Htcp://127.0.0.1:2375", "version"},
+		{"--host=tcp://127.0.0.1:2375", "version"},
+	} {
+		command := exec.Command(wrapper, args...)
+		command.Env = env
+		output, err := command.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "daemon-selection overrides are not supported") {
+			t.Fatalf("configured wrapper did not reject daemon override %v safely: err=%v output=%q", args, err, output)
+		}
+	}
+	if contents, err := os.ReadFile(log); err == nil && len(contents) != 0 {
+		t.Fatalf("daemon override ran preflight or Docker command:\n%s", contents)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 func TestDockerWrapperWithoutRequiredNetworksIsPassThrough(t *testing.T) {
 	root := repoRoot(t)
 	temp := t.TempDir()
 	fake := filepath.Join(temp, "docker-real")
 	mustWriteExecutable(t, fake, "#!/bin/sh\nprintf 'real:%s\\n' \"$*\"\n")
-	command := exec.Command(filepath.Join(root, "runtime/core/docker-wrapper.sh"), "version")
+	command := exec.Command(filepath.Join(root, "runtime/core/docker-wrapper.sh"), "--context", "default", "version")
 	command.Env = []string{"PATH=" + os.Getenv("PATH"), "NVT_DOCKER_REAL_BIN=" + fake}
 	output, err := command.CombinedOutput()
-	if err != nil || string(output) != "real:version\n" {
+	if err != nil || string(output) != "real:--context default version\n" {
 		t.Fatalf("unconfigured wrapper changed Docker behavior: err=%v output=%q", err, output)
 	}
 }

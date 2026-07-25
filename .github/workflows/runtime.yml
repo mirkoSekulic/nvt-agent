@@ -88,3 +88,17 @@ jobs:
           EXPORT_PLUGIN_TOOLS_BIN: python3 ${{ github.workspace }}/runtime/core/export-plugin-tools.py
           RUN_PLUGINS_BIN: python3 ${{ github.workspace }}/runtime/core/run-plugins.py
         run: go test -v ./...
+
+  required-docker-network:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+      - name: Install exact kind regression version
+        run: go install sigs.k8s.io/kind@v0.32.0
+      - name: Run Docker prune and nested kind network smoke
+        run: bash tests/runtime/kind-required-network-smoke.sh

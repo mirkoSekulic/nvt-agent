@@ -176,10 +176,24 @@ unused required network removed by that command is therefore restored
 synchronously before the next command. An incompatible same-name network
 fails loudly and is never deleted or rewritten.
 
+The wrapper and reconciler must address the same daemon. Set `DOCKER_HOST` or
+`DOCKER_CONTEXT` in the process environment when selecting a non-default
+daemon. While required networks are configured, per-command daemon, context,
+client-config, and TLS overrides are rejected before either reconciliation or
+the requested Docker command runs. Benign global options such as
+`--log-level` remain supported, including for synchronous post-prune repair.
+
 This does not expose the host socket, widen the agent security context, or
 bypass transparent capture and NetworkPolicy. Programs that deliberately
 bypass the `docker` CLI and call the Docker API directly do not receive the
 point-of-use reconciliation guarantee.
+
+The hermetic Docker 27.5.1/kind v0.32.0 CI smoke proves the generic network is
+recreated after a full prune and can host a Ready nested kind control plane.
+Issue #147 still requires a separate staging acceptance gate under the real
+AKS `kata-vm-isolation` execution profile: repeat the prune-and-create flow and
+run the representative Altinn Runtime kind test. The hermetic smoke is not a
+substitute for, and must not be reported as, that real-Kata result.
 
 ## Egress
 
