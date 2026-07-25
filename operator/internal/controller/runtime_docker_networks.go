@@ -25,6 +25,13 @@ func ValidateAgentRunDockerNetworks(agentRun *nvtv1alpha1.AgentRun) error {
 	return validateRuntimeDockerNetworks(agentRun.Spec.Runtime)
 }
 
+// AgentRunDockerKernelLogDevice reports whether the administrator-owned
+// runtime profile requests a kernel-log device for nested privileged Docker
+// workloads.
+func AgentRunDockerKernelLogDevice(agentRun *nvtv1alpha1.AgentRun) bool {
+	return agentRun != nil && agentRun.Spec.Runtime.Docker != nil && agentRun.Spec.Runtime.Docker.KernelLogDevice
+}
+
 func validateRuntimeDockerNetworks(runtime nvtv1alpha1.AgentRunRuntime) error {
 	if runtime.Docker == nil {
 		return nil

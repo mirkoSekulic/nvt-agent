@@ -1095,6 +1095,79 @@ func TestAgentRunRequiredDockerNetworksValidationDeepCopyAndPodRendering(t *test
 	}
 }
 
+func TestAgentRunDockerKernelLogDeviceDeepCopyAndPodRendering(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: true}
+	copy := run.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	copy.Spec.Runtime.Docker.KernelLogDevice = false
+	if !run.Spec.Runtime.Docker.KernelLogDevice {
+		t.Fatal("kernel-log device intent was not deep-copied")
+	}
+
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(requireInitContainer(t, *pod, "docker"), "NVT_DIND_KERNEL_LOG_DEVICE"); got != "true" {
+		t.Fatalf("DinD kernel-log device intent = %q, want true", got)
+	}
+	for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		if container.Name != "docker" && envValue(container, "NVT_DIND_KERNEL_LOG_DEVICE") != "" {
+			t.Fatalf("kernel-log device intent leaked to %q", container.Name)
+		}
+	}
+
+	omitted := testAgentRun()
+	disabled := testAgentRun()
+	disabled.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: false}
+	for name, candidate := range map[string]*nvtv1alpha1.AgentRun{"omitted": omitted, "disabled": disabled} {
+		encoded, err := json.Marshal(candidate.Spec.Runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "kernelLogDevice") {
+			t.Fatalf("%s false/default kernel-log intent was serialized: %s", name, encoded)
+		}
+	}
+
+	defaultPod, err := DesiredAgentPod(omitted, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabledPod, err := DesiredAgentPod(disabled, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(defaultPod, disabledPod) {
+		t.Fatal("explicit false changed the default AgentRun Pod")
+	}
+	for _, container := range append(append([]corev1.Container(nil), defaultPod.Spec.InitContainers...), defaultPod.Spec.Containers...) {
+		if envValue(container, "NVT_DIND_KERNEL_LOG_DEVICE") != "" {
+			t.Fatalf("default AgentRun rendered kernel-log device intent into %q", container.Name)
+		}
+	}
+
+	// Removing the one opt-in variable must leave the complete enabled Pod
+	// identical to the omitted baseline, including privilege, mounts, and
+	// RuntimeClass selection.
+	normalized := pod.DeepCopy()
+	for i := range normalized.Spec.InitContainers {
+		if normalized.Spec.InitContainers[i].Name != "docker" {
+			continue
+		}
+		env := normalized.Spec.InitContainers[i].Env[:0]
+		for _, item := range normalized.Spec.InitContainers[i].Env {
+			if item.Name != "NVT_DIND_KERNEL_LOG_DEVICE" {
+				env = append(env, item)
+			}
+		}
+		normalized.Spec.InitContainers[i].Env = env
+	}
+	if !reflect.DeepEqual(defaultPod, normalized) {
+		t.Fatal("kernel-log opt-in changed Pod fields other than the DinD environment")
+	}
+}
+
 func TestAgentCapabilityDoesNotReachTransparentOrEgressContainers(t *testing.T) {
 	run := transparentAgentRun(t)
 	run.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
@@ -4840,6 +4913,23 @@ func TestAgentRunCRDSchemaIncludesRequiredDockerNetworks(t *testing.T) {
 	if fmt.Sprint(networks["maxItems"]) != "16" || networks["x-kubernetes-list-type"] != "map" ||
 		fmt.Sprint(crdPath(t, networks, "items", "properties", "subnet", "pattern")) != `^172\.31\.[0-9]{1,3}\.0/24$` {
 		t.Fatalf("AgentRun required Docker network schema incomplete: %#v", networks)
+	}
+}
+
+func TestAgentRunCRDSchemaIncludesDockerKernelLogDevice(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatal(err)
+	}
+	if got := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties", "spec", "properties",
+		"runtime", "properties", "docker", "properties", "kernelLogDevice", "type",
+	); got != "boolean" {
+		t.Fatalf("AgentRun Docker kernel-log device schema type = %#v", got)
 	}
 }
 

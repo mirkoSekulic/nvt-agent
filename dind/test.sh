@@ -86,6 +86,16 @@ printf 'mknod %s\n' "$*" >>"${FAKE_LOG}"
 : >"$1"
 FAKE
 
+cat >"${BIN}/stat" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${*: -1}" == */kmsg ]]; then
+  printf '%s\n' "${FAKE_KMSG_STAT:-21b6:1:b}"
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+FAKE
+
 cat >"${BIN}/e2fsck" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -153,6 +163,7 @@ new_fixture() {
   unset FAKE_REPORT_LOST_LOOP
   unset FAKE_LOOP_DETACH_FAIL
   unset FAKE_PERSISTENT_STORAGE
+  unset FAKE_KERNEL_LOG_DEVICE FAKE_KMSG_STAT
 }
 
 run_entrypoint() {
@@ -164,6 +175,7 @@ run_entrypoint() {
     NVT_DIND_IMAGE_SIZE_BYTES=1073741824 \
     NVT_DIND_PERSISTENT_STORAGE="${FAKE_PERSISTENT_STORAGE:-false}" \
     NVT_DIND_TRANSPARENT="${FAKE_DIND_TRANSPARENT:-false}" \
+    NVT_DIND_KERNEL_LOG_DEVICE="${FAKE_KERNEL_LOG_DEVICE:-false}" \
     "${ENTRYPOINT}" --host=tcp://127.0.0.1:2375 --tls=false
 }
 
@@ -189,6 +201,75 @@ assert_docker_not_started() {
     exit 1
   fi
 }
+
+new_fixture kernel-log-device-off
+export FAKE_FS_TYPE=ext4
+printf 'leave-untouched' >"${FIXTURE}/dev/kmsg"
+run_entrypoint
+grep -qx 'leave-untouched' "${FIXTURE}/dev/kmsg"
+if grep -q '^mknod .*/kmsg ' "${FAKE_LOG}"; then
+  echo "disabled kernel-log device changed the device filesystem" >&2
+  exit 1
+fi
+
+new_fixture kernel-log-device-create
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+run_entrypoint
+grep -q '^mknod .*/dev/kmsg c 1 11$' "${FAKE_LOG}"
+[[ "$(/usr/bin/stat -c '%a' "${FIXTURE}/dev/kmsg")" == 600 ]]
+assert_vendor_handoff '--host=tcp://127.0.0.1:2375 --tls=false'
+
+new_fixture kernel-log-device-existing
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=true
+printf 'existing-device' >"${FIXTURE}/dev/kmsg"
+export FAKE_KMSG_STAT=21b6:1:b
+run_entrypoint
+grep -qx 'existing-device' "${FIXTURE}/dev/kmsg"
+if grep -q '^mknod .*/kmsg ' "${FAKE_LOG}"; then
+  echo "existing valid kernel-log device was replaced" >&2
+  exit 1
+fi
+
+for invalid in regular directory wrong-device symlink; do
+  new_fixture "kernel-log-device-${invalid}"
+  export FAKE_FS_TYPE=ext4
+  export FAKE_KERNEL_LOG_DEVICE=true
+  case "${invalid}" in
+    regular)
+      : >"${FIXTURE}/dev/kmsg"
+      export FAKE_KMSG_STAT=81a4:0:0
+      ;;
+    directory)
+      mkdir "${FIXTURE}/dev/kmsg"
+      export FAKE_KMSG_STAT=41ed:0:0
+      ;;
+    wrong-device)
+      : >"${FIXTURE}/dev/kmsg"
+      export FAKE_KMSG_STAT=21b6:1:a
+      ;;
+    symlink)
+      ln -s "${FIXTURE}/outside" "${FIXTURE}/dev/kmsg"
+      ;;
+  esac
+  if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+    echo "invalid ${invalid} kernel-log path was accepted" >&2
+    exit 1
+  fi
+  grep -q 'kernel-log device' "${FIXTURE}/stderr"
+  assert_docker_not_started
+done
+
+new_fixture invalid-kernel-log-intent
+export FAKE_FS_TYPE=ext4
+export FAKE_KERNEL_LOG_DEVICE=maybe
+if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
+  echo "invalid kernel-log device intent was accepted" >&2
+  exit 1
+fi
+grep -q 'kernel-log device intent must be true or false' "${FIXTURE}/stderr"
+assert_docker_not_started
 
 new_fixture non-virtiofs
 export FAKE_FS_TYPE=ext4

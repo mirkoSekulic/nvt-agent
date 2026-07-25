@@ -107,14 +107,16 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
 	profileInstructions := "Prefer repository-local checks.\n\n- Keep commits focused.\n"
 	schedule.Spec.Profiles[0].WorkspaceInstructions = profileInstructions
-	schedule.Spec.Profiles[0].Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{
+	schedule.Spec.Profiles[0].Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: true, RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{
 		{Name: "kind", Subnet: "172.31.250.0/24"},
 	}}
 	scheduleCopy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	scheduleCopy.Spec.Profiles[0].WorkspaceInstructions = "copy changed"
 	scheduleCopy.Spec.Profiles[0].Runtime.Docker.RequiredNetworks[0].Name = "changed"
+	scheduleCopy.Spec.Profiles[0].Runtime.Docker.KernelLogDevice = false
 	if schedule.Spec.Profiles[0].WorkspaceInstructions != profileInstructions ||
-		schedule.Spec.Profiles[0].Runtime.Docker.RequiredNetworks[0].Name != "kind" {
+		schedule.Spec.Profiles[0].Runtime.Docker.RequiredNetworks[0].Name != "kind" ||
+		!schedule.Spec.Profiles[0].Runtime.Docker.KernelLogDevice {
 		t.Fatal("AgentSchedule profile runtime fields were not deep-copied")
 	}
 	runtimeClassName := "kata-vm-isolation"
@@ -139,7 +141,7 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 		t.Fatalf("workspace instructions were not snapshotted exactly: %q", defaultRun.Spec.Agent.WorkspaceInstructions)
 	}
 	if got := defaultRun.Spec.Runtime.Docker; got == nil || len(got.RequiredNetworks) != 1 ||
-		got.RequiredNetworks[0].Name != "kind" || got.RequiredNetworks[0].Subnet != "172.31.250.0/24" {
+		got.RequiredNetworks[0].Name != "kind" || got.RequiredNetworks[0].Subnet != "172.31.250.0/24" || !got.KernelLogDevice {
 		t.Fatalf("required Docker network was not snapshotted: %#v", got)
 	}
 	if defaultRun.Spec.Agent.WorkflowInstructions != "" || defaultRun.Spec.ProfileProvenance.SelectedWorkflow != "" {
@@ -147,11 +149,15 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	}
 	schedule.Spec.Profiles[0].WorkspaceInstructions = "changed after admission"
 	schedule.Spec.Profiles[0].Runtime.Docker.RequiredNetworks[0].Subnet = "172.31.249.0/24"
+	schedule.Spec.Profiles[0].Runtime.Docker.KernelLogDevice = false
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatal("resolved AgentRun workspace instructions alias the AgentSchedule profile")
 	}
 	if defaultRun.Spec.Runtime.Docker.RequiredNetworks[0].Subnet != "172.31.250.0/24" {
 		t.Fatal("resolved AgentRun Docker network aliases the AgentSchedule profile")
+	}
+	if !defaultRun.Spec.Runtime.Docker.KernelLogDevice {
+		t.Fatal("resolved AgentRun kernel-log device intent aliases the AgentSchedule profile")
 	}
 	if defaultRun.Spec.RuntimeClassName == nil || *defaultRun.Spec.RuntimeClassName != runtimeClassName ||
 		!reflect.DeepEqual(defaultRun.Spec.Resources, schedule.Spec.Template.Resources) ||
@@ -528,6 +534,9 @@ func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 		}}}},
 		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
 			"docker": map[string]any{"requiredNetworks": []any{map[string]any{"name": "kind", "subnet": "172.31.250.0/24"}}},
+		}}}},
+		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
+			"docker": map[string]any{"kernelLogDevice": true},
 		}}}},
 		{"broker": map[string]any{"grants": []any{}}},
 		{"profile": "claude-john"},

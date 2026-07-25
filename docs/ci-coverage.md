@@ -107,6 +107,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 - `tests/runtime/git_credentials_smoke.sh` → `images.yml / build` (runtime
   matrix entry)
+- `dind/test.sh` and `tests/runtime/dind-kmsg-device-smoke.sh` → `images.yml / build`
+  (DinD matrix entry; the integration smoke runs against the image built by
+  that job)
 
 ### kind workflow case files
 

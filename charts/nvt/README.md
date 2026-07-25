@@ -24,10 +24,11 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.22`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.23`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
-Docker networks, dedicated Docker storage size, broker grant preparations,
-profile workspace instructions, or workflow producer policies.
+Docker networks, the Docker kernel-log device control, dedicated Docker
+storage size, broker grant preparations, profile workspace instructions, or
+workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -44,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.22 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.23 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.22 --namespace nvt --create-namespace
+  --version 0.8.23 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -333,6 +334,31 @@ remove the contract. Subnets must be unique and inside the managed
 `172.31.0.0/16` pool;
 IPv6, dual-stack, malformed, and incompatible existing networks fail closed.
 Omitting the field preserves existing Docker behavior.
+
+The same profile block can opt into a kernel-log device for nested privileged
+system workloads:
+
+```yaml
+agentSchedule:
+  profiles:
+    - name: nested-system-codex
+      runtime:
+        type: codex
+        autonomy: trusted-local
+        docker:
+          kernelLogDevice: true
+      # agentRuntimeConfig, egress, and broker fields omitted
+```
+
+Only the privileged DinD sidecar prepares the real `/dev/kmsg` character
+device (major 1, minor 11); the untrusted agent container receives neither the
+setting nor the device. Omission remains false.
+
+**Security boundary:** outside a microVM-backed RuntimeClass, exposing
+`/dev/kmsg` can expose the Kubernetes node kernel log to nested privileged
+workloads. Enable it only in an administrator-approved microVM execution
+profile. Invalid existing paths or device numbers fail DinD startup rather
+than being replaced.
 
 Execution profiles may append reusable administrator-owned workspace guidance:
 

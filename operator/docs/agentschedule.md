@@ -77,6 +77,7 @@ profiles:
       type: codex
       autonomy: trusted-local
       docker:
+        kernelLogDevice: true
         requiredNetworks:
           - name: kind
             subnet: 172.31.250.0/24
@@ -87,6 +88,12 @@ The selected network list is deep-copied into the AgentRun and cannot be
 supplied by producer admission. It is reconciled at the Docker CLI boundary,
 including after pruning. Only canonical IPv4 `/24` networks inside the managed
 pool are supported; IPv6 and dual-stack requests fail closed.
+
+`kernelLogDevice` is independently optional and defaults false. It is
+snapshotted from the administrator-owned profile and reaches only DinD. Enable
+it only for approved microVM-backed profiles: on an ordinary container runtime
+the nested privileged workload may otherwise gain access to the Kubernetes
+node kernel log. Producers cannot submit or override this control.
 
 For new deployments that need producer-selectable workflows, keep execution
 credentials in `profiles` and define guidance independently:

@@ -19,6 +19,7 @@ run_dir="${NVT_DIND_RUN_DIR:-/run/nvt-dind}"
 device_dir="${NVT_DIND_DEVICE_DIR:-/dev}"
 image_size_bytes="${NVT_DIND_IMAGE_SIZE_BYTES:-21474836480}"
 persistent_storage="${NVT_DIND_PERSISTENT_STORAGE:-false}"
+kernel_log_device="${NVT_DIND_KERNEL_LOG_DEVICE:-false}"
 image="${backing_dir}/docker-data.ext4"
 creating="${backing_dir}/.docker-data.ext4.creating"
 required_driver_file="${run_dir}/required-storage-driver"
@@ -27,6 +28,30 @@ fail() {
   printf 'nvt-dind: %s\n' "$1" >&2
   exit 1
 }
+
+ensure_kernel_log_device() {
+  kmsg="${device_dir}/kmsg"
+  if [ -L "${kmsg}" ]; then
+    fail "kernel-log device path must not be a symlink"
+  fi
+  if [ ! -e "${kmsg}" ]; then
+    mkdir -p "${device_dir}"
+    (umask 077; mknod "${kmsg}" c 1 11) || fail "could not create the kernel-log character device"
+    chmod 0600 "${kmsg}" || fail "could not restrict the kernel-log character device"
+  fi
+  metadata="$(stat -c '%f:%t:%T' -- "${kmsg}" 2>/dev/null)" ||
+    fail "could not inspect the kernel-log device"
+  case "${metadata}" in
+    2???:1:b) ;;
+    *) fail "kernel-log device path is not character device 1:11" ;;
+  esac
+}
+
+case "${kernel_log_device}" in
+  true) ensure_kernel_log_device ;;
+  false) ;;
+  *) fail "kernel-log device intent must be true or false" ;;
+esac
 
 mkdir -p "${data_root}" "${run_dir}"
 rm -f "${required_driver_file}"
