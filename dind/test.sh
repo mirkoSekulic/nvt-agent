@@ -117,6 +117,15 @@ set -euo pipefail
 printf 'dockerd %s\n' "$*" >>"${FAKE_LOG}"
 FAKE
 
+# Stands in for the base image's Docker entrypoint, which runs the upstream
+# cgroup-v2 nesting setup before executing the requested command.
+cat >"${BIN}/dockerd-entrypoint.sh" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'dockerd-entrypoint.sh %s\n' "$*" >>"${FAKE_LOG}"
+exec "$@"
+FAKE
+
 cat >"${BIN}/docker" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -158,10 +167,33 @@ run_entrypoint() {
     "${ENTRYPOINT}" --host=tcp://127.0.0.1:2375 --tls=false
 }
 
+# Docker must always start through the base image's entrypoint so the upstream
+# cgroup-v2 nesting setup runs, and the prepared dockerd arguments must survive
+# that handoff unchanged.
+assert_vendor_handoff() {
+  local expected_args="$1"
+  local handoff_line dockerd_line
+  if ! grep -qx "dockerd-entrypoint.sh dockerd ${expected_args}" "${FAKE_LOG}"; then
+    echo "Docker did not start through the base image entrypoint with: dockerd ${expected_args}" >&2
+    exit 1
+  fi
+  grep -qx "dockerd ${expected_args}" "${FAKE_LOG}"
+  handoff_line="$(grep -nx "dockerd-entrypoint.sh dockerd ${expected_args}" "${FAKE_LOG}" | head -n 1 | cut -d: -f1)"
+  dockerd_line="$(grep -nx "dockerd ${expected_args}" "${FAKE_LOG}" | head -n 1 | cut -d: -f1)"
+  [[ "${handoff_line}" -lt "${dockerd_line}" ]]
+}
+
+assert_docker_not_started() {
+  if grep -Eq '^dockerd(-entrypoint\.sh)? ' "${FAKE_LOG}"; then
+    echo "Docker startup continued after a fatal storage error" >&2
+    exit 1
+  fi
+}
+
 new_fixture non-virtiofs
 export FAKE_FS_TYPE=ext4
 run_entrypoint
-grep -q '^dockerd --host=tcp://127.0.0.1:2375 --tls=false$' "${FAKE_LOG}"
+assert_vendor_handoff '--host=tcp://127.0.0.1:2375 --tls=false'
 if grep -Eq '^(truncate|mkfs\.ext4|losetup|e2fsck|mount) ' "${FAKE_LOG}"; then
   echo "non-virtiofs startup changed Docker storage" >&2
   exit 1
@@ -173,7 +205,7 @@ export FAKE_PERSISTENT_STORAGE=true
 run_entrypoint
 grep -q '^mkfs.ext4 -q -F .*\.creating$' "${FAKE_LOG}"
 grep -q '^mount -t ext4 -o noatime /dev/loop0 .*/data$' "${FAKE_LOG}"
-grep -q '^dockerd .*--storage-driver=overlay2$' "${FAKE_LOG}"
+assert_vendor_handoff '--host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2'
 printf 'persistent-docker-state' >"${FIXTURE}/backing/docker-data.ext4"
 rm -f "${FAKE_MOUNT_MARKER}" "${FAKE_ASSOCIATED_MARKER}"
 : >"${FAKE_LOG}"
@@ -184,7 +216,7 @@ if grep -Eq '^(truncate|mkfs\.ext4) ' "${FAKE_LOG}"; then
   exit 1
 fi
 grep -qx persistent-docker-state "${FIXTURE}/backing/docker-data.ext4"
-grep -q '^dockerd .*--storage-driver=overlay2$' "${FAKE_LOG}"
+assert_vendor_handoff '--host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2'
 
 new_fixture invalid-persistence-intent
 export FAKE_FS_TYPE=ext4
@@ -194,7 +226,7 @@ if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
   exit 1
 fi
 grep -q 'persistent storage intent must be true or false' "${FIXTURE}/stderr"
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture detection-failure
 export FAKE_FINDMNT_FAIL=1
@@ -203,7 +235,7 @@ if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
   exit 1
 fi
 grep -q 'could not detect the filesystem backing the Docker data root' "${FIXTURE}/stderr"
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture new-image
 export FAKE_FS_TYPE=virtiofs
@@ -221,7 +253,7 @@ grep -q '^losetup -d /dev/loop0$' "${FAKE_LOG}"
 mount_line="$(grep -n '^mount -t ext4 -o noatime /dev/loop0 ' "${FAKE_LOG}" | cut -d: -f1)"
 detach_line="$(grep -n '^losetup -d /dev/loop0$' "${FAKE_LOG}" | cut -d: -f1)"
 [[ "${mount_line}" -lt "${detach_line}" ]]
-grep -q '^dockerd --bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24 --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2$' "${FAKE_LOG}"
+assert_vendor_handoff '--bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24 --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2'
 grep -qx overlay2 "${FIXTURE}/run/required-storage-driver"
 
 new_fixture missing-discovered-loop-node
@@ -251,7 +283,7 @@ printf 'existing-canonical-image' >"${FIXTURE}/backing/docker-data.ext4"
 run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr" &
 recovery_pid=$!
 sleep 0.2
-if grep -q '^dockerd ' "${FAKE_LOG}"; then
+if grep -Eq '^dockerd(-entrypoint\.sh)? ' "${FAKE_LOG}"; then
   echo "dockerd started before delayed filesystem recovery completed" >&2
   exit 1
 fi
@@ -266,7 +298,7 @@ if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
   exit 1
 fi
 grep -q 'partial Docker backing image exists' "${FIXTURE}/stderr"
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture symlink-image
 export FAKE_FS_TYPE=virtiofs
@@ -278,7 +310,7 @@ if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
 fi
 grep -q 'backing image is not a regular file' "${FIXTURE}/stderr"
 grep -qx outside "${FIXTURE}/outside"
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture format-failure
 export FAKE_FS_TYPE=virtiofs
@@ -290,7 +322,7 @@ fi
 grep -q 'could not format the new Docker backing image' "${FIXTURE}/stderr"
 [[ -f "${FIXTURE}/backing/.docker-data.ext4.creating" ]]
 [[ ! -e "${FIXTURE}/backing/docker-data.ext4" ]]
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture corrupt-image
 export FAKE_FS_TYPE=virtiofs
@@ -303,7 +335,7 @@ fi
 grep -q 'backing filesystem check failed' "${FIXTURE}/stderr"
 grep -qx 'do-not-destroy' "${FIXTURE}/backing/docker-data.ext4"
 ! grep -q '^mkfs.ext4 ' "${FAKE_LOG}"
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture mount-failure
 export FAKE_FS_TYPE=virtiofs
@@ -315,7 +347,7 @@ if run_entrypoint >"${FIXTURE}/stdout" 2>"${FIXTURE}/stderr"; then
 fi
 grep -q 'could not mount the Docker backing filesystem' "${FIXTURE}/stderr"
 grep -qx 'do-not-destroy' "${FIXTURE}/backing/docker-data.ext4"
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture detach-failure
 export FAKE_FS_TYPE=virtiofs
@@ -328,7 +360,7 @@ fi
 grep -q 'could not mark the Docker loop device for automatic cleanup' "${FIXTURE}/stderr"
 grep -qx 'do-not-destroy' "${FIXTURE}/backing/docker-data.ext4"
 grep -q '^umount .*/data$' "${FAKE_LOG}"
-! grep -q '^dockerd ' "${FAKE_LOG}"
+assert_docker_not_started
 
 new_fixture driver-check
 printf 'overlay2\n' >"${FIXTURE}/run/required-storage-driver"

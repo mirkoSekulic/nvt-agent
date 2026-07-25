@@ -34,6 +34,10 @@ precise and every hermetic suite has a clear home.
 - `tests/runtime/plugin_exports_test.go`
 - `tests/runtime/smoke_complete_test.go`
 - `tests/runtime/compose-transparent-smoke.sh` → `network.yml / transparent-smoke`
+- `tests/runtime/kind-required-network-smoke.sh` → `runtime.yml` job
+  `required-docker-network`. The smoke exercises the production DinD
+  entrypoint, so the job builds the `nvt-dind` image (`make dind-build`) before
+  running it, and `runtime.yml` includes `dind/**` in its path filters.
 
 ### agentd
 
@@ -137,7 +141,8 @@ The harness and helper scripts are not standalone cases:
 
 ## Workflow summary
 
-- `runtime.yml`: agentd and runtime conformance suites
+- `runtime.yml`: agentd and runtime conformance suites plus the nested kind
+  required-Docker-network smoke
 - `broker.yml`: broker conformance suite
 - `network.yml`: egressd, captured, and transparent Compose smoke
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage

@@ -3,7 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KIND_BIN="${KIND_BIN:-kind}"
-DIND_IMAGE="${NVT_KIND_DIND_IMAGE:-docker:27.5.1-dind}"
+# The regression must run against the production NVT DinD image: its entrypoint
+# is what prepares storage/network arguments and hands startup back to the base
+# image's Docker entrypoint. Stock docker:dind would silently pass while the
+# NVT entrypoint was broken.
+DIND_IMAGE="${NVT_DIND_TEST_IMAGE:-nvt-dind:latest}"
 NETWORK_SUBNET="${NVT_KIND_NETWORK_SUBNET:-172.31.250.0/24}"
 DAEMON="nvt-required-network-$RANDOM-$$"
 CLUSTER="nvt-required-network-$RANDOM"
@@ -35,6 +39,16 @@ command -v "${KIND_BIN}" >/dev/null || { echo "kind is required" >&2; exit 2; }
 "${KIND_BIN}" version | grep -q 'kind v0.32.0' || {
   echo "kind v0.32.0 is required for this regression" >&2
   exit 2
+}
+
+outer_docker image inspect "${DIND_IMAGE}" >/dev/null 2>&1 || {
+  echo "required DinD image ${DIND_IMAGE} is missing; run: make dind-build DIND_IMAGE=${DIND_IMAGE}" >&2
+  exit 1
+}
+outer_docker image inspect "${DIND_IMAGE}" --format '{{index .Config.Entrypoint 0}}' |
+  grep -qx /usr/local/bin/nvt-dind-entrypoint || {
+  echo "${DIND_IMAGE} is not the NVT DinD image" >&2
+  exit 1
 }
 
 ln -s "${ROOT}/runtime/core/docker-wrapper.sh" "${WORKDIR}/docker"
@@ -76,6 +90,32 @@ for _ in $(seq 1 60); do
 done
 docker info >/dev/null
 
+# The NVT entrypoint must hand startup back to the base image's Docker
+# entrypoint, which injects docker-init as PID 1 and runs the upstream
+# cgroup-v2 nesting setup. Executing dockerd directly leaves dockerd as PID 1
+# and skips that setup.
+outer_docker exec "${DAEMON}" cat /proc/1/comm | grep -qx docker-init || {
+  echo "DinD did not start through the base image Docker entrypoint" >&2
+  exit 1
+}
+if outer_docker exec "${DAEMON}" test -f /sys/fs/cgroup/cgroup.controllers; then
+  # Evacuating the cgroup root and enabling the delegated controllers is the
+  # nesting setup this smoke can observe. The resulting root cgroup.type also
+  # depends on the outer host's own delegation, so it is reported rather than
+  # asserted here; the AKS Kata gate is what proves the real topology.
+  outer_docker exec "${DAEMON}" test -d /sys/fs/cgroup/init || {
+    echo "DinD cgroup root was not evacuated by the base image entrypoint" >&2
+    exit 1
+  }
+  outer_docker exec "${DAEMON}" grep -q . /sys/fs/cgroup/cgroup.subtree_control || {
+    echo "DinD cgroup root has no delegated controllers" >&2
+    exit 1
+  }
+  printf 'DinD cgroup root: type=%s subtree_control=%s\n' \
+    "$(outer_docker exec "${DAEMON}" cat /sys/fs/cgroup/cgroup.type 2>/dev/null || echo domain)" \
+    "$(outer_docker exec "${DAEMON}" cat /sys/fs/cgroup/cgroup.subtree_control)"
+fi
+
 # This prune operates only on the disposable nested daemon. The wrapper must
 # recreate the unused required network synchronously before returning.
 docker system prune --all --force --volumes >/dev/null
@@ -87,4 +127,4 @@ docker network inspect kind --format '{{.EnableIPv6}} {{(index .IPAM.Config 0).S
 docker network inspect kind --format '{{.EnableIPv6}} {{(index .IPAM.Config 0).Subnet}}' |
   grep -qx "false ${NETWORK_SUBNET}"
 
-echo "kind v0.32.0 required IPv4 network smoke passed"
+printf 'kind v0.32.0 required IPv4 network smoke passed against %s\n' "${DIND_IMAGE}"
