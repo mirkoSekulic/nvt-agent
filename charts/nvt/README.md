@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.19`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.20`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, dedicated
 Docker storage size, broker grant preparations, profile workspace instructions,
 or workflow producer policies.
@@ -44,15 +44,21 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.19 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.20 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.19 --namespace nvt --create-namespace
+  --version 0.8.20 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
 installed.
+
+For transparent AgentRuns, configure `dind.protectedCIDRs` with every cluster
+Pod, Service, control-plane, broker, and deployment-denied IPv4 range. Startup
+fails closed if any configured range overlaps the managed Docker pool
+`172.30.0.0/15`; malformed CIDRs are also rejected. The defaults protect
+loopback and link-local/metadata ranges but cannot infer cluster-specific CIDRs.
 
 ## Coordinated images
 

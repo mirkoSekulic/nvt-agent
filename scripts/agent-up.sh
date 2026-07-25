@@ -67,6 +67,18 @@ python3 "$script_dir/render-managed-egress.py" \
   --mode "$egress_mode" \
   --egressd-config "$EGRESSD_CONFIG_FILE"
 
+NVT_DIND_TRANSPARENT="$(python3 - "$AGENT_CONFIG_FILE" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = yaml.safe_load(stream) or {}
+egress = config.get("egress") or {}
+print("true" if egress.get("transport") == "transparent" else "false")
+PY
+)"
+export NVT_DIND_TRANSPARENT
+
 expose_compose_file="$repo_root/.agents/$name/compose.expose.yaml"
 
 python3 "$script_dir/render-agent-expose.py" \

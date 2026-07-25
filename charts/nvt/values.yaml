@@ -14,6 +14,11 @@ runtime:
     pullPolicy: IfNotPresent
 
 dind:
+  # Include cluster Pod, Service, control-plane, broker, and other protected
+  # ranges. Transparent AgentRuns fail closed if any overlaps 172.30.0.0/15.
+  protectedCIDRs:
+    - 127.0.0.0/8
+    - 169.254.0.0/16
   image:
     repository: ghcr.io/mirkosekulic/nvt-dind
     tag: ""

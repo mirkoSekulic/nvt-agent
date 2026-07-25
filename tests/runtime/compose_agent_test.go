@@ -24,10 +24,10 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"network_mode: service:docker",
 		"condition: service_healthy",
 		"docker:",
-		"image: docker:27-dind",
+		"image: ${DIND_IMAGE:-nvt-dind:latest}",
 		"privileged: true",
 		"DOCKER_TLS_CERTDIR: \"\"",
-		"- dockerd",
+		"NVT_DIND_TRANSPARENT: ${NVT_DIND_TRANSPARENT:-false}",
 		"--host=tcp://127.0.0.1:2375",
 		"--tls=false",
 		"docker info >/dev/null 2>&1",
@@ -49,8 +49,7 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"iptables -t nat -A NVT_DIND -i br-+ -p tcp",
-		"nft add rule ip nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
-		"nft add rule ip6 nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
+		"iptables -t nat -A NVT_DIND -d 172.30.0.0/15 -j RETURN",
 		"ip6tables -t nat",
 		"profiles:",
 		"- mediated",
@@ -1422,7 +1421,7 @@ code-server: {extensions: []}
 	}, "\n")+"\n")
 	binDir := t.TempDir()
 	dockerLog := filepath.Join(binDir, "docker.calls")
-	mustWriteExecutable(t, filepath.Join(binDir, "docker"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> "+shellQuote(dockerLog)+"\nexit 0\n")
+	mustWriteExecutable(t, filepath.Join(binDir, "docker"), "#!/usr/bin/env bash\nprintf 'transparent=%s %s\\n' \"${NVT_DIND_TRANSPARENT:-unset}\" \"$*\" >> "+shellQuote(dockerLog)+"\nexit 0\n")
 
 	for attempt := range 2 {
 		cmd := exec.Command("bash", filepath.Join(root, "scripts", "agent-up.sh"), "--name", name)
@@ -1464,6 +1463,7 @@ code-server: {extensions: []}
 		t.Fatalf("git route migration did not require an explicit provider hint: %#v", egressd.ForwardProxy.InjectRoutes)
 	}
 	if calls := mustReadFile(t, dockerLog); !strings.Contains(calls, "compose") || !strings.Contains(calls, "up -d") ||
+		!strings.Contains(calls, "transparent=true") ||
 		!strings.Contains(calls, "image inspect nvt-dind:latest") ||
 		!strings.Contains(calls, "image inspect registry.example/nvt-dind:local") {
 		t.Fatalf("agent-up did not continue to Compose after migration:\n%s", calls)

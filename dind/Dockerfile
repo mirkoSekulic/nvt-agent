@@ -4,11 +4,12 @@ FROM docker:27-dind
 # sidecar prepares an ext4 loopback filesystem before dockerd starts, so bake
 # the filesystem/loop tooling into the coordinated image instead of fetching
 # packages during every AgentRun startup.
-RUN apk add --no-cache coreutils e2fsprogs nftables util-linux
+RUN apk add --no-cache coreutils e2fsprogs python3 util-linux
 
 COPY dind/nvt-dind-entrypoint.sh /usr/local/bin/nvt-dind-entrypoint
 COPY dind/nvt-dind-ready.sh /usr/local/bin/nvt-dind-ready
+COPY dind/validate-managed-cidrs.sh /usr/local/bin/nvt-validate-managed-cidrs
 
-RUN chmod 0755 /usr/local/bin/nvt-dind-entrypoint /usr/local/bin/nvt-dind-ready
+RUN chmod 0755 /usr/local/bin/nvt-dind-entrypoint /usr/local/bin/nvt-dind-ready /usr/local/bin/nvt-validate-managed-cidrs
 
 ENTRYPOINT ["/usr/local/bin/nvt-dind-entrypoint"]

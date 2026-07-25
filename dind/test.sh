@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENTRYPOINT="${ROOT}/dind/nvt-dind-entrypoint.sh"
 READY="${ROOT}/dind/nvt-dind-ready.sh"
+CIDR_VALIDATOR="${ROOT}/dind/validate-managed-cidrs.sh"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 BIN="${WORKDIR}/bin"
@@ -153,6 +154,7 @@ run_entrypoint() {
     NVT_DIND_DEVICE_DIR="${FIXTURE}/dev" \
     NVT_DIND_IMAGE_SIZE_BYTES=1073741824 \
     NVT_DIND_PERSISTENT_STORAGE="${FAKE_PERSISTENT_STORAGE:-false}" \
+    NVT_DIND_TRANSPARENT="${FAKE_DIND_TRANSPARENT:-false}" \
     "${ENTRYPOINT}" --host=tcp://127.0.0.1:2375 --tls=false
 }
 
@@ -205,6 +207,7 @@ grep -q 'could not detect the filesystem backing the Docker data root' "${FIXTUR
 
 new_fixture new-image
 export FAKE_FS_TYPE=virtiofs
+export FAKE_DIND_TRANSPARENT=true
 export FAKE_NEED_LOOP_NODES=1
 run_entrypoint
 [[ -f "${FIXTURE}/backing/docker-data.ext4" ]]
@@ -218,7 +221,7 @@ grep -q '^losetup -d /dev/loop0$' "${FAKE_LOG}"
 mount_line="$(grep -n '^mount -t ext4 -o noatime /dev/loop0 ' "${FAKE_LOG}" | cut -d: -f1)"
 detach_line="$(grep -n '^losetup -d /dev/loop0$' "${FAKE_LOG}" | cut -d: -f1)"
 [[ "${mount_line}" -lt "${detach_line}" ]]
-grep -q '^dockerd --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2$' "${FAKE_LOG}"
+grep -q '^dockerd --bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24 --host=tcp://127.0.0.1:2375 --tls=false --storage-driver=overlay2$' "${FAKE_LOG}"
 grep -qx overlay2 "${FIXTURE}/run/required-storage-driver"
 
 new_fixture missing-discovered-loop-node
@@ -342,5 +345,25 @@ export FAKE_DOCKER_DRIVER=vfs
 PATH="${BIN}:${PATH}" NVT_DIND_RUN_DIR="${FIXTURE}/run" "${READY}"
 
 bash "${ROOT}/tests/operator/kata/test.sh"
+
+validate_cidrs() {
+  docker run --rm -e NVT_DIND_PROTECTED_CIDRS="$1" -v "${CIDR_VALIDATOR}:/validator:ro" python:3.13-alpine /validator 172.30.0.0/15
+}
+validate_cidrs '10.0.0.0/8 169.254.0.0/16 fd00:1234::/48'
+for protected in 172.30.0.0/15 172.16.0.0/12 172.30.1.0/24 172.28.0.0/14 172.31.255.0/24; do
+  if validate_cidrs "${protected}" >/dev/null 2>&1; then
+    echo "overlapping protected CIDR ${protected} was accepted" >&2
+    exit 1
+  fi
+done
+if validate_cidrs 'not-a-cidr' >/dev/null 2>&1; then
+  echo "malformed protected CIDR was accepted" >&2
+  exit 1
+fi
+if validate_cidrs 'fd00:1234::/129' >/dev/null 2>&1; then
+  echo "malformed IPv6 protected CIDR was accepted" >&2
+  exit 1
+fi
+echo "nvt-dind CIDR validation test passed"
 
 echo "nvt-dind storage setup test passed"

@@ -6859,15 +6859,15 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 		t.Fatalf("net-init rules incomplete: %q", netInit.Args)
 	}
 	for _, rule := range []string{
+		"managed Docker pool overlaps protected address",
+		"hostname -i",
 		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT",
 		"iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
-		"nft add rule ip nat NVT_DIND iifname \"docker0\" fib daddr oifname \"docker0\" counter return",
-		"nft add rule ip nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
+		"iptables -t nat -A NVT_DIND -d \"$NVT_DIND_NETWORK_CIDR\" -j RETURN",
 		"ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
-		"nft add rule ip6 nat NVT_DIND iifname \"br-*\" fib daddr oifname \"br-*\" counter return",
 	} {
 		if !strings.Contains(netInit.Args[0], rule) {
 			t.Fatalf("net-init missing dynamic bridge rule %q: %q", rule, netInit.Args[0])
@@ -6875,6 +6875,9 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	}
 	if netInit.Image != DindImage() {
 		t.Fatalf("net-init image = %q, want coordinated DinD image %q", netInit.Image, DindImage())
+	}
+	if got := envValue(netInit, "NVT_DIND_PROTECTED_CIDRS"); !strings.Contains(got, "127.0.0.0/8") || !strings.Contains(got, "169.254.0.0/16") {
+		t.Fatalf("net-init protected CIDRs = %q", got)
 	}
 	if netInit.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Fatalf("net-init pull policy = %q", netInit.ImagePullPolicy)

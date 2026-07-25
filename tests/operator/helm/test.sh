@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.19" || "${CHART_APP_VERSION}" != "0.8.19" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.19, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.20" || "${CHART_APP_VERSION}" != "0.8.20" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.20, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.19' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.20' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -237,6 +237,10 @@ grep -q 'value: "80,8443"' "${EGRESS_POLICY_RENDER}" || {
 }
 grep -q 'value: "10.240.0.0/16,fd00:1234::/48"' "${EGRESS_POLICY_RENDER}" || {
   echo "chart did not render configured IPv4/IPv6 deployment exclusions" >&2
+  exit 1
+}
+grep -A1 'name: NVT_DIND_PROTECTED_CIDRS' "${EGRESS_POLICY_RENDER}" | grep -q '10.240.0.0/16 fd00:1234::/48' || {
+  echo "chart did not preserve mixed-family protected CIDRs for DinD validation" >&2
   exit 1
 }
 
@@ -552,6 +556,7 @@ for image in \
 done
 grep -A1 'name: NVT_DIND_IMAGE' "${ALL_IMAGES_RENDER}" | grep -q "ghcr.io/mirkosekulic/nvt-dind:${CHART_APP_VERSION}"
 grep -A1 'name: NVT_DIND_IMAGE_PULL_POLICY' "${ALL_IMAGES_RENDER}" | grep -q 'IfNotPresent'
+grep -A1 'name: NVT_DIND_PROTECTED_CIDRS' "${ALL_IMAGES_RENDER}" | grep -q '127.0.0.0/8 169.254.0.0/16'
 grep -q 'ghcr.io/mirkosekulic/nvt-operator:operator-override' "${COMPONENT_TAG_RENDER}"
 grep -q 'ghcr.io/mirkosekulic/nvt-dind:dind-override' "${COMPONENT_TAG_RENDER}"
 for image in \
