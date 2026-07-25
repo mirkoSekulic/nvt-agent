@@ -314,6 +314,8 @@ spec:
                           docker:
                             type: object
                             properties:
+                              kernelLogDevice:
+                                type: boolean
                               requiredNetworks:
                                 type: array
                                 maxItems: 16

@@ -8,6 +8,7 @@ RUNTIME_IMAGE="${KATA_DIND_RUNTIME_IMAGE:-}"
 STORAGE_CLASS="${KATA_DIND_STORAGE_CLASS:-}"
 DOCKER_SIZE="${KATA_DIND_DOCKER_SIZE:-30Gi}"
 TOLERATIONS_JSON="${KATA_DIND_TOLERATIONS_JSON:-[]}"
+KERNEL_LOG_DEVICE="${KATA_DIND_KERNEL_LOG_DEVICE:-false}"
 RUN_NAME="${KATA_DIND_RUN_NAME:-kata-dind-overlay2-smoke}"
 TIMEOUT="${KATA_DIND_TIMEOUT:-15m}"
 KEEP="${KATA_DIND_KEEP:-0}"
@@ -28,6 +29,7 @@ die() {
 [[ -z "${STORAGE_CLASS}" || "${STORAGE_CLASS}" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || die "KATA_DIND_STORAGE_CLASS must be normalized"
 [[ "${DOCKER_SIZE}" =~ ^[0-9]+([.][0-9]+)?([KMGTPE]i?)?$ ]] || die "KATA_DIND_DOCKER_SIZE must be a simple positive Kubernetes quantity"
 [[ "${PGADMIN_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || die "KATA_DIND_XATTR_IMAGE must use an immutable sha256 digest"
+[[ "${KERNEL_LOG_DEVICE}" == true || "${KERNEL_LOG_DEVICE}" == false ]] || die "KATA_DIND_KERNEL_LOG_DEVICE must be true or false"
 
 if ! TOLERATIONS_JSON="$(python3 - "${TOLERATIONS_JSON}" <<'PY'
 import json
@@ -67,6 +69,10 @@ storage_class_line=""
 if [[ -n "${STORAGE_CLASS}" ]]; then
   storage_class_line="  storageClassName: ${STORAGE_CLASS}"
 fi
+docker_runtime_lines=""
+if [[ "${KERNEL_LOG_DEVICE}" == true ]]; then
+  docker_runtime_lines=$'    docker:\n      kernelLogDevice: true'
+fi
 
 render_agent_run() {
   cat <<YAML
@@ -78,6 +84,7 @@ spec:
   runtime:
     type: codex
     autonomy: trusted-local
+${docker_runtime_lines}
   runtimeClassName: ${RUNTIME_CLASS}
   image: ${RUNTIME_IMAGE}
   workspace:
@@ -143,7 +150,7 @@ k -n "${NAMESPACE}" wait --for=condition=Ready "pod/${POD_NAME}" --timeout="${TI
 
 pod_json="$(mktemp)"
 k -n "${NAMESPACE}" get "pod/${POD_NAME}" -o json >"${pod_json}"
-python3 - "${pod_json}" "${RUNTIME_CLASS}" "${WORKSPACE_PVC_NAME}" "${DOCKER_PVC_NAME}" <<'PY'
+python3 - "${pod_json}" "${RUNTIME_CLASS}" "${WORKSPACE_PVC_NAME}" "${DOCKER_PVC_NAME}" "${KERNEL_LOG_DEVICE}" <<'PY'
 import json
 import sys
 
@@ -154,15 +161,19 @@ volumes = {volume["name"]: volume for volume in pod["spec"].get("volumes", [])}
 assert volumes["workspace"]["persistentVolumeClaim"]["claimName"] == sys.argv[3]
 assert volumes["docker-storage"]["persistentVolumeClaim"]["claimName"] == sys.argv[4]
 containers = pod["spec"].get("initContainers", []) + pod["spec"].get("containers", [])
+expected_kernel_log_device = sys.argv[5] == "true"
 for container in containers:
     security = container.get("securityContext", {})
     privileged = security.get("privileged") is True
     added = security.get("capabilities", {}).get("add", [])
     if container["name"] == "docker":
         assert privileged, container
+        env = {item["name"]: item.get("value", "") for item in container.get("env", [])}
+        assert (env.get("NVT_DIND_KERNEL_LOG_DEVICE") == "true") == expected_kernel_log_device, container
         assert any(mount.get("name") == "docker-storage" and mount.get("mountPath") == "/var/lib/nvt-dind" for mount in container.get("volumeMounts", [])), container
     else:
         assert not privileged, container
+        assert all(item["name"] != "NVT_DIND_KERNEL_LOG_DEVICE" for item in container.get("env", [])), container
         assert "SYS_ADMIN" not in added and "SETFCAP" not in added, container
         assert all(mount.get("name") != "docker-storage" for mount in container.get("volumeMounts", [])), container
         assert all(mount.get("mountPath") != "/var/lib/nvt-dind" for mount in container.get("volumeMounts", [])), container
@@ -177,6 +188,16 @@ k -n "${NAMESPACE}" exec "pod/${POD_NAME}" -c agent -- sh -eu -c '
   docker run --rm --entrypoint getcap "$1" /usr/bin/python3.12 \
     | grep -F "cap_net_bind_service=eip"
 ' sh "${PGADMIN_IMAGE}"
+
+if [[ "${KERNEL_LOG_DEVICE}" == true ]]; then
+  printf '[kata-dind-overlay2] verifying nested privileged kernel-log device\n'
+  k -n "${NAMESPACE}" exec "pod/${POD_NAME}" -c agent -- sh -eu -c '
+    docker run --rm --privileged busybox:1.36 sh -ec '\''
+      test -c /dev/kmsg
+      test "$(stat -c "%t:%T" /dev/kmsg)" = 1:b
+    '\''
+  '
+fi
 
 printf '[kata-dind-overlay2] running BuildKit copy/hash build\n'
 k -n "${NAMESPACE}" exec "pod/${POD_NAME}" -c agent -- sh -eu -c '

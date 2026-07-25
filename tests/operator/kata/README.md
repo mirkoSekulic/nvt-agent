@@ -11,6 +11,7 @@ KATA_DIND_NAMESPACE=nvt \
 KATA_DIND_RUNTIME_CLASS=kata-vm-isolation \
 KATA_DIND_STORAGE_CLASS=managed-csi \
 KATA_DIND_DOCKER_SIZE=30Gi \
+KATA_DIND_KERNEL_LOG_DEVICE=true \
 KATA_DIND_TOLERATIONS_JSON='[{"key":"purpose","operator":"Equal","value":"nvt-agent","effect":"NoSchedule"}]' \
 KATA_DIND_RUNTIME_IMAGE=ghcr.io/mirkosekulic/nvt-agent-runtime:0.8.16-<release-sha> \
 bash tests/operator/kata/dind-overlay2-smoke.sh
@@ -27,6 +28,11 @@ The smoke creates a persistent AgentRun and proves:
 - a native-sidecar restart preserves a marker image, the ext4 filesystem UUID,
   and `overlay2`, proving the existing image was checked and reused; and
 - deleting the AgentRun removes both lifecycle-owned PVCs.
+
+With `KATA_DIND_KERNEL_LOG_DEVICE=true`, the same real-Kata gate also proves a
+nested privileged container receives a real `/dev/kmsg` character device with
+major 1 and minor 11. This remains a post-merge AKS acceptance gate; ordinary
+CI and Kind do not prove the managed `kata-vm-isolation` device boundary.
 
 `KATA_DIND_TOLERATIONS_JSON` defaults to `[]`, which remains suitable on an
 untainted cluster. Set a bounded JSON array of ordinary Kubernetes tolerations

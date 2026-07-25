@@ -57,6 +57,7 @@ jobs:
             dockerfile: dind/Dockerfile
             image: nvt-dind:test
             test: dind/test.sh
+            integration: tests/runtime/dind-kmsg-device-smoke.sh
           - name: broker
             dockerfile: broker/Dockerfile
             image: nvt-broker:test
@@ -88,3 +89,8 @@ jobs:
       - name: Run ${{ matrix.name }} script tests
         if: matrix.test
         run: bash "${{ matrix.test }}"
+      - name: Run ${{ matrix.name }} integration smoke
+        if: matrix.integration
+        env:
+          NVT_DIND_TEST_IMAGE: ${{ matrix.image }}
+        run: bash "${{ matrix.integration }}"

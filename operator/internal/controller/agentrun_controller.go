@@ -3578,6 +3578,17 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 		{Name: workspaceVolumeName, MountPath: workspaceMountPath, SubPath: workspaceSubPath(agentRun)},
 		{Name: dindStorageVolumeName, MountPath: dindStorageMountPath},
 	}
+	dindEnv := []corev1.EnvVar{
+		{Name: "DOCKER_TLS_CERTDIR", Value: ""},
+		{Name: "NVT_DIND_BACKING_DIR", Value: dindStorageMountPath},
+		{Name: "NVT_DIND_DATA_ROOT", Value: dindDataRoot},
+		{Name: "NVT_DIND_IMAGE_SIZE_BYTES", Value: strconv.FormatInt(dindImageSizeBytes(agentRun), 10)},
+		{Name: "NVT_DIND_PERSISTENT_STORAGE", Value: strconv.FormatBool(AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent)},
+		{Name: "NVT_DIND_TRANSPARENT", Value: strconv.FormatBool(AgentRunEgressTransparent(agentRun))},
+	}
+	if AgentRunDockerKernelLogDevice(agentRun) {
+		dindEnv = append(dindEnv, corev1.EnvVar{Name: "NVT_DIND_KERNEL_LOG_DEVICE", Value: "true"})
+	}
 	initContainers = append(initContainers, corev1.Container{
 		Name:            "docker",
 		Image:           DindImage(),
@@ -3589,14 +3600,7 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 			"--host=tcp://127.0.0.1:2375",
 			"--tls=false",
 		},
-		Env: []corev1.EnvVar{
-			{Name: "DOCKER_TLS_CERTDIR", Value: ""},
-			{Name: "NVT_DIND_BACKING_DIR", Value: dindStorageMountPath},
-			{Name: "NVT_DIND_DATA_ROOT", Value: dindDataRoot},
-			{Name: "NVT_DIND_IMAGE_SIZE_BYTES", Value: strconv.FormatInt(dindImageSizeBytes(agentRun), 10)},
-			{Name: "NVT_DIND_PERSISTENT_STORAGE", Value: strconv.FormatBool(AgentRunWorkspaceMode(agentRun) == nvtv1alpha1.AgentRunWorkspacePersistent)},
-			{Name: "NVT_DIND_TRANSPARENT", Value: strconv.FormatBool(AgentRunEgressTransparent(agentRun))},
-		},
+		Env: dindEnv,
 		SecurityContext: &corev1.SecurityContext{
 			Privileged: ptrTo(true),
 		},

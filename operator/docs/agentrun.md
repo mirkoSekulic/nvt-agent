@@ -162,6 +162,7 @@ runtime:
   type: codex
   autonomy: trusted-local
   docker:
+    kernelLogDevice: true
     requiredNetworks:
       - name: kind
         subnet: 172.31.250.0/24
@@ -187,6 +188,18 @@ This does not expose the host socket, widen the agent security context, or
 bypass transparent capture and NetworkPolicy. Programs that deliberately
 bypass the `docker` CLI and call the Docker API directly do not receive the
 point-of-use reconciliation guarantee.
+
+`runtime.docker.kernelLogDevice: true` is a separate administrator-owned,
+opt-in container control. It makes a real `/dev/kmsg` character device (major
+1, minor 11) available inside the privileged DinD sidecar so nested privileged
+system workloads can inherit it. The agent container never receives the
+setting or device, and omission remains false.
+
+**Security boundary:** outside a microVM-backed RuntimeClass, `/dev/kmsg` may
+expose the Kubernetes node kernel log to nested privileged workloads. Enable
+this option only in an administrator-approved microVM execution profile. A
+symlink, ordinary file, directory, or wrong device number fails DinD startup;
+the disabled path does not inspect or modify `/dev/kmsg`.
 
 The hermetic Docker 27.5.1/kind v0.32.0 CI smoke proves the generic network is
 recreated after a full prune and can host a Ready nested kind control plane.

@@ -133,8 +133,8 @@ type AgentRunRuntime struct {
 	// Container contains OCI/Kubernetes agent-container process controls. A
 	// backend that cannot honor these controls must reject them explicitly.
 	Container *AgentRunRuntimeContainer `json:"container,omitempty"`
-	// Docker contains container-runtime networking prepared for Docker-backed
-	// tools inside the agent. It does not expose the host Docker socket.
+	// Docker contains bounded container-runtime controls for Docker-backed tools
+	// inside the agent. It does not expose the host Docker socket.
 	Docker *AgentRunRuntimeDocker `json:"docker,omitempty"`
 }
 
@@ -152,6 +152,10 @@ type AgentRunRuntimeCapabilities struct {
 
 // AgentRunRuntimeDocker contains bounded Docker daemon integration controls.
 type AgentRunRuntimeDocker struct {
+	// KernelLogDevice makes a real /dev/kmsg character device available to
+	// nested privileged workloads through the DinD sidecar. It is intended for
+	// administrator-approved microVM execution profiles only.
+	KernelLogDevice bool `json:"kernelLogDevice,omitempty"`
 	// RequiredNetworks are IPv4 bridge networks reconciled at the Docker CLI
 	// boundary. Subnets must be distinct /24s within NVT's managed pool.
 	// +kubebuilder:validation:MaxItems=16
@@ -414,6 +418,7 @@ func (in *AgentRunRuntime) DeepCopy() *AgentRunRuntime {
 	}
 	if in.Docker != nil {
 		out.Docker = &AgentRunRuntimeDocker{}
+		*out.Docker = *in.Docker
 		if in.Docker.RequiredNetworks != nil {
 			out.Docker.RequiredNetworks = make([]AgentRunDockerNetwork, len(in.Docker.RequiredNetworks))
 			copy(out.Docker.RequiredNetworks, in.Docker.RequiredNetworks)
