@@ -10,13 +10,13 @@ RUN apk add --no-cache coreutils e2fsprogs python3 util-linux
 # so the upstream cgroup-v2 nesting setup still runs. Fail the build instead of
 # reimplementing that setup if the base image ever stops shipping it.
 RUN test -x /usr/local/bin/dockerd-entrypoint.sh \
- && test -x /usr/local/bin/dind \
- && command -v ebtables >/dev/null
+ && test -x /usr/local/bin/dind
 
 COPY dind/nvt-dind-entrypoint.sh /usr/local/bin/nvt-dind-entrypoint
 COPY dind/nvt-dind-ready.sh /usr/local/bin/nvt-dind-ready
 COPY dind/validate-managed-cidrs.sh /usr/local/bin/nvt-validate-managed-cidrs
+COPY dind/disable-bridge-netfilter.sh /usr/local/bin/nvt-disable-bridge-netfilter
 
-RUN chmod 0755 /usr/local/bin/nvt-dind-entrypoint /usr/local/bin/nvt-dind-ready /usr/local/bin/nvt-validate-managed-cidrs
+RUN chmod 0755 /usr/local/bin/nvt-dind-entrypoint /usr/local/bin/nvt-dind-ready /usr/local/bin/nvt-validate-managed-cidrs /usr/local/bin/nvt-disable-bridge-netfilter
 
 ENTRYPOINT ["/usr/local/bin/nvt-dind-entrypoint"]

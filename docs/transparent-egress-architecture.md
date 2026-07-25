@@ -96,28 +96,25 @@ OUTPUT:
   redirect remaining TCP to captured:15001
 
 PREROUTING:
-  mark non-host unicast L2 frames entering docker0 or a br-* bridge
-  allow that transient local-bridge mark for IPv4 and IPv6
   allow destinations in the managed Docker pool (172.30.0.0/15)
   redirect TCP arriving from docker0 or any br-* bridge to captured:15001
 ```
 
-The L2 classifier runs at the bridge hook and marks `otherhost` frames on the
-supported isolated Docker bridges. In Linux packet-type terms, `otherhost`
-means the frame is neither addressed to the bridge host nor broadcast or
-multicast; it is not proof that the destination MAC is already present in the
-bridge FDB, so unknown unicast also matches. Bridge ingress first clears the
-NVT-owned bit so nested workloads cannot forge the classification. The IPv4
-and IPv6 PREROUTING chains return marked frames before redirecting, then bridge
-POSTROUTING clears the bit. This preserves node-to-node and separately routed
-nested-workload traffic without knowing its workload CIDR.
+Before installing these rules, net-init sets
+`net.bridge.bridge-nf-call-iptables` and
+`net.bridge.bridge-nf-call-ip6tables` to `0` when the corresponding sysctl
+exists and verifies the readback. A missing sysctl means that bridge family is
+not hooked into inet netfilter; a failed write or nonzero readback fails
+net-init. This uses the kernel bridge/routing boundary directly and has no
+ebtables, nftables bridge-family, or `physdev` dependency.
 
-Frames addressed to the bridge host/gateway are routed traffic, remain
-unmarked, and continue to transparent capture. Unknown unicast can be flooded
-only within the isolated Docker bridge; it cannot become routed external
-egress without a peer or gateway originating/forwarding a new host-directed
-frame, which re-enters capture. Missing bridge `pkttype`/mark support fails
-net-init rather than disabling capture.
+Frames switched between ports on an isolated Docker bridge stay in the L2
+bridge path, including packets that retain a separately routed nested-workload
+destination. They therefore do not enter IPv4/IPv6 PREROUTING. Traffic
+addressed to the bridge host/gateway enters the normal routing stack and still
+traverses inet PREROUTING, where the `docker0`/`br-*` redirects send it to
+captured. A peer that originates or forwards external traffic likewise emits
+a host-directed frame and re-enters capture.
 
 The coordinated DinD image configures Docker with the explicit managed pool
 `172.30.0.0/15`: `172.30.0.0/24` is the default bridge and dynamic networks
@@ -125,9 +122,8 @@ come from `172.31.0.0/16`. Net-init returns only that bounded pool before the
 redirect, so bridges created after startup remain covered without a kernel FIB
 expression. Traffic outside the pool, including private, metadata, and
 control-plane destinations, remains captured and subject to the existing
-egress policy unless the bridge classifies the frame as non-host unicast L2
-transit. A peer that subsequently originates or forwards external traffic
-emits a host-directed frame and is captured. Custom Docker subnets
+egress policy when routed through the bridge host. Local bridge transit is
+kept at L2 without a nested workload CIDR allowlist. Custom Docker subnets
 outside this managed pool are unsupported
 unless a future validated configuration explicitly extends the contract; they
 must not be silently exempted.

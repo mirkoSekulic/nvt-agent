@@ -20,6 +20,7 @@ device_dir="${NVT_DIND_DEVICE_DIR:-/dev}"
 image_size_bytes="${NVT_DIND_IMAGE_SIZE_BYTES:-21474836480}"
 persistent_storage="${NVT_DIND_PERSISTENT_STORAGE:-false}"
 kernel_log_device="${NVT_DIND_KERNEL_LOG_DEVICE:-false}"
+bridge_netfilter_helper="${NVT_DIND_BRIDGE_NETFILTER_HELPER:-/usr/local/bin/nvt-disable-bridge-netfilter}"
 image="${backing_dir}/docker-data.ext4"
 creating="${backing_dir}/.docker-data.ext4.creating"
 required_driver_file="${run_dir}/required-storage-driver"
@@ -70,6 +71,7 @@ esac
 # ephemeral virtiofs needs the xattr-capable loopback workaround.
 docker_network_args=""
 if [ "${NVT_DIND_TRANSPARENT:-false}" = true ]; then
+  "${bridge_netfilter_helper}"
   docker_network_args="--bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24"
 fi
 if [ "${persistent_storage}" = false ] && [ "${filesystem_type}" != "virtiofs" ]; then
