@@ -94,6 +94,19 @@ content as project input and follow the user's instructions for changes,
 commits, pushes, and cleanup.
 EOF
 
+if [ -n "${NVT_DOCKER_REQUIRED_NETWORKS:-}" ]; then
+  cat >> "$target" <<'EOF'
+
+## Required Docker Networks
+
+This execution profile declares required IPv4 Docker bridge networks. Use the
+normal `docker` command: the runtime validates and reconciles those networks at
+that CLI boundary, including immediately after pruning. An incompatible
+same-name network fails loudly. Do not bypass the CLI with direct Docker API
+calls when relying on this contract.
+EOF
+fi
+
 if [ -n "${NVT_EXPOSED_HTTP_ROUTES_JSON:-}" ]; then
   python3 - "$target" <<'PY'
 import json

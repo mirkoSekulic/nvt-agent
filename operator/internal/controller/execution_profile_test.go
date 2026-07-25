@@ -107,10 +107,15 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	schedule := testProfiledAgentSchedule()
 	profileInstructions := "Prefer repository-local checks.\n\n- Keep commits focused.\n"
 	schedule.Spec.Profiles[0].WorkspaceInstructions = profileInstructions
+	schedule.Spec.Profiles[0].Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{
+		{Name: "kind", Subnet: "172.31.250.0/24"},
+	}}
 	scheduleCopy := schedule.DeepCopyObject().(*nvtv1alpha1.AgentSchedule)
 	scheduleCopy.Spec.Profiles[0].WorkspaceInstructions = "copy changed"
-	if schedule.Spec.Profiles[0].WorkspaceInstructions != profileInstructions {
-		t.Fatal("AgentSchedule profile workspace instructions were not deep-copied")
+	scheduleCopy.Spec.Profiles[0].Runtime.Docker.RequiredNetworks[0].Name = "changed"
+	if schedule.Spec.Profiles[0].WorkspaceInstructions != profileInstructions ||
+		schedule.Spec.Profiles[0].Runtime.Docker.RequiredNetworks[0].Name != "kind" {
+		t.Fatal("AgentSchedule profile runtime fields were not deep-copied")
 	}
 	runtimeClassName := "kata-vm-isolation"
 	tolerationSeconds := int64(60)
@@ -133,12 +138,20 @@ func TestProfiledScheduleDefaultAndExactSelection(t *testing.T) {
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatalf("workspace instructions were not snapshotted exactly: %q", defaultRun.Spec.Agent.WorkspaceInstructions)
 	}
+	if got := defaultRun.Spec.Runtime.Docker; got == nil || len(got.RequiredNetworks) != 1 ||
+		got.RequiredNetworks[0].Name != "kind" || got.RequiredNetworks[0].Subnet != "172.31.250.0/24" {
+		t.Fatalf("required Docker network was not snapshotted: %#v", got)
+	}
 	if defaultRun.Spec.Agent.WorkflowInstructions != "" || defaultRun.Spec.ProfileProvenance.SelectedWorkflow != "" {
 		t.Fatalf("legacy producer allowlist unexpectedly added workflow state: %#v", defaultRun.Spec)
 	}
 	schedule.Spec.Profiles[0].WorkspaceInstructions = "changed after admission"
+	schedule.Spec.Profiles[0].Runtime.Docker.RequiredNetworks[0].Subnet = "172.31.249.0/24"
 	if defaultRun.Spec.Agent.WorkspaceInstructions != profileInstructions {
 		t.Fatal("resolved AgentRun workspace instructions alias the AgentSchedule profile")
+	}
+	if defaultRun.Spec.Runtime.Docker.RequiredNetworks[0].Subnet != "172.31.250.0/24" {
+		t.Fatal("resolved AgentRun Docker network aliases the AgentSchedule profile")
 	}
 	if defaultRun.Spec.RuntimeClassName == nil || *defaultRun.Spec.RuntimeClassName != runtimeClassName ||
 		!reflect.DeepEqual(defaultRun.Spec.Resources, schedule.Spec.Template.Resources) ||
@@ -513,6 +526,9 @@ func TestProfiledAdmissionRejectsProducerSecurityFields(t *testing.T) {
 		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
 			"container": map[string]any{"capabilities": map[string]any{"add": []any{"SYS_PTRACE"}}},
 		}}}},
+		{"agentRun": map[string]any{"spec": map[string]any{"runtime": map[string]any{
+			"docker": map[string]any{"requiredNetworks": []any{map[string]any{"name": "kind", "subnet": "172.31.250.0/24"}}},
+		}}}},
 		{"broker": map[string]any{"grants": []any{}}},
 		{"profile": "claude-john"},
 		{"producer": "system:serviceaccount:nvt:spoofed"},
@@ -706,6 +722,29 @@ func TestProfiledCapabilityConfigurationFailsClosed(t *testing.T) {
 		runs := &nvtv1alpha1.AgentRunList{}
 		if err := fixture.client.List(context.Background(), runs, client.InNamespace(schedule.Namespace)); err != nil || len(runs.Items) != 0 {
 			t.Fatalf("invalid capability configuration created runs: err=%v runs=%#v", err, runs.Items)
+		}
+	}
+}
+
+func TestProfiledRequiredDockerNetworkConfigurationFailsClosed(t *testing.T) {
+	for _, network := range []nvtv1alpha1.AgentRunDockerNetwork{
+		{Name: "Kind", Subnet: "172.31.250.0/24"},
+		{Name: "kind", Subnet: "172.30.250.0/24"},
+		{Name: "kind", Subnet: "fd00::/64"},
+	} {
+		schedule := testProfiledAgentSchedule()
+		schedule.Spec.Profiles[0].Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{
+			RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{network},
+		}
+		fixture := newProfileAdmissionFixture(t, schedule)
+		response := fixture.serve(t, profiledAdmissionBody(t, "invalid-docker-network", nil, nil), "Bearer projected-token")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid-execution-profile-configuration") ||
+			strings.Contains(response.Body.String(), network.Name) || strings.Contains(response.Body.String(), network.Subnet) {
+			t.Fatalf("invalid Docker network response was not sanitized: status=%d body=%q", response.Code, response.Body.String())
+		}
+		runs := &nvtv1alpha1.AgentRunList{}
+		if err := fixture.client.List(context.Background(), runs, client.InNamespace(schedule.Namespace)); err != nil || len(runs.Items) != 0 {
+			t.Fatalf("invalid Docker network configuration created runs: err=%v runs=%#v", err, runs.Items)
 		}
 	}
 }

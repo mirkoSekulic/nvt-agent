@@ -357,6 +357,32 @@ func TestWriteAgentInstructionsIncludesExposedHTTPRoutes(t *testing.T) {
 	}
 }
 
+func TestWriteAgentInstructionsIncludesRequiredDockerNetworkGuidanceOnlyWhenConfigured(t *testing.T) {
+	f := newFixture(t)
+	script := filepath.Join(f.root, "runtime", "core", "write-agent-instructions.sh")
+	f.runWithEnv("bash "+shellQuote(script), true, nil)
+	plain, err := os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "## Required Docker Networks") {
+		t.Fatal("unconfigured runtime gained required-network guidance")
+	}
+
+	f.runWithEnv("bash "+shellQuote(script), true, []string{
+		`NVT_DOCKER_REQUIRED_NETWORKS=[{"name":"kind","subnet":"172.31.250.0/24"}]`,
+	})
+	configured, err := os.ReadFile(filepath.Join(f.workspace, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"## Required Docker Networks", "including immediately after pruning", "Do not bypass the CLI"} {
+		if !strings.Contains(string(configured), text) {
+			t.Fatalf("configured AGENTS.md missing %q:\n%s", text, configured)
+		}
+	}
+}
+
 func TestWriteAgentInstructionsIncludesGitHubPRWorkflowWhenToolsAreAvailable(t *testing.T) {
 	f := newFixture(t)
 	script := filepath.Join(f.root, "runtime", "core", "write-agent-instructions.sh")

@@ -130,6 +130,12 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 		!containsAny(crdPath(t, profileCapabilities, "items", "enum").([]any), "SYS_PTRACE") {
 		t.Fatalf("expected typed profile container capabilities, got %#v", profileCapabilities)
 	}
+	profileNetworks := crdPath(t, properties, "profiles", "items", "properties", "runtime", "properties",
+		"docker", "properties", "requiredNetworks").(map[string]any)
+	if fmt.Sprint(profileNetworks["maxItems"]) != "16" || profileNetworks["x-kubernetes-list-type"] != "map" ||
+		fmt.Sprint(crdPath(t, profileNetworks, "items", "properties", "subnet", "pattern")) != `^172\.31\.[0-9]{1,3}\.0/24$` {
+		t.Fatalf("expected typed profile Docker networks, got %#v", profileNetworks)
+	}
 	if fmt.Sprint(crdPath(t, properties, "profiles", "items", "properties", "workspaceInstructions", "maxLength")) != "65536" {
 		t.Fatalf("expected bounded profile workspace instructions schema, got %#v", properties["profiles"])
 	}
@@ -499,6 +505,25 @@ func TestLegacyProducerCannotConfigureRuntimeContainerCapabilities(t *testing.T)
 	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
 	if decoded.Scheduled || !strings.Contains(decoded.Reason, "use an execution profile") {
 		t.Fatalf("legacy producer capability request was accepted: %#v", decoded)
+	}
+	assertScheduledRunCount(t, k8sClient, fixture.schedule, 0)
+}
+
+func TestLegacyProducerCannotConfigureRequiredDockerNetworks(t *testing.T) {
+	fixture := scheduleAdmissionFixture(t, testAgentSchedule())
+	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t,
+		"legacy-docker-network", "", map[string]any{"spec": map[string]any{
+			"runtime": map[string]any{
+				"type": "codex", "autonomy": "trusted-local",
+				"docker": map[string]any{"requiredNetworks": []any{map[string]any{
+					"name": "kind", "subnet": "172.31.250.0/24",
+				}}},
+			},
+		}}))
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+	if decoded.Scheduled || !strings.Contains(decoded.Reason, "use an execution profile") {
+		t.Fatalf("legacy producer Docker network request was accepted: %#v", decoded)
 	}
 	assertScheduledRunCount(t, k8sClient, fixture.schedule, 0)
 }

@@ -31,6 +31,10 @@ agentSchedule:
           capabilities:
             add:
               - SYS_PTRACE
+        docker:
+          requiredNetworks:
+            - name: kind
+              subnet: 172.31.250.0/24
       agentRuntimeConfig:
         command: codex
         proxy:

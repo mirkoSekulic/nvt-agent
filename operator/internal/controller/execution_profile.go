@@ -138,6 +138,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 		if err := validateRuntimeCapabilities(profile.Runtime); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
+		if err := validateRuntimeDockerNetworks(profile.Runtime); err != nil {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
 		profiles[profile.Name] = profile
 	}
 
