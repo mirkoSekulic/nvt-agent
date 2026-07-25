@@ -17,6 +17,7 @@ on:
       - "scripts/**"
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
+      - "tests/runtime/dind-kmsg-device-smoke.sh"
       - ".github/workflows/images.yml"
   pull_request:
     paths:
@@ -32,6 +33,7 @@ on:
       - "scripts/**"
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
+      - "tests/runtime/dind-kmsg-device-smoke.sh"
       - ".github/workflows/images.yml"
 
 permissions:
