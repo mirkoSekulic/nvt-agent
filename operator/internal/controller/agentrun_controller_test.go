@@ -1117,14 +1117,54 @@ func TestAgentRunDockerKernelLogDeviceDeepCopyAndPodRendering(t *testing.T) {
 		}
 	}
 
-	defaultPod, err := DesiredAgentPod(testAgentRun(), testScheme(t))
+	omitted := testAgentRun()
+	disabled := testAgentRun()
+	disabled.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{KernelLogDevice: false}
+	for name, candidate := range map[string]*nvtv1alpha1.AgentRun{"omitted": omitted, "disabled": disabled} {
+		encoded, err := json.Marshal(candidate.Spec.Runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "kernelLogDevice") {
+			t.Fatalf("%s false/default kernel-log intent was serialized: %s", name, encoded)
+		}
+	}
+
+	defaultPod, err := DesiredAgentPod(omitted, testScheme(t))
 	if err != nil {
 		t.Fatal(err)
+	}
+	disabledPod, err := DesiredAgentPod(disabled, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(defaultPod, disabledPod) {
+		t.Fatal("explicit false changed the default AgentRun Pod")
 	}
 	for _, container := range append(append([]corev1.Container(nil), defaultPod.Spec.InitContainers...), defaultPod.Spec.Containers...) {
 		if envValue(container, "NVT_DIND_KERNEL_LOG_DEVICE") != "" {
 			t.Fatalf("default AgentRun rendered kernel-log device intent into %q", container.Name)
 		}
+	}
+
+	// Removing the one opt-in variable must leave the complete enabled Pod
+	// identical to the omitted baseline, including privilege, mounts, and
+	// RuntimeClass selection.
+	normalized := pod.DeepCopy()
+	for i := range normalized.Spec.InitContainers {
+		if normalized.Spec.InitContainers[i].Name != "docker" {
+			continue
+		}
+		env := normalized.Spec.InitContainers[i].Env[:0]
+		for _, item := range normalized.Spec.InitContainers[i].Env {
+			if item.Name != "NVT_DIND_KERNEL_LOG_DEVICE" {
+				env = append(env, item)
+			}
+		}
+		normalized.Spec.InitContainers[i].Env = env
+	}
+	if !reflect.DeepEqual(defaultPod, normalized) {
+		t.Fatal("kernel-log opt-in changed Pod fields other than the DinD environment")
 	}
 }
 
