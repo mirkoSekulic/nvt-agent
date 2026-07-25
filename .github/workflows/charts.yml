@@ -79,20 +79,14 @@ jobs:
           printf 'revision=%s\n' "${REVISION}" >>"${GITHUB_OUTPUT}"
           printf 'release_tag=%s\n' "${RELEASE_TAG}" >>"${GITHUB_OUTPUT}"
 
-  publish:
+  preflight:
     needs: release_metadata
     if: needs.release_metadata.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    concurrency:
-      # Distinct chart versions use distinct groups and therefore cannot evict
-      # one another from GitHub's single-pending default queue. Duplicate
-      # attempts for one immutable version remain serialized.
-      group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}
-      cancel-in-progress: false
+    timeout-minutes: 15
     permissions:
       contents: read
-      packages: write
+      packages: read
     env:
       VERSION: ${{ needs.release_metadata.outputs.version }}
       REVISION: ${{ needs.release_metadata.outputs.revision }}
@@ -132,11 +126,80 @@ jobs:
             status=$?
             [[ "${status}" == "1" ]] || exit "${status}"
           fi
-      - name: Publish and verify coordinated images
+  publish_image:
+    needs: [release_metadata, preflight]
+    if: needs.release_metadata.result == 'success' && needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        image:
+          - nvt-agent-runtime
+          - nvt-dind
+          - nvt-broker
+          - nvt-egressd
+          - nvt-captured
+          - nvt-operator
+          - nvt-agent-gateway
+          - nvt-github-comments-producer
+    concurrency:
+      group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}-${{ matrix.image }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REVISION: ${{ needs.release_metadata.outputs.revision }}
+      RELEASE_TAG: ${{ needs.release_metadata.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Log in to GHCR
         env:
-          # Keep the whole release under one immutable-version lock while
-          # allowing independent image builds/pushes to share the runner.
-          NVT_RELEASE_IMAGE_PARALLELISM: "4"
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io \
+            --username "${GITHUB_ACTOR}" \
+            --password-stdin
+      - name: Publish and verify ${{ matrix.image }}
+        env:
+          NVT_RELEASE_IMAGE_FILTER: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          bash .github/scripts/release-images.sh \
+            "${owner}" "${RELEASE_TAG}" "${REVISION}" "https://github.com/${GITHUB_REPOSITORY}"
+
+  publish:
+    needs: [release_metadata, preflight, publish_image]
+    if: needs.release_metadata.result == 'success' && needs.preflight.result == 'success' && needs.publish_image.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}-chart
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.release_metadata.outputs.version }}
+      REVISION: ${{ needs.release_metadata.outputs.revision }}
+      RELEASE_TAG: ${{ needs.release_metadata.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          printf '%s' "${GHCR_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+      - name: Verify coordinated image metadata
         run: |
           set -euo pipefail
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"

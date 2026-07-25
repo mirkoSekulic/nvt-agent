@@ -166,6 +166,13 @@ fi
 grep -q 'image is not anonymously readable' "${WORKDIR}/public.err"
 unset REQUIRE_ANONYMOUS DOCKER_CONFIG
 
+export FAKE_VERSION=0.2.2-943d5ba
+: >"${DOCKER_LOG}"
+NVT_RELEASE_IMAGE_FILTER=nvt-dind bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
+[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "1" ]]
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "1" ]]
+grep -q 'ghcr.io/mirkosekulic/nvt-dind:' "${DOCKER_LOG}"
+
 export FAKE_REVISION=1111111111111111111111111111111111111111
 if bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}" >/dev/null 2>"${WORKDIR}/conflict.err"; then
   echo "conflicting existing image was accepted" >&2
@@ -174,9 +181,11 @@ fi
 grep -q 'conflicting immutable image tag' "${WORKDIR}/conflict.err"
 
 workflow="${ROOT}/.github/workflows/charts.yml"
-grep -Fq 'group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}' "${workflow}"
-grep -A6 '^  publish:' "${workflow}" | grep -q 'needs: release_metadata'
-grep -A7 'name: Publish and verify coordinated images' "${workflow}" | grep -q 'NVT_RELEASE_IMAGE_PARALLELISM: "4"'
+grep -Fq 'group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}-${{ matrix.image }}' "${workflow}"
+grep -A10 '^  publish_image:' "${workflow}" | grep -q 'max-parallel: 8'
+grep -A30 '^  publish_image:' "${workflow}" | grep -q 'nvt-github-comments-producer'
+grep -A6 '^  publish:' "${workflow}" | grep -q 'publish_image'
+grep -q 'NVT_RELEASE_IMAGE_FILTER: ${{ matrix.image }}' "${workflow}"
 anonymous_line="$(grep -n 'name: Verify anonymous image pullability' "${workflow}" | cut -d: -f1)"
 chart_line="$(grep -n 'name: Publish the chart last' "${workflow}" | cut -d: -f1)"
 [[ "${anonymous_line}" -lt "${chart_line}" ]]

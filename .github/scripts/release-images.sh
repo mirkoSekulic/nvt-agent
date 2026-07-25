@@ -11,12 +11,14 @@ release_tag="$2"
 revision="$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')"
 source_url="$4"
 parallelism="${NVT_RELEASE_IMAGE_PARALLELISM:-4}"
+image_filter="${NVT_RELEASE_IMAGE_FILTER:-}"
 
 if [[ ! "${owner}" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
    [[ ! "${release_tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] ||
    [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]] ||
    [[ ! "${source_url}" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
-   [[ ! "${parallelism}" =~ ^[1-8]$ ]]; then
+   [[ ! "${parallelism}" =~ ^[1-8]$ ]] ||
+   [[ -n "${image_filter}" && ! "${image_filter}" =~ ^nvt-[a-z0-9-]+$ ]]; then
   echo "invalid coordinated release metadata" >&2
   exit 2
 fi
@@ -31,6 +33,19 @@ images=(
   "nvt-agent-gateway|gateway/Dockerfile"
   "nvt-github-comments-producer|producers/github-comments/Dockerfile"
 )
+
+if [[ -n "${image_filter}" ]]; then
+  filtered=()
+  for entry in "${images[@]}"; do
+    [[ "${entry%%|*}" == "${image_filter}" ]] && filtered+=("${entry}")
+  done
+  if [[ "${#filtered[@]}" != "1" ]]; then
+    echo "unknown coordinated release image" >&2
+    exit 2
+  fi
+  images=("${filtered[@]}")
+  parallelism=1
+fi
 
 verify_release_metadata() {
   local image="$1"
@@ -142,4 +157,8 @@ if [[ "${#batch_pids[@]}" != "0" ]]; then
   wait_for_batch
 fi
 
-echo "Verified all eight image manifests and coordinated release metadata labels."
+if [[ -n "${image_filter}" ]]; then
+  echo "Verified coordinated release image ${image_filter}."
+else
+  echo "Verified all eight image manifests and coordinated release metadata labels."
+fi
