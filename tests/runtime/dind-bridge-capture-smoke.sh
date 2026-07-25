@@ -10,6 +10,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker run -d --privileged --name "${DAEMON}" \
+  -e NVT_DIND_TRANSPARENT=true \
   -v /lib/modules:/lib/modules:ro "${IMAGE}" --tls=false >/dev/null
 for _ in $(seq 1 30); do
   if docker exec "${DAEMON}" docker info >/dev/null 2>&1; then
