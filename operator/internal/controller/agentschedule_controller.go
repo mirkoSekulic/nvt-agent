@@ -195,6 +195,9 @@ func PrepareScheduledAgentRun(
 	if err := ValidateAgentRunRuntimeCapabilities(run); err != nil {
 		return err
 	}
+	if err := ValidateAgentRunDockerNetworks(run); err != nil {
+		return err
+	}
 	return nil
 }
 

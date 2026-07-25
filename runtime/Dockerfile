@@ -65,6 +65,8 @@ COPY runtime/core/start-code-server.sh /usr/local/bin/start-code-server
 COPY runtime/core/start-agent-session.sh /usr/local/bin/start-agent-session
 COPY runtime/core/start-agent-session.py /usr/local/bin/start-agent-session-exec
 COPY runtime/core/supervise-agent-session.sh /usr/local/bin/supervise-agent-session
+COPY runtime/core/ensure-docker-networks.py /usr/local/bin/ensure-docker-networks
+COPY runtime/core/docker-wrapper.sh /usr/local/bin/docker
 COPY runtime/agentd/agentd.py /usr/local/bin/agentd
 COPY runtime/agentd/agentdctl.py /usr/local/bin/agentdctl
 COPY runtime/plugins /usr/local/lib/nvt-agent/plugins
@@ -86,6 +88,8 @@ RUN chmod +x \
   /usr/local/bin/start-agent-session \
   /usr/local/bin/start-agent-session-exec \
   /usr/local/bin/supervise-agent-session \
+  /usr/local/bin/ensure-docker-networks \
+  /usr/local/bin/docker \
   /usr/local/bin/agentd \
   /usr/local/bin/agentdctl \
   /usr/local/lib/nvt-agent/plugins/checkout-repos/run.py \

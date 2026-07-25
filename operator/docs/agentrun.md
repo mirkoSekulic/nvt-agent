@@ -154,6 +154,33 @@ guarantees even though they are administrator-owned and opt-in. No capability
 is added by default, and the setting never applies to egressd, captured,
 net-init, DinD, or platform containers.
 
+`runtime.docker.requiredNetworks` optionally declares administrator-owned,
+IPv4-only Docker bridge networks for Docker-backed tools:
+
+```yaml
+runtime:
+  type: codex
+  autonomy: trusted-local
+  docker:
+    requiredNetworks:
+      - name: kind
+        subnet: 172.31.250.0/24
+```
+
+Names are normalized DNS labels. Each subnet must be a distinct canonical
+IPv4 `/24` inside NVT's managed `172.31.0.0/16` Docker pool; IPv6 and
+dual-stack networks are rejected. The generic Docker CLI boundary validates
+the immutable driver, subnet, IPv6, and masquerade settings before each Docker
+command and reconciles missing networks again after `docker system prune`. An
+unused required network removed by that command is therefore restored
+synchronously before the next command. An incompatible same-name network
+fails loudly and is never deleted or rewritten.
+
+This does not expose the host socket, widen the agent security context, or
+bypass transparent capture and NetworkPolicy. Programs that deliberately
+bypass the `docker` CLI and call the Docker API directly do not receive the
+point-of-use reconciliation guarantee.
+
 ## Egress
 
 `egress` is `direct` or `mediated`; omitted means direct.

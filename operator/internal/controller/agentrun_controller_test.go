@@ -1032,6 +1032,69 @@ func TestAgentRunRuntimeCapabilitiesValidationAndDeepCopy(t *testing.T) {
 	}
 }
 
+func TestAgentRunRequiredDockerNetworksValidationDeepCopyAndPodRendering(t *testing.T) {
+	run := testAgentRun()
+	run.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{
+		{Name: "kind", Subnet: "172.31.250.0/24"},
+		{Name: "build-cluster", Subnet: "172.31.251.0/24"},
+	}}
+	if err := ValidateAgentRunDockerNetworks(run); err != nil {
+		t.Fatal(err)
+	}
+	copy := run.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	copy.Spec.Runtime.Docker.RequiredNetworks[0].Name = "changed"
+	if run.Spec.Runtime.Docker.RequiredNetworks[0].Name != "kind" {
+		t.Fatal("required Docker networks were not deep-copied")
+	}
+
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"name":"kind","subnet":"172.31.250.0/24"},{"name":"build-cluster","subnet":"172.31.251.0/24"}]`
+	if got := envValue(requireContainer(t, *pod, "agent"), "NVT_DOCKER_REQUIRED_NETWORKS"); got != want {
+		t.Fatalf("required Docker network environment = %q, want %q", got, want)
+	}
+	for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		if container.Name != "agent" && envValue(container, "NVT_DOCKER_REQUIRED_NETWORKS") != "" {
+			t.Fatalf("required Docker network contract leaked to %q", container.Name)
+		}
+	}
+
+	empty := testAgentRun()
+	empty.Spec.Runtime.Docker = &nvtv1alpha1.AgentRunRuntimeDocker{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{}}
+	emptyCopy := empty.DeepCopyObject().(*nvtv1alpha1.AgentRun)
+	if emptyCopy.Spec.Runtime.Docker.RequiredNetworks == nil {
+		t.Fatal("explicit-empty required Docker network list was not preserved")
+	}
+	emptyPod, err := DesiredAgentPod(empty, testScheme(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(requireContainer(t, *emptyPod, "agent"), "NVT_DOCKER_REQUIRED_NETWORKS"); got != "" {
+		t.Fatalf("empty contract rendered environment %q", got)
+	}
+
+	invalid := []nvtv1alpha1.AgentRunRuntimeDocker{
+		{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{{Name: "Kind", Subnet: "172.31.250.0/24"}}},
+		{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{{Name: "kind", Subnet: "172.30.1.0/24"}}},
+		{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{{Name: "kind", Subnet: "fd00::/64"}}},
+		{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{{Name: "kind", Subnet: "172.31.250.1/24"}}},
+		{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{{Name: "kind", Subnet: "172.31.250.0/24"}, {Name: "kind", Subnet: "172.31.251.0/24"}}},
+		{RequiredNetworks: []nvtv1alpha1.AgentRunDockerNetwork{{Name: "kind", Subnet: "172.31.250.0/24"}, {Name: "other", Subnet: "172.31.250.0/24"}}},
+	}
+	for i := range invalid {
+		candidate := testAgentRun()
+		candidate.Spec.Runtime.Docker = &invalid[i]
+		if err := ValidateAgentRunDockerNetworks(candidate); err == nil {
+			t.Fatalf("invalid required Docker network case %d was accepted", i)
+		}
+		if _, err := DesiredAgentPod(candidate, testScheme(t)); err == nil {
+			t.Fatalf("invalid required Docker network case %d reached Pod rendering", i)
+		}
+	}
+}
+
 func TestAgentCapabilityDoesNotReachTransparentOrEgressContainers(t *testing.T) {
 	run := transparentAgentRun(t)
 	run.Spec.Runtime.Container = &nvtv1alpha1.AgentRunRuntimeContainer{
@@ -4758,6 +4821,25 @@ func TestAgentRunCRDSchemaIncludesContainerCapabilities(t *testing.T) {
 	values := crdPath(t, add, "items", "enum").([]any)
 	if add["x-kubernetes-list-type"] != "set" || !containsAny(values, "SYS_PTRACE") || !containsAny(values, "CHECKPOINT_RESTORE") {
 		t.Fatalf("AgentRun container capability schema incomplete: %#v", add)
+	}
+}
+
+func TestAgentRunCRDSchemaIncludesRequiredDockerNetworks(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/nvt.dev_agentruns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(data, &crd); err != nil {
+		t.Fatal(err)
+	}
+	networks := crdPath(t, crd,
+		"spec", "versions", 0, "schema", "openAPIV3Schema", "properties", "spec", "properties",
+		"runtime", "properties", "docker", "properties", "requiredNetworks",
+	).(map[string]any)
+	if fmt.Sprint(networks["maxItems"]) != "16" || networks["x-kubernetes-list-type"] != "map" ||
+		fmt.Sprint(crdPath(t, networks, "items", "properties", "subnet", "pattern")) != `^172\.31\.[0-9]{1,3}\.0/24$` {
+		t.Fatalf("AgentRun required Docker network schema incomplete: %#v", networks)
 	}
 }
 

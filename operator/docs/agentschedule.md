@@ -67,6 +67,27 @@ Forward-proxy and transparent execution profiles may set the generic
 the AgentRun with the other profile-owned egress settings. Omission uses
 egressd's default of 256 active tunnels with bounded burst queueing.
 
+Profiles may also require bounded IPv4 Docker bridge networks without naming a
+tool or repository:
+
+```yaml
+profiles:
+  - name: nested-cluster
+    runtime:
+      type: codex
+      autonomy: trusted-local
+      docker:
+        requiredNetworks:
+          - name: kind
+            subnet: 172.31.250.0/24
+    # remaining profile-owned fields omitted
+```
+
+The selected network list is deep-copied into the AgentRun and cannot be
+supplied by producer admission. It is reconciled at the Docker CLI boundary,
+including after pruning. Only canonical IPv4 `/24` networks inside the managed
+pool are supported; IPv6 and dual-stack requests fail closed.
+
 For new deployments that need producer-selectable workflows, keep execution
 credentials in `profiles` and define guidance independently:
 

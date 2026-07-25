@@ -322,6 +322,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := ValidateAgentRunRuntimeCapabilities(&agentRun); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := ValidateAgentRunDockerNetworks(&agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := ValidateAgentRunWorkspaceInstructions(&agentRun); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -3362,6 +3365,10 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 	if err := ValidateAgentRunRuntimeCapabilities(agentRun); err != nil {
 		return nil, err
 	}
+	requiredDockerNetworks, err := requiredDockerNetworksJSON(agentRun)
+	if err != nil {
+		return nil, err
+	}
 	runtimeAuthMountPath, err := RuntimeAuthMountPath(agentRun)
 	if err != nil {
 		return nil, err
@@ -3682,6 +3689,9 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 		{Name: "DOCKER_HOST", Value: "tcp://127.0.0.1:2375"},
 		{Name: "NVT_WORKSPACE", Value: workspaceMountPath},
 		{Name: "NVT_AGENT_CONFIG_FILE", Value: agentConfigMountPath},
+	}
+	if requiredDockerNetworks != "" {
+		agentEnv = append(agentEnv, corev1.EnvVar{Name: "NVT_DOCKER_REQUIRED_NETWORKS", Value: requiredDockerNetworks})
 	}
 	if agentRunHasProviderPreparations(agentRun) {
 		agentEnv = append(agentEnv, corev1.EnvVar{Name: preparedProviderMetadataEnv, Value: preparedProviderMetadataPath})

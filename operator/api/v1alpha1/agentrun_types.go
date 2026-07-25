@@ -133,6 +133,9 @@ type AgentRunRuntime struct {
 	// Container contains OCI/Kubernetes agent-container process controls. A
 	// backend that cannot honor these controls must reject them explicitly.
 	Container *AgentRunRuntimeContainer `json:"container,omitempty"`
+	// Docker contains container-runtime networking prepared for Docker-backed
+	// tools inside the agent. It does not expose the host Docker socket.
+	Docker *AgentRunRuntimeDocker `json:"docker,omitempty"`
 }
 
 // AgentRunRuntimeContainer contains controls specific to the OCI agent container.
@@ -145,6 +148,26 @@ type AgentRunRuntimeCapabilities struct {
 	// Add uses Linux UAPI capability names without the CAP_ prefix.
 	// +listType=set
 	Add []corev1.Capability `json:"add,omitempty"`
+}
+
+// AgentRunRuntimeDocker contains bounded Docker daemon integration controls.
+type AgentRunRuntimeDocker struct {
+	// RequiredNetworks are IPv4 bridge networks reconciled at the Docker CLI
+	// boundary. Subnets must be distinct /24s within NVT's managed pool.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=map
+	// +listMapKey=name
+	RequiredNetworks []AgentRunDockerNetwork `json:"requiredNetworks,omitempty"`
+}
+
+// AgentRunDockerNetwork is one required IPv4 Docker bridge network.
+type AgentRunDockerNetwork struct {
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+	// Subnet is an IPv4 /24 within 172.31.0.0/16.
+	// +kubebuilder:validation:Pattern=`^172\.31\.[0-9]{1,3}\.0/24$`
+	Subnet string `json:"subnet"`
 }
 
 // AgentRunRuntimeAuth references runtime-specific auth material from a Kubernetes Secret.
@@ -387,6 +410,13 @@ func (in *AgentRunRuntime) DeepCopy() *AgentRunRuntime {
 				out.Container.Capabilities.Add = make([]corev1.Capability, len(in.Container.Capabilities.Add))
 				copy(out.Container.Capabilities.Add, in.Container.Capabilities.Add)
 			}
+		}
+	}
+	if in.Docker != nil {
+		out.Docker = &AgentRunRuntimeDocker{}
+		if in.Docker.RequiredNetworks != nil {
+			out.Docker.RequiredNetworks = make([]AgentRunDockerNetwork, len(in.Docker.RequiredNetworks))
+			copy(out.Docker.RequiredNetworks, in.Docker.RequiredNetworks)
 		}
 	}
 	return out

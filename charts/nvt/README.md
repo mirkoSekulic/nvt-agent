@@ -24,10 +24,10 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.20`; otherwise the API server will prune or reject
-new AgentRun and schedule fields such as container capabilities, dedicated
-Docker storage size, broker grant preparations, profile workspace instructions,
-or workflow producer policies.
+of, upgrading to chart `0.8.21`; otherwise the API server will prune or reject
+new AgentRun and schedule fields such as container capabilities, required
+Docker networks, dedicated Docker storage size, broker grant preparations,
+profile workspace instructions, or workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -44,11 +44,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.20 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.21 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.20 --namespace nvt --create-namespace
+  --version 0.8.21 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -323,6 +323,16 @@ to the coordinated runtime image (`runtime.image` with the published chart's
 immutable `appVersion`). Set `agentSchedule.template.image` explicitly to
 preserve an intentional override. An empty template remains omitted for legacy
 schedule admission.
+
+Execution profiles can declare generic required IPv4 Docker networks under
+`runtime.docker.requiredNetworks`. For example, a nested-cluster profile may
+reserve `kind` on `172.31.250.0/24`. The name and explicit `/24` subnet are
+profile-owned, snapshotted into each AgentRun, and reconciled before Docker CLI
+operations and after `docker system prune`, so pruning cannot permanently
+remove the contract. Subnets must be unique and inside the managed
+`172.31.0.0/16` pool;
+IPv6, dual-stack, malformed, and incompatible existing networks fail closed.
+Omitting the field preserves existing Docker behavior.
 
 Execution profiles may append reusable administrator-owned workspace guidance:
 
