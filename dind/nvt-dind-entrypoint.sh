@@ -5,9 +5,12 @@ set -eu
 # arguments. Startup itself is always handed back to the base image's
 # `dockerd-entrypoint.sh`, which runs `/usr/local/bin/dind` and performs the
 # upstream cgroup-v2 nesting setup: it evacuates the cgroup namespace root,
-# enables the delegated controllers, keeps the root a valid domain cgroup, and
-# makes `/` recursively shared. Executing `dockerd` directly skips that setup
-# and leaves nested systemd workloads with an invalid threaded cgroup. The
+# enables the delegated controllers, and makes `/` recursively shared. Where
+# the container runtime supplies a valid delegated domain cgroup, that keeps
+# the root a domain cgroup usable by nested systemd; it cannot repair an
+# already-threaded parent hierarchy, which no process can fix from inside the
+# container. Executing `dockerd` directly skips the setup entirely and leaves
+# the root threaded even when the runtime did supply a domain cgroup. The
 # vendor entrypoint is resolved through PATH so tests can substitute a fake.
 
 data_root="${NVT_DIND_DATA_ROOT:-/var/lib/docker}"
