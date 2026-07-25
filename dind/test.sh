@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENTRYPOINT="${ROOT}/dind/nvt-dind-entrypoint.sh"
 READY="${ROOT}/dind/nvt-dind-ready.sh"
 CIDR_VALIDATOR="${ROOT}/dind/validate-managed-cidrs.sh"
+BRIDGE_NETFILTER="${ROOT}/dind/disable-bridge-netfilter.sh"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 BIN="${WORKDIR}/bin"
@@ -148,6 +149,35 @@ fi
 FAKE
 chmod +x "${BIN}"/*
 
+bridge_sysctls="${WORKDIR}/bridge-sysctls"
+mkdir -p "${bridge_sysctls}"
+printf '1\n' >"${bridge_sysctls}/bridge-nf-call-iptables"
+printf '1\n' >"${bridge_sysctls}/bridge-nf-call-ip6tables"
+NVT_BRIDGE_SYSCTL_ROOT="${bridge_sysctls}" "${BRIDGE_NETFILTER}"
+grep -qx 0 "${bridge_sysctls}/bridge-nf-call-iptables"
+grep -qx 0 "${bridge_sysctls}/bridge-nf-call-ip6tables"
+
+rm "${bridge_sysctls}/bridge-nf-call-ip6tables"
+printf '1\n' >"${bridge_sysctls}/bridge-nf-call-iptables"
+NVT_BRIDGE_SYSCTL_ROOT="${bridge_sysctls}" "${BRIDGE_NETFILTER}"
+grep -qx 0 "${bridge_sysctls}/bridge-nf-call-iptables"
+
+rm "${bridge_sysctls}/bridge-nf-call-iptables"
+ln -s /proc/uptime "${bridge_sysctls}/bridge-nf-call-iptables"
+if NVT_BRIDGE_SYSCTL_ROOT="${bridge_sysctls}" "${BRIDGE_NETFILTER}" >"${WORKDIR}/bridge-stdout" 2>"${WORKDIR}/bridge-stderr"; then
+  echo "bridge netfilter helper accepted an unwritable sysctl" >&2
+  exit 1
+fi
+grep -q 'could not disable bridge-nf-call-iptables' "${WORKDIR}/bridge-stderr"
+
+rm "${bridge_sysctls}/bridge-nf-call-iptables"
+ln -s /dev/null "${bridge_sysctls}/bridge-nf-call-iptables"
+if NVT_BRIDGE_SYSCTL_ROOT="${bridge_sysctls}" "${BRIDGE_NETFILTER}" >"${WORKDIR}/bridge-stdout" 2>"${WORKDIR}/bridge-stderr"; then
+  echo "bridge netfilter helper accepted a failed readback" >&2
+  exit 1
+fi
+grep -q 'read back as .* expected 0' "${WORKDIR}/bridge-stderr"
+
 new_fixture() {
   local name="$1"
   FIXTURE="${WORKDIR}/${name}"
@@ -175,6 +205,8 @@ run_entrypoint() {
     NVT_DIND_IMAGE_SIZE_BYTES=1073741824 \
     NVT_DIND_PERSISTENT_STORAGE="${FAKE_PERSISTENT_STORAGE:-false}" \
     NVT_DIND_TRANSPARENT="${FAKE_DIND_TRANSPARENT:-false}" \
+    NVT_DIND_BRIDGE_NETFILTER_HELPER="${BRIDGE_NETFILTER}" \
+    NVT_BRIDGE_SYSCTL_ROOT="${FIXTURE}/bridge-sysctls" \
     NVT_DIND_KERNEL_LOG_DEVICE="${FAKE_KERNEL_LOG_DEVICE:-false}" \
     "${ENTRYPOINT}" --host=tcp://127.0.0.1:2375 --tls=false
 }
@@ -204,8 +236,13 @@ assert_docker_not_started() {
 
 new_fixture kernel-log-device-off
 export FAKE_FS_TYPE=ext4
+mkdir -p "${FIXTURE}/bridge-sysctls"
+printf '1\n' >"${FIXTURE}/bridge-sysctls/bridge-nf-call-iptables"
+printf '1\n' >"${FIXTURE}/bridge-sysctls/bridge-nf-call-ip6tables"
 printf 'leave-untouched' >"${FIXTURE}/dev/kmsg"
 run_entrypoint
+grep -qx 1 "${FIXTURE}/bridge-sysctls/bridge-nf-call-iptables"
+grep -qx 1 "${FIXTURE}/bridge-sysctls/bridge-nf-call-ip6tables"
 grep -qx 'leave-untouched' "${FIXTURE}/dev/kmsg"
 if grep -q '^mknod .*/kmsg ' "${FAKE_LOG}"; then
   echo "disabled kernel-log device changed the device filesystem" >&2
@@ -322,7 +359,12 @@ new_fixture new-image
 export FAKE_FS_TYPE=virtiofs
 export FAKE_DIND_TRANSPARENT=true
 export FAKE_NEED_LOOP_NODES=1
+mkdir -p "${FIXTURE}/bridge-sysctls"
+printf '1\n' >"${FIXTURE}/bridge-sysctls/bridge-nf-call-iptables"
+printf '1\n' >"${FIXTURE}/bridge-sysctls/bridge-nf-call-ip6tables"
 run_entrypoint
+grep -qx 0 "${FIXTURE}/bridge-sysctls/bridge-nf-call-iptables"
+grep -qx 0 "${FIXTURE}/bridge-sysctls/bridge-nf-call-ip6tables"
 [[ -f "${FIXTURE}/backing/docker-data.ext4" ]]
 [[ ! -e "${FIXTURE}/backing/.docker-data.ext4.creating" ]]
 grep -q '^truncate -s 1073741824 .*\.creating$' "${FAKE_LOG}"

@@ -7033,36 +7033,31 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	for _, rule := range []string{
 		"managed Docker pool overlaps protected address",
 		"hostname -i",
-		"command -v ebtables >/dev/null",
-		"ebtables -t nat -A NVT_DIND_L2_IN -j mark --mark-and \"$local_bridge_clear\" --mark-target CONTINUE",
+		"/usr/local/bin/nvt-disable-bridge-netfilter",
 		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
-		"ebtables -t nat -A NVT_DIND_L2_IN --logical-in docker0 --pkttype-type otherhost",
-		"ebtables -t nat -A NVT_DIND_L2_IN --logical-in br+ --pkttype-type otherhost",
-		"ebtables -t nat -A NVT_DIND_L2_OUT --mark \"$local_bridge_mark/$local_bridge_mark\"",
-		"iptables -t nat -A NVT_DIND -m mark --mark \"$local_bridge_mark/$local_bridge_mark\"",
 		"iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT",
 		"iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
 		"iptables -t nat -A NVT_DIND -d \"$NVT_DIND_NETWORK_CIDR\" -j RETURN",
 		"ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
-		"ip6tables -t nat -A NVT_DIND -m mark --mark \"$local_bridge_mark/$local_bridge_mark\"",
 		"ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT",
 	} {
 		if !strings.Contains(netInit.Args[0], rule) {
 			t.Fatalf("net-init missing dynamic bridge rule %q: %q", rule, netInit.Args[0])
 		}
 	}
-	markScrub := strings.Index(netInit.Args[0], "ebtables -t nat -A NVT_DIND_L2_IN -j mark --mark-and \"$local_bridge_clear\"")
-	bridgeClassifier := strings.Index(netInit.Args[0], "ebtables -t nat -A NVT_DIND_L2_IN --logical-in br+ --pkttype-type otherhost")
+	disableBridgeHooks := strings.Index(netInit.Args[0], "/usr/local/bin/nvt-disable-bridge-netfilter")
 	for _, family := range []string{"iptables", "ip6tables"} {
-		localBridge := strings.Index(netInit.Args[0], family+" -t nat -A NVT_DIND -m mark --mark \"$local_bridge_mark/$local_bridge_mark\"")
+		chain := strings.Index(netInit.Args[0], family+" -t nat -N NVT_DIND")
 		redirect := strings.Index(netInit.Args[0], family+" -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT")
-		if markScrub == -1 || bridgeClassifier == -1 || localBridge == -1 || redirect == -1 || markScrub >= bridgeClassifier || bridgeClassifier >= localBridge || localBridge >= redirect {
-			t.Fatalf("%s local-bridge return must precede bridge redirect: %q", family, netInit.Args[0])
+		if disableBridgeHooks == -1 || chain == -1 || redirect == -1 || disableBridgeHooks >= chain || chain >= redirect {
+			t.Fatalf("%s bridge hooks must be disabled before the bridge redirect chain: %q", family, netInit.Args[0])
 		}
 	}
-	if strings.Contains(netInit.Args[0], "physdev") || strings.Contains(netInit.Args[0], " fib ") {
-		t.Fatalf("net-init must use portable bridge pkttype classification: %q", netInit.Args[0])
+	for _, forbidden := range []string{"ebtables", " nft ", "physdev", "local_bridge_mark", "nvt-local-bridge"} {
+		if strings.Contains(netInit.Args[0], forbidden) {
+			t.Fatalf("net-init contains unsupported bridge classifier %q: %q", forbidden, netInit.Args[0])
+		}
 	}
 	if netInit.Image != DindImage() {
 		t.Fatalf("net-init image = %q, want coordinated DinD image %q", netInit.Image, DindImage())

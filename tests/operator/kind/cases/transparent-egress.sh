@@ -161,9 +161,15 @@ case_run() {
     sh -ec 'mkdir -p /tmp/www; echo compose-bridge-ok >/tmp/www/index.html; exec httpd -f -p 18080 -h /tmp/www'
   wait_for_published_service "${run}" 18081 compose-bridge-ok
 
-  # bridge-nf-call-iptables may send same-bridge frames through PREROUTING.
-  # The FIB exception must preserve this local container-to-container path
-  # without exempting routed traffic that leaves the bridge.
+  # Net-init disables bridge-to-inet hooks when present, so local switching
+  # stays at L2 while host-directed traffic still uses routed PREROUTING.
+  local bridge_sysctl
+  for bridge_sysctl in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
+    if agent_exec "${run}" test -e "/proc/sys/net/bridge/${bridge_sysctl}"; then
+      [[ "$(agent_exec "${run}" cat "/proc/sys/net/bridge/${bridge_sysctl}")" == "0" ]] || \
+        die "${bridge_sysctl} was not disabled"
+    fi
+  done
   local peer_body
   peer_body="$(agent_exec "${run}" docker run --rm --network nvt_issue143_default busybox:1.36 \
     wget -q -T 10 -O- http://nvt-local-compose:18080/)"
