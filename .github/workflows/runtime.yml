@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "runtime/**"
+      - "dind/**"
       - "templates/**"
       - "compose.agent.yaml"
       - "scripts/**"
@@ -17,6 +18,7 @@ on:
   pull_request:
     paths:
       - "runtime/**"
+      - "dind/**"
       - "templates/**"
       - "compose.agent.yaml"
       - "scripts/**"
@@ -100,5 +102,7 @@ jobs:
           cache: false
       - name: Install exact kind regression version
         run: go install sigs.k8s.io/kind@v0.32.0
+      - name: Build NVT DinD image
+        run: make dind-build
       - name: Run Docker prune and nested kind network smoke
         run: bash tests/runtime/kind-required-network-smoke.sh

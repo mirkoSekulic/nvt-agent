@@ -36,9 +36,8 @@ precise and every hermetic suite has a clear home.
 - `tests/runtime/compose-transparent-smoke.sh` → `network.yml / transparent-smoke`
 - `tests/runtime/kind-required-network-smoke.sh` → `runtime.yml` job
   `required-docker-network`. The smoke exercises the production DinD
-  entrypoint, so the job must build the `nvt-dind` image (`make dind-build`)
-  before running it, and `runtime.yml` must include `dind/**` in its path
-  filters.
+  entrypoint, so the job builds the `nvt-dind` image (`make dind-build`) before
+  running it, and `runtime.yml` includes `dind/**` in its path filters.
 
 ### agentd
 
