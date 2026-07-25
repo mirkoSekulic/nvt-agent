@@ -654,6 +654,15 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 		http.Error(w, "list AgentRuns", http.StatusInternalServerError)
 		return
 	}
+	routableRuns, err := s.routableAgentRuns(r.Context())
+	if err != nil {
+		http.Error(w, "list AgentRun pods", http.StatusInternalServerError)
+		return
+	}
+	view := dashboardViewActive
+	if r.URL.Query().Get("view") == dashboardViewAll {
+		view = dashboardViewAll
+	}
 	items := make([]dashboardItem, 0, len(runs.Items))
 	for _, run := range runs.Items {
 		key := run.Annotations[AccessKeyAnnotation]
@@ -666,10 +675,9 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 		if principal != nil && !EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run).Allowed {
 			continue
 		}
-		_, routable, err := s.runningPodForAgentRun(r.Context(), run.Name)
-		if err != nil {
-			http.Error(w, "list AgentRun pods", http.StatusInternalServerError)
-			return
+		routable := run.Status.Phase == nvtv1alpha1.AgentRunPhaseRunning && routableRuns[run.Name]
+		if view == dashboardViewActive && !routable {
+			continue
 		}
 		openURL := s.openURL(r, key, routable)
 		if routable && openURL == "" {
@@ -690,13 +698,30 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 	})
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := dashboardTemplate.Execute(w, dashboardData{Items: items}); err != nil {
+	if err := dashboardTemplate.Execute(w, dashboardData{
+		Items:      items,
+		View:       view,
+		ActiveURL:  s.dashboardViewURL(dashboardViewActive),
+		AllURL:     s.dashboardViewURL(dashboardViewAll),
+		ShowLogout: s.auth != nil,
+		LogoutPath: s.config.mountedPath("/oauth2/logout"),
+	}); err != nil {
 		http.Error(w, "render dashboard", http.StatusInternalServerError)
 	}
 }
 
+const (
+	dashboardViewActive = "active"
+	dashboardViewAll    = "all"
+)
+
 type dashboardData struct {
-	Items []dashboardItem
+	Items      []dashboardItem
+	View       string
+	ActiveURL  string
+	AllURL     string
+	ShowLogout bool
+	LogoutPath string
 }
 
 type dashboardItem struct {
@@ -707,6 +732,27 @@ type dashboardItem struct {
 	SourceURL   string
 	OpenURL     string
 	Routable    bool
+}
+
+func (s *Server) routableAgentRuns(ctx context.Context) (map[string]bool, error) {
+	var pods corev1.PodList
+	if err := s.client.List(ctx, &pods, ctrlclient.InNamespace(s.namespace), ctrlclient.MatchingLabels{
+		AgentRunRoleLabel: AgentRunRoleAgent,
+	}); err != nil {
+		return nil, fmt.Errorf("list AgentRun pods: %w", err)
+	}
+	routable := make(map[string]bool, len(pods.Items))
+	for _, pod := range pods.Items {
+		runName := pod.Labels[AgentRunPodLabel]
+		if runName != "" && pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && podReady(pod) {
+			routable[runName] = true
+		}
+	}
+	return routable, nil
+}
+
+func (s *Server) dashboardViewURL(view string) string {
+	return s.config.mountedPath("/") + "?view=" + url.QueryEscape(view)
 }
 
 func displayName(run nvtv1alpha1.AgentRun) string {
@@ -751,6 +797,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   <title>nvt AgentRuns</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 2rem; color: #17202a; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    nav { display: flex; gap: .35rem; margin: 0 0 1rem; }
+    nav a { border: 1px solid #aeb8c4; border-radius: .35rem; padding: .35rem .65rem; text-decoration: none; }
+    nav a[aria-current="page"] { background: #e8f2fc; border-color: #0b66c3; }
+    form { margin: 0; }
+    button { background: transparent; border: 1px solid #aeb8c4; border-radius: .35rem; padding: .35rem .65rem; color: #17202a; cursor: pointer; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border-bottom: 1px solid #d7dde5; padding: .65rem; text-align: left; vertical-align: top; }
     th { font-size: .85rem; color: #4d5b6a; }
@@ -759,7 +811,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   </style>
 </head>
 <body>
-  <h1>AgentRuns</h1>
+  <header>
+    <h1>AgentRuns</h1>
+    {{ if .ShowLogout }}<form method="post" action="{{ .LogoutPath }}"><button type="submit">Log out</button></form>{{ end }}
+  </header>
+  <nav aria-label="AgentRun view">
+    <a href="{{ .ActiveURL }}"{{ if eq .View "active" }} aria-current="page"{{ end }}>Active</a>
+    <a href="{{ .AllURL }}"{{ if eq .View "all" }} aria-current="page"{{ end }}>All</a>
+  </nav>
   {{ if .Items }}
   <table>
     <thead>
@@ -779,7 +838,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     </tbody>
   </table>
   {{ else }}
-  <p class="empty">No AgentRuns with access metadata found.</p>
+  <p class="empty">{{ if eq .View "active" }}No active AgentRuns.{{ else }}No AgentRuns with access metadata found.{{ end }}</p>
   {{ end }}
 </body>
 </html>`))

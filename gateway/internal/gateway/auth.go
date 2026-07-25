@@ -170,8 +170,7 @@ func (a *Authenticator) HandlePublic(w http.ResponseWriter, r *http.Request) boo
 	case a.mountedPath(a.callbackPath()):
 		a.handleCallback(w, r)
 	case a.mountedPath("/oauth2/logout"):
-		a.clearCookies(w)
-		http.Redirect(w, r, a.mountedPath("/"), http.StatusFound)
+		a.handleLogout(w, r)
 	default:
 		return false
 	}
@@ -182,11 +181,12 @@ func (a *Authenticator) Authenticate(w http.ResponseWriter, r *http.Request) (Pr
 	session, ok := a.readSession(r)
 	if ok && session.ExpiresAt > a.now().Unix() {
 		stored, ok := a.lookupSession(session)
-		if !ok {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return Principal{}, false
+		if ok {
+			return stored.Principal, true
 		}
-		return stored.Principal, true
+	}
+	if ok {
+		a.clearCookie(w, a.config.Auth.Session.CookieName)
 	}
 	if isBrowserRead(r) {
 		loginURL := a.publicBaseURL(r) + "/oauth2/login?return_url=" + url.QueryEscape(a.safeReturnURL(r))
@@ -195,6 +195,19 @@ func (a *Authenticator) Authenticate(w http.ResponseWriter, r *http.Request) (Pr
 	}
 	http.Error(w, "authentication required", http.StatusUnauthorized)
 	return Principal{}, false
+}
+
+func (a *Authenticator) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if session, ok := a.readSession(r); ok {
+		a.deleteSession(session.ID)
+	}
+	a.clearCookies(w)
+	http.Redirect(w, r, a.mountedPath("/"), http.StatusSeeOther)
 }
 
 func isBrowserRead(r *http.Request) bool {
@@ -392,6 +405,15 @@ func (a *Authenticator) lookupSession(cookie sessionCookie) (storedSession, bool
 		return storedSession{}, false
 	}
 	return session, true
+}
+
+func (a *Authenticator) deleteSession(id string) {
+	if id == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.sessions, id)
 }
 
 func (a *Authenticator) authorizationClaims(ctx context.Context, token *oauth2.Token, idToken *oidc.IDToken, idClaims map[string]any) (map[string]any, error) {

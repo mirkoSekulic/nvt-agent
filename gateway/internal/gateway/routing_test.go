@@ -342,8 +342,8 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 	}
 
 	logout := httptest.NewRecorder()
-	server.ServeHTTP(logout, httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/oauth2/logout", nil))
-	if logout.Code != http.StatusFound || logout.Header().Get("Location") != "/agents/" {
+	server.ServeHTTP(logout, httptest.NewRequest(http.MethodPost, "https://staging.altinn.studio/agents/oauth2/logout", nil))
+	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/agents/" {
 		t.Fatalf("logout status=%d location=%q", logout.Code, logout.Header().Get("Location"))
 	}
 	unknownOAuth := httptest.NewRecorder()
@@ -538,7 +538,7 @@ func pathRoutableAgentRun(t *testing.T, upstreamURL, key string) (nvtv1alpha1.Ag
 		Namespace: "nvt", Name: "path-run", Annotations: map[string]string{
 			AccessKeyAnnotation: key, AccessPortAnnotation: strconv.Itoa(port), DisplayNameAnnotation: "Path run",
 		},
-	}}
+	}, Status: nvtv1alpha1.AgentRunStatus{Phase: nvtv1alpha1.AgentRunPhaseRunning}}
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "nvt", Name: "path-pod", Labels: map[string]string{
 			AgentRunPodLabel: run.Name, AgentRunRoleLabel: AgentRunRoleAgent,
