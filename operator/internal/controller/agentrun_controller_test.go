@@ -6859,6 +6859,8 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 		t.Fatalf("net-init rules incomplete: %q", netInit.Args)
 	}
 	for _, rule := range []string{
+		"managed Docker pool overlaps protected address",
+		"hostname -i",
 		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
 		"iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT",

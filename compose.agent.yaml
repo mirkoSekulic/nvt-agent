@@ -90,8 +90,13 @@ services:
       - |
         exclude_v4=""
         exclude_v6=""
+        reject_managed_overlap() {
+          case "$$1" in 172.30.*|172.31.*) echo "managed Docker pool overlaps protected address $$1" >&2; exit 1 ;; esac
+        }
+        for ip in $$(hostname -i); do reject_managed_overlap "$$ip"; done
         for host in $$NVT_CAPTURE_EXCLUDE_HOSTS; do
           for ip in $$(getent ahosts "$$host" | awk '{print $$1}' | sort -u); do
+            reject_managed_overlap "$$ip"
             case "$$ip" in *:*) exclude_v6="$$exclude_v6 $$ip" ;; *) exclude_v4="$$exclude_v4 $$ip" ;; esac
           done
         done
@@ -126,7 +131,7 @@ services:
     privileged: true
     environment:
       DOCKER_TLS_CERTDIR: ""
-      NVT_DIND_TRANSPARENT: ${NVT_EGRESS_MODE:-}
+      NVT_DIND_TRANSPARENT: ${NVT_DIND_TRANSPARENT:-false}
     command:
       - --host=unix:///var/run/docker.sock
       - --host=tcp://127.0.0.1:2375

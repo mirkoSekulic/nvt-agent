@@ -1138,19 +1138,17 @@ func agentConfigPlaceholderCacheKey(agentRun *nvtv1alpha1.AgentRun) string {
 }
 
 func placeholderPreparationTimeout() time.Duration {
-	return 4 * time.Second
+	return 5 * time.Second
 }
 
 var brokerPreparationRetryInterval = 100 * time.Millisecond
-var brokerPreparationRetryWindow = 5 * time.Second
 
 // brokerPreparationRequest tolerates only the short projection race where the
 // broker has not observed its freshly-written agent policy yet. Permanent
 // authorization failures are returned immediately; the bearer token and body
 // are never included in errors.
 func brokerPreparationRequest(ctx context.Context, client *http.Client, url, token string, payload []byte, maxBody int64) (int, []byte, error) {
-	deadline := time.Now().Add(brokerPreparationRetryWindow)
-	for attempt := 0; ; attempt++ {
+	for {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		if err != nil {
 			return 0, nil, err
@@ -1166,7 +1164,7 @@ func brokerPreparationRequest(ctx context.Context, client *http.Client, url, tok
 		if readErr != nil {
 			return response.StatusCode, nil, readErr
 		}
-		if response.StatusCode != http.StatusUnauthorized || attempt >= 7 || time.Now().After(deadline) {
+		if response.StatusCode != http.StatusUnauthorized {
 			return response.StatusCode, body, nil
 		}
 		var reason struct {
@@ -3610,8 +3608,13 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 		const rules = `set -eu
 exclude_v4=""
 exclude_v6=""
+reject_managed_overlap() {
+  case "$1" in 172.30.*|172.31.*) echo "managed Docker pool overlaps protected address $1" >&2; exit 1 ;; esac
+}
+for ip in $(hostname -i); do reject_managed_overlap "$ip"; done
 for host in $NVT_CAPTURE_EXCLUDE_HOSTS; do
   for ip in $(getent ahosts "$host" | awk '{print $1}' | sort -u); do
+    reject_managed_overlap "$ip"
     case "$ip" in *:*) exclude_v6="$exclude_v6 $ip" ;; *) exclude_v4="$exclude_v4 $ip" ;; esac
   done
 done
