@@ -239,6 +239,10 @@ grep -q 'value: "10.240.0.0/16,fd00:1234::/48"' "${EGRESS_POLICY_RENDER}" || {
   echo "chart did not render configured IPv4/IPv6 deployment exclusions" >&2
   exit 1
 }
+grep -A1 'name: NVT_DIND_PROTECTED_CIDRS' "${EGRESS_POLICY_RENDER}" | grep -q '10.240.0.0/16 fd00:1234::/48' || {
+  echo "chart did not preserve mixed-family protected CIDRs for DinD validation" >&2
+  exit 1
+}
 
 has_resource() {
   local file="$1"
