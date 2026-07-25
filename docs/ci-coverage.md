@@ -34,6 +34,8 @@ precise and every hermetic suite has a clear home.
 - `tests/runtime/plugin_exports_test.go`
 - `tests/runtime/smoke_complete_test.go`
 - `tests/runtime/compose-transparent-smoke.sh` → `network.yml / transparent-smoke`
+- `tests/runtime/dind-bridge-capture-smoke.sh` → `network.yml / transparent-smoke`
+  through the Compose smoke; its own path is also a workflow trigger.
 - `tests/runtime/kind-required-network-smoke.sh` → `runtime.yml` job
   `required-docker-network`. The smoke exercises the production DinD
   entrypoint, so the job builds the `nvt-dind` image (`make dind-build`) before

@@ -3630,6 +3630,25 @@ for host in $NVT_CAPTURE_EXCLUDE_HOSTS; do
     case "$ip" in *:*) exclude_v6="$exclude_v6 $ip" ;; *) exclude_v4="$exclude_v4 $ip" ;; esac
   done
 done
+# On supported isolated Docker bridges, classify non-host unicast L2 transit;
+# otherhost also includes unknown unicast and is not an FDB-membership proof.
+# Host/broadcast/multicast frames remain unmarked. Required bridge
+# matcher/mark support fails closed under set -e.
+local_bridge_mark=0x10000000
+local_bridge_clear=0xefffffff
+command -v ebtables >/dev/null
+ebtables -t nat -D PREROUTING -j NVT_DIND_L2_IN 2>/dev/null || true
+ebtables -t nat -N NVT_DIND_L2_IN 2>/dev/null || ebtables -t nat -F NVT_DIND_L2_IN
+ebtables -t nat -A NVT_DIND_L2_IN -j mark --mark-and "$local_bridge_clear" --mark-target CONTINUE
+ebtables -t nat -A NVT_DIND_L2_IN --logical-in docker0 --pkttype-type otherhost -j mark --mark-or "$local_bridge_mark" --mark-target RETURN
+ebtables -t nat -A NVT_DIND_L2_IN --logical-in br+ --pkttype-type otherhost -j mark --mark-or "$local_bridge_mark" --mark-target RETURN
+ebtables -t nat -A NVT_DIND_L2_IN -j RETURN
+ebtables -t nat -I PREROUTING 1 -j NVT_DIND_L2_IN
+ebtables -t nat -D POSTROUTING -j NVT_DIND_L2_OUT 2>/dev/null || true
+ebtables -t nat -N NVT_DIND_L2_OUT 2>/dev/null || ebtables -t nat -F NVT_DIND_L2_OUT
+ebtables -t nat -A NVT_DIND_L2_OUT --mark "$local_bridge_mark/$local_bridge_mark" -j mark --mark-and "$local_bridge_clear" --mark-target RETURN
+ebtables -t nat -A NVT_DIND_L2_OUT -j RETURN
+ebtables -t nat -I POSTROUTING 1 -j NVT_DIND_L2_OUT
 iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
 iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
 for ip in $exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$ip/32" -j RETURN; done
@@ -3644,6 +3663,7 @@ iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
 for ip in $exclude_v4; do iptables -t nat -A NVT_DIND -d "$ip/32" -j RETURN; done
+	iptables -t nat -A NVT_DIND -m mark --mark "$local_bridge_mark/$local_bridge_mark" -m comment --comment nvt-local-bridge -j RETURN
 	iptables -t nat -A NVT_DIND -d "$NVT_DIND_NETWORK_CIDR" -j RETURN
 iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
@@ -3658,6 +3678,7 @@ ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
 for ip in $exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$ip/128" -j RETURN; done
+	ip6tables -t nat -A NVT_DIND -m mark --mark "$local_bridge_mark/$local_bridge_mark" -m comment --comment nvt-local-bridge -j RETURN
 	# Docker's managed pool is IPv4; IPv6 remains captured by the redirect.
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
