@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+# This entrypoint only prepares NVT-specific Docker storage and network
+# arguments. Startup itself is always handed back to the base image's
+# `dockerd-entrypoint.sh`, which runs `/usr/local/bin/dind` and performs the
+# upstream cgroup-v2 nesting setup: it evacuates the cgroup namespace root,
+# enables the delegated controllers, keeps the root a valid domain cgroup, and
+# makes `/` recursively shared. Executing `dockerd` directly skips that setup
+# and leaves nested systemd workloads with an invalid threaded cgroup. The
+# vendor entrypoint is resolved through PATH so tests can substitute a fake.
+
 data_root="${NVT_DIND_DATA_ROOT:-/var/lib/docker}"
 backing_dir="${NVT_DIND_BACKING_DIR:-/var/lib/nvt-dind}"
 run_dir="${NVT_DIND_RUN_DIR:-/run/nvt-dind}"
@@ -36,7 +45,7 @@ if [ "${NVT_DIND_TRANSPARENT:-false}" = true ]; then
   docker_network_args="--bip=172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24"
 fi
 if [ "${persistent_storage}" = false ] && [ "${filesystem_type}" != "virtiofs" ]; then
-  exec dockerd ${docker_network_args} "$@"
+  exec dockerd-entrypoint.sh dockerd ${docker_network_args} "$@"
 fi
 
 case "${image_size_bytes}" in
@@ -145,4 +154,4 @@ if ! losetup -d "${loop_device}"; then
 fi
 
 printf '%s\n' overlay2 >"${required_driver_file}"
-exec dockerd ${docker_network_args} "$@" --storage-driver=overlay2
+exec dockerd-entrypoint.sh dockerd ${docker_network_args} "$@" --storage-driver=overlay2

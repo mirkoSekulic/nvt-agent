@@ -263,6 +263,16 @@ starts. Filesystem and loop tools are baked into the coordinated `nvt-dind`
 image; startup never installs them from the network. A malformed, partial, or
 unmountable existing image fails closed and is never reformatted.
 
+The sidecar entrypoint only prepares those storage and network arguments; it
+then hands startup back to the base image's `dockerd-entrypoint.sh`, which runs
+`/usr/local/bin/dind`. That vendor path owns the cgroup-v2 nesting contract: it
+evacuates the sidecar's cgroup root, enables the delegated controllers, keeps
+the root a valid domain cgroup, and makes `/` recursively shared, so nested
+systemd workloads get a usable domain cgroup. NVT does not reimplement or
+override that setup, and the image build fails if the base image stops
+providing it. This is confined to the DinD sidecar; `agentd`, the runtime core,
+and plugins remain unaware of cgroup layout.
+
 Ephemeral runs keep the backing image in a sidecar-only `emptyDir` with a 20
 GiB size limit, so Pod replacement discards Docker data. Persistent runs keep
 it in the dedicated Docker PVC, so Pod or sidecar replacement reuses the same
