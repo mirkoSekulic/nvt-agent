@@ -7,6 +7,10 @@ on:
     paths:
       - "egressd/**"
       - "captured/**"
+      - "dind/**"
+      - "compose.agent.yaml"
+      - "operator/internal/controller/agentrun_controller.go"
+      - "operator/internal/controller/agentrun_controller_test.go"
       - "scripts/**"
       - "Makefile"
       - "tests/runtime/compose-transparent-smoke.sh"
@@ -19,6 +23,10 @@ on:
     paths:
       - "egressd/**"
       - "captured/**"
+      - "dind/**"
+      - "compose.agent.yaml"
+      - "operator/internal/controller/agentrun_controller.go"
+      - "operator/internal/controller/agentrun_controller_test.go"
       - "scripts/**"
       - "Makefile"
       - "tests/runtime/compose-transparent-smoke.sh"

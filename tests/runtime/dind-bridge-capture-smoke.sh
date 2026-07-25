@@ -71,6 +71,10 @@ rule_packets() {
   docker exec "${DAEMON}" iptables -t nat -L NVT_DIND -v -n | awk '/REDIRECT.*15001/ {sum += $1} END {print sum + 0}'
 }
 
+rule_packets_v6() {
+  docker exec "${DAEMON}" ip6tables -t nat -L NVT_DIND -v -n | awk '/REDIRECT.*15001/ {sum += $1} END {print sum + 0}'
+}
+
 # Prove the baseline before installing capture rules.
 start_fixture nvt_before nvt_before_server
 [[ "$(bridge_request nvt_before nvt_before_server)" == "bridge-ok" ]]
@@ -123,7 +127,7 @@ docker exec "${DAEMON}" iptables -t nat -C NVT_DIND -d 172.30.0.0/15 -m comment 
 
 # Model two nested-system nodes on a managed Docker bridge. The destination is
 # a separately routed workload address, so the managed-pool destination return
-# cannot preserve it; only kernel-identified local L2 bridge transit may do so.
+# cannot preserve it; only non-host unicast L2 bridge transit may do so.
 docker exec "${DAEMON}" docker network create nvt_routed >/dev/null
 docker exec "${DAEMON}" docker run -d --privileged --name nvt_routed_server --network nvt_routed \
   busybox:1.36 sh -ec 'ip addr add 192.0.2.154/32 dev lo; mkdir -p /tmp/www; echo routed-bridge-ok >/tmp/www/index.html; exec httpd -f -p 8080 -h /tmp/www' >/dev/null
@@ -153,6 +157,37 @@ routed_v6_before="$(docker exec "${DAEMON}" ip6tables -t nat -L NVT_DIND -v -n |
 [[ "$(routed_bridge_request_v6 nvt_routed_v6 nvt_routed_server_v6 2001:db8:154::2)" == "routed-v6-ok" ]]
 routed_v6_after="$(docker exec "${DAEMON}" ip6tables -t nat -L NVT_DIND -v -n | awk '/nvt-local-bridge/ {sum += $1} END {print sum + 0}')"
 [[ "${routed_v6_after:-0}" -gt "${routed_v6_before:-0}" ]]
+
+# Host-directed IPv6 traffic on that exact bridge remains unmarked. Forge the
+# reserved bit inside a privileged nested workload for the external case; the
+# bridge ingress scrub must remove it before ip6tables classification.
+docker exec "${DAEMON}" docker run -d --name nvt_marked_client_v6 --privileged --network nvt_routed_v6 busybox:1.36 sleep 300 >/dev/null
+marked_pid_v6="$(docker exec "${DAEMON}" docker inspect -f '{{.State.Pid}}' nvt_marked_client_v6)"
+gateway_v6="$(docker exec "${DAEMON}" docker exec nvt_marked_client_v6 sh -ec 'ip -6 route show default | awk "{print \$3; exit}"')"
+[[ -n "${gateway_v6}" ]]
+docker exec "${DAEMON}" nsenter -t "${marked_pid_v6}" -n \
+  ip6tables -t mangle -A OUTPUT -p tcp -d 2001:db8:ffff::1/128 -j MARK --set-xmark 0x10000000/0x10000000
+docker exec "${DAEMON}" docker exec nvt_marked_client_v6 \
+  ip -6 route replace 2001:db8:ffff::1/128 via "${gateway_v6}"
+redirect_v6_before="$(rule_packets_v6)"
+if docker exec "${DAEMON}" docker exec nvt_marked_client_v6 \
+  wget -q -T 3 -O /dev/null 'http://[2001:db8:ffff::1]/'; then
+  echo "forged-mark IPv6 external traffic bypassed capture" >&2
+  exit 1
+fi
+redirect_v6_external="$(rule_packets_v6)"
+[[ "${redirect_v6_external:-0}" -gt "${redirect_v6_before:-0}" ]]
+
+docker exec "${DAEMON}" docker exec nvt_marked_client_v6 \
+  ip -6 route replace fd00:ec2::254/128 via "${gateway_v6}"
+if docker exec "${DAEMON}" docker exec nvt_marked_client_v6 \
+  wget -q -T 3 -O /dev/null 'http://[fd00:ec2::254]/'; then
+  echo "IPv6 protected traffic bypassed capture" >&2
+  exit 1
+fi
+redirect_v6_protected="$(rule_packets_v6)"
+[[ "${redirect_v6_protected:-0}" -gt "${redirect_v6_external:-0}" ]]
+docker exec "${DAEMON}" docker rm -f nvt_marked_client_v6 >/dev/null
 
 # Routed traffic from the exact post-init bridge must hit the redirect. There
 # is intentionally no listener on 15001 in this isolated proof, so both calls
@@ -194,5 +229,6 @@ fi
 redirect_private="$(rule_packets 'iifname "br-*" ip protocol tcp')"
 [[ "${redirect_private:-0}" -gt "${redirect_metadata:-0}" ]]
 
-printf 'DinD bridge capture smoke passed (local=%s routed-v4=%s routed-v6=%s external=%s metadata=%s private=%s)\n' \
-  "${local_packets}" "${routed_after}" "${routed_v6_after}" "${redirect_external}" "${redirect_metadata}" "${redirect_private}"
+printf 'DinD bridge capture smoke passed (local=%s routed-v4=%s routed-v6=%s external-v6=%s protected-v6=%s external=%s metadata=%s private=%s)\n' \
+  "${local_packets}" "${routed_after}" "${routed_v6_after}" "${redirect_v6_external}" "${redirect_v6_protected}" \
+  "${redirect_external}" "${redirect_metadata}" "${redirect_private}"

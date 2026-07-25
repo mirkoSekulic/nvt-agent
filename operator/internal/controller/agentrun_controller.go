@@ -3630,9 +3630,10 @@ for host in $NVT_CAPTURE_EXCLUDE_HOSTS; do
     case "$ip" in *:*) exclude_v6="$exclude_v6 $ip" ;; *) exclude_v4="$exclude_v4 $ip" ;; esac
   done
 done
-# Classify only frames whose destination MAC belongs to another port on the
-# same Docker bridge. Host-directed frames are routed egress and remain
-# unmarked. Required bridge matcher/mark support fails closed under set -e.
+# On supported isolated Docker bridges, classify non-host unicast L2 transit;
+# otherhost also includes unknown unicast and is not an FDB-membership proof.
+# Host/broadcast/multicast frames remain unmarked. Required bridge
+# matcher/mark support fails closed under set -e.
 local_bridge_mark=0x10000000
 local_bridge_clear=0xefffffff
 command -v ebtables >/dev/null
