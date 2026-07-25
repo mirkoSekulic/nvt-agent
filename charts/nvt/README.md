@@ -54,6 +54,12 @@ helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
 Do not apply CRDs from a different chart version than the release being
 installed.
 
+For transparent AgentRuns, configure `dind.protectedCIDRs` with every cluster
+Pod, Service, control-plane, broker, and deployment-denied IPv4 range. Startup
+fails closed if any configured range overlaps the managed Docker pool
+`172.30.0.0/15`; malformed CIDRs are also rejected. The defaults protect
+loopback and link-local/metadata ranges but cannot infer cluster-specific CIDRs.
+
 ## Coordinated images
 
 The published chart's `appVersion` is the immutable image tag for its tested

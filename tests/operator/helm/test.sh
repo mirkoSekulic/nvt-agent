@@ -552,6 +552,7 @@ for image in \
 done
 grep -A1 'name: NVT_DIND_IMAGE' "${ALL_IMAGES_RENDER}" | grep -q "ghcr.io/mirkosekulic/nvt-dind:${CHART_APP_VERSION}"
 grep -A1 'name: NVT_DIND_IMAGE_PULL_POLICY' "${ALL_IMAGES_RENDER}" | grep -q 'IfNotPresent'
+grep -A1 'name: NVT_DIND_PROTECTED_CIDRS' "${ALL_IMAGES_RENDER}" | grep -q '127.0.0.0/8 169.254.0.0/16'
 grep -q 'ghcr.io/mirkosekulic/nvt-operator:operator-override' "${COMPONENT_TAG_RENDER}"
 grep -q 'ghcr.io/mirkosekulic/nvt-dind:dind-override' "${COMPONENT_TAG_RENDER}"
 for image in \

@@ -3611,6 +3611,7 @@ exclude_v6=""
 reject_managed_overlap() {
   case "$1" in 172.30.*|172.31.*) echo "managed Docker pool overlaps protected address $1" >&2; exit 1 ;; esac
 }
+/usr/local/bin/nvt-validate-managed-cidrs "$NVT_DIND_NETWORK_CIDR"
 for ip in $(hostname -i); do reject_managed_overlap "$ip"; done
 for host in $NVT_CAPTURE_EXCLUDE_HOSTS; do
   for ip in $(getent ahosts "$host" | awk '{print $1}' | sort -u); do
@@ -3662,7 +3663,9 @@ ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PR
 					EgressdServiceName(agentRun.Name),
 					"kubernetes.default.svc", "kube-dns.kube-system.svc",
 				}, " "),
-			}, {Name: "NVT_DIND_NETWORK_CIDR", Value: dockerNetworkCIDR}},
+			}, {Name: "NVT_DIND_NETWORK_CIDR", Value: dockerNetworkCIDR}, {
+				Name: "NVT_DIND_PROTECTED_CIDRS", Value: strings.Join(append([]string{"127.0.0.0/8", "169.254.0.0/16"}, strings.Fields(strings.ReplaceAll(os.Getenv("NVT_DIND_PROTECTED_CIDRS"), ",", " "))...), " "),
+			}},
 			SecurityContext: &corev1.SecurityContext{
 				RunAsUser:                ptrTo(int64(0)),
 				AllowPrivilegeEscalation: ptrTo(false),

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENTRYPOINT="${ROOT}/dind/nvt-dind-entrypoint.sh"
 READY="${ROOT}/dind/nvt-dind-ready.sh"
+CIDR_VALIDATOR="${ROOT}/dind/validate-managed-cidrs.sh"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 BIN="${WORKDIR}/bin"
@@ -344,5 +345,21 @@ export FAKE_DOCKER_DRIVER=vfs
 PATH="${BIN}:${PATH}" NVT_DIND_RUN_DIR="${FIXTURE}/run" "${READY}"
 
 bash "${ROOT}/tests/operator/kata/test.sh"
+
+validate_cidrs() {
+  docker run --rm -e NVT_DIND_PROTECTED_CIDRS="$1" -v "${CIDR_VALIDATOR}:/validator:ro" alpine:3.20 /validator 172.30.0.0/15
+}
+validate_cidrs '10.0.0.0/8 169.254.0.0/16'
+for protected in 172.30.0.0/15 172.16.0.0/12 172.30.1.0/24 172.28.0.0/14 172.31.255.0/24; do
+  if validate_cidrs "${protected}" >/dev/null 2>&1; then
+    echo "overlapping protected CIDR ${protected} was accepted" >&2
+    exit 1
+  fi
+done
+if validate_cidrs 'not-a-cidr' >/dev/null 2>&1; then
+  echo "malformed protected CIDR was accepted" >&2
+  exit 1
+fi
+echo "nvt-dind CIDR validation test passed"
 
 echo "nvt-dind storage setup test passed"

@@ -37,6 +37,8 @@ spec:
               value: {{ include "nvt.dindImage" . | quote }}
             - name: NVT_DIND_IMAGE_PULL_POLICY
               value: {{ .Values.dind.image.pullPolicy | quote }}
+            - name: NVT_DIND_PROTECTED_CIDRS
+              value: {{ join " " (concat .Values.dind.protectedCIDRs .Values.egress.denyCIDRs) | quote }}
             - name: NVT_NETWORK_POLICY_CAPABLE
               value: {{ .Values.egress.networkPolicyCapable | quote }}
             - name: NVT_EGRESS_DENY_CIDRS

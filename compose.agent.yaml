@@ -78,6 +78,7 @@ services:
       - NET_ADMIN
     environment:
       NVT_CAPTURE_EXCLUDE_HOSTS: broker
+      NVT_DIND_PROTECTED_CIDRS: ${NVT_DIND_PROTECTED_CIDRS:-127.0.0.0/8 169.254.0.0/16}
     depends_on:
       docker:
         condition: service_healthy
@@ -93,6 +94,7 @@ services:
         reject_managed_overlap() {
           case "$$1" in 172.30.*|172.31.*) echo "managed Docker pool overlaps protected address $$1" >&2; exit 1 ;; esac
         }
+        /usr/local/bin/nvt-validate-managed-cidrs 172.30.0.0/15
         for ip in $$(hostname -i); do reject_managed_overlap "$$ip"; done
         for host in $$NVT_CAPTURE_EXCLUDE_HOSTS; do
           for ip in $$(getent ahosts "$$host" | awk '{print $$1}' | sort -u); do

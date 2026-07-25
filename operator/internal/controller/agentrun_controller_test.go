@@ -6876,6 +6876,9 @@ func TestTransparentAdmissionAndPodTransportBoundary(t *testing.T) {
 	if netInit.Image != DindImage() {
 		t.Fatalf("net-init image = %q, want coordinated DinD image %q", netInit.Image, DindImage())
 	}
+	if got := envValue(netInit, "NVT_DIND_PROTECTED_CIDRS"); !strings.Contains(got, "127.0.0.0/8") || !strings.Contains(got, "169.254.0.0/16") {
+		t.Fatalf("net-init protected CIDRs = %q", got)
+	}
 	if netInit.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Fatalf("net-init pull policy = %q", netInit.ImagePullPolicy)
 	}

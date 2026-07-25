@@ -8,7 +8,8 @@ RUN apk add --no-cache coreutils e2fsprogs util-linux
 
 COPY dind/nvt-dind-entrypoint.sh /usr/local/bin/nvt-dind-entrypoint
 COPY dind/nvt-dind-ready.sh /usr/local/bin/nvt-dind-ready
+COPY dind/validate-managed-cidrs.sh /usr/local/bin/nvt-validate-managed-cidrs
 
-RUN chmod 0755 /usr/local/bin/nvt-dind-entrypoint /usr/local/bin/nvt-dind-ready
+RUN chmod 0755 /usr/local/bin/nvt-dind-entrypoint /usr/local/bin/nvt-dind-ready /usr/local/bin/nvt-validate-managed-cidrs
 
 ENTRYPOINT ["/usr/local/bin/nvt-dind-entrypoint"]
