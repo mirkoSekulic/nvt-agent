@@ -45,11 +45,18 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 		"image: ${DIND_IMAGE:-nvt-dind:latest}",
 		"NET_ADMIN",
 		"NVT_CAPTURE_EXCLUDE_HOSTS: broker",
+		"command -v ebtables >/dev/null",
+		"ebtables -t nat -A NVT_DIND_L2_IN -j mark --mark-and \"$$local_bridge_clear\" --mark-target CONTINUE",
 		"for ip in $$exclude_v4; do iptables -t nat -A NVT_CAPTURE",
 		"iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN",
 		"iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN",
+		"ebtables -t nat -A NVT_DIND_L2_IN --logical-in docker0 --pkttype-type otherhost",
+		"ebtables -t nat -A NVT_DIND_L2_IN --logical-in br+ --pkttype-type otherhost",
+		"ebtables -t nat -A NVT_DIND_L2_OUT --mark \"$$local_bridge_mark/$$local_bridge_mark\"",
+		"iptables -t nat -A NVT_DIND -m mark --mark \"$$local_bridge_mark/$$local_bridge_mark\"",
 		"iptables -t nat -A NVT_DIND -i br-+ -p tcp",
 		"iptables -t nat -A NVT_DIND -d 172.30.0.0/15 -j RETURN",
+		"ip6tables -t nat -A NVT_DIND -m mark --mark \"$$local_bridge_mark/$$local_bridge_mark\"",
 		"ip6tables -t nat",
 		"profiles:",
 		"- mediated",
@@ -69,6 +76,18 @@ func TestComposeAgentUsesDindSidecar(t *testing.T) {
 	}
 	if strings.Contains(compose, "/var/run/docker.sock:") {
 		t.Fatalf("compose.agent.yaml must not mount the host Docker socket")
+	}
+	markScrub := strings.Index(compose, "ebtables -t nat -A NVT_DIND_L2_IN -j mark --mark-and \"$$local_bridge_clear\"")
+	bridgeClassifier := strings.Index(compose, "ebtables -t nat -A NVT_DIND_L2_IN --logical-in br+ --pkttype-type otherhost")
+	for _, family := range []string{"iptables", "ip6tables"} {
+		localBridge := strings.Index(compose, family+" -t nat -A NVT_DIND -m mark --mark \"$$local_bridge_mark/$$local_bridge_mark\"")
+		redirect := strings.Index(compose, family+" -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT")
+		if markScrub == -1 || bridgeClassifier == -1 || localBridge == -1 || redirect == -1 || markScrub >= bridgeClassifier || bridgeClassifier >= localBridge || localBridge >= redirect {
+			t.Fatalf("%s local-bridge return must precede bridge redirect in compose:\n%s", family, compose)
+		}
+	}
+	if strings.Contains(compose, "physdev") || strings.Contains(compose, " fib ") {
+		t.Fatalf("compose must use portable bridge pkttype classification:\n%s", compose)
 	}
 	if strings.Contains(compose, "NVT_BROKER_TOKEN: ${NVT_EGRESS_BROKER_TOKEN") {
 		t.Fatalf("compose must not pass egress token through agent-loaded interpolation env:\n%s", compose)

@@ -96,9 +96,21 @@ OUTPUT:
   redirect remaining TCP to captured:15001
 
 PREROUTING:
+  mark only peer-directed L2 frames entering docker0 or a br-* bridge
+  allow that transient local-bridge mark for IPv4 and IPv6
   allow destinations in the managed Docker pool (172.30.0.0/15)
   redirect TCP arriving from docker0 or any br-* bridge to captured:15001
 ```
+
+The L2 classifier runs at the bridge hook and marks only `otherhost` frames:
+their destination MAC belongs to another port on the same Docker bridge. The
+bridge ingress first clears that NVT-owned bit so nested workloads cannot
+forge the classification. The IPv4 and IPv6 PREROUTING chains return marked
+frames before redirecting, then bridge POSTROUTING clears the bit. This preserves
+node-to-node and separately routed nested-workload traffic without knowing its
+workload CIDR. Frames addressed to the bridge host/gateway are routed traffic,
+remain unmarked, and continue to transparent capture. Missing bridge
+`pkttype`/mark support fails net-init rather than disabling capture.
 
 The coordinated DinD image configures Docker with the explicit managed pool
 `172.30.0.0/15`: `172.30.0.0/24` is the default bridge and dynamic networks
@@ -106,7 +118,10 @@ come from `172.31.0.0/16`. Net-init returns only that bounded pool before the
 redirect, so bridges created after startup remain covered without a kernel FIB
 expression. Traffic outside the pool, including private, metadata, and
 control-plane destinations, remains captured and subject to the existing
-egress policy. Custom Docker subnets outside this managed pool are unsupported
+egress policy unless the kernel identifies the frame as local peer-to-peer L2
+transit. A peer that subsequently originates or forwards external traffic
+re-enters through a host-directed frame and is captured. Custom Docker subnets
+outside this managed pool are unsupported
 unless a future validated configuration explicitly extends the contract; they
 must not be silently exempted.
 
