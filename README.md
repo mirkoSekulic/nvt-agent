@@ -1,5 +1,7 @@
 # nvt-agent
 
+<img src="assets/branding/nvt-agent-mark-512.png" alt="NVT Agent feather and sun mark" width="112">
+
 `nvt-agent` runs coding agents in isolated, reproducible environments. It works
 locally with Docker Compose and in Kubernetes through an operator.
 

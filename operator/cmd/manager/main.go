@@ -52,6 +52,10 @@ func main() {
 		ctrl.Log.Error(err, "invalid default egress mode configuration")
 		os.Exit(1)
 	}
+	if err := controller.ValidateBrandingConfig(); err != nil {
+		ctrl.Log.Error(err, "invalid branding configuration")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,

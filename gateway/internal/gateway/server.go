@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ type Config struct {
 	DefaultTargetPort int
 	Routing           RoutingConfig
 	Auth              AuthConfig
+	BrandingDir       string
 	basePathValue     string
 	publicOriginValue string
 	publicURLParsed   bool
@@ -99,6 +101,9 @@ type OAuth2IdentityConfig struct {
 }
 
 func (c Config) Validate() error {
+	if c.BrandingDir != "" && (!filepath.IsAbs(c.BrandingDir) || filepath.Clean(c.BrandingDir) != c.BrandingDir) {
+		return fmt.Errorf("brandingDir must be an absolute canonical path")
+	}
 	routingMode := c.routingMode()
 	switch routingMode {
 	case routingModeSubdomain:
@@ -370,6 +375,7 @@ type Server struct {
 	client    ctrlclient.Client
 	namespace string
 	auth      *Authenticator
+	branding  brandAssets
 }
 
 type routeKind int
@@ -396,11 +402,15 @@ func NewServer(config Config, client ctrlclient.Client, namespace string) (*Serv
 		return nil, err
 	}
 	config = config.withParsedPublicURL()
+	branding, err := loadBrandAssets(config.BrandingDir)
+	if err != nil {
+		return nil, fmt.Errorf("load branding assets: %w", err)
+	}
 	auth, err := NewAuthenticator(context.Background(), config)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{config: config, client: client, namespace: namespace, auth: auth}, nil
+	return &Server{config: config, client: client, namespace: namespace, auth: auth, branding: branding}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -424,6 +434,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.config.routingMode() == routingModePath && !requestMatchesPublicOrigin(r, s.config.PublicURL) {
 		http.NotFound(w, r)
+		return
+	}
+	if s.serveBrandAsset(w, r) {
 		return
 	}
 	if s.auth != nil && s.auth.HandlePublic(w, r) {
@@ -699,12 +712,15 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := dashboardTemplate.Execute(w, dashboardData{
-		Items:      items,
-		View:       view,
-		ActiveURL:  s.dashboardViewURL(dashboardViewActive),
-		AllURL:     s.dashboardViewURL(dashboardViewAll),
-		ShowLogout: s.auth != nil,
-		LogoutPath: s.config.mountedPath("/oauth2/logout"),
+		Items:         items,
+		View:          view,
+		ActiveURL:     s.dashboardViewURL(dashboardViewActive),
+		AllURL:        s.dashboardViewURL(dashboardViewAll),
+		ShowLogout:    s.auth != nil,
+		LogoutPath:    s.config.mountedPath("/oauth2/logout"),
+		BrandMarkPath: s.config.mountedPath(brandMarkPath),
+		TouchIconPath: s.config.mountedPath(brandTouchIconPath),
+		FaviconPath:   s.config.mountedPath(brandFaviconPath),
 		PrincipalName: func() string {
 			if principal == nil {
 				return ""
@@ -729,6 +745,9 @@ type dashboardData struct {
 	ShowLogout    bool
 	LogoutPath    string
 	PrincipalName string
+	BrandMarkPath string
+	TouchIconPath string
+	FaviconPath   string
 }
 
 type dashboardItem struct {
@@ -801,10 +820,22 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>nvt AgentRuns</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#C89532">
+  <title>NVT Agent</title>
+  <link rel="icon" href="{{ .FaviconPath }}" sizes="any">
+  <link rel="apple-touch-icon" href="{{ .TouchIconPath }}" sizes="192x192">
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; color: #17202a; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; color: #17202a; background: #fbfaf7; }
+    main { max-width: 80rem; margin: 0 auto; padding: 1.5rem 2rem 2.5rem; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .brand { display: flex; align-items: center; gap: .75rem; color: #17202a; text-decoration: none; }
+    .brand img { display: block; width: 2.75rem; height: 2.75rem; }
+    .brand-name { display: block; font-size: 1.15rem; font-weight: 750; line-height: 1.1; }
+    .brand-context { display: block; color: #687789; font-size: .8rem; margin-top: .18rem; }
+    .account { display: flex; align-items: center; gap: .6rem; color: #4d5b6a; }
     nav { display: flex; gap: .35rem; margin: 0 0 1rem; }
     nav a { border: 1px solid #aeb8c4; border-radius: .35rem; padding: .35rem .65rem; text-decoration: none; }
     nav a[aria-current="page"] { background: #e8f2fc; border-color: #0b66c3; }
@@ -815,12 +846,19 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     th { font-size: .85rem; color: #4d5b6a; }
     a { color: #0b66c3; }
     .empty { color: #687789; }
+    @media (max-width: 640px) {
+      main { padding: 1rem; }
+      header { align-items: flex-start; }
+      .account { width: 100%; justify-content: space-between; }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
   </style>
 </head>
 <body>
+<main>
   <header>
-    <h1>AgentRuns</h1>
-    {{ if .ShowLogout }}<div>{{ if .PrincipalName }}<span>{{ .PrincipalName }}</span> {{ end }}<form method="post" action="{{ .LogoutPath }}" style="display:inline"><button type="submit">Log out</button></form></div>{{ end }}
+    <a class="brand" href="{{ .ActiveURL }}"><img src="{{ .BrandMarkPath }}" alt=""><span><span class="brand-name">NVT Agent</span><span class="brand-context">AgentRuns</span></span></a>
+    {{ if .ShowLogout }}<div class="account">{{ if .PrincipalName }}<span>{{ .PrincipalName }}</span>{{ end }}<form method="post" action="{{ .LogoutPath }}"><button type="submit">Log out</button></form></div>{{ end }}
   </header>
   <nav aria-label="AgentRun view">
     <a href="{{ .ActiveURL }}"{{ if eq .View "active" }} aria-current="page"{{ end }}>Active</a>
@@ -847,5 +885,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   {{ else }}
   <p class="empty">{{ if eq .View "active" }}No active AgentRuns.{{ else }}No AgentRuns with access metadata found.{{ end }}</p>
   {{ end }}
+</main>
 </body>
 </html>`))

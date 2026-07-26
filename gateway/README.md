@@ -9,6 +9,13 @@ defaults to deny whenever authentication is enabled.
 `auth.mode=none` remains the default and preserves unrestricted access to all
 routable AgentRuns, including legacy runs.
 
+The gateway embeds its default public logo assets. Deployments may set
+`NVT_GATEWAY_BRANDING_DIR` (or `--branding-dir`) to an absolute directory
+containing the documented fixed branding files; assets are validated and
+loaded once at startup. The Helm chart's `branding.existingConfigMap` mounts
+this contract without allowing arbitrary gateway asset paths. See the chart
+README for the complete key list and rollout behavior.
+
 ## Routing modes
 
 `routing.mode=subdomain` is the default and preserves the original routing

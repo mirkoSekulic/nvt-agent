@@ -135,6 +135,16 @@ func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 			// The signed-out page reuses the sign-in renderer and returns to the
 			// mounted dashboard root, never to the reserved logged-out path.
 			assertSignInPage(t, loggedOutResponse, test.cookiePath)
+			mountedPrefix := strings.TrimSuffix(test.wantLoggedOut, "/oauth2/logged-out")
+			for _, branded := range []string{
+				`<title>Signed out · NVT Agent</title>`,
+				`href="` + mountedPrefix + brandFaviconPath + `"`,
+				`src="` + mountedPrefix + brandMarkPath + `"`,
+			} {
+				if !strings.Contains(loggedOutResponse.Body.String(), branded) {
+					t.Fatalf("logged-out page missing branding %q: %s", branded, loggedOutResponse.Body.String())
+				}
+			}
 			if len(server.auth.sessions) != 0 || len(loggedOutResponse.Result().Cookies()) != 0 {
 				t.Fatalf("logged-out page created session or cookies: sessions=%d cookies=%v", len(server.auth.sessions), loggedOutResponse.Result().Cookies())
 			}

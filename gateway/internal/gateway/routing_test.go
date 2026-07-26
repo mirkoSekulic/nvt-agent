@@ -186,6 +186,36 @@ func TestPathModeDashboardLinkAndNestedProxy(t *testing.T) {
 	}
 }
 
+func TestPreviouslyValidBrandLikeAccessKeysRemainRoutable(t *testing.T) {
+	for _, accessKey := range []string{"assets", "favicon.ico"} {
+		t.Run(accessKey, func(t *testing.T) {
+			requestURI := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestURI <- r.URL.RequestURI()
+				_, _ = w.Write([]byte("proxied-" + accessKey))
+			}))
+			defer upstream.Close()
+			run, pod := pathRoutableAgentRun(t, upstream.URL, accessKey)
+			config := pathTestConfig(authModeNone)
+			config.PublicURL = "https://staging.altinn.studio/agents"
+			server := mustNewServer(t, config, fakeClient(t, &run, &pod))
+
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, httptest.NewRequest(
+				http.MethodGet,
+				"https://staging.altinn.studio/agents/"+accessKey+"/nested/icon.svg?theme=dark",
+				nil,
+			))
+			if response.Code != http.StatusOK || response.Body.String() != "proxied-"+accessKey {
+				t.Fatalf("access key %q status=%d body=%q", accessKey, response.Code, response.Body.String())
+			}
+			if got := <-requestURI; got != "/nested/icon.svg?theme=dark" {
+				t.Fatalf("access key %q upstream URI=%q", accessKey, got)
+			}
+		})
+	}
+}
+
 func TestRootPathModeRemainsBackwardCompatible(t *testing.T) {
 	run := nvtv1alpha1.AgentRun{ObjectMeta: metav1.ObjectMeta{Namespace: "nvt", Name: "run", Annotations: map[string]string{
 		AccessKeyAnnotation: "opaque-key", DisplayNameAnnotation: "Root run",

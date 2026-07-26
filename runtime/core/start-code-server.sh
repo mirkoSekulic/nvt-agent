@@ -5,6 +5,7 @@ source "$HOME/.nvt-agent/env"
 
 code-server \
   --bind-addr "0.0.0.0:${CODE_SERVER_PORT}" \
+  --app-name "NVT Agent" \
   --auth none \
   --disable-telemetry \
   --disable-update-check \

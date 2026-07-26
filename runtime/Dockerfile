@@ -46,6 +46,14 @@ RUN curl -fsSL https://mise.run \
 RUN curl -fsSL https://code-server.dev/install.sh \
   | sh -s -- --method=standalone --prefix=/usr/local
 
+COPY runtime/branding/install-code-server-branding.sh /tmp/install-code-server-branding
+COPY assets/branding/nvt-agent-mark.svg /usr/local/share/nvt-agent/branding/nvt-agent-mark.svg
+COPY assets/branding/favicon.ico /usr/local/share/nvt-agent/branding/favicon.ico
+COPY assets/branding/nvt-agent-mark-192.png /usr/local/share/nvt-agent/branding/nvt-agent-mark-192.png
+COPY assets/branding/nvt-agent-mark-512.png /usr/local/share/nvt-agent/branding/nvt-agent-mark-512.png
+RUN /bin/sh /tmp/install-code-server-branding /usr/local/share/nvt-agent/branding \
+  && rm -f /tmp/install-code-server-branding
+
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
 COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint

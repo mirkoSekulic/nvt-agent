@@ -19,10 +19,13 @@ import (
 // stays provider-generic: no provider name, endpoint, or configuration appears
 // here or in the rendered page.
 type signInPageData struct {
-	Title     string
-	Heading   string
-	Message   string
-	SignInURL string
+	Title         string
+	Heading       string
+	Message       string
+	SignInURL     string
+	BrandMarkPath string
+	TouchIconPath string
+	FaviconPath   string
 }
 
 var signInTemplate = template.Must(template.New("signin").Parse(`<!doctype html>
@@ -30,20 +33,29 @@ var signInTemplate = template.Must(template.New("signin").Parse(`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#C89532">
   <title>{{ .Title }}</title>
+  <link rel="icon" href="{{ .FaviconPath }}" sizes="any">
+  <link rel="apple-touch-icon" href="{{ .TouchIconPath }}" sizes="192x192">
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; color: #17202a; }
-    main { max-width: 32rem; margin: 0 auto; }
-    p { color: #43536b; line-height: 1.5; }
-    a.signin { display: inline-block; margin-top: .5rem; border: 1px solid #0b66c3; border-radius: .35rem;
-      background: #0b66c3; color: #ffffff; padding: .5rem 1rem; text-decoration: none; font-weight: 600; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; display: grid; place-items: center; margin: 0; padding: 1rem; font-family: system-ui, sans-serif; color: #17202a; background: #fbfaf7; }
+    main { width: min(100%, 25rem); padding: 2rem; text-align: center; background: #fff; border: 1px solid #e2ddd2; border-radius: .8rem; box-shadow: 0 .75rem 2.5rem rgb(23 32 42 / 8%); }
+    img { display: block; width: 4rem; height: 4rem; margin: 0 auto .75rem; }
+    .brand { margin: 0; font-size: 1.15rem; font-weight: 750; }
+    h1 { margin: 1.5rem 0 .5rem; font-size: 1.5rem; }
+    p { color: #596879; line-height: 1.5; }
+    a.signin { display: inline-block; margin-top: .4rem; padding: .55rem .9rem; border-radius: .4rem; color: #fff; background: #17202a; text-decoration: none; font-weight: 600; }
+    a.signin:focus-visible { outline: 3px solid #D6A13A; outline-offset: 3px; }
   </style>
 </head>
 <body>
   <main>
+    <img src="{{ .BrandMarkPath }}" alt="">
+    <p class="brand">NVT Agent</p>
     <h1>{{ .Heading }}</h1>
     <p>{{ .Message }}</p>
-    <p><a class="signin" href="{{ .SignInURL }}">Sign in</a></p>
+    <a class="signin" href="{{ .SignInURL }}">Sign in</a>
   </main>
 </body>
 </html>
@@ -56,13 +68,16 @@ var signInTemplate = template.Must(template.New("signin").Parse(`<!doctype html>
 // the same status and headers with no body.
 func (a *Authenticator) renderSignInPage(w http.ResponseWriter, r *http.Request, returnURL string, signedOut bool) {
 	data := signInPageData{
-		Title:     "Sign in",
-		Heading:   "Sign in",
-		Message:   "Sign in to open the nvt agent gateway.",
-		SignInURL: a.signInURL(returnURL),
+		Title:         "Sign in · NVT Agent",
+		Heading:       "Sign in",
+		Message:       "Sign in to open the NVT Agent gateway.",
+		SignInURL:     a.signInURL(returnURL),
+		BrandMarkPath: a.mountedPath(brandMarkPath),
+		TouchIconPath: a.mountedPath(brandTouchIconPath),
+		FaviconPath:   a.mountedPath(brandFaviconPath),
 	}
 	if signedOut {
-		data.Title = "Signed out"
+		data.Title = "Signed out · NVT Agent"
 		data.Heading = "Signed out"
 		// State plainly that this was a local sign-out. The identity provider
 		// session is untouched and may complete the next sign-in without a

@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.27`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.28`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.27 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.28 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.27 --namespace nvt --create-namespace
+  --version 0.8.28 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -79,6 +79,40 @@ with an isolated credential-free Docker configuration. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
 match. GHCR package writers are trusted: matching labels establish coordinated
 release metadata, not byte-for-byte content identity against copied labels.
+
+### Custom branding
+
+The coordinated images include the NVT Agent logo. An open-source deployment
+can replace the public gateway and code-server artwork with one
+administrator-owned ConfigMap in the release namespace:
+
+```sh
+kubectl create configmap company-agent-branding -n nvt \
+  --from-file=nvt-agent-mark.svg=./nvt-agent-mark.svg \
+  --from-file=favicon.ico=./favicon.ico \
+  --from-file=nvt-agent-mark-64.png=./nvt-agent-mark-64.png \
+  --from-file=nvt-agent-mark-192.png=./nvt-agent-mark-192.png \
+  --from-file=nvt-agent-mark-512.png=./nvt-agent-mark-512.png
+```
+
+```yaml
+branding:
+  existingConfigMap: company-agent-branding
+```
+
+The key names are fixed: the chart does not accept arbitrary paths, external
+URLs, or encoded image values. The ConfigMap is public presentation data, not
+a place for credentials. It is mounted read-only into the gateway and only the
+untrusted agent container; DinD, captured, egressd, broker, and the operator do
+not receive it. Missing keys prevent the affected Pod from starting, and the
+gateway validates the 64/192 PNG dimensions plus ICO header before serving.
+
+Changing the ConfigMap name rolls the gateway Deployment and applies to newly
+created or normally replaced AgentRun Pods. Existing create-once AgentRun Pods
+keep their current mount until replacement. Updating data in the same ConfigMap
+is projected by Kubernetes for code-server, while the gateway must be restarted
+to reload its in-memory validated assets. Leave `existingConfigMap` empty to
+use the built-in branding.
 
 ## Upgrading image values from 0.1
 

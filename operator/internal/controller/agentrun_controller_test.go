@@ -304,6 +304,50 @@ func TestDesiredAgentPodOmittedTolerationsRemainNil(t *testing.T) {
 	}
 }
 
+func TestDesiredAgentPodOptionalBrandingConfigMap(t *testing.T) {
+	run := testAgentRun()
+	t.Setenv("NVT_BRANDING_CONFIGMAP", "")
+	baseline, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("build default agent Pod: %v", err)
+	}
+	for _, volume := range baseline.Spec.Volumes {
+		if volume.Name == brandingVolumeName {
+			t.Fatalf("default Pod unexpectedly contains branding volume: %#v", baseline.Spec.Volumes)
+		}
+	}
+	assertNoVolumeMount(t, requireContainer(t, *baseline, "agent"), brandingVolumeName)
+
+	t.Setenv("NVT_BRANDING_CONFIGMAP", "company-agent-branding")
+	pod, err := DesiredAgentPod(run, testScheme(t))
+	if err != nil {
+		t.Fatalf("build branded agent Pod: %v", err)
+	}
+	volume := requireVolume(t, *pod, brandingVolumeName)
+	if volume.ConfigMap == nil || volume.ConfigMap.Name != "company-agent-branding" {
+		t.Fatalf("unexpected branding volume: %#v", volume.VolumeSource)
+	}
+	wantItems := []corev1.KeyToPath{
+		{Key: "nvt-agent-mark.svg", Path: "nvt-agent-mark.svg"},
+		{Key: "favicon.ico", Path: "favicon.ico"},
+		{Key: "nvt-agent-mark-64.png", Path: "nvt-agent-mark-64.png"},
+		{Key: "nvt-agent-mark-192.png", Path: "nvt-agent-mark-192.png"},
+		{Key: "nvt-agent-mark-512.png", Path: "nvt-agent-mark-512.png"},
+	}
+	if !reflect.DeepEqual(volume.ConfigMap.Items, wantItems) {
+		t.Fatalf("branding items=%#v, want %#v", volume.ConfigMap.Items, wantItems)
+	}
+	assertVolumeMount(t, requireContainer(t, *pod, "agent"), brandingVolumeName, brandingMountPath, "", true)
+	for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers[1:]...) {
+		assertNoVolumeMount(t, container, brandingVolumeName)
+	}
+
+	t.Setenv("NVT_BRANDING_CONFIGMAP", "Invalid_Name")
+	if _, err := DesiredAgentPod(run, testScheme(t)); err == nil || !strings.Contains(err.Error(), "valid Kubernetes ConfigMap name") {
+		t.Fatalf("invalid branding ConfigMap error=%v", err)
+	}
+}
+
 func TestAgentTolerationsDoNotMoveSeparateEgressdPod(t *testing.T) {
 	run := transparentAgentRun(t)
 	run.Spec.Tolerations = []corev1.Toleration{{
