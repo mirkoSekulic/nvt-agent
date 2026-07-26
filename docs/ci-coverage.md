@@ -59,6 +59,8 @@ precise and every hermetic suite has a clear home.
 ### operator
 
 - `operator/executiondriver/conformance_test.go`
+- `operator/executiondriver/gitresolver/resolver_test.go` (hermetic local TLS
+  smart-HTTP Git acquisition; no external repository dependency)
 - `operator/executiondriver/host/host_test.go`
 - `operator/executiondriver/protocol_test.go`
 - `operator/config/broker/broker_manifest_test.go`
