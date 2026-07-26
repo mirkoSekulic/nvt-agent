@@ -280,16 +280,20 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 	server := mustNewServer(t, config, fakeClient(t))
 
 	request := httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/opaque-key/editor?folder=repo", nil)
+	request.Header.Set("Accept", "text/html")
 	request.Header.Set("X-Forwarded-Host", "evil.example")
 	request.Header.Set("X-Forwarded-Proto", "http")
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
-	if response.Code != http.StatusFound {
-		t.Fatalf("authentication redirect status=%d body=%q", response.Code, response.Body.String())
+	// The sign-in control, not an automatic redirect, carries the login URL. A
+	// spoofed X-Forwarded-Host must not influence either it or the return URL.
+	if response.Code != http.StatusOK || response.Header().Get("Location") != "" {
+		t.Fatalf("authentication status=%d location=%q body=%q", response.Code,
+			response.Header().Get("Location"), response.Body.String())
 	}
-	loginURL, err := url.Parse(response.Header().Get("Location"))
+	loginURL, err := url.Parse(assertSignInPageURL(t, response))
 	if err != nil || loginURL.Scheme != "https" || loginURL.Host != "staging.altinn.studio" || loginURL.Path != "/agents/oauth2/login" {
-		t.Fatalf("login redirect=%q err=%v", response.Header().Get("Location"), err)
+		t.Fatalf("sign-in URL=%q err=%v", loginURL, err)
 	}
 	if got := loginURL.Query().Get("return_url"); got != "https://staging.altinn.studio/agents/opaque-key/editor?folder=repo" {
 		t.Fatalf("return_url=%q", got)

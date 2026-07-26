@@ -8,9 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -194,9 +194,10 @@ func (a *Authenticator) Authenticate(w http.ResponseWriter, r *http.Request) (Pr
 	if ok {
 		a.clearCookie(w, a.config.Auth.Session.CookieName)
 	}
+	// Browser navigation renders the sign-in page rather than starting the
+	// provider flow. Only the sign-in control begins authorization.
 	if isBrowserRead(r) {
-		loginURL := a.publicBaseURL(r) + "/oauth2/login?return_url=" + url.QueryEscape(a.safeReturnURL(r))
-		http.Redirect(w, r, loginURL, http.StatusFound)
+		a.renderSignInPage(w, r, a.requestReturnURL(r), false)
 		return Principal{}, false
 	}
 	http.Error(w, "authentication required", http.StatusUnauthorized)
@@ -222,19 +223,59 @@ func (a *Authenticator) handleLoggedOut(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	signInURL := a.mountedPath("/oauth2/login") + "?return_url=" + url.QueryEscape(a.mountedPath("/"))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Signed out</title></head>
-<body><main><h1>Signed out</h1><p>Your gateway session has ended.</p><p><a href="%s">Sign in</a></p></main></body></html>`, html.EscapeString(signInURL))
+	// The logged-out page is the same renderer in its signed-out state. Its
+	// return target is the dashboard root: the logged-out path itself is a
+	// reserved gateway path and is not a valid return URL.
+	a.renderSignInPage(w, r, a.mountedPath("/"), true)
 }
 
+// isBrowserRead reports whether a request is an HTML document navigation, which
+// is the only thing the sign-in page helps. Only an explicit, non-zero-quality
+// text/html qualifies: an absent Accept, a bare */*, or an API media type comes
+// from a generic client, and answering those with HTML would replace a clear
+// 401 with a page the caller cannot act on. A protocol upgrade is never
+// document navigation.
 func isBrowserRead(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
-	accept := r.Header.Get("Accept")
-	return accept == "" || strings.Contains(accept, "text/html") || strings.Contains(accept, "*/*")
+	if r.Header.Get("Upgrade") != "" {
+		return false
+	}
+	return acceptsHTMLDocument(r.Header.Values("Accept"))
+}
+
+func acceptsHTMLDocument(acceptHeaders []string) bool {
+	for _, header := range acceptHeaders {
+		for _, entry := range strings.Split(header, ",") {
+			mediaRange, parameters, _ := strings.Cut(entry, ";")
+			if !strings.EqualFold(strings.TrimSpace(mediaRange), "text/html") {
+				continue
+			}
+			if acceptQuality(parameters) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// acceptQuality reads the q parameter of one Accept entry. An unparsable
+// quality is treated as unacceptable rather than defaulting to 1.
+func acceptQuality(parameters string) float64 {
+	quality := 1.0
+	for _, parameter := range strings.Split(parameters, ";") {
+		name, value, ok := strings.Cut(parameter, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return 0
+		}
+		quality = parsed
+	}
+	return quality
 }
 
 func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
