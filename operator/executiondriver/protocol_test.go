@@ -212,6 +212,36 @@ func TestDecodeStrictJSON(t *testing.T) {
 	}
 }
 
+func TestDecodeStrictJSONRejectsInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	type value struct {
+		Name string `json:"name"`
+	}
+	decoded := value{Name: "unchanged"}
+	input := append([]byte(`{"name":"`), 0xff)
+	input = append(input, []byte(`"}`)...)
+	if err := DecodeStrictJSON(input, &decoded); err == nil {
+		t.Fatal("DecodeStrictJSON unexpectedly replaced invalid UTF-8")
+	}
+	if decoded.Name != "unchanged" {
+		t.Fatalf("invalid UTF-8 mutated decoded value to %q", decoded.Name)
+	}
+
+	configuration := append([]byte(`{"nested":"`), 0xff)
+	configuration = append(configuration, []byte(`"}`)...)
+	if err := ValidateReconcileParams(ReconcileParams{Desired: DesiredExecution{
+		ExecutionID:        "run-invalid-utf8",
+		Generation:         1,
+		DesiredFingerprint: validDesiredFingerprint,
+		WorkloadKind:       WorkloadKindVM,
+		ClassName:          "fake-small",
+		Configuration:      configuration,
+	}}); err == nil {
+		t.Fatal("reconcile configuration with invalid UTF-8 unexpectedly accepted")
+	}
+}
+
 func TestValidateDesiredFingerprint(t *testing.T) {
 	t.Parallel()
 	if err := ValidateDesiredFingerprint(validDesiredFingerprint); err != nil {

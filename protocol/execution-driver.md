@@ -58,13 +58,14 @@ the exact ID. Responses may be produced out of order. The operator sends at
 most one mutating request (`reconcile` or `delete`) at a time for an execution;
 requests for different executions may overlap.
 
-A line, including its newline, is limited to 1 MiB. Duplicate JSON object keys
-are forbidden recursively in every request, response, result, error, and nested
-driver configuration. This includes keys that become equal after JSON escape
-decoding. Oversized, malformed, ambiguous, unknown-ID, duplicate-ID, or
-invalid-version responses invalidate that process generation. Raw protocol
-lines and stderr must not be copied into AgentRun status or ordinary operator
-logs.
+A line, including its newline, is limited to 1 MiB. Invalid UTF-8 is rejected
+before JSON decoding; decoders must not replace invalid bytes with Unicode
+replacement characters. Duplicate JSON object keys are forbidden recursively
+in every request, response, result, error, and nested driver configuration.
+This includes keys that become equal after JSON escape decoding. Oversized,
+malformed, ambiguous, unknown-ID, duplicate-ID, or invalid-version responses
+invalidate that process generation. Raw protocol lines and stderr must not be
+copied into AgentRun status or ordinary operator logs.
 
 Every request has this envelope:
 

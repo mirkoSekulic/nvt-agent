@@ -331,10 +331,10 @@ func ValidateRPCError(value RPCError) error {
 	return ValidateFailure(value.Data)
 }
 
-// DecodeStrictJSON rejects trailing values, unknown object fields, and
-// duplicate object keys at every nesting depth. Framing and the 1 MiB line
-// bound remain transport-host responsibilities in the later executable-loading
-// phase.
+// DecodeStrictJSON rejects invalid UTF-8, trailing values, unknown object
+// fields, and duplicate object keys at every nesting depth. Framing and the
+// 1 MiB line bound remain transport-host responsibilities in the later
+// executable-loading phase.
 func DecodeStrictJSON(data []byte, target any) error {
 	if _, err := decodeUniqueJSON(data); err != nil {
 		return err
@@ -354,6 +354,9 @@ func DecodeStrictJSON(data []byte, target any) error {
 }
 
 func decodeUniqueJSON(data []byte) (any, error) {
+	if !utf8.Valid(data) {
+		return nil, errors.New("JSON input is not valid UTF-8")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	value, err := decodeUniqueJSONValue(decoder)
