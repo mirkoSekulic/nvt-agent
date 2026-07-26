@@ -60,13 +60,13 @@ func TestStaleServerSessionCookieRecoversByRequestType(t *testing.T) {
 
 func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		configure  func(*Config)
-		requestURL string
-		wantRoot   string
-		cookiePath string
+		name          string
+		configure     func(*Config)
+		requestURL    string
+		wantLoggedOut string
+		cookiePath    string
 	}{
-		{name: "subdomain", requestURL: "http://agents.localhost/oauth2/logout", wantRoot: "/", cookiePath: "/"},
+		{name: "subdomain", requestURL: "http://agents.localhost/oauth2/logout", wantLoggedOut: "/oauth2/logged-out", cookiePath: "/"},
 		{
 			name: "root path routing",
 			configure: func(config *Config) {
@@ -74,9 +74,9 @@ func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 				config.PublicURL = "https://agents.example.com"
 				config.Auth.Session.Secure = true
 			},
-			requestURL: "https://agents.example.com/oauth2/logout",
-			wantRoot:   "/",
-			cookiePath: "/",
+			requestURL:    "https://agents.example.com/oauth2/logout",
+			wantLoggedOut: "/oauth2/logged-out",
+			cookiePath:    "/",
 		},
 		{
 			name: "path",
@@ -85,9 +85,9 @@ func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 				config.PublicURL = "https://staging.altinn.studio/agents"
 				config.Auth.Session.Secure = true
 			},
-			requestURL: "https://staging.altinn.studio/agents/oauth2/logout",
-			wantRoot:   "/agents/",
-			cookiePath: "/agents/",
+			requestURL:    "https://staging.altinn.studio/agents/oauth2/logout",
+			wantLoggedOut: "/agents/oauth2/logged-out",
+			cookiePath:    "/agents/",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -112,7 +112,7 @@ func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 			}
 			response := httptest.NewRecorder()
 			server.ServeHTTP(response, request)
-			if response.Code != http.StatusSeeOther || response.Header().Get("Location") != test.wantRoot {
+			if response.Code != http.StatusSeeOther || response.Header().Get("Location") != test.wantLoggedOut {
 				t.Fatalf("status=%d location=%q", response.Code, response.Header().Get("Location"))
 			}
 			if _, ok := server.auth.sessions[sessionID]; ok {
@@ -120,6 +120,37 @@ func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 			}
 			assertClearedCookie(t, response, defaultSessionCookie, test.cookiePath)
 			assertClearedCookie(t, response, loginStateCookie, test.cookiePath)
+
+			loggedOutURL := *logoutURL
+			loggedOutURL.Path = test.wantLoggedOut
+			loggedOutURL.RawQuery = ""
+			loggedOutResponse := httptest.NewRecorder()
+			server.ServeHTTP(loggedOutResponse, httptest.NewRequest(http.MethodGet, loggedOutURL.String(), nil))
+			if loggedOutResponse.Code != http.StatusOK || loggedOutResponse.Header().Get("Location") != "" || !strings.Contains(loggedOutResponse.Body.String(), "Signed out") {
+				t.Fatalf("logged-out status=%d location=%q body=%q", loggedOutResponse.Code, loggedOutResponse.Header().Get("Location"), loggedOutResponse.Body.String())
+			}
+			wantReturnURL := test.cookiePath
+			wantSignIn := strings.TrimSuffix(test.wantLoggedOut, "/oauth2/logged-out") + "/oauth2/login?return_url=" + url.QueryEscape(wantReturnURL)
+			if !strings.Contains(loggedOutResponse.Body.String(), `href="`+wantSignIn+`"`) {
+				t.Fatalf("logged-out page missing sign-in URL %q: %s", wantSignIn, loggedOutResponse.Body.String())
+			}
+			if len(server.auth.sessions) != 0 || len(loggedOutResponse.Result().Cookies()) != 0 {
+				t.Fatalf("logged-out page created session or cookies: sessions=%d cookies=%v", len(server.auth.sessions), loggedOutResponse.Result().Cookies())
+			}
+			wrongPathURL := loggedOutURL
+			wrongPathURL.Path += "/"
+			wrongPath := httptest.NewRecorder()
+			server.ServeHTTP(wrongPath, httptest.NewRequest(http.MethodGet, wrongPathURL.String(), nil))
+			if wrongPath.Code == http.StatusOK {
+				t.Fatalf("non-exact logged-out path was public: %s", wrongPathURL.String())
+			}
+			if test.cookiePath == "/agents/" {
+				wrongOrigin := httptest.NewRecorder()
+				server.ServeHTTP(wrongOrigin, httptest.NewRequest(http.MethodGet, "https://wrong.example/agents/oauth2/logged-out", nil))
+				if wrongOrigin.Code != http.StatusNotFound {
+					t.Fatalf("wrong-origin logged-out status=%d", wrongOrigin.Code)
+				}
+			}
 
 			getResponse := httptest.NewRecorder()
 			server.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, test.requestURL, nil))
@@ -133,16 +164,16 @@ func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 func TestDashboardActiveAndAllViewsUseOnePodList(t *testing.T) {
 	runs := []*nvtv1alpha1.AgentRun{
 		dashboardRun("active-run", "Active run", nvtv1alpha1.AgentRunPhaseRunning),
+		dashboardRun("status-lag-run", "Status lag run", ""),
 		dashboardRun("pending-run", "Pending run", nvtv1alpha1.AgentRunPhasePending),
 		dashboardRun("failed-run", "Failed run", nvtv1alpha1.AgentRunPhaseFailed),
 		dashboardRun("not-ready-run", "Not ready run", nvtv1alpha1.AgentRunPhaseRunning),
 		dashboardRun("missing-pod-run", "Missing pod run", nvtv1alpha1.AgentRunPhaseRunning),
 	}
 	baseClient := fakeClient(t,
-		runs[0], runs[1], runs[2], runs[3], runs[4],
+		runs[0], runs[1], runs[2], runs[3], runs[4], runs[5],
 		dashboardPod("active-run", readyPodStatus("10.0.0.10")),
-		dashboardPod("pending-run", readyPodStatus("10.0.0.11")),
-		dashboardPod("failed-run", readyPodStatus("10.0.0.12")),
+		dashboardPod("status-lag-run", readyPodStatus("10.0.0.11")),
 		dashboardPod("not-ready-run", corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.13"}),
 	)
 	client := &countingClient{Client: baseClient}
@@ -153,7 +184,7 @@ func TestDashboardActiveAndAllViewsUseOnePodList(t *testing.T) {
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, rawURL, nil))
 		body := response.Body.String()
-		if response.Code != http.StatusOK || !strings.Contains(body, "Active run") || !strings.Contains(body, `aria-current="page">Active`) {
+		if response.Code != http.StatusOK || !strings.Contains(body, "Active run") || !strings.Contains(body, "Status lag run") || !strings.Contains(body, `aria-current="page">Active`) {
 			t.Fatalf("active status=%d body=%s", response.Code, body)
 		}
 		for _, hidden := range []string{"Pending run", "Failed run", "Not ready run", "Missing pod run"} {
@@ -172,7 +203,7 @@ func TestDashboardActiveAndAllViewsUseOnePodList(t *testing.T) {
 	client.podLists = 0
 	all := httptest.NewRecorder()
 	server.ServeHTTP(all, httptest.NewRequest(http.MethodGet, "http://agents.localhost/?view=all", nil))
-	for _, visible := range []string{"Active run", "Pending run", "Failed run", "Not ready run", "Missing pod run"} {
+	for _, visible := range []string{"Active run", "Status lag run", "Pending run", "Failed run", "Not ready run", "Missing pod run"} {
 		if !strings.Contains(all.Body.String(), visible) {
 			t.Fatalf("all view omitted %q: %s", visible, all.Body.String())
 		}
@@ -199,10 +230,10 @@ func TestDashboardAuthorizationFiltersBeforeActiveAndAllRendering(t *testing.T) 
 	))
 	for _, query := range []string{"", "?view=all"} {
 		request := httptest.NewRequest(http.MethodGet, "http://agents.localhost/"+query, nil)
-		setTestPrincipalSession(t, server, request, Principal{Issuer: "https://github.com", Subject: "42"})
+		setTestPrincipalSession(t, server, request, Principal{Issuer: "https://github.com", Subject: "42", DisplayName: "Visible User"})
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, request)
-		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Owned visible run") {
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Owned visible run") || !strings.Contains(response.Body.String(), "Visible User") {
 			t.Fatalf("authorized view status=%d body=%s", response.Code, response.Body.String())
 		}
 		for _, hiddenValue := range []string{"Unauthorized metadata canary", "hidden-run", "hidden-key"} {

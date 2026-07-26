@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -171,6 +172,11 @@ func (a *Authenticator) HandlePublic(w http.ResponseWriter, r *http.Request) boo
 		a.handleCallback(w, r)
 	case a.mountedPath("/oauth2/logout"):
 		a.handleLogout(w, r)
+	case a.mountedPath("/oauth2/logged-out"):
+		if r.URL.EscapedPath() != r.URL.Path {
+			return false
+		}
+		a.handleLoggedOut(w, r)
 	default:
 		return false
 	}
@@ -207,7 +213,20 @@ func (a *Authenticator) handleLogout(w http.ResponseWriter, r *http.Request) {
 		a.deleteSession(session.ID)
 	}
 	a.clearCookies(w)
-	http.Redirect(w, r, a.mountedPath("/"), http.StatusSeeOther)
+	http.Redirect(w, r, a.mountedPath("/oauth2/logged-out"), http.StatusSeeOther)
+}
+
+func (a *Authenticator) handleLoggedOut(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	signInURL := a.mountedPath("/oauth2/login") + "?return_url=" + url.QueryEscape(a.mountedPath("/"))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = fmt.Fprintf(w, `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Signed out</title></head>
+<body><main><h1>Signed out</h1><p>Your gateway session has ended.</p><p><a href="%s">Sign in</a></p></main></body></html>`, html.EscapeString(signInURL))
 }
 
 func isBrowserRead(r *http.Request) bool {

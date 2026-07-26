@@ -343,7 +343,7 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 
 	logout := httptest.NewRecorder()
 	server.ServeHTTP(logout, httptest.NewRequest(http.MethodPost, "https://staging.altinn.studio/agents/oauth2/logout", nil))
-	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/agents/" {
+	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/agents/oauth2/logged-out" {
 		t.Fatalf("logout status=%d location=%q", logout.Code, logout.Header().Get("Location"))
 	}
 	unknownOAuth := httptest.NewRecorder()

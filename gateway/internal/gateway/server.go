@@ -675,7 +675,7 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 		if principal != nil && !EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run).Allowed {
 			continue
 		}
-		routable := run.Status.Phase == nvtv1alpha1.AgentRunPhaseRunning && routableRuns[run.Name]
+		routable := routableRuns[run.Name]
 		if view == dashboardViewActive && !routable {
 			continue
 		}
@@ -705,6 +705,12 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 		AllURL:     s.dashboardViewURL(dashboardViewAll),
 		ShowLogout: s.auth != nil,
 		LogoutPath: s.config.mountedPath("/oauth2/logout"),
+		PrincipalName: func() string {
+			if principal == nil {
+				return ""
+			}
+			return strings.TrimSpace(principal.DisplayName)
+		}(),
 	}); err != nil {
 		http.Error(w, "render dashboard", http.StatusInternalServerError)
 	}
@@ -716,12 +722,13 @@ const (
 )
 
 type dashboardData struct {
-	Items      []dashboardItem
-	View       string
-	ActiveURL  string
-	AllURL     string
-	ShowLogout bool
-	LogoutPath string
+	Items         []dashboardItem
+	View          string
+	ActiveURL     string
+	AllURL        string
+	ShowLogout    bool
+	LogoutPath    string
+	PrincipalName string
 }
 
 type dashboardItem struct {
@@ -813,7 +820,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <body>
   <header>
     <h1>AgentRuns</h1>
-    {{ if .ShowLogout }}<form method="post" action="{{ .LogoutPath }}"><button type="submit">Log out</button></form>{{ end }}
+    {{ if .ShowLogout }}<div>{{ if .PrincipalName }}<span>{{ .PrincipalName }}</span> {{ end }}<form method="post" action="{{ .LogoutPath }}" style="display:inline"><button type="submit">Log out</button></form></div>{{ end }}
   </header>
   <nav aria-label="AgentRun view">
     <a href="{{ .ActiveURL }}"{{ if eq .View "active" }} aria-current="page"{{ end }}>Active</a>
