@@ -56,10 +56,13 @@ the exact ID. Responses may be produced out of order. The operator sends at
 most one mutating request (`reconcile` or `delete`) at a time for an execution;
 requests for different executions may overlap.
 
-A line, including its newline, is limited to 1 MiB. Oversized, malformed,
-unknown-ID, duplicate-ID, or invalid-version responses invalidate that process
-generation. Raw protocol lines and stderr must not be copied into AgentRun
-status or ordinary operator logs.
+A line, including its newline, is limited to 1 MiB. Duplicate JSON object keys
+are forbidden recursively in every request, response, result, error, and nested
+driver configuration. This includes keys that become equal after JSON escape
+decoding. Oversized, malformed, ambiguous, unknown-ID, duplicate-ID, or
+invalid-version responses invalidate that process generation. Raw protocol
+lines and stderr must not be copied into AgentRun status or ordinary operator
+logs.
 
 Every request has this envelope:
 
@@ -115,14 +118,34 @@ capability. A version or capability mismatch fails initialization.
 
 ### `reconcile`
 
-`reconcile` is level-triggered. Repeating the same desired generation must be
-safe and must converge the same logical resource. A higher generation updates
-that logical resource according to driver policy; it must not create an
-untracked replacement. The configuration is a bounded JSON object resolved
-from administrator-owned class configuration. It is not an AgentRun producer
-surface in this protocol phase and must not carry credentials; future driver
-hosts provide explicitly allowlisted provider credentials outside desired
-state.
+`reconcile` is level-triggered. `generation` represents the complete desired
+tuple: `workload_kind`, `class_name`, and the fully resolved canonical
+`configuration`. The operator must increment it whenever any member of that
+tuple changes. Execution ID and generation are not configuration members.
+
+The driver durably stores the greatest accepted generation together with a
+fingerprint or equivalent complete canonical representation of that tuple.
+Repeating the same generation and tuple is idempotent and converges the same
+logical resource. A lower generation is rejected as non-retryable
+`stale-generation` without changing durable or provider state. The same
+generation with a divergent tuple is rejected as non-retryable
+`generation-conflict`, also without changing state. These checks apply after a
+driver-process or operator restart. A higher generation updates the same
+logical resource according to driver policy; it must not create an untracked
+replacement.
+
+Canonical comparison is over JSON values, not wire formatting: insignificant
+whitespace and object-member ordering do not differ; array order and string
+values do differ; and mathematically equal JSON decimal spellings such as `1`,
+`1.0`, and `1e0` are equal. Duplicate keys are invalid rather than resolved by
+order. Version 1 bounds an individual expanded canonical number to 1024 bytes
+to prevent exponent expansion. A driver may use another collision-safe
+representation if it preserves these comparison semantics.
+
+The configuration is a bounded JSON object resolved from administrator-owned
+class configuration. It is not an AgentRun producer surface in this protocol
+phase and must not carry credentials; future driver hosts provide explicitly
+allowlisted provider credentials outside desired state.
 
 ```json
 {"jsonrpc":"2.0","id":"reconcile-4","method":"reconcile","params":{"desired":{"execution_id":"opaque-stable-id","generation":4,"workload_kind":"vm","class_name":"approved-small","configuration":{"region":"example-1"}}}}
@@ -151,7 +174,10 @@ that the resource is deleted.
 `delete` is level-triggered and idempotent. It removes all resources owned by
 the execution, including subordinate compute, disks, routes, and identities.
 Absence is success. While deletion is still converging it returns `deleting`;
-only a valid `deleted` observation means driver cleanup is complete.
+only a valid `deleted` observation means driver cleanup is complete. Deletion
+intent and progress must be durable enough for a fresh process to rediscover
+and continue cleanup. `observe` during that interval returns `deleting` without
+creating resources, and repeated `delete` continues the same cleanup operation.
 
 ```json
 {"jsonrpc":"2.0","id":"delete-4","method":"delete","params":{"execution_id":"opaque-stable-id"}}
@@ -170,8 +196,10 @@ itself permission to remove the finalizer.
 ```
 
 `shutdown` requests bounded process termination. It never means resource
-deletion and must not mutate provider resources. If it does not complete within
-the host deadline, the operator terminates and reaps the process.
+deletion and must not mutate provider resources. A valid response acknowledges
+the request but does not complete shutdown: the host continues applying the
+same deadline until the process exits. If it remains alive, the operator
+terminates and reaps it.
 
 ## Portable status
 
@@ -180,7 +208,7 @@ the host deadline, the operator terminates and reaps the process.
 | Field | Contract |
 | --- | --- |
 | `phase` | One of `pending`, `provisioning`, `running`, `succeeded`, `failed`, `deleting`, `deleted`, or `unknown`. |
-| `ready` | `true` only for a `running` execution with a valid endpoint. |
+| `ready` | `true` only for a `running` execution with a valid reachable endpoint after every driver-owned execution-class requirement has converged: compute, required storage, network isolation/enforcement, and any required egress attachment. |
 | `endpoint` | Optional `{scheme,host,port}` using `http` or `https`; no credentials, URL userinfo, query, or fragment. |
 | `external_resource_id` | Optional opaque sanitized provider identifier, at most 2048 bytes. It is diagnostic, never authorization. |
 | `observed_generation` | Non-negative desired generation represented by this observation; zero is allowed when no desired resource exists. |
@@ -191,12 +219,17 @@ the host deadline, the operator terminates and reaps the process.
 data. These portable phases are driver observations, not AgentRun conditions.
 Only the operator maps a validated observation into AgentRun status and decides
 whether a reported failure is terminal under the authorized lifecycle policy.
+The driver's `ready` assertion is necessary but not sufficient for an AgentRun
+to become routable: the operator combines it with operator-owned broker grants,
+gateway routing, and workload-readiness conditions.
 
 ## Conformance fixture
 
 `operator/executiondriver/testdata/fake-driver` is a test-only executable. Its
 conformance suite starts real processes over JSONL and verifies initialization,
-reconciliation, observation, deletion, shutdown, repeated requests, durable
-restart recovery, malformed output, bounded timeout termination and reaping,
-sanitized failures, and resource-state cleanup. It is deliberately not a
-production driver loader or a Kubernetes implementation.
+reconciliation, readiness, generation monotonicity/divergence, observation,
+durable asynchronous deletion, bounded shutdown, repeated requests, abrupt
+restart recovery, recursively ambiguous JSON rejection, malformed output,
+bounded timeout termination and reaping, sanitized failures, and final
+resource-state cleanup. It is deliberately not a production driver loader or a
+Kubernetes implementation.

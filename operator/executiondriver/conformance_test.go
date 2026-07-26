@@ -45,12 +45,13 @@ func TestMain(m *testing.M) {
 }
 
 type driverClient struct {
-	command  *exec.Cmd
-	stdin    *bufio.Writer
-	stdout   *bufio.Scanner
-	stderr   bytes.Buffer
-	waitOnce sync.Once
-	waitErr  error
+	command              *exec.Cmd
+	stdin                *bufio.Writer
+	stdout               *bufio.Scanner
+	stderr               bytes.Buffer
+	waitOnce             sync.Once
+	waitErr              error
+	shutdownAcknowledged bool
 }
 
 type rpcCallError struct {
@@ -62,6 +63,14 @@ func (e *rpcCallError) Error() string {
 		return "execution driver failed: " + e.failure.Reason
 	}
 	return "execution driver failed: " + e.failure.Reason + ": " + e.failure.Message
+}
+
+func requireRPCFailure(t *testing.T, err error, reason string, retryable bool) {
+	t.Helper()
+	var callError *rpcCallError
+	if !errors.As(err, &callError) || callError.failure.Reason != reason || callError.failure.Retryable != retryable {
+		t.Fatalf("RPC failure = %v, want reason=%q retryable=%t", err, reason, retryable)
+	}
 }
 
 func startDriver(t *testing.T, stateDirectory, mode string) *driverClient {
@@ -220,7 +229,21 @@ func (c *driverClient) shutdown(ctx context.Context) error {
 	if err := c.call(ctx, "shutdown", executiondriver.MethodShutdown, struct{}{}, &result); err != nil {
 		return err
 	}
-	return c.wait()
+	c.shutdownAcknowledged = true
+	waitChannel := make(chan error, 1)
+	go func() {
+		waitChannel <- c.wait()
+	}()
+	select {
+	case err := <-waitChannel:
+		return err
+	case <-ctx.Done():
+		if c.command.Process != nil {
+			_ = c.command.Process.Kill()
+		}
+		<-waitChannel
+		return fmt.Errorf("execution driver shutdown timed out: %w", ctx.Err())
+	}
 }
 
 func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T) {
@@ -255,6 +278,7 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 	}
 
 	desired.Configuration = mustJSON(t, map[string]any{"ready": true})
+	desired.Generation = 2
 	running, err := first.reconcile(ctx, "reconcile-2", desired)
 	if err != nil {
 		t.Fatalf("ready reconcile: %v", err)
@@ -271,10 +295,13 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 		t.Fatalf("durable resource state files=%v error=%v", stateFiles, err)
 	}
 	var persisted struct {
-		CreateCount int `json:"create_count"`
+		Generation         int64  `json:"generation"`
+		DesiredFingerprint string `json:"desired_fingerprint"`
+		CreateCount        int    `json:"create_count"`
 	}
 	stateData, err := os.ReadFile(stateFiles[0])
-	if err != nil || json.Unmarshal(stateData, &persisted) != nil || persisted.CreateCount != 1 {
+	if err != nil || json.Unmarshal(stateData, &persisted) != nil || persisted.CreateCount != 1 ||
+		persisted.Generation != 2 || persisted.DesiredFingerprint == "" {
 		t.Fatalf("idempotent reconcile durable state=%q error=%v", stateData, err)
 	}
 	stateInfo, err := os.Stat(stateFiles[0])
@@ -298,13 +325,25 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 		t.Fatalf("restart did not recover durable state: before=%#v after=%#v", running, recovered)
 	}
 
-	desired.Generation = 2
-	updated, err := second.reconcile(ctx, "reconcile-generation-2", desired)
+	lowerGeneration := desired
+	lowerGeneration.Generation = 1
+	lowerGeneration.Configuration = mustJSON(t, map[string]any{"ready": false})
+	_, err = second.reconcile(ctx, "reconcile-stale-generation", lowerGeneration)
+	requireRPCFailure(t, err, "stale-generation", false)
+	divergentGeneration := desired
+	divergentGeneration.Configuration = mustJSON(t, map[string]any{"ready": false})
+	_, err = second.reconcile(ctx, "reconcile-divergent-generation", divergentGeneration)
+	requireRPCFailure(t, err, "generation-conflict", false)
+	idempotentAfterRestart, err := second.reconcile(ctx, "reconcile-after-restart", desired)
 	if err != nil {
-		t.Fatalf("reconcile after restart: %v", err)
+		t.Fatalf("idempotent reconcile after restart: %v", err)
 	}
-	if updated.ExternalResourceID != running.ExternalResourceID || updated.ObservedGeneration != 2 {
-		t.Fatalf("reconcile after restart created a different resource: %#v", updated)
+	if idempotentAfterRestart.ExternalResourceID != running.ExternalResourceID || idempotentAfterRestart.ObservedGeneration != 2 {
+		t.Fatalf("generation rejection regressed durable state: %#v", idempotentAfterRestart)
+	}
+	unchanged, err := second.observe(ctx, "observe-after-generation-rejections", executionID)
+	if err != nil || unchanged.ExternalResourceID != running.ExternalResourceID || unchanged.ObservedGeneration != 2 || !unchanged.Ready {
+		t.Fatalf("generation rejection changed provider state: status=%#v error=%v", unchanged, err)
 	}
 	if err := second.shutdown(ctx); err != nil {
 		t.Fatalf("bounded shutdown: %v", err)
@@ -318,22 +357,45 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 	if err != nil || recoveredAfterShutdown.ExternalResourceID != running.ExternalResourceID {
 		t.Fatalf("shutdown mutated provider state: status=%#v error=%v", recoveredAfterShutdown, err)
 	}
-	deleted, err := third.delete(ctx, "delete-1", executionID)
-	if err != nil || deleted.Phase != executiondriver.PhaseDeleted {
-		t.Fatalf("delete status=%#v error=%v", deleted, err)
+	deleting, err := third.delete(ctx, "delete-start", executionID)
+	if err != nil || deleting.Phase != executiondriver.PhaseDeleting {
+		t.Fatalf("initial delete status=%#v error=%v", deleting, err)
 	}
-	deletedAgain, err := third.delete(ctx, "delete-2", executionID)
+	observedDeleting, err := third.observe(ctx, "observe-deleting", executionID)
+	if err != nil || observedDeleting.Phase != executiondriver.PhaseDeleting ||
+		observedDeleting.ExternalResourceID != running.ExternalResourceID {
+		t.Fatalf("observe while deleting status=%#v error=%v", observedDeleting, err)
+	}
+	third.stop() // Deletion progress must survive abrupt process replacement.
+
+	fourth := startDriver(t, stateDirectory, "")
+	if err := fourth.initialize(ctx); err != nil {
+		t.Fatalf("initialize during deletion: %v", err)
+	}
+	recoveredDeleting, err := fourth.observe(ctx, "observe-deleting-after-restart", executionID)
+	if err != nil || recoveredDeleting.Phase != executiondriver.PhaseDeleting {
+		t.Fatalf("deletion recovery status=%#v error=%v", recoveredDeleting, err)
+	}
+	continuedDeleting, err := fourth.delete(ctx, "delete-continue", executionID)
+	if err != nil || continuedDeleting.Phase != executiondriver.PhaseDeleting {
+		t.Fatalf("continued delete status=%#v error=%v", continuedDeleting, err)
+	}
+	deleted, err := fourth.delete(ctx, "delete-complete", executionID)
+	if err != nil || deleted.Phase != executiondriver.PhaseDeleted {
+		t.Fatalf("completed delete status=%#v error=%v", deleted, err)
+	}
+	deletedAgain, err := fourth.delete(ctx, "delete-after-absence", executionID)
 	if err != nil || deletedAgain.Phase != executiondriver.PhaseDeleted {
 		t.Fatalf("repeated delete status=%#v error=%v", deletedAgain, err)
 	}
-	observedDeleted, err := third.observe(ctx, "observe-deleted", executionID)
+	observedDeleted, err := fourth.observe(ctx, "observe-deleted", executionID)
 	if err != nil || observedDeleted.Phase != executiondriver.PhaseDeleted {
 		t.Fatalf("observe deleted status=%#v error=%v", observedDeleted, err)
 	}
 	if matches, err := filepath.Glob(filepath.Join(stateDirectory, "*.json")); err != nil || len(matches) != 0 {
 		t.Fatalf("driver resource state was not cleaned up: matches=%v error=%v", matches, err)
 	}
-	if err := third.shutdown(ctx); err != nil {
+	if err := fourth.shutdown(ctx); err != nil {
 		t.Fatalf("shutdown cleanup process: %v", err)
 	}
 }
@@ -394,6 +456,34 @@ func TestFakeExecutionDriverRejectsMalformedProtocol(t *testing.T) {
 	}
 }
 
+func TestFakeExecutionDriverRejectsDuplicateConfigurationKeys(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stateDirectory := t.TempDir()
+	client := startDriver(t, stateDirectory, "")
+	if err := client.initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	_, err := client.reconcile(ctx, "duplicate-configuration", executiondriver.DesiredExecution{
+		ExecutionID:   "run-duplicate",
+		Generation:    1,
+		WorkloadKind:  executiondriver.WorkloadKindVM,
+		ClassName:     "fake-small",
+		Configuration: json.RawMessage(`{"nested":{"ready":true,"ready":false}}`),
+	})
+	if err == nil || err.Error() != "JSON-RPC request contains invalid or ambiguous JSON" {
+		t.Fatalf("duplicate configuration error = %v", err)
+	}
+	if matches, globErr := filepath.Glob(filepath.Join(stateDirectory, "*.json")); globErr != nil || len(matches) != 0 {
+		t.Fatalf("ambiguous desired state reached the provider: matches=%v error=%v", matches, globErr)
+	}
+	if err := client.shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+}
+
 func TestFakeExecutionDriverTimeoutCancelsAndReapsProcess(t *testing.T) {
 	t.Parallel()
 	client := startDriver(t, t.TempDir(), "")
@@ -420,6 +510,29 @@ func TestFakeExecutionDriverTimeoutCancelsAndReapsProcess(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), internalFailureCanary) || strings.Contains(client.stderr.String(), internalFailureCanary) {
 		t.Fatalf("timeout exposed internal failure material: error=%v stderr=%q", err, client.stderr.String())
+	}
+}
+
+func TestFakeExecutionDriverShutdownDeadlineKillsAndReapsProcess(t *testing.T) {
+	t.Parallel()
+	client := startDriver(t, t.TempDir(), "hang-after-shutdown")
+	initializeContext, initializeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer initializeCancel()
+	if err := client.initialize(initializeContext); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer shutdownCancel()
+	err := client.shutdown(shutdownContext)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown timeout error = %v", err)
+	}
+	if !client.shutdownAcknowledged {
+		t.Fatal("fake driver did not acknowledge shutdown before remaining alive")
+	}
+	if client.command.ProcessState == nil {
+		t.Fatal("non-exiting driver process was not reaped")
 	}
 }
 

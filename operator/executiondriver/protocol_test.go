@@ -196,10 +196,88 @@ func TestDecodeStrictJSON(t *testing.T) {
 		`{"name":"driver","unknown":true}`,
 		`{"name":"driver"} {}`,
 		`{"name":`,
+		`{"name":"first","name":"second"}`,
+		`{"name":"driver","nested":{"key":1,"key":2}}`,
+		`{"name":"driver","nested":[{"key":1,"\u006bey":2}]}`,
 	} {
 		if err := DecodeStrictJSON([]byte(input), &decoded); err == nil {
 			t.Fatalf("DecodeStrictJSON(%q) unexpectedly succeeded", input)
 		}
+	}
+}
+
+func TestDesiredFingerprintCanonicalizesCompleteTuple(t *testing.T) {
+	t.Parallel()
+
+	base := DesiredExecution{
+		ExecutionID:  "run-1",
+		Generation:   4,
+		WorkloadKind: WorkloadKindVM,
+		ClassName:    "small",
+		Configuration: json.RawMessage(
+			`{"nested":{"enabled":true,"values":[1,0.10,1e-3]},"region":"test-1"}`,
+		),
+	}
+	baseFingerprint, err := DesiredFingerprint(base)
+	if err != nil {
+		t.Fatalf("base fingerprint: %v", err)
+	}
+
+	equivalent := base
+	equivalent.ExecutionID = "another-run"
+	equivalent.Generation = 99
+	equivalent.Configuration = json.RawMessage(
+		` { "region" : "test-1", "nested" : { "values" : [1.0, 1e-1, 0.0010], "enabled" : true } } `,
+	)
+	equivalentFingerprint, err := DesiredFingerprint(equivalent)
+	if err != nil {
+		t.Fatalf("equivalent fingerprint: %v", err)
+	}
+	if equivalentFingerprint != baseFingerprint {
+		t.Fatalf("semantically equivalent desired tuple changed fingerprint: base=%s equivalent=%s", baseFingerprint, equivalentFingerprint)
+	}
+
+	for name, mutate := range map[string]func(*DesiredExecution){
+		"workload kind": func(value *DesiredExecution) { value.WorkloadKind = WorkloadKindPod },
+		"class":         func(value *DesiredExecution) { value.ClassName = "large" },
+		"configuration": func(value *DesiredExecution) {
+			value.Configuration = json.RawMessage(`{"nested":{"enabled":false,"values":[1,0.1,0.001]},"region":"test-1"}`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			mutate(&changed)
+			fingerprint, err := DesiredFingerprint(changed)
+			if err != nil {
+				t.Fatalf("changed fingerprint: %v", err)
+			}
+			if fingerprint == baseFingerprint {
+				t.Fatalf("changed %s did not change fingerprint", name)
+			}
+		})
+	}
+}
+
+func TestDesiredFingerprintRejectsAmbiguousOrUnboundedConfiguration(t *testing.T) {
+	t.Parallel()
+
+	for name, configuration := range map[string]string{
+		"top-level duplicate": `{"region":"first","region":"second"}`,
+		"nested duplicate":    `{"nested":{"size":1,"size":2}}`,
+		"unbounded exponent":  `{"size":1e99999}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := DesiredFingerprint(DesiredExecution{
+				ExecutionID:   "run-1",
+				Generation:    1,
+				WorkloadKind:  WorkloadKindVM,
+				ClassName:     "small",
+				Configuration: json.RawMessage(configuration),
+			})
+			if err == nil {
+				t.Fatalf("ambiguous configuration %s unexpectedly accepted", configuration)
+			}
+		})
 	}
 }
 

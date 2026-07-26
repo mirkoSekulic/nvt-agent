@@ -5,12 +5,15 @@ package executiondriver
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,14 +22,15 @@ const (
 	ProtocolVersion = "nvt.execution-driver/v1"
 	JSONRPCVersion  = "2.0"
 
-	MaxMessageBytes        = 1 << 20
-	MaxDesiredBytes        = 256 << 10
-	MaxExecutionIDBytes    = 256
-	MaxDriverNameBytes     = 128
-	MaxExternalIDBytes     = 2048
-	MaxFailureReasonBytes  = 128
-	MaxFailureMessageBytes = 1024
-	MaxRetryAfterSeconds   = 3600
+	MaxMessageBytes         = 1 << 20
+	MaxDesiredBytes         = 256 << 10
+	MaxExecutionIDBytes     = 256
+	MaxDriverNameBytes      = 128
+	MaxExternalIDBytes      = 2048
+	MaxFailureReasonBytes   = 128
+	MaxFailureMessageBytes  = 1024
+	MaxRetryAfterSeconds    = 3600
+	MaxCanonicalNumberBytes = 1024
 )
 
 type Method string
@@ -115,7 +119,9 @@ type InitializeResult struct {
 
 // DesiredExecution is an operator-owned, level-triggered desired state. The
 // driver-specific configuration must be a JSON object. It is deliberately not
-// part of the producer or AgentRun API in this protocol-only phase.
+// part of the producer or AgentRun API in this protocol-only phase. Generation
+// identifies the complete workload-kind, class-name, and canonical-
+// configuration tuple and must increase whenever any tuple member changes.
 type DesiredExecution struct {
 	ExecutionID   string          `json:"execution_id"`
 	Generation    int64           `json:"generation"`
@@ -147,7 +153,10 @@ type Failure struct {
 // Status is the complete portable observation returned by reconcile, observe,
 // and delete. It is not an AgentRun condition: the operator remains the sole
 // owner of AgentRun status and maps validated observations according to its
-// retry, timeout, and lifecycle policy.
+// retry, timeout, and lifecycle policy. Ready asserts that every driver-owned
+// execution-class requirement has converged, including compute, required
+// storage, network enforcement, required egress attachment, and a reachable
+// endpoint. The operator combines that assertion with its own readiness gates.
 type Status struct {
 	Phase              Phase     `json:"phase"`
 	Ready              bool      `json:"ready"`
@@ -163,6 +172,7 @@ type ShutdownResult struct{}
 var (
 	stableTokenPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 	namePattern        = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
+	jsonNumberPattern  = regexp.MustCompile(`^(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$`)
 )
 
 func ValidateInitializeParams(value InitializeParams) error {
@@ -213,11 +223,46 @@ func ValidateReconcileParams(value ReconcileParams) error {
 	if len(value.Desired.Configuration) == 0 || len(value.Desired.Configuration) > MaxDesiredBytes {
 		return errors.New("reconcile desired configuration size is invalid")
 	}
-	var configuration map[string]json.RawMessage
-	if err := DecodeStrictJSON(value.Desired.Configuration, &configuration); err != nil || configuration == nil {
+	configuration, err := decodeUniqueJSON(value.Desired.Configuration)
+	if err != nil {
 		return errors.New("reconcile desired configuration must be a JSON object")
 	}
+	if _, object := configuration.(map[string]any); !object {
+		return errors.New("reconcile desired configuration must be a JSON object")
+	}
+	var canonical bytes.Buffer
+	if err := encodeCanonicalJSON(&canonical, configuration); err != nil {
+		return errors.New("reconcile desired configuration cannot be canonicalized")
+	}
 	return nil
+}
+
+// DesiredFingerprint returns a stable fingerprint of the complete desired
+// tuple. Drivers may persist this value or an equivalent complete canonical
+// representation to enforce generation monotonicity across process restarts.
+func DesiredFingerprint(value DesiredExecution) (string, error) {
+	if err := ValidateReconcileParams(ReconcileParams{Desired: value}); err != nil {
+		return "", err
+	}
+	configuration, err := decodeUniqueJSON(value.Configuration)
+	if err != nil {
+		return "", errors.New("canonicalize desired configuration")
+	}
+	var canonical bytes.Buffer
+	if err := encodeCanonicalJSON(&canonical, configuration); err != nil {
+		return "", errors.New("canonicalize desired configuration")
+	}
+	hash := sha256.New()
+	for _, component := range []string{
+		ProtocolVersion,
+		string(value.WorkloadKind),
+		value.ClassName,
+		canonical.String(),
+	} {
+		fmt.Fprintf(hash, "%d:", len(component))
+		_, _ = io.WriteString(hash, component)
+	}
+	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
 }
 
 func ValidateExecutionParams(value ExecutionParams) error {
@@ -309,10 +354,14 @@ func ValidateRPCError(value RPCError) error {
 	return ValidateFailure(value.Data)
 }
 
-// DecodeStrictJSON rejects trailing values and unknown object fields. Framing,
-// duplicate-key rejection, and the 1 MiB line bound remain transport-host
-// responsibilities in the later executable-loading phase.
+// DecodeStrictJSON rejects trailing values, unknown object fields, and
+// duplicate object keys at every nesting depth. Framing and the 1 MiB line
+// bound remain transport-host responsibilities in the later executable-loading
+// phase.
 func DecodeStrictJSON(data []byte, target any) error {
+	if _, err := decodeUniqueJSON(data); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -325,6 +374,192 @@ func DecodeStrictJSON(data []byte, target any) error {
 		return err
 	}
 	return nil
+}
+
+func decodeUniqueJSON(data []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	value, err := decodeUniqueJSONValue(decoder)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("unexpected trailing JSON value")
+		}
+		return nil, err
+	}
+	return value, nil
+}
+
+func decodeUniqueJSONValue(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return token, nil
+	}
+
+	switch delimiter {
+	case '{':
+		object := make(map[string]any)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, errors.New("JSON object key is invalid")
+			}
+			if _, duplicate := object[key]; duplicate {
+				return nil, errors.New("JSON object contains a duplicate key")
+			}
+			value, err := decodeUniqueJSONValue(decoder)
+			if err != nil {
+				return nil, err
+			}
+			object[key] = value
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return nil, errors.New("JSON object is not terminated")
+		}
+		return object, nil
+	case '[':
+		array := make([]any, 0)
+		for decoder.More() {
+			value, err := decodeUniqueJSONValue(decoder)
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, value)
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return nil, errors.New("JSON array is not terminated")
+		}
+		return array, nil
+	default:
+		return nil, errors.New("JSON delimiter is invalid")
+	}
+}
+
+func encodeCanonicalJSON(output *bytes.Buffer, value any) error {
+	switch typed := value.(type) {
+	case nil:
+		output.WriteString("null")
+	case bool:
+		if typed {
+			output.WriteString("true")
+		} else {
+			output.WriteString("false")
+		}
+	case string:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return err
+		}
+		output.Write(encoded)
+	case json.Number:
+		canonical, err := canonicalJSONNumber(string(typed))
+		if err != nil {
+			return err
+		}
+		output.WriteString(canonical)
+	case []any:
+		output.WriteByte('[')
+		for index, item := range typed {
+			if index > 0 {
+				output.WriteByte(',')
+			}
+			if err := encodeCanonicalJSON(output, item); err != nil {
+				return err
+			}
+		}
+		output.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		output.WriteByte('{')
+		for index, key := range keys {
+			if index > 0 {
+				output.WriteByte(',')
+			}
+			encodedKey, err := json.Marshal(key)
+			if err != nil {
+				return err
+			}
+			output.Write(encodedKey)
+			output.WriteByte(':')
+			if err := encodeCanonicalJSON(output, typed[key]); err != nil {
+				return err
+			}
+		}
+		output.WriteByte('}')
+	default:
+		return errors.New("canonical JSON value has an unsupported type")
+	}
+	if output.Len() > MaxDesiredBytes {
+		return errors.New("canonical JSON exceeds the desired configuration limit")
+	}
+	return nil
+}
+
+func canonicalJSONNumber(value string) (string, error) {
+	if len(value) > MaxCanonicalNumberBytes {
+		return "", errors.New("JSON number exceeds the canonical number limit")
+	}
+	match := jsonNumberPattern.FindStringSubmatch(value)
+	if match == nil {
+		return "", errors.New("JSON number is invalid")
+	}
+	exponent := 0
+	if match[4] != "" {
+		parsed, err := strconv.Atoi(match[4])
+		if err != nil || parsed > MaxCanonicalNumberBytes || parsed < -MaxCanonicalNumberBytes {
+			return "", errors.New("JSON number exponent is outside the canonical range")
+		}
+		exponent = parsed
+	}
+	digits := match[2] + match[3]
+	if strings.Trim(digits, "0") == "" {
+		return "0", nil
+	}
+	digits = strings.TrimLeft(digits, "0")
+	power := exponent - len(match[3])
+	for strings.HasSuffix(digits, "0") {
+		digits = strings.TrimSuffix(digits, "0")
+		power++
+	}
+
+	var canonical string
+	if power >= 0 {
+		if len(digits)+power > MaxCanonicalNumberBytes {
+			return "", errors.New("JSON number exceeds the canonical number limit")
+		}
+		canonical = digits + strings.Repeat("0", power)
+	} else if decimalPosition := len(digits) + power; decimalPosition > 0 {
+		canonical = digits[:decimalPosition] + "." + digits[decimalPosition:]
+	} else {
+		zeroCount := -decimalPosition
+		if 2+zeroCount+len(digits) > MaxCanonicalNumberBytes {
+			return "", errors.New("JSON number exceeds the canonical number limit")
+		}
+		canonical = "0." + strings.Repeat("0", zeroCount) + digits
+	}
+	if match[1] == "-" {
+		canonical = "-" + canonical
+	}
+	if len(canonical) > MaxCanonicalNumberBytes {
+		return "", errors.New("JSON number exceeds the canonical number limit")
+	}
+	return canonical, nil
 }
 
 func validateExecutionID(value string) error {
@@ -390,6 +625,10 @@ func MarshalRequest(id string, method Method, params any) ([]byte, error) {
 	}
 	if len(encoded)+1 > MaxMessageBytes {
 		return nil, errors.New("JSON-RPC request exceeds the message limit")
+	}
+	var validated Request
+	if err := DecodeStrictJSON(encoded, &validated); err != nil {
+		return nil, errors.New("JSON-RPC request contains invalid or ambiguous JSON")
 	}
 	return encoded, nil
 }

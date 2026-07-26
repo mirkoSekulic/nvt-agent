@@ -20,13 +20,16 @@ type fakeConfiguration struct {
 	Ready             *bool `json:"ready,omitempty"`
 	Fail              bool  `json:"fail,omitempty"`
 	DelayMilliseconds int   `json:"delay_milliseconds,omitempty"`
+	DeleteSteps       int   `json:"delete_steps,omitempty"`
 }
 
 type durableState struct {
-	ExecutionID string                 `json:"execution_id"`
-	Generation  int64                  `json:"generation"`
-	CreateCount int                    `json:"create_count"`
-	Status      executiondriver.Status `json:"status"`
+	ExecutionID          string                 `json:"execution_id"`
+	Generation           int64                  `json:"generation"`
+	DesiredFingerprint   string                 `json:"desired_fingerprint"`
+	CreateCount          int                    `json:"create_count"`
+	DeleteStepsRemaining int                    `json:"delete_steps_remaining"`
+	Status               executiondriver.Status `json:"status"`
 }
 
 type driver struct {
@@ -101,6 +104,18 @@ func (d *driver) handle(line []byte) bool {
 		}
 		status, err := d.reconcile(params)
 		if err != nil {
+			if errors.Is(err, errStaleGeneration) {
+				d.respondError(request.ID, "stale-generation", "desired generation regressed", false)
+				return false
+			}
+			if errors.Is(err, errGenerationConflict) {
+				d.respondError(request.ID, "generation-conflict", "desired state changed without a new generation", false)
+				return false
+			}
+			if errors.Is(err, errDeletionInProgress) {
+				d.respondError(request.ID, "deletion-in-progress", "execution deletion is in progress", false)
+				return false
+			}
 			d.respondError(request.ID, "reconcile-failed", "provider convergence failed", true)
 			return false
 		}
@@ -123,11 +138,12 @@ func (d *driver) handle(line []byte) bool {
 			d.respondError(request.ID, "invalid-request", "delete parameters are invalid", false)
 			return false
 		}
-		if err := d.delete(params.ExecutionID); err != nil {
+		status, err := d.delete(params.ExecutionID)
+		if err != nil {
 			d.respondError(request.ID, "delete-failed", "provider cleanup failed", true)
 			return false
 		}
-		d.respondResult(request.ID, executiondriver.Status{Phase: executiondriver.PhaseDeleted})
+		d.respondResult(request.ID, status)
 	case executiondriver.MethodShutdown:
 		var params struct{}
 		if executiondriver.DecodeStrictJSON(request.Params, &params) != nil {
@@ -135,6 +151,9 @@ func (d *driver) handle(line []byte) bool {
 			return false
 		}
 		d.respondResult(request.ID, executiondriver.ShutdownResult{})
+		if os.Getenv("NVT_FAKE_DRIVER_MODE") == "hang-after-shutdown" {
+			select {}
+		}
 		return true
 	default:
 		d.respondError(request.ID, "method-not-supported", "method is not supported", false)
@@ -142,19 +161,24 @@ func (d *driver) handle(line []byte) bool {
 	return false
 }
 
+var (
+	errStaleGeneration    = errors.New("stale desired generation")
+	errGenerationConflict = errors.New("desired generation conflict")
+	errDeletionInProgress = errors.New("execution deletion is in progress")
+)
+
 func (d *driver) reconcile(params executiondriver.ReconcileParams) (executiondriver.Status, error) {
 	var configuration fakeConfiguration
 	if err := executiondriver.DecodeStrictJSON(params.Desired.Configuration, &configuration); err != nil {
 		return executiondriver.Status{}, err
 	}
-	if configuration.DelayMilliseconds < 0 || configuration.DelayMilliseconds > 60_000 {
-		return executiondriver.Status{}, errors.New("invalid fake delay")
+	if configuration.DelayMilliseconds < 0 || configuration.DelayMilliseconds > 60_000 ||
+		configuration.DeleteSteps < 0 || configuration.DeleteSteps > 10 {
+		return executiondriver.Status{}, errors.New("invalid fake configuration")
 	}
-	if configuration.DelayMilliseconds > 0 {
-		time.Sleep(time.Duration(configuration.DelayMilliseconds) * time.Millisecond)
-	}
-	if configuration.Fail {
-		return failedStatus(params.Desired.Generation, errors.New(internalFailureCanary)), nil
+	fingerprint, err := executiondriver.DesiredFingerprint(params.Desired)
+	if err != nil {
+		return executiondriver.Status{}, err
 	}
 
 	state, err := d.readState(params.Desired.ExecutionID)
@@ -164,12 +188,31 @@ func (d *driver) reconcile(params executiondriver.ReconcileParams) (executiondri
 	if errors.Is(err, os.ErrNotExist) {
 		digest := sha256.Sum256([]byte(params.Desired.ExecutionID))
 		state = durableState{
-			ExecutionID: params.Desired.ExecutionID,
-			CreateCount: 1,
+			ExecutionID:        params.Desired.ExecutionID,
+			CreateCount:        1,
+			DesiredFingerprint: fingerprint,
 			Status: executiondriver.Status{
 				ExternalResourceID: "fake-" + hex.EncodeToString(digest[:8]),
 			},
 		}
+	} else {
+		switch {
+		case params.Desired.Generation < state.Generation:
+			return executiondriver.Status{}, errStaleGeneration
+		case params.Desired.Generation == state.Generation && fingerprint != state.DesiredFingerprint:
+			return executiondriver.Status{}, errGenerationConflict
+		case state.Status.Phase == executiondriver.PhaseDeleting:
+			return executiondriver.Status{}, errDeletionInProgress
+		case params.Desired.Generation == state.Generation:
+			return state.Status, nil
+		}
+	}
+
+	if configuration.DelayMilliseconds > 0 {
+		time.Sleep(time.Duration(configuration.DelayMilliseconds) * time.Millisecond)
+	}
+	if configuration.Fail {
+		return failedStatus(params.Desired.Generation, errors.New(internalFailureCanary)), nil
 	}
 
 	ready := true
@@ -177,6 +220,11 @@ func (d *driver) reconcile(params executiondriver.ReconcileParams) (executiondri
 		ready = *configuration.Ready
 	}
 	state.Generation = params.Desired.Generation
+	state.DesiredFingerprint = fingerprint
+	state.DeleteStepsRemaining = configuration.DeleteSteps
+	if state.DeleteStepsRemaining == 0 {
+		state.DeleteStepsRemaining = 2
+	}
 	state.Status.ObservedGeneration = params.Desired.Generation
 	state.Status.Failure = nil
 	if ready {
@@ -225,12 +273,37 @@ func (d *driver) observe(executionID string) (executiondriver.Status, error) {
 	return state.Status, nil
 }
 
-func (d *driver) delete(executionID string) error {
-	err := os.Remove(d.statePath(executionID))
+func (d *driver) delete(executionID string) (executiondriver.Status, error) {
+	state, err := d.readState(executionID)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return executiondriver.Status{Phase: executiondriver.PhaseDeleted}, nil
 	}
-	return err
+	if err != nil {
+		return executiondriver.Status{}, err
+	}
+	if state.Status.Phase != executiondriver.PhaseDeleting {
+		retryAfter := int32(1)
+		state.Status.Phase = executiondriver.PhaseDeleting
+		state.Status.Ready = false
+		state.Status.Endpoint = nil
+		state.Status.Failure = nil
+		state.Status.RetryAfterSeconds = &retryAfter
+		if err := d.writeState(state); err != nil {
+			return executiondriver.Status{}, err
+		}
+		return state.Status, nil
+	}
+	if state.DeleteStepsRemaining > 1 {
+		state.DeleteStepsRemaining--
+		if err := d.writeState(state); err != nil {
+			return executiondriver.Status{}, err
+		}
+		return state.Status, nil
+	}
+	if err := os.Remove(d.statePath(executionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return executiondriver.Status{}, err
+	}
+	return executiondriver.Status{Phase: executiondriver.PhaseDeleted}, nil
 }
 
 func (d *driver) readState(executionID string) (durableState, error) {
@@ -240,6 +313,8 @@ func (d *driver) readState(executionID string) (durableState, error) {
 	}
 	var state durableState
 	if executiondriver.DecodeStrictJSON(data, &state) != nil || state.ExecutionID != executionID || state.CreateCount != 1 ||
+		state.Generation < 1 || state.DesiredFingerprint == "" || state.DeleteStepsRemaining < 1 ||
+		state.Status.ObservedGeneration != state.Generation ||
 		executiondriver.ValidateStatus(state.Status) != nil {
 		return durableState{}, errors.New("durable state is invalid")
 	}
