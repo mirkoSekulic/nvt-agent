@@ -165,6 +165,41 @@ func TestDashboardListsAgentRuns(t *testing.T) {
 	}
 }
 
+func TestDashboardRequestedByPrefersPrincipalDisplayName(t *testing.T) {
+	run := dashboardTestRun("profiled-run")
+	run.Annotations[RequestedByAnnotation] = "legacy-requester-canary"
+	run.Spec.ProfileProvenance = &nvtv1alpha1.AgentRunProfileProvenance{
+		Principal: &nvtv1alpha1.AgentRunPrincipal{
+			Issuer:      "https://github.com",
+			Subject:     "424242",
+			DisplayName: "profile requester",
+		},
+	}
+	client := fakeClient(t, run, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "nvt",
+			Name:      "profiled-run-agent",
+			Labels: map[string]string{
+				AgentRunPodLabel:  "profiled-run",
+				AgentRunRoleLabel: AgentRunRoleAgent,
+			},
+		},
+		Status: readyPodStatus("10.0.0.10"),
+	})
+	server := mustNewServer(t, Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, client)
+	request := httptest.NewRequest(http.MethodGet, "http://agents.localhost/", nil)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, "profile requester") {
+		t.Fatalf("status=%d dashboard missing principal display name: %s", response.Code, body)
+	}
+	if strings.Contains(body, "legacy-requester-canary") {
+		t.Fatalf("dashboard used legacy requester instead of principal display name: %s", body)
+	}
+}
+
 func TestHealthzDoesNotRequireKubernetes(t *testing.T) {
 	server := mustNewServer(t, Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090}, nil)
 	req := httptest.NewRequest(http.MethodGet, "http://not-the-base-host/healthz", nil)
