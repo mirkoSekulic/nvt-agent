@@ -201,7 +201,7 @@ func TestAuthModeNonePreservesDashboardBehavior(t *testing.T) {
 	}
 }
 
-func TestAuthModeOIDCRedirectsUnauthenticatedDashboardAndSession(t *testing.T) {
+func TestAuthModeOIDCRendersSignInPageForUnauthenticatedDashboardAndSession(t *testing.T) {
 	provider := oidcDiscoveryServer(t)
 	client := fakeClient(t,
 		&nvtv1alpha1.AgentRun{
@@ -219,12 +219,14 @@ func TestAuthModeOIDCRedirectsUnauthenticatedDashboardAndSession(t *testing.T) {
 		req.Header.Set("Accept", "text/html")
 		recorder := httptest.NewRecorder()
 		server.ServeHTTP(recorder, req)
-		if recorder.Code != http.StatusFound {
-			t.Fatalf("target %s status = %d body=%s", target, recorder.Code, recorder.Body.String())
+		// OIDC mode follows the same explicit sign-in contract as OAuth2: the
+		// page is rendered, the provider flow is not started.
+		if recorder.Code != http.StatusOK || recorder.Header().Get("Location") != "" {
+			t.Fatalf("target %s status = %d location = %q body=%s", target, recorder.Code,
+				recorder.Header().Get("Location"), recorder.Body.String())
 		}
-		location := recorder.Header().Get("Location")
-		if !strings.Contains(location, "/oauth2/login?return_url=") {
-			t.Fatalf("target %s location = %q", target, location)
+		if !strings.Contains(recorder.Body.String(), "/oauth2/login?return_url=") {
+			t.Fatalf("target %s sign-in page = %s", target, recorder.Body.String())
 		}
 	}
 }
@@ -482,22 +484,24 @@ func TestAuthorizationLogIsSanitized(t *testing.T) {
 	}
 }
 
-func TestAuthModeOIDCAgentSubdomainRedirectsToStableLoginHost(t *testing.T) {
+func TestAuthModeOIDCAgentSubdomainSignInUsesStableLoginHost(t *testing.T) {
 	provider := oidcDiscoveryServer(t)
 	server := mustNewServer(t, oidcTestConfigWithPublicURL(provider.URL, "https://agents.localhost"), fakeClient(t))
 	req := httptest.NewRequest(http.MethodGet, "https://access-1.agents.localhost/session", nil)
 	req.Header.Set("Accept", "text/html")
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusFound {
-		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	// The sign-in control stays on the stable public host even when the visitor
+	// arrived on an AgentRun subdomain, and it preserves the requested URL.
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Location") != "" {
+		t.Fatalf("status = %d location = %q body=%s", recorder.Code, recorder.Header().Get("Location"), recorder.Body.String())
 	}
-	location := recorder.Header().Get("Location")
-	if !strings.HasPrefix(location, "https://agents.localhost/oauth2/login?return_url=") {
-		t.Fatalf("location = %q", location)
+	signInURL := assertSignInPageURL(t, recorder)
+	if !strings.HasPrefix(signInURL, "https://agents.localhost/oauth2/login?return_url=") {
+		t.Fatalf("sign-in URL = %q", signInURL)
 	}
-	if !strings.Contains(location, url.QueryEscape("https://access-1.agents.localhost/session")) {
-		t.Fatalf("location missing original return URL: %q", location)
+	if !strings.Contains(signInURL, url.QueryEscape("https://access-1.agents.localhost/session")) {
+		t.Fatalf("sign-in URL missing original return URL: %q", signInURL)
 	}
 }
 

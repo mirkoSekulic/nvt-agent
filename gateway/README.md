@@ -99,6 +99,53 @@ organization, group, resource, or entitlement claims. The gateway rejects
 sensitive claim paths and logs only the decision, rule id, agent access key, and
 a short hash of issuer plus subject.
 
+## Sign-in and sign-out
+
+The gateway never starts an OAuth/OIDC flow on its own. When an unauthenticated
+browser navigates to the dashboard or to any AgentRun session URL, the gateway
+renders a provider-generic sign-in page with a `Sign in` control and returns
+`200`. Authorization begins only when the user activates that control.
+
+The sign-in control targets the mounted `/oauth2/login` endpoint and carries a
+`return_url` that preserves the originally requested path and query, so a
+successful login lands on the page the user asked for. The candidate return URL
+is validated exactly like a return URL supplied to the login endpoint: in path
+mode it must resolve to the configured public origin and a routable path below
+the mounted base path, and in subdomain mode it must stay on the base domain or
+one of its AgentRun subdomains. Anything else falls back to the dashboard root,
+so no request can turn the sign-in control into an open redirect.
+
+Rendering the page resolves nothing about the requested AgentRun, so the same
+page is returned whether or not a session with that access key exists. It also
+issues no session or login-state cookie; only a completed login does that. A
+`HEAD` request returns the same status and headers with no body.
+
+Non-browser requests are unaffected. An unauthenticated request that does not
+accept HTML still receives `401` with no HTML body and no provider redirect, and
+protected non-`GET`/`HEAD` requests remain fail-closed. `auth.mode=none` serves
+the dashboard without any sign-in page.
+
+### Local sign-out and persistent identity-provider sessions
+
+`POST /oauth2/logout` deletes the server-side session and clears every
+gateway-owned cookie, then shows the signed-out page. **This is a local gateway
+sign-out only.** The gateway does not attempt single-logout, back-channel
+logout, or any other sign-out at the identity provider, and it cannot end an SSO
+session held by the provider or by an upstream federated login.
+
+That distinction is the reason sign-in is explicit. While the provider session
+is still valid, the next authorization request can complete without prompting
+for credentials. If the gateway redirected automatically, revisiting the
+dashboard after signing out would silently re-authenticate and reappear as
+though sign-out had failed. Requiring the `Sign in` control makes the local
+session state visible: after signing out the visitor stays on the signed-out
+page until they choose to sign in again.
+
+To end the provider session as well, users sign out with the identity provider
+directly. Operators who need enforced re-authentication should configure that at
+the provider, for example with a shorter session lifetime or a prompt/`acr`
+requirement through `auth.oidc.extraAuthParams` or `auth.oidc.acrValues`.
+
 ## AgentRun owner authorization
 
 An owner rule compares the authenticated principal to immutable profiled

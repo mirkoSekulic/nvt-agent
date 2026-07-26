@@ -25,7 +25,10 @@ func TestStaleServerSessionCookieRecoversByRequestType(t *testing.T) {
 		wantStatus int
 		wantLogin  bool
 	}{
-		{name: "browser", accept: "text/html", wantStatus: http.StatusFound, wantLogin: true},
+		// A stale but validly-signed cookie must clear the cookie and land on
+		// the sign-in page. Re-authenticating automatically would hide from the
+		// user that their session is gone.
+		{name: "browser", accept: "text/html", wantStatus: http.StatusOK, wantLogin: true},
 		{name: "api", accept: "application/json", wantStatus: http.StatusUnauthorized},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -39,15 +42,15 @@ func TestStaleServerSessionCookieRecoversByRequestType(t *testing.T) {
 			}
 			assertClearedCookie(t, response, defaultSessionCookie, "/")
 			if test.wantLogin {
-				location, err := url.Parse(response.Header().Get("Location"))
-				if err != nil {
-					t.Fatal(err)
+				if location := response.Header().Get("Location"); location != "" {
+					t.Fatalf("stale session auto-started the provider flow: %q", location)
 				}
-				if location.Path != "/oauth2/login" || location.Query().Get("return_url") != "http://agents.localhost/?view=all" {
-					t.Fatalf("login redirect=%q", location.String())
+				signInURL := assertSignInPage(t, response, "http://agents.localhost/?view=all")
+				if len(afterRestart.auth.sessions) != 0 {
+					t.Fatalf("sign-in page created a session: %d", len(afterRestart.auth.sessions))
 				}
 				login := httptest.NewRecorder()
-				afterRestart.ServeHTTP(login, httptest.NewRequest(http.MethodGet, location.String(), nil))
+				afterRestart.ServeHTTP(login, httptest.NewRequest(http.MethodGet, signInURL, nil))
 				if login.Code != http.StatusFound || !strings.HasPrefix(login.Header().Get("Location"), "https://oauth.example/authorize?") {
 					t.Fatalf("login status=%d location=%q", login.Code, login.Header().Get("Location"))
 				}
@@ -129,19 +132,20 @@ func TestLogoutDeletesServerSessionAndClearsCookies(t *testing.T) {
 			if loggedOutResponse.Code != http.StatusOK || loggedOutResponse.Header().Get("Location") != "" || !strings.Contains(loggedOutResponse.Body.String(), "Signed out") {
 				t.Fatalf("logged-out status=%d location=%q body=%q", loggedOutResponse.Code, loggedOutResponse.Header().Get("Location"), loggedOutResponse.Body.String())
 			}
-			wantReturnURL := test.cookiePath
-			wantSignIn := strings.TrimSuffix(test.wantLoggedOut, "/oauth2/logged-out") + "/oauth2/login?return_url=" + url.QueryEscape(wantReturnURL)
-			if !strings.Contains(loggedOutResponse.Body.String(), `href="`+wantSignIn+`"`) {
-				t.Fatalf("logged-out page missing sign-in URL %q: %s", wantSignIn, loggedOutResponse.Body.String())
-			}
+			// The signed-out page reuses the sign-in renderer and returns to the
+			// mounted dashboard root, never to the reserved logged-out path.
+			assertSignInPage(t, loggedOutResponse, test.cookiePath)
 			if len(server.auth.sessions) != 0 || len(loggedOutResponse.Result().Cookies()) != 0 {
 				t.Fatalf("logged-out page created session or cookies: sessions=%d cookies=%v", len(server.auth.sessions), loggedOutResponse.Result().Cookies())
 			}
 			wrongPathURL := loggedOutURL
 			wrongPathURL.Path += "/"
+			// Only the exact logged-out path may reach the signed-out handler. An
+			// unauthenticated read of any other path now renders the sign-in page,
+			// so the signed-out state itself is what must not appear.
 			wrongPath := httptest.NewRecorder()
 			server.ServeHTTP(wrongPath, httptest.NewRequest(http.MethodGet, wrongPathURL.String(), nil))
-			if wrongPath.Code == http.StatusOK {
+			if strings.Contains(wrongPath.Body.String(), "Signed out") {
 				t.Fatalf("non-exact logged-out path was public: %s", wrongPathURL.String())
 			}
 			if test.cookiePath == "/agents/" {

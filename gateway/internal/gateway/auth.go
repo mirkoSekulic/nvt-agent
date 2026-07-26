@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -194,9 +193,10 @@ func (a *Authenticator) Authenticate(w http.ResponseWriter, r *http.Request) (Pr
 	if ok {
 		a.clearCookie(w, a.config.Auth.Session.CookieName)
 	}
+	// Browser navigation renders the sign-in page rather than starting the
+	// provider flow. Only the sign-in control begins authorization.
 	if isBrowserRead(r) {
-		loginURL := a.publicBaseURL(r) + "/oauth2/login?return_url=" + url.QueryEscape(a.safeReturnURL(r))
-		http.Redirect(w, r, loginURL, http.StatusFound)
+		a.renderSignInPage(w, r, a.requestReturnURL(r), false)
 		return Principal{}, false
 	}
 	http.Error(w, "authentication required", http.StatusUnauthorized)
@@ -222,11 +222,10 @@ func (a *Authenticator) handleLoggedOut(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	signInURL := a.mountedPath("/oauth2/login") + "?return_url=" + url.QueryEscape(a.mountedPath("/"))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Signed out</title></head>
-<body><main><h1>Signed out</h1><p>Your gateway session has ended.</p><p><a href="%s">Sign in</a></p></main></body></html>`, html.EscapeString(signInURL))
+	// The logged-out page is the same renderer in its signed-out state. Its
+	// return target is the dashboard root: the logged-out path itself is a
+	// reserved gateway path and is not a valid return URL.
+	a.renderSignInPage(w, r, a.mountedPath("/"), true)
 }
 
 func isBrowserRead(r *http.Request) bool {
