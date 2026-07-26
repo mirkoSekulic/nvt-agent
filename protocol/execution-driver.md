@@ -2,14 +2,14 @@
 
 `nvt.execution-driver/v1` is the portable contract between the NVT operator and
 a trusted execution implementation. It describes convergence and observation
-of one approved execution; it does not describe how an executable is acquired,
-configured, or supervised.
+of one approved execution independently of process or deployment topology.
 
-This first protocol phase does not load production drivers and does not place
-the existing Kubernetes Pod reconciler behind this interface. Pod-backed
-AgentRuns therefore render and reconcile exactly as before. Local executable
-loading, immutable Git acquisition, execution profiles/classes, the Kubernetes
-adapter, and production VM drivers are separate work.
+`operator/executiondriver/host` provides a trusted local-executable transport
+for this contract, but it is not configured or called by AgentRun reconciliation
+in this phase. Pod-backed AgentRuns therefore render and reconcile exactly as
+before. Production registration, immutable Git acquisition, execution
+profiles/classes, the Kubernetes adapter, and production VM drivers are
+separate work.
 
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
@@ -96,6 +96,47 @@ operator-owned deadline, the process generation is terminated and reaped. A
 provider call may already have taken effect, so the replacement process must
 recover through the same stable `execution_id` rather than assume that a timed
 out create did nothing.
+
+## Trusted local executable host
+
+The optional local host starts one exact administrator-supplied absolute
+executable path directly, without a shell, using `/` as its deterministic
+working directory. Its child environment begins empty. Every name in `PassEnv`
+is required to exist for every process generation; the host copies values for
+those exact names and fails before launch if one is absent. No `PATH`, `HOME`,
+credential, or other operator variable is inherited implicitly. Optional
+variables require a separate future contract rather than implicit omission.
+Scripts must therefore name an absolute interpreter or explicitly allowlist
+every environment variable needed by that interpreter. The executable is
+trusted operator extension code, not a sandbox.
+
+The host implements a small `Client` interface using the portable desired and
+status types. Its local-process implementation serializes all calls for v1; a
+future dedicated driver-host workload can implement the same boundary without
+changing callers. Initialization and every operation are bounded by both the
+caller context and an explicit host deadline. Request IDs are unique for the
+host lifetime, and strict JSONL framing, size, UTF-8, duplicate-key, response-ID,
+and result validation are applied before a response is trusted.
+
+Timeouts, malformed or unsolicited output, duplicate or mismatched responses,
+and transport failures invalidate that exact process generation. The host
+closes its pipes, terminates and then kills the isolated process group when
+needed, and reaps the child. Raw stderr is drained into a small bounded private
+buffer and is never returned or logged. A valid sanitized driver error remains
+an operation result and does not invalidate an otherwise healthy process.
+
+After a crash or invalid process generation, the failed call returns without
+replay. Calls during the fixed bounded backoff fail explicitly. A later caller
+may start and negotiate the same selected executable after backoff; the host
+never chooses a fallback driver. Once `shutdown` begins, new calls fail closed.
+An idle generation receives protocol shutdown followed by bounded
+terminate/kill/reap cleanup. If an operation is active, shutdown terminates and
+reaps that exact generation immediately instead of waiting for the serialized
+operation; the failed operation is never replayed.
+
+This host currently has no CRD, profile, controller, chart, command-line, or
+other production registration surface and starts no process during ordinary
+operator reconciliation.
 
 ## Version and operations
 
@@ -208,10 +249,13 @@ itself permission to remove the finalizer.
 ```
 
 `shutdown` requests bounded process termination. It never means resource
-deletion and must not mutate provider resources. A valid response acknowledges
-the request but does not complete shutdown: the host continues applying the
-same deadline until the process exits. If it remains alive, the operator
-terminates and reaps it.
+deletion and must not mutate provider resources. The only valid successful
+result is the exact empty JSON object shown above; `null`, arrays, and objects
+with members are protocol failures. A valid response acknowledges the request
+but does not complete shutdown: the host continues applying the same deadline
+until the process exits. If it remains alive, the operator terminates and reaps
+it. When an operation is already active, the host does not send another JSONL
+request; it closes the client and terminates that process generation directly.
 
 ## Portable status
 
