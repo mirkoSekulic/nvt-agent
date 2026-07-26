@@ -35,6 +35,8 @@ Files under [`protocol/`](../protocol/) are normative contracts:
 - [Injection](../protocol/injection.md): mediated credential injection.
 - [Transparent egress](../protocol/transparent-egress.md): capture-to-egressd
   transport.
+- [Execution drivers](../protocol/execution-driver.md): portable trusted-driver
+  lifecycle, status, and cleanup contract.
 
 ## Operations And Testing
 

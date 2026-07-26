@@ -58,6 +58,8 @@ precise and every hermetic suite has a clear home.
 
 ### operator
 
+- `operator/executiondriver/conformance_test.go`
+- `operator/executiondriver/protocol_test.go`
 - `operator/config/broker/broker_manifest_test.go`
 - `operator/internal/controller/agentrun_callback_test.go`
 - `operator/internal/controller/agentrun_controller_test.go`
