@@ -23,6 +23,8 @@ The operator owns:
 
 - authenticating and authorizing the work principal and selecting one exact
   administrator-approved driver and class;
+- resolving and canonicalizing the complete desired tuple, advancing its
+  generation, and computing its opaque fingerprint;
 - AgentRun conditions, history, timeouts, retries, requeues, and terminal
   lifecycle decisions;
 - finalizers, broker revocation, and deciding when AgentRun deletion is
@@ -119,28 +121,37 @@ capability. A version or capability mismatch fails initialization.
 ### `reconcile`
 
 `reconcile` is level-triggered. `generation` represents the complete desired
-tuple: `workload_kind`, `class_name`, and the fully resolved canonical
-`configuration`. The operator must increment it whenever any member of that
-tuple changes. Execution ID and generation are not configuration members.
+tuple: `workload_kind`, `class_name`, and the fully resolved
+`configuration`. The trusted operator/driver host canonicalizes that tuple,
+computes its SHA-256 fingerprint, and sends the lowercase
+`sha256:<64-hex-digits>` value as `desired_fingerprint`. The operator must
+increment generation and change the fingerprint whenever any tuple member
+changes. Execution ID and generation are not fingerprint inputs.
 
 The driver durably stores the greatest accepted generation together with a
-fingerprint or equivalent complete canonical representation of that tuple.
+`desired_fingerprint`.
 Repeating the same generation and tuple is idempotent and converges the same
 logical resource. A lower generation is rejected as non-retryable
 `stale-generation` without changing durable or provider state. The same
-generation with a divergent tuple is rejected as non-retryable
+generation with a different fingerprint is rejected as non-retryable
 `generation-conflict`, also without changing state. These checks apply after a
 driver-process or operator restart. A higher generation updates the same
 logical resource according to driver policy; it must not create an untracked
 replacement.
 
-Canonical comparison is over JSON values, not wire formatting: insignificant
-whitespace and object-member ordering do not differ; array order and string
-values do differ; and mathematically equal JSON decimal spellings such as `1`,
-`1.0`, and `1e0` are equal. Duplicate keys are invalid rather than resolved by
-order. Version 1 bounds an individual expanded canonical number to 1024 bytes
-to prevent exponent expansion. A driver may use another collision-safe
-representation if it preserves these comparison semantics.
+The fingerprint is opaque to the external driver. It validates the bounded
+shape, persists it, and compares it byte-for-byte; it does not canonicalize
+configuration or recompute the digest. Canonicalization is operator-owned so
+Python, JavaScript, Rust, shell, and other drivers do not need matching JSON
+number or object-order algorithms. Duplicate keys remain invalid at the
+operator protocol boundary rather than being resolved by order.
+The host must snapshot or deterministically reproduce the same fingerprint for
+an unchanged tuple across operator restarts and upgrades. Any intentional
+fingerprint-algorithm transition requires a new generation.
+
+A matching generation and fingerprint do **not** permit returning cached
+status. Every `reconcile` must observe provider state and repair drift toward
+the unchanged desired tuple while preserving the same logical resource.
 
 The configuration is a bounded JSON object resolved from administrator-owned
 class configuration. It is not an AgentRun producer surface in this protocol
@@ -148,7 +159,7 @@ phase and must not carry credentials; future driver hosts provide explicitly
 allowlisted provider credentials outside desired state.
 
 ```json
-{"jsonrpc":"2.0","id":"reconcile-4","method":"reconcile","params":{"desired":{"execution_id":"opaque-stable-id","generation":4,"workload_kind":"vm","class_name":"approved-small","configuration":{"region":"example-1"}}}}
+{"jsonrpc":"2.0","id":"reconcile-4","method":"reconcile","params":{"desired":{"execution_id":"opaque-stable-id","generation":4,"desired_fingerprint":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","workload_kind":"vm","class_name":"approved-small","configuration":{"region":"example-1"}}}}
 ```
 
 `configuration` is limited to 256 KiB within the 1 MiB message bound.
@@ -228,8 +239,8 @@ gateway routing, and workload-readiness conditions.
 `operator/executiondriver/testdata/fake-driver` is a test-only executable. Its
 conformance suite starts real processes over JSONL and verifies initialization,
 reconciliation, readiness, generation monotonicity/divergence, observation,
-durable asynchronous deletion, bounded shutdown, repeated requests, abrupt
-restart recovery, recursively ambiguous JSON rejection, malformed output,
-bounded timeout termination and reaping, sanitized failures, and final
-resource-state cleanup. It is deliberately not a production driver loader or a
-Kubernetes implementation.
+same-generation drift repair, durable asynchronous deletion, bounded shutdown,
+repeated requests, abrupt restart recovery, recursively ambiguous JSON
+rejection, malformed output, bounded timeout termination and reaping, sanitized
+failures, and final resource-state cleanup. It is deliberately not a production
+driver loader or a Kubernetes implementation.

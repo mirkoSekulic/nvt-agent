@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+const validDesiredFingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func TestValidateProtocolTypes(t *testing.T) {
 	t.Parallel()
 
@@ -25,11 +27,12 @@ func TestValidateProtocolTypes(t *testing.T) {
 
 	configuration := json.RawMessage(`{"region":"test-1"}`)
 	if err := ValidateReconcileParams(ReconcileParams{Desired: DesiredExecution{
-		ExecutionID:   "issuer/subject/run-1",
-		Generation:    1,
-		WorkloadKind:  WorkloadKindVM,
-		ClassName:     "fake-small",
-		Configuration: configuration,
+		ExecutionID:        "issuer/subject/run-1",
+		Generation:         1,
+		DesiredFingerprint: validDesiredFingerprint,
+		WorkloadKind:       WorkloadKindVM,
+		ClassName:          "fake-small",
+		Configuration:      configuration,
 	}}); err != nil {
 		t.Fatalf("valid reconcile params: %v", err)
 	}
@@ -80,30 +83,33 @@ func TestValidateProtocolTypesFailClosed(t *testing.T) {
 		{
 			name: "configuration is not object",
 			err: ValidateReconcileParams(ReconcileParams{Desired: DesiredExecution{
-				ExecutionID:   "run-1",
-				Generation:    1,
-				WorkloadKind:  WorkloadKindVM,
-				ClassName:     "fake-small",
-				Configuration: json.RawMessage(`[]`),
+				ExecutionID:        "run-1",
+				Generation:         1,
+				DesiredFingerprint: validDesiredFingerprint,
+				WorkloadKind:       WorkloadKindVM,
+				ClassName:          "fake-small",
+				Configuration:      json.RawMessage(`[]`),
 			}}),
 		},
 		{
 			name: "zero generation",
 			err: ValidateReconcileParams(ReconcileParams{Desired: DesiredExecution{
-				ExecutionID:   "run-1",
-				WorkloadKind:  WorkloadKindVM,
-				ClassName:     "fake-small",
-				Configuration: json.RawMessage(`{}`),
+				ExecutionID:        "run-1",
+				DesiredFingerprint: validDesiredFingerprint,
+				WorkloadKind:       WorkloadKindVM,
+				ClassName:          "fake-small",
+				Configuration:      json.RawMessage(`{}`),
 			}}),
 		},
 		{
 			name: "provider-specific workload kind",
 			err: ValidateReconcileParams(ReconcileParams{Desired: DesiredExecution{
-				ExecutionID:   "run-1",
-				Generation:    1,
-				WorkloadKind:  WorkloadKind("azure-vm"),
-				ClassName:     "fake-small",
-				Configuration: json.RawMessage(`{}`),
+				ExecutionID:        "run-1",
+				Generation:         1,
+				DesiredFingerprint: validDesiredFingerprint,
+				WorkloadKind:       WorkloadKind("azure-vm"),
+				ClassName:          "fake-small",
+				Configuration:      json.RawMessage(`{}`),
 			}}),
 		},
 		{
@@ -206,76 +212,23 @@ func TestDecodeStrictJSON(t *testing.T) {
 	}
 }
 
-func TestDesiredFingerprintCanonicalizesCompleteTuple(t *testing.T) {
+func TestValidateDesiredFingerprint(t *testing.T) {
 	t.Parallel()
-
-	base := DesiredExecution{
-		ExecutionID:  "run-1",
-		Generation:   4,
-		WorkloadKind: WorkloadKindVM,
-		ClassName:    "small",
-		Configuration: json.RawMessage(
-			`{"nested":{"enabled":true,"values":[1,0.10,1e-3]},"region":"test-1"}`,
-		),
-	}
-	baseFingerprint, err := DesiredFingerprint(base)
-	if err != nil {
-		t.Fatalf("base fingerprint: %v", err)
+	if err := ValidateDesiredFingerprint(validDesiredFingerprint); err != nil {
+		t.Fatalf("valid desired fingerprint: %v", err)
 	}
 
-	equivalent := base
-	equivalent.ExecutionID = "another-run"
-	equivalent.Generation = 99
-	equivalent.Configuration = json.RawMessage(
-		` { "region" : "test-1", "nested" : { "values" : [1.0, 1e-1, 0.0010], "enabled" : true } } `,
-	)
-	equivalentFingerprint, err := DesiredFingerprint(equivalent)
-	if err != nil {
-		t.Fatalf("equivalent fingerprint: %v", err)
-	}
-	if equivalentFingerprint != baseFingerprint {
-		t.Fatalf("semantically equivalent desired tuple changed fingerprint: base=%s equivalent=%s", baseFingerprint, equivalentFingerprint)
-	}
-
-	for name, mutate := range map[string]func(*DesiredExecution){
-		"workload kind": func(value *DesiredExecution) { value.WorkloadKind = WorkloadKindPod },
-		"class":         func(value *DesiredExecution) { value.ClassName = "large" },
-		"configuration": func(value *DesiredExecution) {
-			value.Configuration = json.RawMessage(`{"nested":{"enabled":false,"values":[1,0.1,0.001]},"region":"test-1"}`)
-		},
+	for name, fingerprint := range map[string]string{
+		"missing":        "",
+		"missing prefix": strings.Repeat("0", 64),
+		"short":          "sha256:" + strings.Repeat("0", 63),
+		"long":           "sha256:" + strings.Repeat("0", 65),
+		"uppercase":      "sha256:" + strings.Repeat("A", 64),
+		"non-hex":        "sha256:" + strings.Repeat("z", 64),
 	} {
 		t.Run(name, func(t *testing.T) {
-			changed := base
-			mutate(&changed)
-			fingerprint, err := DesiredFingerprint(changed)
-			if err != nil {
-				t.Fatalf("changed fingerprint: %v", err)
-			}
-			if fingerprint == baseFingerprint {
-				t.Fatalf("changed %s did not change fingerprint", name)
-			}
-		})
-	}
-}
-
-func TestDesiredFingerprintRejectsAmbiguousOrUnboundedConfiguration(t *testing.T) {
-	t.Parallel()
-
-	for name, configuration := range map[string]string{
-		"top-level duplicate": `{"region":"first","region":"second"}`,
-		"nested duplicate":    `{"nested":{"size":1,"size":2}}`,
-		"unbounded exponent":  `{"size":1e99999}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := DesiredFingerprint(DesiredExecution{
-				ExecutionID:   "run-1",
-				Generation:    1,
-				WorkloadKind:  WorkloadKindVM,
-				ClassName:     "small",
-				Configuration: json.RawMessage(configuration),
-			})
-			if err == nil {
-				t.Fatalf("ambiguous configuration %s unexpectedly accepted", configuration)
+			if err := ValidateDesiredFingerprint(fingerprint); err == nil {
+				t.Fatalf("fingerprint %q unexpectedly accepted", fingerprint)
 			}
 		})
 	}

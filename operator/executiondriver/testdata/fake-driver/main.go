@@ -176,10 +176,7 @@ func (d *driver) reconcile(params executiondriver.ReconcileParams) (executiondri
 		configuration.DeleteSteps < 0 || configuration.DeleteSteps > 10 {
 		return executiondriver.Status{}, errors.New("invalid fake configuration")
 	}
-	fingerprint, err := executiondriver.DesiredFingerprint(params.Desired)
-	if err != nil {
-		return executiondriver.Status{}, err
-	}
+	fingerprint := params.Desired.DesiredFingerprint
 
 	state, err := d.readState(params.Desired.ExecutionID)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -203,8 +200,6 @@ func (d *driver) reconcile(params executiondriver.ReconcileParams) (executiondri
 			return executiondriver.Status{}, errGenerationConflict
 		case state.Status.Phase == executiondriver.PhaseDeleting:
 			return executiondriver.Status{}, errDeletionInProgress
-		case params.Desired.Generation == state.Generation:
-			return state.Status, nil
 		}
 	}
 
@@ -246,6 +241,9 @@ func (d *driver) reconcile(params executiondriver.ReconcileParams) (executiondri
 	if err := d.writeState(state); err != nil {
 		return executiondriver.Status{}, err
 	}
+	if err := d.ensureSubordinate(state); err != nil {
+		return executiondriver.Status{}, err
+	}
 	return state.Status, nil
 }
 
@@ -265,10 +263,25 @@ func failedStatus(generation int64, internal error) executiondriver.Status {
 func (d *driver) observe(executionID string) (executiondriver.Status, error) {
 	state, err := d.readState(executionID)
 	if errors.Is(err, os.ErrNotExist) {
+		if _, resourceErr := os.Stat(d.subordinatePath(executionID)); resourceErr == nil {
+			return executiondriver.Status{}, errors.New("orphaned provider resource exists")
+		} else if !errors.Is(resourceErr, os.ErrNotExist) {
+			return executiondriver.Status{}, resourceErr
+		}
 		return executiondriver.Status{Phase: executiondriver.PhaseDeleted}, nil
 	}
 	if err != nil {
 		return executiondriver.Status{}, err
+	}
+	if state.Status.Phase != executiondriver.PhaseDeleting && !d.subordinateMatches(state) {
+		retryAfter := int32(1)
+		return executiondriver.Status{
+			Phase:              executiondriver.PhaseProvisioning,
+			Ready:              false,
+			ExternalResourceID: state.Status.ExternalResourceID,
+			ObservedGeneration: state.Generation,
+			RetryAfterSeconds:  &retryAfter,
+		}, nil
 	}
 	return state.Status, nil
 }
@@ -276,6 +289,9 @@ func (d *driver) observe(executionID string) (executiondriver.Status, error) {
 func (d *driver) delete(executionID string) (executiondriver.Status, error) {
 	state, err := d.readState(executionID)
 	if errors.Is(err, os.ErrNotExist) {
+		if removeErr := os.Remove(d.subordinatePath(executionID)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return executiondriver.Status{}, removeErr
+		}
 		return executiondriver.Status{Phase: executiondriver.PhaseDeleted}, nil
 	}
 	if err != nil {
@@ -300,6 +316,9 @@ func (d *driver) delete(executionID string) (executiondriver.Status, error) {
 		}
 		return state.Status, nil
 	}
+	if err := os.Remove(d.subordinatePath(executionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return executiondriver.Status{}, err
+	}
 	if err := os.Remove(d.statePath(executionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return executiondriver.Status{}, err
 	}
@@ -313,7 +332,8 @@ func (d *driver) readState(executionID string) (durableState, error) {
 	}
 	var state durableState
 	if executiondriver.DecodeStrictJSON(data, &state) != nil || state.ExecutionID != executionID || state.CreateCount != 1 ||
-		state.Generation < 1 || state.DesiredFingerprint == "" || state.DeleteStepsRemaining < 1 ||
+		state.Generation < 1 || executiondriver.ValidateDesiredFingerprint(state.DesiredFingerprint) != nil ||
+		state.DeleteStepsRemaining < 1 ||
 		state.Status.ObservedGeneration != state.Generation ||
 		executiondriver.ValidateStatus(state.Status) != nil {
 		return durableState{}, errors.New("durable state is invalid")
@@ -353,6 +373,45 @@ func (d *driver) writeState(state durableState) error {
 func (d *driver) statePath(executionID string) string {
 	digest := sha256.Sum256([]byte(executionID))
 	return filepath.Join(d.stateDir, hex.EncodeToString(digest[:])+".json")
+}
+
+func (d *driver) subordinatePath(executionID string) string {
+	digest := sha256.Sum256([]byte(executionID))
+	return filepath.Join(d.stateDir, hex.EncodeToString(digest[:])+".subordinate")
+}
+
+func (d *driver) subordinateMatches(state durableState) bool {
+	data, err := os.ReadFile(d.subordinatePath(state.ExecutionID))
+	return err == nil && string(data) == state.Status.ExternalResourceID
+}
+
+func (d *driver) ensureSubordinate(state durableState) error {
+	if d.subordinateMatches(state) {
+		return nil
+	}
+	path := d.subordinatePath(state.ExecutionID)
+	temporary, err := os.CreateTemp(d.stateDir, ".subordinate-*")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.WriteString(state.Status.ExternalResourceID); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryName, path)
 }
 
 func (d *driver) respondResult(id string, result any) {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -269,6 +270,7 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 		ClassName:     "fake-small",
 		Configuration: mustJSON(t, map[string]any{"ready": notReady}),
 	}
+	setTestDesiredFingerprint(t, &desired)
 	provisioning, err := first.reconcile(ctx, "reconcile-1", desired)
 	if err != nil {
 		t.Fatalf("initial reconcile: %v", err)
@@ -279,6 +281,7 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 
 	desired.Configuration = mustJSON(t, map[string]any{"ready": true})
 	desired.Generation = 2
+	setTestDesiredFingerprint(t, &desired)
 	running, err := first.reconcile(ctx, "reconcile-2", desired)
 	if err != nil {
 		t.Fatalf("ready reconcile: %v", err)
@@ -289,6 +292,28 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 	}
 	if running.ExternalResourceID != repeated.ExternalResourceID || !repeated.Ready {
 		t.Fatalf("repeated reconcile was not idempotent: first=%#v repeated=%#v", running, repeated)
+	}
+	subordinateFiles, err := filepath.Glob(filepath.Join(stateDirectory, "*.subordinate"))
+	if err != nil || len(subordinateFiles) != 1 {
+		t.Fatalf("fake subordinate resources=%v error=%v", subordinateFiles, err)
+	}
+	if err := os.Remove(subordinateFiles[0]); err != nil {
+		t.Fatalf("damage fake subordinate resource: %v", err)
+	}
+	drifted, err := first.observe(ctx, "observe-provider-drift", executionID)
+	if err != nil || drifted.Phase != executiondriver.PhaseProvisioning || drifted.Ready ||
+		drifted.ExternalResourceID != running.ExternalResourceID {
+		t.Fatalf("provider drift observation=%#v error=%v", drifted, err)
+	}
+	repaired, err := first.reconcile(ctx, "reconcile-provider-drift", desired)
+	if err != nil {
+		t.Fatalf("repair provider drift: %v", err)
+	}
+	if !repaired.Ready || repaired.ExternalResourceID != running.ExternalResourceID {
+		t.Fatalf("provider drift repair changed logical resource: before=%#v after=%#v", running, repaired)
+	}
+	if subordinateFiles, err = filepath.Glob(filepath.Join(stateDirectory, "*.subordinate")); err != nil || len(subordinateFiles) != 1 {
+		t.Fatalf("subordinate resource was not repaired: files=%v error=%v", subordinateFiles, err)
 	}
 	stateFiles, err := filepath.Glob(filepath.Join(stateDirectory, "*.json"))
 	if err != nil || len(stateFiles) != 1 {
@@ -301,7 +326,7 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 	}
 	stateData, err := os.ReadFile(stateFiles[0])
 	if err != nil || json.Unmarshal(stateData, &persisted) != nil || persisted.CreateCount != 1 ||
-		persisted.Generation != 2 || persisted.DesiredFingerprint == "" {
+		persisted.Generation != 2 || persisted.DesiredFingerprint != desired.DesiredFingerprint {
 		t.Fatalf("idempotent reconcile durable state=%q error=%v", stateData, err)
 	}
 	stateInfo, err := os.Stat(stateFiles[0])
@@ -328,10 +353,12 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 	lowerGeneration := desired
 	lowerGeneration.Generation = 1
 	lowerGeneration.Configuration = mustJSON(t, map[string]any{"ready": false})
+	setTestDesiredFingerprint(t, &lowerGeneration)
 	_, err = second.reconcile(ctx, "reconcile-stale-generation", lowerGeneration)
 	requireRPCFailure(t, err, "stale-generation", false)
 	divergentGeneration := desired
 	divergentGeneration.Configuration = mustJSON(t, map[string]any{"ready": false})
+	setTestDesiredFingerprint(t, &divergentGeneration)
 	_, err = second.reconcile(ctx, "reconcile-divergent-generation", divergentGeneration)
 	requireRPCFailure(t, err, "generation-conflict", false)
 	idempotentAfterRestart, err := second.reconcile(ctx, "reconcile-after-restart", desired)
@@ -366,6 +393,8 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 		observedDeleting.ExternalResourceID != running.ExternalResourceID {
 		t.Fatalf("observe while deleting status=%#v error=%v", observedDeleting, err)
 	}
+	_, err = third.reconcile(ctx, "reconcile-during-deletion", desired)
+	requireRPCFailure(t, err, "deletion-in-progress", false)
 	third.stop() // Deletion progress must survive abrupt process replacement.
 
 	fourth := startDriver(t, stateDirectory, "")
@@ -392,7 +421,7 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 	if err != nil || observedDeleted.Phase != executiondriver.PhaseDeleted {
 		t.Fatalf("observe deleted status=%#v error=%v", observedDeleted, err)
 	}
-	if matches, err := filepath.Glob(filepath.Join(stateDirectory, "*.json")); err != nil || len(matches) != 0 {
+	if matches, err := filepath.Glob(filepath.Join(stateDirectory, "*")); err != nil || len(matches) != 0 {
 		t.Fatalf("driver resource state was not cleaned up: matches=%v error=%v", matches, err)
 	}
 	if err := fourth.shutdown(ctx); err != nil {
@@ -409,13 +438,15 @@ func TestFakeExecutionDriverFailureIsSanitized(t *testing.T) {
 		t.Fatalf("initialize: %v", err)
 	}
 
-	status, err := client.reconcile(ctx, "failure", executiondriver.DesiredExecution{
+	desired := executiondriver.DesiredExecution{
 		ExecutionID:   "run-failure",
 		Generation:    1,
 		WorkloadKind:  executiondriver.WorkloadKindVM,
 		ClassName:     "fake-small",
 		Configuration: mustJSON(t, map[string]any{"fail": true}),
-	})
+	}
+	setTestDesiredFingerprint(t, &desired)
+	status, err := client.reconcile(ctx, "failure", desired)
 	if err != nil {
 		t.Fatalf("failed provider observation should be a valid status: %v", err)
 	}
@@ -441,13 +472,15 @@ func TestFakeExecutionDriverRejectsMalformedProtocol(t *testing.T) {
 		t.Fatalf("initialize: %v", err)
 	}
 
-	_, err := client.reconcile(ctx, "malformed", executiondriver.DesiredExecution{
+	desired := executiondriver.DesiredExecution{
 		ExecutionID:   "run-malformed",
 		Generation:    1,
 		WorkloadKind:  executiondriver.WorkloadKindVM,
 		ClassName:     "fake-small",
 		Configuration: mustJSON(t, map[string]any{}),
-	})
+	}
+	setTestDesiredFingerprint(t, &desired)
+	_, err := client.reconcile(ctx, "malformed", desired)
 	if err == nil || err.Error() != "execution driver returned a malformed response" {
 		t.Fatalf("malformed response error = %v", err)
 	}
@@ -466,13 +499,15 @@ func TestFakeExecutionDriverRejectsDuplicateConfigurationKeys(t *testing.T) {
 		t.Fatalf("initialize: %v", err)
 	}
 
-	_, err := client.reconcile(ctx, "duplicate-configuration", executiondriver.DesiredExecution{
+	desired := executiondriver.DesiredExecution{
 		ExecutionID:   "run-duplicate",
 		Generation:    1,
 		WorkloadKind:  executiondriver.WorkloadKindVM,
 		ClassName:     "fake-small",
 		Configuration: json.RawMessage(`{"nested":{"ready":true,"ready":false}}`),
-	})
+	}
+	setTestDesiredFingerprint(t, &desired)
+	_, err := client.reconcile(ctx, "duplicate-configuration", desired)
 	if err == nil || err.Error() != "JSON-RPC request contains invalid or ambiguous JSON" {
 		t.Fatalf("duplicate configuration error = %v", err)
 	}
@@ -495,13 +530,15 @@ func TestFakeExecutionDriverTimeoutCancelsAndReapsProcess(t *testing.T) {
 
 	requestContext, requestCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer requestCancel()
-	_, err := client.reconcile(requestContext, "timeout", executiondriver.DesiredExecution{
+	desired := executiondriver.DesiredExecution{
 		ExecutionID:   "run-timeout",
 		Generation:    1,
 		WorkloadKind:  executiondriver.WorkloadKindVM,
 		ClassName:     "fake-small",
 		Configuration: mustJSON(t, map[string]any{"delay_milliseconds": 5_000}),
-	})
+	}
+	setTestDesiredFingerprint(t, &desired)
+	_, err := client.reconcile(requestContext, "timeout", desired)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout error = %v", err)
 	}
@@ -543,4 +580,23 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 		t.Fatalf("marshal test JSON: %v", err)
 	}
 	return encoded
+}
+
+func setTestDesiredFingerprint(t *testing.T, desired *executiondriver.DesiredExecution) {
+	t.Helper()
+	tuple := struct {
+		WorkloadKind  executiondriver.WorkloadKind `json:"workload_kind"`
+		ClassName     string                       `json:"class_name"`
+		Configuration json.RawMessage              `json:"configuration"`
+	}{
+		WorkloadKind:  desired.WorkloadKind,
+		ClassName:     desired.ClassName,
+		Configuration: desired.Configuration,
+	}
+	encoded, err := json.Marshal(tuple)
+	if err != nil {
+		t.Fatalf("marshal test desired tuple: %v", err)
+	}
+	digest := sha256.Sum256(encoded)
+	desired.DesiredFingerprint = fmt.Sprintf("sha256:%x", digest[:])
 }

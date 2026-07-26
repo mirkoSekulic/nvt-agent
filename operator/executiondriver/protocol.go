@@ -5,15 +5,12 @@ package executiondriver
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -22,15 +19,15 @@ const (
 	ProtocolVersion = "nvt.execution-driver/v1"
 	JSONRPCVersion  = "2.0"
 
-	MaxMessageBytes         = 1 << 20
-	MaxDesiredBytes         = 256 << 10
-	MaxExecutionIDBytes     = 256
-	MaxDriverNameBytes      = 128
-	MaxExternalIDBytes      = 2048
-	MaxFailureReasonBytes   = 128
-	MaxFailureMessageBytes  = 1024
-	MaxRetryAfterSeconds    = 3600
-	MaxCanonicalNumberBytes = 1024
+	MaxMessageBytes            = 1 << 20
+	MaxDesiredBytes            = 256 << 10
+	MaxExecutionIDBytes        = 256
+	MaxDriverNameBytes         = 128
+	MaxDesiredFingerprintBytes = len("sha256:") + 64
+	MaxExternalIDBytes         = 2048
+	MaxFailureReasonBytes      = 128
+	MaxFailureMessageBytes     = 1024
+	MaxRetryAfterSeconds       = 3600
 )
 
 type Method string
@@ -120,14 +117,16 @@ type InitializeResult struct {
 // DesiredExecution is an operator-owned, level-triggered desired state. The
 // driver-specific configuration must be a JSON object. It is deliberately not
 // part of the producer or AgentRun API in this protocol-only phase. Generation
-// identifies the complete workload-kind, class-name, and canonical-
-// configuration tuple and must increase whenever any tuple member changes.
+// and DesiredFingerprint identify the complete workload-kind, class-name, and
+// resolved-configuration tuple and must change together whenever any tuple
+// member changes. The driver treats DesiredFingerprint as opaque.
 type DesiredExecution struct {
-	ExecutionID   string          `json:"execution_id"`
-	Generation    int64           `json:"generation"`
-	WorkloadKind  WorkloadKind    `json:"workload_kind"`
-	ClassName     string          `json:"class_name"`
-	Configuration json.RawMessage `json:"configuration"`
+	ExecutionID        string          `json:"execution_id"`
+	Generation         int64           `json:"generation"`
+	DesiredFingerprint string          `json:"desired_fingerprint"`
+	WorkloadKind       WorkloadKind    `json:"workload_kind"`
+	ClassName          string          `json:"class_name"`
+	Configuration      json.RawMessage `json:"configuration"`
 }
 
 type ReconcileParams struct {
@@ -170,9 +169,9 @@ type Status struct {
 type ShutdownResult struct{}
 
 var (
-	stableTokenPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
-	namePattern        = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
-	jsonNumberPattern  = regexp.MustCompile(`^(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$`)
+	stableTokenPattern        = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
+	namePattern               = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
+	desiredFingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 func ValidateInitializeParams(value InitializeParams) error {
@@ -214,6 +213,9 @@ func ValidateReconcileParams(value ReconcileParams) error {
 	if value.Desired.Generation < 1 {
 		return errors.New("reconcile desired generation must be positive")
 	}
+	if err := ValidateDesiredFingerprint(value.Desired.DesiredFingerprint); err != nil {
+		return err
+	}
 	if value.Desired.WorkloadKind != WorkloadKindPod && value.Desired.WorkloadKind != WorkloadKindVM {
 		return errors.New("reconcile desired workload_kind is invalid")
 	}
@@ -230,39 +232,14 @@ func ValidateReconcileParams(value ReconcileParams) error {
 	if _, object := configuration.(map[string]any); !object {
 		return errors.New("reconcile desired configuration must be a JSON object")
 	}
-	var canonical bytes.Buffer
-	if err := encodeCanonicalJSON(&canonical, configuration); err != nil {
-		return errors.New("reconcile desired configuration cannot be canonicalized")
-	}
 	return nil
 }
 
-// DesiredFingerprint returns a stable fingerprint of the complete desired
-// tuple. Drivers may persist this value or an equivalent complete canonical
-// representation to enforce generation monotonicity across process restarts.
-func DesiredFingerprint(value DesiredExecution) (string, error) {
-	if err := ValidateReconcileParams(ReconcileParams{Desired: value}); err != nil {
-		return "", err
+func ValidateDesiredFingerprint(value string) error {
+	if len(value) != MaxDesiredFingerprintBytes || !desiredFingerprintPattern.MatchString(value) {
+		return errors.New("desired fingerprint is invalid")
 	}
-	configuration, err := decodeUniqueJSON(value.Configuration)
-	if err != nil {
-		return "", errors.New("canonicalize desired configuration")
-	}
-	var canonical bytes.Buffer
-	if err := encodeCanonicalJSON(&canonical, configuration); err != nil {
-		return "", errors.New("canonicalize desired configuration")
-	}
-	hash := sha256.New()
-	for _, component := range []string{
-		ProtocolVersion,
-		string(value.WorkloadKind),
-		value.ClassName,
-		canonical.String(),
-	} {
-		fmt.Fprintf(hash, "%d:", len(component))
-		_, _ = io.WriteString(hash, component)
-	}
-	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
+	return nil
 }
 
 func ValidateExecutionParams(value ExecutionParams) error {
@@ -445,121 +422,6 @@ func decodeUniqueJSONValue(decoder *json.Decoder) (any, error) {
 	default:
 		return nil, errors.New("JSON delimiter is invalid")
 	}
-}
-
-func encodeCanonicalJSON(output *bytes.Buffer, value any) error {
-	switch typed := value.(type) {
-	case nil:
-		output.WriteString("null")
-	case bool:
-		if typed {
-			output.WriteString("true")
-		} else {
-			output.WriteString("false")
-		}
-	case string:
-		encoded, err := json.Marshal(typed)
-		if err != nil {
-			return err
-		}
-		output.Write(encoded)
-	case json.Number:
-		canonical, err := canonicalJSONNumber(string(typed))
-		if err != nil {
-			return err
-		}
-		output.WriteString(canonical)
-	case []any:
-		output.WriteByte('[')
-		for index, item := range typed {
-			if index > 0 {
-				output.WriteByte(',')
-			}
-			if err := encodeCanonicalJSON(output, item); err != nil {
-				return err
-			}
-		}
-		output.WriteByte(']')
-	case map[string]any:
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		output.WriteByte('{')
-		for index, key := range keys {
-			if index > 0 {
-				output.WriteByte(',')
-			}
-			encodedKey, err := json.Marshal(key)
-			if err != nil {
-				return err
-			}
-			output.Write(encodedKey)
-			output.WriteByte(':')
-			if err := encodeCanonicalJSON(output, typed[key]); err != nil {
-				return err
-			}
-		}
-		output.WriteByte('}')
-	default:
-		return errors.New("canonical JSON value has an unsupported type")
-	}
-	if output.Len() > MaxDesiredBytes {
-		return errors.New("canonical JSON exceeds the desired configuration limit")
-	}
-	return nil
-}
-
-func canonicalJSONNumber(value string) (string, error) {
-	if len(value) > MaxCanonicalNumberBytes {
-		return "", errors.New("JSON number exceeds the canonical number limit")
-	}
-	match := jsonNumberPattern.FindStringSubmatch(value)
-	if match == nil {
-		return "", errors.New("JSON number is invalid")
-	}
-	exponent := 0
-	if match[4] != "" {
-		parsed, err := strconv.Atoi(match[4])
-		if err != nil || parsed > MaxCanonicalNumberBytes || parsed < -MaxCanonicalNumberBytes {
-			return "", errors.New("JSON number exponent is outside the canonical range")
-		}
-		exponent = parsed
-	}
-	digits := match[2] + match[3]
-	if strings.Trim(digits, "0") == "" {
-		return "0", nil
-	}
-	digits = strings.TrimLeft(digits, "0")
-	power := exponent - len(match[3])
-	for strings.HasSuffix(digits, "0") {
-		digits = strings.TrimSuffix(digits, "0")
-		power++
-	}
-
-	var canonical string
-	if power >= 0 {
-		if len(digits)+power > MaxCanonicalNumberBytes {
-			return "", errors.New("JSON number exceeds the canonical number limit")
-		}
-		canonical = digits + strings.Repeat("0", power)
-	} else if decimalPosition := len(digits) + power; decimalPosition > 0 {
-		canonical = digits[:decimalPosition] + "." + digits[decimalPosition:]
-	} else {
-		zeroCount := -decimalPosition
-		if 2+zeroCount+len(digits) > MaxCanonicalNumberBytes {
-			return "", errors.New("JSON number exceeds the canonical number limit")
-		}
-		canonical = "0." + strings.Repeat("0", zeroCount) + digits
-	}
-	if match[1] == "-" {
-		canonical = "-" + canonical
-	}
-	if len(canonical) > MaxCanonicalNumberBytes {
-		return "", errors.New("JSON number exceeds the canonical number limit")
-	}
-	return canonical, nil
 }
 
 func validateExecutionID(value string) error {
