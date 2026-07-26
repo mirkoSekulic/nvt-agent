@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // The gateway never starts an OAuth/OIDC flow on its own. An unauthenticated
@@ -58,7 +59,7 @@ func (a *Authenticator) renderSignInPage(w http.ResponseWriter, r *http.Request,
 		Title:     "Sign in",
 		Heading:   "Sign in",
 		Message:   "Sign in to open the nvt agent gateway.",
-		SignInURL: a.signInURL(r, returnURL),
+		SignInURL: a.signInURL(returnURL),
 	}
 	if signedOut {
 		data.Title = "Signed out"
@@ -84,11 +85,19 @@ func (a *Authenticator) renderSignInPage(w http.ResponseWriter, r *http.Request,
 	_, _ = w.Write(body.Bytes())
 }
 
-// signInURL targets the mounted login endpoint, matching the URL the gateway
-// redirected to before sign-in became explicit. It works in both routing modes
-// and under a mounted base path.
-func (a *Authenticator) signInURL(r *http.Request, returnURL string) string {
-	return a.publicBaseURL(r) + "/oauth2/login?return_url=" + url.QueryEscape(returnURL)
+// signInURL targets the mounted login endpoint. The origin is never derived
+// from the request: forwarding headers are attacker-controlled, and using them
+// would let a spoofed X-Forwarded-Host become the target of the control itself.
+// A configured PublicURL is trusted operator configuration, so it keeps
+// pointing central login at one stable origin in subdomain mode and carries the
+// mounted base path in path mode. Without it, the control stays relative to the
+// origin the browser already reached, which no header can redirect.
+func (a *Authenticator) signInURL(returnURL string) string {
+	query := "?return_url=" + url.QueryEscape(returnURL)
+	if trusted := strings.TrimRight(a.config.PublicURL, "/"); trusted != "" {
+		return trusted + "/oauth2/login" + query
+	}
+	return a.mountedPath("/oauth2/login") + query
 }
 
 // requestReturnURL keeps the originally requested path and query so an explicit

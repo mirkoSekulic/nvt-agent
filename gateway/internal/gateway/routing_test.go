@@ -280,6 +280,7 @@ func TestPathModeOAuthUsesConfiguredOriginAndSafeReturnURLs(t *testing.T) {
 	server := mustNewServer(t, config, fakeClient(t))
 
 	request := httptest.NewRequest(http.MethodGet, "https://staging.altinn.studio/agents/opaque-key/editor?folder=repo", nil)
+	request.Header.Set("Accept", "text/html")
 	request.Header.Set("X-Forwarded-Host", "evil.example")
 	request.Header.Set("X-Forwarded-Proto", "http")
 	response := httptest.NewRecorder()

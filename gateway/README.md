@@ -108,22 +108,39 @@ renders a provider-generic sign-in page with a `Sign in` control and returns
 
 The sign-in control targets the mounted `/oauth2/login` endpoint and carries a
 `return_url` that preserves the originally requested path and query, so a
-successful login lands on the page the user asked for. The candidate return URL
-is validated exactly like a return URL supplied to the login endpoint: in path
-mode it must resolve to the configured public origin and a routable path below
-the mounted base path, and in subdomain mode it must stay on the base domain or
-one of its AgentRun subdomains. Anything else falls back to the dashboard root,
-so no request can turn the sign-in control into an open redirect.
+successful login lands on the page the user asked for.
+
+The control's own origin is never taken from the request. When `publicURL` is
+configured it is used, which keeps central login on one stable origin in
+subdomain mode and carries the mounted base path in path mode. Without it the
+control is a mounted relative URL, so a forwarded host header cannot point the
+control at another origin.
+
+The candidate return URL is validated exactly like a return URL supplied to the
+login endpoint: in path mode it must resolve to the configured public origin and
+a routable path below the mounted base path, and in subdomain mode it must stay
+on the base domain or one of its AgentRun subdomains. Anything else falls back
+to the dashboard root, so no request can turn the sign-in control into an open
+redirect.
 
 Rendering the page resolves nothing about the requested AgentRun, so the same
 page is returned whether or not a session with that access key exists. It also
 issues no session or login-state cookie; only a completed login does that. A
 `HEAD` request returns the same status and headers with no body.
 
-Non-browser requests are unaffected. An unauthenticated request that does not
-accept HTML still receives `401` with no HTML body and no provider redirect, and
-protected non-`GET`/`HEAD` requests remain fail-closed. `auth.mode=none` serves
-the dashboard without any sign-in page.
+Only an HTML document navigation receives the page. The gateway requires an
+`Accept` header that explicitly lists `text/html` with a non-zero quality, which
+is what browsers send for document navigation. Everything else stays
+fail-closed with `401`, no HTML body, and no provider redirect:
+
+- an absent `Accept` header, as sent by many command-line and library clients;
+- a bare `*/*`, which expresses no preference for a document;
+- API media types such as `application/json`;
+- `text/html;q=0`, or any unparsable quality;
+- protocol upgrades, including WebSocket, which are never navigation.
+
+Protected non-`GET`/`HEAD` requests also remain fail-closed, and `auth.mode=none`
+serves the dashboard without any sign-in page.
 
 ### Local sign-out and persistent identity-provider sessions
 

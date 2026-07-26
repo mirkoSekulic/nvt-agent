@@ -126,7 +126,7 @@ func TestSignInControlStartsProviderFlowAndPreservesReturnURL(t *testing.T) {
 	signInURL := assertSignInPage(t, response, "http://agents.localhost/?view=all")
 
 	login := httptest.NewRecorder()
-	server.ServeHTTP(login, httptest.NewRequest(http.MethodGet, signInURL, nil))
+	server.ServeHTTP(login, signInRequest(t, "http://agents.localhost/?view=all", signInURL))
 	if login.Code != http.StatusFound || !strings.HasPrefix(login.Header().Get("Location"), "https://oauth.example/authorize?") {
 		t.Fatalf("sign-in status=%d location=%q", login.Code, login.Header().Get("Location"))
 	}
@@ -148,21 +148,55 @@ func TestSignInControlStartsProviderFlowAndPreservesReturnURL(t *testing.T) {
 }
 
 func TestSignInPageRejectsUnsafeReturnTargets(t *testing.T) {
-	// In subdomain mode the request origin is derived from forwarding headers, so
-	// a spoofed host must not become the return target. The control falls back to
-	// the mounted dashboard root instead of carrying an off-domain URL.
+	// Forwarding headers are attacker-controlled, so neither the sign-in target
+	// nor the return URL may be derived from them. Without a configured
+	// publicURL the control stays relative to the origin the browser reached.
 	subdomain := mustNewServer(t, authenticatedTestConfig(), fakeClient(t))
 	spoofed := httptest.NewRequest(http.MethodGet, "http://agents.localhost/?view=all", nil)
 	spoofed.Header.Set("Accept", "text/html")
 	spoofed.Header.Set("X-Forwarded-Host", "evil.example")
+	spoofed.Header.Set("X-Forwarded-Proto", "http")
 	response := httptest.NewRecorder()
 	subdomain.ServeHTTP(response, spoofed)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
-	returnURL := mustReturnURL(t, assertSignInPageURL(t, response))
-	if strings.Contains(returnURL, "evil.example") || returnURL != "/" {
+	signInURL := assertSignInPageURL(t, response)
+	parsed, err := url.Parse(signInURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The whole href, not only the nested return_url, must be free of the
+	// spoofed host: no scheme, no authority, just the mounted login path.
+	if parsed.IsAbs() || parsed.Host != "" || parsed.Path != "/oauth2/login" {
+		t.Fatalf("sign-in href was not a mounted relative login URL: %q", signInURL)
+	}
+	if returnURL := parsed.Query().Get("return_url"); returnURL != "/" {
 		t.Fatalf("spoofed host reached the return URL: %q", returnURL)
+	}
+	if strings.Contains(response.Body.String(), "evil.example") {
+		t.Fatalf("spoofed host appeared in the page: %s", response.Body.String())
+	}
+
+	// A configured publicURL is trusted operator configuration and still pins
+	// central login to one stable origin, spoofed headers notwithstanding.
+	centralConfig := authenticatedTestConfig()
+	centralConfig.PublicURL = "https://agents.localhost"
+	central := mustNewServer(t, centralConfig, fakeClient(t))
+	centralRequest := httptest.NewRequest(http.MethodGet, "http://access-1.agents.localhost/session", nil)
+	centralRequest.Header.Set("Accept", "text/html")
+	centralRequest.Header.Set("X-Forwarded-Host", "evil.example")
+	centralResponse := httptest.NewRecorder()
+	central.ServeHTTP(centralResponse, centralRequest)
+	centralSignIn, err := url.Parse(assertSignInPageURL(t, centralResponse))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if centralSignIn.Scheme != "https" || centralSignIn.Host != "agents.localhost" || centralSignIn.Path != "/oauth2/login" {
+		t.Fatalf("configured public origin was not used: %q", centralSignIn)
+	}
+	if strings.Contains(centralResponse.Body.String(), "evil.example") {
+		t.Fatalf("spoofed host appeared in the page: %s", centralResponse.Body.String())
 	}
 
 	// In path mode an off-origin request never reaches the sign-in renderer.
@@ -171,12 +205,80 @@ func TestSignInPageRejectsUnsafeReturnTargets(t *testing.T) {
 	config.PublicURL = "https://staging.altinn.studio/agents"
 	config.Auth.Session.Secure = true
 	pathMode := mustNewServer(t, config, fakeClient(t))
+	mounted := serveBrowserGet(t, pathMode, "https://staging.altinn.studio/agents/?view=all")
+	mountedSignIn, err := url.Parse(assertSignInPageURL(t, mounted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mountedSignIn.Scheme != "https" || mountedSignIn.Host != "staging.altinn.studio" ||
+		mountedSignIn.Path != "/agents/oauth2/login" {
+		t.Fatalf("path-mode sign-in href lost the mounted prefix: %q", mountedSignIn)
+	}
+
 	offOrigin := httptest.NewRecorder()
 	offOriginRequest := httptest.NewRequest(http.MethodGet, "https://attacker.example/agents/?view=all", nil)
 	offOriginRequest.Header.Set("Accept", "text/html")
 	pathMode.ServeHTTP(offOrigin, offOriginRequest)
 	if offOrigin.Code != http.StatusNotFound {
 		t.Fatalf("off-origin status=%d body=%q", offOrigin.Code, offOrigin.Body.String())
+	}
+}
+
+// Only explicit HTML document navigation gets the page. Everything else is a
+// generic client for which HTML replaces an actionable 401 with an unusable
+// body, so those stay fail-closed.
+func TestOnlyExplicitHTMLNavigationReceivesSignInPage(t *testing.T) {
+	server := mustNewServer(t, authenticatedTestConfig(), fakeClient(t))
+	for _, test := range []struct {
+		name     string
+		accept   string
+		upgrade  string
+		wantPage bool
+	}{
+		{name: "browser navigation", accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", wantPage: true},
+		{name: "bare html", accept: "text/html", wantPage: true},
+		{name: "weighted html", accept: "application/json;q=0.9, text/html;q=0.8", wantPage: true},
+		{name: "absent accept"},
+		{name: "wildcard", accept: "*/*"},
+		{name: "json", accept: "application/json"},
+		{name: "html refused", accept: "text/html;q=0"},
+		{name: "html refused with decimal quality", accept: "text/html;q=0.000"},
+		{name: "html with unparsable quality", accept: "text/html;q=high"},
+		{name: "type wildcard only", accept: "text/*"},
+		{name: "websocket upgrade", accept: "text/html", upgrade: "websocket"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				request := httptest.NewRequest(method, "http://agents.localhost/?view=all", nil)
+				if test.accept != "" {
+					request.Header.Set("Accept", test.accept)
+				}
+				if test.upgrade != "" {
+					request.Header.Set("Upgrade", test.upgrade)
+					request.Header.Set("Connection", "Upgrade")
+				}
+				response := httptest.NewRecorder()
+				server.ServeHTTP(response, request)
+				if !test.wantPage {
+					if response.Code != http.StatusUnauthorized || response.Header().Get("Location") != "" ||
+						strings.Contains(response.Body.String(), "<html") {
+						t.Fatalf("%s status=%d location=%q body=%q", method, response.Code,
+							response.Header().Get("Location"), response.Body.String())
+					}
+					continue
+				}
+				if response.Code != http.StatusOK || response.Header().Get("Location") != "" {
+					t.Fatalf("%s status=%d location=%q", method, response.Code, response.Header().Get("Location"))
+				}
+				if method == http.MethodHead {
+					if response.Body.Len() != 0 {
+						t.Fatalf("HEAD returned a body: %q", response.Body.String())
+					}
+					continue
+				}
+				assertSignInPage(t, response, "http://agents.localhost/?view=all")
+			}
+		})
 	}
 }
 
@@ -198,6 +300,21 @@ func serveBrowserGet(t *testing.T, server *Server, rawURL string) *httptest.Resp
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	return response
+}
+
+// signInRequest follows the rendered control the way a browser would, resolving
+// a mounted relative href against the page it was rendered on.
+func signInRequest(t *testing.T, pageURL, signInURL string) *http.Request {
+	t.Helper()
+	page, err := url.Parse(pageURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := page.Parse(signInURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return httptest.NewRequest(http.MethodGet, target.String(), nil)
 }
 
 var signInHrefPattern = regexp.MustCompile(`<a class="signin" href="([^"]+)">Sign in</a>`)

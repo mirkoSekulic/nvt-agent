@@ -50,7 +50,7 @@ func TestStaleServerSessionCookieRecoversByRequestType(t *testing.T) {
 					t.Fatalf("sign-in page created a session: %d", len(afterRestart.auth.sessions))
 				}
 				login := httptest.NewRecorder()
-				afterRestart.ServeHTTP(login, httptest.NewRequest(http.MethodGet, signInURL, nil))
+				afterRestart.ServeHTTP(login, signInRequest(t, "http://agents.localhost/?view=all", signInURL))
 				if login.Code != http.StatusFound || !strings.HasPrefix(login.Header().Get("Location"), "https://oauth.example/authorize?") {
 					t.Fatalf("login status=%d location=%q", login.Code, login.Header().Get("Location"))
 				}
