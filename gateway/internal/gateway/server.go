@@ -699,7 +699,7 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 		items = append(items, dashboardItem{
 			DisplayName: displayName(run),
 			Phase:       string(run.Status.Phase),
-			RequestedBy: run.Annotations[RequestedByAnnotation],
+			RequestedBy: requestedBy(run),
 			CreatedAt:   run.CreationTimestamp.Time,
 			SourceURL:   run.Annotations[SourceURLAnnotation],
 			OpenURL:     openURL,
@@ -786,6 +786,14 @@ func displayName(run nvtv1alpha1.AgentRun) string {
 		return value
 	}
 	return run.Name
+}
+
+func requestedBy(run nvtv1alpha1.AgentRun) string {
+	if run.Spec.ProfileProvenance != nil && run.Spec.ProfileProvenance.Principal != nil &&
+		run.Spec.ProfileProvenance.Principal.DisplayName != "" {
+		return run.Spec.ProfileProvenance.Principal.DisplayName
+	}
+	return run.Annotations[RequestedByAnnotation]
 }
 
 func (s *Server) openURL(r *http.Request, key string, routable bool) string {

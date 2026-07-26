@@ -188,6 +188,8 @@ Display names, GitHub logins, and `nvt.dev/requested-by` annotations never
 participate. Legacy or malformed AgentRuns without
 `spec.profileProvenance.principal` do not match an owner rule. Dashboard results
 are filtered with the same policy; inaccessible run metadata is not rendered.
+After authorization, the dashboard displays the principal display name as
+`Requested by`, falling back to the legacy annotation only when it is absent.
 Each rule must contain exactly one of `authenticated`, `owner`,
 `claimPath`+`values`, or `where`.
 

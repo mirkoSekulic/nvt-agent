@@ -537,10 +537,10 @@ func (s AgentRunSubmitter) scheduleAdmissionURL() string {
 }
 
 func sourceURLForCommand(issue GitHubIssue, commandComment GitHubIssueComment) string {
-	if issue.HTMLURL != "" {
-		return issue.HTMLURL
+	if commandComment.HTMLURL != "" {
+		return commandComment.HTMLURL
 	}
-	return commandComment.HTMLURL
+	return issue.HTMLURL
 }
 
 func agentRunTTL(config AgentRunTTL) *nvtv1alpha1.AgentRunTTL {

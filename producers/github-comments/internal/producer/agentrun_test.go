@@ -75,6 +75,18 @@ func TestSubmitBlocksExistingIdempotencyKeyRegardlessOfPhase(t *testing.T) {
 	}
 }
 
+func TestSourceURLForCommandPrefersTriggeringComment(t *testing.T) {
+	issue := GitHubIssue{HTMLURL: "https://github.test/acme/widget/issues/7"}
+	comment := GitHubIssueComment{HTMLURL: "https://github.test/acme/widget/issues/7#issuecomment-101"}
+	if got := sourceURLForCommand(issue, comment); got != comment.HTMLURL {
+		t.Fatalf("source URL = %q, want triggering comment %q", got, comment.HTMLURL)
+	}
+	comment.HTMLURL = ""
+	if got := sourceURLForCommand(issue, comment); got != issue.HTMLURL {
+		t.Fatalf("source URL = %q, want issue fallback %q", got, issue.HTMLURL)
+	}
+}
+
 func TestSubmitScheduleAdmissionPostsAdmissionRequest(t *testing.T) {
 	var gotRequest scheduleAdmissionRequest
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -153,7 +165,12 @@ func TestSubmitProfiledScheduleAdmissionSendsOnlyWorkPrincipalAndPrompt(t *testi
 		Repository{Owner: "acme", Name: "widget"},
 		GitHubIssue{Number: 7, Title: "Broken widget", HTMLURL: "https://github.test/acme/widget/issues/7"},
 		nil,
-		GitHubIssueComment{ID: 101, Body: "/nvtagent fix it", User: GitHubUser{Login: "alice", ID: 424242}},
+		GitHubIssueComment{
+			ID:      101,
+			HTMLURL: "https://github.test/acme/widget/issues/7#issuecomment-101",
+			Body:    "/nvtagent fix it",
+			User:    GitHubUser{Login: "alice", ID: 424242},
+		},
 		Command{Prefix: "/nvtagent", AdditionalInstructions: "fix it"},
 	)
 	if err != nil || !created {
@@ -166,8 +183,8 @@ func TestSubmitProfiledScheduleAdmissionSendsOnlyWorkPrincipalAndPrompt(t *testi
 	if !reflect.DeepEqual(sortedMapKeys(work), []string{"id", "principal", "repository", "title", "url"}) {
 		t.Fatalf("work keys = %v, work=%#v", sortedMapKeys(work), work)
 	}
-	if work["repository"] != "acme/widget" {
-		t.Fatalf("repository = %#v", work["repository"])
+	if work["repository"] != "acme/widget" || work["url"] != "https://github.test/acme/widget/issues/7#issuecomment-101" {
+		t.Fatalf("work = %#v", work)
 	}
 	principal := mapValue(t, work, "principal")
 	wantPrincipal := map[string]any{
