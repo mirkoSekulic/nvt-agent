@@ -65,6 +65,24 @@ versioned JavaScript asset, and completes a WebSocket upgrade through the
 access-key route. The runtime currently resolves code-server at image build
 time, so record the resolved version when repeating this proof.
 
+The dashboard defaults to the `Active` view: authorized AgentRuns that have a
+Ready, Running agent Pod with a Pod IP and are therefore routable. AgentRun
+phase is display-only because it can lag the Pod state. The `All` view also
+shows authorized Pending, Failed, and otherwise unroutable runs for diagnosis.
+Authorization is applied before either view is rendered. These
+views are selected only by `?view=active` and `?view=all`; they add no chart or
+gateway configuration.
+
+Authenticated sessions are stored only in gateway memory; the signed browser
+cookie contains an opaque session identifier, not principal claims. After a
+gateway restart, a browser presenting an otherwise valid orphaned cookie is
+sent through the normal login flow, while API requests receive `401`; both
+responses clear the orphaned cookie. Dashboard logout uses
+`POST /oauth2/logout`, removes the server-side session, clears gateway cookies,
+and redirects to a public signed-out confirmation page. Reauthentication
+requires the explicit Sign in link on that page. Logout does not perform
+provider- or IdP-specific sign-out.
+
 Path-routed agents share one browser origin, including when the gateway is
 mounted below a broader application origin. Consequently they also share the
 origin's browser storage boundary and can make same-origin requests to other

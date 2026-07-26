@@ -65,7 +65,7 @@ func TestOwnerOnlyDashboardShowsOnlyOwnedAgentRuns(t *testing.T) {
 	config := authenticatedTestConfig()
 	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "agent-owner", Effect: authorizationEffectAllow, Owner: true}}
 	server := mustNewServer(t, config, fakeClient(t, &owned, &other))
-	request := httptest.NewRequest(http.MethodGet, "http://agents.localhost/", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://agents.localhost/?view=all", nil)
 	setTestPrincipalSession(t, server, request, Principal{Issuer: "https://github.com", Subject: "42", DisplayName: "new-login"})
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)

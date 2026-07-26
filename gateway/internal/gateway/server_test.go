@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -189,7 +190,7 @@ func TestAuthModeNonePreservesDashboardBehavior(t *testing.T) {
 		DefaultTargetPort: 4090,
 		Auth:              AuthConfig{Mode: "none"},
 	}, client)
-	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/?view=all", nil)
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
@@ -231,7 +232,7 @@ func TestAuthModeOIDCRedirectsUnauthenticatedDashboardAndSession(t *testing.T) {
 func TestAuthModeOIDCAuthenticatedWithoutAuthorizationRuleIsDenied(t *testing.T) {
 	provider := oidcDiscoveryServer(t)
 	server := mustNewServer(t, oidcTestConfig(provider.URL), fakeClient(t))
-	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/?view=all", nil)
 	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1"})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
@@ -249,7 +250,7 @@ func TestAuthModeOIDCAnyAuthenticatedRuleAllowsAccess(t *testing.T) {
 		Authenticated: true,
 	}}
 	server := mustNewServer(t, config, fakeClient(t, dashboardTestRun("authenticated-run")))
-	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/?view=all", nil)
 	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1"})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
@@ -268,7 +269,7 @@ func TestAuthModeOIDCSimpleClaimRuleAllowsAccess(t *testing.T) {
 		Values:    []string{"nvt-agent-admins"},
 	}}
 	server := mustNewServer(t, config, fakeClient(t, dashboardTestRun("claim-authorized-run")))
-	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/?view=all", nil)
 	setTestSession(t, server, req, "user-1", map[string]any{"sub": "user-1", "groups": []any{"nvt-agent-admins"}})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
@@ -552,10 +553,10 @@ func TestAuthModeOIDCHealthzIsPublic(t *testing.T) {
 func TestAuthModeOIDCLogoutClearsCookies(t *testing.T) {
 	provider := oidcDiscoveryServer(t)
 	server := mustNewServer(t, oidcTestConfig(provider.URL), nil)
-	req := httptest.NewRequest(http.MethodGet, "http://agents.localhost:4090/oauth2/logout", nil)
+	req := httptest.NewRequest(http.MethodPost, "http://agents.localhost:4090/oauth2/logout", nil)
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusFound {
+	if recorder.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	cleared := 0
@@ -567,6 +568,18 @@ func TestAuthModeOIDCLogoutClearsCookies(t *testing.T) {
 	if cleared != 2 {
 		t.Fatalf("cleared cookies = %d, want 2", cleared)
 	}
+}
+
+type countingClient struct {
+	ctrlclient.Client
+	podLists int
+}
+
+func (c *countingClient) List(ctx context.Context, list ctrlclient.ObjectList, options ...ctrlclient.ListOption) error {
+	if _, ok := list.(*corev1.PodList); ok {
+		c.podLists++
+	}
+	return c.Client.List(ctx, list, options...)
 }
 
 func TestOIDCReturnURLRejectsUnsafeExternalURL(t *testing.T) {
