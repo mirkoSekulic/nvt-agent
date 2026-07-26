@@ -2,13 +2,18 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
@@ -47,6 +52,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "fake execution driver: state directory is unavailable")
 		os.Exit(2)
 	}
+	if pidFile := os.Getenv("NVT_FAKE_DRIVER_PID_FILE"); pidFile != "" {
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "fake execution driver: PID file is unavailable")
+			os.Exit(2)
+		}
+	}
+	if os.Getenv("NVT_FAKE_DRIVER_MODE") == "hang-after-shutdown-ignore-term" {
+		signal.Ignore(syscall.SIGTERM)
+	}
 
 	d := &driver{stateDir: stateDir}
 	scanner := bufio.NewScanner(os.Stdin)
@@ -83,24 +97,89 @@ func (d *driver) handle(line []byte) bool {
 			d.respondError(request.ID, "invalid-request", "initialize parameters are invalid", false)
 			return false
 		}
-		d.initialized = true
-		d.respondResult(request.ID, executiondriver.InitializeResult{
+		mode := os.Getenv("NVT_FAKE_DRIVER_MODE")
+		if mode == "hang-initialize" {
+			select {}
+		}
+		if mode == "clean-environment" && !hasExpectedCleanEnvironment() {
+			d.respondError(request.ID, "environment-invalid", "driver environment is invalid", false)
+			return false
+		}
+		result := executiondriver.InitializeResult{
 			ProtocolVersion: executiondriver.ProtocolVersion,
 			Capabilities: []executiondriver.Capability{
 				executiondriver.CapabilityReconcile,
 				executiondriver.CapabilityObserve,
 				executiondriver.CapabilityDelete,
 			},
-		})
-	case executiondriver.MethodReconcile:
-		if os.Getenv("NVT_FAKE_DRIVER_MODE") == "malformed-reconcile" {
-			fmt.Fprintln(os.Stdout, "{malformed")
-			return false
 		}
+		switch mode {
+		case "incompatible-initialize":
+			result.ProtocolVersion = "nvt.execution-driver/v999"
+		case "missing-capability-initialize":
+			result.Capabilities = result.Capabilities[:2]
+		case "unsolicited-initialize":
+			d.respondResult("unsolicited", result)
+		}
+		d.initialized = true
+		d.respondResult(request.ID, result)
+		if mode == "idle-unsolicited" {
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				if marker := os.Getenv("NVT_FAKE_DRIVER_UNSOLICITED_FILE"); marker != "" {
+					_ = os.WriteFile(marker, []byte("emitted"), 0o600)
+				}
+				d.respondResult("idle-unsolicited", result)
+			}()
+		}
+	case executiondriver.MethodReconcile:
 		var params executiondriver.ReconcileParams
 		if executiondriver.DecodeStrictJSON(request.Params, &params) != nil || executiondriver.ValidateReconcileParams(params) != nil {
 			d.respondError(request.ID, "invalid-request", "reconcile parameters are invalid", false)
 			return false
+		}
+		mode := os.Getenv("NVT_FAKE_DRIVER_MODE")
+		testStatus := executiondriver.Status{
+			Phase:              executiondriver.PhasePending,
+			ObservedGeneration: params.Desired.Generation,
+		}
+		switch mode {
+		case "malformed-reconcile":
+			fmt.Fprintln(os.Stdout, "{malformed")
+			return false
+		case "oversized-reconcile":
+			_, _ = os.Stdout.Write(append(bytes.Repeat([]byte{'x'}, executiondriver.MaxMessageBytes), '\n'))
+			return false
+		case "mismatched-reconcile":
+			d.respondResult("mismatched", testStatus)
+			return false
+		case "duplicate-reconcile":
+			d.respondResultTwice(request.ID, testStatus)
+			return false
+		case "invalid-utf8-reconcile":
+			prefix := fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"result":{"phase":"`, request.ID)
+			response := append([]byte(prefix), 0xff)
+			response = append(response, []byte(`"}}`)...)
+			response = append(response, '\n')
+			_, _ = os.Stdout.Write(response)
+			return false
+		case "crash-once-reconcile":
+			marker := filepath.Join(d.stateDir, ".crash-once-complete")
+			if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+				if err := os.WriteFile(marker, []byte("crashed"), 0o600); err != nil {
+					os.Exit(18)
+				}
+				os.Exit(17)
+			}
+		case "stderr-canary-reconcile":
+			fmt.Fprintln(os.Stderr, internalFailureCanary)
+			os.Exit(19)
+		}
+		if activeFile := os.Getenv("NVT_FAKE_DRIVER_ACTIVE_FILE"); activeFile != "" {
+			if err := os.WriteFile(activeFile, []byte("active"), 0o600); err != nil {
+				d.respondError(request.ID, "reconcile-failed", "provider convergence failed", true)
+				return false
+			}
 		}
 		status, err := d.reconcile(params)
 		if err != nil {
@@ -151,7 +230,7 @@ func (d *driver) handle(line []byte) bool {
 			return false
 		}
 		d.respondResult(request.ID, executiondriver.ShutdownResult{})
-		if os.Getenv("NVT_FAKE_DRIVER_MODE") == "hang-after-shutdown" {
+		if mode := os.Getenv("NVT_FAKE_DRIVER_MODE"); mode == "hang-after-shutdown" || mode == "hang-after-shutdown-ignore-term" {
 			select {}
 		}
 		return true
@@ -159,6 +238,22 @@ func (d *driver) handle(line []byte) bool {
 		d.respondError(request.ID, "method-not-supported", "method is not supported", false)
 	}
 	return false
+}
+
+func hasExpectedCleanEnvironment() bool {
+	expected := []string{
+		"NVT_FAKE_DRIVER_ALLOWED=allowed",
+		"NVT_FAKE_DRIVER_MODE=clean-environment",
+	}
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "NVT_FAKE_DRIVER_STATE_DIR=") {
+			expected = append(expected, entry)
+		}
+	}
+	sort.Strings(expected)
+	actual := append([]string(nil), os.Environ()...)
+	sort.Strings(actual)
+	return strings.Join(actual, "\n") == strings.Join(expected, "\n")
 }
 
 var (
@@ -421,6 +516,28 @@ func (d *driver) respondResult(id string, result any) {
 		return
 	}
 	d.respond(executiondriver.Response{JSONRPC: executiondriver.JSONRPCVersion, ID: id, Result: encoded})
+}
+
+func (d *driver) respondResultTwice(id string, result any) {
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		os.Exit(2)
+	}
+	response := executiondriver.Response{
+		JSONRPC: executiondriver.JSONRPCVersion,
+		ID:      id,
+		Result:  encodedResult,
+	}
+	encodedResponse, err := json.Marshal(response)
+	if err != nil || len(encodedResponse)+1 > executiondriver.MaxMessageBytes {
+		os.Exit(2)
+	}
+	combined := make([]byte, 0, (len(encodedResponse)+1)*2)
+	combined = append(combined, encodedResponse...)
+	combined = append(combined, '\n')
+	combined = append(combined, encodedResponse...)
+	combined = append(combined, '\n')
+	_, _ = os.Stdout.Write(combined)
 }
 
 func (d *driver) respondError(id, reason, message string, retryable bool) {
