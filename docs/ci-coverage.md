@@ -109,6 +109,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 - `tests/runtime/git_credentials_smoke.sh` → `images.yml / build` (runtime
   matrix entry)
+- `runtime/branding/test.sh` → runtime-focused local/unit validation
+- `tests/runtime/code-server-branding-smoke.sh` → `images.yml / build`
+  (runtime matrix entry, against the image built by that job)
 - `dind/test.sh` and `tests/runtime/dind-kmsg-device-smoke.sh` → `images.yml / build`
   (DinD matrix entry; the integration smoke runs against the image built by
   that job)

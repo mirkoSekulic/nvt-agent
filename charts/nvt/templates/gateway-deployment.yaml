@@ -1,4 +1,5 @@
 {{- if .Values.gateway.enabled }}
+{{- $brandingConfigMap := include "nvt.brandingConfigMap" . }}
 {{- $admissionConfigured := ne (toJson .Values.gateway.auth.admission) "null" }}
 {{- if not (has .Values.gateway.routing.mode (list "subdomain" "path")) }}
 {{- fail "gateway.routing.mode must be one of subdomain or path" }}
@@ -152,10 +153,33 @@ spec:
         {{- include "nvt.gatewaySelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: nvt-agent-gateway
+      {{- if $brandingConfigMap }}
+      volumes:
+        - name: nvt-branding
+          configMap:
+            name: {{ $brandingConfigMap | quote }}
+            items:
+              - key: nvt-agent-mark.svg
+                path: nvt-agent-mark.svg
+              - key: favicon.ico
+                path: favicon.ico
+              - key: nvt-agent-mark-64.png
+                path: nvt-agent-mark-64.png
+              - key: nvt-agent-mark-192.png
+                path: nvt-agent-mark-192.png
+              - key: nvt-agent-mark-512.png
+                path: nvt-agent-mark-512.png
+      {{- end }}
       containers:
         - name: gateway
           image: {{ include "nvt.image" (dict "root" . "name" "gateway.image" "image" .Values.gateway.image) | quote }}
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          {{- if $brandingConfigMap }}
+          volumeMounts:
+            - name: nvt-branding
+              mountPath: /usr/local/share/nvt-agent/branding
+              readOnly: true
+          {{- end }}
           args:
             - --base-domain={{ .Values.gateway.baseDomain }}
             - --routing-mode={{ .Values.gateway.routing.mode }}
@@ -171,6 +195,10 @@ spec:
                   fieldPath: metadata.namespace
             - name: NVT_GATEWAY_AUTH_MODE
               value: {{ .Values.gateway.auth.mode | quote }}
+            {{- if $brandingConfigMap }}
+            - name: NVT_GATEWAY_BRANDING_DIR
+              value: /usr/local/share/nvt-agent/branding
+            {{- end }}
             {{- if or (eq .Values.gateway.auth.mode "oidc") (eq .Values.gateway.auth.mode "oauth2") }}
             - name: NVT_GATEWAY_SESSION_SECRET
               valueFrom:

@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.27" || "${CHART_APP_VERSION}" != "0.8.27" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.27, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.28" || "${CHART_APP_VERSION}" != "0.8.28" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.28, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.27' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.28' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -38,6 +38,8 @@ GATEWAY_ADMISSION_FAILURE="${WORKDIR}/gateway-admission-failure.txt"
 GATEWAY_OAUTH2_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oauth2-missing-secret-failure.txt"
 GATEWAY_PATH_RENDER="${WORKDIR}/gateway-path.yaml"
 GATEWAY_PATH_FAILURE="${WORKDIR}/gateway-path-failure.txt"
+BRANDING_RENDER="${WORKDIR}/branding.yaml"
+BRANDING_FAILURE="${WORKDIR}/branding-failure.txt"
 BROKER_DISABLED_RENDER="${WORKDIR}/broker-disabled.yaml"
 BROKER_SECRET_RENDER="${WORKDIR}/broker-secret.yaml"
 BROKER_TLS_DISABLED_RENDER="${WORKDIR}/broker-tls-disabled.yaml"
@@ -96,6 +98,19 @@ helm template nvt "${CHART}" -n custom-ns \
   --set 'egress.denyCIDRs={10.240.0.0/16,fd00:1234::/48}' \
   > "${EGRESS_POLICY_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true --set gateway.port=8091 > "${GATEWAY_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set branding.existingConfigMap=company-agent-branding \
+  > "${BRANDING_RENDER}"
+for invalid_branding_name in Invalid_Name foo.-bar; do
+  if helm template nvt "${CHART}" -n custom-ns \
+    --set-string branding.existingConfigMap="${invalid_branding_name}" \
+    > /dev/null 2> "${BRANDING_FAILURE}"; then
+    echo "expected invalid branding ConfigMap name to fail rendering: ${invalid_branding_name}" >&2
+    exit 1
+  fi
+  grep -q 'branding.existingConfigMap must be a valid Kubernetes ConfigMap name' "${BRANDING_FAILURE}"
+done
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set gateway.publicURL=https://agents.altinn.studio \
@@ -539,6 +554,25 @@ missing_resource "${DEFAULT_RENDER}" Service nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-github-comments-producer
 missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-github-comments-producer
+if grep -q 'NVT_BRANDING_CONFIGMAP\|NVT_GATEWAY_BRANDING_DIR\|name: nvt-branding' "${DEFAULT_RENDER}"; then
+  echo "default render unexpectedly enables custom branding" >&2
+  exit 1
+fi
+
+grep -A1 'name: NVT_BRANDING_CONFIGMAP' "${BRANDING_RENDER}" | grep -q 'company-agent-branding'
+grep -A1 'name: NVT_GATEWAY_BRANDING_DIR' "${BRANDING_RENDER}" | grep -q '/usr/local/share/nvt-agent/branding'
+grep -A2 'name: nvt-branding' "${BRANDING_RENDER}" | grep -q 'configMap:'
+grep -q 'name: "company-agent-branding"' "${BRANDING_RENDER}"
+[[ "$(grep -c 'name: nvt-branding' "${BRANDING_RENDER}")" -eq 2 ]]
+for key in nvt-agent-mark.svg favicon.ico nvt-agent-mark-64.png nvt-agent-mark-192.png nvt-agent-mark-512.png; do
+  [[ "$(grep -Fc "key: ${key}" "${BRANDING_RENDER}")" -eq 1 ]] || {
+    echo "expected branding key ${key} exactly once in gateway projection" >&2
+    exit 1
+  }
+done
+grep -Fq 'branding:' "${CHART}/README.md"
+grep -Fq 'existingConfigMap: company-agent-branding' "${CHART}/README.md"
+grep -Fq 'nvt-agent-mark-512.png' "${CHART}/README.md"
 
 for image in \
   nvt-agent-runtime \

@@ -65,6 +65,8 @@ const (
 	workflowWorkspaceInstructionsKey      = "workflow-workspace-instructions.md"
 	workflowWorkspaceInstructionsPath     = agentConfigVolumeDir + "/" + workflowWorkspaceInstructionsKey
 	workflowWorkspaceInstructionsEnv      = "NVT_AGENT_WORKFLOW_INSTRUCTIONS_FILE"
+	brandingVolumeName                    = "nvt-branding"
+	brandingMountPath                     = "/usr/local/share/nvt-agent/branding"
 	agentConfigMountPath                  = "/nvt-agent/agent.yaml"
 	agentConfigVolumeDir                  = "/nvt-agent"
 	runtimeAuthSourcePath                 = "/nvt-agent/runtime-auth-source"
@@ -3365,6 +3367,9 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 	if err := ValidateAgentRunRuntimeCapabilities(agentRun); err != nil {
 		return nil, err
 	}
+	if err := ValidateBrandingConfig(); err != nil {
+		return nil, err
+	}
 	requiredDockerNetworks, err := requiredDockerNetworksJSON(agentRun)
 	if err != nil {
 		return nil, err
@@ -3408,6 +3413,24 @@ func buildDesiredAgentPod(agentRun *nvtv1alpha1.AgentRun, scheme *runtime.Scheme
 				},
 			},
 		},
+	}
+	if brandingConfigMap := BrandingConfigMapName(); brandingConfigMap != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: brandingVolumeName,
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: brandingConfigMap},
+				Items: []corev1.KeyToPath{
+					{Key: "nvt-agent-mark.svg", Path: "nvt-agent-mark.svg"},
+					{Key: "favicon.ico", Path: "favicon.ico"},
+					{Key: "nvt-agent-mark-64.png", Path: "nvt-agent-mark-64.png"},
+					{Key: "nvt-agent-mark-192.png", Path: "nvt-agent-mark-192.png"},
+					{Key: "nvt-agent-mark-512.png", Path: "nvt-agent-mark-512.png"},
+				},
+			}},
+		})
+		agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{
+			Name: brandingVolumeName, MountPath: brandingMountPath, ReadOnly: true,
+		})
 	}
 	dindStorageLimit := dockerPVCSize(agentRun)
 	dindStorageVolumeSource := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &dindStorageLimit}}
@@ -4108,6 +4131,26 @@ func BrokerCASecretName() string {
 // mounting it and rendering broker_ca_file.
 func brokerCADistributed() bool {
 	return brokerIsTLS() && BrokerCASecretName() != ""
+}
+
+// BrandingConfigMapName is the optional administrator-owned ConfigMap whose
+// fixed public asset keys replace the runtime's built-in browser branding.
+func BrandingConfigMapName() string {
+	return strings.TrimSpace(os.Getenv("NVT_BRANDING_CONFIGMAP"))
+}
+
+// ValidateBrandingConfig rejects names Kubernetes cannot mount. The fixed-key
+// volume projection performs the remaining fail-closed check: a missing
+// ConfigMap or asset key prevents the agent Pod from starting.
+func ValidateBrandingConfig() error {
+	name := BrandingConfigMapName()
+	if name == "" {
+		return nil
+	}
+	if problems := utilvalidation.IsDNS1123Subdomain(name); len(problems) != 0 {
+		return fmt.Errorf("NVT_BRANDING_CONFIGMAP must be a valid Kubernetes ConfigMap name: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // ValidateBrokerTLSConfig rejects the half-configured TLS state: an https

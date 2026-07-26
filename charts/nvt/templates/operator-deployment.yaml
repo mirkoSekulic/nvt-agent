@@ -1,3 +1,4 @@
+{{- $brandingConfigMap := include "nvt.brandingConfigMap" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,6 +40,10 @@ spec:
               value: {{ .Values.dind.image.pullPolicy | quote }}
             - name: NVT_DIND_PROTECTED_CIDRS
               value: {{ join " " (concat .Values.dind.protectedCIDRs .Values.egress.denyCIDRs) | quote }}
+            {{- if $brandingConfigMap }}
+            - name: NVT_BRANDING_CONFIGMAP
+              value: {{ $brandingConfigMap | quote }}
+            {{- end }}
             - name: NVT_NETWORK_POLICY_CAPABLE
               value: {{ .Values.egress.networkPolicyCapable | quote }}
             - name: NVT_EGRESS_DENY_CIDRS

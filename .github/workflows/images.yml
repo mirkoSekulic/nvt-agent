@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "runtime/**"
+      - "assets/branding/**"
       - "dind/**"
       - "broker/**"
       - "egressd/**"
@@ -18,10 +19,12 @@ on:
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
       - "tests/runtime/dind-kmsg-device-smoke.sh"
+      - "tests/runtime/code-server-branding-smoke.sh"
       - ".github/workflows/images.yml"
   pull_request:
     paths:
       - "runtime/**"
+      - "assets/branding/**"
       - "dind/**"
       - "broker/**"
       - "egressd/**"
@@ -34,6 +37,7 @@ on:
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
       - "tests/runtime/dind-kmsg-device-smoke.sh"
+      - "tests/runtime/code-server-branding-smoke.sh"
       - ".github/workflows/images.yml"
 
 permissions:
@@ -55,6 +59,7 @@ jobs:
             dockerfile: runtime/Dockerfile
             image: nvt-agent:test
             smoke: true
+            branding: true
           - name: dind
             dockerfile: dind/Dockerfile
             image: nvt-dind:test
@@ -88,6 +93,11 @@ jobs:
       - name: Run runtime git credentials smoke
         if: matrix.smoke
         run: bash tests/runtime/git_credentials_smoke.sh "${{ matrix.image }}"
+      - name: Verify runtime code-server branding
+        if: matrix.branding
+        env:
+          NVT_RUNTIME_BRANDING_IMAGE: ${{ matrix.image }}
+        run: bash tests/runtime/code-server-branding-smoke.sh
       - name: Run ${{ matrix.name }} script tests
         if: matrix.test
         run: bash "${{ matrix.test }}"

@@ -13,6 +13,12 @@ runtime:
     tag: ""
     pullPolicy: IfNotPresent
 
+# Optional administrator-owned public branding bundle. The ConfigMap must be
+# in the release namespace and contain every fixed key documented in the chart
+# README. Empty keeps the coordinated images' built-in NVT Agent branding.
+branding:
+  existingConfigMap: ""
+
 dind:
   # Include cluster Pod, Service, control-plane, broker, and other protected
   # ranges. Transparent AgentRuns fail closed if any overlaps 172.30.0.0/15.

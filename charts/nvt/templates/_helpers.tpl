@@ -19,6 +19,14 @@
 {{- default .Release.Namespace .Values.namespace.name -}}
 {{- end -}}
 
+{{- define "nvt.brandingConfigMap" -}}
+{{- $name := trim .Values.branding.existingConfigMap -}}
+{{- if and $name (or (gt (len $name) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$` $name))) -}}
+{{- fail "branding.existingConfigMap must be a valid Kubernetes ConfigMap name" -}}
+{{- end -}}
+{{- $name -}}
+{{- end -}}
+
 {{- define "nvt.labels" -}}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
