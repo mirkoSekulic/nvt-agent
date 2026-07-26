@@ -144,8 +144,11 @@ The harness and helper scripts are not standalone cases:
 
 ## Manual-only checks
 
-- `make phase6-real-codex-proof` is manual only because it requires real Codex
-  host credentials and is explicitly excluded from CI.
+- `make codex-mediated-proof` is manual only because it requires real Codex
+  host credentials and is explicitly excluded from CI. It gates on a real
+  mediated turn plus a credential non-possession scan; it does not force a
+  token refresh and reports refresh as unproven. See
+  [Codex authentication](codex-auth.md).
 - Any real OAuth / GitHub credential proof remains manual because it depends on
   private secrets and external account state that CI must not possess.
 
