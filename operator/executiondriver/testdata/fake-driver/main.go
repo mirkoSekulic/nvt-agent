@@ -229,7 +229,16 @@ func (d *driver) handle(line []byte) bool {
 			d.respondError(request.ID, "invalid-request", "shutdown parameters are invalid", false)
 			return false
 		}
-		d.respondResult(request.ID, executiondriver.ShutdownResult{})
+		switch os.Getenv("NVT_FAKE_DRIVER_MODE") {
+		case "null-shutdown":
+			d.respondRawResult(request.ID, json.RawMessage(`null`))
+		case "array-shutdown":
+			d.respondRawResult(request.ID, json.RawMessage(`[]`))
+		case "nonempty-shutdown":
+			d.respondRawResult(request.ID, json.RawMessage(`{"unexpected":true}`))
+		default:
+			d.respondResult(request.ID, executiondriver.ShutdownResult{})
+		}
 		if mode := os.Getenv("NVT_FAKE_DRIVER_MODE"); mode == "hang-after-shutdown" || mode == "hang-after-shutdown-ignore-term" {
 			select {}
 		}
@@ -516,6 +525,10 @@ func (d *driver) respondResult(id string, result any) {
 		return
 	}
 	d.respond(executiondriver.Response{JSONRPC: executiondriver.JSONRPCVersion, ID: id, Result: encoded})
+}
+
+func (d *driver) respondRawResult(id string, result json.RawMessage) {
+	d.respond(executiondriver.Response{JSONRPC: executiondriver.JSONRPCVersion, ID: id, Result: result})
 }
 
 func (d *driver) respondResultTwice(id string, result any) {

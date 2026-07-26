@@ -6,6 +6,7 @@ package host
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,9 @@ var (
 	ErrTransport = errors.New("execution driver transport failed")
 	// ErrProtocol indicates malformed or ambiguous driver output.
 	ErrProtocol = errors.New("execution driver protocol failed")
+	// ErrRequiredEnvironment indicates that a configured PassEnv name was not
+	// present in the host environment for this process generation.
+	ErrRequiredEnvironment = errors.New("execution driver required environment variable is unavailable")
 
 	environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
@@ -72,9 +76,9 @@ func (e *DriverError) Error() string {
 }
 
 // LocalExecutableConfig configures one trusted executable. ExecutablePath must
-// be absolute. PassEnv contains names copied from the current process; every
-// other environment variable is omitted. The child starts in / and is invoked
-// directly without a shell.
+// be absolute. Every PassEnv name is required to exist and its value is copied
+// from the current process; every other environment variable is omitted. The
+// child starts in / and is invoked directly without a shell.
 type LocalExecutableConfig struct {
 	DriverInstanceName string
 	ExecutablePath     string
@@ -91,30 +95,35 @@ type LocalExecutableConfig struct {
 // serialized. A failed in-flight call is never replayed; a later caller may
 // start the same executable after RestartBackoff.
 type LocalExecutable struct {
-	config    LocalExecutableConfig
-	serial    chan struct{}
-	process   *localProcess
-	nextStart time.Time
-	requestID uint64
-	closed    bool
+	config           LocalExecutableConfig
+	serial           chan struct{}
+	stateMu          sync.Mutex
+	process          *localProcess
+	nextStart        time.Time
+	requestID        uint64
+	closed           bool
+	shutdownDone     chan struct{}
+	shutdownComplete sync.Once
 }
 
 type localProcess struct {
-	command     *exec.Cmd
-	stdin       io.WriteCloser
-	stdout      *bufio.Reader
-	stdoutPipe  io.ReadCloser
-	done        chan struct{}
-	readerDone  chan struct{}
-	waitErr     error
-	closeInput  sync.Once
-	closeOutput sync.Once
-	responseMu  sync.Mutex
-	pending     *pendingCall
-	fatal       error
-	fatalCh     chan struct{}
-	fatalOnce   sync.Once
-	stderr      *boundedDiagnosticSink
+	command       *exec.Cmd
+	stdin         io.WriteCloser
+	stdout        *bufio.Reader
+	stdoutPipe    io.ReadCloser
+	done          chan struct{}
+	readerDone    chan struct{}
+	waitErr       error
+	closeInput    sync.Once
+	closeOutput   sync.Once
+	responseMu    sync.Mutex
+	pending       *pendingCall
+	fatal         error
+	fatalCh       chan struct{}
+	fatalOnce     sync.Once
+	terminateOnce sync.Once
+	terminated    chan struct{}
+	stderr        *boundedDiagnosticSink
 }
 
 type pendingCall struct {
@@ -150,8 +159,9 @@ func NewLocalExecutable(ctx context.Context, config LocalExecutableConfig) (*Loc
 		return nil, err
 	}
 	host := &LocalExecutable{
-		config: validated,
-		serial: make(chan struct{}, 1),
+		config:       validated,
+		serial:       make(chan struct{}, 1),
+		shutdownDone: make(chan struct{}),
 	}
 	initializeContext, cancel := context.WithTimeout(ctx, validated.InitializeTimeout)
 	defer cancel()
@@ -264,12 +274,18 @@ func (h *LocalExecutable) operation(
 	params, result any,
 	validateResult func() error,
 ) error {
+	if h.isClosed() {
+		return ErrClosed
+	}
 	operationContext, cancel := context.WithTimeout(ctx, h.config.OperationTimeout)
 	defer cancel()
 	if err := h.acquire(operationContext); err != nil {
 		return fmt.Errorf("execution driver operation did not start: %w", err)
 	}
 	defer h.release()
+	if h.isClosed() {
+		return ErrClosed
+	}
 
 	process, err := h.ensureProcessLocked(operationContext)
 	if err != nil {
@@ -292,22 +308,48 @@ func (h *LocalExecutable) operation(
 	return err
 }
 
-// Shutdown permanently closes the client. It requests protocol shutdown,
-// closes stdin, and terminates or kills the process group if it does not exit
-// within the caller/configured deadline.
+// Shutdown permanently and authoritatively closes the client. An idle process
+// receives protocol shutdown. An active operation is not allowed to delay
+// closure: its process generation is terminated and reaped, which unblocks the
+// active call without replay.
 func (h *LocalExecutable) Shutdown(ctx context.Context) error {
 	shutdownContext, cancel := context.WithTimeout(ctx, h.config.ShutdownTimeout)
 	defer cancel()
-	if err := h.acquire(shutdownContext); err != nil {
-		return fmt.Errorf("execution driver shutdown did not start: %w", err)
+	process, first := h.beginShutdown()
+	if !first {
+		select {
+		case <-h.shutdownDone:
+			return nil
+		case <-shutdownContext.Done():
+			return fmt.Errorf("execution driver shutdown wait timed out: %w", shutdownContext.Err())
+		}
 	}
-	defer h.release()
-	if h.closed {
-		return nil
+	defer h.finishShutdown()
+
+	if h.tryAcquire() {
+		defer h.release()
+		h.clearProcess(process)
+		return h.shutdownIdleProcess(shutdownContext, process)
 	}
-	h.closed = true
-	process := h.process
-	h.process = nil
+
+	// An operation owns serialization. Killing its exact process generation
+	// makes the blocked exchange return; the operation then releases serial.
+	// Cleanup is bounded by TerminationGrace even if the caller deadline is
+	// shorter, because returning while the child remains alive is unsafe.
+	if process != nil {
+		process.terminateAndReap(h.config.TerminationGrace)
+		h.clearProcess(process)
+	}
+	cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), h.config.TerminationGrace)
+	defer cleanupCancel()
+	if err := h.acquire(cleanupContext); err != nil {
+		return fmt.Errorf("execution driver active operation did not stop: %w", err)
+	}
+	h.release()
+	return nil
+}
+
+func (h *LocalExecutable) shutdownIdleProcess(ctx context.Context, process *localProcess) error {
 	if process == nil {
 		return nil
 	}
@@ -319,7 +361,7 @@ func (h *LocalExecutable) Shutdown(ctx context.Context) error {
 	}
 
 	var result executiondriver.ShutdownResult
-	err := h.callProcess(shutdownContext, process, executiondriver.MethodShutdown, struct{}{}, &result)
+	err := h.callProcess(ctx, process, executiondriver.MethodShutdown, struct{}{}, &result)
 	process.closeStdin()
 	if err == nil {
 		select {
@@ -331,12 +373,43 @@ func (h *LocalExecutable) Shutdown(ctx context.Context) error {
 				return ErrTransport
 			}
 			return nil
-		case <-shutdownContext.Done():
-			err = fmt.Errorf("execution driver shutdown timed out: %w", shutdownContext.Err())
+		case <-ctx.Done():
+			err = fmt.Errorf("execution driver shutdown timed out: %w", ctx.Err())
 		}
 	}
 	process.terminateAndReap(h.config.TerminationGrace)
 	return err
+}
+
+func (h *LocalExecutable) beginShutdown() (*localProcess, bool) {
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	if h.closed {
+		return nil, false
+	}
+	h.closed = true
+	return h.process, true
+}
+
+func (h *LocalExecutable) isClosed() bool {
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	return h.closed
+}
+
+func (h *LocalExecutable) finishShutdown() {
+	h.shutdownComplete.Do(func() {
+		close(h.shutdownDone)
+	})
+}
+
+func (h *LocalExecutable) tryAcquire() bool {
+	select {
+	case h.serial <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *LocalExecutable) acquire(ctx context.Context) error {
@@ -353,26 +426,42 @@ func (h *LocalExecutable) release() {
 }
 
 func (h *LocalExecutable) ensureProcessLocked(ctx context.Context) (*localProcess, error) {
+	h.stateMu.Lock()
 	if h.closed {
+		h.stateMu.Unlock()
 		return nil, ErrClosed
 	}
-	if h.process != nil {
-		if !h.process.exited() {
-			return h.process, nil
+	process := h.process
+	if process != nil {
+		if !process.exited() {
+			h.stateMu.Unlock()
+			return process, nil
 		}
-		h.process.closePipes()
-		h.process.killRemainingGroup()
-		h.process.waitForReader()
 		h.process = nil
 		h.nextStart = time.Now().Add(h.config.RestartBackoff)
+		h.stateMu.Unlock()
+		process.closePipes()
+		process.killRemainingGroup()
+		process.waitForReader()
 		return nil, ErrUnavailable
 	}
 	if time.Now().Before(h.nextStart) {
+		h.stateMu.Unlock()
 		return nil, ErrRestartBackoff
 	}
+	h.stateMu.Unlock()
 	if err := h.startLocked(ctx); err != nil {
-		h.nextStart = time.Now().Add(h.config.RestartBackoff)
+		h.stateMu.Lock()
+		if !h.closed {
+			h.nextStart = time.Now().Add(h.config.RestartBackoff)
+		}
+		h.stateMu.Unlock()
 		return nil, err
+	}
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	if h.closed {
+		return nil, ErrClosed
 	}
 	return h.process, nil
 }
@@ -411,6 +500,7 @@ func (h *LocalExecutable) startLocked(ctx context.Context) error {
 		done:       make(chan struct{}),
 		readerDone: make(chan struct{}),
 		fatalCh:    make(chan struct{}),
+		terminated: make(chan struct{}),
 		stderr:     stderr,
 	}
 	go func() {
@@ -418,7 +508,14 @@ func (h *LocalExecutable) startLocked(ctx context.Context) error {
 		close(process.done)
 	}()
 	go process.readResponses()
+	h.stateMu.Lock()
+	if h.closed {
+		h.stateMu.Unlock()
+		process.terminateAndReap(h.config.TerminationGrace)
+		return ErrClosed
+	}
 	h.process = process
+	h.stateMu.Unlock()
 
 	initializeContext, cancel := context.WithTimeout(ctx, h.config.InitializeTimeout)
 	defer cancel()
@@ -429,12 +526,12 @@ func (h *LocalExecutable) startLocked(ctx context.Context) error {
 	var result executiondriver.InitializeResult
 	if err := h.callProcess(initializeContext, process, executiondriver.MethodInitialize, params, &result); err != nil {
 		process.terminateAndReap(h.config.TerminationGrace)
-		h.process = nil
+		h.clearProcess(process)
 		return fmt.Errorf("execution driver initialization failed: %w", err)
 	}
 	if err := executiondriver.ValidateInitializeResult(result); err != nil {
 		process.terminateAndReap(h.config.TerminationGrace)
-		h.process = nil
+		h.clearProcess(process)
 		return fmt.Errorf("%w: initialize negotiation is incompatible", ErrProtocol)
 	}
 	return nil
@@ -445,7 +542,7 @@ func (h *LocalExecutable) childEnvironment() ([]string, error) {
 	for _, name := range h.config.PassEnv {
 		value, present := os.LookupEnv(name)
 		if !present {
-			continue
+			return nil, ErrRequiredEnvironment
 		}
 		if strings.IndexByte(value, 0) >= 0 {
 			return nil, errors.New("execution driver allowlisted environment value is invalid")
@@ -503,6 +600,12 @@ func (h *LocalExecutable) callProcess(ctx context.Context, process *localProcess
 	}
 	if response.Error != nil {
 		return &DriverError{Failure: response.Error.Data}
+	}
+	if method == executiondriver.MethodShutdown {
+		var object map[string]json.RawMessage
+		if err := executiondriver.DecodeStrictJSON(response.Result, &object); err != nil || object == nil || len(object) != 0 {
+			return fmt.Errorf("%w: shutdown result must be an empty object", ErrProtocol)
+		}
 	}
 	if err := executiondriver.DecodeStrictJSON(response.Result, result); err != nil {
 		return fmt.Errorf("%w: result is malformed", ErrProtocol)
@@ -640,12 +743,27 @@ func writeAll(writer io.Writer, value []byte) error {
 }
 
 func (h *LocalExecutable) failProcessLocked(process *localProcess) {
-	if h.process != process {
+	h.stateMu.Lock()
+	current := h.process == process
+	if current {
+		h.process = nil
+		if !h.closed {
+			h.nextStart = time.Now().Add(h.config.RestartBackoff)
+		}
+	}
+	h.stateMu.Unlock()
+	if !current {
 		return
 	}
 	process.terminateAndReap(h.config.TerminationGrace)
-	h.process = nil
-	h.nextStart = time.Now().Add(h.config.RestartBackoff)
+}
+
+func (h *LocalExecutable) clearProcess(process *localProcess) {
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	if h.process == process {
+		h.process = nil
+	}
 }
 
 func (p *localProcess) exited() bool {
@@ -675,26 +793,30 @@ func (p *localProcess) waitForReader() {
 }
 
 func (p *localProcess) terminateAndReap(grace time.Duration) {
-	p.closeStdin()
-	if !p.exited() {
-		_ = signalProcessGroup(p.command.Process.Pid, syscall.SIGTERM)
-		timer := time.NewTimer(grace)
-		select {
-		case <-p.done:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+	p.terminateOnce.Do(func() {
+		defer close(p.terminated)
+		p.closeStdin()
+		if !p.exited() {
+			_ = signalProcessGroup(p.command.Process.Pid, syscall.SIGTERM)
+			timer := time.NewTimer(grace)
+			select {
+			case <-p.done:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
+			case <-timer.C:
+				_ = signalProcessGroup(p.command.Process.Pid, syscall.SIGKILL)
+				<-p.done
 			}
-		case <-timer.C:
-			_ = signalProcessGroup(p.command.Process.Pid, syscall.SIGKILL)
-			<-p.done
 		}
-	}
-	p.killRemainingGroup()
-	p.closePipes()
-	p.waitForReader()
+		p.killRemainingGroup()
+		p.closePipes()
+		p.waitForReader()
+	})
+	<-p.terminated
 }
 
 func (p *localProcess) killRemainingGroup() {

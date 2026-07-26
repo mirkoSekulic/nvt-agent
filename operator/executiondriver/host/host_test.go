@@ -304,6 +304,128 @@ func TestLocalExecutableShutdownKillsAndReapsHungProcess(t *testing.T) {
 	}
 }
 
+func TestLocalExecutableShutdownStopsActiveOperation(t *testing.T) {
+	stateDirectory := t.TempDir()
+	activeFile := filepath.Join(t.TempDir(), "driver.active")
+	pidFile := filepath.Join(t.TempDir(), "driver.pid")
+	t.Setenv("NVT_FAKE_DRIVER_STATE_DIR", stateDirectory)
+	t.Setenv("NVT_FAKE_DRIVER_MODE", "")
+	t.Setenv("NVT_FAKE_DRIVER_ACTIVE_FILE", activeFile)
+	t.Setenv("NVT_FAKE_DRIVER_PID_FILE", pidFile)
+	config := validConfig(fakeDriverBinary)
+	config.PassEnv = []string{
+		"NVT_FAKE_DRIVER_ACTIVE_FILE",
+		"NVT_FAKE_DRIVER_MODE",
+		"NVT_FAKE_DRIVER_PID_FILE",
+		"NVT_FAKE_DRIVER_STATE_DIR",
+	}
+	config.OperationTimeout = 5 * time.Second
+	config.ShutdownTimeout = 2 * time.Second
+	config.TerminationGrace = 30 * time.Millisecond
+	client, err := driverhost.NewLocalExecutable(testContext(t), config)
+	if err != nil {
+		t.Fatalf("start active-shutdown host: %v", err)
+	}
+	t.Cleanup(func() {
+		context, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = client.Shutdown(context)
+	})
+	pid := waitForPID(t, pidFile)
+	activeResult := make(chan error, 1)
+	desired := testDesired(t, "run-active-shutdown", map[string]any{"delay_milliseconds": 5_000})
+	go func() {
+		_, err := client.Reconcile(context.Background(), desired)
+		activeResult <- err
+	}()
+	waitForPath(t, activeFile)
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := client.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("authoritative shutdown: %v", err)
+	}
+	requireProcessGone(t, pid)
+	select {
+	case err := <-activeResult:
+		if err == nil || (!errors.Is(err, driverhost.ErrTransport) && !errors.Is(err, driverhost.ErrProtocol)) {
+			t.Fatalf("active reconcile shutdown error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active reconcile outlived shutdown")
+	}
+	if _, err := client.Observe(testContext(t), desired.ExecutionID); !errors.Is(err, driverhost.ErrClosed) {
+		t.Fatalf("call after authoritative shutdown error=%v", err)
+	}
+}
+
+func TestLocalExecutableRequiresPassEnvironmentOnStartupAndRestart(t *testing.T) {
+	t.Run("startup", func(t *testing.T) {
+		stateDirectory := t.TempDir()
+		pidFile := filepath.Join(t.TempDir(), "driver.pid")
+		t.Setenv("NVT_FAKE_DRIVER_STATE_DIR", stateDirectory)
+		t.Setenv("NVT_FAKE_DRIVER_MODE", "")
+		t.Setenv("NVT_FAKE_DRIVER_PID_FILE", pidFile)
+		unsetEnvironment(t, "NVT_FAKE_DRIVER_REQUIRED_MISSING")
+		config := validConfig(fakeDriverBinary)
+		config.PassEnv = []string{
+			"NVT_FAKE_DRIVER_MODE",
+			"NVT_FAKE_DRIVER_PID_FILE",
+			"NVT_FAKE_DRIVER_REQUIRED_MISSING",
+			"NVT_FAKE_DRIVER_STATE_DIR",
+		}
+		client, err := driverhost.NewLocalExecutable(testContext(t), config)
+		if client != nil || !errors.Is(err, driverhost.ErrRequiredEnvironment) {
+			t.Fatalf("missing startup environment client=%v error=%v", client, err)
+		}
+		if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("driver started with missing required environment: %v", err)
+		}
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		t.Setenv("NVT_FAKE_DRIVER_REQUIRED", "present")
+		client, _, pidFile := newFakeHost(t, "crash-once-reconcile", func(config *driverhost.LocalExecutableConfig) {
+			config.PassEnv = append(config.PassEnv, "NVT_FAKE_DRIVER_PID_FILE", "NVT_FAKE_DRIVER_REQUIRED")
+			config.RestartBackoff = 30 * time.Millisecond
+		})
+		firstPID := waitForPID(t, pidFile)
+		desired := testDesired(t, "run-missing-restart-env", map[string]any{})
+		if _, err := client.Reconcile(testContext(t), desired); !errors.Is(err, driverhost.ErrTransport) {
+			t.Fatalf("crash error=%v", err)
+		}
+		requireProcessGone(t, firstPID)
+		if err := os.Unsetenv("NVT_FAKE_DRIVER_REQUIRED"); err != nil {
+			t.Fatalf("unset restart environment: %v", err)
+		}
+		time.Sleep(40 * time.Millisecond)
+		if _, err := client.Observe(testContext(t), desired.ExecutionID); !errors.Is(err, driverhost.ErrRequiredEnvironment) {
+			t.Fatalf("missing restart environment error=%v", err)
+		}
+		if currentPID := waitForPID(t, pidFile); currentPID != firstPID {
+			t.Fatalf("driver restarted without required environment: before=%d after=%d", firstPID, currentPID)
+		}
+	})
+}
+
+func TestLocalExecutableRejectsMalformedShutdownResult(t *testing.T) {
+	for _, mode := range []string{"null-shutdown", "array-shutdown", "nonempty-shutdown"} {
+		t.Run(mode, func(t *testing.T) {
+			client, _, pidFile := newFakeHost(t, mode, func(config *driverhost.LocalExecutableConfig) {
+				config.PassEnv = append(config.PassEnv, "NVT_FAKE_DRIVER_PID_FILE")
+			})
+			pid := waitForPID(t, pidFile)
+			err := client.Shutdown(testContext(t))
+			if !errors.Is(err, driverhost.ErrProtocol) {
+				t.Fatalf("malformed shutdown result error=%v", err)
+			}
+			requireProcessGone(t, pid)
+			if _, err := client.Observe(testContext(t), "run-after-malformed-shutdown"); !errors.Is(err, driverhost.ErrClosed) {
+				t.Fatalf("call after malformed shutdown error=%v", err)
+			}
+		})
+	}
+}
+
 func TestLocalExecutableSerializesConcurrentCalls(t *testing.T) {
 	client, _, activeFile := newFakeHost(t, "", func(config *driverhost.LocalExecutableConfig) {
 		config.PassEnv = append(config.PassEnv, "NVT_FAKE_DRIVER_ACTIVE_FILE")
@@ -520,4 +642,19 @@ func requireProcessGone(t *testing.T, pid int) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("driver process %d was not reaped", pid)
+}
+
+func unsetEnvironment(t *testing.T, name string) {
+	t.Helper()
+	value, present := os.LookupEnv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatalf("unset %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		if present {
+			_ = os.Setenv(name, value)
+		} else {
+			_ = os.Unsetenv(name)
+		}
+	})
 }

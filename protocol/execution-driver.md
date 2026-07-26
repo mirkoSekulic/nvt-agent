@@ -101,12 +101,14 @@ out create did nothing.
 
 The optional local host starts one exact administrator-supplied absolute
 executable path directly, without a shell, using `/` as its deterministic
-working directory. Its child environment begins empty. `PassEnv` is only a
-name allowlist: values for those exact names are copied from the host process,
-and no `PATH`, `HOME`, credential, or other operator variable is inherited
-implicitly. Scripts must therefore name an absolute interpreter or explicitly
-allowlist any environment needed by that interpreter. The executable is trusted
-operator extension code, not a sandbox.
+working directory. Its child environment begins empty. Every name in `PassEnv`
+is required to exist for every process generation; the host copies values for
+those exact names and fails before launch if one is absent. No `PATH`, `HOME`,
+credential, or other operator variable is inherited implicitly. Optional
+variables require a separate future contract rather than implicit omission.
+Scripts must therefore name an absolute interpreter or explicitly allowlist
+every environment variable needed by that interpreter. The executable is
+trusted operator extension code, not a sandbox.
 
 The host implements a small `Client` interface using the portable desired and
 status types. Its local-process implementation serializes all calls for v1; a
@@ -126,9 +128,11 @@ an operation result and does not invalidate an otherwise healthy process.
 After a crash or invalid process generation, the failed call returns without
 replay. Calls during the fixed bounded backoff fail explicitly. A later caller
 may start and negotiate the same selected executable after backoff; the host
-never chooses a fallback driver. `shutdown` requests protocol shutdown, closes
-stdin, and applies its bounded terminate/kill/reap path if acknowledgement or
-process exit does not complete in time.
+never chooses a fallback driver. Once `shutdown` begins, new calls fail closed.
+An idle generation receives protocol shutdown followed by bounded
+terminate/kill/reap cleanup. If an operation is active, shutdown terminates and
+reaps that exact generation immediately instead of waiting for the serialized
+operation; the failed operation is never replayed.
 
 This host currently has no CRD, profile, controller, chart, command-line, or
 other production registration surface and starts no process during ordinary
@@ -245,10 +249,13 @@ itself permission to remove the finalizer.
 ```
 
 `shutdown` requests bounded process termination. It never means resource
-deletion and must not mutate provider resources. A valid response acknowledges
-the request but does not complete shutdown: the host continues applying the
-same deadline until the process exits. If it remains alive, the operator
-terminates and reaps it.
+deletion and must not mutate provider resources. The only valid successful
+result is the exact empty JSON object shown above; `null`, arrays, and objects
+with members are protocol failures. A valid response acknowledges the request
+but does not complete shutdown: the host continues applying the same deadline
+until the process exits. If it remains alive, the operator terminates and reaps
+it. When an operation is already active, the host does not send another JSONL
+request; it closes the client and terminates that process generation directly.
 
 ## Portable status
 
