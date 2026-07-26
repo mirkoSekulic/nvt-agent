@@ -18,8 +18,11 @@ asset is also used by the repository README.
 (the 48 px layer is generated directly into the ICO and is not committed as a
 standalone duplicate). code-server uses the 192/512 assets for both regular
 and maskable PWA filenames because the source already includes a safe quiet
-area. code-server expects SVG favicon filenames, so `nvt-agent-mark.svg` is an explicitly
-documented raster wrapper around the 64 px PNG—not a claimed vector asset.
+area. code-server expects SVG favicon filenames, so `nvt-agent-mark.svg` is an
+explicitly documented raster wrapper around the faithful 512 px PNG—not a
+claimed vector asset. The high-resolution payload avoids upscaling the 64 px
+favicon derivative while remaining small enough for the fixed ConfigMap
+branding bundle.
 The script also refreshes the byte-identical copies required by Go embed in
 `gateway/internal/gateway/branding/`.
 

@@ -23,6 +23,23 @@ done
 PATH="${WORKDIR}/bin:${PATH}" "${INSTALLER}" "${ASSETS}"
 cmp "${ASSETS}/nvt-agent-mark.svg" "${media_dir}/favicon.svg"
 cmp "${ASSETS}/nvt-agent-mark.svg" "${media_dir}/favicon-dark-support.svg"
+
+python3 - "${ASSETS}" <<'PY'
+import base64
+import re
+import sys
+from pathlib import Path
+
+assets = Path(sys.argv[1])
+svg = (assets / "nvt-agent-mark.svg").read_text(encoding="utf-8")
+if 'viewBox="0 0 512 512"' not in svg or '<image width="512" height="512"' not in svg:
+    raise SystemExit("branding test: SVG does not declare the 512 px faithful raster payload")
+match = re.search(r'href="data:image/png;base64,([A-Za-z0-9+/=]+)"', svg)
+if match is None:
+    raise SystemExit("branding test: SVG does not contain an embedded PNG")
+if base64.b64decode(match.group(1), validate=True) != (assets / "nvt-agent-mark-512.png").read_bytes():
+    raise SystemExit("branding test: SVG payload differs from the canonical 512 px derivative")
+PY
 cmp "${ASSETS}/favicon.ico" "${media_dir}/favicon.ico"
 cmp "${ASSETS}/nvt-agent-mark-192.png" "${media_dir}/pwa-icon-192.png"
 cmp "${ASSETS}/nvt-agent-mark-512.png" "${media_dir}/pwa-icon-512.png"

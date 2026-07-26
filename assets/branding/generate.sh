@@ -28,11 +28,13 @@ for size in 512 192 64 32 16; do
 done
 
 # code-server references SVG favicon filenames. This is deliberately and
-# transparently a raster wrapper around the faithful 64 px derivative; it is
-# not presented as a native vector logo.
+# transparently a raster wrapper around the faithful 512 px derivative; it is
+# not presented as a native vector logo. Embedding the high-resolution product
+# asset lets browsers downsample cleanly while keeping the fixed ConfigMap
+# branding bundle within Kubernetes' size limit.
 {
-  printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="NVT Agent"><image width="64" height="64" href="data:image/png;base64,'
-  base64 "${BRANDING_DIR}/nvt-agent-mark-64.png" | tr -d '\n'
+  printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="NVT Agent"><image width="512" height="512" href="data:image/png;base64,'
+  base64 "${BRANDING_DIR}/nvt-agent-mark-512.png" | tr -d '\n'
   printf '%s\n' '"/></svg>'
 } >"${workdir}/nvt-agent-mark.svg"
 install -m 0644 "${workdir}/nvt-agent-mark.svg" "${BRANDING_DIR}/nvt-agent-mark.svg"
