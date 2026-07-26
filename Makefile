@@ -36,7 +36,7 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image.repository=$(word 1,$(subst :, ,$(GATEWAY_IMAGE))) --set gateway.image.tag=$(word 2,$(subst :, ,$(GATEWAY_IMAGE)))
 endif
 
-.PHONY: runtime-build dind-build broker-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load phase2-codex-gate phase2b-codex-forward-proxy operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret phase6-real-codex-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build dind-build broker-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load operator-build producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret codex-mediated-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -55,12 +55,6 @@ captured-build:
 
 transparent-compose-smoke:
 	bash tests/runtime/compose-transparent-smoke.sh
-
-phase2-codex-gate: runtime-build broker-build egressd-build
-	bash scripts/phase2-codex-gate.sh
-
-phase2b-codex-forward-proxy: runtime-build egressd-build
-	bash scripts/phase2b-codex-forward-proxy.sh
 
 operator-build:
 	bash scripts/operator-build.sh $(if $(NO_CACHE),--no-cache)
@@ -174,9 +168,9 @@ operator-codex-auth-secret:
 	CODEX_AUTH_SOURCE="$(CODEX_AUTH_SOURCE)" CODEX_AUTH_SECRET="$(CODEX_AUTH_SECRET)" SOURCE="$(SOURCE)" SECRET="$(SECRET)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" bash scripts/operator-codex-auth-secret.sh
 
 # Manual, opt-in real-Codex mediated-auth proof (docs/codex-auth.md).
-# NOT run in CI: needs real host Codex auth. Writes evidence to .phase6-out/.
-phase6-real-codex-proof:
-	CODEX_AUTH_SOURCE="$(CODEX_AUTH_SOURCE)" CODEX_AUTH_SECRET="$(CODEX_AUTH_SECRET)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" ROLLOUT_TIMEOUT="$(ROLLOUT_TIMEOUT)" bash scripts/phase6-real-codex-proof.sh
+# NOT run in CI: needs real host Codex auth. Writes evidence to .proof-out/codex/.
+codex-mediated-proof:
+	CODEX_AUTH_SOURCE="$(CODEX_AUTH_SOURCE)" CODEX_AUTH_SECRET="$(CODEX_AUTH_SECRET)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" ROLLOUT_TIMEOUT="$(ROLLOUT_TIMEOUT)" bash scripts/codex-mediated-proof.sh
 
 github-comments-producer-secret:
 	GITHUB_APP_PRIVATE_KEY_FILE="$(GITHUB_APP_PRIVATE_KEY_FILE)" PRODUCER_GITHUB_APP_SECRET="$(PRODUCER_GITHUB_APP_SECRET)" PRODUCER_GITHUB_APP_KEY="$(PRODUCER_GITHUB_APP_KEY)" NAMESPACE="$(NAMESPACE)" CLUSTER="$(CLUSTER)" KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" bash scripts/github-comments-producer-secret.sh

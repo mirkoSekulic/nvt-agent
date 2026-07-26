@@ -9,8 +9,8 @@ set -euo pipefail
 # placeholder-file, and records evidence under an ignored output directory.
 #
 # Usage:
-#   make phase6-real-codex-proof            # uses ~/.codex
-#   CODEX_AUTH_SOURCE=/path/to/.codex make phase6-real-codex-proof
+#   make codex-mediated-proof               # uses ~/.codex
+#   CODEX_AUTH_SOURCE=/path/to/.codex make codex-mediated-proof
 #
 # Requires: kind, kubectl, helm, docker, and a working host Codex login.
 
@@ -25,15 +25,15 @@ ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 # Unique per invocation so a rerun always creates a fresh AgentRun/pod (an
 # apply over the previous run's still-sleeping pod would not start a new turn).
 RUN_NAME="${RUN_NAME:-real-codex-proof-$(date +%s)}"
-OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/.phase6-out/real-codex-proof}"
+OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/.proof-out/codex}"
 # A fixed-per-run nonce the model must echo back; passed in so the script stays
 # reproducible (no Date/Random at import time in the harness values file).
 PROOF_NONCE="${PROOF_NONCE:-NVT_CODEX_PROOF_$(date +%s)}"
 
 KUBECTL=(kubectl --context "${KUBECTL_CONTEXT}")
 
-log() { printf '[phase6-real-codex-proof] %s\n' "$*"; }
-die() { printf '[phase6-real-codex-proof] ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '[codex-mediated-proof] %s\n' "$*"; }
+die() { printf '[codex-mediated-proof] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [[ -d "${CODEX_AUTH_SOURCE}" ]] || die "CODEX_AUTH_SOURCE must be an existing Codex auth dir: ${CODEX_AUTH_SOURCE}"
 [[ -f "${CODEX_AUTH_SOURCE}/auth.json" ]] || die "missing ${CODEX_AUTH_SOURCE}/auth.json — log into Codex first"

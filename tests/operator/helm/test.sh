@@ -236,6 +236,24 @@ helm template nvt "${WORKDIR}/nvt-${CHART_VERSION}.tgz" -n custom-ns -s template
 bash -n "${ROOT}/scripts/operator-codex-auth-secret.sh"
 bash -n "${ROOT}/scripts/github-comments-producer-secret.sh"
 bash -n "${ROOT}/scripts/broker-env-secret.sh"
+bash -n "${ROOT}/scripts/codex-mediated-proof.sh"
+
+# The manual Codex proof never runs in CI, so at least keep its Make wiring
+# honest: the target must exist and must invoke the script it names.
+make -C "${ROOT}" -n codex-mediated-proof >"${WORKDIR}/codex-mediated-proof.dry" || {
+  echo "make codex-mediated-proof does not resolve" >&2
+  exit 1
+}
+grep -q 'bash scripts/codex-mediated-proof.sh' "${WORKDIR}/codex-mediated-proof.dry" || {
+  echo "codex-mediated-proof target does not invoke scripts/codex-mediated-proof.sh" >&2
+  exit 1
+}
+for obsolete_target in phase2-codex-gate phase2b-codex-forward-proxy phase6-real-codex-proof; do
+  if make -C "${ROOT}" -n "${obsolete_target}" >/dev/null 2>&1; then
+    echo "obsolete phase-named Make target still present: ${obsolete_target}" >&2
+    exit 1
+  fi
+done
 bash "${ROOT}/tests/operator/codex-auth-secret/test.sh"
 bash "${ROOT}/tests/operator/github-comments-producer-secret/test.sh"
 bash "${ROOT}/tests/operator/broker-env-secret/test.sh"

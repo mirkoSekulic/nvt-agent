@@ -38,25 +38,50 @@ Use a `placeholder-file` grant and explicitly select the provider used by the
 runtime proxy. This is important when multiple Codex accounts share the same
 upstream hostname: provider selection is never inferred from the host.
 
-## What Has Been Proven
-
-The real Codex proof validates:
-
-- a real Codex turn through TLS-terminating egress;
-- WebSocket upgrade and bidirectional relay;
-- placeholder removal and broker credential injection;
-- absence of real Codex credentials in agent filesystem, environment, and
-  process arguments;
-- broker-owned refresh and refresh-token rotation;
-- fail-closed behavior when broker authorization is unavailable.
+## What the Manual Proof Shows
 
 Run the manual proof from a trusted host that has a valid Codex login:
 
 ```sh
-make phase6-real-codex-proof
+make codex-mediated-proof
 ```
 
-The proof is manual because it consumes a real subscription credential and
+It runs one real `codex exec` turn inside a mediated + enforced +
+forward-proxy `AgentRun` whose `codex-main` grant uses `placeholder-file`
+materialization, and writes evidence to `.proof-out/codex/`.
+
+The run fails unless both of these hold:
+
+- **Real turn under mediation.** Codex completes a turn through the
+  TLS-terminating forward proxy and echoes a per-run nonce back in
+  `/tmp/last-message`. Because the agent holds only a placeholder `auth.json`,
+  a successful turn means `egressd` stripped the placeholder and injected the
+  broker-held credential.
+- **Non-possession in the collected evidence.** The host access, refresh, and
+  id tokens appear in none of: the agent's copied `~/.codex` directory, the
+  agent's proxy environment, Codex stdout/stderr, the agent's last message, the
+  `egressd` and broker logs, or the broker audit log.
+
+The summary file also records, without gating the run:
+
+- **WebSocket upgrade**, reported as passing only when the broker audit shows a
+  `101 Switching Protocols` for the run; a WSS-to-HTTPS fallback or a run with
+  no upgrade is reported as unproven.
+- **Refresh**, always reported as `unproven`. This harness does not force a
+  token refresh, so it says nothing about real-Codex refresh or refresh-token
+  rotation. Do not read a passing run as refresh evidence.
+
+Broker-owned refresh and rotated-refresh-token persistence for the
+`codex-oauth` provider are covered hermetically, against a fake OAuth server,
+by `TestCodexOAuthRefreshPersistsRotatedTokenAndAudits` and
+`TestCodexOAuthPersistsRotatedRefreshTokenBeforeNewAccessValidation` in
+`tests/broker/broker_conformance_test.go`. Fail-closed behavior when broker
+authorization is unavailable or denied is covered by
+`TestForwardProxyMITMFailsClosedOnBrokerDown` in
+`egressd/internal/egress/forward_proxy_mitm_test.go` and
+`TestFailsClosedWhenBrokerDenies` in `egressd/internal/egress/proxy_test.go`.
+
+The proof stays manual because it consumes a real subscription credential and
 calls external services. Hermetic protocol, proxy, refresh, and non-possession
 tests run in CI; see [CI coverage](ci-coverage.md).
 
