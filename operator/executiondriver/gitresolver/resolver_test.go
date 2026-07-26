@@ -2,6 +2,7 @@ package gitresolver
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -153,6 +154,29 @@ func TestResolveAcquiresCachesAndNeverStartsArtifact(t *testing.T) {
 	}
 	if fixture.repository.infoRequests.Load() != infoRequests+1 {
 		t.Fatalf("new complete source did not acquire independently: before=%d after=%d", infoRequests, fixture.repository.infoRequests.Load())
+	}
+	requireCleanGitContract(t, readInvocations(t, fixture.logPath))
+}
+
+func TestResolveAcquiresSHA256RepositoryOverSmartHTTP(t *testing.T) {
+	repository := newRepositoryFixtureWithObjectFormat(t, "sha256")
+	if len(repository.revision) != sha256.Size*2 {
+		t.Fatalf("SHA-256 revision length=%d, want %d", len(repository.revision), sha256.Size*2)
+	}
+	repository.startServer()
+	fixture := newResolverForRepository(t, repository, "", nil)
+
+	artifact, err := fixture.resolver.Resolve(testContext(t), fixture.source)
+	if err != nil {
+		t.Fatalf("resolve SHA-256 repository: %v", err)
+	}
+	requireArtifact(t, artifact, fixture)
+	if repository.infoRequests.Load() == 0 {
+		t.Fatal("SHA-256 repository was not acquired over smart HTTP")
+	}
+	objectFormat := strings.TrimSpace(runGit(t, filepath.Join(fixture.cache, artifact.CacheKey), "rev-parse", "--show-object-format"))
+	if objectFormat != "sha256" {
+		t.Fatalf("cache object format=%q, want sha256", objectFormat)
 	}
 	requireCleanGitContract(t, readInvocations(t, fixture.logPath))
 }
@@ -359,6 +383,53 @@ func TestResolveRejectsSubmodulesAndResourceOverflow(t *testing.T) {
 	})
 }
 
+func TestCompletionMetadataIsIncludedInResourceBounds(t *testing.T) {
+	fixture := newResolverFixture(t, "")
+	artifact, err := fixture.resolver.Resolve(testContext(t), fixture.source)
+	if err != nil {
+		t.Fatalf("baseline resolve: %v", err)
+	}
+	checkout := filepath.Join(fixture.cache, artifact.CacheKey)
+	entries, bytesUsed := measureTree(t, checkout)
+	if entries < 2 || bytesUsed < 2 {
+		t.Fatalf("unexpected baseline bounds: entries=%d bytes=%d", entries, bytesUsed)
+	}
+
+	removeCheckout := func() {
+		t.Helper()
+		if err := os.RemoveAll(checkout); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolveWithBounds := func(maxEntries int, maxBytes int64) error {
+		t.Helper()
+		fixture.resolver.maxEntries = maxEntries
+		fixture.resolver.maxBytes = maxBytes
+		_, resolveErr := fixture.resolver.Resolve(testContext(t), fixture.source)
+		return resolveErr
+	}
+
+	removeCheckout()
+	if err := resolveWithBounds(entries, bytesUsed); err != nil {
+		t.Fatalf("exact entry/byte boundary rejected: %v", err)
+	}
+	removeCheckout()
+	if err := resolveWithBounds(entries-1, maximumMaxBytes); !errors.Is(err, ErrCache) {
+		t.Fatalf("entry bound excluding completion metadata error=%v, want ErrCache", err)
+	}
+	requireNoPublishedOrTemporary(t, fixture)
+
+	fixture.resolver.maxEntries = maximumMaxEntries
+	if err := resolveWithBounds(maximumMaxEntries, bytesUsed); err != nil {
+		t.Fatalf("exact byte boundary rejected: %v", err)
+	}
+	removeCheckout()
+	if err := resolveWithBounds(maximumMaxEntries, bytesUsed-1); !errors.Is(err, ErrCache) {
+		t.Fatalf("byte bound excluding completion metadata error=%v, want ErrCache", err)
+	}
+	requireNoPublishedOrTemporary(t, fixture)
+}
+
 func TestResolveTimeoutProcessFailureAndOutputRemainBounded(t *testing.T) {
 	t.Run("timeout reaps process group", func(t *testing.T) {
 		fixture := newResolverFixture(t, "hang", func(config *Config) {
@@ -458,6 +529,66 @@ func TestResolverConfigurationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCacheRootRequiresPrivateOwnershipAndPermissions(t *testing.T) {
+	newConfig := func(cache string) Config {
+		return Config{
+			CacheDirectory: cache,
+			AllowedHosts:   []string{"github.com"},
+			GitExecutable:  testGitPath,
+		}
+	}
+
+	t.Run("new root is private", func(t *testing.T) {
+		cache := filepath.Join(t.TempDir(), "new-cache")
+		if _, err := New(newConfig(cache)); err != nil {
+			t.Fatalf("new resolver: %v", err)
+		}
+		info, err := os.Lstat(cache)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int(stat.Uid) != os.Geteuid() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("cache root ownership/mode=%#v %04o", info.Sys(), info.Mode().Perm())
+		}
+	})
+
+	for name, mode := range map[string]os.FileMode{
+		"group readable":   0o740,
+		"group writable":   0o720,
+		"world accessible": 0o701,
+		"world writable":   0o702,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cache := filepath.Join(t.TempDir(), "cache")
+			if err := os.Mkdir(cache, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(cache, mode); err != nil {
+				t.Fatal(err)
+			}
+			if resolver, err := New(newConfig(cache)); resolver != nil || !errors.Is(err, ErrCache) {
+				t.Fatalf("resolver=%v error=%v, want ErrCache", resolver, err)
+			}
+		})
+	}
+
+	if os.Geteuid() == 0 {
+		t.Run("different owner", func(t *testing.T) {
+			cache := filepath.Join(t.TempDir(), "cache")
+			if err := os.Mkdir(cache, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(cache, 65534, -1); err != nil {
+				t.Fatal(err)
+			}
+			if resolver, err := New(newConfig(cache)); resolver != nil || !errors.Is(err, ErrCache) {
+				t.Fatalf("resolver=%v error=%v, want ErrCache", resolver, err)
+			}
+		})
+	}
+}
+
 func newResolverFixture(t *testing.T, mode string, mutate ...func(*Config)) *resolverFixture {
 	t.Helper()
 	repository := newRepositoryFixture(t)
@@ -516,6 +647,10 @@ func newResolverForRepository(t *testing.T, repository *repositoryFixture, mode 
 }
 
 func newRepositoryFixture(t *testing.T) *repositoryFixture {
+	return newRepositoryFixtureWithObjectFormat(t, "sha1")
+}
+
+func newRepositoryFixtureWithObjectFormat(t *testing.T, objectFormat string) *repositoryFixture {
 	t.Helper()
 	root := t.TempDir()
 	work := filepath.Join(root, "work")
@@ -523,7 +658,7 @@ func newRepositoryFixture(t *testing.T) *repositoryFixture {
 	if err := os.MkdirAll(filepath.Dir(bare), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, root, "init", "--quiet", work)
+	runGit(t, root, "init", "--quiet", "--object-format="+objectFormat, work)
 	runGit(t, work, "config", "user.name", "Resolver Fixture")
 	runGit(t, work, "config", "user.email", "resolver@example.invalid")
 	driverDirectory := filepath.Join(work, "drivers", "fake")
@@ -703,6 +838,38 @@ func requireNoPublishedOrTemporary(t *testing.T, fixture *resolverFixture) {
 			t.Fatalf("incomplete temporary cache remains: %s", entry.Name())
 		}
 	}
+}
+
+func measureTree(t *testing.T, root string) (int, int64) {
+	t.Helper()
+	entries := 0
+	var bytesUsed int64
+	if err := filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		entries++
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.IsDir(), info.Mode().IsRegular():
+			bytesUsed += info.Size()
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(current)
+			if err != nil {
+				return err
+			}
+			bytesUsed += int64(len(target))
+		default:
+			return fmt.Errorf("unexpected tree entry %s", current)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return entries, bytesUsed
 }
 
 func testContext(t *testing.T) context.Context {

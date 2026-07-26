@@ -253,11 +253,27 @@ func validDNSHost(host string) bool {
 }
 
 func ensureCacheRoot(root string) error {
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	_, initialErr := os.Lstat(root)
+	created := errors.Is(initialErr, os.ErrNotExist)
+	if initialErr != nil && !created {
 		return ErrCache
 	}
+	if created {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return ErrCache
+		}
+		// MkdirAll honors the process umask. Normalize only a cache root this
+		// resolver created; an insecure pre-existing root fails closed below.
+		if err := os.Chmod(root, 0o700); err != nil {
+			return ErrCache
+		}
+	}
 	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return ErrCache
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
 		return ErrCache
 	}
 	return nil
@@ -453,8 +469,12 @@ func (r *Resolver) populate(ctx context.Context, destination string, source norm
 			_ = os.RemoveAll(temporary)
 		}
 	}()
+	objectFormat := "sha1"
+	if len(source.Revision) == sha256.Size*2 {
+		objectFormat = "sha256"
+	}
 	commands := [][]string{
-		{"init", "--quiet"},
+		{"init", "--quiet", "--object-format=" + objectFormat},
 		{"remote", "add", "origin", source.URL},
 		{"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", source.Revision},
 	}
@@ -488,14 +508,16 @@ func (r *Resolver) populate(ctx context.Context, destination string, source norm
 	if err != nil || containsGitlink(staged) {
 		return Artifact{}, ErrAcquisition
 	}
-	if err := r.validateBounds(temporary); err != nil {
-		return Artifact{}, err
-	}
 	if _, err := artifactFromCheckout(temporary, source); err != nil {
 		return Artifact{}, err
 	}
 	metadata := expectedMetadata(source)
 	if err := writeCompletionMetadata(temporary, metadata); err != nil {
+		return Artifact{}, err
+	}
+	// Completion metadata is part of the published cache entry and therefore
+	// must be included in both entry and byte accounting.
+	if err := r.validateBounds(temporary); err != nil {
 		return Artifact{}, err
 	}
 	if err := syncDirectory(temporary); err != nil {

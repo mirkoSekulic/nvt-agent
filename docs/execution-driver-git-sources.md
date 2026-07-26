@@ -34,7 +34,9 @@ non-canonical paths, and implicit credentials are rejected.
 
 Each source names one full lowercase SHA-1 or SHA-256 object ID, a non-empty
 contained subdirectory, and one explicit relative executable command. The
-fetched object must be exactly the requested object and must be a commit.
+temporary client repository is initialized explicitly with the matching Git
+object format. The fetched object must be exactly the requested object and must
+be a commit.
 Branches, tags, abbreviated or symbolic revisions, repository scanning, and
 fallback artifacts are not supported. Command arguments are fixed operator
 configuration and must not contain credentials; provider credentials belong in
@@ -48,8 +50,10 @@ selected Git LFS pointer, gitlink, missing path, non-executable file, special
 file, or escaping symlink fails closed.
 
 Acquisition has one caller/configured deadline, a shallow immutable fetch, a
-bounded stdout/stderr path, and explicit checkout entry/byte limits. The cache
-directory should still be placed on an administrator-owned filesystem with an
+bounded stdout/stderr path, and explicit checkout entry/byte limits, including
+the completion metadata that makes a cache entry publishable. The cache
+directory must be owned by the resolver process identity with exact mode
+`0700`, and should be placed on an administrator-owned filesystem with an
 ordinary storage quota because a Git transport can consume space before a
 completed checkout is measured.
 
@@ -58,9 +62,9 @@ completed checkout is measured.
 The cache key covers canonical URL, revision, subdirectory, the executable
 path, and every fixed argument. A process-safe per-key lock converges concurrent
 callers. Fetch and validation occur only in a private temporary directory.
-Completion metadata is written and synced last, then the complete directory is
-renamed atomically into place. Interrupted temporary state is removed and is
-never returned.
+Completion metadata is written and synced before the final resource-bound
+validation, then the complete directory is renamed atomically into place.
+Interrupted temporary state is removed and is never returned.
 
 Every cache hit revalidates exact completion metadata, commit identity and
 type, Git object integrity, worktree/index cleanliness (including untracked
