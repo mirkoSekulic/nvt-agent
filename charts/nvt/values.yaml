@@ -101,6 +101,16 @@ operator:
     pullPolicy: IfNotPresent
   replicas: 1
 
+# Administrator-owned external execution-driver registrations. Each entry
+# creates one isolated host workload. AgentRun reconciliation does not route to
+# these services yet; empty preserves the built-in Kubernetes-only deployment.
+executionDrivers:
+  hostImage:
+    repository: ghcr.io/mirkosekulic/nvt-execution-driver-host
+    tag: ""
+    pullPolicy: IfNotPresent
+  registrations: []
+
 gateway:
   enabled: false
   image:

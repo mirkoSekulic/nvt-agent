@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.30`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.31`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.30 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.31 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.30 --namespace nvt --create-namespace
+  --version 0.8.31 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -66,15 +66,16 @@ loopback and link-local/metadata ranges but cannot infer cluster-specific CIDRs.
 The published chart's `appVersion` is the immutable image tag for its tested
 platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
 uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
-gateway, and producer images. Empty component tags default to `Chart.AppVersion`;
-repository, tag, and pull policy remain independently overridable.
+gateway, producer, and execution-driver-host images. Empty component tags
+default to `Chart.AppVersion`; repository, tag, and pull policy remain
+independently overridable.
 
 `dind.image` is the coordinated Docker sidecar image. It contains the ext4 and
 loop-device tools used only when an AgentRun's Docker data root is backed by
 Kata virtiofs; it performs no per-run package installation.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all eight manifests exist and can be fetched anonymously
+published only after all nine manifests exist and can be fetched anonymously
 with an isolated credential-free Docker configuration. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
 match. GHCR package writers are trusted: matching labels establish coordinated
@@ -330,9 +331,10 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.30` does
-not wire an external driver host, so defaults remain Kubernetes-only and need
-no Git access, cloud SDK, cloud credentials, or extra workload.
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.31` can
+deploy administrator-registered driver hosts, but AgentRun reconciliation does
+not route to them in this phase. Defaults remain Kubernetes-only and need no
+source access, cloud SDK, cloud credentials, or extra workload.
 
 ```yaml
 agentSchedule:
@@ -347,9 +349,60 @@ agentSchedule:
       # remaining profile-owned fields omitted
 ```
 
-This external example defines a valid immutable selection but remains
-unavailable until that logical driver is registered by a future driver-host
-deployment; the chart does not start or discover it.
+The matching installation-owned registration uses a complete provider image
+pinned by digest. One workload is created per registration, so two logical
+registrations may reuse the same implementation image without sharing a
+ServiceAccount, infrastructure credential, authentication token, or process:
+
+```yaml
+executionDrivers:
+  registrations:
+    - name: example-vm
+      image: registry.example.test/nvt/example-vm@sha256:<64-lowercase-hex>
+      command: [/usr/local/bin/example-vm-driver]
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: "1", memory: 512Mi}
+      serviceAccount:
+        create: true
+        annotations: {} # workload-identity annotations belong here
+        podLabels: {}   # generic identity-webhook opt-in labels, if required
+      # Names injected by an approved workload-identity webhook. Every listed
+      # name is required at process start; values are never stored here.
+      passEnv: [PROVIDER_FEDERATED_TOKEN_FILE]
+      secretEnvironment:
+        - name: PROVIDER_CLIENT_SECRET
+          secretName: example-vm-infrastructure
+          key: client-secret
+      secretFiles:
+        - name: provider
+          secretName: example-vm-infrastructure
+          items:
+            - {key: config, path: config.json}
+```
+
+The provider image owns its language runtime and dependencies. A coordinated
+static host binary is copied into the Pod and starts only the explicit command;
+there is no clone, build, package installation, hook, or source acquisition at
+startup. `passEnv` is the exact allowlist for environment added by an approved
+workload-identity webhook; a missing listed name fails process startup.
+Secret-backed environment entries are automatically included in the same
+allowlist. Secret files have fixed mounts below
+`/var/run/secrets/nvt-execution-driver/<name>`; no unlisted host environment
+enters the driver's clean child environment.
+The per-registration HTTPS Service requires its own bearer token and trusts its
+own chart-managed CA; NetworkPolicy admits only the operator Pod. These drivers
+are trusted control-plane extensions, not sandboxes. Infrastructure credentials
+must be scoped to the matching registration. The operator receives only host
+transport CA/token material, never provider credentials.
+
+Helm validates the same load-bearing registration bounds as the host contract:
+the command is capped at 128 arguments and 16 KiB aggregate text, and CPU and
+memory requests/limits must be positive Kubernetes quantities with each request
+no greater than its limit. Kubernetes admission remains authoritative for the
+full syntax of arbitrary annotations, labels, extended resources, and Secret
+object existence; those API-owned checks are not duplicated as a second chart
+policy.
 
 Scheduling fields in the shared template are passed to the generated agent Pod:
 

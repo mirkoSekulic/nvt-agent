@@ -59,9 +59,9 @@ precise and every hermetic suite has a clear home.
 ### operator
 
 - `operator/executiondriver/conformance_test.go`
-- `operator/executiondriver/gitresolver/resolver_test.go` (hermetic local TLS
-  smart-HTTP Git acquisition; no external repository dependency)
 - `operator/executiondriver/host/host_test.go`
+- `operator/executiondriver/hostapi/hostapi_test.go`
+- `operator/executiondriver/registration/registration_test.go`
 - `operator/executiondriver/protocol_test.go`
 - `operator/config/broker/broker_manifest_test.go`
 - `operator/internal/controller/agentrun_callback_test.go`
@@ -120,6 +120,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `dind/test.sh` and `tests/runtime/dind-kmsg-device-smoke.sh` → `images.yml / build`
   (DinD matrix entry; the integration smoke runs against the image built by
   that job)
+- `tests/operator/execution-driver-host-image-smoke.sh` → `images.yml / build`
+  (the host matrix entry copies the coordinated static host into the complete
+  fake provider image and exercises authenticated protocol traffic)
 
 ### kind workflow case files
 

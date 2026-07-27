@@ -4,12 +4,13 @@
 a trusted execution implementation. It describes convergence and observation
 of one approved execution independently of process or deployment topology.
 
-`operator/executiondriver/host` provides a trusted local-executable transport
-and the operator has a separate immutable public-Git artifact resolver, but
-neither is configured or called by AgentRun reconciliation in this phase.
-AgentRun execution selection registers only the behavior-preserving built-in
-Kubernetes Pod adapter. A dedicated driver-host workload, production
-registration, and production VM drivers remain separate work.
+`operator/executiondriver/host` provides a trusted local-executable transport.
+Production drivers are distributed as complete OCI images pinned by SHA-256
+digest and run in isolated driver-host workloads; source acquisition is not an
+execution-driver runtime contract. AgentRun execution selection still routes
+only to the behavior-preserving built-in Kubernetes Pod adapter in this phase.
+Routing an AgentRun to a registered external driver and production VM drivers
+remain separate work.
 
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
@@ -134,9 +135,48 @@ terminate/kill/reap cleanup. If an operation is active, shutdown terminates and
 reaps that exact generation immediately instead of waiting for the serialized
 operation; the failed operation is never replayed.
 
-This host currently has no CRD, profile, controller, chart, command-line, or
-other production registration surface and starts no process during ordinary
-operator reconciliation.
+The standalone driver-host service uses this transport to launch the explicit
+driver command already present in one digest-pinned provider image. The image
+owns its language runtime and dependencies; the host performs no cloning,
+build, package installation, hook, or source acquisition. Ordinary AgentRun
+reconciliation does not invoke this host yet.
+
+### Dedicated OCI driver-host workload
+
+The production distribution unit is one complete provider OCI image pinned by
+`sha256` digest. The image contains the selected driver executable, its
+language runtime, and every dependency. A coordinated static
+`nvt-execution-driver-host` binary is copied into an `emptyDir` by an init
+container and then becomes PID 1 inside the provider image. It invokes the
+registered absolute command through `LocalExecutable`; it does not clone,
+build, install packages, execute hooks, scan the image, or discover a fallback.
+
+Registrations are administrator-owned installation configuration. Each
+logical registration renders an independent Deployment, ClusterIP Service,
+ServiceAccount selection, infrastructure-credential projection, TLS
+certificate, bearer authentication token, and ingress NetworkPolicy. Reusing
+one provider-image digest in two registrations still creates two process and
+credential boundaries. Provider credentials enter only their matching Pod.
+Explicit `passEnv` names allow approved workload-identity webhook variables
+into the otherwise empty child environment; every name is required at process
+start. Explicitly projected Secret environment names are included in the same
+allowlist. Secret files use fixed, registration-owned mount roots. The operator
+receives the per-host CA and transport token, not provider credentials.
+
+The service wraps the portable operations in bounded HTTPS requests. It
+requires both certificate validation and the exact registration bearer token;
+NetworkPolicy is an additional ingress boundary, not authentication. Bodies
+are limited to the protocol message bound and decoded with the same invalid
+UTF-8, duplicate-key, and result validation rules. Transport failures expose a
+fixed diagnostic rather than driver output or payloads. Kubernetes readiness
+tracks the negotiated child process, and liveness restarts a host whose child
+has exited; termination still applies the bounded protocol shutdown and
+terminate/kill/reap behavior.
+
+This deployment does not change the JSONL execution-driver protocol and does
+not route AgentRuns to external services yet. Runtime-plugin and executable
+broker-provider Git loading are separate extension contracts and are
+unchanged; Git acquisition is not an execution-driver distribution mechanism.
 
 ## Version and operations
 
