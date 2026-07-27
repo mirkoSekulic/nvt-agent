@@ -6,6 +6,9 @@ VERSION="${1:-}"
 REVISION="${2:-}"
 OUTPUT="${3:-${ROOT}/dist/host-bundle}"
 ARCHITECTURE="${NVT_HOST_BUNDLE_ARCH:-amd64}"
+if [[ "${OUTPUT}" != /* ]]; then
+  OUTPUT="${ROOT}/${OUTPUT}"
+fi
 
 if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$ ]] ||
    [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]] ||
