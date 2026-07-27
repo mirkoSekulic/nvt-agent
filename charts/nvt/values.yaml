@@ -118,6 +118,22 @@ executionDrivers:
     repository: ghcr.io/mirkosekulic/nvt-execution-driver-host
     tag: ""
     pullPolicy: IfNotPresent
+  # Optional trusted bridge from the operator to the broker issuer and the
+  # exact selected external driver host. Secret values are projected from
+  # existing Secrets and never enter this values document.
+  guestEnrollment:
+    enabled: false
+    brokerURL: ""
+    serverName: ""
+    ca:
+      existingSecret: ""
+      key: ca.crt
+    orchestratorAuth:
+      existingSecret: ""
+      tokenKey: token
+    requestTimeoutSeconds: 30
+    handoffTimeoutSeconds: 30
+    ttlSeconds: 300
   registrations: []
 
 gateway:

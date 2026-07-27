@@ -221,6 +221,7 @@ type AgentRunReconciler struct {
 	Now              func() metav1.Time
 	BrokerHTTPClient *http.Client
 	ExecutionDrivers executionDriverClientRegistry
+	GuestEnrollment  guestEnrollmentIssuer
 
 	externalExecutionCallsMu sync.Mutex
 	externalExecutionCalls   chan struct{}
@@ -322,11 +323,18 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	backend, available := r.executionBackendFor(selection)
 	if !available {
+		if selection.Driver != builtInKubernetesDriver && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) &&
+			(!agentRun.DeletionTimestamp.IsZero() || externalTerminalCleanupDue(&agentRun, r.now())) {
+			if result, complete, revokeErr := r.revokeGuestEnrollmentScope(ctx, &agentRun, selection.Driver); revokeErr != nil || !complete {
+				return result, revokeErr
+			}
+		}
 		// Once exact-driver cleanup has completed, the removed external
 		// finalizer is the durable proof that terminal CR retention or final
 		// AgentRun deletion no longer requires a live registration.
 		if selection.Driver != builtInKubernetesDriver &&
 			!controllerutil.ContainsFinalizer(&agentRun, externalExecutionFinalizer) &&
+			!controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) &&
 			!controllerutil.ContainsFinalizer(&agentRun, agentRunFinalizer) {
 			if !agentRun.DeletionTimestamp.IsZero() {
 				if err := r.finalizeAgentRun(ctx, &agentRun); err != nil {

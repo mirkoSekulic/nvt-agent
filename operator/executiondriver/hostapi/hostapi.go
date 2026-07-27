@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
+	driverhandoff "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/handoff"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver/host"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
 
 const (
@@ -35,16 +37,22 @@ type readiness interface {
 }
 
 type ServerConfig struct {
-	Client           host.Client
-	BearerToken      []byte
-	OperationTimeout time.Duration
+	Client             host.Client
+	Handoff            guestenrollment.Handoff
+	DriverRegistration string
+	BearerToken        []byte
+	OperationTimeout   time.Duration
+	HandoffTimeout     time.Duration
 }
 
 type Server struct {
-	client           host.Client
-	ready            readiness
-	bearerToken      []byte
-	operationTimeout time.Duration
+	client             host.Client
+	handoff            guestenrollment.Handoff
+	driverRegistration string
+	ready              readiness
+	bearerToken        []byte
+	operationTimeout   time.Duration
+	handoffTimeout     time.Duration
 }
 
 type operationResponse struct {
@@ -68,7 +76,18 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if !ok {
 		return nil, errors.New("execution driver host client does not expose readiness")
 	}
-	return &Server{client: config.Client, ready: ready, bearerToken: append([]byte(nil), config.BearerToken...), operationTimeout: config.OperationTimeout}, nil
+	if (config.Handoff == nil) != (config.DriverRegistration == "") {
+		return nil, errors.New("execution driver enrollment handoff configuration is invalid")
+	}
+	if config.Handoff != nil && (config.HandoffTimeout <= 0 || config.HandoffTimeout > guestenrollment.MaxOperationDuration) {
+		return nil, errors.New("execution driver enrollment handoff configuration is invalid")
+	}
+	if config.Handoff != nil && executiondriver.ValidateInitializeParams(executiondriver.InitializeParams{
+		ProtocolVersion: executiondriver.ProtocolVersion, DriverInstanceName: config.DriverRegistration,
+	}) != nil {
+		return nil, errors.New("execution driver enrollment handoff configuration is invalid")
+	}
+	return &Server{client: config.Client, handoff: config.Handoff, driverRegistration: config.DriverRegistration, ready: ready, bearerToken: append([]byte(nil), config.BearerToken...), operationTimeout: config.OperationTimeout, handoffTimeout: config.HandoffTimeout}, nil
 }
 
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -98,6 +117,11 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		response.WriteHeader(http.StatusOK)
 		return
 	case "/v1/reconcile", "/v1/observe", "/v1/delete":
+	case "/v1/guest-enrollment/prepare", "/v1/guest-enrollment/replace", "/v1/guest-enrollment/deliver":
+		if s.handoff == nil {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
 	default:
 		response.WriteHeader(http.StatusNotFound)
 		return
@@ -115,13 +139,26 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		response.WriteHeader(http.StatusUnsupportedMediaType)
 		return
 	}
-	body, err := readBounded(request.Body, MaxBodyBytes)
+	maximum := int64(MaxBodyBytes)
+	if strings.HasPrefix(request.URL.Path, "/v1/guest-enrollment/") {
+		maximum = int64(guestenrollment.MaxHandoffRequestBytes)
+	}
+	body, err := readBounded(request.Body, maximum)
 	if err != nil {
 		writeFailure(response, http.StatusRequestEntityTooLarge)
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), s.operationTimeout)
+	defer zero(body)
+	timeout := s.operationTimeout
+	if strings.HasPrefix(request.URL.Path, "/v1/guest-enrollment/") {
+		timeout = s.handoffTimeout
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), timeout)
 	defer cancel()
+	if strings.HasPrefix(request.URL.Path, "/v1/guest-enrollment/") {
+		s.serveHandoff(response, request.URL.Path, body, ctx)
+		return
+	}
 
 	var status executiondriver.Status
 	switch request.URL.Path {
@@ -158,6 +195,55 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(response, http.StatusOK, operationResponse{ProtocolVersion: ProtocolVersion, Status: &status})
+}
+
+func (s *Server) serveHandoff(response http.ResponseWriter, path string, body []byte, ctx context.Context) {
+	switch path {
+	case "/v1/guest-enrollment/prepare":
+		request, err := guestenrollment.DecodeHandoffPrepareRequest(body)
+		if err != nil || request.ExecutionScope.DriverRegistration != s.driverRegistration {
+			writeFailure(response, http.StatusBadRequest)
+			return
+		}
+		result, err := s.handoff.Prepare(ctx, request)
+		if err != nil || guestenrollment.ValidateHandoffPrepareResult(result) != nil {
+			writeHandoffError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, result)
+	case "/v1/guest-enrollment/replace":
+		request, err := guestenrollment.DecodeHandoffReplaceRequest(body)
+		if err != nil || request.Binding.DriverRegistration != s.driverRegistration {
+			writeFailure(response, http.StatusBadRequest)
+			return
+		}
+		result, err := s.handoff.Replace(ctx, request)
+		if err != nil || guestenrollment.ValidateHandoffPrepareResult(result) != nil || result.State != guestenrollment.HandoffStatePrepared ||
+			!result.NewlyPrepared || result.GuestInstanceID == request.Binding.GuestInstanceID {
+			writeHandoffError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, result)
+	case "/v1/guest-enrollment/deliver":
+		request, err := guestenrollment.DecodeHandoffDeliverRequest(body)
+		if err != nil || request.Envelope.Binding.DriverRegistration != s.driverRegistration {
+			writeFailure(response, http.StatusBadRequest)
+			return
+		}
+		if err := s.handoff.Deliver(ctx, request); err != nil {
+			writeHandoffError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, guestenrollment.HandoffAcknowledgement{ContractVersion: guestenrollment.HandoffVersion})
+	}
+}
+
+func writeHandoffError(response http.ResponseWriter, err error) {
+	if errors.Is(err, driverhandoff.ErrRejected) {
+		writeFailure(response, http.StatusUnprocessableEntity)
+		return
+	}
+	writeFailure(response, http.StatusServiceUnavailable)
 }
 
 func (s *Server) authenticated(header string) bool {
@@ -209,23 +295,25 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 }
 
 type ClientConfig struct {
-	BaseURL         string
-	ServerName      string
-	CAFile          string
-	BearerTokenFile string
-	RequestTimeout  time.Duration
+	BaseURL            string
+	DriverRegistration string
+	ServerName         string
+	CAFile             string
+	BearerTokenFile    string
+	RequestTimeout     time.Duration
 }
 
 type Client struct {
-	baseURL        *url.URL
-	token          []byte
-	httpClient     *http.Client
-	lifetime       context.Context
-	cancelLifetime context.CancelFunc
-	mu             sync.Mutex
-	closed         bool
-	active         int
-	idle           chan struct{}
+	baseURL            *url.URL
+	driverRegistration string
+	token              []byte
+	httpClient         *http.Client
+	lifetime           context.Context
+	cancelLifetime     context.CancelFunc
+	mu                 sync.Mutex
+	closed             bool
+	active             int
+	idle               chan struct{}
 }
 
 var _ host.Client = (*Client)(nil)
@@ -235,7 +323,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.Path != "" || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.User != nil {
 		return nil, errors.New("execution driver host endpoint is invalid")
 	}
-	if config.ServerName == "" || config.RequestTimeout <= 0 || config.RequestTimeout > 10*time.Minute {
+	if config.ServerName == "" || (config.DriverRegistration != "" && executiondriver.ValidateInitializeParams(executiondriver.InitializeParams{ProtocolVersion: executiondriver.ProtocolVersion, DriverInstanceName: config.DriverRegistration}) != nil) || config.RequestTimeout <= 0 || config.RequestTimeout > 10*time.Minute {
 		return nil, errors.New("execution driver host client configuration is invalid")
 	}
 	ca, err := os.ReadFile(config.CAFile)
@@ -258,12 +346,13 @@ func NewClient(config ClientConfig) (*Client, error) {
 	idle := make(chan struct{})
 	close(idle)
 	return &Client{
-		baseURL:        endpoint,
-		token:          token,
-		httpClient:     &http.Client{Transport: transport, Timeout: config.RequestTimeout},
-		lifetime:       lifetime,
-		cancelLifetime: cancelLifetime,
-		idle:           idle,
+		baseURL:            endpoint,
+		driverRegistration: config.DriverRegistration,
+		token:              token,
+		httpClient:         &http.Client{Transport: transport, Timeout: config.RequestTimeout},
+		lifetime:           lifetime,
+		cancelLifetime:     cancelLifetime,
+		idle:               idle,
 	}, nil
 }
 
@@ -280,6 +369,121 @@ func (c *Client) Observe(ctx context.Context, executionID string) (executiondriv
 
 func (c *Client) Delete(ctx context.Context, executionID string) (executiondriver.Status, error) {
 	return c.executionOperation(ctx, "/v1/delete", executionID)
+}
+
+func (c *Client) Prepare(ctx context.Context, request guestenrollment.HandoffPrepareRequest) (guestenrollment.HandoffPrepareResult, error) {
+	if guestenrollment.ValidateHandoffPrepareRequest(request) != nil || request.ExecutionScope.DriverRegistration != c.driverRegistration {
+		return guestenrollment.HandoffPrepareResult{}, driverhandoff.ErrRejected
+	}
+	body, status, err := c.handoffOperation(ctx, "/v1/guest-enrollment/prepare", request)
+	if err != nil {
+		return guestenrollment.HandoffPrepareResult{}, err
+	}
+	defer zero(body)
+	if status != http.StatusOK {
+		return guestenrollment.HandoffPrepareResult{}, handoffStatus(status)
+	}
+	result, err := guestenrollment.DecodeHandoffPrepareResult(body)
+	if err != nil {
+		return guestenrollment.HandoffPrepareResult{}, driverhandoff.ErrUnavailable
+	}
+	return result, nil
+}
+
+func (c *Client) Replace(ctx context.Context, request guestenrollment.HandoffReplaceRequest) (guestenrollment.HandoffPrepareResult, error) {
+	if guestenrollment.ValidateHandoffReplaceRequest(request) != nil || request.Binding.DriverRegistration != c.driverRegistration {
+		return guestenrollment.HandoffPrepareResult{}, driverhandoff.ErrRejected
+	}
+	body, status, err := c.handoffOperation(ctx, "/v1/guest-enrollment/replace", request)
+	if err != nil {
+		return guestenrollment.HandoffPrepareResult{}, err
+	}
+	defer zero(body)
+	if status != http.StatusOK {
+		return guestenrollment.HandoffPrepareResult{}, handoffStatus(status)
+	}
+	result, err := guestenrollment.DecodeHandoffPrepareResult(body)
+	if err != nil || result.State != guestenrollment.HandoffStatePrepared || !result.NewlyPrepared || result.GuestInstanceID == request.Binding.GuestInstanceID {
+		return guestenrollment.HandoffPrepareResult{}, driverhandoff.ErrUnavailable
+	}
+	return result, nil
+}
+
+func (c *Client) Deliver(ctx context.Context, request guestenrollment.HandoffDeliverRequest) error {
+	if guestenrollment.ValidateHandoffDeliverRequest(request) != nil || request.Envelope.Binding.DriverRegistration != c.driverRegistration {
+		return driverhandoff.ErrRejected
+	}
+	body, status, err := c.handoffOperation(ctx, "/v1/guest-enrollment/deliver", request)
+	if err != nil {
+		return err
+	}
+	defer zero(body)
+	if status != http.StatusOK {
+		return handoffStatus(status)
+	}
+	if _, err := guestenrollment.DecodeHandoffAcknowledgement(body); err != nil {
+		return driverhandoff.ErrUnavailable
+	}
+	return nil
+}
+
+func (c *Client) handoffOperation(ctx context.Context, path string, value any) ([]byte, int, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, 0, host.ErrClosed
+	}
+	if c.active == 0 {
+		c.idle = make(chan struct{})
+	}
+	c.active++
+	token := append([]byte(nil), c.token...)
+	lifetime := c.lifetime
+	c.mu.Unlock()
+	defer c.finishOperation()
+	defer zero(token)
+
+	payload, err := json.Marshal(value)
+	if err != nil || len(payload) > guestenrollment.MaxHandoffRequestBytes {
+		return nil, 0, driverhandoff.ErrRejected
+	}
+	defer zero(payload)
+	requestContext, cancelRequest := context.WithCancel(ctx)
+	stopLifetimeCancellation := context.AfterFunc(lifetime, cancelRequest)
+	defer func() { stopLifetimeCancellation(); cancelRequest() }()
+	endpoint := c.baseURL.ResolveReference(&url.URL{Path: path})
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, driverhandoff.ErrUnavailable
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+string(token))
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, 0, driverhandoff.ErrUnavailable
+	}
+	defer response.Body.Close()
+	if response.Header.Get("Content-Type") != "application/json" {
+		return nil, 0, driverhandoff.ErrUnavailable
+	}
+	body, err := readBounded(response.Body, int64(guestenrollment.MaxHandoffResponseBytes))
+	if err != nil {
+		return nil, 0, driverhandoff.ErrUnavailable
+	}
+	return body, response.StatusCode, nil
+}
+
+func handoffStatus(status int) error {
+	if status == http.StatusUnprocessableEntity || status == http.StatusBadRequest || status == http.StatusConflict {
+		return driverhandoff.ErrRejected
+	}
+	return driverhandoff.ErrUnavailable
+}
+
+func zero(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func (c *Client) executionOperation(ctx context.Context, path, executionID string) (executiondriver.Status, error) {

@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
+	driverhandoff "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/handoff"
 )
 
 const (
@@ -99,6 +100,7 @@ type LocalExecutableConfig struct {
 	ShutdownTimeout    time.Duration
 	TerminationGrace   time.Duration
 	RestartBackoff     time.Duration
+	EnrollmentSocket   string
 }
 
 // LocalExecutable supervises exactly one configured local driver. Calls are
@@ -216,13 +218,16 @@ func validateLocalExecutableConfig(config LocalExecutableConfig) (LocalExecutabl
 	}
 	seenEnvironment := make(map[string]struct{}, len(config.PassEnv))
 	for _, name := range config.PassEnv {
-		if !environmentNamePattern.MatchString(name) {
+		if !environmentNamePattern.MatchString(name) || name == driverhandoff.EnvironmentSocket {
 			return LocalExecutableConfig{}, errors.New("execution driver environment allowlist contains an invalid name")
 		}
 		if _, duplicate := seenEnvironment[name]; duplicate {
 			return LocalExecutableConfig{}, errors.New("execution driver environment allowlist contains a duplicate name")
 		}
 		seenEnvironment[name] = struct{}{}
+	}
+	if config.EnrollmentSocket != "" && (!filepath.IsAbs(config.EnrollmentSocket) || filepath.Clean(config.EnrollmentSocket) != config.EnrollmentSocket || len(config.EnrollmentSocket) > 100) {
+		return LocalExecutableConfig{}, errors.New("execution driver enrollment socket path is invalid")
 	}
 	for name, duration := range map[string]time.Duration{
 		"initialize":        config.InitializeTimeout,
@@ -477,6 +482,16 @@ func (h *LocalExecutable) ensureProcessLocked(ctx context.Context) (*localProces
 }
 
 func (h *LocalExecutable) startLocked(ctx context.Context) error {
+	if h.config.EnrollmentSocket != "" {
+		info, err := os.Lstat(h.config.EnrollmentSocket)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 || os.Remove(h.config.EnrollmentSocket) != nil {
+				return errors.New("execution driver enrollment socket is unsafe")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("execution driver enrollment socket is unavailable")
+		}
+	}
 	environment, err := h.childEnvironment()
 	if err != nil {
 		return err
@@ -548,7 +563,7 @@ func (h *LocalExecutable) startLocked(ctx context.Context) error {
 }
 
 func (h *LocalExecutable) childEnvironment() ([]string, error) {
-	environment := make([]string, 0, len(h.config.PassEnv))
+	environment := make([]string, 0, len(h.config.PassEnv)+1)
 	for _, name := range h.config.PassEnv {
 		value, present := os.LookupEnv(name)
 		if !present {
@@ -558,6 +573,9 @@ func (h *LocalExecutable) childEnvironment() ([]string, error) {
 			return nil, errors.New("execution driver allowlisted environment value is invalid")
 		}
 		environment = append(environment, name+"="+value)
+	}
+	if h.config.EnrollmentSocket != "" {
+		environment = append(environment, driverhandoff.EnvironmentSocket+"="+h.config.EnrollmentSocket)
 	}
 	return environment, nil
 }

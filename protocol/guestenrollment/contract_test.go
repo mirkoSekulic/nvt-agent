@@ -91,6 +91,53 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	}
 }
 
+func TestSensitiveHandoffContractIsSeparateStrictAndRedacted(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	binding := validBinding()
+	prepare := HandoffPrepareRequest{ContractVersion: HandoffVersion, ExecutionScope: binding.ExecutionScope(), DesiredGeneration: binding.DesiredGeneration}
+	prepared := HandoffPrepareResult{ContractVersion: HandoffVersion, GuestInstanceID: binding.GuestInstanceID, State: HandoffStatePrepared, NewlyPrepared: true}
+	replace := HandoffReplaceRequest{ContractVersion: HandoffVersion, Binding: binding}
+	deliver := HandoffDeliverRequest{ContractVersion: HandoffVersion, Envelope: BootstrapEnvelope{
+		ContractVersion: Version, Binding: binding, ExchangeURL: "https://issuer.example/v1/guest-enrollment/exchange",
+		Token: opaqueValue(TokenBytes, 0x66), IssuedAt: FormatTimestamp(now), ExpiresAt: FormatTimestamp(now.Add(time.Minute)),
+	}}
+	ack := HandoffAcknowledgement{ContractVersion: HandoffVersion}
+	for name, value := range map[string]any{"prepare": prepare, "prepared": prepared, "replace": replace, "deliver": deliver, "ack": ack} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		switch name {
+		case "prepare":
+			_, err = DecodeHandoffPrepareRequest(encoded)
+		case "prepared":
+			_, err = DecodeHandoffPrepareResult(encoded)
+		case "replace":
+			_, err = DecodeHandoffReplaceRequest(encoded)
+		case "deliver":
+			_, err = DecodeHandoffDeliverRequest(encoded)
+		case "ack":
+			_, err = DecodeHandoffAcknowledgement(encoded)
+		}
+		if err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+	}
+	if prepared.State = HandoffStateAccepted; ValidateHandoffPrepareResult(prepared) == nil {
+		t.Fatal("accepted state claimed a newly prepared attempt")
+	}
+	if prepared = (HandoffPrepareResult{ContractVersion: HandoffVersion, GuestInstanceID: binding.GuestInstanceID, State: HandoffStatePrepared}); ValidateHandoffPrepareResult(prepared) != nil {
+		t.Fatal("repeat prepared observation was rejected")
+	}
+	if !strings.Contains(fmt.Sprint(deliver), "sensitive") || strings.Contains(fmt.Sprint(deliver), deliver.Envelope.Token) {
+		t.Fatal("sensitive handoff formatting disclosed the token")
+	}
+	if _, err := DecodeHandoffDeliverRequest([]byte(`{"contract_version":"nvt.guest-enrollment-handoff/v1","envelope":null,"token":"forbidden"}`)); err == nil {
+		t.Fatal("credential field outside the envelope was accepted")
+	}
+}
+
 func TestContractRejectsInvalidFieldsAndBounds(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)

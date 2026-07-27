@@ -3,20 +3,26 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
 
 const internalFailureCanary = "EXECUTION-DRIVER-INTERNAL-SECRET-CANARY"
@@ -64,6 +70,12 @@ func main() {
 	if os.Getenv("NVT_FAKE_DRIVER_MODE") == "hang-after-shutdown-ignore-term" {
 		signal.Ignore(syscall.SIGTERM)
 	}
+	stopHandoff, err := startEnrollmentHandoff(stateDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake execution driver: enrollment handoff is unavailable")
+		os.Exit(2)
+	}
+	defer stopHandoff()
 
 	d := &driver{stateDir: stateDir}
 	scanner := bufio.NewScanner(os.Stdin)
@@ -80,6 +92,149 @@ func main() {
 	}
 }
 
+type fakeHandoffState struct {
+	ExecutionScope guestenrollment.ExecutionScope `json:"execution_scope"`
+	Generation     int64                          `json:"generation"`
+	GuestID        string                         `json:"guest_id"`
+	Accepted       bool                           `json:"accepted"`
+}
+
+func startEnrollmentHandoff(stateDir string) (func(), error) {
+	socket := os.Getenv("NVT_EXECUTION_DRIVER_ENROLLMENT_SOCKET")
+	if socket == "" {
+		return func() {}, nil
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	server := &http.Server{Handler: fakeHandoffHandler(stateDir), ReadHeaderTimeout: time.Second}
+	go func() { _ = server.Serve(listener) }()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+		_ = os.Remove(socket)
+	}, nil
+}
+
+func fakeHandoffHandler(stateDir string) http.Handler {
+	var handoffMu sync.Mutex
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(request.Body, int64(guestenrollment.MaxHandoffRequestBytes+1)))
+		if err != nil || len(body) > guestenrollment.MaxHandoffRequestBytes {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		defer func() {
+			for index := range body {
+				body[index] = 0
+			}
+		}()
+		handoffMu.Lock()
+		defer handoffMu.Unlock()
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/v1/prepare":
+			value, err := guestenrollment.DecodeHandoffPrepareRequest(body)
+			if err != nil {
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			state, fresh, err := loadOrCreateFakeHandoffState(stateDir, value)
+			if err != nil {
+				response.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			status := guestenrollment.HandoffStatePrepared
+			if state.Accepted {
+				status = guestenrollment.HandoffStateAccepted
+				fresh = false
+			}
+			_ = json.NewEncoder(response).Encode(guestenrollment.HandoffPrepareResult{ContractVersion: guestenrollment.HandoffVersion, GuestInstanceID: state.GuestID, State: status, NewlyPrepared: fresh})
+		case "/v1/replace":
+			value, err := guestenrollment.DecodeHandoffReplaceRequest(body)
+			state, readErr := readFakeHandoffState(stateDir, value.Binding.ExecutionID)
+			if err != nil || readErr != nil || state.ExecutionScope != value.Binding.ExecutionScope() || state.Generation != value.Binding.DesiredGeneration || state.GuestID != value.Binding.GuestInstanceID {
+				response.WriteHeader(http.StatusConflict)
+				return
+			}
+			sum := sha256.Sum256([]byte(state.GuestID + ":replacement"))
+			state.GuestID = "guest-" + hex.EncodeToString(sum[:16])
+			state.Accepted = false
+			if writeFakeHandoffState(stateDir, state) != nil {
+				response.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(response).Encode(guestenrollment.HandoffPrepareResult{ContractVersion: guestenrollment.HandoffVersion, GuestInstanceID: state.GuestID, State: guestenrollment.HandoffStatePrepared, NewlyPrepared: true})
+		case "/v1/deliver":
+			value, err := guestenrollment.DecodeHandoffDeliverRequest(body)
+			state, readErr := readFakeHandoffState(stateDir, value.Envelope.Binding.ExecutionID)
+			if err != nil || readErr != nil || state.ExecutionScope != value.Envelope.Binding.ExecutionScope() || state.Generation != value.Envelope.Binding.DesiredGeneration || state.GuestID != value.Envelope.Binding.GuestInstanceID {
+				response.WriteHeader(http.StatusConflict)
+				return
+			}
+			state.Accepted = true
+			if writeFakeHandoffState(stateDir, state) != nil {
+				response.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(response).Encode(guestenrollment.HandoffAcknowledgement{ContractVersion: guestenrollment.HandoffVersion})
+		default:
+			response.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
+func loadOrCreateFakeHandoffState(stateDir string, request guestenrollment.HandoffPrepareRequest) (fakeHandoffState, bool, error) {
+	state, err := readFakeHandoffState(stateDir, request.ExecutionScope.ExecutionID)
+	if err == nil {
+		if state.ExecutionScope != request.ExecutionScope || state.Generation != request.DesiredGeneration {
+			return fakeHandoffState{}, false, errors.New("handoff generation mismatch")
+		}
+		return state, false, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fakeHandoffState{}, false, err
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", request.ExecutionScope.ExecutionID, request.DesiredGeneration)))
+	state = fakeHandoffState{ExecutionScope: request.ExecutionScope, Generation: request.DesiredGeneration, GuestID: "guest-" + hex.EncodeToString(sum[:16])}
+	return state, true, writeFakeHandoffState(stateDir, state)
+}
+
+func readFakeHandoffState(stateDir, executionID string) (fakeHandoffState, error) {
+	data, err := os.ReadFile(fakeHandoffStatePath(stateDir, executionID))
+	if err != nil {
+		return fakeHandoffState{}, err
+	}
+	var state fakeHandoffState
+	if json.Unmarshal(data, &state) != nil || guestenrollment.ValidateExecutionScope(state.ExecutionScope) != nil || state.ExecutionScope.ExecutionID != executionID || state.GuestID == "" {
+		return fakeHandoffState{}, errors.New("invalid handoff state")
+	}
+	return state, nil
+}
+
+func writeFakeHandoffState(stateDir string, state fakeHandoffState) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(fakeHandoffStatePath(stateDir, state.ExecutionScope.ExecutionID), data, 0o600)
+}
+
+func fakeHandoffStatePath(stateDir, executionID string) string {
+	return filepath.Join(stateDir, ".enrollment-"+stateFileName(executionID))
+}
+
+func stateFileName(executionID string) string {
+	digest := sha256.Sum256([]byte(executionID))
+	return hex.EncodeToString(digest[:]) + ".json"
+}
+
 // runFixtureCommand exposes only bounded, non-secret lifecycle assertions for
 // the hermetic Kind gate. This binary is a test fixture, not a production
 // driver implementation.
@@ -92,7 +247,7 @@ func runFixtureCommand() bool {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
-	case "fixture-state-present", "fixture-state-absent", "fixture-damage-subordinate":
+	case "fixture-state-present", "fixture-state-absent", "fixture-damage-subordinate", "fixture-enrollment-accepted":
 		if len(os.Args) != 3 || os.Getenv("NVT_FAKE_DRIVER_STATE_DIR") == "" {
 			fail()
 			return true
@@ -103,7 +258,12 @@ func runFixtureCommand() bool {
 			_, err := os.Stat(d.subordinatePath(os.Args[2]))
 			return err
 		}()
-		if os.Args[1] == "fixture-damage-subordinate" {
+		if os.Args[1] == "fixture-enrollment-accepted" {
+			handoff, handoffErr := readFakeHandoffState(d.stateDir, os.Args[2])
+			if handoffErr != nil || !handoff.Accepted {
+				fail()
+			}
+		} else if os.Args[1] == "fixture-damage-subordinate" {
 			if stateErr != nil || os.Remove(d.subordinatePath(os.Args[2])) != nil {
 				fail()
 			}
@@ -112,6 +272,8 @@ func runFixtureCommand() bool {
 				fail()
 			}
 		} else if !errors.Is(stateErr, os.ErrNotExist) || !errors.Is(subordinateErr, os.ErrNotExist) {
+			fail()
+		} else if _, handoffErr := os.Stat(fakeHandoffStatePath(d.stateDir, os.Args[2])); !errors.Is(handoffErr, os.ErrNotExist) {
 			fail()
 		}
 	case "fixture-stop-host":
@@ -154,6 +316,10 @@ func (d *driver) handle(line []byte) bool {
 			time.Sleep(1500 * time.Millisecond)
 		}
 		if mode == "clean-environment" && !hasExpectedCleanEnvironment() {
+			d.respondError(request.ID, "environment-invalid", "driver environment is invalid", false)
+			return false
+		}
+		if mode == "enrollment-environment" && !hasExpectedEnrollmentEnvironment() {
 			d.respondError(request.ID, "environment-invalid", "driver environment is invalid", false)
 			return false
 		}
@@ -305,6 +471,22 @@ func hasExpectedCleanEnvironment() bool {
 	expected := []string{
 		"NVT_FAKE_DRIVER_ALLOWED=allowed",
 		"NVT_FAKE_DRIVER_MODE=clean-environment",
+	}
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "NVT_FAKE_DRIVER_STATE_DIR=") {
+			expected = append(expected, entry)
+		}
+	}
+	sort.Strings(expected)
+	actual := append([]string(nil), os.Environ()...)
+	sort.Strings(actual)
+	return strings.Join(actual, "\n") == strings.Join(expected, "\n")
+}
+
+func hasExpectedEnrollmentEnvironment() bool {
+	expected := []string{
+		"NVT_EXECUTION_DRIVER_ENROLLMENT_SOCKET=/tmp/nvt-test-enrollment.sock",
+		"NVT_FAKE_DRIVER_MODE=enrollment-environment",
 	}
 	for _, entry := range os.Environ() {
 		if strings.HasPrefix(entry, "NVT_FAKE_DRIVER_STATE_DIR=") {
@@ -476,6 +658,9 @@ func (d *driver) delete(executionID string) (executiondriver.Status, error) {
 		return executiondriver.Status{}, err
 	}
 	if err := os.Remove(d.statePath(executionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return executiondriver.Status{}, err
+	}
+	if err := os.Remove(fakeHandoffStatePath(d.stateDir, executionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return executiondriver.Status{}, err
 	}
 	return executiondriver.Status{Phase: executiondriver.PhaseDeleted}, nil

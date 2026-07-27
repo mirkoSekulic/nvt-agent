@@ -21,9 +21,38 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
 	driverhost "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/host"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver/hostapi"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
 
 var fakeDriverBinary string
+
+type fakeHandoff struct {
+	guestID  string
+	accepted bool
+	token    string
+}
+
+func (h *fakeHandoff) Prepare(context.Context, guestenrollment.HandoffPrepareRequest) (guestenrollment.HandoffPrepareResult, error) {
+	state := guestenrollment.HandoffStatePrepared
+	if h.accepted {
+		state = guestenrollment.HandoffStateAccepted
+	}
+	return guestenrollment.HandoffPrepareResult{ContractVersion: guestenrollment.HandoffVersion, GuestInstanceID: h.guestID, State: state, NewlyPrepared: !h.accepted}, nil
+}
+
+func (h *fakeHandoff) Replace(_ context.Context, request guestenrollment.HandoffReplaceRequest) (guestenrollment.HandoffPrepareResult, error) {
+	if request.Binding.GuestInstanceID != h.guestID {
+		return guestenrollment.HandoffPrepareResult{}, errors.New("binding mismatch")
+	}
+	h.guestID = "guest-replacement"
+	return guestenrollment.HandoffPrepareResult{ContractVersion: guestenrollment.HandoffVersion, GuestInstanceID: h.guestID, State: guestenrollment.HandoffStatePrepared, NewlyPrepared: true}, nil
+}
+
+func (h *fakeHandoff) Deliver(_ context.Context, request guestenrollment.HandoffDeliverRequest) error {
+	h.token = request.Envelope.Token
+	h.accepted = true
+	return nil
+}
 
 func TestMain(m *testing.M) {
 	directory, err := os.MkdirTemp("", "nvt-driver-host-api-*")
@@ -207,6 +236,65 @@ func TestClientShutdownCancelsActiveOperationAndClosesAuthoritatively(t *testing
 	}
 }
 
+func TestSensitiveHandoffUsesExactAuthenticatedHostBoundary(t *testing.T) {
+	t.Setenv("NVT_FAKE_DRIVER_MODE", "")
+	t.Setenv("NVT_FAKE_DRIVER_STATE_DIR", t.TempDir())
+	local, err := driverhost.NewLocalExecutable(testContext(t), driverhost.LocalExecutableConfig{
+		DriverInstanceName: "fake-driver", ExecutablePath: fakeDriverBinary,
+		PassEnv: []string{"NVT_FAKE_DRIVER_MODE", "NVT_FAKE_DRIVER_STATE_DIR"}, InitializeTimeout: time.Second,
+		OperationTimeout: time.Second, ShutdownTimeout: time.Second, TerminationGrace: 25 * time.Millisecond, RestartBackoff: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Shutdown(context.Background()) })
+	handoff := &fakeHandoff{guestID: "guest-1"}
+	handler, err := hostapi.NewServer(hostapi.ServerConfig{
+		Client: local, Handoff: handoff, DriverRegistration: "fake-driver", BearerToken: []byte(testToken()), OperationTimeout: time.Second, HandoffTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	remote := newClientForTLSServer(t, server)
+	binding := guestenrollment.Binding{AgentRunUID: "uid", ExecutionID: "execution", DriverRegistration: "fake-driver", DesiredGeneration: 1, GuestInstanceID: "guest-1"}
+	prepared, err := remote.Prepare(testContext(t), guestenrollment.HandoffPrepareRequest{ContractVersion: guestenrollment.HandoffVersion, ExecutionScope: binding.ExecutionScope(), DesiredGeneration: 1})
+	if err != nil || prepared.GuestInstanceID != binding.GuestInstanceID {
+		t.Fatalf("prepare=%#v err=%v", prepared, err)
+	}
+	replaced, err := remote.Replace(testContext(t), guestenrollment.HandoffReplaceRequest{ContractVersion: guestenrollment.HandoffVersion, Binding: binding})
+	if err != nil || replaced.GuestInstanceID == binding.GuestInstanceID {
+		t.Fatalf("replace=%#v err=%v", replaced, err)
+	}
+	binding.GuestInstanceID = replaced.GuestInstanceID
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	// Use one canonical 32-byte base64url token.
+	token := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	envelope := guestenrollment.BootstrapEnvelope{
+		ContractVersion: guestenrollment.Version, Binding: binding, ExchangeURL: "https://broker.example/v1/guest-enrollment/exchange",
+		Token: token, IssuedAt: guestenrollment.FormatTimestamp(now), ExpiresAt: guestenrollment.FormatTimestamp(now.Add(time.Minute)),
+	}
+	if err := remote.Deliver(testContext(t), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: envelope}); err != nil {
+		t.Fatal(err)
+	}
+	if handoff.token != token || !handoff.accepted {
+		t.Fatal("exact handoff did not receive the sensitive envelope")
+	}
+	wrong := binding
+	wrong.DriverRegistration = "other-driver"
+	if _, err := remote.Prepare(testContext(t), guestenrollment.HandoffPrepareRequest{
+		ContractVersion: guestenrollment.HandoffVersion, ExecutionScope: wrong.ExecutionScope(), DesiredGeneration: wrong.DesiredGeneration,
+	}); err == nil {
+		t.Fatal("cross-registration prepare was accepted")
+	}
+	if err := remote.Deliver(testContext(t), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: guestenrollment.BootstrapEnvelope{
+		ContractVersion: guestenrollment.Version, Binding: wrong, ExchangeURL: envelope.ExchangeURL, Token: token, IssuedAt: envelope.IssuedAt, ExpiresAt: envelope.ExpiresAt,
+	}}); err == nil {
+		t.Fatal("cross-registration handoff was accepted")
+	}
+}
+
 func newService(t *testing.T, mode string) (*driverhost.LocalExecutable, *httptest.Server, *hostapi.Client) {
 	t.Helper()
 	t.Setenv("NVT_FAKE_DRIVER_MODE", mode)
@@ -263,7 +351,7 @@ func newClientForTLSServerWithCA(t *testing.T, server *httptest.Server, caFile s
 	if err := os.WriteFile(tokenFile, []byte(testToken()), 0o600); err != nil {
 		t.Fatalf("write token: %v", err)
 	}
-	remote, err := hostapi.NewClient(hostapi.ClientConfig{BaseURL: server.URL, ServerName: parsed.DNSNames[0], CAFile: caFile, BearerTokenFile: tokenFile, RequestTimeout: time.Second})
+	remote, err := hostapi.NewClient(hostapi.ClientConfig{BaseURL: server.URL, DriverRegistration: "fake-driver", ServerName: parsed.DNSNames[0], CAFile: caFile, BearerTokenFile: tokenFile, RequestTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("create remote client: %v", err)
 	}

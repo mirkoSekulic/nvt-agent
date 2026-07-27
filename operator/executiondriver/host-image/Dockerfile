@@ -3,9 +3,12 @@ FROM golang:1.24-bookworm AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH
 
+WORKDIR /src
+COPY protocol/guestenrollment/go.mod protocol/guestenrollment/go.mod
+COPY operator/go.mod operator/go.sum operator/
 WORKDIR /src/operator
-COPY operator/go.mod operator/go.sum ./
 RUN go mod download
+COPY protocol/guestenrollment/ ../protocol/guestenrollment/
 COPY operator/ ./
 RUN CGO_ENABLED=0 \
     GOOS="${TARGETOS:-linux}" \

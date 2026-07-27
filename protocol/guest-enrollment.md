@@ -51,9 +51,34 @@ The plaintext one-time token and resulting runtime identity are forbidden in:
 
 The sensitive handoff is a distinct envelope passed outside
 `nvt.execution-driver/v1`. Adding it to `DesiredExecution` would make retries,
-provider state, and fingerprinting credential-bearing and is prohibited. A
-future transport may add a separate authenticated host operation, but must not
-change or overload the frozen reconcile payload.
+provider state, and fingerprinting credential-bearing and is prohibited. The
+driver host exposes the separately versioned
+`nvt.guest-enrollment-handoff/v1` operation only over the exact registration's
+existing authenticated TLS service, and forwards it to that provider process
+through a private Unix socket. It never changes or overloads the frozen
+reconcile payload.
+
+The handoff has three bounded operations:
+
+- `prepare(execution_scope, desired_generation)` durably resolves the intended
+  guest instance before issuance. It returns `prepared` or `accepted` and a
+  `newly_prepared` bit. Only the call that established a fresh durable attempt
+  may return that bit.
+- `replace(binding)` is valid only after exact-binding revocation. It must
+  return a distinct freshly prepared guest instance.
+- `deliver(envelope)` atomically makes the envelope available to exactly the
+  bound bootstrap instance before acknowledging. A later `prepare` must report
+  `accepted`, including when the acknowledgement was lost.
+
+The driver checks the execution ID and desired generation on every operation,
+and checks the complete delivered/replaced binding byte-for-byte against the
+durably prepared instance. A mismatched operation fails without mutation.
+
+Requests are at most 20 KiB and responses at most 4 KiB. They use strict JSON,
+the versioned shapes in `protocol/guestenrollment`, bounded deadlines, and
+sanitized errors. The provider-side prepared/accepted marker is non-secret but
+durable; the envelope is not ordinary provider state and must be discarded
+after it is passed to the intended bootstrap mechanism.
 
 ## Binding
 
@@ -265,12 +290,13 @@ Recovery uses explicit revocation plus a new intended guest/bootstrap instance,
 never an implicit replay or fallback driver.
 
 The orchestrator may hold the envelope only in bounded memory while performing
-the sensitive handoff. An orchestrator restart invokes execution-scoped
-revocation from stable AgentRun ownership; it does not need to query tokens,
-remember every prior guest binding, or expect token bytes in an AgentRun or
-provider record. The broker issuer exists, but production operator-to-broker
-issuance and operator-to-driver envelope delivery remain intentionally
-deferred.
+the sensitive handoff. A repeated `prepare` returning `accepted` completes
+response-loss recovery without another issuance. A repeated `prepare`
+returning an older non-fresh `prepared` attempt triggers exact-binding
+revocation followed by explicit replacement before any new issue request. An
+orchestrator restart invokes execution-scoped revocation from stable AgentRun
+ownership during cleanup; it does not need to query tokens, remember every
+prior guest binding, or expect token bytes in an AgentRun or provider record.
 
 ## Diagnostics
 
@@ -285,10 +311,11 @@ handle, but no plaintext token or identity.
 
 ## Compatibility and next phase
 
-The broker-backed issuer adds no CRD, status, controller, guest service, or
-driver-host operation. It is opt-in and unreachable by default; existing Pod,
-Kata, and Compose behavior is unchanged. `DesiredExecution` remains the same
-non-secret, level-triggered contract, and host bundles remain credential-free.
+Broker orchestration and the driver-host handoff are external-execution-only,
+opt-in, and unreachable by default. They add no credential-bearing CRD or
+status field; existing Pod, Kata, and Compose behavior is unchanged.
+`DesiredExecution` remains the same non-secret, level-triggered contract, and
+host bundles remain credential-free.
 
 Issue #127 contains historical public-Git execution-driver language. The merged
 repository contract is authoritative: production execution drivers are complete
@@ -296,8 +323,7 @@ OCI images pinned by digest and run in isolated driver-host workloads. Git
 loading remains supported only for the separate runtime-plugin and executable
 broker-provider contracts.
 
-The next implementation step is the separate authenticated
-operator-to-broker issuance and operator-to-exact-driver sensitive handoff.
-After that, a QEMU reference driver can provision a guest and exercise
-enrollment; gateway routing, runtime identity use, broker identity, and
-mediated egress remain separate production gates.
+The next implementation step is a QEMU reference driver that can provision a
+guest and implement the private handoff endpoint. Guest exchange, gateway
+routing, runtime identity use, broker identity, and mediated egress remain
+separate production gates.

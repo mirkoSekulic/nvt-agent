@@ -1,4 +1,26 @@
 {{- $brandingConfigMap := include "nvt.brandingConfigMap" . -}}
+{{- if .Values.executionDrivers.guestEnrollment.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-guest-enrollment-client
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.operatorLabels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "version": 1,
+      "baseURL": {{ .Values.executionDrivers.guestEnrollment.brokerURL | quote }},
+      "serverName": {{ .Values.executionDrivers.guestEnrollment.serverName | quote }},
+      "caFile": "/var/run/nvt-guest-enrollment/ca.crt",
+      "bearerTokenFile": "/var/run/nvt-guest-enrollment/orchestrator-token",
+      "requestTimeoutSeconds": {{ .Values.executionDrivers.guestEnrollment.requestTimeoutSeconds }},
+      "handoffTimeoutSeconds": {{ .Values.executionDrivers.guestEnrollment.handoffTimeoutSeconds }},
+      "ttlSeconds": {{ .Values.executionDrivers.guestEnrollment.ttlSeconds }}
+    }
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +35,10 @@ spec:
       {{- include "nvt.operatorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.executionDrivers.guestEnrollment.enabled }}
+      annotations:
+        checksum/guest-enrollment-client: {{ .Values.executionDrivers.guestEnrollment | toJson | sha256sum | quote }}
+      {{- end }}
       labels:
         {{- include "nvt.operatorSelectorLabels" . | nindent 8 }}
     spec:
@@ -64,6 +90,10 @@ spec:
             - name: NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE
               value: /var/run/nvt-execution-drivers/registrations.json
             {{- end }}
+            {{- if .Values.executionDrivers.guestEnrollment.enabled }}
+            - name: NVT_GUEST_ENROLLMENT_CONFIG_FILE
+              value: /var/run/nvt-guest-enrollment/config.json
+            {{- end }}
             {{- if .Values.egress.allowInsecureUpstreams }}
             - name: NVT_ALLOW_INSECURE_UPSTREAMS
               value: "1"
@@ -94,6 +124,11 @@ spec:
             - name: execution-driver-registrations
               mountPath: /var/run/nvt-execution-drivers
               readOnly: true
+            {{- if .Values.executionDrivers.guestEnrollment.enabled }}
+            - name: guest-enrollment-client
+              mountPath: /var/run/nvt-guest-enrollment
+              readOnly: true
+            {{- end }}
           {{- end }}
       {{- if .Values.executionDrivers.registrations }}
       volumes:
@@ -116,4 +151,25 @@ spec:
                     - key: auth-token
                       path: {{ printf "%s/auth-token" $registration.name | quote }}
               {{- end }}
+        {{- if .Values.executionDrivers.guestEnrollment.enabled }}
+        - name: guest-enrollment-client
+          projected:
+            defaultMode: 0440
+            sources:
+              - configMap:
+                  name: nvt-guest-enrollment-client
+                  items:
+                    - key: config.json
+                      path: config.json
+              - secret:
+                  name: {{ .Values.executionDrivers.guestEnrollment.ca.existingSecret | quote }}
+                  items:
+                    - key: {{ .Values.executionDrivers.guestEnrollment.ca.key | quote }}
+                      path: ca.crt
+              - secret:
+                  name: {{ .Values.executionDrivers.guestEnrollment.orchestratorAuth.existingSecret | quote }}
+                  items:
+                    - key: {{ .Values.executionDrivers.guestEnrollment.orchestratorAuth.tokenKey | quote }}
+                      path: orchestrator-token
+        {{- end }}
       {{- end }}

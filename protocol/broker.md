@@ -82,6 +82,15 @@ canonical HTTPS endpoint loaded at broker startup. Unknown fields, duplicate
 keys at any depth, invalid UTF-8, trailing JSON, and over-limit requests fail
 as `invalid-request`.
 
+The operator client exposes only issue and the two revoke operations; it has no
+guest exchange method. It holds the dedicated bearer in a projected Secret and
+never passes it to a driver host. For external AgentRun cleanup it repeats
+execution-scope revocation until this API acknowledges it, then invokes the
+exact driver delete operation, and only then clears the lifecycle finalizer.
+The separately authenticated driver-host handoff is specified in
+[guest-enrollment.md](guest-enrollment.md); its ordinary reconcile payload
+remains credential-free.
+
 The orchestrator bearer is a separate Secret-mounted authority. Ordinary
 agent and egress identities cannot issue or revoke enrollments. The broker
 authenticates issue and revoke authorization before reading their request

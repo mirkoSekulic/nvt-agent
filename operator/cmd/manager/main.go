@@ -17,6 +17,7 @@ import (
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 	driverregistry "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/registry"
+	"github.com/mirkoSekulic/nvt-agent/operator/guestenrollment/brokerclient"
 	"github.com/mirkoSekulic/nvt-agent/operator/internal/controller"
 )
 
@@ -62,6 +63,11 @@ func main() {
 		ctrl.Log.Error(err, "invalid execution driver registry")
 		os.Exit(1)
 	}
+	guestEnrollment, err := brokerclient.LoadConfigured()
+	if err != nil {
+		ctrl.Log.Error(err, "invalid guest enrollment broker configuration")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -80,6 +86,7 @@ func main() {
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		ExecutionDrivers: driverRegistry,
+		GuestEnrollment:  guestEnrollment,
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
@@ -87,6 +94,12 @@ func main() {
 	if err = mgr.Add(driverRegistry); err != nil {
 		ctrl.Log.Error(err, "unable to add execution driver registry lifecycle")
 		os.Exit(1)
+	}
+	if guestEnrollment != nil {
+		if err = mgr.Add(guestEnrollment); err != nil {
+			ctrl.Log.Error(err, "unable to add guest enrollment broker client lifecycle")
+			os.Exit(1)
+		}
 	}
 	if err = (&controller.AgentScheduleReconciler{
 		Client: mgr.GetClient(),

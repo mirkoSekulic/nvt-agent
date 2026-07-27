@@ -222,10 +222,12 @@ KIND_SMOKE_MODE=render KIND_SMOKE_CASE=external-execution make operator-kind-smo
 ```
 
 `external-execution` runs the digest-pinned fake OCI driver through its
-authenticated host, proves no Agent Pod is created, restarts both the host and
-operator, damages and observes repair of fake provider state after each
-restart, and verifies durable and subordinate provider state are absent before
-the AgentRun finalizer clears.
+authenticated host, issues and delivers one broker-backed guest enrollment,
+proves no Agent Pod is created, restarts both the host and operator, and
+observes the accepted handoff plus provider drift repair after each restart.
+Deletion verifies the broker execution-scope tombstone/revocation before the
+durable provider, handoff, and subordinate state disappear and the finalizer
+clears.
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,
 no-secret lifecycle:

@@ -41,6 +41,9 @@ const (
 	MaxOperationDuration       = 30 * time.Second
 	MaxDurableEntries          = 10_000
 	MaxTombstoneRetention      = 24 * time.Hour
+	HandoffVersion             = "nvt.guest-enrollment-handoff/v1"
+	MaxHandoffRequestBytes     = MaxBootstrapEnvelopeBytes + (4 << 10)
+	MaxHandoffResponseBytes    = 4 << 10
 )
 
 var (
@@ -135,6 +138,59 @@ type RevokeBindingRequest struct {
 type RevokeExecutionRequest struct {
 	ContractVersion string         `json:"contract_version"`
 	ExecutionScope  ExecutionScope `json:"execution_scope"`
+}
+
+type HandoffState string
+
+const (
+	HandoffStatePrepared HandoffState = "prepared"
+	HandoffStateAccepted HandoffState = "accepted"
+)
+
+// HandoffPrepareRequest asks the exact driver to durably resolve one intended
+// bootstrap instance before the issuer creates an enrollment token.
+type HandoffPrepareRequest struct {
+	ContractVersion   string         `json:"contract_version"`
+	ExecutionScope    ExecutionScope `json:"execution_scope"`
+	DesiredGeneration int64          `json:"desired_generation"`
+}
+
+// HandoffPrepareResult contains non-secret provider-side delivery state.
+// NewlyPrepared is true exactly for the call that durably established this
+// attempt. An older prepared attempt must be revoked and replaced before a
+// new token is issued.
+type HandoffPrepareResult struct {
+	ContractVersion string       `json:"contract_version"`
+	GuestInstanceID string       `json:"guest_instance_id"`
+	State           HandoffState `json:"state"`
+	NewlyPrepared   bool         `json:"newly_prepared"`
+}
+
+// HandoffReplaceRequest is valid only after Binding has been durably revoked
+// at the issuer. The exact driver must return a distinct, freshly prepared
+// bootstrap instance.
+type HandoffReplaceRequest struct {
+	ContractVersion string  `json:"contract_version"`
+	Binding         Binding `json:"binding"`
+}
+
+// HandoffDeliverRequest is the dedicated sensitive channel. It is never part
+// of DesiredExecution, its fingerprint, portable status, or ordinary state.
+type HandoffDeliverRequest struct {
+	ContractVersion string            `json:"contract_version"`
+	Envelope        BootstrapEnvelope `json:"envelope"`
+}
+
+type HandoffAcknowledgement struct {
+	ContractVersion string `json:"contract_version"`
+}
+
+// Handoff is implemented by the exact selected provider driver. Accepted and
+// prepared state must survive driver-host and orchestrator restarts.
+type Handoff interface {
+	Prepare(context.Context, HandoffPrepareRequest) (HandoffPrepareResult, error)
+	Replace(context.Context, HandoffReplaceRequest) (HandoffPrepareResult, error)
+	Deliver(context.Context, HandoffDeliverRequest) error
 }
 
 // Issuer is the topology-neutral lifecycle boundary. A production
@@ -281,6 +337,49 @@ func ValidateRevokeExecutionRequest(value RevokeExecutionRequest) error {
 	return nil
 }
 
+func ValidateHandoffPrepareRequest(value HandoffPrepareRequest) error {
+	if value.ContractVersion != HandoffVersion || ValidateExecutionScope(value.ExecutionScope) != nil || value.DesiredGeneration < 1 {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
+func ValidateHandoffPrepareResult(value HandoffPrepareResult) error {
+	if value.ContractVersion != HandoffVersion || !validText(value.GuestInstanceID, MaxGuestInstanceIDBytes) {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	switch value.State {
+	case HandoffStatePrepared:
+		return nil
+	case HandoffStateAccepted:
+		if !value.NewlyPrepared {
+			return nil
+		}
+	}
+	return NewFailure(ReasonInvalidRequest)
+}
+
+func ValidateHandoffReplaceRequest(value HandoffReplaceRequest) error {
+	if value.ContractVersion != HandoffVersion || ValidateBinding(value.Binding) != nil {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
+func ValidateHandoffDeliverRequest(value HandoffDeliverRequest) error {
+	if value.ContractVersion != HandoffVersion || ValidateBootstrapEnvelope(value.Envelope) != nil {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
+func ValidateHandoffAcknowledgement(value HandoffAcknowledgement) error {
+	if value.ContractVersion != HandoffVersion {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
 func ValidateBinding(value Binding) error {
 	if ValidateExecutionScope(value.ExecutionScope()) != nil ||
 		value.DesiredGeneration < 1 || !validText(value.GuestInstanceID, MaxGuestInstanceIDBytes) {
@@ -349,6 +448,46 @@ func DecodeRevokeExecutionRequest(data []byte) (RevokeExecutionRequest, error) {
 	return value, nil
 }
 
+func DecodeHandoffPrepareRequest(data []byte) (HandoffPrepareRequest, error) {
+	var value HandoffPrepareRequest
+	if DecodeStrictJSON(data, MaxHandoffRequestBytes, &value) != nil || ValidateHandoffPrepareRequest(value) != nil {
+		return HandoffPrepareRequest{}, NewFailure(ReasonInvalidRequest)
+	}
+	return value, nil
+}
+
+func DecodeHandoffPrepareResult(data []byte) (HandoffPrepareResult, error) {
+	var value HandoffPrepareResult
+	if DecodeStrictJSON(data, MaxHandoffResponseBytes, &value) != nil || ValidateHandoffPrepareResult(value) != nil {
+		return HandoffPrepareResult{}, NewFailure(ReasonInvalidRequest)
+	}
+	return value, nil
+}
+
+func DecodeHandoffReplaceRequest(data []byte) (HandoffReplaceRequest, error) {
+	var value HandoffReplaceRequest
+	if DecodeStrictJSON(data, MaxHandoffRequestBytes, &value) != nil || ValidateHandoffReplaceRequest(value) != nil {
+		return HandoffReplaceRequest{}, NewFailure(ReasonInvalidRequest)
+	}
+	return value, nil
+}
+
+func DecodeHandoffDeliverRequest(data []byte) (HandoffDeliverRequest, error) {
+	var value HandoffDeliverRequest
+	if DecodeStrictJSON(data, MaxHandoffRequestBytes, &value) != nil || ValidateHandoffDeliverRequest(value) != nil {
+		return HandoffDeliverRequest{}, NewFailure(ReasonInvalidRequest)
+	}
+	return value, nil
+}
+
+func DecodeHandoffAcknowledgement(data []byte) (HandoffAcknowledgement, error) {
+	var value HandoffAcknowledgement
+	if DecodeStrictJSON(data, MaxHandoffResponseBytes, &value) != nil || ValidateHandoffAcknowledgement(value) != nil {
+		return HandoffAcknowledgement{}, NewFailure(ReasonInvalidRequest)
+	}
+	return value, nil
+}
+
 // DecodeStrictJSON rejects invalid UTF-8, unknown fields, trailing values, and
 // duplicate keys recursively, including escaped-equivalent keys.
 func DecodeStrictJSON(data []byte, maximum int, target any) error {
@@ -377,6 +516,12 @@ func (ExchangeResult) String() string      { return "[sensitive guest enrollment
 func (ExchangeResult) GoString() string    { return "[sensitive guest enrollment exchange result]" }
 func (RuntimeIdentity) String() string     { return "[sensitive guest runtime identity]" }
 func (RuntimeIdentity) GoString() string   { return "[sensitive guest runtime identity]" }
+func (HandoffDeliverRequest) String() string {
+	return "[sensitive guest enrollment handoff]"
+}
+func (HandoffDeliverRequest) GoString() string {
+	return "[sensitive guest enrollment handoff]"
+}
 
 func FormatTimestamp(value time.Time) string {
 	return value.UTC().Truncate(time.Second).Format(time.RFC3339)

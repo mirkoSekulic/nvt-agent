@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.34`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.35`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.34 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.35 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.34 --namespace nvt --create-namespace
+  --version 0.8.35 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -324,11 +324,34 @@ metadata in `/state/guest-enrollment.sqlite3`. It uses SQLite transactions and
 therefore shares the broker's existing one-replica, `Recreate`, single-writer
 contract. Do not scale the broker or mount the same database through multiple
 broker Pods. The canonical URL must resolve to this issuer over authenticated
-HTTPS. Enabling this issuer does not route AgentRuns to VMs and does not add
-the later operator-to-driver sensitive envelope handoff. Expiry maintenance is
-automatic; reclaiming terminal/tombstone state additionally requires the later
-orchestrator integration's authoritative cleanup-complete scope so elapsed
-time alone can never erase a revocation.
+HTTPS. Enabling this issuer alone does not route AgentRuns to VMs. The operator
+bridge is a separate opt-in and uses explicit broker trust plus the same
+dedicated orchestrator Secret:
+
+```yaml
+executionDrivers:
+  guestEnrollment:
+    enabled: true
+    brokerURL: https://nvt-broker.nvt.svc:7347
+    serverName: nvt-broker.nvt.svc
+    ca:
+      existingSecret: nvt-broker-tls
+      key: ca.crt
+    orchestratorAuth:
+      existingSecret: nvt-guest-enrollment-orchestrator
+      tokenKey: token
+    requestTimeoutSeconds: 30
+    handoffTimeoutSeconds: 30
+    ttlSeconds: 300
+```
+
+The operator receives the orchestrator bearer; driver hosts receive only their
+existing per-registration authentication and the one-time envelope addressed
+to that exact registration. The bearer is never passed to a driver. Keep this
+configuration and registration available while any AgentRun retains the
+`nvt.dev/agentrun-guest-enrollment` finalizer: cleanup must acknowledge broker
+execution-scope revocation before driver deletion. Expiry maintenance is
+automatic, but elapsed time alone never erases an uncompleted revocation.
 
 ## Agent Egress
 
@@ -371,7 +394,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.34`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.35`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.

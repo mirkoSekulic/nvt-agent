@@ -19,6 +19,7 @@ import (
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver/host"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
 
 const (
@@ -29,6 +30,7 @@ const (
 	executionDriverRejectedReason       = "ExecutionDriverRejected"
 	executionDriverReadyReason          = "ExternalExecutionReady"
 	externalExecutionFinalizer          = "nvt.dev/agentrun-external-execution"
+	guestEnrollmentFinalizer            = "nvt.dev/agentrun-guest-enrollment"
 	externalExecutionDefaultRequeue     = 10 * time.Second
 	externalExecutionMinimumRequeue     = 2 * time.Second
 	externalExecutionMaximumRequeue     = 5 * time.Minute
@@ -47,6 +49,14 @@ type executionDriverClientRegistry interface {
 	Client(string) (host.Client, bool)
 }
 
+type guestEnrollmentIssuer interface {
+	Issue(context.Context, guestenrollment.IssueRequest) (guestenrollment.BootstrapEnvelope, error)
+	RevokeBinding(context.Context, guestenrollment.RevokeBindingRequest) error
+	RevokeExecution(context.Context, guestenrollment.RevokeExecutionRequest) error
+	TTLSeconds() int32
+	HandoffTimeout() time.Duration
+}
+
 // agentRunExecutionBackend is the operator-owned execution selection boundary.
 // The built-in implementation delegates to the existing Kubernetes reconciler;
 // the external implementation satisfies the same lifecycle boundary without
@@ -59,7 +69,8 @@ type agentRunExecutionBackend interface {
 type kubernetesExecutionBackend struct{}
 
 type externalExecutionBackend struct {
-	client host.Client
+	registration string
+	client       host.Client
 }
 
 func (kubernetesExecutionBackend) Reconcile(
@@ -99,7 +110,7 @@ func (r *AgentRunReconciler) executionBackendFor(selection effectiveExecutionSel
 	if !exists {
 		return nil, false
 	}
-	return externalExecutionBackend{client: client}, true
+	return externalExecutionBackend{registration: selection.Driver, client: client}, true
 }
 
 func (backend externalExecutionBackend) Reconcile(
@@ -118,6 +129,12 @@ func (backend externalExecutionBackend) Reconcile(
 	if controllerutil.AddFinalizer(&agentRun, externalExecutionFinalizer) {
 		if err := reconciler.Update(ctx, &agentRun); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add external execution finalizer: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+	if reconciler.GuestEnrollment != nil && controllerutil.AddFinalizer(&agentRun, guestEnrollmentFinalizer) {
+		if err := reconciler.Update(ctx, &agentRun); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add guest enrollment finalizer: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -152,6 +169,13 @@ func (backend externalExecutionBackend) Reconcile(
 	}
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
+	}
+	if controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
+		enrollmentResult, enrollmentErr := backend.reconcileGuestEnrollment(ctx, reconciler, &agentRun, desired)
+		if enrollmentErr != nil {
+			return ctrl.Result{}, enrollmentErr
+		}
+		result = earliestRequeue(result, enrollmentResult)
 	}
 	deadlineResult, deadlineExceeded, err = reconciler.reconcileExternalActiveDeadline(ctx, &agentRun)
 	if err != nil {
@@ -217,6 +241,11 @@ func (backend externalExecutionBackend) reconcileOperationalCleanup(
 	if err != nil {
 		return reconciler.recordExecutionSelectionFailure(ctx, agentRun, executionSelectionInvalidReason, "resolved external execution state is invalid")
 	}
+	if controllerutil.ContainsFinalizer(agentRun, guestEnrollmentFinalizer) {
+		if result, complete, revokeErr := reconciler.revokeGuestEnrollmentScope(ctx, agentRun, backend.registration); revokeErr != nil || !complete {
+			return result, revokeErr
+		}
+	}
 	status, err := backend.delete(ctx, reconciler, executionID)
 	if err != nil {
 		return reconciler.recordExternalExecutionCallFailure(ctx, agentRun, err, true)
@@ -234,6 +263,44 @@ func (backend externalExecutionBackend) reconcileOperationalCleanup(
 		return reconciler.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
 	return ctrl.Result{}, nil
+}
+
+func externalTerminalCleanupDue(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) bool {
+	if !IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		return false
+	}
+	if agentRun.Status.Phase == nvtv1alpha1.AgentRunPhaseDeadlineExceeded {
+		return true
+	}
+	_, due := TerminalOperationalCleanupDelay(agentRun, now)
+	return due
+}
+
+func (r *AgentRunReconciler) revokeGuestEnrollmentScope(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	driverRegistration string,
+) (ctrl.Result, bool, error) {
+	if r.GuestEnrollment == nil {
+		result, err := r.recordExternalCleanupFailure(ctx, agentRun, "GuestEnrollmentUnavailable", externalExecutionCleanupRetry)
+		return result, false, err
+	}
+	release, acquired := r.tryAcquireExternalExecutionCall()
+	if !acquired {
+		return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, false, nil
+	}
+	defer release()
+	executionID, err := externalExecutionID(agentRun.UID)
+	if err != nil {
+		result, recordErr := r.recordExternalCleanupFailure(ctx, agentRun, "GuestEnrollmentRevocationPending", externalExecutionCleanupRetry)
+		return result, false, recordErr
+	}
+	scope := guestenrollment.ExecutionScope{AgentRunUID: string(agentRun.UID), ExecutionID: executionID, DriverRegistration: driverRegistration}
+	if err := r.GuestEnrollment.RevokeExecution(ctx, guestenrollment.RevokeExecutionRequest{ContractVersion: guestenrollment.Version, ExecutionScope: scope}); err != nil {
+		result, recordErr := r.recordExternalCleanupFailure(ctx, agentRun, "GuestEnrollmentRevocationPending", externalExecutionCleanupRetry)
+		return result, false, recordErr
+	}
+	return ctrl.Result{}, true, nil
 }
 
 func (backend externalExecutionBackend) reconcile(
@@ -260,6 +327,112 @@ func (backend externalExecutionBackend) delete(
 	}
 	defer release()
 	return backend.client.Delete(ctx, executionID)
+}
+
+func (backend externalExecutionBackend) reconcileGuestEnrollment(
+	ctx context.Context,
+	reconciler *AgentRunReconciler,
+	agentRun *nvtv1alpha1.AgentRun,
+	desired executiondriver.DesiredExecution,
+) (ctrl.Result, error) {
+	issuer := reconciler.GuestEnrollment
+	handoff, ok := backend.client.(guestenrollment.Handoff)
+	if issuer == nil || !ok {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapHandoffUnavailable")
+	}
+	handoffTimeout := issuer.HandoffTimeout()
+	if handoffTimeout <= 0 || handoffTimeout > guestenrollment.MaxOperationDuration {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapInvalid")
+	}
+	release, acquired := reconciler.tryAcquireExternalExecutionCall()
+	if !acquired {
+		return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
+	}
+	defer release()
+	scope := guestenrollment.ExecutionScope{AgentRunUID: string(agentRun.UID), ExecutionID: desired.ExecutionID, DriverRegistration: backend.registration}
+	if guestenrollment.ValidateExecutionScope(scope) != nil {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapInvalid")
+	}
+	handoffContext, cancelHandoff := context.WithTimeout(ctx, handoffTimeout)
+	prepared, err := handoff.Prepare(handoffContext, guestenrollment.HandoffPrepareRequest{
+		ContractVersion: guestenrollment.HandoffVersion, ExecutionScope: scope, DesiredGeneration: desired.Generation,
+	})
+	cancelHandoff()
+	if err != nil || guestenrollment.ValidateHandoffPrepareResult(prepared) != nil {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapHandoffUnavailable")
+	}
+	binding := guestenrollment.Binding{
+		AgentRunUID: scope.AgentRunUID, ExecutionID: scope.ExecutionID, DriverRegistration: scope.DriverRegistration,
+		DesiredGeneration: desired.Generation, GuestInstanceID: prepared.GuestInstanceID,
+	}
+	if guestenrollment.ValidateBinding(binding) != nil {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapInvalid")
+	}
+	if prepared.State == guestenrollment.HandoffStateAccepted {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, true, "ExternalBootstrapAccepted")
+	}
+	if !prepared.NewlyPrepared {
+		if err := issuer.RevokeBinding(ctx, guestenrollment.RevokeBindingRequest{ContractVersion: guestenrollment.Version, Binding: binding}); err != nil {
+			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapRevocationPending")
+		}
+		handoffContext, cancelHandoff = context.WithTimeout(ctx, handoffTimeout)
+		replacement, err := handoff.Replace(handoffContext, guestenrollment.HandoffReplaceRequest{ContractVersion: guestenrollment.HandoffVersion, Binding: binding})
+		cancelHandoff()
+		if err != nil || guestenrollment.ValidateHandoffPrepareResult(replacement) != nil || replacement.State != guestenrollment.HandoffStatePrepared ||
+			!replacement.NewlyPrepared || replacement.GuestInstanceID == binding.GuestInstanceID {
+			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapReplacementPending")
+		}
+		binding.GuestInstanceID = replacement.GuestInstanceID
+	}
+	envelope, err := issuer.Issue(ctx, guestenrollment.IssueRequest{
+		ContractVersion: guestenrollment.Version, Binding: binding, TTLSeconds: issuer.TTLSeconds(),
+	})
+	if err != nil || guestenrollment.ValidateBootstrapEnvelope(envelope) != nil || envelope.Binding != binding {
+		clearBootstrapEnvelope(&envelope)
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapIssuePending")
+	}
+	defer clearBootstrapEnvelope(&envelope)
+	handoffContext, cancelHandoff = context.WithTimeout(ctx, handoffTimeout)
+	err = handoff.Deliver(handoffContext, guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: envelope})
+	cancelHandoff()
+	if err != nil {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapDeliveryUncertain")
+	}
+	return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, true, "ExternalBootstrapAccepted")
+}
+
+func clearBootstrapEnvelope(envelope *guestenrollment.BootstrapEnvelope) {
+	envelope.Token = ""
+	envelope.ExchangeURL = ""
+	envelope.IssuedAt = ""
+	envelope.ExpiresAt = ""
+	envelope.Binding = guestenrollment.Binding{}
+	envelope.ContractVersion = ""
+}
+
+func (r *AgentRunReconciler) recordGuestEnrollmentCondition(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	ready bool,
+	reason string,
+) (ctrl.Result, error) {
+	previous := agentRun.Status.DeepCopy()
+	conditionStatus := metav1.ConditionFalse
+	message := "external guest bootstrap has not completed"
+	if ready {
+		conditionStatus = metav1.ConditionTrue
+		message = "the exact selected driver accepted the external guest bootstrap handoff"
+	}
+	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, conditionStatus, reason, message)
+	if !reflect.DeepEqual(*previous, agentRun.Status) {
+		if err := r.Status().Update(ctx, agentRun); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update guest enrollment status: %w", err)
+		}
+	}
+	if ready {
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
 }
 
 func (r *AgentRunReconciler) tryAcquireExternalExecutionCall() (func(), bool) {
@@ -384,7 +557,13 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 ) (ctrl.Result, error) {
 	previous := agentRun.Status.DeepCopy()
 	InitializeAgentRunStatus(agentRun)
-	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
+	// When the guest-bootstrap cleanup obligation is present, the separate
+	// sensitive handoff owns this aggregate backend-availability condition.
+	// Avoid writing a transient driver-only success between every prepare and
+	// accepted observation, which would otherwise churn status indefinitely.
+	if !controllerutil.ContainsFinalizer(agentRun, guestEnrollmentFinalizer) {
+		r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
+	}
 	ready := status.Ready && status.ObservedGeneration == desiredGeneration
 	reason := "ExternalExecutionPending"
 	phase := nvtv1alpha1.AgentRunPhasePending
@@ -572,6 +751,7 @@ func (r *AgentRunReconciler) finalizeExternalAgentRun(ctx context.Context, agent
 	}
 	controllerutil.RemoveFinalizer(agentRun, agentRunFinalizer)
 	controllerutil.RemoveFinalizer(agentRun, externalExecutionFinalizer)
+	controllerutil.RemoveFinalizer(agentRun, guestEnrollmentFinalizer)
 	if err := r.Update(ctx, agentRun); err != nil {
 		return fmt.Errorf("remove external execution finalizer: %w", err)
 	}

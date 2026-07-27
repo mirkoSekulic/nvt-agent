@@ -92,7 +92,7 @@ func load(path string, factory clientFactory) (*Registry, error) {
 	}
 	for _, entry := range value.Registrations {
 		client, createErr := factory(hostapi.ClientConfig{
-			BaseURL: entry.URL, ServerName: entry.ServerName, CAFile: entry.CAFile,
+			BaseURL: entry.URL, DriverRegistration: entry.Name, ServerName: entry.ServerName, CAFile: entry.CAFile,
 			BearerTokenFile: entry.TokenFile, RequestTimeout: defaultRequestTimeout,
 		})
 		if createErr != nil {

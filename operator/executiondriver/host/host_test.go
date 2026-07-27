@@ -138,6 +138,15 @@ func TestLocalExecutableUsesOnlyAllowlistedEnvironment(t *testing.T) {
 	}
 }
 
+func TestLocalExecutablePassesOnlyTheDeterministicEnrollmentSocket(t *testing.T) {
+	client, _, _ := newFakeHost(t, "enrollment-environment", func(config *driverhost.LocalExecutableConfig) {
+		config.EnrollmentSocket = "/tmp/nvt-test-enrollment.sock"
+	})
+	if err := client.Shutdown(testContext(t)); err != nil {
+		t.Fatalf("enrollment environment shutdown: %v", err)
+	}
+}
+
 func TestLocalExecutableStartsCommandWithoutShell(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "shell-expanded")
 	client, _, _ := newFakeHost(t, "", func(config *driverhost.LocalExecutableConfig) {
