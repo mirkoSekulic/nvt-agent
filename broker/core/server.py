@@ -13,6 +13,19 @@ from broker.core.audit import AuditLog
 from broker.core.agents import AgentRegistry
 from broker.core.config import BrokerConfigError, load_config
 from broker.core.errors import ProviderError
+from broker.core.guest_enrollment import (
+    ENDPOINT_LIMITS as GUEST_ENROLLMENT_ENDPOINT_LIMITS,
+    EXCHANGE_PATH as GUEST_ENROLLMENT_EXCHANGE_PATH,
+    ISSUE_PATH as GUEST_ENROLLMENT_ISSUE_PATH,
+    REVOKE_BINDING_PATH as GUEST_ENROLLMENT_REVOKE_BINDING_PATH,
+    REVOKE_EXECUTION_PATH as GUEST_ENROLLMENT_REVOKE_EXECUTION_PATH,
+    EnrollmentConfigError,
+    EnrollmentFailure,
+    decode_exchange_request,
+    decode_issue_request,
+    decode_revoke_request,
+    load_guest_enrollment_from_environment,
+)
 from broker.core.providers import load_providers
 
 
@@ -33,6 +46,8 @@ PATH_CLASS_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 # only credential-shaped value allowed inside a mediated agent container.
 INJECTION_PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 MAX_IDENTITY_FIELD_BYTES = 512
+MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES = 64
+GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
 
 
 class Broker:
@@ -41,8 +56,17 @@ class Broker:
         self.providers = load_providers(self.config)
         self.audit = AuditLog(audit_path)
         self.agents = AgentRegistry()
+        try:
+            self.guest_enrollment, self.guest_enrollment_orchestrator = load_guest_enrollment_from_environment()
+        except EnrollmentConfigError as error:
+            for provider in self.providers.values():
+                provider.close()
+            raise BrokerConfigError(str(error)) from error
 
     def close(self):
+        guest_enrollment = getattr(self, "guest_enrollment", None)
+        if guest_enrollment is not None:
+            guest_enrollment.close()
         for provider in self.providers.values():
             provider.close()
 
@@ -61,6 +85,9 @@ class Broker:
 
     def readiness(self):
         """Provider-owned acceptance readiness without upstream operations."""
+        guest_enrollment = getattr(self, "guest_enrollment", None)
+        if guest_enrollment is not None and not guest_enrollment.ready():
+            return {"ok": False, "status": "unready"}
         for provider in self.providers.values():
             try:
                 if not provider.ready or not provider.validate_state():
@@ -70,6 +97,63 @@ class Broker:
                 # readiness deliberately exposes neither their text nor state.
                 return {"ok": False, "status": "unready"}
         return {"ok": True, "status": "ready"}
+
+    def guest_enrollment_issue(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            result = self.guest_enrollment.issue(decode_issue_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.issue", allowed=True)
+        return result
+
+    def guest_enrollment_exchange(self, request_id, raw_payload):
+        self._require_guest_enrollment()
+        try:
+            result = self.guest_enrollment.exchange(decode_exchange_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=None, operation="guest-enrollment.exchange", allowed=True)
+        return result
+
+    def guest_enrollment_revoke_binding(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            self.guest_enrollment.revoke_binding(decode_revoke_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.revoke-binding", allowed=True)
+        return {"ok": True}
+
+    def guest_enrollment_revoke_execution(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            self.guest_enrollment.revoke_execution(decode_revoke_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.revoke-execution", allowed=True)
+        return {"ok": True}
+
+    def _require_guest_enrollment(self):
+        if self.guest_enrollment is None:
+            raise ProviderError("not-found", "not-found", 404)
+
+    def _authenticate_guest_enrollment_orchestrator(self, authorization):
+        try:
+            self.agents.authenticate(authorization)
+        except ProviderError:
+            pass
+        else:
+            # Keep this authority disjoint even if an installation
+            # accidentally reuses the same plaintext in both Secret sources.
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        try:
+            return self.guest_enrollment_orchestrator.authenticate(authorization)
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
 
     def provider(self, name):
         provider = self.providers.get(name)
@@ -531,6 +615,8 @@ def operation_from_path(path):
 
 
 def make_handler(broker):
+    guest_exchange_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "nvt-brokerd/0.1"
 
@@ -551,6 +637,29 @@ def make_handler(broker):
             request_id = str(uuid.uuid4())
             payload = {}
             try:
+                if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS:
+                    broker._require_guest_enrollment()
+                    exchange_admitted = False
+                    try:
+                        if self.path == GUEST_ENROLLMENT_EXCHANGE_PATH:
+                            exchange_admitted = guest_exchange_requests.acquire(blocking=False)
+                            if not exchange_admitted:
+                                raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
+                        self.connection.settimeout(GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS)
+                        raw_payload = self.read_body(GUEST_ENROLLMENT_ENDPOINT_LIMITS[self.path], "invalid-request")
+                        if self.path == GUEST_ENROLLMENT_ISSUE_PATH:
+                            response = broker.guest_enrollment_issue(request_id, raw_payload, self.headers.get("authorization"))
+                        elif self.path == GUEST_ENROLLMENT_EXCHANGE_PATH:
+                            response = broker.guest_enrollment_exchange(request_id, raw_payload)
+                        elif self.path == GUEST_ENROLLMENT_REVOKE_BINDING_PATH:
+                            response = broker.guest_enrollment_revoke_binding(request_id, raw_payload, self.headers.get("authorization"))
+                        else:
+                            response = broker.guest_enrollment_revoke_execution(request_id, raw_payload, self.headers.get("authorization"))
+                        self.write_json(200, response)
+                        return
+                    finally:
+                        if exchange_admitted:
+                            guest_exchange_requests.release()
                 payload = self.read_payload()
                 if self.path == "/v1/http/request":
                     response = broker.http_request(request_id, payload, self.headers.get("authorization"))
@@ -592,19 +701,30 @@ def make_handler(broker):
             except ProviderError as error:
                 self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization"), operation_from_path(self.path)))
             except Exception as error:
-                self.write_json(500, broker.denied(request_id, payload, "internal-error", str(error), self.headers.get("authorization"), operation_from_path(self.path)))
+                message = "internal-error" if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS else str(error)
+                self.write_json(500, broker.denied(request_id, payload, "internal-error", message, self.headers.get("authorization"), operation_from_path(self.path)))
 
         def read_payload(self):
-            length = int(self.headers.get("content-length") or "0")
-            if length <= 0 or length > MAX_REQUEST_BYTES:
-                raise ProviderError("request-size-invalid")
+            raw_payload = self.read_body(MAX_REQUEST_BYTES)
             try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            except json.JSONDecodeError:
+                payload = json.loads(raw_payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 raise ProviderError("malformed-json")
             if not isinstance(payload, dict):
                 raise ProviderError("request-not-object")
             return payload
+
+        def read_body(self, maximum, error_reason="request-size-invalid"):
+            try:
+                length = int(self.headers.get("content-length") or "0")
+            except ValueError:
+                raise ProviderError(error_reason)
+            if length <= 0 or length > maximum:
+                raise ProviderError(error_reason)
+            try:
+                return self.rfile.read(length)
+            except TimeoutError as error:
+                raise ProviderError(error_reason) from error
 
         def write_json(self, status, payload):
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -653,3 +773,7 @@ def parse_bind(bind):
         raise BrokerConfigError("bind must be host:port")
     host, port = bind.rsplit(":", 1)
     return host, int(port)
+
+
+def _guest_enrollment_provider_error(error):
+    return ProviderError(error.reason, error.reason, error.status)

@@ -30,6 +30,33 @@ agents:
 
 `agents.yaml` is live-reloaded. Provider config is loaded at startup.
 
+## Native guest enrollment issuer
+
+The optional broker-backed implementation of
+[`nvt.guest-enrollment/v1`](../protocol/guest-enrollment.md) uses a durable
+SQLite database and is disabled unless all four settings are present:
+
+```sh
+export NVT_BROKER_GUEST_ENROLLMENT_ENABLED=true
+export NVT_BROKER_GUEST_ENROLLMENT_DB=/state/guest-enrollment.sqlite3
+export NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL=https://broker.example/v1/guest-enrollment/exchange
+export NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE=/run/secrets/guest-enrollment-orchestrator
+```
+
+The token file is a dedicated control-plane authorization boundary for issue
+and revoke operations. Agent and egress bearer identities are never accepted.
+The public exchange operation authenticates only the one-time enrollment token
+plus its exact binding; the caller cannot choose the exchange destination.
+The broker stores token and runtime-identity digests, never either plaintext
+value. Stable, bounded error classes intentionally hide request bodies and
+SQLite diagnostics.
+
+SQLite is used in single-writer mode. One broker process owns the database;
+deployments must not share it across replicas. The broker readiness endpoint
+fails closed if the configured durable store becomes unavailable. This phase
+issues an opaque runtime identity but does not yet wire its use into gateway,
+broker, or VM egress authentication.
+
 Example config:
 
 ```yaml

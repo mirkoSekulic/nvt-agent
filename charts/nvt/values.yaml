@@ -89,6 +89,15 @@ broker:
     # restarts the broker child inside the existing Pod after an atomic import.
     seedSecretName: ""
     seedTargetDir: codex
+  # Provider-neutral native VM guest enrollment is opt-in. It requires the
+  # persistent single-writer broker state, TLS, and a dedicated orchestrator
+  # bearer token mounted from an existing Secret. The token is never a value.
+  guestEnrollment:
+    enabled: false
+    exchangeURL: ""
+    orchestratorAuth:
+      existingSecret: ""
+      tokenKey: token
   config:
     providers: []
   agents:

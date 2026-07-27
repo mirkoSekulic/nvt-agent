@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.33" || "${CHART_APP_VERSION}" != "0.8.33" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.33, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.34" || "${CHART_APP_VERSION}" != "0.8.34" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.34, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.33' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.34' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -52,6 +52,8 @@ BROKER_EXISTING_CLAIM_RENDER="${WORKDIR}/broker-existing-claim.yaml"
 BROKER_SEED_RENDER="${WORKDIR}/broker-seed.yaml"
 BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE="${WORKDIR}/broker-seed-without-persistence-failure.txt"
 BROKER_SEED_TARGET_FAILURE="${WORKDIR}/broker-seed-target-failure.txt"
+BROKER_ENROLLMENT_RENDER="${WORKDIR}/broker-enrollment.yaml"
+BROKER_ENROLLMENT_FAILURE="${WORKDIR}/broker-enrollment-failure.txt"
 NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
@@ -210,6 +212,13 @@ helm template nvt "${CHART}" -n custom-ns \
   --set broker.persistence.seedSecretName=codex-auth \
   --set broker.persistence.seedTargetDir=codex \
   > "${BROKER_SEED_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set broker.persistence.enabled=true \
+  --set broker.guestEnrollment.enabled=true \
+  --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange \
+  --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-guest-enrollment-orchestrator \
+  --set broker.guestEnrollment.orchestratorAuth.tokenKey=control-plane-token \
+  > "${BROKER_ENROLLMENT_RENDER}"
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true > "${PRODUCER_RENDER}"
@@ -1339,6 +1348,44 @@ missing_resource "${DEFAULT_RENDER}" PersistentVolumeClaim nvt-broker-state
 grep -q 'emptyDir: {}' "${DEFAULT_RENDER}"
 if grep -q 'seed_supervisor.py\|NVT_BROKER_SEED_DIR\|name: broker-state-seed' "${DEFAULT_RENDER}"; then
   echo "default broker rendering must preserve the unsupervised local/ephemeral path" >&2
+  exit 1
+fi
+if grep -q 'NVT_BROKER_GUEST_ENROLLMENT\|guest-enrollment-orchestrator-auth' "${DEFAULT_RENDER}"; then
+  echo "default broker rendering must not enable guest enrollment or project its auth Secret" >&2
+  exit 1
+fi
+
+require_resource "${BROKER_ENROLLMENT_RENDER}" PersistentVolumeClaim nvt-broker-state
+grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_ENABLED' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: "true"'
+grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_DB' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: /state/guest-enrollment.sqlite3'
+grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: "https://broker.example.test/v1/guest-enrollment/exchange"'
+grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: /guest-enrollment-auth/token'
+grep -q 'secretName: "nvt-guest-enrollment-orchestrator"' "${BROKER_ENROLLMENT_RENDER}"
+grep -q 'key: "control-plane-token"' "${BROKER_ENROLLMENT_RENDER}"
+grep -q 'defaultMode: 0400' "${BROKER_ENROLLMENT_RENDER}"
+grep -q 'mountPath: /guest-enrollment-auth' "${BROKER_ENROLLMENT_RENDER}"
+grep -q 'readinessProbe:' "${BROKER_ENROLLMENT_RENDER}"
+if has_resource "${BROKER_ENROLLMENT_RENDER}" Secret nvt-guest-enrollment-orchestrator; then
+  echo "guest enrollment must reference, never create, the orchestrator auth Secret" >&2
+  exit 1
+fi
+
+for enrollment_failure in \
+  '--set broker.guestEnrollment.enabled=true' \
+  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set broker.tls.enabled=false' \
+  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=http://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
+  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=Invalid_Name'; do
+  read -r -a enrollment_args <<< "${enrollment_failure}"
+  if helm template nvt "${CHART}" -n custom-ns "${enrollment_args[@]}" > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then
+    echo "expected invalid guest enrollment configuration to fail rendering: ${enrollment_failure}" >&2
+    exit 1
+  fi
+done
+if helm template nvt "${CHART}" -n custom-ns \
+  --set broker.enabled=false \
+  --set broker.guestEnrollment.enabled=true \
+  > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then
+  echo "expected guest enrollment with the broker disabled to fail rendering" >&2
   exit 1
 fi
 

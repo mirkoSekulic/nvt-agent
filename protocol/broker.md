@@ -60,6 +60,50 @@ upstreams or refresh credentials from this probe; executable providers must
 have a successfully initialized live generation. Failures return a generic
 HTTP 503 without provider names, configuration, or credential diagnostics.
 Seed replacement uses this stricter endpoint before discarding recovery state.
+When the optional guest-enrollment issuer is enabled, `/ready` also requires a
+readable v1 durable store; it performs no issuance and exposes no state.
+
+### Guest enrollment endpoints
+
+The optional production issuer implements the exact payloads and lifecycle in
+[guest-enrollment.md](guest-enrollment.md):
+
+| Endpoint | Maximum request | Authorization |
+| --- | ---: | --- |
+| `POST /v1/guest-enrollment/issue` | 4 KiB | Dedicated orchestrator bearer |
+| `POST /v1/guest-enrollment/exchange` | 16 KiB | One-time token plus exact binding in the body |
+| `POST /v1/guest-enrollment/revoke-binding` | 4 KiB | Dedicated orchestrator bearer |
+| `POST /v1/guest-enrollment/revoke-execution` | 4 KiB | Dedicated orchestrator bearer |
+
+Issue returns the frozen `BootstrapEnvelope`; exchange returns the frozen
+`ExchangeResult`; both revoke operations return `{"ok":true}`. The issue
+caller cannot supply `exchange_url`: every envelope carries the issuer-owned
+canonical HTTPS endpoint loaded at broker startup. Unknown fields, duplicate
+keys at any depth, invalid UTF-8, trailing JSON, and over-limit requests fail
+as `invalid-request`.
+
+The orchestrator bearer is a separate Secret-mounted authority. Ordinary
+agent and egress identities cannot issue or revoke enrollments. Exchange is
+intentionally available before the guest has a runtime identity, but its
+SQLite transaction accepts only one canonical 256-bit token with the complete
+exact binding. Exchange request framing has a 10-second read deadline and a
+64-request bound; decoded transactions have a 32-operation bound and a global
+128 requests/second token bucket with a burst of 256. Saturation returns
+`capacity-exceeded`; there is no alternate identity or driver fallback.
+
+Errors are bounded stable classes from the guest-enrollment contract. Responses,
+audit entries, readiness, and process logs never contain a request body,
+plaintext or digest token, plaintext runtime identity, or SQLite diagnostic.
+The broker uses one durable SQLite database with full synchronous commits. It
+must run as the chart's single `Recreate` replica; sharing that file among
+broker processes is unsupported. This issuer is disabled unless durable state,
+TLS/canonical URL, and the dedicated authorization Secret are all configured.
+Background maintenance records token and runtime-identity expiry at their
+original deadlines. It does not infer AgentRun cleanup from elapsed time:
+tombstones and terminal records are reclaimed only when a later orchestrator
+integration supplies the authoritative completed scope and permanently denies
+new issuance for it. Until then the 10,000-entry hard bound fails closed rather
+than evicting live or revocation state.
 
 ### POST /v1/http/request
 

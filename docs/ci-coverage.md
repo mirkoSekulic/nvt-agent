@@ -57,6 +57,11 @@ precise and every hermetic suite has a clear home.
 - `tests/broker/injection_report_conformance_test.go`
 - `tests/broker/placeholder_config_validation_test.go`
 - `tests/broker/placeholder_file_conformance_test.go`
+- `tests/broker/guest_enrollment_conformance_test.go` → real broker process,
+  durable restart, dedicated authorization, strict bounds, replay, and
+  execution-scope cleanup.
+- `tests/broker/guest_enrollment_unit_test.go` → transactional SQLite issuer,
+  pre/post-commit faults, capacity/GC, identity expiry, and redaction.
 
 ### operator
 
