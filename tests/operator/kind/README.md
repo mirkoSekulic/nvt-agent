@@ -218,6 +218,7 @@ KIND_SMOKE_MODE=render KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smo
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=mediated-egress make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=profile-auth make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=broker-seed make operator-kind-smoke
+KIND_SMOKE_MODE=render KIND_SMOKE_CASE=external-execution make operator-kind-smoke
 ```
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,

@@ -173,10 +173,21 @@ tracks the negotiated child process, and liveness restarts a host whose child
 has exited; termination still applies the bounded protocol shutdown and
 terminate/kill/reap behavior.
 
-This deployment does not change the JSONL execution-driver protocol and does
-not route AgentRuns to external services yet. Runtime-plugin and executable
+This deployment does not change the JSONL execution-driver protocol. The
+AgentRun controller resolves only the immutable logical driver name snapshotted
+by admission, adds its cleanup finalizer before the first mutating call, and
+reconciles through that exact authenticated host. It never falls back to
+Kubernetes or another registration. Runtime-plugin and executable
 broker-provider Git loading are separate extension contracts and are
 unchanged; Git acquisition is not an execution-driver distribution mechanism.
+
+The operator derives the opaque execution ID from the immutable AgentRun UID
+and computes the desired fingerprint over the snapshotted workload kind, class
+name, and canonical configuration. Provider convergence therefore survives
+operator and host restarts without in-memory call history. Removing a
+registration while runs reference it is unsupported: cleanup retains the
+finalizer until the same registration is restored. Driver readiness remains a
+portable observation and does not by itself publish a gateway route.
 
 ## Version and operations
 

@@ -43,6 +43,7 @@ jobs:
           - profile-auth
           - broker-seed
           - capabilities
+          - external-execution
     env:
       CREATE_CLUSTER: 1
       DELETE_CLUSTER: 1
@@ -109,6 +110,7 @@ jobs:
           - profile-auth
           - broker-seed
           - capabilities
+          - external-execution
     env:
       CREATE_CLUSTER: 1
       DELETE_CLUSTER: 1

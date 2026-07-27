@@ -102,8 +102,8 @@ operator:
   replicas: 1
 
 # Administrator-owned external execution-driver registrations. Each entry
-# creates one isolated host workload. AgentRun reconciliation does not route to
-# these services yet; empty preserves the built-in Kubernetes-only deployment.
+# creates one isolated host workload. AgentRuns select only the exact matching
+# logical name; empty preserves the built-in Kubernetes-only deployment.
 executionDrivers:
   hostImage:
     repository: ghcr.io/mirkosekulic/nvt-execution-driver-host

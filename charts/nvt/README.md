@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.31`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.32`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.31 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.32 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.31 --namespace nvt --create-namespace
+  --version 0.8.32 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -331,10 +331,10 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.31` can
-deploy administrator-registered driver hosts, but AgentRun reconciliation does
-not route to them in this phase. Defaults remain Kubernetes-only and need no
-source access, cloud SDK, cloud credentials, or extra workload.
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.32`
+reconciles external AgentRuns only through the exact matching registered host.
+Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
+credentials, or extra workload.
 
 ```yaml
 agentSchedule:
@@ -395,6 +395,14 @@ own chart-managed CA; NetworkPolicy admits only the operator Pod. These drivers
 are trusted control-plane extensions, not sandboxes. Infrastructure credentials
 must be scoped to the matching registration. The operator receives only host
 transport CA/token material, never provider credentials.
+
+Registrations are an operational lifecycle commitment. Do not remove or rename
+a registration while an AgentRun still references it: deletion keeps the
+operator finalizer and reports the driver unavailable until the same logical
+registration is restored. Restoring that registration lets level-triggered
+provider cleanup resume; the operator never falls back to Kubernetes or a
+different driver. A driver's ready response is portable execution state only
+and does not publish an external endpoint through the gateway.
 
 Helm validates the same load-bearing registration bounds as the host contract:
 the command is capped at 128 arguments and 16 KiB aggregate text, and CPU and

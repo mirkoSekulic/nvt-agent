@@ -219,6 +219,7 @@ type AgentRunReconciler struct {
 	Scheme           *runtime.Scheme
 	Now              func() metav1.Time
 	BrokerHTTPClient *http.Client
+	ExecutionDrivers executionDriverClientRegistry
 }
 
 type preparedPlaceholderFile struct {
@@ -315,7 +316,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		return r.recordExecutionSelectionFailure(ctx, &agentRun, executionSelectionInvalidReason, "resolved execution selection is invalid")
 	}
-	backend, available := executionBackendFor(selection)
+	backend, available := r.executionBackendFor(selection)
 	if !available {
 		return r.recordExecutionSelectionFailure(ctx, &agentRun, executionDriverUnavailableReason, "selected execution driver is not available")
 	}
