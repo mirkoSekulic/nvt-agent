@@ -301,7 +301,8 @@ type podCredentialVolumeMountState struct {
 
 const defaultProjectedVolumeMode int32 = 420
 
-// Reconcile renders the AgentRun config, creates the agent Pod, and syncs basic Pod-phase status.
+// Reconcile selects the exact operator-owned execution backend and delegates
+// the complete lifecycle without falling back to a different backend.
 func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var agentRun nvtv1alpha1.AgentRun
 	if err := r.Get(ctx, req.NamespacedName, &agentRun); err != nil {
@@ -310,13 +311,25 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, fmt.Errorf("get AgentRun: %w", err)
 	}
+	selection, err := effectiveAgentRunExecution(&agentRun)
+	if err != nil {
+		return r.recordExecutionSelectionFailure(ctx, &agentRun, executionSelectionInvalidReason, "resolved execution selection is invalid")
+	}
+	backend, available := executionBackendFor(selection)
+	if !available {
+		return r.recordExecutionSelectionFailure(ctx, &agentRun, executionDriverUnavailableReason, "selected execution driver is not available")
+	}
 
 	if !agentRun.DeletionTimestamp.IsZero() {
-		if err := r.finalizeAgentRun(ctx, &agentRun); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return backend.Delete(ctx, r, &agentRun)
 	}
+	return backend.Reconcile(ctx, r, agentRun)
+}
+
+// reconcileKubernetesAgentRun is the behavior-preserving built-in Pod adapter.
+// Kubernetes-specific rendering and lifecycle helpers intentionally remain in
+// the operator rather than entering the portable execution-driver protocol.
+func (r *AgentRunReconciler) reconcileKubernetesAgentRun(ctx context.Context, agentRun nvtv1alpha1.AgentRun) (ctrl.Result, error) {
 	if !IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		if err := ValidateRemovedEgressForwardProxy(&agentRun); err != nil {
 			return ctrl.Result{}, err

@@ -24,7 +24,8 @@ const maxWorkspaceInstructionsBytes = 64 * 1024
 
 // ResolvedExecutionProfile is the single immutable profile selected for a request.
 type ResolvedExecutionProfile struct {
-	Profile nvtv1alpha1.AgentScheduleExecutionProfile
+	Profile   nvtv1alpha1.AgentScheduleExecutionProfile
+	Execution *nvtv1alpha1.AgentRunExecution
 }
 
 // ResolvedWorkflowProfile is the independently authorized workflow snapshot.
@@ -50,6 +51,7 @@ type StaticExecutionProfileResolver struct{}
 // ScheduleUsesExecutionProfiles reports whether any profiled-mode configuration is present.
 func ScheduleUsesExecutionProfiles(schedule *nvtv1alpha1.AgentSchedule) bool {
 	return schedule.Spec.Template != nil || len(schedule.Spec.Profiles) != 0 ||
+		len(schedule.Spec.ExecutionClasses) != 0 ||
 		schedule.Spec.ProfileSelection != nil || len(schedule.Spec.AllowedProducers) != 0 ||
 		len(schedule.Spec.WorkflowProfiles) != 0 || len(schedule.Spec.ProducerPolicies) != 0
 }
@@ -81,7 +83,15 @@ func (StaticExecutionProfileResolver) Resolve(
 		selected = selection.DefaultProfile
 	}
 	profile := profiles[selected]
-	return &ResolvedExecutionProfile{Profile: *profile.DeepCopy()}, nil
+	classes, err := validateExecutionClasses(schedule)
+	if err != nil {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
+	execution, err := resolveProfileExecution(&profile, classes)
+	if err != nil {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
+	return &ResolvedExecutionProfile{Profile: *profile.DeepCopy(), Execution: execution.DeepCopy()}, nil
 }
 
 func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[string]nvtv1alpha1.AgentScheduleExecutionProfile, error) {
@@ -106,6 +116,10 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 
 	if _, err := validateWorkflowConfiguration(schedule); err != nil {
 		return nil, err
+	}
+	classes, err := validateExecutionClasses(schedule)
+	if err != nil {
+		return nil, errInvalidExecutionProfileConfiguration
 	}
 
 	profiles := make(map[string]nvtv1alpha1.AgentScheduleExecutionProfile, len(schedule.Spec.Profiles))
@@ -139,6 +153,9 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 			return nil, errInvalidExecutionProfileConfiguration
 		}
 		if err := validateRuntimeDockerNetworks(profile.Runtime); err != nil {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		if _, err := resolveProfileExecution(&profile, classes); err != nil {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
 		profiles[profile.Name] = profile
@@ -331,6 +348,7 @@ func buildProfiledAgentRun(
 	}
 	run := &nvtv1alpha1.AgentRun{
 		Spec: nvtv1alpha1.AgentRunSpec{
+			Execution:                  resolved.Execution.DeepCopy(),
 			Runtime:                    *profile.Runtime.DeepCopy(),
 			RuntimeAuth:                profile.RuntimeAuth.DeepCopy(),
 			Image:                      template.Image,

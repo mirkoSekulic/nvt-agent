@@ -27,6 +27,10 @@ spec:
       failOn: [plugin.github.pr.failed]
   profiles:
     - name: codex-default
+      # Omit execution for the same built-in default; this explicit form is equivalent.
+      execution:
+        kind: pod
+        driver: kubernetes
       runtime:
         type: codex
         autonomy: trusted-local

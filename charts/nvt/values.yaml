@@ -179,6 +179,9 @@ agentSchedule:
   # Empty profile fields preserve the legacy full-AgentRun admission contract.
   # See operator/docs/agentschedule.md for a complete profiled example.
   template: {}
+  # Administrator-owned opaque configurations for explicitly selected
+  # execution drivers. Empty keeps the built-in Kubernetes Pod path only.
+  executionClasses: []
   profiles: []
   profileSelection: {}
   workflowProfiles: []

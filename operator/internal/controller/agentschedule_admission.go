@@ -247,10 +247,10 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		}
 		run = *profiledRun
 	} else if admission.AgentRun != nil {
-		if admission.AgentRun.Spec.Runtime.Container != nil || admission.AgentRun.Spec.Runtime.Docker != nil {
+		if admission.AgentRun.Spec.Execution != nil || admission.AgentRun.Spec.Runtime.Container != nil || admission.AgentRun.Spec.Runtime.Docker != nil {
 			h.recordRejected(ctx, schedule, "legacy producer cannot configure profile-owned runtime controls")
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "legacy producer cannot configure spec.runtime.container or spec.runtime.docker; use an execution profile",
+				Scheduled: false, Reason: "legacy producer cannot configure spec.execution, spec.runtime.container, or spec.runtime.docker; use an execution profile",
 			})
 			return
 		}
@@ -262,6 +262,21 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	// so the stored spec.egress is always explicit and a later knob change can
 	// never reclassify this run. Never overrides an explicit mode.
 	ApplyDefaultEgressMode(&run)
+	if err := ValidateAgentRunExecution(&run); err != nil {
+		if profiled {
+			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
+			return
+		}
+		reason := err.Error()
+		h.recordRejected(ctx, schedule, reason)
+		writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+			Scheduled: false, Reason: reason,
+		})
+		return
+	}
 	if err := ValidateAgentRunRuntimeCapabilities(&run); err != nil {
 		if profiled {
 			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")

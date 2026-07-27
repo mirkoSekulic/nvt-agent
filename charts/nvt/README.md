@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.29`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.30`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.29 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.30 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.29 --namespace nvt --create-namespace
+  --version 0.8.30 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -317,12 +317,39 @@ CRD default, which is direct.
 
 ## Execution profiles
 
-`agentSchedule.template`, `profiles`, `profileSelection`, and either the legacy
+`agentSchedule.template`, optional `executionClasses`, `profiles`,
+`profileSelection`, and either the legacy
 `allowedProducers` list or typed workflow `producerPolicies` configure profiled
 admission. Empty values
 preserve legacy full-`AgentRun` admission. Profiled admission requires a
 projected ServiceAccount token with audience `nvt-operator`; see the
 [AgentSchedule contract](../../operator/docs/agentschedule.md).
+
+Omitted profile execution keeps the existing Kubernetes Pod path. Operators
+may spell that selection explicitly as `execution: {kind: pod, driver:
+kubernetes}`. Future external drivers select one exact entry from
+`agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
+the class's bounded opaque configuration is snapshotted into the AgentRun.
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.30` does
+not wire an external driver host, so defaults remain Kubernetes-only and need
+no Git access, cloud SDK, cloud credentials, or extra workload.
+
+```yaml
+agentSchedule:
+  executionClasses:
+    - name: vm-standard
+      kind: vm
+      driver: example-vm
+      configuration: {cpu: 4}
+  profiles:
+    - name: codex-vm
+      execution: {kind: vm, driver: example-vm, classRef: vm-standard}
+      # remaining profile-owned fields omitted
+```
+
+This external example defines a valid immutable selection but remains
+unavailable until that logical driver is registered by a future driver-host
+deployment; the chart does not start or discover it.
 
 Scheduling fields in the shared template are passed to the generated agent Pod:
 

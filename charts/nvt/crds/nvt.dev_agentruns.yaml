@@ -41,9 +41,39 @@ spec:
                   message: spec.egressMaxConcurrentTunnels requires spec.egressTransport forward-proxy or transparent
                 - rule: "has(self.profileProvenance) == has(oldSelf.profileProvenance) && (!has(self.profileProvenance) || self.profileProvenance == oldSelf.profileProvenance)"
                   message: spec.profileProvenance is immutable
+                - rule: "has(self.execution) == has(oldSelf.execution) && (!has(self.execution) || self.execution == oldSelf.execution)"
+                  message: spec.execution is immutable
                 - rule: "self.workspace == oldSelf.workspace"
                   message: spec.workspace is immutable
               properties:
+                execution:
+                  description: Immutable operator-resolved execution backend selection. Omitted means the built-in Kubernetes Pod backend.
+                  type: object
+                  required:
+                    - kind
+                    - driver
+                  x-kubernetes-validations:
+                    - rule: "self.driver == 'kubernetes' ? self.kind == 'pod' && !has(self.classRef) && !has(self.configuration) : has(self.classRef) && has(self.configuration)"
+                      message: kubernetes requires pod with no class; external drivers require classRef and configuration
+                  properties:
+                    kind:
+                      type: string
+                      enum:
+                        - pod
+                        - vm
+                    driver:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                    classRef:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                    configuration:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                 runtime:
                   type: object
                   required:
