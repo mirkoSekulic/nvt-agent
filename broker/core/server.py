@@ -46,7 +46,7 @@ PATH_CLASS_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 # only credential-shaped value allowed inside a mediated agent container.
 INJECTION_PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 MAX_IDENTITY_FIELD_BYTES = 512
-MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES = 64
+MAX_GUEST_ENROLLMENT_HTTP_REQUESTS = 64
 GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
 
 
@@ -615,7 +615,10 @@ def operation_from_path(path):
 
 
 def make_handler(broker):
-    guest_exchange_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES)
+    # ThreadingHTTPServer creates one thread per accepted connection. Acquire a
+    # shared admission slot before authentication or body reads so slow clients
+    # cannot retain an unbounded number of active enrollment handlers.
+    guest_enrollment_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_REQUESTS)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "nvt-brokerd/0.1"
@@ -639,27 +642,27 @@ def make_handler(broker):
             try:
                 if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS:
                     broker._require_guest_enrollment()
-                    exchange_admitted = False
+                    authorization = self.headers.get("authorization")
+                    request_admitted = guest_enrollment_requests.acquire(blocking=False)
+                    if not request_admitted:
+                        raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
                     try:
-                        if self.path == GUEST_ENROLLMENT_EXCHANGE_PATH:
-                            exchange_admitted = guest_exchange_requests.acquire(blocking=False)
-                            if not exchange_admitted:
-                                raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
+                        if self.path != GUEST_ENROLLMENT_EXCHANGE_PATH:
+                            broker._authenticate_guest_enrollment_orchestrator(authorization)
                         self.connection.settimeout(GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS)
                         raw_payload = self.read_body(GUEST_ENROLLMENT_ENDPOINT_LIMITS[self.path], "invalid-request")
                         if self.path == GUEST_ENROLLMENT_ISSUE_PATH:
-                            response = broker.guest_enrollment_issue(request_id, raw_payload, self.headers.get("authorization"))
+                            response = broker.guest_enrollment_issue(request_id, raw_payload, authorization)
                         elif self.path == GUEST_ENROLLMENT_EXCHANGE_PATH:
                             response = broker.guest_enrollment_exchange(request_id, raw_payload)
                         elif self.path == GUEST_ENROLLMENT_REVOKE_BINDING_PATH:
-                            response = broker.guest_enrollment_revoke_binding(request_id, raw_payload, self.headers.get("authorization"))
+                            response = broker.guest_enrollment_revoke_binding(request_id, raw_payload, authorization)
                         else:
-                            response = broker.guest_enrollment_revoke_execution(request_id, raw_payload, self.headers.get("authorization"))
+                            response = broker.guest_enrollment_revoke_execution(request_id, raw_payload, authorization)
                         self.write_json(200, response)
                         return
                     finally:
-                        if exchange_admitted:
-                            guest_exchange_requests.release()
+                        guest_enrollment_requests.release()
                 payload = self.read_payload()
                 if self.path == "/v1/http/request":
                     response = broker.http_request(request_id, payload, self.headers.get("authorization"))

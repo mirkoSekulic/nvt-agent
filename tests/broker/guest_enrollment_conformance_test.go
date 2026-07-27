@@ -1,15 +1,18 @@
 package broker_test
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -151,6 +154,52 @@ func TestGuestEnrollmentDedicatedAuthorizationAndIssuerOwnedURL(t *testing.T) {
 	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 }
 
+func TestGuestEnrollmentAuthenticatesBeforeBodyAndBoundsSlowRequests(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	for _, path := range []string{
+		guestEnrollmentIssuePath,
+		guestEnrollmentRevokeBinding,
+		guestEnrollmentRevokeExecution,
+	} {
+		connection := openIncompleteEnrollmentRequest(t, fixture, path, "")
+		if err := connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		status, err := bufio.NewReader(connection).ReadString('\n')
+		_ = connection.Close()
+		if err != nil {
+			t.Fatalf("%s did not reject unauthenticated request before reading its body: %v", path, err)
+		}
+		if !strings.Contains(status, " 401 ") {
+			t.Fatalf("%s status line = %q, want 401", path, strings.TrimSpace(status))
+		}
+	}
+
+	const enrollmentHTTPBound = 64
+	slow := make([]net.Conn, 0, enrollmentHTTPBound)
+	t.Cleanup(func() {
+		for _, connection := range slow {
+			_ = connection.Close()
+		}
+	})
+	for range enrollmentHTTPBound {
+		slow = append(slow, openIncompleteEnrollmentRequest(t, fixture, guestEnrollmentIssuePath, guestEnrollmentOrchestrator))
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, body := fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentRevokeExecution, []byte(`{}`))
+		if status == http.StatusTooManyRequests {
+			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+			break
+		}
+		if status != http.StatusBadRequest || time.Now().After(deadline) {
+			t.Fatalf("enrollment HTTP concurrency bound was not enforced: status=%d body=%v", status, body)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) {
 	fixture := newGuestEnrollmentBrokerFixture(t)
 	request := enrollmentIssueRequest("revoke-uid", "revoke-execution", 1, "revoke-guest", 300)
@@ -204,6 +253,28 @@ func (f *brokerFixture) postEnrollmentRaw(token, path string, payload []byte) (i
 		f.t.Fatal(err)
 	}
 	return response.StatusCode, decoded
+}
+
+func openIncompleteEnrollmentRequest(t *testing.T, fixture *brokerFixture, path, token string) net.Conn {
+	t.Helper()
+	connection, err := net.DialTimeout("tcp", fixture.bind, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := "POST " + path + " HTTP/1.1\r\n" +
+		"Host: " + fixture.bind + "\r\n" +
+		"Content-Type: application/json\r\n" +
+		"Content-Length: 1\r\n" +
+		"Connection: close\r\n"
+	if token != "" {
+		request += "Authorization: Bearer " + token + "\r\n"
+	}
+	request += "\r\n"
+	if _, err := connection.Write([]byte(request)); err != nil {
+		_ = connection.Close()
+		t.Fatal(err)
+	}
+	return connection
 }
 
 func enrollmentIssueRequest(uid, execution string, generation int64, guest string, ttl int) map[string]any {

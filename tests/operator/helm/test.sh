@@ -1374,6 +1374,8 @@ for enrollment_failure in \
   '--set broker.guestEnrollment.enabled=true' \
   '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set broker.tls.enabled=false' \
   '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=http://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
+  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:0/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
+  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:99999/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
   '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=Invalid_Name'; do
   read -r -a enrollment_args <<< "${enrollment_failure}"
   if helm template nvt "${CHART}" -n custom-ns "${enrollment_args[@]}" > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then
@@ -1381,6 +1383,15 @@ for enrollment_failure in \
     exit 1
   fi
 done
+if ! helm template nvt "${CHART}" -n custom-ns \
+  --set broker.guestEnrollment.enabled=true \
+  --set broker.persistence.enabled=true \
+  --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:65535/v1/guest-enrollment/exchange \
+  --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment \
+  > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then
+  echo "expected maximum valid guest enrollment exchange port to render" >&2
+  exit 1
+fi
 if helm template nvt "${CHART}" -n custom-ns \
   --set broker.enabled=false \
   --set broker.guestEnrollment.enabled=true \

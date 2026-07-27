@@ -83,13 +83,15 @@ keys at any depth, invalid UTF-8, trailing JSON, and over-limit requests fail
 as `invalid-request`.
 
 The orchestrator bearer is a separate Secret-mounted authority. Ordinary
-agent and egress identities cannot issue or revoke enrollments. Exchange is
-intentionally available before the guest has a runtime identity, but its
-SQLite transaction accepts only one canonical 256-bit token with the complete
-exact binding. Exchange request framing has a 10-second read deadline and a
-64-request bound; decoded transactions have a 32-operation bound and a global
-128 requests/second token bucket with a burst of 256. Saturation returns
-`capacity-exceeded`; there is no alternate identity or driver fallback.
+agent and egress identities cannot issue or revoke enrollments. The broker
+authenticates issue and revoke authorization before reading their request
+bodies. Exchange is intentionally available before the guest has a runtime
+identity, but its SQLite transaction accepts only one canonical 256-bit token
+with the complete exact binding. All enrollment request framing has a
+10-second read deadline and shares a 64-request bound; decoded exchange
+transactions have a 32-operation bound and a global 128 requests/second token
+bucket with a burst of 256. Saturation returns `capacity-exceeded`; there is no
+alternate identity or driver fallback.
 
 Errors are bounded stable classes from the guest-enrollment contract. Responses,
 audit entries, readiness, and process logs never contain a request body,

@@ -281,6 +281,67 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
             GuestEnrollmentIssuer(incomplete, EXCHANGE_URL, maintenance_interval=None)
 
+    def test_semantically_corrupt_rows_fail_startup_and_readiness(self):
+        malformed_timestamp_database = str(Path(self.temporary.name) / "malformed-timestamp.sqlite3")
+        issuer = GuestEnrollmentIssuer(
+            malformed_timestamp_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(40),
+            maintenance_interval=None,
+        )
+        issuer.issue(issue_request(uid="semantic-uid", execution="semantic-execution"))
+        issuer.close()
+        update_database(malformed_timestamp_database, "UPDATE enrollments SET expires_at = ?", ("not-a-timestamp",))
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(malformed_timestamp_database, EXCHANGE_URL, maintenance_interval=None)
+
+        live_corruption_database = str(Path(self.temporary.name) / "live-corruption.sqlite3")
+        live = GuestEnrollmentIssuer(
+            live_corruption_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(50),
+            maintenance_interval=None,
+        )
+        self.addCleanup(live.close)
+        live.issue(issue_request(uid="live-corrupt-uid", execution="live-corrupt-execution"))
+        update_database(live_corruption_database, "UPDATE enrollments SET token_digest = ?", ("sha256:not-a-digest",))
+        self.assertFalse(live.ready())
+        self.assertFailure("issuer-storage-failed", live.maintain)
+
+        binding_tombstone_database = str(Path(self.temporary.name) / "binding-tombstone.sqlite3")
+        binding_issuer = GuestEnrollmentIssuer(binding_tombstone_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        request = issue_request(uid="binding-tombstone-uid", execution="binding-tombstone-execution")
+        binding_issuer.revoke_binding(revoke_binding_request(request["binding"]))
+        binding_issuer.close()
+        update_database(binding_tombstone_database, "UPDATE binding_tombstones SET delete_after = ?", ("invalid",))
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(binding_tombstone_database, EXCHANGE_URL, maintenance_interval=None)
+
+        execution_tombstone_database = str(Path(self.temporary.name) / "execution-tombstone.sqlite3")
+        execution_issuer = GuestEnrollmentIssuer(execution_tombstone_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        execution_issuer.revoke_execution(revoke_execution_request(request["binding"]))
+        execution_issuer.close()
+        update_database(execution_tombstone_database, "UPDATE execution_tombstones SET delete_after = ?", ("2026-07-29T12:00:00Z",))
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(execution_tombstone_database, EXCHANGE_URL, maintenance_interval=None)
+
+        identity_database = str(Path(self.temporary.name) / "runtime-identity.sqlite3")
+        identity_issuer = GuestEnrollmentIssuer(
+            identity_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(60),
+            maintenance_interval=None,
+        )
+        envelope = identity_issuer.issue(issue_request(uid="identity-uid", execution="identity-execution"))
+        identity_issuer.exchange(exchange_request(envelope))
+        identity_issuer.close()
+        update_database(identity_database, "UPDATE enrollments SET runtime_identity_expires_at = ?", ("invalid",))
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(identity_database, EXCHANGE_URL, maintenance_interval=None)
+
     def test_orchestrator_auth_stores_only_digest(self):
         token = b"orchestrator-auth-token-0123456789abcdef"
         token_file = Path(self.temporary.name) / "orchestrator-token"
@@ -298,6 +359,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             "https://broker.example/v1/guest-enrollment/exchange?",
             "https://broker.example/v1/guest-enrollment/../exchange",
             "https://broker.example/v1/guest-enrollment/other",
+            "https://broker.example/prefix/v1/guest-enrollment/exchange",
         ):
             with self.subTest(url=invalid_url):
                 with self.assertRaises(EnrollmentConfigError):
@@ -360,6 +422,15 @@ def execution_scope(value):
         "execution_id": value["execution_id"],
         "driver_registration": value["driver_registration"],
     }
+
+
+def update_database(database, statement, parameters):
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(statement, parameters)
+        connection.commit()
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ ENDPOINT_LIMITS = {
 
 DRIVER_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ORCHESTRATOR_TOKEN_RE = re.compile(rb"^[A-Za-z0-9._~-]{32,4096}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -129,8 +130,6 @@ class GuestEnrollmentIssuer:
     ):
         self.database_path = _validate_database_path(database_path)
         self.exchange_url = validate_exchange_url(exchange_url)
-        if not self.exchange_url.endswith(EXCHANGE_PATH):
-            raise EnrollmentConfigError("guest enrollment exchange URL must select the broker exchange endpoint")
         if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries < 1 or max_entries > MAX_DURABLE_ENTRIES:
             raise EnrollmentConfigError("guest enrollment durable entry limit is invalid")
         self.max_entries = max_entries
@@ -183,6 +182,7 @@ class GuestEnrollmentIssuer:
         connection = self._connect_or_failure()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
             self._expire_issued(connection, now)
             if self._scope_tombstoned(connection, binding):
                 raise EnrollmentFailure("revoked", 409)
@@ -241,6 +241,7 @@ class GuestEnrollmentIssuer:
             row = connection.execute("SELECT * FROM enrollments WHERE token_digest = ?", (token_digest,)).fetchone()
             if row is None:
                 raise EnrollmentFailure("invalid-token", 401)
+            _validate_persisted_enrollment(row)
             if row["state"] == "consumed":
                 raise EnrollmentFailure("already-consumed", 409)
             if row["state"] == "revoked":
@@ -312,6 +313,7 @@ class GuestEnrollmentIssuer:
         connection = self._connect_or_failure()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
             if self._scope_tombstoned(connection, binding):
                 connection.commit()
                 return
@@ -353,6 +355,7 @@ class GuestEnrollmentIssuer:
         connection = self._connect_or_failure()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
             scope_values = _scope_values(scope)
             scope_present = connection.execute(
                 """
@@ -415,6 +418,7 @@ class GuestEnrollmentIssuer:
         connection = self._connect_or_failure()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
             self._expire_issued(connection, now)
             connection.execute(
                 """
@@ -443,6 +447,7 @@ class GuestEnrollmentIssuer:
         connection = self._connect_or_failure()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
             self._expire_issued(connection, now)
             for scope in validated:
                 values = _scope_values(scope)
@@ -600,29 +605,41 @@ class GuestEnrollmentIssuer:
         version = connection.execute("SELECT value FROM enrollment_meta WHERE key = 'schema_version'").fetchone()
         if version is None or version[0] != "1":
             raise sqlite3.DatabaseError("guest enrollment database schema is unsupported")
-        connection.execute(
+        try:
+            validation_now = self._now()
+        except EnrollmentFailure as error:
+            raise sqlite3.DatabaseError("guest enrollment validation clock is invalid") from error
+        if self._entry_count(connection) > self.max_entries:
+            raise sqlite3.DatabaseError("guest enrollment database exceeds its durable entry bound")
+        enrollment_rows = connection.execute(
             """
             SELECT token_digest, agent_run_uid, execution_id, driver_registration,
                    desired_generation, guest_instance_id, issued_at, expires_at,
                    state, terminal_at, runtime_identity_digest,
                    runtime_identity_issued_at, runtime_identity_expires_at,
                    runtime_identity_active
-              FROM enrollments LIMIT 0
+              FROM enrollments
             """
-        )
-        connection.execute(
+        ).fetchall()
+        binding_tombstones = connection.execute(
             """
             SELECT agent_run_uid, execution_id, driver_registration,
                    desired_generation, guest_instance_id, delete_after
-              FROM binding_tombstones LIMIT 0
+              FROM binding_tombstones
             """
-        )
-        connection.execute(
+        ).fetchall()
+        execution_tombstones = connection.execute(
             """
             SELECT agent_run_uid, execution_id, driver_registration, delete_after
-              FROM execution_tombstones LIMIT 0
+              FROM execution_tombstones
             """
-        )
+        ).fetchall()
+        for row in enrollment_rows:
+            _validate_persisted_enrollment(row)
+        for row in binding_tombstones:
+            _validate_persisted_binding_tombstone(row, validation_now)
+        for row in execution_tombstones:
+            _validate_persisted_execution_tombstone(row, validation_now)
 
     def _now(self):
         value = self.now()
@@ -830,8 +847,7 @@ def validate_exchange_url(value):
         or parsed.fragment
         or "?" in value
         or "#" in value
-        or not parsed.path
-        or parsed.path == "/"
+        or parsed.path != EXCHANGE_PATH
         or "\\" in parsed.path
         or "//" in parsed.path
         or "%" in parsed.path
@@ -859,6 +875,86 @@ def parse_timestamp(value):
     if format_timestamp(parsed) != value:
         raise EnrollmentFailure("issuer-storage-failed", 503)
     return parsed
+
+
+def _validate_persisted_enrollment(row):
+    try:
+        if not isinstance(row["token_digest"], str) or not DIGEST_RE.fullmatch(row["token_digest"]):
+            raise ValueError
+        validate_binding(_row_binding(row))
+        issued_at = parse_timestamp(row["issued_at"])
+        expires_at = parse_timestamp(row["expires_at"])
+        if not issued_at < expires_at or expires_at - issued_at > timedelta(seconds=MAX_ENROLLMENT_TTL_SECONDS):
+            raise ValueError
+
+        state = row["state"]
+        terminal_at = row["terminal_at"]
+        identity_digest = row["runtime_identity_digest"]
+        identity_issued_value = row["runtime_identity_issued_at"]
+        identity_expires_value = row["runtime_identity_expires_at"]
+        identity_active = row["runtime_identity_active"]
+        if identity_active not in (0, 1):
+            raise ValueError
+
+        if state == "consumed":
+            if not isinstance(identity_digest, str) or not DIGEST_RE.fullmatch(identity_digest):
+                raise ValueError
+            identity_issued_at = parse_timestamp(identity_issued_value)
+            identity_expires_at = parse_timestamp(identity_expires_value)
+            if not issued_at <= identity_issued_at < expires_at:
+                raise ValueError
+            if not identity_issued_at < identity_expires_at or identity_expires_at - identity_issued_at > MAX_RUNTIME_IDENTITY_LIFETIME:
+                raise ValueError
+            if identity_active == 1:
+                if terminal_at is not None:
+                    raise ValueError
+            elif terminal_at != identity_expires_value:
+                raise ValueError
+            return
+
+        if any(value is not None for value in (identity_digest, identity_issued_value, identity_expires_value)) or identity_active != 0:
+            raise ValueError
+        if state == "issued":
+            if terminal_at is not None:
+                raise ValueError
+        elif state == "expired":
+            if terminal_at != row["expires_at"]:
+                raise ValueError
+        elif state == "revoked":
+            revoked_at = parse_timestamp(terminal_at)
+            if revoked_at < issued_at:
+                raise ValueError
+        else:
+            raise ValueError
+    except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
+        raise sqlite3.DatabaseError("guest enrollment database contains an invalid enrollment record") from error
+
+
+def _validate_persisted_binding_tombstone(row, now):
+    try:
+        validate_binding(_row_binding(row))
+        delete_after = parse_timestamp(row["delete_after"])
+        if delete_after > now + TOMBSTONE_RETENTION:
+            raise ValueError
+    except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
+        raise sqlite3.DatabaseError("guest enrollment database contains an invalid binding tombstone") from error
+
+
+def _validate_persisted_execution_tombstone(row, now):
+    try:
+        validate_scope(
+            {
+                "agent_run_uid": row["agent_run_uid"],
+                "execution_id": row["execution_id"],
+                "driver_registration": row["driver_registration"],
+            },
+            exact=True,
+        )
+        delete_after = parse_timestamp(row["delete_after"])
+        if delete_after > now + TOMBSTONE_RETENTION:
+            raise ValueError
+    except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
+        raise sqlite3.DatabaseError("guest enrollment database contains an invalid execution tombstone") from error
 
 
 def _validate_database_path(value):

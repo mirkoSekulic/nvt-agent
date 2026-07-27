@@ -9,6 +9,11 @@
 {{- if not .Values.broker.persistence.enabled }}{{ fail "broker.guestEnrollment.enabled requires broker.persistence.enabled=true" }}{{ end }}
 {{- if not .Values.broker.tls.enabled }}{{ fail "broker.guestEnrollment.enabled requires broker.tls.enabled=true" }}{{ end }}
 {{- if or (gt (len .Values.broker.guestEnrollment.exchangeURL) 2048) (not (regexMatch `^https://[A-Za-z0-9](?:[-A-Za-z0-9.]*[A-Za-z0-9])?(?::[0-9]{1,5})?/v1/guest-enrollment/exchange$` .Values.broker.guestEnrollment.exchangeURL)) }}{{ fail "broker.guestEnrollment.exchangeURL must be the canonical HTTPS broker exchange endpoint" }}{{ end }}
+{{- $guestEnrollmentPortMatch := regexFind `:[0-9]{1,5}/v1/guest-enrollment/exchange$` .Values.broker.guestEnrollment.exchangeURL }}
+{{- if $guestEnrollmentPortMatch }}
+{{- $guestEnrollmentPort := int (trimSuffix "/v1/guest-enrollment/exchange" (trimPrefix ":" $guestEnrollmentPortMatch)) }}
+{{- if or (lt $guestEnrollmentPort 1) (gt $guestEnrollmentPort 65535) }}{{ fail "broker.guestEnrollment.exchangeURL port must be between 1 and 65535" }}{{ end }}
+{{- end }}
 {{- if or (gt (len .Values.broker.guestEnrollment.orchestratorAuth.existingSecret) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` .Values.broker.guestEnrollment.orchestratorAuth.existingSecret)) }}{{ fail "broker.guestEnrollment.orchestratorAuth.existingSecret must be a Kubernetes Secret name" }}{{ end }}
 {{- if or (gt (len .Values.broker.guestEnrollment.orchestratorAuth.tokenKey) 253) (not (regexMatch `^[A-Za-z0-9._-]+$` .Values.broker.guestEnrollment.orchestratorAuth.tokenKey)) }}{{ fail "broker.guestEnrollment.orchestratorAuth.tokenKey is invalid" }}{{ end }}
 {{- end }}
