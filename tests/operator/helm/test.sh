@@ -583,13 +583,14 @@ if grep -q 'app.kubernetes.io/component: execution-driver-host\|NVT_EXECUTION_DR
   exit 1
 fi
 
-python3 - "${EXECUTION_DRIVERS_RENDER}" "${CHART_APP_VERSION}" <<'PY'
+python3 - "${EXECUTION_DRIVERS_RENDER}" "${CHART_APP_VERSION}" "${DEFAULT_RENDER}" <<'PY'
 import json
 import sys
 import yaml
 
 documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
 version = sys.argv[2]
+default_documents = [item for item in yaml.safe_load_all(open(sys.argv[3])) if item]
 
 def resources(kind):
     return {item["metadata"]["name"]: item for item in documents if item.get("kind") == kind}
@@ -600,6 +601,8 @@ policies = resources("NetworkPolicy")
 secrets = resources("Secret")
 accounts = resources("ServiceAccount")
 configmaps = resources("ConfigMap")
+default_operator = next(item for item in default_documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-operator")
+assert "securityContext" not in default_operator["spec"]["template"]["spec"]
 expected = {"fake-east", "fake-west"}
 driver_names = {f"nvt-execution-driver-{name}" for name in expected}
 assert driver_names <= deployments.keys()
@@ -609,7 +612,18 @@ assert driver_names <= secrets.keys()
 assert "nvt-execution-driver-fake-east" in accounts
 assert "nvt-execution-driver-fake-west" not in accounts
 
-operator = deployments["nvt-operator"]["spec"]["template"]["spec"]["containers"][0]
+operator_pod = deployments["nvt-operator"]["spec"]["template"]["spec"]
+operator_security = operator_pod["securityContext"]
+assert operator_security == {
+    "runAsNonRoot": True,
+    "runAsUser": 65532,
+    "runAsGroup": 65532,
+    "fsGroup": 65532,
+    "fsGroupChangePolicy": "OnRootMismatch",
+}
+projection = next(volume for volume in operator_pod["volumes"] if volume["name"] == "execution-driver-registrations")["projected"]
+assert projection["defaultMode"] == 0o440
+operator = operator_pod["containers"][0]
 operator_env = {item["name"]: item for item in operator["env"]}
 assert operator_env["NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE"]["value"] == "/var/run/nvt-execution-drivers/registrations.json"
 operator_text = json.dumps(operator, sort_keys=True)
@@ -638,10 +652,60 @@ for name, credential in (("fake-east", "fake-east-cloud"), ("fake-west", "fake-w
     assert pod["automountServiceAccountToken"] is False
     assert container["securityContext"]["allowPrivilegeEscalation"] is False
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    startup = container["startupProbe"]
+    assert startup["httpGet"] == {"path": "/readyz", "port": "https", "scheme": "HTTPS"}
+    assert startup["periodSeconds"] * startup["failureThreshold"] >= 60
+    assert startup["timeoutSeconds"] == 2
     assert policies[f"nvt-execution-driver-{name}"]["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "nvt-operator"
 
 assert deployments["nvt-execution-driver-fake-east"]["spec"]["template"]["spec"]["serviceAccountName"] == "nvt-execution-driver-fake-east"
 assert deployments["nvt-execution-driver-fake-west"]["spec"]["template"]["spec"]["serviceAccountName"] == "fake-west-workload-identity"
+PY
+
+if [[ "$(id -u)" == "0" ]]; then
+  ELEVATE=()
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  ELEVATE=(sudo -n)
+else
+  echo "operator projection readability test requires root or passwordless sudo" >&2
+  exit 1
+fi
+"${ELEVATE[@]}" python3 - <<'PY'
+import os
+import shutil
+import tempfile
+
+directory = tempfile.mkdtemp(prefix="nvt-operator-projection-")
+try:
+    os.chown(directory, 0, 65532)
+    os.chmod(directory, 0o750)
+    paths = []
+    for name in ("registrations.json", "ca.crt", "auth-token"):
+        path = os.path.join(directory, name)
+        with open(path, "wb") as value:
+            value.write(name.encode())
+        os.chown(path, 0, 65532)
+        os.chmod(path, 0o440)
+        paths.append(path)
+
+    child = os.fork()
+    if child == 0:
+        try:
+            os.setgroups([])
+            os.setgid(65532)
+            os.setuid(65532)
+            for path in paths:
+                with open(path, "rb") as value:
+                    if not value.read():
+                        raise RuntimeError("empty projected file")
+        except BaseException:
+            os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(child, 0)
+    if status != 0:
+        raise SystemExit("UID/GID 65532 could not read group-projected 0440 files")
+finally:
+    shutil.rmtree(directory)
 PY
 
 LONG_DRIVER_NAME="$(printf '%063d' 0 | tr 0 a)"
@@ -661,6 +725,53 @@ if helm template nvt "${CHART}" -n custom-ns \
   exit 1
 fi
 grep -q 'image must be pinned by lowercase sha256 digest' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].resources.requests.cpu=0 \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "zero execution-driver CPU request was accepted" >&2
+  exit 1
+fi
+grep -q 'resources.requests.cpu must be a positive Kubernetes quantity' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].resources.limits.memory=-1Gi \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "negative execution-driver memory limit was accepted" >&2
+  exit 1
+fi
+grep -q 'resources.limits.memory must be a positive Kubernetes quantity' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].resources.requests.cpu=2 \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "execution-driver CPU request above its limit was accepted" >&2
+  exit 1
+fi
+grep -q 'resource requests must not exceed limits' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].resources.requests.memory=1Gi \
+  --set-string executionDrivers.registrations[0].resources.limits.memory=512Mi \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "execution-driver memory request above its limit was accepted" >&2
+  exit 1
+fi
+grep -q 'resource requests must not exceed limits' "${EXECUTION_DRIVER_FAILURE}"
+
+LARGE_DRIVER_ARGUMENT="$(python3 -c 'print("x" * 16384)')"
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].command[1]="${LARGE_DRIVER_ARGUMENT}" \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "oversized execution-driver command was accepted" >&2
+  exit 1
+fi
+grep -q 'command exceeds the 16 KiB aggregate bound' "${EXECUTION_DRIVER_FAILURE}"
 
 if helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \

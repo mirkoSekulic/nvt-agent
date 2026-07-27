@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,6 +153,57 @@ func TestServiceFailureInvalidatesAndLaterRestartsExactDriver(t *testing.T) {
 	status, err := remote.Reconcile(testContext(t), desired)
 	if err != nil || !status.Ready {
 		t.Fatalf("restart status=%#v error=%v", status, err)
+	}
+}
+
+func TestClientShutdownCancelsActiveOperationAndClosesAuthoritatively(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	var requests atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		close(started)
+		<-request.Context().Done()
+		close(canceled)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	remote := newClientForTLSServer(t, server)
+	operationDone := make(chan error, 1)
+	go func() {
+		_, err := remote.Observe(context.Background(), "blocked-operation")
+		operationDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("active operation did not reach the host")
+	}
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := remote.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("shutdown active client: %v", err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("driver-host request context was not canceled")
+	}
+	select {
+	case err := <-operationDone:
+		if err == nil {
+			t.Fatal("canceled operation unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active operation remained blocked after shutdown")
+	}
+	if _, err := remote.Observe(context.Background(), "after-shutdown"); !errors.Is(err, driverhost.ErrClosed) {
+		t.Fatalf("operation after shutdown error=%v, want ErrClosed", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("host received %d requests, want only the in-flight request", got)
 	}
 }
 

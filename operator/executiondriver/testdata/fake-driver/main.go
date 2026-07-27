@@ -101,6 +101,9 @@ func (d *driver) handle(line []byte) bool {
 		if mode == "hang-initialize" {
 			select {}
 		}
+		if mode == "slow-initialize" {
+			time.Sleep(1500 * time.Millisecond)
+		}
 		if mode == "clean-environment" && !hasExpectedCleanEnvironment() {
 			d.respondError(request.ID, "environment-invalid", "driver environment is invalid", false)
 			return false

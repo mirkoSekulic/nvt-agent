@@ -17,6 +17,14 @@ spec:
         {{- include "nvt.operatorSelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: nvt-operator
+      {{- if .Values.executionDrivers.registrations }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      {{- end }}
       containers:
         - name: manager
           image: {{ include "nvt.image" (dict "root" . "name" "operator.image" "image" .Values.operator.image) | quote }}
@@ -91,7 +99,7 @@ spec:
       volumes:
         - name: execution-driver-registrations
           projected:
-            defaultMode: 0400
+            defaultMode: 0440
             sources:
               - configMap:
                   name: nvt-execution-driver-registrations

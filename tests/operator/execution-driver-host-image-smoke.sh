@@ -47,6 +47,7 @@ docker run -d --name "${CONTAINER}" \
   -v "${WORKDIR}/auth:/auth:ro" \
   -v "${WORKDIR}/state:/state" \
   -e NVT_FAKE_DRIVER_STATE_DIR=/state \
+  -e NVT_FAKE_DRIVER_MODE=slow-initialize \
   --entrypoint /nvt-host/nvt-execution-driver-host \
   "${DRIVER_IMAGE}" \
   serve \
@@ -54,6 +55,7 @@ docker run -d --name "${CONTAINER}" \
   --driver-instance=fake-oci \
   --driver-command=/fake-driver \
   --pass-env=NVT_FAKE_DRIVER_STATE_DIR \
+  --pass-env=NVT_FAKE_DRIVER_MODE \
   --tls-cert=/auth/tls.crt \
   --tls-key=/auth/tls.key \
   --auth-token=/auth/auth-token \
@@ -61,6 +63,13 @@ docker run -d --name "${CONTAINER}" \
   --operation-timeout=5s >/dev/null
 
 [[ "${port}" =~ ^[0-9]+$ ]]
+if curl --silent --fail --noproxy '*' --connect-timeout 1 --max-time 1 \
+  --cacert "${WORKDIR}/auth/tls.crt" \
+  --resolve "nvt-driver.test:${port}:127.0.0.1" \
+  "https://nvt-driver.test:${port}/readyz" >/dev/null 2>&1; then
+  echo "execution driver host became ready before the slow initialization completed" >&2
+  exit 1
+fi
 ready=0
 for _ in $(seq 1 50); do
   if curl --silent --fail --noproxy '*' --cacert "${WORKDIR}/auth/tls.crt" \

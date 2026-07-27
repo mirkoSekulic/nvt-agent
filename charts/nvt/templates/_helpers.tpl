@@ -112,6 +112,24 @@ app.kubernetes.io/part-of: nvt
 {{- end -}}
 {{- end -}}
 
+{{- define "nvt.executionDriverQuantity" -}}
+{{- $raw := toString .value -}}
+{{- if not (regexMatch `^\+?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+|[numkMGTPE]|[KMGTPE]i)?$` $raw) -}}
+{{- fail (printf "execution driver %s %s must be a positive Kubernetes quantity" .name .field) -}}
+{{- end -}}
+{{- $value := 0.0 -}}
+{{- if regexMatch `[eE][+-]?[0-9]+$` $raw -}}
+{{- $value = float64 $raw -}}
+{{- else -}}
+{{- $suffix := regexFind `(?:[KMGTPE]i|[numkMGTPE])$` $raw -}}
+{{- $number := trimSuffix $suffix $raw | float64 -}}
+{{- $factors := dict "" "1" "n" "0.000000001" "u" "0.000001" "m" "0.001" "k" "1000" "M" "1000000" "G" "1000000000" "T" "1000000000000" "P" "1000000000000000" "E" "1000000000000000000" "Ki" "1024" "Mi" "1048576" "Gi" "1073741824" "Ti" "1099511627776" "Pi" "1125899906842624" "Ei" "1152921504606846976" -}}
+{{- $value = mulf $number (index $factors $suffix | float64) -}}
+{{- end -}}
+{{- if le $value 0.0 -}}{{ fail (printf "execution driver %s %s must be a positive Kubernetes quantity" .name .field) }}{{- end -}}
+{{- printf "%.17g" $value -}}
+{{- end -}}
+
 {{- define "nvt.validateExecutionDrivers" -}}
 {{- $registrations := .Values.executionDrivers.registrations -}}
 {{- if not (kindIs "slice" $registrations) -}}{{ fail "executionDrivers.registrations must be a list" }}{{- end -}}
@@ -125,8 +143,15 @@ app.kubernetes.io/part-of: nvt
 {{- $_ := set $seen $name true -}}
 {{- if not (regexMatch `^(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?/)(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*[a-z0-9]+(?:[._-][a-z0-9]+)*@sha256:[0-9a-f]{64}$` (default "" $registration.image)) -}}{{ fail (printf "execution driver %s image must be pinned by lowercase sha256 digest" $name) }}{{- end -}}
 {{- if or (not (kindIs "slice" $registration.command)) (eq (len $registration.command) 0) (gt (len $registration.command) 128) (not (regexMatch `^/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$` (first $registration.command))) -}}{{ fail (printf "execution driver %s command must begin with a canonical absolute executable path" $name) }}{{- end -}}
-{{- range $argument := $registration.command -}}{{- if or (not (kindIs "string" $argument)) (eq $argument "") -}}{{ fail (printf "execution driver %s command contains an invalid argument" $name) }}{{- end -}}{{- end -}}
+{{- $commandBytes := 0 -}}
+{{- range $argument := $registration.command -}}{{- if or (not (kindIs "string" $argument)) (eq $argument "") -}}{{ fail (printf "execution driver %s command contains an invalid argument" $name) }}{{- end -}}{{- $commandBytes = add $commandBytes (len $argument) -}}{{- end -}}
+{{- if gt $commandBytes 16384 -}}{{ fail (printf "execution driver %s command exceeds the 16 KiB aggregate bound" $name) }}{{- end -}}
 {{- if or (not $registration.resources) (not $registration.resources.requests.cpu) (not $registration.resources.requests.memory) (not $registration.resources.limits.cpu) (not $registration.resources.limits.memory) -}}{{ fail (printf "execution driver %s requires cpu/memory requests and limits" $name) }}{{- end -}}
+{{- $requestCPU := include "nvt.executionDriverQuantity" (dict "name" $name "field" "resources.requests.cpu" "value" $registration.resources.requests.cpu) | float64 -}}
+{{- $limitCPU := include "nvt.executionDriverQuantity" (dict "name" $name "field" "resources.limits.cpu" "value" $registration.resources.limits.cpu) | float64 -}}
+{{- $requestMemory := include "nvt.executionDriverQuantity" (dict "name" $name "field" "resources.requests.memory" "value" $registration.resources.requests.memory) | float64 -}}
+{{- $limitMemory := include "nvt.executionDriverQuantity" (dict "name" $name "field" "resources.limits.memory" "value" $registration.resources.limits.memory) | float64 -}}
+{{- if or (gt $requestCPU $limitCPU) (gt $requestMemory $limitMemory) -}}{{ fail (printf "execution driver %s resource requests must not exceed limits" $name) }}{{- end -}}
 {{- if not $registration.serviceAccount -}}{{ fail (printf "execution driver %s requires a ServiceAccount selection" $name) }}{{- end -}}
 {{- if and (not $registration.serviceAccount.create) (not $registration.serviceAccount.name) -}}{{ fail (printf "execution driver %s existing ServiceAccount name is required" $name) }}{{- end -}}
 {{- range $key, $value := (default (dict) $registration.serviceAccount.podLabels) -}}{{- if or (hasPrefix "app.kubernetes.io/" $key) (hasPrefix "nvt.dev/" $key) -}}{{ fail (printf "execution driver %s workload-identity Pod label uses a reserved key" $name) }}{{- end -}}{{- end -}}

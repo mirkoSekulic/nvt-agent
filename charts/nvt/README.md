@@ -396,6 +396,14 @@ are trusted control-plane extensions, not sandboxes. Infrastructure credentials
 must be scoped to the matching registration. The operator receives only host
 transport CA/token material, never provider credentials.
 
+Helm validates the same load-bearing registration bounds as the host contract:
+the command is capped at 128 arguments and 16 KiB aggregate text, and CPU and
+memory requests/limits must be positive Kubernetes quantities with each request
+no greater than its limit. Kubernetes admission remains authoritative for the
+full syntax of arbitrary annotations, labels, extended resources, and Secret
+object existence; those API-owned checks are not duplicated as a second chart
+policy.
+
 Scheduling fields in the shared template are passed to the generated agent Pod:
 
 ```yaml

@@ -217,11 +217,15 @@ type ClientConfig struct {
 }
 
 type Client struct {
-	baseURL    *url.URL
-	token      []byte
-	httpClient *http.Client
-	mu         sync.Mutex
-	closed     bool
+	baseURL        *url.URL
+	token          []byte
+	httpClient     *http.Client
+	lifetime       context.Context
+	cancelLifetime context.CancelFunc
+	mu             sync.Mutex
+	closed         bool
+	active         int
+	idle           chan struct{}
 }
 
 var _ host.Client = (*Client)(nil)
@@ -246,8 +250,21 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: config.ServerName}}
-	return &Client{baseURL: endpoint, token: token, httpClient: &http.Client{Transport: transport, Timeout: config.RequestTimeout}}, nil
+	transport := &http.Transport{
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: config.ServerName},
+		ForceAttemptHTTP2: true,
+	}
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
+	idle := make(chan struct{})
+	close(idle)
+	return &Client{
+		baseURL:        endpoint,
+		token:          token,
+		httpClient:     &http.Client{Transport: transport, Timeout: config.RequestTimeout},
+		lifetime:       lifetime,
+		cancelLifetime: cancelLifetime,
+		idle:           idle,
+	}, nil
 }
 
 func (c *Client) Reconcile(ctx context.Context, desired executiondriver.DesiredExecution) (executiondriver.Status, error) {
@@ -278,14 +295,27 @@ func (c *Client) operation(ctx context.Context, path string, value any) (executi
 		c.mu.Unlock()
 		return executiondriver.Status{}, host.ErrClosed
 	}
+	if c.active == 0 {
+		c.idle = make(chan struct{})
+	}
+	c.active++
 	token := append([]byte(nil), c.token...)
+	lifetime := c.lifetime
 	c.mu.Unlock()
+	defer c.finishOperation()
+
+	requestContext, cancelRequest := context.WithCancel(ctx)
+	stopLifetimeCancellation := context.AfterFunc(lifetime, cancelRequest)
+	defer func() {
+		stopLifetimeCancellation()
+		cancelRequest()
+	}()
 	payload, err := json.Marshal(value)
 	if err != nil || len(payload) > MaxBodyBytes {
 		return executiondriver.Status{}, errors.New("execution driver host request is invalid")
 	}
 	endpoint := c.baseURL.ResolveReference(&url.URL{Path: path})
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
 	if err != nil {
 		return executiondriver.Status{}, errors.New("execution driver host request could not be created")
 	}
@@ -319,6 +349,15 @@ func (c *Client) operation(ctx context.Context, path string, value any) (executi
 	return *result.Status, nil
 }
 
+func (c *Client) finishOperation() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.active--
+	if c.active == 0 {
+		close(c.idle)
+	}
+}
+
 func validateOperationStatus(path string, status executiondriver.Status) error {
 	switch path {
 	case "/v1/reconcile":
@@ -332,15 +371,26 @@ func validateOperationStatus(path string, status executiondriver.Status) error {
 	}
 }
 
-func (c *Client) Shutdown(context.Context) error {
+func (c *Client) Shutdown(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil
+	if !c.closed {
+		c.closed = true
+		c.cancelLifetime()
+		c.httpClient.CloseIdleConnections()
 	}
-	c.closed = true
-	c.httpClient.CloseIdleConnections()
-	return nil
+	idle := c.idle
+	c.mu.Unlock()
+	select {
+	case <-idle:
+		return nil
+	default:
+	}
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) String() string {
