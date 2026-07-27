@@ -84,6 +84,38 @@ spec:
                         minLength: 1
                         maxLength: 63
                         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                executionClasses:
+                  description: Administrator-owned opaque execution-driver configurations.
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - name
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - kind
+                      - driver
+                      - configuration
+                    properties:
+                      name:
+                        type: string
+                        minLength: 1
+                        maxLength: 63
+                        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                      kind:
+                        type: string
+                        enum:
+                          - pod
+                          - vm
+                      driver:
+                        type: string
+                        minLength: 1
+                        maxLength: 63
+                        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                      configuration:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
                 template:
                   type: object
                   required:
@@ -349,6 +381,28 @@ spec:
                       agentRuntimeConfig:
                         type: object
                         x-kubernetes-preserve-unknown-fields: true
+                      execution:
+                        description: Operator-owned execution selection. Omitted means the built-in Kubernetes Pod backend.
+                        type: object
+                        required:
+                          - kind
+                          - driver
+                        properties:
+                          kind:
+                            type: string
+                            enum:
+                              - pod
+                              - vm
+                          driver:
+                            type: string
+                            minLength: 1
+                            maxLength: 63
+                            pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                          classRef:
+                            type: string
+                            minLength: 1
+                            maxLength: 63
+                            pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
                       workspaceInstructions:
                         type: string
                         maxLength: 65536

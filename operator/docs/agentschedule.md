@@ -27,6 +27,56 @@ The operator inserts
 `profile.agentRuntimeConfig` as `AgentRun.spec.agent.config.runtime`. This is an
 explicit replacement boundary, not an arbitrary merge patch.
 
+### Execution selection
+
+Execution selection is administrator-owned. Omitting `execution` from a
+profile preserves the existing built-in Kubernetes Pod path byte-for-byte. An
+explicit built-in selection is equivalent:
+
+```yaml
+profiles:
+  - name: codex-default
+    execution:
+      kind: pod
+      driver: kubernetes
+    # runtime, agentRuntimeConfig, egress, and broker fields omitted
+```
+
+External drivers use a logical name and one exact operator-owned class. Class
+configuration is opaque JSON, bounded to 256 KiB, and snapshotted into the
+resolved AgentRun so later schedule changes cannot alter an accepted run:
+
+```yaml
+executionClasses:
+  - name: vm-standard
+    kind: vm
+    driver: example-vm
+    configuration:
+      cpu: 4
+      network:
+        isolation: required
+profiles:
+  - name: codex-vm
+    execution:
+      kind: vm
+      driver: example-vm
+      classRef: vm-standard
+    # remaining profile-owned fields omitted
+```
+
+The profile kind and driver must match the named class exactly. Missing,
+unknown, or mismatched selections fail before an agent Pod is created and
+never fall back to Kubernetes or another driver. This release registers only
+the built-in `pod`/`kubernetes` adapter; external selections report the stable
+`ExecutionDriverUnavailable` condition until a future dedicated driver-host
+integration is installed. Class configuration must not contain credentials;
+future driver credentials remain a separate operator-owned projection.
+
+Producer admission can select only its authorized workflow and immutable work
+principal as documented below. It cannot name an execution profile, class,
+driver source, executable, environment, credentials, or arbitrary driver
+configuration.
+
 `workspaceInstructions` is administrator-owned, reusable workflow guidance.
 The selected value is snapshotted into the resolved AgentRun and appended to
 the generated workspace `AGENTS.md`; it never replaces nvt's platform guidance.

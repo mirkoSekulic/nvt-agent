@@ -115,9 +115,9 @@ type InitializeResult struct {
 }
 
 // DesiredExecution is an operator-owned, level-triggered desired state. The
-// driver-specific configuration must be a JSON object. It is deliberately not
-// part of the producer or AgentRun API in this protocol-only phase. Generation
-// and DesiredFingerprint identify the complete workload-kind, class-name, and
+// driver-specific configuration must be a JSON object resolved exclusively
+// from operator-owned execution selection; producers cannot supply it.
+// Generation and DesiredFingerprint identify the complete workload-kind, class-name, and
 // resolved-configuration tuple and must change together whenever any tuple
 // member changes. The driver treats DesiredFingerprint as opaque.
 type DesiredExecution struct {

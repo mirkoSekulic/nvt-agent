@@ -129,6 +129,24 @@ schedule onto matching tainted nodes, but a toleration does not select a node or
 remove the taint. The separate egress service Pod and platform Deployments do
 not inherit AgentRun tolerations.
 
+`execution` is an immutable operator-resolved backend snapshot. Omission is
+backward compatible and selects the built-in `pod`/`kubernetes` adapter. The
+equivalent explicit form is:
+
+```yaml
+execution:
+  kind: pod
+  driver: kubernetes
+```
+
+An external selection additionally records its exact `classRef` and a bounded
+opaque configuration copied from the administrator-owned AgentSchedule
+execution class. The operator never derives this from producer input. Unknown
+drivers and kind/driver/class mismatches fail closed with a portable execution
+condition and no Kubernetes Pod fallback. Deletion uses the same resolved
+backend; old stored AgentRuns with no `execution` field continue to reconcile
+and delete through Kubernetes.
+
 `runtime.container.capabilities.add` optionally adds valid Linux capabilities
 to the untrusted Kubernetes/OCI `agent` container only:
 

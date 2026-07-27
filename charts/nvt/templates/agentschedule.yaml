@@ -21,6 +21,10 @@ spec:
   template:
     {{- toYaml $template | nindent 4 }}
   {{- end }}
+  {{- with .Values.agentSchedule.executionClasses }}
+  executionClasses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- with .Values.agentSchedule.profiles }}
   profiles:
     {{- toYaml . | nindent 4 }}

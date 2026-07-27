@@ -5,11 +5,11 @@ a trusted execution implementation. It describes convergence and observation
 of one approved execution independently of process or deployment topology.
 
 `operator/executiondriver/host` provides a trusted local-executable transport
-for this contract, but it is not configured or called by AgentRun reconciliation
-in this phase. Pod-backed AgentRuns therefore render and reconcile exactly as
-before. Production registration, immutable Git acquisition, execution
-profiles/classes, the Kubernetes adapter, and production VM drivers are
-separate work.
+and the operator has a separate immutable public-Git artifact resolver, but
+neither is configured or called by AgentRun reconciliation in this phase.
+AgentRun execution selection registers only the behavior-preserving built-in
+Kubernetes Pod adapter. A dedicated driver-host workload, production
+registration, and production VM drivers remain separate work.
 
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
@@ -196,8 +196,8 @@ status. Every `reconcile` must observe provider state and repair drift toward
 the unchanged desired tuple while preserving the same logical resource.
 
 The configuration is a bounded JSON object resolved from administrator-owned
-class configuration. It is not an AgentRun producer surface in this protocol
-phase and must not carry credentials; future driver hosts provide explicitly
+class configuration. It is never an AgentRun producer surface and must not
+carry credentials; future driver hosts provide explicitly
 allowlisted provider credentials outside desired state.
 
 ```json

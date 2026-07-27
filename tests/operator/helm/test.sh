@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.29" || "${CHART_APP_VERSION}" != "0.8.29" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.29, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.30" || "${CHART_APP_VERSION}" != "0.8.30" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.30, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.29' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.30' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -652,6 +652,11 @@ fi
 grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 0.1 scalar image values before upgrading' "${LEGACY_IMAGE_FAILURE}"
 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
+grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'name: vm-standard'
+grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'driver: example-vm'
+grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'isolation: required'
+grep -A3 '^      execution:' "${PROFILE_RENDER}" | grep -q 'kind: pod'
+grep -A3 '^      execution:' "${PROFILE_RENDER}" | grep -q 'driver: kubernetes'
 grep -q 'provider: codex-main' "${PROFILE_RENDER}"
 grep -q 'provider: github-main-app' "${PROFILE_RENDER}"
 grep -q 'egressMaxConcurrentTunnels: 512' "${PROFILE_RENDER}"
