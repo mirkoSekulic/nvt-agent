@@ -176,32 +176,18 @@ func TestGuestEnrollmentAuthenticatesBeforeBodyAndReservesRevocationCapacity(t *
 	}
 
 	const exchangeHTTPBound = 64
-	slow := make([]net.Conn, 0, exchangeHTTPBound)
+	slow := saturateEnrollmentRequestSlots(t, fixture, guestEnrollmentExchangePath, "", exchangeHTTPBound)
 	t.Cleanup(func() {
 		for _, connection := range slow {
 			_ = connection.Close()
 		}
 	})
-	for range exchangeHTTPBound {
-		slow = append(slow, openIncompleteEnrollmentRequest(t, fixture, guestEnrollmentExchangePath, ""))
-	}
-
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		status, body := fixture.postEnrollmentRaw("", guestEnrollmentExchangePath, []byte(`{}`))
-		if status == http.StatusTooManyRequests {
-			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
-			break
-		}
-		if status != http.StatusBadRequest || time.Now().After(deadline) {
-			t.Fatalf("enrollment HTTP concurrency bound was not enforced: status=%d body=%v", status, body)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	status, body := fixture.postEnrollmentRaw("", guestEnrollmentExchangePath, []byte(`{}`))
+	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
 
 	request := enrollmentIssueRequest("saturated-uid", "saturated-execution", 1, "saturated-guest", 300)
 	started := time.Now()
-	status, body := fixture.postJSONWithToken(
+	status, body = fixture.postJSONWithToken(
 		guestEnrollmentOrchestrator,
 		guestEnrollmentRevokeExecution,
 		enrollmentRevokeExecutionRequest(request),
@@ -215,28 +201,14 @@ func TestGuestEnrollmentAuthenticatesBeforeBodyAndReservesRevocationCapacity(t *
 func TestGuestEnrollmentControlRequestBodiesHaveIndependentBound(t *testing.T) {
 	fixture := newGuestEnrollmentBrokerFixture(t)
 	const controlHTTPBound = 16
-	slow := make([]net.Conn, 0, controlHTTPBound)
+	slow := saturateEnrollmentRequestSlots(t, fixture, guestEnrollmentIssuePath, guestEnrollmentOrchestrator, controlHTTPBound)
 	t.Cleanup(func() {
 		for _, connection := range slow {
 			_ = connection.Close()
 		}
 	})
-	for range controlHTTPBound {
-		slow = append(slow, openIncompleteEnrollmentRequest(t, fixture, guestEnrollmentIssuePath, guestEnrollmentOrchestrator))
-	}
-
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		status, body := fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, []byte(`{}`))
-		if status == http.StatusTooManyRequests {
-			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
-			return
-		}
-		if status != http.StatusBadRequest || time.Now().After(deadline) {
-			t.Fatalf("control-plane HTTP concurrency bound was not enforced: status=%d body=%v", status, body)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	status, body := fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, []byte(`{}`))
+	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
 }
 
 func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) {
@@ -314,6 +286,46 @@ func openIncompleteEnrollmentRequest(t *testing.T, fixture *brokerFixture, path,
 		t.Fatal(err)
 	}
 	return connection
+}
+
+// saturateEnrollmentRequestSlots observes a rejected incomplete request before
+// returning. Merely opening exactly bound sockets races handler admission on a
+// loaded runner and does not prove that every semaphore slot is occupied.
+func saturateEnrollmentRequestSlots(t *testing.T, fixture *brokerFixture, path, token string, bound int) []net.Conn {
+	t.Helper()
+	connections := make([]net.Conn, 0, bound+32)
+	for range bound {
+		connections = append(connections, openIncompleteEnrollmentRequest(t, fixture, path, token))
+	}
+	for range 32 {
+		connection := openIncompleteEnrollmentRequest(t, fixture, path, token)
+		if err := connection.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			_ = connection.Close()
+			t.Fatal(err)
+		}
+		status, err := bufio.NewReader(connection).ReadString('\n')
+		if err == nil {
+			_ = connection.Close()
+			if strings.Contains(status, " 429 ") {
+				return connections
+			}
+			t.Fatalf("incomplete enrollment request was unexpectedly answered: %q", strings.TrimSpace(status))
+		}
+		if networkError, ok := err.(net.Error); !ok || !networkError.Timeout() {
+			_ = connection.Close()
+			t.Fatalf("wait for enrollment request admission: %v", err)
+		}
+		if err := connection.SetReadDeadline(time.Time{}); err != nil {
+			_ = connection.Close()
+			t.Fatal(err)
+		}
+		connections = append(connections, connection)
+	}
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	t.Fatal("enrollment request slots did not reach their configured bound")
+	return nil
 }
 
 func enrollmentIssueRequest(uid, execution string, generation int64, guest string, ttl int) map[string]any {
