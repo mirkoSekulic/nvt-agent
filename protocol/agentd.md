@@ -1,6 +1,6 @@
 # agentd Protocol
 
-`agentd` is the container-local session API. It runs inside the agent
+`nvt.agentd/v1` is the current `agentd` session API contract. `agentd` runs inside the agent
 container and listens on a Unix socket.
 
 Default socket:

@@ -11,6 +11,12 @@ execution-driver runtime contract. AgentRun execution selects either the
 behavior-preserving built-in Kubernetes Pod adapter or one exact registered
 external driver host. Production provider drivers remain separate work.
 
+The complete driver image is distinct from the
+[native guest host bundle](host-bundle.md). The driver image is an executable
+control-plane workload. The host bundle is a non-runnable OCI artifact that a
+future provider driver installs by digest inside a provisioned Linux guest.
+Neither contract uses Git acquisition in production.
+
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
 not expose credentials, provider response bodies, request headers, or other

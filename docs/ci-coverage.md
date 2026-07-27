@@ -8,6 +8,7 @@ precise and every hermetic suite has a clear home.
 - `captured/go.mod` → `network.yml / captured`
 - `egressd/go.mod` → `network.yml / egressd`
 - `gateway/go.mod` → `kubernetes.yml / gateway`
+- `hostbundle/go.mod` → `host-bundle.yml / host-bundle`
 - `operator/go.mod` → `kubernetes.yml / operator` and `kubernetes.yml / operator-helm`
 - `producers/github-comments/go.mod` → `kubernetes.yml / producer`
 - `tests/agentd/go.mod` → `runtime.yml / agentd`
@@ -124,6 +125,16 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
   (the host matrix entry copies the coordinated static host into the complete
   fake provider image and exercises authenticated protocol traffic)
 
+### native host bundle
+
+- `hostbundle/contract`, `bundle`, `oci`, and `install` adversarial tests →
+  `host-bundle.yml / host-bundle`
+- `hostbundle/guest_e2e_test.go` → `host-bundle.yml / host-bundle`; it builds an
+  OCI layout, pulls by digest from a hermetic TLS registry, installs and
+  activates natively, starts the installed supervisor and real `agentd`,
+  delivers a prompt, restarts, and proves idempotent reuse. This is guest-side
+  Linux coverage, not a real provider VM proof.
+
 ### kind workflow case files
 
 `kind.yml` uses a PR tier for the three fast/representative cases and a full
@@ -167,5 +178,7 @@ The harness and helper scripts are not standalone cases:
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage
 - `images.yml`: all shipped/test fixture images plus the runtime git-credentials
   smoke
+- `host-bundle.yml`: native bundle trusted-core tests and guest-side lifecycle
+  E2E
 - `kind.yml`: mediated, enforced, transparent, quota, revocation, and
   parallel-lifecycle kind cases

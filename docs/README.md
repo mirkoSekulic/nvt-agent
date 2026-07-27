@@ -37,6 +37,8 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   transport.
 - [Execution drivers](../protocol/execution-driver.md): portable trusted-driver
   lifecycle, status, and cleanup contract.
+- [Native host bundle](../protocol/host-bundle.md): digest-pinned OCI artifact,
+  native guest installation, activation, and service boundary.
 
 ## Operations And Testing
 

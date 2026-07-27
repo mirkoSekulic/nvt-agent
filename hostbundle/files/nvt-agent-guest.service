@@ -1,0 +1,25 @@
+[Unit]
+Description=NVT Agent native guest supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvt-agent
+Group=nvt-agent
+RuntimeDirectory=nvt-agent
+StateDirectory=nvt-agent
+WorkingDirectory=/workspace
+ExecStart=/opt/nvt/current/bin/nvt-guest-supervisor --config /etc/nvt-agent/guest.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/nvt
+ReadWritePaths=/workspace /run/nvt-agent /var/lib/nvt-agent
+
+[Install]
+WantedBy=multi-user.target
