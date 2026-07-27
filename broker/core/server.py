@@ -2,7 +2,9 @@ import json
 import os
 import re
 import signal
+import socket
 import ssl
+import sys
 import threading
 import time
 import uuid
@@ -13,6 +15,19 @@ from broker.core.audit import AuditLog
 from broker.core.agents import AgentRegistry
 from broker.core.config import BrokerConfigError, load_config
 from broker.core.errors import ProviderError
+from broker.core.guest_enrollment import (
+    ENDPOINT_LIMITS as GUEST_ENROLLMENT_ENDPOINT_LIMITS,
+    EXCHANGE_PATH as GUEST_ENROLLMENT_EXCHANGE_PATH,
+    ISSUE_PATH as GUEST_ENROLLMENT_ISSUE_PATH,
+    REVOKE_BINDING_PATH as GUEST_ENROLLMENT_REVOKE_BINDING_PATH,
+    REVOKE_EXECUTION_PATH as GUEST_ENROLLMENT_REVOKE_EXECUTION_PATH,
+    EnrollmentConfigError,
+    EnrollmentFailure,
+    decode_exchange_request,
+    decode_issue_request,
+    decode_revoke_request,
+    load_guest_enrollment_from_environment,
+)
 from broker.core.providers import load_providers
 
 
@@ -33,6 +48,134 @@ PATH_CLASS_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 # only credential-shaped value allowed inside a mediated agent container.
 INJECTION_PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 MAX_IDENTITY_FIELD_BYTES = 512
+MAX_BROKER_HTTP_CONNECTIONS = 128
+BROKER_HEADER_TIMEOUT_SECONDS = 10
+MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES = 64
+MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS = 16
+GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
+
+
+class _AbsoluteSocketDeadline:
+    """Interrupt socket I/O at one monotonic deadline regardless of progress."""
+
+    def __init__(self, connection, timeout):
+        self._connection = connection
+        self._expires_at = time.monotonic() + timeout
+        self._lock = threading.Lock()
+        self._active = False
+        self._expired = False
+        self._timer = None
+
+    def start(self):
+        with self._lock:
+            if self._active or self._timer is not None:
+                raise RuntimeError("socket deadline cannot be reused")
+            remaining = max(0.0, self._expires_at - time.monotonic())
+            self._connection.settimeout(remaining)
+            self._active = True
+            self._timer = threading.Timer(remaining, self._expire)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def cancel(self):
+        with self._lock:
+            self._active = False
+            timer = self._timer
+            expired = self._expired or time.monotonic() >= self._expires_at
+            self._expired = expired
+        if timer is not None:
+            timer.cancel()
+        if expired:
+            try:
+                self._connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        return not expired
+
+    def _expire(self):
+        with self._lock:
+            if not self._active:
+                return
+            self._active = False
+            self._expired = True
+        try:
+            self._connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Bound accepted connections, TLS handshakes, and header parsing."""
+
+    def __init__(
+        self,
+        server_address,
+        request_handler_class,
+        *,
+        max_connections=MAX_BROKER_HTTP_CONNECTIONS,
+        header_timeout=BROKER_HEADER_TIMEOUT_SECONDS,
+        body_timeout=GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS,
+        tls_context=None,
+    ):
+        if not isinstance(max_connections, int) or max_connections < 1:
+            raise ValueError("broker HTTP connection bound is invalid")
+        if not isinstance(header_timeout, (int, float)) or header_timeout <= 0:
+            raise ValueError("broker HTTP header timeout is invalid")
+        if not isinstance(body_timeout, (int, float)) or body_timeout <= 0:
+            raise ValueError("broker HTTP body timeout is invalid")
+        self._connection_slots = threading.BoundedSemaphore(max_connections)
+        self._header_timeout = float(header_timeout)
+        self._body_timeout = float(body_timeout)
+        if tls_context is not None and not isinstance(tls_context, ssl.SSLContext):
+            raise ValueError("broker TLS context is invalid")
+        self._tls_context = tls_context
+        super().__init__(server_address, request_handler_class)
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self._header_timeout)
+        return request, client_address
+
+    def process_request(self, request, client_address):
+        if not self._connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            if self._tls_context is not None:
+                deadline = None
+                try:
+                    request = self._tls_context.wrap_socket(
+                        request,
+                        server_side=True,
+                        do_handshake_on_connect=False,
+                    )
+                    deadline = _AbsoluteSocketDeadline(request, self._header_timeout)
+                    deadline.start()
+                    request.do_handshake()
+                except OSError:
+                    if deadline is not None:
+                        deadline.cancel()
+                    self.shutdown_request(request)
+                    return
+                if not deadline.cancel():
+                    self.shutdown_request(request)
+                    return
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class Broker:
@@ -41,8 +184,17 @@ class Broker:
         self.providers = load_providers(self.config)
         self.audit = AuditLog(audit_path)
         self.agents = AgentRegistry()
+        try:
+            self.guest_enrollment, self.guest_enrollment_orchestrator = load_guest_enrollment_from_environment()
+        except EnrollmentConfigError as error:
+            for provider in self.providers.values():
+                provider.close()
+            raise BrokerConfigError(str(error)) from error
 
     def close(self):
+        guest_enrollment = getattr(self, "guest_enrollment", None)
+        if guest_enrollment is not None:
+            guest_enrollment.close()
         for provider in self.providers.values():
             provider.close()
 
@@ -61,6 +213,9 @@ class Broker:
 
     def readiness(self):
         """Provider-owned acceptance readiness without upstream operations."""
+        guest_enrollment = getattr(self, "guest_enrollment", None)
+        if guest_enrollment is not None and not guest_enrollment.ready():
+            return {"ok": False, "status": "unready"}
         for provider in self.providers.values():
             try:
                 if not provider.ready or not provider.validate_state():
@@ -70,6 +225,63 @@ class Broker:
                 # readiness deliberately exposes neither their text nor state.
                 return {"ok": False, "status": "unready"}
         return {"ok": True, "status": "ready"}
+
+    def guest_enrollment_issue(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            result = self.guest_enrollment.issue(decode_issue_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.issue", allowed=True)
+        return result
+
+    def guest_enrollment_exchange(self, request_id, raw_payload):
+        self._require_guest_enrollment()
+        try:
+            result = self.guest_enrollment.exchange(decode_exchange_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=None, operation="guest-enrollment.exchange", allowed=True)
+        return result
+
+    def guest_enrollment_revoke_binding(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            self.guest_enrollment.revoke_binding(decode_revoke_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.revoke-binding", allowed=True)
+        return {"ok": True}
+
+    def guest_enrollment_revoke_execution(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            self.guest_enrollment.revoke_execution(decode_revoke_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.revoke-execution", allowed=True)
+        return {"ok": True}
+
+    def _require_guest_enrollment(self):
+        if self.guest_enrollment is None:
+            raise ProviderError("not-found", "not-found", 404)
+
+    def _authenticate_guest_enrollment_orchestrator(self, authorization):
+        try:
+            self.agents.authenticate(authorization)
+        except ProviderError:
+            pass
+        else:
+            # Keep this authority disjoint even if an installation
+            # accidentally reuses the same plaintext in both Secret sources.
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        try:
+            return self.guest_enrollment_orchestrator.authenticate(authorization)
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
 
     def provider(self, name):
         provider = self.providers.get(name)
@@ -531,11 +743,43 @@ def operation_from_path(path):
 
 
 def make_handler(broker):
+    # Public pre-enrollment exchange traffic and trusted control-plane traffic
+    # have independent bounds. Saturating exchange cannot consume the slots
+    # required for authoritative execution revocation.
+    guest_exchange_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES)
+    guest_control_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "nvt-brokerd/0.1"
 
         def log_message(self, format, *args):
             return
+
+        def handle_one_request(self):
+            self._header_deadline = _AbsoluteSocketDeadline(
+                self.connection,
+                self.server._header_timeout,
+            )
+            self._header_deadline.start()
+            try:
+                super().handle_one_request()
+            finally:
+                self._cancel_header_deadline()
+
+        def parse_request(self):
+            parsed = False
+            try:
+                parsed = super().parse_request()
+            finally:
+                within_deadline = self._cancel_header_deadline()
+            return parsed and within_deadline
+
+        def _cancel_header_deadline(self):
+            deadline = getattr(self, "_header_deadline", None)
+            if deadline is None:
+                return True
+            self._header_deadline = None
+            return deadline.cancel()
 
         def do_GET(self):
             if self.path == "/health":
@@ -551,6 +795,32 @@ def make_handler(broker):
             request_id = str(uuid.uuid4())
             payload = {}
             try:
+                if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS:
+                    broker._require_guest_enrollment()
+                    authorization = self.headers.get("authorization")
+                    request_slots = guest_exchange_requests
+                    if self.path != GUEST_ENROLLMENT_EXCHANGE_PATH:
+                        broker._authenticate_guest_enrollment_orchestrator(authorization)
+                        request_slots = guest_control_requests
+                    request_admitted = request_slots.acquire(blocking=False)
+                    if not request_admitted:
+                        raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
+                    try:
+                        raw_payload = self.read_enrollment_body(
+                            GUEST_ENROLLMENT_ENDPOINT_LIMITS[self.path],
+                        )
+                        if self.path == GUEST_ENROLLMENT_ISSUE_PATH:
+                            response = broker.guest_enrollment_issue(request_id, raw_payload, authorization)
+                        elif self.path == GUEST_ENROLLMENT_EXCHANGE_PATH:
+                            response = broker.guest_enrollment_exchange(request_id, raw_payload)
+                        elif self.path == GUEST_ENROLLMENT_REVOKE_BINDING_PATH:
+                            response = broker.guest_enrollment_revoke_binding(request_id, raw_payload, authorization)
+                        else:
+                            response = broker.guest_enrollment_revoke_execution(request_id, raw_payload, authorization)
+                        self.write_json(200, response)
+                        return
+                    finally:
+                        request_slots.release()
                 payload = self.read_payload()
                 if self.path == "/v1/http/request":
                     response = broker.http_request(request_id, payload, self.headers.get("authorization"))
@@ -592,19 +862,47 @@ def make_handler(broker):
             except ProviderError as error:
                 self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization"), operation_from_path(self.path)))
             except Exception as error:
-                self.write_json(500, broker.denied(request_id, payload, "internal-error", str(error), self.headers.get("authorization"), operation_from_path(self.path)))
+                message = "internal-error" if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS else str(error)
+                self.write_json(500, broker.denied(request_id, payload, "internal-error", message, self.headers.get("authorization"), operation_from_path(self.path)))
 
         def read_payload(self):
-            length = int(self.headers.get("content-length") or "0")
-            if length <= 0 or length > MAX_REQUEST_BYTES:
-                raise ProviderError("request-size-invalid")
+            raw_payload = self.read_body(MAX_REQUEST_BYTES)
             try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            except json.JSONDecodeError:
+                payload = json.loads(raw_payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 raise ProviderError("malformed-json")
             if not isinstance(payload, dict):
                 raise ProviderError("request-not-object")
             return payload
+
+        def read_body(self, maximum, error_reason="request-size-invalid"):
+            try:
+                length = int(self.headers.get("content-length") or "0")
+            except ValueError:
+                raise ProviderError(error_reason)
+            if length <= 0 or length > maximum:
+                raise ProviderError(error_reason)
+            try:
+                body = self.rfile.read(length)
+            except TimeoutError as error:
+                raise ProviderError(error_reason) from error
+            if len(body) != length:
+                raise ProviderError(error_reason)
+            return body
+
+        def read_enrollment_body(self, maximum):
+            deadline = _AbsoluteSocketDeadline(
+                self.connection,
+                self.server._body_timeout,
+            )
+            deadline.start()
+            try:
+                body = self.read_body(maximum, "invalid-request")
+            finally:
+                within_deadline = deadline.cancel()
+            if not within_deadline:
+                raise ProviderError("invalid-request")
+            return body
 
         def write_json(self, status, payload):
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -623,15 +921,19 @@ def serve(bind, config_path=None, audit_path=None):
     previous_sigterm = None
     try:
         host, port = parse_bind(bind)
-        server = ThreadingHTTPServer((host, port), make_handler(broker))
         cert = os.environ.get("NVT_BROKER_TLS_CERT")
         key = os.environ.get("NVT_BROKER_TLS_KEY")
         if bool(cert) != bool(key):
             raise BrokerConfigError("NVT_BROKER_TLS_CERT and NVT_BROKER_TLS_KEY must be set together")
+        context = None
         if cert and key:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certfile=cert, keyfile=key)
-            server.socket = context.wrap_socket(server.socket, server_side=True)
+        server = BoundedThreadingHTTPServer(
+            (host, port),
+            make_handler(broker),
+            tls_context=context,
+        )
 
         def stop_for_sigterm(_signum, _frame):
             # HTTPServer.shutdown must run outside serve_forever's thread.
@@ -653,3 +955,7 @@ def parse_bind(bind):
         raise BrokerConfigError("bind must be host:port")
     host, port = bind.rsplit(":", 1)
     return host, int(port)
+
+
+def _guest_enrollment_provider_error(error):
+    return ProviderError(error.reason, error.reason, error.status)

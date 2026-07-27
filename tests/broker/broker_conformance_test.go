@@ -396,8 +396,32 @@ type brokerFixture struct {
 	codexClaimHeaders string
 	codexExtraConfig  string
 	claudeExtraConfig string
-	stdout            bytes.Buffer
-	stderr            bytes.Buffer
+	extraEnv          []string
+	stdout            synchronizedBuffer
+	stderr            synchronizedBuffer
+}
+
+type synchronizedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *synchronizedBuffer) Write(value []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(value)
+}
+
+func (buffer *synchronizedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
+}
+
+func (buffer *synchronizedBuffer) Bytes() []byte {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return bytes.Clone(buffer.buffer.Bytes())
 }
 
 func newBrokerFixture(t *testing.T) *brokerFixture {
@@ -413,6 +437,13 @@ func newBrokerFixtureWithClaudeConfig(t *testing.T, claudeExtraConfig string) *b
 }
 
 func newBrokerFixtureWithProviderConfig(t *testing.T, codexExtraConfig, claudeExtraConfig string) *brokerFixture {
+	f := newBrokerFixtureBase(t, codexExtraConfig, claudeExtraConfig)
+	f.start()
+	t.Cleanup(f.stop)
+	return f
+}
+
+func newBrokerFixtureBase(t *testing.T, codexExtraConfig, claudeExtraConfig string) *brokerFixture {
 	t.Helper()
 	fake := newFakeGitHub(t)
 	oauth := newFakeOAuth(t)
@@ -454,8 +485,6 @@ func newBrokerFixtureWithProviderConfig(t *testing.T, codexExtraConfig, claudeEx
 			},
 		},
 	})
-	f.start()
-	t.Cleanup(f.stop)
 	return f
 }
 
@@ -680,7 +709,13 @@ func (f *brokerFixture) writeClaudeCredentialsExpiring(accessToken, refreshToken
 func (f *brokerFixture) start() {
 	f.t.Helper()
 	cmd := exec.Command("python3", filepath.Join(f.root, "broker", "brokerd.py"))
-	cmd.Env = append(os.Environ(),
+	cleanEnvironment := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "NVT_BROKER_GUEST_ENROLLMENT_") {
+			cleanEnvironment = append(cleanEnvironment, entry)
+		}
+	}
+	cmd.Env = append(cleanEnvironment,
 		"NVT_BROKER_CONFIG="+f.config,
 		"NVT_BROKER_AGENTS_CONFIG="+f.agents,
 		"NVT_BROKER_BIND="+f.bind,
@@ -694,6 +729,7 @@ func (f *brokerFixture) start() {
 		"TEST_PLACEHOLDER_ACCESS=real-placeholder-access-token-secret",
 		"TEST_PLACEHOLDER_ID=real-placeholder-id-token-secret",
 	)
+	cmd.Env = append(cmd.Env, f.extraEnv...)
 	cmd.Stdout = &f.stdout
 	cmd.Stderr = &f.stderr
 	if err := cmd.Start(); err != nil {
@@ -716,6 +752,7 @@ func (f *brokerFixture) stop() {
 	}
 	_ = f.broker.Process.Kill()
 	_ = f.broker.Wait()
+	f.broker = nil
 }
 
 type agentGrant struct {

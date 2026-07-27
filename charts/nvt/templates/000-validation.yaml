@@ -1,2 +1,5 @@
 {{- include "nvt.validateImageValues" . -}}
 {{- include "nvt.validateExecutionDrivers" . -}}
+{{- if and .Values.broker.guestEnrollment.enabled (not .Values.broker.enabled) -}}
+{{- fail "broker.guestEnrollment.enabled requires broker.enabled=true" -}}
+{{- end -}}

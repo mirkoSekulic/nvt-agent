@@ -60,6 +60,70 @@ upstreams or refresh credentials from this probe; executable providers must
 have a successfully initialized live generation. Failures return a generic
 HTTP 503 without provider names, configuration, or credential diagnostics.
 Seed replacement uses this stricter endpoint before discarding recovery state.
+When the optional guest-enrollment issuer is enabled, `/ready` also requires a
+readable v1 durable store; it performs no issuance and exposes no state.
+
+### Guest enrollment endpoints
+
+The optional production issuer implements the exact payloads and lifecycle in
+[guest-enrollment.md](guest-enrollment.md):
+
+| Endpoint | Maximum request | Authorization |
+| --- | ---: | --- |
+| `POST /v1/guest-enrollment/issue` | 4 KiB | Dedicated orchestrator bearer |
+| `POST /v1/guest-enrollment/exchange` | 16 KiB | One-time token plus exact binding in the body |
+| `POST /v1/guest-enrollment/revoke-binding` | 4 KiB | Dedicated orchestrator bearer |
+| `POST /v1/guest-enrollment/revoke-execution` | 4 KiB | Dedicated orchestrator bearer |
+
+Issue returns the frozen `BootstrapEnvelope`; exchange returns the frozen
+`ExchangeResult`; both revoke operations return `{"ok":true}`. The issue
+caller cannot supply `exchange_url`: every envelope carries the issuer-owned
+canonical HTTPS endpoint loaded at broker startup. Unknown fields, duplicate
+keys at any depth, invalid UTF-8, trailing JSON, and over-limit requests fail
+as `invalid-request`.
+
+The orchestrator bearer is a separate Secret-mounted authority. Ordinary
+agent and egress identities cannot issue or revoke enrollments. The broker
+authenticates issue and revoke authorization before reading their request
+bodies. Exchange is intentionally available before the guest has a runtime
+identity, but its SQLite transaction accepts only one canonical 256-bit token
+with the complete exact binding. The broker admits at most 128 accepted
+connections before TLS handshake or HTTP parsing and gives both TLS handshake
+and request-line/header parsing a 10-second monotonic absolute deadline; byte
+progress does not extend either deadline. Saturation at this
+pre-header boundary closes the connection because no HTTP request exists yet;
+the JSON `capacity-exceeded` response is available only after a request has
+been parsed. Enrollment bodies have a separate 10-second monotonic absolute
+deadline that is likewise not extended by partial reads. Public
+exchange bodies have a 64-request bound; authenticated issue/revoke bodies use
+an independent 16-request control-plane bound so public exchange saturation
+cannot block authoritative revocation. Decoded exchange transactions have a
+32-operation bound and a global 128 requests/second token bucket with a burst
+of 256. Enrollment admission saturation after parsing returns
+`capacity-exceeded`; there is no alternate identity or driver fallback.
+Valid-shaped absent tokens are rejected through indexed read-only lookups and
+never acquire the SQLite writer lock. A token that selects durable state must
+enter the transactional writer path, which validates the complete bounded
+store before consuming the token or issuing an identity.
+Runtime identity timestamps use the later of the issuer's current wall clock
+and the enrollment's durable `issued_at`, so a backward clock adjustment cannot
+commit a record that the same issuer subsequently rejects as malformed.
+
+Errors are bounded stable classes from the guest-enrollment contract. Responses,
+audit entries, readiness, and process logs never contain a request body,
+plaintext or digest token, plaintext runtime identity, or SQLite diagnostic.
+The broker uses one durable SQLite database with full synchronous commits. It
+must run as the chart's single `Recreate` replica; sharing that file among
+broker processes is unsupported. This issuer is disabled unless durable state,
+TLS/canonical URL, and the dedicated authorization Secret are all configured.
+Background maintenance records token and runtime-identity expiry at their
+original deadlines. Each tombstone durably records its transition time and a
+retention deadline no more than 24 hours later, independent of later wall-clock
+movement. Maintenance does not infer AgentRun cleanup from elapsed time:
+tombstones and terminal records are reclaimed only when a later orchestrator
+integration supplies the authoritative completed scope and permanently denies
+new issuance for it. Until then the 10,000-entry hard bound fails closed rather
+than evicting live or revocation state.
 
 ### POST /v1/http/request
 

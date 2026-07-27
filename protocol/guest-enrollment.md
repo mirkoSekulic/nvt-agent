@@ -17,8 +17,8 @@ workload without changing the contract.
   ID and desired generation, and requests/revokes enrollment.
 - The **enrollment issuer** creates a cryptographically random token, durably
   stores only its one-way digest and exact binding, atomically consumes it, and
-  issues/revokes the guest runtime identity. A production issuer is expected to
-  be broker-backed, but no broker endpoint is added in this phase.
+  issues/revokes the guest runtime identity. The production broker-backed
+  issuer uses the exact bounded endpoints documented in [broker.md](broker.md).
 - The **exact selected execution driver** receives one separately delivered
   encoded bootstrap envelope and places it into the intended VM's protected
   bootstrap channel. It treats the envelope as opaque, never places it in
@@ -147,7 +147,7 @@ runtime identity:
 
 The opaque identity material decodes to 32 through 65,536 bytes and has a
 maximum lifetime of 24 hours in v1. This contract intentionally does not assign
-provider, gateway, or egress semantics to it. A later broker-backed issuer
+provider, gateway, or egress semantics to it. A later control-plane integration
 defines how the guest uses and rotates that runtime identity without widening
 this one-time bootstrap envelope.
 
@@ -268,7 +268,9 @@ The orchestrator may hold the envelope only in bounded memory while performing
 the sensitive handoff. An orchestrator restart invokes execution-scoped
 revocation from stable AgentRun ownership; it does not need to query tokens,
 remember every prior guest binding, or expect token bytes in an AgentRun or
-provider record. Production operator/broker wiring is intentionally deferred.
+provider record. The broker issuer exists, but production operator-to-broker
+issuance and operator-to-driver envelope delivery remain intentionally
+deferred.
 
 ## Diagnostics
 
@@ -283,10 +285,10 @@ handle, but no plaintext token or identity.
 
 ## Compatibility and next phase
 
-This phase adds no CRD, status, chart, controller, broker endpoint, guest
-service, or driver-host operation. Existing Pod, Kata, and Compose behavior is
-unchanged. `DesiredExecution` remains the same non-secret, level-triggered
-contract, and host bundles remain credential-free.
+The broker-backed issuer adds no CRD, status, controller, guest service, or
+driver-host operation. It is opt-in and unreachable by default; existing Pod,
+Kata, and Compose behavior is unchanged. `DesiredExecution` remains the same
+non-secret, level-triggered contract, and host bundles remain credential-free.
 
 Issue #127 contains historical public-Git execution-driver language. The merged
 repository contract is authoritative: production execution drivers are complete
@@ -294,8 +296,8 @@ OCI images pinned by digest and run in isolated driver-host workloads. Git
 loading remains supported only for the separate runtime-plugin and executable
 broker-provider contracts.
 
-The next implementation step is a broker-backed durable issuer and a separate
-authenticated operator-to-exact-driver sensitive handoff. After that, a QEMU
-reference driver can provision a guest and exercise enrollment; gateway
-routing, runtime identity use, broker identity, and mediated egress remain
-separate production gates.
+The next implementation step is the separate authenticated
+operator-to-broker issuance and operator-to-exact-driver sensitive handoff.
+After that, a QEMU reference driver can provision a guest and exercise
+enrollment; gateway routing, runtime identity use, broker identity, and
+mediated egress remain separate production gates.
