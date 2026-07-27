@@ -130,10 +130,14 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `hostbundle/contract`, `bundle`, `oci`, and `install` adversarial tests →
   `host-bundle.yml / host-bundle`
 - `hostbundle/guest_e2e_test.go` → `host-bundle.yml / host-bundle`; it builds an
-  OCI layout, pulls by digest from a hermetic TLS registry, installs and
-  activates natively, starts the installed supervisor and real `agentd`,
-  delivers a prompt, restarts, and proves idempotent reuse. This is guest-side
-  Linux coverage, not a real provider VM proof.
+  OCI layout, runs the real bootstrap CLI against a hermetic TLS registry by
+  digest, installs and activates natively, starts the installed supervisor and
+  real `agentd`, delivers a prompt, proves clean restart and fail-closed session
+  loss, and proves idempotent reuse. This is guest-side Linux coverage, not a
+  real provider VM proof.
+- `hostbundle/build-test.sh` → `host-bundle.yml / host-bundle`; it pins cleaned
+  repository-relative and absolute outputs, deterministic tar/layout content,
+  and non-empty output rejection.
 
 ### kind workflow case files
 

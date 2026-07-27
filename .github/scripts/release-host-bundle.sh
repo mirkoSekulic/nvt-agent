@@ -55,12 +55,21 @@ found="$(oras resolve "${reference}")"
 
 verified=0
 for _ in $(seq 1 "${NVT_PUBLIC_VERIFY_ATTEMPTS:-10}"); do
-  if ORAS_AUTH_FILE="${anonymous}/config.json" oras manifest fetch --registry-config "${anonymous}/config.json" "ghcr.io/${owner}/nvt-host-bundle@${expected}" >/dev/null 2>&1; then
+  pull_directory="$(mktemp -d "${anonymous}/pull.XXXXXX")"
+  if ORAS_AUTH_FILE="${anonymous}/config.json" oras manifest fetch \
+      --registry-config "${anonymous}/config.json" \
+      "ghcr.io/${owner}/nvt-host-bundle@${expected}" >/dev/null 2>&1 &&
+    ORAS_AUTH_FILE="${anonymous}/config.json" oras pull \
+      --registry-config "${anonymous}/config.json" \
+      --platform linux/amd64 \
+      --output "${pull_directory}" \
+      "ghcr.io/${owner}/nvt-host-bundle@${expected}" >/dev/null 2>&1 &&
+    [[ -f "${pull_directory}/nvt-host-bundle.tar.gz" ]]; then
     verified=1
     break
   fi
   sleep "${NVT_PUBLIC_VERIFY_DELAY_SECONDS:-2}"
 done
-[[ "${verified}" == "1" ]] || { echo "host bundle is not anonymously readable" >&2; exit 2; }
+[[ "${verified}" == "1" ]] || { echo "host bundle platform content is not anonymously readable" >&2; exit 2; }
 
 echo "Verified public coordinated host bundle ${reference}@${expected}."

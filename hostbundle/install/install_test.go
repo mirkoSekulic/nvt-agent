@@ -135,6 +135,95 @@ func TestInstallRejectsUnsafeExistingRootWithoutMutatingIt(t *testing.T) {
 	}
 }
 
+func TestInstallSynchronizesReleaseAndActivationDurably(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "opt", "nvt")
+	archive := makeArchive(t, "0.8.33-durable", "content")
+	source := oci.Source{Repository: "https://registry.example.test/nvt/host", Digest: "sha256:" + strings.Repeat("6", 64), OS: "linux", Architecture: "amd64"}
+	var synchronized []string
+	installer := Installer{
+		Puller: staticPuller{data: archive}, Root: root,
+		syncPath: func(path string) error {
+			synchronized = append(synchronized, path)
+			return nil
+		},
+	}
+	if _, err := installer.Install(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	if len(synchronized) == 0 || synchronized[0] != filepath.Dir(root) {
+		t.Fatalf("install-root parent was not synchronized after creation: %v", synchronized)
+	}
+	requiredSuffixes := []string{
+		filepath.Join("bin", "nvt-guest-supervisor"),
+		contract.ManifestPath,
+		completionFile,
+		filepath.Join("releases", "0.8.33-durable"),
+		"releases",
+	}
+	for _, suffix := range requiredSuffixes {
+		if !containsPathSuffix(synchronized, suffix) {
+			t.Fatalf("durability sync omitted %q: %v", suffix, synchronized)
+		}
+	}
+	if synchronized[len(synchronized)-1] != root {
+		t.Fatalf("install root was not synchronized after current commit: %v", synchronized)
+	}
+}
+
+func TestDurabilityFailuresBeforeActivationPreserveCurrent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "opt", "nvt")
+	firstSource := oci.Source{Repository: "https://registry.example.test/nvt/host", Digest: "sha256:" + strings.Repeat("7", 64), OS: "linux", Architecture: "amd64"}
+	if _, err := (Installer{Puller: staticPuller{data: makeArchive(t, "0.8.33-durable-a", "first")}, Root: root}).Install(context.Background(), firstSource); err != nil {
+		t.Fatal(err)
+	}
+	currentBefore, err := os.Readlink(filepath.Join(root, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		version    string
+		digestByte string
+		fail       func(string) bool
+	}{
+		{name: "file before publication", version: "0.8.33-durable-file", digestByte: "8", fail: func(path string) bool { return filepath.Base(path) == completionFile }},
+		{name: "parent after publication", version: "0.8.33-durable-parent", digestByte: "9", fail: func(path string) bool { return path == filepath.Join(root, "releases", "0.8.33-durable-parent") }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			canary := "NVT_TEST_SYNC_CANARY"
+			source := oci.Source{Repository: firstSource.Repository, Digest: "sha256:" + strings.Repeat(test.digestByte, 64), OS: "linux", Architecture: "amd64"}
+			installer := Installer{
+				Puller: staticPuller{data: makeArchive(t, test.version, "next")}, Root: root,
+				syncPath: func(path string) error {
+					if test.fail(path) {
+						return errors.New(canary)
+					}
+					return syncFilesystemPath(path)
+				},
+			}
+			_, err := installer.Install(context.Background(), source)
+			if err == nil || strings.Contains(err.Error(), canary) {
+				t.Fatalf("durability failure was not sanitized: %v", err)
+			}
+			currentAfter, readErr := os.Readlink(filepath.Join(root, "current"))
+			if readErr != nil || currentAfter != currentBefore {
+				t.Fatalf("pre-activation sync failure changed current: %q %v", currentAfter, readErr)
+			}
+		})
+	}
+}
+
+func containsPathSuffix(paths []string, suffix string) bool {
+	for _, path := range paths {
+		if path == suffix || strings.HasSuffix(path, string(filepath.Separator)+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestConcurrentIdenticalInstallsConvergeOnOneCompleteRelease(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "opt", "nvt")
 	archive := makeArchive(t, "0.8.33-concurrent", "content")

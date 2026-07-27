@@ -9,6 +9,7 @@ ARCHITECTURE="${NVT_HOST_BUNDLE_ARCH:-amd64}"
 if [[ "${OUTPUT}" != /* ]]; then
   OUTPUT="${ROOT}/${OUTPUT}"
 fi
+OUTPUT="$(realpath -m -- "${OUTPUT}")"
 
 if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$ ]] ||
    [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]] ||

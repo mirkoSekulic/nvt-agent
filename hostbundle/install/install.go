@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,7 @@ type Installer struct {
 	Puller         Puller
 	Root           string
 	BeforeActivate func() error
+	syncPath       func(string) error
 }
 
 type Result struct {
@@ -44,7 +46,7 @@ type completion struct {
 }
 
 func (installer Installer) Install(ctx context.Context, source oci.Source) (Result, error) {
-	if installer.Puller == nil || !filepath.IsAbs(installer.Root) || filepath.Clean(installer.Root) != installer.Root {
+	if installer.Puller == nil || installer.Root == "/" || !filepath.IsAbs(installer.Root) || filepath.Clean(installer.Root) != installer.Root {
 		return Result{}, errors.New("host-bundle installer configuration is invalid")
 	}
 	if source.OS == "" {
@@ -54,6 +56,9 @@ func (installer Installer) Install(ctx context.Context, source oci.Source) (Resu
 		source.Architecture = runtime.GOARCH
 	}
 	if err := ensurePrivateRoot(installer.Root); err != nil {
+		return Result{}, err
+	}
+	if err := installer.synchronize(filepath.Dir(installer.Root)); err != nil {
 		return Result{}, err
 	}
 	layer, err := installer.Puller.Pull(ctx, source)
@@ -98,9 +103,15 @@ func (installer Installer) Install(ctx context.Context, source oci.Source) (Resu
 	if err := validateInstalledTree(temporary, manifest, metadata); err != nil {
 		return Result{}, err
 	}
+	if err := installer.syncReleaseTree(temporary); err != nil {
+		return Result{}, err
+	}
 	digestComponent := strings.TrimPrefix(source.Digest, "sha256:")
 	versionDirectory := filepath.Join(installer.Root, "releases", manifest.BundleVersion)
 	if err := secureDirectory(versionDirectory, 0o755); err != nil {
+		return Result{}, err
+	}
+	if err := installer.synchronize(filepath.Join(installer.Root, "releases")); err != nil {
 		return Result{}, err
 	}
 	releasePath := filepath.Join(versionDirectory, digestComponent)
@@ -108,6 +119,9 @@ func (installer Installer) Install(ctx context.Context, source oci.Source) (Resu
 	if _, statErr := os.Lstat(releasePath); statErr == nil {
 		if err := validateInstalledTree(releasePath, manifest, metadata); err != nil {
 			return Result{}, errors.New("host-bundle release path exists but is incomplete or invalid")
+		}
+		if err := installer.syncReleaseTree(releasePath); err != nil {
+			return Result{}, err
 		}
 		reused = true
 		if err := os.RemoveAll(temporary); err != nil {
@@ -130,12 +144,18 @@ func (installer Installer) Install(ctx context.Context, source oci.Source) (Resu
 		}
 		published = true
 	}
+	if err := installer.synchronize(versionDirectory); err != nil {
+		return Result{}, err
+	}
+	if err := installer.synchronize(filepath.Join(installer.Root, "releases")); err != nil {
+		return Result{}, err
+	}
 	if installer.BeforeActivate != nil {
 		if err := installer.BeforeActivate(); err != nil {
 			return Result{}, errors.New("host-bundle activation precondition failed")
 		}
 	}
-	if err := activate(installer.Root, releasePath); err != nil {
+	if err := activate(installer.Root, releasePath, installer.synchronize); err != nil {
 		return Result{}, err
 	}
 	return Result{ReleasePath: releasePath, Digest: source.Digest, Version: manifest.BundleVersion, Reused: reused}, nil
@@ -177,7 +197,7 @@ func secureDirectory(directory string, mode os.FileMode) error {
 	return nil
 }
 
-func activate(root, releasePath string) error {
+func activate(root, releasePath string, synchronize func(string) error) error {
 	current := filepath.Join(root, "current")
 	if info, err := os.Lstat(current); err == nil {
 		if info.Mode()&os.ModeSymlink == 0 {
@@ -192,7 +212,7 @@ func activate(root, releasePath string) error {
 			absolute = filepath.Join(root, target)
 		}
 		if filepath.Clean(absolute) == releasePath {
-			return nil
+			return synchronize(root)
 		}
 	} else if !os.IsNotExist(err) {
 		return errors.New("host-bundle current path could not be inspected")
@@ -209,7 +229,63 @@ func activate(root, releasePath string) error {
 	if err := os.Rename(temporary, current); err != nil {
 		return errors.New("host-bundle activation could not be committed")
 	}
+	if err := synchronize(root); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (installer Installer) syncReleaseTree(root string) error {
+	directories := []string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return errors.New("host-bundle release could not be synchronized")
+		}
+		if entry.IsDir() {
+			directories = append(directories, path)
+			return nil
+		}
+		if entry.Type().IsRegular() {
+			return installer.synchronize(path)
+		}
+		return errors.New("host-bundle release contains an unsynchronizable entry")
+	})
+	if err != nil {
+		return err
+	}
+	sort.Slice(directories, func(left, right int) bool {
+		return strings.Count(directories[left], string(filepath.Separator)) > strings.Count(directories[right], string(filepath.Separator))
+	})
+	for _, directory := range directories {
+		if err := installer.synchronize(directory); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (installer Installer) synchronize(path string) error {
+	synchronize := installer.syncPath
+	if synchronize == nil {
+		synchronize = syncFilesystemPath
+	}
+	if err := synchronize(path); err != nil {
+		return errors.New("host-bundle durable state could not be synchronized")
+	}
+	return nil
+}
+
+func syncFilesystemPath(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
 
 func validateInstalledTree(root string, manifest contract.Manifest, expected completion) error {

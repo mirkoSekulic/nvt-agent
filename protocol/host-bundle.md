@@ -68,6 +68,21 @@ failure leaves the previous `current` target untouched.
 Published release directories are root-owned and `0755`: the non-root service
 can read/execute them but cannot replace trusted code or activation links.
 
+Before publication, the installer synchronizes every extracted regular file,
+the manifest, completion metadata, and the completed temporary directory tree.
+After the release rename it synchronizes the version and `releases`
+directories; after replacing `current` it synchronizes `/opt/nvt`. A successful
+installation also synchronizes the parent of the install root so a newly
+created `/opt/nvt` entry is durable. A successful return therefore makes the
+selected complete release and activation durable on
+Linux filesystems that honor `fsync`. Any synchronization failure before the
+`current` rename leaves the old activation unchanged. If the final install-root
+sync fails after the atomic rename, the installer reports failure; after a
+crash either old or new `current` may be recovered, but both targets refer only
+to a previously synchronized complete release. Tests inject each boundary;
+they do not simulate power loss or claim guarantees from a filesystem that
+does not honor `fsync`.
+
 The bootstrap binary itself is an input delivered by a future execution driver
 or trusted guest image. It carries no enrollment material. The OCI bundle,
 class configuration, completion metadata, and ordinary logs must not contain a
@@ -82,6 +97,12 @@ queueing, and event logging. The current bundle includes the real `agentd` and
 `agentdctl` sources plus a bounded session fixture for the guest-side lifecycle
 gate. It does not yet package code-server, an AI runtime, plugins, enrollment,
 broker integration, gateway publication, or mediated VM egress.
+
+Readiness is owned by the supervisor. It publishes `guest-ready` only after
+agentd and the tmux session are stable, continuously monitors both processes,
+and removes readiness before returning failure when either one disappears.
+Systemd's `Restart=on-failure` can then start a fresh native lifecycle without
+making agentd responsible for host supervision.
 
 Guest prerequisites for v1 are Linux, Python 3, tmux, a dedicated `nvt-agent`
 user, writable runtime/state/workspace directories, and systemd when the unit is

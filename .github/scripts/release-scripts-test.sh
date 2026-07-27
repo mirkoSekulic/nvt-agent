@@ -231,6 +231,27 @@ case "$1 $2" in
     [[ "$(cat "${state}")" == "${reference##*@}" ]]
     printf '{}\n'
     ;;
+  "pull --registry-config")
+    config="$3"
+    platform=""
+    output=""
+    reference="${@: -1}"
+    previous=""
+    for argument in "$@"; do
+      if [[ "${previous}" == "--platform" ]]; then platform="${argument}"; fi
+      if [[ "${previous}" == "--output" ]]; then output="${argument}"; fi
+      previous="${argument}"
+    done
+    grep -qx '{"auths":{}}' "${config}"
+    [[ "${platform}" == "linux/amd64" ]]
+    tag_reference="${reference%@*}:${FAKE_HOST_BUNDLE_VERSION}"
+    state="${ORAS_STATE}/$(state_key "${tag_reference}")"
+    [[ -f "${state}" ]]
+    [[ "$(cat "${state}")" == "${reference##*@}" ]]
+    [[ "${FAIL_ORAS_PULL:-0}" != "1" ]]
+    mkdir -p "${output}"
+    printf 'verified layer\n' >"${output}/nvt-host-bundle.tar.gz"
+    ;;
   *)
     echo "unexpected oras invocation: $*" >&2
     exit 1
@@ -243,10 +264,28 @@ export ORAS_STATE="${WORKDIR}/oras-state"
 export FAKE_HOST_BUNDLE_VERSION="0.2.3-943d5ba"
 mkdir -p "${ORAS_STATE}"
 : >"${ORAS_LOG}"
-bash "${ROOT}/.github/scripts/release-host-bundle.sh" \
-  mirkoSekulic "${FAKE_HOST_BUNDLE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
+export FAIL_ORAS_PULL=1
+if NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \
+  bash "${ROOT}/.github/scripts/release-host-bundle.sh" \
+    mirkoSekulic "${FAKE_HOST_BUNDLE_VERSION}" "${SHA}" "${FAKE_SOURCE}" >/dev/null 2>"${WORKDIR}/host-bundle-public.err"; then
+  echo "missing anonymous host-bundle platform content was accepted" >&2
+  exit 1
+fi
+grep -q 'platform content is not anonymously readable' "${WORKDIR}/host-bundle-public.err"
+unset FAIL_ORAS_PULL
 [[ "$(grep -c '^oras cp ' "${ORAS_LOG}")" == "1" ]]
 grep -q '^oras manifest fetch ' "${ORAS_LOG}"
+grep -q '^oras pull .*--platform linux/amd64 ' "${ORAS_LOG}"
+
+: >"${ORAS_LOG}"
+bash "${ROOT}/.github/scripts/release-host-bundle.sh" \
+  mirkoSekulic "${FAKE_HOST_BUNDLE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
+if grep -q '^oras cp ' "${ORAS_LOG}"; then
+  echo "matching host-bundle artifact was republished after public retry" >&2
+  exit 1
+fi
+grep -q '^oras manifest fetch ' "${ORAS_LOG}"
+grep -q '^oras pull .*--platform linux/amd64 ' "${ORAS_LOG}"
 
 : >"${ORAS_LOG}"
 bash "${ROOT}/.github/scripts/release-host-bundle.sh" \
@@ -255,6 +294,7 @@ if grep -q '^oras cp ' "${ORAS_LOG}"; then
   echo "matching host-bundle artifact was republished" >&2
   exit 1
 fi
+grep -q '^oras pull .*--platform linux/amd64 ' "${ORAS_LOG}"
 
 reference="ghcr.io/mirkosekulic/nvt-host-bundle:${FAKE_HOST_BUNDLE_VERSION}"
 printf 'sha256:%064d\n' 0 >"${ORAS_STATE}/$(printf '%s' "${reference}" | tr '/:@' '____')"

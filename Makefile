@@ -67,6 +67,7 @@ host-bundle-build:
 
 host-bundle-test:
 	cd hostbundle && go vet ./... && go test -race -count=1 ./...
+	bash hostbundle/build-test.sh
 
 producer-build:
 	docker build -f producers/github-comments/Dockerfile -t "$(PRODUCER_IMAGE)" .

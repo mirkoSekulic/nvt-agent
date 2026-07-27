@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	if os.Geteuid() != 0 {
+	if effectiveUID() != 0 {
 		fmt.Fprintln(os.Stderr, "nvt-host-bootstrap: native installation requires root")
 		os.Exit(1)
 	}
@@ -28,7 +28,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "nvt-host-bootstrap: repository and digest are required")
 		os.Exit(2)
 	}
-	client, err := oci.NewClient(*timeout)
+	client, err := newOCIClient(*timeout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "nvt-host-bootstrap: invalid bootstrap configuration")
 		os.Exit(2)

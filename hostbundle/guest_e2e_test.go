@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
@@ -20,7 +21,6 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/bundle"
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/contract"
-	"github.com/mirkoSekulic/nvt-agent/hostbundle/install"
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/oci"
 )
 
@@ -48,6 +48,8 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	buildBinary(t, moduleRoot, "./cmd/nvt-guest-supervisor", filepath.Join(binaries, "nvt-guest-supervisor"))
 	buildBinary(t, moduleRoot, "./cmd/nvt-host-bootstrap", filepath.Join(binaries, "nvt-host-bootstrap"))
+	testBootstrap := filepath.Join(binaries, "nvt-host-bootstrap-test")
+	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-host-bootstrap", testBootstrap, "hostbundletest")
 	buildBinary(t, moduleRoot, "./cmd/nvt-guest-session-fixture", filepath.Join(binaries, "nvt-guest-session-fixture"))
 
 	archive := filepath.Join(work, "nvt-host-bundle.tar.gz")
@@ -78,20 +80,52 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, transport := serveLayout(t, layout)
+	server, _ := serveLayout(t, layout)
 	defer server.Close()
-	client, err := oci.NewClientWithTransport(10*time.Second, transport)
-	if err != nil {
+	certificatePath := filepath.Join(work, "registry-ca.pem")
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(certificatePath, certificate, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(work, "opt", "nvt")
-	source := oci.Source{Repository: "https://registry.example.test/nvt/host-bundle", Digest: digest, OS: "linux", Architecture: runtime.GOARCH}
-	result, err := (install.Installer{Puller: client, Root: root}).Install(context.Background(), source)
-	if err != nil {
-		t.Fatal(err)
+	repository := "https://example.com/nvt/host-bundle"
+	bootstrapEnvironment := append(os.Environ(),
+		"NVT_HOST_BUNDLE_TEST_EUID=0",
+		"NVT_HOST_BUNDLE_TEST_CA_FILE="+certificatePath,
+		"NVT_HOST_BUNDLE_TEST_DIAL_ADDRESS="+server.Listener.Addr().String(),
+	)
+	bootstrapArguments := []string{"--repository", repository, "--digest", digest, "--root", root, "--os", "linux", "--arch", runtime.GOARCH, "--timeout", "10s"}
+	output, err := runBootstrap(testBootstrap, bootstrapEnvironment, bootstrapArguments...)
+	if err != nil || !bytes.Contains(output, []byte("installed host bundle")) || !bytes.Contains(output, []byte(digest)) {
+		t.Fatalf("bootstrap CLI install failed: %v %s", err, output)
 	}
-	if result.Reused {
-		t.Fatal("first guest install was reported as reused")
+
+	wrongDigest := "sha256:" + strings.Repeat("f", 64)
+	wrongOutput, wrongErr := runBootstrap(testBootstrap, bootstrapEnvironment,
+		"--repository", repository, "--digest", wrongDigest, "--root", filepath.Join(work, "wrong"), "--timeout", "2s")
+	if wrongErr == nil || bytes.Contains(wrongOutput, []byte(repository)) || bytes.Contains(wrongOutput, []byte(wrongDigest)) {
+		t.Fatalf("wrong digest did not fail safely: %v %s", wrongErr, wrongOutput)
+	}
+	invalidOutput, invalidErr := runBootstrap(testBootstrap, bootstrapEnvironment,
+		"--repository", repository, "--digest", digest, "--root", filepath.Join(work, "invalid"), "--timeout", "0s")
+	if invalidErr == nil || !bytes.Contains(invalidOutput, []byte("invalid bootstrap configuration")) {
+		t.Fatalf("invalid bootstrap configuration was accepted: %v %s", invalidErr, invalidOutput)
+	}
+	nonRootEnvironment := append([]string(nil), bootstrapEnvironment...)
+	nonRootEnvironment = append(nonRootEnvironment, "NVT_HOST_BUNDLE_TEST_EUID=1000")
+	nonRootPath := filepath.Join(work, "non-root")
+	nonRootArguments := append([]string(nil), bootstrapArguments...)
+	for index := range nonRootArguments {
+		if index > 0 && nonRootArguments[index-1] == "--root" {
+			nonRootArguments[index] = nonRootPath
+		}
+	}
+	nonRootOutput, nonRootErr := runBootstrap(testBootstrap, nonRootEnvironment, nonRootArguments...)
+	if nonRootErr == nil || !bytes.Contains(nonRootOutput, []byte("requires root")) {
+		t.Fatalf("non-root bootstrap was accepted: %v %s", nonRootErr, nonRootOutput)
+	}
+	if _, err := os.Stat(nonRootPath); !os.IsNotExist(err) {
+		t.Fatal("non-root bootstrap mutated the install root")
 	}
 
 	state := filepath.Join(work, "state")
@@ -152,10 +186,27 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	command, done = start()
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "restart-native-prompt")
 	stop(command, done)
+	command, done = start()
+	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "session-exit-prompt")
+	kill := exec.Command(tmux, "kill-session", "-t", session)
+	kill.Env = []string{"HOME=" + state, "PATH=/usr/bin:/bin"}
+	if output, err := kill.CombinedOutput(); err != nil {
+		t.Fatalf("kill guest session: %v %s", err, output)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("supervisor exited successfully after unexpected session loss")
+		}
+	case <-time.After(10 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatal("supervisor did not exit after session loss")
+	}
+	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
 
-	repeated, err := (install.Installer{Puller: client, Root: root}).Install(context.Background(), source)
-	if err != nil || !repeated.Reused || repeated.ReleasePath != result.ReleasePath {
-		t.Fatalf("repeated guest install was not idempotent: %#v %v", repeated, err)
+	repeatedOutput, err := runBootstrap(testBootstrap, bootstrapEnvironment, bootstrapArguments...)
+	if err != nil || !bytes.Contains(repeatedOutput, []byte("verified host bundle")) {
+		t.Fatalf("repeated bootstrap CLI install was not idempotent: %v %s", err, repeatedOutput)
 	}
 	service, err := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-agent-guest.service"))
 	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) {
@@ -196,6 +247,21 @@ func buildBinary(t *testing.T, moduleRoot, pkg, output string) {
 	}
 }
 
+func buildBinaryWithTags(t *testing.T, moduleRoot, pkg, output, tags string) {
+	t.Helper()
+	command := exec.Command("go", "build", "-tags", tags, "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", output, pkg)
+	command.Dir = moduleRoot
+	if outputBytes, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build %s with tags: %v\n%s", pkg, err, outputBytes)
+	}
+}
+
+func runBootstrap(binary string, environment []string, arguments ...string) ([]byte, error) {
+	command := exec.Command(binary, arguments...)
+	command.Env = environment
+	return command.CombinedOutput()
+}
+
 func serveLayout(t *testing.T, layout string) (*httptest.Server, *http.Transport) {
 	t.Helper()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -233,6 +299,18 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", filepath.Base(path))
+}
+
+func waitForAbsent(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s removal", filepath.Base(path))
 }
 
 func assertAgentdHealthAndPrompt(t *testing.T, current, socket, state, capture, prompt string) {

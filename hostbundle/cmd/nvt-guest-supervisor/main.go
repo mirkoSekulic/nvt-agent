@@ -141,11 +141,19 @@ func run(config configuration, releaseRoot string) error {
 	signals := make(chan os.Signal, 1)
 	signalNotify(signals)
 	defer signal.Stop(signals)
-	select {
-	case <-signals:
-		return nil
-	case <-agentdDone:
-		return errors.New("agentd exited unexpectedly")
+	sessionMonitor := time.NewTicker(250 * time.Millisecond)
+	defer sessionMonitor.Stop()
+	for {
+		select {
+		case <-signals:
+			return nil
+		case <-agentdDone:
+			return errors.New("agentd exited unexpectedly")
+		case <-sessionMonitor.C:
+			if !sessionExists(config) {
+				return errors.New("guest session exited unexpectedly")
+			}
+		}
 	}
 }
 
