@@ -9,6 +9,7 @@ precise and every hermetic suite has a clear home.
 - `egressd/go.mod` → `network.yml / egressd`
 - `gateway/go.mod` → `kubernetes.yml / gateway`
 - `hostbundle/go.mod` → `host-bundle.yml / host-bundle`
+- `protocol/guestenrollment/go.mod` → `kubernetes.yml / guest-enrollment`
 - `operator/go.mod` → `kubernetes.yml / operator` and `kubernetes.yml / operator-helm`
 - `producers/github-comments/go.mod` → `kubernetes.yml / producer`
 - `tests/agentd/go.mod` → `runtime.yml / agentd`
@@ -69,6 +70,16 @@ precise and every hermetic suite has a clear home.
 - `operator/internal/controller/agentrun_controller_test.go`
 - `operator/internal/controller/agentschedule_controller_test.go`
 - `operator/internal/controller/default_egress_mode_test.go`
+
+### guest enrollment
+
+- `protocol/guestenrollment/contract_test.go` → strict versioned types,
+  bounds, UTF-8/duplicate-key rejection, token-digest handling, and redacted
+  sensitive formatting.
+- `protocol/guestenrollment/conformance_test.go` → durable fake issuer/guest
+  exchange, exact binding, execution-scoped restart cleanup, concurrent single
+  use, pre/post-commit fault injection, replay, expiry, bounded revocation
+  tombstones, cancellation, capacity, and secret non-disclosure.
 
 The `kubernetes.yml / operator-helm` job also runs the shell-level chart and
 helper coverage aggregated by `tests/operator/helm/test.sh`:
@@ -181,6 +192,7 @@ The harness and helper scripts are not standalone cases:
 - `broker.yml`: broker conformance suite
 - `network.yml`: egressd, captured, and transparent Compose smoke
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage
+  plus the provider-neutral guest-enrollment contract/conformance module
 - `images.yml`: all shipped/test fixture images plus the runtime git-credentials
   smoke
 - `host-bundle.yml`: native bundle trusted-core tests and guest-side lifecycle

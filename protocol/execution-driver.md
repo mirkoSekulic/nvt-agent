@@ -17,6 +17,13 @@ control-plane workload. The host bundle is a non-runnable OCI artifact that a
 future provider driver installs by digest inside a provisioned Linux guest.
 Neither contract uses Git acquisition in production.
 
+Native VM bootstrap uses the separate sensitive
+[guest enrollment contract](guest-enrollment.md). Its one-time token and
+runtime identity are never fields of `DesiredExecution`, class configuration,
+desired fingerprints, portable status, or ordinary driver state. A provider
+driver may deliver only the opaque encoded envelope through a future dedicated
+sensitive handoff; reconcile remains credential-free.
+
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
 not expose credentials, provider response bodies, request headers, or other

@@ -34,6 +34,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  guest-enrollment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: protocol/guestenrollment/go.mod
+          cache: false
+      - name: Run guest enrollment contract and conformance tests
+        working-directory: protocol/guestenrollment
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
   operator:
     runs-on: ubuntu-latest
     timeout-minutes: 30
