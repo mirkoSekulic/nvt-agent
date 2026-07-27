@@ -17,9 +17,9 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	token := opaqueValue(TokenBytes, 0x21)
 	identity := opaqueValue(TokenBytes, 0x42)
 
-	issue := IssueRequest{ContractVersion: Version, Binding: binding, IssuerURL: "https://enrollment.nvt-system.svc/v1/exchange", TTLSeconds: 300}
+	issue := IssueRequest{ContractVersion: Version, Binding: binding, TTLSeconds: 300}
 	envelope := BootstrapEnvelope{
-		ContractVersion: Version, Binding: binding, IssuerURL: issue.IssuerURL, Token: token,
+		ContractVersion: Version, Binding: binding, ExchangeURL: "https://enrollment.nvt-system.svc/v1/exchange", Token: token,
 		IssuedAt: FormatTimestamp(now), ExpiresAt: FormatTimestamp(now.Add(5 * time.Minute)),
 	}
 	exchange := ExchangeRequest{ContractVersion: Version, Binding: binding, Token: token}
@@ -27,14 +27,16 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 		ContractVersion: Version, Binding: binding,
 		RuntimeIdentity: RuntimeIdentity{Type: RuntimeIdentityType, Opaque: identity, IssuedAt: FormatTimestamp(now), ExpiresAt: FormatTimestamp(now.Add(time.Hour))},
 	}
-	revoke := RevokeRequest{ContractVersion: Version, Binding: binding}
+	revokeBinding := RevokeBindingRequest{ContractVersion: Version, Binding: binding}
+	revokeExecution := RevokeExecutionRequest{ContractVersion: Version, ExecutionScope: binding.ExecutionScope()}
 
 	for name, validation := range map[string]func() error{
-		"issue":    func() error { return ValidateIssueRequest(issue) },
-		"envelope": func() error { return ValidateBootstrapEnvelope(envelope) },
-		"exchange": func() error { return ValidateExchangeRequest(exchange) },
-		"result":   func() error { return ValidateExchangeResult(result) },
-		"revoke":   func() error { return ValidateRevokeRequest(revoke) },
+		"issue":            func() error { return ValidateIssueRequest(issue) },
+		"envelope":         func() error { return ValidateBootstrapEnvelope(envelope) },
+		"exchange":         func() error { return ValidateExchangeRequest(exchange) },
+		"result":           func() error { return ValidateExchangeResult(result) },
+		"revoke binding":   func() error { return ValidateRevokeBindingRequest(revokeBinding) },
+		"revoke execution": func() error { return ValidateRevokeExecutionRequest(revokeExecution) },
 	} {
 		if err := validation(); err != nil {
 			t.Fatalf("valid %s: %v", name, err)
@@ -52,7 +54,8 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	issueJSON, _ := json.Marshal(issue)
 	exchangeJSON, _ := json.Marshal(exchange)
 	resultJSON, _ := json.Marshal(result)
-	revokeJSON, _ := json.Marshal(revoke)
+	revokeBindingJSON, _ := json.Marshal(revokeBinding)
+	revokeExecutionJSON, _ := json.Marshal(revokeExecution)
 	if _, err := DecodeIssueRequest(issueJSON); err != nil {
 		t.Fatalf("decode issue: %v", err)
 	}
@@ -62,8 +65,14 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	if _, err := DecodeExchangeResult(resultJSON); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if _, err := DecodeRevokeRequest(revokeJSON); err != nil {
-		t.Fatalf("decode revoke: %v", err)
+	if _, err := DecodeRevokeBindingRequest(revokeBindingJSON); err != nil {
+		t.Fatalf("decode binding revoke: %v", err)
+	}
+	if _, err := DecodeRevokeExecutionRequest(revokeExecutionJSON); err != nil {
+		t.Fatalf("decode execution revoke: %v", err)
+	}
+	if _, err := DecodeRevokeExecutionRequest([]byte(`{"contract_version":"nvt.guest-enrollment/v1","execution_scope":{"agent_run_uid":"uid","execution_id":"execution","driver_registration":"driver"},"token":"forbidden"}`)); err == nil {
+		t.Fatal("credential-bearing execution revocation request was accepted")
 	}
 
 	invalid := [][]byte{
@@ -85,7 +94,7 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 func TestContractRejectsInvalidFieldsAndBounds(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
-	validIssue := IssueRequest{ContractVersion: Version, Binding: validBinding(), IssuerURL: "https://issuer.example/v1/exchange", TTLSeconds: 300}
+	validIssue := IssueRequest{ContractVersion: Version, Binding: validBinding(), TTLSeconds: 300}
 
 	tests := []struct {
 		name   string
@@ -97,10 +106,6 @@ func TestContractRejectsInvalidFieldsAndBounds(t *testing.T) {
 		{"driver", func(value *IssueRequest) { value.Binding.DriverRegistration = "Invalid_Driver" }},
 		{"generation", func(value *IssueRequest) { value.Binding.DesiredGeneration = 0 }},
 		{"guest", func(value *IssueRequest) { value.Binding.GuestInstanceID = "bad\nvalue" }},
-		{"http", func(value *IssueRequest) { value.IssuerURL = "http://issuer.example/v1/exchange" }},
-		{"userinfo", func(value *IssueRequest) { value.IssuerURL = "https://user@issuer.example/v1/exchange" }},
-		{"query", func(value *IssueRequest) { value.IssuerURL += "?token=x" }},
-		{"root", func(value *IssueRequest) { value.IssuerURL = "https://issuer.example/" }},
 		{"ttl zero", func(value *IssueRequest) { value.TTLSeconds = 0 }},
 		{"ttl large", func(value *IssueRequest) { value.TTLSeconds = MaxEnrollmentTTLSeconds + 1 }},
 	}
@@ -114,8 +119,25 @@ func TestContractRejectsInvalidFieldsAndBounds(t *testing.T) {
 		})
 	}
 
+	for _, endpoint := range []string{
+		"http://issuer.example/v1/exchange",
+		"https://user@issuer.example/v1/exchange",
+		"https://issuer.example/v1/exchange?token=x",
+		"https://issuer.example/",
+	} {
+		if err := ValidateIssuerConfiguration(IssuerConfiguration{ExchangeURL: endpoint}); err == nil {
+			t.Fatalf("invalid issuer-owned exchange endpoint was accepted: %s", endpoint)
+		}
+	}
+	if err := ValidateIssuerConfiguration(IssuerConfiguration{ExchangeURL: "https://issuer.example/v1/exchange"}); err != nil {
+		t.Fatalf("valid issuer-owned exchange endpoint was rejected: %v", err)
+	}
+	if _, err := DecodeIssueRequest([]byte(`{"contract_version":"nvt.guest-enrollment/v1","binding":{"agent_run_uid":"uid","execution_id":"execution","driver_registration":"driver","desired_generation":1,"guest_instance_id":"guest"},"issuer_url":"https://attacker.example/exchange","ttl_seconds":300}`)); err == nil {
+		t.Fatal("caller-controlled issuer_url was accepted in an issue request")
+	}
+
 	envelope := BootstrapEnvelope{
-		ContractVersion: Version, Binding: validBinding(), IssuerURL: validIssue.IssuerURL,
+		ContractVersion: Version, Binding: validBinding(), ExchangeURL: "https://issuer.example/v1/exchange",
 		Token: opaqueValue(TokenBytes, 1), IssuedAt: FormatTimestamp(now), ExpiresAt: FormatTimestamp(now.Add(901 * time.Second)),
 	}
 	if err := ValidateBootstrapEnvelope(envelope); err == nil {

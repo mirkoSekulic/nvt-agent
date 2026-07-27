@@ -29,17 +29,18 @@ const (
 	MaxBootstrapEnvelopeBytes  = 16 << 10
 	MaxExchangeRequestBytes    = 16 << 10
 	MaxExchangeResultBytes     = 128 << 10
-	MaxRevokeRequestBytes      = 4 << 10
+	MaxRevocationRequestBytes  = 4 << 10
 	MaxExecutionIDBytes        = 256
 	MaxAgentRunUIDBytes        = 128
 	MaxDriverNameBytes         = 63
 	MaxGuestInstanceIDBytes    = 256
-	MaxIssuerURLBytes          = 2048
+	MaxExchangeURLBytes        = 2048
 	MaxRuntimeIdentityBytes    = 64 << 10
 	MaxEnrollmentTTLSeconds    = 900
 	MaxRuntimeIdentityLifetime = 24 * time.Hour
 	MaxOperationDuration       = 30 * time.Second
-	MaxOutstandingRecords      = 10_000
+	MaxDurableEntries          = 10_000
+	MaxTombstoneRetention      = 24 * time.Hour
 )
 
 var (
@@ -57,13 +58,32 @@ type Binding struct {
 	GuestInstanceID    string `json:"guest_instance_id"`
 }
 
+// ExecutionScope is the stable, non-secret ownership key available from an
+// immutable AgentRun after an orchestrator restart. It intentionally excludes
+// desired generation and guest instance so cleanup covers every replacement.
+type ExecutionScope struct {
+	AgentRunUID        string `json:"agent_run_uid"`
+	ExecutionID        string `json:"execution_id"`
+	DriverRegistration string `json:"driver_registration"`
+}
+
+func (value Binding) ExecutionScope() ExecutionScope {
+	return ExecutionScope{
+		AgentRunUID: value.AgentRunUID, ExecutionID: value.ExecutionID,
+		DriverRegistration: value.DriverRegistration,
+	}
+}
+
+// IssuerConfiguration is trusted issuer-owned configuration. Issue callers do
+// not select or override the destination that receives a bearer token.
+type IssuerConfiguration struct {
+	ExchangeURL string
+}
+
 // IssueRequest asks the issuer to create one short-lived, single-use token.
-// IssuerURL is public trust configuration carried to the guest; it must not
-// contain credentials, query parameters, or fragments.
 type IssueRequest struct {
 	ContractVersion string  `json:"contract_version"`
 	Binding         Binding `json:"binding"`
-	IssuerURL       string  `json:"issuer_url"`
 	TTLSeconds      int32   `json:"ttl_seconds"`
 }
 
@@ -73,7 +93,7 @@ type IssueRequest struct {
 type BootstrapEnvelope struct {
 	ContractVersion string  `json:"contract_version"`
 	Binding         Binding `json:"binding"`
-	IssuerURL       string  `json:"issuer_url"`
+	ExchangeURL     string  `json:"exchange_url"`
 	Token           string  `json:"token"`
 	IssuedAt        string  `json:"issued_at"`
 	ExpiresAt       string  `json:"expires_at"`
@@ -103,11 +123,18 @@ type ExchangeResult struct {
 	RuntimeIdentity RuntimeIdentity `json:"runtime_identity"`
 }
 
-// RevokeRequest revokes every outstanding token and resulting runtime identity
-// for the exact binding. Absence is idempotent success.
-type RevokeRequest struct {
+// RevokeBindingRequest abandons one exact bootstrap handoff. It is not
+// sufficient for AgentRun cleanup because one execution may have replacements.
+type RevokeBindingRequest struct {
 	ContractVersion string  `json:"contract_version"`
 	Binding         Binding `json:"binding"`
+}
+
+// RevokeExecutionRequest durably revokes every generation and guest instance
+// owned by the stable execution scope. This is the cleanup/restart primitive.
+type RevokeExecutionRequest struct {
+	ContractVersion string         `json:"contract_version"`
+	ExecutionScope  ExecutionScope `json:"execution_scope"`
 }
 
 // Issuer is the topology-neutral lifecycle boundary. A production
@@ -115,7 +142,8 @@ type RevokeRequest struct {
 type Issuer interface {
 	Issue(context.Context, IssueRequest) (BootstrapEnvelope, error)
 	Exchange(context.Context, ExchangeRequest) (ExchangeResult, error)
-	Revoke(context.Context, RevokeRequest) error
+	RevokeBinding(context.Context, RevokeBindingRequest) error
+	RevokeExecution(context.Context, RevokeExecutionRequest) error
 }
 
 type LifecycleState string
@@ -139,6 +167,7 @@ const (
 	ReasonRevoked         FailureReason = "revoked"
 	ReasonAlreadyConsumed FailureReason = "already-consumed"
 	ReasonIdentityFailure FailureReason = "identity-issuance-failed"
+	ReasonStorageFailure  FailureReason = "issuer-storage-failed"
 )
 
 // Failure is deliberately value-free so an error cannot expose a token,
@@ -154,7 +183,7 @@ func (failure *Failure) Error() string {
 func NewFailure(reason FailureReason) error {
 	switch reason {
 	case ReasonInvalidRequest, ReasonCapacity, ReasonAlreadyIssued, ReasonInvalidToken, ReasonBindingMismatch,
-		ReasonExpired, ReasonRevoked, ReasonAlreadyConsumed, ReasonIdentityFailure:
+		ReasonExpired, ReasonRevoked, ReasonAlreadyConsumed, ReasonIdentityFailure, ReasonStorageFailure:
 		return &Failure{reason: reason}
 	default:
 		return &Failure{reason: ReasonInvalidRequest}
@@ -199,7 +228,7 @@ func ValidateTokenDigest(value string) error {
 }
 
 func ValidateIssueRequest(value IssueRequest) error {
-	if value.ContractVersion != Version || ValidateBinding(value.Binding) != nil || validateIssuerURL(value.IssuerURL) != nil ||
+	if value.ContractVersion != Version || ValidateBinding(value.Binding) != nil ||
 		value.TTLSeconds < 1 || value.TTLSeconds > MaxEnrollmentTTLSeconds {
 		return NewFailure(ReasonInvalidRequest)
 	}
@@ -207,7 +236,7 @@ func ValidateIssueRequest(value IssueRequest) error {
 }
 
 func ValidateBootstrapEnvelope(value BootstrapEnvelope) error {
-	if value.ContractVersion != Version || ValidateBinding(value.Binding) != nil || validateIssuerURL(value.IssuerURL) != nil ||
+	if value.ContractVersion != Version || ValidateBinding(value.Binding) != nil || ValidateExchangeURL(value.ExchangeURL) != nil ||
 		validateOpaque(value.Token, TokenBytes, TokenBytes) != nil {
 		return NewFailure(ReasonInvalidRequest)
 	}
@@ -238,20 +267,38 @@ func ValidateExchangeResult(value ExchangeResult) error {
 	return nil
 }
 
-func ValidateRevokeRequest(value RevokeRequest) error {
+func ValidateRevokeBindingRequest(value RevokeBindingRequest) error {
 	if value.ContractVersion != Version || ValidateBinding(value.Binding) != nil {
 		return NewFailure(ReasonInvalidRequest)
 	}
 	return nil
 }
 
+func ValidateRevokeExecutionRequest(value RevokeExecutionRequest) error {
+	if value.ContractVersion != Version || ValidateExecutionScope(value.ExecutionScope) != nil {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
 func ValidateBinding(value Binding) error {
-	if !validText(value.AgentRunUID, MaxAgentRunUIDBytes) || !validText(value.ExecutionID, MaxExecutionIDBytes) ||
-		len(value.DriverRegistration) > MaxDriverNameBytes || !driverNamePattern.MatchString(value.DriverRegistration) ||
+	if ValidateExecutionScope(value.ExecutionScope()) != nil ||
 		value.DesiredGeneration < 1 || !validText(value.GuestInstanceID, MaxGuestInstanceIDBytes) {
 		return errors.New("guest enrollment binding is invalid")
 	}
 	return nil
+}
+
+func ValidateExecutionScope(value ExecutionScope) error {
+	if !validText(value.AgentRunUID, MaxAgentRunUIDBytes) || !validText(value.ExecutionID, MaxExecutionIDBytes) ||
+		len(value.DriverRegistration) > MaxDriverNameBytes || !driverNamePattern.MatchString(value.DriverRegistration) {
+		return errors.New("guest enrollment execution scope is invalid")
+	}
+	return nil
+}
+
+func ValidateIssuerConfiguration(value IssuerConfiguration) error {
+	return ValidateExchangeURL(value.ExchangeURL)
 }
 
 func DecodeIssueRequest(data []byte) (IssueRequest, error) {
@@ -286,10 +333,18 @@ func DecodeExchangeResult(data []byte) (ExchangeResult, error) {
 	return value, nil
 }
 
-func DecodeRevokeRequest(data []byte) (RevokeRequest, error) {
-	var value RevokeRequest
-	if DecodeStrictJSON(data, MaxRevokeRequestBytes, &value) != nil || ValidateRevokeRequest(value) != nil {
-		return RevokeRequest{}, NewFailure(ReasonInvalidRequest)
+func DecodeRevokeBindingRequest(data []byte) (RevokeBindingRequest, error) {
+	var value RevokeBindingRequest
+	if DecodeStrictJSON(data, MaxRevocationRequestBytes, &value) != nil || ValidateRevokeBindingRequest(value) != nil {
+		return RevokeBindingRequest{}, NewFailure(ReasonInvalidRequest)
+	}
+	return value, nil
+}
+
+func DecodeRevokeExecutionRequest(data []byte) (RevokeExecutionRequest, error) {
+	var value RevokeExecutionRequest
+	if DecodeStrictJSON(data, MaxRevocationRequestBytes, &value) != nil || ValidateRevokeExecutionRequest(value) != nil {
+		return RevokeExecutionRequest{}, NewFailure(ReasonInvalidRequest)
 	}
 	return value, nil
 }
@@ -327,16 +382,16 @@ func FormatTimestamp(value time.Time) string {
 	return value.UTC().Truncate(time.Second).Format(time.RFC3339)
 }
 
-func validateIssuerURL(value string) error {
-	if !validText(value, MaxIssuerURLBytes) {
-		return errors.New("issuer URL is invalid")
+func ValidateExchangeURL(value string) error {
+	if !validText(value, MaxExchangeURLBytes) {
+		return errors.New("exchange URL is invalid")
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" ||
 		parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
 		parsed.Path == "" || parsed.Path == "/" || path.Clean(parsed.Path) != parsed.Path || strings.Contains(parsed.Path, "\\") ||
 		strings.Contains(parsed.Path, "//") || parsed.String() != value {
-		return errors.New("issuer URL is invalid")
+		return errors.New("exchange URL is invalid")
 	}
 	return nil
 }

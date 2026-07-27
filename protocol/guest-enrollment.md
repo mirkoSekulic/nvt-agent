@@ -76,6 +76,13 @@ The guest instance ID is a provider-neutral opaque value selected before
 issuance. It is not authorization by itself; it prevents a token intended for
 one bootstrap instance from being exchanged by another.
 
+Cleanup and restart recovery use the stable **execution scope**, which is the
+`agent_run_uid`, `execution_id`, and exact `driver_registration` subset of the
+binding. It intentionally excludes generation and guest instance. The immutable
+AgentRun and selected backend are therefore sufficient to revoke every earlier
+or replacement guest without persisting sensitive envelope state or enumerating
+provider resources.
+
 ## Sensitive envelope and exchange
 
 An authorized issuance request is bounded to 4 KiB:
@@ -90,7 +97,6 @@ An authorized issuance request is bounded to 4 KiB:
     "desired_generation": 7,
     "guest_instance_id": "guest-boot-42"
   },
-  "issuer_url": "https://enrollment.nvt-system.svc/v1/guest-enrollment/exchange",
   "ttl_seconds": 300
 }
 ```
@@ -101,16 +107,20 @@ The issuer returns one envelope, bounded to 16 KiB:
 {
   "contract_version": "nvt.guest-enrollment/v1",
   "binding": {"agent_run_uid":"...","execution_id":"...","driver_registration":"qemu-lab","desired_generation":7,"guest_instance_id":"guest-boot-42"},
-  "issuer_url": "https://enrollment.nvt-system.svc/v1/guest-enrollment/exchange",
+  "exchange_url": "https://enrollment.nvt-system.svc/v1/guest-enrollment/exchange",
   "token": "<32 random bytes encoded as canonical base64url without padding>",
   "issued_at": "2026-07-27T12:00:00Z",
   "expires_at": "2026-07-27T12:05:00Z"
 }
 ```
 
-`issuer_url` is exact HTTPS with no userinfo, query, or fragment. Transport
-trust, server authentication, and reachability are deployment-owned and must be
-provided independently of the token. The URL is not a bearer credential.
+`exchange_url` is exact issuer-owned configuration. An issuance caller cannot
+provide or override it. The issuer validates its canonical endpoint at startup
+and places only that value in every envelope. It is HTTPS with no userinfo,
+query, or fragment. Transport trust, server authentication, and reachability
+are deployment-owned and must be provided independently of the token. The URL
+is not a bearer credential, but misdirecting the bearer token is a credential
+disclosure and therefore fails closed.
 
 The token contains 256 bits from a cryptographic random source. V1 permits a
 TTL from 1 through 900 seconds. The issuer stores and compares
@@ -167,36 +177,78 @@ issued -> consumed
 - **revoked**: AgentRun cleanup or explicit recovery invalidated the token and,
   if already consumed, revoked the resulting runtime identity.
 
-The compare, state transition, and identity issuance are one atomic durable
-operation. Under concurrent exchange, exactly one caller may receive an
-identity. An invalid token, wrong binding, expiry, revocation, replay, capacity
-limit, storage failure, or identity failure never falls back, never issues a
-second identity, and returns only a bounded stable failure class.
+The compare, staged runtime identity, consumed transition, and identity
+activation are one atomic durable-store transaction. Before commit, neither the
+consumed state nor an active runtime identity may be visible. After commit, both
+must be visible even if the response is lost. Under concurrent exchange,
+exactly one caller may receive an identity. An invalid token, wrong binding,
+expiry, revocation, replay, capacity limit, storage failure, or identity failure
+never falls back, never issues a second identity, and returns only a bounded
+stable failure class.
 
-Consumed/revoked digest tombstones may remain for a bounded audit/replay window;
-they contain no plaintext. Expired and terminal tombstones must be garbage
-collected under explicit issuer count/time limits. V1 permits at most 10,000
-outstanding records per issuer partition; deployments may choose a lower bound
-and must also bound request concurrency. Saturation fails explicitly rather
-than evicting a live enrollment.
+Consumed/revoked digest records and revocation tombstones contain no plaintext.
+All token records, exact-binding tombstones, and execution-scope tombstones
+share one hard limit of 10,000 durable entries per issuer partition;
+deployments may choose a lower bound and must also bound request concurrency.
+Creating a record or tombstone at capacity fails explicitly. It never evicts or
+overwrites a live enrollment or active identity.
 
-Revocation is exact-binding, idempotent, and durable even when no token record
-is currently present. A later issuance for that revoked exact binding is
-rejected, closing the issue-versus-cleanup race. AgentRun deletion asks the
-issuer to revoke before operator cleanup is complete. The issuer must revoke
-both an unconsumed token and any runtime identity resulting from that binding.
-Removing the VM or driver resource alone is not proof of revocation.
+Terminal records and tombstones use a retention deadline no later than 24 hours
+after their terminal transition. Issuers must garbage-collect them once that
+deadline has passed and the authoritative orchestrator has completed cleanup
+for the execution scope, provided its authorization source will permanently
+reject new issue requests for that deleted AgentRun. A later cleanup completion
+makes an already-expired tombstone eligible immediately. Binding tombstones
+covered by an execution tombstone may be compacted into the single scope
+tombstone. Saturation remains fail-closed until eligible cleanup frees capacity.
+
+Exact-binding revocation is idempotent and durably abandons one handoff even
+when no token record is currently present. It is useful for uncertain envelope
+delivery, but it is not AgentRun cleanup.
+
+The exact-binding revocation request is bounded to 4 KiB and carries
+`contract_version` plus the complete `binding`. The authoritative execution
+revocation request is also bounded to 4 KiB and has this implementation-neutral
+shape:
+
+```json
+{
+  "contract_version": "nvt.guest-enrollment/v1",
+  "execution_scope": {
+    "agent_run_uid": "3f203e6c-e244-4a75-9445-c24f34b26cd9",
+    "execution_id": "nvt-exec-0123456789abcdef",
+    "driver_registration": "qemu-lab"
+  }
+}
+```
+
+Execution-scoped revocation is the authoritative cleanup operation. It
+atomically installs one durable scope tombstone, revokes all issued tokens and
+all active runtime identities for every matching generation/guest instance,
+and rejects future issuance for that scope. Unrelated scopes remain unchanged.
+AgentRun cleanup ordering is:
+
+1. durably revoke the stable execution scope and retry until acknowledged;
+2. converge exact-driver resource deletion and all other operator cleanup; and
+3. only then complete the finalizer/AgentRun deletion and make the scope
+   eligible for bounded tombstone garbage collection.
+
+An operator or issuer restart resumes step 1 from the immutable AgentRun and
+selected exact driver. Removing the VM or driver resource alone is never proof
+of token or runtime-identity revocation.
 
 ## Restart and uncertain-delivery semantics
 
 Production correctness depends on a transactional durable issuer store, not
 process memory. A fresh issuer process must accept an unexpired issued token,
-reject a consumed/revoked/expired token, and continue exact revocation from
-durable state. The conformance fake models this by replacing the issuer process
-object while retaining only a store containing token digests and bindings. Its
-deterministic clock/random sources and in-memory plaintext delivery are explicit
-test seams; the reusable token generator uses `crypto/rand`, and the fake's
-durable snapshots never retain plaintext.
+reject a consumed/revoked/expired token, and continue execution-scoped
+revocation from durable state. The conformance fake replaces issuer/orchestrator
+objects while retaining only a digest/binding store. Its explicit transaction
+seam injects failure before commit and response loss after commit; this models
+the required atomic boundary without claiming that an in-memory mutex simulates
+a power loss or production database. Deterministic clock/random sources and
+in-memory plaintext delivery are test-only seams; the reusable token generator
+uses `crypto/rand`, and durable snapshots never retain plaintext.
 
 The plaintext response cannot be reconstructed from a digest. If issuance may
 have succeeded but the envelope was not durably delivered, the orchestrator
@@ -208,19 +260,21 @@ Recovery uses explicit revocation plus a new intended guest/bootstrap instance,
 never an implicit replay or fallback driver.
 
 The orchestrator may hold the envelope only in bounded memory while performing
-the sensitive handoff. An orchestrator restart must recover by querying/revoking
-issuer state, not by expecting token bytes in an AgentRun or provider record.
-Production operator/broker wiring is intentionally deferred.
+the sensitive handoff. An orchestrator restart invokes execution-scoped
+revocation from stable AgentRun ownership; it does not need to query tokens,
+remember every prior guest binding, or expect token bytes in an AgentRun or
+provider record. Production operator/broker wiring is intentionally deferred.
 
 ## Diagnostics
 
 Errors expose only stable classes such as `invalid-request`, `invalid-token`,
-`binding-mismatch`, `expired`, `revoked`, `already-consumed`, and
-`capacity-exceeded`. They never include request bodies, tokens, token digests,
-runtime identity material, credential values, provider responses, or guest
-bootstrap content. Normal state snapshots may include the one-way token digest,
-binding, timestamps, lifecycle state, and a non-secret revocation handle, but no
-plaintext token or identity.
+`binding-mismatch`, `expired`, `revoked`, `already-consumed`,
+`capacity-exceeded`, `issuer-storage-failed`, and
+`identity-issuance-failed`. They never include request bodies, tokens, token
+digests, runtime identity material, credential values, provider responses, or
+guest bootstrap content. Normal state snapshots may include the one-way token
+digest, binding, timestamps, lifecycle state, and a non-secret revocation
+handle, but no plaintext token or identity.
 
 ## Compatibility and next phase
 

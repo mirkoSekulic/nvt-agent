@@ -77,8 +77,9 @@ precise and every hermetic suite has a clear home.
   bounds, UTF-8/duplicate-key rejection, token-digest handling, and redacted
   sensitive formatting.
 - `protocol/guestenrollment/conformance_test.go` → durable fake issuer/guest
-  exchange, exact binding, concurrent single use, replay, expiry, revocation,
-  cancellation, restart recovery, capacity, and secret non-disclosure.
+  exchange, exact binding, execution-scoped restart cleanup, concurrent single
+  use, pre/post-commit fault injection, replay, expiry, bounded revocation
+  tombstones, cancellation, capacity, and secret non-disclosure.
 
 The `kubernetes.yml / operator-helm` job also runs the shell-level chart and
 helper coverage aggregated by `tests/operator/helm/test.sh`:
