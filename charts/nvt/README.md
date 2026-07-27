@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.32`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.33`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.32 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.33 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.32 --namespace nvt --create-namespace
+  --version 0.8.33 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -75,8 +75,9 @@ loop-device tools used only when an AgentRun's Docker data root is backed by
 Kata virtiofs; it performs no per-run package installation.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all nine manifests exist and can be fetched anonymously
-with an isolated credential-free Docker configuration. The release reuses an
+published only after all nine image manifests and the native host-bundle OCI
+artifact exist and can be fetched anonymously with isolated credential-free
+clients. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
 match. GHCR package writers are trusted: matching labels establish coordinated
 release metadata, not byte-for-byte content identity against copied labels.
@@ -331,7 +332,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.32`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.33`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -409,6 +410,29 @@ operator-owned for external runs. When cleanup becomes due, the operator calls
 only that run's exact driver until it reports `deleted`; the external cleanup
 finalizer is not removed on an error. `runRetentionSeconds` independently
 controls how long the terminal AgentRun remains after operational cleanup.
+
+### Native VM host bundle
+
+The coordinated release also publishes
+`ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>` as a generic OCI artifact,
+not a runnable container image. Tags are discovery only. A VM execution class
+must snapshot the complete repository and `sha256` OCI index digest in its
+existing opaque, administrator-owned configuration:
+
+```yaml
+executionClasses:
+  - name: native-vm-small
+    kind: vm
+    driver: example-vm
+    configuration:
+      hostBundle:
+        repository: https://ghcr.io/mirkosekulic/nvt-host-bundle
+        digest: sha256:<64-hex>
+```
+
+The value contains no enrollment credential and is not a producer surface.
+See the [native host-bundle contract](../../protocol/host-bundle.md) for bundle
+contents, native prerequisites, atomic activation, and current limitations.
 
 Helm validates the same load-bearing registration bounds as the host contract:
 the command is capped at 128 arguments and 16 KiB aggregate text, and CPU and

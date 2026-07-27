@@ -1,0 +1,65 @@
+name: host bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "hostbundle/**"
+      - "runtime/agentd/**"
+      - "protocol/agentd.md"
+      - "protocol/host-bundle.md"
+      - ".github/workflows/host-bundle.yml"
+  pull_request:
+    paths:
+      - "hostbundle/**"
+      - "runtime/agentd/**"
+      - "protocol/agentd.md"
+      - "protocol/host-bundle.md"
+      - ".github/workflows/host-bundle.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hostbundle/go.mod
+          cache-dependency-path: hostbundle/go.mod
+      - name: Verify native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+          command -v python3
+          command -v tmux
+      - name: Run trusted-core and guest lifecycle tests
+        working-directory: hostbundle
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+  build-contract:
+    name: build-contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hostbundle/go.mod
+          cache-dependency-path: hostbundle/go.mod
+      - name: Verify portable deterministic artifact build
+        run: bash hostbundle/build-test.sh
