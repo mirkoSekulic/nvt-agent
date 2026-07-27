@@ -87,15 +87,18 @@ agent and egress identities cannot issue or revoke enrollments. The broker
 authenticates issue and revoke authorization before reading their request
 bodies. Exchange is intentionally available before the guest has a runtime
 identity, but its SQLite transaction accepts only one canonical 256-bit token
-with the complete exact binding. The broker admits at most 128 accepted HTTP
-handler connections and gives request-line/header parsing a 10-second deadline
-before dispatch. Enrollment bodies have a separate 10-second deadline. Public
+with the complete exact binding. The broker admits at most 128 accepted
+connections before TLS handshake or HTTP parsing and gives both TLS handshake
+and request-line/header parsing a 10-second deadline. Saturation at this
+pre-header boundary closes the connection because no HTTP request exists yet;
+the JSON `capacity-exceeded` response is available only after a request has
+been parsed. Enrollment bodies have a separate 10-second deadline. Public
 exchange bodies have a 64-request bound; authenticated issue/revoke bodies use
 an independent 16-request control-plane bound so public exchange saturation
 cannot block authoritative revocation. Decoded exchange transactions have a
 32-operation bound and a global 128 requests/second token bucket with a burst
-of 256. Saturation returns `capacity-exceeded`; there is no alternate identity
-or driver fallback.
+of 256. Enrollment admission saturation after parsing returns
+`capacity-exceeded`; there is no alternate identity or driver fallback.
 
 Errors are bounded stable classes from the guest-enrollment contract. Responses,
 audit entries, readiness, and process logs never contain a request body,

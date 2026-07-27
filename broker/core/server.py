@@ -54,7 +54,7 @@ GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
-    """Bound accepted handler threads and header parsing before dispatch."""
+    """Bound accepted connections, TLS handshakes, and header parsing."""
 
     def __init__(
         self,
@@ -63,6 +63,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         *,
         max_connections=MAX_BROKER_HTTP_CONNECTIONS,
         header_timeout=BROKER_HEADER_TIMEOUT_SECONDS,
+        tls_context=None,
     ):
         if not isinstance(max_connections, int) or max_connections < 1:
             raise ValueError("broker HTTP connection bound is invalid")
@@ -70,6 +71,9 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             raise ValueError("broker HTTP header timeout is invalid")
         self._connection_slots = threading.BoundedSemaphore(max_connections)
         self._header_timeout = float(header_timeout)
+        if tls_context is not None and not isinstance(tls_context, ssl.SSLContext):
+            raise ValueError("broker TLS context is invalid")
+        self._tls_context = tls_context
         super().__init__(server_address, request_handler_class)
 
     def get_request(self):
@@ -89,6 +93,18 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
     def process_request_thread(self, request, client_address):
         try:
+            if self._tls_context is not None:
+                try:
+                    request = self._tls_context.wrap_socket(
+                        request,
+                        server_side=True,
+                        do_handshake_on_connect=False,
+                    )
+                    request.settimeout(self._header_timeout)
+                    request.do_handshake()
+                except OSError:
+                    self.shutdown_request(request)
+                    return
             super().process_request_thread(request, client_address)
         finally:
             self._connection_slots.release()
@@ -793,15 +809,19 @@ def serve(bind, config_path=None, audit_path=None):
     previous_sigterm = None
     try:
         host, port = parse_bind(bind)
-        server = BoundedThreadingHTTPServer((host, port), make_handler(broker))
         cert = os.environ.get("NVT_BROKER_TLS_CERT")
         key = os.environ.get("NVT_BROKER_TLS_KEY")
         if bool(cert) != bool(key):
             raise BrokerConfigError("NVT_BROKER_TLS_CERT and NVT_BROKER_TLS_KEY must be set together")
+        context = None
         if cert and key:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certfile=cert, keyfile=key)
-            server.socket = context.wrap_socket(server.socket, server_side=True)
+        server = BoundedThreadingHTTPServer(
+            (host, port),
+            make_handler(broker),
+            tls_context=context,
+        )
 
         def stop_for_sigterm(_signum, _frame):
             # HTTPServer.shutdown must run outside serve_forever's thread.

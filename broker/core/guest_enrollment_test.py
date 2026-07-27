@@ -1,6 +1,8 @@
 import json
 import socket
 import sqlite3
+import ssl
+import subprocess
 import tempfile
 import threading
 import time
@@ -27,6 +29,19 @@ from broker.core.server import BoundedThreadingHTTPServer
 class QuietHTTPHandler(BaseHTTPRequestHandler):
     def log_message(self, _format, *_args):
         return
+
+
+class ReadyHTTPHandler(QuietHTTPHandler):
+    def do_GET(self):
+        if self.path != "/ready":
+            self.send_error(404)
+            return
+        payload = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
 
 class BrokerHTTPAdmissionTest(unittest.TestCase):
@@ -75,6 +90,88 @@ class BrokerHTTPAdmissionTest(unittest.TestCase):
             header_result = b""
         self.assertEqual(header_result, b"")
         self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_tls_handshake_is_admitted_and_time_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            certificate = str(Path(temporary) / "server.crt")
+            private_key = str(Path(temporary) / "server.key")
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-days",
+                    "1",
+                    "-subj",
+                    "/CN=localhost",
+                    "-keyout",
+                    private_key,
+                    "-out",
+                    certificate,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(certificate, private_key)
+
+            server = BoundedThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                ReadyHTTPHandler,
+                max_connections=2,
+                header_timeout=0.5,
+                tls_context=server_context,
+            )
+            thread = threading.Thread(
+                target=server.serve_forever,
+                kwargs={"poll_interval": 0.01},
+                daemon=True,
+            )
+            thread.start()
+            stalled = socket.create_connection(server.server_address, timeout=1.0)
+
+            def cleanup():
+                stalled.close()
+                server.shutdown()
+                thread.join(timeout=2.0)
+                server.server_close()
+
+            self.addCleanup(cleanup)
+
+            # The first TCP client never sends a ClientHello. Its admitted
+            # handshake must run outside the accept loop so a second client
+            # can complete TLS and reach the broker concurrently.
+            time.sleep(0.1)
+            client_context = ssl.create_default_context()
+            client_context.check_hostname = False
+            client_context.verify_mode = ssl.CERT_NONE
+            started = time.monotonic()
+            with socket.create_connection(server.server_address, timeout=1.0) as connection:
+                with client_context.wrap_socket(connection, server_hostname="localhost") as tls_connection:
+                    tls_connection.sendall(
+                        b"GET /ready HTTP/1.1\r\nHost: broker.test\r\nConnection: close\r\n\r\n"
+                    )
+                    response = b""
+                    while True:
+                        chunk = tls_connection.recv(4096)
+                        if not chunk:
+                            break
+                        response += chunk
+            self.assertIn(b"HTTP/1.0 200 OK", response)
+            self.assertIn(b'{"ok":true}', response)
+            self.assertLess(time.monotonic() - started, 0.5)
+
+            stalled.settimeout(1.5)
+            try:
+                stalled_result = stalled.recv(1)
+            except ConnectionResetError:
+                stalled_result = b""
+            self.assertEqual(stalled_result, b"")
 
 
 START = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
