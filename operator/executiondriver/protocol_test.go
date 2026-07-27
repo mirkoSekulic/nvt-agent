@@ -3,6 +3,7 @@ package executiondriver
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,40 @@ func TestValidateProtocolTypes(t *testing.T) {
 	}
 	if err := ValidateStatus(status); err != nil {
 		t.Fatalf("valid status: %v", err)
+	}
+}
+
+func TestDesiredExecutionRemainsCredentialFree(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(DesiredExecution{
+		ExecutionID:        "run-1",
+		Generation:         1,
+		DesiredFingerprint: validDesiredFingerprint,
+		WorkloadKind:       WorkloadKindVM,
+		ClassName:          "fake-small",
+		Configuration:      json.RawMessage(`{"region":"test-1"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"class_name", "configuration", "desired_fingerprint", "execution_id", "generation", "workload_kind"}
+	got := make([]string, 0, len(fields))
+	for name := range fields {
+		got = append(got, name)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("DesiredExecution wire fields changed: got %v want %v", got, want)
+	}
+	for _, forbidden := range []string{"enrollment", "token", "credential", "secret", "runtime_identity", "egress_identity"} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("DesiredExecution contains forbidden sensitive field %q: %s", forbidden, encoded)
+		}
 	}
 }
 

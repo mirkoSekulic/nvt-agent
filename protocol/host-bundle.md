@@ -128,7 +128,10 @@ configuration:
 Producers cannot select or mutate execution-class configuration. Enrollment is
 a separate future short-lived input and must not be embedded here.
 
-The next provider phase must provision a real guest, deliver the bootstrap and
-one-time enrollment independently, and implement gateway routing, broker
-identity, revocation, and mediated egress before VM execution is production
-ready.
+The provider-neutral [guest enrollment contract](guest-enrollment.md) defines
+the separate one-time sensitive envelope, exact execution binding, atomic
+exchange, and revocation semantics without placing any credential in this
+bundle. The next implementation phase is a broker-backed issuer plus a
+dedicated operator-to-driver sensitive handoff, followed by a QEMU reference
+driver. Gateway routing, runtime identity use, broker identity, and mediated
+egress remain separate production gates before VM execution is ready.

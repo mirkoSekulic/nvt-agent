@@ -25,6 +25,10 @@ bounded lifecycle fixture, not a production AI runtime. Provider bootstrap,
 short-lived enrollment, code-server, plugins, gateway routing, broker identity,
 and mediated VM egress remain later phases.
 
+The separate provider-neutral enrollment boundary is documented in
+[`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md). Its sensitive
+envelope is never embedded in this bundle, its OCI metadata, or guest config.
+
 After the bootstrap has installed and activated a release, guest provisioning
 may install the repository-owned unit and its separately supplied non-secret
 configuration using the stable `current` path:
