@@ -218,7 +218,14 @@ KIND_SMOKE_MODE=render KIND_SMOKE_CASE=parallel-lifecycle make operator-kind-smo
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=mediated-egress make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=profile-auth make operator-kind-smoke
 KIND_SMOKE_MODE=render KIND_SMOKE_CASE=broker-seed make operator-kind-smoke
+KIND_SMOKE_MODE=render KIND_SMOKE_CASE=external-execution make operator-kind-smoke
 ```
+
+`external-execution` runs the digest-pinned fake OCI driver through its
+authenticated host, proves no Agent Pod is created, restarts both the host and
+operator, damages and observes repair of fake provider state after each
+restart, and verifies durable and subordinate provider state are absent before
+the AgentRun finalizer clears.
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,
 no-secret lifecycle:

@@ -159,6 +159,9 @@ cleanup() {
   if [[ "${SMOKE_TMPDIR_CREATED:-0}" == "1" && -n "${SMOKE_TMPDIR:-}" ]]; then
     rm -rf "${SMOKE_TMPDIR}"
   fi
+  if [[ -n "${KIND_BUILDX_BUILDER:-}" ]]; then
+    docker buildx rm -f "${KIND_BUILDX_BUILDER}" >/dev/null 2>&1 || true
+  fi
   if [[ "${DELETE_CLUSTER:-0}" == "1" ]]; then
     log "deleting kind cluster ${CLUSTER}"
     kind delete cluster --name "${CLUSTER}" >/dev/null 2>&1 || true
