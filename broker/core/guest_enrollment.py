@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 VERSION = "nvt.guest-enrollment/v1"
 RUNTIME_IDENTITY_TYPE = "nvt.runtime-identity/v1"
+STORE_SCHEMA_VERSION = "2"
 TOKEN_BYTES = 32
 MAX_ISSUE_REQUEST_BYTES = 4 << 10
 MAX_EXCHANGE_REQUEST_BYTES = 16 << 10
@@ -236,6 +237,7 @@ class GuestEnrollmentIssuer:
         committed = False
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
             if self._scope_tombstoned(connection, binding) or self._binding_tombstoned(connection, binding):
                 raise EnrollmentFailure("revoked", 409)
             row = connection.execute("SELECT * FROM enrollments WHERE token_digest = ?", (token_digest,)).fetchone()
@@ -326,10 +328,10 @@ class GuestEnrollmentIssuer:
                     """
                     INSERT INTO binding_tombstones (
                         agent_run_uid, execution_id, driver_registration,
-                        desired_generation, guest_instance_id, delete_after
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        desired_generation, guest_instance_id, created_at, delete_after
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (*_binding_values(binding), format_timestamp(now + TOMBSTONE_RETENTION)),
+                    (*_binding_values(binding), format_timestamp(now), format_timestamp(now + TOMBSTONE_RETENTION)),
                 )
             connection.execute(
                 """
@@ -384,10 +386,10 @@ class GuestEnrollmentIssuer:
                 connection.execute(
                     """
                     INSERT INTO execution_tombstones (
-                        agent_run_uid, execution_id, driver_registration, delete_after
-                    ) VALUES (?, ?, ?, ?)
+                        agent_run_uid, execution_id, driver_registration, created_at, delete_after
+                    ) VALUES (?, ?, ?, ?, ?)
                     """,
-                    (*scope_values, format_timestamp(now + TOMBSTONE_RETENTION)),
+                    (*scope_values, format_timestamp(now), format_timestamp(now + TOMBSTONE_RETENTION)),
                 )
             connection.execute(
                 """
@@ -549,6 +551,7 @@ class GuestEnrollmentIssuer:
                     driver_registration TEXT NOT NULL,
                     desired_generation INTEGER NOT NULL,
                     guest_instance_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
                     delete_after TEXT NOT NULL,
                     PRIMARY KEY (agent_run_uid, execution_id, driver_registration, desired_generation, guest_instance_id)
                 ) WITHOUT ROWID;
@@ -556,6 +559,7 @@ class GuestEnrollmentIssuer:
                     agent_run_uid TEXT NOT NULL,
                     execution_id TEXT NOT NULL,
                     driver_registration TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
                     delete_after TEXT NOT NULL,
                     PRIMARY KEY (agent_run_uid, execution_id, driver_registration)
                 ) WITHOUT ROWID;
@@ -563,8 +567,20 @@ class GuestEnrollmentIssuer:
             )
             row = connection.execute("SELECT value FROM enrollment_meta WHERE key = 'schema_version'").fetchone()
             if row is None:
-                connection.execute("INSERT INTO enrollment_meta (key, value) VALUES ('schema_version', '1')")
-            elif row[0] != "1":
+                connection.execute("INSERT INTO enrollment_meta (key, value) VALUES ('schema_version', ?)", (STORE_SCHEMA_VERSION,))
+            elif row[0] == "1":
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._migrate_schema_v1(connection)
+                    connection.execute(
+                        "UPDATE enrollment_meta SET value = ? WHERE key = 'schema_version'",
+                        (STORE_SCHEMA_VERSION,),
+                    )
+                    connection.commit()
+                except Exception:
+                    _rollback(connection)
+                    raise
+            elif row[0] != STORE_SCHEMA_VERSION:
                 raise EnrollmentConfigError("guest enrollment database schema is unsupported")
             connection.commit()
             self._validate_store(connection, full=True)
@@ -581,6 +597,34 @@ class GuestEnrollmentIssuer:
         finally:
             if connection is not None:
                 connection.close()
+
+    def _migrate_schema_v1(self, connection):
+        for table, key_columns in (
+            (
+                "binding_tombstones",
+                ("agent_run_uid", "execution_id", "driver_registration", "desired_generation", "guest_instance_id"),
+            ),
+            ("execution_tombstones", ("agent_run_uid", "execution_id", "driver_registration")),
+        ):
+            columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if "created_at" not in columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN created_at TEXT")
+            selected_columns = ", ".join((*key_columns, "created_at", "delete_after"))
+            for row in connection.execute(f"SELECT {selected_columns} FROM {table}").fetchall():
+                try:
+                    delete_after = parse_timestamp(row["delete_after"])
+                    created_at = row["created_at"]
+                    if created_at is None:
+                        created_at = format_timestamp(delete_after - TOMBSTONE_RETENTION)
+                    else:
+                        created_at = format_timestamp(parse_timestamp(created_at))
+                except (EnrollmentFailure, OverflowError) as error:
+                    raise sqlite3.DatabaseError("guest enrollment database contains an invalid tombstone") from error
+                predicate = " AND ".join(f"{column} = ?" for column in key_columns)
+                connection.execute(
+                    f"UPDATE {table} SET created_at = ? WHERE {predicate}",
+                    (created_at, *(row[column] for column in key_columns)),
+                )
 
     def _connect(self):
         connection = sqlite3.connect(self.database_path, timeout=5.0, isolation_level=None)
@@ -603,12 +647,8 @@ class GuestEnrollmentIssuer:
             if row is None or row[0] != "ok":
                 raise sqlite3.DatabaseError("guest enrollment database integrity check failed")
         version = connection.execute("SELECT value FROM enrollment_meta WHERE key = 'schema_version'").fetchone()
-        if version is None or version[0] != "1":
+        if version is None or version[0] != STORE_SCHEMA_VERSION:
             raise sqlite3.DatabaseError("guest enrollment database schema is unsupported")
-        try:
-            validation_now = self._now()
-        except EnrollmentFailure as error:
-            raise sqlite3.DatabaseError("guest enrollment validation clock is invalid") from error
         if self._entry_count(connection) > self.max_entries:
             raise sqlite3.DatabaseError("guest enrollment database exceeds its durable entry bound")
         enrollment_rows = connection.execute(
@@ -624,22 +664,22 @@ class GuestEnrollmentIssuer:
         binding_tombstones = connection.execute(
             """
             SELECT agent_run_uid, execution_id, driver_registration,
-                   desired_generation, guest_instance_id, delete_after
+                   desired_generation, guest_instance_id, created_at, delete_after
               FROM binding_tombstones
             """
         ).fetchall()
         execution_tombstones = connection.execute(
             """
-            SELECT agent_run_uid, execution_id, driver_registration, delete_after
+            SELECT agent_run_uid, execution_id, driver_registration, created_at, delete_after
               FROM execution_tombstones
             """
         ).fetchall()
         for row in enrollment_rows:
             _validate_persisted_enrollment(row)
         for row in binding_tombstones:
-            _validate_persisted_binding_tombstone(row, validation_now)
+            _validate_persisted_binding_tombstone(row)
         for row in execution_tombstones:
-            _validate_persisted_execution_tombstone(row, validation_now)
+            _validate_persisted_execution_tombstone(row)
 
     def _now(self):
         value = self.now()
@@ -930,17 +970,18 @@ def _validate_persisted_enrollment(row):
         raise sqlite3.DatabaseError("guest enrollment database contains an invalid enrollment record") from error
 
 
-def _validate_persisted_binding_tombstone(row, now):
+def _validate_persisted_binding_tombstone(row):
     try:
         validate_binding(_row_binding(row))
+        created_at = parse_timestamp(row["created_at"])
         delete_after = parse_timestamp(row["delete_after"])
-        if delete_after > now + TOMBSTONE_RETENTION:
+        if not created_at <= delete_after or delete_after - created_at > TOMBSTONE_RETENTION:
             raise ValueError
     except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
         raise sqlite3.DatabaseError("guest enrollment database contains an invalid binding tombstone") from error
 
 
-def _validate_persisted_execution_tombstone(row, now):
+def _validate_persisted_execution_tombstone(row):
     try:
         validate_scope(
             {
@@ -950,8 +991,9 @@ def _validate_persisted_execution_tombstone(row, now):
             },
             exact=True,
         )
+        created_at = parse_timestamp(row["created_at"])
         delete_after = parse_timestamp(row["delete_after"])
-        if delete_after > now + TOMBSTONE_RETENTION:
+        if not created_at <= delete_after or delete_after - created_at > TOMBSTONE_RETENTION:
             raise ValueError
     except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
         raise sqlite3.DatabaseError("guest enrollment database contains an invalid execution tombstone") from error

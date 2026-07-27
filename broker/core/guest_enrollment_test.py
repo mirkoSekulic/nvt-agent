@@ -1,9 +1,13 @@
 import json
+import socket
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +21,60 @@ from broker.core.guest_enrollment import (
     VERSION,
     load_guest_enrollment_from_environment,
 )
+from broker.core.server import BoundedThreadingHTTPServer
+
+
+class QuietHTTPHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format, *_args):
+        return
+
+
+class BrokerHTTPAdmissionTest(unittest.TestCase):
+    def test_incomplete_headers_are_thread_bounded_and_time_bounded(self):
+        server = BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            QuietHTTPHandler,
+            max_connections=2,
+            header_timeout=1.0,
+        )
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        sockets = []
+
+        def cleanup():
+            for connection in sockets:
+                connection.close()
+            server.shutdown()
+            thread.join(timeout=2.0)
+            server.server_close()
+
+        self.addCleanup(cleanup)
+
+        def incomplete_request():
+            connection = socket.create_connection(server.server_address, timeout=1.0)
+            connection.sendall(b"GET /ready HTTP/1.1\r\nHost: broker.test\r\n")
+            sockets.append(connection)
+            return connection
+
+        first = incomplete_request()
+        incomplete_request()
+        time.sleep(0.1)
+        overflow = incomplete_request()
+        overflow.settimeout(1.0)
+        try:
+            overflow_result = overflow.recv(1)
+        except ConnectionResetError:
+            overflow_result = b""
+        self.assertEqual(overflow_result, b"")
+
+        first.settimeout(2.0)
+        started = time.monotonic()
+        try:
+            header_result = first.recv(1)
+        except ConnectionResetError:
+            header_result = b""
+        self.assertEqual(header_result, b"")
+        self.assertLess(time.monotonic() - started, 1.5)
 
 
 START = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
@@ -98,6 +156,29 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertFailure("binding-mismatch", lambda: issuer.exchange(wrong))
         result = issuer.exchange(exchange_request(envelope))
         self.assertEqual(result["binding"], envelope["binding"])
+
+    def test_unrelated_semantic_corruption_blocks_exchange(self):
+        issuer = self.issuer()
+        bad = issuer.issue(issue_request(uid="bad-uid", execution="bad-execution", guest="bad-guest"))
+        good = issuer.issue(issue_request(uid="good-uid", execution="good-execution", guest="good-guest"))
+        update_database(
+            self.database,
+            "UPDATE enrollments SET expires_at = ? WHERE guest_instance_id = ?",
+            ("not-a-timestamp", bad["binding"]["guest_instance_id"]),
+        )
+        self.assertFalse(issuer.ready())
+        self.assertFailure("issuer-storage-failed", lambda: issuer.exchange(exchange_request(good)))
+        rows = query_database(
+            self.database,
+            "SELECT state, runtime_identity_digest, runtime_identity_active FROM enrollments ORDER BY guest_instance_id",
+        )
+        self.assertEqual(
+            rows,
+            [
+                ("issued", None, 0),
+                ("issued", None, 0),
+            ],
+        )
 
     def test_concurrent_exchange_is_single_use(self):
         issuer = self.issuer()
@@ -342,6 +423,42 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
             GuestEnrollmentIssuer(identity_database, EXCHANGE_URL, maintenance_interval=None)
 
+    def test_tombstone_retention_survives_clock_rollback_and_v1_migration(self):
+        rollback_database = str(Path(self.temporary.name) / "rollback.sqlite3")
+        issuer = GuestEnrollmentIssuer(rollback_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        request = issue_request(uid="rollback-uid", execution="rollback-execution", guest="rollback-guest")
+        issuer.revoke_binding(revoke_binding_request(request["binding"]))
+        before = issuer.snapshot()["binding_tombstones"][0]
+        issuer.close()
+
+        self.clock.value = START - timedelta(seconds=1)
+        restarted = GuestEnrollmentIssuer(rollback_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        self.addCleanup(restarted.close)
+        after = restarted.snapshot()["binding_tombstones"][0]
+        self.assertTrue(restarted.ready())
+        self.assertEqual((after["created_at"], after["delete_after"]), (before["created_at"], before["delete_after"]))
+
+        migration_database = str(Path(self.temporary.name) / "schema-v1.sqlite3")
+        self.clock.value = START
+        old = GuestEnrollmentIssuer(migration_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        old.revoke_binding(revoke_binding_request(issue_request(uid="v1-uid", execution="v1-execution")["binding"]))
+        old.close()
+        connection = sqlite3.connect(migration_database)
+        try:
+            connection.execute("ALTER TABLE binding_tombstones DROP COLUMN created_at")
+            connection.execute("ALTER TABLE execution_tombstones DROP COLUMN created_at")
+            connection.execute("UPDATE enrollment_meta SET value = '1' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+        migrated = GuestEnrollmentIssuer(migration_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        self.addCleanup(migrated.close)
+        migrated_tombstone = migrated.snapshot()["binding_tombstones"][0]
+        created_at = datetime.strptime(migrated_tombstone["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        delete_after = datetime.strptime(migrated_tombstone["delete_after"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        self.assertEqual(delete_after - created_at, TOMBSTONE_RETENTION)
+        self.assertEqual(query_database(migration_database, "SELECT value FROM enrollment_meta"), [("2",)])
+
     def test_orchestrator_auth_stores_only_digest(self):
         token = b"orchestrator-auth-token-0123456789abcdef"
         token_file = Path(self.temporary.name) / "orchestrator-token"
@@ -429,6 +546,14 @@ def update_database(database, statement, parameters):
     try:
         connection.execute(statement, parameters)
         connection.commit()
+    finally:
+        connection.close()
+
+
+def query_database(database, statement):
+    connection = sqlite3.connect(database)
+    try:
+        return connection.execute(statement).fetchall()
     finally:
         connection.close()
 

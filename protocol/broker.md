@@ -87,11 +87,15 @@ agent and egress identities cannot issue or revoke enrollments. The broker
 authenticates issue and revoke authorization before reading their request
 bodies. Exchange is intentionally available before the guest has a runtime
 identity, but its SQLite transaction accepts only one canonical 256-bit token
-with the complete exact binding. All enrollment request framing has a
-10-second read deadline and shares a 64-request bound; decoded exchange
-transactions have a 32-operation bound and a global 128 requests/second token
-bucket with a burst of 256. Saturation returns `capacity-exceeded`; there is no
-alternate identity or driver fallback.
+with the complete exact binding. The broker admits at most 128 accepted HTTP
+handler connections and gives request-line/header parsing a 10-second deadline
+before dispatch. Enrollment bodies have a separate 10-second deadline. Public
+exchange bodies have a 64-request bound; authenticated issue/revoke bodies use
+an independent 16-request control-plane bound so public exchange saturation
+cannot block authoritative revocation. Decoded exchange transactions have a
+32-operation bound and a global 128 requests/second token bucket with a burst
+of 256. Saturation returns `capacity-exceeded`; there is no alternate identity
+or driver fallback.
 
 Errors are bounded stable classes from the guest-enrollment contract. Responses,
 audit entries, readiness, and process logs never contain a request body,
@@ -101,7 +105,9 @@ must run as the chart's single `Recreate` replica; sharing that file among
 broker processes is unsupported. This issuer is disabled unless durable state,
 TLS/canonical URL, and the dedicated authorization Secret are all configured.
 Background maintenance records token and runtime-identity expiry at their
-original deadlines. It does not infer AgentRun cleanup from elapsed time:
+original deadlines. Each tombstone durably records its transition time and a
+retention deadline no more than 24 hours later, independent of later wall-clock
+movement. Maintenance does not infer AgentRun cleanup from elapsed time:
 tombstones and terminal records are reclaimed only when a later orchestrator
 integration supplies the authoritative completed scope and permanently denies
 new issuance for it. Until then the 10,000-entry hard bound fails closed rather

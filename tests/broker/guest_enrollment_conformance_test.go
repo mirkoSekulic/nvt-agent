@@ -154,7 +154,7 @@ func TestGuestEnrollmentDedicatedAuthorizationAndIssuerOwnedURL(t *testing.T) {
 	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 }
 
-func TestGuestEnrollmentAuthenticatesBeforeBodyAndBoundsSlowRequests(t *testing.T) {
+func TestGuestEnrollmentAuthenticatesBeforeBodyAndReservesRevocationCapacity(t *testing.T) {
 	fixture := newGuestEnrollmentBrokerFixture(t)
 	for _, path := range []string{
 		guestEnrollmentIssuePath,
@@ -175,26 +175,65 @@ func TestGuestEnrollmentAuthenticatesBeforeBodyAndBoundsSlowRequests(t *testing.
 		}
 	}
 
-	const enrollmentHTTPBound = 64
-	slow := make([]net.Conn, 0, enrollmentHTTPBound)
+	const exchangeHTTPBound = 64
+	slow := make([]net.Conn, 0, exchangeHTTPBound)
 	t.Cleanup(func() {
 		for _, connection := range slow {
 			_ = connection.Close()
 		}
 	})
-	for range enrollmentHTTPBound {
-		slow = append(slow, openIncompleteEnrollmentRequest(t, fixture, guestEnrollmentIssuePath, guestEnrollmentOrchestrator))
+	for range exchangeHTTPBound {
+		slow = append(slow, openIncompleteEnrollmentRequest(t, fixture, guestEnrollmentExchangePath, ""))
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		status, body := fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentRevokeExecution, []byte(`{}`))
+		status, body := fixture.postEnrollmentRaw("", guestEnrollmentExchangePath, []byte(`{}`))
 		if status == http.StatusTooManyRequests {
 			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
 			break
 		}
 		if status != http.StatusBadRequest || time.Now().After(deadline) {
 			t.Fatalf("enrollment HTTP concurrency bound was not enforced: status=%d body=%v", status, body)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	request := enrollmentIssueRequest("saturated-uid", "saturated-execution", 1, "saturated-guest", 300)
+	started := time.Now()
+	status, body := fixture.postJSONWithToken(
+		guestEnrollmentOrchestrator,
+		guestEnrollmentRevokeExecution,
+		enrollmentRevokeExecutionRequest(request),
+	)
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("authoritative revoke was delayed by saturated public exchange traffic: %s", elapsed)
+	}
+}
+
+func TestGuestEnrollmentControlRequestBodiesHaveIndependentBound(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	const controlHTTPBound = 16
+	slow := make([]net.Conn, 0, controlHTTPBound)
+	t.Cleanup(func() {
+		for _, connection := range slow {
+			_ = connection.Close()
+		}
+	})
+	for range controlHTTPBound {
+		slow = append(slow, openIncompleteEnrollmentRequest(t, fixture, guestEnrollmentIssuePath, guestEnrollmentOrchestrator))
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, body := fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, []byte(`{}`))
+		if status == http.StatusTooManyRequests {
+			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+			return
+		}
+		if status != http.StatusBadRequest || time.Now().After(deadline) {
+			t.Fatalf("control-plane HTTP concurrency bound was not enforced: status=%d body=%v", status, body)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

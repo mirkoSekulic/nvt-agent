@@ -46,8 +46,52 @@ PATH_CLASS_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 # only credential-shaped value allowed inside a mediated agent container.
 INJECTION_PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 MAX_IDENTITY_FIELD_BYTES = 512
-MAX_GUEST_ENROLLMENT_HTTP_REQUESTS = 64
+MAX_BROKER_HTTP_CONNECTIONS = 128
+BROKER_HEADER_TIMEOUT_SECONDS = 10
+MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES = 64
+MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS = 16
 GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Bound accepted handler threads and header parsing before dispatch."""
+
+    def __init__(
+        self,
+        server_address,
+        request_handler_class,
+        *,
+        max_connections=MAX_BROKER_HTTP_CONNECTIONS,
+        header_timeout=BROKER_HEADER_TIMEOUT_SECONDS,
+    ):
+        if not isinstance(max_connections, int) or max_connections < 1:
+            raise ValueError("broker HTTP connection bound is invalid")
+        if not isinstance(header_timeout, (int, float)) or header_timeout <= 0:
+            raise ValueError("broker HTTP header timeout is invalid")
+        self._connection_slots = threading.BoundedSemaphore(max_connections)
+        self._header_timeout = float(header_timeout)
+        super().__init__(server_address, request_handler_class)
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self._header_timeout)
+        return request, client_address
+
+    def process_request(self, request, client_address):
+        if not self._connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
 
 class Broker:
@@ -615,10 +659,11 @@ def operation_from_path(path):
 
 
 def make_handler(broker):
-    # ThreadingHTTPServer creates one thread per accepted connection. Acquire a
-    # shared admission slot before authentication or body reads so slow clients
-    # cannot retain an unbounded number of active enrollment handlers.
-    guest_enrollment_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_REQUESTS)
+    # Public pre-enrollment exchange traffic and trusted control-plane traffic
+    # have independent bounds. Saturating exchange cannot consume the slots
+    # required for authoritative execution revocation.
+    guest_exchange_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES)
+    guest_control_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "nvt-brokerd/0.1"
@@ -643,12 +688,14 @@ def make_handler(broker):
                 if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS:
                     broker._require_guest_enrollment()
                     authorization = self.headers.get("authorization")
-                    request_admitted = guest_enrollment_requests.acquire(blocking=False)
+                    request_slots = guest_exchange_requests
+                    if self.path != GUEST_ENROLLMENT_EXCHANGE_PATH:
+                        broker._authenticate_guest_enrollment_orchestrator(authorization)
+                        request_slots = guest_control_requests
+                    request_admitted = request_slots.acquire(blocking=False)
                     if not request_admitted:
                         raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
                     try:
-                        if self.path != GUEST_ENROLLMENT_EXCHANGE_PATH:
-                            broker._authenticate_guest_enrollment_orchestrator(authorization)
                         self.connection.settimeout(GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS)
                         raw_payload = self.read_body(GUEST_ENROLLMENT_ENDPOINT_LIMITS[self.path], "invalid-request")
                         if self.path == GUEST_ENROLLMENT_ISSUE_PATH:
@@ -662,7 +709,7 @@ def make_handler(broker):
                         self.write_json(200, response)
                         return
                     finally:
-                        guest_enrollment_requests.release()
+                        request_slots.release()
                 payload = self.read_payload()
                 if self.path == "/v1/http/request":
                     response = broker.http_request(request_id, payload, self.headers.get("authorization"))
@@ -746,7 +793,7 @@ def serve(bind, config_path=None, audit_path=None):
     previous_sigterm = None
     try:
         host, port = parse_bind(bind)
-        server = ThreadingHTTPServer((host, port), make_handler(broker))
+        server = BoundedThreadingHTTPServer((host, port), make_handler(broker))
         cert = os.environ.get("NVT_BROKER_TLS_CERT")
         key = os.environ.get("NVT_BROKER_TLS_KEY")
         if bool(cert) != bool(key):
