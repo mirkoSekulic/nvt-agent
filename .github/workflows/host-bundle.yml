@@ -46,5 +46,20 @@ jobs:
         run: |
           go vet ./...
           go test -race -count=1 ./...
-      - name: Verify deterministic artifact build
+
+  build-contract:
+    name: build-contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hostbundle/go.mod
+          cache-dependency-path: hostbundle/go.mod
+      - name: Verify portable deterministic artifact build
         run: bash hostbundle/build-test.sh

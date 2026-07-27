@@ -135,9 +135,10 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
   real `agentd`, delivers a prompt, proves clean restart and fail-closed session
   loss, and proves idempotent reuse. This is guest-side Linux coverage, not a
   real provider VM proof.
-- `hostbundle/build-test.sh` → `host-bundle.yml / host-bundle`; it pins cleaned
-  repository-relative and absolute outputs, deterministic tar/layout content,
-  and non-empty output rejection.
+- `hostbundle/build-test.sh` → `host-bundle.yml / build-contract (ubuntu-latest,
+  macos-latest)`; it pins cleaned repository-relative and absolute outputs,
+  deterministic tar/layout content, and non-empty/root output rejection using
+  each platform's standard shell tooling.
 
 ### kind workflow case files
 

@@ -23,11 +23,15 @@ bash hostbundle/build.sh 0.8.33-ci "${revision}" "${absolute_output}"
 cmp "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" "${absolute_output}/nvt-host-bundle-linux-amd64.tar.gz"
 diff -ru "${relative_output}/oci" "${absolute_output}/oci"
 
-before="$(sha256sum "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz")"
 if bash hostbundle/build.sh 0.8.33-ci "${revision}" "${relative}" >/dev/null 2>&1; then
   echo "non-empty host-bundle output directory was accepted" >&2
   exit 1
 fi
-[[ "$(sha256sum "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz")" == "${before}" ]]
+cmp "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" "${absolute_output}/nvt-host-bundle-linux-amd64.tar.gz"
+
+if bash hostbundle/build.sh 0.8.33-ci "${revision}" / >/dev/null 2>&1; then
+  echo "root host-bundle output directory was accepted" >&2
+  exit 1
+fi
 
 echo "host-bundle relative/absolute deterministic build test passed"

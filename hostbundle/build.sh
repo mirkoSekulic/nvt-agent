@@ -1,15 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERSION="${1:-}"
 REVISION="${2:-}"
 OUTPUT="${3:-${ROOT}/dist/host-bundle}"
 ARCHITECTURE="${NVT_HOST_BUNDLE_ARCH:-amd64}"
+
+clean_absolute_path() {
+  local input="$1"
+  local component count index
+  local -a raw_components=()
+  local -a clean_components=()
+  [[ "${input}" == /* ]] || return 1
+  [[ "${input}" != *$'\n'* && "${input}" != *$'\r'* ]] || return 1
+  IFS='/' read -r -a raw_components <<<"${input#/}"
+  for component in "${raw_components[@]}"; do
+    case "${component}" in
+      ""|.) continue ;;
+      ..)
+        count="${#clean_components[@]}"
+        (( count > 0 )) || return 1
+        unset "clean_components[$((count - 1))]"
+        ;;
+      *) clean_components+=("${component}") ;;
+    esac
+  done
+  if (( ${#clean_components[@]} == 0 )); then
+    printf '/\n'
+    return
+  fi
+  printf '/%s' "${clean_components[0]}"
+  for ((index = 1; index < ${#clean_components[@]}; index++)); do
+    printf '/%s' "${clean_components[index]}"
+  done
+  printf '\n'
+}
+
 if [[ "${OUTPUT}" != /* ]]; then
   OUTPUT="${ROOT}/${OUTPUT}"
 fi
-OUTPUT="$(realpath -m -- "${OUTPUT}")"
+if ! OUTPUT="$(clean_absolute_path "${OUTPUT}")"; then
+  echo "host-bundle output path is unsafe" >&2
+  exit 2
+fi
 
 if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$ ]] ||
    [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]] ||
@@ -19,8 +53,8 @@ if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$ ]] ||
   exit 2
 fi
 
-if [[ -e "${OUTPUT}" ]]; then
-  if [[ ! -d "${OUTPUT}" ]] || [[ -n "$(find "${OUTPUT}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+if [[ -e "${OUTPUT}" || -L "${OUTPUT}" ]]; then
+  if [[ -L "${OUTPUT}" ]] || [[ ! -d "${OUTPUT}" ]] || [[ -n "$(find "${OUTPUT}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
     echo "host-bundle output directory must be empty" >&2
     exit 2
   fi
