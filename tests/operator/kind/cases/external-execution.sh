@@ -106,11 +106,17 @@ spec:
 YAML
   wait_for_external_running
   assert_no_agent_pod
+  capture_external_execution_identity
+  assert_fake_driver_state fixture-state-present
+
+  log "restarting the driver host and proving durable provider-state recovery"
+  restart_driver_host
+  damage_and_wait_for_provider_repair
 
   log "restarting the operator and proving level-triggered recovery"
   kubectl_smoke rollout restart deployment/nvt-operator -n "${NAMESPACE}"
   kubectl_smoke rollout status deployment/nvt-operator -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
-  wait_for_external_running
+  damage_and_wait_for_provider_repair
   assert_no_agent_pod
 
   log "deleting the external AgentRun and waiting for driver cleanup/finalizer completion"
@@ -118,12 +124,70 @@ YAML
   local deadline=$((SECONDS + EXTERNAL_EXECUTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if ! kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" >/dev/null 2>&1; then
+      assert_fake_driver_state fixture-state-absent
       log "external AgentRun cleanup completed"
       return
     fi
     sleep 2
   done
   die "external AgentRun finalizer did not clear after driver cleanup"
+}
+
+capture_external_execution_identity() {
+  local uid
+  uid="$(kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.metadata.uid}')"
+  [[ -n "${uid}" ]] || die "external AgentRun has no immutable UID"
+  EXTERNAL_EXECUTION_ID="nvt-agentrun-$(printf '%s' "${uid}" | sha256sum | awk '{print $1}')"
+}
+
+external_driver_pod() {
+  kubectl_smoke get pod -n "${NAMESPACE}" \
+    -l nvt.dev/execution-driver-registration=fake-vm \
+    -o jsonpath='{.items[0].metadata.name}'
+}
+
+assert_fake_driver_state() {
+  local assertion="$1" pod
+  pod="$(external_driver_pod)"
+  [[ -n "${pod}" ]] || die "fake driver-host Pod is unavailable"
+  kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- \
+    /fake-driver "${assertion}" "${EXTERNAL_EXECUTION_ID}"
+}
+
+damage_and_wait_for_provider_repair() {
+  local pod deadline
+  pod="$(external_driver_pod)"
+  kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- \
+    /fake-driver fixture-damage-subordinate "${EXTERNAL_EXECUTION_ID}"
+  deadline=$((SECONDS + EXTERNAL_EXECUTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- \
+      /fake-driver fixture-state-present "${EXTERNAL_EXECUTION_ID}" >/dev/null 2>&1; then
+      wait_for_external_running
+      return
+    fi
+    sleep 2
+  done
+  die "external driver did not repair provider drift after restart"
+}
+
+restart_driver_host() {
+  local pod before deadline current
+  pod="$(external_driver_pod)"
+  [[ -n "${pod}" ]] || die "fake driver-host Pod is unavailable"
+  before="$(kubectl_smoke get pod "${pod}" -n "${NAMESPACE}" -o jsonpath='{.status.containerStatuses[?(@.name=="driver-host")].restartCount}')"
+  [[ "${before}" =~ ^[0-9]+$ ]] || die "driver host restart count is unavailable"
+  kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- /fake-driver fixture-stop-host >/dev/null 2>&1 || true
+  deadline=$((SECONDS + EXTERNAL_EXECUTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    current="$(kubectl_smoke get pod "${pod}" -n "${NAMESPACE}" -o jsonpath='{.status.containerStatuses[?(@.name=="driver-host")].restartCount}' 2>/dev/null || true)"
+    if [[ "${current}" =~ ^[0-9]+$ ]] && (( current > before )); then
+      kubectl_smoke wait --for=condition=Ready "pod/${pod}" -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
+      return
+    fi
+    sleep 2
+  done
+  die "driver host did not restart within the bounded lifecycle window"
 }
 
 wait_for_external_running() {

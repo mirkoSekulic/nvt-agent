@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -220,6 +221,9 @@ type AgentRunReconciler struct {
 	Now              func() metav1.Time
 	BrokerHTTPClient *http.Client
 	ExecutionDrivers executionDriverClientRegistry
+
+	externalExecutionCallsMu sync.Mutex
+	externalExecutionCalls   chan struct{}
 }
 
 type preparedPlaceholderFile struct {
@@ -318,6 +322,22 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	backend, available := r.executionBackendFor(selection)
 	if !available {
+		// Once exact-driver cleanup has completed, the removed external
+		// finalizer is the durable proof that terminal CR retention or final
+		// AgentRun deletion no longer requires a live registration.
+		if selection.Driver != builtInKubernetesDriver &&
+			!controllerutil.ContainsFinalizer(&agentRun, externalExecutionFinalizer) &&
+			!controllerutil.ContainsFinalizer(&agentRun, agentRunFinalizer) {
+			if !agentRun.DeletionTimestamp.IsZero() {
+				if err := r.finalizeAgentRun(ctx, &agentRun); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{}, nil
+			}
+			if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+				return r.reconcileTerminalAgentRunRetention(ctx, &agentRun)
+			}
+		}
 		return r.recordExecutionSelectionFailure(ctx, &agentRun, executionDriverUnavailableReason, "selected execution driver is not available")
 	}
 
@@ -617,7 +637,7 @@ func (r *AgentRunReconciler) reconcileTerminalResourceCleanup(ctx context.Contex
 		return r.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
 
-	remaining, shouldDelete := TerminalPodCleanupDelay(agentRun, r.now())
+	remaining, shouldDelete := TerminalOperationalCleanupDelay(agentRun, r.now())
 	if remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
@@ -1281,7 +1301,10 @@ func (r *AgentRunReconciler) ensureImmutablePodSecurityState(ctx context.Context
 }
 
 func agentRunMaxConcurrentReconciles() int {
-	return 2
+	// At most two external driver calls may run concurrently. The third worker
+	// remains available for the built-in Kubernetes backend and for quick
+	// fail-closed/requeue decisions when an external host stalls.
+	return externalExecutionMaxConcurrentCalls + 1
 }
 
 func podCredentialProjectionSignature(agentRun *nvtv1alpha1.AgentRun, pod *corev1.Pod) (string, error) {
@@ -5066,8 +5089,9 @@ func IsTerminalAgentRunPhase(phase nvtv1alpha1.AgentRunPhase) bool {
 	}
 }
 
-// TerminalPodCleanupDelay returns the remaining TTL and whether the owned Pod should be deleted now.
-func TerminalPodCleanupDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.Duration, bool) {
+// TerminalOperationalCleanupDelay returns the remaining resource TTL and
+// whether the selected backend's operational resources must be deleted now.
+func TerminalOperationalCleanupDelay(agentRun *nvtv1alpha1.AgentRun, now metav1.Time) (time.Duration, bool) {
 	if agentRun.Status.FinishedAt == nil || agentRun.Spec.TTL == nil {
 		return 0, false
 	}

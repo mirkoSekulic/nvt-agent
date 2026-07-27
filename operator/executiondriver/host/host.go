@@ -1,6 +1,7 @@
 // Package host provides process-independent clients for execution drivers.
-// LocalExecutable is the trusted local-process transport; it is deliberately
-// not wired into AgentRun reconciliation in this phase.
+// LocalExecutable is the trusted local-process transport used inside the
+// dedicated host workload; the controller consumes this boundary through the
+// authenticated remote host client rather than launching drivers itself.
 package host
 
 import (

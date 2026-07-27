@@ -1,12 +1,15 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,12 +38,28 @@ type recordingExecutionDriver struct {
 	delete         []executiondriver.Status
 	reconcileError error
 	deleteError    error
+	reconcileBlock <-chan struct{}
+	reconcileStart chan<- struct{}
 }
 
-func (d *recordingExecutionDriver) Reconcile(_ context.Context, desired executiondriver.DesiredExecution) (executiondriver.Status, error) {
+func (d *recordingExecutionDriver) Reconcile(ctx context.Context, desired executiondriver.DesiredExecution) (executiondriver.Status, error) {
+	d.mu.Lock()
+	d.desired = append(d.desired, desired)
+	block := d.reconcileBlock
+	started := d.reconcileStart
+	d.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return executiondriver.Status{}, ctx.Err()
+		}
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.desired = append(d.desired, desired)
 	if d.reconcileError != nil {
 		return executiondriver.Status{}, d.reconcileError
 	}
@@ -165,7 +184,8 @@ func TestExternalExecutionUnavailableAndMalformedResponsesFailClosed(t *testing.
 				t.Fatalf("unavailable condition=%#v", condition)
 			}
 			if name == "permanent rejection" {
-				if result.RequeueAfter != 0 || condition.Reason != executionDriverRejectedReason {
+				if result.RequeueAfter <= 0 || condition.Reason != executionDriverRejectedReason ||
+					updated.Status.Phase != nvtv1alpha1.AgentRunPhaseFailed || updated.Status.FinishedAt == nil {
 					t.Fatalf("permanent result=%#v condition=%#v", result, condition)
 				}
 			} else if result.RequeueAfter != externalExecutionDefaultRequeue {
@@ -234,6 +254,232 @@ func TestExternalExecutionDeletionConvergesAndRetainsFinalizerWhenMissing(t *tes
 		t.Fatalf("AgentRun remained after completed driver cleanup: err=%v object=%#v", err, deleted)
 	}
 	assertNoAgentPods(t, ctx, k8sClient, run.Namespace)
+}
+
+func TestExternalExecutionTerminalResourceTTLDeletesProviderBeforeRunRetention(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	finished := metav1.Date(2026, 7, 27, 11, 59, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		phase nvtv1alpha1.AgentRunPhase
+	}{
+		{name: "completed", phase: nvtv1alpha1.AgentRunPhaseCompleted},
+		{name: "failed", phase: nvtv1alpha1.AgentRunPhaseFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := externalTestAgentRun()
+			run.Finalizers = []string{externalExecutionFinalizer}
+			run.Status.Phase = test.phase
+			run.Status.FinishedAt = &finished
+			run.Spec.TTL = &nvtv1alpha1.AgentRunTTL{RunRetentionSeconds: ptrTo[int64](3600)}
+			if test.phase == nvtv1alpha1.AgentRunPhaseCompleted {
+				run.Spec.TTL.CompletedTTLSeconds = ptrTo[int64](0)
+			} else {
+				run.Spec.TTL.FailedTTLSeconds = ptrTo[int64](0)
+			}
+			driver := &recordingExecutionDriver{delete: []executiondriver.Status{
+				{Phase: executiondriver.PhaseDeleting, RetryAfterSeconds: ptrTo[int32](1)},
+				{Phase: executiondriver.PhaseDeleted},
+			}}
+			k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+			reconciler.Now = func() metav1.Time { return now }
+
+			if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != externalExecutionMinimumRequeue {
+				t.Fatalf("first cleanup result=%#v err=%v", result, err)
+			}
+			progress := getExternalRun(t, ctx, k8sClient, run)
+			if progress.Status.Phase != test.phase || !controllerHasFinalizer(&progress, externalExecutionFinalizer) {
+				t.Fatalf("terminal state changed before cleanup: %#v", progress)
+			}
+			if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != 3540*time.Second {
+				t.Fatalf("completed cleanup result=%#v err=%v", result, err)
+			}
+			retained := getExternalRun(t, ctx, k8sClient, run)
+			if retained.Status.Phase != test.phase || controllerHasFinalizer(&retained, externalExecutionFinalizer) || len(driver.deleteIDs) != 2 {
+				t.Fatalf("provider cleanup did not preserve retained terminal run: %#v deletes=%#v", retained, driver.deleteIDs)
+			}
+			assertNoAgentPods(t, ctx, k8sClient, run.Namespace)
+		})
+	}
+}
+
+func TestExternalExecutionRunRetentionZeroStillCleansProviderAtResourceTTL(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	finished := metav1.Date(2026, 7, 27, 11, 59, 0, 0, time.UTC)
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer}
+	run.Status.Phase = nvtv1alpha1.AgentRunPhaseCompleted
+	run.Status.FinishedAt = &finished
+	run.Spec.TTL = &nvtv1alpha1.AgentRunTTL{CompletedTTLSeconds: ptrTo[int64](0), RunRetentionSeconds: ptrTo[int64](0)}
+	driver := &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.Now = func() metav1.Time { return now }
+
+	if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("cleanup result=%#v err=%v", result, err)
+	}
+	retained := getExternalRun(t, ctx, k8sClient, run)
+	if controllerHasFinalizer(&retained, externalExecutionFinalizer) || len(driver.deleteIDs) != 1 {
+		t.Fatalf("disabled run retention retained provider cleanup obligation: %#v deletes=%#v", retained, driver.deleteIDs)
+	}
+}
+
+func TestExternalExecutionActiveDeadlineTransitionsAndCleansProvider(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	started := metav1.Date(2026, 7, 27, 11, 58, 0, 0, time.UTC)
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer}
+	run.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
+	run.Status.StartedAt = &started
+	run.Spec.TTL = &nvtv1alpha1.AgentRunTTL{ActiveDeadlineSeconds: ptrTo[int64](60), RunRetentionSeconds: ptrTo[int64](3600)}
+	driver := &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.Now = func() metav1.Time { return now }
+
+	if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != time.Hour {
+		t.Fatalf("deadline cleanup result=%#v err=%v", result, err)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseDeadlineExceeded || updated.Status.FinishedAt == nil ||
+		controllerHasFinalizer(&updated, externalExecutionFinalizer) || len(driver.desired) != 0 || len(driver.deleteIDs) != 1 {
+		t.Fatalf("active deadline did not converge exact cleanup: %#v reconcile=%d delete=%#v", updated, len(driver.desired), driver.deleteIDs)
+	}
+}
+
+func TestExternalExecutionNonRetryableDeleteKeepsRetryingExactDriver(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer}
+	run.DeletionTimestamp = &now
+	driver := &recordingExecutionDriver{deleteError: &host.DriverError{Failure: executiondriver.Failure{Reason: "permanent-denial", Message: "DELETE-TOKEN-CANARY", Retryable: false}}}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+
+	if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != externalExecutionCleanupRetry {
+		t.Fatalf("non-retryable cleanup result=%#v err=%v", result, err)
+	}
+	retained := getExternalRun(t, ctx, k8sClient, run)
+	if !controllerHasFinalizer(&retained, externalExecutionFinalizer) || len(driver.deleteIDs) != 1 {
+		t.Fatalf("cleanup failure stranded or removed finalizer: %#v deletes=%#v", retained, driver.deleteIDs)
+	}
+	encodedStatus, err := json.Marshal(retained.Status)
+	if err != nil || bytes.Contains(encodedStatus, []byte("DELETE-TOKEN-CANARY")) {
+		t.Fatalf("cleanup status exposed remote diagnostic: %s err=%v", encodedStatus, err)
+	}
+	driver.deleteError = nil
+	driver.delete = []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("cleanup recovery: %v", err)
+	}
+	var deleted nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &deleted); !apierrors.IsNotFound(err) {
+		t.Fatalf("AgentRun did not finish exact-driver cleanup: err=%v object=%#v", err, deleted)
+	}
+	if len(driver.deleteIDs) != 2 || driver.deleteIDs[0] != driver.deleteIDs[1] {
+		t.Fatalf("cleanup switched identity or driver: %#v", driver.deleteIDs)
+	}
+}
+
+func TestExternalExecutionStaleTerminalGenerationCannotTerminateCurrentRun(t *testing.T) {
+	tests := map[string]executiondriver.Status{
+		"succeeded": {Phase: executiondriver.PhaseSucceeded, ObservedGeneration: 4},
+		"failed":    {Phase: executiondriver.PhaseFailed, ObservedGeneration: 4, Failure: &executiondriver.Failure{Reason: "rejected", Retryable: false}},
+	}
+	for name, status := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			run := externalTestAgentRun()
+			run.Generation = 5
+			run.Finalizers = []string{externalExecutionFinalizer}
+			driver := &recordingExecutionDriver{reconcile: []executiondriver.Status{status}}
+			k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+			if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != externalExecutionDefaultRequeue {
+				t.Fatalf("stale terminal result=%#v err=%v", result, err)
+			}
+			updated := getExternalRun(t, ctx, k8sClient, run)
+			if IsTerminalAgentRunPhase(updated.Status.Phase) || updated.Status.FinishedAt != nil || updated.Status.Reason != "ExternalExecutionStaleObservation" {
+				t.Fatalf("stale terminal status ended current run: %#v", updated.Status)
+			}
+		})
+	}
+}
+
+func TestStalledExternalDriversReserveWorkerForKubernetesBackend(t *testing.T) {
+	ctx := context.Background()
+	blocked := make(chan struct{})
+	var releaseBlocked sync.Once
+	release := func() { releaseBlocked.Do(func() { close(blocked) }) }
+	t.Cleanup(release)
+	startedA := make(chan struct{}, 1)
+	startedB := make(chan struct{}, 1)
+	externalA := externalTestAgentRun()
+	externalA.Name = "external-a"
+	externalA.UID = "external-a-uid"
+	externalA.Finalizers = []string{externalExecutionFinalizer}
+	externalB := externalTestAgentRun()
+	externalB.Name = "external-b"
+	externalB.UID = "external-b-uid"
+	externalB.Spec.Execution.Driver = "example-vm-b"
+	externalB.Finalizers = []string{externalExecutionFinalizer}
+	kubernetesRun := testAgentRun()
+	kubernetesRun.Name = "kubernetes-run"
+	kubernetesRun.UID = "kubernetes-run-uid"
+	kubernetesRun.Status.Phase = nvtv1alpha1.AgentRunPhaseCompleted
+	kubernetesRun.Status.FinishedAt = ptrTo(metav1.Now())
+	kubernetesRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{RunRetentionSeconds: ptrTo[int64](0)}
+
+	scheme := testScheme(t)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(externalA, externalB, kubernetesRun, testBrokerAgentsConfigMap(externalA.Namespace)).Build()
+	reconciler := &AgentRunReconciler{
+		Client: k8sClient, Scheme: scheme,
+		ExecutionDrivers: fakeExecutionDriverRegistry{
+			"example-vm": &recordingExecutionDriver{
+				reconcileBlock: blocked, reconcileStart: startedA,
+				reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}},
+			},
+			"example-vm-b": &recordingExecutionDriver{
+				reconcileBlock: blocked, reconcileStart: startedB,
+				reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}},
+			},
+		},
+	}
+	errorsChannel := make(chan error, 2)
+	go func() { _, err := reconciler.Reconcile(ctx, requestFor(externalA)); errorsChannel <- err }()
+	go func() { _, err := reconciler.Reconcile(ctx, requestFor(externalB)); errorsChannel <- err }()
+	select {
+	case <-startedA:
+	case <-time.After(time.Second):
+		t.Fatal("first external driver did not block")
+	}
+	select {
+	case <-startedB:
+	case <-time.After(time.Second):
+		t.Fatal("second external driver did not block")
+	}
+	if agentRunMaxConcurrentReconciles() <= externalExecutionMaxConcurrentCalls {
+		t.Fatal("controller has no worker reserved beyond external call capacity")
+	}
+	kubernetesDone := make(chan error, 1)
+	go func() { _, err := reconciler.Reconcile(ctx, requestFor(kubernetesRun)); kubernetesDone <- err }()
+	select {
+	case err := <-kubernetesDone:
+		if err != nil {
+			t.Fatalf("Kubernetes reconcile failed while external hosts stalled: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stalled external hosts blocked the built-in Kubernetes backend")
+	}
+	release()
+	for range 2 {
+		if err := <-errorsChannel; err != nil {
+			t.Fatalf("external reconcile after release: %v", err)
+		}
+	}
 }
 
 func externalTestAgentRun() *nvtv1alpha1.AgentRun {

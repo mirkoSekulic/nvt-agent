@@ -404,6 +404,12 @@ provider cleanup resume; the operator never falls back to Kubernetes or a
 different driver. A driver's ready response is portable execution state only
 and does not publish an external endpoint through the gateway.
 
+`activeDeadlineSeconds`, `completedTTLSeconds`, and `failedTTLSeconds` remain
+operator-owned for external runs. When cleanup becomes due, the operator calls
+only that run's exact driver until it reports `deleted`; the external cleanup
+finalizer is not removed on an error. `runRetentionSeconds` independently
+controls how long the terminal AgentRun remains after operational cleanup.
+
 Helm validates the same load-bearing registration bounds as the host contract:
 the command is capped at 128 arguments and 16 KiB aggregate text, and CPU and
 memory requests/limits must be positive Kubernetes quantities with each request

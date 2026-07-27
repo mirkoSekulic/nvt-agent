@@ -43,6 +43,9 @@ type driver struct {
 }
 
 func main() {
+	if runFixtureCommand() {
+		return
+	}
 	stateDir := os.Getenv("NVT_FAKE_DRIVER_STATE_DIR")
 	if stateDir == "" {
 		fmt.Fprintln(os.Stderr, "fake execution driver: state directory is required")
@@ -75,6 +78,52 @@ func main() {
 		fmt.Fprintln(os.Stderr, "fake execution driver: request framing failed")
 		os.Exit(2)
 	}
+}
+
+// runFixtureCommand exposes only bounded, non-secret lifecycle assertions for
+// the hermetic Kind gate. This binary is a test fixture, not a production
+// driver implementation.
+func runFixtureCommand() bool {
+	if len(os.Args) < 2 || !strings.HasPrefix(os.Args[1], "fixture-") {
+		return false
+	}
+	fail := func() {
+		fmt.Fprintln(os.Stderr, "fake execution driver: fixture assertion failed")
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "fixture-state-present", "fixture-state-absent", "fixture-damage-subordinate":
+		if len(os.Args) != 3 || os.Getenv("NVT_FAKE_DRIVER_STATE_DIR") == "" {
+			fail()
+			return true
+		}
+		d := &driver{stateDir: os.Getenv("NVT_FAKE_DRIVER_STATE_DIR")}
+		state, stateErr := d.readState(os.Args[2])
+		subordinateErr := func() error {
+			_, err := os.Stat(d.subordinatePath(os.Args[2]))
+			return err
+		}()
+		if os.Args[1] == "fixture-damage-subordinate" {
+			if stateErr != nil || os.Remove(d.subordinatePath(os.Args[2])) != nil {
+				fail()
+			}
+		} else if os.Args[1] == "fixture-state-present" {
+			if stateErr != nil || subordinateErr != nil || !d.subordinateMatches(state) {
+				fail()
+			}
+		} else if !errors.Is(stateErr, os.ErrNotExist) || !errors.Is(subordinateErr, os.ErrNotExist) {
+			fail()
+		}
+	case "fixture-stop-host":
+		if len(os.Args) != 2 || syscall.Kill(1, syscall.SIGTERM) != nil {
+			fail()
+			return true
+		}
+	default:
+		fail()
+		return true
+	}
+	return true
 }
 
 func (d *driver) handle(line []byte) bool {

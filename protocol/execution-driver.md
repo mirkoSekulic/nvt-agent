@@ -7,10 +7,9 @@ of one approved execution independently of process or deployment topology.
 `operator/executiondriver/host` provides a trusted local-executable transport.
 Production drivers are distributed as complete OCI images pinned by SHA-256
 digest and run in isolated driver-host workloads; source acquisition is not an
-execution-driver runtime contract. AgentRun execution selection still routes
-only to the behavior-preserving built-in Kubernetes Pod adapter in this phase.
-Routing an AgentRun to a registered external driver and production VM drivers
-remain separate work.
+execution-driver runtime contract. AgentRun execution selects either the
+behavior-preserving built-in Kubernetes Pod adapter or one exact registered
+external driver host. Production provider drivers remain separate work.
 
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
@@ -138,8 +137,9 @@ operation; the failed operation is never replayed.
 The standalone driver-host service uses this transport to launch the explicit
 driver command already present in one digest-pinned provider image. The image
 owns its language runtime and dependencies; the host performs no cloning,
-build, package installation, hook, or source acquisition. Ordinary AgentRun
-reconciliation does not invoke this host yet.
+build, package installation, hook, or source acquisition. External AgentRun
+reconciliation reaches it only through the authenticated host API for the
+exact logical registration.
 
 ### Dedicated OCI driver-host workload
 
@@ -188,6 +188,17 @@ operator and host restarts without in-memory call history. Removing a
 registration while runs reference it is unsupported: cleanup retains the
 finalizer until the same registration is restored. Driver readiness remains a
 portable observation and does not by itself publish a gateway route.
+
+The operator owns active deadlines, terminal operational-resource TTLs, and
+AgentRun retention independently. A deadline or expired completed/failed
+resource TTL drives level-triggered `delete` through the exact selected driver;
+the cleanup finalizer remains until `deleted`, while the terminal AgentRun may
+remain for its separate retention interval. Non-retryable convergence failure
+is a sanitized terminal AgentRun failure. Once cleanup is owed, every failure
+remains retryable by controller policy so a repaired exact registration can
+finish deletion. External host calls are synchronously bounded and admitted
+below the controller worker count so stalled hosts cannot consume all capacity
+needed by the built-in Kubernetes backend.
 
 ## Version and operations
 

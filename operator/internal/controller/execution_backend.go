@@ -22,17 +22,21 @@ import (
 )
 
 const (
-	ConditionExecutionBackendAvailable = "ExecutionBackendAvailable"
-	ConditionExternalExecutionReady    = "ExternalExecutionReady"
-	executionSelectionInvalidReason    = "ExecutionSelectionInvalid"
-	executionDriverUnavailableReason   = "ExecutionDriverUnavailable"
-	executionDriverRejectedReason      = "ExecutionDriverRejected"
-	executionDriverReadyReason         = "ExternalExecutionReady"
-	externalExecutionFinalizer         = "nvt.dev/agentrun-external-execution"
-	externalExecutionDefaultRequeue    = 10 * time.Second
-	externalExecutionMinimumRequeue    = 2 * time.Second
-	externalExecutionMaximumRequeue    = 5 * time.Minute
+	ConditionExecutionBackendAvailable  = "ExecutionBackendAvailable"
+	ConditionExternalExecutionReady     = "ExternalExecutionReady"
+	executionSelectionInvalidReason     = "ExecutionSelectionInvalid"
+	executionDriverUnavailableReason    = "ExecutionDriverUnavailable"
+	executionDriverRejectedReason       = "ExecutionDriverRejected"
+	executionDriverReadyReason          = "ExternalExecutionReady"
+	externalExecutionFinalizer          = "nvt.dev/agentrun-external-execution"
+	externalExecutionDefaultRequeue     = 10 * time.Second
+	externalExecutionMinimumRequeue     = 2 * time.Second
+	externalExecutionMaximumRequeue     = 5 * time.Minute
+	externalExecutionCleanupRetry       = time.Minute
+	externalExecutionMaxConcurrentCalls = 2
 )
+
+var errExternalExecutionCapacity = errors.New("external execution call capacity is occupied")
 
 type executionBackendKey struct {
 	kind   nvtv1alpha1.AgentRunExecutionKind
@@ -45,8 +49,8 @@ type executionDriverClientRegistry interface {
 
 // agentRunExecutionBackend is the operator-owned execution selection boundary.
 // The built-in implementation delegates to the existing Kubernetes reconciler;
-// future external implementations can satisfy the same lifecycle boundary
-// without teaching the portable driver protocol about Pod internals.
+// the external implementation satisfies the same lifecycle boundary without
+// teaching the portable driver protocol about Pod internals.
 type agentRunExecutionBackend interface {
 	Reconcile(context.Context, *AgentRunReconciler, nvtv1alpha1.AgentRun) (ctrl.Result, error)
 	Delete(context.Context, *AgentRunReconciler, *nvtv1alpha1.AgentRun) (ctrl.Result, error)
@@ -104,7 +108,7 @@ func (backend externalExecutionBackend) Reconcile(
 	agentRun nvtv1alpha1.AgentRun,
 ) (ctrl.Result, error) {
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
-		return reconciler.reconcileTerminalAgentRunRetention(ctx, &agentRun)
+		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
 	}
 	desired, err := desiredExternalExecution(&agentRun)
 	if err != nil {
@@ -117,14 +121,46 @@ func (backend externalExecutionBackend) Reconcile(
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-	status, err := backend.client.Reconcile(ctx, desired)
+	deadlineResult, deadlineExceeded, err := reconciler.reconcileExternalActiveDeadline(ctx, &agentRun)
 	if err != nil {
-		return reconciler.recordExternalExecutionCallFailure(ctx, &agentRun, err)
+		return ctrl.Result{}, err
+	}
+	if deadlineExceeded {
+		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
+	}
+
+	status, err := backend.reconcile(ctx, reconciler, desired)
+	if err != nil {
+		var driverError *host.DriverError
+		if errors.As(err, &driverError) && !driverError.Failure.Retryable {
+			if err := reconciler.recordExternalExecutionRejected(ctx, &agentRun); err != nil {
+				return ctrl.Result{}, err
+			}
+			return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
+		}
+		return reconciler.recordExternalExecutionCallFailure(ctx, &agentRun, err, false)
 	}
 	if executiondriver.ValidateReconcileStatus(status) != nil || status.ObservedGeneration > desired.Generation {
-		return reconciler.recordExternalExecutionCallFailure(ctx, &agentRun, fmt.Errorf("invalid observed generation"))
+		return reconciler.recordExternalExecutionCallFailure(ctx, &agentRun, fmt.Errorf("invalid observed generation"), false)
 	}
-	return reconciler.recordExternalExecutionStatus(ctx, &agentRun, status, desired.Generation, false)
+	if staleTerminalExternalStatus(status, desired.Generation) {
+		return reconciler.recordExternalStaleTerminalStatus(ctx, &agentRun)
+	}
+	result, err := reconciler.recordExternalExecutionStatus(ctx, &agentRun, status, desired.Generation)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
+		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
+	}
+	deadlineResult, deadlineExceeded, err = reconciler.reconcileExternalActiveDeadline(ctx, &agentRun)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if deadlineExceeded {
+		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
+	}
+	return earliestRequeue(result, deadlineResult), nil
 }
 
 func (backend externalExecutionBackend) Delete(
@@ -138,24 +174,117 @@ func (backend externalExecutionBackend) Delete(
 		}
 		return ctrl.Result{}, nil
 	}
+	return backend.reconcileOperationalCleanup(ctx, reconciler, agentRun, true)
+}
+
+func (backend externalExecutionBackend) reconcileTerminalLifecycle(
+	ctx context.Context,
+	reconciler *AgentRunReconciler,
+	agentRun *nvtv1alpha1.AgentRun,
+) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) {
+		return reconciler.reconcileTerminalAgentRunRetention(ctx, agentRun)
+	}
+	if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseDeadlineExceeded {
+		now := reconciler.now()
+		resourceRemaining, resourceDue := TerminalOperationalCleanupDelay(agentRun, now)
+		retentionRemaining, retentionDue := RunRetentionDelay(agentRun, now)
+		if resourceDue {
+			return backend.reconcileOperationalCleanup(ctx, reconciler, agentRun, false)
+		}
+		if retentionDue {
+			return reconciler.reconcileTerminalAgentRunRetention(ctx, agentRun)
+		}
+		result := earliestRequeue(
+			ctrl.Result{RequeueAfter: resourceRemaining},
+			ctrl.Result{RequeueAfter: retentionRemaining},
+		)
+		if result.RequeueAfter > 0 {
+			return result, nil
+		}
+		return ctrl.Result{}, nil
+	}
+	return backend.reconcileOperationalCleanup(ctx, reconciler, agentRun, false)
+}
+
+func (backend externalExecutionBackend) reconcileOperationalCleanup(
+	ctx context.Context,
+	reconciler *AgentRunReconciler,
+	agentRun *nvtv1alpha1.AgentRun,
+	deletingAgentRun bool,
+) (ctrl.Result, error) {
 	executionID, err := externalExecutionID(agentRun.UID)
 	if err != nil {
 		return reconciler.recordExecutionSelectionFailure(ctx, agentRun, executionSelectionInvalidReason, "resolved external execution state is invalid")
 	}
-	status, err := backend.client.Delete(ctx, executionID)
+	status, err := backend.delete(ctx, reconciler, executionID)
 	if err != nil {
-		return reconciler.recordExternalExecutionCallFailure(ctx, agentRun, err)
+		return reconciler.recordExternalExecutionCallFailure(ctx, agentRun, err, true)
 	}
 	if executiondriver.ValidateDeleteStatus(status) != nil {
-		return reconciler.recordExternalExecutionCallFailure(ctx, agentRun, fmt.Errorf("invalid delete status"))
+		return reconciler.recordExternalExecutionCallFailure(ctx, agentRun, fmt.Errorf("invalid delete status"), true)
 	}
 	if status.Phase != executiondriver.PhaseDeleted {
-		return reconciler.recordExternalExecutionStatus(ctx, agentRun, status, 0, true)
+		return reconciler.recordExternalCleanupProgress(ctx, agentRun, status)
 	}
 	if err := reconciler.finalizeExternalAgentRun(ctx, agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
+	if !deletingAgentRun {
+		return reconciler.reconcileTerminalAgentRunRetention(ctx, agentRun)
+	}
 	return ctrl.Result{}, nil
+}
+
+func (backend externalExecutionBackend) reconcile(
+	ctx context.Context,
+	reconciler *AgentRunReconciler,
+	desired executiondriver.DesiredExecution,
+) (executiondriver.Status, error) {
+	release, acquired := reconciler.tryAcquireExternalExecutionCall()
+	if !acquired {
+		return executiondriver.Status{}, errExternalExecutionCapacity
+	}
+	defer release()
+	return backend.client.Reconcile(ctx, desired)
+}
+
+func (backend externalExecutionBackend) delete(
+	ctx context.Context,
+	reconciler *AgentRunReconciler,
+	executionID string,
+) (executiondriver.Status, error) {
+	release, acquired := reconciler.tryAcquireExternalExecutionCall()
+	if !acquired {
+		return executiondriver.Status{}, errExternalExecutionCapacity
+	}
+	defer release()
+	return backend.client.Delete(ctx, executionID)
+}
+
+func (r *AgentRunReconciler) tryAcquireExternalExecutionCall() (func(), bool) {
+	r.externalExecutionCallsMu.Lock()
+	if r.externalExecutionCalls == nil {
+		r.externalExecutionCalls = make(chan struct{}, externalExecutionMaxConcurrentCalls)
+	}
+	slots := r.externalExecutionCalls
+	r.externalExecutionCallsMu.Unlock()
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, true
+	default:
+		return nil, false
+	}
+}
+
+func staleTerminalExternalStatus(status executiondriver.Status, desiredGeneration int64) bool {
+	if status.ObservedGeneration == desiredGeneration {
+		return false
+	}
+	if status.Phase == executiondriver.PhaseSucceeded {
+		return true
+	}
+	return status.Phase == executiondriver.PhaseFailed && status.Failure != nil && !status.Failure.Retryable
 }
 
 func desiredExternalExecution(agentRun *nvtv1alpha1.AgentRun) (executiondriver.DesiredExecution, error) {
@@ -226,13 +355,19 @@ func (r *AgentRunReconciler) recordExternalExecutionCallFailure(
 	ctx context.Context,
 	agentRun *nvtv1alpha1.AgentRun,
 	callError error,
+	cleanupRequired bool,
 ) (ctrl.Result, error) {
 	reason := executionDriverUnavailableReason
 	requeue := externalExecutionDefaultRequeue
 	var driverError *host.DriverError
 	if errors.As(callError, &driverError) && !driverError.Failure.Retryable {
 		reason = executionDriverRejectedReason
-		requeue = 0
+		if cleanupRequired {
+			requeue = externalExecutionCleanupRetry
+		}
+	}
+	if cleanupRequired {
+		return r.recordExternalCleanupFailure(ctx, agentRun, reason, requeue)
 	}
 	result, err := r.recordExecutionSelectionFailure(ctx, agentRun, reason, "selected execution driver could not converge the run")
 	if err == nil {
@@ -246,7 +381,6 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 	agentRun *nvtv1alpha1.AgentRun,
 	status executiondriver.Status,
 	desiredGeneration int64,
-	deleting bool,
 ) (ctrl.Result, error) {
 	previous := agentRun.Status.DeepCopy()
 	InitializeAgentRunStatus(agentRun)
@@ -260,13 +394,13 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 		reason = "ExternalExecutionProvisioning"
 	case executiondriver.PhaseRunning:
 		phase = nvtv1alpha1.AgentRunPhaseRunning
+		if agentRun.Status.StartedAt == nil {
+			now := r.now()
+			agentRun.Status.StartedAt = &now
+		}
 		if ready {
 			reason = executionDriverReadyReason
 			conditionStatus = metav1.ConditionTrue
-			if agentRun.Status.StartedAt == nil {
-				now := r.now()
-				agentRun.Status.StartedAt = &now
-			}
 		} else {
 			reason = "ExternalExecutionNotReady"
 		}
@@ -302,11 +436,109 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 			return ctrl.Result{}, fmt.Errorf("update external execution status: %w", err)
 		}
 	}
-	result := ctrl.Result{RequeueAfter: externalExecutionRequeue(status)}
-	if deleting && result.RequeueAfter == 0 {
-		result.RequeueAfter = externalExecutionDefaultRequeue
+	return ctrl.Result{RequeueAfter: externalExecutionRequeue(status)}, nil
+}
+
+func (r *AgentRunReconciler) recordExternalExecutionRejected(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+) error {
+	previous := agentRun.Status.DeepCopy()
+	InitializeAgentRunStatus(agentRun)
+	now := r.now()
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseFailed
+	agentRun.Status.PodName = ""
+	agentRun.Status.FinishedAt = &now
+	agentRun.Status.Reason = executionDriverRejectedReason
+	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionFalse, executionDriverRejectedReason, "selected execution driver rejected the resolved run")
+	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, executionDriverRejectedReason, "external execution is not ready")
+	if reflect.DeepEqual(*previous, agentRun.Status) {
+		return nil
 	}
-	return result, nil
+	if err := r.Status().Update(ctx, agentRun); err != nil {
+		return fmt.Errorf("record external execution rejection: %w", err)
+	}
+	return nil
+}
+
+func (r *AgentRunReconciler) recordExternalStaleTerminalStatus(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+) (ctrl.Result, error) {
+	previous := agentRun.Status.DeepCopy()
+	InitializeAgentRunStatus(agentRun)
+	agentRun.Status.PodName = ""
+	agentRun.Status.Reason = "ExternalExecutionStaleObservation"
+	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
+	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, "ExternalExecutionStaleObservation", "external execution has not observed the current desired generation")
+	if !reflect.DeepEqual(*previous, agentRun.Status) {
+		if err := r.Status().Update(ctx, agentRun); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record stale external execution observation: %w", err)
+		}
+	}
+	return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
+}
+
+func (r *AgentRunReconciler) recordExternalCleanupProgress(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	status executiondriver.Status,
+) (ctrl.Result, error) {
+	previous := agentRun.Status.DeepCopy()
+	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
+	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, "ExternalExecutionDeleting", "external execution cleanup is converging")
+	if !reflect.DeepEqual(*previous, agentRun.Status) {
+		if err := r.Status().Update(ctx, agentRun); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record external execution cleanup: %w", err)
+		}
+	}
+	requeue := externalExecutionRequeue(status)
+	if requeue == 0 {
+		requeue = externalExecutionDefaultRequeue
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+func (r *AgentRunReconciler) recordExternalCleanupFailure(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	reason string,
+	requeue time.Duration,
+) (ctrl.Result, error) {
+	previous := agentRun.Status.DeepCopy()
+	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionFalse, reason, "selected execution driver could not complete cleanup")
+	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, reason, "external execution cleanup is incomplete")
+	if !reflect.DeepEqual(*previous, agentRun.Status) {
+		if err := r.Status().Update(ctx, agentRun); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record external execution cleanup failure: %w", err)
+		}
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+func (r *AgentRunReconciler) reconcileExternalActiveDeadline(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+) (ctrl.Result, bool, error) {
+	now := r.now()
+	remaining, exceeded := ActiveDeadlineDelay(agentRun, now)
+	if remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, false, nil
+	}
+	if !exceeded {
+		return ctrl.Result{}, false, nil
+	}
+	previous := agentRun.Status.DeepCopy()
+	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseDeadlineExceeded
+	agentRun.Status.FinishedAt = &now
+	agentRun.Status.Reason = activeDeadlineReason
+	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, "ExternalExecutionDeadlineExceeded", "external execution exceeded its active deadline")
+	if !reflect.DeepEqual(*previous, agentRun.Status) {
+		if err := r.Status().Update(ctx, agentRun); err != nil {
+			return ctrl.Result{}, true, fmt.Errorf("mark external AgentRun active deadline exceeded: %w", err)
+		}
+	}
+	return ctrl.Result{}, true, nil
 }
 
 func externalExecutionRequeue(status executiondriver.Status) time.Duration {
@@ -371,7 +603,7 @@ func (r *AgentRunReconciler) recordExecutionSelectionFailure(
 		}
 	}
 	result := ctrl.Result{}
-	if !agentRun.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) {
+	if controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) {
 		result.RequeueAfter = externalExecutionDefaultRequeue
 	}
 	return result, nil
