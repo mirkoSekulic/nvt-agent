@@ -23,7 +23,7 @@ from broker.core.guest_enrollment import (
     VERSION,
     load_guest_enrollment_from_environment,
 )
-from broker.core.server import BoundedThreadingHTTPServer
+from broker.core.server import BoundedThreadingHTTPServer, make_handler
 
 
 class QuietHTTPHandler(BaseHTTPRequestHandler):
@@ -42,6 +42,37 @@ class ReadyHTTPHandler(QuietHTTPHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+
+class EnrollmentHTTPBroker:
+    guest_enrollment = object()
+
+    def _require_guest_enrollment(self):
+        return None
+
+    def guest_enrollment_exchange(self, _request_id, _payload):
+        return {"ok": True}
+
+    def readiness(self):
+        return {"ok": True, "status": "ready"}
+
+    def denied(self, _request_id, _payload, reason, _message, _authorization, _operation):
+        return {"ok": False, "error": reason}
+
+
+def wait_for_plain_ready(test, address):
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(address, timeout=0.2) as connection:
+                connection.sendall(b"GET /ready HTTP/1.0\r\nHost: broker.test\r\n\r\n")
+                response = connection.recv(4096)
+            if b"HTTP/1.0 200 OK" in response:
+                return
+        except OSError:
+            pass
+        time.sleep(0.02)
+    test.fail("connection capacity was not released after the absolute deadline")
 
 
 class BrokerHTTPAdmissionTest(unittest.TestCase):
@@ -123,7 +154,7 @@ class BrokerHTTPAdmissionTest(unittest.TestCase):
             server = BoundedThreadingHTTPServer(
                 ("127.0.0.1", 0),
                 ReadyHTTPHandler,
-                max_connections=2,
+                max_connections=1,
                 header_timeout=0.5,
                 tls_context=server_context,
             )
@@ -134,44 +165,174 @@ class BrokerHTTPAdmissionTest(unittest.TestCase):
             )
             thread.start()
             stalled = socket.create_connection(server.server_address, timeout=1.0)
+            incoming = ssl.MemoryBIO()
+            outgoing = ssl.MemoryBIO()
+            client_hello_context = ssl.create_default_context()
+            client_hello_context.check_hostname = False
+            client_hello_context.verify_mode = ssl.CERT_NONE
+            client_ssl = client_hello_context.wrap_bio(incoming, outgoing, server_hostname="localhost")
+            with self.assertRaises(ssl.SSLWantReadError):
+                client_ssl.do_handshake()
+            client_hello = outgoing.read()
+            drip_stopped = threading.Event()
+
+            def drip_client_hello():
+                try:
+                    for value in client_hello:
+                        stalled.sendall(bytes([value]))
+                        time.sleep(0.05)
+                except OSError:
+                    pass
+                finally:
+                    drip_stopped.set()
+
+            drip_thread = threading.Thread(target=drip_client_hello, daemon=True)
+            drip_thread.start()
 
             def cleanup():
                 stalled.close()
+                drip_thread.join(timeout=2.0)
                 server.shutdown()
                 thread.join(timeout=2.0)
                 server.server_close()
 
             self.addCleanup(cleanup)
 
-            # The first TCP client never sends a ClientHello. Its admitted
-            # handshake must run outside the accept loop so a second client
-            # can complete TLS and reach the broker concurrently.
+            # The first client drip-feeds a valid ClientHello slowly enough to
+            # exceed the absolute handshake deadline. The accept loop must
+            # still promptly reject overflow rather than blocking in TLS.
             time.sleep(0.1)
-            client_context = ssl.create_default_context()
-            client_context.check_hostname = False
-            client_context.verify_mode = ssl.CERT_NONE
-            started = time.monotonic()
-            with socket.create_connection(server.server_address, timeout=1.0) as connection:
-                with client_context.wrap_socket(connection, server_hostname="localhost") as tls_connection:
-                    tls_connection.sendall(
-                        b"GET /ready HTTP/1.1\r\nHost: broker.test\r\nConnection: close\r\n\r\n"
-                    )
-                    response = b""
-                    while True:
-                        chunk = tls_connection.recv(4096)
-                        if not chunk:
-                            break
-                        response += chunk
-            self.assertIn(b"HTTP/1.0 200 OK", response)
-            self.assertIn(b'{"ok":true}', response)
-            self.assertLess(time.monotonic() - started, 0.5)
+            overflow = socket.create_connection(server.server_address, timeout=1.0)
+            overflow.settimeout(0.3)
+            try:
+                overflow_result = overflow.recv(1)
+            except ConnectionResetError:
+                overflow_result = b""
+            overflow.close()
+            self.assertEqual(overflow_result, b"")
 
-            stalled.settimeout(1.5)
+            self.assertTrue(drip_stopped.wait(1.0))
+            stalled.settimeout(1.0)
             try:
                 stalled_result = stalled.recv(1)
             except ConnectionResetError:
                 stalled_result = b""
             self.assertEqual(stalled_result, b"")
+
+            # Once the absolute deadline expires, the handshake slot is
+            # released and a complete HTTPS request can use it.
+            client_context = ssl.create_default_context()
+            client_context.check_hostname = False
+            client_context.verify_mode = ssl.CERT_NONE
+            response = b""
+            ready_deadline = time.monotonic() + 1.0
+            while time.monotonic() < ready_deadline and b"HTTP/1.0 200 OK" not in response:
+                try:
+                    with socket.create_connection(server.server_address, timeout=0.2) as connection:
+                        with client_context.wrap_socket(connection, server_hostname="localhost") as tls_connection:
+                            tls_connection.sendall(
+                                b"GET /ready HTTP/1.1\r\nHost: broker.test\r\nConnection: close\r\n\r\n"
+                            )
+                            response = b""
+                            while True:
+                                chunk = tls_connection.recv(4096)
+                                if not chunk:
+                                    break
+                                response += chunk
+                except OSError:
+                    time.sleep(0.02)
+            self.assertIn(b"HTTP/1.0 200 OK", response)
+            self.assertIn(b'{"ok":true}', response)
+
+    def test_slow_drip_headers_hit_absolute_deadline_and_release_capacity(self):
+        server = BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(EnrollmentHTTPBroker()),
+            max_connections=1,
+            header_timeout=0.2,
+        )
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        stalled = socket.create_connection(server.server_address, timeout=1.0)
+
+        def drip_headers():
+            try:
+                for value in b"GET /ready HTTP/1.1\r\nHost: broker.test\r\nX-Slow: value\r\n\r\n":
+                    stalled.sendall(bytes([value]))
+                    time.sleep(0.05)
+            except OSError:
+                pass
+
+        drip_thread = threading.Thread(target=drip_headers, daemon=True)
+        drip_thread.start()
+
+        def cleanup():
+            stalled.close()
+            drip_thread.join(timeout=2.0)
+            server.shutdown()
+            thread.join(timeout=2.0)
+            server.server_close()
+
+        self.addCleanup(cleanup)
+        time.sleep(0.1)
+        overflow = socket.create_connection(server.server_address, timeout=1.0)
+        overflow.settimeout(1.0)
+        try:
+            overflow_result = overflow.recv(1)
+        except ConnectionResetError:
+            overflow_result = b""
+        overflow.close()
+        self.assertEqual(overflow_result, b"")
+
+        wait_for_plain_ready(self, server.server_address)
+
+    def test_slow_drip_enrollment_body_hits_absolute_deadline_and_releases_capacity(self):
+        server = BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(EnrollmentHTTPBroker()),
+            max_connections=1,
+            header_timeout=1.0,
+            body_timeout=0.2,
+        )
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        stalled = socket.create_connection(server.server_address, timeout=1.0)
+        stalled.sendall(
+            b"POST /v1/guest-enrollment/exchange HTTP/1.1\r\n"
+            b"Host: broker.test\r\nContent-Type: application/json\r\n"
+            b"Content-Length: 100\r\n\r\n"
+        )
+
+        def drip_body():
+            try:
+                for value in b"{" + (b" " * 99):
+                    stalled.sendall(bytes([value]))
+                    time.sleep(0.05)
+            except OSError:
+                pass
+
+        drip_thread = threading.Thread(target=drip_body, daemon=True)
+        drip_thread.start()
+
+        def cleanup():
+            stalled.close()
+            drip_thread.join(timeout=2.0)
+            server.shutdown()
+            thread.join(timeout=2.0)
+            server.server_close()
+
+        self.addCleanup(cleanup)
+        time.sleep(0.1)
+        overflow = socket.create_connection(server.server_address, timeout=1.0)
+        overflow.settimeout(1.0)
+        try:
+            overflow_result = overflow.recv(1)
+        except ConnectionResetError:
+            overflow_result = b""
+        overflow.close()
+        self.assertEqual(overflow_result, b"")
+
+        wait_for_plain_ready(self, server.server_address)
 
 
 START = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
@@ -254,6 +415,16 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         result = issuer.exchange(exchange_request(envelope))
         self.assertEqual(result["binding"], envelope["binding"])
 
+    def test_clock_rollback_cannot_commit_invalid_identity_timestamps(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        self.clock.value = START - timedelta(seconds=1)
+        result = issuer.exchange(exchange_request(envelope))
+        record = issuer.snapshot()["records"][0]
+        self.assertEqual(result["runtime_identity"]["issued_at"], envelope["issued_at"])
+        self.assertEqual(record["runtime_identity_issued_at"], envelope["issued_at"])
+        self.assertTrue(issuer.ready())
+
     def test_unrelated_semantic_corruption_blocks_exchange(self):
         issuer = self.issuer()
         bad = issuer.issue(issue_request(uid="bad-uid", execution="bad-execution", guest="bad-guest"))
@@ -295,6 +466,52 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         record = issuer.snapshot()["records"][0]
         self.assertEqual(record["state"], "consumed")
         self.assertEqual(record["runtime_identity_active"], 1)
+
+    def test_concurrent_invalid_exchange_does_not_take_writer_validation_path(self):
+        issuer = self.issuer()
+        original_validate_store = issuer._validate_store
+        invalid_validation_calls = 0
+        validation_lock = threading.Lock()
+
+        def tracked_validate_store(connection, full=False):
+            nonlocal invalid_validation_calls
+            if threading.current_thread().name.startswith("invalid-exchange"):
+                with validation_lock:
+                    invalid_validation_calls += 1
+                # If an invalid public request reaches full validation while
+                # holding BEGIN IMMEDIATE, concurrent requests serialize here.
+                time.sleep(0.05)
+            return original_validate_store(connection, full=full)
+
+        issuer._validate_store = tracked_validate_store
+        invalid = exchange_request(
+            {
+                "contract_version": VERSION,
+                "binding": issue_request(uid="invalid-uid", execution="invalid-execution")["binding"],
+                "token": "A" * 43,
+            }
+        )
+        barrier = threading.Barrier(17)
+
+        def invalid_exchange(_index):
+            barrier.wait()
+            try:
+                issuer.exchange(invalid)
+            except EnrollmentFailure as error:
+                return error.reason
+            return "unexpected-success"
+
+        with ThreadPoolExecutor(max_workers=16, thread_name_prefix="invalid-exchange") as pool:
+            futures = [pool.submit(invalid_exchange, index) for index in range(16)]
+            barrier.wait()
+            started = time.monotonic()
+            issuer.revoke_execution(revoke_execution_request(issue_request()["binding"]))
+            elapsed = time.monotonic() - started
+            reasons = [future.result(timeout=2.0) for future in futures]
+
+        self.assertEqual(reasons, ["invalid-token"] * 16)
+        self.assertEqual(invalid_validation_calls, 0)
+        self.assertLess(elapsed, 0.5)
 
     def test_execution_revocation_covers_replacements_and_preserves_unrelated(self):
         issuer = self.issuer()

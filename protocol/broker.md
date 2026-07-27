@@ -89,16 +89,25 @@ bodies. Exchange is intentionally available before the guest has a runtime
 identity, but its SQLite transaction accepts only one canonical 256-bit token
 with the complete exact binding. The broker admits at most 128 accepted
 connections before TLS handshake or HTTP parsing and gives both TLS handshake
-and request-line/header parsing a 10-second deadline. Saturation at this
+and request-line/header parsing a 10-second monotonic absolute deadline; byte
+progress does not extend either deadline. Saturation at this
 pre-header boundary closes the connection because no HTTP request exists yet;
 the JSON `capacity-exceeded` response is available only after a request has
-been parsed. Enrollment bodies have a separate 10-second deadline. Public
+been parsed. Enrollment bodies have a separate 10-second monotonic absolute
+deadline that is likewise not extended by partial reads. Public
 exchange bodies have a 64-request bound; authenticated issue/revoke bodies use
 an independent 16-request control-plane bound so public exchange saturation
 cannot block authoritative revocation. Decoded exchange transactions have a
 32-operation bound and a global 128 requests/second token bucket with a burst
 of 256. Enrollment admission saturation after parsing returns
 `capacity-exceeded`; there is no alternate identity or driver fallback.
+Valid-shaped absent tokens are rejected through indexed read-only lookups and
+never acquire the SQLite writer lock. A token that selects durable state must
+enter the transactional writer path, which validates the complete bounded
+store before consuming the token or issuing an identity.
+Runtime identity timestamps use the later of the issuer's current wall clock
+and the enrollment's durable `issued_at`, so a backward clock adjustment cannot
+commit a record that the same issuer subsequently rejects as malformed.
 
 Errors are bounded stable classes from the guest-enrollment contract. Responses,
 audit entries, readiness, and process logs never contain a request body,

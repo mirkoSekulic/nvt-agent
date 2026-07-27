@@ -233,6 +233,7 @@ class GuestEnrollmentIssuer:
     def _exchange_locked(self, binding, token):
         now = self._now()
         token_digest = _digest(token)
+        self._preflight_exchange_candidate(binding, token_digest)
         connection = self._connect_or_failure()
         committed = False
         try:
@@ -269,8 +270,10 @@ class GuestEnrollmentIssuer:
             except Exception as error:
                 raise EnrollmentFailure("identity-issuance-failed", 503) from error
             identity_digest = _digest(identity)
-            identity_issued_at = format_timestamp(now)
-            identity_expires_at = format_timestamp(now + timedelta(hours=1))
+            enrollment_issued_at = parse_timestamp(row["issued_at"])
+            identity_issued_time = max(now, enrollment_issued_at)
+            identity_issued_at = format_timestamp(identity_issued_time)
+            identity_expires_at = format_timestamp(identity_issued_time + timedelta(hours=1))
             connection.execute(
                 """
                 UPDATE enrollments
@@ -305,6 +308,28 @@ class GuestEnrollmentIssuer:
         except sqlite3.Error as error:
             if not committed:
                 _rollback(connection)
+            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+        finally:
+            connection.close()
+
+    def _preflight_exchange_candidate(self, binding, token_digest):
+        """Reject absent tokens through indexed reads without a writer lock."""
+        connection = self._connect_or_failure()
+        try:
+            connection.execute("BEGIN")
+            if self._scope_tombstoned(connection, binding) or self._binding_tombstoned(connection, binding):
+                raise EnrollmentFailure("revoked", 409)
+            row = connection.execute(
+                "SELECT 1 FROM enrollments WHERE token_digest = ?",
+                (token_digest,),
+            ).fetchone()
+            if row is None:
+                raise EnrollmentFailure("invalid-token", 401)
+        except EnrollmentFailure:
+            _rollback(connection)
+            raise
+        except sqlite3.Error as error:
+            _rollback(connection)
             raise EnrollmentFailure("issuer-storage-failed", 503) from error
         finally:
             connection.close()

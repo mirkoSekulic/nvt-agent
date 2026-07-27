@@ -2,7 +2,9 @@ import json
 import os
 import re
 import signal
+import socket
 import ssl
+import sys
 import threading
 import time
 import uuid
@@ -53,6 +55,55 @@ MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS = 16
 GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
 
 
+class _AbsoluteSocketDeadline:
+    """Interrupt socket I/O at one monotonic deadline regardless of progress."""
+
+    def __init__(self, connection, timeout):
+        self._connection = connection
+        self._expires_at = time.monotonic() + timeout
+        self._lock = threading.Lock()
+        self._active = False
+        self._expired = False
+        self._timer = None
+
+    def start(self):
+        with self._lock:
+            if self._active or self._timer is not None:
+                raise RuntimeError("socket deadline cannot be reused")
+            remaining = max(0.0, self._expires_at - time.monotonic())
+            self._connection.settimeout(remaining)
+            self._active = True
+            self._timer = threading.Timer(remaining, self._expire)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def cancel(self):
+        with self._lock:
+            self._active = False
+            timer = self._timer
+            expired = self._expired or time.monotonic() >= self._expires_at
+            self._expired = expired
+        if timer is not None:
+            timer.cancel()
+        if expired:
+            try:
+                self._connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        return not expired
+
+    def _expire(self):
+        with self._lock:
+            if not self._active:
+                return
+            self._active = False
+            self._expired = True
+        try:
+            self._connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """Bound accepted connections, TLS handshakes, and header parsing."""
 
@@ -63,14 +114,18 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         *,
         max_connections=MAX_BROKER_HTTP_CONNECTIONS,
         header_timeout=BROKER_HEADER_TIMEOUT_SECONDS,
+        body_timeout=GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS,
         tls_context=None,
     ):
         if not isinstance(max_connections, int) or max_connections < 1:
             raise ValueError("broker HTTP connection bound is invalid")
         if not isinstance(header_timeout, (int, float)) or header_timeout <= 0:
             raise ValueError("broker HTTP header timeout is invalid")
+        if not isinstance(body_timeout, (int, float)) or body_timeout <= 0:
+            raise ValueError("broker HTTP body timeout is invalid")
         self._connection_slots = threading.BoundedSemaphore(max_connections)
         self._header_timeout = float(header_timeout)
+        self._body_timeout = float(body_timeout)
         if tls_context is not None and not isinstance(tls_context, ssl.SSLContext):
             raise ValueError("broker TLS context is invalid")
         self._tls_context = tls_context
@@ -94,20 +149,33 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     def process_request_thread(self, request, client_address):
         try:
             if self._tls_context is not None:
+                deadline = None
                 try:
                     request = self._tls_context.wrap_socket(
                         request,
                         server_side=True,
                         do_handshake_on_connect=False,
                     )
-                    request.settimeout(self._header_timeout)
+                    deadline = _AbsoluteSocketDeadline(request, self._header_timeout)
+                    deadline.start()
                     request.do_handshake()
                 except OSError:
+                    if deadline is not None:
+                        deadline.cancel()
+                    self.shutdown_request(request)
+                    return
+                if not deadline.cancel():
                     self.shutdown_request(request)
                     return
             super().process_request_thread(request, client_address)
         finally:
             self._connection_slots.release()
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class Broker:
@@ -687,6 +755,32 @@ def make_handler(broker):
         def log_message(self, format, *args):
             return
 
+        def handle_one_request(self):
+            self._header_deadline = _AbsoluteSocketDeadline(
+                self.connection,
+                self.server._header_timeout,
+            )
+            self._header_deadline.start()
+            try:
+                super().handle_one_request()
+            finally:
+                self._cancel_header_deadline()
+
+        def parse_request(self):
+            parsed = False
+            try:
+                parsed = super().parse_request()
+            finally:
+                within_deadline = self._cancel_header_deadline()
+            return parsed and within_deadline
+
+        def _cancel_header_deadline(self):
+            deadline = getattr(self, "_header_deadline", None)
+            if deadline is None:
+                return True
+            self._header_deadline = None
+            return deadline.cancel()
+
         def do_GET(self):
             if self.path == "/health":
                 self.write_json(200, broker.health())
@@ -712,8 +806,9 @@ def make_handler(broker):
                     if not request_admitted:
                         raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
                     try:
-                        self.connection.settimeout(GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS)
-                        raw_payload = self.read_body(GUEST_ENROLLMENT_ENDPOINT_LIMITS[self.path], "invalid-request")
+                        raw_payload = self.read_enrollment_body(
+                            GUEST_ENROLLMENT_ENDPOINT_LIMITS[self.path],
+                        )
                         if self.path == GUEST_ENROLLMENT_ISSUE_PATH:
                             response = broker.guest_enrollment_issue(request_id, raw_payload, authorization)
                         elif self.path == GUEST_ENROLLMENT_EXCHANGE_PATH:
@@ -788,9 +883,26 @@ def make_handler(broker):
             if length <= 0 or length > maximum:
                 raise ProviderError(error_reason)
             try:
-                return self.rfile.read(length)
+                body = self.rfile.read(length)
             except TimeoutError as error:
                 raise ProviderError(error_reason) from error
+            if len(body) != length:
+                raise ProviderError(error_reason)
+            return body
+
+        def read_enrollment_body(self, maximum):
+            deadline = _AbsoluteSocketDeadline(
+                self.connection,
+                self.server._body_timeout,
+            )
+            deadline.start()
+            try:
+                body = self.read_body(maximum, "invalid-request")
+            finally:
+                within_deadline = deadline.cancel()
+            if not within_deadline:
+                raise ProviderError("invalid-request")
+            return body
 
         def write_json(self, status, payload):
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
