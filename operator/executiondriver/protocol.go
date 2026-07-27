@@ -333,8 +333,7 @@ func ValidateRPCError(value RPCError) error {
 
 // DecodeStrictJSON rejects invalid UTF-8, trailing values, unknown object
 // fields, and duplicate object keys at every nesting depth. Framing and the
-// 1 MiB line bound remain transport-host responsibilities in the later
-// executable-loading phase.
+// 1 MiB framing bound remain transport-host responsibilities.
 func DecodeStrictJSON(data []byte, target any) error {
 	if _, err := decodeUniqueJSON(data); err != nil {
 		return err

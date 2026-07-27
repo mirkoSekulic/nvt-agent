@@ -15,6 +15,8 @@ on:
       - "gateway/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
+      - "tests/fixtures/execution-driver/**"
+      - "tests/operator/execution-driver-host-image-smoke.sh"
       - "scripts/**"
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
@@ -33,6 +35,8 @@ on:
       - "gateway/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
+      - "tests/fixtures/execution-driver/**"
+      - "tests/operator/execution-driver-host-image-smoke.sh"
       - "scripts/**"
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
@@ -77,6 +81,10 @@ jobs:
           - name: operator
             dockerfile: operator/Dockerfile
             image: nvt-operator:test
+          - name: execution-driver-host
+            dockerfile: operator/executiondriver/host-image/Dockerfile
+            image: nvt-execution-driver-host:test
+            hostIntegration: true
           - name: gateway
             dockerfile: gateway/Dockerfile
             image: nvt-agent-gateway:test
@@ -106,3 +114,8 @@ jobs:
         env:
           NVT_DIND_TEST_IMAGE: ${{ matrix.image }}
         run: bash "${{ matrix.integration }}"
+      - name: Run execution-driver host OCI smoke
+        if: matrix.hostIntegration
+        env:
+          NVT_EXECUTION_DRIVER_HOST_IMAGE: ${{ matrix.image }}
+        run: bash tests/operator/execution-driver-host-image-smoke.sh

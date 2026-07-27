@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.30" || "${CHART_APP_VERSION}" != "0.8.30" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.30, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.31" || "${CHART_APP_VERSION}" != "0.8.31" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.31, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.30' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.31' "${CHART}/README.md"
 grep -Fq 'kubectl apply --server-side -f -' "${CHART}/README.md"
 TEST_RELEASE_TAG="${CHART_VERSION}-943d5ba"
 WORKDIR="$(mktemp -d)"
@@ -70,6 +70,9 @@ PACKAGED_RELEASE_RENDER="${WORKDIR}/packaged-release.yaml"
 SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
 COMPONENT_TAG_RENDER="${WORKDIR}/component-tag.yaml"
 LEGACY_IMAGE_FAILURE="${WORKDIR}/legacy-image-failure.txt"
+EXECUTION_DRIVERS_RENDER="${WORKDIR}/execution-drivers.yaml"
+EXECUTION_DRIVER_LONG_NAME_RENDER="${WORKDIR}/execution-driver-long-name.yaml"
+EXECUTION_DRIVER_FAILURE="${WORKDIR}/execution-driver-failure.txt"
 OAUTH2_ARGS=(
   --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2
   --set gateway.auth.oauth2.credentials.clientIDKey=oauth2-client-id
@@ -84,6 +87,8 @@ OAUTH2_ARGS=(
 )
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" > "${EXECUTION_DRIVERS_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
   --set agentSchedule.template.workspace.mode=Ephemeral > "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
@@ -572,6 +577,118 @@ missing_resource "${DEFAULT_RENDER}" Service nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-github-comments-producer
 missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-github-comments-producer
+missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-execution-driver-registrations
+if grep -q 'app.kubernetes.io/component: execution-driver-host\|NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE\|nvt-execution-driver-host:' "${DEFAULT_RENDER}"; then
+  echo "default render unexpectedly creates or wires an execution-driver host" >&2
+  exit 1
+fi
+
+python3 - "${EXECUTION_DRIVERS_RENDER}" "${CHART_APP_VERSION}" <<'PY'
+import json
+import sys
+import yaml
+
+documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+version = sys.argv[2]
+
+def resources(kind):
+    return {item["metadata"]["name"]: item for item in documents if item.get("kind") == kind}
+
+deployments = resources("Deployment")
+services = resources("Service")
+policies = resources("NetworkPolicy")
+secrets = resources("Secret")
+accounts = resources("ServiceAccount")
+configmaps = resources("ConfigMap")
+expected = {"fake-east", "fake-west"}
+driver_names = {f"nvt-execution-driver-{name}" for name in expected}
+assert driver_names <= deployments.keys()
+assert driver_names <= services.keys()
+assert driver_names <= policies.keys()
+assert driver_names <= secrets.keys()
+assert "nvt-execution-driver-fake-east" in accounts
+assert "nvt-execution-driver-fake-west" not in accounts
+
+operator = deployments["nvt-operator"]["spec"]["template"]["spec"]["containers"][0]
+operator_env = {item["name"]: item for item in operator["env"]}
+assert operator_env["NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE"]["value"] == "/var/run/nvt-execution-drivers/registrations.json"
+operator_text = json.dumps(operator, sort_keys=True)
+assert "fake-east-cloud" not in operator_text and "fake-west-cloud" not in operator_text
+
+registry = json.loads(configmaps["nvt-execution-driver-registrations"]["data"]["registrations.json"])
+assert registry["version"] == 1
+assert {item["name"] for item in registry["registrations"]} == expected
+assert len({item["tokenFile"] for item in registry["registrations"]}) == 2
+assert len({item["caFile"] for item in registry["registrations"]}) == 2
+
+for name, credential in (("fake-east", "fake-east-cloud"), ("fake-west", "fake-west-cloud")):
+    pod = deployments[f"nvt-execution-driver-{name}"]["spec"]["template"]["spec"]
+    assert len(pod["containers"]) == 1 and len(pod["initContainers"]) == 1
+    init = pod["initContainers"][0]
+    assert init["image"] == f"ghcr.io/mirkosekulic/nvt-execution-driver-host:{version}"
+    container = pod["containers"][0]
+    assert container["image"].endswith("@sha256:" + "a" * 64)
+    assert container["command"] == ["/nvt-host/nvt-execution-driver-host"]
+    if name == "fake-east":
+        assert "--pass-env=WORKLOAD_IDENTITY_TOKEN_FILE" in container["args"]
+    env = {item["name"]: item for item in container["env"]}
+    assert env["CLOUD_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == credential
+    other = "fake-west-cloud" if name == "fake-east" else "fake-east-cloud"
+    assert other not in json.dumps(pod, sort_keys=True)
+    assert pod["automountServiceAccountToken"] is False
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    assert policies[f"nvt-execution-driver-{name}"]["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "nvt-operator"
+
+assert deployments["nvt-execution-driver-fake-east"]["spec"]["template"]["spec"]["serviceAccountName"] == "nvt-execution-driver-fake-east"
+assert deployments["nvt-execution-driver-fake-west"]["spec"]["template"]["spec"]["serviceAccountName"] == "fake-west-workload-identity"
+PY
+
+LONG_DRIVER_NAME="$(printf '%063d' 0 | tr 0 a)"
+LONG_DRIVER_RESOURCE="nvt-ed-$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:56])' "${LONG_DRIVER_NAME}")"
+helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].name="${LONG_DRIVER_NAME}" \
+  > "${EXECUTION_DRIVER_LONG_NAME_RENDER}"
+grep -q "name: \"${LONG_DRIVER_RESOURCE}\"" "${EXECUTION_DRIVER_LONG_NAME_RENDER}"
+grep -q "serviceAccountName: \"${LONG_DRIVER_RESOURCE}\"" "${EXECUTION_DRIVER_LONG_NAME_RENDER}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].image=registry.example.test/nvt/fake-driver:latest \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "floating execution-driver image tag was accepted" >&2
+  exit 1
+fi
+grep -q 'image must be pinned by lowercase sha256 digest' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[1].name=fake-east \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "duplicate execution-driver registration was accepted" >&2
+  exit 1
+fi
+grep -q 'registration names must be unique' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set executionDrivers.registrations[0].serviceAccount.create=false \
+  --set-string executionDrivers.registrations[0].serviceAccount.name=fake-west-workload-identity \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "shared execution-driver ServiceAccount was accepted" >&2
+  exit 1
+fi
+grep -q 'registrations must use distinct ServiceAccounts' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].serviceAccount.podLabels.app\\.kubernetes\\.io/name=other-driver \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "reserved execution-driver workload label was accepted" >&2
+  exit 1
+fi
+grep -q 'workload-identity Pod label uses a reserved key' "${EXECUTION_DRIVER_FAILURE}"
 if grep -q 'NVT_BRANDING_CONFIGMAP\|NVT_GATEWAY_BRANDING_DIR\|name: nvt-branding' "${DEFAULT_RENDER}"; then
   echo "default render unexpectedly enables custom branding" >&2
   exit 1

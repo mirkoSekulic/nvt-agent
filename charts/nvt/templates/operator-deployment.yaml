@@ -52,6 +52,10 @@ spec:
               value: {{ join "," .Values.egress.allowedTCPPorts | quote }}
             - name: NVT_DEFAULT_EGRESS_MODE
               value: {{ .Values.egress.defaultMode | quote }}
+            {{- if .Values.executionDrivers.registrations }}
+            - name: NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE
+              value: /var/run/nvt-execution-drivers/registrations.json
+            {{- end }}
             {{- if .Values.egress.allowInsecureUpstreams }}
             - name: NVT_ALLOW_INSECURE_UPSTREAMS
               value: "1"
@@ -77,3 +81,31 @@ spec:
             httpGet:
               path: /readyz
               port: 8081
+          {{- if .Values.executionDrivers.registrations }}
+          volumeMounts:
+            - name: execution-driver-registrations
+              mountPath: /var/run/nvt-execution-drivers
+              readOnly: true
+          {{- end }}
+      {{- if .Values.executionDrivers.registrations }}
+      volumes:
+        - name: execution-driver-registrations
+          projected:
+            defaultMode: 0400
+            sources:
+              - configMap:
+                  name: nvt-execution-driver-registrations
+                  items:
+                    - key: registrations.json
+                      path: registrations.json
+              {{- range $registration := .Values.executionDrivers.registrations }}
+              {{- $context := dict "root" $ "registration" $registration }}
+              - secret:
+                  name: {{ include "nvt.executionDriverResourceName" $context | quote }}
+                  items:
+                    - key: ca.crt
+                      path: {{ printf "%s/ca.crt" $registration.name | quote }}
+                    - key: auth-token
+                      path: {{ printf "%s/auth-token" $registration.name | quote }}
+              {{- end }}
+      {{- end }}

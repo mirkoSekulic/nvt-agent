@@ -61,6 +61,15 @@ type Client interface {
 
 var _ Client = (*LocalExecutable)(nil)
 
+// Ready reports whether the negotiated process generation is currently alive.
+// It performs no provider operation and is used only by the dedicated host
+// workload's readiness endpoint.
+func (h *LocalExecutable) Ready() bool {
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	return !h.closed && h.process != nil && !h.process.exited()
+}
+
 // DriverError is a protocol-valid, bounded, sanitized error returned by the
 // selected driver. Raw stderr and request or response payloads are never
 // included.

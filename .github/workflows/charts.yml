@@ -142,6 +142,7 @@ jobs:
           - nvt-egressd
           - nvt-captured
           - nvt-operator
+          - nvt-execution-driver-host
           - nvt-agent-gateway
           - nvt-github-comments-producer
     concurrency:
@@ -237,5 +238,5 @@ jobs:
           fi
 
           # The image steps have verified coordinated metadata and anonymous
-          # manifest access for all eight release tags.
+          # manifest access for all nine release tags.
           helm push "${package}" "oci://${repository}"

@@ -1,1 +1,2 @@
 {{- include "nvt.validateImageValues" . -}}
+{{- include "nvt.validateExecutionDrivers" . -}}
