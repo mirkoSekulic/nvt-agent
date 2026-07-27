@@ -243,10 +243,15 @@ func (store *fakeDurableStore) consumeTransaction(
 	default:
 		return ExchangeResult{}, NewFailure(ReasonInvalidToken)
 	}
-	expires, _ := parseTimestamp(record.ExpiresAt)
+	expires, err := parseTimestamp(record.ExpiresAt)
+	if err != nil {
+		return ExchangeResult{}, NewFailure(ReasonInvalidToken)
+	}
 	if !now.Before(expires) {
 		record.State = StateExpired
-		record.TerminalAt = FormatTimestamp(now)
+		// Expiry is the issuer-owned deadline, not the later time at which a
+		// request or maintenance pass first observes it.
+		record.TerminalAt = record.ExpiresAt
 		store.records[digest] = record
 		return ExchangeResult{}, NewFailure(ReasonExpired)
 	}
@@ -391,6 +396,13 @@ func (store *fakeDurableStore) recordPresent(token string) bool {
 	return present
 }
 
+func (store *fakeDurableStore) terminalAt(token string) string {
+	digest, _ := TokenDigest(token)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.records[digest].TerminalAt
+}
+
 func (store *fakeDurableStore) runtimeIdentityActive(token string) bool {
 	digest, _ := TokenDigest(token)
 	store.mu.Lock()
@@ -445,6 +457,15 @@ func (store *fakeDurableStore) garbageCollectCompleted(now time.Time, completed 
 		}
 	}
 	for digest, record := range store.records {
+		if record.State == StateIssued {
+			expiresAt, err := parseTimestamp(record.ExpiresAt)
+			if err != nil || now.Before(expiresAt) {
+				continue
+			}
+			record.State = StateExpired
+			record.TerminalAt = record.ExpiresAt
+			store.records[digest] = record
+		}
 		_, identityActive := store.activeIdentities[record.RuntimeIdentityDigest]
 		if _, complete := completed[record.Binding.ExecutionScope()]; !complete || record.TerminalAt == "" || identityActive {
 			continue
@@ -763,6 +784,90 @@ func TestFakeIssuerGuestConformanceExpiryRevocationAndIdempotency(t *testing.T) 
 	}
 	if _, err = issuer.Exchange(context.Background(), ExchangeRequest{ContractVersion: Version, Binding: revoked.Binding, Token: revoked.Token}); failureReason(t, err) != ReasonRevoked {
 		t.Fatalf("revoked exchange: %v", err)
+	}
+}
+
+func TestFakeIssuerMaintenanceExpiresAndReclaimsFromDeadline(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	current := start
+	store := &fakeDurableStore{}
+	issuer := newFakeIssuer(store, func() time.Time { return current }, deterministicRandom(0x88), validIdentityFactory(0x89))
+
+	neverExchangedRequest := validIssueRequest()
+	neverExchangedRequest.TTLSeconds = 1
+	neverExchangedRequest.Binding.AgentRunUID = "never-exchanged-run"
+	neverExchangedRequest.Binding.ExecutionID = "never-exchanged-execution"
+	neverExchangedRequest.Binding.GuestInstanceID = "never-exchanged-guest"
+	neverExchanged, err := issuer.Issue(context.Background(), neverExchangedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current = start.Add(2 * time.Second)
+	if removed := store.garbageCollectCompleted(current, nil); removed != 0 {
+		t.Fatalf("maintenance removed a record without authoritative cleanup: %d", removed)
+	}
+	if state := store.state(neverExchanged.Token); state != StateExpired {
+		t.Fatalf("never-exchanged record state = %s, want expired", state)
+	}
+	if terminalAt := store.terminalAt(neverExchanged.Token); terminalAt != neverExchanged.ExpiresAt {
+		t.Fatalf("expiry terminal time = %q, want deadline %q", terminalAt, neverExchanged.ExpiresAt)
+	}
+
+	current = start.Add(time.Second).Add(MaxTombstoneRetention)
+	liveRequest := validIssueRequest()
+	liveRequest.Binding.AgentRunUID = "unrelated-live-run"
+	liveRequest.Binding.ExecutionID = "unrelated-live-execution"
+	liveRequest.Binding.GuestInstanceID = "unrelated-live-guest"
+	live, err := issuer.Issue(context.Background(), liveRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumedRequest := validIssueRequest()
+	consumedRequest.Binding.AgentRunUID = "unrelated-consumed-run"
+	consumedRequest.Binding.ExecutionID = "unrelated-consumed-execution"
+	consumedRequest.Binding.GuestInstanceID = "unrelated-consumed-guest"
+	consumed, err := issuer.Issue(context.Background(), consumedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuer.Exchange(context.Background(), ExchangeRequest{ContractVersion: Version, Binding: consumed.Binding, Token: consumed.Token}); err != nil {
+		t.Fatal(err)
+	}
+	completed := map[ExecutionScope]struct{}{neverExchanged.Binding.ExecutionScope(): {}}
+	if removed := store.garbageCollectCompleted(current, completed); removed != 1 || store.recordPresent(neverExchanged.Token) {
+		t.Fatalf("eligible expired record removed=%d present=%v", removed, store.recordPresent(neverExchanged.Token))
+	}
+	if !store.recordPresent(live.Token) || store.state(live.Token) != StateIssued {
+		t.Fatal("maintenance affected an unrelated live enrollment")
+	}
+	if !store.recordPresent(consumed.Token) || store.state(consumed.Token) != StateConsumed || !store.runtimeIdentityActive(consumed.Token) {
+		t.Fatal("maintenance affected an unrelated consumed enrollment or active identity")
+	}
+
+	lateCurrent := start
+	lateStore := &fakeDurableStore{}
+	lateIssuer := newFakeIssuer(lateStore, func() time.Time { return lateCurrent }, deterministicRandom(0x8a), validIdentityFactory(0x8b))
+	lateRequest := validIssueRequest()
+	lateRequest.TTLSeconds = 1
+	lateRequest.Binding.AgentRunUID = "late-exchange-run"
+	lateRequest.Binding.ExecutionID = "late-exchange-execution"
+	lateRequest.Binding.GuestInstanceID = "late-exchange-guest"
+	late, err := lateIssuer.Issue(context.Background(), lateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateCurrent = start.Add(time.Second).Add(MaxTombstoneRetention).Add(time.Hour)
+	if _, err := lateIssuer.Exchange(context.Background(), ExchangeRequest{ContractVersion: Version, Binding: late.Binding, Token: late.Token}); failureReason(t, err) != ReasonExpired {
+		t.Fatalf("late exchange was not rejected as expired: %v", err)
+	}
+	if terminalAt := lateStore.terminalAt(late.Token); terminalAt != late.ExpiresAt {
+		t.Fatalf("late observation extended retention: terminal=%q deadline=%q", terminalAt, late.ExpiresAt)
+	}
+	completed = map[ExecutionScope]struct{}{late.Binding.ExecutionScope(): {}}
+	if removed := lateStore.garbageCollectCompleted(lateCurrent, completed); removed != 1 || lateStore.recordPresent(late.Token) {
+		t.Fatalf("late-observed expired record was not immediately eligible: removed=%d present=%v", removed, lateStore.recordPresent(late.Token))
 	}
 }
 

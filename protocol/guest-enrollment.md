@@ -173,7 +173,9 @@ issued -> consumed
   may be exchanged once before expiry.
 - **consumed**: exactly one transaction accepted the token and issued one
   runtime identity. Every concurrent or later exchange is a replay and fails.
-- **expired**: the deadline was reached before successful consumption.
+- **expired**: the `expires_at` deadline was reached before successful
+  consumption. This transition occurs at `expires_at` whether or not an
+  exchange request observes it.
 - **revoked**: AgentRun cleanup or explicit recovery invalidated the token and,
   if already consumed, revoked the resulting runtime identity.
 
@@ -201,6 +203,9 @@ reject new issue requests for that deleted AgentRun. A later cleanup completion
 makes an already-expired tombstone eligible immediately. Binding tombstones
 covered by an execution tombstone may be compacted into the single scope
 tombstone. Saturation remains fail-closed until eligible cleanup frees capacity.
+Issuer maintenance must recognize an `issued` record whose `expires_at` is at
+or before the current time as expired without waiting for an exchange. Its
+retention clock starts at `expires_at`; late observation must not extend it.
 
 Exact-binding revocation is idempotent and durably abandons one handoff even
 when no token record is currently present. It is useful for uncertain envelope
