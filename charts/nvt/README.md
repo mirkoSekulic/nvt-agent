@@ -66,16 +66,17 @@ loopback and link-local/metadata ranges but cannot infer cluster-specific CIDRs.
 The published chart's `appVersion` is the immutable image tag for its tested
 platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
 uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
-gateway, producer, execution-driver-host, and QEMU reference-driver images. Empty component tags
+gateway, producer, and execution-driver-host images. Empty component tags
 default to `Chart.AppVersion`; repository, tag, and pull policy remain
-independently overridable.
+independently overridable. The QEMU reference driver is a test implementation,
+not a coordinated product image.
 
 `dind.image` is the coordinated Docker sidecar image. It contains the ext4 and
 loop-device tools used only when an AgentRun's Docker data root is backed by
 Kata virtiofs; it performs no per-run package installation.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all ten image manifests and the native host-bundle OCI
+published only after all nine image manifests and the native host-bundle OCI
 artifact exist and can be fetched anonymously with isolated credential-free
 clients. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
@@ -481,14 +482,14 @@ provider cleanup resume; the operator never falls back to Kubernetes or a
 different driver. A driver's ready response is portable execution state only
 and does not publish an external endpoint through the gateway.
 
-The shipped `nvt-qemu-execution-driver` is a provider-isolated reference
-implementation, not a default. It consumes one persistent registration claim,
-boots its pinned linux/amd64 guest through KVM when an administrator-provided
-device is usable or bounded TCG otherwise, and reports ready only after the
-guest has exchanged its one-time enrollment token and started the installed
-native supervisor, real agentd, and session. See the
-[QEMU driver contract](../../executiondrivers/qemu/README.md). Gateway routing
-and mediated VM egress remain intentionally outside this reference milestone.
+The repository's QEMU implementation is a provider-isolated, test-only
+reference driver. CI builds it locally to prove persistent registration
+storage, native linux/amd64 provisioning, one-time guest enrollment, real
+agentd/session readiness, restart recovery, and cleanup. It is not published
+as a coordinated image or supported as a production execution provider. See
+the [QEMU reference-driver contract](../../executiondrivers/qemu/README.md).
+Gateway routing and mediated VM egress remain intentionally outside this
+reference proof.
 
 `activeDeadlineSeconds`, `completedTTLSeconds`, and `failedTTLSeconds` remain
 operator-owned for external runs. When cleanup becomes due, the operator calls

@@ -173,7 +173,7 @@ PY
 
   log "restarting the QEMU driver host and proving durable TCG guest recovery"
   restart_qemu_driver_without_overlap
-  wait_for_qemu_running
+  wait_for_qemu_recovery
   assert_qemu_provider_present
   assert_sensitive_material_absent
 
@@ -213,11 +213,10 @@ wait_for_qemu_running() {
     fi
     sleep 2
   done
-  qemu_failure_diagnostics
   die "real QEMU guest did not reach native agentd/session readiness"
 }
 
-qemu_failure_diagnostics() {
+case_diagnostics() {
   local pod
   printf '\n[operator-kind-smoke] QEMU lifecycle diagnostics\n' >&2
   kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o yaml >&2 || true
@@ -247,7 +246,6 @@ items=[item for item in json.load(sys.stdin)["items"] if not item["metadata"].ge
 print(len(items), items[0]["metadata"]["uid"] if len(items)==1 else "")
 ' <<<"${pods}")
     if (( active_count > 1 )); then
-      qemu_failure_diagnostics
       die "Recreate rollout permitted overlapping QEMU driver owners"
     fi
     if [[ "${active_count}" == 1 && "${active_uid}" != "${old_uid}" ]] &&
@@ -256,8 +254,32 @@ print(len(items), items[0]["metadata"]["uid"] if len(items)==1 else "")
     fi
     sleep 1
   done
-  qemu_failure_diagnostics
   die "QEMU driver Recreate rollout did not converge"
+}
+
+wait_for_qemu_recovery() {
+  local deadline=$((SECONDS + QEMU_EXECUTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if qemu_provider_ready; then
+      wait_for_qemu_running
+      return
+    fi
+    sleep 2
+  done
+  die "QEMU guest did not recover from durable state after driver restart"
+}
+
+qemu_provider_ready() {
+  local pod state host_port
+  pod="$(qemu_driver_pod 2>/dev/null)" || return 1
+  [[ -n "${pod}" ]] || return 1
+  state="$(kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- \
+    cat "/var/lib/nvt-execution-driver/executions/${QEMU_STATE_KEY}/state.json" 2>/dev/null)" || return 1
+  host_port="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["host_port"])' <<<"${state}" 2>/dev/null)" || return 1
+  [[ "${host_port}" =~ ^[0-9]+$ ]] || return 1
+  kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- sh -eu -c \
+    'test -f "$1/executions/$2/guest.qcow2"; ps | grep -q "[q]emu-system-x86_64"; wget -q -T 2 -O /dev/null "http://127.0.0.1:$3/ready"' \
+    sh /var/lib/nvt-execution-driver "${QEMU_STATE_KEY}" "${host_port}" >/dev/null 2>&1
 }
 
 assert_no_qemu_agent_pod() {
@@ -267,11 +289,7 @@ assert_no_qemu_agent_pod() {
 }
 
 assert_qemu_provider_present() {
-  local pod
-  pod="$(qemu_driver_pod)"
-  kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- sh -eu -c \
-    'test -f "$1/executions/$2/state.json"; test -f "$1/executions/$2/guest.qcow2"; ps | grep -q "[q]emu-system-x86_64"' \
-    sh /var/lib/nvt-execution-driver "${QEMU_STATE_KEY}"
+  qemu_provider_ready
 }
 
 assert_qemu_provider_absent() {

@@ -22,7 +22,6 @@ images=(
   nvt-captured
   nvt-operator
   nvt-execution-driver-host
-  nvt-qemu-execution-driver
   nvt-agent-gateway
   nvt-github-comments-producer
 )
@@ -49,4 +48,4 @@ for name in "${images[@]}"; do
   fi
 done
 
-echo "Verified anonymous manifest access for all ten release images."
+echo "Verified anonymous manifest access for all nine release images."

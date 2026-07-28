@@ -1,12 +1,14 @@
-# QEMU reference execution driver
+# QEMU test/reference execution driver
 
-This directory is a complete OCI execution-driver implementation for the
+This directory is a complete test OCI execution-driver implementation for the
 generic `nvt.execution-driver/v1` and sensitive guest-enrollment handoff
 contracts. QEMU is isolated here; the operator, broker, portable protocol,
 agentd, runtime plugins, and built-in Kubernetes backend contain no QEMU
-branches.
+branches. It is built locally by CI to prove the generic native-VM lifecycle;
+NVT does not publish it in the coordinated product image set or support it as a
+production execution provider.
 
-The production image includes a pinned amd64 Alpine kernel, initramfs, and
+The reference image includes a pinned amd64 Alpine kernel, initramfs, and
 minimal native disk template. The execution class must repeat the exact
 aggregate `sha256` checksum baked into that image and identify a native NVT
 host-bundle OCI index by repository plus digest:
@@ -27,12 +29,15 @@ host-bundle OCI index by repository plus digest:
 }
 ```
 
-For a digest-pinned driver image, an administrator can read the matching guest
-checksum without starting the driver protocol:
+The test workflows build the complete image locally and pin its OCI manifest
+digest before registration. The matching guest checksum can be read without
+starting the driver protocol:
 
 ```sh
+docker build -f executiondrivers/qemu/Dockerfile \
+  -t nvt-qemu-execution-driver:test .
 docker run --rm --entrypoint cat \
-  ghcr.io/mirkosekulic/nvt-qemu-execution-driver@sha256:<driver-manifest-digest> \
+  nvt-qemu-execution-driver:test \
   /opt/nvt-qemu/guest/digest
 ```
 
@@ -67,7 +72,8 @@ The chart does not grant host devices or additional privilege. The hermetic CI
 gate therefore uses TCG. Current guest artifacts target linux/amd64; the
 driver image itself is built for the host architecture.
 
-This reference proves provisioning, one-time enrollment, native bundle
+This test reference proves provisioning, one-time enrollment, native bundle
 installation, supervisor/agentd/session readiness, restart recovery, and
-cleanup. Gateway publication, public VM ingress, production runtime identity
-use, and mediated VM egress are intentionally not implemented here.
+cleanup. It is not released or supported as a production provider. Gateway
+publication, public VM ingress, production runtime identity use, and mediated
+VM egress are intentionally not implemented here.

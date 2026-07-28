@@ -12,7 +12,8 @@ precise and every hermetic suite has a clear home.
 - `protocol/guestenrollment/go.mod` → `kubernetes.yml / guest-enrollment`
 - `operator/go.mod` → `kubernetes.yml / operator` and `kubernetes.yml / operator-helm`
 - `executiondrivers/qemu/go.mod` → `qemu.yml / real-guest-e2e` and
-  `images.yml / build (qemu-execution-driver)`
+  `images.yml / build (qemu-execution-driver)`; both build the unpublished
+  test/reference image locally
 - `producers/github-comments/go.mod` → `kubernetes.yml / producer`
 - `tests/agentd/go.mod` → `runtime.yml / agentd`
 - `tests/broker/go.mod` → `broker.yml / broker`
@@ -166,6 +167,7 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `executiondrivers/qemu/image-smoke.sh` → `images.yml / build
   (qemu-execution-driver)`; it verifies the baked guest checksum and boots the
   packaged Linux guest under TCG through real JSONL initialization/reconcile.
+  This is a local CI image, not a coordinated product publication.
 - `tests/operator/kind/cases/qemu-external-execution.sh` → `qemu.yml /
   real-guest-e2e`; it boots an actual amd64 Linux guest under bounded TCG,
   performs production broker one-time enrollment, pulls and activates the real
@@ -216,8 +218,9 @@ The harness and helper scripts are not standalone cases:
 - `network.yml`: egressd, captured, and transparent Compose smoke
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage
   plus the provider-neutral guest-enrollment contract/conformance module
-- `images.yml`: all shipped/test fixture images plus the runtime git-credentials
-  smoke and the execution-driver host's private enrollment-handoff smoke
+- `images.yml`: shipped images plus local test/reference and fixture images,
+  the runtime git-credentials smoke, and the execution-driver host's private
+  enrollment-handoff smoke
 - `host-bundle.yml`: native bundle trusted-core tests and guest-side lifecycle
   E2E
 - `kind.yml`: mediated, enforced, transparent, quota, revocation, and
