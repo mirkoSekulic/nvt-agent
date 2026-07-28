@@ -301,15 +301,24 @@ assert_qemu_provider_absent() {
 }
 
 assert_enrollment_consumed() {
-  local pod
+  local pod deadline
   pod="$(kubectl_smoke get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=nvt-broker -o jsonpath='{.items[0].metadata.name}')"
-  kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c broker -- python3 -c '
+  deadline=$((SECONDS + 60))
+  while (( SECONDS < deadline )); do
+    if kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c broker -- python3 -c '
 import sqlite3,sys
 db=sqlite3.connect("/state/guest-enrollment.sqlite3")
 rows=db.execute("SELECT state,runtime_identity_active,token_digest,runtime_identity_digest FROM enrollments WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",(sys.argv[1],sys.argv[2],"qemu-reference")).fetchall()
 assert len(rows)==1 and rows[0][0]=="consumed" and rows[0][1]==1
 assert rows[0][2].startswith("sha256:") and rows[0][3].startswith("sha256:")
-' "${QEMU_AGENTRUN_UID}" "${QEMU_EXECUTION_ID}"
+history=db.execute("SELECT runtime_identity_digest FROM runtime_identity_history WHERE token_digest=?",(rows[0][2],)).fetchall()
+assert len(history)>=1 and all(value[0].startswith("sha256:") for value in history)
+' "${QEMU_AGENTRUN_UID}" "${QEMU_EXECUTION_ID}" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+  die "native guest runtime identity did not rotate"
 }
 
 assert_qemu_broker_cleanup() {

@@ -18,6 +18,10 @@ if grep -aFq 'NVT_HOST_BUNDLE_TEST_' "${relative_output}/bin/nvt-host-bootstrap"
   echo "test-only bootstrap transport entered the production binary" >&2
   exit 1
 fi
+if grep -aFq 'NVT_GUEST_IDENTITY_TEST_' "${relative_output}/bin/nvt-guest-identityd"; then
+  echo "test-only identity-daemon seam entered the production binary" >&2
+  exit 1
+fi
 
 bash hostbundle/build.sh 0.8.33-ci "${revision}" "${absolute_output}"
 cmp "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" "${absolute_output}/nvt-host-bundle-linux-amd64.tar.gz"

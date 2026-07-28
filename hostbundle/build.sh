@@ -74,6 +74,7 @@ build_static() {
 
 build_static ./cmd/nvt-host-bootstrap "${OUTPUT}/bin/nvt-host-bootstrap"
 build_static ./cmd/nvt-guest-supervisor "${OUTPUT}/bin/nvt-guest-supervisor"
+build_static ./cmd/nvt-guest-identityd "${OUTPUT}/bin/nvt-guest-identityd"
 build_static ./cmd/nvt-guest-session-fixture "${OUTPUT}/bin/nvt-guest-session-fixture"
 
 (
@@ -87,12 +88,15 @@ build_static ./cmd/nvt-guest-session-fixture "${OUTPUT}/bin/nvt-guest-session-fi
     --tag "${VERSION}" \
     --source "${NVT_HOST_BUNDLE_SOURCE_URL:-https://github.com/mirkoSekulic/nvt-agent}" \
     --supervisor "${OUTPUT}/bin/nvt-guest-supervisor" \
+    --identity-daemon "${OUTPUT}/bin/nvt-guest-identityd" \
     --bootstrap "${OUTPUT}/bin/nvt-host-bootstrap" \
     --session-fixture "${OUTPUT}/bin/nvt-guest-session-fixture" \
     --agentd "${ROOT}/runtime/agentd/agentd.py" \
     --agentdctl "${ROOT}/runtime/agentd/agentdctl.py" \
     --service "${ROOT}/hostbundle/files/nvt-agent-guest.service" \
-    --config "${ROOT}/hostbundle/files/guest.json" >"${OUTPUT}/digest.txt"
+    --identity-service "${ROOT}/hostbundle/files/nvt-guest-identity.service" \
+    --config "${ROOT}/hostbundle/files/guest.json" \
+    --identity-config "${ROOT}/hostbundle/files/identity.json" >"${OUTPUT}/digest.txt"
 )
 
 printf 'Built NVT host bundle %s for linux/%s at %s\n' "${VERSION}" "${ARCHITECTURE}" "${OUTPUT}"

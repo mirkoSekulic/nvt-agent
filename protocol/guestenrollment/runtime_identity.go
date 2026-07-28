@@ -22,6 +22,8 @@ const (
 	MaxRuntimeIdentityHistoryCapacity       = 10_000_000
 	RuntimeIdentityCapacityPlanningInterval = 30 * time.Minute
 	RuntimeIdentityPlanningHorizon          = 365 * 24 * time.Hour
+	RuntimeIdentityStatusPath               = "/v1/guest-runtime-identity/status"
+	RuntimeIdentityRotatePath               = "/v1/guest-runtime-identity/rotate"
 )
 
 // RuntimeIdentityStatusRequest authenticates with the opaque identity in the

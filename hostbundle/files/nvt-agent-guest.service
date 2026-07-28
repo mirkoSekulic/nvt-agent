@@ -1,7 +1,8 @@
 [Unit]
 Description=NVT Agent native guest supervisor
-After=network-online.target
+After=network-online.target nvt-guest-identity.service
 Wants=network-online.target
+Requires=nvt-guest-identity.service
 
 [Service]
 Type=simple

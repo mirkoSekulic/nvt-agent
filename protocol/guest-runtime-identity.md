@@ -175,10 +175,43 @@ record, counters, and digest membership; recurring guest work does not scan
 predecessor history or unrelated identities and does not hold the SQLite writer
 lock during a global scan.
 
-## Current implementation boundary
+## Native guest client
 
-The broker implements this authority when guest enrollment is enabled. This
-phase does not add a guest daemon/rotation loop, gateway routing, production
-runtime-identity consumers, or mediated VM networking. The test-only QEMU
-reference remains only a conformance consumer; no provider-specific branch is
-present in this contract or broker implementation.
+The host bundle contains the provider-neutral static `nvt-guest-identityd`.
+It is separate from `agentd` and the untrusted agent session. Provider
+bootstrap supplies only root-owned path configuration, explicit CA trust, and
+the one-time envelope file. The daemon never accepts a bearer through argv or
+environment and emits only stable non-secret health classes.
+
+The daemon durably records one of these states in a strict bounded mode `0600`
+document below a root-owned mode `0700` directory:
+
+1. current identity with broker-owned issue/expiry metadata;
+2. current identity plus exactly one proposed successor while rotation outcome
+   is ambiguous; or
+3. a non-secret terminal `replacement-required` marker after expiry,
+   revocation, or unrecoverable authentication.
+
+Writes use a same-directory temporary file, file `fsync`, atomic rename, and
+parent-directory `fsync`. On restart, an unresolved successor is probed before
+the predecessor; the daemon retries only that successor when the predecessor
+is still current. It reports identity readiness only after broker status
+authenticates the exact durable binding. Production rotation is scheduled no
+earlier than the 30-minute planning interval, with deterministic per-binding
+jitter and a recovery window before the one-hour broker expiry. The schedule
+is a client invariant; the broker remains authoritative for timestamps and
+capacity.
+
+TLS uses only the explicitly provisioned CA pool, direct HTTPS without ambient
+proxy configuration, exact endpoint paths, no redirects, and bounded
+DNS/connect/TLS/header/body/overall time and message sizes. Plaintext envelope,
+identity, and successor values exist only in bounded trusted memory and the
+root-only state document. They do not enter readiness, logs, diagnostics,
+bundle metadata, the agent workspace, or `agentd`.
+
+The broker implements the authority when guest enrollment is enabled, and the
+native daemon implements its guest lifecycle. The test-only QEMU reference is
+only a real-guest conformance consumer; no provider-specific branch is present
+in the daemon or protocol. Gateway routing, downstream production
+runtime-identity authorization, and mediated VM networking remain separate
+future gates.

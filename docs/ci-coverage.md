@@ -98,6 +98,10 @@ precise and every hermetic suite has a clear home.
   implementations of runtime-identity authentication/rotation, including
   transaction fault points, durable restart, authorization separation,
   independent admission bounds, and plaintext canary scans.
+- `hostbundle/guestidentity` → the native root-only client/store/state machine:
+  strict TLS and files, initial exchange, status, scheduled rotation,
+  successor-first ambiguous-response recovery, restart, revocation/expiry,
+  atomic persistence faults, bounds, and redacted output.
 
 The `kubernetes.yml / operator-helm` job also runs the shell-level chart and
 helper coverage aggregated by `tests/operator/helm/test.sh`:
@@ -161,9 +165,10 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `hostbundle/guest_e2e_test.go` → `host-bundle.yml / host-bundle`; it builds an
   OCI layout, runs the real bootstrap CLI against a hermetic TLS registry by
   digest, installs and activates natively, starts the installed supervisor and
-  real `agentd`, delivers a prompt, proves clean restart and fail-closed session
-  loss, and proves idempotent reuse. This is guest-side Linux coverage, not a
-  real provider VM proof.
+  real `agentd`, exchanges and rotates a synthetic-TLS-broker runtime identity
+  through the installed root-owned daemon, restarts both native boundaries,
+  delivers a prompt, proves fail-closed session loss, and proves idempotent
+  reuse. This is guest-side Linux coverage, not a real provider VM proof.
 - `hostbundle/build-test.sh` → `host-bundle.yml / build-contract (ubuntu-latest,
   macos-latest)`; it pins cleaned repository-relative and absolute outputs,
   deterministic tar/layout content, and non-empty/root output rejection using
@@ -181,8 +186,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `tests/operator/kind/cases/qemu-external-execution.sh` → `qemu.yml /
   real-guest-e2e`; it boots an actual amd64 Linux guest under bounded TCG,
   performs production broker one-time enrollment, pulls and activates the real
-  digest-pinned host bundle, reaches real supervisor/agentd/tmux readiness,
-  restarts the driver host, and proves QEMU disk/process/state cleanup. It is a
+  digest-pinned host bundle, performs a real runtime-identity rotation, reaches
+  real identity-daemon/supervisor/agentd/tmux readiness, restarts the driver
+  host, and proves QEMU disk/process/state cleanup. It is a
   hermetic reference-provider proof, not a production gateway or mediated-VM
   networking claim.
 
