@@ -335,7 +335,10 @@ OCI images pinned by digest and run in isolated driver-host workloads. Git
 loading remains supported only for the separate runtime-plugin and executable
 broker-provider contracts.
 
-The next implementation step is a QEMU reference driver that can provision a
-guest and implement the private handoff endpoint. Guest exchange, gateway
-routing, runtime identity use, broker identity, and mediated egress remain
-separate production gates.
+A test-only QEMU reference driver now provisions a real Linux guest, consumes
+the private handoff, performs the one-time exchange, installs the pinned native
+host bundle, proves agentd/session readiness and restart recovery, and removes
+its resources during cleanup. It is built only for repository conformance and
+is neither published nor supported as a production execution provider.
+Gateway routing, production runtime-identity/provider use, broker identity,
+and mediated VM networking remain separate future production gates.

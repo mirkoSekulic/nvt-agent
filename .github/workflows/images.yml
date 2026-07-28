@@ -12,6 +12,8 @@ on:
       - "egressd/**"
       - "captured/**"
       - "operator/**"
+      - "executiondrivers/qemu/**"
+      - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
       - "producers/github-comments/**"
@@ -33,6 +35,8 @@ on:
       - "egressd/**"
       - "captured/**"
       - "operator/**"
+      - "executiondrivers/qemu/**"
+      - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
       - "producers/github-comments/**"
@@ -87,6 +91,10 @@ jobs:
             dockerfile: operator/executiondriver/host-image/Dockerfile
             image: nvt-execution-driver-host:test
             hostIntegration: true
+          - name: qemu-execution-driver
+            dockerfile: executiondrivers/qemu/Dockerfile
+            image: nvt-qemu-execution-driver:test
+            qemuIntegration: true
           - name: gateway
             dockerfile: gateway/Dockerfile
             image: nvt-agent-gateway:test
@@ -121,3 +129,8 @@ jobs:
         env:
           NVT_EXECUTION_DRIVER_HOST_IMAGE: ${{ matrix.image }}
         run: bash tests/operator/execution-driver-host-image-smoke.sh
+      - name: Run QEMU execution-driver TCG image smoke
+        if: matrix.qemuIntegration
+        env:
+          NVT_QEMU_DRIVER_IMAGE: ${{ matrix.image }}
+        run: bash executiondrivers/qemu/image-smoke.sh

@@ -12,6 +12,9 @@ executionDrivers:
         limits:
           cpu: "1"
           memory: 256Mi
+      storage:
+        size: 20Gi
+        storageClassName: fast-state
       serviceAccount:
         create: true
         annotations:

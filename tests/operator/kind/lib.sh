@@ -145,6 +145,9 @@ diagnostics() {
     kubectl_smoke describe "${pod}" -n "${NAMESPACE}" >&2 || true
     kubectl_smoke logs "${pod}" -n "${NAMESPACE}" --all-containers --tail=200 >&2 || true
   done
+  if declare -F case_diagnostics >/dev/null; then
+    case_diagnostics
+  fi
   if [[ -n "${PORT_FORWARD_PID:-}" ]]; then
     cat "${SMOKE_TMPDIR}/operator-port-forward.log" >&2 || true
   fi
@@ -152,6 +155,9 @@ diagnostics() {
 
 cleanup() {
   local status=$?
+  # Returning the original failing status from an EXIT trap must not invoke the
+  # ERR trap again after the cluster and its diagnostic state have been removed.
+  trap - ERR
   if [[ -n "${PORT_FORWARD_PID:-}" ]]; then
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
     wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true

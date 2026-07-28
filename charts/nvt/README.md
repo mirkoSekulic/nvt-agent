@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.35`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.36`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.35 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.36 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.35 --namespace nvt --create-namespace
+  --version 0.8.36 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -68,7 +68,8 @@ platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
 uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
 gateway, producer, and execution-driver-host images. Empty component tags
 default to `Chart.AppVersion`; repository, tag, and pull policy remain
-independently overridable.
+independently overridable. The QEMU reference driver is a test implementation,
+not a coordinated product image.
 
 `dind.image` is the coordinated Docker sidecar image. It contains the ext4 and
 loop-device tools used only when an AgentRun's Docker data root is backed by
@@ -402,7 +403,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.35`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.36`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -438,6 +439,12 @@ executionDrivers:
         create: true
         annotations: {} # workload-identity annotations belong here
         podLabels: {}   # generic identity-webhook opt-in labels, if required
+      # Optional provider-neutral durable convergence/resource storage. A
+      # driver that owns local disks must request a bounded claim or select one
+      # existing claim; omission preserves the previous stateless Pod shape.
+      storage:
+        size: 20Gi
+        storageClassName: ""
       # Names injected by an approved workload-identity webhook. Every listed
       # name is required at process start; values are never stored here.
       passEnv: [PROVIDER_FEDERATED_TOKEN_FILE]
@@ -474,6 +481,15 @@ registration is restored. Restoring that registration lets level-triggered
 provider cleanup resume; the operator never falls back to Kubernetes or a
 different driver. A driver's ready response is portable execution state only
 and does not publish an external endpoint through the gateway.
+
+The repository's QEMU implementation is a provider-isolated, test-only
+reference driver. CI builds it locally to prove persistent registration
+storage, native linux/amd64 provisioning, one-time guest enrollment, real
+agentd/session readiness, restart recovery, and cleanup. It is not published
+as a coordinated image or supported as a production execution provider. See
+the [QEMU reference-driver contract](../../executiondrivers/qemu/README.md).
+Gateway routing and mediated VM egress remain intentionally outside this
+reference proof.
 
 `activeDeadlineSeconds`, `completedTTLSeconds`, and `failedTTLSeconds` remain
 operator-owned for external runs. When cleanup becomes due, the operator calls

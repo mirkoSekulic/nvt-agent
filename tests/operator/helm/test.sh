@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.35" || "${CHART_APP_VERSION}" != "0.8.35" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.35, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.36" || "${CHART_APP_VERSION}" != "0.8.36" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.36, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.35' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.36' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -76,6 +76,7 @@ SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
 COMPONENT_TAG_RENDER="${WORKDIR}/component-tag.yaml"
 LEGACY_IMAGE_FAILURE="${WORKDIR}/legacy-image-failure.txt"
 EXECUTION_DRIVERS_RENDER="${WORKDIR}/execution-drivers.yaml"
+EXECUTION_DRIVER_EXISTING_STORAGE_RENDER="${WORKDIR}/execution-driver-existing-storage.yaml"
 EXECUTION_DRIVER_ENROLLMENT_RENDER="${WORKDIR}/execution-driver-enrollment.yaml"
 EXECUTION_DRIVER_LONG_NAME_RENDER="${WORKDIR}/execution-driver-long-name.yaml"
 EXECUTION_DRIVER_FAILURE="${WORKDIR}/execution-driver-failure.txt"
@@ -93,8 +94,18 @@ OAUTH2_ARGS=(
 )
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+if grep -q 'NVT_EXECUTION_DRIVER_STATE_DIR\|name: driver-state\|component: execution-driver-host' "${DEFAULT_RENDER}"; then
+  echo "default rendering unexpectedly added execution-driver storage/workloads" >&2
+  exit 1
+fi
 helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" > "${EXECUTION_DRIVERS_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].storage.size= \
+  --set-string executionDrivers.registrations[0].storage.storageClassName= \
+  --set-string executionDrivers.registrations[0].storage.existingClaim=existing-driver-state \
+  > "${EXECUTION_DRIVER_EXISTING_STORAGE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set executionDrivers.guestEnrollment.enabled=true \
@@ -621,6 +632,7 @@ def resources(kind):
 deployments = resources("Deployment")
 services = resources("Service")
 policies = resources("NetworkPolicy")
+persistent_volume_claims = resources("PersistentVolumeClaim")
 secrets = resources("Secret")
 accounts = resources("ServiceAccount")
 configmaps = resources("ConfigMap")
@@ -634,6 +646,11 @@ assert driver_names <= policies.keys()
 assert driver_names <= secrets.keys()
 assert "nvt-execution-driver-fake-east" in accounts
 assert "nvt-execution-driver-fake-west" not in accounts
+assert persistent_volume_claims["nvt-execution-driver-fake-east"]["spec"]["resources"]["requests"]["storage"] == "20Gi"
+assert persistent_volume_claims["nvt-execution-driver-fake-east"]["spec"]["storageClassName"] == "fast-state"
+assert "nvt-execution-driver-fake-west" not in persistent_volume_claims
+assert deployments["nvt-execution-driver-fake-east"]["spec"]["strategy"] == {"type": "Recreate"}
+assert "strategy" not in deployments["nvt-execution-driver-fake-west"]["spec"]
 
 operator_pod = deployments["nvt-operator"]["spec"]["template"]["spec"]
 operator_security = operator_pod["securityContext"]
@@ -668,6 +685,13 @@ for name, credential in (("fake-east", "fake-east-cloud"), ("fake-west", "fake-w
     assert container["command"] == ["/nvt-host/nvt-execution-driver-host"]
     if name == "fake-east":
         assert "--pass-env=WORKLOAD_IDENTITY_TOKEN_FILE" in container["args"]
+        assert "--pass-env=NVT_EXECUTION_DRIVER_STATE_DIR" in container["args"]
+        assert next(item for item in container["env"] if item["name"] == "NVT_EXECUTION_DRIVER_STATE_DIR")["value"] == "/var/lib/nvt-execution-driver"
+        assert next(item for item in container["volumeMounts"] if item["name"] == "driver-state")["mountPath"] == "/var/lib/nvt-execution-driver"
+        assert next(item for item in pod["volumes"] if item["name"] == "driver-state")["persistentVolumeClaim"]["claimName"] == "nvt-execution-driver-fake-east"
+    else:
+        assert not any(item == "--pass-env=NVT_EXECUTION_DRIVER_STATE_DIR" for item in container["args"])
+        assert all(item["name"] != "driver-state" for item in container["volumeMounts"])
     env = {item["name"]: item for item in container["env"]}
     assert env["CLOUD_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == credential
     other = "fake-west-cloud" if name == "fake-east" else "fake-east-cloud"
@@ -683,6 +707,17 @@ for name, credential in (("fake-east", "fake-east-cloud"), ("fake-west", "fake-w
 
 assert deployments["nvt-execution-driver-fake-east"]["spec"]["template"]["spec"]["serviceAccountName"] == "nvt-execution-driver-fake-east"
 assert deployments["nvt-execution-driver-fake-west"]["spec"]["template"]["spec"]["serviceAccountName"] == "fake-west-workload-identity"
+PY
+
+python3 - "${EXECUTION_DRIVER_EXISTING_STORAGE_RENDER}" <<'PY'
+import sys
+import yaml
+
+documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+assert not any(item.get("kind") == "PersistentVolumeClaim" and item["metadata"]["name"] == "nvt-execution-driver-fake-east" for item in documents)
+deployment = next(item for item in documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-execution-driver-fake-east")
+volume = next(item for item in deployment["spec"]["template"]["spec"]["volumes"] if item["name"] == "driver-state")
+assert volume["persistentVolumeClaim"]["claimName"] == "existing-driver-state"
 PY
 
 python3 - "${EXECUTION_DRIVER_ENROLLMENT_RENDER}" <<'PY'
@@ -867,6 +902,15 @@ grep -q 'command exceeds the 16 KiB aggregate bound' "${EXECUTION_DRIVER_FAILURE
 
 if helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].passEnv[1]=NVT_EXECUTION_DRIVER_STATE_DIR \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "reserved execution-driver state environment was accepted" >&2
+  exit 1
+fi
+grep -q 'environment allowlist contains an invalid name' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set-string executionDrivers.registrations[1].name=fake-east \
   >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
   echo "duplicate execution-driver registration was accepted" >&2
@@ -892,6 +936,36 @@ if helm template nvt "${CHART}" -n custom-ns \
   exit 1
 fi
 grep -q 'workload-identity Pod label uses a reserved key' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].storage.size=512Mi \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "undersized execution-driver storage was accepted" >&2
+  exit 1
+fi
+grep -q 'storage.size must be between 1Gi and 1Ti' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].storage.existingClaim=driver-state \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "ambiguous execution-driver storage was accepted" >&2
+  exit 1
+fi
+grep -q 'existing storage claim is invalid' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].storage.size= \
+  --set-string executionDrivers.registrations[0].storage.storageClassName= \
+  --set-string executionDrivers.registrations[0].storage.existingClaim=shared-driver-state \
+  --set-string executionDrivers.registrations[1].storage.existingClaim=shared-driver-state \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "shared execution-driver existing storage claim was accepted" >&2
+  exit 1
+fi
+grep -q 'registrations must use distinct existing storage claims' "${EXECUTION_DRIVER_FAILURE}"
 if grep -q 'NVT_BRANDING_CONFIGMAP\|NVT_GATEWAY_BRANDING_DIR\|name: nvt-branding' "${DEFAULT_RENDER}"; then
   echo "default render unexpectedly enables custom branding" >&2
   exit 1
