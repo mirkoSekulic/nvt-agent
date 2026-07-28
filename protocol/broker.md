@@ -75,6 +75,8 @@ The optional production issuer implements the exact payloads and lifecycle in
 | `POST /v1/guest-enrollment/revoke-binding` | 4 KiB | Dedicated orchestrator bearer |
 | `POST /v1/guest-enrollment/revoke-execution` | 4 KiB | Dedicated orchestrator bearer |
 | `POST /v1/guest-enrollment/complete-execution-cleanup` | 4 KiB | Dedicated orchestrator bearer |
+| `POST /v1/guest-runtime-identity/status` | 4 KiB | Current runtime identity plus exact binding |
+| `POST /v1/guest-runtime-identity/rotate` | 16 KiB | Current runtime identity plus exact binding and successor |
 
 Issue returns the frozen `BootstrapEnvelope`; exchange returns the frozen
 `ExchangeResult`; both revoke operations and cleanup completion return
@@ -83,6 +85,14 @@ caller cannot supply `exchange_url`: every envelope carries the issuer-owned
 canonical HTTPS endpoint loaded at broker startup. Unknown fields, duplicate
 keys at any depth, invalid UTF-8, trailing JSON, and over-limit requests fail
 as `invalid-request`.
+
+The runtime identity endpoints implement
+[`nvt.guest-runtime-identity/v1`](guest-runtime-identity.md). Status returns
+only the exact non-secret binding and broker-owned issuance/expiry window.
+Rotation atomically replaces the authenticating digest with a client-generated
+successor digest and never echoes the successor. Lost-response recovery probes
+the already-known successor before retrying that same value; it never blindly
+creates another identity.
 
 The operator client exposes only issue, the two revoke operations, and cleanup
 completion; it has no guest exchange method. It holds the dedicated bearer in
@@ -118,6 +128,12 @@ Valid-shaped absent tokens are rejected through indexed read-only lookups and
 never acquire the SQLite writer lock. A token that selects durable state must
 enter the transactional writer path, which validates the complete bounded
 store before consuming the token or issuing an identity.
+Runtime status/rotation bodies have an independent 64-request HTTP bound and a
+32-operation issuer bound with the same bounded token-bucket policy. They do
+not consume the control-plane revocation body slots. Valid-shaped absent
+identity digests are rejected through an indexed read-only preflight; only an
+identity selecting durable state reaches complete-store validation or the
+rotation writer transaction.
 Runtime identity timestamps use the later of the issuer's current wall clock
 and the enrollment's durable `issued_at`, so a backward clock adjustment cannot
 commit a record that the same issuer subsequently rejects as malformed.

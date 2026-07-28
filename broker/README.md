@@ -51,11 +51,20 @@ The broker stores token and runtime-identity digests, never either plaintext
 value. Stable, bounded error classes intentionally hide request bodies and
 SQLite diagnostics.
 
+An enrolled guest can authenticate and atomically rotate its opaque control-
+plane identity using
+[`nvt.guest-runtime-identity/v1`](../protocol/guest-runtime-identity.md). The
+guest proposes a cryptographically random successor; SQLite commits only its
+digest and the broker-owned validity window. Ambiguous response recovery checks
+the already-known successor before retrying the same proposal. Execution
+revocation removes whichever rotated digest is current.
+
 SQLite is used in single-writer mode. One broker process owns the database;
 deployments must not share it across replicas. The broker readiness endpoint
 fails closed if the configured durable store becomes unavailable. This phase
-issues an opaque runtime identity but does not yet wire its use into gateway,
-broker, or VM egress authentication.
+issues and authenticates an opaque runtime identity, but there is not yet a
+guest rotation daemon, gateway route, production runtime consumer, or mediated
+VM egress identity.
 
 Example config:
 

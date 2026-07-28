@@ -172,9 +172,10 @@ runtime identity:
 
 The opaque identity material decodes to 32 through 65,536 bytes and has a
 maximum lifetime of 24 hours in v1. This contract intentionally does not assign
-provider, gateway, or egress semantics to it. A later control-plane integration
-defines how the guest uses and rotates that runtime identity without widening
-this one-time bootstrap envelope.
+provider, gateway, or egress semantics to it. Authentication and atomic
+digest-only rotation use the separate
+[`nvt.guest-runtime-identity/v1`](guest-runtime-identity.md) contract without
+widening this one-time bootstrap envelope, its binding, or execution cleanup.
 
 All JSON is UTF-8 and uses strict object shapes. Unknown fields, trailing
 values, invalid UTF-8, and duplicate keys at any nesting depth (including
@@ -340,5 +341,7 @@ the private handoff, performs the one-time exchange, installs the pinned native
 host bundle, proves agentd/session readiness and restart recovery, and removes
 its resources during cleanup. It is built only for repository conformance and
 is neither published nor supported as a production execution provider.
-Gateway routing, production runtime-identity/provider use, broker identity,
-and mediated VM networking remain separate future production gates.
+The broker now authenticates and atomically rotates the runtime identity under
+the separate runtime-identity contract. A native guest rotation daemon,
+gateway routing, downstream production identity consumers, broker session
+identity, and mediated VM networking remain separate future production gates.

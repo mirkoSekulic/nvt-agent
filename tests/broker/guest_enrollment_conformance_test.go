@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -22,7 +24,10 @@ const (
 	guestEnrollmentRevokeBinding   = "/v1/guest-enrollment/revoke-binding"
 	guestEnrollmentRevokeExecution = "/v1/guest-enrollment/revoke-execution"
 	guestEnrollmentCompleteCleanup = "/v1/guest-enrollment/complete-execution-cleanup"
+	guestRuntimeIdentityStatus     = "/v1/guest-runtime-identity/status"
+	guestRuntimeIdentityRotate     = "/v1/guest-runtime-identity/rotate"
 	guestEnrollmentExchangeURL     = "https://broker.example/v1/guest-enrollment/exchange"
+	guestRuntimeIdentityVersion    = "nvt.guest-runtime-identity/v1"
 	guestEnrollmentOrchestrator    = "orchestrator-token-0123456789abcdef"
 )
 
@@ -67,6 +72,23 @@ func TestGuestEnrollmentAPIExactLifecycleRestartAndScopeCleanup(t *testing.T) {
 	status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(first))
 	assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
 	identity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+	status, runtimeStatus := fixture.postJSONWithToken(identity, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
+	assertEnrollmentStatus(t, status, runtimeStatus, http.StatusOK, "")
+	if runtimeStatus["binding"] == nil || runtimeStatus["identity_type"] != "nvt.runtime-identity/v1" || runtimeStatus["opaque"] != nil {
+		t.Fatalf("runtime identity status exposed invalid metadata: %v", runtimeStatus)
+	}
+	successor := runtimeIdentityCanary(0x6a)
+	status, rotated := fixture.postJSONWithToken(identity, guestRuntimeIdentityRotate, runtimeIdentityRotateRequest(first, successor))
+	assertEnrollmentStatus(t, status, rotated, http.StatusOK, "")
+	if encoded, _ := json.Marshal(rotated); bytes.Contains(encoded, []byte(successor)) {
+		t.Fatal("rotation response echoed the successor")
+	}
+	status, body = fixture.postJSONWithToken(identity, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
+	assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	fixture.stop()
+	fixture.start()
+	status, body = fixture.postJSONWithToken(successor, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 	status, body = fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(first))
 	assertEnrollmentStatus(t, status, body, http.StatusConflict, "already-consumed")
 
@@ -87,6 +109,8 @@ func TestGuestEnrollmentAPIExactLifecycleRestartAndScopeCleanup(t *testing.T) {
 		status, body = fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
 		assertEnrollmentStatus(t, status, body, http.StatusConflict, "revoked")
 	}
+	status, body = fixture.postJSONWithToken(successor, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
+	assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
 	status, body = fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, enrollmentIssueRequest("run-uid", "execution-1", 3, "guest-third", 300))
 	assertEnrollmentStatus(t, status, body, http.StatusConflict, "revoked")
 	status, body = fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(unrelated))
@@ -102,7 +126,7 @@ func TestGuestEnrollmentAPIExactLifecycleRestartAndScopeCleanup(t *testing.T) {
 	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 
 	fixture.stop()
-	for _, canary := range []string{firstToken, identity} {
+	for _, canary := range []string{firstToken, identity, successor} {
 		if strings.Contains(fixture.stdout.String(), canary) || strings.Contains(fixture.stderr.String(), canary) {
 			t.Fatalf("sensitive enrollment canary entered broker output")
 		}
@@ -128,15 +152,21 @@ func TestGuestEnrollmentAPIExactLifecycleRestartAndScopeCleanup(t *testing.T) {
 		}
 	}
 	tokenDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(firstToken)))
-	if strings.Contains(fixture.stdout.String(), tokenDigest) || strings.Contains(fixture.stderr.String(), tokenDigest) {
-		t.Fatal("enrollment token digest entered broker output")
-	}
 	audit, err := os.ReadFile(fixture.audit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(audit, []byte(tokenDigest)) {
-		t.Fatal("enrollment token digest entered broker audit")
+	for _, digest := range []string{
+		tokenDigest,
+		fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(identity))),
+		fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(successor))),
+	} {
+		if strings.Contains(fixture.stdout.String(), digest) || strings.Contains(fixture.stderr.String(), digest) {
+			t.Fatal("sensitive enrollment digest entered broker output")
+		}
+		if bytes.Contains(audit, []byte(digest)) {
+			t.Fatal("sensitive enrollment digest entered broker audit")
+		}
 	}
 }
 
@@ -164,6 +194,68 @@ func TestGuestEnrollmentDedicatedAuthorizationAndIssuerOwnedURL(t *testing.T) {
 	}
 	status, body = fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
 	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	identity := cloneObject(body["runtime_identity"])["opaque"].(string)
+	for _, unauthorized := range []string{"", "frontend-token", "frontend-egress-token", "not-a-runtime-identity"} {
+		status, rejected := fixture.postJSONWithToken(unauthorized, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(envelope))
+		assertEnrollmentStatus(t, status, rejected, http.StatusUnauthorized, "unauthorized")
+	}
+	wrongBinding := runtimeIdentityStatusRequest(envelope)
+	wrongBinding["binding"] = cloneObject(envelope["binding"])
+	wrongBinding["binding"].(map[string]any)["desired_generation"] = float64(2)
+	status, body = fixture.postJSONWithToken(identity, guestRuntimeIdentityStatus, wrongBinding)
+	assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	malformedRotate := runtimeIdentityRotateRequest(envelope, runtimeIdentityCanary(0x51))
+	malformedRotate["unknown"] = true
+	status, body = fixture.postJSONWithToken(identity, guestRuntimeIdentityRotate, malformedRotate)
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+}
+
+func TestGuestRuntimeIdentityConcurrentRotationIsSingleCAS(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	request := enrollmentIssueRequest("rotate-uid", "rotate-execution", 1, "rotate-guest", 300)
+	status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+	assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+	status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+	assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+	identity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+
+	start := make(chan struct{})
+	type result struct {
+		status int
+		body   map[string]any
+	}
+	results := make(chan result, 2)
+	var workers sync.WaitGroup
+	for _, successor := range []string{runtimeIdentityCanary(0x61), runtimeIdentityCanary(0x62)} {
+		workers.Add(1)
+		go func(successor string) {
+			defer workers.Done()
+			<-start
+			status, body := fixture.postJSONWithToken(identity, guestRuntimeIdentityRotate, runtimeIdentityRotateRequest(envelope, successor))
+			results <- result{status: status, body: body}
+		}(successor)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	successes := 0
+	unauthorized := 0
+	for result := range results {
+		switch result.status {
+		case http.StatusOK:
+			successes++
+		case http.StatusUnauthorized:
+			if result.body["error"] != "unauthorized" {
+				t.Fatalf("rotation error = %v", result.body)
+			}
+			unauthorized++
+		default:
+			t.Fatalf("rotation status=%d body=%v", result.status, result.body)
+		}
+	}
+	if successes != 1 || unauthorized != 1 {
+		t.Fatalf("rotation outcomes success=%d unauthorized=%d", successes, unauthorized)
+	}
 }
 
 func TestGuestEnrollmentAuthenticatesBeforeBodyAndReservesRevocationCapacity(t *testing.T) {
@@ -224,6 +316,37 @@ func TestGuestEnrollmentControlRequestBodiesHaveIndependentBound(t *testing.T) {
 	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
 }
 
+func TestGuestRuntimeIdentityBodiesCannotStarveRevocation(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	const runtimeHTTPBound = 64
+	slow := saturateEnrollmentRequestSlots(
+		t,
+		fixture,
+		guestRuntimeIdentityRotate,
+		runtimeIdentityCanary(0x7a),
+		runtimeHTTPBound,
+	)
+	t.Cleanup(func() {
+		for _, connection := range slow {
+			_ = connection.Close()
+		}
+	})
+	status, body := fixture.postEnrollmentRaw(runtimeIdentityCanary(0x7a), guestRuntimeIdentityRotate, []byte(`{}`))
+	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+
+	request := enrollmentIssueRequest("runtime-saturated-uid", "runtime-saturated-execution", 1, "runtime-saturated-guest", 300)
+	started := time.Now()
+	status, body = fixture.postJSONWithToken(
+		guestEnrollmentOrchestrator,
+		guestEnrollmentRevokeExecution,
+		enrollmentRevokeExecutionRequest(request),
+	)
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("revocation was delayed by saturated runtime identity traffic: %s", elapsed)
+	}
+}
+
 func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) {
 	fixture := newGuestEnrollmentBrokerFixture(t)
 	request := enrollmentIssueRequest("revoke-uid", "revoke-execution", 1, "revoke-guest", 300)
@@ -248,11 +371,18 @@ func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) 
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 	status, body = fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentCompleteCleanup, duplicate)
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	runtimeDuplicate := []byte(`{"contract_version":"nvt.guest-runtime-identity/v1","binding":{},"successor":"x","successor":"y"}`)
+	status, body = fixture.postEnrollmentRaw(runtimeIdentityCanary(0x44), guestRuntimeIdentityRotate, runtimeDuplicate)
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	status, body = fixture.postEnrollmentRaw(runtimeIdentityCanary(0x44), guestRuntimeIdentityRotate, bytes.Repeat([]byte{' '}, (16<<10)+1))
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 
 	disabled := newBrokerFixture(t)
 	status, body = disabled.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
 	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
 	status, body = disabled.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentExchangePath, bytes.Repeat([]byte{'x'}, 32<<10))
+	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
+	status, body = disabled.postJSONWithToken(runtimeIdentityCanary(0x44), guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(map[string]any{"binding": request["binding"]}))
 	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
 	if matches, _ := filepath.Glob(filepath.Join(disabled.home, "*enrollment*")); len(matches) != 0 {
 		t.Fatalf("disabled broker created enrollment state: %v", matches)
@@ -363,6 +493,23 @@ func enrollmentExchangeRequest(envelope map[string]any) map[string]any {
 		"binding":          cloneObject(envelope["binding"]),
 		"token":            envelope["token"],
 	}
+}
+
+func runtimeIdentityStatusRequest(envelope map[string]any) map[string]any {
+	return map[string]any{
+		"contract_version": guestRuntimeIdentityVersion,
+		"binding":          cloneObject(envelope["binding"]),
+	}
+}
+
+func runtimeIdentityRotateRequest(envelope map[string]any, successor string) map[string]any {
+	request := runtimeIdentityStatusRequest(envelope)
+	request["successor"] = successor
+	return request
+}
+
+func runtimeIdentityCanary(value byte) string {
+	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32))
 }
 
 func enrollmentRevokeExecutionRequest(issue map[string]any) map[string]any {

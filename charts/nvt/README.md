@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.36`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.37`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.36 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.37 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.36 --namespace nvt --create-namespace
+  --version 0.8.37 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -327,8 +327,11 @@ The issuer stores only token/runtime-identity digests and bounded lifecycle
 metadata in `/state/guest-enrollment.sqlite3`. It uses SQLite transactions and
 therefore shares the broker's existing one-replica, `Recreate`, single-writer
 contract. Do not scale the broker or mount the same database through multiple
-broker Pods. The canonical URL must resolve to this issuer over authenticated
-HTTPS. Enabling this issuer alone does not route AgentRuns to VMs. The operator
+broker Pods. Enrolled guests can authenticate and atomically rotate the current
+opaque identity through the same TLS broker; no additional Helm value or
+plaintext credential storage is introduced. The canonical URL must resolve to
+this issuer over authenticated HTTPS. Enabling this issuer alone does not route
+AgentRuns to VMs. The operator
 bridge is a separate opt-in and uses explicit broker trust plus the same
 dedicated orchestrator Secret:
 
@@ -403,7 +406,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.36`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.37`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.

@@ -1,3 +1,4 @@
+import base64
 import json
 import socket
 import sqlite3
@@ -19,6 +20,7 @@ from broker.core.guest_enrollment import (
     EnrollmentFaults,
     GuestEnrollmentIssuer,
     OrchestratorAuthenticator,
+    RUNTIME_IDENTITY_VERSION,
     TOMBSTONE_RETENTION,
     VERSION,
     format_timestamp,
@@ -371,6 +373,16 @@ class ResponseLostFailure(EnrollmentFaults):
         raise ConnectionAbortedError("response-lost")
 
 
+class RotationBeforeCommitFailure(EnrollmentFaults):
+    def before_rotation_commit(self):
+        raise sqlite3.OperationalError("rotation-storage-secret-canary")
+
+
+class RotationResponseLostFailure(EnrollmentFaults):
+    def after_rotation_commit(self):
+        raise ConnectionAbortedError("rotation-response-lost")
+
+
 class GuestEnrollmentIssuerTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -409,6 +421,198 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertNotIn(identity, snapshot)
         self.assertEqual(snapshot.count('"runtime_identity_active": 1'), 1)
         self.assertFailure("already-consumed", lambda: restarted.exchange(exchange_request(envelope)))
+
+    def test_runtime_identity_status_rotation_restart_and_revocation(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        status = issuer.runtime_identity_status(identity, runtime_status_request(envelope["binding"]))
+        self.assertEqual(status["binding"], envelope["binding"])
+        self.assertNotIn("opaque", status)
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.runtime_identity_status(opaque_canary(69), runtime_status_request(envelope["binding"])),
+        )
+
+        # Rotation is a runtime operation and remains valid after the one-time
+        # enrollment token's independent TTL has elapsed.
+        self.clock.value += timedelta(minutes=30)
+        first_successor = opaque_canary(70)
+        self.assertFailure(
+            "invalid-request",
+            lambda: issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], identity)),
+        )
+        rotated = issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], first_successor))
+        self.assertEqual(rotated["identity_type"], "nvt.runtime-identity/v1")
+        self.assertFailure("unauthorized", lambda: issuer.runtime_identity_status(identity, runtime_status_request(envelope["binding"])))
+        self.assertEqual(issuer.runtime_identity_status(first_successor, runtime_status_request(envelope["binding"])), rotated)
+        self.assertTrue(issuer.ready())
+
+        second_successor = opaque_canary(71)
+        issuer.rotate_runtime_identity(first_successor, runtime_rotate_request(envelope["binding"], second_successor))
+        issuer.close()
+        restarted = self.issuer()
+        self.assertEqual(
+            restarted.runtime_identity_status(second_successor, runtime_status_request(envelope["binding"]))["binding"],
+            envelope["binding"],
+        )
+        self.clock.value += timedelta(hours=1)
+        restarted.maintain()
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.runtime_identity_status(second_successor, runtime_status_request(envelope["binding"])),
+        )
+        restarted.revoke_execution(revoke_execution_request(envelope["binding"]))
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.runtime_identity_status(second_successor, runtime_status_request(envelope["binding"])),
+        )
+
+        durable = json.dumps(restarted.snapshot(), sort_keys=True)
+        for secret in (identity, first_successor, second_successor):
+            self.assertNotIn(secret, durable)
+
+    def test_runtime_identity_rotation_is_single_cas_and_exact_binding(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        wrong = runtime_status_request(dict(envelope["binding"], guest_instance_id="other-guest"))
+        self.assertFailure("unauthorized", lambda: issuer.runtime_identity_status(identity, wrong))
+        wrong_rotation = runtime_rotate_request(
+            dict(envelope["binding"], desired_generation=2),
+            opaque_canary(78),
+        )
+        self.assertFailure("unauthorized", lambda: issuer.rotate_runtime_identity(identity, wrong_rotation))
+        self.assertTrue(runtime_identity_is_active(issuer, identity, envelope["binding"]))
+
+        barrier = threading.Barrier(3)
+        successors = (opaque_canary(72), opaque_canary(73))
+
+        def rotate(successor):
+            barrier.wait()
+            try:
+                issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor))
+                return "success"
+            except EnrollmentFailure as error:
+                return error.reason
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(rotate, successor) for successor in successors]
+            barrier.wait()
+            outcomes = [future.result(timeout=2) for future in futures]
+        self.assertEqual(outcomes.count("success"), 1)
+        self.assertEqual(outcomes.count("unauthorized"), 1)
+        active = [
+            successor
+            for successor in successors
+            if runtime_identity_is_active(issuer, successor, envelope["binding"])
+        ]
+        self.assertEqual(len(active), 1)
+
+    def test_runtime_identity_rotation_commit_boundaries_and_recovery(self):
+        before = self.issuer(faults=RotationBeforeCommitFailure())
+        envelope = before.issue(issue_request())
+        identity = before.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        successor = opaque_canary(74)
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: before.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor)),
+        )
+        self.assertTrue(runtime_identity_is_active(before, identity, envelope["binding"]))
+        self.assertFalse(runtime_identity_is_active(before, successor, envelope["binding"]))
+        before.close()
+        before_recovered = self.issuer()
+        before_recovered.rotate_runtime_identity(
+            identity,
+            runtime_rotate_request(envelope["binding"], successor),
+        )
+        self.assertTrue(runtime_identity_is_active(before_recovered, successor, envelope["binding"]))
+
+        lost_database = str(Path(self.temporary.name) / "rotation-response-lost.sqlite3")
+        lost = GuestEnrollmentIssuer(
+            lost_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(80),
+            faults=RotationResponseLostFailure(),
+            maintenance_interval=None,
+        )
+        self.addCleanup(lost.close)
+        lost_envelope = lost.issue(issue_request(uid="lost-uid", execution="lost-execution"))
+        old_identity = lost.exchange(exchange_request(lost_envelope))["runtime_identity"]["opaque"]
+        proposed = opaque_canary(75)
+        with self.assertRaises(ConnectionAbortedError):
+            lost.rotate_runtime_identity(old_identity, runtime_rotate_request(lost_envelope["binding"], proposed))
+        lost.close()
+        recovered = GuestEnrollmentIssuer(lost_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        self.addCleanup(recovered.close)
+        self.assertFalse(runtime_identity_is_active(recovered, old_identity, lost_envelope["binding"]))
+        self.assertTrue(runtime_identity_is_active(recovered, proposed, lost_envelope["binding"]))
+
+    def test_runtime_identity_expiry_and_malformed_state_fail_closed(self):
+        issuer = self.issuer()
+        first = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(first))["runtime_identity"]["opaque"]
+        self.clock.value += timedelta(hours=1)
+        self.assertFailure("unauthorized", lambda: issuer.runtime_identity_status(identity, runtime_status_request(first["binding"])))
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.rotate_runtime_identity(identity, runtime_rotate_request(first["binding"], opaque_canary(76))),
+        )
+
+        second = issuer.issue(issue_request(uid="corrupt-uid", execution="corrupt-execution", guest="corrupt-guest"))
+        second_identity = issuer.exchange(exchange_request(second))["runtime_identity"]["opaque"]
+        update_database(self.database, "UPDATE enrollments SET expires_at = ? WHERE agent_run_uid = ?", ("invalid", "uid-run"))
+        self.assertFalse(issuer.ready())
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(second_identity, runtime_status_request(second["binding"])),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.rotate_runtime_identity(
+                second_identity,
+                runtime_rotate_request(second["binding"], opaque_canary(77)),
+            ),
+        )
+
+    def test_unknown_runtime_identities_do_not_scan_or_block_revocation(self):
+        issuer = self.issuer()
+        original_validate_store = issuer._validate_store
+        unknown_validation_calls = 0
+        validation_lock = threading.Lock()
+
+        def tracked_validate_store(connection, full=False):
+            nonlocal unknown_validation_calls
+            if threading.current_thread().name.startswith("unknown-runtime"):
+                with validation_lock:
+                    unknown_validation_calls += 1
+                time.sleep(0.05)
+            return original_validate_store(connection, full=full)
+
+        issuer._validate_store = tracked_validate_store
+        request = runtime_status_request(issue_request()["binding"])
+        barrier = threading.Barrier(17)
+
+        def unknown_status(index):
+            barrier.wait()
+            try:
+                issuer.runtime_identity_status(opaque_canary(100 + index), request)
+            except EnrollmentFailure as error:
+                return error.reason
+            return "unexpected-success"
+
+        with ThreadPoolExecutor(max_workers=16, thread_name_prefix="unknown-runtime") as pool:
+            futures = [pool.submit(unknown_status, index) for index in range(16)]
+            barrier.wait()
+            started = time.monotonic()
+            issuer.revoke_execution(revoke_execution_request(issue_request()["binding"]))
+            elapsed = time.monotonic() - started
+            reasons = [future.result(timeout=2.0) for future in futures]
+
+        self.assertEqual(reasons, ["unauthorized"] * 16)
+        self.assertEqual(unknown_validation_calls, 0)
+        self.assertLess(elapsed, 0.5)
 
     def test_binding_mismatch_does_not_consume(self):
         issuer = self.issuer()
@@ -619,6 +823,22 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
 
         result = issuer.exchange(exchange_request(envelope))
         self.assertTrue(result["runtime_identity"]["opaque"])
+        identity = result["runtime_identity"]["opaque"]
+        original_runtime_rate = issuer.runtime_identity_rate
+        issuer.runtime_identity_rate = DenyRate()
+        self.assertFailure(
+            "capacity-exceeded",
+            lambda: issuer.runtime_identity_status(identity, runtime_status_request(envelope["binding"])),
+        )
+        issuer.runtime_identity_rate = original_runtime_rate
+        runtime_acquired = [issuer.runtime_identity_slots.acquire(blocking=False) for _ in range(32)]
+        self.assertTrue(all(runtime_acquired))
+        self.assertFailure(
+            "capacity-exceeded",
+            lambda: issuer.runtime_identity_status(identity, runtime_status_request(envelope["binding"])),
+        )
+        for _ in runtime_acquired:
+            issuer.runtime_identity_slots.release()
         record = issuer.snapshot()["records"][0]
         self.assertEqual(record["runtime_identity_active"], 1)
         self.assertEqual(record["runtime_identity_expires_at"], result["runtime_identity"]["expires_at"])
@@ -884,6 +1104,32 @@ def issue_request(uid="uid-run", execution="execution-1", generation=1, guest="g
 
 def exchange_request(envelope):
     return {"contract_version": VERSION, "binding": dict(envelope["binding"]), "token": envelope["token"]}
+
+
+def runtime_status_request(value):
+    return {"contract_version": RUNTIME_IDENTITY_VERSION, "binding": dict(value)}
+
+
+def runtime_rotate_request(value, successor):
+    return {
+        "contract_version": RUNTIME_IDENTITY_VERSION,
+        "binding": dict(value),
+        "successor": successor,
+    }
+
+
+def opaque_canary(value):
+    return base64.urlsafe_b64encode(bytes([value]) * 32).rstrip(b"=").decode("ascii")
+
+
+def runtime_identity_is_active(issuer, identity, value):
+    try:
+        issuer.runtime_identity_status(identity, runtime_status_request(value))
+        return True
+    except EnrollmentFailure as error:
+        if error.reason != "unauthorized":
+            raise
+        return False
 
 
 def revoke_binding_request(value):

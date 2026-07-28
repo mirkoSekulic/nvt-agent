@@ -17,11 +17,14 @@ from urllib.parse import urlsplit
 
 VERSION = "nvt.guest-enrollment/v1"
 RUNTIME_IDENTITY_TYPE = "nvt.runtime-identity/v1"
+RUNTIME_IDENTITY_VERSION = "nvt.guest-runtime-identity/v1"
 STORE_SCHEMA_VERSION = "3"
 TOKEN_BYTES = 32
 MAX_ISSUE_REQUEST_BYTES = 4 << 10
 MAX_EXCHANGE_REQUEST_BYTES = 16 << 10
 MAX_REVOCATION_REQUEST_BYTES = 4 << 10
+MAX_RUNTIME_IDENTITY_STATUS_REQUEST_BYTES = 4 << 10
+MAX_RUNTIME_IDENTITY_ROTATE_REQUEST_BYTES = 16 << 10
 MAX_AGENT_RUN_UID_BYTES = 128
 MAX_EXECUTION_ID_BYTES = 256
 MAX_DRIVER_NAME_BYTES = 63
@@ -34,18 +37,25 @@ TOMBSTONE_RETENTION = timedelta(hours=24)
 MAX_CONCURRENT_EXCHANGES = 32
 EXCHANGE_RATE_PER_SECOND = 128.0
 EXCHANGE_RATE_BURST = 256.0
+MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS = 32
+RUNTIME_IDENTITY_RATE_PER_SECOND = 128.0
+RUNTIME_IDENTITY_RATE_BURST = 256.0
 
 ISSUE_PATH = "/v1/guest-enrollment/issue"
 EXCHANGE_PATH = "/v1/guest-enrollment/exchange"
 REVOKE_BINDING_PATH = "/v1/guest-enrollment/revoke-binding"
 REVOKE_EXECUTION_PATH = "/v1/guest-enrollment/revoke-execution"
 COMPLETE_EXECUTION_CLEANUP_PATH = "/v1/guest-enrollment/complete-execution-cleanup"
+RUNTIME_IDENTITY_STATUS_PATH = "/v1/guest-runtime-identity/status"
+RUNTIME_IDENTITY_ROTATE_PATH = "/v1/guest-runtime-identity/rotate"
 ENDPOINT_LIMITS = {
     ISSUE_PATH: MAX_ISSUE_REQUEST_BYTES,
     EXCHANGE_PATH: MAX_EXCHANGE_REQUEST_BYTES,
     REVOKE_BINDING_PATH: MAX_REVOCATION_REQUEST_BYTES,
     REVOKE_EXECUTION_PATH: MAX_REVOCATION_REQUEST_BYTES,
     COMPLETE_EXECUTION_CLEANUP_PATH: MAX_REVOCATION_REQUEST_BYTES,
+    RUNTIME_IDENTITY_STATUS_PATH: MAX_RUNTIME_IDENTITY_STATUS_REQUEST_BYTES,
+    RUNTIME_IDENTITY_ROTATE_PATH: MAX_RUNTIME_IDENTITY_ROTATE_REQUEST_BYTES,
 }
 
 DRIVER_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
@@ -73,6 +83,12 @@ class EnrollmentFaults:
         return None
 
     def after_exchange_commit(self):
+        return None
+
+    def before_rotation_commit(self):
+        return None
+
+    def after_rotation_commit(self):
         return None
 
 
@@ -141,6 +157,8 @@ class GuestEnrollmentIssuer:
         self.faults = faults or EnrollmentFaults()
         self.exchange_slots = threading.BoundedSemaphore(MAX_CONCURRENT_EXCHANGES)
         self.exchange_rate = _RateLimiter(EXCHANGE_RATE_PER_SECOND, EXCHANGE_RATE_BURST)
+        self.runtime_identity_slots = threading.BoundedSemaphore(MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS)
+        self.runtime_identity_rate = _RateLimiter(RUNTIME_IDENTITY_RATE_PER_SECOND, RUNTIME_IDENTITY_RATE_BURST)
         self.stop_event = threading.Event()
         self.maintenance_thread = None
         self._initialize()
@@ -327,6 +345,147 @@ class GuestEnrollmentIssuer:
             ).fetchone()
             if row is None:
                 raise EnrollmentFailure("invalid-token", 401)
+        except EnrollmentFailure:
+            _rollback(connection)
+            raise
+        except sqlite3.Error as error:
+            _rollback(connection)
+            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+        finally:
+            connection.close()
+
+    def runtime_identity_status(self, identity, request):
+        binding = validate_runtime_identity_status_request(request)
+        identity_digest = _runtime_identity_digest(identity)
+        if not self.runtime_identity_rate.allow() or not self.runtime_identity_slots.acquire(blocking=False):
+            raise EnrollmentFailure("capacity-exceeded", 429)
+        try:
+            self._preflight_runtime_identity_candidate(identity_digest)
+            now = self._now()
+            connection = self._connect_or_failure()
+            try:
+                connection.execute("BEGIN")
+                self._validate_store(connection)
+                row = connection.execute(
+                    "SELECT * FROM enrollments WHERE runtime_identity_digest = ?",
+                    (identity_digest,),
+                ).fetchone()
+                return self._authenticated_runtime_identity_status(row, binding, now)
+            except EnrollmentFailure:
+                _rollback(connection)
+                raise
+            except sqlite3.Error as error:
+                _rollback(connection)
+                raise EnrollmentFailure("issuer-storage-failed", 503) from error
+            finally:
+                connection.close()
+        finally:
+            self.runtime_identity_slots.release()
+
+    def rotate_runtime_identity(self, identity, request):
+        binding, successor = validate_runtime_identity_rotate_request(request)
+        identity_digest = _runtime_identity_digest(identity)
+        successor_digest = _runtime_identity_digest(successor)
+        if hmac.compare_digest(identity_digest, successor_digest):
+            raise EnrollmentFailure("invalid-request", 400)
+        if not self.runtime_identity_rate.allow() or not self.runtime_identity_slots.acquire(blocking=False):
+            raise EnrollmentFailure("capacity-exceeded", 429)
+        try:
+            self._preflight_runtime_identity_candidate(identity_digest)
+            return self._rotate_runtime_identity_locked(binding, identity_digest, successor_digest)
+        finally:
+            self.runtime_identity_slots.release()
+
+    def _rotate_runtime_identity_locked(self, binding, identity_digest, successor_digest):
+        now = self._now()
+        connection = self._connect_or_failure()
+        committed = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
+            if self._scope_tombstoned(connection, binding) or self._binding_tombstoned(connection, binding):
+                raise EnrollmentFailure("unauthorized", 401)
+            row = connection.execute(
+                "SELECT * FROM enrollments WHERE runtime_identity_digest = ?",
+                (identity_digest,),
+            ).fetchone()
+            self._authenticated_runtime_identity_status(row, binding, now)
+            if connection.execute(
+                "SELECT 1 FROM enrollments WHERE runtime_identity_digest = ?",
+                (successor_digest,),
+            ).fetchone() is not None:
+                raise EnrollmentFailure("invalid-request", 400)
+
+            previous_issued_at = parse_timestamp(row["runtime_identity_issued_at"])
+            successor_issued_time = max(now, previous_issued_at)
+            successor_issued_at = format_timestamp(successor_issued_time)
+            successor_expires_at = format_timestamp(successor_issued_time + timedelta(hours=1))
+            updated = connection.execute(
+                """
+                UPDATE enrollments
+                   SET runtime_identity_digest = ?, runtime_identity_issued_at = ?,
+                       runtime_identity_expires_at = ?, runtime_identity_active = 1,
+                       terminal_at = NULL
+                 WHERE token_digest = ? AND runtime_identity_digest = ?
+                   AND state = 'consumed' AND runtime_identity_active = 1
+                """,
+                (
+                    successor_digest,
+                    successor_issued_at,
+                    successor_expires_at,
+                    row["token_digest"],
+                    identity_digest,
+                ),
+            ).rowcount
+            if updated != 1:
+                raise EnrollmentFailure("unauthorized", 401)
+            try:
+                self.faults.before_rotation_commit()
+            except Exception as error:
+                raise EnrollmentFailure("issuer-storage-failed", 503) from error
+            connection.commit()
+            committed = True
+            self.faults.after_rotation_commit()
+            return _runtime_identity_status(binding, successor_issued_at, successor_expires_at)
+        except EnrollmentFailure:
+            if not committed:
+                _rollback(connection)
+            raise
+        except sqlite3.Error as error:
+            if not committed:
+                _rollback(connection)
+            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+        finally:
+            connection.close()
+
+    def _authenticated_runtime_identity_status(self, row, binding, now):
+        if row is None:
+            raise EnrollmentFailure("unauthorized", 401)
+        _validate_persisted_enrollment(row)
+        if (
+            row["state"] != "consumed"
+            or row["runtime_identity_active"] != 1
+            or _row_binding(row) != binding
+            or now >= parse_timestamp(row["runtime_identity_expires_at"])
+        ):
+            raise EnrollmentFailure("unauthorized", 401)
+        return _runtime_identity_status(
+            binding,
+            row["runtime_identity_issued_at"],
+            row["runtime_identity_expires_at"],
+        )
+
+    def _preflight_runtime_identity_candidate(self, identity_digest):
+        """Reject absent bearer digests without a full scan or writer lock."""
+        connection = self._connect_or_failure()
+        try:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT 1 FROM enrollments WHERE runtime_identity_digest = ?",
+                (identity_digest,),
+            ).fetchone()
+            if row is None:
+                raise EnrollmentFailure("unauthorized", 401)
         except EnrollmentFailure:
             _rollback(connection)
             raise
@@ -843,6 +1002,22 @@ def decode_revoke_request(data):
     return strict_decode(data, MAX_REVOCATION_REQUEST_BYTES)
 
 
+def decode_runtime_identity_status_request(data):
+    return strict_decode(data, MAX_RUNTIME_IDENTITY_STATUS_REQUEST_BYTES)
+
+
+def decode_runtime_identity_rotate_request(data):
+    return strict_decode(data, MAX_RUNTIME_IDENTITY_ROTATE_REQUEST_BYTES)
+
+
+def runtime_identity_from_authorization(authorization):
+    if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        raise EnrollmentFailure("unauthorized", 401)
+    identity = authorization.removeprefix("Bearer ")
+    _runtime_identity_digest(identity)
+    return identity
+
+
 def validate_issue_request(value):
     _exact_keys(value, {"contract_version", "binding", "ttl_seconds"})
     if value["contract_version"] != VERSION:
@@ -884,6 +1059,24 @@ def validate_complete_execution_cleanup_request(value):
     if value["contract_version"] != VERSION:
         _invalid()
     return validate_scope(value["execution_scope"], exact=True)
+
+
+def validate_runtime_identity_status_request(value):
+    _exact_keys(value, {"contract_version", "binding"})
+    if value["contract_version"] != RUNTIME_IDENTITY_VERSION:
+        _invalid()
+    return validate_binding(value["binding"])
+
+
+def validate_runtime_identity_rotate_request(value):
+    _exact_keys(value, {"contract_version", "binding", "successor"})
+    if value["contract_version"] != RUNTIME_IDENTITY_VERSION:
+        _invalid()
+    binding = validate_binding(value["binding"])
+    successor = value["successor"]
+    if not isinstance(successor, str) or not TOKEN_RE.fullmatch(successor) or not _canonical_opaque(successor, TOKEN_BYTES, TOKEN_BYTES):
+        _invalid()
+    return binding, successor
 
 
 def validate_binding(value):
@@ -993,7 +1186,11 @@ def _validate_persisted_enrollment(row):
                 raise ValueError
             identity_issued_at = parse_timestamp(identity_issued_value)
             identity_expires_at = parse_timestamp(identity_expires_value)
-            if not issued_at <= identity_issued_at < expires_at:
+            # The first identity is issued during enrollment, but later
+            # authenticated rotations legitimately occur after the one-time
+            # enrollment token has expired. The broker-owned identity window
+            # remains independently bounded below.
+            if identity_issued_at < issued_at:
                 raise ValueError
             if not identity_issued_at < identity_expires_at or identity_expires_at - identity_issued_at > MAX_RUNTIME_IDENTITY_LIFETIME:
                 raise ValueError
@@ -1117,6 +1314,22 @@ def _opaque_random(source, size):
     if not isinstance(value, bytes) or len(value) != size:
         raise EnrollmentFailure("identity-issuance-failed", 503)
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _runtime_identity_digest(value):
+    if not isinstance(value, str) or not TOKEN_RE.fullmatch(value) or not _canonical_opaque(value, TOKEN_BYTES, TOKEN_BYTES):
+        raise EnrollmentFailure("unauthorized", 401)
+    return _digest(value)
+
+
+def _runtime_identity_status(binding, issued_at, expires_at):
+    return {
+        "contract_version": RUNTIME_IDENTITY_VERSION,
+        "identity_type": RUNTIME_IDENTITY_TYPE,
+        "binding": binding,
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+    }
 
 
 def _digest(value):
