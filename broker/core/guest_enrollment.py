@@ -383,8 +383,15 @@ class GuestEnrollmentIssuer:
                 raise EnrollmentFailure("invalid-token", 401)
             expires_at = parse_timestamp(row["expires_at"])
             if now >= expires_at:
+                self._release_runtime_identity_history_reservations(connection, [token_digest])
                 connection.execute(
-                    "UPDATE enrollments SET state = 'expired', terminal_at = expires_at WHERE token_digest = ?",
+                    """
+                    UPDATE enrollments
+                       SET state = 'expired', terminal_at = expires_at,
+                           runtime_identity_history_count = 0,
+                           runtime_identity_history_capacity = 0
+                     WHERE token_digest = ? AND state = 'issued'
+                    """,
                     (token_digest,),
                 )
                 connection.commit()
@@ -1098,11 +1105,15 @@ class GuestEnrollmentIssuer:
         }
         reserved = 0
         rows = connection.execute(
-            "SELECT token_digest, runtime_identity_history_complete FROM enrollments"
+            "SELECT token_digest, state, runtime_identity_history_complete FROM enrollments"
         )
         for row in rows:
             history_count = history_counts.get(row["token_digest"], 0)
-            history_capacity = self.max_runtime_identity_history_per_enrollment if row["runtime_identity_history_complete"] == 1 else 0
+            history_capacity = (
+                self.max_runtime_identity_history_per_enrollment
+                if row["runtime_identity_history_complete"] == 1 and row["state"] in ("issued", "consumed")
+                else 0
+            )
             if history_count > history_capacity:
                 raise sqlite3.DatabaseError("guest enrollment runtime identity history exceeds its lifecycle reservation")
             reserved += history_capacity
@@ -1128,6 +1139,33 @@ class GuestEnrollmentIssuer:
 
     def _configure_runtime_identity_history_capacity(self, connection):
         capacity, reserved = self._runtime_identity_history_capacity(connection, require_configured=False)
+        expired = connection.execute(
+            """
+            SELECT COALESCE(SUM(runtime_identity_history_capacity), 0) AS released,
+                   COALESCE(SUM(runtime_identity_history_count), 0) AS used
+              FROM enrollments
+             WHERE state = 'expired'
+            """
+        ).fetchone()
+        if expired["used"] != 0 or expired["released"] > reserved:
+            raise sqlite3.DatabaseError("guest enrollment expired lifecycle has runtime identity history reservation")
+        if expired["released"]:
+            # Normalize databases written by the initial schema-v5 review
+            # implementation, which retained a never-consumed lifecycle's
+            # unused reservation after its token expired.
+            reserved -= expired["released"]
+            connection.execute(
+                """
+                UPDATE enrollments
+                   SET runtime_identity_history_count = 0,
+                       runtime_identity_history_capacity = 0
+                 WHERE state = 'expired'
+                """
+            )
+            connection.execute(
+                "UPDATE enrollment_meta SET value = ? WHERE key = 'runtime_identity_history_reserved'",
+                (str(reserved),),
+            )
         if reserved > self.max_runtime_identity_history_entries:
             raise sqlite3.DatabaseError("guest enrollment runtime identity history reservations exceed configured capacity")
         if capacity != self.max_runtime_identity_history_entries:
@@ -1330,10 +1368,25 @@ class GuestEnrollmentIssuer:
 
     def _expire_issued(self, connection, now):
         now_value = format_timestamp(now)
+        expiring = connection.execute(
+            """
+            SELECT * FROM enrollments
+             WHERE state = 'issued' AND expires_at <= ?
+            """,
+            (now_value,),
+        ).fetchall()
+        for row in expiring:
+            _validate_persisted_enrollment(row)
+        self._release_runtime_identity_history_reservations(
+            connection,
+            [row["token_digest"] for row in expiring],
+        )
         connection.execute(
             """
             UPDATE enrollments
-               SET state = 'expired', terminal_at = expires_at
+               SET state = 'expired', terminal_at = expires_at,
+                   runtime_identity_history_count = 0,
+                   runtime_identity_history_capacity = 0
              WHERE state = 'issued' AND expires_at <= ?
             """,
             (now_value,),
@@ -1697,11 +1750,12 @@ def _validate_persisted_enrollment(row):
             or history_count > history_capacity
             or history_capacity > MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT
             or (history_complete == 0 and (history_count != 0 or history_capacity != 0))
-            or (history_complete == 1 and history_capacity == 0)
         ):
             raise ValueError
 
         if state == "consumed":
+            if history_complete == 1 and history_capacity == 0:
+                raise ValueError
             if not isinstance(identity_digest, str) or not DIGEST_RE.fullmatch(identity_digest):
                 raise ValueError
             identity_issued_at = parse_timestamp(identity_issued_value)
@@ -1724,14 +1778,14 @@ def _validate_persisted_enrollment(row):
         if any(value is not None for value in (identity_digest, identity_issued_value, identity_expires_value)) or identity_active != 0:
             raise ValueError
         if state == "issued":
-            if terminal_at is not None:
+            if terminal_at is not None or history_complete != 1 or history_count != 0 or history_capacity == 0:
                 raise ValueError
         elif state == "expired":
-            if terminal_at != row["expires_at"]:
+            if terminal_at != row["expires_at"] or history_count != 0 or history_capacity != 0:
                 raise ValueError
         elif state == "revoked":
             revoked_at = parse_timestamp(terminal_at)
-            if revoked_at < issued_at:
+            if revoked_at < issued_at or history_count != 0 or history_capacity != 0:
                 raise ValueError
         else:
             raise ValueError

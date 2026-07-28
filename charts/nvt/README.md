@@ -340,7 +340,9 @@ the default `2000000` admits 100 complete lifecycles and cannot be consumed
 first-come by rotations from another lifecycle. Values from 20,000 through
 10,000,000 are accepted; size the broker PVC for the selected maximum. New
 enrollment fails before an envelope is returned if a complete reservation is
-unavailable. The recommended 30-minute rotation interval provides a one-year
+unavailable. Expiry before exchange atomically releases the unused reservation;
+an issued runtime identity retains its allowance until exact revocation. The
+recommended 30-minute rotation interval provides a one-year
 planning horizon only when clients follow it; the broker does not enforce that
 interval. Replace/re-enroll guests before their reservation is exhausted.
 

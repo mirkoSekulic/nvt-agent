@@ -165,11 +165,14 @@ bounded from 20,000 through 10,000,000). Issue atomically reserves one complete
 20,000-entry allowance or fails before returning an enrollment envelope.
 Rotation records the retired digest and increments the reserved lifecycle's
 used count atomically, rejecting any successor digest already current or
-historical. Exact-binding and execution cleanup release the reservation and
-delete all matching history. At the recommended 30-minute planning interval
-the allowance covers more than 365 days, but the interval is a client `SHOULD`,
-not broker enforcement. The orchestrator must replace/re-enroll the guest
-binding before exhaustion rather than evicting replay history.
+historical. Expiry before the one-time exchange releases the unused reservation
+atomically but retains the expired record for replay and binding enforcement.
+After identity issuance, exact-binding and execution cleanup release the
+reservation and delete all matching history. At the recommended 30-minute
+planning interval the allowance covers more than 365 days, but the interval is
+a client `SHOULD`, not broker enforcement. The orchestrator must
+replace/re-enroll the guest binding before exhaustion rather than evicting
+replay history.
 
 ### POST /v1/http/request
 

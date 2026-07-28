@@ -781,6 +781,11 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             max_runtime_identity_history_per_enrollment=2,
             max_runtime_identity_history_entries=2,
         )
+        expired = issuer.issue(
+            issue_request(uid="expired-uid", execution="expired-execution", guest="expired-guest", ttl=1)
+        )
+        self.clock.value += timedelta(seconds=2)
+        issuer.maintain()
         envelope = issuer.issue(issue_request())
         identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
         successor = opaque_canary(89)
@@ -806,9 +811,12 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             max_runtime_identity_history_per_enrollment=2,
             max_runtime_identity_history_entries=2,
         )
-        record = migrated.snapshot()["records"][0]
-        self.assertEqual(record["runtime_identity_history_count"], 1)
-        self.assertEqual(record["runtime_identity_history_capacity"], 2)
+        records = {record["agent_run_uid"]: record for record in migrated.snapshot()["records"]}
+        self.assertEqual(records[expired["binding"]["agent_run_uid"]]["state"], "expired")
+        self.assertEqual(records[expired["binding"]["agent_run_uid"]]["runtime_identity_history_count"], 0)
+        self.assertEqual(records[expired["binding"]["agent_run_uid"]]["runtime_identity_history_capacity"], 0)
+        self.assertEqual(records[envelope["binding"]["agent_run_uid"]]["runtime_identity_history_count"], 1)
+        self.assertEqual(records[envelope["binding"]["agent_run_uid"]]["runtime_identity_history_capacity"], 2)
         self.assertTrue(runtime_identity_is_active(migrated, successor, envelope["binding"]))
         self.assertEqual(
             query_database(
@@ -820,6 +828,49 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
                 ("runtime_identity_history_reserved", "2"),
             ],
         )
+
+    def test_early_v5_expired_reservation_is_normalized_on_restart(self):
+        issuer = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        expired = issuer.issue(
+            issue_request(uid="expired-uid", execution="expired-execution", guest="expired-guest", ttl=1)
+        )
+        issuer.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            # The first schema-v5 review implementation transitioned the row
+            # but retained this never-consumed lifecycle's complete allowance.
+            token_digest = connection.execute("SELECT token_digest FROM enrollments").fetchone()[0]
+            connection.execute(
+                "UPDATE enrollments SET state = 'expired', terminal_at = expires_at WHERE token_digest = ?",
+                (token_digest,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        restarted = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        record = restarted.snapshot()["records"][0]
+        self.assertEqual(record["state"], "expired")
+        self.assertEqual(record["terminal_at"], expired["expires_at"])
+        self.assertEqual(record["runtime_identity_history_count"], 0)
+        self.assertEqual(record["runtime_identity_history_capacity"], 0)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("0",)],
+        )
+        replacement = restarted.issue(
+            issue_request(uid="replacement-uid", execution="replacement-execution", guest="replacement-guest")
+        )
+        self.assertTrue(replacement["token"])
 
     def test_runtime_identity_admission_is_per_identity_and_unknown_safe(self):
         issuer = self.issuer(runtime_identity_rate=0.001, runtime_identity_burst=2, runtime_identity_concurrency=2)
@@ -1199,6 +1250,79 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(sum(len(value) for value in issuer.snapshot().values()), 1)
         replacement = issuer.issue(issue_request(guest="after-gc"))
         self.assertTrue(replacement["token"])
+
+    def test_unexchanged_expiry_releases_reserved_rotation_capacity(self):
+        issuer = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        maintained = issuer.issue(
+            issue_request(uid="maintained-uid", execution="maintained-execution", guest="maintained-guest", ttl=1)
+        )
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("2",)],
+        )
+
+        self.clock.value += timedelta(seconds=2)
+        issuer.maintain()
+        records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
+        self.assertEqual(records["maintained-uid"]["state"], "expired")
+        self.assertEqual(records["maintained-uid"]["terminal_at"], maintained["expires_at"])
+        self.assertEqual(records["maintained-uid"]["runtime_identity_history_count"], 0)
+        self.assertEqual(records["maintained-uid"]["runtime_identity_history_capacity"], 0)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("0",)],
+        )
+
+        replacement = issuer.issue(
+            issue_request(uid="replacement-uid", execution="replacement-execution", guest="replacement-guest")
+        )
+        self.assertTrue(replacement["token"])
+        issuer.revoke_binding(revoke_binding_request(replacement["binding"]))
+
+        issue_time = issuer.issue(
+            issue_request(uid="issue-time-uid", execution="issue-time-execution", guest="issue-time-guest", ttl=1)
+        )
+        self.clock.value += timedelta(seconds=2)
+        after_issue_time_expiry = issuer.issue(
+            issue_request(uid="after-issue-uid", execution="after-issue-execution", guest="after-issue-guest")
+        )
+        records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
+        self.assertEqual(records["issue-time-uid"]["state"], "expired")
+        self.assertEqual(records["issue-time-uid"]["terminal_at"], issue_time["expires_at"])
+        self.assertEqual(records["issue-time-uid"]["runtime_identity_history_capacity"], 0)
+        self.assertTrue(after_issue_time_expiry["token"])
+        issuer.revoke_binding(revoke_binding_request(after_issue_time_expiry["binding"]))
+
+        late = issuer.issue(
+            issue_request(uid="late-uid", execution="late-execution", guest="late-guest", ttl=1)
+        )
+        self.clock.value += timedelta(seconds=2)
+        self.assertFailure("expired", lambda: issuer.exchange(exchange_request(late)))
+        records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
+        self.assertEqual(records["late-uid"]["state"], "expired")
+        self.assertEqual(records["late-uid"]["terminal_at"], late["expires_at"])
+        self.assertEqual(records["late-uid"]["runtime_identity_history_count"], 0)
+        self.assertEqual(records["late-uid"]["runtime_identity_history_capacity"], 0)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("0",)],
+        )
+        unrelated = issuer.issue(
+            issue_request(uid="unrelated-uid", execution="unrelated-execution", guest="unrelated-guest")
+        )
+        self.assertTrue(unrelated["token"])
 
     def test_late_expiry_uses_original_deadline_and_completed_scope_gc(self):
         issuer = self.issuer()

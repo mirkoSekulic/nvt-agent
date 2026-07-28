@@ -82,11 +82,15 @@ successor. A successful response never echoes the successor.
 History is bounded to 20,000 predecessor digests per enrollment. The issuer
 reserves that complete allowance atomically when it admits the enrollment; if
 the configured aggregate capacity cannot fund another complete allowance,
-issue fails with `capacity-exceeded` before returning an envelope. Reservations
-are released only by exact-binding or execution-scope revocation, which also
-deletes the corresponding current identity and history. An admitted lifecycle
-therefore cannot lose its promised renewal budget to another lifecycle, and
-live history is never evicted to admit a rotation. The production default
+issue fails with `capacity-exceeded` before returning an envelope. If the
+one-time enrollment expires before exchange, the issuer atomically releases
+the complete unused reservation while retaining the expired enrollment record
+and its replay semantics. After a runtime identity has been issued, only
+exact-binding or execution-scope revocation releases the reservation; that
+operation also deletes the corresponding current identity and history. An
+admitted live lifecycle therefore cannot lose its promised renewal budget to
+another lifecycle, and live history is never evicted to admit a rotation. The
+production default
 aggregate capacity is 2,000,000 predecessor records (100 complete lifecycle
 reservations); administrators may configure a bounded value from 20,000 to
 10,000,000 and must size durable storage accordingly.
@@ -101,9 +105,10 @@ Schema migration cannot reconstruct historical digests: an already-consumed
 pre-history record remains usable for status but rotation fails closed until
 the orchestrator revokes and re-enrolls that binding. Early schema-v4 review
 stores retain and validate every history row, reserve a complete allowance for
-each history-capable lifecycle, and discard only the obsolete first-come global
-counter. Migration fails closed if the configured aggregate cannot fund those
-reservations; no predecessor record is evicted.
+each history-capable issued or consumed lifecycle, assign no allowance to an
+already-expired never-consumed record, and discard only the obsolete first-come
+global counter. Migration fails closed if the configured aggregate cannot fund
+the live reservations; no predecessor record is evicted.
 
 The production identity window is one hour. A compliant guest implementation
 SHOULD rotate no more often than every 30 minutes and MUST finish before expiry. The

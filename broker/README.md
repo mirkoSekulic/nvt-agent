@@ -71,7 +71,9 @@ guest's runtime-identity capacity.
 Each enrollment atomically reserves its complete 20,000-rotation allowance at
 issue time. The default aggregate capacity is 2,000,000 entries (100 admitted
 lifecycles) and may be configured from 20,000 through 10,000,000; a new issue
-fails before returning an envelope when no complete allowance remains. Exact
+fails before returning an envelope when no complete allowance remains. An
+unexchanged token's expiry atomically releases its unused allowance while the
+expired enrollment record remains replay-safe. After identity issuance, exact
 revocation releases the reservation. With the one-hour identity window, guests
 should rotate no more often than every 30 minutes and deployments must schedule
 controlled guest replacement/re-enrollment before the allowance is exhausted.
