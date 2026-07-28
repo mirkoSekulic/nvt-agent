@@ -309,6 +309,7 @@ broker:
   guestEnrollment:
     enabled: true
     exchangeURL: https://nvt-broker.nvt.svc:7347/v1/guest-enrollment/exchange
+    runtimeIdentityHistoryCapacity: 2000000
     orchestratorAuth:
       existingSecret: nvt-guest-enrollment-orchestrator
       tokenKey: token
@@ -328,12 +329,23 @@ metadata in `/state/guest-enrollment.sqlite3`. It uses SQLite transactions and
 therefore shares the broker's existing one-replica, `Recreate`, single-writer
 contract. Do not scale the broker or mount the same database through multiple
 broker Pods. Enrolled guests can authenticate and atomically rotate the current
-opaque identity through the same TLS broker; no additional Helm value or
-plaintext credential storage is introduced. The canonical URL must resolve to
+opaque identity through the same TLS broker; no plaintext credential storage
+is introduced. The canonical URL must resolve to
 this issuer over authenticated HTTPS. Enabling this issuer alone does not route
-AgentRuns to VMs. The operator
-bridge is a separate opt-in and uses explicit broker trust plus the same
-dedicated orchestrator Secret:
+AgentRuns to VMs.
+
+`runtimeIdentityHistoryCapacity` is the practical aggregate predecessor-digest
+storage bound. Each accepted enrollment reserves 20,000 entries atomically, so
+the default `2000000` admits 100 complete lifecycles and cannot be consumed
+first-come by rotations from another lifecycle. Values from 20,000 through
+10,000,000 are accepted; size the broker PVC for the selected maximum. New
+enrollment fails before an envelope is returned if a complete reservation is
+unavailable. The recommended 30-minute rotation interval provides a one-year
+planning horizon only when clients follow it; the broker does not enforce that
+interval. Replace/re-enroll guests before their reservation is exhausted.
+
+The operator bridge is a separate opt-in and uses explicit broker trust plus
+the same dedicated orchestrator Secret:
 
 ```yaml
 executionDrivers:

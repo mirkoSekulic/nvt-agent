@@ -41,7 +41,11 @@ export NVT_BROKER_GUEST_ENROLLMENT_ENABLED=true
 export NVT_BROKER_GUEST_ENROLLMENT_DB=/state/guest-enrollment.sqlite3
 export NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL=https://broker.example/v1/guest-enrollment/exchange
 export NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE=/run/secrets/guest-enrollment-orchestrator
+export NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY=2000000
 ```
+
+The first four variables are required. The history-capacity variable is an
+optional bounded storage policy and defaults to `2000000`.
 
 The token file is a dedicated control-plane authorization boundary for issue
 and revoke operations. Agent and egress bearer identities are never accepted.
@@ -64,12 +68,20 @@ Runtime requests authenticate by indexed digest before body admission and use
 per-enrollment quotas, so unknown or noisy guests cannot consume another
 guest's runtime-identity capacity.
 
-Each enrollment owns a 20,000-rotation history allowance; it is not drawn from
-a shared first-come pool. With the one-hour identity window, guests should
-rotate no more often than every 30 minutes and deployments must schedule
-controlled guest replacement/re-enrollment before the allowance is exhausted
-(at least 365 days at that interval). The broker never evicts predecessor
-history to extend a binding.
+Each enrollment atomically reserves its complete 20,000-rotation allowance at
+issue time. The default aggregate capacity is 2,000,000 entries (100 admitted
+lifecycles) and may be configured from 20,000 through 10,000,000; a new issue
+fails before returning an envelope when no complete allowance remains. Exact
+revocation releases the reservation. With the one-hour identity window, guests
+should rotate no more often than every 30 minutes and deployments must schedule
+controlled guest replacement/re-enrollment before the allowance is exhausted.
+The resulting 365-day planning horizon depends on compliant client behavior;
+the broker does not enforce a minimum rotation interval and never evicts
+predecessor history to extend a binding.
+
+Steady readiness, maintenance, status, and rotation use bounded metadata and
+indexed lookups rather than enumerating predecessor history. Startup and
+health-latch recovery perform the deliberate streaming full integrity sweep.
 
 SQLite is used in single-writer mode. One broker process owns the database;
 deployments must not share it across replicas. The broker readiness endpoint

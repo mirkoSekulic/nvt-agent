@@ -18,9 +18,10 @@ const (
 	MaxRuntimeIdentityRotateRequestBytes    = 16 << 10
 	MaxRuntimeIdentityResponseBytes         = 16 << 10
 	MaxRuntimeIdentityHistoryPerEnrollment  = 20_000
-	MaxRuntimeIdentityHistoryAggregate      = MaxDurableEntries * MaxRuntimeIdentityHistoryPerEnrollment
+	DefaultRuntimeIdentityHistoryCapacity   = 2_000_000
+	MaxRuntimeIdentityHistoryCapacity       = 10_000_000
 	RuntimeIdentityCapacityPlanningInterval = 30 * time.Minute
-	MinRuntimeIdentityLifecycleHorizon      = 365 * 24 * time.Hour
+	RuntimeIdentityPlanningHorizon          = 365 * 24 * time.Hour
 )
 
 // RuntimeIdentityStatusRequest authenticates with the opaque identity in the

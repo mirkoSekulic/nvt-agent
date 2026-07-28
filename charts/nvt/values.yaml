@@ -95,6 +95,10 @@ broker:
   guestEnrollment:
     enabled: false
     exchangeURL: ""
+    # Aggregate predecessor-digest slots reserved in fixed 20,000-entry
+    # lifecycle units. The default admits 100 concurrent enrollment
+    # lifecycles; size the persistent volume for the selected bound.
+    runtimeIdentityHistoryCapacity: "2000000"
     orchestratorAuth:
       existingSecret: ""
       tokenKey: token

@@ -19,15 +19,16 @@ from broker.core.guest_enrollment import (
     EnrollmentFailure,
     EnrollmentFaults,
     GuestEnrollmentIssuer,
-    MAX_DURABLE_ENTRIES,
-    MAX_RUNTIME_IDENTITY_HISTORY_AGGREGATE,
+    DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY,
     MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
-    MIN_RUNTIME_IDENTITY_LIFECYCLE_HORIZON,
+    MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY,
     OrchestratorAuthenticator,
     RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL,
+    RUNTIME_IDENTITY_PLANNING_HORIZON,
     RUNTIME_IDENTITY_VERSION,
     TOMBSTONE_RETENTION,
     VERSION,
+    _validate_persisted_runtime_identity_history,
     format_timestamp,
     load_guest_enrollment_from_environment,
 )
@@ -543,6 +544,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             lambda: before.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor)),
         )
         self.assertFalse(before.store_healthy)
+        before.maintain()
         self.assertTrue(before.ready())
         self.assertTrue(runtime_identity_is_active(before, identity, envelope["binding"]))
         self.assertFalse(runtime_identity_is_active(before, successor, envelope["binding"]))
@@ -578,11 +580,26 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(len(recovered.snapshot()["runtime_identity_history"]), 1)
 
     def test_runtime_identity_history_is_bounded_restart_safe_and_cleaned(self):
-        issuer = self.issuer(max_entries=3, max_runtime_identity_history_per_enrollment=2)
+        issuer = self.issuer(
+            max_entries=3,
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=4,
+        )
         envelope = issuer.issue(issue_request())
         initial = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
         unrelated = issuer.issue(issue_request(uid="unrelated-uid", execution="unrelated-execution", guest="unrelated-guest"))
         unrelated_identity = issuer.exchange(exchange_request(unrelated))["runtime_identity"]["opaque"]
+        self.assertFailure(
+            "capacity-exceeded",
+            lambda: issuer.issue(issue_request(uid="unreserved", execution="unreserved", guest="unreserved")),
+        )
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("4",)],
+        )
         first = opaque_canary(90)
         second = opaque_canary(91)
         third = opaque_canary(92)
@@ -593,20 +610,22 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             lambda: issuer.rotate_runtime_identity(second, runtime_rotate_request(envelope["binding"], third)),
         )
         issuer.close()
-        update_database(
-            self.database,
-            "INSERT INTO enrollment_meta (key, value) VALUES (?, ?)",
-            ("runtime_identity_history_count", "2"),
-        )
 
-        restarted = self.issuer(max_entries=3, max_runtime_identity_history_per_enrollment=2)
-        self.assertEqual(restarted.max_runtime_identity_history_entries, 6)
-        self.assertEqual(
-            query_database(
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(
                 self.database,
-                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_count'",
-            ),
-            [],
+                EXCHANGE_URL,
+                now=self.clock,
+                maintenance_interval=None,
+                max_entries=3,
+                max_runtime_identity_history_per_enrollment=2,
+                max_runtime_identity_history_entries=3,
+            )
+
+        restarted = self.issuer(
+            max_entries=3,
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=4,
         )
         self.assertTrue(runtime_identity_is_active(restarted, second, envelope["binding"]))
         self.assertFailure(
@@ -623,6 +642,13 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 3)
         restarted.revoke_binding(revoke_binding_request(envelope["binding"]))
         self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 1)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("2",)],
+        )
         replacement = restarted.issue(
             issue_request(uid="replacement-uid", execution="replacement-execution", guest="replacement-guest")
         )
@@ -635,17 +661,12 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
     def test_runtime_identity_history_capacity_supports_documented_lifecycle(self):
         self.assertGreaterEqual(
             MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT * RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL,
-            MIN_RUNTIME_IDENTITY_LIFECYCLE_HORIZON,
+            RUNTIME_IDENTITY_PLANNING_HORIZON,
         )
-        self.assertEqual(
-            MAX_RUNTIME_IDENTITY_HISTORY_AGGREGATE,
-            MAX_DURABLE_ENTRIES * MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
-        )
+        self.assertEqual(DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY // MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT, 100)
+        self.assertGreaterEqual(MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY, DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY)
         issuer = self.issuer()
-        self.assertEqual(
-            issuer.max_runtime_identity_history_entries,
-            MAX_DURABLE_ENTRIES * MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
-        )
+        self.assertEqual(issuer.max_runtime_identity_history_entries, DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY)
 
     def test_runtime_detected_corruption_latches_until_complete_validation(self):
         issuer = self.issuer()
@@ -658,9 +679,11 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         )
         healthy = issuer.issue(issue_request(uid="healthy-uid", execution="healthy-execution", guest="healthy-guest"))
         healthy_identity = issuer.exchange(exchange_request(healthy))["runtime_identity"]["opaque"]
-        original_retired_at = issuer.snapshot()["runtime_identity_history"][0]["retired_at"]
-
-        update_database(self.database, "UPDATE runtime_identity_history SET retired_at = ?", ("invalid",))
+        update_database(
+            self.database,
+            "UPDATE enrollments SET runtime_identity_history_complete = 0 WHERE agent_run_uid = ?",
+            (damaged["binding"]["agent_run_uid"],),
+        )
         self.assertFailure(
             "issuer-storage-failed",
             lambda: issuer.runtime_identity_status(
@@ -677,13 +700,13 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             ),
         )
 
-        # Repair alone cannot let an unrelated record-local request declare
-        # the store healthy. Only a complete readiness/maintenance scan may do
-        # so.
+        # Repair alone cannot let a fast readiness probe or unrelated
+        # record-local request declare the store healthy. Recovery is a
+        # deliberate complete maintenance scan.
         update_database(
             self.database,
-            "UPDATE runtime_identity_history SET retired_at = ?",
-            (original_retired_at,),
+            "UPDATE enrollments SET runtime_identity_history_complete = 1 WHERE agent_run_uid = ?",
+            (damaged["binding"]["agent_run_uid"],),
         )
         self.assertFailure(
             "issuer-storage-failed",
@@ -692,6 +715,13 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
                 runtime_status_request(healthy["binding"]),
             ),
         )
+        self.assertFalse(issuer.ready())
+        with patch(
+            "broker.core.guest_enrollment._validate_persisted_runtime_identity_history",
+            wraps=_validate_persisted_runtime_identity_history,
+        ) as history_validator:
+            issuer.maintain()
+            self.assertGreaterEqual(history_validator.call_count, 1)
         self.assertTrue(issuer.ready())
         self.assertEqual(
             issuer.runtime_identity_status(healthy_identity, runtime_status_request(healthy["binding"]))["binding"],
@@ -746,6 +776,51 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         )
         self.assertEqual(migrated.snapshot()["records"][0]["runtime_identity_history_complete"], 0)
 
+    def test_v4_history_migration_reserves_existing_lifecycle_without_eviction(self):
+        issuer = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        envelope = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        successor = opaque_canary(89)
+        issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor))
+        issuer.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE enrollments SET runtime_identity_history_count = 0, runtime_identity_history_capacity = 0"
+            )
+            connection.execute(
+                "DELETE FROM enrollment_meta WHERE key IN ('runtime_identity_history_capacity', 'runtime_identity_history_reserved')"
+            )
+            connection.execute(
+                "INSERT INTO enrollment_meta (key, value) VALUES ('runtime_identity_history_count', '1')"
+            )
+            connection.execute("UPDATE enrollment_meta SET value = '4' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        record = migrated.snapshot()["records"][0]
+        self.assertEqual(record["runtime_identity_history_count"], 1)
+        self.assertEqual(record["runtime_identity_history_capacity"], 2)
+        self.assertTrue(runtime_identity_is_active(migrated, successor, envelope["binding"]))
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT key, value FROM enrollment_meta WHERE key LIKE 'runtime_identity_history%' ORDER BY key",
+            ),
+            [
+                ("runtime_identity_history_capacity", "2"),
+                ("runtime_identity_history_reserved", "2"),
+            ],
+        )
+
     def test_runtime_identity_admission_is_per_identity_and_unknown_safe(self):
         issuer = self.issuer(runtime_identity_rate=0.001, runtime_identity_burst=2, runtime_identity_concurrency=2)
         first = issuer.issue(issue_request())
@@ -771,7 +846,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         )
 
     def test_runtime_identity_requests_are_record_local_and_do_not_delay_revocation(self):
-        issuer = self.issuer()
+        issuer = self.issuer(max_runtime_identity_history_entries=MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY)
         target = issuer.issue(issue_request())
         identity = issuer.exchange(exchange_request(target))["runtime_identity"]["opaque"]
         for index in range(200):
@@ -782,6 +857,34 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
                     guest=f"unrelated-guest-{index}",
                 )
             )
+
+        connection = sqlite3.connect(self.database)
+        try:
+            token_digest = connection.execute(
+                "SELECT token_digest FROM enrollments WHERE agent_run_uid = ?",
+                (target["binding"]["agent_run_uid"],),
+            ).fetchone()[0]
+            connection.executemany(
+                "INSERT INTO runtime_identity_history (runtime_identity_digest, token_digest, retired_at) VALUES (?, ?, ?)",
+                ((f"sha256:{index:064x}", token_digest, format_timestamp(START)) for index in range(1, 1001)),
+            )
+            connection.execute(
+                "UPDATE enrollments SET runtime_identity_history_count = 1000 WHERE token_digest = ?",
+                (token_digest,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        statements = []
+        original_connect = issuer._connect
+
+        def traced_connect():
+            connection = original_connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        issuer._connect = traced_connect
 
         original_validate_store = issuer._validate_store
         full_scans = 0
@@ -797,14 +900,33 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
 
         issuer._validate_store = tracked_validate_store
         rotated_identity = opaque_canary(97)
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="runtime-load-rotation") as pool:
-            pool.submit(
-                issuer.rotate_runtime_identity,
-                identity,
-                runtime_rotate_request(target["binding"], rotated_identity),
-            ).result(timeout=2.0)
+        with patch(
+            "broker.core.guest_enrollment._validate_persisted_runtime_identity_history",
+            wraps=_validate_persisted_runtime_identity_history,
+        ) as history_validator:
+            self.assertEqual(
+                issuer.runtime_identity_status(identity, runtime_status_request(target["binding"]))["binding"],
+                target["binding"],
+            )
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="runtime-load-rotation") as pool:
+                pool.submit(
+                    issuer.rotate_runtime_identity,
+                    identity,
+                    runtime_rotate_request(target["binding"], rotated_identity),
+                ).result(timeout=2.0)
+            self.assertTrue(issuer.ready())
+            issuer.maintain()
+            self.assertEqual(history_validator.call_count, 0)
         identity = rotated_identity
         self.assertEqual(full_scans, 0)
+        self.assertFalse(
+            any(
+                "COUNT(*) FROM RUNTIME_IDENTITY_HISTORY" in statement.upper()
+                or "ORDER BY HISTORY.RETIRED_AT" in statement.upper()
+                for statement in statements
+            ),
+            statements,
+        )
 
         entered = threading.Barrier(5)
         release = threading.Event()
@@ -857,6 +979,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         second = issuer.issue(issue_request(uid="corrupt-uid", execution="corrupt-execution", guest="corrupt-guest"))
         second_identity = issuer.exchange(exchange_request(second))["runtime_identity"]["opaque"]
         update_database(self.database, "UPDATE enrollments SET expires_at = ? WHERE agent_run_uid = ?", ("invalid", "uid-run"))
+        self.assertFailure("issuer-storage-failed", issuer.validate_integrity)
         self.assertFalse(issuer.ready())
         self.assertFailure(
             "issuer-storage-failed",
@@ -936,6 +1059,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             "UPDATE enrollments SET expires_at = ? WHERE guest_instance_id = ?",
             ("not-a-timestamp", bad["binding"]["guest_instance_id"]),
         )
+        self.assertFailure("issuer-storage-failed", issuer.validate_integrity)
         self.assertFalse(issuer.ready())
         self.assertFailure("issuer-storage-failed", lambda: issuer.exchange(exchange_request(good)))
         rows = query_database(
@@ -1238,6 +1362,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.addCleanup(live.close)
         live.issue(issue_request(uid="live-corrupt-uid", execution="live-corrupt-execution"))
         update_database(live_corruption_database, "UPDATE enrollments SET token_digest = ?", ("sha256:not-a-digest",))
+        self.assertFailure("issuer-storage-failed", live.validate_integrity)
         self.assertFalse(live.ready())
         self.assertFailure("issuer-storage-failed", live.maintain)
 
@@ -1337,7 +1462,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(delete_after - created_at, TOMBSTONE_RETENTION)
         self.assertEqual(
             query_database(migration_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
-            [("4",)],
+            [("5",)],
         )
 
         schema_v2_database = str(Path(self.temporary.name) / "schema-v2.sqlite3")
@@ -1356,7 +1481,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertIsNone(migrated_v2.snapshot()["execution_tombstones"][0]["cleanup_completed_at"])
         self.assertEqual(
             query_database(schema_v2_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
-            [("4",)],
+            [("5",)],
         )
 
     def test_orchestrator_auth_stores_only_digest(self):
@@ -1392,6 +1517,25 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         with patch.dict("os.environ", {"NVT_BROKER_GUEST_ENROLLMENT_ENABLED": "true"}, clear=True):
             with self.assertRaisesRegex(EnrollmentConfigError, "requires database"):
                 load_guest_enrollment_from_environment()
+        valid_token_file = Path(self.temporary.name) / "valid-orchestrator-token"
+        valid_token_file.write_text("orchestrator-token-0123456789abcdef", encoding="utf-8")
+        environment = {
+            "NVT_BROKER_GUEST_ENROLLMENT_ENABLED": "true",
+            "NVT_BROKER_GUEST_ENROLLMENT_DB": str(Path(self.temporary.name) / "configured.sqlite3"),
+            "NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL": EXCHANGE_URL,
+            "NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE": str(valid_token_file),
+            "NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY": "20000",
+        }
+        with patch.dict("os.environ", environment, clear=True):
+            configured, _ = load_guest_enrollment_from_environment()
+            self.addCleanup(configured.close)
+            self.assertEqual(configured.max_runtime_identity_history_entries, 20000)
+        for invalid_capacity in ("0", "19999", "10000001", "not-a-count"):
+            with self.subTest(history_capacity=invalid_capacity):
+                environment["NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY"] = invalid_capacity
+                with patch.dict("os.environ", environment, clear=True):
+                    with self.assertRaisesRegex(EnrollmentConfigError, "history capacity"):
+                        load_guest_enrollment_from_environment()
 
     def assertFailure(self, reason, operation):
         with self.assertRaises(EnrollmentFailure) as caught:

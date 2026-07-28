@@ -134,11 +134,13 @@ bounds. They do not consume the control-plane revocation body slots. An indexed
 digest lookup authenticates an active identity before body admission, so an
 unknown identity consumes neither a body slot nor another identity's quota.
 A noisy valid identity can exhaust only its own quota. Normal status and
-rotation validate the selected record and at most 20,000 digest-only predecessor
-entries; complete-store validation remains a startup, readiness, maintenance,
-and trusted control-plane operation. A known integrity failure latches the
-issuer unhealthy and all runtime operations fail closed until readiness or
-maintenance successfully validates the complete store.
+rotation validate the selected record, transactionally maintained counters,
+and indexed digest membership; they never enumerate predecessor history.
+Complete-store validation is a streaming startup/recovery operation. Steady
+readiness and maintenance validate bounded metadata rather than deserializing
+fleet history. A known integrity failure latches the issuer unhealthy and all
+runtime operations fail closed until maintenance successfully validates the
+complete store; readiness alone never clears the latch.
 Runtime identity timestamps use the later of the issuer's current wall clock
 and the enrollment's durable `issued_at`, so a backward clock adjustment cannot
 commit a record that the same issuer subsequently rejects as malformed.
@@ -158,14 +160,16 @@ Tombstones and terminal records are reclaimed only after the authenticated
 cleanup-complete operation durably marks the exact revoked scope and the
 retention deadline has passed. Until then the 10,000-entry hard bound fails
 closed rather than evicting live or revocation state. Runtime identity history
-has an independent 20,000-entry allowance for every durable enrollment; its
-aggregate physical bound is therefore 200,000,000 entries, but it is not a
-first-come shared quota. Rotation records the retired digest atomically and
-rejects any successor digest already current or historical. Exact-binding and
-execution cleanup delete all matching history. At the documented minimum
-30-minute rotation interval the allowance covers more than 365 days; the
-orchestrator must replace/re-enroll the guest binding before exhaustion rather
-than evicting replay history.
+uses an administrator-configured aggregate capacity (2,000,000 by default,
+bounded from 20,000 through 10,000,000). Issue atomically reserves one complete
+20,000-entry allowance or fails before returning an enrollment envelope.
+Rotation records the retired digest and increments the reserved lifecycle's
+used count atomically, rejecting any successor digest already current or
+historical. Exact-binding and execution cleanup release the reservation and
+delete all matching history. At the recommended 30-minute planning interval
+the allowance covers more than 365 days, but the interval is a client `SHOULD`,
+not broker enforcement. The orchestrator must replace/re-enroll the guest
+binding before exhaustion rather than evicting replay history.
 
 ### POST /v1/http/request
 

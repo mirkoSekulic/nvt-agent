@@ -87,10 +87,13 @@ func TestGenerateRuntimeIdentityUsesCanonicalRandomShape(t *testing.T) {
 }
 
 func TestRuntimeIdentityHistoryCapacityIsLifecyclePartitionedAndLongLived(t *testing.T) {
-	if MaxRuntimeIdentityHistoryAggregate != MaxDurableEntries*MaxRuntimeIdentityHistoryPerEnrollment {
-		t.Fatalf("aggregate history bound = %d", MaxRuntimeIdentityHistoryAggregate)
+	if DefaultRuntimeIdentityHistoryCapacity/MaxRuntimeIdentityHistoryPerEnrollment != 100 {
+		t.Fatalf("default capacity admits %d complete lifecycle reservations", DefaultRuntimeIdentityHistoryCapacity/MaxRuntimeIdentityHistoryPerEnrollment)
 	}
-	if time.Duration(MaxRuntimeIdentityHistoryPerEnrollment)*RuntimeIdentityCapacityPlanningInterval < MinRuntimeIdentityLifecycleHorizon {
+	if MaxRuntimeIdentityHistoryCapacity < DefaultRuntimeIdentityHistoryCapacity {
+		t.Fatalf("maximum history capacity = %d", MaxRuntimeIdentityHistoryCapacity)
+	}
+	if time.Duration(MaxRuntimeIdentityHistoryPerEnrollment)*RuntimeIdentityCapacityPlanningInterval < RuntimeIdentityPlanningHorizon {
 		t.Fatalf("history allowance does not cover the documented lifecycle horizon")
 	}
 }

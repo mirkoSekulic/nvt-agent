@@ -79,23 +79,37 @@ Exactly one concurrent rotation from a predecessor can commit. Once committed,
 the predecessor cannot authenticate and it can never be selected as a later
 successor. A successful response never echoes the successor.
 
-History is bounded to 20,000 predecessor digests per enrollment. This is a
-reserved per-lifecycle allowance, not a first-come issuer pool: the aggregate
-physical bound is the 10,000 durable-enrollment bound multiplied by 20,000,
-and one lifecycle reaching its allowance cannot deny another lifecycle's next
-rotation. Saturation fails only that lifecycle with `capacity-exceeded`; live
-history is never evicted to admit a rotation. Exact-binding and execution-scope
-revocation delete the corresponding current identity and all its history.
+History is bounded to 20,000 predecessor digests per enrollment. The issuer
+reserves that complete allowance atomically when it admits the enrollment; if
+the configured aggregate capacity cannot fund another complete allowance,
+issue fails with `capacity-exceeded` before returning an envelope. Reservations
+are released only by exact-binding or execution-scope revocation, which also
+deletes the corresponding current identity and history. An admitted lifecycle
+therefore cannot lose its promised renewal budget to another lifecycle, and
+live history is never evicted to admit a rotation. The production default
+aggregate capacity is 2,000,000 predecessor records (100 complete lifecycle
+reservations); administrators may configure a bounded value from 20,000 to
+10,000,000 and must size durable storage accordingly.
+
+The enrollment row durably stores its reservation and used count. Rotation
+increments that count in the same transaction as predecessor insertion and the
+current-identity compare-and-swap. Indexed digest membership rejects replay;
+normal status and rotation never enumerate predecessor history. Startup and
+explicit recovery stream a complete integrity sweep, while steady readiness
+and maintenance validate bounded metadata and do not deserialize fleet history.
 Schema migration cannot reconstruct historical digests: an already-consumed
 pre-history record remains usable for status but rotation fails closed until
 the orchestrator revokes and re-enrolls that binding. Early schema-v4 review
-stores retain and validate every history row while discarding only the obsolete
-first-come global counter; no predecessor record is evicted during migration.
+stores retain and validate every history row, reserve a complete allowance for
+each history-capable lifecycle, and discard only the obsolete first-come global
+counter. Migration fails closed if the configured aggregate cannot fund those
+reservations; no predecessor record is evicted.
 
-The production identity window is one hour. A guest implementation SHOULD
-rotate no more often than every 30 minutes and MUST finish before expiry. The
-20,000-entry allowance therefore covers at least 365 days even at the most
-aggressive documented interval (about 416 days). The guest must durably count
+The production identity window is one hour. A compliant guest implementation
+SHOULD rotate no more often than every 30 minutes and MUST finish before expiry. The
+20,000-entry allowance covers at least 365 days (about 416 days) only when the
+guest follows that planning interval; the broker does not enforce a minimum
+time between rotations. The guest must durably count
 committed rotations, resolving ambiguous responses before advancing its count.
 The administrator/orchestrator must schedule controlled replacement before the
 allowance is exhausted: provision a new guest instance binding, complete its
@@ -127,7 +141,7 @@ Process memory is not part of correctness. Existing exact-binding and
 execution-scope revocation delete the record containing the current digest and
 its history, regardless of rotation count. Runtime expiry is broker-owned; a
 caller cannot extend it. Wall-clock rollback MUST NOT create a persisted window
-rejected by readiness validation.
+rejected by durable validation.
 
 ## Framing and failures
 
@@ -146,13 +160,15 @@ record includes a bearer, digest, successor, request body, or SQLite diagnostic.
 Authentication is completed by an indexed digest lookup before a runtime body
 is admitted. Body concurrency and rate limits include per-enrollment bounds,
 so unknown or noisy identities cannot consume another identity's quota.
-Complete-store integrity validation occurs at startup, readiness, and
-maintenance. A detected integrity failure on either a complete scan or an
-indexed runtime path latches the issuer unhealthy and all runtime requests fail
-closed until readiness or maintenance completes a successful full validation.
-Normal status and rotation validate only their
-indexed record and bounded lifecycle history; recurring guest work does not
-scan unrelated identities or hold the SQLite writer lock during a global scan.
+Complete-store integrity validation occurs at startup and explicit recovery.
+A detected integrity failure on either a complete scan or an indexed runtime
+path latches the issuer unhealthy and all runtime requests fail closed until
+maintenance completes a successful full recovery validation. Steady readiness
+checks only the latched state and bounded durable metadata; it does not perform
+or trigger recovery. Normal status and rotation validate only their indexed
+record, counters, and digest membership; recurring guest work does not scan
+predecessor history or unrelated identities and does not hold the SQLite writer
+lock during a global scan.
 
 ## Current implementation boundary
 
