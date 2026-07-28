@@ -126,12 +126,15 @@ configuration:
 ```
 
 Producers cannot select or mutate execution-class configuration. Enrollment is
-a separate future short-lived input and must not be embedded here.
+a separate short-lived input and must not be embedded here.
 
 The provider-neutral [guest enrollment contract](guest-enrollment.md) defines
 the separate one-time sensitive envelope, exact execution binding, atomic
 exchange, and revocation semantics without placing any credential in this
-bundle. The next implementation phase is a broker-backed issuer plus a
-dedicated operator-to-driver sensitive handoff, followed by a QEMU reference
-driver. Gateway routing, runtime identity use, broker identity, and mediated
-egress remain separate production gates before VM execution is ready.
+bundle. The broker-backed issuer and dedicated operator-to-driver handoff are
+implemented, and a test-only QEMU reference driver proves bundle installation,
+native readiness, restart recovery, and cleanup in a real TCG guest. That
+driver is not published or supported as a production provider. Gateway
+routing, production runtime-identity/provider use, broker identity, and
+mediated VM networking remain separate future production gates before VM
+execution is ready.

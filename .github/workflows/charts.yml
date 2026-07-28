@@ -8,7 +8,6 @@ on:
       - ".github/scripts/chart-version-exists.sh"
       - ".github/scripts/release-*.sh"
       - "hostbundle/**"
-      - "executiondrivers/qemu/**"
       - "protocol/host-bundle.md"
       - "tests/operator/helm/**"
   push:
