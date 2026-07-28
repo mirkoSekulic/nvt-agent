@@ -50,9 +50,11 @@ type executionDriverClientRegistry interface {
 }
 
 type guestEnrollmentIssuer interface {
+	EnabledFor(string) bool
 	Issue(context.Context, guestenrollment.IssueRequest) (guestenrollment.BootstrapEnvelope, error)
 	RevokeBinding(context.Context, guestenrollment.RevokeBindingRequest) error
 	RevokeExecution(context.Context, guestenrollment.RevokeExecutionRequest) error
+	CompleteExecutionCleanup(context.Context, guestenrollment.CompleteExecutionCleanupRequest) error
 	TTLSeconds() int32
 	HandoffTimeout() time.Duration
 }
@@ -71,6 +73,7 @@ type kubernetesExecutionBackend struct{}
 type externalExecutionBackend struct {
 	registration string
 	client       host.Client
+	kind         nvtv1alpha1.AgentRunExecutionKind
 }
 
 func (kubernetesExecutionBackend) Reconcile(
@@ -110,7 +113,7 @@ func (r *AgentRunReconciler) executionBackendFor(selection effectiveExecutionSel
 	if !exists {
 		return nil, false
 	}
-	return externalExecutionBackend{registration: selection.Driver, client: client}, true
+	return externalExecutionBackend{registration: selection.Driver, client: client, kind: selection.Kind}, true
 }
 
 func (backend externalExecutionBackend) Reconcile(
@@ -132,7 +135,7 @@ func (backend externalExecutionBackend) Reconcile(
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-	if reconciler.GuestEnrollment != nil && controllerutil.AddFinalizer(&agentRun, guestEnrollmentFinalizer) {
+	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && reconciler.GuestEnrollment != nil && reconciler.GuestEnrollment.EnabledFor(backend.registration) && controllerutil.AddFinalizer(&agentRun, guestEnrollmentFinalizer) {
 		if err := reconciler.Update(ctx, &agentRun); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add guest enrollment finalizer: %w", err)
 		}
@@ -170,7 +173,7 @@ func (backend externalExecutionBackend) Reconcile(
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
 	}
-	if controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
+	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
 		enrollmentResult, enrollmentErr := backend.reconcileGuestEnrollment(ctx, reconciler, &agentRun, desired)
 		if enrollmentErr != nil {
 			return ctrl.Result{}, enrollmentErr
@@ -192,7 +195,7 @@ func (backend externalExecutionBackend) Delete(
 	reconciler *AgentRunReconciler,
 	agentRun *nvtv1alpha1.AgentRun,
 ) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) {
+	if !controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) && !controllerutil.ContainsFinalizer(agentRun, guestEnrollmentFinalizer) {
 		if err := reconciler.finalizeAgentRun(ctx, agentRun); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -206,7 +209,7 @@ func (backend externalExecutionBackend) reconcileTerminalLifecycle(
 	reconciler *AgentRunReconciler,
 	agentRun *nvtv1alpha1.AgentRun,
 ) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) {
+	if !controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) && !controllerutil.ContainsFinalizer(agentRun, guestEnrollmentFinalizer) {
 		return reconciler.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
 	if agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseDeadlineExceeded {
@@ -256,6 +259,11 @@ func (backend externalExecutionBackend) reconcileOperationalCleanup(
 	if status.Phase != executiondriver.PhaseDeleted {
 		return reconciler.recordExternalCleanupProgress(ctx, agentRun, status)
 	}
+	if controllerutil.ContainsFinalizer(agentRun, guestEnrollmentFinalizer) {
+		if result, complete, completionErr := reconciler.completeGuestEnrollmentCleanup(ctx, agentRun, backend.registration); completionErr != nil || !complete {
+			return result, completionErr
+		}
+	}
 	if err := reconciler.finalizeExternalAgentRun(ctx, agentRun); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -298,6 +306,33 @@ func (r *AgentRunReconciler) revokeGuestEnrollmentScope(
 	scope := guestenrollment.ExecutionScope{AgentRunUID: string(agentRun.UID), ExecutionID: executionID, DriverRegistration: driverRegistration}
 	if err := r.GuestEnrollment.RevokeExecution(ctx, guestenrollment.RevokeExecutionRequest{ContractVersion: guestenrollment.Version, ExecutionScope: scope}); err != nil {
 		result, recordErr := r.recordExternalCleanupFailure(ctx, agentRun, "GuestEnrollmentRevocationPending", externalExecutionCleanupRetry)
+		return result, false, recordErr
+	}
+	return ctrl.Result{}, true, nil
+}
+
+func (r *AgentRunReconciler) completeGuestEnrollmentCleanup(
+	ctx context.Context,
+	agentRun *nvtv1alpha1.AgentRun,
+	driverRegistration string,
+) (ctrl.Result, bool, error) {
+	if r.GuestEnrollment == nil {
+		result, err := r.recordExternalCleanupFailure(ctx, agentRun, "GuestEnrollmentCleanupCompletionPending", externalExecutionCleanupRetry)
+		return result, false, err
+	}
+	release, acquired := r.tryAcquireExternalExecutionCall()
+	if !acquired {
+		return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, false, nil
+	}
+	defer release()
+	executionID, err := externalExecutionID(agentRun.UID)
+	if err != nil {
+		result, recordErr := r.recordExternalCleanupFailure(ctx, agentRun, "GuestEnrollmentCleanupCompletionPending", externalExecutionCleanupRetry)
+		return result, false, recordErr
+	}
+	scope := guestenrollment.ExecutionScope{AgentRunUID: string(agentRun.UID), ExecutionID: executionID, DriverRegistration: driverRegistration}
+	if err := r.GuestEnrollment.CompleteExecutionCleanup(ctx, guestenrollment.CompleteExecutionCleanupRequest{ContractVersion: guestenrollment.Version, ExecutionScope: scope}); err != nil {
+		result, recordErr := r.recordExternalCleanupFailure(ctx, agentRun, "GuestEnrollmentCleanupCompletionPending", externalExecutionCleanupRetry)
 		return result, false, recordErr
 	}
 	return ctrl.Result{}, true, nil

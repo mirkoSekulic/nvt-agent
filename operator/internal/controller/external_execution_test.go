@@ -149,15 +149,19 @@ func (d *recordingEnrollmentDriver) Delete(ctx context.Context, executionID stri
 }
 
 type recordingEnrollmentIssuer struct {
-	mu             sync.Mutex
-	issues         []guestenrollment.IssueRequest
-	revokeBindings []guestenrollment.RevokeBindingRequest
-	revokeScopes   []guestenrollment.RevokeExecutionRequest
-	issueError     error
-	revokeError    error
-	sequence       *[]string
-	handoffTimeout time.Duration
+	mu              sync.Mutex
+	issues          []guestenrollment.IssueRequest
+	revokeBindings  []guestenrollment.RevokeBindingRequest
+	revokeScopes    []guestenrollment.RevokeExecutionRequest
+	completions     []guestenrollment.CompleteExecutionCleanupRequest
+	issueError      error
+	revokeError     error
+	completionError error
+	sequence        *[]string
+	handoffTimeout  time.Duration
 }
+
+func (i *recordingEnrollmentIssuer) EnabledFor(_ string) bool { return true }
 
 func (i *recordingEnrollmentIssuer) TTLSeconds() int32 { return 300 }
 func (i *recordingEnrollmentIssuer) HandoffTimeout() time.Duration {
@@ -198,6 +202,16 @@ func (i *recordingEnrollmentIssuer) RevokeExecution(_ context.Context, request g
 		*i.sequence = append(*i.sequence, "scope-revoke")
 	}
 	return i.revokeError
+}
+
+func (i *recordingEnrollmentIssuer) CompleteExecutionCleanup(_ context.Context, request guestenrollment.CompleteExecutionCleanupRequest) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.completions = append(i.completions, request)
+	if i.sequence != nil {
+		*i.sequence = append(*i.sequence, "cleanup-complete")
+	}
+	return i.completionError
 }
 
 func (d *recordingExecutionDriver) Reconcile(ctx context.Context, desired executiondriver.DesiredExecution) (executiondriver.Status, error) {
@@ -901,6 +915,77 @@ func TestExternalGuestEnrollmentDeliveryUsesBoundedDedicatedDeadline(t *testing.
 	}
 }
 
+func TestExternalPodDriverDoesNotParticipateInGuestEnrollment(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Spec.Execution.Kind = nvtv1alpha1.AgentRunExecutionPod
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseRunning, Ready: true, ObservedGeneration: 1}}},
+		guestID:                  "must-not-be-used",
+	}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("add external finalizer: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("external Pod reconcile: %v", err)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	if controllerHasFinalizer(&updated, guestEnrollmentFinalizer) {
+		t.Fatalf("external Pod gained VM enrollment finalizer: %#v", updated.Finalizers)
+	}
+	if len(issuer.issues) != 0 || len(issuer.revokeBindings) != 0 || len(issuer.revokeScopes) != 0 || len(issuer.completions) != 0 || driver.deliverCalls != 0 {
+		t.Fatalf("external Pod used guest enrollment: issuer=%#v delivers=%d", issuer, driver.deliverCalls)
+	}
+
+	now := metav1.Now()
+	deleting := externalTestAgentRun()
+	deleting.Name = "external-pod-delete"
+	deleting.UID = "external-pod-delete-uid"
+	deleting.Spec.Execution.Kind = nvtv1alpha1.AgentRunExecutionPod
+	deleting.Finalizers = []string{externalExecutionFinalizer}
+	deleting.DeletionTimestamp = &now
+	deleteDriver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}}}
+	_, deleteReconciler := externalReconcileFixture(t, deleting, fakeExecutionDriverRegistry{"example-vm": deleteDriver})
+	deleteReconciler.GuestEnrollment = issuer
+	if _, err := deleteReconciler.Reconcile(ctx, requestFor(deleting)); err != nil {
+		t.Fatalf("external Pod delete: %v", err)
+	}
+	if len(issuer.revokeScopes) != 0 || len(issuer.completions) != 0 || len(issuer.issues) != 0 || driver.deliverCalls != 0 {
+		t.Fatalf("external Pod deletion used guest enrollment: revokes=%d completions=%d issues=%d delivers=%d", len(issuer.revokeScopes), len(issuer.completions), len(issuer.issues), driver.deliverCalls)
+	}
+}
+
+func TestExistingGuestEnrollmentFinalizerRemainsCleanupAuthoritative(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	run := externalTestAgentRun()
+	run.Spec.Execution.Kind = nvtv1alpha1.AgentRunExecutionPod
+	run.Finalizers = []string{guestEnrollmentFinalizer}
+	run.DeletionTimestamp = &now
+	sequence := []string{}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}},
+		operationSequence:        &sequence,
+	}
+	issuer := &recordingEnrollmentIssuer{sequence: &sequence}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("existing enrollment cleanup obligation: %v", err)
+	}
+	if !reflect.DeepEqual(sequence, []string{"scope-revoke", "driver-delete", "cleanup-complete"}) {
+		t.Fatalf("existing cleanup obligation ordering=%#v", sequence)
+	}
+	var deleted nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &deleted); !apierrors.IsNotFound(err) {
+		t.Fatalf("existing cleanup obligation did not finalize: err=%v finalizers=%#v", err, deleted.Finalizers)
+	}
+}
+
 func TestExternalGuestEnrollmentCleanupRevokesScopeBeforeExactDriverDelete(t *testing.T) {
 	ctx := context.Background()
 	now := metav1.Now()
@@ -918,8 +1003,8 @@ func TestExternalGuestEnrollmentCleanupRevokesScopeBeforeExactDriverDelete(t *te
 	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
-	if !reflect.DeepEqual(sequence, []string{"scope-revoke", "driver-delete"}) || len(issuer.revokeScopes) != 1 {
-		t.Fatalf("cleanup ordering=%#v scope=%#v", sequence, issuer.revokeScopes)
+	if !reflect.DeepEqual(sequence, []string{"scope-revoke", "driver-delete", "cleanup-complete"}) || len(issuer.revokeScopes) != 1 || len(issuer.completions) != 1 {
+		t.Fatalf("cleanup ordering=%#v scope=%#v completions=%#v", sequence, issuer.revokeScopes, issuer.completions)
 	}
 	var deleted nvtv1alpha1.AgentRun
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &deleted); !apierrors.IsNotFound(err) {
@@ -945,6 +1030,45 @@ func TestExternalGuestEnrollmentCleanupRevokesScopeBeforeExactDriverDelete(t *te
 	encoded, _ := json.Marshal(retained.Status)
 	if bytes.Contains(encoded, []byte("BROKER-TOKEN-CANARY")) {
 		t.Fatalf("cleanup disclosed broker diagnostic: %s", encoded)
+	}
+
+	completionRun := externalTestAgentRun()
+	completionRun.Name = "blocked-completion"
+	completionRun.UID = "blocked-completion-uid"
+	completionRun.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	completionRun.DeletionTimestamp = &now
+	completionSequence := []string{}
+	completionDriver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}, {Phase: executiondriver.PhaseDeleted}}},
+		operationSequence:        &completionSequence,
+	}
+	completionIssuer := &recordingEnrollmentIssuer{completionError: errors.New("COMPLETION-CANARY response lost"), sequence: &completionSequence}
+	completionRegistry := fakeExecutionDriverRegistry{"example-vm": completionDriver}
+	completionClient, completionReconciler := externalReconcileFixture(t, completionRun, completionRegistry)
+	completionReconciler.GuestEnrollment = completionIssuer
+	if result, err := completionReconciler.Reconcile(ctx, requestFor(completionRun)); err != nil || result.RequeueAfter != externalExecutionCleanupRetry {
+		t.Fatalf("completion response loss result=%#v err=%v", result, err)
+	}
+	retained = getExternalRun(t, ctx, completionClient, completionRun)
+	if !controllerHasFinalizer(&retained, guestEnrollmentFinalizer) || !controllerHasFinalizer(&retained, externalExecutionFinalizer) {
+		t.Fatalf("completion response loss released finalizers: %#v", retained.Finalizers)
+	}
+	if !reflect.DeepEqual(completionSequence, []string{"scope-revoke", "driver-delete", "cleanup-complete"}) {
+		t.Fatalf("completion failure ordering=%#v", completionSequence)
+	}
+	completionIssuer.completionError = nil
+	restartedCompletionReconciler := &AgentRunReconciler{
+		Client: completionClient, Scheme: completionReconciler.Scheme,
+		ExecutionDrivers: completionRegistry, GuestEnrollment: completionIssuer,
+	}
+	if _, err := restartedCompletionReconciler.Reconcile(ctx, requestFor(completionRun)); err != nil {
+		t.Fatalf("completion response-loss retry: %v", err)
+	}
+	if !reflect.DeepEqual(completionSequence, []string{"scope-revoke", "driver-delete", "cleanup-complete", "scope-revoke", "driver-delete", "cleanup-complete"}) {
+		t.Fatalf("completion retry ordering=%#v", completionSequence)
+	}
+	if err := completionClient.Get(ctx, client.ObjectKeyFromObject(completionRun), &retained); !apierrors.IsNotFound(err) {
+		t.Fatalf("completion retry did not finalize run: err=%v finalizers=%#v", err, retained.Finalizers)
 	}
 }
 

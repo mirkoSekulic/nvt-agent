@@ -140,6 +140,15 @@ type RevokeExecutionRequest struct {
 	ExecutionScope  ExecutionScope `json:"execution_scope"`
 }
 
+// CompleteExecutionCleanupRequest records the authoritative orchestrator's
+// durable proof that exact-driver resource deletion has completed. It is
+// valid only after execution-scoped revocation and makes the retained scope
+// tombstone eligible for GC after its independent retention deadline.
+type CompleteExecutionCleanupRequest struct {
+	ContractVersion string         `json:"contract_version"`
+	ExecutionScope  ExecutionScope `json:"execution_scope"`
+}
+
 type HandoffState string
 
 const (
@@ -200,6 +209,7 @@ type Issuer interface {
 	Exchange(context.Context, ExchangeRequest) (ExchangeResult, error)
 	RevokeBinding(context.Context, RevokeBindingRequest) error
 	RevokeExecution(context.Context, RevokeExecutionRequest) error
+	CompleteExecutionCleanup(context.Context, CompleteExecutionCleanupRequest) error
 }
 
 type LifecycleState string
@@ -337,6 +347,13 @@ func ValidateRevokeExecutionRequest(value RevokeExecutionRequest) error {
 	return nil
 }
 
+func ValidateCompleteExecutionCleanupRequest(value CompleteExecutionCleanupRequest) error {
+	if value.ContractVersion != Version || ValidateExecutionScope(value.ExecutionScope) != nil {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
 func ValidateHandoffPrepareRequest(value HandoffPrepareRequest) error {
 	if value.ContractVersion != HandoffVersion || ValidateExecutionScope(value.ExecutionScope) != nil || value.DesiredGeneration < 1 {
 		return NewFailure(ReasonInvalidRequest)
@@ -444,6 +461,14 @@ func DecodeRevokeExecutionRequest(data []byte) (RevokeExecutionRequest, error) {
 	var value RevokeExecutionRequest
 	if DecodeStrictJSON(data, MaxRevocationRequestBytes, &value) != nil || ValidateRevokeExecutionRequest(value) != nil {
 		return RevokeExecutionRequest{}, NewFailure(ReasonInvalidRequest)
+	}
+	return value, nil
+}
+
+func DecodeCompleteExecutionCleanupRequest(data []byte) (CompleteExecutionCleanupRequest, error) {
+	var value CompleteExecutionCleanupRequest
+	if DecodeStrictJSON(data, MaxRevocationRequestBytes, &value) != nil || ValidateCompleteExecutionCleanupRequest(value) != nil {
+		return CompleteExecutionCleanupRequest{}, NewFailure(ReasonInvalidRequest)
 	}
 	return value, nil
 }

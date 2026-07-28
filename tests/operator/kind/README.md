@@ -225,9 +225,9 @@ KIND_SMOKE_MODE=render KIND_SMOKE_CASE=external-execution make operator-kind-smo
 authenticated host, issues and delivers one broker-backed guest enrollment,
 proves no Agent Pod is created, restarts both the host and operator, and
 observes the accepted handoff plus provider drift repair after each restart.
-Deletion verifies the broker execution-scope tombstone/revocation before the
-durable provider, handoff, and subordinate state disappear and the finalizer
-clears.
+Deletion verifies broker execution-scope revocation before the durable
+provider, handoff, and subordinate state disappear, then verifies the durable
+broker cleanup-complete marker before the finalizer clears.
 
 The current case is `parallel-lifecycle`. It exercises this no-GitHub,
 no-secret lifecycle:

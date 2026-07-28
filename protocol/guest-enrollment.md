@@ -179,9 +179,9 @@ this one-time bootstrap envelope.
 All JSON is UTF-8 and uses strict object shapes. Unknown fields, trailing
 values, invalid UTF-8, and duplicate keys at any nesting depth (including
 escaped-equivalent keys) fail closed. Request and response handlers also apply
-the stated byte limits before decoding. Issuance, exchange, and revocation each
-have an absolute 30-second v1 operation ceiling; callers and implementations
-may select a shorter deadline.
+the stated byte limits before decoding. Issuance, exchange, revocation, and
+cleanup completion each have an absolute 30-second v1 operation ceiling;
+callers and implementations may select a shorter deadline.
 
 ## Lifecycle and atomicity
 
@@ -259,13 +259,25 @@ and rejects future issuance for that scope. Unrelated scopes remain unchanged.
 AgentRun cleanup ordering is:
 
 1. durably revoke the stable execution scope and retry until acknowledged;
-2. converge exact-driver resource deletion and all other operator cleanup; and
-3. only then complete the finalizer/AgentRun deletion and make the scope
-   eligible for bounded tombstone garbage collection.
+2. converge exact-driver resource deletion and all other operator cleanup;
+3. durably acknowledge execution cleanup completion to the issuer and retry
+   until acknowledged; and
+4. only then remove the finalizer or allow AgentRun deletion.
 
-An operator or issuer restart resumes step 1 from the immutable AgentRun and
-selected exact driver. Removing the VM or driver resource alone is never proof
-of token or runtime-identity revocation.
+Cleanup completion uses the same bounded `contract_version` plus
+`execution_scope` object as execution revocation. It is idempotent and marks
+the existing revoked scope as garbage-collection eligible; it does not revoke
+an execution and therefore never replaces step 1. A missing tombstone is an
+idempotent success only after an earlier completion and retention-based
+collection. The issuer may reclaim the scope only when both the durable
+completion marker and its retention deadline are present. If the completion
+response is lost, the operator retains its finalizer and repeats completion
+from stable scope ownership after restart.
+
+An operator or issuer restart resumes the first unacknowledged step from the
+immutable AgentRun and selected exact driver. Removing the VM or driver
+resource alone is never proof of token/runtime-identity revocation or issuer
+cleanup completion.
 
 ## Restart and uncertain-delivery semantics
 

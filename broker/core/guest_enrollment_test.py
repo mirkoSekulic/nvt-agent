@@ -21,6 +21,7 @@ from broker.core.guest_enrollment import (
     OrchestratorAuthenticator,
     TOMBSTONE_RETENTION,
     VERSION,
+    format_timestamp,
     load_guest_enrollment_from_environment,
 )
 from broker.core.server import BoundedThreadingHTTPServer, make_handler
@@ -51,6 +52,9 @@ class EnrollmentHTTPBroker:
         return None
 
     def guest_enrollment_exchange(self, _request_id, _payload):
+        return {"ok": True}
+
+    def guest_enrollment_complete_execution_cleanup(self, _request_id, _payload, _authorization):
         return {"ok": True}
 
     def readiness(self):
@@ -545,11 +549,12 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             issuer.revoke_binding(revoke_binding_request(request["binding"]))
         self.assertFailure("revoked", lambda: issuer.exchange(exchange_request(envelope)))
         self.assertFailure("revoked", lambda: issuer.issue(request))
+        issuer.revoke_execution(revoke_execution_request(request["binding"]))
+        issuer.complete_execution_cleanup(complete_execution_cleanup_request(request["binding"]))
         self.clock.value += TOMBSTONE_RETENTION
         issuer.maintain()
-        self.assertEqual(len(issuer.snapshot()["binding_tombstones"]), 1)
-        issuer.garbage_collect_completed([execution_scope(request["binding"])])
         self.assertEqual(issuer.snapshot()["binding_tombstones"], [])
+        self.assertEqual(issuer.snapshot()["execution_tombstones"], [])
 
     def test_expiry_capacity_and_tombstone_gc(self):
         issuer = self.issuer(max_entries=2)
@@ -566,10 +571,9 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
 
         issuer.revoke_execution(revoke_execution_request(expiring["binding"]))
         self.assertEqual(sum(len(value) for value in issuer.snapshot().values()), 2)
+        issuer.complete_execution_cleanup(complete_execution_cleanup_request(expiring["binding"]))
         self.clock.value = START + timedelta(seconds=2) + TOMBSTONE_RETENTION
         issuer.maintain()
-        self.assertEqual(sum(len(value) for value in issuer.snapshot().values()), 2)
-        issuer.garbage_collect_completed([execution_scope(expiring["binding"])])
         self.assertEqual(sum(len(value) for value in issuer.snapshot().values()), 1)
         replacement = issuer.issue(issue_request(guest="after-gc"))
         self.assertTrue(replacement["token"])
@@ -578,12 +582,15 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         issuer = self.issuer()
         expired = issuer.issue(issue_request(uid="expired-uid", execution="expired-execution", guest="expired-guest", ttl=1))
         self.clock.value = START + TOMBSTONE_RETENTION + timedelta(hours=1)
-        live = issuer.issue(issue_request(uid="live-uid", execution="live-execution", guest="live-guest"))
         self.assertFailure("expired", lambda: issuer.exchange(exchange_request(expired)))
         records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
         self.assertEqual(records["expired-uid"]["terminal_at"], expired["expires_at"])
 
-        issuer.garbage_collect_completed([execution_scope(expired["binding"])])
+        issuer.revoke_execution(revoke_execution_request(expired["binding"]))
+        issuer.complete_execution_cleanup(complete_execution_cleanup_request(expired["binding"]))
+        self.clock.value += TOMBSTONE_RETENTION
+        live = issuer.issue(issue_request(uid="live-uid", execution="live-execution", guest="live-guest"))
+        issuer.maintain()
         records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
         self.assertNotIn("expired-uid", records)
         self.assertEqual(records["live-uid"]["state"], "issued")
@@ -651,7 +658,29 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(record["runtime_identity_active"], 1)
         self.assertFailure("already-consumed", lambda: lost_restarted.exchange(exchange_request(lost_envelope)))
         lost_restarted.revoke_execution(revoke_execution_request(lost_envelope["binding"]))
+        lost_restarted.complete_execution_cleanup(complete_execution_cleanup_request(lost_envelope["binding"]))
         self.assertEqual(lost_restarted.snapshot()["records"], [])
+
+    def test_cleanup_completion_is_durable_idempotent_and_reuses_capacity_after_retention(self):
+        database = str(Path(self.temporary.name) / "completion.sqlite3")
+        issuer = GuestEnrollmentIssuer(database, EXCHANGE_URL, now=self.clock, max_entries=1, maintenance_interval=None)
+        self.addCleanup(issuer.close)
+        request = issue_request(uid="completed-uid", execution="completed-execution", guest="completed-guest")
+        issuer.revoke_execution(revoke_execution_request(request["binding"]))
+        self.assertFailure("capacity-exceeded", lambda: issuer.issue(issue_request(uid="blocked", execution="blocked")))
+        issuer.complete_execution_cleanup(complete_execution_cleanup_request(request["binding"]))
+        # Simulate a response lost after the durable transaction and an issuer restart.
+        issuer.close()
+        restarted = GuestEnrollmentIssuer(database, EXCHANGE_URL, now=self.clock, max_entries=1, maintenance_interval=None)
+        self.addCleanup(restarted.close)
+        restarted.complete_execution_cleanup(complete_execution_cleanup_request(request["binding"]))
+        tombstone = restarted.snapshot()["execution_tombstones"][0]
+        self.assertEqual(tombstone["cleanup_completed_at"], format_timestamp(self.clock.value))
+        self.assertFailure("capacity-exceeded", lambda: restarted.issue(issue_request(uid="still-blocked", execution="still-blocked")))
+        self.clock.value += TOMBSTONE_RETENTION
+        restarted.maintain()
+        self.assertEqual(restarted.snapshot()["execution_tombstones"], [])
+        self.assertTrue(restarted.issue(issue_request(uid="reused", execution="reused"))["token"])
 
     def test_corrupt_store_and_errors_are_sanitized(self):
         Path(self.database).write_bytes(b"not-a-sqlite-database\nsecret-canary")
@@ -722,6 +751,15 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
             GuestEnrollmentIssuer(execution_tombstone_database, EXCHANGE_URL, maintenance_interval=None)
 
+        cleanup_tombstone_database = str(Path(self.temporary.name) / "cleanup-tombstone.sqlite3")
+        cleanup_issuer = GuestEnrollmentIssuer(cleanup_tombstone_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        cleanup_issuer.revoke_execution(revoke_execution_request(request["binding"]))
+        cleanup_issuer.complete_execution_cleanup(complete_execution_cleanup_request(request["binding"]))
+        cleanup_issuer.close()
+        update_database(cleanup_tombstone_database, "UPDATE execution_tombstones SET cleanup_completed_at = ?", ("invalid",))
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(cleanup_tombstone_database, EXCHANGE_URL, maintenance_interval=None)
+
         identity_database = str(Path(self.temporary.name) / "runtime-identity.sqlite3")
         identity_issuer = GuestEnrollmentIssuer(
             identity_database,
@@ -771,7 +809,23 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         created_at = datetime.strptime(migrated_tombstone["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         delete_after = datetime.strptime(migrated_tombstone["delete_after"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         self.assertEqual(delete_after - created_at, TOMBSTONE_RETENTION)
-        self.assertEqual(query_database(migration_database, "SELECT value FROM enrollment_meta"), [("2",)])
+        self.assertEqual(query_database(migration_database, "SELECT value FROM enrollment_meta"), [("3",)])
+
+        schema_v2_database = str(Path(self.temporary.name) / "schema-v2.sqlite3")
+        schema_v2 = GuestEnrollmentIssuer(schema_v2_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        schema_v2.revoke_execution(revoke_execution_request(issue_request(uid="v2-uid", execution="v2-execution")["binding"]))
+        schema_v2.close()
+        connection = sqlite3.connect(schema_v2_database)
+        try:
+            connection.execute("ALTER TABLE execution_tombstones DROP COLUMN cleanup_completed_at")
+            connection.execute("UPDATE enrollment_meta SET value = '2' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+        migrated_v2 = GuestEnrollmentIssuer(schema_v2_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        self.addCleanup(migrated_v2.close)
+        self.assertIsNone(migrated_v2.snapshot()["execution_tombstones"][0]["cleanup_completed_at"])
+        self.assertEqual(query_database(schema_v2_database, "SELECT value FROM enrollment_meta"), [("3",)])
 
     def test_orchestrator_auth_stores_only_digest(self):
         token = b"orchestrator-auth-token-0123456789abcdef"
@@ -844,6 +898,13 @@ def revoke_execution_request(value):
             "execution_id": value["execution_id"],
             "driver_registration": value["driver_registration"],
         },
+    }
+
+
+def complete_execution_cleanup_request(value):
+    return {
+        "contract_version": VERSION,
+        "execution_scope": execution_scope(value),
     }
 
 

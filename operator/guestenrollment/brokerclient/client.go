@@ -46,23 +46,27 @@ type Config struct {
 	RequestTimeout  time.Duration `json:"-"`
 	HandoffTimeout  time.Duration `json:"-"`
 	TTLSeconds      int32         `json:"ttlSeconds"`
+	Registrations   []string      `json:"driverRegistrations"`
 }
 
 type configDocument struct {
-	Version         int    `json:"version"`
-	BaseURL         string `json:"baseURL"`
-	ServerName      string `json:"serverName"`
-	CAFile          string `json:"caFile"`
-	BearerTokenFile string `json:"bearerTokenFile"`
-	RequestTimeout  int32  `json:"requestTimeoutSeconds"`
-	HandoffTimeout  int32  `json:"handoffTimeoutSeconds"`
-	TTLSeconds      int32  `json:"ttlSeconds"`
+	Version         int      `json:"version"`
+	BaseURL         string   `json:"baseURL"`
+	ServerName      string   `json:"serverName"`
+	CAFile          string   `json:"caFile"`
+	BearerTokenFile string   `json:"bearerTokenFile"`
+	RequestTimeout  int32    `json:"requestTimeoutSeconds"`
+	HandoffTimeout  int32    `json:"handoffTimeoutSeconds"`
+	TTLSeconds      int32    `json:"ttlSeconds"`
+	Registrations   []string `json:"driverRegistrations"`
 }
 
 type Interface interface {
+	EnabledFor(string) bool
 	Issue(context.Context, guestenrollment.IssueRequest) (guestenrollment.BootstrapEnvelope, error)
 	RevokeBinding(context.Context, guestenrollment.RevokeBindingRequest) error
 	RevokeExecution(context.Context, guestenrollment.RevokeExecutionRequest) error
+	CompleteExecutionCleanup(context.Context, guestenrollment.CompleteExecutionCleanupRequest) error
 	Shutdown(context.Context) error
 }
 
@@ -73,12 +77,13 @@ type Client struct {
 	ttl     int32
 	handoff time.Duration
 
-	lifetime context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	closed   bool
-	active   int
-	idle     chan struct{}
+	lifetime      context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	closed        bool
+	active        int
+	idle          chan struct{}
+	registrations map[string]struct{}
 }
 
 func LoadConfigured() (*Client, error) {
@@ -106,11 +111,13 @@ func LoadConfigured() (*Client, error) {
 		BaseURL: document.BaseURL, ServerName: document.ServerName, CAFile: document.CAFile,
 		BearerTokenFile: document.BearerTokenFile, RequestTimeout: time.Duration(document.RequestTimeout) * time.Second,
 		HandoffTimeout: time.Duration(document.HandoffTimeout) * time.Second, TTLSeconds: document.TTLSeconds,
+		Registrations: document.Registrations,
 	})
 }
 
 var serverNamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$`)
 var orchestratorTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+var registrationNamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 
 func New(config Config) (*Client, error) {
 	endpoint, err := url.Parse(config.BaseURL)
@@ -121,6 +128,19 @@ func New(config Config) (*Client, error) {
 	if port := endpoint.Port(); port != "" {
 		value, parseErr := strconv.Atoi(port)
 		portValid = parseErr == nil && value >= 1 && value <= 65535
+	}
+	registrations := make(map[string]struct{}, len(config.Registrations))
+	if len(config.Registrations) == 0 || len(config.Registrations) > 32 {
+		return nil, errors.New("guest enrollment client configuration is invalid")
+	}
+	for _, name := range config.Registrations {
+		if len(name) > guestenrollment.MaxDriverNameBytes || !registrationNamePattern.MatchString(name) {
+			return nil, errors.New("guest enrollment client configuration is invalid")
+		}
+		if _, exists := registrations[name]; exists {
+			return nil, errors.New("guest enrollment client configuration is invalid")
+		}
+		registrations[name] = struct{}{}
 	}
 	if len(config.BaseURL) > guestenrollment.MaxExchangeURLBytes || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.Opaque != "" ||
 		endpoint.Path != "" || endpoint.RawPath != "" || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" ||
@@ -150,13 +170,18 @@ func New(config Config) (*Client, error) {
 	close(idle)
 	return &Client{
 		baseURL: endpoint, token: token, http: &http.Client{Transport: transport, Timeout: config.RequestTimeout}, ttl: config.TTLSeconds, handoff: config.HandoffTimeout,
-		lifetime: lifetime, cancel: cancel, idle: idle,
+		lifetime: lifetime, cancel: cancel, idle: idle, registrations: registrations,
 	}, nil
 }
 
 func (c *Client) TTLSeconds() int32 { return c.ttl }
 
 func (c *Client) HandoffTimeout() time.Duration { return c.handoff }
+
+func (c *Client) EnabledFor(registration string) bool {
+	_, enabled := c.registrations[registration]
+	return enabled
+}
 
 func (c *Client) Issue(ctx context.Context, request guestenrollment.IssueRequest) (guestenrollment.BootstrapEnvelope, error) {
 	if request.TTLSeconds == 0 {
@@ -192,6 +217,13 @@ func (c *Client) RevokeExecution(ctx context.Context, request guestenrollment.Re
 		return ErrRejected
 	}
 	return c.revoke(ctx, "/v1/guest-enrollment/revoke-execution", request)
+}
+
+func (c *Client) CompleteExecutionCleanup(ctx context.Context, request guestenrollment.CompleteExecutionCleanupRequest) error {
+	if guestenrollment.ValidateCompleteExecutionCleanupRequest(request) != nil {
+		return ErrRejected
+	}
+	return c.revoke(ctx, "/v1/guest-enrollment/complete-execution-cleanup", request)
 }
 
 func (c *Client) revoke(ctx context.Context, path string, request any) error {

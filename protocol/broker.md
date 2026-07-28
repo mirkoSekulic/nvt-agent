@@ -74,19 +74,23 @@ The optional production issuer implements the exact payloads and lifecycle in
 | `POST /v1/guest-enrollment/exchange` | 16 KiB | One-time token plus exact binding in the body |
 | `POST /v1/guest-enrollment/revoke-binding` | 4 KiB | Dedicated orchestrator bearer |
 | `POST /v1/guest-enrollment/revoke-execution` | 4 KiB | Dedicated orchestrator bearer |
+| `POST /v1/guest-enrollment/complete-execution-cleanup` | 4 KiB | Dedicated orchestrator bearer |
 
 Issue returns the frozen `BootstrapEnvelope`; exchange returns the frozen
-`ExchangeResult`; both revoke operations return `{"ok":true}`. The issue
+`ExchangeResult`; both revoke operations and cleanup completion return
+`{"ok":true}`. The issue
 caller cannot supply `exchange_url`: every envelope carries the issuer-owned
 canonical HTTPS endpoint loaded at broker startup. Unknown fields, duplicate
 keys at any depth, invalid UTF-8, trailing JSON, and over-limit requests fail
 as `invalid-request`.
 
-The operator client exposes only issue and the two revoke operations; it has no
-guest exchange method. It holds the dedicated bearer in a projected Secret and
-never passes it to a driver host. For external AgentRun cleanup it repeats
-execution-scope revocation until this API acknowledges it, then invokes the
-exact driver delete operation, and only then clears the lifecycle finalizer.
+The operator client exposes only issue, the two revoke operations, and cleanup
+completion; it has no guest exchange method. It holds the dedicated bearer in
+a projected Secret and never passes it to a driver host. For external AgentRun
+cleanup it repeats execution-scope revocation until acknowledged, invokes the
+exact driver delete operation until `deleted`, repeats cleanup completion until
+acknowledged, and only then clears the lifecycle finalizer. Response loss at
+any step is recovered by repeating that exact idempotent operation.
 The separately authenticated driver-host handoff is specified in
 [guest-enrollment.md](guest-enrollment.md); its ordinary reconcile payload
 remains credential-free.
@@ -128,11 +132,11 @@ TLS/canonical URL, and the dedicated authorization Secret are all configured.
 Background maintenance records token and runtime-identity expiry at their
 original deadlines. Each tombstone durably records its transition time and a
 retention deadline no more than 24 hours later, independent of later wall-clock
-movement. Maintenance does not infer AgentRun cleanup from elapsed time:
-tombstones and terminal records are reclaimed only when a later orchestrator
-integration supplies the authoritative completed scope and permanently denies
-new issuance for it. Until then the 10,000-entry hard bound fails closed rather
-than evicting live or revocation state.
+movement. Maintenance does not infer AgentRun cleanup from elapsed time.
+Tombstones and terminal records are reclaimed only after the authenticated
+cleanup-complete operation durably marks the exact revoked scope and the
+retention deadline has passed. Until then the 10,000-entry hard bound fails
+closed rather than evicting live or revocation state.
 
 ### POST /v1/http/request
 

@@ -21,6 +21,7 @@ const (
 	guestEnrollmentExchangePath    = "/v1/guest-enrollment/exchange"
 	guestEnrollmentRevokeBinding   = "/v1/guest-enrollment/revoke-binding"
 	guestEnrollmentRevokeExecution = "/v1/guest-enrollment/revoke-execution"
+	guestEnrollmentCompleteCleanup = "/v1/guest-enrollment/complete-execution-cleanup"
 	guestEnrollmentExchangeURL     = "https://broker.example/v1/guest-enrollment/exchange"
 	guestEnrollmentOrchestrator    = "orchestrator-token-0123456789abcdef"
 )
@@ -91,6 +92,15 @@ func TestGuestEnrollmentAPIExactLifecycleRestartAndScopeCleanup(t *testing.T) {
 	status, body = fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(unrelated))
 	assertEnrollmentStatus(t, status, body, http.StatusConflict, "already-consumed")
 
+	// Treat the first successful response as lost, restart, and repeat from the
+	// stable execution scope. Completion is durable and idempotent.
+	status, body = fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentCompleteCleanup, enrollmentRevokeExecutionRequest(firstRequest))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	fixture.stop()
+	fixture.start()
+	status, body = fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentCompleteCleanup, enrollmentRevokeExecutionRequest(firstRequest))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+
 	fixture.stop()
 	for _, canary := range []string{firstToken, identity} {
 		if strings.Contains(fixture.stdout.String(), canary) || strings.Contains(fixture.stderr.String(), canary) {
@@ -138,6 +148,8 @@ func TestGuestEnrollmentDedicatedAuthorizationAndIssuerOwnedURL(t *testing.T) {
 		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
 		status, body = fixture.postJSONWithToken(unauthorized, guestEnrollmentRevokeExecution, enrollmentRevokeExecutionRequest(request))
 		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+		status, body = fixture.postJSONWithToken(unauthorized, guestEnrollmentCompleteCleanup, enrollmentRevokeExecutionRequest(request))
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
 	}
 
 	redirect := cloneObject(request)
@@ -160,6 +172,7 @@ func TestGuestEnrollmentAuthenticatesBeforeBodyAndReservesRevocationCapacity(t *
 		guestEnrollmentIssuePath,
 		guestEnrollmentRevokeBinding,
 		guestEnrollmentRevokeExecution,
+		guestEnrollmentCompleteCleanup,
 	} {
 		connection := openIncompleteEnrollmentRequest(t, fixture, path, "")
 		if err := connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
@@ -232,6 +245,8 @@ func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) 
 	status, body = fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, bytes.Repeat([]byte{' '}, 4097))
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 	status, body = fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, []byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'})
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	status, body = fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentCompleteCleanup, duplicate)
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 
 	disabled := newBrokerFixture(t)
@@ -385,7 +400,9 @@ func assertEnrollmentStatus(t *testing.T, status int, body map[string]any, expec
 func Example_guestEnrollmentPaths() {
 	fmt.Println(guestEnrollmentIssuePath)
 	fmt.Println(guestEnrollmentExchangePath)
+	fmt.Println(guestEnrollmentCompleteCleanup)
 	// Output:
 	// /v1/guest-enrollment/issue
 	// /v1/guest-enrollment/exchange
+	// /v1/guest-enrollment/complete-execution-cleanup
 }

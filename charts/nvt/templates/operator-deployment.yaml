@@ -17,7 +17,8 @@ data:
       "bearerTokenFile": "/var/run/nvt-guest-enrollment/orchestrator-token",
       "requestTimeoutSeconds": {{ .Values.executionDrivers.guestEnrollment.requestTimeoutSeconds }},
       "handoffTimeoutSeconds": {{ .Values.executionDrivers.guestEnrollment.handoffTimeoutSeconds }},
-      "ttlSeconds": {{ .Values.executionDrivers.guestEnrollment.ttlSeconds }}
+      "ttlSeconds": {{ .Values.executionDrivers.guestEnrollment.ttlSeconds }},
+      "driverRegistrations": {{ .Values.executionDrivers.guestEnrollment.registrations | toJson }}
     }
 ---
 {{- end }}

@@ -316,8 +316,11 @@ broker:
 The referenced Secret key must contain one 32–4096 byte opaque token using
 letters, digits, `.`, `_`, `~`, or `-`, with no newline. The chart never
 creates or copies that value into a ConfigMap, environment value, AgentRun, or
-agent Pod. Rotation requires a broker rollout because the authorization digest
-is loaded once at startup.
+agent Pod. The broker and operator each read the projected bearer once at
+startup. Rotation is therefore one coordinated maintenance operation: update
+the shared Secret, then restart both the broker and operator Deployments.
+Restarting only one side creates a temporary authorization mismatch that fails
+closed and can block enrollment cleanup until the other Deployment restarts.
 
 The issuer stores only token/runtime-identity digests and bounded lifecycle
 metadata in `/state/guest-enrollment.sqlite3`. It uses SQLite transactions and
@@ -332,6 +335,7 @@ dedicated orchestrator Secret:
 executionDrivers:
   guestEnrollment:
     enabled: true
+    registrations: [qemu-lab]
     brokerURL: https://nvt-broker.nvt.svc:7347
     serverName: nvt-broker.nvt.svc
     ca:
@@ -347,11 +351,15 @@ executionDrivers:
 
 The operator receives the orchestrator bearer; driver hosts receive only their
 existing per-registration authentication and the one-time envelope addressed
-to that exact registration. The bearer is never passed to a driver. Keep this
-configuration and registration available while any AgentRun retains the
+to that exact registration. The bearer is never passed to a driver. Only exact
+names in `guestEnrollment.registrations` receive the sensitive handoff socket;
+other external registrations retain the ordinary execution-driver protocol.
+The controller activates enrollment only for external `kind: vm` runs. Keep
+this configuration and registration available while any AgentRun retains the
 `nvt.dev/agentrun-guest-enrollment` finalizer: cleanup must acknowledge broker
-execution-scope revocation before driver deletion. Expiry maintenance is
-automatic, but elapsed time alone never erases an uncompleted revocation.
+execution-scope revocation, exact-driver deletion, and broker cleanup completion
+before finalizer removal. Expiry maintenance is automatic, but elapsed time
+alone never erases an uncompleted revocation.
 
 ## Agent Egress
 

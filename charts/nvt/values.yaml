@@ -120,9 +120,13 @@ executionDrivers:
     pullPolicy: IfNotPresent
   # Optional trusted bridge from the operator to the broker issuer and the
   # exact selected external driver host. Secret values are projected from
-  # existing Secrets and never enter this values document.
+  # existing Secrets and never enter this values document. The broker and
+  # operator load the bearer once; rotate it by restarting both Deployments.
   guestEnrollment:
     enabled: false
+    # Exact external VM driver registrations whose host accepts the sensitive
+    # enrollment handoff. Other registrations retain the ordinary protocol.
+    registrations: []
     brokerURL: ""
     serverName: ""
     ca:

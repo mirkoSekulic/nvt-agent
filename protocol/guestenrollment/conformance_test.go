@@ -43,7 +43,8 @@ type fakeRecord struct {
 }
 
 type fakeTombstone struct {
-	DeleteAfter string `json:"delete_after"`
+	DeleteAfter        string `json:"delete_after"`
+	CleanupCompletedAt string `json:"cleanup_completed_at,omitempty"`
 }
 
 type fakeDurableStore struct {
@@ -55,14 +56,15 @@ type fakeDurableStore struct {
 }
 
 type fakeIssuer struct {
-	store          *fakeDurableStore
-	configuration  IssuerConfiguration
-	now            func() time.Time
-	random         io.Reader
-	identity       func(Binding, time.Time) (RuntimeIdentity, error)
-	diagnosticSink func(string)
-	faultMu        sync.Mutex
-	nextFault      fakeExchangeFault
+	store                  *fakeDurableStore
+	configuration          IssuerConfiguration
+	now                    func() time.Time
+	random                 io.Reader
+	identity               func(Binding, time.Time) (RuntimeIdentity, error)
+	diagnosticSink         func(string)
+	faultMu                sync.Mutex
+	nextFault              fakeExchangeFault
+	loseCompletionResponse bool
 }
 
 type fakeGuest struct {
@@ -111,6 +113,20 @@ func (issuer *fakeIssuer) takeNextFault() fakeExchangeFault {
 	defer issuer.faultMu.Unlock()
 	value := issuer.nextFault
 	issuer.nextFault = fakeNoFault
+	return value
+}
+
+func (issuer *fakeIssuer) loseNextCompletionResponse() {
+	issuer.faultMu.Lock()
+	defer issuer.faultMu.Unlock()
+	issuer.loseCompletionResponse = true
+}
+
+func (issuer *fakeIssuer) takeCompletionResponseLoss() bool {
+	issuer.faultMu.Lock()
+	defer issuer.faultMu.Unlock()
+	value := issuer.loseCompletionResponse
+	issuer.loseCompletionResponse = false
 	return value
 }
 
@@ -356,6 +372,27 @@ func (issuer *fakeIssuer) RevokeExecution(ctx context.Context, request RevokeExe
 	return nil
 }
 
+func (issuer *fakeIssuer) CompleteExecutionCleanup(ctx context.Context, request CompleteExecutionCleanupRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := ValidateCompleteExecutionCleanupRequest(request); err != nil {
+		return err
+	}
+	issuer.store.mu.Lock()
+	issuer.store.initializeLocked()
+	tombstone, present := issuer.store.executionTombstones[request.ExecutionScope]
+	if present && tombstone.CleanupCompletedAt == "" {
+		tombstone.CleanupCompletedAt = FormatTimestamp(issuer.now().UTC().Truncate(time.Second))
+		issuer.store.executionTombstones[request.ExecutionScope] = tombstone
+	}
+	issuer.store.mu.Unlock()
+	if issuer.takeCompletionResponseLoss() {
+		return errFakeResponseLost
+	}
+	return nil
+}
+
 func (store *fakeDurableStore) snapshot() []byte {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -434,45 +471,28 @@ func (store *fakeDurableStore) activeRuntimeIdentities(scope ExecutionScope) int
 	return active
 }
 
-// garbageCollectCompleted models the only permitted tombstone GC boundary:
-// retention elapsed and the authoritative orchestrator has completed cleanup
-// for a scope it will no longer authorize for issuance.
-func (store *fakeDurableStore) garbageCollectCompleted(now time.Time, completed map[ExecutionScope]struct{}) int {
+// garbageCollectCompleted models issuer maintenance after durable cleanup
+// completion. No process-local completed-scope list participates in GC.
+func (store *fakeDurableStore) garbageCollectCompleted(now time.Time) int {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.initializeLocked()
 	removed := 0
-	for binding, tombstone := range store.bindingTombstones {
-		deleteAfter, _ := parseTimestamp(tombstone.DeleteAfter)
-		if _, complete := completed[binding.ExecutionScope()]; complete && !now.Before(deleteAfter) {
-			delete(store.bindingTombstones, binding)
-			removed++
-		}
-	}
-	for scope, tombstone := range store.executionTombstones {
-		deleteAfter, _ := parseTimestamp(tombstone.DeleteAfter)
-		if _, complete := completed[scope]; complete && !now.Before(deleteAfter) {
-			delete(store.executionTombstones, scope)
-			removed++
-		}
-	}
 	for digest, record := range store.records {
-		if record.State == StateIssued {
-			expiresAt, err := parseTimestamp(record.ExpiresAt)
-			if err != nil || now.Before(expiresAt) {
-				continue
-			}
+		if record.State != StateIssued {
+			continue
+		}
+		expiresAt, err := parseTimestamp(record.ExpiresAt)
+		if err == nil && !now.Before(expiresAt) {
 			record.State = StateExpired
 			record.TerminalAt = record.ExpiresAt
 			store.records[digest] = record
 		}
-		_, identityActive := store.activeIdentities[record.RuntimeIdentityDigest]
-		if _, complete := completed[record.Binding.ExecutionScope()]; !complete || record.TerminalAt == "" || identityActive {
-			continue
-		}
-		terminalAt, _ := parseTimestamp(record.TerminalAt)
-		if !now.Before(terminalAt.Add(MaxTombstoneRetention)) {
-			delete(store.records, digest)
+	}
+	for scope, tombstone := range store.executionTombstones {
+		deleteAfter, _ := parseTimestamp(tombstone.DeleteAfter)
+		if tombstone.CleanupCompletedAt != "" && !now.Before(deleteAfter) {
+			delete(store.executionTombstones, scope)
 			removed++
 		}
 	}
@@ -602,6 +622,25 @@ func TestFakeIssuerExecutionScopedRevocationSurvivesRestart(t *testing.T) {
 	}
 	if store.state(unrelated.Token) != StateConsumed || !store.runtimeIdentityActive(unrelated.Token) || store.activeRuntimeIdentities(unrelated.Binding.ExecutionScope()) != 1 {
 		t.Fatal("execution-scoped revoke affected an unrelated execution")
+	}
+	if removed := store.garbageCollectCompleted(now.Add(MaxTombstoneRetention + time.Hour)); removed != 0 {
+		t.Fatal("revoked scope was reclaimed before durable cleanup completion")
+	}
+	restarted.loseNextCompletionResponse()
+	if err := restarted.CompleteExecutionCleanup(context.Background(), CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: scope}); !errors.Is(err, errFakeResponseLost) {
+		t.Fatalf("cleanup completion response-loss fault = %v", err)
+	}
+	// A replacement orchestrator knows only the stable scope. Repeating the
+	// completion after response loss is idempotent and does not recreate state.
+	afterResponseLoss := newFakeIssuer(store, func() time.Time { return now.Add(2 * time.Second) }, deterministicRandom(0x53), validIdentityFactory(0x54))
+	if err := afterResponseLoss.CompleteExecutionCleanup(context.Background(), CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: scope}); err != nil {
+		t.Fatalf("cleanup completion did not recover after restart: %v", err)
+	}
+	if removed := store.garbageCollectCompleted(now.Add(MaxTombstoneRetention + time.Hour)); removed != 1 {
+		t.Fatalf("completed retained scope removed=%d, want 1", removed)
+	}
+	if store.state(unrelated.Token) != StateConsumed || !store.runtimeIdentityActive(unrelated.Token) {
+		t.Fatal("completed-scope GC affected an unrelated execution")
 	}
 }
 
@@ -805,7 +844,7 @@ func TestFakeIssuerMaintenanceExpiresAndReclaimsFromDeadline(t *testing.T) {
 	}
 
 	current = start.Add(2 * time.Second)
-	if removed := store.garbageCollectCompleted(current, nil); removed != 0 {
+	if removed := store.garbageCollectCompleted(current); removed != 0 {
 		t.Fatalf("maintenance removed a record without authoritative cleanup: %d", removed)
 	}
 	if state := store.state(neverExchanged.Token); state != StateExpired {
@@ -816,6 +855,14 @@ func TestFakeIssuerMaintenanceExpiresAndReclaimsFromDeadline(t *testing.T) {
 	}
 
 	current = start.Add(time.Second).Add(MaxTombstoneRetention)
+	neverScope := neverExchanged.Binding.ExecutionScope()
+	if err := issuer.RevokeExecution(context.Background(), RevokeExecutionRequest{ContractVersion: Version, ExecutionScope: neverScope}); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuer.CompleteExecutionCleanup(context.Background(), CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: neverScope}); err != nil {
+		t.Fatal(err)
+	}
+	current = current.Add(MaxTombstoneRetention)
 	liveRequest := validIssueRequest()
 	liveRequest.Binding.AgentRunUID = "unrelated-live-run"
 	liveRequest.Binding.ExecutionID = "unrelated-live-execution"
@@ -835,8 +882,7 @@ func TestFakeIssuerMaintenanceExpiresAndReclaimsFromDeadline(t *testing.T) {
 	if _, err := issuer.Exchange(context.Background(), ExchangeRequest{ContractVersion: Version, Binding: consumed.Binding, Token: consumed.Token}); err != nil {
 		t.Fatal(err)
 	}
-	completed := map[ExecutionScope]struct{}{neverExchanged.Binding.ExecutionScope(): {}}
-	if removed := store.garbageCollectCompleted(current, completed); removed != 1 || store.recordPresent(neverExchanged.Token) {
+	if removed := store.garbageCollectCompleted(current); removed != 1 || store.recordPresent(neverExchanged.Token) {
 		t.Fatalf("eligible expired record removed=%d present=%v", removed, store.recordPresent(neverExchanged.Token))
 	}
 	if !store.recordPresent(live.Token) || store.state(live.Token) != StateIssued {
@@ -865,8 +911,15 @@ func TestFakeIssuerMaintenanceExpiresAndReclaimsFromDeadline(t *testing.T) {
 	if terminalAt := lateStore.terminalAt(late.Token); terminalAt != late.ExpiresAt {
 		t.Fatalf("late observation extended retention: terminal=%q deadline=%q", terminalAt, late.ExpiresAt)
 	}
-	completed = map[ExecutionScope]struct{}{late.Binding.ExecutionScope(): {}}
-	if removed := lateStore.garbageCollectCompleted(lateCurrent, completed); removed != 1 || lateStore.recordPresent(late.Token) {
+	lateScope := late.Binding.ExecutionScope()
+	if err := lateIssuer.RevokeExecution(context.Background(), RevokeExecutionRequest{ContractVersion: Version, ExecutionScope: lateScope}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lateIssuer.CompleteExecutionCleanup(context.Background(), CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: lateScope}); err != nil {
+		t.Fatal(err)
+	}
+	lateCurrent = lateCurrent.Add(MaxTombstoneRetention)
+	if removed := lateStore.garbageCollectCompleted(lateCurrent); removed != 1 || lateStore.recordPresent(late.Token) {
 		t.Fatalf("late-observed expired record was not immediately eligible: removed=%d present=%v", removed, lateStore.recordPresent(late.Token))
 	}
 }
@@ -946,7 +999,6 @@ func TestFakeIssuerTombstonesShareTheHardCapacityBound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	completed := make(map[ExecutionScope]struct{}, maxFakeEntries-1)
 	for index := 0; index < maxFakeEntries-1; index++ {
 		binding := live.Binding
 		binding.AgentRunUID = fmt.Sprintf("completed-run-%d", index)
@@ -956,7 +1008,13 @@ func TestFakeIssuerTombstonesShareTheHardCapacityBound(t *testing.T) {
 		if err := issuer.RevokeBinding(context.Background(), RevokeBindingRequest{ContractVersion: Version, Binding: binding}); err != nil {
 			t.Fatalf("fill tombstone %d: %v", index, err)
 		}
-		completed[binding.ExecutionScope()] = struct{}{}
+		scope := binding.ExecutionScope()
+		if err := issuer.RevokeExecution(context.Background(), RevokeExecutionRequest{ContractVersion: Version, ExecutionScope: scope}); err != nil {
+			t.Fatalf("compact scope tombstone %d: %v", index, err)
+		}
+		if err := issuer.CompleteExecutionCleanup(context.Background(), CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: scope}); err != nil {
+			t.Fatalf("complete scope %d: %v", index, err)
+		}
 	}
 	if store.usedEntries() != maxFakeEntries {
 		t.Fatalf("durable entry count = %d, want %d", store.usedEntries(), maxFakeEntries)
@@ -979,11 +1037,13 @@ func TestFakeIssuerTombstonesShareTheHardCapacityBound(t *testing.T) {
 	if store.activeRuntimeIdentities(live.Binding.ExecutionScope()) != 0 || store.usedEntries() != maxFakeEntries {
 		t.Fatal("execution cleanup at capacity did not atomically replace its record with a tombstone")
 	}
-	if removed := store.garbageCollectCompleted(now.Add(MaxTombstoneRetention), completed); removed != maxFakeEntries-1 || store.usedEntries() != 1 {
+	if removed := store.garbageCollectCompleted(now.Add(MaxTombstoneRetention)); removed != maxFakeEntries-1 || store.usedEntries() != 1 {
 		t.Fatalf("completed-scope tombstone GC removed=%d entries=%d", removed, store.usedEntries())
 	}
-	completed[live.Binding.ExecutionScope()] = struct{}{}
-	if removed := store.garbageCollectCompleted(now.Add(MaxTombstoneRetention), completed); removed != 1 || store.usedEntries() != 0 {
+	if err := issuer.CompleteExecutionCleanup(context.Background(), CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: live.Binding.ExecutionScope()}); err != nil {
+		t.Fatal(err)
+	}
+	if removed := store.garbageCollectCompleted(now.Add(MaxTombstoneRetention)); removed != 1 || store.usedEntries() != 0 {
 		t.Fatalf("completed execution tombstone GC removed=%d entries=%d", removed, store.usedEntries())
 	}
 }

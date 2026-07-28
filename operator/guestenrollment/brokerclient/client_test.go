@@ -50,6 +50,9 @@ func TestClientIssueRevokeAndAuthoritativeShutdown(t *testing.T) {
 	}))
 	defer server.Close()
 	client := newTestClient(t, server, token)
+	if !client.EnabledFor("fake-vm") || client.EnabledFor("other-vm") {
+		t.Fatal("client registration allowlist is not exact")
+	}
 	issued, err := client.Issue(context.Background(), guestenrollment.IssueRequest{ContractVersion: guestenrollment.Version, Binding: binding})
 	if err != nil || issued.Token != envelope.Token || issued.Binding != binding {
 		t.Fatalf("issue=%#v err=%v", issued, err)
@@ -60,6 +63,9 @@ func TestClientIssueRevokeAndAuthoritativeShutdown(t *testing.T) {
 	if err := client.RevokeExecution(context.Background(), guestenrollment.RevokeExecutionRequest{ContractVersion: guestenrollment.Version, ExecutionScope: binding.ExecutionScope()}); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.CompleteExecutionCleanup(context.Background(), guestenrollment.CompleteExecutionCleanupRequest{ContractVersion: guestenrollment.Version, ExecutionScope: binding.ExecutionScope()}); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +74,7 @@ func TestClientIssueRevokeAndAuthoritativeShutdown(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	want := []string{"/v1/guest-enrollment/issue", "/v1/guest-enrollment/revoke-binding", "/v1/guest-enrollment/revoke-execution"}
+	want := []string{"/v1/guest-enrollment/issue", "/v1/guest-enrollment/revoke-binding", "/v1/guest-enrollment/revoke-execution", "/v1/guest-enrollment/complete-execution-cleanup"}
 	if strings.Join(paths, ",") != strings.Join(want, ",") {
 		t.Fatalf("paths=%#v", paths)
 	}
@@ -204,7 +210,7 @@ func newTestClientWithTimeout(t *testing.T, server *httptest.Server, token strin
 	}
 	client, err := New(Config{
 		BaseURL: server.URL, ServerName: certificate.DNSNames[0], CAFile: caPath, BearerTokenFile: tokenPath,
-		RequestTimeout: timeout, HandoffTimeout: time.Second, TTLSeconds: 300,
+		RequestTimeout: timeout, HandoffTimeout: time.Second, TTLSeconds: 300, Registrations: []string{"fake-vm"},
 	})
 	if err != nil {
 		t.Fatal(err)

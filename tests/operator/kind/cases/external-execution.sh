@@ -81,6 +81,7 @@ executionDrivers:
     pullPolicy: IfNotPresent
   guestEnrollment:
     enabled: true
+    registrations: [fake-vm]
     brokerURL: https://nvt-broker.${NAMESPACE}.svc:7347
     serverName: nvt-broker.${NAMESPACE}.svc
     ca:
@@ -183,9 +184,9 @@ import sqlite3,sys
 db=sqlite3.connect("/state/guest-enrollment.sqlite3")
 key=(sys.argv[1],sys.argv[2],"fake-vm")
 rows=db.execute("SELECT state,runtime_identity_active FROM enrollments WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",key).fetchall()
-tombstone=db.execute("SELECT count(*) FROM execution_tombstones WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",key).fetchone()[0]
+tombstone=db.execute("SELECT cleanup_completed_at FROM execution_tombstones WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",key).fetchone()
 assert not rows
-assert tombstone==1
+assert tombstone is not None and tombstone[0] is not None
 ' "${EXTERNAL_AGENTRUN_UID}" "${EXTERNAL_EXECUTION_ID}"
 }
 

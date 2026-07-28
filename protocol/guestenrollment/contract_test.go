@@ -29,6 +29,7 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	}
 	revokeBinding := RevokeBindingRequest{ContractVersion: Version, Binding: binding}
 	revokeExecution := RevokeExecutionRequest{ContractVersion: Version, ExecutionScope: binding.ExecutionScope()}
+	completeCleanup := CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: binding.ExecutionScope()}
 
 	for name, validation := range map[string]func() error{
 		"issue":            func() error { return ValidateIssueRequest(issue) },
@@ -37,6 +38,7 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 		"result":           func() error { return ValidateExchangeResult(result) },
 		"revoke binding":   func() error { return ValidateRevokeBindingRequest(revokeBinding) },
 		"revoke execution": func() error { return ValidateRevokeExecutionRequest(revokeExecution) },
+		"complete cleanup": func() error { return ValidateCompleteExecutionCleanupRequest(completeCleanup) },
 	} {
 		if err := validation(); err != nil {
 			t.Fatalf("valid %s: %v", name, err)
@@ -56,6 +58,7 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	resultJSON, _ := json.Marshal(result)
 	revokeBindingJSON, _ := json.Marshal(revokeBinding)
 	revokeExecutionJSON, _ := json.Marshal(revokeExecution)
+	completeCleanupJSON, _ := json.Marshal(completeCleanup)
 	if _, err := DecodeIssueRequest(issueJSON); err != nil {
 		t.Fatalf("decode issue: %v", err)
 	}
@@ -70,6 +73,12 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	}
 	if _, err := DecodeRevokeExecutionRequest(revokeExecutionJSON); err != nil {
 		t.Fatalf("decode execution revoke: %v", err)
+	}
+	if _, err := DecodeCompleteExecutionCleanupRequest(completeCleanupJSON); err != nil {
+		t.Fatalf("decode cleanup completion: %v", err)
+	}
+	if _, err := DecodeCompleteExecutionCleanupRequest([]byte(`{"contract_version":"nvt.guest-enrollment/v1","execution_scope":{"agent_run_uid":"uid","execution_id":"execution","driver_registration":"driver"},"token":"forbidden"}`)); err == nil {
+		t.Fatal("credential-bearing cleanup completion request was accepted")
 	}
 	if _, err := DecodeRevokeExecutionRequest([]byte(`{"contract_version":"nvt.guest-enrollment/v1","execution_scope":{"agent_run_uid":"uid","execution_id":"execution","driver_registration":"driver"},"token":"forbidden"}`)); err == nil {
 		t.Fatal("credential-bearing execution revocation request was accepted")

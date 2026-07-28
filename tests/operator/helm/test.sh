@@ -98,6 +98,7 @@ helm template nvt "${CHART}" -n custom-ns \
 helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set executionDrivers.guestEnrollment.enabled=true \
+  --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
   --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc:7347 \
   --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc \
   --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
@@ -708,18 +709,39 @@ assert config == {
     "requestTimeoutSeconds": 30,
     "handoffTimeoutSeconds": 30,
     "ttlSeconds": 300,
+    "driverRegistrations": ["fake-east"],
 }
 volume = next(item for item in operator["volumes"] if item["name"] == "guest-enrollment-client")
 assert volume["projected"]["defaultMode"] == 0o440
 projection_text = json.dumps(volume, sort_keys=True)
 assert "nvt-broker-tls" in projection_text and "nvt-enrollment-orchestrator" in projection_text and "control-token" in projection_text
 assert "orchestrator-token-" not in projection_text
-for name in ("fake-east", "fake-west"):
-    args = deployments[f"nvt-execution-driver-{name}"]["spec"]["template"]["spec"]["containers"][0]["args"]
-    assert "--enrollment-socket=/tmp/nvt-guest-enrollment.sock" in args
-    assert "--enrollment-timeout=30s" in args
+east_args = deployments["nvt-execution-driver-fake-east"]["spec"]["template"]["spec"]["containers"][0]["args"]
+west_args = deployments["nvt-execution-driver-fake-west"]["spec"]["template"]["spec"]["containers"][0]["args"]
+assert "--enrollment-socket=/tmp/nvt-guest-enrollment.sock" in east_args
+assert "--enrollment-timeout=30s" in east_args
+assert "--enrollment-socket=/tmp/nvt-guest-enrollment.sock" not in west_args
+assert not any(item.startswith("--enrollment-timeout=") for item in west_args)
+for args in (east_args, west_args):
     assert not any(item.startswith("--operation-timeout=") for item in args)
 PY
+
+for invalid_enrollment_registrations in \
+  '--set executionDrivers.guestEnrollment.registrations[0]=missing' \
+  '--set executionDrivers.guestEnrollment.registrations[0]=fake-east --set executionDrivers.guestEnrollment.registrations[1]=fake-east'; do
+  read -r -a registration_args <<< "${invalid_enrollment_registrations}"
+  if helm template nvt "${CHART}" -n custom-ns \
+    -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+    --set executionDrivers.guestEnrollment.enabled=true \
+    --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc:7347 \
+    --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc \
+    --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
+    --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
+    "${registration_args[@]}" > /dev/null 2> "${EXECUTION_DRIVER_FAILURE}"; then
+    echo "expected invalid guest enrollment registration selection to fail: ${invalid_enrollment_registrations}" >&2
+    exit 1
+  fi
+done
 
 for enrollment_failure in \
   '--set executionDrivers.guestEnrollment.enabled=true' \
@@ -1423,6 +1445,7 @@ grep -q 'key: "control-plane-token"' "${BROKER_ENROLLMENT_RENDER}"
 grep -q 'defaultMode: 0400' "${BROKER_ENROLLMENT_RENDER}"
 grep -q 'mountPath: /guest-enrollment-auth' "${BROKER_ENROLLMENT_RENDER}"
 grep -q 'readinessProbe:' "${BROKER_ENROLLMENT_RENDER}"
+grep -q 'restart both the broker and operator Deployments' "${CHART}/README.md"
 if has_resource "${BROKER_ENROLLMENT_RENDER}" Secret nvt-guest-enrollment-orchestrator; then
   echo "guest enrollment must reference, never create, the orchestrator auth Secret" >&2
   exit 1

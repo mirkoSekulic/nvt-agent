@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 VERSION = "nvt.guest-enrollment/v1"
 RUNTIME_IDENTITY_TYPE = "nvt.runtime-identity/v1"
-STORE_SCHEMA_VERSION = "2"
+STORE_SCHEMA_VERSION = "3"
 TOKEN_BYTES = 32
 MAX_ISSUE_REQUEST_BYTES = 4 << 10
 MAX_EXCHANGE_REQUEST_BYTES = 16 << 10
@@ -39,11 +39,13 @@ ISSUE_PATH = "/v1/guest-enrollment/issue"
 EXCHANGE_PATH = "/v1/guest-enrollment/exchange"
 REVOKE_BINDING_PATH = "/v1/guest-enrollment/revoke-binding"
 REVOKE_EXECUTION_PATH = "/v1/guest-enrollment/revoke-execution"
+COMPLETE_EXECUTION_CLEANUP_PATH = "/v1/guest-enrollment/complete-execution-cleanup"
 ENDPOINT_LIMITS = {
     ISSUE_PATH: MAX_ISSUE_REQUEST_BYTES,
     EXCHANGE_PATH: MAX_EXCHANGE_REQUEST_BYTES,
     REVOKE_BINDING_PATH: MAX_REVOCATION_REQUEST_BYTES,
     REVOKE_EXECUTION_PATH: MAX_REVOCATION_REQUEST_BYTES,
+    COMPLETE_EXECUTION_CLEANUP_PATH: MAX_REVOCATION_REQUEST_BYTES,
 }
 
 DRIVER_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
@@ -440,6 +442,47 @@ class GuestEnrollmentIssuer:
         finally:
             connection.close()
 
+    def complete_execution_cleanup(self, request):
+        scope = validate_complete_execution_cleanup_request(request)
+        now = self._now()
+        connection = self._connect_or_failure()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._validate_store(connection)
+            values = _scope_values(scope)
+            row = connection.execute(
+                """
+                SELECT created_at, cleanup_completed_at
+                  FROM execution_tombstones
+                 WHERE agent_run_uid = ? AND execution_id = ? AND driver_registration = ?
+                """,
+                values,
+            ).fetchone()
+            # Absence is an idempotent success after eligible maintenance has
+            # already reclaimed a previously completed scope. The trusted
+            # orchestrator contract still requires revoke-before-complete.
+            if row is not None and row["cleanup_completed_at"] is None:
+                created_at = parse_timestamp(row["created_at"])
+                completed_at = format_timestamp(max(now, created_at))
+                connection.execute(
+                    """
+                    UPDATE execution_tombstones
+                       SET cleanup_completed_at = ?
+                     WHERE agent_run_uid = ? AND execution_id = ? AND driver_registration = ?
+                    """,
+                    (completed_at, *values),
+                )
+            self._collect_completed(connection, now)
+            connection.commit()
+        except EnrollmentFailure:
+            _rollback(connection)
+            raise
+        except sqlite3.Error as error:
+            _rollback(connection)
+            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+        finally:
+            connection.close()
+
     def maintain(self):
         now = self._now()
         connection = self._connect_or_failure()
@@ -456,6 +499,7 @@ class GuestEnrollmentIssuer:
                 """,
                 (format_timestamp(now),),
             )
+            self._collect_completed(connection, now)
             connection.commit()
         except sqlite3.Error as error:
             _rollback(connection)
@@ -464,54 +508,12 @@ class GuestEnrollmentIssuer:
             connection.close()
 
     def garbage_collect_completed(self, scopes):
-        """Reclaim retained state only for authoritatively completed scopes."""
+        """Test helper using the same durable completion and maintenance path."""
         if not isinstance(scopes, (list, tuple)) or len(scopes) > self.max_entries:
             raise EnrollmentFailure("invalid-request", 400)
-        validated = [validate_scope(scope, exact=True) for scope in scopes]
-        now = self._now()
-        now_value = format_timestamp(now)
-        retention_cutoff = format_timestamp(now - TOMBSTONE_RETENTION)
-        connection = self._connect_or_failure()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            self._validate_store(connection)
-            self._expire_issued(connection, now)
-            for scope in validated:
-                values = _scope_values(scope)
-                connection.execute(
-                    """
-                    DELETE FROM binding_tombstones
-                     WHERE agent_run_uid = ? AND execution_id = ? AND driver_registration = ?
-                       AND delete_after <= ?
-                    """,
-                    (*values, now_value),
-                )
-                connection.execute(
-                    """
-                    DELETE FROM enrollments
-                     WHERE agent_run_uid = ? AND execution_id = ? AND driver_registration = ?
-                       AND terminal_at IS NOT NULL AND terminal_at <= ?
-                       AND runtime_identity_active = 0
-                    """,
-                    (*values, retention_cutoff),
-                )
-                connection.execute(
-                    """
-                    DELETE FROM execution_tombstones
-                     WHERE agent_run_uid = ? AND execution_id = ? AND driver_registration = ?
-                       AND delete_after <= ?
-                    """,
-                    (*values, now_value),
-                )
-            connection.commit()
-        except EnrollmentFailure:
-            _rollback(connection)
-            raise
-        except sqlite3.Error as error:
-            _rollback(connection)
-            raise EnrollmentFailure("issuer-storage-failed", 503) from error
-        finally:
-            connection.close()
+        for scope in scopes:
+            self.complete_execution_cleanup({"contract_version": VERSION, "execution_scope": scope})
+        self.maintain()
 
     def snapshot(self):
         """Return non-secret durable state for tests and bounded diagnostics."""
@@ -586,6 +588,7 @@ class GuestEnrollmentIssuer:
                     driver_registration TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     delete_after TEXT NOT NULL,
+                    cleanup_completed_at TEXT,
                     PRIMARY KEY (agent_run_uid, execution_id, driver_registration)
                 ) WITHOUT ROWID;
                 """
@@ -593,10 +596,12 @@ class GuestEnrollmentIssuer:
             row = connection.execute("SELECT value FROM enrollment_meta WHERE key = 'schema_version'").fetchone()
             if row is None:
                 connection.execute("INSERT INTO enrollment_meta (key, value) VALUES ('schema_version', ?)", (STORE_SCHEMA_VERSION,))
-            elif row[0] == "1":
+            elif row[0] in ("1", "2"):
                 connection.execute("BEGIN IMMEDIATE")
                 try:
-                    self._migrate_schema_v1(connection)
+                    if row[0] == "1":
+                        self._migrate_schema_v1(connection)
+                    self._migrate_schema_v2(connection)
                     connection.execute(
                         "UPDATE enrollment_meta SET value = ? WHERE key = 'schema_version'",
                         (STORE_SCHEMA_VERSION,),
@@ -651,6 +656,11 @@ class GuestEnrollmentIssuer:
                     (created_at, *(row[column] for column in key_columns)),
                 )
 
+    def _migrate_schema_v2(self, connection):
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(execution_tombstones)")}
+        if "cleanup_completed_at" not in columns:
+            connection.execute("ALTER TABLE execution_tombstones ADD COLUMN cleanup_completed_at TEXT")
+
     def _connect(self):
         connection = sqlite3.connect(self.database_path, timeout=5.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
@@ -695,7 +705,8 @@ class GuestEnrollmentIssuer:
         ).fetchall()
         execution_tombstones = connection.execute(
             """
-            SELECT agent_run_uid, execution_id, driver_registration, created_at, delete_after
+            SELECT agent_run_uid, execution_id, driver_registration, created_at,
+                   delete_after, cleanup_completed_at
               FROM execution_tombstones
             """
         ).fetchall()
@@ -727,6 +738,15 @@ class GuestEnrollmentIssuer:
         return sum(
             connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in ("enrollments", "binding_tombstones", "execution_tombstones")
+        )
+
+    def _collect_completed(self, connection, now):
+        connection.execute(
+            """
+            DELETE FROM execution_tombstones
+             WHERE cleanup_completed_at IS NOT NULL AND delete_after <= ?
+            """,
+            (format_timestamp(now),),
         )
 
     def _binding_record(self, connection, binding):
@@ -853,6 +873,13 @@ def validate_revoke_binding_request(value):
 
 
 def validate_revoke_execution_request(value):
+    _exact_keys(value, {"contract_version", "execution_scope"})
+    if value["contract_version"] != VERSION:
+        _invalid()
+    return validate_scope(value["execution_scope"], exact=True)
+
+
+def validate_complete_execution_cleanup_request(value):
     _exact_keys(value, {"contract_version", "execution_scope"})
     if value["contract_version"] != VERSION:
         _invalid()
@@ -1019,6 +1046,9 @@ def _validate_persisted_execution_tombstone(row):
         created_at = parse_timestamp(row["created_at"])
         delete_after = parse_timestamp(row["delete_after"])
         if not created_at <= delete_after or delete_after - created_at > TOMBSTONE_RETENTION:
+            raise ValueError
+        cleanup_completed = row["cleanup_completed_at"]
+        if cleanup_completed is not None and parse_timestamp(cleanup_completed) < created_at:
             raise ValueError
     except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
         raise sqlite3.DatabaseError("guest enrollment database contains an invalid execution tombstone") from error
