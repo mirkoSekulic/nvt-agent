@@ -11,11 +11,13 @@ import (
 )
 
 const (
-	RuntimeIdentityVersion               = "nvt.guest-runtime-identity/v1"
-	RuntimeIdentityBytes                 = 32
-	MaxRuntimeIdentityStatusRequestBytes = 4 << 10
-	MaxRuntimeIdentityRotateRequestBytes = 16 << 10
-	MaxRuntimeIdentityResponseBytes      = 16 << 10
+	RuntimeIdentityVersion                 = "nvt.guest-runtime-identity/v1"
+	RuntimeIdentityBytes                   = 32
+	MaxRuntimeIdentityStatusRequestBytes   = 4 << 10
+	MaxRuntimeIdentityRotateRequestBytes   = 16 << 10
+	MaxRuntimeIdentityResponseBytes        = 16 << 10
+	MaxRuntimeIdentityHistoryPerEnrollment = 1024
+	MaxRuntimeIdentityHistoryEntries       = 10_000
 )
 
 // RuntimeIdentityStatusRequest authenticates with the opaque identity in the

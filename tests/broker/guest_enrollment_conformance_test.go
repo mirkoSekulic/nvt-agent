@@ -85,10 +85,14 @@ func TestGuestEnrollmentAPIExactLifecycleRestartAndScopeCleanup(t *testing.T) {
 	}
 	status, body = fixture.postJSONWithToken(identity, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
 	assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	status, body = fixture.postJSONWithToken(successor, guestRuntimeIdentityRotate, runtimeIdentityRotateRequest(first, identity))
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 	fixture.stop()
 	fixture.start()
 	status, body = fixture.postJSONWithToken(successor, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
 	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	status, body = fixture.postJSONWithToken(successor, guestRuntimeIdentityRotate, runtimeIdentityRotateRequest(first, identity))
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 	status, body = fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(first))
 	assertEnrollmentStatus(t, status, body, http.StatusConflict, "already-consumed")
 
@@ -318,33 +322,94 @@ func TestGuestEnrollmentControlRequestBodiesHaveIndependentBound(t *testing.T) {
 
 func TestGuestRuntimeIdentityBodiesCannotStarveRevocation(t *testing.T) {
 	fixture := newGuestEnrollmentBrokerFixture(t)
-	const runtimeHTTPBound = 64
+	unknown := openIncompleteEnrollmentRequest(t, fixture, guestRuntimeIdentityRotate, runtimeIdentityCanary(0x7a))
+	if err := unknown.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	unknownStatus, err := bufio.NewReader(unknown).ReadString('\n')
+	_ = unknown.Close()
+	if err != nil || !strings.Contains(unknownStatus, " 401 ") {
+		t.Fatalf("unknown runtime identity retained a slow body slot: status=%q err=%v", strings.TrimSpace(unknownStatus), err)
+	}
+
+	firstRequest := enrollmentIssueRequest("runtime-saturated-uid", "runtime-saturated-execution", 1, "runtime-saturated-guest", 300)
+	status, first := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, firstRequest)
+	assertEnrollmentStatus(t, status, first, http.StatusOK, "")
+	status, firstExchange := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(first))
+	assertEnrollmentStatus(t, status, firstExchange, http.StatusOK, "")
+	firstIdentity := cloneObject(firstExchange["runtime_identity"])["opaque"].(string)
+
+	secondRequest := enrollmentIssueRequest("runtime-second-uid", "runtime-second-execution", 1, "runtime-second-guest", 300)
+	status, second := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, secondRequest)
+	assertEnrollmentStatus(t, status, second, http.StatusOK, "")
+	status, secondExchange := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(second))
+	assertEnrollmentStatus(t, status, secondExchange, http.StatusOK, "")
+	secondIdentity := cloneObject(secondExchange["runtime_identity"])["opaque"].(string)
+
+	const perIdentityHTTPBound = 4
 	slow := saturateEnrollmentRequestSlots(
 		t,
 		fixture,
 		guestRuntimeIdentityRotate,
-		runtimeIdentityCanary(0x7a),
-		runtimeHTTPBound,
+		firstIdentity,
+		perIdentityHTTPBound,
 	)
 	t.Cleanup(func() {
 		for _, connection := range slow {
 			_ = connection.Close()
 		}
 	})
-	status, body := fixture.postEnrollmentRaw(runtimeIdentityCanary(0x7a), guestRuntimeIdentityRotate, []byte(`{}`))
+	status, body := fixture.postEnrollmentRaw(firstIdentity, guestRuntimeIdentityRotate, []byte(`{}`))
 	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+	status, body = fixture.postJSONWithToken(secondIdentity, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(second))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 
-	request := enrollmentIssueRequest("runtime-saturated-uid", "runtime-saturated-execution", 1, "runtime-saturated-guest", 300)
 	started := time.Now()
 	status, body = fixture.postJSONWithToken(
 		guestEnrollmentOrchestrator,
 		guestEnrollmentRevokeExecution,
-		enrollmentRevokeExecutionRequest(request),
+		enrollmentRevokeExecutionRequest(firstRequest),
 	)
 	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 	if elapsed := time.Since(started); elapsed >= 2*time.Second {
 		t.Fatalf("revocation was delayed by saturated runtime identity traffic: %s", elapsed)
 	}
+}
+
+func TestGuestRuntimeIdentityRateAdmissionIsIsolated(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	issueAndExchange := func(uid string) (map[string]any, string) {
+		request := enrollmentIssueRequest(uid, uid+"-execution", 1, uid+"-guest", 300)
+		status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+		assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+		status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+		assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+		return envelope, cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+	}
+	first, firstIdentity := issueAndExchange("rate-first")
+	second, secondIdentity := issueAndExchange("rate-second")
+
+	for value := byte(0xa0); value < 0xa8; value++ {
+		status, body := fixture.postJSONWithToken(runtimeIdentityCanary(value), guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	}
+
+	limited := false
+	deadline := time.Now().Add(3 * time.Second)
+	for attempts := 0; attempts < 128 && time.Now().Before(deadline); attempts++ {
+		status, body := fixture.postJSONWithToken(firstIdentity, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(first))
+		if status == http.StatusTooManyRequests {
+			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+			limited = true
+			break
+		}
+		assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	}
+	if !limited {
+		t.Fatal("noisy runtime identity did not reach its bounded rate admission")
+	}
+	status, body := fixture.postJSONWithToken(secondIdentity, guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(second))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 }
 
 func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) {
@@ -371,10 +436,16 @@ func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) 
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 	status, body = fixture.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentCompleteCleanup, duplicate)
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	runtimeRequest := enrollmentIssueRequest("strict-runtime-uid", "strict-runtime-execution", 1, "strict-runtime-guest", 300)
+	status, runtimeEnvelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, runtimeRequest)
+	assertEnrollmentStatus(t, status, runtimeEnvelope, http.StatusOK, "")
+	status, runtimeExchange := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(runtimeEnvelope))
+	assertEnrollmentStatus(t, status, runtimeExchange, http.StatusOK, "")
+	runtimeIdentity := cloneObject(runtimeExchange["runtime_identity"])["opaque"].(string)
 	runtimeDuplicate := []byte(`{"contract_version":"nvt.guest-runtime-identity/v1","binding":{},"successor":"x","successor":"y"}`)
-	status, body = fixture.postEnrollmentRaw(runtimeIdentityCanary(0x44), guestRuntimeIdentityRotate, runtimeDuplicate)
+	status, body = fixture.postEnrollmentRaw(runtimeIdentity, guestRuntimeIdentityRotate, runtimeDuplicate)
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
-	status, body = fixture.postEnrollmentRaw(runtimeIdentityCanary(0x44), guestRuntimeIdentityRotate, bytes.Repeat([]byte{' '}, (16<<10)+1))
+	status, body = fixture.postEnrollmentRaw(runtimeIdentity, guestRuntimeIdentityRotate, bytes.Repeat([]byte{' '}, (16<<10)+1))
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 
 	disabled := newBrokerFixture(t)

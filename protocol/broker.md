@@ -128,12 +128,16 @@ Valid-shaped absent tokens are rejected through indexed read-only lookups and
 never acquire the SQLite writer lock. A token that selects durable state must
 enter the transactional writer path, which validates the complete bounded
 store before consuming the token or issuing an identity.
-Runtime status/rotation bodies have an independent 64-request HTTP bound and a
-32-operation issuer bound with the same bounded token-bucket policy. They do
-not consume the control-plane revocation body slots. Valid-shaped absent
-identity digests are rejected through an indexed read-only preflight; only an
-identity selecting durable state reaches complete-store validation or the
-rotation writer transaction.
+Runtime status/rotation bodies have an independent 64-request HTTP bound, a
+32-operation issuer bound, and per-enrollment body-concurrency and token-bucket
+bounds. They do not consume the control-plane revocation body slots. An indexed
+digest lookup authenticates an active identity before body admission, so an
+unknown identity consumes neither a body slot nor another identity's quota.
+A noisy valid identity can exhaust only its own quota. Normal status and
+rotation validate the selected record and at most 1,024 digest-only predecessor
+entries; complete-store validation remains a startup, readiness, maintenance,
+and trusted control-plane operation. A known integrity failure latches the
+issuer unhealthy and all runtime operations fail closed.
 Runtime identity timestamps use the later of the issuer's current wall clock
 and the enrollment's durable `issued_at`, so a backward clock adjustment cannot
 commit a record that the same issuer subsequently rejects as malformed.
@@ -152,7 +156,11 @@ movement. Maintenance does not infer AgentRun cleanup from elapsed time.
 Tombstones and terminal records are reclaimed only after the authenticated
 cleanup-complete operation durably marks the exact revoked scope and the
 retention deadline has passed. Until then the 10,000-entry hard bound fails
-closed rather than evicting live or revocation state.
+closed rather than evicting live or revocation state. Runtime identity history
+has a separate 10,000-entry issuer bound and 1,024-entry per-enrollment bound.
+Rotation records the retired digest atomically and rejects any successor digest
+already current or historical. Exact-binding and execution cleanup delete all
+matching history.
 
 ### POST /v1/http/request
 

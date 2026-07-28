@@ -55,9 +55,14 @@ An enrolled guest can authenticate and atomically rotate its opaque control-
 plane identity using
 [`nvt.guest-runtime-identity/v1`](../protocol/guest-runtime-identity.md). The
 guest proposes a cryptographically random successor; SQLite commits only its
-digest and the broker-owned validity window. Ambiguous response recovery checks
-the already-known successor before retrying the same proposal. Execution
-revocation removes whichever rotated digest is current.
+digest and the broker-owned validity window. Bounded digest-only predecessor
+history prevents a retired identity from being selected again, including after
+a broker restart. Ambiguous response recovery checks the already-known
+successor before retrying the same proposal. Exact-binding and execution
+revocation remove the current digest and its complete predecessor history.
+Runtime requests authenticate by indexed digest before body admission and use
+per-enrollment quotas, so unknown or noisy guests cannot consume another
+guest's runtime-identity capacity.
 
 SQLite is used in single-writer mode. One broker process owns the database;
 deployments must not share it across replicas. The broker readiness endpoint

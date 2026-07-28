@@ -18,8 +18,9 @@ type runtimeIdentityRecord struct {
 }
 
 type runtimeIdentityStore struct {
-	mu     sync.Mutex
-	record runtimeIdentityRecord
+	mu      sync.Mutex
+	record  runtimeIdentityRecord
+	history map[string]struct{}
 }
 
 type fakeRuntimeIdentityAuthority struct {
@@ -60,10 +61,17 @@ func (authority *fakeRuntimeIdentityAuthority) Rotate(_ context.Context, identit
 	if _, err := authority.statusLocked(currentDigest, request.Binding); err != nil {
 		return RuntimeIdentityStatus{}, err
 	}
+	if _, reused := authority.store.history[successorDigest]; reused {
+		return RuntimeIdentityStatus{}, NewFailure(ReasonInvalidRequest)
+	}
+	if len(authority.store.history) >= MaxRuntimeIdentityHistoryPerEnrollment {
+		return RuntimeIdentityStatus{}, NewFailure(ReasonCapacity)
+	}
 	now := authority.now().UTC().Truncate(time.Second)
 	if now.Before(authority.store.record.IssuedAt) {
 		now = authority.store.record.IssuedAt
 	}
+	authority.store.history[currentDigest] = struct{}{}
 	authority.store.record.Digest = successorDigest
 	authority.store.record.IssuedAt = now
 	authority.store.record.ExpiresAt = now.Add(time.Hour)
@@ -97,7 +105,7 @@ func TestRuntimeIdentityRotationConformance(t *testing.T) {
 	initialDigest, _ := RuntimeIdentityDigest(initial)
 	store := &runtimeIdentityStore{record: runtimeIdentityRecord{
 		Digest: initialDigest, Binding: binding, IssuedAt: now, ExpiresAt: now.Add(time.Hour), Active: true,
-	}}
+	}, history: make(map[string]struct{})}
 	newAuthority := func() *fakeRuntimeIdentityAuthority {
 		return &fakeRuntimeIdentityAuthority{store: store, now: func() time.Time { return clock }}
 	}
@@ -116,6 +124,9 @@ func TestRuntimeIdentityRotationConformance(t *testing.T) {
 	}
 	if _, err := newAuthority().Authenticate(context.Background(), first, statusRequest); err != nil {
 		t.Fatalf("status after restart: %v", err)
+	}
+	if _, err := newAuthority().Rotate(context.Background(), first, RuntimeIdentityRotateRequest{ContractVersion: RuntimeIdentityVersion, Binding: binding, Successor: initial}); runtimeFailureReason(err) != ReasonInvalidRequest {
+		t.Fatalf("historical predecessor reuse error = %v", err)
 	}
 
 	wrong := statusRequest
@@ -171,10 +182,17 @@ func TestRuntimeIdentityRotationConformance(t *testing.T) {
 	}
 	store.mu.Lock()
 	store.record.Active = false // execution-scope revocation after restart
+	store.record = runtimeIdentityRecord{}
+	store.history = make(map[string]struct{})
 	store.mu.Unlock()
 	if _, err := newAuthority().Authenticate(context.Background(), proposed, statusRequest); runtimeFailureReason(err) != ReasonUnauthorized {
 		t.Fatalf("revoked identity error = %v", err)
 	}
+	store.mu.Lock()
+	if len(store.history) != 0 {
+		t.Fatalf("revocation retained %d predecessor digests", len(store.history))
+	}
+	store.mu.Unlock()
 }
 
 func runtimeFailureReason(err error) FailureReason {

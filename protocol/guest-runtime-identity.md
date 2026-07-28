@@ -19,6 +19,8 @@ identity, a gateway routing credential, or an AgentRun field.
   diagnostics, image layers, or Helm values.
 - The broker persists only `sha256:<lowercase hex>` digests and non-secret
   binding/lifecycle metadata. It MUST NOT persist either plaintext identity.
+  Each enrollment lifecycle also retains a bounded digest-only predecessor
+  history so no identity previously used by that lifecycle can be revived.
 - Execution-scope or exact-binding revocation invalidates whichever rotated
   identity is current. Rotation does not change cleanup ownership.
 
@@ -64,16 +66,26 @@ with the current identity in the Authorization header and sends:
 
 The broker performs one durable compare-and-swap transaction:
 
-1. validate the complete bounded store and exact active predecessor;
+1. require a healthy store and validate the indexed exact active predecessor
+   plus its bounded lifecycle history;
 2. reject an expired/revoked identity, wrong binding, reused successor, or
-   identity not owned by this record;
-3. replace the current digest with the successor digest;
+   identity digest currently or historically owned by any record;
+3. add the predecessor digest to history and replace the current digest with
+   the successor digest atomically;
 4. assign a broker-owned canonical issuance/expiry window; and
 5. commit before returning the non-secret status response above.
 
 Exactly one concurrent rotation from a predecessor can commit. Once committed,
-the predecessor cannot authenticate. A successful response never echoes the
-successor.
+the predecessor cannot authenticate and it can never be selected as a later
+successor. A successful response never echoes the successor.
+
+History is bounded to 1,024 predecessor digests per enrollment and 10,000
+history entries per issuer. Saturation fails with `capacity-exceeded`; live
+history is never evicted to admit a rotation. Exact-binding and execution-scope
+revocation delete the corresponding current identity and all its history.
+Schema migration cannot reconstruct historical digests: an already-consumed
+pre-history record remains usable for status but rotation fails closed until
+the orchestrator revokes and re-enrolls that binding.
 
 ### Ambiguous response recovery
 
@@ -94,11 +106,12 @@ one current digest.
 ## Revocation, restart, and expiry
 
 Broker restart reconstructs authentication solely from the durable current
-digest, exact binding, and lifecycle timestamps. Process memory is not part of
-correctness. Existing exact-binding and execution-scope revocation delete the
-record containing the current digest, regardless of rotation count. Runtime
-expiry is broker-owned; a caller cannot extend it. Wall-clock rollback MUST NOT
-create a persisted window rejected by readiness validation.
+digest, predecessor digest history, exact binding, and lifecycle timestamps.
+Process memory is not part of correctness. Existing exact-binding and
+execution-scope revocation delete the record containing the current digest and
+its history, regardless of rotation count. Runtime expiry is broker-owned; a
+caller cannot extend it. Wall-clock rollback MUST NOT create a persisted window
+rejected by readiness validation.
 
 ## Framing and failures
 
@@ -113,6 +126,15 @@ authentication all return generic `unauthorized`. Malformed input returns
 `invalid-request`, admission saturation returns `capacity-exceeded`, and
 durable-store failure returns `issuer-storage-failed`. No response or audit/log
 record includes a bearer, digest, successor, request body, or SQLite diagnostic.
+
+Authentication is completed by an indexed digest lookup before a runtime body
+is admitted. Body concurrency and rate limits include per-enrollment bounds,
+so unknown or noisy identities cannot consume another identity's quota.
+Complete-store integrity validation occurs at startup, readiness, and
+maintenance. A detected integrity failure latches the issuer unhealthy and all
+runtime requests fail closed. Normal status and rotation validate only their
+indexed record and bounded lifecycle history; recurring guest work does not
+scan unrelated identities or hold the SQLite writer lock during a global scan.
 
 ## Current implementation boundary
 
