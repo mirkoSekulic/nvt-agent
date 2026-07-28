@@ -18,7 +18,7 @@ case_render() {
 case_kind_setup() {
   # Build before starting the control-plane so constrained development
   # environments cannot evict the Kind node during a cold Go image build.
-  make -C "${ROOT}" operator-build execution-driver-host-build
+  make -C "${ROOT}" operator-build execution-driver-host-build broker-build
   KIND_BUILDX_BUILDER="nvt-kind-oci-${CLUSTER}"
   docker buildx create --name "${KIND_BUILDX_BUILDER}" --driver docker-container --use >/dev/null
   docker buildx build --builder "${KIND_BUILDX_BUILDER}" --platform "linux/$(go env GOARCH)" \
@@ -43,9 +43,13 @@ case_kind_setup() {
 
   kind load docker-image nvt-operator:latest --name "${CLUSTER}"
   kind load docker-image nvt-execution-driver-host:latest --name "${CLUSTER}"
+  kind load docker-image nvt-broker:latest --name "${CLUSTER}"
   kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
   kubectl_smoke -n "${NAMESPACE}" create secret generic fake-driver-environment \
     --from-literal=state-dir=/tmp/nvt-fake-driver-state \
+    --dry-run=client -o yaml | kubectl_smoke apply -f -
+  kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-enrollment-orchestrator \
+    --from-literal=token=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_ \
     --dry-run=client -o yaml | kubectl_smoke apply -f -
 
   cat >"${SMOKE_TMPDIR}/external-execution-values.yaml" <<YAML
@@ -56,11 +60,39 @@ operator:
     repository: nvt-operator
     tag: latest
     pullPolicy: IfNotPresent
+broker:
+  image:
+    repository: nvt-broker
+    tag: latest
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 1Gi
+  guestEnrollment:
+    enabled: true
+    exchangeURL: https://nvt-broker.${NAMESPACE}.svc:7347/v1/guest-enrollment/exchange
+    orchestratorAuth:
+      existingSecret: nvt-enrollment-orchestrator
+      tokenKey: token
 executionDrivers:
   hostImage:
     repository: nvt-execution-driver-host
     tag: latest
     pullPolicy: IfNotPresent
+  guestEnrollment:
+    enabled: true
+    registrations: [fake-vm]
+    brokerURL: https://nvt-broker.${NAMESPACE}.svc:7347
+    serverName: nvt-broker.${NAMESPACE}.svc
+    ca:
+      existingSecret: nvt-broker-tls
+      key: ca.crt
+    orchestratorAuth:
+      existingSecret: nvt-enrollment-orchestrator
+      tokenKey: token
+    requestTimeoutSeconds: 10
+    handoffTimeoutSeconds: 10
+    ttlSeconds: 300
   registrations:
     - name: fake-vm
       image: ${EXTERNAL_DRIVER_IMAGE}
@@ -78,6 +110,7 @@ YAML
     --kube-context "${KUBECTL_CONTEXT}" -n "${NAMESPACE}" \
     --timeout "${ROLLOUT_TIMEOUT}" -f "${SMOKE_TMPDIR}/external-execution-values.yaml"
   kubectl_smoke rollout status deployment/nvt-execution-driver-fake-vm -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
+  kubectl_smoke rollout status deployment/nvt-broker -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
   kubectl_smoke rollout status deployment/nvt-operator -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
 }
 
@@ -108,6 +141,7 @@ YAML
   assert_no_agent_pod
   capture_external_execution_identity
   assert_fake_driver_state fixture-state-present
+  assert_fake_driver_state fixture-enrollment-accepted
 
   log "restarting the driver host and proving durable provider-state recovery"
   restart_driver_host
@@ -124,6 +158,7 @@ YAML
   local deadline=$((SECONDS + EXTERNAL_EXECUTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if ! kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" >/dev/null 2>&1; then
+      assert_broker_scope_revoked
       assert_fake_driver_state fixture-state-absent
       log "external AgentRun cleanup completed"
       return
@@ -135,9 +170,24 @@ YAML
 
 capture_external_execution_identity() {
   local uid
-  uid="$(kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.metadata.uid}')"
-  [[ -n "${uid}" ]] || die "external AgentRun has no immutable UID"
-  EXTERNAL_EXECUTION_ID="nvt-agentrun-$(printf '%s' "${uid}" | sha256sum | awk '{print $1}')"
+  EXTERNAL_AGENTRUN_UID="$(kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.metadata.uid}')"
+  [[ -n "${EXTERNAL_AGENTRUN_UID}" ]] || die "external AgentRun has no immutable UID"
+  EXTERNAL_EXECUTION_ID="nvt-agentrun-$(printf '%s' "${EXTERNAL_AGENTRUN_UID}" | sha256sum | awk '{print $1}')"
+}
+
+assert_broker_scope_revoked() {
+  local pod
+  pod="$(kubectl_smoke get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=nvt-broker -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "${pod}" ]] || die "broker Pod is unavailable"
+  kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c broker -- python3 -c '
+import sqlite3,sys
+db=sqlite3.connect("/state/guest-enrollment.sqlite3")
+key=(sys.argv[1],sys.argv[2],"fake-vm")
+rows=db.execute("SELECT state,runtime_identity_active FROM enrollments WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",key).fetchall()
+tombstone=db.execute("SELECT cleanup_completed_at FROM execution_tombstones WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",key).fetchone()
+assert not rows
+assert tombstone is not None and tombstone[0] is not None
+' "${EXTERNAL_AGENTRUN_UID}" "${EXTERNAL_EXECUTION_ID}"
 }
 
 external_driver_pod() {
@@ -192,11 +242,12 @@ restart_driver_host() {
 
 wait_for_external_running() {
   local deadline=$((SECONDS + EXTERNAL_EXECUTION_TIMEOUT_SECONDS))
-  local phase condition
+  local phase condition enrollment
   while (( SECONDS < deadline )); do
     phase="$(kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     condition="$(kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="ExternalExecutionReady")].status}' 2>/dev/null || true)"
-    if [[ "${phase}" == "Running" && "${condition}" == "True" ]]; then
+    enrollment="$(kubectl_smoke get agentrun external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="ExecutionBackendAvailable")].reason}' 2>/dev/null || true)"
+    if [[ "${phase}" == "Running" && "${condition}" == "True" && "${enrollment}" == "ExternalBootstrapAccepted" ]]; then
       return
     fi
     sleep 2

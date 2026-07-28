@@ -59,6 +59,8 @@ docker run -d --name "${CONTAINER}" \
   --tls-cert=/auth/tls.crt \
   --tls-key=/auth/tls.key \
   --auth-token=/auth/auth-token \
+  --enrollment-socket=/tmp/nvt-guest-enrollment.sock \
+  --enrollment-timeout=5s \
   --initialize-timeout=5s \
   --operation-timeout=5s >/dev/null
 
@@ -114,6 +116,65 @@ assert value["status"]["phase"] == "running"
 assert value["status"]["ready"] is True
 assert value["status"]["external_resource_id"]
 PY
+
+prepare_payload='{"contract_version":"nvt.guest-enrollment-handoff/v1","execution_scope":{"agent_run_uid":"00000000-0000-0000-0000-000000000001","execution_id":"oci-smoke","driver_registration":"fake-oci"},"desired_generation":1}'
+prepare_code="$(curl --silent --noproxy '*' --output "${WORKDIR}/prepare.json" --write-out '%{http_code}' --cacert "${WORKDIR}/auth/tls.crt" \
+  --resolve "nvt-driver.test:${port}:127.0.0.1" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $(cat "${WORKDIR}/auth/auth-token")" \
+  --data "${prepare_payload}" \
+  "https://nvt-driver.test:${port}/v1/guest-enrollment/prepare")"
+[[ "${prepare_code}" == "200" ]]
+python3 - "${WORKDIR}/prepare.json" "${WORKDIR}/deliver.json" <<'PY'
+import json
+import sys
+prepare = json.load(open(sys.argv[1]))
+assert prepare["contract_version"] == "nvt.guest-enrollment-handoff/v1"
+assert prepare["state"] == "prepared" and prepare["newly_prepared"] is True
+binding = {
+    "agent_run_uid": "00000000-0000-0000-0000-000000000001",
+    "execution_id": "oci-smoke",
+    "driver_registration": "fake-oci",
+    "desired_generation": 1,
+    "guest_instance_id": prepare["guest_instance_id"],
+}
+value = {
+    "contract_version": "nvt.guest-enrollment-handoff/v1",
+    "envelope": {
+        "contract_version": "nvt.guest-enrollment/v1",
+        "binding": binding,
+        "exchange_url": "https://broker.example/v1/guest-enrollment/exchange",
+        "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "issued_at": "2026-07-27T12:00:00Z",
+        "expires_at": "2026-07-27T12:05:00Z",
+    },
+}
+with open(sys.argv[2], "w") as output:
+    json.dump(value, output, separators=(",", ":"))
+PY
+deliver_code="$(curl --silent --noproxy '*' --output "${WORKDIR}/deliver-response.json" --write-out '%{http_code}' --cacert "${WORKDIR}/auth/tls.crt" \
+  --resolve "nvt-driver.test:${port}:127.0.0.1" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $(cat "${WORKDIR}/auth/auth-token")" \
+  --data-binary "@${WORKDIR}/deliver.json" \
+  "https://nvt-driver.test:${port}/v1/guest-enrollment/deliver")"
+[[ "${deliver_code}" == "200" ]]
+curl --silent --fail --noproxy '*' --cacert "${WORKDIR}/auth/tls.crt" \
+  --resolve "nvt-driver.test:${port}:127.0.0.1" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $(cat "${WORKDIR}/auth/auth-token")" \
+  --data "${prepare_payload}" \
+  "https://nvt-driver.test:${port}/v1/guest-enrollment/prepare" >"${WORKDIR}/accepted.json"
+python3 - "${WORKDIR}/accepted.json" <<'PY'
+import json
+import sys
+value = json.load(open(sys.argv[1]))
+assert value["state"] == "accepted" and value["newly_prepared"] is False
+PY
+if grep -R -Fq 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' "${WORKDIR}/state"; then
+  echo "fake driver persisted plaintext enrollment material" >&2
+  exit 1
+fi
 
 unauthorized="$(curl --silent --noproxy '*' --output /dev/null --write-out '%{http_code}' \
   --cacert "${WORKDIR}/auth/tls.crt" \

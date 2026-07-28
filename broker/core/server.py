@@ -16,6 +16,7 @@ from broker.core.agents import AgentRegistry
 from broker.core.config import BrokerConfigError, load_config
 from broker.core.errors import ProviderError
 from broker.core.guest_enrollment import (
+    COMPLETE_EXECUTION_CLEANUP_PATH as GUEST_ENROLLMENT_COMPLETE_EXECUTION_CLEANUP_PATH,
     ENDPOINT_LIMITS as GUEST_ENROLLMENT_ENDPOINT_LIMITS,
     EXCHANGE_PATH as GUEST_ENROLLMENT_EXCHANGE_PATH,
     ISSUE_PATH as GUEST_ENROLLMENT_ISSUE_PATH,
@@ -263,6 +264,16 @@ class Broker:
         except EnrollmentFailure as error:
             raise _guest_enrollment_provider_error(error) from error
         self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.revoke-execution", allowed=True)
+        return {"ok": True}
+
+    def guest_enrollment_complete_execution_cleanup(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            self.guest_enrollment.complete_execution_cleanup(decode_revoke_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.complete-execution-cleanup", allowed=True)
         return {"ok": True}
 
     def _require_guest_enrollment(self):
@@ -815,8 +826,12 @@ def make_handler(broker):
                             response = broker.guest_enrollment_exchange(request_id, raw_payload)
                         elif self.path == GUEST_ENROLLMENT_REVOKE_BINDING_PATH:
                             response = broker.guest_enrollment_revoke_binding(request_id, raw_payload, authorization)
-                        else:
+                        elif self.path == GUEST_ENROLLMENT_REVOKE_EXECUTION_PATH:
                             response = broker.guest_enrollment_revoke_execution(request_id, raw_payload, authorization)
+                        elif self.path == GUEST_ENROLLMENT_COMPLETE_EXECUTION_CLEANUP_PATH:
+                            response = broker.guest_enrollment_complete_execution_cleanup(request_id, raw_payload, authorization)
+                        else:
+                            raise ProviderError("not-found", "not-found", 404)
                         self.write_json(200, response)
                         return
                     finally:

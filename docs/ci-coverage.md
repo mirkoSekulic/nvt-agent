@@ -199,7 +199,7 @@ The harness and helper scripts are not standalone cases:
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage
   plus the provider-neutral guest-enrollment contract/conformance module
 - `images.yml`: all shipped/test fixture images plus the runtime git-credentials
-  smoke
+  smoke and the execution-driver host's private enrollment-handoff smoke
 - `host-bundle.yml`: native bundle trusted-core tests and guest-side lifecycle
   E2E
 - `kind.yml`: mediated, enforced, transparent, quota, revocation, and

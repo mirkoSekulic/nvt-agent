@@ -29,6 +29,7 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	}
 	revokeBinding := RevokeBindingRequest{ContractVersion: Version, Binding: binding}
 	revokeExecution := RevokeExecutionRequest{ContractVersion: Version, ExecutionScope: binding.ExecutionScope()}
+	completeCleanup := CompleteExecutionCleanupRequest{ContractVersion: Version, ExecutionScope: binding.ExecutionScope()}
 
 	for name, validation := range map[string]func() error{
 		"issue":            func() error { return ValidateIssueRequest(issue) },
@@ -37,6 +38,7 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 		"result":           func() error { return ValidateExchangeResult(result) },
 		"revoke binding":   func() error { return ValidateRevokeBindingRequest(revokeBinding) },
 		"revoke execution": func() error { return ValidateRevokeExecutionRequest(revokeExecution) },
+		"complete cleanup": func() error { return ValidateCompleteExecutionCleanupRequest(completeCleanup) },
 	} {
 		if err := validation(); err != nil {
 			t.Fatalf("valid %s: %v", name, err)
@@ -56,6 +58,7 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	resultJSON, _ := json.Marshal(result)
 	revokeBindingJSON, _ := json.Marshal(revokeBinding)
 	revokeExecutionJSON, _ := json.Marshal(revokeExecution)
+	completeCleanupJSON, _ := json.Marshal(completeCleanup)
 	if _, err := DecodeIssueRequest(issueJSON); err != nil {
 		t.Fatalf("decode issue: %v", err)
 	}
@@ -70,6 +73,12 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 	}
 	if _, err := DecodeRevokeExecutionRequest(revokeExecutionJSON); err != nil {
 		t.Fatalf("decode execution revoke: %v", err)
+	}
+	if _, err := DecodeCompleteExecutionCleanupRequest(completeCleanupJSON); err != nil {
+		t.Fatalf("decode cleanup completion: %v", err)
+	}
+	if _, err := DecodeCompleteExecutionCleanupRequest([]byte(`{"contract_version":"nvt.guest-enrollment/v1","execution_scope":{"agent_run_uid":"uid","execution_id":"execution","driver_registration":"driver"},"token":"forbidden"}`)); err == nil {
+		t.Fatal("credential-bearing cleanup completion request was accepted")
 	}
 	if _, err := DecodeRevokeExecutionRequest([]byte(`{"contract_version":"nvt.guest-enrollment/v1","execution_scope":{"agent_run_uid":"uid","execution_id":"execution","driver_registration":"driver"},"token":"forbidden"}`)); err == nil {
 		t.Fatal("credential-bearing execution revocation request was accepted")
@@ -88,6 +97,53 @@ func TestContractValidationAndStrictDecoding(t *testing.T) {
 		if _, err := DecodeBootstrapEnvelope(data); err == nil {
 			t.Fatalf("invalid envelope %d was accepted", index)
 		}
+	}
+}
+
+func TestSensitiveHandoffContractIsSeparateStrictAndRedacted(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	binding := validBinding()
+	prepare := HandoffPrepareRequest{ContractVersion: HandoffVersion, ExecutionScope: binding.ExecutionScope(), DesiredGeneration: binding.DesiredGeneration}
+	prepared := HandoffPrepareResult{ContractVersion: HandoffVersion, GuestInstanceID: binding.GuestInstanceID, State: HandoffStatePrepared, NewlyPrepared: true}
+	replace := HandoffReplaceRequest{ContractVersion: HandoffVersion, Binding: binding}
+	deliver := HandoffDeliverRequest{ContractVersion: HandoffVersion, Envelope: BootstrapEnvelope{
+		ContractVersion: Version, Binding: binding, ExchangeURL: "https://issuer.example/v1/guest-enrollment/exchange",
+		Token: opaqueValue(TokenBytes, 0x66), IssuedAt: FormatTimestamp(now), ExpiresAt: FormatTimestamp(now.Add(time.Minute)),
+	}}
+	ack := HandoffAcknowledgement{ContractVersion: HandoffVersion}
+	for name, value := range map[string]any{"prepare": prepare, "prepared": prepared, "replace": replace, "deliver": deliver, "ack": ack} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		switch name {
+		case "prepare":
+			_, err = DecodeHandoffPrepareRequest(encoded)
+		case "prepared":
+			_, err = DecodeHandoffPrepareResult(encoded)
+		case "replace":
+			_, err = DecodeHandoffReplaceRequest(encoded)
+		case "deliver":
+			_, err = DecodeHandoffDeliverRequest(encoded)
+		case "ack":
+			_, err = DecodeHandoffAcknowledgement(encoded)
+		}
+		if err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+	}
+	if prepared.State = HandoffStateAccepted; ValidateHandoffPrepareResult(prepared) == nil {
+		t.Fatal("accepted state claimed a newly prepared attempt")
+	}
+	if prepared = (HandoffPrepareResult{ContractVersion: HandoffVersion, GuestInstanceID: binding.GuestInstanceID, State: HandoffStatePrepared}); ValidateHandoffPrepareResult(prepared) != nil {
+		t.Fatal("repeat prepared observation was rejected")
+	}
+	if !strings.Contains(fmt.Sprint(deliver), "sensitive") || strings.Contains(fmt.Sprint(deliver), deliver.Envelope.Token) {
+		t.Fatal("sensitive handoff formatting disclosed the token")
+	}
+	if _, err := DecodeHandoffDeliverRequest([]byte(`{"contract_version":"nvt.guest-enrollment-handoff/v1","envelope":null,"token":"forbidden"}`)); err == nil {
+		t.Fatal("credential field outside the envelope was accepted")
 	}
 }
 

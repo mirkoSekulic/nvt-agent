@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	driverhandoff "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/handoff"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver/host"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver/hostapi"
 )
@@ -96,9 +97,11 @@ func serve(arguments []string) error {
 	authToken := flags.String("auth-token", "", "bearer-token path")
 	initializeTimeout := flags.Duration("initialize-timeout", 30*time.Second, "driver initialize timeout")
 	operationTimeout := flags.Duration("operation-timeout", 2*time.Minute, "driver operation timeout")
+	enrollmentTimeout := flags.Duration("enrollment-timeout", 30*time.Second, "guest-enrollment handoff timeout")
 	shutdownTimeout := flags.Duration("shutdown-timeout", 15*time.Second, "driver shutdown timeout")
 	terminationGrace := flags.Duration("termination-grace", 5*time.Second, "driver termination grace")
 	restartBackoff := flags.Duration("restart-backoff", 5*time.Second, "driver restart backoff")
+	enrollmentSocket := flags.String("enrollment-socket", "", "private guest-enrollment handoff Unix socket")
 	var driverArgs stringsFlag
 	var passEnvironment stringsFlag
 	flags.Var(&driverArgs, "driver-arg", "driver argument (repeatable)")
@@ -126,11 +129,23 @@ func serve(arguments []string) error {
 		ShutdownTimeout:    *shutdownTimeout,
 		TerminationGrace:   *terminationGrace,
 		RestartBackoff:     *restartBackoff,
+		EnrollmentSocket:   *enrollmentSocket,
 	})
 	if err != nil {
 		return errors.New("execution driver could not be initialized")
 	}
-	handler, err := hostapi.NewServer(hostapi.ServerConfig{Client: client, BearerToken: token, OperationTimeout: *operationTimeout})
+	serverConfig := hostapi.ServerConfig{Client: client, BearerToken: token, OperationTimeout: *operationTimeout}
+	if *enrollmentSocket != "" {
+		handoffClient, handoffErr := driverhandoff.NewLocalClient(*enrollmentSocket, *enrollmentTimeout)
+		if handoffErr != nil {
+			shutdownClient(client, *shutdownTimeout)
+			return handoffErr
+		}
+		serverConfig.Handoff = handoffClient
+		serverConfig.DriverRegistration = *driverInstance
+		serverConfig.HandoffTimeout = *enrollmentTimeout
+	}
+	handler, err := hostapi.NewServer(serverConfig)
 	if err != nil {
 		shutdownClient(client, *shutdownTimeout)
 		return err

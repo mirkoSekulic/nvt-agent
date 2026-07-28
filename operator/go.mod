@@ -3,6 +3,7 @@ module github.com/mirkoSekulic/nvt-agent/operator
 go 1.24.0
 
 require (
+	github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment v0.0.0
 	k8s.io/api v0.34.2
 	k8s.io/apiextensions-apiserver v0.34.1
 	k8s.io/apimachinery v0.34.2
@@ -10,6 +11,8 @@ require (
 	sigs.k8s.io/controller-runtime v0.22.4
 	sigs.k8s.io/yaml v1.6.0
 )
+
+replace github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment => ../protocol/guestenrollment
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

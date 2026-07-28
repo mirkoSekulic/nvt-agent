@@ -1,8 +1,11 @@
 FROM golang:1.24-bookworm AS builder
 
+WORKDIR /src
+COPY protocol/guestenrollment/go.mod protocol/guestenrollment/go.mod
+COPY operator/go.mod operator/go.sum operator/
 WORKDIR /src/operator
-COPY operator/go.mod operator/go.sum ./
 RUN go mod download
+COPY protocol/guestenrollment/ ../protocol/guestenrollment/
 COPY operator/executiondriver/ ./executiondriver/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/fake-driver ./executiondriver/testdata/fake-driver
 

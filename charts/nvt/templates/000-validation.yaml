@@ -3,3 +3,24 @@
 {{- if and .Values.broker.guestEnrollment.enabled (not .Values.broker.enabled) -}}
 {{- fail "broker.guestEnrollment.enabled requires broker.enabled=true" -}}
 {{- end -}}
+{{- $enrollment := .Values.executionDrivers.guestEnrollment -}}
+{{- if $enrollment.enabled -}}
+{{- if eq (len .Values.executionDrivers.registrations) 0 -}}{{ fail "executionDrivers.guestEnrollment.enabled requires at least one execution-driver registration" }}{{- end -}}
+{{- if eq (len $enrollment.registrations) 0 -}}{{ fail "executionDrivers.guestEnrollment.enabled requires at least one exact guestEnrollment.registrations entry" }}{{- end -}}
+{{- $availableRegistrations := dict -}}
+{{- range $registration := .Values.executionDrivers.registrations -}}{{- $_ := set $availableRegistrations $registration.name true -}}{{- end -}}
+{{- $enrollmentRegistrations := dict -}}
+{{- range $name := $enrollment.registrations -}}
+{{- if or (not (kindIs "string" $name)) (not (hasKey $availableRegistrations $name)) -}}{{ fail "executionDrivers.guestEnrollment.registrations must contain exact configured registration names" }}{{- end -}}
+{{- if hasKey $enrollmentRegistrations $name -}}{{ fail "executionDrivers.guestEnrollment.registrations must not contain duplicates" }}{{- end -}}
+{{- $_ := set $enrollmentRegistrations $name true -}}
+{{- end -}}
+{{- if or (not (regexMatch `^https://[A-Za-z0-9](?:[-A-Za-z0-9.]*[A-Za-z0-9])?(?::[0-9]{1,5})?$` $enrollment.brokerURL)) (gt (len $enrollment.brokerURL) 2048) -}}{{ fail "executionDrivers.guestEnrollment.brokerURL must be one canonical HTTPS origin" }}{{- end -}}
+{{- $portMatch := regexFind `:[0-9]{1,5}$` $enrollment.brokerURL -}}
+{{- if $portMatch -}}{{- $port := int (trimPrefix ":" $portMatch) -}}{{- if or (lt $port 1) (gt $port 65535) -}}{{ fail "executionDrivers.guestEnrollment.brokerURL port must be between 1 and 65535" }}{{- end -}}{{- end -}}
+{{- if or (gt (len $enrollment.serverName) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $enrollment.serverName)) -}}{{ fail "executionDrivers.guestEnrollment.serverName must be a DNS name" }}{{- end -}}
+{{- range $field := list $enrollment.ca.existingSecret $enrollment.orchestratorAuth.existingSecret -}}{{- if or (gt (len $field) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $field)) -}}{{ fail "executionDrivers.guestEnrollment Secret references must be valid names" }}{{- end -}}{{- end -}}
+{{- range $field := list $enrollment.ca.key $enrollment.orchestratorAuth.tokenKey -}}{{- if or (gt (len $field) 253) (not (regexMatch `^[A-Za-z0-9._-]+$` $field)) -}}{{ fail "executionDrivers.guestEnrollment Secret keys are invalid" }}{{- end -}}{{- end -}}
+{{- if or (lt (int $enrollment.requestTimeoutSeconds) 1) (gt (int $enrollment.requestTimeoutSeconds) 30) (lt (int $enrollment.handoffTimeoutSeconds) 1) (gt (int $enrollment.handoffTimeoutSeconds) 30) -}}{{ fail "executionDrivers.guestEnrollment deadlines must be between 1 and 30 seconds" }}{{- end -}}
+{{- if or (lt (int $enrollment.ttlSeconds) 1) (gt (int $enrollment.ttlSeconds) 900) -}}{{ fail "executionDrivers.guestEnrollment.ttlSeconds must be between 1 and 900" }}{{- end -}}
+{{- end -}}

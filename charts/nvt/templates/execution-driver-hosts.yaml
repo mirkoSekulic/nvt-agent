@@ -110,6 +110,10 @@ spec:
             - --tls-cert=/var/run/nvt-host-auth/tls.crt
             - --tls-key=/var/run/nvt-host-auth/tls.key
             - --auth-token=/var/run/nvt-host-auth/auth-token
+            {{- if and $root.Values.executionDrivers.guestEnrollment.enabled (has $registration.name $root.Values.executionDrivers.guestEnrollment.registrations) }}
+            - --enrollment-socket=/tmp/nvt-guest-enrollment.sock
+            - {{ printf "--enrollment-timeout=%vs" $root.Values.executionDrivers.guestEnrollment.handoffTimeoutSeconds | quote }}
+            {{- end }}
           ports:
             - name: https
               containerPort: 9443

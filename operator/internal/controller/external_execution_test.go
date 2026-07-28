@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -21,6 +22,7 @@ import (
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver/host"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
 
 type fakeExecutionDriverRegistry map[string]host.Client
@@ -40,6 +42,176 @@ type recordingExecutionDriver struct {
 	deleteError    error
 	reconcileBlock <-chan struct{}
 	reconcileStart chan<- struct{}
+}
+
+type recordingEnrollmentDriver struct {
+	*recordingExecutionDriver
+	mu                sync.Mutex
+	guestID           string
+	prepared          bool
+	accepted          bool
+	prepareCalls      int
+	replaceCalls      int
+	deliverCalls      int
+	prepareError      error
+	prepareBlock      <-chan struct{}
+	prepareStart      chan<- struct{}
+	replaceError      error
+	deliverError      error
+	deliverBlock      bool
+	acceptBeforeError bool
+	deliveredToken    string
+	operationSequence *[]string
+}
+
+func (d *recordingEnrollmentDriver) Prepare(ctx context.Context, request guestenrollment.HandoffPrepareRequest) (guestenrollment.HandoffPrepareResult, error) {
+	d.mu.Lock()
+	d.prepareCalls++
+	block := d.prepareBlock
+	started := d.prepareStart
+	if d.prepareError != nil {
+		err := d.prepareError
+		d.mu.Unlock()
+		return guestenrollment.HandoffPrepareResult{}, err
+	}
+	d.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return guestenrollment.HandoffPrepareResult{}, ctx.Err()
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.prepareError != nil {
+		return guestenrollment.HandoffPrepareResult{}, d.prepareError
+	}
+	if d.guestID == "" {
+		d.guestID = "guest-instance-1"
+	}
+	newlyPrepared := !d.prepared
+	d.prepared = true
+	state := guestenrollment.HandoffStatePrepared
+	if d.accepted {
+		state = guestenrollment.HandoffStateAccepted
+		newlyPrepared = false
+	}
+	return guestenrollment.HandoffPrepareResult{ContractVersion: guestenrollment.HandoffVersion, GuestInstanceID: d.guestID, State: state, NewlyPrepared: newlyPrepared}, nil
+}
+
+func (d *recordingEnrollmentDriver) Replace(_ context.Context, request guestenrollment.HandoffReplaceRequest) (guestenrollment.HandoffPrepareResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.replaceError != nil {
+		return guestenrollment.HandoffPrepareResult{}, d.replaceError
+	}
+	if request.Binding.GuestInstanceID != d.guestID {
+		return guestenrollment.HandoffPrepareResult{}, errors.New("wrong guest")
+	}
+	d.replaceCalls++
+	d.guestID = "guest-instance-replacement"
+	d.accepted = false
+	d.prepared = true
+	return guestenrollment.HandoffPrepareResult{ContractVersion: guestenrollment.HandoffVersion, GuestInstanceID: d.guestID, State: guestenrollment.HandoffStatePrepared, NewlyPrepared: true}, nil
+}
+
+func (d *recordingEnrollmentDriver) Deliver(ctx context.Context, request guestenrollment.HandoffDeliverRequest) error {
+	d.mu.Lock()
+	d.deliverCalls++
+	d.deliveredToken = request.Envelope.Token
+	if request.Envelope.Binding.GuestInstanceID != d.guestID {
+		d.mu.Unlock()
+		return errors.New("wrong guest")
+	}
+	block := d.deliverBlock
+	d.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.deliverError == nil || d.acceptBeforeError {
+		d.accepted = true
+	}
+	return d.deliverError
+}
+
+func (d *recordingEnrollmentDriver) Delete(ctx context.Context, executionID string) (executiondriver.Status, error) {
+	if d.operationSequence != nil {
+		*d.operationSequence = append(*d.operationSequence, "driver-delete")
+	}
+	return d.recordingExecutionDriver.Delete(ctx, executionID)
+}
+
+type recordingEnrollmentIssuer struct {
+	mu              sync.Mutex
+	issues          []guestenrollment.IssueRequest
+	revokeBindings  []guestenrollment.RevokeBindingRequest
+	revokeScopes    []guestenrollment.RevokeExecutionRequest
+	completions     []guestenrollment.CompleteExecutionCleanupRequest
+	issueError      error
+	revokeError     error
+	completionError error
+	sequence        *[]string
+	handoffTimeout  time.Duration
+}
+
+func (i *recordingEnrollmentIssuer) EnabledFor(_ string) bool { return true }
+
+func (i *recordingEnrollmentIssuer) TTLSeconds() int32 { return 300 }
+func (i *recordingEnrollmentIssuer) HandoffTimeout() time.Duration {
+	if i.handoffTimeout > 0 {
+		return i.handoffTimeout
+	}
+	return time.Second
+}
+
+func (i *recordingEnrollmentIssuer) Issue(_ context.Context, request guestenrollment.IssueRequest) (guestenrollment.BootstrapEnvelope, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.issues = append(i.issues, request)
+	if i.issueError != nil {
+		return guestenrollment.BootstrapEnvelope{}, i.issueError
+	}
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	return guestenrollment.BootstrapEnvelope{
+		ContractVersion: guestenrollment.Version, Binding: request.Binding,
+		ExchangeURL: "https://broker.example/v1/guest-enrollment/exchange",
+		Token:       base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, guestenrollment.TokenBytes)),
+		IssuedAt:    guestenrollment.FormatTimestamp(now), ExpiresAt: guestenrollment.FormatTimestamp(now.Add(5 * time.Minute)),
+	}, nil
+}
+
+func (i *recordingEnrollmentIssuer) RevokeBinding(_ context.Context, request guestenrollment.RevokeBindingRequest) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.revokeBindings = append(i.revokeBindings, request)
+	return i.revokeError
+}
+
+func (i *recordingEnrollmentIssuer) RevokeExecution(_ context.Context, request guestenrollment.RevokeExecutionRequest) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.revokeScopes = append(i.revokeScopes, request)
+	if i.sequence != nil {
+		*i.sequence = append(*i.sequence, "scope-revoke")
+	}
+	return i.revokeError
+}
+
+func (i *recordingEnrollmentIssuer) CompleteExecutionCleanup(_ context.Context, request guestenrollment.CompleteExecutionCleanupRequest) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.completions = append(i.completions, request)
+	if i.sequence != nil {
+		*i.sequence = append(*i.sequence, "cleanup-complete")
+	}
+	return i.completionError
 }
 
 func (d *recordingExecutionDriver) Reconcile(ctx context.Context, desired executiondriver.DesiredExecution) (executiondriver.Status, error) {
@@ -479,6 +651,446 @@ func TestStalledExternalDriversReserveWorkerForKubernetesBackend(t *testing.T) {
 		if err := <-errorsChannel; err != nil {
 			t.Fatalf("external reconcile after release: %v", err)
 		}
+	}
+}
+
+func TestStalledGuestEnrollmentHandoffsReserveWorkerForKubernetesBackend(t *testing.T) {
+	ctx := context.Background()
+	blocked := make(chan struct{})
+	var releaseBlocked sync.Once
+	release := func() { releaseBlocked.Do(func() { close(blocked) }) }
+	t.Cleanup(release)
+	startedA := make(chan struct{}, 1)
+	startedB := make(chan struct{}, 1)
+	externalA := externalTestAgentRun()
+	externalA.Name = "enrollment-a"
+	externalA.UID = "enrollment-a-uid"
+	externalA.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	externalB := externalTestAgentRun()
+	externalB.Name = "enrollment-b"
+	externalB.UID = "enrollment-b-uid"
+	externalB.Spec.Execution.Driver = "example-vm-b"
+	externalB.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	kubernetesRun := testAgentRun()
+	kubernetesRun.Name = "kubernetes-during-enrollment"
+	kubernetesRun.UID = "kubernetes-during-enrollment-uid"
+	kubernetesRun.Status.Phase = nvtv1alpha1.AgentRunPhaseCompleted
+	kubernetesRun.Status.FinishedAt = ptrTo(metav1.Now())
+	kubernetesRun.Spec.TTL = &nvtv1alpha1.AgentRunTTL{RunRetentionSeconds: ptrTo[int64](0)}
+	driverA := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		prepareBlock:             blocked, prepareStart: startedA,
+	}
+	driverB := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		prepareBlock:             blocked, prepareStart: startedB,
+	}
+	scheme := testScheme(t)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&nvtv1alpha1.AgentRun{}).
+		WithObjects(externalA, externalB, kubernetesRun, testBrokerAgentsConfigMap(externalA.Namespace)).Build()
+	reconciler := &AgentRunReconciler{
+		Client: k8sClient, Scheme: scheme, GuestEnrollment: &recordingEnrollmentIssuer{handoffTimeout: time.Second},
+		ExecutionDrivers: fakeExecutionDriverRegistry{"example-vm": driverA, "example-vm-b": driverB},
+	}
+	errorsChannel := make(chan error, 2)
+	go func() { _, err := reconciler.Reconcile(ctx, requestFor(externalA)); errorsChannel <- err }()
+	go func() { _, err := reconciler.Reconcile(ctx, requestFor(externalB)); errorsChannel <- err }()
+	for name, started := range map[string]<-chan struct{}{"a": startedA, "b": startedB} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("enrollment handoff %s did not block", name)
+		}
+	}
+	kubernetesDone := make(chan error, 1)
+	go func() { _, err := reconciler.Reconcile(ctx, requestFor(kubernetesRun)); kubernetesDone <- err }()
+	select {
+	case err := <-kubernetesDone:
+		if err != nil {
+			t.Fatalf("Kubernetes reconcile failed while enrollment handoffs stalled: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stalled enrollment handoffs blocked the built-in Kubernetes backend")
+	}
+	release()
+	for range 2 {
+		if err := <-errorsChannel; err != nil {
+			t.Fatalf("enrollment reconcile after release: %v", err)
+		}
+	}
+}
+
+func TestExternalGuestEnrollmentIssuesDeliversOnceAndRecoversAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	base := &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}}
+	driver := &recordingEnrollmentDriver{recordingExecutionDriver: base}
+	other := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{}}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver, "other": other})
+	reconciler.GuestEnrollment = issuer
+
+	// Both cleanup obligations are made durable before issuance or delivery.
+	for index := range 2 {
+		if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || !result.Requeue {
+			t.Fatalf("finalizer reconcile %d result=%#v err=%v", index, result, err)
+		}
+	}
+	if len(issuer.issues) != 0 || driver.deliverCalls != 0 {
+		t.Fatal("enrollment started before both finalizers were durable")
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("enrollment reconcile: %v", err)
+	}
+	if len(issuer.issues) != 1 || driver.deliverCalls != 1 || other.deliverCalls != 0 || !driver.accepted {
+		t.Fatalf("exact handoff issue=%d deliver=%d other=%d accepted=%t", len(issuer.issues), driver.deliverCalls, other.deliverCalls, driver.accepted)
+	}
+	issued := issuer.issues[0]
+	if issued.Binding.DriverRegistration != "example-vm" || issued.Binding.GuestInstanceID != "guest-instance-1" || issued.Binding.ExecutionID != base.desired[0].ExecutionID {
+		t.Fatalf("incorrect exact binding: %#v", issued.Binding)
+	}
+
+	// A new reconciler has no issuance history. Durable driver acceptance is
+	// sufficient to avoid issuing or delivering a second token.
+	restarted := &AgentRunReconciler{Client: k8sClient, Scheme: reconciler.Scheme, ExecutionDrivers: reconciler.ExecutionDrivers, GuestEnrollment: issuer}
+	if _, err := restarted.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("restart reconcile: %v", err)
+	}
+	if len(issuer.issues) != 1 || driver.deliverCalls != 1 {
+		t.Fatalf("restart duplicated enrollment issue=%d deliver=%d", len(issuer.issues), driver.deliverCalls)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	encoded, err := json.Marshal(struct {
+		Run     nvtv1alpha1.AgentRun
+		Desired []executiondriver.DesiredExecution
+	}{updated, base.desired})
+	if err != nil || bytes.Contains(encoded, []byte(driver.deliveredToken)) || bytes.Contains(encoded, []byte("exchange_url")) {
+		t.Fatalf("ordinary state disclosed enrollment material: %s err=%v", encoded, err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, ConditionExecutionBackendAvailable)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "ExternalBootstrapAccepted" {
+		t.Fatalf("unexpected enrollment condition: %#v", condition)
+	}
+	assertNoAgentPods(t, ctx, k8sClient, run.Namespace)
+}
+
+func TestExternalGuestEnrollmentResponseLossDoesNotIssueAgain(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		deliverError:             errors.New("HANDOFF-TOKEN-CANARY response lost"), acceptBeforeError: true,
+	}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != externalExecutionDefaultRequeue {
+		t.Fatalf("lost response result=%#v err=%v", result, err)
+	}
+	if len(issuer.issues) != 1 || !driver.accepted {
+		t.Fatalf("delivery was not durably accepted: issues=%d accepted=%t", len(issuer.issues), driver.accepted)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("recover accepted delivery: %v", err)
+	}
+	if len(issuer.issues) != 1 || len(issuer.revokeBindings) != 0 || driver.deliverCalls != 1 {
+		t.Fatalf("uncertain accepted delivery was replaced: issues=%d revokes=%d delivers=%d", len(issuer.issues), len(issuer.revokeBindings), driver.deliverCalls)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	status, _ := json.Marshal(updated.Status)
+	if bytes.Contains(status, []byte("HANDOFF-TOKEN-CANARY")) {
+		t.Fatalf("uncertain delivery diagnostic leaked: %s", status)
+	}
+}
+
+func TestExternalGuestEnrollmentDefiniteNonAcceptanceRevokesBeforeReplacement(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		deliverError:             errors.New("rejected"),
+	}
+	issuer := &recordingEnrollmentIssuer{}
+	_, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	if len(issuer.issues) != 1 || driver.accepted {
+		t.Fatal("first rejected handoff state is incorrect")
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	if len(issuer.revokeBindings) != 1 || driver.replaceCalls != 1 || len(issuer.issues) != 2 {
+		t.Fatalf("replacement choreography revokes=%d replaces=%d issues=%d", len(issuer.revokeBindings), driver.replaceCalls, len(issuer.issues))
+	}
+	if issuer.revokeBindings[0].Binding.GuestInstanceID != "guest-instance-1" || issuer.issues[1].Binding.GuestInstanceID != "guest-instance-replacement" {
+		t.Fatalf("replacement reused revoked binding: revoke=%#v issue=%#v", issuer.revokeBindings[0], issuer.issues[1])
+	}
+}
+
+func TestExternalGuestEnrollmentIssueFailureRevokesBeforeRetry(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+	}
+	issuer := &recordingEnrollmentIssuer{issueError: errors.New("ISSUER-RESPONSE-CANARY lost")}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	if len(issuer.issues) != 1 || driver.deliverCalls != 0 || len(issuer.revokeBindings) != 0 {
+		t.Fatalf("first issue failure issues=%d delivers=%d revokes=%d", len(issuer.issues), driver.deliverCalls, len(issuer.revokeBindings))
+	}
+	issuer.issueError = nil
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	if len(issuer.revokeBindings) != 1 || driver.replaceCalls != 1 || len(issuer.issues) != 2 || driver.deliverCalls != 1 {
+		t.Fatalf("issue recovery revokes=%d replaces=%d issues=%d delivers=%d", len(issuer.revokeBindings), driver.replaceCalls, len(issuer.issues), driver.deliverCalls)
+	}
+	if issuer.revokeBindings[0].Binding == issuer.issues[1].Binding {
+		t.Fatal("issue response loss retried the same binding")
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	encoded, _ := json.Marshal(updated.Status)
+	if bytes.Contains(encoded, []byte("ISSUER-RESPONSE-CANARY")) {
+		t.Fatalf("issue diagnostic leaked: %s", encoded)
+	}
+}
+
+func TestExternalGuestEnrollmentUnavailableHandoffDoesNotIssueOrFallback(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		prepareError:             errors.New("HANDOFF-SECRET-CANARY unavailable"),
+	}
+	other := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{}}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver, "other": other})
+	reconciler.GuestEnrollment = issuer
+	if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != externalExecutionDefaultRequeue {
+		t.Fatalf("unavailable handoff result=%#v err=%v", result, err)
+	}
+	if len(issuer.issues) != 0 || other.prepareCalls != 0 || other.deliverCalls != 0 {
+		t.Fatalf("unavailable exact handoff issued or fell back: issues=%d other_prepare=%d other_deliver=%d", len(issuer.issues), other.prepareCalls, other.deliverCalls)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	encoded, _ := json.Marshal(updated.Status)
+	if bytes.Contains(encoded, []byte("HANDOFF-SECRET-CANARY")) {
+		t.Fatalf("handoff diagnostic leaked: %s", encoded)
+	}
+	assertNoAgentPods(t, ctx, k8sClient, run.Namespace)
+}
+
+func TestExternalGuestEnrollmentDeliveryUsesBoundedDedicatedDeadline(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		deliverBlock:             true,
+	}
+	issuer := &recordingEnrollmentIssuer{handoffTimeout: 20 * time.Millisecond}
+	_, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	started := time.Now()
+	result, err := reconciler.Reconcile(ctx, requestFor(run))
+	if err != nil || result.RequeueAfter != externalExecutionDefaultRequeue {
+		t.Fatalf("bounded delivery result=%#v err=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("delivery exceeded its dedicated deadline: %s", elapsed)
+	}
+	if len(issuer.issues) != 1 || driver.deliverCalls != 1 || driver.accepted {
+		t.Fatalf("timed-out delivery state issues=%d delivers=%d accepted=%t", len(issuer.issues), driver.deliverCalls, driver.accepted)
+	}
+}
+
+func TestExternalPodDriverDoesNotParticipateInGuestEnrollment(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Spec.Execution.Kind = nvtv1alpha1.AgentRunExecutionPod
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseRunning, Ready: true, ObservedGeneration: 1}}},
+		guestID:                  "must-not-be-used",
+	}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("add external finalizer: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("external Pod reconcile: %v", err)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	if controllerHasFinalizer(&updated, guestEnrollmentFinalizer) {
+		t.Fatalf("external Pod gained VM enrollment finalizer: %#v", updated.Finalizers)
+	}
+	if len(issuer.issues) != 0 || len(issuer.revokeBindings) != 0 || len(issuer.revokeScopes) != 0 || len(issuer.completions) != 0 || driver.deliverCalls != 0 {
+		t.Fatalf("external Pod used guest enrollment: issuer=%#v delivers=%d", issuer, driver.deliverCalls)
+	}
+
+	now := metav1.Now()
+	deleting := externalTestAgentRun()
+	deleting.Name = "external-pod-delete"
+	deleting.UID = "external-pod-delete-uid"
+	deleting.Spec.Execution.Kind = nvtv1alpha1.AgentRunExecutionPod
+	deleting.Finalizers = []string{externalExecutionFinalizer}
+	deleting.DeletionTimestamp = &now
+	deleteDriver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}}}
+	_, deleteReconciler := externalReconcileFixture(t, deleting, fakeExecutionDriverRegistry{"example-vm": deleteDriver})
+	deleteReconciler.GuestEnrollment = issuer
+	if _, err := deleteReconciler.Reconcile(ctx, requestFor(deleting)); err != nil {
+		t.Fatalf("external Pod delete: %v", err)
+	}
+	if len(issuer.revokeScopes) != 0 || len(issuer.completions) != 0 || len(issuer.issues) != 0 || driver.deliverCalls != 0 {
+		t.Fatalf("external Pod deletion used guest enrollment: revokes=%d completions=%d issues=%d delivers=%d", len(issuer.revokeScopes), len(issuer.completions), len(issuer.issues), driver.deliverCalls)
+	}
+}
+
+func TestExistingGuestEnrollmentFinalizerRemainsCleanupAuthoritative(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	run := externalTestAgentRun()
+	run.Spec.Execution.Kind = nvtv1alpha1.AgentRunExecutionPod
+	run.Finalizers = []string{guestEnrollmentFinalizer}
+	run.DeletionTimestamp = &now
+	sequence := []string{}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}},
+		operationSequence:        &sequence,
+	}
+	issuer := &recordingEnrollmentIssuer{sequence: &sequence}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("existing enrollment cleanup obligation: %v", err)
+	}
+	if !reflect.DeepEqual(sequence, []string{"scope-revoke", "driver-delete", "cleanup-complete"}) {
+		t.Fatalf("existing cleanup obligation ordering=%#v", sequence)
+	}
+	var deleted nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &deleted); !apierrors.IsNotFound(err) {
+		t.Fatalf("existing cleanup obligation did not finalize: err=%v finalizers=%#v", err, deleted.Finalizers)
+	}
+}
+
+func TestExternalGuestEnrollmentCleanupRevokesScopeBeforeExactDriverDelete(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{agentRunFinalizer, externalExecutionFinalizer, guestEnrollmentFinalizer}
+	run.DeletionTimestamp = &now
+	sequence := []string{}
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}},
+		operationSequence:        &sequence,
+	}
+	issuer := &recordingEnrollmentIssuer{sequence: &sequence}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if !reflect.DeepEqual(sequence, []string{"scope-revoke", "driver-delete", "cleanup-complete"}) || len(issuer.revokeScopes) != 1 || len(issuer.completions) != 1 {
+		t.Fatalf("cleanup ordering=%#v scope=%#v completions=%#v", sequence, issuer.revokeScopes, issuer.completions)
+	}
+	var deleted nvtv1alpha1.AgentRun
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &deleted); !apierrors.IsNotFound(err) {
+		t.Fatalf("run remained after ordered cleanup: %#v err=%v", deleted.Finalizers, err)
+	}
+
+	blockedRun := externalTestAgentRun()
+	blockedRun.Name = "blocked-cleanup"
+	blockedRun.UID = "blocked-cleanup-uid"
+	blockedRun.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	blockedRun.DeletionTimestamp = &now
+	blockedDriver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}}}
+	blockedIssuer := &recordingEnrollmentIssuer{revokeError: errors.New("BROKER-TOKEN-CANARY unavailable")}
+	blockedClient, blocked := externalReconcileFixture(t, blockedRun, fakeExecutionDriverRegistry{"example-vm": blockedDriver})
+	blocked.GuestEnrollment = blockedIssuer
+	if result, err := blocked.Reconcile(ctx, requestFor(blockedRun)); err != nil || result.RequeueAfter != externalExecutionCleanupRetry {
+		t.Fatalf("blocked cleanup result=%#v err=%v", result, err)
+	}
+	retained := getExternalRun(t, ctx, blockedClient, blockedRun)
+	if !controllerHasFinalizer(&retained, guestEnrollmentFinalizer) || len(blockedDriver.deleteIDs) != 0 {
+		t.Fatalf("revocation failure allowed delete/finalize: %#v deletes=%#v", retained.Finalizers, blockedDriver.deleteIDs)
+	}
+	encoded, _ := json.Marshal(retained.Status)
+	if bytes.Contains(encoded, []byte("BROKER-TOKEN-CANARY")) {
+		t.Fatalf("cleanup disclosed broker diagnostic: %s", encoded)
+	}
+
+	completionRun := externalTestAgentRun()
+	completionRun.Name = "blocked-completion"
+	completionRun.UID = "blocked-completion-uid"
+	completionRun.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	completionRun.DeletionTimestamp = &now
+	completionSequence := []string{}
+	completionDriver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}, {Phase: executiondriver.PhaseDeleted}}},
+		operationSequence:        &completionSequence,
+	}
+	completionIssuer := &recordingEnrollmentIssuer{completionError: errors.New("COMPLETION-CANARY response lost"), sequence: &completionSequence}
+	completionRegistry := fakeExecutionDriverRegistry{"example-vm": completionDriver}
+	completionClient, completionReconciler := externalReconcileFixture(t, completionRun, completionRegistry)
+	completionReconciler.GuestEnrollment = completionIssuer
+	if result, err := completionReconciler.Reconcile(ctx, requestFor(completionRun)); err != nil || result.RequeueAfter != externalExecutionCleanupRetry {
+		t.Fatalf("completion response loss result=%#v err=%v", result, err)
+	}
+	retained = getExternalRun(t, ctx, completionClient, completionRun)
+	if !controllerHasFinalizer(&retained, guestEnrollmentFinalizer) || !controllerHasFinalizer(&retained, externalExecutionFinalizer) {
+		t.Fatalf("completion response loss released finalizers: %#v", retained.Finalizers)
+	}
+	if !reflect.DeepEqual(completionSequence, []string{"scope-revoke", "driver-delete", "cleanup-complete"}) {
+		t.Fatalf("completion failure ordering=%#v", completionSequence)
+	}
+	completionIssuer.completionError = nil
+	restartedCompletionReconciler := &AgentRunReconciler{
+		Client: completionClient, Scheme: completionReconciler.Scheme,
+		ExecutionDrivers: completionRegistry, GuestEnrollment: completionIssuer,
+	}
+	if _, err := restartedCompletionReconciler.Reconcile(ctx, requestFor(completionRun)); err != nil {
+		t.Fatalf("completion response-loss retry: %v", err)
+	}
+	if !reflect.DeepEqual(completionSequence, []string{"scope-revoke", "driver-delete", "cleanup-complete", "scope-revoke", "driver-delete", "cleanup-complete"}) {
+		t.Fatalf("completion retry ordering=%#v", completionSequence)
+	}
+	if err := completionClient.Get(ctx, client.ObjectKeyFromObject(completionRun), &retained); !apierrors.IsNotFound(err) {
+		t.Fatalf("completion retry did not finalize run: err=%v finalizers=%#v", err, retained.Finalizers)
+	}
+}
+
+func TestExternalGuestEnrollmentMissingRegistrationStillRevokesAndRetainsCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	run.DeletionTimestamp = &now
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{})
+	reconciler.GuestEnrollment = issuer
+	result, err := reconciler.Reconcile(ctx, requestFor(run))
+	if err != nil || result.RequeueAfter != externalExecutionDefaultRequeue {
+		t.Fatalf("missing registration cleanup result=%#v err=%v", result, err)
+	}
+	if len(issuer.revokeScopes) != 1 || issuer.revokeScopes[0].ExecutionScope.DriverRegistration != "example-vm" {
+		t.Fatalf("missing registration did not revoke exact scope: %#v", issuer.revokeScopes)
+	}
+	retained := getExternalRun(t, ctx, k8sClient, run)
+	if !controllerHasFinalizer(&retained, externalExecutionFinalizer) || !controllerHasFinalizer(&retained, guestEnrollmentFinalizer) {
+		t.Fatalf("missing registration released cleanup finalizers: %#v", retained.Finalizers)
 	}
 }
 
