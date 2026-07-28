@@ -41,8 +41,10 @@ MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS = 32
 MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS_PER_IDENTITY = 4
 RUNTIME_IDENTITY_RATE_PER_SECOND = 8.0
 RUNTIME_IDENTITY_RATE_BURST = 16.0
-MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT = 1024
-MAX_RUNTIME_IDENTITY_HISTORY_ENTRIES = 10_000
+MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT = 20_000
+MAX_RUNTIME_IDENTITY_HISTORY_AGGREGATE = MAX_DURABLE_ENTRIES * MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT
+RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL = timedelta(minutes=30)
+MIN_RUNTIME_IDENTITY_LIFECYCLE_HORIZON = timedelta(days=365)
 
 ISSUE_PATH = "/v1/guest-enrollment/issue"
 EXCHANGE_PATH = "/v1/guest-enrollment/exchange"
@@ -178,7 +180,6 @@ class GuestEnrollmentIssuer:
         runtime_identity_burst=RUNTIME_IDENTITY_RATE_BURST,
         runtime_identity_concurrency=MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS_PER_IDENTITY,
         max_runtime_identity_history_per_enrollment=MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
-        max_runtime_identity_history_entries=MAX_RUNTIME_IDENTITY_HISTORY_ENTRIES,
     ):
         self.database_path = _validate_database_path(database_path)
         self.exchange_url = validate_exchange_url(exchange_url)
@@ -206,17 +207,17 @@ class GuestEnrollmentIssuer:
             or isinstance(max_runtime_identity_history_per_enrollment, bool)
             or max_runtime_identity_history_per_enrollment < 1
             or max_runtime_identity_history_per_enrollment > MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT
-            or not isinstance(max_runtime_identity_history_entries, int)
-            or isinstance(max_runtime_identity_history_entries, bool)
-            or max_runtime_identity_history_entries < 1
-            or max_runtime_identity_history_entries > MAX_RUNTIME_IDENTITY_HISTORY_ENTRIES
         ):
             raise EnrollmentConfigError("guest runtime identity admission limits are invalid")
         self.runtime_identity_admission_rate = float(runtime_identity_rate)
         self.runtime_identity_admission_burst = float(runtime_identity_burst)
         self.runtime_identity_admission_concurrency = runtime_identity_concurrency
         self.max_runtime_identity_history_per_enrollment = max_runtime_identity_history_per_enrollment
-        self.max_runtime_identity_history_entries = max_runtime_identity_history_entries
+        # Every durable enrollment owns this complete allowance. The aggregate
+        # physical bound derives from the enrollment bound rather than a
+        # first-come shared pool, so one lifecycle cannot spend another's
+        # renewal budget.
+        self.max_runtime_identity_history_entries = self.max_entries * self.max_runtime_identity_history_per_enrollment
         self.runtime_identity_admissions = {}
         self.runtime_identity_admissions_lock = threading.Lock()
         self.store_health_lock = threading.Lock()
@@ -247,7 +248,7 @@ class GuestEnrollmentIssuer:
     def ready(self):
         try:
             with self._connect() as connection:
-                self._validate_store_health(connection)
+                self._validate_store_health(connection, recover=True)
                 return True
         except sqlite3.Error:
             self._set_store_health(False)
@@ -301,6 +302,7 @@ class GuestEnrollmentIssuer:
             raise
         except sqlite3.Error as error:
             _rollback(connection)
+            self._set_store_health(False)
             raise EnrollmentFailure("issuer-storage-failed", 503) from error
         finally:
             connection.close()
@@ -431,7 +433,7 @@ class GuestEnrollmentIssuer:
         identity_digest = _runtime_identity_digest(identity)
         self._require_store_healthy()
         now = self._now()
-        connection = self._connect_or_failure()
+        connection = self._runtime_connect_or_failure()
         try:
             connection.execute("BEGIN")
             row = connection.execute(
@@ -445,7 +447,7 @@ class GuestEnrollmentIssuer:
             raise
         except sqlite3.Error as error:
             _rollback(connection)
-            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+            self._raise_runtime_storage_failure(error)
         finally:
             connection.close()
 
@@ -463,7 +465,7 @@ class GuestEnrollmentIssuer:
         # Close the lookup/allocation race with authoritative revocation. If
         # cleanup committed before this admission state was published, do not
         # retain an orphan quota entry or admit a body for the removed bearer.
-        connection = self._connect_or_failure()
+        connection = self._runtime_connect_or_failure()
         try:
             row = connection.execute(
                 """
@@ -479,7 +481,7 @@ class GuestEnrollmentIssuer:
                         self.runtime_identity_admissions.pop(token_digest, None)
                 raise EnrollmentFailure("unauthorized", 401)
         except sqlite3.Error as error:
-            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+            self._raise_runtime_storage_failure(error)
         finally:
             connection.close()
         if not state.rate.allow() or not state.slots.acquire(blocking=False):
@@ -497,7 +499,7 @@ class GuestEnrollmentIssuer:
         try:
             self._require_store_healthy()
             now = self._now()
-            connection = self._connect_or_failure()
+            connection = self._runtime_connect_or_failure()
             try:
                 connection.execute("BEGIN")
                 row = connection.execute(
@@ -510,7 +512,7 @@ class GuestEnrollmentIssuer:
                 raise
             except sqlite3.Error as error:
                 _rollback(connection)
-                raise EnrollmentFailure("issuer-storage-failed", 503) from error
+                self._raise_runtime_storage_failure(error)
             finally:
                 connection.close()
         finally:
@@ -539,7 +541,7 @@ class GuestEnrollmentIssuer:
 
     def _rotate_runtime_identity_locked(self, binding, identity_digest, successor_digest):
         now = self._now()
-        connection = self._connect_or_failure()
+        connection = self._runtime_connect_or_failure()
         committed = False
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -568,11 +570,7 @@ class GuestEnrollmentIssuer:
                 "SELECT COUNT(*) FROM runtime_identity_history WHERE token_digest = ?",
                 (row["token_digest"],),
             ).fetchone()[0]
-            history_count = self._runtime_identity_history_count(connection)
-            if (
-                lifecycle_history_count >= self.max_runtime_identity_history_per_enrollment
-                or history_count >= self.max_runtime_identity_history_entries
-            ):
+            if lifecycle_history_count >= self.max_runtime_identity_history_per_enrollment:
                 raise EnrollmentFailure("capacity-exceeded", 429)
 
             previous_issued_at = parse_timestamp(row["runtime_identity_issued_at"])
@@ -587,7 +585,6 @@ class GuestEnrollmentIssuer:
                 """,
                 (identity_digest, row["token_digest"], successor_issued_at),
             )
-            self._set_runtime_identity_history_count(connection, history_count + 1)
             updated = connection.execute(
                 """
                 UPDATE enrollments
@@ -610,7 +607,7 @@ class GuestEnrollmentIssuer:
             try:
                 self.faults.before_rotation_commit()
             except Exception as error:
-                raise EnrollmentFailure("issuer-storage-failed", 503) from error
+                self._raise_runtime_storage_failure(error)
             connection.commit()
             committed = True
             self.faults.after_rotation_commit()
@@ -622,7 +619,7 @@ class GuestEnrollmentIssuer:
         except sqlite3.Error as error:
             if not committed:
                 _rollback(connection)
-            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+            self._raise_runtime_storage_failure(error)
         finally:
             connection.close()
 
@@ -819,7 +816,7 @@ class GuestEnrollmentIssuer:
         connection = self._connect_or_failure()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            self._validate_store_health(connection)
+            self._validate_store_health(connection, recover=True)
             self._expire_issued(connection, now)
             connection.execute(
                 """
@@ -834,6 +831,7 @@ class GuestEnrollmentIssuer:
             connection.commit()
         except sqlite3.Error as error:
             _rollback(connection)
+            self._set_store_health(False)
             raise EnrollmentFailure("issuer-storage-failed", 503) from error
         finally:
             connection.close()
@@ -945,10 +943,8 @@ class GuestEnrollmentIssuer:
                 """
             )
             row = connection.execute("SELECT value FROM enrollment_meta WHERE key = 'schema_version'").fetchone()
-            schema_initialized_or_migrated = False
             if row is None:
                 connection.execute("INSERT INTO enrollment_meta (key, value) VALUES ('schema_version', ?)", (STORE_SCHEMA_VERSION,))
-                schema_initialized_or_migrated = True
             elif row[0] in ("1", "2", "3"):
                 connection.execute("BEGIN IMMEDIATE")
                 try:
@@ -962,27 +958,19 @@ class GuestEnrollmentIssuer:
                         (STORE_SCHEMA_VERSION,),
                     )
                     connection.commit()
-                    schema_initialized_or_migrated = True
                 except Exception:
                     _rollback(connection)
                     raise
             elif row[0] != STORE_SCHEMA_VERSION:
                 raise EnrollmentConfigError("guest enrollment database schema is unsupported")
-            history_count = connection.execute("SELECT COUNT(*) FROM runtime_identity_history").fetchone()[0]
-            history_meta = connection.execute(
-                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_count'"
-            ).fetchone()
-            if history_meta is None:
-                if not schema_initialized_or_migrated:
-                    raise EnrollmentConfigError("guest enrollment runtime identity history count is missing")
-                connection.execute(
-                    "INSERT INTO enrollment_meta (key, value) VALUES ('runtime_identity_history_count', ?)",
-                    (str(history_count),),
-                )
-            elif history_meta[0] != str(history_count):
-                raise EnrollmentConfigError("guest enrollment runtime identity history count is invalid")
+            # Early v4 review builds used a first-come global history counter.
+            # Remove that obsolete metadata: capacity is now derived from the
+            # durable enrollment bound and each lifecycle's reserved quota.
+            connection.execute(
+                "DELETE FROM enrollment_meta WHERE key = 'runtime_identity_history_count'"
+            )
             connection.commit()
-            self._validate_store_health(connection, full=True)
+            self._validate_store_health(connection, full=True, recover=True)
             os.chmod(self.database_path, 0o600)
         except EnrollmentConfigError:
             raise
@@ -1059,6 +1047,16 @@ class GuestEnrollmentIssuer:
         except sqlite3.Error as error:
             raise EnrollmentFailure("issuer-storage-failed", 503) from error
 
+    def _runtime_connect_or_failure(self):
+        try:
+            return self._connect()
+        except sqlite3.Error as error:
+            self._raise_runtime_storage_failure(error)
+
+    def _raise_runtime_storage_failure(self, error):
+        self._set_store_health(False)
+        raise EnrollmentFailure("issuer-storage-failed", 503) from error
+
     def _validate_store(self, connection, full=False):
         if full:
             row = connection.execute("PRAGMA quick_check").fetchone()
@@ -1109,8 +1107,7 @@ class GuestEnrollmentIssuer:
             _validate_persisted_binding_tombstone(row)
         for row in execution_tombstones:
             _validate_persisted_execution_tombstone(row)
-        history_count = self._runtime_identity_history_count(connection)
-        if history_count != len(history_rows) or history_count > self.max_runtime_identity_history_entries:
+        if len(history_rows) > self.max_runtime_identity_history_entries:
             raise sqlite3.DatabaseError("guest enrollment runtime identity history count is invalid")
         duplicate_current = connection.execute(
             """
@@ -1133,13 +1130,16 @@ class GuestEnrollmentIssuer:
         if overlong_history is not None:
             raise sqlite3.DatabaseError("guest enrollment runtime identity history exceeds its lifecycle bound")
 
-    def _validate_store_health(self, connection, full=False):
+    def _validate_store_health(self, connection, full=False, recover=False):
+        if not recover:
+            self._require_store_healthy()
         try:
             self._validate_store(connection, full=full)
         except sqlite3.Error:
             self._set_store_health(False)
             raise
-        self._set_store_health(True)
+        if recover:
+            self._set_store_health(True)
 
     def _validate_runtime_identity_lifecycle(self, connection, enrollment):
         history = connection.execute(
@@ -1181,27 +1181,6 @@ class GuestEnrollmentIssuer:
             (enrollment["token_digest"],),
         ).fetchone() is not None:
             raise sqlite3.DatabaseError("guest enrollment runtime identity history conflicts with an active identity")
-
-    def _runtime_identity_history_count(self, connection):
-        row = connection.execute(
-            "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_count'"
-        ).fetchone()
-        if row is None or not isinstance(row[0], str) or not re.fullmatch(r"0|[1-9][0-9]*", row[0]):
-            raise sqlite3.DatabaseError("guest enrollment runtime identity history count is invalid")
-        count = int(row[0])
-        if count > self.max_runtime_identity_history_entries:
-            raise sqlite3.DatabaseError("guest enrollment runtime identity history count is invalid")
-        return count
-
-    def _set_runtime_identity_history_count(self, connection, count):
-        if not isinstance(count, int) or count < 0 or count > self.max_runtime_identity_history_entries:
-            raise sqlite3.DatabaseError("guest enrollment runtime identity history count is invalid")
-        updated = connection.execute(
-            "UPDATE enrollment_meta SET value = ? WHERE key = 'runtime_identity_history_count'",
-            (str(count),),
-        ).rowcount
-        if updated != 1:
-            raise sqlite3.DatabaseError("guest enrollment runtime identity history count is invalid")
 
     def _now(self):
         value = self.now()
@@ -1283,24 +1262,13 @@ class GuestEnrollmentIssuer:
     def _delete_runtime_identity_history(self, connection, token_digests):
         if not token_digests:
             return
-        removed = 0
         for offset in range(0, len(token_digests), 500):
             chunk = token_digests[offset : offset + 500]
             placeholders = ",".join("?" for _ in chunk)
-            removed += connection.execute(
-                f"SELECT COUNT(*) FROM runtime_identity_history WHERE token_digest IN ({placeholders})",
+            connection.execute(
+                f"DELETE FROM runtime_identity_history WHERE token_digest IN ({placeholders})",
                 chunk,
-            ).fetchone()[0]
-        if removed:
-            count = self._runtime_identity_history_count(connection)
-            for offset in range(0, len(token_digests), 500):
-                chunk = token_digests[offset : offset + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                connection.execute(
-                    f"DELETE FROM runtime_identity_history WHERE token_digest IN ({placeholders})",
-                    chunk,
-                )
-            self._set_runtime_identity_history_count(connection, count - removed)
+            )
 
     def _discard_runtime_identity_admissions(self, token_digests):
         if not token_digests:

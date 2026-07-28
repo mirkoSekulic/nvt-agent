@@ -8,16 +8,19 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"time"
 )
 
 const (
-	RuntimeIdentityVersion                 = "nvt.guest-runtime-identity/v1"
-	RuntimeIdentityBytes                   = 32
-	MaxRuntimeIdentityStatusRequestBytes   = 4 << 10
-	MaxRuntimeIdentityRotateRequestBytes   = 16 << 10
-	MaxRuntimeIdentityResponseBytes        = 16 << 10
-	MaxRuntimeIdentityHistoryPerEnrollment = 1024
-	MaxRuntimeIdentityHistoryEntries       = 10_000
+	RuntimeIdentityVersion                  = "nvt.guest-runtime-identity/v1"
+	RuntimeIdentityBytes                    = 32
+	MaxRuntimeIdentityStatusRequestBytes    = 4 << 10
+	MaxRuntimeIdentityRotateRequestBytes    = 16 << 10
+	MaxRuntimeIdentityResponseBytes         = 16 << 10
+	MaxRuntimeIdentityHistoryPerEnrollment  = 20_000
+	MaxRuntimeIdentityHistoryAggregate      = MaxDurableEntries * MaxRuntimeIdentityHistoryPerEnrollment
+	RuntimeIdentityCapacityPlanningInterval = 30 * time.Minute
+	MinRuntimeIdentityLifecycleHorizon      = 365 * 24 * time.Hour
 )
 
 // RuntimeIdentityStatusRequest authenticates with the opaque identity in the

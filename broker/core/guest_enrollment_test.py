@@ -19,7 +19,12 @@ from broker.core.guest_enrollment import (
     EnrollmentFailure,
     EnrollmentFaults,
     GuestEnrollmentIssuer,
+    MAX_DURABLE_ENTRIES,
+    MAX_RUNTIME_IDENTITY_HISTORY_AGGREGATE,
+    MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
+    MIN_RUNTIME_IDENTITY_LIFECYCLE_HORIZON,
     OrchestratorAuthenticator,
+    RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL,
     RUNTIME_IDENTITY_VERSION,
     TOMBSTONE_RETENTION,
     VERSION,
@@ -537,6 +542,8 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             "issuer-storage-failed",
             lambda: before.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor)),
         )
+        self.assertFalse(before.store_healthy)
+        self.assertTrue(before.ready())
         self.assertTrue(runtime_identity_is_active(before, identity, envelope["binding"]))
         self.assertFalse(runtime_identity_is_active(before, successor, envelope["binding"]))
         self.assertEqual(before.snapshot()["runtime_identity_history"], [])
@@ -571,12 +578,11 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(len(recovered.snapshot()["runtime_identity_history"]), 1)
 
     def test_runtime_identity_history_is_bounded_restart_safe_and_cleaned(self):
-        issuer = self.issuer(
-            max_runtime_identity_history_per_enrollment=2,
-            max_runtime_identity_history_entries=2,
-        )
+        issuer = self.issuer(max_entries=3, max_runtime_identity_history_per_enrollment=2)
         envelope = issuer.issue(issue_request())
         initial = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        unrelated = issuer.issue(issue_request(uid="unrelated-uid", execution="unrelated-execution", guest="unrelated-guest"))
+        unrelated_identity = issuer.exchange(exchange_request(unrelated))["runtime_identity"]["opaque"]
         first = opaque_canary(90)
         second = opaque_canary(91)
         third = opaque_canary(92)
@@ -587,26 +593,36 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             lambda: issuer.rotate_runtime_identity(second, runtime_rotate_request(envelope["binding"], third)),
         )
         issuer.close()
+        update_database(
+            self.database,
+            "INSERT INTO enrollment_meta (key, value) VALUES (?, ?)",
+            ("runtime_identity_history_count", "2"),
+        )
 
-        restarted = self.issuer(
-            max_runtime_identity_history_per_enrollment=2,
-            max_runtime_identity_history_entries=2,
+        restarted = self.issuer(max_entries=3, max_runtime_identity_history_per_enrollment=2)
+        self.assertEqual(restarted.max_runtime_identity_history_entries, 6)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_count'",
+            ),
+            [],
         )
         self.assertTrue(runtime_identity_is_active(restarted, second, envelope["binding"]))
         self.assertFailure(
             "invalid-request",
             lambda: restarted.rotate_runtime_identity(second, runtime_rotate_request(envelope["binding"], initial)),
         )
-        self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 2)
-        restarted.revoke_binding(revoke_binding_request(envelope["binding"]))
-        self.assertEqual(restarted.snapshot()["runtime_identity_history"], [])
-        self.assertEqual(
-            query_database(
-                self.database,
-                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_count'",
-            ),
-            [("0",)],
+        # The unrelated lifecycle owns its own complete allowance even though
+        # the first lifecycle has exhausted its quota.
+        unrelated_successor = opaque_canary(98)
+        restarted.rotate_runtime_identity(
+            unrelated_identity,
+            runtime_rotate_request(unrelated["binding"], unrelated_successor),
         )
+        self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 3)
+        restarted.revoke_binding(revoke_binding_request(envelope["binding"]))
+        self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 1)
         replacement = restarted.issue(
             issue_request(uid="replacement-uid", execution="replacement-execution", guest="replacement-guest")
         )
@@ -614,6 +630,72 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         restarted.rotate_runtime_identity(
             replacement_identity,
             runtime_rotate_request(replacement["binding"], opaque_canary(96)),
+        )
+
+    def test_runtime_identity_history_capacity_supports_documented_lifecycle(self):
+        self.assertGreaterEqual(
+            MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT * RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL,
+            MIN_RUNTIME_IDENTITY_LIFECYCLE_HORIZON,
+        )
+        self.assertEqual(
+            MAX_RUNTIME_IDENTITY_HISTORY_AGGREGATE,
+            MAX_DURABLE_ENTRIES * MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
+        )
+        issuer = self.issuer()
+        self.assertEqual(
+            issuer.max_runtime_identity_history_entries,
+            MAX_DURABLE_ENTRIES * MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
+        )
+
+    def test_runtime_detected_corruption_latches_until_complete_validation(self):
+        issuer = self.issuer()
+        damaged = issuer.issue(issue_request())
+        damaged_identity = issuer.exchange(exchange_request(damaged))["runtime_identity"]["opaque"]
+        damaged_successor = opaque_canary(99)
+        issuer.rotate_runtime_identity(
+            damaged_identity,
+            runtime_rotate_request(damaged["binding"], damaged_successor),
+        )
+        healthy = issuer.issue(issue_request(uid="healthy-uid", execution="healthy-execution", guest="healthy-guest"))
+        healthy_identity = issuer.exchange(exchange_request(healthy))["runtime_identity"]["opaque"]
+        original_retired_at = issuer.snapshot()["runtime_identity_history"][0]["retired_at"]
+
+        update_database(self.database, "UPDATE runtime_identity_history SET retired_at = ?", ("invalid",))
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(
+                damaged_successor,
+                runtime_status_request(damaged["binding"]),
+            ),
+        )
+        self.assertFalse(issuer.store_healthy)
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(
+                healthy_identity,
+                runtime_status_request(healthy["binding"]),
+            ),
+        )
+
+        # Repair alone cannot let an unrelated record-local request declare
+        # the store healthy. Only a complete readiness/maintenance scan may do
+        # so.
+        update_database(
+            self.database,
+            "UPDATE runtime_identity_history SET retired_at = ?",
+            (original_retired_at,),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(
+                healthy_identity,
+                runtime_status_request(healthy["binding"]),
+            ),
+        )
+        self.assertTrue(issuer.ready())
+        self.assertEqual(
+            issuer.runtime_identity_status(healthy_identity, runtime_status_request(healthy["binding"]))["binding"],
+            healthy["binding"],
         )
 
     def test_runtime_identity_successor_cannot_be_owned_by_another_lifecycle(self):
@@ -648,7 +730,6 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         try:
             connection.execute("DROP TABLE runtime_identity_history")
             connection.execute("ALTER TABLE enrollments DROP COLUMN runtime_identity_history_complete")
-            connection.execute("DELETE FROM enrollment_meta WHERE key = 'runtime_identity_history_count'")
             connection.execute("UPDATE enrollment_meta SET value = '3' WHERE key = 'schema_version'")
             connection.commit()
         finally:
@@ -1132,22 +1213,6 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             GuestEnrollmentIssuer(incomplete, EXCHANGE_URL, maintenance_interval=None)
 
     def test_semantically_corrupt_rows_fail_startup_and_readiness(self):
-        missing_history_meta_database = str(Path(self.temporary.name) / "missing-history-meta.sqlite3")
-        missing_history_meta = GuestEnrollmentIssuer(
-            missing_history_meta_database,
-            EXCHANGE_URL,
-            now=self.clock,
-            maintenance_interval=None,
-        )
-        missing_history_meta.close()
-        update_database(
-            missing_history_meta_database,
-            "DELETE FROM enrollment_meta WHERE key = ?",
-            ("runtime_identity_history_count",),
-        )
-        with self.assertRaisesRegex(EnrollmentConfigError, "history count is missing"):
-            GuestEnrollmentIssuer(missing_history_meta_database, EXCHANGE_URL, maintenance_interval=None)
-
         malformed_timestamp_database = str(Path(self.temporary.name) / "malformed-timestamp.sqlite3")
         issuer = GuestEnrollmentIssuer(
             malformed_timestamp_database,

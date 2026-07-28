@@ -64,6 +64,13 @@ Runtime requests authenticate by indexed digest before body admission and use
 per-enrollment quotas, so unknown or noisy guests cannot consume another
 guest's runtime-identity capacity.
 
+Each enrollment owns a 20,000-rotation history allowance; it is not drawn from
+a shared first-come pool. With the one-hour identity window, guests should
+rotate no more often than every 30 minutes and deployments must schedule
+controlled guest replacement/re-enrollment before the allowance is exhausted
+(at least 365 days at that interval). The broker never evicts predecessor
+history to extend a binding.
+
 SQLite is used in single-writer mode. One broker process owns the database;
 deployments must not share it across replicas. The broker readiness endpoint
 fails closed if the configured durable store becomes unavailable. This phase

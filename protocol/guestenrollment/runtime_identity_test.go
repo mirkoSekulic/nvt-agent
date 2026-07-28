@@ -85,3 +85,12 @@ func TestGenerateRuntimeIdentityUsesCanonicalRandomShape(t *testing.T) {
 		t.Fatal("non-canonical runtime identity was accepted")
 	}
 }
+
+func TestRuntimeIdentityHistoryCapacityIsLifecyclePartitionedAndLongLived(t *testing.T) {
+	if MaxRuntimeIdentityHistoryAggregate != MaxDurableEntries*MaxRuntimeIdentityHistoryPerEnrollment {
+		t.Fatalf("aggregate history bound = %d", MaxRuntimeIdentityHistoryAggregate)
+	}
+	if time.Duration(MaxRuntimeIdentityHistoryPerEnrollment)*RuntimeIdentityCapacityPlanningInterval < MinRuntimeIdentityLifecycleHorizon {
+		t.Fatalf("history allowance does not cover the documented lifecycle horizon")
+	}
+}

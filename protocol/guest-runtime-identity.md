@@ -79,13 +79,29 @@ Exactly one concurrent rotation from a predecessor can commit. Once committed,
 the predecessor cannot authenticate and it can never be selected as a later
 successor. A successful response never echoes the successor.
 
-History is bounded to 1,024 predecessor digests per enrollment and 10,000
-history entries per issuer. Saturation fails with `capacity-exceeded`; live
+History is bounded to 20,000 predecessor digests per enrollment. This is a
+reserved per-lifecycle allowance, not a first-come issuer pool: the aggregate
+physical bound is the 10,000 durable-enrollment bound multiplied by 20,000,
+and one lifecycle reaching its allowance cannot deny another lifecycle's next
+rotation. Saturation fails only that lifecycle with `capacity-exceeded`; live
 history is never evicted to admit a rotation. Exact-binding and execution-scope
 revocation delete the corresponding current identity and all its history.
 Schema migration cannot reconstruct historical digests: an already-consumed
 pre-history record remains usable for status but rotation fails closed until
-the orchestrator revokes and re-enrolls that binding.
+the orchestrator revokes and re-enrolls that binding. Early schema-v4 review
+stores retain and validate every history row while discarding only the obsolete
+first-come global counter; no predecessor record is evicted during migration.
+
+The production identity window is one hour. A guest implementation SHOULD
+rotate no more often than every 30 minutes and MUST finish before expiry. The
+20,000-entry allowance therefore covers at least 365 days even at the most
+aggressive documented interval (about 416 days). The guest must durably count
+committed rotations, resolving ambiguous responses before advancing its count.
+The administrator/orchestrator must schedule controlled replacement before the
+allowance is exhausted: provision a new guest instance binding, complete its
+one-time enrollment, then revoke and clean up the old exact binding. Unbounded
+rotation of one binding is deliberately unsupported; silent history eviction
+would revive predecessor replay.
 
 ### Ambiguous response recovery
 
@@ -131,8 +147,10 @@ Authentication is completed by an indexed digest lookup before a runtime body
 is admitted. Body concurrency and rate limits include per-enrollment bounds,
 so unknown or noisy identities cannot consume another identity's quota.
 Complete-store integrity validation occurs at startup, readiness, and
-maintenance. A detected integrity failure latches the issuer unhealthy and all
-runtime requests fail closed. Normal status and rotation validate only their
+maintenance. A detected integrity failure on either a complete scan or an
+indexed runtime path latches the issuer unhealthy and all runtime requests fail
+closed until readiness or maintenance completes a successful full validation.
+Normal status and rotation validate only their
 indexed record and bounded lifecycle history; recurring guest work does not
 scan unrelated identities or hold the SQLite writer lock during a global scan.
 
