@@ -1,11 +1,13 @@
 package nativesession
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,10 +20,9 @@ var (
 	credentialRecoveryWindow = time.Minute
 	credentialRenewalJitter  = 30 * time.Second
 	reconnectDelay           = time.Second
+	renewalRetryDelay        = 5 * time.Second
 	idleProbeInterval        = 5 * time.Second
 )
-
-var errRenewCredential = errors.New("native session credential renewal is due")
 
 type Runtime struct {
 	Configuration Configuration
@@ -45,6 +46,26 @@ type sessionCredential struct {
 	LocalRenewAt   time.Time
 }
 
+type credentialState struct {
+	current              *sessionCredential
+	pending              *sessionCredential
+	renewalUncertain     bool
+	nextRenewalAttemptAt time.Time
+}
+
+func (state *credentialState) clear() {
+	if state == nil {
+		return
+	}
+	if state.current != nil {
+		state.current.Opaque = ""
+	}
+	if state.pending != nil {
+		state.pending.Opaque = ""
+	}
+	*state = credentialState{}
+}
+
 func (sessionCredential) String() string   { return "[sensitive guest session credential]" }
 func (sessionCredential) GoString() string { return "[sensitive guest session credential]" }
 
@@ -61,17 +82,13 @@ func (runtime *Runtime) Run(ctx context.Context) error {
 	}
 	_ = runtime.writeReadiness(false)
 	defer runtime.writeReadiness(false)
-	var credential *sessionCredential
-	defer func() {
-		if credential != nil {
-			credential.Opaque = ""
-		}
-	}()
+	state := &credentialState{}
+	defer state.clear()
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if credential == nil {
+		if state.current == nil {
 			issued, err := runtime.issueCredential(ctx)
 			if err != nil {
 				_, temporary, _ := FailureDetails(err)
@@ -83,20 +100,14 @@ func (runtime *Runtime) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			credential = &issued
+			state.current = &issued
 		}
-		err := runtime.serveCredential(ctx, *credential)
-		if errors.Is(err, errRenewCredential) {
-			credential.Opaque = ""
-			credential = nil
-			continue
-		}
+		err := runtime.serveCredential(ctx, state)
 		if err == nil && ctx.Err() != nil {
 			return nil
 		}
 		_, temporary, _ := FailureDetails(err)
-		if !temporary || !runtime.now().Before(credential.ExpiresAt) {
-			credential.Opaque = ""
+		if !temporary || state.current == nil || !runtime.credentialCurrent(*state.current) {
 			return err
 		}
 		if err := waitContext(ctx, reconnectDelay); err != nil {
@@ -165,38 +176,15 @@ func (runtime *Runtime) validateCredential(result guestenrollment.GuestSessionIs
 	}, nil
 }
 
-func (runtime *Runtime) serveCredential(ctx context.Context, credential sessionCredential) error {
-	if !runtime.credentialCurrent(credential) {
+func (runtime *Runtime) serveCredential(ctx context.Context, state *credentialState) error {
+	if state == nil || state.current == nil || !runtime.credentialCurrent(*state.current) {
 		return fail(ReasonCredentialExpired, false, false)
 	}
-	connection, err := runtime.Connector.Connect(ctx, runtime.Configuration.GatewayEndpoint)
+	connection, reader, err := runtime.openCredential(ctx, *state.current)
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
-	reader := newFrameReader(connection)
-	hello := guestenrollment.NativeSessionMessage{
-		ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHello,
-		Binding: &credential.Binding, Audience: guestenrollment.NativeGuestControlAudience, Credential: credential.Opaque,
-	}
-	if err := writeFrame(connection, hello, time.Now().Add(frameTimeout)); err != nil {
-		return err
-	}
-	hello.Credential = ""
-	response, err := readFrame(reader, connection, time.Now().Add(frameTimeout))
-	if err != nil {
-		return err
-	}
-	if response.Type == guestenrollment.NativeSessionHelloReject {
-		return fail(ReasonGatewayDenied, false, false)
-	}
-	if response.Type != guestenrollment.NativeSessionHelloAck || response.Binding == nil ||
-		*response.Binding != credential.Binding || response.Audience != guestenrollment.NativeGuestControlAudience {
-		return fail(ReasonProtocolInvalid, false, false)
-	}
-	if err := runtime.checkAgentd(); err != nil {
-		return err
-	}
+	defer func() { _ = connection.Close() }()
 	if err := runtime.writeReadiness(true); err != nil {
 		return err
 	}
@@ -206,16 +194,23 @@ func (runtime *Runtime) serveCredential(ctx context.Context, credential sessionC
 		if ctx.Err() != nil {
 			return nil
 		}
-		if !runtime.credentialCurrent(credential) {
+		if state.current == nil || !runtime.credentialCurrent(*state.current) {
 			return fail(ReasonCredentialExpired, false, false)
 		}
-		if runtime.credentialRenewalDue(credential) {
-			return errRenewCredential
+		if runtime.credentialRenewalDue(*state.current) && runtime.renewalAttemptDue(state) {
+			replacement, replacementReader, switched, renewalErr := runtime.prepareReplacement(ctx, state)
+			if renewalErr != nil {
+				return renewalErr
+			}
+			if switched {
+				previous := connection
+				connection, reader = replacement, replacementReader
+				requestIDs = make(map[string]struct{}, guestenrollment.MaxNativeSessionRequestsPerConnection)
+				_ = previous.Close()
+				continue
+			}
 		}
-		deadline := time.Now().Add(idleProbeInterval)
-		if until := runtime.untilRenewal(credential); until > 0 && until < idleProbeInterval {
-			deadline = time.Now().Add(until)
-		}
+		deadline := runtime.nextReadDeadline(state)
 		frame, readErr := readFrame(reader, connection, deadline)
 		if readErr != nil {
 			if ctx.Err() != nil {
@@ -225,8 +220,11 @@ func (runtime *Runtime) serveCredential(ctx context.Context, credential sessionC
 			if !temporary {
 				return readErr
 			}
-			if runtime.credentialRenewalDue(credential) {
-				return errRenewCredential
+			if state.current == nil || !runtime.credentialCurrent(*state.current) {
+				return fail(ReasonCredentialExpired, false, false)
+			}
+			if runtime.credentialRenewalDue(*state.current) && runtime.renewalAttemptDue(state) {
+				continue
 			}
 			if err := runtime.checkAgentd(); err != nil {
 				return err
@@ -236,45 +234,173 @@ func (runtime *Runtime) serveCredential(ctx context.Context, credential sessionC
 			}, time.Now().Add(frameTimeout)); err != nil {
 				return err
 			}
-			pong, err := readFrame(reader, connection, time.Now().Add(frameTimeout))
-			if err != nil || pong.Type != guestenrollment.NativeSessionPong {
-				if err != nil {
-					return err
-				}
-				return fail(ReasonProtocolInvalid, false, false)
+			if err := runtime.awaitPong(reader, connection, requestIDs, time.Now().Add(frameTimeout)); err != nil {
+				return err
 			}
 			continue
 		}
-		switch frame.Type {
-		case guestenrollment.NativeSessionPing:
-			if err := writeFrame(connection, guestenrollment.NativeSessionMessage{
-				ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
-			}, time.Now().Add(frameTimeout)); err != nil {
-				return err
-			}
-		case guestenrollment.NativeSessionPong:
-			continue
-		case guestenrollment.NativeSessionAgentdRequest:
-			if _, duplicate := requestIDs[frame.RequestID]; duplicate || len(requestIDs) >= guestenrollment.MaxNativeSessionRequestsPerConnection {
-				return fail(ReasonProtocolInvalid, false, false)
-			}
-			requestIDs[frame.RequestID] = struct{}{}
-			payload, err := relayAgentd(runtime.Configuration.AgentdSocketPath, frame.Payload)
-			if err != nil {
-				return err
-			}
-			response := guestenrollment.NativeSessionMessage{
-				ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionAgentdResponse,
-				RequestID: frame.RequestID, Payload: json.RawMessage(payload),
-			}
-			if err := writeFrame(connection, response, time.Now().Add(frameTimeout)); err != nil {
-				zero(payload)
-				return err
-			}
-			zero(payload)
-		default:
-			return fail(ReasonProtocolInvalid, false, false)
+		if _, err := runtime.handleFrame(frame, connection, requestIDs); err != nil {
+			return err
 		}
+	}
+}
+
+func (runtime *Runtime) openCredential(ctx context.Context, credential sessionCredential) (net.Conn, *bufio.Reader, error) {
+	if !runtime.credentialCurrent(credential) {
+		return nil, nil, fail(ReasonCredentialExpired, false, false)
+	}
+	connection, err := runtime.Connector.Connect(ctx, runtime.Configuration.GatewayEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	reader := newFrameReader(connection)
+	hello := guestenrollment.NativeSessionMessage{
+		ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHello,
+		Binding: &credential.Binding, Audience: guestenrollment.NativeGuestControlAudience, Credential: credential.Opaque,
+	}
+	if err := writeFrame(connection, hello, time.Now().Add(frameTimeout)); err != nil {
+		hello.Credential = ""
+		_ = connection.Close()
+		return nil, nil, err
+	}
+	hello.Credential = ""
+	response, err := readFrame(reader, connection, time.Now().Add(frameTimeout))
+	if err != nil {
+		_ = connection.Close()
+		return nil, nil, err
+	}
+	if response.Type == guestenrollment.NativeSessionHelloReject {
+		_ = connection.Close()
+		return nil, nil, fail(ReasonGatewayDenied, false, false)
+	}
+	if response.Type != guestenrollment.NativeSessionHelloAck || response.Binding == nil ||
+		*response.Binding != credential.Binding || response.Audience != guestenrollment.NativeGuestControlAudience {
+		_ = connection.Close()
+		return nil, nil, fail(ReasonProtocolInvalid, false, false)
+	}
+	if err := runtime.checkAgentd(); err != nil {
+		_ = connection.Close()
+		return nil, nil, err
+	}
+	return connection, reader, nil
+}
+
+func (runtime *Runtime) prepareReplacement(ctx context.Context, state *credentialState) (net.Conn, *bufio.Reader, bool, error) {
+	if state.renewalUncertain {
+		return nil, nil, false, nil
+	}
+	if state.pending != nil && !runtime.credentialCurrent(*state.pending) {
+		state.pending.Opaque = ""
+		state.pending = nil
+	}
+	if state.pending == nil {
+		issued, err := runtime.issueCredential(ctx)
+		if err != nil {
+			_, temporary, uncertain := FailureDetails(err)
+			if uncertain {
+				state.renewalUncertain = true
+				return nil, nil, false, nil
+			}
+			if temporary {
+				state.nextRenewalAttemptAt = runtime.monotonicNow().Add(renewalRetryDelay)
+				return nil, nil, false, nil
+			}
+			return nil, nil, false, err
+		}
+		state.pending = &issued
+	}
+	connection, reader, err := runtime.openCredential(ctx, *state.pending)
+	if err != nil {
+		_, temporary, _ := FailureDetails(err)
+		if temporary {
+			state.nextRenewalAttemptAt = runtime.monotonicNow().Add(renewalRetryDelay)
+			return nil, nil, false, nil
+		}
+		return nil, nil, false, err
+	}
+	previous := state.current
+	state.current = state.pending
+	state.pending = nil
+	state.nextRenewalAttemptAt = time.Time{}
+	state.renewalUncertain = false
+	if previous != nil {
+		previous.Opaque = ""
+	}
+	return connection, reader, true, nil
+}
+
+func (runtime *Runtime) renewalAttemptDue(state *credentialState) bool {
+	return state != nil && !state.renewalUncertain &&
+		(state.nextRenewalAttemptAt.IsZero() || !runtime.monotonicNow().Before(state.nextRenewalAttemptAt))
+}
+
+func (runtime *Runtime) nextReadDeadline(state *credentialState) time.Time {
+	wait := idleProbeInterval
+	if state != nil && state.current != nil {
+		if until := runtime.untilRenewal(*state.current); until > 0 && until < wait {
+			wait = until
+		}
+		wallExpiry := state.current.ExpiresAt.Sub(runtime.now())
+		localExpiry := state.current.LocalExpiresAt.Sub(runtime.monotonicNow())
+		if wallExpiry > 0 && wallExpiry < wait {
+			wait = wallExpiry
+		}
+		if localExpiry > 0 && localExpiry < wait {
+			wait = localExpiry
+		}
+		if !state.nextRenewalAttemptAt.IsZero() {
+			if retry := state.nextRenewalAttemptAt.Sub(runtime.monotonicNow()); retry > 0 && retry < wait {
+				wait = retry
+			}
+		}
+	}
+	if wait <= 0 {
+		wait = time.Millisecond
+	}
+	return time.Now().Add(wait)
+}
+
+func (runtime *Runtime) awaitPong(reader *bufio.Reader, connection net.Conn, requestIDs map[string]struct{}, deadline time.Time) error {
+	for {
+		frame, err := readFrame(reader, connection, deadline)
+		if err != nil {
+			return err
+		}
+		pong, err := runtime.handleFrame(frame, connection, requestIDs)
+		if err != nil {
+			return err
+		}
+		if pong {
+			return nil
+		}
+	}
+}
+
+func (runtime *Runtime) handleFrame(frame guestenrollment.NativeSessionMessage, connection net.Conn, requestIDs map[string]struct{}) (bool, error) {
+	switch frame.Type {
+	case guestenrollment.NativeSessionPing:
+		return false, writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
+		}, time.Now().Add(frameTimeout))
+	case guestenrollment.NativeSessionPong:
+		return true, nil
+	case guestenrollment.NativeSessionAgentdRequest:
+		if _, duplicate := requestIDs[frame.RequestID]; duplicate || len(requestIDs) >= guestenrollment.MaxNativeSessionRequestsPerConnection {
+			return false, fail(ReasonProtocolInvalid, false, false)
+		}
+		requestIDs[frame.RequestID] = struct{}{}
+		payload, err := relayAgentd(runtime.Configuration.AgentdSocketPath, frame.Payload)
+		if err != nil {
+			return false, err
+		}
+		defer zero(payload)
+		response := guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionAgentdResponse,
+			RequestID: frame.RequestID, Payload: json.RawMessage(payload),
+		}
+		return false, writeFrame(connection, response, time.Now().Add(frameTimeout))
+	default:
+		return false, fail(ReasonProtocolInvalid, false, false)
 	}
 }
 

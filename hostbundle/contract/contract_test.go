@@ -45,6 +45,21 @@ func TestManifestRoundTripAndStrictJSON(t *testing.T) {
 	}
 }
 
+func TestLegacyV1ManifestWithoutNativeSessionRemainsValid(t *testing.T) {
+	manifest := validManifest()
+	manifest.Compatibility.NativeSessionProtocol = ""
+	encoded, err := EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "native_session_protocol") {
+		t.Fatal("legacy manifest gained a native-session requirement")
+	}
+	if _, err := DecodeManifest(encoded); err != nil {
+		t.Fatalf("legacy v1 manifest was rejected: %v", err)
+	}
+}
+
 func TestManifestValidationRejectsUnsafeAndAmbiguousFiles(t *testing.T) {
 	tests := []func(*Manifest){
 		func(manifest *Manifest) { manifest.NativeEntrypoint = "../bin/agent" },

@@ -43,6 +43,14 @@ enrollment path, stores current/successor bearer state below root-owned mode
 No bearer is accepted through argv, environment, or agent-visible
 configuration.
 
+The native supervisor explicitly starts agentd with a group-scoped `0660`
+socket owned by `nvt-agent:nvt-agent`; this is the only access granted to the
+capability-free root session service. Agentd's default remains `0600` for the
+existing container and Compose paths. The version-1 `session_readiness_path`
+member is additive: older guest configurations that omit it retain their
+original agentd/tmux readiness behavior, while newly provisioned native-session
+guests enable the outbound-session readiness gate.
+
 After the bootstrap has installed and activated a release, guest provisioning
 may install the repository-owned unit and its separately supplied non-secret
 configuration using the stable `current` path:

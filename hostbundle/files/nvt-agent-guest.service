@@ -9,6 +9,7 @@ Type=simple
 User=nvt-agent
 Group=nvt-agent
 RuntimeDirectory=nvt-agent
+RuntimeDirectoryMode=0750
 StateDirectory=nvt-agent
 WorkingDirectory=/workspace
 ExecStart=/opt/nvt/current/bin/nvt-guest-supervisor --config /etc/nvt-agent/guest.json

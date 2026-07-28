@@ -51,7 +51,7 @@ type Manifest struct {
 
 type Compatibility struct {
 	AgentdProtocol        string `json:"agentd_protocol"`
-	NativeSessionProtocol string `json:"native_session_protocol"`
+	NativeSessionProtocol string `json:"native_session_protocol,omitempty"`
 }
 
 type File struct {
@@ -96,7 +96,7 @@ func ValidateManifest(manifest Manifest) error {
 		return errors.New("host bundle service identity is invalid")
 	}
 	if manifest.Compatibility.AgentdProtocol != AgentdProtocolVersion ||
-		manifest.Compatibility.NativeSessionProtocol != NativeSessionProtocolVersion {
+		(manifest.Compatibility.NativeSessionProtocol != "" && manifest.Compatibility.NativeSessionProtocol != NativeSessionProtocolVersion) {
 		return errors.New("host bundle agentd protocol is incompatible")
 	}
 	if len(manifest.Files) == 0 || len(manifest.Files) > MaxFiles {

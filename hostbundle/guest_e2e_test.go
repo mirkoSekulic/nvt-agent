@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -202,6 +203,9 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 
 	command, done := start()
+	if info, err := os.Stat(socket); err != nil || info.Mode().Perm() != 0o660 {
+		t.Fatalf("native agentd socket permission contract = %v, %v", info, err)
+	}
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "first-native-prompt")
 	stop(command, done)
 	command, done = start()
@@ -224,6 +228,20 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		t.Fatal("supervisor did not exit after session loss")
 	}
 	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
+	delete(config, "session_readiness_path")
+	legacyConfigBytes, _ := json.Marshal(config)
+	if err := os.WriteFile(configPath, append(legacyConfigBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(sessionReadiness); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	command, done = start()
+	if info, err := os.Stat(socket); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("legacy agentd socket permission contract = %v, %v", info, err)
+	}
+	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "legacy-v1-native-prompt")
+	stop(command, done)
 
 	repeatedOutput, err := runBootstrap(testBootstrap, bootstrapEnvironment, bootstrapArguments...)
 	if err != nil || !bytes.Contains(repeatedOutput, []byte("verified host bundle")) {
@@ -232,11 +250,11 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	service, err := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-agent-guest.service"))
 	identityService, identityServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-identity.service"))
 	sessionService, sessionServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-session.service"))
-	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || identityServiceErr != nil ||
+	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || !bytes.Contains(service, []byte("RuntimeDirectoryMode=0750")) || identityServiceErr != nil ||
 		!bytes.Contains(identityService, []byte("User=root")) || !bytes.Contains(identityService, []byte("Type=notify")) ||
 		!bytes.Contains(identityService, []byte("TimeoutStartSec=0")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) ||
 		sessionServiceErr != nil || !bytes.Contains(sessionService, []byte("User=root")) || !bytes.Contains(sessionService, []byte("Group=nvt-agent")) ||
-		!bytes.Contains(sessionService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(sessionService, []byte("nvt-guest-sessiond")) ||
+		!bytes.Contains(sessionService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(sessionService, []byte("CapabilityBoundingSet=\n")) || !bytes.Contains(sessionService, []byte("nvt-guest-sessiond")) ||
 		!bytes.Contains(sessionService, []byte("Requires=nvt-guest-identity.service nvt-agent-guest.service")) {
 		t.Fatal("installed systemd boundaries are missing")
 	}

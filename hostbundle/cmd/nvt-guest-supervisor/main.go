@@ -63,9 +63,14 @@ func run(config configuration, releaseRoot string) error {
 	_ = killSession(config)
 
 	agentdPath := filepath.Join(releaseRoot, "bin", "agentd")
+	socketMode := "0600"
+	if config.SessionReadinessPath != "" {
+		socketMode = "0660"
+	}
 	agentd := exec.Command(config.PythonPath,
 		agentdPath,
 		"--socket", config.SocketPath,
+		"--socket-mode", socketMode,
 		"--state-dir", config.StateDir,
 		"--session", config.SessionName,
 		"--session-ready-marker", markerPath,
@@ -135,8 +140,10 @@ func run(config configuration, releaseRoot string) error {
 	if err := waitForAgentd(config.SocketPath, startupDeadline, agentdDone); err != nil {
 		return err
 	}
-	if err := waitForSessionReadiness(config, time.Now().Add(90*time.Second), agentdDone); err != nil {
-		return err
+	if config.SessionReadinessPath != "" {
+		if err := waitForSessionReadiness(config, time.Now().Add(90*time.Second), agentdDone); err != nil {
+			return err
+		}
 	}
 	if err := atomicWrite(readinessPath, []byte("ready\n"), 0o600); err != nil {
 		return errors.New("guest readiness could not be published")
@@ -157,7 +164,7 @@ func run(config configuration, releaseRoot string) error {
 			if !sessionExists(config) {
 				return errors.New("guest session exited unexpectedly")
 			}
-			if !sessionTransportReady(config.SessionReadinessPath) {
+			if config.SessionReadinessPath != "" && !sessionTransportReady(config.SessionReadinessPath) {
 				return errors.New("native session transport exited unexpectedly")
 			}
 		}
@@ -173,7 +180,7 @@ func loadConfiguration(path string) (configuration, string, error) {
 	if contract.DecodeStrict(data, maxConfigBytes, &config) != nil {
 		return configuration{}, "", errors.New("guest supervisor configuration is invalid")
 	}
-	if config.Version != 1 || !absoluteRegularExecutable(config.PythonPath) || !absoluteRegularExecutable(config.TmuxPath) || !validAbsoluteDirectory(config.StateDir) || !validAbsolutePath(config.SocketPath) || !validAbsolutePath(config.SessionReadinessPath) || config.SessionReadinessPath == config.SocketPath || !validAbsoluteDirectory(config.Workspace) || !sessionPattern.MatchString(config.SessionName) || config.SessionStartupGraceSeconds < 0 || config.SessionStartupGraceSeconds > 30 || len(config.SessionCommand) == 0 || len(config.SessionCommand) > 32 {
+	if config.Version != 1 || !absoluteRegularExecutable(config.PythonPath) || !absoluteRegularExecutable(config.TmuxPath) || !validAbsoluteDirectory(config.StateDir) || !validAbsolutePath(config.SocketPath) || !validSessionReadinessPath(config) || !validAbsoluteDirectory(config.Workspace) || !sessionPattern.MatchString(config.SessionName) || config.SessionStartupGraceSeconds < 0 || config.SessionStartupGraceSeconds > 30 || len(config.SessionCommand) == 0 || len(config.SessionCommand) > 32 {
 		return configuration{}, "", errors.New("guest supervisor configuration is invalid")
 	}
 	argumentBytes := 0
@@ -196,6 +203,11 @@ func loadConfiguration(path string) (configuration, string, error) {
 		return configuration{}, "", errors.New("guest workspace is unavailable")
 	}
 	return config, releaseRoot, nil
+}
+
+func validSessionReadinessPath(config configuration) bool {
+	return config.SessionReadinessPath == "" ||
+		(validAbsolutePath(config.SessionReadinessPath) && config.SessionReadinessPath != config.SocketPath)
 }
 
 func waitForSessionReadiness(config configuration, deadline time.Time, done <-chan struct{}) error {

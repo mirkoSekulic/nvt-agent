@@ -24,6 +24,25 @@ type fakeIssuer struct {
 	errors  []error
 }
 
+type issuerFunc func(context.Context) (guestenrollment.GuestSessionIssueResult, error)
+
+func (function issuerFunc) Issue(ctx context.Context) (guestenrollment.GuestSessionIssueResult, error) {
+	return function(ctx)
+}
+
+func testIssueResult(binding guestenrollment.Binding, sequence uint64, issuedAt time.Time) guestenrollment.GuestSessionIssueResult {
+	credential, _ := guestenrollment.GenerateGuestSessionCredential(sequence)
+	return guestenrollment.GuestSessionIssueResult{
+		ContractVersion: guestenrollment.GuestSessionIdentityVersion,
+		Binding:         binding,
+		Credential: guestenrollment.GuestSessionCredential{
+			Type: guestenrollment.GuestSessionCredentialType, Opaque: credential,
+			Audience: guestenrollment.NativeGuestControlAudience,
+			IssuedAt: guestenrollment.FormatTimestamp(issuedAt), ExpiresAt: guestenrollment.FormatTimestamp(issuedAt.Add(5 * time.Minute)),
+		},
+	}
+}
+
 func (issuer *fakeIssuer) Issue(_ context.Context) (guestenrollment.GuestSessionIssueResult, error) {
 	issuer.mu.Lock()
 	defer issuer.mu.Unlock()
@@ -201,6 +220,229 @@ func TestFirstIssuanceResponseLossHasOneBoundedRetry(t *testing.T) {
 	}
 }
 
+func TestRenewalBrokerOutageKeepsReadySessionUntilReplacement(t *testing.T) {
+	restoreFastRenewal(t)
+	work := t.TempDir()
+	agentdSocket := filepath.Join(work, "agentd.sock")
+	stopAgentd := serveFakeAgentd(t, agentdSocket)
+	defer stopAgentd()
+	binding := testBinding()
+	var mu sync.Mutex
+	calls := 0
+	renewalStarted := make(chan struct{})
+	releaseRenewal := make(chan struct{})
+	replacementHello := make(chan struct{})
+	releaseReplacementAck := make(chan struct{})
+	issuer := issuerFunc(func(_ context.Context) (guestenrollment.GuestSessionIssueResult, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		switch call {
+		case 1:
+			return testIssueResult(binding, 1, time.Now().UTC().Truncate(time.Second)), nil
+		case 2:
+			close(renewalStarted)
+			<-releaseRenewal
+			return guestenrollment.GuestSessionIssueResult{}, fail(ReasonIdentityUnavailable, true, false)
+		default:
+			return testIssueResult(binding, uint64(call), time.Now().UTC().Truncate(time.Second)), nil
+		}
+	})
+	connected := make(chan int, 4)
+	connector := keepAliveConnectorBeforeAck(binding, connected, func(call int) {
+		if call == 2 {
+			close(replacementHello)
+			<-releaseReplacementAck
+		}
+	})
+	runtime := newTestRuntime(t, work, agentdSocket, issuer, connector)
+	runtime.Now = time.Now
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	waitConnected(t, connected, 1)
+	readinessPath := filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)
+	select {
+	case <-renewalStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("renewal did not start")
+	}
+	if _, err := os.Stat(readinessPath); err != nil {
+		cancel()
+		t.Fatalf("renewal removed healthy readiness: %v", err)
+	}
+	close(releaseRenewal)
+	select {
+	case <-replacementHello:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("replacement hello did not start")
+	}
+	if _, err := os.Stat(readinessPath); err != nil {
+		cancel()
+		t.Fatalf("readiness disappeared before replacement authentication: %v", err)
+	}
+	close(releaseReplacementAck)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readinessPath); err != nil {
+			cancel()
+			t.Fatalf("readiness disappeared before replacement: %v", err)
+		}
+		select {
+		case call := <-connected:
+			if call != 2 {
+				t.Fatalf("replacement connection = %d", call)
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("replacement session was not established")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestRenewalResponseLossCapacityKeepsPredecessorAndNeverIssuesThird(t *testing.T) {
+	restoreFastRenewal(t)
+	work := t.TempDir()
+	agentdSocket := filepath.Join(work, "agentd.sock")
+	stopAgentd := serveFakeAgentd(t, agentdSocket)
+	defer stopAgentd()
+	binding := testBinding()
+	var mu sync.Mutex
+	calls := 0
+	issuer := issuerFunc(func(_ context.Context) (guestenrollment.GuestSessionIssueResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		switch calls {
+		case 1:
+			return testIssueResult(binding, 1, time.Now().UTC().Truncate(time.Second)), nil
+		case 2:
+			return guestenrollment.GuestSessionIssueResult{}, fail(ReasonIdentityUnavailable, true, true)
+		case 3:
+			return guestenrollment.GuestSessionIssueResult{}, fail(ReasonIdentityUnavailable, true, false)
+		default:
+			return guestenrollment.GuestSessionIssueResult{}, fail(ReasonIdentityUnavailable, false, true)
+		}
+	})
+	connected := make(chan int, 2)
+	runtime := newTestRuntime(t, work, agentdSocket, issuer, keepAliveConnector(binding, connected))
+	runtime.Now = time.Now
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	waitConnected(t, connected, 1)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		observed := calls
+		mu.Unlock()
+		if observed == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("response-loss recovery calls = %d", observed)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	readinessPath := filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)
+	if _, err := os.Stat(readinessPath); err != nil {
+		cancel()
+		t.Fatalf("uncertain renewal removed usable predecessor: %v", err)
+	}
+	time.Sleep(5 * renewalRetryDelay)
+	mu.Lock()
+	observed := calls
+	mu.Unlock()
+	if observed != 3 {
+		cancel()
+		t.Fatalf("renewal issued %d candidates after bounded response loss", observed)
+	}
+	if _, err := os.Stat(readinessPath); err != nil {
+		cancel()
+		t.Fatalf("predecessor readiness was not retained: %v", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHeartbeatProcessesQueuedRequestAndSimultaneousPing(t *testing.T) {
+	originalProbe := idleProbeInterval
+	idleProbeInterval = 20 * time.Millisecond
+	t.Cleanup(func() { idleProbeInterval = originalProbe })
+	work := t.TempDir()
+	agentdSocket := filepath.Join(work, "agentd.sock")
+	stopAgentd := serveFakeAgentd(t, agentdSocket)
+	defer stopAgentd()
+	binding := testBinding()
+	issuer := &fakeIssuer{binding: binding, now: time.Now().UTC().Truncate(time.Second)}
+	ctx, cancel := context.WithCancel(context.Background())
+	connector := &pipeConnector{handler: func(_ int, connection net.Conn) {
+		defer connection.Close()
+		reader := newFrameReader(connection)
+		hello, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || hello.Type != guestenrollment.NativeSessionHello {
+			t.Errorf("hello = %#v, %v", hello, err)
+			return
+		}
+		_ = writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHelloAck,
+			Binding: &binding, Audience: guestenrollment.NativeGuestControlAudience,
+		}, time.Now().Add(time.Second))
+		ping, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || ping.Type != guestenrollment.NativeSessionPing {
+			t.Errorf("client heartbeat = %#v, %v", ping, err)
+			return
+		}
+		_ = writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionAgentdRequest,
+			RequestID: "queued-during-ping", Payload: json.RawMessage(`{"type":"health"}`),
+		}, time.Now().Add(time.Second))
+		response, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || response.Type != guestenrollment.NativeSessionAgentdResponse || response.RequestID != "queued-during-ping" {
+			t.Errorf("queued response = %#v, %v", response, err)
+			return
+		}
+		_ = writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPing,
+		}, time.Now().Add(time.Second))
+		pong, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || pong.Type != guestenrollment.NativeSessionPong {
+			t.Errorf("simultaneous ping response = %#v, %v", pong, err)
+			return
+		}
+		_ = writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
+		}, time.Now().Add(time.Second))
+		cancel()
+	}}
+	runtime := newTestRuntime(t, work, agentdSocket, issuer, connector)
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("heartbeat collision did not converge")
+	}
+}
+
 func TestCredentialScheduleRemainsBoundedAcrossClockRollback(t *testing.T) {
 	issuedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	local := time.Now()
@@ -309,6 +551,68 @@ func newTestRuntime(t *testing.T, work, agentdSocket string, issuer CredentialIs
 		t.Fatal(err)
 	}
 	return runtime
+}
+
+func restoreFastRenewal(t *testing.T) {
+	t.Helper()
+	originalAge, originalRecovery, originalJitter := credentialRenewalAge, credentialRecoveryWindow, credentialRenewalJitter
+	originalReconnect, originalRetry, originalProbe := reconnectDelay, renewalRetryDelay, idleProbeInterval
+	credentialRenewalAge, credentialRecoveryWindow, credentialRenewalJitter = 40*time.Millisecond, 20*time.Millisecond, 0
+	reconnectDelay, renewalRetryDelay, idleProbeInterval = 5*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() {
+		credentialRenewalAge, credentialRecoveryWindow, credentialRenewalJitter = originalAge, originalRecovery, originalJitter
+		reconnectDelay, renewalRetryDelay, idleProbeInterval = originalReconnect, originalRetry, originalProbe
+	})
+}
+
+func keepAliveConnector(binding guestenrollment.Binding, connected chan<- int) *pipeConnector {
+	return keepAliveConnectorBeforeAck(binding, connected, nil)
+}
+
+func keepAliveConnectorBeforeAck(binding guestenrollment.Binding, connected chan<- int, beforeAck func(int)) *pipeConnector {
+	connector := &pipeConnector{}
+	connector.handler = func(call int, connection net.Conn) {
+		defer connection.Close()
+		reader := newFrameReader(connection)
+		hello, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || hello.Type != guestenrollment.NativeSessionHello || hello.Binding == nil || *hello.Binding != binding {
+			return
+		}
+		if beforeAck != nil {
+			beforeAck(call)
+		}
+		if writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHelloAck,
+			Binding: &binding, Audience: guestenrollment.NativeGuestControlAudience,
+		}, time.Now().Add(time.Second)) != nil {
+			return
+		}
+		connected <- call
+		for {
+			frame, err := readFrame(reader, connection, time.Now().Add(time.Second))
+			if err != nil {
+				return
+			}
+			if frame.Type == guestenrollment.NativeSessionPing {
+				_ = writeFrame(connection, guestenrollment.NativeSessionMessage{
+					ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
+				}, time.Now().Add(time.Second))
+			}
+		}
+	}
+	return connector
+}
+
+func waitConnected(t *testing.T, connected <-chan int, want int) {
+	t.Helper()
+	select {
+	case call := <-connected:
+		if call != want {
+			t.Fatalf("connection = %d, want %d", call, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("connection %d was not established", want)
+	}
 }
 
 func serveFakeAgentd(t *testing.T, path string) func() {

@@ -445,6 +445,9 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 			return errors.New("native runtime directory setup failed")
 		}
 	}
+	if err := os.Chmod("/run/nvt-agent", 0o750); err != nil {
+		return errors.New("native runtime directory permissions failed")
+	}
 	if err := os.MkdirAll("/etc/nvt-agent", 0o755); err != nil {
 		return err
 	}
@@ -513,6 +516,27 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	done := make(chan struct{})
 	go func() { _ = supervisor.Wait(); close(done) }()
 	defer stopNativeProcess(supervisor, done)
+	agentdSocketDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(agentdSocketDeadline) {
+		info, statErr := os.Lstat("/run/nvt-agent/agentd.sock")
+		stat, statOK := identityStateInfoSys(info)
+		if statErr == nil && info.Mode()&os.ModeSocket != 0 && info.Mode().Perm() == 0o660 && statOK && stat.Uid == 65532 && stat.Gid == 65532 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	agentdSocketInfo, agentdSocketErr := os.Lstat("/run/nvt-agent/agentd.sock")
+	agentdSocketStat, agentdSocketStatOK := identityStateInfoSys(agentdSocketInfo)
+	if agentdSocketErr != nil || agentdSocketInfo.Mode()&os.ModeSocket == 0 || agentdSocketInfo.Mode().Perm() != 0o660 ||
+		!agentdSocketStatOK || agentdSocketStat.Uid != 65532 || agentdSocketStat.Gid != 65532 {
+		return errors.New("native agentd socket permission contract failed")
+	}
+	agentdGroupProbe := exec.Command("/usr/bin/python3", "-c", "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/run/nvt-agent/agentd.sock'); s.sendall(b'{\"type\":\"health\"}\\n'); data=s.recv(4096); raise SystemExit(0 if b'\"status\":\"ready\"' in data else 1)")
+	agentdGroupProbe.Stdout, agentdGroupProbe.Stderr = io.Discard, io.Discard
+	agentdGroupProbe.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65531, Gid: 65532}}
+	if agentdGroupProbe.Run() != nil {
+		return errors.New("native agentd group access contract failed")
+	}
 	if err := atomicWrite(sessionCAPath, []byte(configuration.NativeSessionCAPEM), 0o600); err != nil {
 		return errors.New("native session trust setup failed")
 	}

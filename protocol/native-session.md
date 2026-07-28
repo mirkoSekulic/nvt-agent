@@ -95,25 +95,40 @@ local agentd Unix socket, reads one bounded response, and returns:
 {"contract_version":"nvt.native-session/v1","type":"agentd_response","request_id":"request-1","payload":{"status":"ready"}}
 ```
 
+The native supervisor starts agentd with socket mode `0660`; the socket remains
+owned by the dedicated `nvt-agent:nvt-agent` service identity. This gives the
+root session daemon's sole supplementary/primary `nvt-agent` group bounded
+read/write access even after systemd removes every capability. Existing
+container/Compose agentd launches omit that flag and retain mode `0600`.
+
 The client does not add agentd methods, touch its event log, open caller-chosen
 paths or ports, execute commands, or expose credentials. One request is
 processed at a time in v1. Request IDs must be unique on a connection, and a
 connection is limited to 1,024 requests; a duplicate or overflow fails closed
 instead of growing replay state without bound. `ping` and `pong` frames provide
-bounded liveness; the client also verifies local agentd health while the
-gateway is idle.
+bounded liveness; either peer may initiate a ping. While awaiting its own pong,
+the client continues to answer a peer ping and process bounded agentd requests
+under the original absolute pong deadline. The client also verifies local
+agentd health while the gateway is idle.
 
 ## Renewal, reconnect, and readiness
 
 Broker timestamps are authoritative. The client renews on a deterministic
 per-binding schedule no later than one minute before the five-minute session
-expiry and never requests more than one replacement per established session.
+expiry and retains at most one returned replacement candidate at a time.
 It also derives conservative monotonic local renewal/expiry deadlines capped by
 the broker window, so a backward guest wall-clock step cannot extend bearer
 use indefinitely; a forward step fails closed at the broker timestamp.
 An ordinary transport disconnect may reconnect with the same still-live
-credential. Renewal obtains one new credential, establishes and authenticates
-the replacement connection, then drops references to the predecessor.
+credential. Renewal is make-before-break: the established predecessor
+connection and readiness remain active while the client obtains and
+authenticates one replacement. Only then does it switch connections and drop
+references to the predecessor. A temporary broker or gateway failure retains
+the still-live predecessor and retries the same pending credential where one
+was returned. If response-loss recovery consumes the two-live broker allowance
+without returning a usable candidate, the client never issues a third; it
+serves the predecessor until its authoritative or monotonic local expiry and
+then fails closed.
 
 A process restart has no plaintext recovery file: it requests a fresh
 credential through the local socket. At most two live credentials can exist;
@@ -124,7 +139,8 @@ or inability to establish a safe window fails closed without requesting a
 third candidate.
 
 `nvt-guest-sessiond` publishes `session-ready` only after the exact hello is
-acknowledged and local agentd health succeeds. It removes readiness before
-disconnect, renewal, or failure. The non-root supervisor waits for and
-continuously monitors this file, so a disappeared gateway session or agentd
-cannot leave stale overall guest readiness.
+acknowledged and local agentd health succeeds. It preserves readiness across a
+make-before-break renewal and removes it before an actual disconnect or
+failure. The non-root supervisor waits for and continuously monitors this
+file, so a disappeared gateway session or agentd cannot leave stale overall
+guest readiness.

@@ -30,6 +30,7 @@ class Agentd:
         prompt_buffer,
         session_startup_grace_seconds,
         session_ready_marker,
+        socket_mode,
     ):
         self.socket_path = Path(socket_path)
         self.state_dir = Path(state_dir)
@@ -41,6 +42,7 @@ class Agentd:
             session_startup_grace_seconds * SESSION_READY_WAIT_MARGIN_RATIO,
         )
         self.session_ready_marker = Path(session_ready_marker)
+        self.socket_mode = socket_mode
         self.queue = queue.Queue()
         self.enqueue_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -75,7 +77,7 @@ class Agentd:
 
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server_socket.bind(str(self.socket_path))
-        os.chmod(self.socket_path, 0o600)
+        os.chmod(self.socket_path, self.socket_mode)
         self.server_socket.listen(50)
         self.server_socket.settimeout(0.25)
         self.session_monitor.start()
@@ -270,6 +272,12 @@ def bounded_startup_grace(value):
     return parsed
 
 
+def bounded_socket_mode(value):
+    if value not in ("0600", "0660"):
+        raise argparse.ArgumentTypeError("socket mode must be 0600 or 0660")
+    return int(value, 8)
+
+
 def format_prompt(item):
     if not item["external"]:
         return item["message"]
@@ -288,6 +296,7 @@ def format_prompt(item):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", default=os.environ.get("NVT_AGENTD_SOCKET", "/run/nvt-agent/agentd.sock"))
+    parser.add_argument("--socket-mode", type=bounded_socket_mode, default=bounded_socket_mode("0600"))
     parser.add_argument("--state-dir", default=os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
     parser.add_argument("--session", default=os.environ.get("AGENT_SESSION", "agent"))
     parser.add_argument("--prompt-buffer", default=os.environ.get("AGENT_PROMPT_BUFFER", "agent-prompt"))
@@ -309,6 +318,7 @@ def main():
         args.prompt_buffer,
         args.session_startup_grace_seconds,
         session_ready_marker,
+        args.socket_mode,
     )
 
     def handle_signal(_signum, _frame):
