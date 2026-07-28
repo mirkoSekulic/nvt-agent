@@ -166,6 +166,8 @@ implemented, and the bundle now contains the provider-neutral native identity
 daemon. A test-only QEMU reference driver proves one-time exchange, bundle
 installation, a real rotation, daemon/guest restart recovery, native readiness,
 and cleanup in a real TCG guest. That driver is not published or supported as a
-production provider. Gateway routing, downstream production authorization with
-the runtime identity, broker session identity, and mediated VM networking
-remain future production gates before VM execution is ready.
+production provider. The broker now implements the separate
+[guest session identity contract](guest-session-identity.md), but this bundle
+does not request, store, or expose a session credential. A trusted native
+session client, gateway transport/routing, and mediated VM networking remain
+future production gates before VM execution is ready.

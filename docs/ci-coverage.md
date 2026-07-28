@@ -93,11 +93,15 @@ precise and every hermetic suite has a clear home.
   framing, digest-only identity handling, exact binding, single-winner CAS,
   predecessor replay denial, restart/lost-response recovery, expiry,
   revocation, and redaction.
+- `protocol/guestenrollment/session_identity_test.go` and
+  `session_identity_conformance_test.go` → fixed-audience session issuance and
+  authentication, exact binding, bounded concurrent/lost-response reissue,
+  restart, expiry, revocation, strict framing, and sensitive formatting.
 - `broker/core/guest_enrollment_test.py` and
   `tests/broker/guest_enrollment_conformance_test.go` → the SQLite and real HTTP
-  implementations of runtime-identity authentication/rotation, including
+  implementations of runtime-identity and guest-session authority, including
   transaction fault points, durable restart, authorization separation,
-  independent admission bounds, and plaintext canary scans.
+  per-credential admission bounds, cleanup, and plaintext canary scans.
 - `hostbundle/guestidentity` → the native root-only client/store/state machine:
   strict TLS and files, initial exchange, status, scheduled rotation,
   successor-first ambiguous-response recovery, restart, revocation/expiry,

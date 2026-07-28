@@ -344,6 +344,9 @@ is neither published nor supported as a production execution provider.
 The broker now authenticates and atomically rotates the runtime identity under
 the separate runtime-identity contract, and the native host bundle contains a
 provider-neutral root-owned daemon that consumes, validates, persists, rotates,
-and recovers that identity. Gateway routing, downstream production identity
-consumers, broker session identity, and mediated VM networking remain separate
-future production gates.
+and recovers that identity. The broker also implements the separate short-lived
+[`nvt.guest-session-identity/v1`](guest-session-identity.md) authority for the
+single native-control audience. No guest daemon consumes that session
+credential and no gateway route or transport exists yet. Gateway routing, a
+production native session runtime, broker identity use, and mediated VM
+networking remain separate future production gates.

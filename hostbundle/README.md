@@ -29,6 +29,9 @@ mediated VM egress remain later phases.
 The separate provider-neutral enrollment and runtime-identity boundaries are
 documented in [`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md)
 and [`protocol/guest-runtime-identity.md`](../protocol/guest-runtime-identity.md).
+The broker-side future session credential boundary is documented separately in
+[`protocol/guest-session-identity.md`](../protocol/guest-session-identity.md);
+the current bundle does not request, store, or expose that credential.
 The sensitive envelope is never embedded in this bundle, its OCI metadata, or
 guest config. The daemon accepts it only from the root-owned mode `0600`
 enrollment path, stores current/successor bearer state below root-owned mode
