@@ -221,7 +221,8 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	service, err := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-agent-guest.service"))
 	identityService, identityServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-identity.service"))
 	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || identityServiceErr != nil ||
-		!bytes.Contains(identityService, []byte("User=root")) || !bytes.Contains(identityService, []byte("Type=notify")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) {
+		!bytes.Contains(identityService, []byte("User=root")) || !bytes.Contains(identityService, []byte("Type=notify")) ||
+		!bytes.Contains(identityService, []byte("TimeoutStartSec=0")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) {
 		t.Fatal("installed systemd boundaries are missing")
 	}
 	canary := []byte("NVT_TEST_SECRET_CANARY")

@@ -46,8 +46,10 @@ type testBroker struct {
 	mode        brokerMode
 	modeUsed    bool
 	rotateCount int
+	statusCount int
 	proposals   []string
 	redirectURL string
+	statusHook  func()
 }
 
 func (broker *testBroker) serve(writer http.ResponseWriter, request *http.Request) {
@@ -95,11 +97,16 @@ func (broker *testBroker) serve(writer http.ResponseWriter, request *http.Reques
 
 func (broker *testBroker) status(writer http.ResponseWriter, request *http.Request) {
 	broker.mu.Lock()
+	broker.statusCount++
 	mode := broker.mode
+	hook := broker.statusHook
 	if mode == modeOversizedStatus || mode == modeRedirectStatus || mode == modeSlowStatus || mode == modeSlowBodyStatus {
 		broker.modeUsed = true
 	}
 	broker.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	switch mode {
 	case modeOversizedStatus:
 		writer.Header().Set("Content-Type", "application/json")
@@ -267,6 +274,125 @@ func TestDefiniteBrokerUnavailabilityRetainsOneTimeEnvelope(t *testing.T) {
 	}
 	if _, exists, loadErr := fixture.store.load(); loadErr != nil || exists {
 		t.Fatalf("broker failure created identity state: exists=%v err=%v", exists, loadErr)
+	}
+}
+
+func TestExpiredIdentityFailsClosedWithoutBrokerAvailability(t *testing.T) {
+	t.Run("expired before broker call", func(t *testing.T) {
+		clock := time.Now().UTC().Truncate(time.Second)
+		fixture := newRuntimeFixture(t, clock.Add(-time.Hour), clock, modeSlowStatus)
+		if err := fixture.runtime.Initialize(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		fixture.runtime.Now = func() time.Time { return clock }
+
+		snapshot, _, err := fixture.runtime.Reconcile(context.Background())
+		if err == nil || snapshot.Ready || snapshot.Reason != ReasonReplacementRequired {
+			t.Fatalf("expired reconcile = %#v, %v", snapshot, err)
+		}
+		if _, temporary, _ := FailureDetails(err); temporary {
+			t.Fatal("expired identity returned a retry-only outcome")
+		}
+		state, exists, loadErr := fixture.store.load()
+		if loadErr != nil || !exists || state.FailureReason != ReasonReplacementRequired ||
+			state.RuntimeIdentity != nil || state.PendingSuccessor != "" {
+			t.Fatalf("expired durable state = %#v, %v", state, loadErr)
+		}
+		fixture.broker.mu.Lock()
+		statusCount := fixture.broker.statusCount
+		fixture.broker.mu.Unlock()
+		if statusCount != 0 {
+			t.Fatalf("expired identity made %d broker status calls", statusCount)
+		}
+	})
+
+	t.Run("expiry while unavailable status is in flight", func(t *testing.T) {
+		clock := time.Now().UTC().Truncate(time.Second)
+		fixture := newRuntimeFixture(t, clock.Add(-time.Hour), clock.Add(time.Second), modeSlowStatus)
+		if err := fixture.runtime.Initialize(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		fixture.runtime.Now = func() time.Time {
+			calls++
+			if calls <= 2 {
+				return clock
+			}
+			return clock.Add(time.Second)
+		}
+
+		snapshot, _, err := fixture.runtime.Reconcile(context.Background())
+		if err == nil || snapshot.Ready || snapshot.Reason != ReasonReplacementRequired {
+			t.Fatalf("in-flight expiry reconcile = %#v, %v", snapshot, err)
+		}
+		if _, temporary, _ := FailureDetails(err); temporary {
+			t.Fatal("in-flight expiry returned a retry-only outcome")
+		}
+		state, _, loadErr := fixture.store.load()
+		if loadErr != nil || state.FailureReason != ReasonReplacementRequired || state.RuntimeIdentity != nil || state.PendingSuccessor != "" {
+			t.Fatalf("in-flight expiry durable state = %#v, %v", state, loadErr)
+		}
+		fixture.broker.mu.Lock()
+		statusCount := fixture.broker.statusCount
+		fixture.broker.mu.Unlock()
+		if statusCount != 1 {
+			t.Fatalf("unavailable status calls = %d", statusCount)
+		}
+	})
+}
+
+func TestCommittedIdentityRetriesEnvelopeRemovalBeforeReadiness(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Second)
+	fixture := newRuntimeFixture(t, clock, clock.Add(time.Hour), modeNormal)
+	removeAttempts := 0
+	fixture.store.removePath = func(path string) error {
+		removeAttempts++
+		if removeAttempts == 1 {
+			return errors.New("NVT_ENVELOPE_REMOVE_SECRET_CANARY")
+		}
+		return os.Remove(path)
+	}
+	firstSnapshot, _, firstErr := fixture.runtime.Reconcile(context.Background())
+	if firstErr == nil || firstSnapshot.Ready || strings.Contains(firstErr.Error(), "CANARY") {
+		t.Fatalf("first envelope removal = %#v, %v", firstSnapshot, firstErr)
+	}
+	state, exists, err := fixture.store.load()
+	if err != nil || !exists || state.RuntimeIdentity == nil {
+		t.Fatalf("committed identity = %#v, %v", state, err)
+	}
+	if _, err := os.Stat(fixture.configuration.EnrollmentPath); err != nil {
+		t.Fatal("failed removal did not retain the envelope for retry")
+	}
+
+	directorySyncs := 0
+	fixture.store.syncPath = func(path string) error {
+		directorySyncs++
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			return openErr
+		}
+		defer file.Close()
+		return file.Sync()
+	}
+	fixture.broker.statusHook = func() {
+		if _, statErr := os.Stat(fixture.configuration.EnrollmentPath); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("broker status observed retained enrollment envelope: %v", statErr)
+		}
+	}
+	restarted, err := NewRuntime(fixture.store, fixture.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.Now = func() time.Time { return clock }
+	snapshot, _, err := restarted.Reconcile(context.Background())
+	if err != nil || !snapshot.Ready {
+		t.Fatalf("restart reconcile = %#v, %v", snapshot, err)
+	}
+	if removeAttempts != 2 || directorySyncs == 0 {
+		t.Fatalf("removal attempts=%d directory syncs=%d", removeAttempts, directorySyncs)
+	}
+	if _, err := os.Stat(fixture.configuration.EnrollmentPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("consumed envelope remains after readiness: %v", err)
 	}
 }
 

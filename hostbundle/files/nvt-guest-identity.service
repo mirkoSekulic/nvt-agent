@@ -16,6 +16,7 @@ RuntimeDirectoryMode=0700
 ExecStart=/opt/nvt/current/bin/nvt-guest-identityd --config /etc/nvt-agent/identity.json
 Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=0
 TimeoutStopSec=20s
 NoNewPrivileges=true
 PrivateTmp=true

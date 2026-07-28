@@ -105,11 +105,16 @@ The bundle includes two independent native service boundaries:
 The agent service requires the identity service. The identity unit uses
 systemd `Type=notify` and becomes active only after durable state has been
 validated and the exact current identity has authenticated successfully. A
-later identity failure removes identity readiness. Transient broker failures
-remain bounded inside the daemon and retry without claiming readiness; a
-terminal revoked, expired, or unrecoverable identity exits non-zero so systemd
-can stop/restart the dependent lifecycle without exposing bearer state to the
-agent user.
+later identity failure removes identity readiness. `TimeoutStartSec=0` leaves
+the initial activation pending while the daemon applies the enrollment
+envelope's broker-owned expiry and its own bounded network operations; a
+generic systemd startup timeout must not kill a recoverable enrollment and
+strand the dependent agent start job. Transient broker failures remain bounded
+inside the daemon and retry without claiming readiness. At local identity
+expiry, or after a terminal revoked or unrecoverable result, the daemon
+atomically erases bearer state, records replacement-required, and exits
+non-zero so systemd stops/restarts the dependent lifecycle without exposing
+bearer state to the agent user.
 
 The current bundle includes the real `agentd` and `agentdctl` sources plus a
 bounded session fixture for the guest-side lifecycle gate. It does not yet

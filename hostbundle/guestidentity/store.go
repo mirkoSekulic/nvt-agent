@@ -19,6 +19,7 @@ type Store struct {
 	beforeCommit   func() error
 	syncFile       func(*os.File) error
 	syncPath       func(string) error
+	removePath     func(string) error
 }
 
 func OpenStore(configuration Configuration) (*Store, error) {
@@ -144,7 +145,11 @@ func (store *Store) saveEnvelope(value guestenrollment.BootstrapEnvelope) error 
 }
 
 func (store *Store) removeEnvelope() error {
-	if err := os.Remove(store.enrollmentPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	remove := os.Remove
+	if store.removePath != nil {
+		remove = store.removePath
+	}
+	if err := remove(store.enrollmentPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return failure(ReasonStateUnavailable, false, false)
 	}
 	if err := store.synchronize(store.directory); err != nil {

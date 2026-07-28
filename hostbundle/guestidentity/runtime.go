@@ -39,7 +39,7 @@ func (runtime *Runtime) AcceptEnvelope(ctx context.Context, envelope guestenroll
 	if exists {
 		if state.FailureReason == "" && state.Binding == envelope.Binding && state.RuntimeIdentity != nil {
 			envelope.Token = ""
-			return nil
+			return runtime.Store.removeEnvelope()
 		}
 		envelope.Token = ""
 		return failure(ReasonReplacementRequired, false, false)
@@ -130,15 +130,28 @@ func (runtime *Runtime) Reconcile(ctx context.Context) (Snapshot, time.Duration,
 			return Snapshot{Reason: ReasonStateInvalid}, retryInterval, err
 		}
 	}
+	// Durable terminal or identity state may coexist with its already-consumed
+	// envelope only after an unlink or directory-sync failure. Never return the
+	// durable result, authenticate, or publish readiness until that sensitive
+	// bootstrap input has been removed durably.
+	if err := runtime.Store.removeEnvelope(); err != nil {
+		return Snapshot{Reason: ReasonStateUnavailable, Binding: state.Binding}, retryInterval, err
+	}
 	if state.FailureReason != "" {
 		return Snapshot{Reason: state.FailureReason, Binding: state.Binding}, retryInterval,
 			failure(state.FailureReason, false, false)
+	}
+	if !localIdentityCurrent(state, runtime.now()) {
+		return runtime.markReplacement(&state)
 	}
 	if state.PendingSuccessor != "" {
 		if err := runtime.resolvePending(ctx, &state); err != nil {
 			reason, temporary, _ := FailureDetails(err)
 			return snapshotFor(state, runtime.now(), reason), retryFor(temporary), err
 		}
+	}
+	if !localIdentityCurrent(state, runtime.now()) {
+		return runtime.markReplacement(&state)
 	}
 	status, err := runtime.Client.Status(ctx, state.BrokerURL, state.RuntimeIdentity.Opaque, state.Binding)
 	if err != nil {
@@ -193,10 +206,16 @@ func (runtime *Runtime) Reconcile(ctx context.Context) (Snapshot, time.Duration,
 }
 
 func (runtime *Runtime) resolvePending(ctx context.Context, state *durableState) error {
+	if err := runtime.requireCurrentIdentity(state); err != nil {
+		return err
+	}
 	successor := state.PendingSuccessor
 	status, err := runtime.Client.Status(ctx, state.BrokerURL, successor, state.Binding)
 	if err == nil {
 		return runtime.commitSuccessor(state, successor, status)
+	}
+	if err := runtime.requireCurrentIdentity(state); err != nil {
+		return err
 	}
 	reason, temporary, _ := FailureDetails(err)
 	if temporary {
@@ -205,8 +224,14 @@ func (runtime *Runtime) resolvePending(ctx context.Context, state *durableState)
 	if reason != ReasonReplacementRequired {
 		return err
 	}
+	if err := runtime.requireCurrentIdentity(state); err != nil {
+		return err
+	}
 	predecessor := state.RuntimeIdentity.Opaque
 	if _, err := runtime.Client.Status(ctx, state.BrokerURL, predecessor, state.Binding); err != nil {
+		if expiryErr := runtime.requireCurrentIdentity(state); expiryErr != nil {
+			return expiryErr
+		}
 		predecessorReason, predecessorTemporary, _ := FailureDetails(err)
 		if predecessorTemporary {
 			return err
@@ -217,8 +242,14 @@ func (runtime *Runtime) resolvePending(ctx context.Context, state *durableState)
 		}
 		return err
 	}
+	if err := runtime.requireCurrentIdentity(state); err != nil {
+		return err
+	}
 	status, err = runtime.Client.Rotate(ctx, state.BrokerURL, predecessor, successor, state.Binding)
 	if err != nil {
+		if expiryErr := runtime.requireCurrentIdentity(state); expiryErr != nil {
+			return expiryErr
+		}
 		// The pending candidate remains durable for successor-first recovery.
 		rotateReason, _, uncertain := FailureDetails(err)
 		if !uncertain && (rotateReason == ReasonReplacementRequired || rotateReason == ReasonProtocolInvalid) {
@@ -239,6 +270,11 @@ func (runtime *Runtime) commitSuccessor(state *durableState, successor string, s
 }
 
 func (runtime *Runtime) statusFailure(state *durableState, err error) (Snapshot, time.Duration, error) {
+	// An operation may have crossed the local expiry boundary while waiting on
+	// the broker. A temporary transport failure must never extend bearer life.
+	if !localIdentityCurrent(*state, runtime.now()) {
+		return runtime.markReplacement(state)
+	}
 	reason, temporary, _ := FailureDetails(err)
 	if temporary {
 		return snapshotFor(*state, runtime.now(), reason), retryInterval, err
@@ -247,6 +283,23 @@ func (runtime *Runtime) statusFailure(state *durableState, err error) (Snapshot,
 		return runtime.markReplacement(state)
 	}
 	return snapshotFor(*state, runtime.now(), reason), retryInterval, err
+}
+
+func (runtime *Runtime) requireCurrentIdentity(state *durableState) error {
+	if localIdentityCurrent(*state, runtime.now()) {
+		return nil
+	}
+	_, _, err := runtime.markReplacement(state)
+	return err
+}
+
+func localIdentityCurrent(state durableState, now time.Time) bool {
+	if state.RuntimeIdentity == nil {
+		return false
+	}
+	issuedAt, issuedErr := time.Parse(time.RFC3339, state.RuntimeIdentity.IssuedAt)
+	expiresAt, expiresErr := time.Parse(time.RFC3339, state.RuntimeIdentity.ExpiresAt)
+	return issuedErr == nil && expiresErr == nil && issuedAt.Before(expiresAt) && now.Before(expiresAt)
 }
 
 func (runtime *Runtime) markReplacement(state *durableState) (Snapshot, time.Duration, error) {
