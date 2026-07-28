@@ -7,8 +7,8 @@ import (
 	"os"
 )
 
-func readRootFile(_ string, _ int) ([]byte, error) {
+func readProcessOwnedFile(_ string, _ int) ([]byte, error) {
 	return nil, errors.New("native session files require Linux")
 }
 
-func ownedByRoot(os.FileInfo) bool { return false }
+func ownedByProcess(os.FileInfo) bool { return false }

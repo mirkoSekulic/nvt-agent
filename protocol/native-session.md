@@ -26,12 +26,13 @@ alone is never authentication.
 ## Root-only credential issuance socket
 
 `nvt-guest-identityd` owns the Unix socket
-`/run/nvt-agent-identity/session-credential.sock`. Its parent is root-owned
-mode `0700`; the socket is root-owned mode `0600`. The server requires Linux
-`SO_PEERCRED` UID 0, admits at most four handlers, accepts one request per
-connection, and applies one absolute five-second read/write deadline. It
-removes the socket before exit. No caller-supplied binding, audience, broker
-URL, or bearer is accepted.
+`/run/nvt-agent-identity/session-credential.sock`. Both production daemons
+refuse non-root startup. The parent is therefore root-owned mode `0700`, the
+socket is root-owned mode `0600`, and the server requires the Linux
+`SO_PEERCRED` UID to equal its own daemon UID (UID 0 in production). It admits
+at most four handlers, accepts one request per connection, and applies one
+absolute five-second read/write deadline. It removes the socket before exit.
+No caller-supplied binding, audience, broker URL, or bearer is accepted.
 
 The request is one UTF-8 JSONL object bounded to 32 KiB:
 

@@ -65,7 +65,7 @@ func FailureDetails(err error) (Reason, bool, bool) {
 }
 
 func LoadConfiguration(path string) (Configuration, error) {
-	data, err := readRootFile(path, MaxConfigurationBytes)
+	data, err := readProcessOwnedFile(path, MaxConfigurationBytes)
 	if err != nil {
 		return Configuration{}, fail(ReasonConfiguration, false, false)
 	}
@@ -123,7 +123,7 @@ func ensureRuntimeDirectory(path string) error {
 		return err
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o750 || info.Mode()&os.ModeSymlink != 0 || !ownedByRoot(info) {
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o750 || info.Mode()&os.ModeSymlink != 0 || !ownedByProcess(info) {
 		return errors.New("native session runtime directory is unsafe")
 	}
 	return nil

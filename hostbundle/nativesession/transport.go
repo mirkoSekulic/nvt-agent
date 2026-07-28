@@ -45,7 +45,7 @@ func NewTLSConnector(caPEM []byte) (*TLSConnector, error) {
 }
 
 func NewTLSConnectorFromFile(path string) (*TLSConnector, error) {
-	data, err := readRootFile(path, 1<<20)
+	data, err := readProcessOwnedFile(path, 1<<20)
 	if err != nil {
 		return nil, fail(ReasonConfiguration, false, false)
 	}

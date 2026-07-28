@@ -1050,10 +1050,7 @@ func TestRuntimeIssuesGuestSessionWithoutExposingRuntimeBearer(t *testing.T) {
 	}
 }
 
-func TestRootOnlySessionCredentialIPCIsBoundedAndRemoved(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("SO_PEERCRED root boundary requires root")
-	}
+func TestSessionCredentialIPCIsBoundedOwnerRestrictedAndRemoved(t *testing.T) {
 	clock := time.Now().UTC().Truncate(time.Second)
 	fixture := newRuntimeFixture(t, clock, clock.Add(time.Hour), modeNormal)
 	if err := fixture.runtime.Initialize(context.Background()); err != nil {
@@ -1099,25 +1096,27 @@ func TestRootOnlySessionCredentialIPCIsBoundedAndRemoved(t *testing.T) {
 	if credential == "" || strings.Contains(fmtSprint(response), credential) {
 		t.Fatal("IPC response formatting disclosed or omitted credential")
 	}
-	helperSource, err := os.Open(os.Args[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer helperSource.Close()
-	helperBinary, err := os.CreateTemp("/tmp", "nvt-guestidentity-helper-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	helperPath := helperBinary.Name()
-	defer os.Remove(helperPath)
-	if _, err := io.Copy(helperBinary, helperSource); err != nil || helperBinary.Chmod(0o755) != nil || helperBinary.Close() != nil {
-		t.Fatal("prepare non-root IPC helper")
-	}
-	nonRoot := exec.Command(helperPath, "-test.run=^TestSessionCredentialIPCNonRootHelper$")
-	nonRoot.Env = append(os.Environ(), "NVT_TEST_SESSION_CREDENTIAL_SOCKET="+socketPath)
-	nonRoot.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532}}
-	if output, err := nonRoot.CombinedOutput(); err != nil {
-		t.Fatalf("non-root IPC peer was not denied cleanly: %v %s", err, output)
+	if os.Geteuid() == 0 {
+		helperSource, err := os.Open(os.Args[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer helperSource.Close()
+		helperBinary, err := os.CreateTemp("/tmp", "nvt-guestidentity-helper-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		helperPath := helperBinary.Name()
+		defer os.Remove(helperPath)
+		if _, err := io.Copy(helperBinary, helperSource); err != nil || helperBinary.Chmod(0o755) != nil || helperBinary.Close() != nil {
+			t.Fatal("prepare non-root IPC helper")
+		}
+		nonRoot := exec.Command(helperPath, "-test.run=^TestSessionCredentialIPCNonRootHelper$")
+		nonRoot.Env = append(os.Environ(), "NVT_TEST_SESSION_CREDENTIAL_SOCKET="+socketPath)
+		nonRoot.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532}}
+		if output, err := nonRoot.CombinedOutput(); err != nil {
+			t.Fatalf("non-owner IPC peer was not denied cleanly: %v %s", err, output)
+		}
 	}
 
 	malformed, err := net.DialTimeout("unix", socketPath, time.Second)

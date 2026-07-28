@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-func readRootFile(path string, maximum int) ([]byte, error) {
+func readProcessOwnedFile(path string, maximum int) ([]byte, error) {
 	if !validFile(path) || maximum < 1 {
 		return nil, errors.New("native session file is invalid")
 	}
@@ -22,7 +22,7 @@ func readRootFile(path string, maximum int) ([]byte, error) {
 	info, err := file.Stat()
 	stat, ok := infoSys(info)
 	if err != nil || info == nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() < 1 ||
-		info.Size() > int64(maximum) || !ok || stat.Uid != 0 || stat.Nlink != 1 {
+		info.Size() > int64(maximum) || !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
 		return nil, errors.New("native session file is unsafe")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
@@ -45,7 +45,7 @@ func infoSys(info os.FileInfo) (*syscall.Stat_t, bool) {
 	return value, ok
 }
 
-func ownedByRoot(info os.FileInfo) bool {
+func ownedByProcess(info os.FileInfo) bool {
 	stat, ok := infoSys(info)
-	return ok && stat.Uid == 0
+	return ok && stat.Uid == uint32(os.Geteuid())
 }

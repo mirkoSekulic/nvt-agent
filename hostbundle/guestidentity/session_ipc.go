@@ -25,19 +25,21 @@ func SessionCredentialSocketPath(runtimeDirectory string) string {
 	return filepath.Join(runtimeDirectory, SessionCredentialSocketName)
 }
 
-// ServeSessionCredentials exposes a root-peer-only issuance boundary. It does
-// not accept bearer, binding, audience, or endpoint input from the caller.
+// ServeSessionCredentials exposes a same-daemon-UID issuance boundary. Both
+// production callers independently require UID 0 before reaching this code.
+// The request accepts no bearer, binding, audience, or endpoint input.
 func ServeSessionCredentials(ctx context.Context, runtime *Runtime, runtimeDirectory string) error {
-	if ctx == nil || runtime == nil || !validAbsoluteDirectory(runtimeDirectory) || os.Geteuid() != 0 {
+	if ctx == nil || runtime == nil || !validAbsoluteDirectory(runtimeDirectory) {
 		return failure(ReasonStateInvalid, false, false)
 	}
-	if err := ensurePrivateDirectory(runtimeDirectory, 0); err != nil {
+	ownerUID := uint32(os.Geteuid())
+	if err := ensurePrivateDirectory(runtimeDirectory, ownerUID); err != nil {
 		return failure(ReasonStateUnavailable, false, false)
 	}
 	socketPath := SessionCredentialSocketPath(runtimeDirectory)
 	if info, err := os.Lstat(socketPath); err == nil {
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 || stat.Uid != 0 {
+		if !ok || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 || stat.Uid != ownerUID {
 			return failure(ReasonStateUnavailable, false, false)
 		}
 		if err := os.Remove(socketPath); err != nil {
@@ -80,7 +82,7 @@ func ServeSessionCredentials(ctx context.Context, runtime *Runtime, runtimeDirec
 		case slots <- struct{}{}:
 			go func() {
 				defer func() { <-slots }()
-				handleSessionCredentialConnection(ctx, runtime, connection)
+				handleSessionCredentialConnection(ctx, runtime, connection, ownerUID)
 			}()
 		default:
 			_ = connection.Close()
@@ -88,9 +90,9 @@ func ServeSessionCredentials(ctx context.Context, runtime *Runtime, runtimeDirec
 	}
 }
 
-func handleSessionCredentialConnection(ctx context.Context, runtime *Runtime, connection *net.UnixConn) {
+func handleSessionCredentialConnection(ctx context.Context, runtime *Runtime, connection *net.UnixConn, ownerUID uint32) {
 	defer connection.Close()
-	if peerUID, err := unixPeerUID(connection); err != nil || peerUID != 0 {
+	if peerUID, err := unixPeerUID(connection); err != nil || peerUID != ownerUID {
 		return
 	}
 	deadline := time.Now().Add(sessionCredentialIPCDeadline)
