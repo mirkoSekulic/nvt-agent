@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -16,6 +17,8 @@ const (
 	GuestSessionCredentialType           = "nvt.guest-session-credential/v1"
 	NativeGuestControlAudience           = "nvt.native-guest-control/v1"
 	GuestSessionCredentialBytes          = 40
+	GuestSessionCredentialRandomBytes    = 32
+	MaxGuestSessionIssuanceSequence      = uint64(1<<63 - 1)
 	MaxGuestSessionIssueRequestBytes     = 8 << 10
 	MaxGuestSessionAuthRequestBytes      = 4 << 10
 	MaxGuestSessionResponseBytes         = 16 << 10
@@ -76,20 +79,24 @@ type GuestSessionAuthority interface {
 	AuthenticateGuestSession(context.Context, string, GuestSessionAuthenticateRequest) (GuestSessionStatus, error)
 }
 
-func GenerateGuestSessionCredential() (string, error) {
-	return generateGuestSessionCredential(rand.Reader)
+func GenerateGuestSessionCredential(issuanceSequence uint64) (string, error) {
+	return generateGuestSessionCredential(issuanceSequence, rand.Reader)
 }
 
-func generateGuestSessionCredential(source io.Reader) (string, error) {
+func generateGuestSessionCredential(issuanceSequence uint64, source io.Reader) (string, error) {
+	if issuanceSequence == 0 || issuanceSequence > MaxGuestSessionIssuanceSequence {
+		return "", errors.New("guest session credential generation failed")
+	}
 	value := make([]byte, GuestSessionCredentialBytes)
-	if _, err := io.ReadFull(source, value); err != nil {
+	binary.BigEndian.PutUint64(value[:8], issuanceSequence)
+	if _, err := io.ReadFull(source, value[8:]); err != nil {
 		return "", errors.New("guest session credential generation failed")
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
 func GuestSessionCredentialDigest(credential string) (string, error) {
-	if err := validateOpaque(credential, GuestSessionCredentialBytes, GuestSessionCredentialBytes); err != nil {
+	if err := validateGuestSessionCredential(credential); err != nil {
 		return "", errors.New("guest session credential is invalid")
 	}
 	sum := sha256.Sum256([]byte(credential))
@@ -108,12 +115,27 @@ func ValidateGuestSessionIssueResult(value GuestSessionIssueResult) error {
 	credential := value.Credential
 	if value.ContractVersion != GuestSessionIdentityVersion || ValidateBinding(value.Binding) != nil ||
 		credential.Type != GuestSessionCredentialType || credential.Audience != NativeGuestControlAudience ||
-		validateOpaque(credential.Opaque, GuestSessionCredentialBytes, GuestSessionCredentialBytes) != nil {
+		validateGuestSessionCredential(credential.Opaque) != nil {
 		return NewFailure(ReasonInvalidRequest)
 	}
 	issued, expires, err := validateWindow(credential.IssuedAt, credential.ExpiresAt, MaxGuestSessionCredentialLifetime)
 	if err != nil || !issued.Before(expires) {
 		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
+func validateGuestSessionCredential(credential string) error {
+	if err := validateOpaque(credential, GuestSessionCredentialBytes, GuestSessionCredentialBytes); err != nil {
+		return err
+	}
+	value, err := base64.RawURLEncoding.DecodeString(credential)
+	if err != nil {
+		return err
+	}
+	issuanceSequence := binary.BigEndian.Uint64(value[:8])
+	if issuanceSequence == 0 || issuanceSequence > MaxGuestSessionIssuanceSequence {
+		return errors.New("guest session credential issuance sequence is invalid")
 	}
 	return nil
 }

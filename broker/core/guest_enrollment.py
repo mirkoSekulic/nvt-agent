@@ -911,6 +911,8 @@ class GuestEnrollmentIssuer:
                        enrollment.driver_registration, enrollment.desired_generation,
                        enrollment.guest_instance_id, enrollment.state,
                        enrollment.issued_at AS enrollment_issued_at,
+                       enrollment.runtime_identity_active,
+                       enrollment.runtime_identity_expires_at,
                        enrollment.guest_session_issuance_sequence
                   FROM guest_session_credentials AS session
                   JOIN enrollments AS enrollment ON enrollment.token_digest = session.token_digest
@@ -972,6 +974,8 @@ class GuestEnrollmentIssuer:
                            enrollment.driver_registration, enrollment.desired_generation,
                            enrollment.guest_instance_id, enrollment.state,
                            enrollment.issued_at AS enrollment_issued_at,
+                           enrollment.runtime_identity_active,
+                           enrollment.runtime_identity_expires_at,
                            enrollment.guest_session_issuance_sequence
                       FROM guest_session_credentials AS session
                       JOIN enrollments AS enrollment ON enrollment.token_digest = session.token_digest
@@ -1687,6 +1691,8 @@ class GuestEnrollmentIssuer:
                    enrollment.driver_registration, enrollment.desired_generation,
                    enrollment.guest_instance_id, enrollment.state,
                    enrollment.issued_at AS enrollment_issued_at,
+                   enrollment.runtime_identity_active,
+                   enrollment.runtime_identity_expires_at,
                    enrollment.guest_session_issuance_sequence
               FROM guest_session_credentials AS session
               LEFT JOIN enrollments AS enrollment ON enrollment.token_digest = session.token_digest
@@ -2298,10 +2304,13 @@ def _validate_persisted_guest_session(row):
         issued_at = parse_timestamp(row["issued_at"])
         expires_at = parse_timestamp(row["expires_at"])
         enrollment_issued_at = parse_timestamp(row["enrollment_issued_at"])
+        runtime_identity_expires_at = parse_timestamp(row["runtime_identity_expires_at"])
         if (
             issued_at < enrollment_issued_at
             or not issued_at < expires_at
             or expires_at - issued_at > MAX_GUEST_SESSION_CREDENTIAL_LIFETIME
+            or row["runtime_identity_active"] != 1
+            or expires_at > runtime_identity_expires_at
         ):
             raise ValueError
     except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
@@ -2453,6 +2462,8 @@ def _authenticated_guest_session_record(row, binding, now):
         (binding is not None and _row_binding(row) != binding)
         or row["audience"] != NATIVE_GUEST_CONTROL_AUDIENCE
         or now >= parse_timestamp(row["expires_at"])
+        or row["runtime_identity_active"] != 1
+        or now >= parse_timestamp(row["runtime_identity_expires_at"])
     ):
         raise EnrollmentFailure("unauthorized", 401)
     if binding is None:

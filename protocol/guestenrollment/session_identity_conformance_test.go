@@ -3,6 +3,8 @@ package guestenrollment
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"sync"
 	"testing"
@@ -12,18 +14,20 @@ import (
 type fakeGuestSessionRecord struct {
 	Binding   Binding
 	Digest    string
+	Sequence  uint64
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 }
 
 type fakeGuestSessionStore struct {
-	mu              sync.Mutex
-	runtimeIdentity string
-	binding         Binding
-	records         map[string]fakeGuestSessionRecord
-	nextRandom      byte
-	loseResponse    bool
-	revoked         bool
+	mu               sync.Mutex
+	runtimeIdentity  string
+	binding          Binding
+	records          map[string]fakeGuestSessionRecord
+	nextRandom       byte
+	issuanceSequence uint64
+	loseResponse     bool
+	revoked          bool
 }
 
 type fakeGuestSessionAuthority struct {
@@ -52,14 +56,18 @@ func (authority *fakeGuestSessionAuthority) IssueGuestSession(_ context.Context,
 	if len(store.records) >= MaxLiveGuestSessionsPerBinding {
 		return GuestSessionIssueResult{}, NewFailure(ReasonCapacity)
 	}
+	if store.issuanceSequence >= MaxGuestSessionIssuanceSequence {
+		return GuestSessionIssueResult{}, NewFailure(ReasonCapacity)
+	}
+	store.issuanceSequence++
 	store.nextRandom++
-	credential, err := generateGuestSessionCredential(bytes.NewReader(bytes.Repeat([]byte{store.nextRandom}, GuestSessionCredentialBytes)))
+	credential, err := generateGuestSessionCredential(store.issuanceSequence, bytes.NewReader(bytes.Repeat([]byte{store.nextRandom}, GuestSessionCredentialRandomBytes)))
 	if err != nil {
 		return GuestSessionIssueResult{}, NewFailure(ReasonIdentityFailure)
 	}
 	digest, _ := GuestSessionCredentialDigest(credential)
 	record := fakeGuestSessionRecord{
-		Binding: request.Binding, Digest: digest, IssuedAt: now,
+		Binding: request.Binding, Digest: digest, Sequence: store.issuanceSequence, IssuedAt: now,
 		ExpiresAt: now.Add(MaxGuestSessionCredentialLifetime),
 	}
 	store.records[digest] = record
@@ -116,6 +124,15 @@ func guestSessionStatus(record fakeGuestSessionRecord) GuestSessionStatus {
 	}
 }
 
+func guestSessionCredentialSequence(t *testing.T, credential string) uint64 {
+	t.Helper()
+	decoded, err := base64.RawURLEncoding.DecodeString(credential)
+	if err != nil || len(decoded) != GuestSessionCredentialBytes {
+		t.Fatalf("decode guest session credential: %v", err)
+	}
+	return binary.BigEndian.Uint64(decoded[:8])
+}
+
 func TestGuestSessionIdentityConformance(t *testing.T) {
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	binding := validBinding()
@@ -134,6 +151,9 @@ func TestGuestSessionIdentityConformance(t *testing.T) {
 	first, err := newAuthority().IssueGuestSession(context.Background(), store.runtimeIdentity, issue)
 	if err != nil || ValidateGuestSessionIssueResult(first) != nil {
 		t.Fatalf("first issue: %#v %v", first, err)
+	}
+	if got := guestSessionCredentialSequence(t, first.Credential.Opaque); got != 1 {
+		t.Fatalf("first issuance sequence = %d, want 1", got)
 	}
 	if _, err := newAuthority().AuthenticateGuestSession(context.Background(), first.Credential.Opaque, auth); err != nil {
 		t.Fatalf("authenticate after restart: %v", err)
@@ -180,6 +200,46 @@ func TestGuestSessionIdentityConformance(t *testing.T) {
 	}
 	if _, err := newAuthority().IssueGuestSession(context.Background(), store.runtimeIdentity, issue); failureReason(t, err) != ReasonUnauthorized {
 		t.Fatalf("revoked issuance reason = %v", err)
+	}
+}
+
+func TestGuestSessionFirstResponseLossAllowsOneBoundedRecovery(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	binding := validBinding()
+	store := &fakeGuestSessionStore{
+		runtimeIdentity: opaqueValue(RuntimeIdentityBytes, 0x63),
+		binding:         binding,
+		records:         map[string]fakeGuestSessionRecord{},
+		nextRandom:      0x20,
+		loseResponse:    true,
+	}
+	newAuthority := func() *fakeGuestSessionAuthority {
+		return &fakeGuestSessionAuthority{store: store, now: func() time.Time { return now }}
+	}
+	issue := GuestSessionIssueRequest{ContractVersion: GuestSessionIdentityVersion, Binding: binding, Audience: NativeGuestControlAudience}
+	auth := GuestSessionAuthenticateRequest{ContractVersion: GuestSessionIdentityVersion, Binding: binding, Audience: NativeGuestControlAudience}
+
+	if _, err := newAuthority().IssueGuestSession(context.Background(), store.runtimeIdentity, issue); err == nil {
+		t.Fatal("first committed response loss was not surfaced")
+	}
+	if len(store.records) != 1 || store.issuanceSequence != 1 {
+		t.Fatalf("first response loss records=%d sequence=%d", len(store.records), store.issuanceSequence)
+	}
+	recovered, err := newAuthority().IssueGuestSession(context.Background(), store.runtimeIdentity, issue)
+	if err != nil {
+		t.Fatalf("bounded recovery issue: %v", err)
+	}
+	if got := guestSessionCredentialSequence(t, recovered.Credential.Opaque); got != 2 {
+		t.Fatalf("recovery issuance sequence = %d, want 2", got)
+	}
+	if _, err := newAuthority().AuthenticateGuestSession(context.Background(), recovered.Credential.Opaque, auth); err != nil {
+		t.Fatalf("authenticate recovered credential: %v", err)
+	}
+	if len(store.records) != MaxLiveGuestSessionsPerBinding {
+		t.Fatalf("recovery records = %d", len(store.records))
+	}
+	if _, err := newAuthority().IssueGuestSession(context.Background(), store.runtimeIdentity, issue); failureReason(t, err) != ReasonCapacity {
+		t.Fatalf("third issue reason = %v", err)
 	}
 }
 

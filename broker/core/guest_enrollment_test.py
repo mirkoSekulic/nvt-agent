@@ -1733,6 +1733,45 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             ),
         )
 
+    def test_guest_session_first_response_loss_allows_one_bounded_retry_after_restart(self):
+        database = str(Path(self.temporary.name) / "first-session-response-loss.sqlite3")
+        issuer = GuestEnrollmentIssuer(
+            database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(0x80),
+            faults=GuestSessionResponseLostFailure(),
+            maintenance_interval=None,
+        )
+        envelope = issuer.issue(issue_request(uid="first-loss-uid", execution="first-loss-execution", guest="first-loss-guest"))
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = guest_session_issue_request(envelope["binding"])
+        with self.assertRaises(ConnectionAbortedError):
+            issuer.issue_guest_session(runtime_identity, request)
+        self.assertEqual(len(issuer.snapshot()["guest_session_credentials"]), 1)
+        issuer.close()
+
+        restarted = GuestEnrollmentIssuer(
+            database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(0x90),
+            maintenance_interval=None,
+        )
+        self.addCleanup(restarted.close)
+        recovered = restarted.issue_guest_session(runtime_identity, request)
+        recovered_credential = recovered["credential"]["opaque"]
+        self.assertEqual(
+            restarted.authenticate_guest_session(
+                recovered_credential,
+                guest_session_authenticate_request(envelope["binding"]),
+            )["binding"],
+            envelope["binding"],
+        )
+        self.assertEqual(len(restarted.snapshot()["guest_session_credentials"]), MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING)
+        self.assertFailure("capacity-exceeded", lambda: restarted.issue_guest_session(runtime_identity, request))
+        self.assertNotIn(recovered_credential, json.dumps(restarted.snapshot(), sort_keys=True))
+
     def test_guest_session_concurrent_issue_is_bounded_and_exact(self):
         issuer = self.issuer()
         envelope = issuer.issue(issue_request())
@@ -1866,6 +1905,67 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         issuer.close()
         with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
             GuestEnrollmentIssuer(self.database, EXCHANGE_URL, maintenance_interval=None)
+
+    def test_guest_session_parent_runtime_corruption_fails_authentication_and_startup(self):
+        for name, corrupt in (
+            (
+                "expiry",
+                lambda database, session, envelope: update_database(
+                    database,
+                    "UPDATE guest_session_credentials SET expires_at = ?",
+                    (
+                        format_timestamp(
+                            datetime.strptime(session["credential"]["issued_at"], "%Y-%m-%dT%H:%M:%SZ")
+                            .replace(tzinfo=timezone.utc)
+                            + MAX_GUEST_SESSION_CREDENTIAL_LIFETIME
+                        ),
+                    ),
+                ),
+            ),
+            (
+                "inactive",
+                lambda database, _session, envelope: update_database(
+                    database,
+                    "UPDATE enrollments SET runtime_identity_active = 0, terminal_at = runtime_identity_expires_at",
+                    (),
+                ),
+            ),
+        ):
+            with self.subTest(corruption=name):
+                database = str(Path(self.temporary.name) / f"session-parent-{name}.sqlite3")
+                clock = Clock()
+                issuer = GuestEnrollmentIssuer(
+                    database,
+                    EXCHANGE_URL,
+                    now=clock,
+                    random_bytes=DeterministicRandom(0xa0),
+                    maintenance_interval=None,
+                )
+                envelope = issuer.issue(
+                    issue_request(uid=f"parent-{name}-uid", execution=f"parent-{name}-execution", guest=f"parent-{name}-guest")
+                )
+                runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+                if name == "expiry":
+                    clock.value += timedelta(minutes=58)
+                session = issuer.issue_guest_session(
+                    runtime_identity,
+                    guest_session_issue_request(envelope["binding"]),
+                )
+                credential = session["credential"]["opaque"]
+                corrupt(database, session, envelope)
+                if name == "expiry":
+                    clock.value += timedelta(minutes=2)
+                self.assertFailure(
+                    "issuer-storage-failed",
+                    lambda: issuer.authenticate_guest_session(
+                        credential,
+                        guest_session_authenticate_request(envelope["binding"]),
+                    ),
+                )
+                self.assertFalse(issuer.store_healthy)
+                issuer.close()
+                with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+                    GuestEnrollmentIssuer(database, EXCHANGE_URL, maintenance_interval=None)
 
     def test_guest_session_clock_rollback_and_record_local_paths(self):
         issuer = self.issuer()

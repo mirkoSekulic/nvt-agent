@@ -36,7 +36,7 @@ orchestrator credential cannot use either session endpoint.
 | Contract version | `nvt.guest-session-identity/v1` |
 | Credential type | `nvt.guest-session-credential/v1` |
 | Audience | `nvt.native-guest-control/v1` |
-| Credential form | opaque 8-byte per-lifecycle sequence plus 32 random bytes, canonical unpadded base64url |
+| Credential form | opaque positive 63-bit per-lifecycle sequence encoded as 8-byte big-endian, plus 32 random bytes, canonical unpadded base64url |
 | Maximum lifetime | 5 minutes |
 | Maximum simultaneously live credentials per exact binding | 2 |
 | Issue request | 8 KiB |
@@ -141,7 +141,11 @@ trusted native relay presents:
 
 The broker MUST perform an indexed digest lookup before admitting or reading a
 slow body, then revalidate the selected durable record and exact binding during
-the bounded operation. Success returns non-secret metadata only:
+the bounded operation. The selected session expiry MUST NOT exceed the current
+parent runtime-identity expiry, and authentication requires that parent
+identity lifecycle to remain active and unexpired. Rotation of the parent
+runtime bearer does not invalidate an otherwise live session for the same
+enrollment lifecycle. Success returns non-secret metadata only:
 
 ```json
 {

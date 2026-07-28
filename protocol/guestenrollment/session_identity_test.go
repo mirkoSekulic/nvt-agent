@@ -2,6 +2,8 @@ package guestenrollment
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,7 +13,7 @@ import (
 
 func TestGuestSessionIdentityContractStrictValidationAndRedaction(t *testing.T) {
 	binding := validBinding()
-	credential, err := generateGuestSessionCredential(bytes.NewReader(bytes.Repeat([]byte{0x71}, GuestSessionCredentialBytes)))
+	credential, err := generateGuestSessionCredential(7, bytes.NewReader(bytes.Repeat([]byte{0x71}, GuestSessionCredentialRandomBytes)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,14 +97,38 @@ func TestGuestSessionIdentityContractStrictValidationAndRedaction(t *testing.T) 
 }
 
 func TestGenerateGuestSessionCredentialUsesCanonicalRandomShape(t *testing.T) {
-	credential, err := GenerateGuestSessionCredential()
+	const sequence = uint64(42)
+	credential, err := GenerateGuestSessionCredential(sequence)
 	if err != nil {
 		t.Fatal(err)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(credential)
+	if err != nil || len(decoded) != GuestSessionCredentialBytes || binary.BigEndian.Uint64(decoded[:8]) != sequence {
+		t.Fatalf("credential does not encode sequence %d", sequence)
 	}
 	if _, err := GuestSessionCredentialDigest(credential); err != nil {
 		t.Fatal(err)
 	}
-	for _, invalid := range []string{"", credential + "=", opaqueValue(GuestSessionCredentialBytes-1, 0x72)} {
+	zeroSequence := make([]byte, GuestSessionCredentialBytes)
+	copy(zeroSequence[8:], bytes.Repeat([]byte{0x72}, GuestSessionCredentialRandomBytes))
+	overflowSequence := make([]byte, GuestSessionCredentialBytes)
+	binary.BigEndian.PutUint64(overflowSequence[:8], MaxGuestSessionIssuanceSequence+1)
+	copy(overflowSequence[8:], bytes.Repeat([]byte{0x72}, GuestSessionCredentialRandomBytes))
+	for _, invalidSequence := range []uint64{0, MaxGuestSessionIssuanceSequence + 1} {
+		if _, err := generateGuestSessionCredential(invalidSequence, bytes.NewReader(bytes.Repeat([]byte{0x72}, GuestSessionCredentialRandomBytes))); err == nil {
+			t.Fatalf("accepted invalid issuance sequence %d", invalidSequence)
+		}
+	}
+	if _, err := generateGuestSessionCredential(1, bytes.NewReader(bytes.Repeat([]byte{0x72}, GuestSessionCredentialRandomBytes-1))); err == nil {
+		t.Fatal("accepted a short random source")
+	}
+	for _, invalid := range []string{
+		"",
+		credential + "=",
+		opaqueValue(GuestSessionCredentialBytes-1, 0x72),
+		base64.RawURLEncoding.EncodeToString(zeroSequence),
+		base64.RawURLEncoding.EncodeToString(overflowSequence),
+	} {
 		if _, err := GuestSessionCredentialDigest(invalid); err == nil {
 			t.Fatalf("accepted invalid credential %q", invalid)
 		}
