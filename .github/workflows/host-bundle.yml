@@ -9,6 +9,9 @@ on:
       - "runtime/agentd/**"
       - "protocol/agentd.md"
       - "protocol/host-bundle.md"
+      - "protocol/guest-enrollment.md"
+      - "protocol/guest-runtime-identity.md"
+      - "protocol/guestenrollment/**"
       - ".github/workflows/host-bundle.yml"
   pull_request:
     paths:
@@ -16,6 +19,9 @@ on:
       - "runtime/agentd/**"
       - "protocol/agentd.md"
       - "protocol/host-bundle.md"
+      - "protocol/guest-enrollment.md"
+      - "protocol/guest-runtime-identity.md"
+      - "protocol/guestenrollment/**"
       - ".github/workflows/host-bundle.yml"
 
 permissions:
@@ -34,7 +40,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: hostbundle/go.mod
-          cache-dependency-path: hostbundle/go.mod
+          cache-dependency-path: |
+            hostbundle/go.mod
+            protocol/guestenrollment/go.mod
       - name: Verify native prerequisites
         run: |
           sudo apt-get update
@@ -60,6 +68,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: hostbundle/go.mod
-          cache-dependency-path: hostbundle/go.mod
+          cache-dependency-path: |
+            hostbundle/go.mod
+            protocol/guestenrollment/go.mod
       - name: Verify portable deterministic artifact build
         run: bash hostbundle/build-test.sh

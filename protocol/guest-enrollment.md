@@ -342,6 +342,8 @@ host bundle, proves agentd/session readiness and restart recovery, and removes
 its resources during cleanup. It is built only for repository conformance and
 is neither published nor supported as a production execution provider.
 The broker now authenticates and atomically rotates the runtime identity under
-the separate runtime-identity contract. A native guest rotation daemon,
-gateway routing, downstream production identity consumers, broker session
-identity, and mediated VM networking remain separate future production gates.
+the separate runtime-identity contract, and the native host bundle contains a
+provider-neutral root-owned daemon that consumes, validates, persists, rotates,
+and recovers that identity. Gateway routing, downstream production identity
+consumers, broker session identity, and mediated VM networking remain separate
+future production gates.

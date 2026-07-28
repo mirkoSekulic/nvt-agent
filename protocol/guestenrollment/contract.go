@@ -44,6 +44,7 @@ const (
 	HandoffVersion             = "nvt.guest-enrollment-handoff/v1"
 	MaxHandoffRequestBytes     = MaxBootstrapEnvelopeBytes + (4 << 10)
 	MaxHandoffResponseBytes    = 4 << 10
+	EnrollmentExchangePath     = "/v1/guest-enrollment/exchange"
 )
 
 var (
@@ -325,12 +326,22 @@ func ValidateExchangeRequest(value ExchangeRequest) error {
 func ValidateExchangeResult(value ExchangeResult) error {
 	if value.ContractVersion != Version || ValidateBinding(value.Binding) != nil ||
 		value.RuntimeIdentity.Type != RuntimeIdentityType ||
-		validateOpaque(value.RuntimeIdentity.Opaque, TokenBytes, MaxRuntimeIdentityBytes) != nil {
+		ValidateRuntimeIdentity(value.RuntimeIdentity.Opaque) != nil {
 		return NewFailure(ReasonInvalidRequest)
 	}
 	issued, expires, err := validateWindow(value.RuntimeIdentity.IssuedAt, value.RuntimeIdentity.ExpiresAt, MaxRuntimeIdentityLifetime)
 	if err != nil || !issued.Before(expires) {
 		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
+// ValidateRuntimeIdentity validates the opaque bearer shape returned by the
+// one-time enrollment exchange. Rotation successors deliberately use the
+// narrower fixed-size validation in ValidateRuntimeIdentityRotateRequest.
+func ValidateRuntimeIdentity(value string) error {
+	if validateOpaque(value, TokenBytes, MaxRuntimeIdentityBytes) != nil {
+		return errors.New("runtime identity is invalid")
 	}
 	return nil
 }

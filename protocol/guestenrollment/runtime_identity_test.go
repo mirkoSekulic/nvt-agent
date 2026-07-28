@@ -84,6 +84,18 @@ func TestGenerateRuntimeIdentityUsesCanonicalRandomShape(t *testing.T) {
 	if _, err := RuntimeIdentityDigest(identity + "="); err == nil {
 		t.Fatal("non-canonical runtime identity was accepted")
 	}
+	if ValidateRuntimeIdentity(identity) != nil || ValidateRuntimeIdentity(opaqueValue(RuntimeIdentityBytes+1, 0x43)) != nil {
+		t.Fatal("valid exchange runtime identity was rejected")
+	}
+	for _, invalid := range []string{
+		opaqueValue(RuntimeIdentityBytes-1, 0x44),
+		identity + "=",
+		opaqueValue(MaxRuntimeIdentityBytes+1, 0x45),
+	} {
+		if ValidateRuntimeIdentity(invalid) == nil {
+			t.Fatal("invalid exchange runtime identity was accepted")
+		}
+	}
 }
 
 func TestRuntimeIdentityHistoryCapacityIsLifecyclePartitionedAndLongLived(t *testing.T) {

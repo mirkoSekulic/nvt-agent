@@ -61,8 +61,13 @@ execution hash. Storage-backed registrations use one `Recreate` Deployment and
 must not share an existing claim with another registration, so two driver
 processes never intentionally operate the same disks. Enrollment envelopes are
 streamed once over the private virtio channel and are never written to ordinary
-driver state or seed media. The guest commits the exact binding and exchanged
-runtime identity as one root-only atomic sensitive record. Deletion confirms
+driver state or seed media. The guest passes the envelope to the generic
+host-bundle identity package, which commits the exact binding and current
+runtime identity in root-only atomic state. The installed daemon authenticates
+and rotates it independently of the agent session. The QEMU-only bundle
+fixture uses the compile-time `hostbundleidentitytest` schedule to prove a
+rotation promptly; that tag and accelerated schedule are absent from every
+coordinated production bundle. Deletion confirms
 QEMU has been reaped before removing the disk, socket, state, and temporary
 resources or reporting `deleted`.
 
@@ -73,7 +78,8 @@ gate therefore uses TCG. Current guest artifacts target linux/amd64; the
 driver image itself is built for the host architecture.
 
 This test reference proves provisioning, one-time enrollment, native bundle
-installation, supervisor/agentd/session readiness, restart recovery, and
-cleanup. It is not released or supported as a production provider. Gateway
-publication, public VM ingress, production runtime identity use, and mediated
+installation, a real broker-backed identity rotation, identity-daemon and
+supervisor/agentd/session readiness, restart recovery, and cleanup. It is not
+released or supported as a production provider. Gateway publication, public
+VM ingress, downstream production runtime-identity authorization, and mediated
 VM egress are intentionally not implemented here.

@@ -9,6 +9,9 @@ on:
       - ".github/scripts/release-*.sh"
       - "hostbundle/**"
       - "protocol/host-bundle.md"
+      - "protocol/guest-enrollment.md"
+      - "protocol/guest-runtime-identity.md"
+      - "protocol/guestenrollment/**"
       - "tests/operator/helm/**"
   push:
     branches:
@@ -33,7 +36,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: hostbundle/go.mod
-          cache-dependency-path: hostbundle/go.mod
+          cache-dependency-path: |
+            hostbundle/go.mod
+            protocol/guestenrollment/go.mod
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
       - name: Validate coordinated chart release
         env:
@@ -198,7 +203,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: hostbundle/go.mod
-          cache-dependency-path: hostbundle/go.mod
+          cache-dependency-path: |
+            hostbundle/go.mod
+            protocol/guestenrollment/go.mod
       - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
           version: 1.3.0

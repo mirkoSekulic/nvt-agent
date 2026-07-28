@@ -34,9 +34,9 @@ RUN apk add --no-cache \
 COPY --from=builder /out/nvt-qemu-guest-init /sbin/nvt-qemu-guest-init
 COPY --from=builder /out/nvt-host-bootstrap /usr/local/bin/nvt-host-bootstrap
 RUN rm -f /sbin/init && ln -s /sbin/nvt-qemu-guest-init /sbin/init && \
-    mkdir -p /guest-root /out /workspace /run/nvt-agent /var/lib/nvt-agent /var/lib/nvt-enrollment && \
+    mkdir -p /guest-root /out /workspace /run/nvt-agent /var/lib/nvt-agent /var/lib/nvt-agent-identity && \
     chown 65532:65532 /workspace /run/nvt-agent /var/lib/nvt-agent && \
-    chmod 0700 /var/lib/nvt-enrollment && \
+    chmod 0700 /var/lib/nvt-agent-identity && \
     cp -a /bin /etc /lib /sbin /usr /var /guest-root/ && \
     mkdir -p /guest-root/dev /guest-root/proc /guest-root/sys /guest-root/run/nvt-agent /guest-root/workspace /guest-root/opt/nvt /guest-root/tmp && \
     test -x /guest-root/sbin/mdev && \

@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,21 +19,19 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/executiondrivers/qemu/internal/config"
 	"github.com/mirkoSekulic/nvt-agent/executiondrivers/qemu/internal/wire"
+	"github.com/mirkoSekulic/nvt-agent/hostbundle/guestidentity"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
 
 const (
-	controlDevice  = "/dev/virtio-ports/org.nvt.control"
-	secretRoot     = "/var/lib/nvt-enrollment"
-	enrollmentPath = secretRoot + "/enrollment.json"
+	controlDevice          = "/dev/virtio-ports/org.nvt.control"
+	identityStateRoot      = "/var/lib/nvt-agent-identity"
+	identityRuntimeRoot    = "/run/nvt-agent-identity"
+	identityEnrollmentPath = identityStateRoot + "/enrollment.json"
+	identityConfigPath     = "/etc/nvt-agent/identity.json"
+	identityCAPath         = "/etc/nvt-agent/runtime-identity-ca.pem"
 )
-
-type enrollmentRecord struct {
-	ContractVersion string                          `json:"contract_version"`
-	Binding         guestenrollment.Binding         `json:"binding"`
-	RuntimeIdentity guestenrollment.RuntimeIdentity `json:"runtime_identity"`
-}
 
 type guest struct {
 	mu            sync.Mutex
@@ -57,11 +53,11 @@ func main() {
 	}
 	guestLog("control channel starting")
 	guest := &guest{bootstrap: make(chan struct{}, 1)}
-	binding, identity, err := loadEnrollment()
+	binding, err := loadEnrollmentBinding()
 	if err != nil {
 		fatal("sensitive enrollment state is invalid")
 	}
-	if binding != nil && identity != nil {
+	if binding != nil {
 		guest.enrolled = true
 	}
 	go guest.bootstrapLoop()
@@ -264,7 +260,12 @@ func (guest *guest) handle(data []byte) wire.Response {
 			guest.mu.Unlock()
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "binding-mismatch"}
 		}
-		if persisted, _, err := loadEnrollment(); err == nil && persisted != nil && *persisted != request.Configuration.Binding {
+		persisted, loadErr := loadEnrollmentBinding()
+		if loadErr != nil {
+			guest.mu.Unlock()
+			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "state-invalid"}
+		}
+		if persisted != nil && *persisted != request.Configuration.Binding {
 			guest.mu.Unlock()
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "binding-mismatch"}
 		}
@@ -305,18 +306,12 @@ func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope) wire.Re
 	}
 	if !alreadyEnrolled {
 		guestLog("enrollment exchange starting")
-		result, err := exchange(*envelope, configuration.EnrollmentCAPEM)
+		err := acceptEnrollment(*envelope, configuration.EnrollmentCAPEM)
 		envelope.Token = ""
 		if err != nil {
-			guestLog(enrollmentFailureLog(err))
+			guestLog("enrollment exchange failed")
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "enrollment-failed"}
 		}
-		if persistEnrollment(result) != nil {
-			result.RuntimeIdentity.Opaque = ""
-			guestLog("enrollment persistence failed")
-			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "enrollment-failed"}
-		}
-		result.RuntimeIdentity.Opaque = ""
 		guest.mu.Lock()
 		guest.enrolled = true
 		guest.failed = false
@@ -329,98 +324,44 @@ func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope) wire.Re
 	return guest.responseLocked()
 }
 
-func enrollmentFailureLog(err error) string {
-	switch err.Error() {
-	case "enrollment trust is invalid":
-		return "enrollment exchange failed: trust invalid"
-	case "enrollment request is invalid":
-		return "enrollment exchange failed: request invalid"
-	case "enrollment issuer is unavailable":
-		return "enrollment exchange failed: issuer unavailable"
-	case "enrollment exchange was rejected":
-		return "enrollment exchange failed: issuer rejected"
-	case "enrollment result is invalid":
-		return "enrollment exchange failed: result invalid"
-	default:
-		return "enrollment exchange failed"
+func loadEnrollmentBinding() (*guestenrollment.Binding, error) {
+	store, err := guestidentity.OpenStore(identityConfiguration())
+	if err != nil {
+		return nil, errors.New("identity state is unavailable")
 	}
+	binding, err := store.LoadActiveBinding()
+	if err != nil {
+		return nil, errors.New("identity state is invalid")
+	}
+	return binding, nil
 }
 
-func exchange(envelope guestenrollment.BootstrapEnvelope, caPEM string) (guestenrollment.ExchangeResult, error) {
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM([]byte(caPEM)) {
-		return guestenrollment.ExchangeResult{}, errors.New("enrollment trust is invalid")
+func acceptEnrollment(envelope guestenrollment.BootstrapEnvelope, caPEM string) error {
+	client, err := guestidentity.NewClient([]byte(caPEM))
+	if err != nil {
+		return errors.New("identity trust is invalid")
 	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}}
-	client := &http.Client{Transport: transport, Timeout: guestenrollment.MaxOperationDuration, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	value := guestenrollment.ExchangeRequest{ContractVersion: guestenrollment.Version, Binding: envelope.Binding, Token: envelope.Token}
-	payload, err := json.Marshal(value)
-	if err != nil || len(payload) > guestenrollment.MaxExchangeRequestBytes {
-		zero(payload)
-		return guestenrollment.ExchangeResult{}, errors.New("enrollment request is invalid")
+	store, err := guestidentity.OpenStore(identityConfiguration())
+	if err != nil {
+		return errors.New("identity state is unavailable")
 	}
-	defer zero(payload)
+	runtime, err := guestidentity.NewRuntime(store, client)
+	if err != nil {
+		return errors.New("identity lifecycle is unavailable")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), guestenrollment.MaxOperationDuration)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, envelope.ExchangeURL, bytes.NewReader(payload))
-	if err != nil {
-		return guestenrollment.ExchangeResult{}, errors.New("enrollment request is invalid")
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
-	if err != nil {
-		return guestenrollment.ExchangeResult{}, errors.New("enrollment issuer is unavailable")
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, guestenrollment.MaxExchangeResultBytes+1))
-	if err != nil || len(body) > guestenrollment.MaxExchangeResultBytes || response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/json" {
-		zero(body)
-		return guestenrollment.ExchangeResult{}, errors.New("enrollment exchange was rejected")
-	}
-	defer zero(body)
-	result, err := guestenrollment.DecodeExchangeResult(body)
-	if err != nil || result.Binding != envelope.Binding {
-		return guestenrollment.ExchangeResult{}, errors.New("enrollment result is invalid")
-	}
-	return result, nil
-}
-
-func persistEnrollment(result guestenrollment.ExchangeResult) error {
-	return persistEnrollmentAt(enrollmentPath, result, atomicWrite)
-}
-
-func persistEnrollmentAt(path string, result guestenrollment.ExchangeResult, write func(string, []byte, os.FileMode) error) error {
-	if guestenrollment.ValidateExchangeResult(result) != nil || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
-		return errors.New("enrollment state is invalid")
-	}
-	record := enrollmentRecord{ContractVersion: guestenrollment.Version, Binding: result.Binding, RuntimeIdentity: result.RuntimeIdentity}
-	encoded, err := json.Marshal(record)
-	if err != nil || write(path, append(encoded, '\n'), 0o600) != nil {
-		return errors.New("enrollment state is unavailable")
+	if err := runtime.AcceptEnvelope(ctx, envelope); err != nil {
+		return errors.New("identity enrollment failed")
 	}
 	return nil
 }
 
-func loadEnrollment() (*guestenrollment.Binding, *guestenrollment.RuntimeIdentity, error) {
-	return loadEnrollmentAt(enrollmentPath)
-}
-
-func loadEnrollmentAt(path string) (*guestenrollment.Binding, *guestenrollment.RuntimeIdentity, error) {
-	encoded, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil, nil
+func identityConfiguration() guestidentity.Configuration {
+	return guestidentity.Configuration{
+		Version: guestidentity.ConfigurationVersion, StateDirectory: identityStateRoot, RuntimeDirectory: identityRuntimeRoot,
+		EnrollmentPath: identityEnrollmentPath, CAPEMPath: identityCAPath,
 	}
-	if err != nil {
-		return nil, nil, errors.New("enrollment state is unavailable")
-	}
-	var record enrollmentRecord
-	if executiondriver.DecodeStrictJSON(encoded, &record) != nil || record.ContractVersion != guestenrollment.Version ||
-		guestenrollment.ValidateExchangeResult(guestenrollment.ExchangeResult{
-			ContractVersion: record.ContractVersion, Binding: record.Binding, RuntimeIdentity: record.RuntimeIdentity,
-		}) != nil {
-		return nil, nil, errors.New("enrollment state is invalid")
-	}
-	return &record.Binding, &record.RuntimeIdentity, nil
 }
 
 func validateBootConfiguration(value wire.BootConfiguration) error {
@@ -502,6 +443,51 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	if err := os.MkdirAll("/etc/nvt-agent", 0o755); err != nil {
 		return err
 	}
+	if err := atomicWrite(identityCAPath, []byte(configuration.EnrollmentCAPEM), 0o600); err != nil {
+		return errors.New("native identity trust setup failed")
+	}
+	identityConfigBytes, _ := json.Marshal(identityConfiguration())
+	if err := atomicWrite(identityConfigPath, append(identityConfigBytes, '\n'), 0o600); err != nil {
+		return errors.New("native identity configuration failed")
+	}
+	identityDaemon := exec.Command("/opt/nvt/current/bin/nvt-guest-identityd", "--config", identityConfigPath)
+	identityDaemon.Env = []string{"PATH=/usr/bin:/bin"}
+	identityDaemon.Stdout, identityDaemon.Stderr = io.Discard, io.Discard
+	identityDaemon.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := identityDaemon.Start(); err != nil {
+		return errors.New("native identity daemon could not start")
+	}
+	identityDone := make(chan struct{})
+	go func() { _ = identityDaemon.Wait(); close(identityDone) }()
+	defer stopNativeProcess(identityDaemon, identityDone)
+	identityDeadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(identityDeadline) {
+		select {
+		case <-identityDone:
+			return errors.New("native identity daemon exited")
+		default:
+		}
+		if data, err := os.ReadFile(filepath.Join(identityRuntimeRoot, guestidentity.ReadinessFileName)); err == nil && bytes.Equal(data, []byte("ready\n")) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if data, err := os.ReadFile(filepath.Join(identityRuntimeRoot, guestidentity.ReadinessFileName)); err != nil || !bytes.Equal(data, []byte("ready\n")) {
+		return errors.New("native identity readiness timed out")
+	}
+	identityStatePath := filepath.Join(identityStateRoot, guestidentity.StateFileName)
+	identityStateInfo, identityStateErr := os.Lstat(identityStatePath)
+	identityStateStat, identityStateStatOK := identityStateInfoSys(identityStateInfo)
+	if identityStateErr != nil || !identityStateInfo.Mode().IsRegular() || identityStateInfo.Mode().Perm() != 0o600 ||
+		!identityStateStatOK || identityStateStat.Uid != 0 {
+		return errors.New("native identity state is not private")
+	}
+	identityAccessProbe := exec.Command("/bin/cat", identityStatePath)
+	identityAccessProbe.Stdout, identityAccessProbe.Stderr = io.Discard, io.Discard
+	identityAccessProbe.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532}}
+	if identityAccessProbe.Run() == nil {
+		return errors.New("agent user can read native identity state")
+	}
 	guestConfig := map[string]any{
 		"version": 1, "python_path": "/usr/bin/python3", "tmux_path": "/usr/bin/tmux", "state_dir": "/var/lib/nvt-agent",
 		"socket_path": "/run/nvt-agent/agentd.sock", "workspace": "/workspace", "session_name": "agent", "session_startup_grace_seconds": 0,
@@ -518,31 +504,64 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	if err := supervisor.Start(); err != nil {
 		return errors.New("native guest supervisor could not start")
 	}
-	done := make(chan error, 1)
-	go func() { done <- supervisor.Wait() }()
+	done := make(chan struct{})
+	go func() { _ = supervisor.Wait(); close(done) }()
+	defer stopNativeProcess(supervisor, done)
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case <-done:
 			return errors.New("native guest supervisor exited")
+		case <-identityDone:
+			return errors.New("native identity daemon exited")
 		default:
 		}
 		if data, err := os.ReadFile("/var/lib/nvt-agent/guest-ready"); err == nil && bytes.Equal(data, []byte("ready\n")) {
 			guest.mu.Lock()
 			guest.failed, guest.ready = false, true
 			guest.mu.Unlock()
-			if err := <-done; err != nil {
+			select {
+			case <-identityDone:
+				guest.mu.Lock()
+				guest.failed, guest.ready = true, false
+				guest.mu.Unlock()
+				return errors.New("native identity daemon exited")
+			case <-done:
 				guest.mu.Lock()
 				guest.failed, guest.ready = true, false
 				guest.mu.Unlock()
 				return errors.New("native guest supervisor exited")
 			}
-			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	_ = syscall.Kill(-supervisor.Process.Pid, syscall.SIGKILL)
 	return errors.New("native guest readiness timed out")
+}
+
+func identityStateInfoSys(info os.FileInfo) (*syscall.Stat_t, bool) {
+	if info == nil {
+		return nil, false
+	}
+	value, ok := info.Sys().(*syscall.Stat_t)
+	return value, ok
+}
+
+func stopNativeProcess(command *exec.Cmd, done <-chan struct{}) {
+	if command == nil || command.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+	select {
+	case <-done:
+		return
+	case <-time.After(5 * time.Second):
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func (guest *guest) serveHealth() {
@@ -562,10 +581,6 @@ func (guest *guest) serveHealth() {
 }
 
 func atomicWrite(path string, content []byte, mode os.FileMode) error {
-	return atomicWriteBeforeCommit(path, content, mode, nil)
-}
-
-func atomicWriteBeforeCommit(path string, content []byte, mode os.FileMode, beforeCommit func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -580,9 +595,6 @@ func atomicWriteBeforeCommit(path string, content []byte, mode os.FileMode, befo
 		return err
 	}
 	if _, err := temporary.Write(content); err != nil || temporary.Sync() != nil || temporary.Close() != nil {
-		return errors.New("atomic write failed")
-	}
-	if beforeCommit != nil && beforeCommit() != nil {
 		return errors.New("atomic write failed")
 	}
 	if os.Rename(name, path) != nil {

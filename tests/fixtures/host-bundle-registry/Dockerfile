@@ -7,9 +7,11 @@ ARG NVT_REVISION
 WORKDIR /src
 RUN apk add --no-cache bash openssl
 COPY hostbundle/ hostbundle/
+COPY protocol/guestenrollment/ protocol/guestenrollment/
 COPY runtime/agentd/ runtime/agentd/
 COPY tests/fixtures/host-bundle-registry/main.go tests/fixtures/host-bundle-registry/main.go
-RUN NVT_HOST_BUNDLE_ARCH=amd64 /src/hostbundle/build.sh "${NVT_VERSION}" "${NVT_REVISION}" /fixture && \
+RUN GOFLAGS=-tags=hostbundleidentitytest NVT_HOST_BUNDLE_ARCH=amd64 \
+      /src/hostbundle/build.sh "${NVT_VERSION}" "${NVT_REVISION}" /fixture && \
     cd /src && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
       go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
       -o /fixture/nvt-host-bundle-registry ./tests/fixtures/host-bundle-registry/main.go && \

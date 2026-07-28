@@ -90,13 +90,36 @@ broker token, provider credential, or one-time enrollment secret.
 
 ## Guest service boundary
 
-The bundle includes `nvt-agent-guest.service`, which runs the static
-`nvt-guest-supervisor` from `/opt/nvt/current`. The supervisor owns the native
-session and `agentd` processes; `agentd` remains limited to session I/O, prompt
-queueing, and event logging. The current bundle includes the real `agentd` and
-`agentdctl` sources plus a bounded session fixture for the guest-side lifecycle
-gate. It does not yet package code-server, an AI runtime, plugins, enrollment,
-broker integration, gateway publication, or mediated VM egress.
+The bundle includes two independent native service boundaries:
+
+- `nvt-guest-identity.service` runs the static root-owned
+  `nvt-guest-identityd`. It consumes the separately delivered one-time
+  envelope, keeps the current bearer and an unresolved successor only below
+  root-owned `/var/lib/nvt-agent-identity`, authenticates to the configured
+  broker, and rotates according to
+  [`nvt.guest-runtime-identity/v1`](guest-runtime-identity.md).
+- `nvt-agent-guest.service` runs the static non-root `nvt-guest-supervisor`.
+  It owns the native session and `agentd` processes; `agentd` remains limited
+  to session I/O, prompt queueing, and event logging.
+
+The agent service requires the identity service. The identity unit uses
+systemd `Type=notify` and becomes active only after durable state has been
+validated and the exact current identity has authenticated successfully. A
+later identity failure removes identity readiness. `TimeoutStartSec=0` leaves
+the initial activation pending while the daemon applies the enrollment
+envelope's broker-owned expiry and its own bounded network operations; a
+generic systemd startup timeout must not kill a recoverable enrollment and
+strand the dependent agent start job. Transient broker failures remain bounded
+inside the daemon and retry without claiming readiness. At local identity
+expiry, or after a terminal revoked or unrecoverable result, the daemon
+atomically erases bearer state, records replacement-required, and exits
+non-zero so systemd stops/restarts the dependent lifecycle without exposing
+bearer state to the agent user.
+
+The current bundle includes the real `agentd` and `agentdctl` sources plus a
+bounded session fixture for the guest-side lifecycle gate. It does not yet
+package code-server, an AI runtime, plugins, gateway publication, or mediated
+VM egress.
 
 Readiness is owned by the supervisor. It publishes `guest-ready` only after
 agentd and the tmux session are stable, continuously monitors both processes,
@@ -109,11 +132,18 @@ user, writable runtime/state/workspace directories, and systemd when the unit is
 used. The containerized CI harness invokes the exact same supervisor and files
 without pretending to be a provider VM or systemd proof.
 
-The installer does not write `/etc` or enable services. Guest provisioning
-copies the fixed unit from
-`/opt/nvt/current/share/systemd/nvt-agent-guest.service`, supplies the resolved
-non-secret `/etc/nvt-agent/guest.json`, then enables the unit. This explicit
-step is provider-owned and is not an archive hook.
+The installer does not write `/etc`, deliver an enrollment envelope, or enable
+services. Guest provisioning copies both fixed units from
+`/opt/nvt/current/share/systemd/`, installs the non-secret broker CA at
+`/etc/nvt-agent/runtime-identity-ca.pem`, writes the root-owned mode `0600`
+identity path configuration at `/etc/nvt-agent/identity.json`, and delivers
+the one-time mode `0600` envelope to
+`/var/lib/nvt-agent-identity/enrollment.json`. It separately supplies the
+resolved non-secret `/etc/nvt-agent/guest.json`, reloads systemd, and enables
+the services. The identity state directory is root-owned mode `0700`; neither
+the `nvt-agent` user nor its workspace can read it. These explicit steps are
+provider-owned and are not archive hooks. No bearer is accepted through argv,
+environment, systemd unit content, or ordinary guest configuration.
 
 An administrator-owned VM execution class can already carry the opaque,
 non-secret reference without a new core API field:
@@ -132,10 +162,10 @@ The provider-neutral [guest enrollment contract](guest-enrollment.md) defines
 the separate one-time sensitive envelope, exact execution binding, atomic
 exchange, and revocation semantics without placing any credential in this
 bundle. The broker-backed issuer and dedicated operator-to-driver handoff are
-implemented, and a test-only QEMU reference driver proves bundle installation,
-native readiness, restart recovery, and cleanup in a real TCG guest. That
-driver is not published or supported as a production provider. The broker now
-authenticates and atomically rotates the opaque runtime identity, while a native
-guest rotation daemon/downstream consumer, gateway routing, broker session
-identity, and mediated VM networking remain future production gates before VM
-execution is ready.
+implemented, and the bundle now contains the provider-neutral native identity
+daemon. A test-only QEMU reference driver proves one-time exchange, bundle
+installation, a real rotation, daemon/guest restart recovery, native readiness,
+and cleanup in a real TCG guest. That driver is not published or supported as a
+production provider. Gateway routing, downstream production authorization with
+the runtime identity, broker session identity, and mediated VM networking
+remain future production gates before VM execution is ready.

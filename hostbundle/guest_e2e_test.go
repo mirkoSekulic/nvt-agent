@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -15,13 +16,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/bundle"
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/contract"
+	"github.com/mirkoSekulic/nvt-agent/hostbundle/guestidentity"
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/oci"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
 
 func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
@@ -47,6 +51,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	buildBinary(t, moduleRoot, "./cmd/nvt-guest-supervisor", filepath.Join(binaries, "nvt-guest-supervisor"))
+	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-identityd", filepath.Join(binaries, "nvt-guest-identityd"), "hostbundleidentitytest")
 	buildBinary(t, moduleRoot, "./cmd/nvt-host-bootstrap", filepath.Join(binaries, "nvt-host-bootstrap"))
 	testBootstrap := filepath.Join(binaries, "nvt-host-bootstrap-test")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-host-bootstrap", testBootstrap, "hostbundletest")
@@ -61,12 +66,15 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	inputs := []bundle.InputFile{
 		{Path: "bin/nvt-guest-supervisor", Source: filepath.Join(binaries, "nvt-guest-supervisor"), Mode: 0o755},
+		{Path: "bin/nvt-guest-identityd", Source: filepath.Join(binaries, "nvt-guest-identityd"), Mode: 0o755},
 		{Path: "bin/nvt-host-bootstrap", Source: filepath.Join(binaries, "nvt-host-bootstrap"), Mode: 0o755},
 		{Path: "bin/nvt-guest-session-fixture", Source: filepath.Join(binaries, "nvt-guest-session-fixture"), Mode: 0o755},
 		{Path: "bin/agentd", Source: filepath.Join(repositoryRoot, "runtime", "agentd", "agentd.py"), Mode: 0o755},
 		{Path: "bin/agentdctl", Source: filepath.Join(repositoryRoot, "runtime", "agentd", "agentdctl.py"), Mode: 0o755},
 		{Path: "share/systemd/nvt-agent-guest.service", Source: filepath.Join(moduleRoot, "files", "nvt-agent-guest.service"), Mode: 0o644},
+		{Path: "share/systemd/nvt-guest-identity.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-identity.service"), Mode: 0o644},
 		{Path: "share/examples/guest.json", Source: filepath.Join(moduleRoot, "files", "guest.json"), Mode: 0o644},
+		{Path: "share/examples/identity.json", Source: filepath.Join(moduleRoot, "files", "identity.json"), Mode: 0o644},
 	}
 	if _, err := bundle.BuildArchive(archive, manifest, inputs); err != nil {
 		t.Fatal(err)
@@ -127,6 +135,8 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	if _, err := os.Stat(nonRootPath); !os.IsNotExist(err) {
 		t.Fatal("non-root bootstrap mutated the install root")
 	}
+
+	identityLogs, identityCanaries := exerciseInstalledIdentityDaemon(t, filepath.Join(root, "current"), work)
 
 	state := filepath.Join(work, "state")
 	workspace := filepath.Join(work, "workspace")
@@ -209,14 +219,210 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		t.Fatalf("repeated bootstrap CLI install was not idempotent: %v %s", err, repeatedOutput)
 	}
 	service, err := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-agent-guest.service"))
-	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) {
-		t.Fatal("installed systemd boundary is missing")
+	identityService, identityServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-identity.service"))
+	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || identityServiceErr != nil ||
+		!bytes.Contains(identityService, []byte("User=root")) || !bytes.Contains(identityService, []byte("Type=notify")) ||
+		!bytes.Contains(identityService, []byte("TimeoutStartSec=0")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) {
+		t.Fatal("installed systemd boundaries are missing")
 	}
 	canary := []byte("NVT_TEST_SECRET_CANARY")
 	archiveBytes, _ := os.ReadFile(archive)
-	if bytes.Contains(archiveBytes, canary) || bytes.Contains(logs.Bytes(), canary) || treeContains(t, state, canary) {
+	if bytes.Contains(archiveBytes, canary) || bytes.Contains(logs.Bytes(), canary) || bytes.Contains(identityLogs, canary) || treeContains(t, state, canary) {
 		t.Fatal("credential canary entered the bundle or normal logs")
 	}
+	for _, identityCanary := range identityCanaries {
+		if bytes.Contains(archiveBytes, identityCanary) || bytes.Contains(logs.Bytes(), identityCanary) || bytes.Contains(identityLogs, identityCanary) {
+			t.Fatal("runtime identity canary entered the bundle or normal logs")
+		}
+	}
+}
+
+type identityE2EBroker struct {
+	mu          sync.Mutex
+	binding     guestenrollment.Binding
+	token       string
+	current     string
+	issuedAt    time.Time
+	expiresAt   time.Time
+	rotateCount int
+}
+
+func (broker *identityE2EBroker) serve(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" {
+		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	switch request.URL.Path {
+	case guestenrollment.EnrollmentExchangePath:
+		var value guestenrollment.ExchangeRequest
+		if json.NewDecoder(request.Body).Decode(&value) != nil || value.Binding != broker.binding || value.Token != broker.token {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		broker.mu.Lock()
+		identity := broker.current
+		status := broker.statusLocked()
+		broker.mu.Unlock()
+		writeIdentityJSON(writer, guestenrollment.ExchangeResult{
+			ContractVersion: guestenrollment.Version, Binding: broker.binding,
+			RuntimeIdentity: guestenrollment.RuntimeIdentity{Type: guestenrollment.RuntimeIdentityType, Opaque: identity, IssuedAt: status.IssuedAt, ExpiresAt: status.ExpiresAt},
+		})
+	case guestenrollment.RuntimeIdentityStatusPath:
+		var value guestenrollment.RuntimeIdentityStatusRequest
+		broker.mu.Lock()
+		valid := json.NewDecoder(request.Body).Decode(&value) == nil && value.Binding == broker.binding && identityBearer(request) == broker.current
+		status := broker.statusLocked()
+		broker.mu.Unlock()
+		if !valid {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeIdentityJSON(writer, status)
+	case guestenrollment.RuntimeIdentityRotatePath:
+		var value guestenrollment.RuntimeIdentityRotateRequest
+		broker.mu.Lock()
+		if json.NewDecoder(request.Body).Decode(&value) != nil || value.Binding != broker.binding || identityBearer(request) != broker.current ||
+			guestenrollment.ValidateRuntimeIdentityRotateRequest(value) != nil {
+			broker.mu.Unlock()
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		broker.current = value.Successor
+		broker.issuedAt = time.Now().UTC().Truncate(time.Second)
+		broker.expiresAt = broker.issuedAt.Add(time.Hour)
+		broker.rotateCount++
+		status := broker.statusLocked()
+		broker.mu.Unlock()
+		writeIdentityJSON(writer, status)
+	default:
+		writer.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (broker *identityE2EBroker) statusLocked() guestenrollment.RuntimeIdentityStatus {
+	return guestenrollment.RuntimeIdentityStatus{
+		ContractVersion: guestenrollment.RuntimeIdentityVersion, IdentityType: guestenrollment.RuntimeIdentityType,
+		Binding: broker.binding, IssuedAt: guestenrollment.FormatTimestamp(broker.issuedAt), ExpiresAt: guestenrollment.FormatTimestamp(broker.expiresAt),
+	}
+}
+
+func exerciseInstalledIdentityDaemon(t *testing.T, current, work string) ([]byte, [][]byte) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	binding := guestenrollment.Binding{
+		AgentRunUID: "11111111-1111-1111-1111-111111111111", ExecutionID: "nvt-native-e2e",
+		DriverRegistration: "test-driver", DesiredGeneration: 1, GuestInstanceID: "guest-native-e2e",
+	}
+	broker := &identityE2EBroker{
+		binding: binding, token: identityOpaque(0x21), current: identityOpaque(0x31), issuedAt: now, expiresAt: now.Add(time.Hour),
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(broker.serve))
+	defer server.Close()
+	identityRoot := filepath.Join(work, "identity-state")
+	identityRun := filepath.Join(work, "identity-run")
+	if err := os.Mkdir(identityRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(work, "identity-ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := guestidentity.Configuration{
+		Version: guestidentity.ConfigurationVersion, StateDirectory: identityRoot, RuntimeDirectory: identityRun,
+		EnrollmentPath: filepath.Join(identityRoot, "enrollment.json"), CAPEMPath: caPath,
+	}
+	configBytes, _ := json.Marshal(configuration)
+	configPath := filepath.Join(work, "identity-config.json")
+	if err := os.WriteFile(configPath, append(configBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envelope := guestenrollment.BootstrapEnvelope{
+		ContractVersion: guestenrollment.Version, Binding: binding,
+		ExchangeURL: server.URL + guestenrollment.EnrollmentExchangePath, Token: broker.token,
+		IssuedAt: guestenrollment.FormatTimestamp(now.Add(-time.Minute)), ExpiresAt: guestenrollment.FormatTimestamp(now.Add(time.Minute)),
+	}
+	envelopeBytes, _ := json.Marshal(envelope)
+	if err := os.WriteFile(configuration.EnrollmentPath, append(envelopeBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	start := func() (*exec.Cmd, chan error) {
+		command := exec.Command(filepath.Join(current, "bin", "nvt-guest-identityd"), "--config", configPath)
+		command.Env = append(os.Environ(), "NVT_GUEST_IDENTITY_TEST_EUID=0")
+		command.Stdout, command.Stderr = &logs, &logs
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- command.Wait() }()
+		waitForFile(t, filepath.Join(identityRun, guestidentity.ReadinessFileName), 10*time.Second)
+		return command, done
+	}
+	stop := func(command *exec.Cmd, done chan error) {
+		if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("identity daemon stop failed: %v %s", err, logs.String())
+			}
+		case <-time.After(5 * time.Second):
+			_ = command.Process.Kill()
+			t.Fatal("identity daemon did not stop")
+		}
+	}
+	command, done := start()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		broker.mu.Lock()
+		rotated := broker.rotateCount >= 1
+		broker.mu.Unlock()
+		if rotated {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	broker.mu.Lock()
+	rotations := broker.rotateCount
+	identityCanary := broker.current
+	broker.mu.Unlock()
+	if rotations < 1 {
+		t.Fatalf("installed identity daemon never rotated: %s", logs.String())
+	}
+	stop(command, done)
+	command, done = start()
+	stop(command, done)
+	stateInfo, err := os.Stat(filepath.Join(identityRoot, guestidentity.StateFileName))
+	if err != nil || stateInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("identity state mode = %v, %v", stateInfo, err)
+	}
+	directoryInfo, err := os.Stat(identityRoot)
+	if err != nil || directoryInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("identity directory mode = %v, %v", directoryInfo, err)
+	}
+	if bytes.Contains(logs.Bytes(), []byte(broker.token)) || bytes.Contains(logs.Bytes(), []byte(identityCanary)) {
+		t.Fatal("identity daemon logs disclosed bearer material")
+	}
+	nonRoot := exec.Command(filepath.Join(current, "bin", "nvt-guest-identityd"), "--config", configPath)
+	nonRoot.Env = append(os.Environ(), "NVT_GUEST_IDENTITY_TEST_EUID=65532")
+	if output, err := nonRoot.CombinedOutput(); err == nil || !bytes.Contains(output, []byte("invalid startup configuration")) || bytes.Contains(output, []byte(identityCanary)) {
+		t.Fatalf("non-root identity daemon boundary = %v %s", err, output)
+	}
+	return logs.Bytes(), [][]byte{[]byte(broker.token), []byte(identityCanary)}
+}
+
+func identityBearer(request *http.Request) string {
+	return strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+}
+
+func identityOpaque(value byte) string {
+	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, guestenrollment.RuntimeIdentityBytes))
+}
+
+func writeIdentityJSON(writer http.ResponseWriter, value any) {
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(value)
 }
 
 func treeContains(t *testing.T, root string, value []byte) bool {
