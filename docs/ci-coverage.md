@@ -88,6 +88,16 @@ precise and every hermetic suite has a clear home.
   exchange, exact binding, execution-scoped restart cleanup, concurrent single
   use, pre/post-commit fault injection, replay, expiry, bounded revocation
   tombstones, cancellation, capacity, and secret non-disclosure.
+- `protocol/guestenrollment/runtime_identity_test.go` and
+  `runtime_identity_conformance_test.go` → strict runtime status/rotation
+  framing, digest-only identity handling, exact binding, single-winner CAS,
+  predecessor replay denial, restart/lost-response recovery, expiry,
+  revocation, and redaction.
+- `broker/core/guest_enrollment_test.py` and
+  `tests/broker/guest_enrollment_conformance_test.go` → the SQLite and real HTTP
+  implementations of runtime-identity authentication/rotation, including
+  transaction fault points, durable restart, authorization separation,
+  independent admission bounds, and plaintext canary scans.
 
 The `kubernetes.yml / operator-helm` job also runs the shell-level chart and
 helper coverage aggregated by `tests/operator/helm/test.sh`:

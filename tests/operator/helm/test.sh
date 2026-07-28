@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.36" || "${CHART_APP_VERSION}" != "0.8.36" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.36, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.37" || "${CHART_APP_VERSION}" != "0.8.37" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.37, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.36' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.37' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -1514,6 +1514,7 @@ grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_ENABLED' "${BROKER_ENROLLMENT_RENDER
 grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_DB' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: /state/guest-enrollment.sqlite3'
 grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: "https://broker.example.test/v1/guest-enrollment/exchange"'
 grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: /guest-enrollment-auth/token'
+grep -A1 'name: NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY' "${BROKER_ENROLLMENT_RENDER}" | grep -q 'value: "2000000"'
 grep -q 'secretName: "nvt-guest-enrollment-orchestrator"' "${BROKER_ENROLLMENT_RENDER}"
 grep -q 'key: "control-plane-token"' "${BROKER_ENROLLMENT_RENDER}"
 grep -q 'defaultMode: 0400' "${BROKER_ENROLLMENT_RENDER}"
@@ -1531,6 +1532,8 @@ for enrollment_failure in \
   '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=http://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
   '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:0/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
   '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test:99999/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment' \
+  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment --set broker.guestEnrollment.runtimeIdentityHistoryCapacity=19999' \
+  '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment --set broker.guestEnrollment.runtimeIdentityHistoryCapacity=10000001' \
   '--set broker.guestEnrollment.enabled=true --set broker.persistence.enabled=true --set-string broker.guestEnrollment.exchangeURL=https://broker.example.test/v1/guest-enrollment/exchange --set broker.guestEnrollment.orchestratorAuth.existingSecret=Invalid_Name'; do
   read -r -a enrollment_args <<< "${enrollment_failure}"
   if helm template nvt "${CHART}" -n custom-ns "${enrollment_args[@]}" > /dev/null 2> "${BROKER_ENROLLMENT_FAILURE}"; then

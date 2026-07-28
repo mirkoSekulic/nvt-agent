@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.36`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.37`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.36 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.37 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.36 --namespace nvt --create-namespace
+  --version 0.8.37 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -309,6 +309,7 @@ broker:
   guestEnrollment:
     enabled: true
     exchangeURL: https://nvt-broker.nvt.svc:7347/v1/guest-enrollment/exchange
+    runtimeIdentityHistoryCapacity: 2000000
     orchestratorAuth:
       existingSecret: nvt-guest-enrollment-orchestrator
       tokenKey: token
@@ -327,10 +328,26 @@ The issuer stores only token/runtime-identity digests and bounded lifecycle
 metadata in `/state/guest-enrollment.sqlite3`. It uses SQLite transactions and
 therefore shares the broker's existing one-replica, `Recreate`, single-writer
 contract. Do not scale the broker or mount the same database through multiple
-broker Pods. The canonical URL must resolve to this issuer over authenticated
-HTTPS. Enabling this issuer alone does not route AgentRuns to VMs. The operator
-bridge is a separate opt-in and uses explicit broker trust plus the same
-dedicated orchestrator Secret:
+broker Pods. Enrolled guests can authenticate and atomically rotate the current
+opaque identity through the same TLS broker; no plaintext credential storage
+is introduced. The canonical URL must resolve to
+this issuer over authenticated HTTPS. Enabling this issuer alone does not route
+AgentRuns to VMs.
+
+`runtimeIdentityHistoryCapacity` is the practical aggregate predecessor-digest
+storage bound. Each accepted enrollment reserves 20,000 entries atomically, so
+the default `2000000` admits 100 complete lifecycles and cannot be consumed
+first-come by rotations from another lifecycle. Values from 20,000 through
+10,000,000 are accepted; size the broker PVC for the selected maximum. New
+enrollment fails before an envelope is returned if a complete reservation is
+unavailable. Expiry before exchange atomically releases the unused reservation;
+an issued runtime identity retains its allowance until exact revocation. The
+recommended 30-minute rotation interval provides a one-year
+planning horizon only when clients follow it; the broker does not enforce that
+interval. Replace/re-enroll guests before their reservation is exhausted.
+
+The operator bridge is a separate opt-in and uses explicit broker trust plus
+the same dedicated orchestrator Secret:
 
 ```yaml
 executionDrivers:
@@ -403,7 +420,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.36`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.37`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.

@@ -75,6 +75,8 @@ The optional production issuer implements the exact payloads and lifecycle in
 | `POST /v1/guest-enrollment/revoke-binding` | 4 KiB | Dedicated orchestrator bearer |
 | `POST /v1/guest-enrollment/revoke-execution` | 4 KiB | Dedicated orchestrator bearer |
 | `POST /v1/guest-enrollment/complete-execution-cleanup` | 4 KiB | Dedicated orchestrator bearer |
+| `POST /v1/guest-runtime-identity/status` | 4 KiB | Current runtime identity plus exact binding |
+| `POST /v1/guest-runtime-identity/rotate` | 16 KiB | Current runtime identity plus exact binding and successor |
 
 Issue returns the frozen `BootstrapEnvelope`; exchange returns the frozen
 `ExchangeResult`; both revoke operations and cleanup completion return
@@ -83,6 +85,14 @@ caller cannot supply `exchange_url`: every envelope carries the issuer-owned
 canonical HTTPS endpoint loaded at broker startup. Unknown fields, duplicate
 keys at any depth, invalid UTF-8, trailing JSON, and over-limit requests fail
 as `invalid-request`.
+
+The runtime identity endpoints implement
+[`nvt.guest-runtime-identity/v1`](guest-runtime-identity.md). Status returns
+only the exact non-secret binding and broker-owned issuance/expiry window.
+Rotation atomically replaces the authenticating digest with a client-generated
+successor digest and never echoes the successor. Lost-response recovery probes
+the already-known successor before retrying that same value; it never blindly
+creates another identity.
 
 The operator client exposes only issue, the two revoke operations, and cleanup
 completion; it has no guest exchange method. It holds the dedicated bearer in
@@ -118,6 +128,19 @@ Valid-shaped absent tokens are rejected through indexed read-only lookups and
 never acquire the SQLite writer lock. A token that selects durable state must
 enter the transactional writer path, which validates the complete bounded
 store before consuming the token or issuing an identity.
+Runtime status/rotation bodies have an independent 64-request HTTP bound, a
+32-operation issuer bound, and per-enrollment body-concurrency and token-bucket
+bounds. They do not consume the control-plane revocation body slots. An indexed
+digest lookup authenticates an active identity before body admission, so an
+unknown identity consumes neither a body slot nor another identity's quota.
+A noisy valid identity can exhaust only its own quota. Normal status and
+rotation validate the selected record, transactionally maintained counters,
+and indexed digest membership; they never enumerate predecessor history.
+Complete-store validation is a streaming startup/recovery operation. Steady
+readiness and maintenance validate bounded metadata rather than deserializing
+fleet history. A known integrity failure latches the issuer unhealthy and all
+runtime operations fail closed until maintenance successfully validates the
+complete store; readiness alone never clears the latch.
 Runtime identity timestamps use the later of the issuer's current wall clock
 and the enrollment's durable `issued_at`, so a backward clock adjustment cannot
 commit a record that the same issuer subsequently rejects as malformed.
@@ -136,7 +159,20 @@ movement. Maintenance does not infer AgentRun cleanup from elapsed time.
 Tombstones and terminal records are reclaimed only after the authenticated
 cleanup-complete operation durably marks the exact revoked scope and the
 retention deadline has passed. Until then the 10,000-entry hard bound fails
-closed rather than evicting live or revocation state.
+closed rather than evicting live or revocation state. Runtime identity history
+uses an administrator-configured aggregate capacity (2,000,000 by default,
+bounded from 20,000 through 10,000,000). Issue atomically reserves one complete
+20,000-entry allowance or fails before returning an enrollment envelope.
+Rotation records the retired digest and increments the reserved lifecycle's
+used count atomically, rejecting any successor digest already current or
+historical. Expiry before the one-time exchange releases the unused reservation
+atomically but retains the expired record for replay and binding enforcement.
+After identity issuance, exact-binding and execution cleanup release the
+reservation and delete all matching history. At the recommended 30-minute
+planning interval the allowance covers more than 365 days, but the interval is
+a client `SHOULD`, not broker enforcement. The orchestrator must
+replace/re-enroll the guest binding before exhaustion rather than evicting
+replay history.
 
 ### POST /v1/http/request
 

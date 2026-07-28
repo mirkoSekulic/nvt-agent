@@ -234,6 +234,7 @@ const (
 	ReasonAlreadyConsumed FailureReason = "already-consumed"
 	ReasonIdentityFailure FailureReason = "identity-issuance-failed"
 	ReasonStorageFailure  FailureReason = "issuer-storage-failed"
+	ReasonUnauthorized    FailureReason = "unauthorized"
 )
 
 // Failure is deliberately value-free so an error cannot expose a token,
@@ -249,7 +250,8 @@ func (failure *Failure) Error() string {
 func NewFailure(reason FailureReason) error {
 	switch reason {
 	case ReasonInvalidRequest, ReasonCapacity, ReasonAlreadyIssued, ReasonInvalidToken, ReasonBindingMismatch,
-		ReasonExpired, ReasonRevoked, ReasonAlreadyConsumed, ReasonIdentityFailure, ReasonStorageFailure:
+		ReasonExpired, ReasonRevoked, ReasonAlreadyConsumed, ReasonIdentityFailure, ReasonStorageFailure,
+		ReasonUnauthorized:
 		return &Failure{reason: reason}
 	default:
 		return &Failure{reason: ReasonInvalidRequest}

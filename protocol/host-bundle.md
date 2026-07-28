@@ -134,7 +134,8 @@ exchange, and revocation semantics without placing any credential in this
 bundle. The broker-backed issuer and dedicated operator-to-driver handoff are
 implemented, and a test-only QEMU reference driver proves bundle installation,
 native readiness, restart recovery, and cleanup in a real TCG guest. That
-driver is not published or supported as a production provider. Gateway
-routing, production runtime-identity/provider use, broker identity, and
-mediated VM networking remain separate future production gates before VM
+driver is not published or supported as a production provider. The broker now
+authenticates and atomically rotates the opaque runtime identity, while a native
+guest rotation daemon/downstream consumer, gateway routing, broker session
+identity, and mediated VM networking remain future production gates before VM
 execution is ready.

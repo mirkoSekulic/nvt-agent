@@ -41,7 +41,11 @@ export NVT_BROKER_GUEST_ENROLLMENT_ENABLED=true
 export NVT_BROKER_GUEST_ENROLLMENT_DB=/state/guest-enrollment.sqlite3
 export NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL=https://broker.example/v1/guest-enrollment/exchange
 export NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE=/run/secrets/guest-enrollment-orchestrator
+export NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY=2000000
 ```
+
+The first four variables are required. The history-capacity variable is an
+optional bounded storage policy and defaults to `2000000`.
 
 The token file is a dedicated control-plane authorization boundary for issue
 and revoke operations. Agent and egress bearer identities are never accepted.
@@ -51,11 +55,42 @@ The broker stores token and runtime-identity digests, never either plaintext
 value. Stable, bounded error classes intentionally hide request bodies and
 SQLite diagnostics.
 
+An enrolled guest can authenticate and atomically rotate its opaque control-
+plane identity using
+[`nvt.guest-runtime-identity/v1`](../protocol/guest-runtime-identity.md). The
+guest proposes a cryptographically random successor; SQLite commits only its
+digest and the broker-owned validity window. Bounded digest-only predecessor
+history prevents a retired identity from being selected again, including after
+a broker restart. Ambiguous response recovery checks the already-known
+successor before retrying the same proposal. Exact-binding and execution
+revocation remove the current digest and its complete predecessor history.
+Runtime requests authenticate by indexed digest before body admission and use
+per-enrollment quotas, so unknown or noisy guests cannot consume another
+guest's runtime-identity capacity.
+
+Each enrollment atomically reserves its complete 20,000-rotation allowance at
+issue time. The default aggregate capacity is 2,000,000 entries (100 admitted
+lifecycles) and may be configured from 20,000 through 10,000,000; a new issue
+fails before returning an envelope when no complete allowance remains. An
+unexchanged token's expiry atomically releases its unused allowance while the
+expired enrollment record remains replay-safe. After identity issuance, exact
+revocation releases the reservation. With the one-hour identity window, guests
+should rotate no more often than every 30 minutes and deployments must schedule
+controlled guest replacement/re-enrollment before the allowance is exhausted.
+The resulting 365-day planning horizon depends on compliant client behavior;
+the broker does not enforce a minimum rotation interval and never evicts
+predecessor history to extend a binding.
+
+Steady readiness, maintenance, status, and rotation use bounded metadata and
+indexed lookups rather than enumerating predecessor history. Startup and
+health-latch recovery perform the deliberate streaming full integrity sweep.
+
 SQLite is used in single-writer mode. One broker process owns the database;
 deployments must not share it across replicas. The broker readiness endpoint
 fails closed if the configured durable store becomes unavailable. This phase
-issues an opaque runtime identity but does not yet wire its use into gateway,
-broker, or VM egress authentication.
+issues and authenticates an opaque runtime identity, but there is not yet a
+guest rotation daemon, gateway route, production runtime consumer, or mediated
+VM egress identity.
 
 Example config:
 

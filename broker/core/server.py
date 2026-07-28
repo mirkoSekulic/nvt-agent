@@ -22,12 +22,17 @@ from broker.core.guest_enrollment import (
     ISSUE_PATH as GUEST_ENROLLMENT_ISSUE_PATH,
     REVOKE_BINDING_PATH as GUEST_ENROLLMENT_REVOKE_BINDING_PATH,
     REVOKE_EXECUTION_PATH as GUEST_ENROLLMENT_REVOKE_EXECUTION_PATH,
+    RUNTIME_IDENTITY_ROTATE_PATH as GUEST_RUNTIME_IDENTITY_ROTATE_PATH,
+    RUNTIME_IDENTITY_STATUS_PATH as GUEST_RUNTIME_IDENTITY_STATUS_PATH,
     EnrollmentConfigError,
     EnrollmentFailure,
     decode_exchange_request,
     decode_issue_request,
     decode_revoke_request,
+    decode_runtime_identity_rotate_request,
+    decode_runtime_identity_status_request,
     load_guest_enrollment_from_environment,
+    runtime_identity_from_authorization,
 )
 from broker.core.providers import load_providers
 
@@ -53,6 +58,7 @@ MAX_BROKER_HTTP_CONNECTIONS = 128
 BROKER_HEADER_TIMEOUT_SECONDS = 10
 MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES = 64
 MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS = 16
+MAX_GUEST_RUNTIME_IDENTITY_HTTP_REQUESTS = 64
 GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
 
 
@@ -275,6 +281,43 @@ class Broker:
             raise _guest_enrollment_provider_error(error) from error
         self.audit.write(request_id=request_id, agent=actor, operation="guest-enrollment.complete-execution-cleanup", allowed=True)
         return {"ok": True}
+
+    def admit_guest_runtime_identity(self, authorization):
+        self._require_guest_enrollment()
+        try:
+            identity = runtime_identity_from_authorization(authorization)
+            admission = self.guest_enrollment.admit_runtime_identity(identity)
+            return identity, admission
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+
+    def guest_runtime_identity_status(self, request_id, raw_payload, authorization, admission=None):
+        self._require_guest_enrollment()
+        try:
+            identity = runtime_identity_from_authorization(authorization)
+            result = self.guest_enrollment.runtime_identity_status(
+                identity,
+                decode_runtime_identity_status_request(raw_payload),
+                admission=admission,
+            )
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=None, operation="guest-runtime-identity.status", allowed=True)
+        return result
+
+    def guest_runtime_identity_rotate(self, request_id, raw_payload, authorization, admission=None):
+        self._require_guest_enrollment()
+        try:
+            identity = runtime_identity_from_authorization(authorization)
+            result = self.guest_enrollment.rotate_runtime_identity(
+                identity,
+                decode_runtime_identity_rotate_request(raw_payload),
+                admission=admission,
+            )
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=None, operation="guest-runtime-identity.rotate", allowed=True)
+        return result
 
     def _require_guest_enrollment(self):
         if self.guest_enrollment is None:
@@ -759,6 +802,7 @@ def make_handler(broker):
     # required for authoritative execution revocation.
     guest_exchange_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES)
     guest_control_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS)
+    guest_runtime_identity_requests = threading.BoundedSemaphore(MAX_GUEST_RUNTIME_IDENTITY_HTTP_REQUESTS)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "nvt-brokerd/0.1"
@@ -805,16 +849,23 @@ def make_handler(broker):
         def do_POST(self):
             request_id = str(uuid.uuid4())
             payload = {}
+            runtime_admission = None
             try:
                 if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS:
                     broker._require_guest_enrollment()
                     authorization = self.headers.get("authorization")
                     request_slots = guest_exchange_requests
-                    if self.path != GUEST_ENROLLMENT_EXCHANGE_PATH:
+                    if self.path in (GUEST_RUNTIME_IDENTITY_STATUS_PATH, GUEST_RUNTIME_IDENTITY_ROTATE_PATH):
+                        _, runtime_admission = broker.admit_guest_runtime_identity(authorization)
+                        request_slots = guest_runtime_identity_requests
+                    elif self.path != GUEST_ENROLLMENT_EXCHANGE_PATH:
                         broker._authenticate_guest_enrollment_orchestrator(authorization)
                         request_slots = guest_control_requests
                     request_admitted = request_slots.acquire(blocking=False)
                     if not request_admitted:
+                        if runtime_admission is not None:
+                            runtime_admission.release()
+                            runtime_admission = None
                         raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
                     try:
                         raw_payload = self.read_enrollment_body(
@@ -830,12 +881,22 @@ def make_handler(broker):
                             response = broker.guest_enrollment_revoke_execution(request_id, raw_payload, authorization)
                         elif self.path == GUEST_ENROLLMENT_COMPLETE_EXECUTION_CLEANUP_PATH:
                             response = broker.guest_enrollment_complete_execution_cleanup(request_id, raw_payload, authorization)
+                        elif self.path == GUEST_RUNTIME_IDENTITY_STATUS_PATH:
+                            response = broker.guest_runtime_identity_status(
+                                request_id, raw_payload, authorization, admission=runtime_admission
+                            )
+                        elif self.path == GUEST_RUNTIME_IDENTITY_ROTATE_PATH:
+                            response = broker.guest_runtime_identity_rotate(
+                                request_id, raw_payload, authorization, admission=runtime_admission
+                            )
                         else:
                             raise ProviderError("not-found", "not-found", 404)
                         self.write_json(200, response)
                         return
                     finally:
                         request_slots.release()
+                        if runtime_admission is not None:
+                            runtime_admission.release()
                 payload = self.read_payload()
                 if self.path == "/v1/http/request":
                     response = broker.http_request(request_id, payload, self.headers.get("authorization"))

@@ -1,3 +1,4 @@
+import base64
 import json
 import socket
 import sqlite3
@@ -18,9 +19,16 @@ from broker.core.guest_enrollment import (
     EnrollmentFailure,
     EnrollmentFaults,
     GuestEnrollmentIssuer,
+    DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY,
+    MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
+    MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY,
     OrchestratorAuthenticator,
+    RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL,
+    RUNTIME_IDENTITY_PLANNING_HORIZON,
+    RUNTIME_IDENTITY_VERSION,
     TOMBSTONE_RETENTION,
     VERSION,
+    _validate_persisted_runtime_identity_history,
     format_timestamp,
     load_guest_enrollment_from_environment,
 )
@@ -371,6 +379,16 @@ class ResponseLostFailure(EnrollmentFaults):
         raise ConnectionAbortedError("response-lost")
 
 
+class RotationBeforeCommitFailure(EnrollmentFaults):
+    def before_rotation_commit(self):
+        raise sqlite3.OperationalError("rotation-storage-secret-canary")
+
+
+class RotationResponseLostFailure(EnrollmentFaults):
+    def after_rotation_commit(self):
+        raise ConnectionAbortedError("rotation-response-lost")
+
+
 class GuestEnrollmentIssuerTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -410,6 +428,660 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(snapshot.count('"runtime_identity_active": 1'), 1)
         self.assertFailure("already-consumed", lambda: restarted.exchange(exchange_request(envelope)))
 
+    def test_runtime_identity_status_rotation_restart_and_revocation(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        status = issuer.runtime_identity_status(identity, runtime_status_request(envelope["binding"]))
+        self.assertEqual(status["binding"], envelope["binding"])
+        self.assertNotIn("opaque", status)
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.runtime_identity_status(opaque_canary(69), runtime_status_request(envelope["binding"])),
+        )
+
+        # Rotation is a runtime operation and remains valid after the one-time
+        # enrollment token's independent TTL has elapsed.
+        self.clock.value += timedelta(minutes=30)
+        first_successor = opaque_canary(70)
+        self.assertFailure(
+            "invalid-request",
+            lambda: issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], identity)),
+        )
+        rotated = issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], first_successor))
+        self.assertEqual(rotated["identity_type"], "nvt.runtime-identity/v1")
+        self.assertFailure(
+            "invalid-request",
+            lambda: issuer.rotate_runtime_identity(
+                first_successor,
+                runtime_rotate_request(envelope["binding"], identity),
+            ),
+        )
+        self.assertFailure("unauthorized", lambda: issuer.runtime_identity_status(identity, runtime_status_request(envelope["binding"])))
+        self.assertEqual(issuer.runtime_identity_status(first_successor, runtime_status_request(envelope["binding"])), rotated)
+        self.assertTrue(issuer.ready())
+
+        second_successor = opaque_canary(71)
+        issuer.rotate_runtime_identity(first_successor, runtime_rotate_request(envelope["binding"], second_successor))
+        issuer.close()
+        restarted = self.issuer()
+        self.assertEqual(
+            restarted.runtime_identity_status(second_successor, runtime_status_request(envelope["binding"]))["binding"],
+            envelope["binding"],
+        )
+        self.assertFailure(
+            "invalid-request",
+            lambda: restarted.rotate_runtime_identity(
+                second_successor,
+                runtime_rotate_request(envelope["binding"], first_successor),
+            ),
+        )
+        durable_with_history = json.dumps(restarted.snapshot(), sort_keys=True)
+        self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 2)
+        for secret in (identity, first_successor, second_successor):
+            self.assertNotIn(secret, durable_with_history)
+        self.clock.value += timedelta(hours=1)
+        restarted.maintain()
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.runtime_identity_status(second_successor, runtime_status_request(envelope["binding"])),
+        )
+        restarted.revoke_execution(revoke_execution_request(envelope["binding"]))
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.runtime_identity_status(second_successor, runtime_status_request(envelope["binding"])),
+        )
+
+        durable = json.dumps(restarted.snapshot(), sort_keys=True)
+        self.assertEqual(restarted.snapshot()["runtime_identity_history"], [])
+        for secret in (identity, first_successor, second_successor):
+            self.assertNotIn(secret, durable)
+
+    def test_runtime_identity_rotation_is_single_cas_and_exact_binding(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        wrong = runtime_status_request(dict(envelope["binding"], guest_instance_id="other-guest"))
+        self.assertFailure("unauthorized", lambda: issuer.runtime_identity_status(identity, wrong))
+        wrong_rotation = runtime_rotate_request(
+            dict(envelope["binding"], desired_generation=2),
+            opaque_canary(78),
+        )
+        self.assertFailure("unauthorized", lambda: issuer.rotate_runtime_identity(identity, wrong_rotation))
+        self.assertTrue(runtime_identity_is_active(issuer, identity, envelope["binding"]))
+
+        barrier = threading.Barrier(3)
+        successors = (opaque_canary(72), opaque_canary(73))
+
+        def rotate(successor):
+            barrier.wait()
+            try:
+                issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor))
+                return "success"
+            except EnrollmentFailure as error:
+                return error.reason
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(rotate, successor) for successor in successors]
+            barrier.wait()
+            outcomes = [future.result(timeout=2) for future in futures]
+        self.assertEqual(outcomes.count("success"), 1)
+        self.assertEqual(outcomes.count("unauthorized"), 1)
+        active = [
+            successor
+            for successor in successors
+            if runtime_identity_is_active(issuer, successor, envelope["binding"])
+        ]
+        self.assertEqual(len(active), 1)
+
+    def test_runtime_identity_rotation_commit_boundaries_and_recovery(self):
+        before = self.issuer(faults=RotationBeforeCommitFailure())
+        envelope = before.issue(issue_request())
+        identity = before.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        successor = opaque_canary(74)
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: before.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor)),
+        )
+        self.assertFalse(before.store_healthy)
+        before.maintain()
+        self.assertTrue(before.ready())
+        self.assertTrue(runtime_identity_is_active(before, identity, envelope["binding"]))
+        self.assertFalse(runtime_identity_is_active(before, successor, envelope["binding"]))
+        self.assertEqual(before.snapshot()["runtime_identity_history"], [])
+        before.close()
+        before_recovered = self.issuer()
+        before_recovered.rotate_runtime_identity(
+            identity,
+            runtime_rotate_request(envelope["binding"], successor),
+        )
+        self.assertTrue(runtime_identity_is_active(before_recovered, successor, envelope["binding"]))
+
+        lost_database = str(Path(self.temporary.name) / "rotation-response-lost.sqlite3")
+        lost = GuestEnrollmentIssuer(
+            lost_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(80),
+            faults=RotationResponseLostFailure(),
+            maintenance_interval=None,
+        )
+        self.addCleanup(lost.close)
+        lost_envelope = lost.issue(issue_request(uid="lost-uid", execution="lost-execution"))
+        old_identity = lost.exchange(exchange_request(lost_envelope))["runtime_identity"]["opaque"]
+        proposed = opaque_canary(75)
+        with self.assertRaises(ConnectionAbortedError):
+            lost.rotate_runtime_identity(old_identity, runtime_rotate_request(lost_envelope["binding"], proposed))
+        lost.close()
+        recovered = GuestEnrollmentIssuer(lost_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
+        self.addCleanup(recovered.close)
+        self.assertFalse(runtime_identity_is_active(recovered, old_identity, lost_envelope["binding"]))
+        self.assertTrue(runtime_identity_is_active(recovered, proposed, lost_envelope["binding"]))
+        self.assertEqual(len(recovered.snapshot()["runtime_identity_history"]), 1)
+
+    def test_runtime_identity_history_is_bounded_restart_safe_and_cleaned(self):
+        issuer = self.issuer(
+            max_entries=3,
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=4,
+        )
+        envelope = issuer.issue(issue_request())
+        initial = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        unrelated = issuer.issue(issue_request(uid="unrelated-uid", execution="unrelated-execution", guest="unrelated-guest"))
+        unrelated_identity = issuer.exchange(exchange_request(unrelated))["runtime_identity"]["opaque"]
+        self.assertFailure(
+            "capacity-exceeded",
+            lambda: issuer.issue(issue_request(uid="unreserved", execution="unreserved", guest="unreserved")),
+        )
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("4",)],
+        )
+        first = opaque_canary(90)
+        second = opaque_canary(91)
+        third = opaque_canary(92)
+        issuer.rotate_runtime_identity(initial, runtime_rotate_request(envelope["binding"], first))
+        issuer.rotate_runtime_identity(first, runtime_rotate_request(envelope["binding"], second))
+        self.assertFailure(
+            "capacity-exceeded",
+            lambda: issuer.rotate_runtime_identity(second, runtime_rotate_request(envelope["binding"], third)),
+        )
+        issuer.close()
+
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(
+                self.database,
+                EXCHANGE_URL,
+                now=self.clock,
+                maintenance_interval=None,
+                max_entries=3,
+                max_runtime_identity_history_per_enrollment=2,
+                max_runtime_identity_history_entries=3,
+            )
+
+        restarted = self.issuer(
+            max_entries=3,
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=4,
+        )
+        self.assertTrue(runtime_identity_is_active(restarted, second, envelope["binding"]))
+        self.assertFailure(
+            "invalid-request",
+            lambda: restarted.rotate_runtime_identity(second, runtime_rotate_request(envelope["binding"], initial)),
+        )
+        # The unrelated lifecycle owns its own complete allowance even though
+        # the first lifecycle has exhausted its quota.
+        unrelated_successor = opaque_canary(98)
+        restarted.rotate_runtime_identity(
+            unrelated_identity,
+            runtime_rotate_request(unrelated["binding"], unrelated_successor),
+        )
+        self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 3)
+        restarted.revoke_binding(revoke_binding_request(envelope["binding"]))
+        self.assertEqual(len(restarted.snapshot()["runtime_identity_history"]), 1)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("2",)],
+        )
+        replacement = restarted.issue(
+            issue_request(uid="replacement-uid", execution="replacement-execution", guest="replacement-guest")
+        )
+        replacement_identity = restarted.exchange(exchange_request(replacement))["runtime_identity"]["opaque"]
+        restarted.rotate_runtime_identity(
+            replacement_identity,
+            runtime_rotate_request(replacement["binding"], opaque_canary(96)),
+        )
+
+    def test_runtime_identity_history_capacity_supports_documented_lifecycle(self):
+        self.assertGreaterEqual(
+            MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT * RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL,
+            RUNTIME_IDENTITY_PLANNING_HORIZON,
+        )
+        self.assertEqual(DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY // MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT, 100)
+        self.assertGreaterEqual(MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY, DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY)
+        issuer = self.issuer()
+        self.assertEqual(issuer.max_runtime_identity_history_entries, DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY)
+
+    def test_runtime_detected_corruption_latches_until_complete_validation(self):
+        issuer = self.issuer()
+        damaged = issuer.issue(issue_request())
+        damaged_identity = issuer.exchange(exchange_request(damaged))["runtime_identity"]["opaque"]
+        damaged_successor = opaque_canary(99)
+        issuer.rotate_runtime_identity(
+            damaged_identity,
+            runtime_rotate_request(damaged["binding"], damaged_successor),
+        )
+        healthy = issuer.issue(issue_request(uid="healthy-uid", execution="healthy-execution", guest="healthy-guest"))
+        healthy_identity = issuer.exchange(exchange_request(healthy))["runtime_identity"]["opaque"]
+        update_database(
+            self.database,
+            "UPDATE enrollments SET runtime_identity_history_complete = 0 WHERE agent_run_uid = ?",
+            (damaged["binding"]["agent_run_uid"],),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(
+                damaged_successor,
+                runtime_status_request(damaged["binding"]),
+            ),
+        )
+        self.assertFalse(issuer.store_healthy)
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(
+                healthy_identity,
+                runtime_status_request(healthy["binding"]),
+            ),
+        )
+
+        # Repair alone cannot let a fast readiness probe or unrelated
+        # record-local request declare the store healthy. Recovery is a
+        # deliberate complete maintenance scan.
+        update_database(
+            self.database,
+            "UPDATE enrollments SET runtime_identity_history_complete = 1 WHERE agent_run_uid = ?",
+            (damaged["binding"]["agent_run_uid"],),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(
+                healthy_identity,
+                runtime_status_request(healthy["binding"]),
+            ),
+        )
+        self.assertFalse(issuer.ready())
+        with patch(
+            "broker.core.guest_enrollment._validate_persisted_runtime_identity_history",
+            wraps=_validate_persisted_runtime_identity_history,
+        ) as history_validator:
+            issuer.maintain()
+            self.assertGreaterEqual(history_validator.call_count, 1)
+        self.assertTrue(issuer.ready())
+        self.assertEqual(
+            issuer.runtime_identity_status(healthy_identity, runtime_status_request(healthy["binding"]))["binding"],
+            healthy["binding"],
+        )
+
+    def test_runtime_identity_successor_cannot_be_owned_by_another_lifecycle(self):
+        issuer = self.issuer()
+        first = issuer.issue(issue_request())
+        first_identity = issuer.exchange(exchange_request(first))["runtime_identity"]["opaque"]
+        second = issuer.issue(issue_request(uid="owner-uid", execution="owner-execution", guest="owner-guest"))
+        second_identity = issuer.exchange(exchange_request(second))["runtime_identity"]["opaque"]
+        self.assertFailure(
+            "invalid-request",
+            lambda: issuer.rotate_runtime_identity(
+                first_identity,
+                runtime_rotate_request(first["binding"], second_identity),
+            ),
+        )
+        second_successor = opaque_canary(94)
+        issuer.rotate_runtime_identity(second_identity, runtime_rotate_request(second["binding"], second_successor))
+        self.assertFailure(
+            "invalid-request",
+            lambda: issuer.rotate_runtime_identity(
+                first_identity,
+                runtime_rotate_request(first["binding"], second_identity),
+            ),
+        )
+
+    def test_v3_consumed_identity_is_status_only_until_reenrollment(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        issuer.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute("DROP TABLE runtime_identity_history")
+            connection.execute("ALTER TABLE enrollments DROP COLUMN runtime_identity_history_complete")
+            connection.execute("UPDATE enrollment_meta SET value = '3' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = self.issuer()
+        self.assertTrue(runtime_identity_is_active(migrated, identity, envelope["binding"]))
+        self.assertFailure(
+            "unauthorized",
+            lambda: migrated.rotate_runtime_identity(
+                identity,
+                runtime_rotate_request(envelope["binding"], opaque_canary(93)),
+            ),
+        )
+        self.assertEqual(migrated.snapshot()["records"][0]["runtime_identity_history_complete"], 0)
+
+    def test_v4_history_migration_reserves_existing_lifecycle_without_eviction(self):
+        issuer = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        expired = issuer.issue(
+            issue_request(uid="expired-uid", execution="expired-execution", guest="expired-guest", ttl=1)
+        )
+        self.clock.value += timedelta(seconds=2)
+        issuer.maintain()
+        envelope = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        successor = opaque_canary(89)
+        issuer.rotate_runtime_identity(identity, runtime_rotate_request(envelope["binding"], successor))
+        issuer.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE enrollments SET runtime_identity_history_count = 0, runtime_identity_history_capacity = 0"
+            )
+            connection.execute(
+                "DELETE FROM enrollment_meta WHERE key IN ('runtime_identity_history_capacity', 'runtime_identity_history_reserved')"
+            )
+            connection.execute(
+                "INSERT INTO enrollment_meta (key, value) VALUES ('runtime_identity_history_count', '1')"
+            )
+            connection.execute("UPDATE enrollment_meta SET value = '4' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        records = {record["agent_run_uid"]: record for record in migrated.snapshot()["records"]}
+        self.assertEqual(records[expired["binding"]["agent_run_uid"]]["state"], "expired")
+        self.assertEqual(records[expired["binding"]["agent_run_uid"]]["runtime_identity_history_count"], 0)
+        self.assertEqual(records[expired["binding"]["agent_run_uid"]]["runtime_identity_history_capacity"], 0)
+        self.assertEqual(records[envelope["binding"]["agent_run_uid"]]["runtime_identity_history_count"], 1)
+        self.assertEqual(records[envelope["binding"]["agent_run_uid"]]["runtime_identity_history_capacity"], 2)
+        self.assertTrue(runtime_identity_is_active(migrated, successor, envelope["binding"]))
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT key, value FROM enrollment_meta WHERE key LIKE 'runtime_identity_history%' ORDER BY key",
+            ),
+            [
+                ("runtime_identity_history_capacity", "2"),
+                ("runtime_identity_history_reserved", "2"),
+            ],
+        )
+
+    def test_early_v5_expired_reservation_is_normalized_on_restart(self):
+        issuer = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        expired = issuer.issue(
+            issue_request(uid="expired-uid", execution="expired-execution", guest="expired-guest", ttl=1)
+        )
+        issuer.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            # The first schema-v5 review implementation transitioned the row
+            # but retained this never-consumed lifecycle's complete allowance.
+            token_digest = connection.execute("SELECT token_digest FROM enrollments").fetchone()[0]
+            connection.execute(
+                "UPDATE enrollments SET state = 'expired', terminal_at = expires_at WHERE token_digest = ?",
+                (token_digest,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        restarted = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        record = restarted.snapshot()["records"][0]
+        self.assertEqual(record["state"], "expired")
+        self.assertEqual(record["terminal_at"], expired["expires_at"])
+        self.assertEqual(record["runtime_identity_history_count"], 0)
+        self.assertEqual(record["runtime_identity_history_capacity"], 0)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("0",)],
+        )
+        replacement = restarted.issue(
+            issue_request(uid="replacement-uid", execution="replacement-execution", guest="replacement-guest")
+        )
+        self.assertTrue(replacement["token"])
+
+    def test_runtime_identity_admission_is_per_identity_and_unknown_safe(self):
+        issuer = self.issuer(runtime_identity_rate=0.001, runtime_identity_burst=2, runtime_identity_concurrency=2)
+        first = issuer.issue(issue_request())
+        first_identity = issuer.exchange(exchange_request(first))["runtime_identity"]["opaque"]
+        second = issuer.issue(issue_request(uid="second-uid", execution="second-execution", guest="second-guest"))
+        second_identity = issuer.exchange(exchange_request(second))["runtime_identity"]["opaque"]
+
+        for value in (100, 101, 102):
+            self.assertFailure("unauthorized", lambda value=value: issuer.admit_runtime_identity(opaque_canary(value)))
+        self.assertEqual(issuer.runtime_identity_admissions, {})
+        first_admissions = [issuer.admit_runtime_identity(first_identity) for _ in range(2)]
+        self.assertFailure("capacity-exceeded", lambda: issuer.admit_runtime_identity(first_identity))
+        second_admission = issuer.admit_runtime_identity(second_identity)
+        second_admission.release()
+        for admission in first_admissions:
+            admission.release()
+
+        # The first lifecycle exhausted only its own token bucket. The second
+        # still authenticates and completes status normally.
+        self.assertEqual(
+            issuer.runtime_identity_status(second_identity, runtime_status_request(second["binding"]))["binding"],
+            second["binding"],
+        )
+
+    def test_runtime_identity_requests_are_record_local_and_do_not_delay_revocation(self):
+        issuer = self.issuer(max_runtime_identity_history_entries=MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY)
+        target = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(target))["runtime_identity"]["opaque"]
+        for index in range(200):
+            issuer.issue(
+                issue_request(
+                    uid=f"unrelated-{index}",
+                    execution=f"unrelated-execution-{index}",
+                    guest=f"unrelated-guest-{index}",
+                )
+            )
+
+        connection = sqlite3.connect(self.database)
+        try:
+            token_digest = connection.execute(
+                "SELECT token_digest FROM enrollments WHERE agent_run_uid = ?",
+                (target["binding"]["agent_run_uid"],),
+            ).fetchone()[0]
+            connection.executemany(
+                "INSERT INTO runtime_identity_history (runtime_identity_digest, token_digest, retired_at) VALUES (?, ?, ?)",
+                ((f"sha256:{index:064x}", token_digest, format_timestamp(START)) for index in range(1, 1001)),
+            )
+            connection.execute(
+                "UPDATE enrollments SET runtime_identity_history_count = 1000 WHERE token_digest = ?",
+                (token_digest,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        statements = []
+        original_connect = issuer._connect
+
+        def traced_connect():
+            connection = original_connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        issuer._connect = traced_connect
+
+        original_validate_store = issuer._validate_store
+        full_scans = 0
+        full_scan_lock = threading.Lock()
+
+        def tracked_validate_store(connection, full=False):
+            nonlocal full_scans
+            if threading.current_thread().name.startswith("runtime-load"):
+                with full_scan_lock:
+                    full_scans += 1
+                time.sleep(0.2)
+            return original_validate_store(connection, full=full)
+
+        issuer._validate_store = tracked_validate_store
+        rotated_identity = opaque_canary(97)
+        with patch(
+            "broker.core.guest_enrollment._validate_persisted_runtime_identity_history",
+            wraps=_validate_persisted_runtime_identity_history,
+        ) as history_validator:
+            self.assertEqual(
+                issuer.runtime_identity_status(identity, runtime_status_request(target["binding"]))["binding"],
+                target["binding"],
+            )
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="runtime-load-rotation") as pool:
+                pool.submit(
+                    issuer.rotate_runtime_identity,
+                    identity,
+                    runtime_rotate_request(target["binding"], rotated_identity),
+                ).result(timeout=2.0)
+            self.assertTrue(issuer.ready())
+            issuer.maintain()
+            self.assertEqual(history_validator.call_count, 0)
+        identity = rotated_identity
+        self.assertEqual(full_scans, 0)
+        self.assertFalse(
+            any(
+                "COUNT(*) FROM RUNTIME_IDENTITY_HISTORY" in statement.upper()
+                or "ORDER BY HISTORY.RETIRED_AT" in statement.upper()
+                for statement in statements
+            ),
+            statements,
+        )
+
+        entered = threading.Barrier(5)
+        release = threading.Event()
+        original_validate_lifecycle = issuer._validate_runtime_identity_lifecycle
+        held_threads = set()
+        held_threads_lock = threading.Lock()
+
+        def held_validate_lifecycle(connection, row):
+            result = original_validate_lifecycle(connection, row)
+            if threading.current_thread().name.startswith("runtime-load"):
+                with held_threads_lock:
+                    first_call = threading.get_ident() not in held_threads
+                    held_threads.add(threading.get_ident())
+                if first_call:
+                    entered.wait(timeout=2.0)
+                    release.wait(timeout=2.0)
+            return result
+
+        issuer._validate_runtime_identity_lifecycle = held_validate_lifecycle
+
+        def status_call():
+            return issuer.runtime_identity_status(identity, runtime_status_request(target["binding"]))
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="runtime-load") as pool:
+            futures = [pool.submit(status_call) for _ in range(4)]
+            entered.wait(timeout=2.0)
+            started = time.monotonic()
+            issuer.revoke_execution(
+                revoke_execution_request(issue_request(uid="missing-uid", execution="missing-execution")["binding"])
+            )
+            elapsed = time.monotonic() - started
+            release.set()
+            for future in futures:
+                future.result(timeout=2.0)
+
+        self.assertEqual(full_scans, 0)
+        self.assertLess(elapsed, 0.5)
+
+    def test_runtime_identity_expiry_and_malformed_state_fail_closed(self):
+        issuer = self.issuer()
+        first = issuer.issue(issue_request())
+        identity = issuer.exchange(exchange_request(first))["runtime_identity"]["opaque"]
+        self.clock.value += timedelta(hours=1)
+        self.assertFailure("unauthorized", lambda: issuer.runtime_identity_status(identity, runtime_status_request(first["binding"])))
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.rotate_runtime_identity(identity, runtime_rotate_request(first["binding"], opaque_canary(76))),
+        )
+
+        second = issuer.issue(issue_request(uid="corrupt-uid", execution="corrupt-execution", guest="corrupt-guest"))
+        second_identity = issuer.exchange(exchange_request(second))["runtime_identity"]["opaque"]
+        update_database(self.database, "UPDATE enrollments SET expires_at = ? WHERE agent_run_uid = ?", ("invalid", "uid-run"))
+        self.assertFailure("issuer-storage-failed", issuer.validate_integrity)
+        self.assertFalse(issuer.ready())
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.runtime_identity_status(second_identity, runtime_status_request(second["binding"])),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.rotate_runtime_identity(
+                second_identity,
+                runtime_rotate_request(second["binding"], opaque_canary(77)),
+            ),
+        )
+
+    def test_unknown_runtime_identities_do_not_scan_or_block_revocation(self):
+        issuer = self.issuer()
+        original_validate_store = issuer._validate_store
+        unknown_validation_calls = 0
+        validation_lock = threading.Lock()
+
+        def tracked_validate_store(connection, full=False):
+            nonlocal unknown_validation_calls
+            if threading.current_thread().name.startswith("unknown-runtime"):
+                with validation_lock:
+                    unknown_validation_calls += 1
+                time.sleep(0.05)
+            return original_validate_store(connection, full=full)
+
+        issuer._validate_store = tracked_validate_store
+        request = runtime_status_request(issue_request()["binding"])
+        barrier = threading.Barrier(17)
+
+        def unknown_status(index):
+            barrier.wait()
+            try:
+                issuer.runtime_identity_status(opaque_canary(100 + index), request)
+            except EnrollmentFailure as error:
+                return error.reason
+            return "unexpected-success"
+
+        with ThreadPoolExecutor(max_workers=16, thread_name_prefix="unknown-runtime") as pool:
+            futures = [pool.submit(unknown_status, index) for index in range(16)]
+            barrier.wait()
+            started = time.monotonic()
+            issuer.revoke_execution(revoke_execution_request(issue_request()["binding"]))
+            elapsed = time.monotonic() - started
+            reasons = [future.result(timeout=2.0) for future in futures]
+
+        self.assertEqual(reasons, ["unauthorized"] * 16)
+        self.assertEqual(unknown_validation_calls, 0)
+        self.assertLess(elapsed, 0.5)
+
     def test_binding_mismatch_does_not_consume(self):
         issuer = self.issuer()
         envelope = issuer.issue(issue_request())
@@ -438,6 +1110,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             "UPDATE enrollments SET expires_at = ? WHERE guest_instance_id = ?",
             ("not-a-timestamp", bad["binding"]["guest_instance_id"]),
         )
+        self.assertFailure("issuer-storage-failed", issuer.validate_integrity)
         self.assertFalse(issuer.ready())
         self.assertFailure("issuer-storage-failed", lambda: issuer.exchange(exchange_request(good)))
         rows = query_database(
@@ -578,6 +1251,79 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         replacement = issuer.issue(issue_request(guest="after-gc"))
         self.assertTrue(replacement["token"])
 
+    def test_unexchanged_expiry_releases_reserved_rotation_capacity(self):
+        issuer = self.issuer(
+            max_runtime_identity_history_per_enrollment=2,
+            max_runtime_identity_history_entries=2,
+        )
+        maintained = issuer.issue(
+            issue_request(uid="maintained-uid", execution="maintained-execution", guest="maintained-guest", ttl=1)
+        )
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("2",)],
+        )
+
+        self.clock.value += timedelta(seconds=2)
+        issuer.maintain()
+        records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
+        self.assertEqual(records["maintained-uid"]["state"], "expired")
+        self.assertEqual(records["maintained-uid"]["terminal_at"], maintained["expires_at"])
+        self.assertEqual(records["maintained-uid"]["runtime_identity_history_count"], 0)
+        self.assertEqual(records["maintained-uid"]["runtime_identity_history_capacity"], 0)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("0",)],
+        )
+
+        replacement = issuer.issue(
+            issue_request(uid="replacement-uid", execution="replacement-execution", guest="replacement-guest")
+        )
+        self.assertTrue(replacement["token"])
+        issuer.revoke_binding(revoke_binding_request(replacement["binding"]))
+
+        issue_time = issuer.issue(
+            issue_request(uid="issue-time-uid", execution="issue-time-execution", guest="issue-time-guest", ttl=1)
+        )
+        self.clock.value += timedelta(seconds=2)
+        after_issue_time_expiry = issuer.issue(
+            issue_request(uid="after-issue-uid", execution="after-issue-execution", guest="after-issue-guest")
+        )
+        records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
+        self.assertEqual(records["issue-time-uid"]["state"], "expired")
+        self.assertEqual(records["issue-time-uid"]["terminal_at"], issue_time["expires_at"])
+        self.assertEqual(records["issue-time-uid"]["runtime_identity_history_capacity"], 0)
+        self.assertTrue(after_issue_time_expiry["token"])
+        issuer.revoke_binding(revoke_binding_request(after_issue_time_expiry["binding"]))
+
+        late = issuer.issue(
+            issue_request(uid="late-uid", execution="late-execution", guest="late-guest", ttl=1)
+        )
+        self.clock.value += timedelta(seconds=2)
+        self.assertFailure("expired", lambda: issuer.exchange(exchange_request(late)))
+        records = {record["agent_run_uid"]: record for record in issuer.snapshot()["records"]}
+        self.assertEqual(records["late-uid"]["state"], "expired")
+        self.assertEqual(records["late-uid"]["terminal_at"], late["expires_at"])
+        self.assertEqual(records["late-uid"]["runtime_identity_history_count"], 0)
+        self.assertEqual(records["late-uid"]["runtime_identity_history_capacity"], 0)
+        self.assertEqual(
+            query_database(
+                self.database,
+                "SELECT value FROM enrollment_meta WHERE key = 'runtime_identity_history_reserved'",
+            ),
+            [("0",)],
+        )
+        unrelated = issuer.issue(
+            issue_request(uid="unrelated-uid", execution="unrelated-execution", guest="unrelated-guest")
+        )
+        self.assertTrue(unrelated["token"])
+
     def test_late_expiry_uses_original_deadline_and_completed_scope_gc(self):
         issuer = self.issuer()
         expired = issuer.issue(issue_request(uid="expired-uid", execution="expired-execution", guest="expired-guest", ttl=1))
@@ -619,6 +1365,15 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
 
         result = issuer.exchange(exchange_request(envelope))
         self.assertTrue(result["runtime_identity"]["opaque"])
+        identity = result["runtime_identity"]["opaque"]
+        runtime_acquired = [issuer.runtime_identity_slots.acquire(blocking=False) for _ in range(32)]
+        self.assertTrue(all(runtime_acquired))
+        self.assertFailure(
+            "capacity-exceeded",
+            lambda: issuer.runtime_identity_status(identity, runtime_status_request(envelope["binding"])),
+        )
+        for _ in runtime_acquired:
+            issuer.runtime_identity_slots.release()
         record = issuer.snapshot()["records"][0]
         self.assertEqual(record["runtime_identity_active"], 1)
         self.assertEqual(record["runtime_identity_expires_at"], result["runtime_identity"]["expires_at"])
@@ -731,6 +1486,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.addCleanup(live.close)
         live.issue(issue_request(uid="live-corrupt-uid", execution="live-corrupt-execution"))
         update_database(live_corruption_database, "UPDATE enrollments SET token_digest = ?", ("sha256:not-a-digest",))
+        self.assertFailure("issuer-storage-failed", live.validate_integrity)
         self.assertFalse(live.ready())
         self.assertFailure("issuer-storage-failed", live.maintain)
 
@@ -775,6 +1531,25 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
             GuestEnrollmentIssuer(identity_database, EXCHANGE_URL, maintenance_interval=None)
 
+        history_database = str(Path(self.temporary.name) / "runtime-identity-history.sqlite3")
+        history_issuer = GuestEnrollmentIssuer(
+            history_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(61),
+            maintenance_interval=None,
+        )
+        history_envelope = history_issuer.issue(issue_request(uid="history-uid", execution="history-execution"))
+        history_identity = history_issuer.exchange(exchange_request(history_envelope))["runtime_identity"]["opaque"]
+        history_issuer.rotate_runtime_identity(
+            history_identity,
+            runtime_rotate_request(history_envelope["binding"], opaque_canary(95)),
+        )
+        history_issuer.close()
+        update_database(history_database, "UPDATE runtime_identity_history SET retired_at = ?", ("invalid",))
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(history_database, EXCHANGE_URL, maintenance_interval=None)
+
     def test_tombstone_retention_survives_clock_rollback_and_v1_migration(self):
         rollback_database = str(Path(self.temporary.name) / "rollback.sqlite3")
         issuer = GuestEnrollmentIssuer(rollback_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
@@ -809,7 +1584,10 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         created_at = datetime.strptime(migrated_tombstone["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         delete_after = datetime.strptime(migrated_tombstone["delete_after"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         self.assertEqual(delete_after - created_at, TOMBSTONE_RETENTION)
-        self.assertEqual(query_database(migration_database, "SELECT value FROM enrollment_meta"), [("3",)])
+        self.assertEqual(
+            query_database(migration_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
+            [("5",)],
+        )
 
         schema_v2_database = str(Path(self.temporary.name) / "schema-v2.sqlite3")
         schema_v2 = GuestEnrollmentIssuer(schema_v2_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
@@ -825,7 +1603,10 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         migrated_v2 = GuestEnrollmentIssuer(schema_v2_database, EXCHANGE_URL, now=self.clock, maintenance_interval=None)
         self.addCleanup(migrated_v2.close)
         self.assertIsNone(migrated_v2.snapshot()["execution_tombstones"][0]["cleanup_completed_at"])
-        self.assertEqual(query_database(schema_v2_database, "SELECT value FROM enrollment_meta"), [("3",)])
+        self.assertEqual(
+            query_database(schema_v2_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
+            [("5",)],
+        )
 
     def test_orchestrator_auth_stores_only_digest(self):
         token = b"orchestrator-auth-token-0123456789abcdef"
@@ -860,6 +1641,25 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         with patch.dict("os.environ", {"NVT_BROKER_GUEST_ENROLLMENT_ENABLED": "true"}, clear=True):
             with self.assertRaisesRegex(EnrollmentConfigError, "requires database"):
                 load_guest_enrollment_from_environment()
+        valid_token_file = Path(self.temporary.name) / "valid-orchestrator-token"
+        valid_token_file.write_text("orchestrator-token-0123456789abcdef", encoding="utf-8")
+        environment = {
+            "NVT_BROKER_GUEST_ENROLLMENT_ENABLED": "true",
+            "NVT_BROKER_GUEST_ENROLLMENT_DB": str(Path(self.temporary.name) / "configured.sqlite3"),
+            "NVT_BROKER_GUEST_ENROLLMENT_EXCHANGE_URL": EXCHANGE_URL,
+            "NVT_BROKER_GUEST_ENROLLMENT_ORCHESTRATOR_TOKEN_FILE": str(valid_token_file),
+            "NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY": "20000",
+        }
+        with patch.dict("os.environ", environment, clear=True):
+            configured, _ = load_guest_enrollment_from_environment()
+            self.addCleanup(configured.close)
+            self.assertEqual(configured.max_runtime_identity_history_entries, 20000)
+        for invalid_capacity in ("0", "19999", "10000001", "not-a-count"):
+            with self.subTest(history_capacity=invalid_capacity):
+                environment["NVT_BROKER_GUEST_ENROLLMENT_RUNTIME_IDENTITY_HISTORY_CAPACITY"] = invalid_capacity
+                with patch.dict("os.environ", environment, clear=True):
+                    with self.assertRaisesRegex(EnrollmentConfigError, "history capacity"):
+                        load_guest_enrollment_from_environment()
 
     def assertFailure(self, reason, operation):
         with self.assertRaises(EnrollmentFailure) as caught:
@@ -884,6 +1684,32 @@ def issue_request(uid="uid-run", execution="execution-1", generation=1, guest="g
 
 def exchange_request(envelope):
     return {"contract_version": VERSION, "binding": dict(envelope["binding"]), "token": envelope["token"]}
+
+
+def runtime_status_request(value):
+    return {"contract_version": RUNTIME_IDENTITY_VERSION, "binding": dict(value)}
+
+
+def runtime_rotate_request(value, successor):
+    return {
+        "contract_version": RUNTIME_IDENTITY_VERSION,
+        "binding": dict(value),
+        "successor": successor,
+    }
+
+
+def opaque_canary(value):
+    return base64.urlsafe_b64encode(bytes([value]) * 32).rstrip(b"=").decode("ascii")
+
+
+def runtime_identity_is_active(issuer, identity, value):
+    try:
+        issuer.runtime_identity_status(identity, runtime_status_request(value))
+        return True
+    except EnrollmentFailure as error:
+        if error.reason != "unauthorized":
+            raise
+        return False
 
 
 def revoke_binding_request(value):
