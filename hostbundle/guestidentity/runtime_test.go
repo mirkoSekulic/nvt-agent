@@ -47,6 +47,7 @@ type testBroker struct {
 	modeUsed    bool
 	rotateCount int
 	statusCount int
+	statusIDs   []string
 	proposals   []string
 	redirectURL string
 	statusHook  func()
@@ -98,6 +99,7 @@ func (broker *testBroker) serve(writer http.ResponseWriter, request *http.Reques
 func (broker *testBroker) status(writer http.ResponseWriter, request *http.Request) {
 	broker.mu.Lock()
 	broker.statusCount++
+	broker.statusIDs = append(broker.statusIDs, bearer(request))
 	mode := broker.mode
 	hook := broker.statusHook
 	if mode == modeOversizedStatus || mode == modeRedirectStatus || mode == modeSlowStatus || mode == modeSlowBodyStatus {
@@ -453,6 +455,86 @@ func TestAcceptEnvelopeIsExactAndIdempotent(t *testing.T) {
 	state, _, _ := fixture.store.load()
 	if state.Binding != envelope.Binding {
 		t.Fatal("different bootstrap binding mutated state")
+	}
+}
+
+func TestPendingSuccessorRecoveryPrecedesPredecessorExpiry(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Second)
+	fixture := newRuntimeFixture(t, clock.Add(-time.Hour), clock, modeNormal)
+	if err := fixture.runtime.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := fixture.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor := state.RuntimeIdentity.Opaque
+	successor := opaque(0x4a)
+	state.PendingSuccessor = successor
+	if err := fixture.store.save(state); err != nil {
+		t.Fatal(err)
+	}
+	fixture.broker.mu.Lock()
+	fixture.broker.current = successor
+	fixture.broker.issuedAt = clock
+	fixture.broker.expiresAt = clock.Add(time.Hour)
+	fixture.broker.mu.Unlock()
+	fixture.runtime.Now = func() time.Time { return clock }
+
+	snapshot, _, err := fixture.runtime.Reconcile(context.Background())
+	if err != nil || !snapshot.Ready || snapshot.Reason != "" {
+		t.Fatalf("successor recovery = %#v, %v", snapshot, err)
+	}
+	recovered, _, loadErr := fixture.store.load()
+	if loadErr != nil || recovered.RuntimeIdentity == nil || recovered.RuntimeIdentity.Opaque != successor || recovered.PendingSuccessor != "" {
+		t.Fatalf("recovered state = %#v, %v", recovered, loadErr)
+	}
+	fixture.broker.mu.Lock()
+	statusIDs := append([]string(nil), fixture.broker.statusIDs...)
+	fixture.broker.mu.Unlock()
+	if len(statusIDs) == 0 || statusIDs[0] != successor {
+		t.Fatalf("successor was not probed first: %v", statusIDs)
+	}
+	for _, identity := range statusIDs {
+		if identity == predecessor {
+			t.Fatalf("expired predecessor was authenticated: %v", statusIDs)
+		}
+	}
+}
+
+func TestUnavailablePendingSuccessorWithExpiredPredecessorRequiresReplacement(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Second)
+	fixture := newRuntimeFixture(t, clock.Add(-time.Hour), clock, modeSlowStatus)
+	if err := fixture.runtime.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := fixture.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor := opaque(0x4b)
+	state.PendingSuccessor = successor
+	if err := fixture.store.save(state); err != nil {
+		t.Fatal(err)
+	}
+	fixture.runtime.Now = func() time.Time { return clock }
+
+	snapshot, _, err := fixture.runtime.Reconcile(context.Background())
+	if err == nil || snapshot.Ready || snapshot.Reason != ReasonReplacementRequired {
+		t.Fatalf("unavailable successor recovery = %#v, %v", snapshot, err)
+	}
+	if _, temporary, _ := FailureDetails(err); temporary {
+		t.Fatal("expired ambiguous state returned a retry-only outcome")
+	}
+	failed, _, loadErr := fixture.store.load()
+	if loadErr != nil || failed.FailureReason != ReasonReplacementRequired || failed.RuntimeIdentity != nil || failed.PendingSuccessor != "" {
+		t.Fatalf("replacement state = %#v, %v", failed, loadErr)
+	}
+	fixture.broker.mu.Lock()
+	statusIDs := append([]string(nil), fixture.broker.statusIDs...)
+	fixture.broker.mu.Unlock()
+	if len(statusIDs) != 1 || statusIDs[0] != successor {
+		t.Fatalf("unexpected ambiguity probes: %v", statusIDs)
 	}
 }
 

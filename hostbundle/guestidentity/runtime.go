@@ -141,14 +141,13 @@ func (runtime *Runtime) Reconcile(ctx context.Context) (Snapshot, time.Duration,
 		return Snapshot{Reason: state.FailureReason, Binding: state.Binding}, retryInterval,
 			failure(state.FailureReason, false, false)
 	}
-	if !localIdentityCurrent(state, runtime.now()) {
-		return runtime.markReplacement(&state)
-	}
 	if state.PendingSuccessor != "" {
 		if err := runtime.resolvePending(ctx, &state); err != nil {
 			reason, temporary, _ := FailureDetails(err)
 			return snapshotFor(state, runtime.now(), reason), retryFor(temporary), err
 		}
+	} else if !localIdentityCurrent(state, runtime.now()) {
+		return runtime.markReplacement(&state)
 	}
 	if !localIdentityCurrent(state, runtime.now()) {
 		return runtime.markReplacement(&state)
@@ -206,9 +205,9 @@ func (runtime *Runtime) Reconcile(ctx context.Context) (Snapshot, time.Duration,
 }
 
 func (runtime *Runtime) resolvePending(ctx context.Context, state *durableState) error {
-	if err := runtime.requireCurrentIdentity(state); err != nil {
-		return err
-	}
+	// A committed rotation whose response was lost can leave the predecessor
+	// locally expired while the durable successor is active with a fresh broker
+	// window. Probe that exact successor before consulting predecessor expiry.
 	successor := state.PendingSuccessor
 	status, err := runtime.Client.Status(ctx, state.BrokerURL, successor, state.Binding)
 	if err == nil {
