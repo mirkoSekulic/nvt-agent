@@ -95,8 +95,8 @@ mkdir -p "${PARALLEL_DIR}"
 
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
 [[ -f "${PARALLEL_DIR}/witnessed" ]]
-[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "9" ]]
-[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "9" ]]
+[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "10" ]]
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "10" ]]
 if grep -q 'nvt-smoke-echo' "${DOCKER_LOG}"; then
   echo "fixture image entered the production release" >&2
   exit 1
@@ -126,8 +126,8 @@ grep -q 'coordinated image worker failed' "${WORKDIR}/worker.err"
 unset FAIL_BUILD_MATCH
 : >"${DOCKER_LOG}"
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
-[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "6" ]]
-[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "6" ]]
+[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "7" ]]
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "7" ]]
 : >"${DOCKER_LOG}"
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
 if grep -Eq '^docker (build|push) ' "${DOCKER_LOG}"; then
@@ -155,7 +155,7 @@ export REQUIRE_ANONYMOUS=1
 : >"${DOCKER_LOG}"
 NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \
   bash "${ROOT}/.github/scripts/verify-public-images.sh" mirkoSekulic "${FAKE_VERSION}"
-[[ "$(grep -c '^docker manifest inspect ' "${DOCKER_LOG}")" == "9" ]]
+[[ "$(grep -c '^docker manifest inspect ' "${DOCKER_LOG}")" == "10" ]]
 
 rm -f "${MANIFEST_DIR}/ghcr.io_mirkosekulic_nvt-agent-runtime:${FAKE_VERSION}"
 if NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \
@@ -185,6 +185,7 @@ grep -Fq 'group: nvt-coordinated-release-${{ needs.release_metadata.outputs.vers
 grep -A10 '^  publish_image:' "${workflow}" | grep -q 'max-parallel: 8'
 grep -A30 '^  publish_image:' "${workflow}" | grep -q 'nvt-github-comments-producer'
 grep -A30 '^  publish_image:' "${workflow}" | grep -q 'nvt-execution-driver-host'
+grep -A35 '^  publish_image:' "${workflow}" | grep -q 'nvt-qemu-execution-driver'
 grep -A6 '^  publish:' "${workflow}" | grep -q 'publish_image'
 grep -A6 '^  publish:' "${workflow}" | grep -q 'publish_host_bundle'
 grep -q '^  publish_host_bundle:' "${workflow}"

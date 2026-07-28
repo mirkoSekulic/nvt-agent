@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -25,6 +26,7 @@ const (
 	MaxSecretFiles         = 32
 	MaxSecretItemsPerFile  = 64
 	SecretProjectionRoot   = "/var/run/secrets/nvt-execution-driver"
+	PersistentStateRoot    = "/var/lib/nvt-execution-driver"
 	DriverHostPort         = 9443
 	DriverHostProtocolName = "nvt.execution-driver-host/v1"
 )
@@ -48,6 +50,16 @@ type Registration struct {
 	PassEnv           []string
 	SecretEnvironment []SecretEnvironmentVariable
 	SecretFiles       []SecretFile
+	Storage           *PersistentStorage
+}
+
+// PersistentStorage is an optional registration-owned writable filesystem.
+// It is provider-neutral: the driver decides which durable resources and
+// convergence records it stores below PersistentStateRoot.
+type PersistentStorage struct {
+	Size             resource.Quantity
+	StorageClassName string
+	ExistingClaim    string
 }
 
 type ServiceAccount struct {
@@ -131,7 +143,34 @@ func Validate(value Registration) error {
 	if err := validateEnvironment(value.PassEnv, value.SecretEnvironment); err != nil {
 		return err
 	}
-	return validateSecretFiles(value.SecretFiles)
+	if err := validateSecretFiles(value.SecretFiles); err != nil {
+		return err
+	}
+	return validatePersistentStorage(value.Storage)
+}
+
+func validatePersistentStorage(value *PersistentStorage) error {
+	if value == nil {
+		return nil
+	}
+	if value.ExistingClaim != "" {
+		if len(validation.IsDNS1123Subdomain(value.ExistingClaim)) != 0 || !value.Size.IsZero() || value.StorageClassName != "" {
+			return errors.New("execution driver existing storage claim is invalid")
+		}
+		return nil
+	}
+	if value.StorageClassName != "" && len(validation.IsDNS1123Subdomain(value.StorageClassName)) != 0 {
+		return errors.New("execution driver storage class is invalid")
+	}
+	if value.Size.IsZero() {
+		return errors.New("execution driver storage requires one bounded storage request")
+	}
+	minimum := resource.MustParse("1Gi")
+	maximum := resource.MustParse("1Ti")
+	if value.Size.Cmp(minimum) < 0 || value.Size.Cmp(maximum) > 0 {
+		return errors.New("execution driver storage request must be between 1Gi and 1Ti")
+	}
+	return nil
 }
 
 func validateCommand(command []string) error {
@@ -190,7 +229,7 @@ func validateEnvironment(passEnv []string, values []SecretEnvironmentVariable) e
 	}
 	seen := make(map[string]struct{}, len(passEnv)+len(values))
 	for _, name := range passEnv {
-		if !environmentPattern.MatchString(name) {
+		if !environmentPattern.MatchString(name) || name == "NVT_EXECUTION_DRIVER_STATE_DIR" {
 			return errors.New("execution driver environment allowlist contains an invalid name")
 		}
 		if _, duplicate := seen[name]; duplicate {
@@ -199,7 +238,7 @@ func validateEnvironment(passEnv []string, values []SecretEnvironmentVariable) e
 		seen[name] = struct{}{}
 	}
 	for _, value := range values {
-		if !environmentPattern.MatchString(value.Name) || !validSecretName(value.SecretName) || !validSecretKey(value.Key) {
+		if !environmentPattern.MatchString(value.Name) || value.Name == "NVT_EXECUTION_DRIVER_STATE_DIR" || !validSecretName(value.SecretName) || !validSecretKey(value.Key) {
 			return errors.New("execution driver secret environment entry is invalid")
 		}
 		if _, duplicate := seen[value.Name]; duplicate {

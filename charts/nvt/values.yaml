@@ -138,6 +138,10 @@ executionDrivers:
     requestTimeoutSeconds: 30
     handoffTimeoutSeconds: 30
     ttlSeconds: 300
+  # Each registration may opt into one isolated persistent filesystem at
+  # /var/lib/nvt-execution-driver. Omitted storage preserves the existing
+  # ephemeral host shape. A registration may request a chart-owned claim or
+  # name one existing same-namespace claim; it cannot configure both.
   registrations: []
 
 gateway:

@@ -8,6 +8,7 @@ on:
       - ".github/scripts/chart-version-exists.sh"
       - ".github/scripts/release-*.sh"
       - "hostbundle/**"
+      - "executiondrivers/qemu/**"
       - "protocol/host-bundle.md"
       - "tests/operator/helm/**"
   push:
@@ -149,6 +150,7 @@ jobs:
           - nvt-captured
           - nvt-operator
           - nvt-execution-driver-host
+          - nvt-qemu-execution-driver
           - nvt-agent-gateway
           - nvt-github-comments-producer
     concurrency:
@@ -282,5 +284,5 @@ jobs:
           fi
 
           # The preceding jobs have verified coordinated metadata and anonymous
-          # access for all nine images and the native host-bundle artifact.
+          # access for all ten images and the native host-bundle artifact.
           helm push "${package}" "oci://${repository}"

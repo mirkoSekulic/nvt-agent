@@ -47,6 +47,9 @@ func TestValidateRegistration(t *testing.T) {
 		"duplicate injected and secret env": func(v *Registration) {
 			v.PassEnv = append(v.PassEnv, "CLOUD_TOKEN")
 		},
+		"reserved state env": func(v *Registration) {
+			v.PassEnv = append(v.PassEnv, "NVT_EXECUTION_DRIVER_STATE_DIR")
+		},
 		"traversal": func(v *Registration) { v.SecretFiles[0].Items[0].Path = "../token" },
 		"duplicate file path": func(v *Registration) {
 			v.SecretFiles[0].Items = append(v.SecretFiles[0].Items, SecretFileItem{Key: "other", Path: "config.json"})
@@ -58,6 +61,34 @@ func TestValidateRegistration(t *testing.T) {
 			mutate(&value)
 			if err := Validate(value); err == nil {
 				t.Fatal("invalid registration accepted")
+			}
+		})
+	}
+}
+
+func TestValidateRegistrationPersistentStorage(t *testing.T) {
+	value := validRegistration("driver-a")
+	value.Storage = &PersistentStorage{Size: resource.MustParse("20Gi"), StorageClassName: "fast-state"}
+	if err := Validate(value); err != nil {
+		t.Fatalf("valid dynamic storage rejected: %v", err)
+	}
+	value.Storage = &PersistentStorage{ExistingClaim: "driver-a-state"}
+	if err := Validate(value); err != nil {
+		t.Fatalf("valid existing claim rejected: %v", err)
+	}
+
+	for name, storage := range map[string]*PersistentStorage{
+		"too small":       {Size: resource.MustParse("512Mi")},
+		"too large":       {Size: resource.MustParse("2Ti")},
+		"invalid class":   {Size: resource.MustParse("20Gi"), StorageClassName: "BAD CLASS"},
+		"invalid claim":   {ExistingClaim: "BAD CLAIM"},
+		"ambiguous claim": {ExistingClaim: "driver-a-state", Size: resource.MustParse("20Gi")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := validRegistration("driver-a")
+			candidate.Storage = storage
+			if err := Validate(candidate); err == nil {
+				t.Fatal("invalid persistent storage accepted")
 			}
 		})
 	}

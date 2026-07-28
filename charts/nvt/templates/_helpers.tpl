@@ -152,6 +152,16 @@ app.kubernetes.io/part-of: nvt
 {{- $requestMemory := include "nvt.executionDriverQuantity" (dict "name" $name "field" "resources.requests.memory" "value" $registration.resources.requests.memory) | float64 -}}
 {{- $limitMemory := include "nvt.executionDriverQuantity" (dict "name" $name "field" "resources.limits.memory" "value" $registration.resources.limits.memory) | float64 -}}
 {{- if or (gt $requestCPU $limitCPU) (gt $requestMemory $limitMemory) -}}{{ fail (printf "execution driver %s resource requests must not exceed limits" $name) }}{{- end -}}
+{{- with $registration.storage -}}
+{{- if .existingClaim -}}
+{{- if or .size .storageClassName (gt (len .existingClaim) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$` .existingClaim)) -}}{{ fail (printf "execution driver %s existing storage claim is invalid" $name) }}{{- end -}}
+{{- else -}}
+{{- if not .size -}}{{ fail (printf "execution driver %s storage.size is required" $name) }}{{- end -}}
+{{- $storageBytes := include "nvt.executionDriverQuantity" (dict "name" $name "field" "storage.size" "value" .size) | float64 -}}
+{{- if or (lt $storageBytes 1073741824.0) (gt $storageBytes 1099511627776.0) -}}{{ fail (printf "execution driver %s storage.size must be between 1Gi and 1Ti" $name) }}{{- end -}}
+{{- if and .storageClassName (or (gt (len .storageClassName) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$` .storageClassName))) -}}{{ fail (printf "execution driver %s storageClassName is invalid" $name) }}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if not $registration.serviceAccount -}}{{ fail (printf "execution driver %s requires a ServiceAccount selection" $name) }}{{- end -}}
 {{- if and (not $registration.serviceAccount.create) (not $registration.serviceAccount.name) -}}{{ fail (printf "execution driver %s existing ServiceAccount name is required" $name) }}{{- end -}}
 {{- range $key, $value := (default (dict) $registration.serviceAccount.podLabels) -}}{{- if or (hasPrefix "app.kubernetes.io/" $key) (hasPrefix "nvt.dev/" $key) -}}{{ fail (printf "execution driver %s workload-identity Pod label uses a reserved key" $name) }}{{- end -}}{{- end -}}
@@ -163,12 +173,12 @@ app.kubernetes.io/part-of: nvt
 {{- $envSeen := dict -}}
 {{- if gt (add (len (default (list) $registration.passEnv)) (len (default (list) $registration.secretEnvironment))) 64 -}}{{ fail (printf "execution driver %s environment allowlist exceeds 64 names" $name) }}{{- end -}}
 {{- range $environmentName := (default (list) $registration.passEnv) -}}
-{{- if not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` $environmentName) -}}{{ fail (printf "execution driver %s environment allowlist contains an invalid name" $name) }}{{- end -}}
+{{- if or (eq $environmentName "NVT_EXECUTION_DRIVER_STATE_DIR") (not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` $environmentName)) -}}{{ fail (printf "execution driver %s environment allowlist contains an invalid name" $name) }}{{- end -}}
 {{- if hasKey $envSeen $environmentName -}}{{ fail (printf "execution driver %s environment allowlist names must be unique" $name) }}{{- end -}}
 {{- $_ := set $envSeen $environmentName true -}}
 {{- end -}}
 {{- range $item := (default (list) $registration.secretEnvironment) -}}
-{{- if or (not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` (default "" $item.name))) (not (regexMatch `^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$` (default "" $item.secretName))) (not (regexMatch `^[A-Za-z0-9._-]+$` (default "" $item.key))) -}}{{ fail (printf "execution driver %s secret environment entry is invalid" $name) }}{{- end -}}
+{{- if or (eq $item.name "NVT_EXECUTION_DRIVER_STATE_DIR") (not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` (default "" $item.name))) (not (regexMatch `^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$` (default "" $item.secretName))) (not (regexMatch `^[A-Za-z0-9._-]+$` (default "" $item.key))) -}}{{ fail (printf "execution driver %s secret environment entry is invalid" $name) }}{{- end -}}
 {{- if hasKey $envSeen $item.name -}}{{ fail (printf "execution driver %s environment allowlist names must be unique" $name) }}{{- end -}}
 {{- $_ := set $envSeen $item.name true -}}
 {{- end -}}

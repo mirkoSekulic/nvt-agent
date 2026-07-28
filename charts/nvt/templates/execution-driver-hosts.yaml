@@ -3,6 +3,26 @@
 {{- $context := dict "root" $root "registration" $registration -}}
 {{- $name := include "nvt.executionDriverResourceName" $context -}}
 {{- $secretData := include "nvt.executionDriverSecretData" $context | fromJson -}}
+{{- if and $registration.storage (not $registration.storage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ include "nvt.namespace" $root | quote }}
+  labels:
+    {{- include "nvt.labels" $root | nindent 4 }}
+    app.kubernetes.io/name: {{ $name | quote }}
+    app.kubernetes.io/component: execution-driver-host
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $registration.storage.size | quote }}
+  {{- if $registration.storage.storageClassName }}
+  storageClassName: {{ $registration.storage.storageClassName | quote }}
+  {{- end }}
+---
+{{- end }}
 {{- if $registration.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
@@ -107,6 +127,9 @@ spec:
             {{- range (default (list) $registration.secretEnvironment) }}
             - {{ printf "--pass-env=%s" .name | quote }}
             {{- end }}
+            {{- if $registration.storage }}
+            - --pass-env=NVT_EXECUTION_DRIVER_STATE_DIR
+            {{- end }}
             - --tls-cert=/var/run/nvt-host-auth/tls.crt
             - --tls-key=/var/run/nvt-host-auth/tls.key
             - --auth-token=/var/run/nvt-host-auth/auth-token
@@ -127,6 +150,13 @@ spec:
                   name: {{ .secretName | quote }}
                   key: {{ .key | quote }}
             {{- end }}
+          {{- end }}
+          {{- if and $registration.storage (not $registration.secretEnvironment) }}
+          env:
+          {{- end }}
+          {{- if $registration.storage }}
+            - name: NVT_EXECUTION_DRIVER_STATE_DIR
+              value: /var/lib/nvt-execution-driver
           {{- end }}
           resources:
             {{- toYaml $registration.resources | nindent 12 }}
@@ -169,6 +199,10 @@ spec:
               readOnly: true
             - name: scratch
               mountPath: /tmp
+            {{- if $registration.storage }}
+            - name: driver-state
+              mountPath: /var/lib/nvt-execution-driver
+            {{- end }}
             {{- range (default (list) $registration.secretFiles) }}
             - name: {{ printf "credential-%s" .name | quote }}
               mountPath: {{ printf "/var/run/secrets/nvt-execution-driver/%s" .name | quote }}
@@ -184,6 +218,11 @@ spec:
             defaultMode: 0440
         - name: scratch
           emptyDir: {}
+        {{- if $registration.storage }}
+        - name: driver-state
+          persistentVolumeClaim:
+            claimName: {{ default $name $registration.storage.existingClaim | quote }}
+        {{- end }}
         {{- range (default (list) $registration.secretFiles) }}
         - name: {{ printf "credential-%s" .name | quote }}
           secret:
