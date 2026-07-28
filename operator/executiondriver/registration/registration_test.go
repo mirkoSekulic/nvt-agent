@@ -111,6 +111,16 @@ func TestValidateAllRejectsSharedServiceAccount(t *testing.T) {
 	}
 }
 
+func TestValidateAllRejectsSharedExistingStorageClaim(t *testing.T) {
+	first := validRegistration("driver-a")
+	second := validRegistration("driver-b")
+	first.Storage = &PersistentStorage{ExistingClaim: "shared-driver-state"}
+	second.Storage = &PersistentStorage{ExistingClaim: "shared-driver-state"}
+	if err := ValidateAll([]Registration{first, second}); err == nil {
+		t.Fatal("shared execution-driver existing storage claim accepted")
+	}
+}
+
 func TestResourceNamePreservesPublicLogicalNameContract(t *testing.T) {
 	if got, want := ResourceName("driver-a"), "nvt-execution-driver-driver-a"; got != want {
 		t.Fatalf("short resource name = %q, want %q", got, want)

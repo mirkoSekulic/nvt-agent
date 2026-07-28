@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -16,6 +17,12 @@ import (
 )
 
 const stateVersion = 1
+
+const (
+	minimumHostPort = 20000
+	maximumHostPort = 49999
+	hostPortCount   = maximumHostPort - minimumHostPort + 1
+)
 
 type State struct {
 	Version            int                             `json:"version"`
@@ -38,7 +45,7 @@ func (state State) Validate() error {
 	}
 	if state.Version != stateVersion || executiondriver.ValidateReconcileParams(executiondriver.ReconcileParams{Desired: desired}) != nil ||
 		config.Validate(state.Configuration) != nil || state.Attempt < 1 || state.Attempt > 1_000_000 ||
-		state.GuestInstanceID != guestInstanceID(state.ExecutionID, state.Generation, state.Attempt) || state.HostPort < 20000 || state.HostPort > 49999 {
+		state.GuestInstanceID != guestInstanceID(state.ExecutionID, state.Generation, state.Attempt) || state.HostPort < minimumHostPort || state.HostPort > maximumHostPort {
 		return errors.New("QEMU durable state is invalid")
 	}
 	if state.ExecutionScope != nil {
@@ -102,6 +109,48 @@ func (store Store) Remove(executionID string) error {
 	return syncDirectory(filepath.Join(store.Root, "executions"))
 }
 
+// AllocateHostPort deterministically probes the bounded local-forwarding range
+// while treating every validated durable execution record as a reservation.
+// Recreate deployment semantics ensure only one registration process performs
+// this allocation against a PVC at a time.
+func (store Store) AllocateHostPort(executionID string) (int, error) {
+	used := make(map[int]struct{})
+	entries, err := os.ReadDir(filepath.Join(store.Root, "executions"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, errors.New("QEMU durable port reservations are unavailable")
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return 0, errors.New("QEMU durable port reservations are invalid")
+		}
+		data, readErr := os.ReadFile(filepath.Join(store.Root, "executions", entry.Name(), "state.json"))
+		if readErr != nil {
+			return 0, errors.New("QEMU durable port reservations are invalid")
+		}
+		var state State
+		if executiondriver.DecodeStrictJSON(data, &state) != nil || state.Validate() != nil {
+			return 0, errors.New("QEMU durable port reservations are invalid")
+		}
+		used[state.HostPort] = struct{}{}
+	}
+	start := stableHostPort(executionID)
+	for offset := 0; offset < hostPortCount; offset++ {
+		candidate := minimumHostPort + (start-minimumHostPort+offset)%hostPortCount
+		if _, reserved := used[candidate]; reserved {
+			continue
+		}
+		listener, listenErr := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", candidate))
+		if listenErr != nil {
+			continue
+		}
+		if closeErr := listener.Close(); closeErr != nil {
+			return 0, errors.New("QEMU local health port could not be reserved")
+		}
+		return candidate, nil
+	}
+	return 0, errors.New("QEMU local health port capacity is exhausted")
+}
+
 func guestInstanceID(executionID string, generation int64, attempt int) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("nvt.qemu-guest/v1:%s:%d:%d", executionID, generation, attempt)))
 	return "qemu-guest-" + hex.EncodeToString(sum[:16])
@@ -109,7 +158,7 @@ func guestInstanceID(executionID string, generation int64, attempt int) string {
 
 func stableHostPort(executionID string) int {
 	sum := sha256.Sum256([]byte("nvt.qemu-port/v1:" + executionID))
-	return 20000 + int(binary.BigEndian.Uint16(sum[:2]))%30000
+	return minimumHostPort + int(binary.BigEndian.Uint16(sum[:2]))%hostPortCount
 }
 
 func writeSyncClose(file *os.File, data []byte) error {

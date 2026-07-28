@@ -649,6 +649,8 @@ assert "nvt-execution-driver-fake-west" not in accounts
 assert persistent_volume_claims["nvt-execution-driver-fake-east"]["spec"]["resources"]["requests"]["storage"] == "20Gi"
 assert persistent_volume_claims["nvt-execution-driver-fake-east"]["spec"]["storageClassName"] == "fast-state"
 assert "nvt-execution-driver-fake-west" not in persistent_volume_claims
+assert deployments["nvt-execution-driver-fake-east"]["spec"]["strategy"] == {"type": "Recreate"}
+assert "strategy" not in deployments["nvt-execution-driver-fake-west"]["spec"]
 
 operator_pod = deployments["nvt-operator"]["spec"]["template"]["spec"]
 operator_security = operator_pod["securityContext"]
@@ -952,6 +954,18 @@ if helm template nvt "${CHART}" -n custom-ns \
   exit 1
 fi
 grep -q 'existing storage claim is invalid' "${EXECUTION_DRIVER_FAILURE}"
+
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set-string executionDrivers.registrations[0].storage.size= \
+  --set-string executionDrivers.registrations[0].storage.storageClassName= \
+  --set-string executionDrivers.registrations[0].storage.existingClaim=shared-driver-state \
+  --set-string executionDrivers.registrations[1].storage.existingClaim=shared-driver-state \
+  >/dev/null 2>"${EXECUTION_DRIVER_FAILURE}"; then
+  echo "shared execution-driver existing storage claim was accepted" >&2
+  exit 1
+fi
+grep -q 'registrations must use distinct existing storage claims' "${EXECUTION_DRIVER_FAILURE}"
 if grep -q 'NVT_BRANDING_CONFIGMAP\|NVT_GATEWAY_BRANDING_DIR\|name: nvt-branding' "${DEFAULT_RENDER}"; then
   echo "default render unexpectedly enables custom branding" >&2
   exit 1

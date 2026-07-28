@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -25,11 +26,16 @@ import (
 )
 
 const (
-	controlDevice = "/dev/virtio-ports/org.nvt.control"
-	secretRoot    = "/var/lib/nvt-enrollment"
-	bindingPath   = secretRoot + "/binding.json"
-	identityPath  = secretRoot + "/runtime-identity.json"
+	controlDevice  = "/dev/virtio-ports/org.nvt.control"
+	secretRoot     = "/var/lib/nvt-enrollment"
+	enrollmentPath = secretRoot + "/enrollment.json"
 )
+
+type enrollmentRecord struct {
+	ContractVersion string                          `json:"contract_version"`
+	Binding         guestenrollment.Binding         `json:"binding"`
+	RuntimeIdentity guestenrollment.RuntimeIdentity `json:"runtime_identity"`
+}
 
 type guest struct {
 	mu            sync.Mutex
@@ -39,6 +45,11 @@ type guest struct {
 	failed        bool
 	bootstrap     chan struct{}
 }
+
+var (
+	controlDiscoveryPendingLog sync.Once
+	controlDeviceReadyLog      sync.Once
+)
 
 func main() {
 	if err := initializeOS(); err != nil {
@@ -64,6 +75,14 @@ func main() {
 
 func initializeOS() error {
 	guestLog("mounting native filesystems")
+	// The Alpine initramfs hands the native root to PID 1 read-only even when
+	// the kernel command line requests rw. The execution disk is deliberately
+	// writable and owns enrollment plus the installed immutable host release,
+	// so make that contract explicit before accepting sensitive configuration.
+	if err := syscall.Mount("", "/", "", syscall.MS_REMOUNT, ""); err != nil {
+		guestLog("native root activation failed (" + filesystemFailureClass(err) + ")")
+		return err
+	}
 	for _, mount := range []struct{ source, target, kind string }{
 		{"proc", "/proc", "proc"}, {"sysfs", "/sys", "sysfs"}, {"devtmpfs", "/dev", "devtmpfs"}, {"devpts", "/dev/pts", "devpts"},
 	} {
@@ -74,13 +93,20 @@ func initializeOS() error {
 			return err
 		}
 	}
-	// virtio_console is built into the pinned Alpine virt kernel. Entropy is
-	// auto-probed; only networking must be loaded before DHCP.
-	for _, module := range []string{"virtio_net"} {
+	// Entropy is auto-probed. Load both devices explicitly because the pinned
+	// kernel may package either driver as a module.
+	for _, module := range []string{"virtio_net", "virtio_console"} {
 		if err := exec.Command("/sbin/modprobe", module).Run(); err != nil {
-			guestLog("required network device is unavailable")
+			guestLog("required virtio device is unavailable")
 			return err
 		}
+	}
+	// The minimal guest has no udev daemon. Populate devtmpfs from the mounted
+	// sysfs after loading the drivers so virtio character devices and
+	// mdev-conf's stable named links exist before the control channel starts.
+	if err := exec.Command("/sbin/mdev", "-s").Run(); err != nil {
+		guestLog("native device discovery failed")
+		return err
 	}
 	guestLog("configuring native network")
 	_ = exec.Command("/bin/busybox", "ip", "link", "set", "lo", "up").Run()
@@ -105,19 +131,75 @@ func initializeOS() error {
 		guestLog("native network configuration failed")
 		return err
 	}
+	// QEMU user networking owns this stable DNS forwarder. Do not retain the
+	// container-build resolver (commonly 127.0.0.11) inside the native guest.
+	resolverTemporary := "/etc/.nvt-resolv.conf"
+	if err := os.WriteFile(resolverTemporary, []byte("nameserver 10.0.2.3\noptions timeout:1 attempts:3\n"), 0o644); err != nil {
+		_ = os.Remove(resolverTemporary)
+		guestLog("native DNS temporary write failed (" + filesystemFailureClass(err) + ")")
+		return err
+	}
+	if err := os.Rename(resolverTemporary, "/etc/resolv.conf"); err != nil {
+		_ = os.Remove(resolverTemporary)
+		guestLog("native DNS activation failed (" + filesystemFailureClass(err) + ")")
+		return err
+	}
 	return nil
+}
+
+// filesystemFailureClass keeps native-guest diagnostics actionable without
+// exposing paths, enrollment material, or arbitrary operating-system errors.
+func filesystemFailureClass(err error) string {
+	switch {
+	case errors.Is(err, syscall.EROFS):
+		return "read-only-filesystem"
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "permission-denied"
+	case errors.Is(err, syscall.ENOSPC):
+		return "capacity-exhausted"
+	case errors.Is(err, syscall.ENOENT):
+		return "path-unavailable"
+	default:
+		return "filesystem-error"
+	}
 }
 
 func (guest *guest) serveControl() error {
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		device, err := os.OpenFile(controlDevice, os.O_RDWR, 0)
+		devicePath, locateErr := locateControlDevice()
+		if locateErr != nil {
+			controlDiscoveryPendingLog.Do(func() { guestLog("control device discovery pending") })
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		device, err := os.OpenFile(devicePath, os.O_RDWR, 0)
 		if err == nil {
+			controlDeviceReadyLog.Do(func() { guestLog("control device ready") })
+			// QEMU may accept a host-side chardev connection before this port is
+			// open and discard bytes written during that window. Announce that the
+			// guest endpoint is ready before the host sends configuration or the
+			// one-time enrollment envelope.
+			greeting, encodeErr := wire.Encode(wire.Response{ContractVersion: wire.Version, State: wire.StateConnected})
+			if encodeErr != nil {
+				_ = device.Close()
+				return errors.New("control greeting failed")
+			}
 			defer device.Close()
-			line, err := bufio.NewReader(io.LimitReader(device, wire.MaxMessageBytes+1)).ReadBytes('\n')
-			if err != nil || len(line) > wire.MaxMessageBytes {
+			// QEMU retains this bounded greeting until an exact host connection
+			// reads it, including when the first host attempt times out while the
+			// guest is still booting. Sending it once avoids an output backlog.
+			if _, writeErr := device.Write(greeting); writeErr != nil {
+				zero(greeting)
+				return errors.New("control greeting failed")
+			}
+			zero(greeting)
+			line, readErr := bufio.NewReader(io.LimitReader(device, wire.MaxMessageBytes+1)).ReadBytes('\n')
+			if readErr != nil || len(line) > wire.MaxMessageBytes {
+				zero(line)
 				return errors.New("control framing failed")
 			}
+			guestLog("control request received")
 			response := guest.handle(bytes.TrimSuffix(line, []byte{'\n'}))
 			zero(line)
 			encoded, err := wire.Encode(response)
@@ -125,11 +207,46 @@ func (guest *guest) serveControl() error {
 				return err
 			}
 			_, err = device.Write(encoded)
+			zero(encoded)
+			if err == nil {
+				guestLog("control response sent")
+			}
 			return err
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	return errors.New("control device unavailable")
+}
+
+func locateControlDevice() (string, error) {
+	if info, err := os.Lstat(controlDevice); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+		return controlDevice, nil
+	}
+	return locateControlDeviceAt("/sys/class/virtio-ports", "/dev")
+}
+
+// Minimal native guests do not run udev, so the friendly
+// /dev/virtio-ports/<name> link may not exist. The kernel still publishes the
+// stable port name through sysfs and creates its vport character device in
+// devtmpfs; resolve that relationship without guessing a device number.
+func locateControlDeviceAt(sysfsRoot, deviceRoot string) (string, error) {
+	entries, err := os.ReadDir(sysfsRoot)
+	if err != nil {
+		return "", errors.New("control device is unavailable")
+	}
+	for _, entry := range entries {
+		name, readErr := os.ReadFile(filepath.Join(sysfsRoot, entry.Name(), "name"))
+		if readErr != nil || strings.TrimSpace(string(name)) != "org.nvt.control" {
+			continue
+		}
+		path := filepath.Join(deviceRoot, entry.Name())
+		info, statErr := os.Lstat(path)
+		if statErr != nil || info.Mode()&os.ModeCharDevice == 0 {
+			return "", errors.New("control device is invalid")
+		}
+		return path, nil
+	}
+	return "", errors.New("control device is unavailable")
 }
 
 func (guest *guest) handle(data []byte) wire.Response {
@@ -159,6 +276,7 @@ func (guest *guest) handle(data []byte) wire.Response {
 		if enrolled {
 			guest.triggerBootstrap()
 		}
+		guestLog("control configuration accepted")
 		return state
 	case wire.RequestStatus:
 		if request.Configuration != nil || request.Envelope != nil {
@@ -186,9 +304,16 @@ func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope) wire.Re
 		return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "binding-mismatch"}
 	}
 	if !alreadyEnrolled {
+		guestLog("enrollment exchange starting")
 		result, err := exchange(*envelope, configuration.EnrollmentCAPEM)
 		envelope.Token = ""
-		if err != nil || persistEnrollment(result) != nil {
+		if err != nil {
+			guestLog(enrollmentFailureLog(err))
+			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "enrollment-failed"}
+		}
+		if persistEnrollment(result) != nil {
+			result.RuntimeIdentity.Opaque = ""
+			guestLog("enrollment persistence failed")
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "enrollment-failed"}
 		}
 		result.RuntimeIdentity.Opaque = ""
@@ -196,11 +321,29 @@ func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope) wire.Re
 		guest.enrolled = true
 		guest.failed = false
 		guest.mu.Unlock()
+		guestLog("enrollment accepted")
 		guest.triggerBootstrap()
 	}
 	guest.mu.Lock()
 	defer guest.mu.Unlock()
 	return guest.responseLocked()
+}
+
+func enrollmentFailureLog(err error) string {
+	switch err.Error() {
+	case "enrollment trust is invalid":
+		return "enrollment exchange failed: trust invalid"
+	case "enrollment request is invalid":
+		return "enrollment exchange failed: request invalid"
+	case "enrollment issuer is unavailable":
+		return "enrollment exchange failed: issuer unavailable"
+	case "enrollment exchange was rejected":
+		return "enrollment exchange failed: issuer rejected"
+	case "enrollment result is invalid":
+		return "enrollment exchange failed: result invalid"
+	default:
+		return "enrollment exchange failed"
+	}
 }
 
 func exchange(envelope guestenrollment.BootstrapEnvelope, caPEM string) (guestenrollment.ExchangeResult, error) {
@@ -243,35 +386,41 @@ func exchange(envelope guestenrollment.BootstrapEnvelope, caPEM string) (guesten
 }
 
 func persistEnrollment(result guestenrollment.ExchangeResult) error {
-	if guestenrollment.ValidateExchangeResult(result) != nil || os.MkdirAll(secretRoot, 0o700) != nil {
+	return persistEnrollmentAt(enrollmentPath, result, atomicWrite)
+}
+
+func persistEnrollmentAt(path string, result guestenrollment.ExchangeResult, write func(string, []byte, os.FileMode) error) error {
+	if guestenrollment.ValidateExchangeResult(result) != nil || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
 		return errors.New("enrollment state is invalid")
 	}
-	binding, _ := json.Marshal(result.Binding)
-	identity, _ := json.Marshal(result.RuntimeIdentity)
-	if atomicWrite(bindingPath, append(binding, '\n'), 0o600) != nil || atomicWrite(identityPath, append(identity, '\n'), 0o600) != nil {
+	record := enrollmentRecord{ContractVersion: guestenrollment.Version, Binding: result.Binding, RuntimeIdentity: result.RuntimeIdentity}
+	encoded, err := json.Marshal(record)
+	if err != nil || write(path, append(encoded, '\n'), 0o600) != nil {
 		return errors.New("enrollment state is unavailable")
 	}
 	return nil
 }
 
 func loadEnrollment() (*guestenrollment.Binding, *guestenrollment.RuntimeIdentity, error) {
-	bindingData, bindingErr := os.ReadFile(bindingPath)
-	identityData, identityErr := os.ReadFile(identityPath)
-	if errors.Is(bindingErr, os.ErrNotExist) && errors.Is(identityErr, os.ErrNotExist) {
+	return loadEnrollmentAt(enrollmentPath)
+}
+
+func loadEnrollmentAt(path string) (*guestenrollment.Binding, *guestenrollment.RuntimeIdentity, error) {
+	encoded, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, nil
 	}
-	if bindingErr != nil || identityErr != nil {
-		return nil, nil, errors.New("enrollment state is incomplete")
+	if err != nil {
+		return nil, nil, errors.New("enrollment state is unavailable")
 	}
-	var binding guestenrollment.Binding
-	var identity guestenrollment.RuntimeIdentity
-	if executiondriver.DecodeStrictJSON(bindingData, &binding) != nil || guestenrollment.ValidateBinding(binding) != nil ||
-		executiondriver.DecodeStrictJSON(identityData, &identity) != nil || guestenrollment.ValidateExchangeResult(guestenrollment.ExchangeResult{
-		ContractVersion: guestenrollment.Version, Binding: binding, RuntimeIdentity: identity,
-	}) != nil {
+	var record enrollmentRecord
+	if executiondriver.DecodeStrictJSON(encoded, &record) != nil || record.ContractVersion != guestenrollment.Version ||
+		guestenrollment.ValidateExchangeResult(guestenrollment.ExchangeResult{
+			ContractVersion: record.ContractVersion, Binding: record.Binding, RuntimeIdentity: record.RuntimeIdentity,
+		}) != nil {
 		return nil, nil, errors.New("enrollment state is invalid")
 	}
-	return &binding, &identity, nil
+	return &record.Binding, &record.RuntimeIdentity, nil
 }
 
 func validateBootConfiguration(value wire.BootConfiguration) error {
@@ -413,6 +562,10 @@ func (guest *guest) serveHealth() {
 }
 
 func atomicWrite(path string, content []byte, mode os.FileMode) error {
+	return atomicWriteBeforeCommit(path, content, mode, nil)
+}
+
+func atomicWriteBeforeCommit(path string, content []byte, mode os.FileMode, beforeCommit func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -426,7 +579,13 @@ func atomicWrite(path string, content []byte, mode os.FileMode) error {
 		temporary.Close()
 		return err
 	}
-	if _, err := temporary.Write(content); err != nil || temporary.Sync() != nil || temporary.Close() != nil || os.Rename(name, path) != nil {
+	if _, err := temporary.Write(content); err != nil || temporary.Sync() != nil || temporary.Close() != nil {
+		return errors.New("atomic write failed")
+	}
+	if beforeCommit != nil && beforeCommit() != nil {
+		return errors.New("atomic write failed")
+	}
+	if os.Rename(name, path) != nil {
 		return errors.New("atomic write failed")
 	}
 	directory, err := os.Open(filepath.Dir(path))

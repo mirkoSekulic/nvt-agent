@@ -38,7 +38,9 @@ RUN rm -f /sbin/init && ln -s /sbin/nvt-qemu-guest-init /sbin/init && \
     chown 65532:65532 /workspace /run/nvt-agent /var/lib/nvt-agent && \
     chmod 0700 /var/lib/nvt-enrollment && \
     cp -a /bin /etc /lib /sbin /usr /var /guest-root/ && \
-    mkdir -p /guest-root/dev /guest-root/proc /guest-root/sys /guest-root/run/nvt-agent /guest-root/workspace /guest-root/opt/nvt && \
+    mkdir -p /guest-root/dev /guest-root/proc /guest-root/sys /guest-root/run/nvt-agent /guest-root/workspace /guest-root/opt/nvt /guest-root/tmp && \
+    test -x /guest-root/sbin/mdev && \
+    chmod 01777 /guest-root/tmp && test "$(stat -c %a /guest-root/tmp)" = 1777 && \
     chown 65532:65532 /guest-root/run/nvt-agent /guest-root/workspace /guest-root/var/lib/nvt-agent && \
     truncate -s 768M /out/root.raw && \
     mke2fs -q -F -t ext4 -L nvt-guest -U 64b1e27d-2f2f-47ae-94e8-e474c1f135fb -d /guest-root /out/root.raw && \

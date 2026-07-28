@@ -28,7 +28,8 @@ func main() {
 	stateRoot := os.Getenv("NVT_EXECUTION_DRIVER_STATE_DIR")
 	machines, err := driver.NewQEMUManager(driver.QEMUConfig{
 		Binary: "/usr/bin/qemu-system-x86_64", Kernel: "/opt/nvt-qemu/guest/vmlinuz",
-		Initramfs: "/opt/nvt-qemu/guest/initramfs", DiskTemplate: "/opt/nvt-qemu/guest/root.qcow2", StateRoot: stateRoot,
+		Initramfs: "/opt/nvt-qemu/guest/initramfs", DiskTemplate: "/opt/nvt-qemu/guest/root.qcow2",
+		StateRoot: stateRoot, ScratchRoot: "/tmp",
 	})
 	if err != nil || stateRoot == "" {
 		fatal("runtime artifacts are unavailable")

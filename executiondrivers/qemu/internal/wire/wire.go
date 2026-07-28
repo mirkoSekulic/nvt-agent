@@ -11,6 +11,7 @@ import (
 const (
 	Version          = "nvt.qemu-guest-control/v1"
 	MaxMessageBytes  = 64 << 10
+	StateConnected   = "connected"
 	StateWaiting     = "waiting"
 	StateEnrolled    = "enrolled"
 	StateReady       = "ready"

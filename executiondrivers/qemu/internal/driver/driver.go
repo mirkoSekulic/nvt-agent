@@ -70,10 +70,14 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 	}
 	state, err := driver.store.Load(desired.ExecutionID)
 	if errors.Is(err, os.ErrNotExist) {
+		hostPort, allocationErr := driver.store.AllocateHostPort(desired.ExecutionID)
+		if allocationErr != nil {
+			return executiondriver.Status{}, retry("capacity-unavailable", "QEMU local health capacity is unavailable")
+		}
 		state = State{
 			Version: stateVersion, ExecutionID: desired.ExecutionID, Generation: desired.Generation,
 			DesiredFingerprint: desired.DesiredFingerprint, ClassName: desired.ClassName, Configuration: resolved,
-			Attempt: 1, GuestInstanceID: guestInstanceID(desired.ExecutionID, desired.Generation, 1), HostPort: stableHostPort(desired.ExecutionID),
+			Attempt: 1, GuestInstanceID: guestInstanceID(desired.ExecutionID, desired.Generation, 1), HostPort: hostPort,
 		}
 		if err := driver.store.Save(state); err != nil {
 			return executiondriver.Status{}, retry("state-unavailable", "QEMU durable state is unavailable")
@@ -94,10 +98,14 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 			if err := driver.machines.Delete(ctx, &state); err != nil || driver.store.Remove(state.ExecutionID) != nil {
 				return executiondriver.Status{}, retry("replacement-pending", "QEMU prior desired state cleanup is pending")
 			}
+			hostPort, allocationErr := driver.store.AllocateHostPort(desired.ExecutionID)
+			if allocationErr != nil {
+				return executiondriver.Status{}, retry("capacity-unavailable", "QEMU local health capacity is unavailable")
+			}
 			state = State{
 				Version: stateVersion, ExecutionID: desired.ExecutionID, Generation: desired.Generation,
 				DesiredFingerprint: desired.DesiredFingerprint, ClassName: desired.ClassName, Configuration: resolved,
-				Attempt: 1, GuestInstanceID: guestInstanceID(desired.ExecutionID, desired.Generation, 1), HostPort: stableHostPort(desired.ExecutionID),
+				Attempt: 1, GuestInstanceID: guestInstanceID(desired.ExecutionID, desired.Generation, 1), HostPort: hostPort,
 			}
 			if err := driver.store.Save(state); err != nil {
 				return executiondriver.Status{}, retry("state-unavailable", "QEMU durable state is unavailable")
@@ -182,14 +190,18 @@ func (driver *Driver) Prepare(ctx context.Context, request guestenrollment.Hando
 	if state.ExecutionScope == nil {
 		scope := request.ExecutionScope
 		state.ExecutionScope = &scope
-		if err := driver.store.Save(state); err != nil {
-			return guestenrollment.HandoffPrepareResult{}, errors.New("QEMU enrollment handoff is unavailable")
-		}
 		fresh = true
 	} else if *state.ExecutionScope != request.ExecutionScope {
 		return guestenrollment.HandoffPrepareResult{}, errors.New("QEMU enrollment handoff was rejected")
 	}
 	if err := driver.machines.Ensure(ctx, &state); err != nil || driver.machines.Configure(ctx, &state, bootConfiguration(state)) != nil {
+		return guestenrollment.HandoffPrepareResult{}, errors.New("QEMU enrollment handoff is unavailable")
+	}
+	// Persist the prepared obligation only after this exact guest is able to
+	// accept the envelope. Before that point a retry is still the same fresh,
+	// deterministic attempt; recording it early would make the orchestrator
+	// conservatively revoke and replace a guest that was merely still booting.
+	if fresh && driver.store.Save(state) != nil {
 		return guestenrollment.HandoffPrepareResult{}, errors.New("QEMU enrollment handoff is unavailable")
 	}
 	if observation, observeErr := driver.machines.Observe(ctx, &state); observeErr == nil && observation.Enrolled && !state.EnrollmentAccepted {

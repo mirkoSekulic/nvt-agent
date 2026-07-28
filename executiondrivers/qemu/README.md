@@ -50,11 +50,16 @@ inside the generic host's authoritative two-minute operation deadline.
 
 The registration requires provider-neutral persistent storage. The driver
 stores one execution-ID-hashed directory containing its non-secret convergence
-record and qcow2 disk. Enrollment envelopes are streamed once over the private
-virtio channel and are never written to ordinary driver state or seed media.
-The guest stores the exchanged runtime identity only in its root-only sensitive
-state. Deletion stops QEMU and removes the disk, socket, state, and temporary
-resources before reporting `deleted`.
+record and qcow2 disk. Short-lived AF_UNIX control sockets live under `/tmp`
+instead of the persistent path and are derived from a short collision-resistant
+execution hash. Storage-backed registrations use one `Recreate` Deployment and
+must not share an existing claim with another registration, so two driver
+processes never intentionally operate the same disks. Enrollment envelopes are
+streamed once over the private virtio channel and are never written to ordinary
+driver state or seed media. The guest commits the exact binding and exchanged
+runtime identity as one root-only atomic sensitive record. Deletion confirms
+QEMU has been reaped before removing the disk, socket, state, and temporary
+resources or reporting `deleted`.
 
 `acceleration: auto` uses `/dev/kvm` only when the registration workload has
 been explicitly granted a usable KVM device; otherwise it uses bounded TCG.

@@ -106,15 +106,15 @@ broker:
   persistence: {enabled: true, size: 1Gi}
   guestEnrollment:
     enabled: true
-    exchangeURL: https://nvt-broker.${NAMESPACE}.svc:7347/v1/guest-enrollment/exchange
+    exchangeURL: https://nvt-broker.${NAMESPACE}.svc.cluster.local:7347/v1/guest-enrollment/exchange
     orchestratorAuth: {existingSecret: nvt-enrollment-orchestrator, tokenKey: token}
 executionDrivers:
   hostImage: {repository: nvt-execution-driver-host, tag: latest, pullPolicy: IfNotPresent}
   guestEnrollment:
     enabled: true
     registrations: [qemu-reference]
-    brokerURL: https://nvt-broker.${NAMESPACE}.svc:7347
-    serverName: nvt-broker.${NAMESPACE}.svc
+    brokerURL: https://nvt-broker.${NAMESPACE}.svc.cluster.local:7347
+    serverName: nvt-broker.${NAMESPACE}.svc.cluster.local
     ca: {existingSecret: nvt-broker-tls, key: ca.crt}
     orchestratorAuth: {existingSecret: nvt-enrollment-orchestrator, tokenKey: token}
     requestTimeoutSeconds: 15
@@ -147,7 +147,7 @@ registry_ca=open(sys.argv[2]).read()
 configuration={
   "contract_version":"nvt.qemu-driver/v1",
   "guest_image":{"digest":sys.argv[3]},
-  "host_bundle":{"repository":f"https://nvt-host-bundle-registry.{sys.argv[5]}.svc/nvt/host-bundle","digest":sys.argv[4]},
+  "host_bundle":{"repository":f"https://nvt-host-bundle-registry.{sys.argv[5]}.svc.cluster.local/nvt/host-bundle","digest":sys.argv[4]},
   "registry_ca_pem":registry_ca,
   "enrollment_ca_pem":broker_ca,
   "cpus":1,"memory_mib":512,"acceleration":"tcg","boot_timeout_seconds":110,
@@ -172,8 +172,7 @@ PY
   assert_sensitive_material_absent
 
   log "restarting the QEMU driver host and proving durable TCG guest recovery"
-  kubectl_smoke rollout restart deployment/nvt-execution-driver-qemu-reference -n "${NAMESPACE}"
-  kubectl_smoke rollout status deployment/nvt-execution-driver-qemu-reference -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
+  restart_qemu_driver_without_overlap
   wait_for_qemu_running
   assert_qemu_provider_present
   assert_sensitive_material_absent
@@ -214,7 +213,51 @@ wait_for_qemu_running() {
     fi
     sleep 2
   done
+  qemu_failure_diagnostics
   die "real QEMU guest did not reach native agentd/session readiness"
+}
+
+qemu_failure_diagnostics() {
+  local pod
+  printf '\n[operator-kind-smoke] QEMU lifecycle diagnostics\n' >&2
+  kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o yaml >&2 || true
+  kubectl_smoke logs deployment/nvt-operator -n "${NAMESPACE}" --all-containers --tail=300 >&2 || true
+  pod="$(qemu_driver_pod 2>/dev/null || true)"
+  if [[ -n "${pod}" ]]; then
+    kubectl_smoke describe pod "${pod}" -n "${NAMESPACE}" >&2 || true
+    kubectl_smoke logs "${pod}" -n "${NAMESPACE}" -c driver-host --tail=300 >&2 || true
+    kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- sh -c \
+      'find /var/lib/nvt-execution-driver -maxdepth 3 -type f -not -name guest.qcow2 -print -exec sh -c '\''echo "--- $1"; cat "$1"'\'' sh {} \;' >&2 || true
+  fi
+  kubectl_smoke logs deployment/nvt-broker -n "${NAMESPACE}" --all-containers --tail=300 >&2 || true
+}
+
+restart_qemu_driver_without_overlap() {
+  local deployment=nvt-execution-driver-qemu-reference old_uid deadline pods active_uid active_count
+  [[ "$(kubectl_smoke get deployment "${deployment}" -n "${NAMESPACE}" -o jsonpath='{.spec.strategy.type}')" == Recreate ]] ||
+    die "storage-backed QEMU driver deployment is not Recreate"
+  old_uid="$(kubectl_smoke get pod -n "${NAMESPACE}" -l nvt.dev/execution-driver-registration=qemu-reference -o jsonpath='{.items[0].metadata.uid}')"
+  kubectl_smoke rollout restart deployment/"${deployment}" -n "${NAMESPACE}"
+  deadline=$((SECONDS + QEMU_EXECUTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    pods="$(kubectl_smoke get pod -n "${NAMESPACE}" -l nvt.dev/execution-driver-registration=qemu-reference -o json)"
+    read -r active_count active_uid < <(python3 -c '
+import json,sys
+items=[item for item in json.load(sys.stdin)["items"] if not item["metadata"].get("deletionTimestamp")]
+print(len(items), items[0]["metadata"]["uid"] if len(items)==1 else "")
+' <<<"${pods}")
+    if (( active_count > 1 )); then
+      qemu_failure_diagnostics
+      die "Recreate rollout permitted overlapping QEMU driver owners"
+    fi
+    if [[ "${active_count}" == 1 && "${active_uid}" != "${old_uid}" ]] &&
+      kubectl_smoke rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout=1s >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+  qemu_failure_diagnostics
+  die "QEMU driver Recreate rollout did not converge"
 }
 
 assert_no_qemu_agent_pod() {

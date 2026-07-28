@@ -14,8 +14,8 @@ RUN NVT_HOST_BUNDLE_ARCH=amd64 /src/hostbundle/build.sh "${NVT_VERSION}" "${NVT_
       go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
       -o /fixture/nvt-host-bundle-registry ./tests/fixtures/host-bundle-registry/main.go && \
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 -sha256 \
-      -subj /CN=nvt-host-bundle-registry.nvt.svc \
-      -addext subjectAltName=DNS:nvt-host-bundle-registry.nvt.svc \
+      -subj /CN=nvt-host-bundle-registry.nvt.svc.cluster.local \
+      -addext subjectAltName=DNS:nvt-host-bundle-registry.nvt.svc,DNS:nvt-host-bundle-registry.nvt.svc.cluster.local \
       -keyout /fixture/tls.key -out /fixture/tls.crt >/dev/null 2>&1 && \
     chmod 0755 /fixture/nvt-host-bundle-registry && chmod 0600 /fixture/tls.key && chmod 0644 /fixture/tls.crt
 

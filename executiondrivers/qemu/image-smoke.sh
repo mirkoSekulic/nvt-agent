@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${NVT_QEMU_DRIVER_IMAGE:-nvt-qemu-execution-driver:test}"
 WORKDIR="$(mktemp -d "${ROOT}/.qemu-image-smoke.XXXXXX")"
 cleanup() {
+  docker run --rm --user 0:0 --entrypoint sh \
+    -v "${WORKDIR}:/var/lib/nvt-execution-driver" "${IMAGE}" \
+    -c 'rm -rf /var/lib/nvt-execution-driver/executions' >/dev/null 2>&1 || true
   chmod -R u+rwX "${WORKDIR}" >/dev/null 2>&1 || true
   rm -rf "${WORKDIR}"
 }
@@ -78,9 +81,24 @@ for request in requests:
 PY
 
 docker run --rm -i \
-  -e NVT_EXECUTION_DRIVER_STATE_DIR=/state \
-  -v "${WORKDIR}:/state" \
+  -e NVT_EXECUTION_DRIVER_STATE_DIR=/var/lib/nvt-execution-driver \
+  -v "${WORKDIR}:/var/lib/nvt-execution-driver" \
   "${IMAGE}" <"${WORKDIR}/requests.jsonl" >"${WORKDIR}/responses.jsonl"
+
+# The production state tree is intentionally private to UID 65532. Inspect it
+# through an explicit root test container instead of weakening its modes for
+# the unrelated host runner identity.
+state_count="$(docker run --rm --user 0:0 --entrypoint sh \
+  -v "${WORKDIR}:/var/lib/nvt-execution-driver" "${IMAGE}" \
+  -c 'find /var/lib/nvt-execution-driver/executions -mindepth 2 -maxdepth 2 -name state.json -type f | wc -l')"
+[[ "${state_count}" == "1" ]] || {
+  echo "QEMU built-image smoke produced an unexpected durable-state count" >&2
+  exit 1
+}
+docker run --rm --user 0:0 --entrypoint sh \
+  -v "${WORKDIR}:/var/lib/nvt-execution-driver" "${IMAGE}" \
+  -c 'state="$(find /var/lib/nvt-execution-driver/executions -mindepth 2 -maxdepth 2 -name state.json -type f)"; cat "${state}"; test -f "$(dirname "${state}")/guest.qcow2"; test ! -e "$(dirname "${state}")/control.sock"' \
+  >"${WORKDIR}/inspected-state.json"
 
 python3 - "${WORKDIR}" <<'PY'
 import json
@@ -95,9 +113,7 @@ assert responses[1]["result"]["phase"] == "provisioning"
 assert responses[1]["result"]["ready"] is False
 assert responses[2]["result"] == {}
 
-states = list((root / "executions").glob("*/state.json"))
-assert len(states) == 1
-state = json.loads(states[0].read_text())
+state = json.loads((root / "inspected-state.json").read_text())
 assert set(state) == {
     "version", "execution_id", "generation", "desired_fingerprint",
     "class_name", "configuration", "attempt", "guest_instance_id",
@@ -106,7 +122,6 @@ assert set(state) == {
 encoded = json.dumps(state, sort_keys=True).lower()
 for forbidden in ("runtime_identity", "enrollment_token", "bootstrap_envelope", '"token"', '"opaque"'):
     assert forbidden not in encoded
-assert states[0].with_name("guest.qcow2").is_file()
 PY
 
 echo "QEMU built-image TCG guest smoke passed"

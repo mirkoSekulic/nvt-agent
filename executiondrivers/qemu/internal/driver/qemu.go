@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -30,13 +31,16 @@ type QEMUConfig struct {
 	Initramfs    string
 	DiskTemplate string
 	StateRoot    string
+	ScratchRoot  string
 }
 
 type QEMUManager struct {
-	config      QEMUConfig
-	imageDigest string
-	mu          sync.Mutex
-	active      map[string]*activeMachine
+	config         QEMUConfig
+	imageDigest    string
+	mu             sync.Mutex
+	active         map[string]*activeMachine
+	terminateGrace time.Duration
+	killGrace      time.Duration
 }
 
 type activeMachine struct {
@@ -53,11 +57,23 @@ func NewQEMUManager(value QEMUConfig) (*QEMUManager, error) {
 	if value.StateRoot == "" {
 		return nil, errors.New("QEMU state root is unavailable")
 	}
+	if value.ScratchRoot == "" {
+		value.ScratchRoot = "/tmp"
+	}
+	if !filepath.IsAbs(value.ScratchRoot) || filepath.Clean(value.ScratchRoot) != value.ScratchRoot {
+		return nil, errors.New("QEMU scratch root is invalid")
+	}
+	if len(filepath.Join(value.ScratchRoot, "nvt-qemu-"+strings.Repeat("0", 32)+".sock")) > 107 {
+		return nil, errors.New("QEMU scratch root is too long")
+	}
 	digest, err := aggregateDigest(value.Kernel, value.Initramfs, value.DiskTemplate)
 	if err != nil {
 		return nil, errors.New("QEMU guest image could not be verified")
 	}
-	return &QEMUManager{config: value, imageDigest: digest, active: map[string]*activeMachine{}}, nil
+	return &QEMUManager{
+		config: value, imageDigest: digest, active: map[string]*activeMachine{},
+		terminateGrace: 3 * time.Second, killGrace: 2 * time.Second,
+	}, nil
 }
 
 func (manager *QEMUManager) GuestImageDigest() (string, error) { return manager.imageDigest, nil }
@@ -79,21 +95,26 @@ func (manager *QEMUManager) Ensure(ctx context.Context, state *State) error {
 	}
 	disk := filepath.Join(runDirectory, "guest.qcow2")
 	if _, err := os.Stat(disk); errors.Is(err, os.ErrNotExist) {
+		if state.EnrollmentAccepted {
+			return errors.New("QEMU enrolled guest disk is missing")
+		}
 		if err := copyAtomic(manager.config.DiskTemplate, disk); err != nil {
 			return errors.New("QEMU guest disk could not be created")
 		}
 	} else if err != nil {
 		return errors.New("QEMU guest disk is unavailable")
 	}
-	control := filepath.Join(runDirectory, "control.sock")
+	control := manager.controlSocketPath(state.ExecutionID)
+	console := filepath.Join(runDirectory, "guest-console.log")
 	_ = os.Remove(control)
+	_ = os.Remove(console)
 	acceleration, err := resolveAcceleration(state.Configuration.Acceleration)
 	if err != nil {
 		return err
 	}
 	cpuModel := cpuModelForAcceleration(acceleration)
 	args := []string{
-		"-nodefaults", "-no-reboot", "-nographic", "-monitor", "none", "-serial", "null",
+		"-nodefaults", "-no-reboot", "-nographic", "-monitor", "none", "-serial", "file:" + console,
 		"-machine", "q35,accel=" + acceleration, "-cpu", cpuModel, "-smp", strconv.Itoa(state.Configuration.CPUs),
 		"-m", strconv.Itoa(state.Configuration.MemoryMiB),
 		"-kernel", manager.config.Kernel, "-initrd", manager.config.Initramfs,
@@ -126,7 +147,7 @@ func (manager *QEMUManager) Ensure(ctx context.Context, state *State) error {
 		}
 		select {
 		case <-ctx.Done():
-			manager.stopLocked(state.ExecutionID)
+			_ = manager.stopLocked(state.ExecutionID)
 			return errors.New("QEMU startup was cancelled")
 		case <-done:
 			delete(manager.active, state.ExecutionID)
@@ -134,7 +155,7 @@ func (manager *QEMUManager) Ensure(ctx context.Context, state *State) error {
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
-	manager.stopLocked(state.ExecutionID)
+	_ = manager.stopLocked(state.ExecutionID)
 	return errors.New("QEMU control channel did not start")
 }
 
@@ -190,21 +211,33 @@ func (manager *QEMUManager) Deliver(ctx context.Context, state *State, envelope 
 
 func (manager *QEMUManager) Replace(ctx context.Context, state *State) error {
 	manager.mu.Lock()
-	manager.stopLocked(state.ExecutionID)
+	stopErr := manager.stopLocked(state.ExecutionID)
 	manager.mu.Unlock()
+	if stopErr != nil {
+		return stopErr
+	}
 	directory := (Store{Root: manager.config.StateRoot}).RunDir(state.ExecutionID)
+	previousConsole := filepath.Join(directory, "previous-guest-console.log")
+	_ = os.Remove(previousConsole)
+	if err := os.Rename(filepath.Join(directory, "guest-console.log"), previousConsole); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("QEMU replacement diagnostics could not be retained")
+	}
 	for _, name := range []string{"guest.qcow2", "control.sock"} {
 		if err := os.Remove(filepath.Join(directory, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return errors.New("QEMU replacement cleanup failed")
 		}
 	}
+	_ = os.Remove(manager.controlSocketPath(state.ExecutionID))
 	return nil
 }
 
 func (manager *QEMUManager) Delete(_ context.Context, state *State) error {
 	manager.mu.Lock()
-	manager.stopLocked(state.ExecutionID)
+	stopErr := manager.stopLocked(state.ExecutionID)
 	manager.mu.Unlock()
+	if stopErr != nil {
+		return stopErr
+	}
 	directory := (Store{Root: manager.config.StateRoot}).RunDir(state.ExecutionID)
 	entries, err := os.ReadDir(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -220,6 +253,9 @@ func (manager *QEMUManager) Delete(_ context.Context, state *State) error {
 		if err := os.RemoveAll(filepath.Join(directory, entry.Name())); err != nil {
 			return errors.New("QEMU resource cleanup failed")
 		}
+	}
+	if err := os.Remove(manager.controlSocketPath(state.ExecutionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("QEMU control socket cleanup failed")
 	}
 	return syncDirectory(directory)
 }
@@ -249,26 +285,29 @@ func (manager *QEMUManager) Shutdown(ctx context.Context) error {
 	return errors.New("QEMU shutdown did not reap every guest")
 }
 
-func (manager *QEMUManager) stopLocked(executionID string) {
+func (manager *QEMUManager) stopLocked(executionID string) error {
 	machine := manager.active[executionID]
 	if machine == nil {
-		return
+		return nil
 	}
-	delete(manager.active, executionID)
 	if machine.command.Process != nil {
 		_ = syscall.Kill(-machine.command.Process.Pid, syscall.SIGTERM)
 	}
 	select {
 	case <-machine.done:
-		return
-	case <-time.After(3 * time.Second):
+		delete(manager.active, executionID)
+		return nil
+	case <-time.After(manager.terminateGrace):
 	}
 	if machine.command.Process != nil {
 		_ = syscall.Kill(-machine.command.Process.Pid, syscall.SIGKILL)
 	}
 	select {
 	case <-machine.done:
-	case <-time.After(2 * time.Second):
+		delete(manager.active, executionID)
+		return nil
+	case <-time.After(manager.killGrace):
+		return errors.New("QEMU process could not be reaped")
 	}
 }
 
@@ -305,7 +344,7 @@ func (manager *QEMUManager) call(ctx context.Context, state *State, request wire
 		return wire.Response{}, errors.New("QEMU guest control request is invalid")
 	}
 	defer zero(payload)
-	socket := filepath.Join((Store{Root: manager.config.StateRoot}).RunDir(state.ExecutionID), "control.sock")
+	socket := manager.controlSocketPath(state.ExecutionID)
 	deadline := time.Now().Add(time.Duration(state.Configuration.BootTimeoutSec) * time.Second)
 	for time.Now().Before(deadline) {
 		connection, dialErr := (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext(ctx, "unix", socket)
@@ -316,11 +355,33 @@ func (manager *QEMUManager) call(ctx context.Context, state *State, request wire
 				operationDeadline = callerDeadline
 			}
 			_ = connection.SetDeadline(operationDeadline)
+			reader := bufio.NewReader(io.LimitReader(connection, (wire.MaxMessageBytes+1)*2))
+			greetingLine, readErr := reader.ReadBytes('\n')
+			if readErr != nil || len(greetingLine) > wire.MaxMessageBytes {
+				return wire.Response{}, errors.New("QEMU guest control greeting failed")
+			}
+			var greeting wire.Response
+			if executiondriver.DecodeStrictJSON(bytes.TrimSuffix(greetingLine, []byte{'\n'}), &greeting) != nil ||
+				greeting != (wire.Response{ContractVersion: wire.Version, State: wire.StateConnected}) {
+				return wire.Response{}, errors.New("QEMU guest control greeting is invalid")
+			}
 			if _, err := connection.Write(payload); err != nil {
 				return wire.Response{}, errors.New("QEMU guest control request failed")
 			}
-			line, err := bufio.NewReader(io.LimitReader(connection, wire.MaxMessageBytes+1)).ReadBytes('\n')
-			if err != nil || len(line) > wire.MaxMessageBytes {
+			var line []byte
+			for skippedGreetings := 0; skippedGreetings < 4; skippedGreetings++ {
+				line, err = reader.ReadBytes('\n')
+				if err != nil || len(line) > wire.MaxMessageBytes {
+					return wire.Response{}, errors.New("QEMU guest control response failed")
+				}
+				var repeatedGreeting wire.Response
+				if executiondriver.DecodeStrictJSON(bytes.TrimSuffix(line, []byte{'\n'}), &repeatedGreeting) == nil &&
+					repeatedGreeting == (wire.Response{ContractVersion: wire.Version, State: wire.StateConnected}) {
+					continue
+				}
+				break
+			}
+			if len(line) == 0 {
 				return wire.Response{}, errors.New("QEMU guest control response failed")
 			}
 			var response wire.Response
@@ -343,6 +404,11 @@ func (manager *QEMUManager) call(ctx context.Context, state *State, request wire
 		}
 	}
 	return wire.Response{}, errors.New("QEMU guest control request timed out")
+}
+
+func (manager *QEMUManager) controlSocketPath(executionID string) string {
+	sum := sha256.Sum256([]byte("nvt.qemu-control/v1:" + executionID))
+	return filepath.Join(manager.config.ScratchRoot, "nvt-qemu-"+hex.EncodeToString(sum[:16])+".sock")
 }
 
 func resolveAcceleration(requested string) (string, error) {

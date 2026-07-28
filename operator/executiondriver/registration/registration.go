@@ -92,6 +92,7 @@ func ValidateAll(registrations []Registration) error {
 	}
 	seen := make(map[string]struct{}, len(registrations))
 	seenServiceAccounts := make(map[string]struct{}, len(registrations))
+	seenExistingClaims := make(map[string]struct{}, len(registrations))
 	for _, registration := range registrations {
 		if _, duplicate := seen[registration.Name]; duplicate {
 			return errors.New("execution driver registration names must be unique")
@@ -108,6 +109,12 @@ func ValidateAll(registrations []Registration) error {
 			return errors.New("execution driver registrations must use distinct ServiceAccounts")
 		}
 		seenServiceAccounts[serviceAccountName] = struct{}{}
+		if registration.Storage != nil && registration.Storage.ExistingClaim != "" {
+			if _, duplicate := seenExistingClaims[registration.Storage.ExistingClaim]; duplicate {
+				return errors.New("execution driver registrations must use distinct existing storage claims")
+			}
+			seenExistingClaims[registration.Storage.ExistingClaim] = struct{}{}
+		}
 	}
 	return nil
 }

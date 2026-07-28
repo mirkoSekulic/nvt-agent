@@ -67,6 +67,10 @@ metadata:
     app.kubernetes.io/component: execution-driver-host
 spec:
   replicas: 1
+  {{- if $registration.storage }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ $root.Release.Name }}

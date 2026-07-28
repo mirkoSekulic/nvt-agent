@@ -12,6 +12,7 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,14 +31,15 @@ const (
 )
 
 type fakeProvider struct {
-	mu         sync.Mutex
-	resources  map[string]MachineObservation
-	creates    int
-	deletes    int
-	configs    int
-	deliveries int
-	block      bool
-	digest     string
+	mu           sync.Mutex
+	resources    map[string]MachineObservation
+	creates      int
+	deletes      int
+	configs      int
+	deliveries   int
+	block        bool
+	configureErr bool
+	digest       string
 }
 
 type fakeMachines struct{ provider *fakeProvider }
@@ -66,6 +68,10 @@ func (machine *fakeMachines) Configure(_ context.Context, _ *State, configuratio
 		return errors.New("invalid boot configuration")
 	}
 	machine.provider.mu.Lock()
+	if machine.provider.configureErr {
+		machine.provider.mu.Unlock()
+		return errors.New("injected unhealthy guest")
+	}
 	machine.provider.configs++
 	machine.provider.mu.Unlock()
 	return nil
@@ -166,6 +172,79 @@ func TestExecutionDriverConformanceLifecycleAndRestart(t *testing.T) {
 	}
 }
 
+func TestPreparedUnacceptedGuestRemainsReplaceableAfterBecomingUnhealthy(t *testing.T) {
+	root := t.TempDir()
+	configuration := testConfiguration(t)
+	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest}
+	implementation, err := New(root, registration, &fakeMachines{provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredExecution(t, configuration)
+	if _, err := implementation.Reconcile(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	scope := guestenrollment.ExecutionScope{
+		AgentRunUID: "99999999-9999-9999-9999-999999999999", ExecutionID: desired.ExecutionID, DriverRegistration: registration,
+	}
+	prepared, err := implementation.Prepare(context.Background(), guestenrollment.HandoffPrepareRequest{
+		ContractVersion: guestenrollment.HandoffVersion, ExecutionScope: scope, DesiredGeneration: desired.Generation,
+	})
+	if err != nil || prepared.State != guestenrollment.HandoffStatePrepared || !prepared.NewlyPrepared {
+		t.Fatalf("initial prepared attempt = %#v %v", prepared, err)
+	}
+	provider.configureErr = true
+	if _, err := implementation.Prepare(context.Background(), guestenrollment.HandoffPrepareRequest{
+		ContractVersion: guestenrollment.HandoffVersion, ExecutionScope: scope, DesiredGeneration: desired.Generation,
+	}); err == nil {
+		t.Fatal("unhealthy guest was advertised as ready for a new enrollment envelope")
+	}
+	provider.configureErr = false
+	binding := guestenrollment.Binding{
+		AgentRunUID: scope.AgentRunUID, ExecutionID: scope.ExecutionID, DriverRegistration: scope.DriverRegistration,
+		DesiredGeneration: desired.Generation, GuestInstanceID: prepared.GuestInstanceID,
+	}
+	replacement, err := implementation.Replace(context.Background(), guestenrollment.HandoffReplaceRequest{ContractVersion: guestenrollment.HandoffVersion, Binding: binding})
+	if err != nil || !replacement.NewlyPrepared || replacement.GuestInstanceID == prepared.GuestInstanceID {
+		t.Fatalf("unhealthy prepared attempt did not converge through replacement: %#v %v", replacement, err)
+	}
+}
+
+func TestPrepareDoesNotPersistObligationBeforeGuestCanAcceptEnvelope(t *testing.T) {
+	root := t.TempDir()
+	configuration := testConfiguration(t)
+	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest, configureErr: true}
+	implementation, err := New(root, registration, &fakeMachines{provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredExecution(t, configuration)
+	if _, err := implementation.Reconcile(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	scope := guestenrollment.ExecutionScope{
+		AgentRunUID: "88888888-8888-8888-8888-888888888888", ExecutionID: desired.ExecutionID, DriverRegistration: registration,
+	}
+	request := guestenrollment.HandoffPrepareRequest{
+		ContractVersion: guestenrollment.HandoffVersion, ExecutionScope: scope, DesiredGeneration: desired.Generation,
+	}
+	if _, err := implementation.Prepare(context.Background(), request); err == nil {
+		t.Fatal("unavailable guest was advertised as prepared")
+	}
+	state, err := implementation.store.Load(desired.ExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ExecutionScope != nil {
+		t.Fatal("unavailable guest created a durable enrollment obligation")
+	}
+	provider.configureErr = false
+	prepared, err := implementation.Prepare(context.Background(), request)
+	if err != nil || !prepared.NewlyPrepared || prepared.GuestInstanceID != state.GuestInstanceID {
+		t.Fatalf("converged fresh preparation = %#v, %v", prepared, err)
+	}
+}
+
 func TestDriverRejectsConflictMalformedHandoffAndCancels(t *testing.T) {
 	configuration := testConfiguration(t)
 	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest}
@@ -224,6 +303,102 @@ func TestStableResourceIdentity(t *testing.T) {
 	if cpuModelForAcceleration("kvm") != "host" || cpuModelForAcceleration("tcg") != "max" {
 		t.Fatal("QEMU acceleration did not select its compatible CPU model")
 	}
+}
+
+func TestCollidingStablePortsReceiveDistinctDurableReservations(t *testing.T) {
+	if stableHostPort("execution-51") != stableHostPort("execution-253") {
+		t.Fatal("test fixture no longer exercises the known hash collision")
+	}
+	root := t.TempDir()
+	configuration := testConfiguration(t)
+	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest}
+	implementation, err := New(root, registration, &fakeMachines{provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := desiredExecution(t, configuration)
+	first.ExecutionID = "execution-51"
+	second := desiredExecution(t, configuration)
+	second.ExecutionID = "execution-253"
+	if _, err := implementation.Reconcile(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := implementation.Reconcile(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	firstState, err := (Store{Root: root}).Load(first.ExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondState, err := (Store{Root: root}).Load(second.ExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstState.HostPort == secondState.HostPort {
+		t.Fatalf("colliding executions shared local health port %d", firstState.HostPort)
+	}
+}
+
+func TestProductionStateRootUsesShortScratchSocket(t *testing.T) {
+	manager := testQEMUManager(t, "/var/lib/nvt-execution-driver", "/tmp")
+	path := manager.controlSocketPath("nvt-agentrun-" + strings.Repeat("a", 64))
+	if len(path) > 107 || strings.HasPrefix(path, "/var/lib/nvt-execution-driver") {
+		t.Fatalf("control socket path is not short scratch state: %q (%d bytes)", path, len(path))
+	}
+}
+
+func TestAcceptedGuestNeverRecreatesMissingDisk(t *testing.T) {
+	root := t.TempDir()
+	manager := testQEMUManager(t, root, "/tmp")
+	state := State{ExecutionID: "accepted-execution", EnrollmentAccepted: true}
+	if err := manager.Ensure(context.Background(), &state); err == nil {
+		t.Fatal("accepted durable state recreated a missing guest disk")
+	}
+	if _, err := os.Stat(filepath.Join((Store{Root: root}).RunDir(state.ExecutionID), "guest.qcow2")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("accepted missing disk was changed: %v", err)
+	}
+}
+
+func TestDeleteRetainsResourcesUntilProcessIsConfirmedReaped(t *testing.T) {
+	root := t.TempDir()
+	manager := testQEMUManager(t, root, "/tmp")
+	manager.terminateGrace = time.Millisecond
+	manager.killGrace = time.Millisecond
+	state := State{ExecutionID: "stuck-execution"}
+	directory := (Store{Root: root}).RunDir(state.ExecutionID)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resource := filepath.Join(directory, "guest.qcow2")
+	if err := os.WriteFile(resource, []byte("durable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager.active[state.ExecutionID] = &activeMachine{command: &exec.Cmd{}, done: make(chan struct{})}
+	if err := manager.Delete(context.Background(), &state); err == nil {
+		t.Fatal("delete reported success without confirmed process reaping")
+	}
+	if _, err := os.Stat(resource); err != nil {
+		t.Fatalf("delete removed resources before reaping: %v", err)
+	}
+}
+
+func testQEMUManager(t *testing.T, stateRoot, scratchRoot string) *QEMUManager {
+	t.Helper()
+	directory := t.TempDir()
+	paths := make([]string, 4)
+	for index, name := range []string{"qemu", "kernel", "initramfs", "disk"} {
+		paths[index] = filepath.Join(directory, name)
+		if err := os.WriteFile(paths[index], []byte(name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager, err := NewQEMUManager(QEMUConfig{
+		Binary: paths[0], Kernel: paths[1], Initramfs: paths[2], DiskTemplate: paths[3], StateRoot: stateRoot, ScratchRoot: scratchRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
 }
 
 func desiredExecution(t *testing.T, configuration config.Configuration) executiondriver.DesiredExecution {

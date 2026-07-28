@@ -136,6 +136,7 @@ app.kubernetes.io/part-of: nvt
 {{- if gt (len $registrations) 32 -}}{{ fail "executionDrivers.registrations supports at most 32 entries" }}{{- end -}}
 {{- $seen := dict -}}
 {{- $seenServiceAccounts := dict -}}
+{{- $seenExistingClaims := dict -}}
 {{- range $registration := $registrations -}}
 {{- $name := default "" $registration.name -}}
 {{- if or (gt (len $name) 63) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$` $name)) -}}{{ fail "execution driver registration name must be a DNS label of at most 63 characters" }}{{- end -}}
@@ -155,6 +156,8 @@ app.kubernetes.io/part-of: nvt
 {{- with $registration.storage -}}
 {{- if .existingClaim -}}
 {{- if or .size .storageClassName (gt (len .existingClaim) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$` .existingClaim)) -}}{{ fail (printf "execution driver %s existing storage claim is invalid" $name) }}{{- end -}}
+{{- if hasKey $seenExistingClaims .existingClaim -}}{{ fail "execution driver registrations must use distinct existing storage claims" }}{{- end -}}
+{{- $_ := set $seenExistingClaims .existingClaim true -}}
 {{- else -}}
 {{- if not .size -}}{{ fail (printf "execution driver %s storage.size is required" $name) }}{{- end -}}
 {{- $storageBytes := include "nvt.executionDriverQuantity" (dict "name" $name "field" "storage.size" "value" .size) | float64 -}}

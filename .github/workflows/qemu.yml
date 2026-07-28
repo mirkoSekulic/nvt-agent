@@ -26,6 +26,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: |
+            operator/go.sum
+            executiondrivers/qemu/go.mod
+      - name: Vet and race-test QEMU driver
+        run: |
+          cd executiondrivers/qemu
+          go vet ./...
+          go test -race -count=1 ./...
+
   real-guest-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 60
