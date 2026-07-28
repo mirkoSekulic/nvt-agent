@@ -103,7 +103,7 @@ func TestRuntimeEstablishesRelaysReconnectsAndRenews(t *testing.T) {
 	defer stopAgentd()
 	binding := testBinding()
 	now := time.Now().UTC().Truncate(time.Second)
-	issuer := &fakeIssuer{binding: binding, now: now, clock: time.Now}
+	issuer := &fakeIssuer{binding: binding, now: now}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	credentials := make(chan string, 4)
@@ -151,7 +151,11 @@ func TestRuntimeEstablishesRelaysReconnectsAndRenews(t *testing.T) {
 		}
 	}
 	runtime := newTestRuntime(t, work, agentdSocket, issuer, connector)
-	runtime.Now = time.Now
+	// Keep the authoritative wall clock fixed so the sub-second test renewal
+	// window cannot already be due solely because protocol timestamps have
+	// whole-second precision. Monotonic time still drives the planned renewal.
+	runtime.Now = func() time.Time { return now }
+	runtime.MonotonicNow = time.Now
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
 	select {
