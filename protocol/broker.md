@@ -77,6 +77,8 @@ The optional production issuer implements the exact payloads and lifecycle in
 | `POST /v1/guest-enrollment/complete-execution-cleanup` | 4 KiB | Dedicated orchestrator bearer |
 | `POST /v1/guest-runtime-identity/status` | 4 KiB | Current runtime identity plus exact binding |
 | `POST /v1/guest-runtime-identity/rotate` | 16 KiB | Current runtime identity plus exact binding and successor |
+| `POST /v1/guest-session-identity/issue` | 8 KiB | Current runtime identity plus exact binding and fixed audience |
+| `POST /v1/guest-session-identity/authenticate` | 4 KiB | Session credential plus exact binding and fixed audience |
 
 Issue returns the frozen `BootstrapEnvelope`; exchange returns the frozen
 `ExchangeResult`; both revoke operations and cleanup completion return
@@ -93,6 +95,14 @@ Rotation atomically replaces the authenticating digest with a client-generated
 successor digest and never echoes the successor. Lost-response recovery probes
 the already-known successor before retrying that same value; it never blindly
 creates another identity.
+
+The session endpoints implement
+[`nvt.guest-session-identity/v1`](guest-session-identity.md). Issue authenticates
+the indexed active runtime identity before body admission, accepts only the
+fixed `nvt.native-guest-control/v1` audience, and returns one short-lived
+broker-generated credential. Authenticate accepts that credential and returns
+only its exact non-secret binding, audience, and broker-owned time window. It
+does not establish a gateway route or transport in this phase.
 
 The operator client exposes only issue, the two revoke operations, and cleanup
 completion; it has no guest exchange method. It holds the dedicated bearer in
@@ -145,9 +155,22 @@ Runtime identity timestamps use the later of the issuer's current wall clock
 and the enrollment's durable `issued_at`, so a backward clock adjustment cannot
 commit a record that the same issuer subsequently rejects as malformed.
 
+Guest session authentication has its own 64-request HTTP and 32-operation
+issuer bounds plus independent per-credential concurrency and rate admission;
+session issuance and authentication also use separate 32-operation issuer
+bounds.
+Unknown bearers are rejected by indexed digest lookup before slow-body
+admission. A session credential cannot consume the runtime-identity or
+orchestrator control quotas. Issuance permits exactly two simultaneously live
+credentials per exact binding: this is the bounded response-loss recovery
+window. A third issue fails until expiry, and maintenance removes expired rows.
+Both exact-binding and execution-scope revocation delete every matching session
+digest in the same transaction as the runtime identity.
+
 Errors are bounded stable classes from the guest-enrollment contract. Responses,
 audit entries, readiness, and process logs never contain a request body,
-plaintext or digest token, plaintext runtime identity, or SQLite diagnostic.
+plaintext or digest token, plaintext runtime identity, plaintext or digest
+session credential, or SQLite diagnostic.
 The broker uses one durable SQLite database with full synchronous commits. It
 must run as the chart's single `Recreate` replica; sharing that file among
 broker processes is unsupported. This issuer is disabled unless durable state,

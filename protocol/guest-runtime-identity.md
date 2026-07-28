@@ -210,8 +210,10 @@ root-only state document. They do not enter readiness, logs, diagnostics,
 bundle metadata, the agent workspace, or `agentd`.
 
 The broker implements the authority when guest enrollment is enabled, and the
-native daemon implements its guest lifecycle. The test-only QEMU reference is
-only a real-guest conformance consumer; no provider-specific branch is present
-in the daemon or protocol. Gateway routing, downstream production
-runtime-identity authorization, and mediated VM networking remain separate
-future gates.
+native daemon implements its guest lifecycle. The runtime identity may
+authenticate issuance under the separate
+[`nvt.guest-session-identity/v1`](guest-session-identity.md) contract, but it is
+not itself exposed to a gateway, agent session, or egress path. The test-only
+QEMU reference is only a real-guest conformance consumer; no provider-specific
+branch is present in the daemon or protocol. Native session transport, gateway
+routing, and mediated VM networking remain separate future gates.

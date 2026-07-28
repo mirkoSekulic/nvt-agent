@@ -68,6 +68,15 @@ Runtime requests authenticate by indexed digest before body admission and use
 per-enrollment quotas, so unknown or noisy guests cannot consume another
 guest's runtime-identity capacity.
 
+An exact active runtime identity may also issue a short-lived credential under
+[`nvt.guest-session-identity/v1`](../protocol/guest-session-identity.md). The
+only v1 audience is `nvt.native-guest-control/v1`; callers cannot select scopes.
+The broker permits at most two live credentials per exact binding so one lost
+committed response has a bounded reissue path. Authentication returns only the
+binding, audience, and broker-owned time window. SQLite stores only credential
+digests, and exact-binding/execution revocation removes every matching session
+credential atomically with the runtime identity.
+
 Each enrollment atomically reserves its complete 20,000-rotation allowance at
 issue time. The default aggregate capacity is 2,000,000 entries (100 admitted
 lifecycles) and may be configured from 20,000 through 10,000,000; a new issue
@@ -87,10 +96,11 @@ health-latch recovery perform the deliberate streaming full integrity sweep.
 
 SQLite is used in single-writer mode. One broker process owns the database;
 deployments must not share it across replicas. The broker readiness endpoint
-fails closed if the configured durable store becomes unavailable. This phase
-issues and authenticates an opaque runtime identity, but there is not yet a
-guest rotation daemon, gateway route, production runtime consumer, or mediated
-VM egress identity.
+fails closed if the configured durable store becomes unavailable. The native
+host bundle now owns runtime-identity enrollment and rotation. This phase adds
+only the broker-side session authority: there is no guest session client,
+gateway route, reverse tunnel, production native session transport, or mediated
+VM egress identity yet.
 
 Example config:
 

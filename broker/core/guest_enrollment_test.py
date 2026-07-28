@@ -26,9 +26,14 @@ from broker.core.guest_enrollment import (
     RUNTIME_IDENTITY_CAPACITY_PLANNING_INTERVAL,
     RUNTIME_IDENTITY_PLANNING_HORIZON,
     RUNTIME_IDENTITY_VERSION,
+    GUEST_SESSION_IDENTITY_VERSION,
+    NATIVE_GUEST_CONTROL_AUDIENCE,
+    MAX_GUEST_SESSION_CREDENTIAL_LIFETIME,
+    MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING,
     TOMBSTONE_RETENTION,
     VERSION,
     _validate_persisted_runtime_identity_history,
+    _validate_persisted_guest_session,
     format_timestamp,
     load_guest_enrollment_from_environment,
 )
@@ -387,6 +392,16 @@ class RotationBeforeCommitFailure(EnrollmentFaults):
 class RotationResponseLostFailure(EnrollmentFaults):
     def after_rotation_commit(self):
         raise ConnectionAbortedError("rotation-response-lost")
+
+
+class GuestSessionBeforeCommitFailure(EnrollmentFaults):
+    def before_guest_session_commit(self):
+        raise sqlite3.OperationalError("session-storage-secret-canary")
+
+
+class GuestSessionResponseLostFailure(EnrollmentFaults):
+    def after_guest_session_commit(self):
+        raise ConnectionAbortedError("session-response-lost")
 
 
 class GuestEnrollmentIssuerTest(unittest.TestCase):
@@ -1586,7 +1601,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(delete_after - created_at, TOMBSTONE_RETENTION)
         self.assertEqual(
             query_database(migration_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
-            [("5",)],
+            [("6",)],
         )
 
         schema_v2_database = str(Path(self.temporary.name) / "schema-v2.sqlite3")
@@ -1605,7 +1620,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertIsNone(migrated_v2.snapshot()["execution_tombstones"][0]["cleanup_completed_at"])
         self.assertEqual(
             query_database(schema_v2_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
-            [("5",)],
+            [("6",)],
         )
 
     def test_orchestrator_auth_stores_only_digest(self):
@@ -1661,6 +1676,256 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
                     with self.assertRaisesRegex(EnrollmentConfigError, "history capacity"):
                         load_guest_enrollment_from_environment()
 
+    def test_guest_session_issue_authenticate_restart_loss_and_expiry(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = guest_session_issue_request(envelope["binding"])
+        first = issuer.issue_guest_session(runtime_identity, request)
+        credential = first["credential"]["opaque"]
+        self.assertEqual(first["credential"]["audience"], NATIVE_GUEST_CONTROL_AUDIENCE)
+        self.assertEqual(
+            issuer.authenticate_guest_session(
+                credential,
+                guest_session_authenticate_request(envelope["binding"]),
+            )["binding"],
+            envelope["binding"],
+        )
+        self.assertNotIn(credential, json.dumps(issuer.snapshot(), sort_keys=True))
+        issuer.close()
+        restarted = self.issuer()
+        self.assertEqual(
+            restarted.authenticate_guest_session(
+                credential,
+                guest_session_authenticate_request(envelope["binding"]),
+            )["credential_type"],
+            "nvt.guest-session-credential/v1",
+        )
+
+        successor = opaque_canary(0x6e)
+        restarted.rotate_runtime_identity(
+            runtime_identity,
+            runtime_rotate_request(envelope["binding"], successor),
+        )
+        restarted.authenticate_guest_session(
+            credential,
+            guest_session_authenticate_request(envelope["binding"]),
+        )
+        runtime_identity = successor
+
+        restarted.faults = GuestSessionResponseLostFailure()
+        with self.assertRaises(ConnectionAbortedError):
+            restarted.issue_guest_session(runtime_identity, request)
+        self.assertEqual(len(restarted.snapshot()["guest_session_credentials"]), 2)
+        self.assertFailure("capacity-exceeded", lambda: restarted.issue_guest_session(runtime_identity, request))
+
+        self.clock.value += MAX_GUEST_SESSION_CREDENTIAL_LIFETIME
+        restarted.maintain()
+        self.assertEqual(restarted.snapshot()["guest_session_credentials"], [])
+        restarted.faults = EnrollmentFaults()
+        replacement = restarted.issue_guest_session(runtime_identity, request)
+        self.assertNotEqual(replacement["credential"]["opaque"], credential)
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.authenticate_guest_session(
+                credential,
+                guest_session_authenticate_request(envelope["binding"]),
+            ),
+        )
+
+    def test_guest_session_concurrent_issue_is_bounded_and_exact(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = guest_session_issue_request(envelope["binding"])
+        barrier = threading.Barrier(9)
+
+        def issue_session():
+            barrier.wait()
+            try:
+                return issuer.issue_guest_session(runtime_identity, request)
+            except EnrollmentFailure as error:
+                return error.reason
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(issue_session) for _ in range(8)]
+            barrier.wait()
+            results = [future.result(timeout=3) for future in futures]
+        issued = [value for value in results if isinstance(value, dict)]
+        self.assertEqual(len(issued), MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING)
+        self.assertEqual(results.count("capacity-exceeded"), 8 - MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING)
+        self.assertEqual(len(issuer.snapshot()["guest_session_credentials"]), MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING)
+
+        credential = issued[0]["credential"]["opaque"]
+        wrong_binding = dict(envelope["binding"], guest_instance_id="wrong")
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.authenticate_guest_session(
+                credential,
+                guest_session_authenticate_request(wrong_binding),
+            ),
+        )
+        wrong_audience = guest_session_authenticate_request(envelope["binding"])
+        wrong_audience["audience"] = "caller-selected"
+        self.assertFailure(
+            "invalid-request",
+            lambda: issuer.authenticate_guest_session(credential, wrong_audience),
+        )
+
+    def test_guest_session_sequence_prevents_random_repeat_revival(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        issuer.random_bytes = lambda size: bytes([0x7c]) * size
+        request = guest_session_issue_request(envelope["binding"])
+        first = issuer.issue_guest_session(runtime_identity, request)["credential"]["opaque"]
+        self.clock.value += MAX_GUEST_SESSION_CREDENTIAL_LIFETIME
+        issuer.maintain()
+        second = issuer.issue_guest_session(runtime_identity, request)["credential"]["opaque"]
+        self.assertNotEqual(first, second)
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.authenticate_guest_session(
+                first,
+                guest_session_authenticate_request(envelope["binding"]),
+            ),
+        )
+        snapshot = issuer.snapshot()
+        self.assertEqual(snapshot["records"][0]["guest_session_issuance_sequence"], 2)
+        self.assertEqual(snapshot["guest_session_credentials"][0]["issuance_sequence"], 2)
+
+    def test_guest_session_revocation_cleanup_and_commit_boundaries(self):
+        before = self.issuer(faults=GuestSessionBeforeCommitFailure())
+        envelope = before.issue(issue_request())
+        runtime_identity = before.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = guest_session_issue_request(envelope["binding"])
+        self.assertFailure("issuer-storage-failed", lambda: before.issue_guest_session(runtime_identity, request))
+        self.assertEqual(before.snapshot()["guest_session_credentials"], [])
+        before.maintain()
+        before.faults = EnrollmentFaults()
+        session = before.issue_guest_session(runtime_identity, request)
+        credential = session["credential"]["opaque"]
+        before.close()
+
+        restarted = self.issuer()
+        self.assertNotIn(credential, json.dumps(restarted.snapshot(), sort_keys=True))
+        restarted.revoke_binding(revoke_binding_request(envelope["binding"]))
+        self.assertEqual(restarted.snapshot()["guest_session_credentials"], [])
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.authenticate_guest_session(
+                credential,
+                guest_session_authenticate_request(envelope["binding"]),
+            ),
+        )
+
+        unrelated = restarted.issue(issue_request(uid="other-uid", execution="other-execution", guest="other-guest"))
+        unrelated_identity = restarted.exchange(exchange_request(unrelated))["runtime_identity"]["opaque"]
+        unrelated_session = restarted.issue_guest_session(
+            unrelated_identity,
+            guest_session_issue_request(unrelated["binding"]),
+        )
+        restarted.revoke_execution(revoke_execution_request(unrelated["binding"]))
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.authenticate_guest_session(
+                unrelated_session["credential"]["opaque"],
+                guest_session_authenticate_request(unrelated["binding"]),
+            ),
+        )
+
+    def test_guest_session_semantic_corruption_fails_closed(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        session = issuer.issue_guest_session(runtime_identity, guest_session_issue_request(envelope["binding"]))
+        credential = session["credential"]["opaque"]
+        healthy = issuer.issue(issue_request(uid="healthy-session-uid", execution="healthy-session-execution", guest="healthy-session-guest"))
+        healthy_identity = issuer.exchange(exchange_request(healthy))["runtime_identity"]["opaque"]
+        healthy_session = issuer.issue_guest_session(healthy_identity, guest_session_issue_request(healthy["binding"]))
+        update_database(
+            self.database,
+            "UPDATE guest_session_credentials SET audience = 'wrong-audience'",
+            (),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.authenticate_guest_session(
+                credential,
+                guest_session_authenticate_request(envelope["binding"]),
+            ),
+        )
+        self.assertFalse(issuer.store_healthy)
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: issuer.authenticate_guest_session(
+                healthy_session["credential"]["opaque"],
+                guest_session_authenticate_request(healthy["binding"]),
+            ),
+        )
+        issuer.close()
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(self.database, EXCHANGE_URL, maintenance_interval=None)
+
+    def test_guest_session_clock_rollback_and_record_local_paths(self):
+        issuer = self.issuer()
+        sessions = []
+        for index in range(20):
+            envelope = issuer.issue(
+                issue_request(
+                    uid=f"indexed-{index}",
+                    execution=f"indexed-execution-{index}",
+                    guest=f"indexed-guest-{index}",
+                )
+            )
+            runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+            session = issuer.issue_guest_session(runtime_identity, guest_session_issue_request(envelope["binding"]))
+            sessions.append((envelope, runtime_identity, session["credential"]["opaque"]))
+
+        envelope, runtime_identity, credential = sessions[-1]
+        self.clock.value = START - timedelta(seconds=1)
+        rollback_session = issuer.issue_guest_session(
+            runtime_identity,
+            guest_session_issue_request(envelope["binding"]),
+        )
+        self.assertEqual(rollback_session["credential"]["issued_at"], format_timestamp(START))
+        self.assertTrue(issuer.ready())
+
+        with patch(
+            "broker.core.guest_enrollment._validate_persisted_guest_session",
+            wraps=_validate_persisted_guest_session,
+        ) as validator:
+            issuer.authenticate_guest_session(
+                credential,
+                guest_session_authenticate_request(envelope["binding"]),
+            )
+            self.assertLessEqual(validator.call_count, 2)
+            validator.reset_mock()
+            self.assertTrue(issuer.ready())
+            issuer.maintain()
+            self.assertEqual(validator.call_count, 0)
+
+    def test_schema_v5_migration_adds_guest_session_store(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        issuer.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute("DROP TABLE guest_session_credentials")
+            connection.execute("UPDATE enrollment_meta SET value = '5' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = self.issuer()
+        session = migrated.issue_guest_session(
+            runtime_identity,
+            guest_session_issue_request(envelope["binding"]),
+        )
+        self.assertEqual(len(migrated.snapshot()["guest_session_credentials"]), 1)
+        self.assertNotIn(session["credential"]["opaque"], json.dumps(migrated.snapshot(), sort_keys=True))
+
     def assertFailure(self, reason, operation):
         with self.assertRaises(EnrollmentFailure) as caught:
             operation()
@@ -1696,6 +1961,18 @@ def runtime_rotate_request(value, successor):
         "binding": dict(value),
         "successor": successor,
     }
+
+
+def guest_session_issue_request(value):
+    return {
+        "contract_version": GUEST_SESSION_IDENTITY_VERSION,
+        "binding": dict(value),
+        "audience": NATIVE_GUEST_CONTROL_AUDIENCE,
+    }
+
+
+def guest_session_authenticate_request(value):
+    return guest_session_issue_request(value)
 
 
 def opaque_canary(value):

@@ -18,13 +18,19 @@ from urllib.parse import urlsplit
 VERSION = "nvt.guest-enrollment/v1"
 RUNTIME_IDENTITY_TYPE = "nvt.runtime-identity/v1"
 RUNTIME_IDENTITY_VERSION = "nvt.guest-runtime-identity/v1"
-STORE_SCHEMA_VERSION = "5"
+GUEST_SESSION_IDENTITY_VERSION = "nvt.guest-session-identity/v1"
+GUEST_SESSION_CREDENTIAL_TYPE = "nvt.guest-session-credential/v1"
+NATIVE_GUEST_CONTROL_AUDIENCE = "nvt.native-guest-control/v1"
+STORE_SCHEMA_VERSION = "6"
 TOKEN_BYTES = 32
+GUEST_SESSION_CREDENTIAL_BYTES = 40
 MAX_ISSUE_REQUEST_BYTES = 4 << 10
 MAX_EXCHANGE_REQUEST_BYTES = 16 << 10
 MAX_REVOCATION_REQUEST_BYTES = 4 << 10
 MAX_RUNTIME_IDENTITY_STATUS_REQUEST_BYTES = 4 << 10
 MAX_RUNTIME_IDENTITY_ROTATE_REQUEST_BYTES = 16 << 10
+MAX_GUEST_SESSION_ISSUE_REQUEST_BYTES = 8 << 10
+MAX_GUEST_SESSION_AUTH_REQUEST_BYTES = 4 << 10
 MAX_AGENT_RUN_UID_BYTES = 128
 MAX_EXECUTION_ID_BYTES = 256
 MAX_DRIVER_NAME_BYTES = 63
@@ -32,6 +38,8 @@ MAX_GUEST_INSTANCE_ID_BYTES = 256
 MAX_EXCHANGE_URL_BYTES = 2048
 MAX_ENROLLMENT_TTL_SECONDS = 900
 MAX_RUNTIME_IDENTITY_LIFETIME = timedelta(hours=24)
+MAX_GUEST_SESSION_CREDENTIAL_LIFETIME = timedelta(minutes=5)
+MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING = 2
 MAX_DURABLE_ENTRIES = 10_000
 TOMBSTONE_RETENTION = timedelta(hours=24)
 MAX_CONCURRENT_EXCHANGES = 32
@@ -41,6 +49,10 @@ MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS = 32
 MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS_PER_IDENTITY = 4
 RUNTIME_IDENTITY_RATE_PER_SECOND = 8.0
 RUNTIME_IDENTITY_RATE_BURST = 16.0
+MAX_CONCURRENT_GUEST_SESSION_REQUESTS = 32
+MAX_CONCURRENT_GUEST_SESSION_REQUESTS_PER_CREDENTIAL = 4
+GUEST_SESSION_RATE_PER_SECOND = 8.0
+GUEST_SESSION_RATE_BURST = 16.0
 MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT = 20_000
 DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY = 2_000_000
 MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY = 10_000_000
@@ -54,6 +66,8 @@ REVOKE_EXECUTION_PATH = "/v1/guest-enrollment/revoke-execution"
 COMPLETE_EXECUTION_CLEANUP_PATH = "/v1/guest-enrollment/complete-execution-cleanup"
 RUNTIME_IDENTITY_STATUS_PATH = "/v1/guest-runtime-identity/status"
 RUNTIME_IDENTITY_ROTATE_PATH = "/v1/guest-runtime-identity/rotate"
+GUEST_SESSION_IDENTITY_ISSUE_PATH = "/v1/guest-session-identity/issue"
+GUEST_SESSION_IDENTITY_AUTHENTICATE_PATH = "/v1/guest-session-identity/authenticate"
 ENDPOINT_LIMITS = {
     ISSUE_PATH: MAX_ISSUE_REQUEST_BYTES,
     EXCHANGE_PATH: MAX_EXCHANGE_REQUEST_BYTES,
@@ -62,10 +76,13 @@ ENDPOINT_LIMITS = {
     COMPLETE_EXECUTION_CLEANUP_PATH: MAX_REVOCATION_REQUEST_BYTES,
     RUNTIME_IDENTITY_STATUS_PATH: MAX_RUNTIME_IDENTITY_STATUS_REQUEST_BYTES,
     RUNTIME_IDENTITY_ROTATE_PATH: MAX_RUNTIME_IDENTITY_ROTATE_REQUEST_BYTES,
+    GUEST_SESSION_IDENTITY_ISSUE_PATH: MAX_GUEST_SESSION_ISSUE_REQUEST_BYTES,
+    GUEST_SESSION_IDENTITY_AUTHENTICATE_PATH: MAX_GUEST_SESSION_AUTH_REQUEST_BYTES,
 }
 
 DRIVER_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+GUEST_SESSION_CREDENTIAL_RE = re.compile(r"^[A-Za-z0-9_-]{54}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ORCHESTRATOR_TOKEN_RE = re.compile(rb"^[A-Za-z0-9._~-]{32,4096}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -95,6 +112,12 @@ class EnrollmentFaults:
         return None
 
     def after_rotation_commit(self):
+        return None
+
+    def before_guest_session_commit(self):
+        return None
+
+    def after_guest_session_commit(self):
         return None
 
 
@@ -133,6 +156,25 @@ class RuntimeIdentityAdmission:
         self._state = state
         self.token_digest = token_digest
         self.identity_digest = identity_digest
+        self._released = False
+        self._release_lock = threading.Lock()
+
+    def release(self):
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        self._state.slots.release()
+
+
+class GuestSessionAdmission:
+    """Internal digest-only handle held across one bounded HTTP operation."""
+
+    def __init__(self, issuer, state, token_digest, credential_digest):
+        self._issuer = issuer
+        self._state = state
+        self.token_digest = token_digest
+        self.credential_digest = credential_digest
         self._released = False
         self._release_lock = threading.Lock()
 
@@ -222,6 +264,10 @@ class GuestEnrollmentIssuer:
         self.max_runtime_identity_history_entries = max_runtime_identity_history_entries
         self.runtime_identity_admissions = {}
         self.runtime_identity_admissions_lock = threading.Lock()
+        self.guest_session_issue_slots = threading.BoundedSemaphore(MAX_CONCURRENT_GUEST_SESSION_REQUESTS)
+        self.guest_session_auth_slots = threading.BoundedSemaphore(MAX_CONCURRENT_GUEST_SESSION_REQUESTS)
+        self.guest_session_admissions = {}
+        self.guest_session_admissions_lock = threading.Lock()
         self.store_health_lock = threading.Lock()
         self.store_healthy = False
         self.stop_event = threading.Event()
@@ -584,6 +630,7 @@ class GuestEnrollmentIssuer:
         now = self._now()
         connection = self._runtime_connect_or_failure()
         committed = False
+        expired_session_digests = []
         try:
             connection.execute("BEGIN IMMEDIATE")
             self._require_store_healthy()
@@ -603,6 +650,11 @@ class GuestEnrollmentIssuer:
                 raise EnrollmentFailure("invalid-request", 400)
             if connection.execute(
                 "SELECT 1 FROM runtime_identity_history WHERE runtime_identity_digest = ?",
+                (successor_digest,),
+            ).fetchone() is not None:
+                raise EnrollmentFailure("invalid-request", 400)
+            if connection.execute(
+                "SELECT 1 FROM guest_session_credentials WHERE credential_digest = ?",
                 (successor_digest,),
             ).fetchone() is not None:
                 raise EnrollmentFailure("invalid-request", 400)
@@ -699,11 +751,277 @@ class GuestEnrollmentIssuer:
             raise EnrollmentFailure("unauthorized", 401)
         return admission, False
 
+    def issue_guest_session(self, runtime_identity, request, admission=None):
+        binding = validate_guest_session_issue_request(request)
+        identity_digest = _runtime_identity_digest(runtime_identity)
+        admission, owned_admission = self._runtime_identity_admission(
+            runtime_identity,
+            identity_digest,
+            admission,
+        )
+        if not self.guest_session_issue_slots.acquire(blocking=False):
+            if owned_admission:
+                admission.release()
+            raise EnrollmentFailure("capacity-exceeded", 429)
+        try:
+            self._require_store_healthy()
+            now = self._now()
+            connection = self._runtime_connect_or_failure()
+            try:
+                live = connection.execute(
+                    "SELECT COUNT(*) FROM guest_session_credentials WHERE token_digest = ? AND expires_at > ?",
+                    (admission.token_digest, format_timestamp(now)),
+                ).fetchone()[0]
+            except sqlite3.Error as error:
+                self._raise_runtime_storage_failure(error)
+            finally:
+                connection.close()
+            if live >= MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING:
+                raise EnrollmentFailure("capacity-exceeded", 429)
+            try:
+                credential_random = self.random_bytes(TOKEN_BYTES)
+                if not isinstance(credential_random, bytes) or len(credential_random) != TOKEN_BYTES:
+                    raise ValueError
+            except Exception as error:
+                raise EnrollmentFailure("identity-issuance-failed", 503) from error
+            return self._issue_guest_session_locked(
+                binding,
+                identity_digest,
+                admission.token_digest,
+                credential_random,
+                now,
+            )
+        finally:
+            self.guest_session_issue_slots.release()
+            if owned_admission:
+                admission.release()
+
+    def _issue_guest_session_locked(self, binding, identity_digest, token_digest, credential_random, now):
+        connection = self._runtime_connect_or_failure()
+        committed = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_store_healthy()
+            enrollment = connection.execute(
+                "SELECT * FROM enrollments WHERE token_digest = ? AND runtime_identity_digest = ?",
+                (token_digest, identity_digest),
+            ).fetchone()
+            self._authenticated_runtime_identity_record(connection, enrollment, binding, now)
+            previous_sequence = enrollment["guest_session_issuance_sequence"]
+            if not isinstance(previous_sequence, int) or isinstance(previous_sequence, bool) or previous_sequence < 0 or previous_sequence >= (1 << 63) - 1:
+                raise EnrollmentFailure("capacity-exceeded", 429)
+            issuance_sequence = previous_sequence + 1
+            credential = _encode_guest_session_credential(issuance_sequence, credential_random)
+            credential_digest = _guest_session_credential_digest(credential)
+            expired_session_digests = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT credential_digest FROM guest_session_credentials WHERE token_digest = ? AND expires_at <= ?",
+                    (token_digest, format_timestamp(now)),
+                ).fetchall()
+            ]
+            connection.execute(
+                "DELETE FROM guest_session_credentials WHERE token_digest = ? AND expires_at <= ?",
+                (token_digest, format_timestamp(now)),
+            )
+            live = connection.execute(
+                "SELECT COUNT(*) FROM guest_session_credentials WHERE token_digest = ?",
+                (token_digest,),
+            ).fetchone()[0]
+            if live >= MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING:
+                raise EnrollmentFailure("capacity-exceeded", 429)
+            if connection.execute(
+                "SELECT 1 FROM guest_session_credentials WHERE credential_digest = ?",
+                (credential_digest,),
+            ).fetchone() is not None:
+                raise EnrollmentFailure("identity-issuance-failed", 503)
+            if connection.execute(
+                "SELECT 1 FROM enrollments WHERE runtime_identity_digest = ?",
+                (credential_digest,),
+            ).fetchone() is not None or connection.execute(
+                "SELECT 1 FROM runtime_identity_history WHERE runtime_identity_digest = ?",
+                (credential_digest,),
+            ).fetchone() is not None:
+                raise EnrollmentFailure("identity-issuance-failed", 503)
+            runtime_expires_at = parse_timestamp(enrollment["runtime_identity_expires_at"])
+            runtime_issued_at = parse_timestamp(enrollment["runtime_identity_issued_at"])
+            issued = max(now, runtime_issued_at)
+            expires = min(issued + MAX_GUEST_SESSION_CREDENTIAL_LIFETIME, runtime_expires_at)
+            if not issued < expires:
+                raise EnrollmentFailure("unauthorized", 401)
+            issued_at = format_timestamp(issued)
+            expires_at = format_timestamp(expires)
+            connection.execute(
+                """
+                INSERT INTO guest_session_credentials (
+                    credential_digest, token_digest, issuance_sequence,
+                    audience, issued_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    credential_digest,
+                    token_digest,
+                    issuance_sequence,
+                    NATIVE_GUEST_CONTROL_AUDIENCE,
+                    issued_at,
+                    expires_at,
+                ),
+            )
+            updated = connection.execute(
+                """
+                UPDATE enrollments
+                   SET guest_session_issuance_sequence = ?
+                 WHERE token_digest = ? AND guest_session_issuance_sequence = ?
+                """,
+                (issuance_sequence, token_digest, previous_sequence),
+            ).rowcount
+            if updated != 1:
+                raise EnrollmentFailure("issuer-storage-failed", 503)
+            try:
+                self.faults.before_guest_session_commit()
+            except Exception as error:
+                self._raise_runtime_storage_failure(error)
+            connection.commit()
+            committed = True
+            self._discard_guest_session_admissions(expired_session_digests)
+            self.faults.after_guest_session_commit()
+            return _guest_session_issue_result(binding, credential, issued_at, expires_at)
+        except EnrollmentFailure:
+            if not committed:
+                _rollback(connection)
+            raise
+        except sqlite3.Error as error:
+            if not committed:
+                _rollback(connection)
+            self._raise_runtime_storage_failure(error)
+        finally:
+            connection.close()
+
+    def admit_guest_session_identity(self, credential):
+        self._require_store_healthy()
+        credential_digest = _guest_session_credential_digest(credential)
+        connection = self._runtime_connect_or_failure()
+        try:
+            row = connection.execute(
+                """
+                SELECT session.credential_digest, session.token_digest,
+                       session.issuance_sequence, session.audience,
+                       session.issued_at, session.expires_at,
+                       enrollment.agent_run_uid, enrollment.execution_id,
+                       enrollment.driver_registration, enrollment.desired_generation,
+                       enrollment.guest_instance_id, enrollment.state,
+                       enrollment.issued_at AS enrollment_issued_at,
+                       enrollment.guest_session_issuance_sequence
+                  FROM guest_session_credentials AS session
+                  JOIN enrollments AS enrollment ON enrollment.token_digest = session.token_digest
+                 WHERE session.credential_digest = ?
+                """,
+                (credential_digest,),
+            ).fetchone()
+            self._validate_guest_session_role_separation(connection, credential_digest)
+            _authenticated_guest_session_record(row, None, self._now())
+            token_digest = row["token_digest"]
+            with self.guest_session_admissions_lock:
+                state = self.guest_session_admissions.get(credential_digest)
+                if state is None:
+                    state = _RuntimeIdentityAdmissionState(
+                        GUEST_SESSION_RATE_PER_SECOND,
+                        GUEST_SESSION_RATE_BURST,
+                        MAX_CONCURRENT_GUEST_SESSION_REQUESTS_PER_CREDENTIAL,
+                    )
+                    self.guest_session_admissions[credential_digest] = state
+                if connection.execute(
+                    "SELECT 1 FROM guest_session_credentials WHERE credential_digest = ?",
+                    (credential_digest,),
+                ).fetchone() is None:
+                    self.guest_session_admissions.pop(credential_digest, None)
+                    raise EnrollmentFailure("unauthorized", 401)
+        except EnrollmentFailure:
+            raise
+        except sqlite3.Error as error:
+            self._raise_runtime_storage_failure(error)
+        finally:
+            connection.close()
+        if not state.rate.allow() or not state.slots.acquire(blocking=False):
+            raise EnrollmentFailure("capacity-exceeded", 429)
+        return GuestSessionAdmission(self, state, token_digest, credential_digest)
+
+    def authenticate_guest_session(self, credential, request, admission=None):
+        binding = validate_guest_session_authenticate_request(request)
+        credential_digest = _guest_session_credential_digest(credential)
+        admission, owned_admission = self._guest_session_admission(
+            credential,
+            credential_digest,
+            admission,
+        )
+        if not self.guest_session_auth_slots.acquire(blocking=False):
+            if owned_admission:
+                admission.release()
+            raise EnrollmentFailure("capacity-exceeded", 429)
+        try:
+            self._require_store_healthy()
+            connection = self._runtime_connect_or_failure()
+            try:
+                connection.execute("BEGIN")
+                row = connection.execute(
+                    """
+                    SELECT session.credential_digest, session.token_digest,
+                           session.issuance_sequence, session.audience,
+                           session.issued_at, session.expires_at,
+                           enrollment.agent_run_uid, enrollment.execution_id,
+                           enrollment.driver_registration, enrollment.desired_generation,
+                           enrollment.guest_instance_id, enrollment.state,
+                           enrollment.issued_at AS enrollment_issued_at,
+                           enrollment.guest_session_issuance_sequence
+                      FROM guest_session_credentials AS session
+                      JOIN enrollments AS enrollment ON enrollment.token_digest = session.token_digest
+                     WHERE session.credential_digest = ?
+                    """,
+                    (credential_digest,),
+                ).fetchone()
+                self._validate_guest_session_role_separation(connection, credential_digest)
+                return _authenticated_guest_session_record(row, binding, self._now())
+            except EnrollmentFailure:
+                _rollback(connection)
+                raise
+            except sqlite3.Error as error:
+                _rollback(connection)
+                self._raise_runtime_storage_failure(error)
+            finally:
+                connection.close()
+        finally:
+            self.guest_session_auth_slots.release()
+            if owned_admission:
+                admission.release()
+
+    def _guest_session_admission(self, credential, credential_digest, admission):
+        if admission is None:
+            return self.admit_guest_session_identity(credential), True
+        if (
+            not isinstance(admission, GuestSessionAdmission)
+            or admission._issuer is not self
+            or admission._released
+            or not hmac.compare_digest(admission.credential_digest, credential_digest)
+        ):
+            raise EnrollmentFailure("unauthorized", 401)
+        return admission, False
+
+    def _validate_guest_session_role_separation(self, connection, credential_digest):
+        if connection.execute(
+            "SELECT 1 FROM enrollments WHERE runtime_identity_digest = ?",
+            (credential_digest,),
+        ).fetchone() is not None or connection.execute(
+            "SELECT 1 FROM runtime_identity_history WHERE runtime_identity_digest = ?",
+            (credential_digest,),
+        ).fetchone() is not None:
+            raise sqlite3.DatabaseError("guest session credential conflicts with a runtime identity")
+
     def revoke_binding(self, request):
         binding = validate_revoke_binding_request(request)
         now = self._now()
         connection = self._connect_or_failure()
         removed_tokens = []
+        removed_sessions = []
         try:
             connection.execute("BEGIN IMMEDIATE")
             self._validate_store_health(connection)
@@ -725,6 +1043,7 @@ class GuestEnrollmentIssuer:
                     (*_binding_values(binding), format_timestamp(now), format_timestamp(now + TOMBSTONE_RETENTION)),
                 )
             removed_tokens = self._binding_token_digests(connection, binding)
+            removed_sessions = self._guest_session_digests(connection, removed_tokens)
             self._release_runtime_identity_history_reservations(connection, removed_tokens)
             self._delete_runtime_identity_history(connection, removed_tokens)
             connection.execute(
@@ -737,6 +1056,7 @@ class GuestEnrollmentIssuer:
             )
             connection.commit()
             self._discard_runtime_identity_admissions(removed_tokens)
+            self._discard_guest_session_admissions(removed_sessions)
         except EnrollmentFailure:
             _rollback(connection)
             raise
@@ -751,6 +1071,7 @@ class GuestEnrollmentIssuer:
         now = self._now()
         connection = self._connect_or_failure()
         removed_tokens = []
+        removed_sessions = []
         try:
             connection.execute("BEGIN IMMEDIATE")
             self._validate_store_health(connection)
@@ -795,6 +1116,7 @@ class GuestEnrollmentIssuer:
                 scope_values,
             )
             removed_tokens = self._scope_token_digests(connection, scope)
+            removed_sessions = self._guest_session_digests(connection, removed_tokens)
             self._release_runtime_identity_history_reservations(connection, removed_tokens)
             self._delete_runtime_identity_history(connection, removed_tokens)
             connection.execute(
@@ -806,6 +1128,7 @@ class GuestEnrollmentIssuer:
             )
             connection.commit()
             self._discard_runtime_identity_admissions(removed_tokens)
+            self._discard_guest_session_admissions(removed_sessions)
         except EnrollmentFailure:
             _rollback(connection)
             raise
@@ -873,8 +1196,20 @@ class GuestEnrollmentIssuer:
                 """,
                 (format_timestamp(now),),
             )
+            expired_sessions = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT credential_digest FROM guest_session_credentials WHERE expires_at <= ?",
+                    (format_timestamp(now),),
+                ).fetchall()
+            ]
+            connection.execute(
+                "DELETE FROM guest_session_credentials WHERE expires_at <= ?",
+                (format_timestamp(now),),
+            )
             self._collect_completed(connection, now)
             connection.commit()
+            self._discard_guest_session_admissions(expired_sessions)
         except sqlite3.Error as error:
             _rollback(connection)
             self._set_store_health(False)
@@ -901,11 +1236,18 @@ class GuestEnrollmentIssuer:
                     "SELECT * FROM runtime_identity_history ORDER BY token_digest, retired_at, runtime_identity_digest"
                 )
             ]
+            sessions = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM guest_session_credentials ORDER BY token_digest, issued_at, credential_digest"
+                )
+            ]
             bindings = [dict(row) for row in connection.execute("SELECT * FROM binding_tombstones ORDER BY agent_run_uid, execution_id")]
             executions = [dict(row) for row in connection.execute("SELECT * FROM execution_tombstones ORDER BY agent_run_uid, execution_id")]
             return {
                 "records": records,
                 "runtime_identity_history": history,
+                "guest_session_credentials": sessions,
                 "binding_tombstones": bindings,
                 "execution_tombstones": executions,
             }
@@ -952,6 +1294,8 @@ class GuestEnrollmentIssuer:
                         CHECK (runtime_identity_history_count >= 0),
                     runtime_identity_history_capacity INTEGER NOT NULL DEFAULT 0
                         CHECK (runtime_identity_history_capacity >= 0),
+                    guest_session_issuance_sequence INTEGER NOT NULL DEFAULT 0
+                        CHECK (guest_session_issuance_sequence >= 0),
                     CHECK (runtime_identity_history_count <= runtime_identity_history_capacity),
                     CHECK (
                         (state = 'consumed' AND runtime_identity_digest IS NOT NULL
@@ -972,6 +1316,19 @@ class GuestEnrollmentIssuer:
                 ) WITHOUT ROWID;
                 CREATE INDEX IF NOT EXISTS runtime_identity_history_enrollment
                     ON runtime_identity_history (token_digest);
+                CREATE TABLE IF NOT EXISTS guest_session_credentials (
+                    credential_digest TEXT PRIMARY KEY,
+                    token_digest TEXT NOT NULL REFERENCES enrollments(token_digest) ON DELETE CASCADE,
+                    issuance_sequence INTEGER NOT NULL CHECK (issuance_sequence > 0),
+                    audience TEXT NOT NULL,
+                    issued_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    UNIQUE (token_digest, issuance_sequence)
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS guest_session_credentials_enrollment
+                    ON guest_session_credentials (token_digest);
+                CREATE INDEX IF NOT EXISTS guest_session_credentials_expiry
+                    ON guest_session_credentials (expires_at);
                 CREATE TABLE IF NOT EXISTS binding_tombstones (
                     agent_run_uid TEXT NOT NULL,
                     execution_id TEXT NOT NULL,
@@ -1003,7 +1360,7 @@ class GuestEnrollmentIssuer:
                         ("runtime_identity_history_reserved", "0"),
                     ),
                 )
-            elif row[0] in ("1", "2", "3", "4"):
+            elif row[0] in ("1", "2", "3", "4", "5"):
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     if row[0] == "1":
@@ -1012,7 +1369,9 @@ class GuestEnrollmentIssuer:
                         self._migrate_schema_v2(connection)
                     if row[0] in ("1", "2", "3"):
                         self._migrate_schema_v3(connection)
-                    self._migrate_schema_v4(connection)
+                    if row[0] in ("1", "2", "3", "4"):
+                        self._migrate_schema_v4(connection)
+                    self._migrate_schema_v5(connection)
                     connection.execute(
                         "UPDATE enrollment_meta SET value = ? WHERE key = 'schema_version'",
                         (STORE_SCHEMA_VERSION,),
@@ -1136,6 +1495,13 @@ class GuestEnrollmentIssuer:
             "INSERT OR REPLACE INTO enrollment_meta (key, value) VALUES ('runtime_identity_history_reserved', ?)",
             (str(reserved),),
         )
+
+    def _migrate_schema_v5(self, connection):
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(enrollments)")}
+        if "guest_session_issuance_sequence" not in columns:
+            connection.execute(
+                "ALTER TABLE enrollments ADD COLUMN guest_session_issuance_sequence INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _configure_runtime_identity_history_capacity(self, connection):
         capacity, reserved = self._runtime_identity_history_capacity(connection, require_configured=False)
@@ -1278,7 +1644,8 @@ class GuestEnrollmentIssuer:
                        state, terminal_at, runtime_identity_digest,
                        runtime_identity_issued_at, runtime_identity_expires_at,
                        runtime_identity_active, runtime_identity_history_complete,
-                       runtime_identity_history_count, runtime_identity_history_capacity
+                       runtime_identity_history_count, runtime_identity_history_capacity,
+                       guest_session_issuance_sequence
                   FROM enrollments
             """
         )
@@ -1309,6 +1676,43 @@ class GuestEnrollmentIssuer:
         for token_digest, (expected_count, lifecycle_capacity) in enrollment_history.items():
             if actual_history[token_digest] != expected_count or expected_count > lifecycle_capacity:
                 raise sqlite3.DatabaseError("guest enrollment runtime identity history count is invalid")
+
+        session_counts = {}
+        session_rows = connection.execute(
+            """
+            SELECT session.credential_digest, session.token_digest,
+                   session.issuance_sequence, session.audience,
+                   session.issued_at, session.expires_at,
+                   enrollment.agent_run_uid, enrollment.execution_id,
+                   enrollment.driver_registration, enrollment.desired_generation,
+                   enrollment.guest_instance_id, enrollment.state,
+                   enrollment.issued_at AS enrollment_issued_at,
+                   enrollment.guest_session_issuance_sequence
+              FROM guest_session_credentials AS session
+              LEFT JOIN enrollments AS enrollment ON enrollment.token_digest = session.token_digest
+            """
+        )
+        for row in session_rows:
+            _validate_persisted_guest_session(row)
+            session_counts[row["token_digest"]] = session_counts.get(row["token_digest"], 0) + 1
+            if session_counts[row["token_digest"]] > MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING:
+                raise sqlite3.DatabaseError("guest session credential count exceeds its binding bound")
+        if sum(session_counts.values()) > self.max_entries * MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING:
+            raise sqlite3.DatabaseError("guest session credential store exceeds its durable bound")
+        session_identity_conflict = connection.execute(
+            """
+            SELECT 1
+              FROM guest_session_credentials AS session
+              LEFT JOIN enrollments AS enrollment
+                ON enrollment.runtime_identity_digest = session.credential_digest
+              LEFT JOIN runtime_identity_history AS history
+                ON history.runtime_identity_digest = session.credential_digest
+             WHERE enrollment.token_digest IS NOT NULL OR history.token_digest IS NOT NULL
+             LIMIT 1
+            """
+        ).fetchone()
+        if session_identity_conflict is not None:
+            raise sqlite3.DatabaseError("guest session credential conflicts with a runtime identity")
 
         binding_tombstones = connection.execute(
             """
@@ -1463,12 +1867,33 @@ class GuestEnrollmentIssuer:
                 chunk,
             )
 
+    def _guest_session_digests(self, connection, token_digests):
+        output = []
+        for offset in range(0, len(token_digests), 500):
+            chunk = token_digests[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            output.extend(
+                row[0]
+                for row in connection.execute(
+                    f"SELECT credential_digest FROM guest_session_credentials WHERE token_digest IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            )
+        return output
+
     def _discard_runtime_identity_admissions(self, token_digests):
         if not token_digests:
             return
         with self.runtime_identity_admissions_lock:
             for token_digest in token_digests:
                 self.runtime_identity_admissions.pop(token_digest, None)
+
+    def _discard_guest_session_admissions(self, credential_digests):
+        if not credential_digests:
+            return
+        with self.guest_session_admissions_lock:
+            for credential_digest in credential_digests:
+                self.guest_session_admissions.pop(credential_digest, None)
 
     def _binding_tombstoned(self, connection, binding):
         return connection.execute(
@@ -1565,12 +1990,28 @@ def decode_runtime_identity_rotate_request(data):
     return strict_decode(data, MAX_RUNTIME_IDENTITY_ROTATE_REQUEST_BYTES)
 
 
+def decode_guest_session_issue_request(data):
+    return strict_decode(data, MAX_GUEST_SESSION_ISSUE_REQUEST_BYTES)
+
+
+def decode_guest_session_authenticate_request(data):
+    return strict_decode(data, MAX_GUEST_SESSION_AUTH_REQUEST_BYTES)
+
+
 def runtime_identity_from_authorization(authorization):
     if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
         raise EnrollmentFailure("unauthorized", 401)
     identity = authorization.removeprefix("Bearer ")
     _runtime_identity_digest(identity)
     return identity
+
+
+def guest_session_credential_from_authorization(authorization):
+    if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        raise EnrollmentFailure("unauthorized", 401)
+    credential = authorization.removeprefix("Bearer ")
+    _guest_session_credential_digest(credential)
+    return credential
 
 
 def validate_issue_request(value):
@@ -1632,6 +2073,24 @@ def validate_runtime_identity_rotate_request(value):
     if not isinstance(successor, str) or not TOKEN_RE.fullmatch(successor) or not _canonical_opaque(successor, TOKEN_BYTES, TOKEN_BYTES):
         _invalid()
     return binding, successor
+
+
+def validate_guest_session_issue_request(value):
+    _exact_keys(value, {"contract_version", "binding", "audience"})
+    if value["contract_version"] != GUEST_SESSION_IDENTITY_VERSION:
+        _invalid()
+    if value["audience"] != NATIVE_GUEST_CONTROL_AUDIENCE:
+        _invalid()
+    return validate_binding(value["binding"])
+
+
+def validate_guest_session_authenticate_request(value):
+    _exact_keys(value, {"contract_version", "binding", "audience"})
+    if value["contract_version"] != GUEST_SESSION_IDENTITY_VERSION:
+        _invalid()
+    if value["audience"] != NATIVE_GUEST_CONTROL_AUDIENCE:
+        _invalid()
+    return validate_binding(value["binding"])
 
 
 def validate_binding(value):
@@ -1736,6 +2195,7 @@ def _validate_persisted_enrollment(row):
         history_complete = row["runtime_identity_history_complete"]
         history_count = row["runtime_identity_history_count"]
         history_capacity = row["runtime_identity_history_capacity"]
+        session_sequence = row["guest_session_issuance_sequence"]
         if identity_active not in (0, 1):
             raise ValueError
         if history_complete not in (0, 1):
@@ -1749,6 +2209,10 @@ def _validate_persisted_enrollment(row):
             or history_capacity < 0
             or history_count > history_capacity
             or history_capacity > MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT
+            or not isinstance(session_sequence, int)
+            or isinstance(session_sequence, bool)
+            or session_sequence < 0
+            or session_sequence > (1 << 63) - 1
             or (history_complete == 0 and (history_count != 0 or history_capacity != 0))
         ):
             raise ValueError
@@ -1776,6 +2240,8 @@ def _validate_persisted_enrollment(row):
             return
 
         if any(value is not None for value in (identity_digest, identity_issued_value, identity_expires_value)) or identity_active != 0:
+            raise ValueError
+        if session_sequence != 0:
             raise ValueError
         if state == "issued":
             if terminal_at is not None or history_complete != 1 or history_count != 0 or history_capacity == 0:
@@ -1807,6 +2273,39 @@ def _validate_persisted_runtime_identity_history(row):
             raise ValueError
     except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
         raise sqlite3.DatabaseError("guest enrollment database contains invalid runtime identity history") from error
+
+
+def _validate_persisted_guest_session(row):
+    try:
+        if not isinstance(row["credential_digest"], str) or not DIGEST_RE.fullmatch(row["credential_digest"]):
+            raise ValueError
+        if not isinstance(row["token_digest"], str) or not DIGEST_RE.fullmatch(row["token_digest"]):
+            raise ValueError
+        issuance_sequence = row["issuance_sequence"]
+        lifecycle_sequence = row["guest_session_issuance_sequence"]
+        if (
+            not isinstance(issuance_sequence, int)
+            or isinstance(issuance_sequence, bool)
+            or issuance_sequence < 1
+            or not isinstance(lifecycle_sequence, int)
+            or isinstance(lifecycle_sequence, bool)
+            or issuance_sequence > lifecycle_sequence
+        ):
+            raise ValueError
+        if row["audience"] != NATIVE_GUEST_CONTROL_AUDIENCE or row["state"] != "consumed":
+            raise ValueError
+        validate_binding(_row_binding(row))
+        issued_at = parse_timestamp(row["issued_at"])
+        expires_at = parse_timestamp(row["expires_at"])
+        enrollment_issued_at = parse_timestamp(row["enrollment_issued_at"])
+        if (
+            issued_at < enrollment_issued_at
+            or not issued_at < expires_at
+            or expires_at - issued_at > MAX_GUEST_SESSION_CREDENTIAL_LIFETIME
+        ):
+            raise ValueError
+    except (EnrollmentFailure, KeyError, TypeError, ValueError) as error:
+        raise sqlite3.DatabaseError("guest enrollment database contains an invalid guest session credential") from error
 
 
 def _validate_persisted_binding_tombstone(row):
@@ -1912,11 +2411,75 @@ def _runtime_identity_digest(value):
     return _digest(value)
 
 
+def _guest_session_credential_digest(value):
+    if (
+        not isinstance(value, str)
+        or not GUEST_SESSION_CREDENTIAL_RE.fullmatch(value)
+        or not _canonical_opaque(value, GUEST_SESSION_CREDENTIAL_BYTES, GUEST_SESSION_CREDENTIAL_BYTES)
+    ):
+        raise EnrollmentFailure("unauthorized", 401)
+    return _digest(value)
+
+
+def _encode_guest_session_credential(issuance_sequence, random_value):
+    if (
+        not isinstance(issuance_sequence, int)
+        or isinstance(issuance_sequence, bool)
+        or issuance_sequence < 1
+        or issuance_sequence > (1 << 63) - 1
+        or not isinstance(random_value, bytes)
+        or len(random_value) != TOKEN_BYTES
+    ):
+        raise EnrollmentFailure("identity-issuance-failed", 503)
+    value = issuance_sequence.to_bytes(8, "big") + random_value
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
 def _runtime_identity_status(binding, issued_at, expires_at):
     return {
         "contract_version": RUNTIME_IDENTITY_VERSION,
         "identity_type": RUNTIME_IDENTITY_TYPE,
         "binding": binding,
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+    }
+
+
+def _authenticated_guest_session_record(row, binding, now):
+    if row is None:
+        raise EnrollmentFailure("unauthorized", 401)
+    _validate_persisted_guest_session(row)
+    if (
+        (binding is not None and _row_binding(row) != binding)
+        or row["audience"] != NATIVE_GUEST_CONTROL_AUDIENCE
+        or now >= parse_timestamp(row["expires_at"])
+    ):
+        raise EnrollmentFailure("unauthorized", 401)
+    if binding is None:
+        return None
+    return _guest_session_status(binding, row["issued_at"], row["expires_at"])
+
+
+def _guest_session_issue_result(binding, credential, issued_at, expires_at):
+    return {
+        "contract_version": GUEST_SESSION_IDENTITY_VERSION,
+        "binding": binding,
+        "credential": {
+            "type": GUEST_SESSION_CREDENTIAL_TYPE,
+            "opaque": credential,
+            "audience": NATIVE_GUEST_CONTROL_AUDIENCE,
+            "issued_at": issued_at,
+            "expires_at": expires_at,
+        },
+    }
+
+
+def _guest_session_status(binding, issued_at, expires_at):
+    return {
+        "contract_version": GUEST_SESSION_IDENTITY_VERSION,
+        "credential_type": GUEST_SESSION_CREDENTIAL_TYPE,
+        "binding": binding,
+        "audience": NATIVE_GUEST_CONTROL_AUDIENCE,
         "issued_at": issued_at,
         "expires_at": expires_at,
     }

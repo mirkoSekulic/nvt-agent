@@ -28,6 +28,10 @@ const (
 	guestRuntimeIdentityRotate     = "/v1/guest-runtime-identity/rotate"
 	guestEnrollmentExchangeURL     = "https://broker.example/v1/guest-enrollment/exchange"
 	guestRuntimeIdentityVersion    = "nvt.guest-runtime-identity/v1"
+	guestSessionIdentityVersion    = "nvt.guest-session-identity/v1"
+	guestSessionIdentityIssue      = "/v1/guest-session-identity/issue"
+	guestSessionIdentityAuth       = "/v1/guest-session-identity/authenticate"
+	guestSessionAudience           = "nvt.native-guest-control/v1"
 	guestEnrollmentOrchestrator    = "orchestrator-token-0123456789abcdef"
 )
 
@@ -214,6 +218,86 @@ func TestGuestEnrollmentDedicatedAuthorizationAndIssuerOwnedURL(t *testing.T) {
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 }
 
+func TestGuestSessionIdentityExactLifecycleRestartAndRevocation(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	request := enrollmentIssueRequest("session-uid", "session-execution", 1, "session-guest", 300)
+	status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+	assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+	status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+	assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+	runtimeIdentity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+
+	status, issued := fixture.postJSONWithToken(runtimeIdentity, guestSessionIdentityIssue, guestSessionIssueRequest(envelope))
+	assertEnrollmentStatus(t, status, issued, http.StatusOK, "")
+	credential := cloneObject(issued["credential"])["opaque"].(string)
+	if cloneObject(issued["credential"])["audience"] != guestSessionAudience {
+		t.Fatalf("session audience = %v", cloneObject(issued["credential"])["audience"])
+	}
+	status, authenticated := fixture.postJSONWithToken(credential, guestSessionIdentityAuth, guestSessionAuthenticateRequest(envelope))
+	assertEnrollmentStatus(t, status, authenticated, http.StatusOK, "")
+	if authenticated["audience"] != guestSessionAudience || authenticated["credential_type"] != "nvt.guest-session-credential/v1" || authenticated["opaque"] != nil {
+		t.Fatalf("unsafe session status %v", authenticated)
+	}
+
+	wrongBinding := guestSessionAuthenticateRequest(envelope)
+	wrongBinding["binding"] = cloneObject(envelope["binding"])
+	wrongBinding["binding"].(map[string]any)["guest_instance_id"] = "wrong"
+	status, body := fixture.postJSONWithToken(credential, guestSessionIdentityAuth, wrongBinding)
+	assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	wrongAudience := guestSessionIssueRequest(envelope)
+	wrongAudience["audience"] = "caller-selected"
+	status, body = fixture.postJSONWithToken(runtimeIdentity, guestSessionIdentityIssue, wrongAudience)
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	for _, unauthorized := range []string{"frontend-token", "frontend-egress-token", credential} {
+		status, body = fixture.postJSONWithToken(unauthorized, guestSessionIdentityIssue, guestSessionIssueRequest(envelope))
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	}
+
+	fixture.stop()
+	fixture.start()
+	status, body = fixture.postJSONWithToken(credential, guestSessionIdentityAuth, guestSessionAuthenticateRequest(envelope))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	status, second := fixture.postJSONWithToken(runtimeIdentity, guestSessionIdentityIssue, guestSessionIssueRequest(envelope))
+	assertEnrollmentStatus(t, status, second, http.StatusOK, "")
+	secondCredential := cloneObject(second["credential"])["opaque"].(string)
+	status, body = fixture.postJSONWithToken(runtimeIdentity, guestSessionIdentityIssue, guestSessionIssueRequest(envelope))
+	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+
+	status, body = fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentRevokeExecution, enrollmentRevokeExecutionRequest(request))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	for _, revoked := range []string{credential, secondCredential} {
+		status, body = fixture.postJSONWithToken(revoked, guestSessionIdentityAuth, guestSessionAuthenticateRequest(envelope))
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	}
+
+	fixture.stop()
+	for _, canary := range []string{runtimeIdentity, credential, secondCredential} {
+		if strings.Contains(fixture.stdout.String(), canary) || strings.Contains(fixture.stderr.String(), canary) {
+			t.Fatal("guest session canary entered broker output")
+		}
+		audit, err := os.ReadFile(fixture.audit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(audit, []byte(canary)) {
+			t.Fatal("guest session canary entered broker audit")
+		}
+		matches, err := filepath.Glob(filepath.Join(fixture.home, "guest-enrollment.sqlite3*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range matches {
+			content, err := os.ReadFile(match)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(content, []byte(canary)) {
+				t.Fatalf("plaintext guest session canary entered %s", filepath.Base(match))
+			}
+		}
+	}
+}
+
 func TestGuestRuntimeIdentityConcurrentRotationIsSingleCAS(t *testing.T) {
 	fixture := newGuestEnrollmentBrokerFixture(t)
 	request := enrollmentIssueRequest("rotate-uid", "rotate-execution", 1, "rotate-guest", 300)
@@ -376,6 +460,94 @@ func TestGuestRuntimeIdentityBodiesCannotStarveRevocation(t *testing.T) {
 	}
 }
 
+func TestGuestSessionIdentityAdmissionIsAuthenticatedBoundedAndIsolated(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	unknown := openIncompleteEnrollmentRequest(t, fixture, guestSessionIdentityAuth, guestSessionCredentialCanary(0x7b))
+	if err := unknown.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	unknownStatus, err := bufio.NewReader(unknown).ReadString('\n')
+	_ = unknown.Close()
+	if err != nil || !strings.Contains(unknownStatus, " 401 ") {
+		t.Fatalf("unknown session credential retained a slow body slot: status=%q err=%v", strings.TrimSpace(unknownStatus), err)
+	}
+
+	issueSession := func(uid string) (map[string]any, string) {
+		request := enrollmentIssueRequest(uid, uid+"-execution", 1, uid+"-guest", 300)
+		status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+		assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+		status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+		assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+		runtimeIdentity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+		status, session := fixture.postJSONWithToken(runtimeIdentity, guestSessionIdentityIssue, guestSessionIssueRequest(envelope))
+		assertEnrollmentStatus(t, status, session, http.StatusOK, "")
+		return envelope, cloneObject(session["credential"])["opaque"].(string)
+	}
+	first, firstCredential := issueSession("session-saturated")
+	second, secondCredential := issueSession("session-second")
+
+	const perCredentialHTTPBound = 4
+	slow := saturateEnrollmentRequestSlots(
+		t,
+		fixture,
+		guestSessionIdentityAuth,
+		firstCredential,
+		perCredentialHTTPBound,
+	)
+	t.Cleanup(func() {
+		for _, connection := range slow {
+			_ = connection.Close()
+		}
+	})
+	status, body := fixture.postEnrollmentRaw(firstCredential, guestSessionIdentityAuth, []byte(`{}`))
+	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+	status, body = fixture.postJSONWithToken(secondCredential, guestSessionIdentityAuth, guestSessionAuthenticateRequest(second))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+
+	started := time.Now()
+	status, body = fixture.postJSONWithToken(
+		guestEnrollmentOrchestrator,
+		guestEnrollmentRevokeExecution,
+		enrollmentRevokeExecutionRequest(first),
+	)
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("revocation was delayed by saturated guest session traffic: %s", elapsed)
+	}
+}
+
+func TestGuestSessionIdentityRateAdmissionIsPerCredential(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	issueSession := func(uid string) (map[string]any, string) {
+		request := enrollmentIssueRequest(uid, uid+"-execution", 1, uid+"-guest", 300)
+		status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+		assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+		status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+		assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+		runtimeIdentity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+		status, session := fixture.postJSONWithToken(runtimeIdentity, guestSessionIdentityIssue, guestSessionIssueRequest(envelope))
+		assertEnrollmentStatus(t, status, session, http.StatusOK, "")
+		return envelope, cloneObject(session["credential"])["opaque"].(string)
+	}
+	first, firstCredential := issueSession("session-rate-first")
+	second, secondCredential := issueSession("session-rate-second")
+	rateLimited := false
+	for range 64 {
+		status, body := fixture.postJSONWithToken(firstCredential, guestSessionIdentityAuth, guestSessionAuthenticateRequest(first))
+		if status == http.StatusTooManyRequests {
+			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+			rateLimited = true
+			break
+		}
+		assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	}
+	if !rateLimited {
+		t.Fatal("noisy credential did not reach its rate bound")
+	}
+	status, body := fixture.postJSONWithToken(secondCredential, guestSessionIdentityAuth, guestSessionAuthenticateRequest(second))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+}
+
 func TestGuestRuntimeIdentityRateAdmissionIsIsolated(t *testing.T) {
 	fixture := newGuestEnrollmentBrokerFixture(t)
 	issueAndExchange := func(uid string) (map[string]any, string) {
@@ -447,6 +619,16 @@ func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) 
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 	status, body = fixture.postEnrollmentRaw(runtimeIdentity, guestRuntimeIdentityRotate, bytes.Repeat([]byte{' '}, (16<<10)+1))
 	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	status, session := fixture.postJSONWithToken(runtimeIdentity, guestSessionIdentityIssue, guestSessionIssueRequest(runtimeEnvelope))
+	assertEnrollmentStatus(t, status, session, http.StatusOK, "")
+	sessionCredential := cloneObject(session["credential"])["opaque"].(string)
+	sessionDuplicate := []byte(`{"contract_version":"nvt.guest-session-identity/v1","binding":{},"audience":"nvt.native-guest-control/v1","audience":"nvt.native-guest-control/v1"}`)
+	status, body = fixture.postEnrollmentRaw(runtimeIdentity, guestSessionIdentityIssue, sessionDuplicate)
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	status, body = fixture.postEnrollmentRaw(runtimeIdentity, guestSessionIdentityIssue, bytes.Repeat([]byte{' '}, (8<<10)+1))
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	status, body = fixture.postEnrollmentRaw(sessionCredential, guestSessionIdentityAuth, bytes.Repeat([]byte{' '}, (4<<10)+1))
+	assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
 
 	disabled := newBrokerFixture(t)
 	status, body = disabled.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
@@ -454,6 +636,10 @@ func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) 
 	status, body = disabled.postEnrollmentRaw(guestEnrollmentOrchestrator, guestEnrollmentExchangePath, bytes.Repeat([]byte{'x'}, 32<<10))
 	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
 	status, body = disabled.postJSONWithToken(runtimeIdentityCanary(0x44), guestRuntimeIdentityStatus, runtimeIdentityStatusRequest(map[string]any{"binding": request["binding"]}))
+	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
+	status, body = disabled.postJSONWithToken(runtimeIdentityCanary(0x45), guestSessionIdentityIssue, guestSessionIssueRequest(runtimeEnvelope))
+	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
+	status, body = disabled.postJSONWithToken(guestSessionCredentialCanary(0x46), guestSessionIdentityAuth, guestSessionAuthenticateRequest(runtimeEnvelope))
 	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
 	if matches, _ := filepath.Glob(filepath.Join(disabled.home, "*enrollment*")); len(matches) != 0 {
 		t.Fatalf("disabled broker created enrollment state: %v", matches)
@@ -579,8 +765,24 @@ func runtimeIdentityRotateRequest(envelope map[string]any, successor string) map
 	return request
 }
 
+func guestSessionIssueRequest(envelope map[string]any) map[string]any {
+	return map[string]any{
+		"contract_version": guestSessionIdentityVersion,
+		"binding":          cloneObject(envelope["binding"]),
+		"audience":         guestSessionAudience,
+	}
+}
+
+func guestSessionAuthenticateRequest(envelope map[string]any) map[string]any {
+	return guestSessionIssueRequest(envelope)
+}
+
 func runtimeIdentityCanary(value byte) string {
 	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32))
+}
+
+func guestSessionCredentialCanary(value byte) string {
+	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, 40))
 }
 
 func enrollmentRevokeExecutionRequest(issue map[string]any) map[string]any {
@@ -619,8 +821,12 @@ func Example_guestEnrollmentPaths() {
 	fmt.Println(guestEnrollmentIssuePath)
 	fmt.Println(guestEnrollmentExchangePath)
 	fmt.Println(guestEnrollmentCompleteCleanup)
+	fmt.Println(guestSessionIdentityIssue)
+	fmt.Println(guestSessionIdentityAuth)
 	// Output:
 	// /v1/guest-enrollment/issue
 	// /v1/guest-enrollment/exchange
 	// /v1/guest-enrollment/complete-execution-cleanup
+	// /v1/guest-session-identity/issue
+	// /v1/guest-session-identity/authenticate
 }
