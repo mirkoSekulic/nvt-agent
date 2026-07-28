@@ -22,6 +22,8 @@ host-bundle OCI index by repository plus digest:
     "digest": "sha256:<64 lowercase hex>"
   },
   "enrollment_ca_pem": "<issuer CA certificate PEM>",
+  "native_session_endpoint": "tls://test-gateway.example:7443",
+  "native_session_ca_pem": "<test gateway CA certificate PEM>",
   "cpus": 1,
   "memory_mib": 512,
   "acceleration": "auto",
@@ -79,7 +81,8 @@ driver image itself is built for the host architecture.
 
 This test reference proves provisioning, one-time enrollment, native bundle
 installation, a real broker-backed identity rotation, identity-daemon and
-supervisor/agentd/session readiness, restart recovery, and cleanup. It is not
+session-daemon/supervisor/agentd/session readiness against a synthetic trusted
+gateway, restart recovery, and cleanup. It is not
 released or supported as a production provider. Gateway publication, public
 VM ingress, downstream production runtime-identity authorization, and mediated
 VM egress are intentionally not implemented here.

@@ -14,7 +14,7 @@ func validManifest() Manifest {
 		BuildID:          strings.Repeat("a", 40),
 		NativeEntrypoint: "bin/nvt-guest-supervisor",
 		ServiceIdentity:  "nvt-agent-guest.service",
-		Compatibility:    Compatibility{AgentdProtocol: AgentdProtocolVersion},
+		Compatibility:    Compatibility{AgentdProtocol: AgentdProtocolVersion, NativeSessionProtocol: NativeSessionProtocolVersion},
 		Files:            []File{{Path: "bin/nvt-guest-supervisor", SHA256: "sha256:" + strings.Repeat("b", 64), Size: 1, Mode: 0o755}},
 	}
 }
@@ -53,6 +53,7 @@ func TestManifestValidationRejectsUnsafeAndAmbiguousFiles(t *testing.T) {
 		func(manifest *Manifest) { manifest.Files = append(manifest.Files, manifest.Files[0]) },
 		func(manifest *Manifest) { manifest.Architecture = "s390x" },
 		func(manifest *Manifest) { manifest.Compatibility.AgentdProtocol = "nvt.agentd/v2" },
+		func(manifest *Manifest) { manifest.Compatibility.NativeSessionProtocol = "nvt.native-session/v2" },
 	}
 	for index, mutate := range tests {
 		manifest := validManifest()

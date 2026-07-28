@@ -58,6 +58,8 @@ configuration = {
         "digest": "sha256:" + "b" * 64,
     },
     "enrollment_ca_pem": ca,
+    "native_session_endpoint": "tls://gateway.example:7443",
+    "native_session_ca_pem": ca,
     "cpus": 1,
     "memory_mib": 512,
     "acceleration": "tcg",

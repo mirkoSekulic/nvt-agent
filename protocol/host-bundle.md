@@ -26,7 +26,10 @@ manifest. Its schema is:
   "build_id": "0123456789abcdef0123456789abcdef01234567",
   "native_entrypoint": "bin/nvt-guest-supervisor",
   "service_identity": "nvt-agent-guest.service",
-  "compatibility": {"agentd_protocol": "nvt.agentd/v1"},
+  "compatibility": {
+    "agentd_protocol": "nvt.agentd/v1",
+    "native_session_protocol": "nvt.native-session/v1"
+  },
   "files": [
     {
       "path": "bin/agentd",
@@ -90,7 +93,7 @@ broker token, provider credential, or one-time enrollment secret.
 
 ## Guest service boundary
 
-The bundle includes two independent native service boundaries:
+The bundle includes three independent native service boundaries:
 
 - `nvt-guest-identity.service` runs the static root-owned
   `nvt-guest-identityd`. It consumes the separately delivered one-time
@@ -101,6 +104,12 @@ The bundle includes two independent native service boundaries:
 - `nvt-agent-guest.service` runs the static non-root `nvt-guest-supervisor`.
   It owns the native session and `agentd` processes; `agentd` remains limited
   to session I/O, prompt queueing, and event logging.
+- `nvt-guest-session.service` runs the static root-owned
+  `nvt-guest-sessiond`. It requests only a short-lived fixed-audience session
+  credential over the identity daemon's root-only Unix socket, establishes
+  the provider-neutral outbound [`nvt.native-session/v1`](native-session.md)
+  transport, and relays bounded JSON to the unchanged agentd socket. It never
+  receives or persists the root runtime identity.
 
 The agent service requires the identity service. The identity unit uses
 systemd `Type=notify` and becomes active only after durable state has been
@@ -116,14 +125,15 @@ atomically erases bearer state, records replacement-required, and exits
 non-zero so systemd stops/restarts the dependent lifecycle without exposing
 bearer state to the agent user.
 
-The current bundle includes the real `agentd` and `agentdctl` sources plus a
-bounded session fixture for the guest-side lifecycle gate. It does not yet
-package code-server, an AI runtime, plugins, gateway publication, or mediated
-VM egress.
+The current bundle includes the real `agentd` and `agentdctl` sources, the
+trusted native session client, plus a bounded session fixture for the
+guest-side lifecycle gate. It does not yet package code-server, an AI runtime,
+plugins, a production gateway listener/route, or mediated VM egress.
 
 Readiness is owned by the supervisor. It publishes `guest-ready` only after
-agentd and the tmux session are stable, continuously monitors both processes,
-and removes readiness before returning failure when either one disappears.
+agentd, the tmux session, and the native outbound session are stable,
+continuously monitors all three boundaries, and removes readiness before
+returning failure when any one disappears.
 Systemd's `Restart=on-failure` can then start a fresh native lifecycle without
 making agentd responsible for host supervision.
 
@@ -139,9 +149,10 @@ services. Guest provisioning copies both fixed units from
 identity path configuration at `/etc/nvt-agent/identity.json`, and delivers
 the one-time mode `0600` envelope to
 `/var/lib/nvt-agent-identity/enrollment.json`. It separately supplies the
-resolved non-secret `/etc/nvt-agent/guest.json`, reloads systemd, and enables
-the services. The identity state directory is root-owned mode `0700`; neither
-the `nvt-agent` user nor its workspace can read it. These explicit steps are
+resolved non-secret `/etc/nvt-agent/guest.json`, root-owned mode `0600`
+`/etc/nvt-agent/session.json`, and explicit gateway CA trust, reloads systemd,
+and enables the services. The identity state directory is root-owned mode
+`0700`; neither the `nvt-agent` user nor its workspace can read it. These explicit steps are
 provider-owned and are not archive hooks. No bearer is accepted through argv,
 environment, systemd unit content, or ordinary guest configuration.
 
@@ -166,8 +177,11 @@ implemented, and the bundle now contains the provider-neutral native identity
 daemon. A test-only QEMU reference driver proves one-time exchange, bundle
 installation, a real rotation, daemon/guest restart recovery, native readiness,
 and cleanup in a real TCG guest. That driver is not published or supported as a
-production provider. The broker now implements the separate
-[guest session identity contract](guest-session-identity.md), but this bundle
-does not request, store, or expose a session credential. A trusted native
-session client, gateway transport/routing, and mediated VM networking remain
-future production gates before VM execution is ready.
+production provider. The broker implements the separate
+[guest session identity contract](guest-session-identity.md), and this bundle
+now requests a short-lived credential only through the root-only identity
+authority and holds it only in trusted session-process memory. A synthetic TLS
+gateway and the test-only real QEMU/TCG guest prove establishment, relay, and
+restart; no production gateway listener, browser route, or reverse tunnel is
+shipped. Production gateway routing and mediated VM networking remain future
+gates before VM execution is ready.

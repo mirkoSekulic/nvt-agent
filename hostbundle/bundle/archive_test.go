@@ -51,7 +51,7 @@ func TestExtractArchiveRejectsUnsafeTypesPathsOwnershipAndDuplicates(t *testing.
 		ContractVersion: contract.Version, OS: "linux", Architecture: "amd64",
 		BundleVersion: "0.8.33-test", BuildID: strings.Repeat("a", 40),
 		NativeEntrypoint: "bin/nvt-guest-supervisor", ServiceIdentity: "nvt-agent-guest.service",
-		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion},
+		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion},
 		Files:         []contract.File{{Path: "bin/nvt-guest-supervisor", SHA256: contract.Digest([]byte("x")), Size: 1, Mode: 0o755}},
 	})
 	if err != nil {
@@ -110,6 +110,6 @@ func testManifest() contract.Manifest {
 		ContractVersion: contract.Version, OS: "linux", Architecture: "amd64",
 		BundleVersion: "0.8.33-test", BuildID: strings.Repeat("a", 40),
 		NativeEntrypoint: "bin/nvt-guest-supervisor", ServiceIdentity: "nvt-agent-guest.service",
-		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion},
+		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion},
 	}
 }

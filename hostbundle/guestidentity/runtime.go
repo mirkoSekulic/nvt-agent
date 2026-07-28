@@ -13,17 +13,20 @@ import (
 )
 
 type Runtime struct {
-	Store    *Store
-	Client   *Client
-	Now      func() time.Time
-	Generate func() (string, error)
+	Store     *Store
+	Client    *Client
+	Now       func() time.Time
+	Generate  func() (string, error)
+	operation chan struct{}
 }
 
 func NewRuntime(store *Store, client *Client) (*Runtime, error) {
 	if store == nil || client == nil {
 		return nil, failure(ReasonStateInvalid, false, false)
 	}
-	return &Runtime{Store: store, Client: client, Now: time.Now, Generate: guestenrollment.GenerateRuntimeIdentity}, nil
+	operation := make(chan struct{}, 1)
+	operation <- struct{}{}
+	return &Runtime{Store: store, Client: client, Now: time.Now, Generate: guestenrollment.GenerateRuntimeIdentity, operation: operation}, nil
 }
 
 // AcceptEnvelope is the small provider-neutral bootstrap boundary used by a
@@ -116,6 +119,10 @@ func (runtime *Runtime) failEnrollment(binding guestenrollment.Binding, brokerUR
 // Reconcile authenticates the current state, resolves any ambiguous rotation,
 // and performs at most one due rotation. It returns only non-secret metadata.
 func (runtime *Runtime) Reconcile(ctx context.Context) (Snapshot, time.Duration, error) {
+	if err := runtime.acquire(ctx); err != nil {
+		return Snapshot{Reason: ReasonStateUnavailable}, retryInterval, err
+	}
+	defer runtime.release()
 	state, exists, err := runtime.Store.load()
 	if err != nil {
 		return Snapshot{Reason: ReasonStateInvalid}, retryInterval, err
@@ -202,6 +209,64 @@ func (runtime *Runtime) Reconcile(ctx context.Context) (Snapshot, time.Duration,
 		wait = time.Second
 	}
 	return snapshotFor(state, runtime.now(), ""), wait, nil
+}
+
+// IssueGuestSession is the only runtime-bearer use exposed to the local
+// native-session IPC server. The caller supplies no identity, binding,
+// audience, or broker endpoint. Rotation and issuance are serialized so an
+// already-retired predecessor is never copied into a second process.
+func (runtime *Runtime) IssueGuestSession(ctx context.Context) (guestenrollment.GuestSessionIssueResult, error) {
+	if err := runtime.acquire(ctx); err != nil {
+		return guestenrollment.GuestSessionIssueResult{}, err
+	}
+	defer runtime.release()
+	state, exists, err := runtime.Store.load()
+	if err != nil || !exists || state.FailureReason != "" || state.RuntimeIdentity == nil {
+		return guestenrollment.GuestSessionIssueResult{}, failure(ReasonReplacementRequired, false, false)
+	}
+	now := runtime.now()
+	if state.PendingSuccessor != "" {
+		return guestenrollment.GuestSessionIssueResult{}, failure(ReasonBrokerUnavailable, true, false)
+	}
+	if !localIdentityCurrent(state, now) {
+		_, _, replacementErr := runtime.markReplacement(&state)
+		return guestenrollment.GuestSessionIssueResult{}, replacementErr
+	}
+	result, err := runtime.Client.IssueGuestSession(ctx, state.BrokerURL, state.RuntimeIdentity.Opaque, state.Binding)
+	if err != nil {
+		reason, _, _ := FailureDetails(err)
+		if reason == ReasonReplacementRequired {
+			_, _, replacementErr := runtime.markReplacement(&state)
+			return guestenrollment.GuestSessionIssueResult{}, replacementErr
+		}
+		return guestenrollment.GuestSessionIssueResult{}, err
+	}
+	issuedAt, issuedErr := time.Parse(time.RFC3339, result.Credential.IssuedAt)
+	expiresAt, expiresErr := time.Parse(time.RFC3339, result.Credential.ExpiresAt)
+	runtimeExpiresAt, runtimeExpiresErr := time.Parse(time.RFC3339, state.RuntimeIdentity.ExpiresAt)
+	if guestenrollment.ValidateGuestSessionIssueResult(result) != nil || result.Binding != state.Binding ||
+		issuedErr != nil || expiresErr != nil || runtimeExpiresErr != nil || !issuedAt.Before(expiresAt) ||
+		!now.Before(expiresAt) || expiresAt.After(runtimeExpiresAt) {
+		result.Credential.Opaque = ""
+		return guestenrollment.GuestSessionIssueResult{}, failure(ReasonProtocolInvalid, false, true)
+	}
+	return result, nil
+}
+
+func (runtime *Runtime) acquire(ctx context.Context) error {
+	if runtime == nil || runtime.operation == nil || ctx == nil {
+		return failure(ReasonStateUnavailable, false, false)
+	}
+	select {
+	case <-ctx.Done():
+		return failure(ReasonBrokerUnavailable, true, false)
+	case <-runtime.operation:
+		return nil
+	}
+}
+
+func (runtime *Runtime) release() {
+	runtime.operation <- struct{}{}
 }
 
 func (runtime *Runtime) resolvePending(ctx context.Context, state *durableState) error {

@@ -6,6 +6,7 @@
   "socket_path": "/run/nvt-agent/agentd.sock",
   "workspace": "/workspace",
   "session_name": "agent",
+  "session_readiness_path": "/run/nvt-agent-session/session-ready",
   "session_startup_grace_seconds": 5,
   "session_command": [
     "@release/bin/nvt-guest-session-fixture",

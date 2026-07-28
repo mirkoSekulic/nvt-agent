@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
@@ -24,15 +25,17 @@ const (
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type Configuration struct {
-	ContractVersion string     `json:"contract_version"`
-	GuestImage      GuestImage `json:"guest_image"`
-	HostBundle      Artifact   `json:"host_bundle"`
-	RegistryCAPEM   string     `json:"registry_ca_pem,omitempty"`
-	EnrollmentCAPEM string     `json:"enrollment_ca_pem"`
-	CPUs            int        `json:"cpus"`
-	MemoryMiB       int        `json:"memory_mib"`
-	Acceleration    string     `json:"acceleration"`
-	BootTimeoutSec  int        `json:"boot_timeout_seconds"`
+	ContractVersion       string     `json:"contract_version"`
+	GuestImage            GuestImage `json:"guest_image"`
+	HostBundle            Artifact   `json:"host_bundle"`
+	RegistryCAPEM         string     `json:"registry_ca_pem,omitempty"`
+	EnrollmentCAPEM       string     `json:"enrollment_ca_pem"`
+	NativeSessionEndpoint string     `json:"native_session_endpoint"`
+	NativeSessionCAPEM    string     `json:"native_session_ca_pem"`
+	CPUs                  int        `json:"cpus"`
+	MemoryMiB             int        `json:"memory_mib"`
+	Acceleration          string     `json:"acceleration"`
+	BootTimeoutSec        int        `json:"boot_timeout_seconds"`
 }
 
 type GuestImage struct {
@@ -60,13 +63,28 @@ func Validate(value Configuration) error {
 	if value.RegistryCAPEM != "" && ValidateCAPEM(value.RegistryCAPEM) != nil {
 		return errors.New("QEMU registry CA is invalid")
 	}
-	if ValidateCAPEM(value.EnrollmentCAPEM) != nil {
+	if ValidateCAPEM(value.EnrollmentCAPEM) != nil || ValidateCAPEM(value.NativeSessionCAPEM) != nil ||
+		ValidateNativeSessionEndpoint(value.NativeSessionEndpoint) != nil {
 		return errors.New("QEMU enrollment CA is invalid")
 	}
 	if value.CPUs < 1 || value.CPUs > 8 || value.MemoryMiB < 256 || value.MemoryMiB > 8192 ||
 		(value.Acceleration != "auto" && value.Acceleration != "kvm" && value.Acceleration != "tcg") ||
 		value.BootTimeoutSec < 10 || value.BootTimeoutSec > MaxBootTimeoutSeconds {
 		return errors.New("QEMU execution class resource settings are invalid")
+	}
+	return nil
+}
+
+func ValidateNativeSessionEndpoint(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "tls" || parsed.User != nil || parsed.Opaque != "" || parsed.Host == "" ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.String() != value ||
+		parsed.Hostname() == "" || parsed.Port() == "" || net.ParseIP(parsed.Hostname()) != nil || parsed.Hostname() != strings.ToLower(parsed.Hostname()) || !strings.Contains(parsed.Hostname(), ".") {
+		return errors.New("native session endpoint is invalid")
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return errors.New("native session endpoint is invalid")
 	}
 	return nil
 }

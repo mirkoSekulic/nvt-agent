@@ -279,6 +279,7 @@ func bootConfiguration(state State) wire.BootConfiguration {
 			DesiredGeneration: state.Generation, GuestInstanceID: state.GuestInstanceID,
 		},
 		HostBundle: state.Configuration.HostBundle, RegistryCAPEM: state.Configuration.RegistryCAPEM, EnrollmentCAPEM: state.Configuration.EnrollmentCAPEM,
+		NativeSessionEndpoint: state.Configuration.NativeSessionEndpoint, NativeSessionCAPEM: state.Configuration.NativeSessionCAPEM,
 	}
 }
 
