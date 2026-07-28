@@ -239,7 +239,7 @@ func (runtime *Runtime) serveCredential(ctx context.Context, state *credentialSt
 			}
 			continue
 		}
-		if _, err := runtime.handleFrame(frame, connection, requestIDs); err != nil {
+		if _, err := runtime.handleFrame(frame, connection, requestIDs, time.Now().Add(frameTimeout)); err != nil {
 			return err
 		}
 	}
@@ -362,13 +362,24 @@ func (runtime *Runtime) nextReadDeadline(state *credentialState) time.Time {
 
 func (runtime *Runtime) awaitPong(reader *bufio.Reader, connection net.Conn, requestIDs map[string]struct{}, deadline time.Time) error {
 	for {
+		if deadlineElapsed(deadline) {
+			return fail(ReasonGatewayUnavailable, true, false)
+		}
 		frame, err := readFrame(reader, connection, deadline)
 		if err != nil {
 			return err
 		}
-		pong, err := runtime.handleFrame(frame, connection, requestIDs)
+		// A buffered reader can return a complete queued frame without touching
+		// the socket deadline. Enforce the same absolute budget in user space.
+		if deadlineElapsed(deadline) {
+			return fail(ReasonGatewayUnavailable, true, false)
+		}
+		pong, err := runtime.handleFrame(frame, connection, requestIDs, deadline)
 		if err != nil {
 			return err
+		}
+		if deadlineElapsed(deadline) {
+			return fail(ReasonGatewayUnavailable, true, false)
 		}
 		if pong {
 			return nil
@@ -376,12 +387,12 @@ func (runtime *Runtime) awaitPong(reader *bufio.Reader, connection net.Conn, req
 	}
 }
 
-func (runtime *Runtime) handleFrame(frame guestenrollment.NativeSessionMessage, connection net.Conn, requestIDs map[string]struct{}) (bool, error) {
+func (runtime *Runtime) handleFrame(frame guestenrollment.NativeSessionMessage, connection net.Conn, requestIDs map[string]struct{}, deadline time.Time) (bool, error) {
 	switch frame.Type {
 	case guestenrollment.NativeSessionPing:
 		return false, writeFrame(connection, guestenrollment.NativeSessionMessage{
 			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
-		}, time.Now().Add(frameTimeout))
+		}, deadline)
 	case guestenrollment.NativeSessionPong:
 		return true, nil
 	case guestenrollment.NativeSessionAgentdRequest:
@@ -389,7 +400,7 @@ func (runtime *Runtime) handleFrame(frame guestenrollment.NativeSessionMessage, 
 			return false, fail(ReasonProtocolInvalid, false, false)
 		}
 		requestIDs[frame.RequestID] = struct{}{}
-		payload, err := relayAgentd(runtime.Configuration.AgentdSocketPath, frame.Payload)
+		payload, err := relayAgentdUntil(runtime.Configuration.AgentdSocketPath, frame.Payload, deadline)
 		if err != nil {
 			return false, err
 		}
@@ -398,10 +409,14 @@ func (runtime *Runtime) handleFrame(frame guestenrollment.NativeSessionMessage, 
 			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionAgentdResponse,
 			RequestID: frame.RequestID, Payload: json.RawMessage(payload),
 		}
-		return false, writeFrame(connection, response, time.Now().Add(frameTimeout))
+		return false, writeFrame(connection, response, deadline)
 	default:
 		return false, fail(ReasonProtocolInvalid, false, false)
 	}
+}
+
+func deadlineElapsed(deadline time.Time) bool {
+	return deadline.IsZero() || !time.Now().Before(deadline)
 }
 
 func (runtime *Runtime) checkAgentd() error {

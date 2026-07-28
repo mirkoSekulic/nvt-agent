@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -443,6 +444,107 @@ func TestHeartbeatProcessesQueuedRequestAndSimultaneousPing(t *testing.T) {
 	}
 }
 
+func TestHeartbeatBufferedRequestsRespectAbsoluteDeadline(t *testing.T) {
+	originalProbe, originalFrame := idleProbeInterval, frameTimeout
+	idleProbeInterval, frameTimeout = 10*time.Millisecond, 80*time.Millisecond
+	t.Cleanup(func() { idleProbeInterval, frameTimeout = originalProbe, originalFrame })
+	work := t.TempDir()
+	agentdSocket := filepath.Join(work, "agentd.sock")
+	stopAgentd := serveDelayedAgentd(t, agentdSocket, 2, 60*time.Millisecond)
+	defer stopAgentd()
+	binding := testBinding()
+	issuer := &fakeIssuer{binding: binding, now: time.Now().UTC().Truncate(time.Second)}
+	heartbeat := make(chan struct{})
+	releaseQueued := make(chan struct{})
+	connector := &pipeConnector{handler: func(_ int, connection net.Conn) {
+		defer connection.Close()
+		reader := newFrameReader(connection)
+		hello, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || hello.Type != guestenrollment.NativeSessionHello {
+			t.Errorf("hello = %#v, %v", hello, err)
+			return
+		}
+		if err := writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHelloAck,
+			Binding: &binding, Audience: guestenrollment.NativeGuestControlAudience,
+		}, time.Now().Add(time.Second)); err != nil {
+			t.Errorf("hello acknowledgment: %v", err)
+			return
+		}
+		ping, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || ping.Type != guestenrollment.NativeSessionPing {
+			t.Errorf("client heartbeat = %#v, %v", ping, err)
+			return
+		}
+		close(heartbeat)
+		<-releaseQueued
+		var queued []byte
+		for index := 1; index <= 2; index++ {
+			encoded, encodeErr := guestenrollment.EncodeNativeSessionMessage(guestenrollment.NativeSessionMessage{
+				ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionAgentdRequest,
+				RequestID: fmt.Sprintf("buffered-%d", index), Payload: json.RawMessage(`{"type":"health"}`),
+			})
+			if encodeErr != nil {
+				t.Errorf("encode queued request: %v", encodeErr)
+				return
+			}
+			queued = append(queued, encoded...)
+		}
+		pong, encodeErr := guestenrollment.EncodeNativeSessionMessage(guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
+		})
+		if encodeErr != nil {
+			t.Errorf("encode queued pong: %v", encodeErr)
+			return
+		}
+		queued = append(queued, pong...)
+		if _, err := connection.Write(queued); err != nil {
+			return
+		}
+		_, _ = readFrame(reader, connection, time.Now().Add(time.Second))
+	}}
+	runtime := newTestRuntime(t, work, agentdSocket, issuer, connector)
+	result, err := issuer.Issue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := runtime.validateCredential(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &credentialState{current: &credential}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runtime.serveCredential(ctx, state) }()
+	select {
+	case <-heartbeat:
+	case <-time.After(time.Second):
+		t.Fatal("client heartbeat was not sent")
+	}
+	readinessPath := filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)
+	if _, err := os.Stat(readinessPath); err != nil {
+		t.Fatalf("session was not ready before heartbeat: %v", err)
+	}
+	started := time.Now()
+	close(releaseQueued)
+	select {
+	case err := <-done:
+		reason, temporary, _ := FailureDetails(err)
+		if (reason != ReasonAgentdUnavailable && reason != ReasonGatewayUnavailable) || !temporary {
+			t.Fatalf("buffered heartbeat result = %v", err)
+		}
+		if elapsed := time.Since(started); elapsed > frameTimeout+150*time.Millisecond {
+			t.Fatalf("absolute heartbeat deadline overrun: %v", elapsed)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("buffered requests extended the heartbeat deadline")
+	}
+	if _, err := os.Stat(readinessPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("readiness remained after heartbeat failure: %v", err)
+	}
+}
+
 func TestCredentialScheduleRemainsBoundedAcrossClockRollback(t *testing.T) {
 	issuedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	local := time.Now()
@@ -635,6 +737,45 @@ func serveFakeAgentd(t *testing.T, path string) func() {
 				if len(line) != 0 {
 					_, _ = connection.Write([]byte(`{"status":"ready"}` + "\n"))
 				}
+			}()
+		}
+	}()
+	return func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func serveDelayedAgentd(t *testing.T, path string, immediate int, delay time.Duration) func() {
+	t.Helper()
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	calls := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			calls++
+			call := calls
+			mu.Unlock()
+			go func() {
+				defer connection.Close()
+				line, _ := bufio.NewReader(connection).ReadBytes('\n')
+				if len(line) == 0 {
+					return
+				}
+				if call > immediate {
+					time.Sleep(delay)
+				}
+				_, _ = connection.Write([]byte(`{"status":"ready"}` + "\n"))
 			}()
 		}
 	}()

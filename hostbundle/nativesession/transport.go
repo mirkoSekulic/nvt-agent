@@ -18,9 +18,10 @@ import (
 const (
 	connectTimeout   = 5 * time.Second
 	handshakeTimeout = 5 * time.Second
-	frameTimeout     = 5 * time.Second
 	localTimeout     = 3 * time.Second
 )
+
+var frameTimeout = 5 * time.Second
 
 type Connector interface {
 	Connect(context.Context, string) (net.Conn, error)
@@ -126,15 +127,29 @@ func newFrameReader(connection io.Reader) *bufio.Reader {
 }
 
 func relayAgentd(socketPath string, payload []byte) ([]byte, error) {
+	return relayAgentdUntil(socketPath, payload, time.Now().Add(localTimeout))
+}
+
+func relayAgentdUntil(socketPath string, payload []byte, deadline time.Time) ([]byte, error) {
 	if !validFile(socketPath) || len(payload) == 0 || len(payload) > guestenrollment.MaxNativeSessionAgentdPayloadBytes {
 		return nil, fail(ReasonProtocolInvalid, false, false)
 	}
-	connection, err := net.DialTimeout("unix", socketPath, localTimeout)
+	operationDeadline := deadline
+	now := time.Now()
+	if localDeadline := now.Add(localTimeout); operationDeadline.IsZero() || localDeadline.Before(operationDeadline) {
+		operationDeadline = localDeadline
+	}
+	if !now.Before(operationDeadline) {
+		return nil, fail(ReasonAgentdUnavailable, true, false)
+	}
+	connection, err := net.DialTimeout("unix", socketPath, operationDeadline.Sub(now))
 	if err != nil {
 		return nil, fail(ReasonAgentdUnavailable, true, false)
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(localTimeout))
+	if err := connection.SetDeadline(operationDeadline); err != nil {
+		return nil, fail(ReasonAgentdUnavailable, true, false)
+	}
 	request := append(append([]byte(nil), payload...), '\n')
 	if _, err := io.Copy(connection, bytes.NewReader(request)); err != nil {
 		zero(request)
@@ -156,6 +171,10 @@ func relayAgentd(socketPath string, payload []byte) ([]byte, error) {
 	if guestenrollment.ValidateNativeSessionMessage(probe) != nil {
 		zero(line)
 		return nil, fail(ReasonProtocolInvalid, false, false)
+	}
+	if !time.Now().Before(operationDeadline) {
+		zero(line)
+		return nil, fail(ReasonAgentdUnavailable, true, false)
 	}
 	return line[:len(line)-1], nil
 }

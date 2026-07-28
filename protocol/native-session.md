@@ -108,8 +108,10 @@ connection is limited to 1,024 requests; a duplicate or overflow fails closed
 instead of growing replay state without bound. `ping` and `pong` frames provide
 bounded liveness; either peer may initiate a ping. While awaiting its own pong,
 the client continues to answer a peer ping and process bounded agentd requests
-under the original absolute pong deadline. The client also verifies local
-agentd health while the gateway is idle.
+under the original absolute pong deadline. User-space checks guard buffered
+frames, and the local agentd relay plus gateway response write inherit the
+remaining budget rather than starting new timeouts. The client also verifies
+local agentd health while the gateway is idle.
 
 ## Renewal, reconnect, and readiness
 
