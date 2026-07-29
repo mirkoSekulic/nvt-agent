@@ -14,14 +14,14 @@ bash hostbundle/build.sh 0.8.33-ci "${revision}" "${relative}/../${relative}"
 [[ -f "${relative_output}/oci/index.json" ]]
 [[ "$(tr -d '\n' <"${relative_output}/digest.txt")" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ ! -e "${ROOT}/hostbundle/${relative}" ]]
-tar -tzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" | grep -Fxq 'share/examples/session-workspace.json'
-tar -tzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" | grep -Fxq 'share/examples/native-egress.json'
-tar -tzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" | grep -Fxq 'share/systemd/nvt-guest-egress.service'
-tar -tzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" | grep -Fxq 'bin/nvt-guest-egressd'
-tar -xOzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" manifest.json |
-  grep -Fq '"native_workspace_protocol":"nvt.native-workspace/v1"'
-tar -xOzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" manifest.json |
-  grep -Fq '"native_egress_protocol":"nvt.native-egress/v1"'
+archive_listing="$(tar -tzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz")"
+grep -Fxq 'share/examples/session-workspace.json' <<<"${archive_listing}"
+grep -Fxq 'share/examples/native-egress.json' <<<"${archive_listing}"
+grep -Fxq 'share/systemd/nvt-guest-egress.service' <<<"${archive_listing}"
+grep -Fxq 'bin/nvt-guest-egressd' <<<"${archive_listing}"
+archive_manifest="$(tar -xOzf "${relative_output}/nvt-host-bundle-linux-amd64.tar.gz" manifest.json)"
+grep -Fq '"native_workspace_protocol":"nvt.native-workspace/v1"' <<<"${archive_manifest}"
+grep -Fq '"native_egress_protocol":"nvt.native-egress/v1"' <<<"${archive_manifest}"
 if grep -aFq 'NVT_HOST_BUNDLE_TEST_' "${relative_output}/bin/nvt-host-bootstrap"; then
   echo "test-only bootstrap transport entered the production binary" >&2
   exit 1
