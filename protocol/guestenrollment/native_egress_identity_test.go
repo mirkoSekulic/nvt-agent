@@ -2,8 +2,10 @@ package guestenrollment
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -85,8 +87,13 @@ func TestNativeEgressIdentityContractStrictPurposeValidationAndRedaction(t *test
 			t.Fatalf("ordinary formatting exposed binding: %q", formatted)
 		}
 	}
-	if digest, err := NativeEgressCredentialDigest(credential); err != nil || ValidateRuntimeIdentityDigest(digest) != nil || strings.Contains(digest, credential) {
+	digest, err := NativeEgressCredentialDigest(credential)
+	if err != nil || ValidateRuntimeIdentityDigest(digest) != nil || strings.Contains(digest, credential) {
 		t.Fatalf("invalid digest %q: %v", digest, err)
+	}
+	plain := sha256.Sum256([]byte(credential))
+	if digest == "sha256:"+hex.EncodeToString(plain[:]) {
+		t.Fatal("native egress credential digest lacks purpose separation")
 	}
 }
 

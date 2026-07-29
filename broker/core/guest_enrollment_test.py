@@ -30,14 +30,23 @@ from broker.core.guest_enrollment import (
     NATIVE_GUEST_CONTROL_AUDIENCE,
     MAX_GUEST_SESSION_CREDENTIAL_LIFETIME,
     MAX_LIVE_GUEST_SESSION_CREDENTIALS_PER_BINDING,
+    NATIVE_EGRESS_AUDIENCE,
+    NATIVE_EGRESS_IDENTITY_VERSION,
+    MAX_LIVE_NATIVE_EGRESS_CREDENTIALS_PER_BINDING,
+    MAX_NATIVE_EGRESS_CREDENTIAL_LIFETIME,
+    MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS,
+    MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS,
     TOMBSTONE_RETENTION,
     VERSION,
     _validate_persisted_runtime_identity_history,
     _validate_persisted_guest_session,
+    _validate_persisted_native_egress,
     format_timestamp,
     load_guest_enrollment_from_environment,
 )
-from broker.core.server import BoundedThreadingHTTPServer, make_handler
+from broker.core.agents import AgentRegistry
+from broker.core.audit import AuditLog
+from broker.core.server import Broker, BoundedThreadingHTTPServer, make_handler
 
 
 class QuietHTTPHandler(BaseHTTPRequestHandler):
@@ -402,6 +411,67 @@ class GuestSessionBeforeCommitFailure(EnrollmentFaults):
 class GuestSessionResponseLostFailure(EnrollmentFaults):
     def after_guest_session_commit(self):
         raise ConnectionAbortedError("session-response-lost")
+
+
+class NativeEgressBeforeCommitFailure(EnrollmentFaults):
+    def before_native_egress_commit(self):
+        raise sqlite3.OperationalError("egress-storage-secret-canary")
+
+
+class NativeEgressResponseLostFailure(EnrollmentFaults):
+    def after_native_egress_commit(self):
+        raise ConnectionAbortedError("egress-response-lost")
+
+
+class BlockingNativeEgressLookup(EnrollmentFaults):
+    def __init__(self):
+        self.release = threading.Event()
+        self.condition = threading.Condition()
+        self.calls = 0
+        self.deadline_remaining = []
+
+    def _block(self, operation):
+        with self.condition:
+            self.calls += 1
+            self.deadline_remaining.append(operation.remaining())
+            self.condition.notify_all()
+        self.release.wait(timeout=10)
+
+    def before_native_egress_runtime_lookup(self, operation):
+        self._block(operation)
+
+    def before_native_egress_credential_lookup(self, operation):
+        self._block(operation)
+
+    def wait_for_calls(self, count, timeout=3):
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while self.calls < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.condition.wait(remaining)
+            return True
+
+
+class AdvanceNativeEgressTransactionClock(EnrollmentFaults):
+    def __init__(self, clock, value):
+        self.clock = clock
+        self.value = value
+
+    def before_native_egress_transaction(self, operation):
+        operation.check()
+        self.clock.value = self.value
+
+
+class BlockingNativeEgressCommit(EnrollmentFaults):
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def before_native_egress_commit(self):
+        self.entered.set()
+        self.release.wait(timeout=10)
 
 
 class GuestEnrollmentIssuerTest(unittest.TestCase):
@@ -1601,7 +1671,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(delete_after - created_at, TOMBSTONE_RETENTION)
         self.assertEqual(
             query_database(migration_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
-            [("6",)],
+            [("7",)],
         )
 
         schema_v2_database = str(Path(self.temporary.name) / "schema-v2.sqlite3")
@@ -1620,7 +1690,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertIsNone(migrated_v2.snapshot()["execution_tombstones"][0]["cleanup_completed_at"])
         self.assertEqual(
             query_database(schema_v2_database, "SELECT value FROM enrollment_meta WHERE key = 'schema_version'"),
-            [("6",)],
+            [("7",)],
         )
 
     def test_orchestrator_auth_stores_only_digest(self):
@@ -2026,6 +2096,625 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(len(migrated.snapshot()["guest_session_credentials"]), 1)
         self.assertNotIn(session["credential"]["opaque"], json.dumps(migrated.snapshot(), sort_keys=True))
 
+    def test_native_egress_issue_authenticate_restart_exact_binding_and_runtime_rotation(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = native_egress_issue_request(envelope["binding"])
+        issued = issuer.issue_native_egress(runtime_identity, request)
+        credential = issued["credential"]["opaque"]
+        status = issuer.authenticate_native_egress(
+            credential,
+            native_egress_authenticate_request(envelope["binding"]),
+        )
+        self.assertEqual(status["binding"], envelope["binding"])
+        self.assertEqual(status["sequence"], 1)
+        self.assertEqual(status["audience"], NATIVE_EGRESS_AUDIENCE)
+        snapshot = json.dumps(issuer.snapshot(), sort_keys=True)
+        self.assertNotIn(runtime_identity, snapshot)
+        self.assertNotIn(credential, snapshot)
+
+        for field, value in (
+            ("agent_run_uid", "wrong-uid"),
+            ("execution_id", "wrong-execution"),
+            ("driver_registration", "other-driver"),
+            ("desired_generation", 2),
+            ("guest_instance_id", "other-guest"),
+        ):
+            with self.subTest(field=field):
+                wrong = dict(envelope["binding"])
+                wrong[field] = value
+                self.assertFailure(
+                    "unauthorized",
+                    lambda wrong=wrong: issuer.authenticate_native_egress(
+                        credential,
+                        native_egress_authenticate_request(wrong),
+                    ),
+                )
+                self.assertFailure(
+                    "unauthorized",
+                    lambda wrong=wrong: issuer.issue_native_egress(
+                        runtime_identity,
+                        native_egress_issue_request(wrong),
+                    ),
+                )
+
+        successor = opaque_canary(0xd1)
+        issuer.rotate_runtime_identity(
+            runtime_identity,
+            runtime_rotate_request(envelope["binding"], successor),
+        )
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.issue_native_egress(runtime_identity, request),
+        )
+        second = issuer.issue_native_egress(successor, request)
+        self.assertEqual(second["credential"]["opaque"].split("nvt_eg1_", 1)[0], "")
+
+        issuer.close()
+        restarted = self.issuer()
+        restarted.authenticate_native_egress(
+            credential,
+            native_egress_authenticate_request(envelope["binding"]),
+        )
+        self.assertTrue(restarted.ready())
+
+    def test_native_egress_concurrent_two_live_response_loss_expiry_and_replay(self):
+        issuer = self.issuer(faults=NativeEgressResponseLostFailure())
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = native_egress_issue_request(envelope["binding"])
+        with self.assertRaises(ConnectionAbortedError):
+            issuer.issue_native_egress(runtime_identity, request)
+        self.assertEqual(len(issuer.snapshot()["native_egress_credentials"]), 1)
+        issuer.close()
+
+        restarted = self.issuer()
+        second = restarted.issue_native_egress(runtime_identity, request)
+        second_credential = second["credential"]["opaque"]
+        self.assertEqual(len(restarted.snapshot()["native_egress_credentials"]), 2)
+        self.assertFailure("capacity-exceeded", lambda: restarted.issue_native_egress(runtime_identity, request))
+        self.clock.value += MAX_NATIVE_EGRESS_CREDENTIAL_LIFETIME
+        restarted.maintain()
+        self.assertEqual(restarted.snapshot()["native_egress_credentials"], [])
+        self.assertFailure(
+            "unauthorized",
+            lambda: restarted.authenticate_native_egress(
+                second_credential,
+                native_egress_authenticate_request(envelope["binding"]),
+            ),
+        )
+        replacement = restarted.issue_native_egress(runtime_identity, request)
+        self.assertEqual(
+            restarted.authenticate_native_egress(
+                replacement["credential"]["opaque"],
+                native_egress_authenticate_request(envelope["binding"]),
+            )["sequence"],
+            3,
+        )
+
+    def test_native_egress_concurrent_issue_cap_and_shared_revocation(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = native_egress_issue_request(envelope["binding"])
+        barrier = threading.Barrier(9)
+
+        def issue_egress():
+            barrier.wait()
+            try:
+                return issuer.issue_native_egress(runtime_identity, request)
+            except EnrollmentFailure as error:
+                return error.reason
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(issue_egress) for _ in range(8)]
+            barrier.wait()
+            results = [future.result(timeout=3) for future in futures]
+        credentials = [value["credential"]["opaque"] for value in results if isinstance(value, dict)]
+        self.assertEqual(len(credentials), MAX_LIVE_NATIVE_EGRESS_CREDENTIALS_PER_BINDING)
+        self.assertEqual(results.count("capacity-exceeded"), 8 - MAX_LIVE_NATIVE_EGRESS_CREDENTIALS_PER_BINDING)
+
+        # The original guest-enrollment revocation and the native-egress
+        # endpoint share one transaction and tombstone domain.
+        issuer.revoke_binding(revoke_binding_request(envelope["binding"]))
+        self.assertEqual(issuer.snapshot()["native_egress_credentials"], [])
+        for credential in credentials:
+            self.assertFailure(
+                "unauthorized",
+                lambda credential=credential: issuer.authenticate_native_egress(
+                    credential,
+                    native_egress_authenticate_request(envelope["binding"]),
+                ),
+            )
+        self.assertFailure("unauthorized", lambda: issuer.issue_native_egress(runtime_identity, request))
+
+        unrelated = issuer.issue(issue_request(uid="egress-other", execution="egress-other", guest="egress-other"))
+        unrelated_identity = issuer.exchange(exchange_request(unrelated))["runtime_identity"]["opaque"]
+        unrelated_credential = issuer.issue_native_egress(
+            unrelated_identity,
+            native_egress_issue_request(unrelated["binding"]),
+        )["credential"]["opaque"]
+        issuer.revoke_native_egress_execution(native_egress_revoke_execution_request(unrelated["binding"]))
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.authenticate_native_egress(
+                unrelated_credential,
+                native_egress_authenticate_request(unrelated["binding"]),
+            ),
+        )
+
+    def test_native_egress_admission_bounds_bearer_lookup_and_reserves_revocation(self):
+        faults = BlockingNativeEgressLookup()
+        issuer = self.issuer(faults=faults, native_egress_operation_timeout=5)
+        target = binding(uid="admission", execution="admission", guest="admission")
+        issue = native_egress_issue_request(target)
+        authenticate = native_egress_authenticate_request(target)
+        unknown_runtime = opaque_canary(0xe1)
+        unknown_egress = native_egress_credential_canary(1, 0xe2)
+
+        def blocked(index):
+            try:
+                if index % 2 == 0:
+                    issuer.issue_native_egress(unknown_runtime, issue)
+                else:
+                    issuer.authenticate_native_egress(unknown_egress, authenticate)
+            except EnrollmentFailure as error:
+                return error.reason
+            return "unexpected-success"
+
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS) as pool:
+            futures = [
+                pool.submit(blocked, index)
+                for index in range(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS)
+            ]
+            self.assertTrue(faults.wait_for_calls(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS))
+            self.assertEqual(len(faults.deadline_remaining), MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS)
+            self.assertTrue(all(0 < value <= 5 for value in faults.deadline_remaining))
+
+            self.assertFailure(
+                "capacity-exceeded",
+                lambda: issuer.authenticate_native_egress(unknown_egress, authenticate),
+            )
+            self.assertEqual(faults.calls, MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS)
+
+            # Guest lookup saturation retains sixteen shared authority slots.
+            # A trusted revoke takes only one shared slot and reaches SQLite.
+            issuer.revoke_native_egress_binding(
+                {"contract_version": NATIVE_EGRESS_IDENTITY_VERSION, "binding": target}
+            )
+            self.assertEqual(len(issuer.snapshot()["binding_tombstones"]), 1)
+
+            faults.release.set()
+            self.assertTrue(all(future.result(timeout=3) == "unauthorized" for future in futures))
+
+    def test_native_egress_http_lookup_saturation_returns_429_and_preserves_revoke(self):
+        faults = BlockingNativeEgressLookup()
+        issuer = self.issuer(faults=faults, native_egress_operation_timeout=0.1)
+        orchestrator_token = "orchestrator-authority-token-0001"
+        token_path = Path(self.temporary.name) / "orchestrator.token"
+        token_path.write_text(orchestrator_token, encoding="utf-8")
+        broker = Broker.__new__(Broker)
+        broker.guest_enrollment = issuer
+        broker.guest_enrollment_orchestrator = OrchestratorAuthenticator(token_path)
+        broker.agents = AgentRegistry()
+        broker.audit = AuditLog(Path(self.temporary.name) / "audit.jsonl")
+        broker.providers = {}
+        server = BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(broker),
+            max_connections=128,
+            header_timeout=2,
+            body_timeout=2,
+        )
+        server_thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        server_thread.start()
+        blocked_connections = []
+
+        def release_blocked():
+            faults.release.set()
+            while blocked_connections:
+                connection = blocked_connections.pop()
+                try:
+                    connection.settimeout(2)
+                    connection.recv(4096)
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+
+        def cleanup():
+            release_blocked()
+            server.shutdown()
+            server_thread.join(timeout=3)
+            server.server_close()
+
+        self.addCleanup(cleanup)
+        target = binding(uid="http-admission", execution="http-admission", guest="http-admission")
+        issue_body = json.dumps(native_egress_issue_request(target), separators=(",", ":")).encode()
+        auth_body = json.dumps(native_egress_authenticate_request(target), separators=(",", ":")).encode()
+
+        def send(path, bearer, body, *, wait):
+            connection = socket.create_connection(server.server_address, timeout=2)
+            connection.settimeout(2)
+            connection.sendall(
+                f"POST {path} HTTP/1.1\r\nHost: broker.test\r\nAuthorization: Bearer {bearer}\r\n".encode()
+                + b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                + body
+            )
+            if not wait:
+                blocked_connections.append(connection)
+                return None
+            reader = connection.makefile("rb")
+            try:
+                status_line = reader.readline().decode("ascii", "strict")
+            finally:
+                reader.close()
+                connection.close()
+            return int(status_line.split()[1])
+
+        for index in range(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS):
+            if index % 2 == 0:
+                send(
+                    "/v1/native-egress-identity/issue",
+                    opaque_canary(0xe6),
+                    issue_body,
+                    wait=False,
+                )
+            else:
+                send(
+                    "/v1/native-egress-identity/authenticate",
+                    native_egress_credential_canary(1, 0xe7),
+                    auth_body,
+                    wait=False,
+                )
+        self.assertTrue(faults.wait_for_calls(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS))
+        self.assertTrue(all(0 < value <= 0.1 for value in faults.deadline_remaining))
+        # The client-visible deadline has expired, but every handler remains
+        # inside the injected lookup. Capacity must stay owned until those
+        # handlers actually unwind.
+        time.sleep(0.15)
+        calls_at_capacity = faults.calls
+        self.assertEqual(
+            send(
+                "/v1/native-egress-identity/authenticate",
+                native_egress_credential_canary(1, 0xe8),
+                auth_body,
+                wait=True,
+            ),
+            429,
+        )
+        self.assertEqual(faults.calls, calls_at_capacity)
+
+        revoke_body = json.dumps(
+            {"contract_version": NATIVE_EGRESS_IDENTITY_VERSION, "binding": target},
+            separators=(",", ":"),
+        ).encode()
+        self.assertEqual(
+            send(
+                "/v1/native-egress-identity/revoke-binding",
+                orchestrator_token,
+                revoke_body,
+                wait=True,
+            ),
+            200,
+        )
+        self.assertEqual(len(issuer.snapshot()["binding_tombstones"]), 1)
+        release_blocked()
+
+        # Do not let the temporary audit/database directory disappear while
+        # expired handlers are still unwinding. Full lease availability is the
+        # observable proof that every owner has passed its finally block.
+        unwind_deadline = time.monotonic() + 3
+        while time.monotonic() < unwind_deadline:
+            acquired = 0
+            for _ in range(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS):
+                if issuer.native_egress_operation_slots.acquire(blocking=False):
+                    acquired += 1
+            for _ in range(acquired):
+                issuer.native_egress_operation_slots.release()
+            if acquired == MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("expired HTTP native-egress handlers did not unwind")
+
+    def test_native_egress_lookup_deadline_retains_admission_until_owner_unwinds(self):
+        faults = BlockingNativeEgressLookup()
+        issuer = self.issuer(faults=faults, native_egress_operation_timeout=0.1)
+        target = binding(uid="lookup-deadline", execution="lookup-deadline", guest="lookup-deadline")
+        unknown = native_egress_credential_canary(1, 0xe3)
+        original_connect = issuer._runtime_connect_or_failure
+        connect_calls = 0
+
+        def traced_connect(operation=None):
+            nonlocal connect_calls
+            connect_calls += 1
+            return original_connect(operation)
+
+        issuer._runtime_connect_or_failure = traced_connect
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                issuer.authenticate_native_egress,
+                unknown,
+                native_egress_authenticate_request(target),
+            )
+            self.assertTrue(faults.wait_for_calls(1))
+            time.sleep(0.15)
+
+            def acquire_available(semaphore, maximum):
+                acquired = 0
+                for _ in range(maximum):
+                    if semaphore.acquire(blocking=False):
+                        acquired += 1
+                return acquired
+
+            acquired_guest_slots = acquire_available(
+                issuer.native_egress_guest_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS,
+            )
+            acquired_operation_slots = acquire_available(
+                issuer.native_egress_operation_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS,
+            )
+            self.assertEqual(
+                acquired_guest_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS - 1,
+            )
+            self.assertEqual(
+                acquired_operation_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS - 1,
+            )
+            for _ in range(acquired_guest_slots):
+                issuer.native_egress_guest_slots.release()
+            for _ in range(acquired_operation_slots):
+                issuer.native_egress_operation_slots.release()
+
+            faults.release.set()
+            with self.assertRaises(EnrollmentFailure) as caught:
+                future.result(timeout=3)
+            self.assertEqual(caught.exception.reason, "issuer-storage-failed")
+        self.assertEqual(connect_calls, 0)
+
+        acquired_guest_slots = acquire_available(
+            issuer.native_egress_guest_slots,
+            MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS,
+        )
+        acquired_operation_slots = acquire_available(
+            issuer.native_egress_operation_slots,
+            MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS,
+        )
+        self.assertEqual(acquired_guest_slots, MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS)
+        self.assertEqual(acquired_operation_slots, MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS)
+        for _ in range(acquired_guest_slots):
+            issuer.native_egress_guest_slots.release()
+        for _ in range(acquired_operation_slots):
+            issuer.native_egress_operation_slots.release()
+
+    def test_native_egress_transaction_uses_current_clock_for_authority_and_capacity(self):
+        issuer = self.issuer()
+        envelope = issuer.issue(issue_request(uid="txn-clock", execution="txn-clock", guest="txn-clock"))
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = native_egress_issue_request(envelope["binding"])
+
+        issuer.faults = AdvanceNativeEgressTransactionClock(self.clock, START + timedelta(hours=1))
+        self.assertFailure("unauthorized", lambda: issuer.issue_native_egress(runtime_identity, request))
+        snapshot = issuer.snapshot()
+        self.assertEqual(snapshot["native_egress_credentials"], [])
+        enrollment = snapshot["records"][0]
+        self.assertEqual(enrollment["native_egress_issuance_sequence"], 0)
+
+        capacity_database = str(Path(self.temporary.name) / "egress-capacity-clock.sqlite3")
+        self.clock.value = START
+        capacity = GuestEnrollmentIssuer(
+            capacity_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(0xe4),
+            maintenance_interval=None,
+        )
+        self.addCleanup(capacity.close)
+        capacity_envelope = capacity.issue(
+            issue_request(uid="capacity-clock", execution="capacity-clock", guest="capacity-clock")
+        )
+        capacity_identity = capacity.exchange(exchange_request(capacity_envelope))["runtime_identity"]["opaque"]
+        capacity_request = native_egress_issue_request(capacity_envelope["binding"])
+        capacity.issue_native_egress(capacity_identity, capacity_request)
+        capacity.issue_native_egress(capacity_identity, capacity_request)
+        capacity.faults = AdvanceNativeEgressTransactionClock(
+            self.clock, START + MAX_NATIVE_EGRESS_CREDENTIAL_LIFETIME
+        )
+        third = capacity.issue_native_egress(capacity_identity, capacity_request)
+        third_status = capacity.authenticate_native_egress(
+            third["credential"]["opaque"], native_egress_authenticate_request(capacity_envelope["binding"])
+        )
+        self.assertEqual(third_status["sequence"], 3)
+        self.assertEqual(third["credential"]["issued_at"], format_timestamp(self.clock.value))
+        self.assertEqual(len(capacity.snapshot()["native_egress_credentials"]), 1)
+
+    def test_native_egress_deadline_bounds_sqlite_lock_and_precommit_work(self):
+        issuer = self.issuer(native_egress_operation_timeout=0.1)
+        envelope = issuer.issue(issue_request(uid="lock-timeout", execution="lock-timeout", guest="lock-timeout"))
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = native_egress_issue_request(envelope["binding"])
+
+        lock = sqlite3.connect(self.database, timeout=1, isolation_level=None)
+        self.addCleanup(lock.close)
+        lock.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(issuer.issue_native_egress, runtime_identity, request)
+            with self.assertRaises(EnrollmentFailure) as caught:
+                future.result(timeout=1)
+            self.assertEqual(caught.exception.reason, "issuer-storage-failed")
+        row = lock.execute(
+            "SELECT native_egress_issuance_sequence FROM enrollments WHERE agent_run_uid = 'lock-timeout'"
+        ).fetchone()
+        self.assertEqual(row[0], 0)
+        self.assertEqual(lock.execute("SELECT COUNT(*) FROM native_egress_credentials").fetchone()[0], 0)
+        lock.rollback()
+        self.assertTrue(issuer.ready())
+
+        commit_database = str(Path(self.temporary.name) / "egress-commit-deadline.sqlite3")
+        commit_fault = BlockingNativeEgressCommit()
+        commit_issuer = GuestEnrollmentIssuer(
+            commit_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(0xe5),
+            faults=commit_fault,
+            maintenance_interval=None,
+            native_egress_operation_timeout=0.1,
+        )
+        self.addCleanup(commit_issuer.close)
+        commit_envelope = commit_issuer.issue(
+            issue_request(uid="commit-timeout", execution="commit-timeout", guest="commit-timeout")
+        )
+        commit_identity = commit_issuer.exchange(exchange_request(commit_envelope))["runtime_identity"]["opaque"]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                commit_issuer.issue_native_egress,
+                commit_identity,
+                native_egress_issue_request(commit_envelope["binding"]),
+            )
+            self.assertTrue(commit_fault.entered.wait(timeout=1))
+            time.sleep(0.15)
+            commit_fault.release.set()
+            with self.assertRaises(EnrollmentFailure) as caught:
+                future.result(timeout=1)
+            self.assertEqual(caught.exception.reason, "issuer-storage-failed")
+        snapshot = commit_issuer.snapshot()
+        self.assertEqual(snapshot["native_egress_credentials"], [])
+        self.assertEqual(snapshot["records"][0]["native_egress_issuance_sequence"], 0)
+        self.assertTrue(commit_issuer.ready())
+
+    def test_native_egress_runtime_expiry_and_shared_tombstone_capacity(self):
+        issuer = self.issuer(max_entries=2)
+        envelope = issuer.issue(issue_request())
+        runtime_identity = issuer.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        self.clock.value += timedelta(hours=1)
+        self.assertFailure(
+            "unauthorized",
+            lambda: issuer.issue_native_egress(
+                runtime_identity,
+                native_egress_issue_request(envelope["binding"]),
+            ),
+        )
+
+        issuer.revoke_native_egress_binding(
+            {"contract_version": NATIVE_EGRESS_IDENTITY_VERSION, "binding": envelope["binding"]}
+        )
+        other = binding(uid="absent", execution="absent", guest="absent")
+        issuer.revoke_native_egress_binding(
+            {"contract_version": NATIVE_EGRESS_IDENTITY_VERSION, "binding": other}
+        )
+        self.assertEqual(len(issuer.snapshot()["binding_tombstones"]), 2)
+        third = binding(uid="third", execution="third", guest="third")
+        self.assertFailure(
+            "capacity-exceeded",
+            lambda: issuer.revoke_native_egress_binding(
+                {"contract_version": NATIVE_EGRESS_IDENTITY_VERSION, "binding": third}
+            ),
+        )
+
+    def test_native_egress_commit_failure_corruption_readiness_and_schema_v6_migration(self):
+        before = self.issuer(faults=NativeEgressBeforeCommitFailure())
+        envelope = before.issue(issue_request())
+        runtime_identity = before.exchange(exchange_request(envelope))["runtime_identity"]["opaque"]
+        request = native_egress_issue_request(envelope["binding"])
+        self.assertFailure("issuer-storage-failed", lambda: before.issue_native_egress(runtime_identity, request))
+        self.assertEqual(before.snapshot()["native_egress_credentials"], [])
+        before.maintain()
+        before.faults = EnrollmentFaults()
+        credential = before.issue_native_egress(runtime_identity, request)["credential"]["opaque"]
+        update_database(
+            self.database,
+            "UPDATE native_egress_credentials SET audience = 'wrong-audience'",
+            (),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: before.authenticate_native_egress(
+                credential,
+                native_egress_authenticate_request(envelope["binding"]),
+            ),
+        )
+        self.assertFalse(before.ready())
+        before.close()
+        with self.assertRaisesRegex(EnrollmentConfigError, "database initialization failed"):
+            GuestEnrollmentIssuer(self.database, EXCHANGE_URL, maintenance_interval=None)
+
+        sequence_database = str(Path(self.temporary.name) / "egress-sequence-corruption.sqlite3")
+        sequence_issuer = GuestEnrollmentIssuer(
+            sequence_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(0xd8),
+            maintenance_interval=None,
+        )
+        sequence_envelope = sequence_issuer.issue(
+            issue_request(uid="sequence-corrupt", execution="sequence-corrupt", guest="sequence-corrupt")
+        )
+        sequence_identity = sequence_issuer.exchange(exchange_request(sequence_envelope))["runtime_identity"]["opaque"]
+        sequence_credential = sequence_issuer.issue_native_egress(
+            sequence_identity,
+            native_egress_issue_request(sequence_envelope["binding"]),
+        )["credential"]["opaque"]
+        update_database(
+            sequence_database,
+            "UPDATE native_egress_credentials SET issuance_sequence = 2",
+            (),
+        )
+        update_database(
+            sequence_database,
+            "UPDATE enrollments SET native_egress_issuance_sequence = 2",
+            (),
+        )
+        self.assertFailure(
+            "issuer-storage-failed",
+            lambda: sequence_issuer.authenticate_native_egress(
+                sequence_credential,
+                native_egress_authenticate_request(sequence_envelope["binding"]),
+            ),
+        )
+        self.assertFalse(sequence_issuer.ready())
+        sequence_issuer.close()
+
+        migration_database = str(Path(self.temporary.name) / "schema-v6-egress.sqlite3")
+        migration = GuestEnrollmentIssuer(
+            migration_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(0xe0),
+            maintenance_interval=None,
+        )
+        migration_envelope = migration.issue(issue_request(uid="migration", execution="migration", guest="migration"))
+        migration_identity = migration.exchange(exchange_request(migration_envelope))["runtime_identity"]["opaque"]
+        migration.close()
+        connection = sqlite3.connect(migration_database)
+        try:
+            connection.execute("DROP TABLE native_egress_credentials")
+            connection.execute("ALTER TABLE enrollments DROP COLUMN native_egress_issuance_sequence")
+            connection.execute("UPDATE enrollment_meta SET value = '6' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+        migrated = GuestEnrollmentIssuer(
+            migration_database,
+            EXCHANGE_URL,
+            now=self.clock,
+            random_bytes=DeterministicRandom(0xe1),
+            maintenance_interval=None,
+        )
+        self.addCleanup(migrated.close)
+        migrated_issue = migrated.issue_native_egress(
+            migration_identity,
+            native_egress_issue_request(migration_envelope["binding"]),
+        )
+        self.assertNotIn(migrated_issue["credential"]["opaque"], json.dumps(migrated.snapshot(), sort_keys=True))
+
     def assertFailure(self, reason, operation):
         with self.assertRaises(EnrollmentFailure) as caught:
             operation()
@@ -2073,6 +2762,30 @@ def guest_session_issue_request(value):
 
 def guest_session_authenticate_request(value):
     return guest_session_issue_request(value)
+
+
+def native_egress_issue_request(value):
+    return {
+        "contract_version": NATIVE_EGRESS_IDENTITY_VERSION,
+        "binding": dict(value),
+        "audience": NATIVE_EGRESS_AUDIENCE,
+    }
+
+
+def native_egress_authenticate_request(value):
+    return native_egress_issue_request(value)
+
+
+def native_egress_revoke_execution_request(value):
+    return {
+        "contract_version": NATIVE_EGRESS_IDENTITY_VERSION,
+        "execution_scope": execution_scope(value),
+    }
+
+
+def native_egress_credential_canary(sequence, value):
+    raw = sequence.to_bytes(8, "big") + bytes([value]) * 32
+    return "nvt_eg1_" + base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
 def opaque_canary(value):

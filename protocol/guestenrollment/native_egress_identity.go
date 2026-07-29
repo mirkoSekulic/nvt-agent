@@ -134,7 +134,9 @@ func NativeEgressCredentialDigest(credential string) (string, error) {
 	if _, err := NativeEgressCredentialSequence(credential); err != nil {
 		return "", errors.New("native egress credential is invalid")
 	}
-	sum := sha256.Sum256([]byte(credential))
+	// Keep the durable digest namespace disjoint from runtime/control identity
+	// roles even if a future wire representation accidentally overlaps.
+	sum := sha256.Sum256([]byte(NativeEgressCredentialType + "\x00" + credential))
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 

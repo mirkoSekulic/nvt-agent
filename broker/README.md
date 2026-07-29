@@ -77,6 +77,25 @@ binding, audience, and broker-owned time window. SQLite stores only credential
 digests, and exact-binding/execution revocation removes every matching session
 credential atomically with the runtime identity.
 
+The same opt-in SQLite authority implements the four broker operations from
+[`nvt.native-egress-identity/v1`](../protocol/native-egress.md). Only the exact
+current active runtime identity can issue for its complete five-field binding
+and fixed `nvt.native-egress/v1` audience. Credentials are sequence-bearing,
+live for at most five minutes, and limited to two live values per binding for
+bounded response-loss recovery. SQLite stores only purpose-domain-separated
+digests and non-secret windows; issue returns plaintext once. Existing and
+native-egress binding/execution revocation share one transaction and tombstone
+domain, so no stale egress credential survives guest cleanup.
+
+The shared 64-operation admission is acquired before bearer lookup; guest issue
+and authenticate use a 48-operation subset so revocation retains headroom. Its
+30-second monotonic deadline bounds SQLite lock waits and every transaction up
+to the final pre-commit check. A synchronous commit already begun after that
+check is treated as a committed response loss rather than replaying plaintext.
+Expiry withdraws authority and closes the client connection, while the owner
+retains its admission leases until its work has actually unwound; stalled work
+cannot make the 48/64 concurrency ceilings over-admit replacement requests.
+
 Each enrollment atomically reserves its complete 20,000-rotation allowance at
 issue time. The default aggregate capacity is 2,000,000 entries (100 admitted
 lifecycles) and may be configured from 20,000 through 10,000,000; a new issue
@@ -97,10 +116,11 @@ health-latch recovery perform the deliberate streaming full integrity sweep.
 SQLite is used in single-writer mode. One broker process owns the database;
 deployments must not share it across replicas. The broker readiness endpoint
 fails closed if the configured durable store becomes unavailable. The native
-host bundle now owns runtime-identity enrollment and rotation. This phase adds
-only the broker-side session authority: there is no guest session client,
-gateway route, reverse tunnel, production native session transport, or mediated
-VM egress identity yet.
+host bundle now owns runtime-identity enrollment and rotation. The native
+control/session and workspace paths are documented separately. For native
+egress, only the broker identity authority is production-wired: there is no
+guest client, relay, trusted-target adapter, provider confinement, or mediated
+VM egress data plane yet.
 
 Example config:
 

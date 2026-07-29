@@ -46,7 +46,8 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   services, including authorized production external-VM browser routing.
 - [Native VM mediated egress](../protocol/native-egress.md): provider-neutral
   infrastructure-confinement, exact identity, flow-routing, readiness, and
-  cleanup contract with a hermetic conformance proof; production wiring is not
+  cleanup contract with a hermetic conformance proof and production broker
+  identity authority; tunnel, guest, target, and provider wiring are not
   implemented.
 
 ## Operations And Testing

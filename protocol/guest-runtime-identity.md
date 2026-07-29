@@ -224,5 +224,7 @@ session. The production guest and gateway also establish the separate
 derived credential, and authorized external-VM browser routing consumes its
 exact active stream boundary. The purpose-separated
 [`nvt.native-egress/v1`](native-egress.md) identity/session/confinement contract
-is frozen separately; no production native egress client, broker API, relay, or
-provider network enforcement consumes this runtime bearer yet.
+is frozen separately. Its production broker authority consumes this runtime
+bearer only to issue the purpose-separated short-lived egress credential; no
+production native egress client, relay, or provider network enforcement exists
+yet.

@@ -79,6 +79,10 @@ The optional production issuer implements the exact payloads and lifecycle in
 | `POST /v1/guest-runtime-identity/rotate` | 16 KiB | Current runtime identity plus exact binding and successor |
 | `POST /v1/guest-session-identity/issue` | 8 KiB | Current runtime identity plus exact binding and fixed audience |
 | `POST /v1/guest-session-identity/authenticate` | 4 KiB | Session credential plus exact binding and fixed audience |
+| `POST /v1/native-egress-identity/issue` | 8 KiB | Current runtime identity plus exact binding and fixed audience |
+| `POST /v1/native-egress-identity/authenticate` | 8 KiB | Native-egress credential plus exact binding and fixed audience |
+| `POST /v1/native-egress-identity/revoke-binding` | 8 KiB | Dedicated orchestrator bearer |
+| `POST /v1/native-egress-identity/revoke-execution` | 8 KiB | Dedicated orchestrator bearer |
 
 Issue returns the frozen `BootstrapEnvelope`; exchange returns the frozen
 `ExchangeResult`; both revoke operations and cleanup completion return
@@ -167,10 +171,43 @@ window. A third issue fails until expiry, and maintenance removes expired rows.
 Both exact-binding and execution-scope revocation delete every matching session
 digest in the same transaction as the runtime identity.
 
+The native-egress identity endpoints implement the authority portion of
+[`nvt.native-egress-identity/v1`](native-egress.md). Issue authenticates the
+indexed current, active, unexpired runtime identity before body admission and
+requires exact equality on all five binding fields plus the fixed
+`nvt.native-egress/v1` audience. The broker returns a purpose-prefixed,
+sequence-bearing credential once and persists only its domain-separated
+SHA-256 digest. Authenticate returns only non-secret binding, sequence,
+audience, and broker-owned time metadata. At most two unexpired credentials
+exist per lifecycle; a committed response loss may consume the first slot and
+one bounded retry may consume the second. Both native-egress revoke paths use
+the existing orchestrator authority and the same enrollment/tombstone
+transactions, so existing guest-enrollment revocation also removes every
+native-egress credential atomically.
+
+Native-egress authority requests have one issuer-owned shared 64-operation cap
+and a 30-second monotonic absolute deadline. Guest-authenticated issue and
+authenticate traffic acquire the shared lease and one of only 48 guest leases
+before any bearer-backed SQLite lookup, retaining sixteen shared slots for
+orchestrator revocation. Bearers are authenticated before request bodies are
+read. Unknown egress bearers are rejected by indexed digest lookup and use
+per-credential rate/concurrency isolation after authentication. The same
+deadline bounds SQLite busy waits and is checked after lock acquisition and at
+the final pre-commit authorization point. Deadline expiry withdraws commit
+authority and closes the client connection, but only the owning request's
+unwind releases its leases; stalled work therefore cannot let replacement work
+exceed the 48/64 concurrency ceilings. Expiry before the commit point rolls the
+transaction back. A synchronous SQLite commit already begun after the final
+check is the sole uninterruptible OS boundary and retains the documented
+committed-response-loss semantics. Requests are at most 8 KiB and responses at
+most 16 KiB. Maintenance removes only expired credential rows; it never evicts
+live credentials or lifecycle/tombstone authority.
+
 Errors are bounded stable classes from the guest-enrollment contract. Responses,
 audit entries, readiness, and process logs never contain a request body,
 plaintext or digest token, plaintext runtime identity, plaintext or digest
-session credential, or SQLite diagnostic.
+session credential, plaintext or digest native-egress credential, or SQLite
+diagnostic.
 The broker uses one durable SQLite database with full synchronous commits. It
 must run as the chart's single `Recreate` replica; sharing that file among
 broker processes is unsupported. This issuer is disabled unless durable state,

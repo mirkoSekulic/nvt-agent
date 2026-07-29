@@ -1,8 +1,9 @@
 # Native VM mediated-egress contract
 
 Status: versioned provider-neutral contract and hermetic conformance proof
-(`nvt.native-egress/v1`). No production tunnel, broker API, host-bundle client,
-provider network implementation, or VM egress wiring exists yet.
+(`nvt.native-egress/v1`) with a production broker identity authority. No
+production tunnel, host-bundle client, provider network implementation, or VM
+egress wiring exists yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -85,9 +86,9 @@ The reserved implementation-neutral operations and paths are:
 | revoke exact binding | `/v1/native-egress-identity/revoke-binding` | trusted orchestrator |
 | revoke execution scope | `/v1/native-egress-identity/revoke-execution` | trusted orchestrator |
 
-These paths are contract reservations, not production broker endpoints in this
-PR. Bodies repeat only the exact non-secret binding/scope, fixed audience, and
-version. Bearers are transport authorization, never body fields.
+The broker implements these paths when its opt-in guest-enrollment authority is
+enabled. Bodies repeat only the exact non-secret binding/scope, fixed audience,
+and version. Bearers are transport authorization, never body fields.
 
 Issuance authenticates possession, ownership, and lifecycle: the presented
 runtime-identity digest MUST be the current active identity, its broker-owned
@@ -104,7 +105,9 @@ minutes after issuance. An authority permits at most two live credentials per
 binding so one lost response or make-before-break replacement is recoverable
 without unbounded live authority. Control/workspace credentials fail syntactic
 egress validation and egress credentials fail control validation; the broker
-also keeps a domain-separated digest namespace.
+also keeps a domain-separated digest namespace. The durable digest is
+`sha256("nvt.native-egress-credential/v1" || 0x00 || credential)`, formatted as
+lowercase `sha256:<hex>`; plaintext is not retained after issue returns.
 
 Plaintext enrollment tokens, runtime identities, egress credentials, provider
 credentials, and injected upstream secrets never enter AgentRun/AgentSchedule
@@ -187,7 +190,7 @@ reviewed multiplexing or packet transport behind this interface.
 | exact active bindings per process | 128 |
 | durable identity bindings per authority | 10,000 |
 | concurrent identity-authority operations | 64 |
-| identity-authority operation | 30 seconds absolute |
+| identity-authority operation | 30 seconds monotonic absolute, from admission through the final pre-commit authorization point |
 | active flows per authenticated session | 64 |
 | concurrent pending flow opens per session | 8 |
 | flow ID | 128 bytes, restricted token syntax |
@@ -212,6 +215,20 @@ Shutdown initiates closing all bounded sessions/flows concurrently and returns
 within the five-second absolute deadline even if a transport's `Close`
 implementation does not return; such a transport is failed and cannot retain
 registry readiness.
+
+The authority deadline is active before bearer-backed storage lookup. SQLite
+busy waits use only its remaining budget, and the operation checks the same
+deadline after lock acquisition and immediately before commit. Expiry before
+that final authorization point withdraws commit authority and rolls the
+transaction back. The timer does not return the operation's capacity lease:
+only the owning request releases it after all of its work has unwound. A
+blocked hook or OS call can therefore retain a lease past the client cutoff,
+but cannot allow replacement work to exceed the bounded concurrency ceiling.
+Once the final check has passed and SQLite's synchronous commit system call has
+begun, the broker cannot safely interrupt the filesystem commit; a commit
+completed across the client cutoff has the ordinary committed-response-loss
+semantics and consumes one of the two live slots. The broker never begins a
+commit after observing deadline expiry.
 
 ## Provisioning and readiness choreography
 
@@ -267,8 +284,10 @@ expiry/revocation, restart/response loss, cross-run/private intent, capacity,
 cancellation, replacement, shutdown, ordering, and redaction under the race
 detector.
 
-This PR does not implement the reserved broker endpoints, a production relay or
-guest client, host-bundle wiring, egressd/captured behavior, provider network
+The production broker implements the four identity operations and shares their
+SQLite lifecycle, exact revocation, tombstones, and maintenance with guest
+enrollment/runtime identity. This phase does not implement a production relay
+or guest client, host-bundle wiring, egressd/captured behavior, provider network
 policy, Azure/AWS/QEMU support, or operator readiness/cleanup orchestration.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed
