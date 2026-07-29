@@ -32,6 +32,12 @@ const (
 	guestSessionIdentityIssue      = "/v1/guest-session-identity/issue"
 	guestSessionIdentityAuth       = "/v1/guest-session-identity/authenticate"
 	guestSessionAudience           = "nvt.native-guest-control/v1"
+	nativeEgressIdentityVersion    = "nvt.native-egress-identity/v1"
+	nativeEgressIdentityIssue      = "/v1/native-egress-identity/issue"
+	nativeEgressIdentityAuth       = "/v1/native-egress-identity/authenticate"
+	nativeEgressRevokeBinding      = "/v1/native-egress-identity/revoke-binding"
+	nativeEgressRevokeExecution    = "/v1/native-egress-identity/revoke-execution"
+	nativeEgressAudience           = "nvt.native-egress/v1"
 	guestEnrollmentOrchestrator    = "orchestrator-token-0123456789abcdef"
 )
 
@@ -296,6 +302,249 @@ func TestGuestSessionIdentityExactLifecycleRestartAndRevocation(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestNativeEgressIdentityHTTPExactLifecycleRestartAndSharedRevocation(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	request := enrollmentIssueRequest("egress-uid", "egress-execution", 1, "egress-guest", 300)
+	status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+	assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+	status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+	assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+	runtimeIdentity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+
+	status, issued := fixture.postJSONWithToken(runtimeIdentity, nativeEgressIdentityIssue, nativeEgressIssueRequest(envelope))
+	assertEnrollmentStatus(t, status, issued, http.StatusOK, "")
+	credential := cloneObject(issued["credential"])["opaque"].(string)
+	if !strings.HasPrefix(credential, "nvt_eg1_") || cloneObject(issued["credential"])["audience"] != nativeEgressAudience {
+		t.Fatalf("native egress issue result = %v", issued)
+	}
+	status, authenticated := fixture.postJSONWithToken(credential, nativeEgressIdentityAuth, nativeEgressAuthenticateRequest(envelope))
+	assertEnrollmentStatus(t, status, authenticated, http.StatusOK, "")
+	if authenticated["credential_type"] != "nvt.native-egress-credential/v1" || authenticated["audience"] != nativeEgressAudience || authenticated["sequence"] != float64(1) {
+		t.Fatalf("native egress status = %v", authenticated)
+	}
+	if authenticated["opaque"] != nil || authenticated["credential"] != nil {
+		t.Fatalf("native egress status exposed a credential: %v", authenticated)
+	}
+
+	for field, replacement := range map[string]any{
+		"agent_run_uid": "other-uid", "execution_id": "other-execution",
+		"driver_registration": "other-driver", "desired_generation": float64(2),
+		"guest_instance_id": "other-guest",
+	} {
+		wrong := nativeEgressAuthenticateRequest(envelope)
+		wrongBinding := cloneObject(wrong["binding"])
+		wrongBinding[field] = replacement
+		wrong["binding"] = wrongBinding
+		status, body := fixture.postJSONWithToken(credential, nativeEgressIdentityAuth, wrong)
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+		encodedError, _ := json.Marshal(body)
+		if bytes.Contains(encodedError, []byte("egress-uid")) || bytes.Contains(encodedError, []byte("egress-guest")) {
+			t.Fatalf("native egress error exposed binding metadata: %s", encodedError)
+		}
+		status, body = fixture.postJSONWithToken(runtimeIdentity, nativeEgressIdentityIssue, wrong)
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	}
+
+	fixture.stop()
+	fixture.start()
+	status, body := fixture.postJSONWithToken(credential, nativeEgressIdentityAuth, nativeEgressAuthenticateRequest(envelope))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	status, second := fixture.postJSONWithToken(runtimeIdentity, nativeEgressIdentityIssue, nativeEgressIssueRequest(envelope))
+	assertEnrollmentStatus(t, status, second, http.StatusOK, "")
+	secondCredential := cloneObject(second["credential"])["opaque"].(string)
+	status, body = fixture.postJSONWithToken(runtimeIdentity, nativeEgressIdentityIssue, nativeEgressIssueRequest(envelope))
+	assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+
+	status, body = fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentRevokeExecution, enrollmentRevokeExecutionRequest(request))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	for _, revoked := range []string{credential, secondCredential} {
+		status, body = fixture.postJSONWithToken(revoked, nativeEgressIdentityAuth, nativeEgressAuthenticateRequest(envelope))
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	}
+
+	fixture.stop()
+	for _, canary := range []string{runtimeIdentity, credential, secondCredential} {
+		if strings.Contains(fixture.stdout.String(), canary) || strings.Contains(fixture.stderr.String(), canary) {
+			t.Fatal("native egress canary entered broker output")
+		}
+		audit, err := os.ReadFile(fixture.audit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(audit, []byte(canary)) {
+			t.Fatal("native egress canary entered broker audit")
+		}
+		digest := fmt.Sprintf(
+			"sha256:%x",
+			sha256.Sum256([]byte("nvt.native-egress-credential/v1\x00"+canary)),
+		)
+		if strings.Contains(fixture.stdout.String(), digest) || strings.Contains(fixture.stderr.String(), digest) || bytes.Contains(audit, []byte(digest)) {
+			t.Fatal("native egress digest entered broker output or audit")
+		}
+		matches, err := filepath.Glob(filepath.Join(fixture.home, "guest-enrollment.sqlite3*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range matches {
+			content, err := os.ReadFile(match)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(content, []byte(canary)) {
+				t.Fatalf("plaintext native egress canary entered %s", filepath.Base(match))
+			}
+		}
+	}
+}
+
+func TestNativeEgressIdentityHTTPStrictInputAuthorityAndConcurrentCap(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	request := enrollmentIssueRequest("egress-strict", "egress-strict", 1, "egress-strict", 300)
+	status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+	assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+	status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+	assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+	runtimeIdentity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+
+	for _, malformed := range [][]byte{
+		[]byte(`{"contract_version":"nvt.native-egress-identity/v1","binding":{},"audience":"nvt.native-egress/v1","audience":"nvt.native-egress/v1"}`),
+		[]byte(`{"contract_version":"nvt.native-egress-identity/v1","binding":{"agent_run_uid":"one","agent_run_uid":"two"},"audience":"nvt.native-egress/v1"}`),
+		[]byte(`{"contract_version":"wrong","binding":{},"audience":"nvt.native-egress/v1"} trailing`),
+		bytes.Repeat([]byte{' '}, (8<<10)+1),
+		[]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'},
+	} {
+		status, body := fixture.postEnrollmentRaw(runtimeIdentity, nativeEgressIdentityIssue, malformed)
+		assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	}
+	for field, value := range map[string]any{
+		"contract_version": "nvt.native-egress-identity/v2",
+		"audience":         "caller-selected",
+		"unknown":          "forbidden",
+	} {
+		invalid := nativeEgressIssueRequest(envelope)
+		invalid[field] = value
+		status, body := fixture.postJSONWithToken(runtimeIdentity, nativeEgressIdentityIssue, invalid)
+		assertEnrollmentStatus(t, status, body, http.StatusBadRequest, "invalid-request")
+	}
+	for _, unauthorized := range []string{"frontend-token", "frontend-egress-token", guestSessionCredentialCanary(0x71)} {
+		status, body := fixture.postJSONWithToken(unauthorized, nativeEgressIdentityIssue, nativeEgressIssueRequest(envelope))
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+		status, body = fixture.postJSONWithToken(unauthorized, nativeEgressRevokeBinding, nativeEgressRevokeBindingRequest(envelope))
+		assertEnrollmentStatus(t, status, body, http.StatusUnauthorized, "unauthorized")
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		status int
+		body   map[string]any
+	}
+	results := make(chan result, 8)
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			status, body := fixture.postJSONWithToken(runtimeIdentity, nativeEgressIdentityIssue, nativeEgressIssueRequest(envelope))
+			results <- result{status, body}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	successes := 0
+	capacity := 0
+	for result := range results {
+		switch result.status {
+		case http.StatusOK:
+			successes++
+		case http.StatusTooManyRequests:
+			if result.body["error"] != "capacity-exceeded" {
+				t.Fatalf("native egress error = %v", result.body)
+			}
+			capacity++
+		default:
+			t.Fatalf("native egress issue status=%d body=%v", result.status, result.body)
+		}
+	}
+	if successes != 2 || capacity != 6 {
+		t.Fatalf("native egress outcomes success=%d capacity=%d", successes, capacity)
+	}
+	status, body := fixture.postJSONWithToken(guestEnrollmentOrchestrator, nativeEgressRevokeBinding, nativeEgressRevokeBindingRequest(envelope))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+
+	executionRequest := enrollmentIssueRequest("egress-revoke-scope", "egress-revoke-scope", 1, "egress-revoke-scope", 300)
+	status, executionEnvelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, executionRequest)
+	assertEnrollmentStatus(t, status, executionEnvelope, http.StatusOK, "")
+	status, body = fixture.postJSONWithToken(guestEnrollmentOrchestrator, nativeEgressRevokeExecution, nativeEgressRevokeExecutionRequest(executionEnvelope))
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
+	status, body = fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(executionEnvelope))
+	assertEnrollmentStatus(t, status, body, http.StatusConflict, "revoked")
+}
+
+func TestNativeEgressIdentityHTTPAuthenticatesBeforeBodyAndPreservesRevocationHeadroom(t *testing.T) {
+	fixture := newGuestEnrollmentBrokerFixture(t)
+	unknown := "nvt_eg1_" + guestSessionCredentialCanary(0x20)
+	connection := openIncompleteEnrollmentRequest(t, fixture, nativeEgressIdentityAuth, unknown)
+	if err := connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	statusLine, err := bufio.NewReader(connection).ReadString('\n')
+	_ = connection.Close()
+	if err != nil || !strings.Contains(statusLine, " 401 ") {
+		t.Fatalf("unknown egress credential was not rejected before body read: status=%q error=%v", statusLine, err)
+	}
+
+	const bindings = 13
+	credentials := make([]string, 0, bindings)
+	envelopes := make([]map[string]any, 0, bindings)
+	for index := range bindings {
+		request := enrollmentIssueRequest(fmt.Sprintf("egress-admission-%d", index), fmt.Sprintf("egress-admission-%d", index), 1, fmt.Sprintf("egress-admission-%d", index), 300)
+		status, envelope := fixture.postJSONWithToken(guestEnrollmentOrchestrator, guestEnrollmentIssuePath, request)
+		assertEnrollmentStatus(t, status, envelope, http.StatusOK, "")
+		status, exchanged := fixture.postJSONWithToken("", guestEnrollmentExchangePath, enrollmentExchangeRequest(envelope))
+		assertEnrollmentStatus(t, status, exchanged, http.StatusOK, "")
+		runtimeIdentity := cloneObject(exchanged["runtime_identity"])["opaque"].(string)
+		status, issued := fixture.postJSONWithToken(runtimeIdentity, nativeEgressIdentityIssue, nativeEgressIssueRequest(envelope))
+		assertEnrollmentStatus(t, status, issued, http.StatusOK, "")
+		credentials = append(credentials, cloneObject(issued["credential"])["opaque"].(string))
+		envelopes = append(envelopes, envelope)
+	}
+
+	// Twelve credentials can each occupy their four per-credential body slots,
+	// reaching the 48-request guest ceiling while leaving sixteen of the shared
+	// 64-operation bound reserved for trusted revocation.
+	slow := make([]net.Conn, 0, 48)
+	for _, credential := range credentials[:12] {
+		for range 4 {
+			slow = append(slow, openIncompleteEnrollmentRequest(t, fixture, nativeEgressIdentityAuth, credential))
+		}
+	}
+	t.Cleanup(func() {
+		for _, connection := range slow {
+			_ = connection.Close()
+		}
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, body := fixture.postEnrollmentRaw(credentials[12], nativeEgressIdentityAuth, []byte(`{}`))
+		if status == http.StatusTooManyRequests {
+			assertEnrollmentStatus(t, status, body, http.StatusTooManyRequests, "capacity-exceeded")
+			break
+		}
+		if status != http.StatusBadRequest || time.Now().After(deadline) {
+			t.Fatalf("native egress admission did not saturate: status=%d body=%v", status, body)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	status, body := fixture.postJSONWithToken(
+		guestEnrollmentOrchestrator,
+		nativeEgressRevokeExecution,
+		nativeEgressRevokeExecutionRequest(envelopes[0]),
+	)
+	assertEnrollmentStatus(t, status, body, http.StatusOK, "")
 }
 
 func TestGuestRuntimeIdentityConcurrentRotationIsSingleCAS(t *testing.T) {
@@ -641,6 +890,12 @@ func TestGuestEnrollmentExactRevokeStrictBoundsAndDisabledDefault(t *testing.T) 
 	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
 	status, body = disabled.postJSONWithToken(guestSessionCredentialCanary(0x46), guestSessionIdentityAuth, guestSessionAuthenticateRequest(runtimeEnvelope))
 	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
+	status, body = disabled.postJSONWithToken(runtimeIdentityCanary(0x47), nativeEgressIdentityIssue, nativeEgressIssueRequest(runtimeEnvelope))
+	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
+	status, body = disabled.postJSONWithToken("nvt_eg1_"+guestSessionCredentialCanary(0x48), nativeEgressIdentityAuth, nativeEgressAuthenticateRequest(runtimeEnvelope))
+	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
+	status, body = disabled.postJSONWithToken(guestEnrollmentOrchestrator, nativeEgressRevokeExecution, nativeEgressRevokeExecutionRequest(runtimeEnvelope))
+	assertEnrollmentStatus(t, status, body, http.StatusNotFound, "not-found")
 	if matches, _ := filepath.Glob(filepath.Join(disabled.home, "*enrollment*")); len(matches) != 0 {
 		t.Fatalf("disabled broker created enrollment state: %v", matches)
 	}
@@ -777,6 +1032,37 @@ func guestSessionAuthenticateRequest(envelope map[string]any) map[string]any {
 	return guestSessionIssueRequest(envelope)
 }
 
+func nativeEgressIssueRequest(envelope map[string]any) map[string]any {
+	return map[string]any{
+		"contract_version": nativeEgressIdentityVersion,
+		"binding":          cloneObject(envelope["binding"]),
+		"audience":         nativeEgressAudience,
+	}
+}
+
+func nativeEgressAuthenticateRequest(envelope map[string]any) map[string]any {
+	return nativeEgressIssueRequest(envelope)
+}
+
+func nativeEgressRevokeBindingRequest(envelope map[string]any) map[string]any {
+	return map[string]any{
+		"contract_version": nativeEgressIdentityVersion,
+		"binding":          cloneObject(envelope["binding"]),
+	}
+}
+
+func nativeEgressRevokeExecutionRequest(envelope map[string]any) map[string]any {
+	binding := cloneObject(envelope["binding"])
+	return map[string]any{
+		"contract_version": nativeEgressIdentityVersion,
+		"execution_scope": map[string]any{
+			"agent_run_uid":       binding["agent_run_uid"],
+			"execution_id":        binding["execution_id"],
+			"driver_registration": binding["driver_registration"],
+		},
+	}
+}
+
 func runtimeIdentityCanary(value byte) string {
 	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32))
 }
@@ -823,10 +1109,14 @@ func Example_guestEnrollmentPaths() {
 	fmt.Println(guestEnrollmentCompleteCleanup)
 	fmt.Println(guestSessionIdentityIssue)
 	fmt.Println(guestSessionIdentityAuth)
+	fmt.Println(nativeEgressIdentityIssue)
+	fmt.Println(nativeEgressIdentityAuth)
 	// Output:
 	// /v1/guest-enrollment/issue
 	// /v1/guest-enrollment/exchange
 	// /v1/guest-enrollment/complete-execution-cleanup
 	// /v1/guest-session-identity/issue
 	// /v1/guest-session-identity/authenticate
+	// /v1/native-egress-identity/issue
+	// /v1/native-egress-identity/authenticate
 }

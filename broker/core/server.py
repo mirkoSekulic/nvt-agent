@@ -26,6 +26,11 @@ from broker.core.guest_enrollment import (
     RUNTIME_IDENTITY_STATUS_PATH as GUEST_RUNTIME_IDENTITY_STATUS_PATH,
     GUEST_SESSION_IDENTITY_AUTHENTICATE_PATH,
     GUEST_SESSION_IDENTITY_ISSUE_PATH,
+    NATIVE_EGRESS_IDENTITY_AUTHENTICATE_PATH,
+    NATIVE_EGRESS_IDENTITY_ISSUE_PATH,
+    NATIVE_EGRESS_IDENTITY_REVOKE_BINDING_PATH,
+    NATIVE_EGRESS_IDENTITY_REVOKE_EXECUTION_PATH,
+    MAX_NATIVE_EGRESS_IDENTITY_RESPONSE_BYTES,
     EnrollmentConfigError,
     EnrollmentFailure,
     decode_exchange_request,
@@ -35,7 +40,11 @@ from broker.core.guest_enrollment import (
     decode_runtime_identity_status_request,
     decode_guest_session_authenticate_request,
     decode_guest_session_issue_request,
+    decode_native_egress_authenticate_request,
+    decode_native_egress_issue_request,
+    decode_native_egress_revoke_request,
     guest_session_credential_from_authorization,
+    native_egress_credential_from_authorization,
     load_guest_enrollment_from_environment,
     runtime_identity_from_authorization,
 )
@@ -65,6 +74,9 @@ MAX_GUEST_ENROLLMENT_HTTP_EXCHANGES = 64
 MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS = 16
 MAX_GUEST_RUNTIME_IDENTITY_HTTP_REQUESTS = 64
 MAX_GUEST_SESSION_IDENTITY_HTTP_REQUESTS = 64
+MAX_NATIVE_EGRESS_IDENTITY_HTTP_REQUESTS = 64
+MAX_NATIVE_EGRESS_IDENTITY_HTTP_GUEST_REQUESTS = 48
+NATIVE_EGRESS_IDENTITY_OPERATION_TIMEOUT_SECONDS = 30
 GUEST_ENROLLMENT_BODY_TIMEOUT_SECONDS = 10
 
 
@@ -361,6 +373,63 @@ class Broker:
             raise _guest_enrollment_provider_error(error) from error
         self.audit.write(request_id=request_id, agent=None, operation="guest-session-identity.authenticate", allowed=True)
         return result
+
+    def native_egress_identity_issue(self, request_id, raw_payload, authorization, admission=None):
+        self._require_guest_enrollment()
+        try:
+            identity = runtime_identity_from_authorization(authorization)
+            result = self.guest_enrollment.issue_native_egress(
+                identity,
+                decode_native_egress_issue_request(raw_payload),
+                admission=admission,
+            )
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=None, operation="native-egress-identity.issue", allowed=True)
+        return result
+
+    def admit_native_egress_identity(self, authorization):
+        self._require_guest_enrollment()
+        try:
+            credential = native_egress_credential_from_authorization(authorization)
+            admission = self.guest_enrollment.admit_native_egress_identity(credential)
+            return credential, admission
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+
+    def native_egress_identity_authenticate(self, request_id, raw_payload, authorization, admission=None):
+        self._require_guest_enrollment()
+        try:
+            credential = native_egress_credential_from_authorization(authorization)
+            result = self.guest_enrollment.authenticate_native_egress(
+                credential,
+                decode_native_egress_authenticate_request(raw_payload),
+                admission=admission,
+            )
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=None, operation="native-egress-identity.authenticate", allowed=True)
+        return result
+
+    def native_egress_identity_revoke_binding(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            self.guest_enrollment.revoke_native_egress_binding(decode_native_egress_revoke_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="native-egress-identity.revoke-binding", allowed=True)
+        return {"ok": True}
+
+    def native_egress_identity_revoke_execution(self, request_id, raw_payload, authorization):
+        self._require_guest_enrollment()
+        actor = self._authenticate_guest_enrollment_orchestrator(authorization)
+        try:
+            self.guest_enrollment.revoke_native_egress_execution(decode_native_egress_revoke_request(raw_payload))
+        except EnrollmentFailure as error:
+            raise _guest_enrollment_provider_error(error) from error
+        self.audit.write(request_id=request_id, agent=actor, operation="native-egress-identity.revoke-execution", allowed=True)
+        return {"ok": True}
 
     def _require_guest_enrollment(self):
         if self.guest_enrollment is None:
@@ -847,6 +916,8 @@ def make_handler(broker):
     guest_control_requests = threading.BoundedSemaphore(MAX_GUEST_ENROLLMENT_HTTP_CONTROL_REQUESTS)
     guest_runtime_identity_requests = threading.BoundedSemaphore(MAX_GUEST_RUNTIME_IDENTITY_HTTP_REQUESTS)
     guest_session_identity_requests = threading.BoundedSemaphore(MAX_GUEST_SESSION_IDENTITY_HTTP_REQUESTS)
+    native_egress_identity_requests = threading.BoundedSemaphore(MAX_NATIVE_EGRESS_IDENTITY_HTTP_REQUESTS)
+    native_egress_guest_requests = threading.BoundedSemaphore(MAX_NATIVE_EGRESS_IDENTITY_HTTP_GUEST_REQUESTS)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "nvt-brokerd/0.1"
@@ -895,6 +966,14 @@ def make_handler(broker):
             payload = {}
             runtime_admission = None
             session_admission = None
+            egress_admission = None
+            native_egress_operation_admitted = False
+            native_egress_operation_deadline = None
+            native_egress_operation_started = (
+                time.monotonic()
+                if self.path.startswith("/v1/native-egress-identity/")
+                else None
+            )
             try:
                 if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS:
                     broker._require_guest_enrollment()
@@ -904,12 +983,20 @@ def make_handler(broker):
                         GUEST_RUNTIME_IDENTITY_STATUS_PATH,
                         GUEST_RUNTIME_IDENTITY_ROTATE_PATH,
                         GUEST_SESSION_IDENTITY_ISSUE_PATH,
+                        NATIVE_EGRESS_IDENTITY_ISSUE_PATH,
                     ):
                         _, runtime_admission = broker.admit_guest_runtime_identity(authorization)
-                        request_slots = guest_runtime_identity_requests
+                        request_slots = (
+                            native_egress_guest_requests
+                            if self.path == NATIVE_EGRESS_IDENTITY_ISSUE_PATH
+                            else guest_runtime_identity_requests
+                        )
                     elif self.path == GUEST_SESSION_IDENTITY_AUTHENTICATE_PATH:
                         _, session_admission = broker.admit_guest_session_identity(authorization)
                         request_slots = guest_session_identity_requests
+                    elif self.path == NATIVE_EGRESS_IDENTITY_AUTHENTICATE_PATH:
+                        _, egress_admission = broker.admit_native_egress_identity(authorization)
+                        request_slots = native_egress_guest_requests
                     elif self.path != GUEST_ENROLLMENT_EXCHANGE_PATH:
                         broker._authenticate_guest_enrollment_orchestrator(authorization)
                         request_slots = guest_control_requests
@@ -921,8 +1008,32 @@ def make_handler(broker):
                         if session_admission is not None:
                             session_admission.release()
                             session_admission = None
+                        if egress_admission is not None:
+                            egress_admission.release()
+                            egress_admission = None
                         raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
+                    if self.path.startswith("/v1/native-egress-identity/"):
+                        native_egress_operation_admitted = native_egress_identity_requests.acquire(blocking=False)
+                        if not native_egress_operation_admitted:
+                            request_slots.release()
+                            if runtime_admission is not None:
+                                runtime_admission.release()
+                                runtime_admission = None
+                            if egress_admission is not None:
+                                egress_admission.release()
+                                egress_admission = None
+                            raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
+                        native_egress_operation_deadline = _AbsoluteSocketDeadline(
+                            self.connection,
+                            max(
+                                0.001,
+                                NATIVE_EGRESS_IDENTITY_OPERATION_TIMEOUT_SECONDS
+                                - (time.monotonic() - native_egress_operation_started),
+                            ),
+                        )
                     try:
+                        if native_egress_operation_deadline is not None:
+                            native_egress_operation_deadline.start()
                         raw_payload = self.read_enrollment_body(
                             GUEST_ENROLLMENT_ENDPOINT_LIMITS[self.path],
                         )
@@ -952,6 +1063,22 @@ def make_handler(broker):
                             response = broker.guest_session_identity_authenticate(
                                 request_id, raw_payload, authorization, admission=session_admission
                             )
+                        elif self.path == NATIVE_EGRESS_IDENTITY_ISSUE_PATH:
+                            response = broker.native_egress_identity_issue(
+                                request_id, raw_payload, authorization, admission=runtime_admission
+                            )
+                        elif self.path == NATIVE_EGRESS_IDENTITY_AUTHENTICATE_PATH:
+                            response = broker.native_egress_identity_authenticate(
+                                request_id, raw_payload, authorization, admission=egress_admission
+                            )
+                        elif self.path == NATIVE_EGRESS_IDENTITY_REVOKE_BINDING_PATH:
+                            response = broker.native_egress_identity_revoke_binding(
+                                request_id, raw_payload, authorization
+                            )
+                        elif self.path == NATIVE_EGRESS_IDENTITY_REVOKE_EXECUTION_PATH:
+                            response = broker.native_egress_identity_revoke_execution(
+                                request_id, raw_payload, authorization
+                            )
                         else:
                             raise ProviderError("not-found", "not-found", 404)
                         self.write_json(200, response)
@@ -962,6 +1089,12 @@ def make_handler(broker):
                             runtime_admission.release()
                         if session_admission is not None:
                             session_admission.release()
+                        if egress_admission is not None:
+                            egress_admission.release()
+                        if native_egress_operation_admitted:
+                            native_egress_identity_requests.release()
+                        if native_egress_operation_deadline is not None:
+                            native_egress_operation_deadline.cancel()
                 payload = self.read_payload()
                 if self.path == "/v1/http/request":
                     response = broker.http_request(request_id, payload, self.headers.get("authorization"))
@@ -1047,6 +1180,12 @@ def make_handler(broker):
 
         def write_json(self, status, payload):
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            if (
+                self.path.startswith("/v1/native-egress-identity/")
+                and len(data) > MAX_NATIVE_EGRESS_IDENTITY_RESPONSE_BYTES
+            ):
+                status = 500
+                data = b'{"ok":false,"error":"internal-error"}'
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
