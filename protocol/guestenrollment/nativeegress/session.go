@@ -32,6 +32,9 @@ type Session struct {
 	idleTimeout    time.Duration
 	closed         bool
 	done           chan struct{}
+	shutdownDone   chan struct{}
+	shutdownErr    error
+	beforeShutdown []func()
 }
 
 func NewSession(authentication Authentication, target EgressTarget) (*Session, error) {
@@ -55,6 +58,7 @@ func newSession(authentication Authentication, target EgressTarget, idleTimeout 
 		active:         make(map[*flowConn]struct{}, MaxActiveFlows),
 		idleTimeout:    idleTimeout,
 		done:           make(chan struct{}),
+		shutdownDone:   make(chan struct{}),
 	}
 	go session.expire(authentication.LocalExpiresAt)
 	return session, nil
@@ -153,26 +157,91 @@ func (session *Session) Ready() bool {
 }
 
 func (session *Session) Close() error {
+	return session.closeWithin(ShutdownTimeout)
+}
+
+func (session *Session) closeWithin(timeout time.Duration) error {
 	if session == nil {
 		return nil
 	}
+	if timeout <= 0 || timeout > ShutdownTimeout {
+		return ErrProtocol
+	}
 	session.mu.Lock()
-	if session.closed {
-		session.mu.Unlock()
-		return nil
+	var flows []*flowConn
+	var beforeShutdown []func()
+	startShutdown := false
+	if !session.closed {
+		session.closed = true
+		session.cancelLifetime()
+		close(session.done)
+		flows = make([]*flowConn, 0, len(session.active))
+		for flow := range session.active {
+			flows = append(flows, flow)
+		}
+		beforeShutdown = append(beforeShutdown, session.beforeShutdown...)
+		session.beforeShutdown = nil
+		startShutdown = true
 	}
-	session.closed = true
-	session.cancelLifetime()
-	close(session.done)
-	flows := make([]*flowConn, 0, len(session.active))
-	for flow := range session.active {
-		flows = append(flows, flow)
-	}
+	done := session.shutdownDone
 	session.mu.Unlock()
-	for _, flow := range flows {
-		_ = flow.Close()
+	if startShutdown {
+		for _, callback := range beforeShutdown {
+			callback()
+		}
+		go session.finishShutdown(flows, timeout)
 	}
-	return nil
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		session.mu.Lock()
+		err := session.shutdownErr
+		session.mu.Unlock()
+		return err
+	case <-timer.C:
+		return ErrUnavailable
+	}
+}
+
+func (session *Session) addBeforeShutdown(callback func()) bool {
+	if session == nil || callback == nil {
+		return false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed {
+		return false
+	}
+	session.beforeShutdown = append(session.beforeShutdown, callback)
+	return true
+}
+
+func (session *Session) finishShutdown(flows []*flowConn, timeout time.Duration) {
+	results := make(chan struct{}, len(flows))
+	for _, flow := range flows {
+		go func() {
+			_ = flow.Close()
+			results <- struct{}{}
+		}()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	err := error(nil)
+	for range flows {
+		select {
+		case <-results:
+		case <-timer.C:
+			err = ErrUnavailable
+			goto complete
+		}
+	}
+
+complete:
+	session.mu.Lock()
+	session.shutdownErr = err
+	close(session.shutdownDone)
+	session.mu.Unlock()
 }
 
 func (session *Session) expire(deadline time.Time) {

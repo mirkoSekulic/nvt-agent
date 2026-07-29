@@ -22,7 +22,7 @@ const (
 	NativeEgressCredentialRandomBytes    = 32
 	MaxNativeEgressCredentialLifetime    = 5 * time.Minute
 	MaxLiveNativeEgressCredentials       = 2
-	MaxNativeEgressIdentityBindings      = MaxDurableEntries
+	MaxNativeEgressIdentityEntries       = MaxDurableEntries
 	MaxConcurrentNativeEgressIdentityOps = 64
 	MaxNativeEgressIdentityOperationTime = MaxOperationDuration
 	MaxNativeEgressIdentityRequestBytes  = 8 << 10
@@ -86,8 +86,12 @@ type NativeEgressRevokeExecutionRequest struct {
 	ExecutionScope  ExecutionScope `json:"execution_scope"`
 }
 
-// NativeEgressAuthority is implementation-swappable. Runtime and egress
-// credential values are transport credentials and never body fields.
+// NativeEgressAuthority is implementation-swappable. IssueNativeEgress MUST
+// authenticate the supplied active runtime identity against the complete exact
+// Binding in the request; possession of a runtime identity for another
+// generation, guest instance, execution, or driver is not authority to choose
+// a binding. Runtime and egress credential values are transport credentials
+// and never body fields.
 type NativeEgressAuthority interface {
 	IssueNativeEgress(context.Context, string, NativeEgressIssueRequest) (NativeEgressIssueResult, error)
 	AuthenticateNativeEgress(context.Context, string, NativeEgressAuthenticateRequest) (NativeEgressStatus, error)

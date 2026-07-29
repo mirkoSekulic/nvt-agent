@@ -177,7 +177,11 @@ func TestMessageAndDestinationBoundsFailClosed(t *testing.T) {
 		{Network: "udp", Host: "example.com", Port: 443},
 		{Network: NetworkTCP, Host: "EXAMPLE.COM", Port: 443},
 		{Network: NetworkTCP, Host: "example..com", Port: 443},
+		{Network: NetworkTCP, Host: "-api.example", Port: 443},
+		{Network: NetworkTCP, Host: "api-.example", Port: 443},
+		{Network: NetworkTCP, Host: strings.Repeat("a", 64) + ".example", Port: 443},
 		{Network: NetworkTCP, Host: "127.0.0.01", Port: 443},
+		{Network: NetworkTCP, Host: "fe80::1%eth0", Port: 443},
 		{Network: NetworkTCP, Host: "example.com", Port: 0},
 		{Network: NetworkTCP, Host: "example.com", Port: 443, CapabilityHint: "Invalid Hint"},
 	} {

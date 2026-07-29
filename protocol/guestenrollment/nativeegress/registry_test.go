@@ -56,6 +56,85 @@ func TestRegistryMakeBeforeBreakMonotonicPromotionAndCleanup(t *testing.T) {
 	}
 }
 
+func TestRegistryClosedPreActivationReservationsCannotLeakSlots(t *testing.T) {
+	t.Run("abandoned active releases binding", func(t *testing.T) {
+		binding := testBinding("run-abandoned-active")
+		registry := NewSessionRegistry()
+		defer registry.Close()
+		abandoned := mustSession(t, binding, 1)
+		if _, err := registry.Reserve(abandoned); err != nil {
+			t.Fatal(err)
+		}
+		if err := abandoned.Close(); err != nil {
+			t.Fatal(err)
+		}
+		waitForRegistrySlot(t, registry, binding, func(slot *sessionSlot) bool { return slot == nil })
+		replacement := mustSession(t, binding, 2)
+		reservation, err := registry.Reserve(replacement)
+		if err != nil || !reservation.Activate() {
+			t.Fatalf("released active slot could not be reused: %v", err)
+		}
+	})
+
+	t.Run("abandoned standby releases standby", func(t *testing.T) {
+		binding := testBinding("run-abandoned-standby")
+		registry := NewSessionRegistry()
+		defer registry.Close()
+		active := mustSession(t, binding, 1)
+		activeReservation, err := registry.Reserve(active)
+		if err != nil || !activeReservation.Activate() {
+			t.Fatal(err)
+		}
+		abandoned := mustSession(t, binding, 2)
+		if _, err := registry.Reserve(abandoned); err != nil {
+			t.Fatal(err)
+		}
+		if err := abandoned.Close(); err != nil {
+			t.Fatal(err)
+		}
+		waitForRegistrySlot(t, registry, binding, func(slot *sessionSlot) bool { return slot != nil && slot.standby == nil })
+		replacement := mustSession(t, binding, 2)
+		replacementReservation, err := registry.Reserve(replacement)
+		if err != nil || !replacementReservation.Activate() {
+			t.Fatalf("released standby slot could not be reused: %v", err)
+		}
+		if got, ok := registry.Active(binding); !ok || got != active {
+			t.Fatal("replacement standby preempted active")
+		}
+	})
+
+	t.Run("ready standby promotes after unready active closes", func(t *testing.T) {
+		binding := testBinding("run-unready-active")
+		registry := NewSessionRegistry()
+		defer registry.Close()
+		unreadyActive := mustSession(t, binding, 1)
+		if _, err := registry.Reserve(unreadyActive); err != nil {
+			t.Fatal(err)
+		}
+		standby := mustSession(t, binding, 2)
+		standbyReservation, err := registry.Reserve(standby)
+		if err != nil || !standbyReservation.Activate() {
+			t.Fatal(err)
+		}
+		if _, ready := registry.Active(binding); ready {
+			t.Fatal("unactivated active reservation became ready")
+		}
+		if err := unreadyActive.Close(); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for {
+			if got, ok := registry.Active(binding); ok && got == standby {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("ready standby was not promoted")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+}
+
 func TestRegistryNewerReplacementExpiryShutdownAndBound(t *testing.T) {
 	binding := testBinding("run-newer")
 	registry := NewSessionRegistry()
@@ -139,6 +218,42 @@ func TestRegistryWithdrawsReadinessBeforeClosingFlows(t *testing.T) {
 	target.closePeers()
 }
 
+func TestSessionOriginatedCloseWithdrawsRegistryBeforeFlows(t *testing.T) {
+	binding := testBinding("run-session-close-order")
+	registry := NewSessionRegistry()
+	closedAfterWithdrawal := make(chan bool, 1)
+	target := &fakeTarget{binding: binding, onClose: func() {
+		_, ready := registry.Active(binding)
+		closedAfterWithdrawal <- !ready
+	}}
+	session, err := NewSession(testAuthentication(binding, 1, time.Minute), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := registry.Reserve(session)
+	if err != nil || !reservation.Activate() {
+		t.Fatal(err)
+	}
+	flow, err := session.OpenFlow(t.Context(), Destination{Network: NetworkTCP, Host: "api.example", Port: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case withdrawn := <-closedAfterWithdrawal:
+		if !withdrawn {
+			t.Fatal("session close closed flow before readiness withdrawal")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session close retained active flow")
+	}
+	_ = flow.Close()
+	_ = registry.Close()
+	target.closePeers()
+}
+
 func TestCredentialDeadlineRemovesSessionAndFlows(t *testing.T) {
 	binding := testBinding("run-expiry")
 	registry := NewSessionRegistry()
@@ -185,4 +300,22 @@ func mustSession(t *testing.T, binding guestenrollment.Binding, sequence uint64)
 		t.Fatal(err)
 	}
 	return session
+}
+
+func waitForRegistrySlot(t *testing.T, registry *SessionRegistry, binding guestenrollment.Binding, predicate func(*sessionSlot) bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		registry.mu.Lock()
+		slot := registry.slots[binding]
+		matched := predicate(slot)
+		registry.mu.Unlock()
+		if matched {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reservation was not removed")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

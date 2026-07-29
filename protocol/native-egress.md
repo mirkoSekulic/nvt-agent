@@ -89,6 +89,12 @@ These paths are contract reservations, not production broker endpoints in this
 PR. Bodies repeat only the exact non-secret binding/scope, fixed audience, and
 version. Bearers are transport authorization, never body fields.
 
+Issuance authenticates both possession and ownership: the presented active
+runtime-identity digest MUST be durably associated with the complete Binding in
+the issue body, and all five fields MUST match exactly. A runtime identity for
+an older generation, replacement guest, other execution, or other driver cannot
+authorize a caller-selected binding.
+
 The canonical egress credential uses a purpose-specific `nvt_eg1_` prefix,
 an eight-byte positive durable issuance sequence, and 32 bytes from
 `crypto/rand`, encoded base64url without padding. It expires no later than five
@@ -114,9 +120,13 @@ session is withdrawn and closed after the ready replacement is promoted. Exact
 binding or execution-scope revocation atomically denies all current and future
 credentials/sessions for its ownership key.
 
-The authority admits at most 10,000 durable binding lifecycles, including live
-records and revocation tombstones, and never evicts a live credential to admit
-another run. Expired credential records may be reclaimed by bounded maintenance.
+The authority admits at most 10,000 durable entries shared by binding
+lifecycles, exact-binding tombstones, and execution-scope tombstones; no
+tombstone map has a separate unbounded allowance. Cleanup may atomically replace
+its own lifecycle entries with a tombstone at capacity, but an absent-binding or
+absent-execution revocation that needs a new entry fails closed at the same
+bound. The authority never evicts a live credential to admit another run.
+Expired credential records may be reclaimed by bounded maintenance.
 Revocation tombstones remain until authoritative execution cleanup makes their
 scope eligible for the existing bounded retention/GC policy; restart recovery
 must not depend on process memory.
@@ -179,7 +189,7 @@ reviewed multiplexing or packet transport behind this interface.
 | active flows per authenticated session | 64 |
 | concurrent pending flow opens per session | 8 |
 | flow ID | 128 bytes, restricted token syntax |
-| destination hostname/IP | 253 canonical ASCII bytes |
+| destination hostname/IP | 253 canonical ASCII bytes; DNS labels at most 63 bytes, unscoped canonical IP |
 | capability hint | 128 bytes, restricted token syntax |
 | handshake | 5 seconds absolute |
 | broker revalidation/reconnect | no later than 30 seconds |
@@ -196,6 +206,10 @@ failure all fail closed. Successful reads or writes refresh one connection-wide
 idle deadline so sustained one-way streams are not truncated. No whole payload
 is buffered by the contract. Session close, expiry, revocation, replacement,
 or process shutdown withdraws registry readiness before closing every flow.
+Shutdown initiates closing all bounded sessions/flows concurrently and returns
+within the five-second absolute deadline even if a transport's `Close`
+implementation does not return; such a transport is failed and cannot retain
+registry readiness.
 
 ## Provisioning and readiness choreography
 

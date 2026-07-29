@@ -2,6 +2,7 @@ package nativeegress
 
 import (
 	"sync"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
@@ -9,9 +10,11 @@ import (
 // SessionRegistry stores one active and one already-authenticated standby per
 // exact binding. It has no list/enumeration or partial-binding lookup API.
 type SessionRegistry struct {
-	mu     sync.Mutex
-	slots  map[guestenrollment.Binding]*sessionSlot
-	closed bool
+	mu           sync.Mutex
+	slots        map[guestenrollment.Binding]*sessionSlot
+	closed       bool
+	shutdownDone chan struct{}
+	shutdownErr  error
 }
 
 type sessionSlot struct {
@@ -26,11 +29,13 @@ type SessionReservation struct {
 	sequence uint64
 	ready    bool
 	removed  bool
-	once     sync.Once
 }
 
 func NewSessionRegistry() *SessionRegistry {
-	return &SessionRegistry{slots: make(map[guestenrollment.Binding]*sessionSlot, MaxSessionBindings)}
+	return &SessionRegistry{
+		slots:        make(map[guestenrollment.Binding]*sessionSlot, MaxSessionBindings),
+		shutdownDone: make(chan struct{}),
+	}
 }
 
 func (registry *SessionRegistry) Reserve(session *Session) (*SessionReservation, error) {
@@ -44,29 +49,38 @@ func (registry *SessionRegistry) Reserve(session *Session) (*SessionReservation,
 	}
 	reservation := &SessionReservation{registry: registry, session: session, binding: binding, sequence: sequence}
 	registry.mu.Lock()
-	defer registry.mu.Unlock()
 	if registry.closed {
+		registry.mu.Unlock()
 		return nil, ErrUnavailable
 	}
 	slot := registry.slots[binding]
 	if slot == nil {
 		if len(registry.slots) >= MaxSessionBindings {
+			registry.mu.Unlock()
 			return nil, ErrCapacity
 		}
 		slot = &sessionSlot{}
+	} else if slot.active == nil || slot.standby != nil {
+		registry.mu.Unlock()
+		return nil, ErrCapacity
+	} else if sequence < slot.active.sequence {
+		registry.mu.Unlock()
+		return nil, ErrUnavailable
+	}
+	if !session.addBeforeShutdown(func() { reservation.withdraw() }) {
+		registry.mu.Unlock()
+		return nil, ErrUnavailable
+	}
+	if registry.slots[binding] == nil {
 		registry.slots[binding] = slot
 	}
 	if slot.active == nil && slot.standby == nil {
 		slot.active = reservation
-		return reservation, nil
+	} else {
+		slot.standby = reservation
 	}
-	if slot.active == nil || slot.standby != nil {
-		return nil, ErrCapacity
-	}
-	if sequence < slot.active.sequence {
-		return nil, ErrUnavailable
-	}
-	slot.standby = reservation
+	registry.mu.Unlock()
+	go reservation.removeWhenClosed()
 	return reservation, nil
 }
 
@@ -91,7 +105,6 @@ func (reservation *SessionReservation) Activate() bool {
 		slot.standby = nil
 	}
 	registry.mu.Unlock()
-	reservation.once.Do(func() { go reservation.removeWhenClosed() })
 	return true
 }
 
@@ -101,11 +114,18 @@ func (reservation *SessionReservation) Remove() {
 	if reservation == nil || reservation.registry == nil {
 		return
 	}
+	if !reservation.withdraw() {
+		return
+	}
+	_ = reservation.session.Close()
+}
+
+func (reservation *SessionReservation) withdraw() bool {
 	registry := reservation.registry
 	registry.mu.Lock()
 	if reservation.removed {
 		registry.mu.Unlock()
-		return
+		return false
 	}
 	reservation.removed = true
 	reservation.ready = false
@@ -125,7 +145,7 @@ func (reservation *SessionReservation) Remove() {
 		}
 	}
 	registry.mu.Unlock()
-	_ = reservation.session.Close()
+	return true
 }
 
 func (reservation *SessionReservation) removeWhenClosed() {
@@ -147,32 +167,73 @@ func (registry *SessionRegistry) Active(binding guestenrollment.Binding) (*Sessi
 }
 
 func (registry *SessionRegistry) Close() error {
+	return registry.closeWithin(ShutdownTimeout)
+}
+
+func (registry *SessionRegistry) closeWithin(timeout time.Duration) error {
 	if registry == nil {
 		return nil
 	}
-	registry.mu.Lock()
-	if registry.closed {
-		registry.mu.Unlock()
-		return nil
+	if timeout <= 0 || timeout > ShutdownTimeout {
+		return ErrProtocol
 	}
-	registry.closed = true
-	reservations := make([]*SessionReservation, 0, len(registry.slots)*2)
-	for _, slot := range registry.slots {
-		for _, reservation := range []*SessionReservation{slot.active, slot.standby} {
-			if reservation == nil || reservation.removed {
-				continue
+	registry.mu.Lock()
+	if !registry.closed {
+		registry.closed = true
+		reservations := make([]*SessionReservation, 0, len(registry.slots)*2)
+		for _, slot := range registry.slots {
+			for _, reservation := range []*SessionReservation{slot.active, slot.standby} {
+				if reservation == nil || reservation.removed {
+					continue
+				}
+				reservation.removed = true
+				reservation.ready = false
+				reservations = append(reservations, reservation)
 			}
-			reservation.removed = true
-			reservation.ready = false
-			reservations = append(reservations, reservation)
+		}
+		registry.slots = nil
+		go registry.finishShutdown(reservations, timeout)
+	}
+	done := registry.shutdownDone
+	registry.mu.Unlock()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		registry.mu.Lock()
+		err := registry.shutdownErr
+		registry.mu.Unlock()
+		return err
+	case <-timer.C:
+		return ErrUnavailable
+	}
+}
+
+func (registry *SessionRegistry) finishShutdown(reservations []*SessionReservation, timeout time.Duration) {
+	results := make(chan error, len(reservations))
+	for _, reservation := range reservations {
+		go func() { results <- reservation.session.closeWithin(timeout) }()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	err := error(nil)
+	for range reservations {
+		select {
+		case result := <-results:
+			if result != nil {
+				err = ErrUnavailable
+			}
+		case <-timer.C:
+			err = ErrUnavailable
+			goto complete
 		}
 	}
-	registry.slots = nil
+
+complete:
+	registry.mu.Lock()
+	registry.shutdownErr = err
+	close(registry.shutdownDone)
 	registry.mu.Unlock()
-	for _, reservation := range reservations {
-		_ = reservation.session.Close()
-	}
-	return nil
 }
 
 func (*SessionRegistry) String() string   { return "[native egress session registry]" }

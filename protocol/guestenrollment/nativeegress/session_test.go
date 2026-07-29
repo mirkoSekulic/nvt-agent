@@ -15,16 +15,17 @@ import (
 )
 
 type fakeTarget struct {
-	binding guestenrollment.Binding
-	deny    func(Destination) bool
-	block   <-chan struct{}
-	echo    bool
-	onClose func()
-	err     error
-	calls   atomic.Int32
-	mu      sync.Mutex
-	seen    []Destination
-	peers   []net.Conn
+	binding  guestenrollment.Binding
+	deny     func(Destination) bool
+	block    <-chan struct{}
+	echo     bool
+	onClose  func()
+	err      error
+	decorate func(net.Conn) net.Conn
+	calls    atomic.Int32
+	mu       sync.Mutex
+	seen     []Destination
+	peers    []net.Conn
 }
 
 func (target *fakeTarget) Binding() guestenrollment.Binding { return target.binding }
@@ -57,10 +58,14 @@ func (target *fakeTarget) OpenFlow(ctx context.Context, destination Destination)
 			_ = peer.Close()
 		}()
 	}
+	connection := net.Conn(client)
 	if target.onClose != nil {
-		return &observedConn{Conn: client, onClose: target.onClose}, nil
+		connection = &observedConn{Conn: connection, onClose: target.onClose}
 	}
-	return client, nil
+	if target.decorate != nil {
+		connection = target.decorate(connection)
+	}
+	return connection, nil
 }
 
 func (target *fakeTarget) closePeers() {
@@ -276,6 +281,56 @@ func TestSessionShutdownCancelsPendingTargetOpen(t *testing.T) {
 	close(blocked)
 }
 
+func TestSessionAndRegistryShutdownAreBoundedWhenConnectionCloseBlocks(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		shutdown func(*SessionRegistry, *Session, time.Duration) error
+	}{
+		{name: "session", shutdown: func(_ *SessionRegistry, session *Session, timeout time.Duration) error {
+			return session.closeWithin(timeout)
+		}},
+		{name: "registry", shutdown: func(registry *SessionRegistry, _ *Session, timeout time.Duration) error {
+			return registry.closeWithin(timeout)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binding := testBinding("run-blocking-close-" + test.name)
+			release := make(chan struct{})
+			target := &fakeTarget{binding: binding, decorate: func(connection net.Conn) net.Conn {
+				return &blockingCloseConn{Conn: connection, release: release}
+			}}
+			registry := NewSessionRegistry()
+			session, err := NewSession(testAuthentication(binding, 1, time.Minute), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reservation, err := registry.Reserve(session)
+			if err != nil || !reservation.Activate() {
+				t.Fatal(err)
+			}
+			flow, err := session.OpenFlow(t.Context(), Destination{Network: NetworkTCP, Host: "api.example", Port: 443})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const timeout = 40 * time.Millisecond
+			started := time.Now()
+			if err := test.shutdown(registry, session, timeout); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("blocking shutdown error=%v", err)
+			}
+			if elapsed := time.Since(started); elapsed > timeout*4 {
+				t.Fatalf("shutdown exceeded bound: %s", elapsed)
+			}
+			if session.Ready() {
+				t.Fatal("bounded shutdown retained readiness")
+			}
+			close(release)
+			_ = flow.Close()
+			target.closePeers()
+			_ = registry.Close()
+		})
+	}
+}
+
 func TestFlowIdleDeadlineIsBidirectionalActivity(t *testing.T) {
 	binding := testBinding("run-idle")
 	target := &fakeTarget{binding: binding}
@@ -347,5 +402,15 @@ type observedConn struct {
 
 func (connection *observedConn) Close() error {
 	connection.once.Do(connection.onClose)
+	return connection.Conn.Close()
+}
+
+type blockingCloseConn struct {
+	net.Conn
+	release <-chan struct{}
+}
+
+func (connection *blockingCloseConn) Close() error {
+	<-connection.release
 	return connection.Conn.Close()
 }

@@ -53,7 +53,7 @@ var (
 	ErrAuthenticationTemporary = errors.New("native egress authentication temporarily unavailable")
 
 	flowIDPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	hostnamePattern       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+	hostnameLabelPattern  = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 	numericHostPattern    = regexp.MustCompile(`^[0-9.]+$`)
 	capabilityHintPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 )
@@ -103,16 +103,29 @@ func ValidateDestination(value Destination) error {
 		return ErrProtocol
 	}
 	if address, err := netip.ParseAddr(value.Host); err == nil {
-		if address.String() != value.Host {
+		if address.Zone() != "" || address.String() != value.Host {
 			return ErrProtocol
 		}
-	} else if !hostnamePattern.MatchString(value.Host) || strings.Contains(value.Host, "..") || numericHostPattern.MatchString(value.Host) {
+	} else if !canonicalHostname(value.Host) || numericHostPattern.MatchString(value.Host) {
 		return ErrProtocol
 	}
 	if value.CapabilityHint != "" && (len(value.CapabilityHint) > MaxCapabilityHintBytes || !capabilityHintPattern.MatchString(value.CapabilityHint)) {
 		return ErrProtocol
 	}
 	return nil
+}
+
+func canonicalHostname(value string) bool {
+	labels := strings.Split(value, ".")
+	if len(labels) == 0 {
+		return false
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || !hostnameLabelPattern.MatchString(label) {
+			return false
+		}
+	}
+	return true
 }
 
 func ValidateMessage(value Message) error {
