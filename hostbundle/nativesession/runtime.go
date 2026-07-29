@@ -406,14 +406,21 @@ func (runtime *Runtime) serveCredential(ctx context.Context, state *credentialSt
 }
 
 func (runtime *Runtime) openCredentialPair(ctx context.Context, credential sessionCredential) (*sessionPair, error) {
-	connection, reader, err := runtime.openControlCredential(ctx, credential)
-	if err != nil {
-		return nil, err
-	}
-	pair := &sessionPair{control: connection, reader: reader}
 	if runtime.Configuration.Workspace == nil {
-		return pair, nil
+		connection, reader, err := runtime.openControlCredential(ctx, credential)
+		if err != nil {
+			return nil, err
+		}
+		return &sessionPair{control: connection, reader: reader}, nil
 	}
+
+	// Prepare and start the workspace leg before opening the control standby.
+	// A control connection that has completed hello is subject to the gateway's
+	// heartbeat deadline, while workspace authentication and destination probing
+	// can legitimately consume the rest of the bounded preparation budget. By
+	// opening control last, no accepted control standby is left unread while the
+	// other required leg is still being prepared.
+	pair := &sessionPair{}
 	workspaceConnection, err := runtime.Connector.Connect(ctx, runtime.Configuration.Workspace.GatewayEndpoint)
 	if err != nil {
 		pair.Close()
@@ -457,6 +464,20 @@ func (runtime *Runtime) openCredentialPair(ctx context.Context, credential sessi
 			err = workspacetunnel.ErrUnavailable
 		}
 		return nil, mapWorkspaceError(err)
+	default:
+	}
+
+	connection, reader, err := runtime.openControlCredential(ctx, credential)
+	if err != nil {
+		pair.Close()
+		return nil, err
+	}
+	pair.control = connection
+	pair.reader = reader
+	select {
+	case <-pair.workspaceStopped():
+		pair.Close()
+		return nil, fail(ReasonGatewayUnavailable, true, false)
 	default:
 		return pair, nil
 	}

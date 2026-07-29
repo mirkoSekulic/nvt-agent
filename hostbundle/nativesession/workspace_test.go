@@ -3,6 +3,7 @@ package nativesession
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -388,10 +389,11 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	workspaceCredentials := make(chan string, 8)
 	workspaceSessions := make(chan *workspacetunnel.GatewaySession, 4)
 	activeControlPongs := make(chan struct{}, 16)
+	replacementControlServed := make(chan struct{}, 1)
 	pendingWorkspaceStarted := make(chan struct{})
 	releasePendingWorkspace := make(chan struct{})
 	failedPendingWorkspace := make(chan struct{})
-	connector := &workspacePipeConnector{controlHandler: heartbeatWorkspaceControlGateway(binding, controlCredentials, activeControlPongs)}
+	connector := &workspacePipeConnector{controlHandler: heartbeatWorkspaceControlGateway(binding, controlCredentials, activeControlPongs, replacementControlServed)}
 	connector.workspaceHandler = func(call int, connection net.Conn) {
 		if call == 2 {
 			defer connection.Close()
@@ -445,13 +447,36 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 		cancel()
 		t.Fatal("pending workspace establishment did not start")
 	}
-	for count := 0; count < 4; count++ {
+drainPongs:
+	for {
+		select {
+		case <-activeControlPongs:
+		default:
+			break drainPongs
+		}
+	}
+	blockedAt := time.Now()
+	// Cross both the shortened ping interval and pong deadline while workspace
+	// preparation remains blocked. A control standby must not be opened until
+	// the slow workspace leg has either completed or failed.
+	for count := 0; count < 8; count++ {
 		select {
 		case <-activeControlPongs:
 		case <-time.After(2 * time.Second):
 			cancel()
 			t.Fatal("predecessor control stopped answering heartbeats during replacement preparation")
 		}
+	}
+	if elapsed := time.Since(blockedAt); elapsed <= 2*frameTimeout {
+		cancel()
+		t.Fatalf("workspace preparation crossed only %s of the %s pending-control heartbeat budget", elapsed, 2*frameTimeout)
+	}
+	connector.mu.Lock()
+	controlCallsDuringWorkspacePreparation := connector.controlCalls
+	connector.mu.Unlock()
+	if controlCallsDuringWorkspacePreparation != 1 {
+		cancel()
+		t.Fatalf("opened %d control connections before workspace preparation completed", controlCallsDuringWorkspacePreparation)
 	}
 	if _, err := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); err != nil {
 		cancel()
@@ -470,17 +495,16 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 		t.Fatalf("one-leg pending failure removed current readiness: %v", err)
 	}
 	assertWorkspaceEcho(t, first, "predecessor-still-ready")
-	failedControl := waitString(t, controlCredentials, "failed replacement control credential")
 	failedWorkspace := waitString(t, workspaceCredentials, "failed replacement workspace credential")
-	if failedControl == initialControl || failedControl != failedWorkspace {
+	if failedWorkspace == initialControl {
 		cancel()
-		t.Fatal("pending replacement did not use one new credential on both legs")
+		t.Fatal("pending workspace did not use a new credential")
 	}
 
 	replacement := waitWorkspaceSession(t, workspaceSessions)
-	retriedControl := waitString(t, controlCredentials, "retried replacement control credential")
 	retriedWorkspace := waitString(t, workspaceCredentials, "retried replacement workspace credential")
-	if retriedControl != failedControl || retriedWorkspace != failedControl {
+	retriedControl := waitString(t, controlCredentials, "retried replacement control credential")
+	if retriedControl != failedWorkspace || retriedWorkspace != failedWorkspace {
 		cancel()
 		t.Fatal("one-leg retry issued or used a different pending credential")
 	}
@@ -510,6 +534,12 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	}
 	waitForSessionReadiness(t, runtime.Configuration.RuntimeDirectory)
 	assertWorkspaceEcho(t, replacement, "replacement-ready")
+	select {
+	case <-replacementControlServed:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("promoted replacement did not service control traffic")
+	}
 	select {
 	case ready := <-readinessEvents:
 		cancel()
@@ -699,7 +729,7 @@ func keepWorkspaceControlGateway(binding guestenrollment.Binding, credentials ch
 	}
 }
 
-func heartbeatWorkspaceControlGateway(binding guestenrollment.Binding, credentials chan<- string, activePongs chan<- struct{}) func(int, net.Conn) {
+func heartbeatWorkspaceControlGateway(binding guestenrollment.Binding, credentials chan<- string, activePongs chan<- struct{}, replacementServed chan<- struct{}) func(int, net.Conn) {
 	return func(call int, connection net.Conn) {
 		defer connection.Close()
 		reader := newFrameReader(connection)
@@ -713,6 +743,14 @@ func heartbeatWorkspaceControlGateway(binding guestenrollment.Binding, credentia
 			Binding: &binding, Audience: guestenrollment.NativeGuestControlAudience,
 		}, time.Now().Add(time.Second)) != nil {
 			return
+		}
+		if call > 1 {
+			if writeFrame(connection, guestenrollment.NativeSessionMessage{
+				ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionAgentdRequest,
+				RequestID: "replacement-health", Payload: json.RawMessage(`{"type":"health"}`),
+			}, time.Now().Add(time.Second)) != nil {
+				return
+			}
 		}
 		for {
 			if call == 1 {
@@ -737,6 +775,14 @@ func heartbeatWorkspaceControlGateway(binding guestenrollment.Binding, credentia
 				case guestenrollment.NativeSessionPong:
 					if call == 1 {
 						activePongs <- struct{}{}
+					}
+				case guestenrollment.NativeSessionAgentdResponse:
+					if call <= 1 || frame.RequestID != "replacement-health" {
+						return
+					}
+					select {
+					case replacementServed <- struct{}{}:
+					default:
 					}
 				default:
 					return
