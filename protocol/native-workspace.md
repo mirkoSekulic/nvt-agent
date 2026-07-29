@@ -199,7 +199,11 @@ control/workspace renewal, fixed-target reachability, and redacted
 observability.
 
 The production gateway has an opt-in workspace listener and bounded
-process-local active/standby `StreamOpener` registry. It has no HTTP handler,
-browser/code-server route, VM egress path, cloud provider, or public VM
-listener. Connecting browser routing to this implementation-neutral boundary
-is a later reviewed change.
+process-local active/standby `StreamOpener` registry. The operator publishes
+only the complete non-secret routing binding of the currently accepted guest
+in the AgentRun status subresource and clears it before that guest ceases to be
+authoritative. A gateway resolver requires exact status, desired generation,
+driver and execution identity plus ready control/workspace registries; it never
+guesses or enumerates bindings. The resolver is not connected to an HTTP
+handler. Browser/code-server routing, VM egress, cloud providers, and public VM
+listeners remain later reviewed production gates.

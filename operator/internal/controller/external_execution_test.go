@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -338,6 +340,7 @@ func TestExternalExecutionUnavailableAndMalformedResponsesFailClosed(t *testing.
 			ctx := context.Background()
 			run := externalTestAgentRun()
 			run.Finalizers = []string{externalExecutionFinalizer}
+			run.Status.NativeGuestBinding = nativeGuestBindingStatus(exactNativeGuestBindingForRun(t, run, "failed-guest"))
 			k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
 			result, err := reconciler.Reconcile(ctx, requestFor(run))
 			if err != nil {
@@ -354,6 +357,9 @@ func TestExternalExecutionUnavailableAndMalformedResponsesFailClosed(t *testing.
 			condition := meta.FindStatusCondition(updated.Status.Conditions, ConditionExecutionBackendAvailable)
 			if condition == nil || condition.Status != metav1.ConditionFalse {
 				t.Fatalf("unavailable condition=%#v", condition)
+			}
+			if updated.Status.NativeGuestBinding != nil {
+				t.Fatalf("backend failure retained native guest binding: %#v", updated.Status.NativeGuestBinding)
 			}
 			if name == "permanent rejection" {
 				if result.RequeueAfter <= 0 || condition.Reason != executionDriverRejectedReason ||
@@ -507,6 +513,7 @@ func TestExternalExecutionActiveDeadlineTransitionsAndCleansProvider(t *testing.
 	run.Finalizers = []string{externalExecutionFinalizer}
 	run.Status.Phase = nvtv1alpha1.AgentRunPhaseRunning
 	run.Status.StartedAt = &started
+	run.Status.NativeGuestBinding = nativeGuestBindingStatus(exactNativeGuestBindingForRun(t, run, "deadline-guest"))
 	run.Spec.TTL = &nvtv1alpha1.AgentRunTTL{ActiveDeadlineSeconds: ptrTo[int64](60), RunRetentionSeconds: ptrTo[int64](3600)}
 	driver := &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}}
 	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
@@ -517,7 +524,7 @@ func TestExternalExecutionActiveDeadlineTransitionsAndCleansProvider(t *testing.
 	}
 	updated := getExternalRun(t, ctx, k8sClient, run)
 	if updated.Status.Phase != nvtv1alpha1.AgentRunPhaseDeadlineExceeded || updated.Status.FinishedAt == nil ||
-		controllerHasFinalizer(&updated, externalExecutionFinalizer) || len(driver.desired) != 0 || len(driver.deleteIDs) != 1 {
+		updated.Status.NativeGuestBinding != nil || controllerHasFinalizer(&updated, externalExecutionFinalizer) || len(driver.desired) != 0 || len(driver.deleteIDs) != 1 {
 		t.Fatalf("active deadline did not converge exact cleanup: %#v reconcile=%d delete=%#v", updated, len(driver.desired), driver.deleteIDs)
 	}
 }
@@ -567,16 +574,39 @@ func TestExternalExecutionStaleTerminalGenerationCannotTerminateCurrentRun(t *te
 			run := externalTestAgentRun()
 			run.Generation = 5
 			run.Finalizers = []string{externalExecutionFinalizer}
+			run.Status.NativeGuestBinding = nativeGuestBindingStatus(exactNativeGuestBindingForRun(t, run, "stale-guest"))
 			driver := &recordingExecutionDriver{reconcile: []executiondriver.Status{status}}
 			k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
 			if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != externalExecutionDefaultRequeue {
 				t.Fatalf("stale terminal result=%#v err=%v", result, err)
 			}
 			updated := getExternalRun(t, ctx, k8sClient, run)
-			if IsTerminalAgentRunPhase(updated.Status.Phase) || updated.Status.FinishedAt != nil || updated.Status.Reason != "ExternalExecutionStaleObservation" {
+			if IsTerminalAgentRunPhase(updated.Status.Phase) || updated.Status.FinishedAt != nil || updated.Status.NativeGuestBinding != nil || updated.Status.Reason != "ExternalExecutionStaleObservation" {
 				t.Fatalf("stale terminal status ended current run: %#v", updated.Status)
 			}
 		})
+	}
+}
+
+func TestExternalExecutionStaleNonTerminalGenerationClearsRoutingBinding(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Generation = 5
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	run.Status.NativeGuestBinding = nativeGuestBindingStatus(exactNativeGuestBindingForRun(t, run, "current-guest"))
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: 4}}},
+		accepted:                 true,
+	}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	if updated.Status.NativeGuestBinding != nil || driver.prepareCalls != 0 || len(issuer.issues) != 0 {
+		t.Fatalf("stale non-terminal generation retained or republished routing: binding=%#v prepares=%d issues=%d", updated.Status.NativeGuestBinding, driver.prepareCalls, len(issuer.issues))
 	}
 }
 
@@ -739,6 +769,9 @@ func TestExternalGuestEnrollmentIssuesDeliversOnceAndRecoversAfterRestart(t *tes
 	if len(issuer.issues) != 0 || driver.deliverCalls != 0 {
 		t.Fatal("enrollment started before both finalizers were durable")
 	}
+	if pending := getExternalRun(t, ctx, k8sClient, run); pending.Status.NativeGuestBinding != nil {
+		t.Fatalf("binding published before accepted handoff: %#v", pending.Status.NativeGuestBinding)
+	}
 	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
 		t.Fatalf("enrollment reconcile: %v", err)
 	}
@@ -749,6 +782,9 @@ func TestExternalGuestEnrollmentIssuesDeliversOnceAndRecoversAfterRestart(t *tes
 	if issued.Binding.DriverRegistration != "example-vm" || issued.Binding.GuestInstanceID != "guest-instance-1" || issued.Binding.ExecutionID != base.desired[0].ExecutionID {
 		t.Fatalf("incorrect exact binding: %#v", issued.Binding)
 	}
+	accepted := getExternalRun(t, ctx, k8sClient, run)
+	assertPublishedNativeGuestBinding(t, accepted.Status.NativeGuestBinding, issued.Binding)
+	acceptedResourceVersion := accepted.ResourceVersion
 
 	// A new reconciler has no issuance history. Durable driver acceptance is
 	// sufficient to avoid issuing or delivering a second token.
@@ -760,6 +796,10 @@ func TestExternalGuestEnrollmentIssuesDeliversOnceAndRecoversAfterRestart(t *tes
 		t.Fatalf("restart duplicated enrollment issue=%d deliver=%d", len(issuer.issues), driver.deliverCalls)
 	}
 	updated := getExternalRun(t, ctx, k8sClient, run)
+	assertPublishedNativeGuestBinding(t, updated.Status.NativeGuestBinding, issued.Binding)
+	if updated.ResourceVersion != acceptedResourceVersion {
+		t.Fatalf("accepted restart churned AgentRun status: resourceVersion %q -> %q", acceptedResourceVersion, updated.ResourceVersion)
+	}
 	encoded, err := json.Marshal(struct {
 		Run     nvtv1alpha1.AgentRun
 		Desired []executiondriver.DesiredExecution
@@ -791,6 +831,9 @@ func TestExternalGuestEnrollmentResponseLossDoesNotIssueAgain(t *testing.T) {
 	if len(issuer.issues) != 1 || !driver.accepted {
 		t.Fatalf("delivery was not durably accepted: issues=%d accepted=%t", len(issuer.issues), driver.accepted)
 	}
+	if updated := getExternalRun(t, ctx, k8sClient, run); updated.Status.NativeGuestBinding != nil {
+		t.Fatalf("uncertain delivery published a routing binding: %#v", updated.Status.NativeGuestBinding)
+	}
 	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
 		t.Fatalf("recover accepted delivery: %v", err)
 	}
@@ -798,6 +841,7 @@ func TestExternalGuestEnrollmentResponseLossDoesNotIssueAgain(t *testing.T) {
 		t.Fatalf("uncertain accepted delivery was replaced: issues=%d revokes=%d delivers=%d", len(issuer.issues), len(issuer.revokeBindings), driver.deliverCalls)
 	}
 	updated := getExternalRun(t, ctx, k8sClient, run)
+	assertPublishedNativeGuestBinding(t, updated.Status.NativeGuestBinding, issuer.issues[0].Binding)
 	status, _ := json.Marshal(updated.Status)
 	if bytes.Contains(status, []byte("HANDOFF-TOKEN-CANARY")) {
 		t.Fatalf("uncertain delivery diagnostic leaked: %s", status)
@@ -832,6 +876,125 @@ func TestExternalGuestEnrollmentDefiniteNonAcceptanceRevokesBeforeReplacement(t 
 	}
 }
 
+func TestExternalGuestBindingClearsBeforeReplacementAndPublishesOnlyAcceptedGuest(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	oldBinding := exactNativeGuestBindingForRun(t, run, "guest-instance-1")
+	run.Status.NativeGuestBinding = nativeGuestBindingStatus(oldBinding)
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		guestID:                  "guest-instance-1", prepared: true,
+	}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+
+	if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || result.RequeueAfter != externalExecutionDefaultRequeue {
+		t.Fatalf("clear old binding result=%#v err=%v", result, err)
+	}
+	cleared := getExternalRun(t, ctx, k8sClient, run)
+	if cleared.Status.NativeGuestBinding != nil || len(issuer.revokeBindings) != 0 || driver.replaceCalls != 0 {
+		t.Fatalf("old binding was not cleared before replacement: status=%#v revokes=%d replaces=%d", cleared.Status.NativeGuestBinding, len(issuer.revokeBindings), driver.replaceCalls)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	if len(issuer.revokeBindings) != 1 || driver.replaceCalls != 1 || len(issuer.issues) != 1 {
+		t.Fatalf("replacement choreography revokes=%d replaces=%d issues=%d prepares=%d desired=%d finalizers=%#v status=%#v", len(issuer.revokeBindings), driver.replaceCalls, len(issuer.issues), driver.prepareCalls, len(driver.desired), updated.Finalizers, updated.Status)
+	}
+	assertPublishedNativeGuestBinding(t, updated.Status.NativeGuestBinding, issuer.issues[0].Binding)
+	if updated.Status.NativeGuestBinding.GuestInstanceID == oldBinding.GuestInstanceID {
+		t.Fatal("replacement republished the obsolete guest")
+	}
+}
+
+func TestExternalGuestBindingAcceptedReplacementClearsBeforeRestartRecoveryPublication(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	run.Status.NativeGuestBinding = nativeGuestBindingStatus(exactNativeGuestBindingForRun(t, run, "obsolete-guest"))
+	driver := &recordingEnrollmentDriver{
+		recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}},
+		guestID:                  "accepted-replacement", prepared: true, accepted: true,
+	}
+	issuer := &recordingEnrollmentIssuer{}
+	k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	cleared := getExternalRun(t, ctx, k8sClient, run)
+	if cleared.Status.NativeGuestBinding != nil || len(issuer.issues) != 0 || driver.deliverCalls != 0 {
+		t.Fatalf("accepted replacement was published before old binding cleared: status=%#v issues=%d deliveries=%d", cleared.Status.NativeGuestBinding, len(issuer.issues), driver.deliverCalls)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getExternalRun(t, ctx, k8sClient, run)
+	want := exactNativeGuestBindingForRun(t, run, "accepted-replacement")
+	assertPublishedNativeGuestBinding(t, updated.Status.NativeGuestBinding, want)
+	if len(issuer.issues) != 0 || driver.deliverCalls != 0 {
+		t.Fatal("restart recovery issued or delivered enrollment for an already accepted replacement")
+	}
+}
+
+func TestExternalGuestBindingMalformedOrStaleStatusFailsClosed(t *testing.T) {
+	for name, mutate := range map[string]func(*nvtv1alpha1.AgentRunNativeGuestBinding){
+		"malformed": func(binding *nvtv1alpha1.AgentRunNativeGuestBinding) { binding.GuestInstanceID = "" },
+		"stale":     func(binding *nvtv1alpha1.AgentRunNativeGuestBinding) { binding.DesiredGeneration++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			run := externalTestAgentRun()
+			run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+			run.Status.NativeGuestBinding = nativeGuestBindingStatus(exactNativeGuestBindingForRun(t, run, "obsolete-guest"))
+			mutate(run.Status.NativeGuestBinding)
+			driver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}}}
+			issuer := &recordingEnrollmentIssuer{}
+			k8sClient, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+			reconciler.GuestEnrollment = issuer
+			if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+				t.Fatal(err)
+			}
+			updated := getExternalRun(t, ctx, k8sClient, run)
+			if updated.Status.NativeGuestBinding != nil || driver.prepareCalls != 0 || len(issuer.issues) != 0 {
+				t.Fatalf("invalid status was used: binding=%#v prepares=%d issues=%d", updated.Status.NativeGuestBinding, driver.prepareCalls, len(issuer.issues))
+			}
+		})
+	}
+}
+
+func TestExternalGuestBindingClearsBeforeDeletionAndMissingBackendCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	for _, missing := range []bool{false, true} {
+		run := externalTestAgentRun()
+		run.Name = fmt.Sprintf("delete-binding-%t", missing)
+		run.UID = types.UID(run.Name + "-uid")
+		run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+		run.DeletionTimestamp = &now
+		run.Status.NativeGuestBinding = nativeGuestBindingStatus(exactNativeGuestBindingForRun(t, run, "deleting-guest"))
+		driver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{delete: []executiondriver.Status{{Phase: executiondriver.PhaseDeleted}}}}
+		registry := fakeExecutionDriverRegistry{"example-vm": driver}
+		if missing {
+			registry = fakeExecutionDriverRegistry{}
+		}
+		issuer := &recordingEnrollmentIssuer{}
+		k8sClient, reconciler := externalReconcileFixture(t, run, registry)
+		reconciler.GuestEnrollment = issuer
+		if result, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil || !result.Requeue {
+			t.Fatalf("clear deletion binding missing=%t result=%#v err=%v", missing, result, err)
+		}
+		updated := getExternalRun(t, ctx, k8sClient, run)
+		if updated.Status.NativeGuestBinding != nil || len(issuer.revokeScopes) != 0 || len(driver.deleteIDs) != 0 {
+			t.Fatalf("cleanup began before binding clear missing=%t status=%#v revokes=%d deletes=%d", missing, updated.Status.NativeGuestBinding, len(issuer.revokeScopes), len(driver.deleteIDs))
+		}
+	}
+}
+
 func TestExternalGuestEnrollmentIssueFailureRevokesBeforeRetry(t *testing.T) {
 	ctx := context.Background()
 	run := externalTestAgentRun()
@@ -848,6 +1011,9 @@ func TestExternalGuestEnrollmentIssueFailureRevokesBeforeRetry(t *testing.T) {
 	if len(issuer.issues) != 1 || driver.deliverCalls != 0 || len(issuer.revokeBindings) != 0 {
 		t.Fatalf("first issue failure issues=%d delivers=%d revokes=%d", len(issuer.issues), driver.deliverCalls, len(issuer.revokeBindings))
 	}
+	if updated := getExternalRun(t, ctx, k8sClient, run); updated.Status.NativeGuestBinding != nil {
+		t.Fatalf("issue failure published a routing binding: %#v", updated.Status.NativeGuestBinding)
+	}
 	issuer.issueError = nil
 	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
 		t.Fatal(err)
@@ -859,6 +1025,7 @@ func TestExternalGuestEnrollmentIssueFailureRevokesBeforeRetry(t *testing.T) {
 		t.Fatal("issue response loss retried the same binding")
 	}
 	updated := getExternalRun(t, ctx, k8sClient, run)
+	assertPublishedNativeGuestBinding(t, updated.Status.NativeGuestBinding, issuer.issues[1].Binding)
 	encoded, _ := json.Marshal(updated.Status)
 	if bytes.Contains(encoded, []byte("ISSUER-RESPONSE-CANARY")) {
 		t.Fatalf("issue diagnostic leaked: %s", encoded)
@@ -936,6 +1103,9 @@ func TestExternalPodDriverDoesNotParticipateInGuestEnrollment(t *testing.T) {
 	updated := getExternalRun(t, ctx, k8sClient, run)
 	if controllerHasFinalizer(&updated, guestEnrollmentFinalizer) {
 		t.Fatalf("external Pod gained VM enrollment finalizer: %#v", updated.Finalizers)
+	}
+	if updated.Status.NativeGuestBinding != nil {
+		t.Fatalf("external Pod published a native guest binding: %#v", updated.Status.NativeGuestBinding)
 	}
 	if len(issuer.issues) != 0 || len(issuer.revokeBindings) != 0 || len(issuer.revokeScopes) != 0 || len(issuer.completions) != 0 || driver.deliverCalls != 0 {
 		t.Fatalf("external Pod used guest enrollment: issuer=%#v delivers=%d", issuer, driver.deliverCalls)
@@ -1135,6 +1305,32 @@ func controllerHasFinalizer(run *nvtv1alpha1.AgentRun, finalizer string) bool {
 		}
 	}
 	return false
+}
+
+func assertPublishedNativeGuestBinding(t *testing.T, status *nvtv1alpha1.AgentRunNativeGuestBinding, want guestenrollment.Binding) {
+	t.Helper()
+	if status == nil {
+		t.Fatal("native guest routing binding was not published")
+	}
+	got := guestenrollment.Binding{
+		AgentRunUID: status.AgentRunUID, ExecutionID: status.ExecutionID, DriverRegistration: status.DriverRegistration,
+		DesiredGeneration: status.DesiredGeneration, GuestInstanceID: status.GuestInstanceID,
+	}
+	if got != want {
+		t.Fatalf("published native guest binding=%#v, want %#v", got, want)
+	}
+}
+
+func exactNativeGuestBindingForRun(t *testing.T, run *nvtv1alpha1.AgentRun, guestInstanceID string) guestenrollment.Binding {
+	t.Helper()
+	desired, err := desiredExternalExecution(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return guestenrollment.Binding{
+		AgentRunUID: string(run.UID), ExecutionID: desired.ExecutionID, DriverRegistration: run.Spec.Execution.Driver,
+		DesiredGeneration: desired.Generation, GuestInstanceID: guestInstanceID,
+	}
 }
 
 func TestExternalExecutionRetryHintIsControllerBounded(t *testing.T) {

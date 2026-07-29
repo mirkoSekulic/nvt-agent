@@ -173,7 +173,7 @@ func (backend externalExecutionBackend) Reconcile(
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
 	}
-	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
+	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && status.ObservedGeneration == desired.Generation && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
 		enrollmentResult, enrollmentErr := backend.reconcileGuestEnrollment(ctx, reconciler, &agentRun, desired)
 		if enrollmentErr != nil {
 			return ctrl.Result{}, enrollmentErr
@@ -209,6 +209,9 @@ func (backend externalExecutionBackend) reconcileTerminalLifecycle(
 	reconciler *AgentRunReconciler,
 	agentRun *nvtv1alpha1.AgentRun,
 ) (ctrl.Result, error) {
+	if cleared, err := reconciler.clearNativeGuestBindingStatus(ctx, agentRun); err != nil || cleared {
+		return ctrl.Result{Requeue: cleared}, err
+	}
 	if !controllerutil.ContainsFinalizer(agentRun, externalExecutionFinalizer) && !controllerutil.ContainsFinalizer(agentRun, guestEnrollmentFinalizer) {
 		return reconciler.reconcileTerminalAgentRunRetention(ctx, agentRun)
 	}
@@ -240,6 +243,9 @@ func (backend externalExecutionBackend) reconcileOperationalCleanup(
 	agentRun *nvtv1alpha1.AgentRun,
 	deletingAgentRun bool,
 ) (ctrl.Result, error) {
+	if cleared, err := reconciler.clearNativeGuestBindingStatus(ctx, agentRun); err != nil || cleared {
+		return ctrl.Result{Requeue: cleared}, err
+	}
 	executionID, err := externalExecutionID(agentRun.UID)
 	if err != nil {
 		return reconciler.recordExecutionSelectionFailure(ctx, agentRun, executionSelectionInvalidReason, "resolved external execution state is invalid")
@@ -373,11 +379,11 @@ func (backend externalExecutionBackend) reconcileGuestEnrollment(
 	issuer := reconciler.GuestEnrollment
 	handoff, ok := backend.client.(guestenrollment.Handoff)
 	if issuer == nil || !ok {
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapHandoffUnavailable")
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapHandoffUnavailable")
 	}
 	handoffTimeout := issuer.HandoffTimeout()
 	if handoffTimeout <= 0 || handoffTimeout > guestenrollment.MaxOperationDuration {
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapInvalid")
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapInvalid")
 	}
 	release, acquired := reconciler.tryAcquireExternalExecutionCall()
 	if !acquired {
@@ -386,7 +392,15 @@ func (backend externalExecutionBackend) reconcileGuestEnrollment(
 	defer release()
 	scope := guestenrollment.ExecutionScope{AgentRunUID: string(agentRun.UID), ExecutionID: desired.ExecutionID, DriverRegistration: backend.registration}
 	if guestenrollment.ValidateExecutionScope(scope) != nil {
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapInvalid")
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapInvalid")
+	}
+	var publishedBinding *guestenrollment.Binding
+	if agentRun.Status.NativeGuestBinding != nil {
+		published, publishedErr := nativeGuestBindingFromStatus(agentRun.Status.NativeGuestBinding)
+		if publishedErr != nil || published.ExecutionScope() != scope || published.DesiredGeneration != desired.Generation {
+			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapPending")
+		}
+		publishedBinding = &published
 	}
 	handoffContext, cancelHandoff := context.WithTimeout(ctx, handoffTimeout)
 	prepared, err := handoff.Prepare(handoffContext, guestenrollment.HandoffPrepareRequest{
@@ -394,28 +408,34 @@ func (backend externalExecutionBackend) reconcileGuestEnrollment(
 	})
 	cancelHandoff()
 	if err != nil || guestenrollment.ValidateHandoffPrepareResult(prepared) != nil {
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapHandoffUnavailable")
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapHandoffUnavailable")
 	}
 	binding := guestenrollment.Binding{
 		AgentRunUID: scope.AgentRunUID, ExecutionID: scope.ExecutionID, DriverRegistration: scope.DriverRegistration,
 		DesiredGeneration: desired.Generation, GuestInstanceID: prepared.GuestInstanceID,
 	}
 	if guestenrollment.ValidateBinding(binding) != nil {
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapInvalid")
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapInvalid")
 	}
 	if prepared.State == guestenrollment.HandoffStateAccepted {
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, true, "ExternalBootstrapAccepted")
+		if publishedBinding != nil && *publishedBinding != binding {
+			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapReplacementPending")
+		}
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, &binding, "ExternalBootstrapAccepted")
+	}
+	if agentRun.Status.NativeGuestBinding != nil {
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapReplacementPending")
 	}
 	if !prepared.NewlyPrepared {
 		if err := issuer.RevokeBinding(ctx, guestenrollment.RevokeBindingRequest{ContractVersion: guestenrollment.Version, Binding: binding}); err != nil {
-			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapRevocationPending")
+			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapRevocationPending")
 		}
 		handoffContext, cancelHandoff = context.WithTimeout(ctx, handoffTimeout)
 		replacement, err := handoff.Replace(handoffContext, guestenrollment.HandoffReplaceRequest{ContractVersion: guestenrollment.HandoffVersion, Binding: binding})
 		cancelHandoff()
 		if err != nil || guestenrollment.ValidateHandoffPrepareResult(replacement) != nil || replacement.State != guestenrollment.HandoffStatePrepared ||
 			!replacement.NewlyPrepared || replacement.GuestInstanceID == binding.GuestInstanceID {
-			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapReplacementPending")
+			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapReplacementPending")
 		}
 		binding.GuestInstanceID = replacement.GuestInstanceID
 	}
@@ -424,16 +444,16 @@ func (backend externalExecutionBackend) reconcileGuestEnrollment(
 	})
 	if err != nil || guestenrollment.ValidateBootstrapEnvelope(envelope) != nil || envelope.Binding != binding {
 		clearBootstrapEnvelope(&envelope)
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapIssuePending")
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapIssuePending")
 	}
 	defer clearBootstrapEnvelope(&envelope)
 	handoffContext, cancelHandoff = context.WithTimeout(ctx, handoffTimeout)
 	err = handoff.Deliver(handoffContext, guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: envelope})
 	cancelHandoff()
 	if err != nil {
-		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, false, "ExternalBootstrapDeliveryUncertain")
+		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapDeliveryUncertain")
 	}
-	return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, true, "ExternalBootstrapAccepted")
+	return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, &binding, "ExternalBootstrapAccepted")
 }
 
 func clearBootstrapEnvelope(envelope *guestenrollment.BootstrapEnvelope) {
@@ -448,15 +468,18 @@ func clearBootstrapEnvelope(envelope *guestenrollment.BootstrapEnvelope) {
 func (r *AgentRunReconciler) recordGuestEnrollmentCondition(
 	ctx context.Context,
 	agentRun *nvtv1alpha1.AgentRun,
-	ready bool,
+	binding *guestenrollment.Binding,
 	reason string,
 ) (ctrl.Result, error) {
 	previous := agentRun.Status.DeepCopy()
 	conditionStatus := metav1.ConditionFalse
 	message := "external guest bootstrap has not completed"
-	if ready {
+	if binding != nil {
+		agentRun.Status.NativeGuestBinding = nativeGuestBindingStatus(*binding)
 		conditionStatus = metav1.ConditionTrue
 		message = "the exact selected driver accepted the external guest bootstrap handoff"
+	} else {
+		agentRun.Status.NativeGuestBinding = nil
 	}
 	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, conditionStatus, reason, message)
 	if !reflect.DeepEqual(*previous, agentRun.Status) {
@@ -464,10 +487,48 @@ func (r *AgentRunReconciler) recordGuestEnrollmentCondition(
 			return ctrl.Result{}, fmt.Errorf("update guest enrollment status: %w", err)
 		}
 	}
-	if ready {
+	if binding != nil {
 		return ctrl.Result{}, nil
 	}
 	return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
+}
+
+func nativeGuestBindingStatus(binding guestenrollment.Binding) *nvtv1alpha1.AgentRunNativeGuestBinding {
+	return &nvtv1alpha1.AgentRunNativeGuestBinding{
+		AgentRunUID:        binding.AgentRunUID,
+		ExecutionID:        binding.ExecutionID,
+		DriverRegistration: binding.DriverRegistration,
+		DesiredGeneration:  binding.DesiredGeneration,
+		GuestInstanceID:    binding.GuestInstanceID,
+	}
+}
+
+func nativeGuestBindingFromStatus(status *nvtv1alpha1.AgentRunNativeGuestBinding) (guestenrollment.Binding, error) {
+	if status == nil {
+		return guestenrollment.Binding{}, fmt.Errorf("native guest binding is unavailable")
+	}
+	binding := guestenrollment.Binding{
+		AgentRunUID:        status.AgentRunUID,
+		ExecutionID:        status.ExecutionID,
+		DriverRegistration: status.DriverRegistration,
+		DesiredGeneration:  status.DesiredGeneration,
+		GuestInstanceID:    status.GuestInstanceID,
+	}
+	if err := guestenrollment.ValidateBinding(binding); err != nil {
+		return guestenrollment.Binding{}, fmt.Errorf("native guest binding is invalid")
+	}
+	return binding, nil
+}
+
+func (r *AgentRunReconciler) clearNativeGuestBindingStatus(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (bool, error) {
+	if agentRun.Status.NativeGuestBinding == nil {
+		return false, nil
+	}
+	agentRun.Status.NativeGuestBinding = nil
+	if err := r.Status().Update(ctx, agentRun); err != nil {
+		return false, fmt.Errorf("clear native guest routing binding: %w", err)
+	}
+	return true, nil
 }
 
 func (r *AgentRunReconciler) tryAcquireExternalExecutionCall() (func(), bool) {
@@ -525,11 +586,7 @@ func desiredExternalExecution(agentRun *nvtv1alpha1.AgentRun) (executiondriver.D
 }
 
 func externalExecutionID(uid types.UID) (string, error) {
-	if uid == "" {
-		return "", fmt.Errorf("AgentRun UID is unavailable")
-	}
-	digest := sha256.Sum256([]byte(uid))
-	return "nvt-agentrun-" + hex.EncodeToString(digest[:]), nil
+	return executiondriver.AgentRunExecutionID(string(uid))
 }
 
 func canonicalExecutionConfiguration(raw []byte) (json.RawMessage, error) {
@@ -638,7 +695,11 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 	agentRun.Status.Phase = phase
 	agentRun.Status.PodName = ""
 	agentRun.Status.Reason = reason
+	if status.ObservedGeneration != desiredGeneration {
+		agentRun.Status.NativeGuestBinding = nil
+	}
 	if phase == nvtv1alpha1.AgentRunPhaseCompleted || phase == nvtv1alpha1.AgentRunPhaseFailed {
+		agentRun.Status.NativeGuestBinding = nil
 		if agentRun.Status.FinishedAt == nil {
 			now := r.now()
 			agentRun.Status.FinishedAt = &now
@@ -664,6 +725,7 @@ func (r *AgentRunReconciler) recordExternalExecutionRejected(
 	agentRun.Status.PodName = ""
 	agentRun.Status.FinishedAt = &now
 	agentRun.Status.Reason = executionDriverRejectedReason
+	agentRun.Status.NativeGuestBinding = nil
 	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionFalse, executionDriverRejectedReason, "selected execution driver rejected the resolved run")
 	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, executionDriverRejectedReason, "external execution is not ready")
 	if reflect.DeepEqual(*previous, agentRun.Status) {
@@ -683,6 +745,7 @@ func (r *AgentRunReconciler) recordExternalStaleTerminalStatus(
 	InitializeAgentRunStatus(agentRun)
 	agentRun.Status.PodName = ""
 	agentRun.Status.Reason = "ExternalExecutionStaleObservation"
+	agentRun.Status.NativeGuestBinding = nil
 	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
 	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, "ExternalExecutionStaleObservation", "external execution has not observed the current desired generation")
 	if !reflect.DeepEqual(*previous, agentRun.Status) {
@@ -699,6 +762,7 @@ func (r *AgentRunReconciler) recordExternalCleanupProgress(
 	status executiondriver.Status,
 ) (ctrl.Result, error) {
 	previous := agentRun.Status.DeepCopy()
+	agentRun.Status.NativeGuestBinding = nil
 	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
 	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, "ExternalExecutionDeleting", "external execution cleanup is converging")
 	if !reflect.DeepEqual(*previous, agentRun.Status) {
@@ -720,6 +784,7 @@ func (r *AgentRunReconciler) recordExternalCleanupFailure(
 	requeue time.Duration,
 ) (ctrl.Result, error) {
 	previous := agentRun.Status.DeepCopy()
+	agentRun.Status.NativeGuestBinding = nil
 	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionFalse, reason, "selected execution driver could not complete cleanup")
 	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, reason, "external execution cleanup is incomplete")
 	if !reflect.DeepEqual(*previous, agentRun.Status) {
@@ -746,6 +811,7 @@ func (r *AgentRunReconciler) reconcileExternalActiveDeadline(
 	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseDeadlineExceeded
 	agentRun.Status.FinishedAt = &now
 	agentRun.Status.Reason = activeDeadlineReason
+	agentRun.Status.NativeGuestBinding = nil
 	r.setRunCondition(agentRun, ConditionExternalExecutionReady, metav1.ConditionFalse, "ExternalExecutionDeadlineExceeded", "external execution exceeded its active deadline")
 	if !reflect.DeepEqual(*previous, agentRun.Status) {
 		if err := r.Status().Update(ctx, agentRun); err != nil {
@@ -800,6 +866,10 @@ func (r *AgentRunReconciler) recordExecutionSelectionFailure(
 	message string,
 ) (ctrl.Result, error) {
 	changed := InitializeAgentRunStatus(agentRun)
+	if agentRun.Status.NativeGuestBinding != nil {
+		agentRun.Status.NativeGuestBinding = nil
+		changed = true
+	}
 	if agentRun.Status.Reason != reason {
 		agentRun.Status.Reason = reason
 		changed = true

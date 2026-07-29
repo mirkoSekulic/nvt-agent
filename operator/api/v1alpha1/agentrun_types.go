@@ -317,11 +317,36 @@ type AgentRunStatus struct {
 	StartedAt  *metav1.Time  `json:"startedAt,omitempty"`
 	FinishedAt *metav1.Time  `json:"finishedAt,omitempty"`
 	Reason     string        `json:"reason,omitempty"`
+	// NativeGuestBinding is the operator-owned, non-secret exact routing
+	// identity for the currently accepted native guest. It is absent for the
+	// built-in Kubernetes backend and whenever no exact guest is authoritative.
+	NativeGuestBinding *AgentRunNativeGuestBinding `json:"nativeGuestBinding,omitempty"`
 	// Conditions surfaces portable execution selection failures and the
 	// enforcement-mode provisioning state machine (BrokerPolicyReady,
 	// EgressdCreated, EgressdReady, EgressCAPublished). The agent Pod is never
 	// created before a valid backend selection and its enforcement gates hold.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// AgentRunNativeGuestBinding is the complete provider-neutral identity used
+// for exact native control/workspace registry lookups. It contains no bearer,
+// endpoint, provider state, or driver configuration.
+type AgentRunNativeGuestBinding struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	AgentRunUID string `json:"agentRunUID"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	ExecutionID string `json:"executionID"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	DriverRegistration string `json:"driverRegistration"`
+	// +kubebuilder:validation:Minimum=1
+	DesiredGeneration int64 `json:"desiredGeneration"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	GuestInstanceID string `json:"guestInstanceID"`
 }
 
 // AgentRunList contains a list of AgentRun resources.
@@ -620,6 +645,10 @@ func (in *AgentRunStatus) DeepCopy() *AgentRunStatus {
 	}
 	if in.FinishedAt != nil {
 		out.FinishedAt = in.FinishedAt.DeepCopy()
+	}
+	if in.NativeGuestBinding != nil {
+		out.NativeGuestBinding = new(AgentRunNativeGuestBinding)
+		*out.NativeGuestBinding = *in.NativeGuestBinding
 	}
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))

@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.42" || "${CHART_APP_VERSION}" != "0.8.42" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.42, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.43" || "${CHART_APP_VERSION}" != "0.8.43" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.43, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.42' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.43' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -1414,6 +1414,7 @@ require_file "${CHART}/crds/nvt.dev_agentschedules.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentruns.yaml" "${CHART}/crds/nvt.dev_agentruns.yaml"
 cmp -s "${ROOT}/operator/config/crd/bases/nvt.dev_agentschedules.yaml" "${CHART}/crds/nvt.dev_agentschedules.yaml"
 grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentruns.yaml" | grep -q -- '- identity'
+grep -A35 'nativeGuestBinding:' "${CHART}/crds/nvt.dev_agentruns.yaml" | grep -q 'guestInstanceID:'
 grep -A10 'preparations:' "${CHART}/crds/nvt.dev_agentschedules.yaml" | grep -q -- '- identity'
 
 rendered_secret_names() {
