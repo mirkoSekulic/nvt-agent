@@ -18,9 +18,15 @@ type fakeNativeEgressRecord struct {
 	ExpiresAt time.Time
 }
 
+type fakeNativeEgressRuntimeRecord struct {
+	Binding   Binding
+	ExpiresAt time.Time
+	Active    bool
+}
+
 type fakeNativeEgressStore struct {
 	mu              sync.Mutex
-	runtimeBindings map[string]Binding
+	runtimeBindings map[string]fakeNativeEgressRuntimeRecord
 	records         map[string]fakeNativeEgressRecord
 	sequences       map[Binding]uint64
 	revokedBindings map[Binding]bool
@@ -45,29 +51,43 @@ type fakeNativeEgressSequenceSnapshot struct {
 }
 
 type fakeNativeEgressStoreSnapshot struct {
-	RuntimeBindings map[string]Binding                 `json:"runtime_bindings"`
-	Records         []fakeNativeEgressRecord           `json:"records"`
-	Sequences       []fakeNativeEgressSequenceSnapshot `json:"sequences"`
-	RevokedBindings []Binding                          `json:"revoked_bindings"`
-	RevokedScopes   []ExecutionScope                   `json:"revoked_scopes"`
+	RuntimeBindings map[string]fakeNativeEgressRuntimeRecord `json:"runtime_bindings"`
+	Records         []fakeNativeEgressRecord                 `json:"records"`
+	Sequences       []fakeNativeEgressSequenceSnapshot       `json:"sequences"`
+	RevokedBindings []Binding                                `json:"revoked_bindings"`
+	RevokedScopes   []ExecutionScope                         `json:"revoked_scopes"`
 }
 
 func newFakeNativeEgressStore() *fakeNativeEgressStore {
 	return &fakeNativeEgressStore{
-		runtimeBindings: map[string]Binding{}, records: map[string]fakeNativeEgressRecord{}, sequences: map[Binding]uint64{},
+		runtimeBindings: map[string]fakeNativeEgressRuntimeRecord{}, records: map[string]fakeNativeEgressRecord{}, sequences: map[Binding]uint64{},
 		revokedBindings: map[Binding]bool{}, revokedScopes: map[ExecutionScope]bool{},
 	}
 }
 
-func addFakeRuntimeIdentity(t *testing.T, store *fakeNativeEgressStore, binding Binding, fill byte) string {
+func addFakeRuntimeIdentity(t *testing.T, store *fakeNativeEgressStore, binding Binding, fill byte, expiresAt time.Time) string {
 	t.Helper()
 	identity := opaqueValue(RuntimeIdentityBytes, fill)
 	digest, err := RuntimeIdentityDigest(identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.runtimeBindings[digest] = binding
+	store.runtimeBindings[digest] = fakeNativeEgressRuntimeRecord{Binding: binding, ExpiresAt: expiresAt, Active: true}
 	return identity
+}
+
+func deactivateFakeRuntimeIdentity(t *testing.T, store *fakeNativeEgressStore, identity string) {
+	t.Helper()
+	digest, err := RuntimeIdentityDigest(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok := store.runtimeBindings[digest]
+	if !ok {
+		t.Fatal("runtime identity is not durable")
+	}
+	record.Active = false
+	store.runtimeBindings[digest] = record
 }
 
 func (store *fakeNativeEgressStore) durableEntriesLocked() int {
@@ -84,9 +104,9 @@ func (store *fakeNativeEgressStore) durableLimit() int {
 func (store *fakeNativeEgressStore) snapshot() ([]byte, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	value := fakeNativeEgressStoreSnapshot{RuntimeBindings: map[string]Binding{}}
-	for digest, binding := range store.runtimeBindings {
-		value.RuntimeBindings[digest] = binding
+	value := fakeNativeEgressStoreSnapshot{RuntimeBindings: map[string]fakeNativeEgressRuntimeRecord{}}
+	for digest, record := range store.runtimeBindings {
+		value.RuntimeBindings[digest] = record
 	}
 	for _, record := range store.records {
 		value.Records = append(value.Records, record)
@@ -114,14 +134,15 @@ func (authority *fakeNativeEgressAuthority) IssueNativeEgress(_ context.Context,
 	store := authority.store
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	runtimeBinding, runtimeActive := store.runtimeBindings[runtimeDigest]
-	if !runtimeActive || runtimeBinding != request.Binding || store.revokedBindings[request.Binding] || store.revokedScopes[request.Binding.ExecutionScope()] {
+	now := authority.now()
+	runtimeRecord, runtimeKnown := store.runtimeBindings[runtimeDigest]
+	if !runtimeKnown || !runtimeRecord.Active || runtimeRecord.Binding != request.Binding || !now.Before(runtimeRecord.ExpiresAt) ||
+		store.revokedBindings[request.Binding] || store.revokedScopes[request.Binding.ExecutionScope()] {
 		return NativeEgressIssueResult{}, NewFailure(ReasonUnauthorized)
 	}
 	if _, known := store.sequences[request.Binding]; !known && store.durableEntriesLocked() >= store.durableLimit() {
 		return NativeEgressIssueResult{}, NewFailure(ReasonCapacity)
 	}
-	now := authority.now()
 	live := 0
 	for digest, record := range store.records {
 		if !now.Before(record.ExpiresAt) {
@@ -249,7 +270,7 @@ func TestNativeEgressIdentityConformanceRestartResponseLossExpiryAndRevocation(t
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	binding := validBinding()
 	store := newFakeNativeEgressStore()
-	runtimeIdentity := addFakeRuntimeIdentity(t, store, binding, 0xa1)
+	runtimeIdentity := addFakeRuntimeIdentity(t, store, binding, 0xa1, now.Add(time.Hour))
 	store.loseResponse = true
 	newAuthority := func() *fakeNativeEgressAuthority {
 		return &fakeNativeEgressAuthority{store: store, now: func() time.Time { return now }}
@@ -314,7 +335,7 @@ func TestNativeEgressIdentityConformanceRestartResponseLossExpiryAndRevocation(t
 
 	replacement := binding
 	replacement.GuestInstanceID = "replacement-guest"
-	replacementRuntimeIdentity := addFakeRuntimeIdentity(t, store, replacement, 0xa2)
+	replacementRuntimeIdentity := addFakeRuntimeIdentity(t, store, replacement, 0xa2, now.Add(time.Hour))
 	replacementIssue := issue
 	replacementIssue.Binding = replacement
 	if _, err := newAuthority().IssueNativeEgress(context.Background(), runtimeIdentity, replacementIssue); nativeEgressFailureReason(err) != ReasonUnauthorized {
@@ -351,7 +372,7 @@ func TestNativeEgressIdentityIssueRequiresRuntimeIdentityExactBinding(t *testing
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	binding := validBinding()
 	store := newFakeNativeEgressStore()
-	runtimeIdentity := addFakeRuntimeIdentity(t, store, binding, 0xb1)
+	runtimeIdentity := addFakeRuntimeIdentity(t, store, binding, 0xb1, now.Add(time.Hour))
 	authority := &fakeNativeEgressAuthority{store: store, now: func() time.Time { return now }}
 
 	mutations := map[string]func(*Binding){
@@ -375,7 +396,7 @@ func TestNativeEgressIdentityIssueRequiresRuntimeIdentityExactBinding(t *testing
 	}
 	replacement := binding
 	replacement.GuestInstanceID = "replacement-guest"
-	replacementIdentity := addFakeRuntimeIdentity(t, store, replacement, 0xb2)
+	replacementIdentity := addFakeRuntimeIdentity(t, store, replacement, 0xb2, now.Add(time.Hour))
 	if _, err := authority.IssueNativeEgress(context.Background(), replacementIdentity, NativeEgressIssueRequest{
 		ContractVersion: NativeEgressIdentityVersion, Binding: replacement, Audience: NativeEgressAudience,
 	}); err != nil {
@@ -383,11 +404,49 @@ func TestNativeEgressIdentityIssueRequiresRuntimeIdentityExactBinding(t *testing
 	}
 }
 
+func TestNativeEgressIdentityIssueRequiresCurrentUnexpiredRuntimeIdentity(t *testing.T) {
+	t.Run("expired identity", func(t *testing.T) {
+		clock := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+		binding := validBinding()
+		store := newFakeNativeEgressStore()
+		identity := addFakeRuntimeIdentity(t, store, binding, 0xb3, clock.Add(time.Minute))
+		authority := &fakeNativeEgressAuthority{store: store, now: func() time.Time { return clock }}
+		clock = clock.Add(time.Minute)
+		_, err := authority.IssueNativeEgress(context.Background(), identity, NativeEgressIssueRequest{
+			ContractVersion: NativeEgressIdentityVersion, Binding: binding, Audience: NativeEgressAudience,
+		})
+		if nativeEgressFailureReason(err) != ReasonUnauthorized {
+			t.Fatalf("expired runtime identity issued egress credential: %v", err)
+		}
+	})
+
+	t.Run("rotated and revoked predecessors", func(t *testing.T) {
+		clock := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+		binding := validBinding()
+		store := newFakeNativeEgressStore()
+		predecessor := addFakeRuntimeIdentity(t, store, binding, 0xb4, clock.Add(time.Hour))
+		deactivateFakeRuntimeIdentity(t, store, predecessor)
+		successor := addFakeRuntimeIdentity(t, store, binding, 0xb5, clock.Add(time.Hour))
+		authority := &fakeNativeEgressAuthority{store: store, now: func() time.Time { return clock }}
+		request := NativeEgressIssueRequest{ContractVersion: NativeEgressIdentityVersion, Binding: binding, Audience: NativeEgressAudience}
+		if _, err := authority.IssueNativeEgress(context.Background(), predecessor, request); nativeEgressFailureReason(err) != ReasonUnauthorized {
+			t.Fatalf("rotated predecessor issued egress credential: %v", err)
+		}
+		if _, err := authority.IssueNativeEgress(context.Background(), successor, request); err != nil {
+			t.Fatalf("current successor could not issue: %v", err)
+		}
+		deactivateFakeRuntimeIdentity(t, store, successor)
+		if _, err := authority.IssueNativeEgress(context.Background(), successor, request); nativeEgressFailureReason(err) != ReasonUnauthorized {
+			t.Fatalf("revoked successor issued another egress credential: %v", err)
+		}
+	})
+}
+
 func TestNativeEgressIdentityConcurrentIssuanceIsBounded(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	binding := validBinding()
 	store := newFakeNativeEgressStore()
-	runtimeIdentity := addFakeRuntimeIdentity(t, store, binding, 0xc1)
+	runtimeIdentity := addFakeRuntimeIdentity(t, store, binding, 0xc1, now.Add(time.Hour))
 	authority := &fakeNativeEgressAuthority{store: store, now: func() time.Time { return now }}
 	request := NativeEgressIssueRequest{ContractVersion: NativeEgressIdentityVersion, Binding: binding, Audience: NativeEgressAudience}
 	results := make(chan error, 16)
@@ -424,8 +483,8 @@ func TestNativeEgressIdentityDurableBindingCapacityIsBounded(t *testing.T) {
 	store := newFakeNativeEgressStore()
 	store.maxEntries = 1
 	identities := map[Binding]string{
-		first:  addFakeRuntimeIdentity(t, store, first, 0xd1),
-		second: addFakeRuntimeIdentity(t, store, second, 0xd2),
+		first:  addFakeRuntimeIdentity(t, store, first, 0xd1, now.Add(time.Hour)),
+		second: addFakeRuntimeIdentity(t, store, second, 0xd2, now.Add(time.Hour)),
 	}
 	authority := &fakeNativeEgressAuthority{store: store, now: func() time.Time { return now }}
 	for _, binding := range []Binding{first, second} {
@@ -500,7 +559,7 @@ func TestNativeEgressIdentityTombstonesShareDurableCapacity(t *testing.T) {
 		store := newFakeNativeEgressStore()
 		store.maxEntries = 1
 		binding := validBinding()
-		identity := addFakeRuntimeIdentity(t, store, binding, 0xe1)
+		identity := addFakeRuntimeIdentity(t, store, binding, 0xe1, now.Add(time.Hour))
 		authority := &fakeNativeEgressAuthority{store: store, now: func() time.Time { return now }}
 		if _, err := authority.IssueNativeEgress(context.Background(), identity, NativeEgressIssueRequest{
 			ContractVersion: NativeEgressIdentityVersion, Binding: binding, Audience: NativeEgressAudience,

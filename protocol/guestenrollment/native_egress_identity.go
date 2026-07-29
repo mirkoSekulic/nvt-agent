@@ -87,11 +87,12 @@ type NativeEgressRevokeExecutionRequest struct {
 }
 
 // NativeEgressAuthority is implementation-swappable. IssueNativeEgress MUST
-// authenticate the supplied active runtime identity against the complete exact
-// Binding in the request; possession of a runtime identity for another
-// generation, guest instance, execution, or driver is not authority to choose
-// a binding. Runtime and egress credential values are transport credentials
-// and never body fields.
+// authenticate the supplied runtime identity as the current active,
+// unexpired identity for the complete exact Binding in the request; an
+// expired, revoked, or rotated predecessor and an identity for another
+// generation, guest instance, execution, or driver are not authority to choose
+// a binding. Runtime and egress credential values are transport credentials and
+// never body fields.
 type NativeEgressAuthority interface {
 	IssueNativeEgress(context.Context, string, NativeEgressIssueRequest) (NativeEgressIssueResult, error)
 	AuthenticateNativeEgress(context.Context, string, NativeEgressAuthenticateRequest) (NativeEgressStatus, error)

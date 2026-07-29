@@ -89,11 +89,13 @@ These paths are contract reservations, not production broker endpoints in this
 PR. Bodies repeat only the exact non-secret binding/scope, fixed audience, and
 version. Bearers are transport authorization, never body fields.
 
-Issuance authenticates both possession and ownership: the presented active
-runtime-identity digest MUST be durably associated with the complete Binding in
-the issue body, and all five fields MUST match exactly. A runtime identity for
-an older generation, replacement guest, other execution, or other driver cannot
-authorize a caller-selected binding.
+Issuance authenticates possession, ownership, and lifecycle: the presented
+runtime-identity digest MUST be the current active identity, its broker-owned
+expiry MUST be in the future, it MUST be durably associated with the complete
+Binding in the issue body, and all five fields MUST match exactly. An expired or
+revoked identity, a rotated predecessor, or an identity for an older generation,
+replacement guest, other execution, or other driver cannot authorize a
+caller-selected binding.
 
 The canonical egress credential uses a purpose-specific `nvt_eg1_` prefix,
 an eight-byte positive durable issuance sequence, and 32 bytes from
