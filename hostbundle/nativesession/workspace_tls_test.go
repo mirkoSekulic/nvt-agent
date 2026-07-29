@@ -31,7 +31,7 @@ func TestWorkspaceRuntimeUsesSeparateTLSConnectionsAndExplicitTrust(t *testing.T
 	controlListener := listenWorkspaceTLS(t, serverTLS)
 	workspaceListener := listenWorkspaceTLS(t, serverTLS)
 	backend := startWorkspaceEchoBackend(t)
-	work := t.TempDir()
+	work := shortNativeSessionTestDirectory(t)
 	agentdSocket := filepath.Join(work, "agentd.sock")
 	stopAgentd := serveFakeAgentd(t, agentdSocket)
 	defer stopAgentd()

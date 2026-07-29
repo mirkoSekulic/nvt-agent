@@ -166,6 +166,16 @@ func (session *GuestForwarder) Binding() guestenrollment.Binding {
 	return session.binding
 }
 
+// Done closes as soon as the authenticated workspace lifetime begins
+// teardown. Callers use it to withdraw external readiness before closing
+// another required transport in the same lifecycle.
+func (session *GuestForwarder) Done() <-chan struct{} {
+	if session == nil {
+		return nil
+	}
+	return session.lifetime.Done()
+}
+
 // CheckDestination verifies that the one trusted configured loopback service
 // is reachable before a caller publishes session readiness. It neither sends
 // application data nor accepts a caller-selected destination.

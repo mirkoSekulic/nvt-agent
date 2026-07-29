@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +68,12 @@ type workspaceAuthenticator struct {
 	err         error
 }
 
+type workspaceAuthenticatorFunc func(context.Context, string, guestenrollment.Binding) (workspacetunnel.Authentication, error)
+
+func (function workspaceAuthenticatorFunc) AuthenticateWorkspace(ctx context.Context, credential string, binding guestenrollment.Binding) (workspacetunnel.Authentication, error) {
+	return function(ctx, credential, binding)
+}
+
 func (authenticator workspaceAuthenticator) AuthenticateWorkspace(_ context.Context, credential string, binding guestenrollment.Binding) (workspacetunnel.Authentication, error) {
 	if binding != authenticator.binding {
 		return workspacetunnel.Authentication{}, workspacetunnel.ErrAuthenticationDenied
@@ -108,7 +115,7 @@ func TestWorkspaceRuntimeUsesSameCredentialAndForwardsFixedHTTPAndUpgrade(t *tes
 	}))
 	defer backend.Close()
 
-	work := t.TempDir()
+	work := shortNativeSessionTestDirectory(t)
 	agentdSocket := filepath.Join(work, "agentd.sock")
 	stopAgentd := serveFakeAgentd(t, agentdSocket)
 	defer stopAgentd()
@@ -228,7 +235,7 @@ func TestWorkspaceRuntimeUsesSameCredentialAndForwardsFixedHTTPAndUpgrade(t *tes
 
 func TestWorkspaceTemporaryDisconnectReusesCurrentCredential(t *testing.T) {
 	backend := startWorkspaceEchoBackend(t)
-	work := t.TempDir()
+	work := shortNativeSessionTestDirectory(t)
 	agentdSocket := filepath.Join(work, "agentd.sock")
 	stopAgentd := serveFakeAgentd(t, agentdSocket)
 	defer stopAgentd()
@@ -284,10 +291,93 @@ func TestWorkspaceTemporaryDisconnectReusesCurrentCredential(t *testing.T) {
 	}
 }
 
+func TestWorkspaceFailureWithdrawsReadinessBeforeControlTeardown(t *testing.T) {
+	backend := startWorkspaceEchoBackend(t)
+	work := shortNativeSessionTestDirectory(t)
+	agentdSocket := filepath.Join(work, "agentd.sock")
+	stopAgentd := serveFakeAgentd(t, agentdSocket)
+	defer stopAgentd()
+	binding := testBinding()
+	now := time.Now().UTC().Truncate(time.Second)
+	runtimeDirectory := filepath.Join(work, "session-run")
+	workspaceConnection := make(chan net.Conn, 1)
+	workspaceSessions := make(chan *workspacetunnel.GatewaySession, 1)
+	controlClosedWithReadiness := make(chan bool, 1)
+	connector := &workspacePipeConnector{}
+	connector.controlHandler = func(_ int, connection net.Conn) {
+		defer connection.Close()
+		reader := newFrameReader(connection)
+		hello, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || hello.Binding == nil || *hello.Binding != binding {
+			return
+		}
+		if writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHelloAck,
+			Binding: &binding, Audience: guestenrollment.NativeGuestControlAudience,
+		}, time.Now().Add(time.Second)) != nil {
+			return
+		}
+		for {
+			frame, err := readFrame(reader, connection, time.Now().Add(time.Second))
+			if err != nil {
+				_, readinessErr := os.Stat(filepath.Join(runtimeDirectory, ReadinessFileName))
+				controlClosedWithReadiness <- readinessErr == nil
+				return
+			}
+			if frame.Type == guestenrollment.NativeSessionPing {
+				_ = writeFrame(connection, guestenrollment.NativeSessionMessage{
+					ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
+				}, time.Now().Add(time.Second))
+			}
+		}
+	}
+	workspaceHandler := keepWorkspaceGateway(t, binding, make(chan string, 1), workspaceSessions)
+	connector.workspaceHandler = func(call int, connection net.Conn) {
+		workspaceConnection <- connection
+		workspaceHandler(call, connection)
+	}
+	runtime := newWorkspaceTestRuntime(t, work, agentdSocket, backend, &fakeIssuer{binding: binding, now: now}, connector)
+	runtime.Now = func() time.Time { return now }
+	credential, err := runtime.issueCredential(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &credentialState{current: &credential, renewalUncertain: true}
+	done := make(chan error, 1)
+	go func() { done <- runtime.serveCredential(t.Context(), state) }()
+	_ = waitWorkspaceSession(t, workspaceSessions)
+	waitForSessionReadiness(t, runtime.Configuration.RuntimeDirectory)
+	_ = (<-workspaceConnection).Close()
+	select {
+	case readinessPresent := <-controlClosedWithReadiness:
+		if readinessPresent {
+			t.Fatal("control transport closed before workspace readiness was withdrawn")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace failure did not tear down the active control pair")
+	}
+	select {
+	case err := <-done:
+		if _, temporary, _ := FailureDetails(err); !temporary {
+			t.Fatalf("workspace failure result=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace failure did not stop the active lifecycle")
+	}
+	state.clear()
+}
+
 func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	restoreFastRenewal(t)
+	renewalRetryDelay = 0
+	idleProbeInterval = time.Second
+	originalFrameTimeout, originalPreparationTimeout := frameTimeout, replacementPreparationTimeout
+	frameTimeout, replacementPreparationTimeout = 30*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() {
+		frameTimeout, replacementPreparationTimeout = originalFrameTimeout, originalPreparationTimeout
+	})
 	backend := startWorkspaceEchoBackend(t)
-	work := t.TempDir()
+	work := shortNativeSessionTestDirectory(t)
 	agentdSocket := filepath.Join(work, "agentd.sock")
 	stopAgentd := serveFakeAgentd(t, agentdSocket)
 	defer stopAgentd()
@@ -297,14 +387,25 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	controlCredentials := make(chan string, 8)
 	workspaceCredentials := make(chan string, 8)
 	workspaceSessions := make(chan *workspacetunnel.GatewaySession, 4)
+	activeControlPongs := make(chan struct{}, 16)
+	pendingWorkspaceStarted := make(chan struct{})
+	releasePendingWorkspace := make(chan struct{})
 	failedPendingWorkspace := make(chan struct{})
-	connector := &workspacePipeConnector{controlHandler: keepWorkspaceControlGateway(binding, controlCredentials)}
+	connector := &workspacePipeConnector{controlHandler: heartbeatWorkspaceControlGateway(binding, controlCredentials, activeControlPongs)}
 	connector.workspaceHandler = func(call int, connection net.Conn) {
 		if call == 2 {
 			defer connection.Close()
-			_, _ = workspacetunnel.Accept(t.Context(), connection, workspaceAuthenticator{
-				binding: binding, credentials: workspaceCredentials, err: workspacetunnel.ErrAuthenticationTemporary,
-			})
+			_, _ = workspacetunnel.Accept(t.Context(), connection, workspaceAuthenticatorFunc(
+				func(_ context.Context, credential string, candidate guestenrollment.Binding) (workspacetunnel.Authentication, error) {
+					workspaceCredentials <- credential
+					close(pendingWorkspaceStarted)
+					<-releasePendingWorkspace
+					if candidate != binding {
+						return workspacetunnel.Authentication{}, workspacetunnel.ErrAuthenticationDenied
+					}
+					return workspacetunnel.Authentication{}, workspacetunnel.ErrAuthenticationTemporary
+				},
+			))
 			close(failedPendingWorkspace)
 			return
 		}
@@ -312,18 +413,52 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	}
 	runtime := newWorkspaceTestRuntime(t, work, agentdSocket, backend, issuer, connector)
 	runtime.Now = func() time.Time { return now }
-	runtime.MonotonicNow = time.Now
+	readinessEvents := make(chan bool, 4)
+	runtime.readinessChanged = func(ready bool) { readinessEvents <- ready }
+	localBase := time.Now().Add(-time.Second)
+	var localClock atomic.Int64
+	localClock.Store(localBase.UnixNano())
+	runtime.MonotonicNow = func() time.Time { return time.Unix(0, localClock.Load()) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
 	first := waitWorkspaceSession(t, workspaceSessions)
 	waitForSessionReadiness(t, runtime.Configuration.RuntimeDirectory)
+	if ready := waitReadinessEvent(t, readinessEvents); ready {
+		cancel()
+		t.Fatal("runtime did not begin from withdrawn readiness")
+	}
+	if ready := waitReadinessEvent(t, readinessEvents); !ready {
+		cancel()
+		t.Fatal("initial complete pair did not publish readiness")
+	}
 	initialControl := waitString(t, controlCredentials, "initial control credential")
 	initialWorkspace := waitString(t, workspaceCredentials, "initial workspace credential")
 	if initialControl != initialWorkspace {
 		cancel()
 		t.Fatal("initial pair did not share a credential")
 	}
+	localClock.Store(localBase.Add(50 * time.Millisecond).UnixNano())
+	select {
+	case <-pendingWorkspaceStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("pending workspace establishment did not start")
+	}
+	for count := 0; count < 4; count++ {
+		select {
+		case <-activeControlPongs:
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatal("predecessor control stopped answering heartbeats during replacement preparation")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); err != nil {
+		cancel()
+		t.Fatalf("slow pending workspace removed current readiness: %v", err)
+	}
+	assertWorkspaceEcho(t, first, "predecessor-during-slow-replacement")
+	close(releasePendingWorkspace)
 	select {
 	case <-failedPendingWorkspace:
 	case <-time.After(2 * time.Second):
@@ -368,8 +503,19 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 		cancel()
 		t.Fatalf("predecessor remained active after complete replacement: %v", err)
 	}
+	select {
+	case runtimeErr := <-done:
+		t.Fatalf("runtime exited during complete workspace replacement: %v", runtimeErr)
+	default:
+	}
 	waitForSessionReadiness(t, runtime.Configuration.RuntimeDirectory)
 	assertWorkspaceEcho(t, replacement, "replacement-ready")
+	select {
+	case ready := <-readinessEvents:
+		cancel()
+		t.Fatalf("successful atomic pair replacement changed readiness to %v", ready)
+	default:
+	}
 	issuer.mu.Lock()
 	issueCalls := issuer.calls
 	issuer.mu.Unlock()
@@ -380,6 +526,9 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	if ready := waitReadinessEvent(t, readinessEvents); ready {
+		t.Fatal("shutdown did not withdraw readiness")
 	}
 }
 
@@ -411,7 +560,7 @@ func TestWorkspaceMalformedAckAndUnavailableDestinationFailClosed(t *testing.T) 
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			work := t.TempDir()
+			work := shortNativeSessionTestDirectory(t)
 			agentdSocket := filepath.Join(work, "agentd.sock")
 			stopAgentd := serveFakeAgentd(t, agentdSocket)
 			defer stopAgentd()
@@ -444,7 +593,7 @@ func TestWorkspaceMalformedAckAndUnavailableDestinationFailClosed(t *testing.T) 
 
 func TestWorkspaceCredentialExpiryRemovesReadinessAndClosesPair(t *testing.T) {
 	backend := startWorkspaceEchoBackend(t)
-	work := t.TempDir()
+	work := shortNativeSessionTestDirectory(t)
 	agentdSocket := filepath.Join(work, "agentd.sock")
 	stopAgentd := serveFakeAgentd(t, agentdSocket)
 	defer stopAgentd()
@@ -507,6 +656,20 @@ func newWorkspaceTestRuntime(t *testing.T, work, agentdSocket, loopback string, 
 	return runtime
 }
 
+func shortNativeSessionTestDirectory(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "nvt-ns-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		_ = os.RemoveAll(directory)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	return directory
+}
+
 func keepWorkspaceControlGateway(binding guestenrollment.Binding, credentials chan<- string) func(int, net.Conn) {
 	return func(_ int, connection net.Conn) {
 		defer connection.Close()
@@ -531,6 +694,57 @@ func keepWorkspaceControlGateway(binding guestenrollment.Binding, credentials ch
 				_ = writeFrame(connection, guestenrollment.NativeSessionMessage{
 					ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
 				}, time.Now().Add(time.Second))
+			}
+		}
+	}
+}
+
+func heartbeatWorkspaceControlGateway(binding guestenrollment.Binding, credentials chan<- string, activePongs chan<- struct{}) func(int, net.Conn) {
+	return func(call int, connection net.Conn) {
+		defer connection.Close()
+		reader := newFrameReader(connection)
+		hello, err := readFrame(reader, connection, time.Now().Add(time.Second))
+		if err != nil || hello.Type != guestenrollment.NativeSessionHello || hello.Binding == nil || *hello.Binding != binding {
+			return
+		}
+		credentials <- hello.Credential
+		if writeFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHelloAck,
+			Binding: &binding, Audience: guestenrollment.NativeGuestControlAudience,
+		}, time.Now().Add(time.Second)) != nil {
+			return
+		}
+		for {
+			if call == 1 {
+				if writeFrame(connection, guestenrollment.NativeSessionMessage{
+					ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPing,
+				}, time.Now().Add(time.Second)) != nil {
+					return
+				}
+			}
+			for {
+				frame, err := readFrame(reader, connection, time.Now().Add(time.Second))
+				if err != nil {
+					return
+				}
+				switch frame.Type {
+				case guestenrollment.NativeSessionPing:
+					if writeFrame(connection, guestenrollment.NativeSessionMessage{
+						ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
+					}, time.Now().Add(time.Second)) != nil {
+						return
+					}
+				case guestenrollment.NativeSessionPong:
+					if call == 1 {
+						activePongs <- struct{}{}
+					}
+				default:
+					return
+				}
+				if call == 1 && frame.Type == guestenrollment.NativeSessionPong {
+					time.Sleep(15 * time.Millisecond)
+					break
+				}
 			}
 		}
 	}
@@ -572,6 +786,17 @@ func waitString(t *testing.T, values <-chan string, name string) string {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("%s was not observed", name)
 		return ""
+	}
+}
+
+func waitReadinessEvent(t *testing.T, events <-chan bool) bool {
+	t.Helper()
+	select {
+	case ready := <-events:
+		return ready
+	case <-time.After(2 * time.Second):
+		t.Fatal("readiness event was not observed")
+		return false
 	}
 }
 
