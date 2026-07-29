@@ -23,16 +23,27 @@ import (
 )
 
 type integrationSessionAuthority struct {
-	mu          sync.Mutex
-	binding     guestenrollment.Binding
-	sequence    uint64
-	credentials map[string]guestenrollment.GuestSessionStatus
-	revoked     bool
-	authCalls   int
+	mu                     sync.Mutex
+	binding                guestenrollment.Binding
+	sequence               uint64
+	credentials            map[string]guestenrollment.GuestSessionStatus
+	credentialLifetime     time.Duration
+	revoked                bool
+	authCalls              int
+	authAttempts           int
+	authenticationFailures []integrationBrokerAuthenticationFailure
+}
+
+type integrationBrokerAuthenticationFailure struct {
+	status     int
+	disconnect bool
 }
 
 func newIntegrationSessionAuthority(binding guestenrollment.Binding) *integrationSessionAuthority {
-	return &integrationSessionAuthority{binding: binding, credentials: make(map[string]guestenrollment.GuestSessionStatus)}
+	return &integrationSessionAuthority{
+		binding: binding, credentials: make(map[string]guestenrollment.GuestSessionStatus),
+		credentialLifetime: 62 * time.Second,
+	}
 }
 
 func (authority *integrationSessionAuthority) Issue(context.Context) (guestenrollment.GuestSessionIssueResult, error) {
@@ -44,7 +55,7 @@ func (authority *integrationSessionAuthority) Issue(context.Context) (guestenrol
 	authority.sequence++
 	credential := nativeSessionTestCredential(authority.sequence)
 	issuedAt := time.Now().UTC().Truncate(time.Second)
-	expiresAt := issuedAt.Add(62 * time.Second)
+	expiresAt := issuedAt.Add(authority.credentialLifetime)
 	status := guestenrollment.GuestSessionStatus{
 		ContractVersion: guestenrollment.GuestSessionIdentityVersion,
 		CredentialType:  guestenrollment.GuestSessionCredentialType,
@@ -78,8 +89,16 @@ func (authority *integrationSessionAuthority) ServeHTTP(response http.ResponseWr
 	authority.mu.Lock()
 	status, found := authority.credentials[credential]
 	revoked := authority.revoked
-	if found {
-		authority.authCalls++
+	var failure *integrationBrokerAuthenticationFailure
+	if found && err == nil && decoded.Binding == authority.binding && decoded.Audience == guestenrollment.NativeGuestControlAudience {
+		authority.authAttempts++
+		if len(authority.authenticationFailures) > 0 {
+			value := authority.authenticationFailures[0]
+			authority.authenticationFailures = authority.authenticationFailures[1:]
+			failure = &value
+		} else if !revoked {
+			authority.authCalls++
+		}
 	}
 	authority.mu.Unlock()
 	credential = ""
@@ -87,6 +106,22 @@ func (authority *integrationSessionAuthority) ServeHTTP(response http.ResponseWr
 		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusUnauthorized)
 		_, _ = response.Write([]byte(`{"error":"unauthorized"}`))
+		return
+	}
+	if failure != nil {
+		if failure.disconnect {
+			if hijacker, ok := response.(http.Hijacker); ok {
+				connection, _, hijackErr := hijacker.Hijack()
+				if hijackErr == nil {
+					_ = connection.Close()
+					return
+				}
+			}
+			failure.status = http.StatusServiceUnavailable
+		}
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(failure.status)
+		_, _ = response.Write([]byte(`{"error":"issuer-storage-failed"}`))
 		return
 	}
 	encoded, _ := json.Marshal(status)
@@ -99,6 +134,18 @@ func (authority *integrationSessionAuthority) counts() (uint64, int) {
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
 	return authority.sequence, authority.authCalls
+}
+
+func (authority *integrationSessionAuthority) attempts() int {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	return authority.authAttempts
+}
+
+func (authority *integrationSessionAuthority) failAuthentication(failures ...integrationBrokerAuthenticationFailure) {
+	authority.mu.Lock()
+	authority.authenticationFailures = append(authority.authenticationFailures, failures...)
+	authority.mu.Unlock()
 }
 
 func (authority *integrationSessionAuthority) revoke() {
@@ -143,7 +190,7 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 
 	work := t.TempDir()
 	runtimeDirectory := filepath.Join(work, "session-runtime")
-	agentdSocket := filepath.Join(work, "agentd.sock")
+	agentdSocket := shortIntegrationSocketPath(t)
 	identitySocket := filepath.Join(work, "identity.sock")
 	agentdRequestCount, stopAgentd := startIntegrationAgentd(t, agentdSocket)
 	defer stopAgentd()
@@ -213,6 +260,121 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(runtimeDirectory, nativesession.ReadinessFileName)); !os.IsNotExist(err) {
 		t.Fatal("revocation left guest session readiness")
 	}
+}
+
+func TestProductionNativeSessionTemporaryBrokerFailuresReuseCredential(t *testing.T) {
+	binding := nativeSessionTestBinding()
+	authority := newIntegrationSessionAuthority(binding)
+	authority.credentialLifetime = 5 * time.Minute
+	authority.failAuthentication(
+		integrationBrokerAuthenticationFailure{status: http.StatusTooManyRequests},
+		integrationBrokerAuthenticationFailure{status: http.StatusServiceUnavailable},
+		integrationBrokerAuthenticationFailure{disconnect: true},
+	)
+	broker := httptest.NewTLSServer(authority)
+	defer broker.Close()
+	brokerCAPath := filepath.Join(t.TempDir(), "broker-ca.pem")
+	writeCertificatePEM(t, brokerCAPath, broker.Certificate())
+	authenticator, err := newBrokerNativeSessionAuthenticator(NativeSessionConfig{
+		BrokerURL: broker.URL, BrokerServerName: broker.Certificate().IPAddresses[0].String(),
+		BrokerCAFile: brokerCAPath, AuthenticationTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayCertificate, _ := nativeSessionTestCertificate(t, "gateway.test")
+	gatewayCAPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: gatewayCertificate.Certificate[0]})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := newNativeSessionServer(NativeSessionConfig{
+		Enabled: true, ListenAddr: listener.Addr().String(), AuthenticationTimeout: time.Second,
+		RevalidationInterval: 30 * time.Second,
+	}, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{gatewayCertificate}}, authenticator)
+	gatewayDone := make(chan error, 1)
+	go func() { gatewayDone <- gateway.Serve(listener) }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = gateway.Shutdown(ctx)
+		<-gatewayDone
+	}()
+
+	work := t.TempDir()
+	agentdSocket := shortIntegrationSocketPath(t)
+	_, stopAgentd := startIntegrationAgentd(t, agentdSocket)
+	defer stopAgentd()
+	connector, err := nativesession.NewTLSConnector(gatewayCAPEM)
+	zeroNativeSessionBytes(gatewayCAPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualAddress := listener.Addr().String()
+	connector.Dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, actualAddress)
+	}
+	runtimeDirectory := filepath.Join(work, "session-runtime")
+	runtime, err := nativesession.NewRuntime(nativesession.Configuration{
+		Version: 1, RuntimeDirectory: runtimeDirectory, IdentitySocketPath: filepath.Join(work, "identity.sock"),
+		AgentdSocketPath: agentdSocket, GatewayEndpoint: fmt.Sprintf("tls://gateway.test:%d", listener.Addr().(*net.TCPAddr).Port),
+		CAPEMPath: filepath.Join(work, "unused-ca-path.pem"),
+	}, authority, connector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeContext, cancelRuntime := context.WithCancel(t.Context())
+	runtimeDone := make(chan error, 1)
+	go func() { runtimeDone <- runtime.Run(runtimeContext) }()
+	defer cancelRuntime()
+
+	readinessPath := filepath.Join(runtimeDirectory, nativesession.ReadinessFileName)
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-runtimeDone:
+			t.Fatalf("temporary authority failure terminated guest runtime: %v", err)
+		default:
+		}
+		if gateway.registry.Ready(binding) {
+			if _, err := os.Stat(readinessPath); err == nil {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !gateway.registry.Ready(binding) {
+		t.Fatal("guest did not recover after temporary broker authentication failures")
+	}
+	if _, err := os.Stat(readinessPath); err != nil {
+		t.Fatalf("guest readiness after recovery: %v", err)
+	}
+	issued, authenticated := authority.counts()
+	if issued != 1 || authenticated != 1 || authority.attempts() != 4 {
+		t.Fatalf("temporary failures issued=%d authenticated=%d attempts=%d", issued, authenticated, authority.attempts())
+	}
+	cancelRuntime()
+	if err := <-runtimeDone; err != nil {
+		t.Fatalf("stop recovered guest runtime: %v", err)
+	}
+}
+
+func shortIntegrationSocketPath(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "nvt-gw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		_ = os.RemoveAll(directory)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	path := filepath.Join(directory, "a.sock")
+	if len(path) > 80 {
+		t.Fatalf("test Unix socket path is not portable: length=%d", len(path))
+	}
+	return path
 }
 
 func startIntegrationAgentd(t *testing.T, path string) (func() int, func()) {

@@ -27,13 +27,26 @@ bounded hello, authenticates the short-lived bearer against the broker's exact
 binding, audience, and window, and then discards the bearer.
 
 The live registry is keyed by the complete enrollment binding and permits one
-active connection plus one authenticated make-before-break replacement. It
+active connection plus one authenticated make-before-break replacement. An
+overlapping reconnect using the same still-live credential may occupy that
+standby slot but never preempts the active connection; an older credential and
+a third connection are rejected without changing readiness. It
 supports only the bounded existing agentd JSON request/response relay. It does
 not publish code-server, HTTP, or WebSocket routes. Connections close at the
 earlier of broker-owned credential expiry and the configured revalidation
 interval, forcing bounded broker reauthentication without retaining the
 credential. Broker denial, unavailability, malformed status, TLS failure, or
 protocol failure removes readiness before closing the connection.
+
+Only a definitive broker `401`/`403`, or a valid broker status proving an
+expired or mismatched binding/audience, produces `hello_reject`. Transport,
+TLS, DNS and timeout failures, `429`, `5xx`, malformed `200` responses, and
+temporary registry capacity close the connection without a rejection frame.
+This is fail-closed but lets the guest retry the same still-live credential
+instead of issuing another one. The registry admits at most 128 complete
+bindings, each with one active and one standby connection, plus 32 concurrent
+pre-authentication handshakes. Thus renewal headroom is reserved for every
+admitted binding while total connection handlers remain bounded at 288.
 
 Production configuration requires a dedicated serving certificate/key Secret
 and an explicit broker CA Secret. The broker URL is one canonical HTTPS origin

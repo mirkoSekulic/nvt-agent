@@ -814,8 +814,12 @@ gateway:
 The Service exposes `native-session` as TLS. The gateway validates each hello
 through the broker, discards the session bearer, and closes the connection at
 the bounded revalidation interval so reconnect must authenticate again. The
-registry is process-local, so Helm rejects more than one gateway replica while
-this feature is enabled. Missing Secrets or keys fail at Kubernetes volume
+registry is process-local, so Helm requires exactly one gateway replica while
+this feature is enabled. The native listener port must also differ from both
+the HTTP container port and HTTP Service port. Temporary broker or bounded
+capacity failures close without a definitive rejection so the guest retries
+the same credential; only an authenticated denial or exact status mismatch is
+terminal. Missing Secrets or keys fail at Kubernetes volume
 setup; invalid TLS or CA material fails gateway startup. This phase exposes
 only the bounded agentd relay used by the native control contract. It does not
 publish a browser/code-server route or implement an HTTP/WebSocket reverse

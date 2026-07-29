@@ -9,11 +9,11 @@
 {{- end }}
 {{- $nativeSession := .Values.gateway.nativeSession }}
 {{- if $nativeSession.enabled }}
-{{- if gt (int .Values.gateway.replicas) 1 }}
-{{- fail "gateway.replicas must be 1 when gateway.nativeSession.enabled=true because the registry is process-local" }}
+{{- if ne (int .Values.gateway.replicas) 1 }}
+{{- fail "gateway.replicas must be exactly 1 when gateway.nativeSession.enabled=true because the registry is process-local" }}
 {{- end }}
-{{- if or (lt (int $nativeSession.port) 1) (gt (int $nativeSession.port) 65535) (eq (int $nativeSession.port) (int .Values.gateway.port)) }}
-{{- fail "gateway.nativeSession.port must be between 1 and 65535 and differ from gateway.port" }}
+{{- if or (lt (int $nativeSession.port) 1) (gt (int $nativeSession.port) 65535) (eq (int $nativeSession.port) (int .Values.gateway.port)) (eq (int $nativeSession.port) (int .Values.gateway.service.port)) }}
+{{- fail "gateway.nativeSession.port must be between 1 and 65535 and differ from gateway.port and gateway.service.port" }}
 {{- end }}
 {{- if or (not (regexMatch `^https://[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?(?::[0-9]{1,5})?$` $nativeSession.brokerURL)) (gt (len $nativeSession.brokerURL) 2048) }}
 {{- fail "gateway.nativeSession.brokerURL must be one canonical HTTPS origin" }}

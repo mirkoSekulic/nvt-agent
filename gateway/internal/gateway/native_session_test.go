@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -113,31 +114,41 @@ func TestBrokerNativeSessionAuthenticationIsStrictAndRedacted(t *testing.T) {
 		contentType string
 		body        func() []byte
 		wantOK      bool
+		definitive  bool
 	}{
 		{name: "valid", status: http.StatusOK, contentType: "application/json", body: func() []byte { value, _ := json.Marshal(validStatus); return value }, wantOK: true},
-		{name: "denied", status: http.StatusUnauthorized, contentType: "application/json", body: func() []byte { return []byte(`{"error":"unauthorized"}`) }},
+		{name: "denied", status: http.StatusUnauthorized, contentType: "application/json", body: func() []byte { return []byte(`{"error":"unauthorized"}`) }, definitive: true},
+		{name: "forbidden", status: http.StatusForbidden, contentType: "application/json", body: func() []byte { return []byte(`{"error":"unauthorized"}`) }, definitive: true},
+		{name: "rate limited", status: http.StatusTooManyRequests, contentType: "application/json", body: func() []byte { return []byte(`{"error":"capacity-exceeded"}`) }},
+		{name: "authority unavailable", status: http.StatusServiceUnavailable, contentType: "application/json", body: func() []byte { return []byte(`{"error":"issuer-storage-failed"}`) }},
 		{name: "wrong content", status: http.StatusOK, contentType: "application/json; charset=utf-8", body: func() []byte { value, _ := json.Marshal(validStatus); return value }},
 		{name: "wrong binding", status: http.StatusOK, contentType: "application/json", body: func() []byte {
 			value := validStatus
 			value.Binding.GuestInstanceID = "other"
 			encoded, _ := json.Marshal(value)
 			return encoded
-		}},
+		}, definitive: true},
 		{name: "wrong audience", status: http.StatusOK, contentType: "application/json", body: func() []byte {
 			value := validStatus
 			value.Audience = "other"
 			encoded, _ := json.Marshal(value)
 			return encoded
-		}},
+		}, definitive: true},
 		{name: "expired", status: http.StatusOK, contentType: "application/json", body: func() []byte {
 			value := validStatus
 			value.IssuedAt = issued.Add(-10 * time.Minute).Format(time.RFC3339)
 			value.ExpiresAt = issued.Add(-5 * time.Minute).Format(time.RFC3339)
 			encoded, _ := json.Marshal(value)
 			return encoded
-		}},
+		}, definitive: true},
 		{name: "duplicate key", status: http.StatusOK, contentType: "application/json", body: func() []byte {
 			return []byte(`{"contract_version":"nvt.guest-session-identity/v1","contract_version":"nvt.guest-session-identity/v1"}`)
+		}},
+		{name: "malformed missing binding", status: http.StatusOK, contentType: "application/json", body: func() []byte {
+			value := validStatus
+			value.Binding = guestenrollment.Binding{}
+			encoded, _ := json.Marshal(value)
+			return encoded
 		}},
 		{name: "invalid UTF-8", status: http.StatusOK, contentType: "application/json", body: func() []byte { return []byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'} }},
 		{name: "oversized", status: http.StatusOK, contentType: "application/json", body: func() []byte { return bytes.Repeat([]byte("x"), guestenrollment.MaxGuestSessionResponseBytes+1) }},
@@ -169,6 +180,12 @@ func TestBrokerNativeSessionAuthenticationIsStrictAndRedacted(t *testing.T) {
 			_, err = authenticator.Authenticate(t.Context(), credentialCanary, binding)
 			if test.wantOK != (err == nil) {
 				t.Fatalf("Authenticate error=%v wantOK=%v", err, test.wantOK)
+			}
+			if err != nil && test.definitive != errors.Is(err, errNativeSessionAuthenticationDenied) {
+				t.Fatalf("Authenticate error=%v definitive=%v", err, test.definitive)
+			}
+			if err != nil && !test.definitive && !errors.Is(err, errNativeSessionAuthorityUnavailable) {
+				t.Fatalf("Authenticate error=%v is not temporary authority failure", err)
 			}
 			if err != nil && strings.Contains(err.Error(), credentialCanary) {
 				t.Fatal("authentication error disclosed session credential")
@@ -202,8 +219,40 @@ func TestBrokerNativeSessionAuthenticationTimeoutFailsClosed(t *testing.T) {
 	if err == nil || time.Since(started) > time.Second {
 		t.Fatalf("timeout error=%v duration=%s", err, time.Since(started))
 	}
+	if !errors.Is(err, errNativeSessionAuthorityUnavailable) {
+		t.Fatalf("timeout error class=%v", err)
+	}
 	if strings.Contains(err.Error(), credential) {
 		t.Fatal("timeout error disclosed credential")
+	}
+}
+
+func TestNativeSessionAuthenticationOutcomeControlsHelloRejection(t *testing.T) {
+	binding := nativeSessionTestBinding()
+	credential := nativeSessionTestCredential(1)
+	for _, test := range []struct {
+		name       string
+		err        error
+		wantReject bool
+	}{
+		{name: "definitive denial", err: errNativeSessionAuthenticationDenied, wantReject: true},
+		{name: "temporary authority failure", err: errNativeSessionAuthorityUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			authenticator := &fakeNativeSessionAuthenticator{err: test.err}
+			_, address, roots := startNativeSessionTestServer(t, authenticator, time.Minute)
+			connection := dialNativeSessionTest(t, address, roots)
+			writeNativeSessionTestHello(t, connection, binding, credential)
+			if test.wantReject {
+				response := readNativeSessionTestFrame(t, connection)
+				if response.Type != guestenrollment.NativeSessionHelloReject || response.Reason != "unauthorized" {
+					t.Fatalf("definitive response=%#v", response)
+				}
+			} else {
+				expectNativeSessionClosed(t, connection)
+			}
+			_ = connection.Close()
+		})
 	}
 }
 
@@ -234,10 +283,10 @@ func TestNativeSessionRelayPingReplacementAndThirdRejection(t *testing.T) {
 	defer second.Close()
 	third := dialNativeSessionTest(t, address, roots)
 	writeNativeSessionTestHello(t, third, binding, thirdCredential)
-	rejection := readNativeSessionTestFrame(t, third)
+	expectNativeSessionClosed(t, third)
 	_ = third.Close()
-	if rejection.Type != guestenrollment.NativeSessionHelloReject || rejection.Reason != "capacity-exceeded" {
-		t.Fatalf("third connection response = %#v", rejection)
+	if !server.registry.Ready(binding) {
+		t.Fatal("temporary third-connection capacity rejection removed active readiness")
 	}
 	_ = first.Close()
 	select {
@@ -245,7 +294,7 @@ func TestNativeSessionRelayPingReplacementAndThirdRejection(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first session did not close")
 	}
-	waitNativeSessionActive(t, server.registry, binding, authenticator.statuses[secondCredential].IssuedAt)
+	waitNativeSessionActiveSequence(t, server.registry, binding, 2)
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- serveNativeSessionTestGuest(second, true) }()
 	response, err = server.registry.RelayAgentd(t.Context(), binding, json.RawMessage(`{"type":"health"}`))
@@ -254,6 +303,50 @@ func TestNativeSessionRelayPingReplacementAndThirdRejection(t *testing.T) {
 	}
 	_ = second.Close()
 	<-secondDone
+}
+
+func TestNativeSessionOverlappingReconnectWithSameCredentialPromotesStandby(t *testing.T) {
+	binding := nativeSessionTestBinding()
+	credential := nativeSessionTestCredential(1)
+	authenticator := &fakeNativeSessionAuthenticator{statuses: map[string]authenticatedNativeSession{
+		credential: nativeSessionTestStatus(binding, time.Now(), time.Now().Add(time.Minute)),
+	}}
+	server, address, roots := startNativeSessionTestServer(t, authenticator, time.Minute)
+	active := connectNativeSessionTestGuest(t, address, roots, binding, credential)
+	activeDone := make(chan error, 1)
+	go func() { activeDone <- serveNativeSessionTestGuest(active, true) }()
+	standby := connectNativeSessionTestGuest(t, address, roots, binding, credential)
+	server.registry.mu.Lock()
+	slot := server.registry.bindings[binding]
+	activeServer, standbyServer := slot.active, slot.replacement
+	server.registry.mu.Unlock()
+	if activeServer == nil || standbyServer == nil || activeServer == standbyServer {
+		t.Fatal("equal-sequence reconnect did not occupy the bounded standby slot")
+	}
+	response, err := server.registry.RelayAgentd(t.Context(), binding, json.RawMessage(`{"type":"health"}`))
+	if err != nil || string(response) != `{"status":"ready"}` {
+		t.Fatalf("active relay response=%s error=%v", response, err)
+	}
+	_ = active.Close()
+	<-activeDone
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		server.registry.mu.Lock()
+		promoted := server.registry.bindings[binding] != nil && server.registry.bindings[binding].active == standbyServer
+		server.registry.mu.Unlock()
+		if promoted {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	standbyDone := make(chan error, 1)
+	go func() { standbyDone <- serveNativeSessionTestGuest(standby, true) }()
+	response, err = server.registry.RelayAgentd(t.Context(), binding, json.RawMessage(`{"type":"health"}`))
+	if err != nil || string(response) != `{"status":"ready"}` {
+		t.Fatalf("promoted standby relay response=%s error=%v", response, err)
+	}
+	_ = standby.Close()
+	<-standbyDone
 }
 
 func TestNativeSessionRevalidationExpiryAndShutdownRemoveReadiness(t *testing.T) {
@@ -310,10 +403,10 @@ func TestNativeSessionOlderReplayCannotPreemptAndRequestLimitCloses(t *testing.T
 	go func() { activeDone <- serveNativeSessionTestGuest(active, true) }()
 	replay := dialNativeSessionTest(t, address, roots)
 	writeNativeSessionTestHello(t, replay, binding, oldCredential)
-	rejection := readNativeSessionTestFrame(t, replay)
+	expectNativeSessionClosed(t, replay)
 	_ = replay.Close()
-	if rejection.Type != guestenrollment.NativeSessionHelloReject || !server.registry.Ready(binding) {
-		t.Fatalf("older replay response=%#v ready=%v", rejection, server.registry.Ready(binding))
+	if !server.registry.Ready(binding) {
+		t.Fatal("older replay removed active readiness")
 	}
 	server.registry.mu.Lock()
 	session := server.registry.bindings[binding].active
@@ -468,14 +561,14 @@ func TestNativeSessionAbsoluteHandshakeAndHelloDeadlinesReleaseCapacity(t *testi
 		t.Fatal("slow-drip hello was not closed at its absolute deadline")
 	}
 	_ = dripping.Close()
-	if len(server.connectionSlots) != 0 {
+	if len(server.handshakeSlots) != 0 {
 		deadline := time.Now().Add(time.Second)
-		for len(server.connectionSlots) != 0 && time.Now().Before(deadline) {
+		for len(server.handshakeSlots) != 0 && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	if len(server.connectionSlots) != 0 {
-		t.Fatalf("connection admission slots were not released: %d", len(server.connectionSlots))
+	if len(server.handshakeSlots) != 0 {
+		t.Fatalf("handshake admission slots were not released: %d", len(server.handshakeSlots))
 	}
 }
 
@@ -489,13 +582,13 @@ func TestNativeSessionGlobalConnectionAdmissionIsBounded(t *testing.T) {
 		credential: nativeSessionTestStatus(binding, time.Now().Add(-time.Second), time.Now().Add(time.Minute)),
 	}}
 	server, address, roots := startNativeSessionTestServer(t, authenticator, time.Minute)
-	stalled := make([]net.Conn, 0, maxNativeSessionConnections)
+	stalled := make([]net.Conn, 0, maxNativeSessionPendingHandshakes)
 	defer func() {
 		for _, connection := range stalled {
 			_ = connection.Close()
 		}
 	}()
-	for range maxNativeSessionConnections {
+	for range maxNativeSessionPendingHandshakes {
 		connection, err := net.DialTimeout("tcp", address, time.Second)
 		if err != nil {
 			t.Fatal(err)
@@ -503,11 +596,11 @@ func TestNativeSessionGlobalConnectionAdmissionIsBounded(t *testing.T) {
 		stalled = append(stalled, connection)
 	}
 	deadline := time.Now().Add(time.Second)
-	for len(server.connectionSlots) != maxNativeSessionConnections && time.Now().Before(deadline) {
+	for len(server.handshakeSlots) != maxNativeSessionPendingHandshakes && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if len(server.connectionSlots) != maxNativeSessionConnections {
-		t.Fatalf("connection admission slots=%d want=%d", len(server.connectionSlots), maxNativeSessionConnections)
+	if len(server.handshakeSlots) != maxNativeSessionPendingHandshakes {
+		t.Fatalf("handshake admission slots=%d want=%d", len(server.handshakeSlots), maxNativeSessionPendingHandshakes)
 	}
 	overflow, err := net.DialTimeout("tcp", address, time.Second)
 	if err != nil {
@@ -519,14 +612,47 @@ func TestNativeSessionGlobalConnectionAdmissionIsBounded(t *testing.T) {
 	}
 	_ = overflow.Close()
 	deadline = time.Now().Add(time.Second)
-	for len(server.connectionSlots) != 0 && time.Now().Before(deadline) {
+	for len(server.handshakeSlots) != 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if len(server.connectionSlots) != 0 {
-		t.Fatalf("expired handshakes retained %d connection slots", len(server.connectionSlots))
+	if len(server.handshakeSlots) != 0 {
+		t.Fatalf("expired handshakes retained %d slots", len(server.handshakeSlots))
 	}
 	valid := connectNativeSessionTestGuest(t, address, roots, binding, credential)
 	_ = valid.Close()
+}
+
+func TestNativeSessionRegistryReservesReplacementCapacityAtBindingLimit(t *testing.T) {
+	registry := newNativeSessionRegistry()
+	bindings := make([]guestenrollment.Binding, 0, maxNativeSessionActiveBindings)
+	for index := range maxNativeSessionActiveBindings {
+		binding := nativeSessionTestBinding()
+		binding.GuestInstanceID = fmt.Sprintf("guest-%d", index)
+		bindings = append(bindings, binding)
+		if err := registry.reserve(nativeSessionRegistryTestConnection(binding, 1)); err != nil {
+			t.Fatalf("reserve active binding %d: %v", index, err)
+		}
+	}
+	for index, binding := range bindings {
+		if err := registry.reserve(nativeSessionRegistryTestConnection(binding, 2)); err != nil {
+			t.Fatalf("reserve replacement binding %d: %v", index, err)
+		}
+	}
+	extra := nativeSessionTestBinding()
+	extra.GuestInstanceID = "guest-over-capacity"
+	if err := registry.reserve(nativeSessionRegistryTestConnection(extra, 1)); !errors.Is(err, ErrNativeSessionCapacity) {
+		t.Fatalf("new binding beyond active capacity error=%v", err)
+	}
+	if len(registry.bindings) != maxNativeSessionActiveBindings {
+		t.Fatalf("registry bindings=%d want=%d", len(registry.bindings), maxNativeSessionActiveBindings)
+	}
+}
+
+func nativeSessionRegistryTestConnection(binding guestenrollment.Binding, sequence uint64) *nativeSessionConnection {
+	return &nativeSessionConnection{
+		authenticated: authenticatedNativeSession{Binding: binding, Sequence: sequence},
+		closedCh:      make(chan struct{}),
+	}
 }
 
 func nativeSessionTestBinding() guestenrollment.Binding {
@@ -626,6 +752,14 @@ func readNativeSessionTestFrame(t *testing.T, connection net.Conn) guestenrollme
 	return frame
 }
 
+func expectNativeSessionClosed(t *testing.T, connection net.Conn) {
+	t.Helper()
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := connection.Read(make([]byte, 1)); err == nil {
+		t.Fatal("native session connection was not closed")
+	}
+}
+
 func serveNativeSessionTestGuest(connection net.Conn, answerAgentd bool) error {
 	reader := bufio.NewReaderSize(connection, guestenrollment.MaxNativeSessionFrameBytes)
 	for {
@@ -665,13 +799,13 @@ func waitNativeSessionReady(t *testing.T, registry *nativeSessionRegistry, bindi
 	}
 }
 
-func waitNativeSessionActive(t *testing.T, registry *nativeSessionRegistry, binding guestenrollment.Binding, issuedAt time.Time) {
+func waitNativeSessionActiveSequence(t *testing.T, registry *nativeSessionRegistry, binding guestenrollment.Binding, sequence uint64) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		registry.mu.Lock()
 		slot := registry.bindings[binding]
-		active := slot != nil && slot.active != nil && slot.active.ready && !slot.active.closed.Load() && slot.active.authenticated.IssuedAt.Equal(issuedAt)
+		active := slot != nil && slot.active != nil && slot.active.ready && !slot.active.closed.Load() && slot.active.authenticated.Sequence == sequence
 		registry.mu.Unlock()
 		if active {
 			// The fake authenticator records credentials in authentication order;

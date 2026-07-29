@@ -26,7 +26,11 @@ import (
 
 const maxNativeSessionTrustFileBytes = 1 << 20
 
-var nativeSessionServerNamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$`)
+var (
+	nativeSessionServerNamePattern       = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$`)
+	errNativeSessionAuthenticationDenied = errors.New("native session authentication denied")
+	errNativeSessionAuthorityUnavailable = errors.New("native session authority unavailable")
+)
 
 // NativeSessionConfig is the opt-in production gateway listener. All
 // credential-bearing values are read from files; this configuration contains
@@ -108,12 +112,12 @@ func nativeSessionCredentialSequence(credential string) (uint64, error) {
 	decoded, err := base64.RawURLEncoding.DecodeString(credential)
 	if err != nil || len(decoded) != guestenrollment.GuestSessionCredentialBytes {
 		zeroNativeSessionBytes(decoded)
-		return 0, errors.New("native session authentication failed")
+		return 0, errNativeSessionAuthenticationDenied
 	}
 	defer zeroNativeSessionBytes(decoded)
 	sequence := binary.BigEndian.Uint64(decoded[:8])
 	if sequence == 0 || sequence > guestenrollment.MaxGuestSessionIssuanceSequence {
-		return 0, errors.New("native session authentication failed")
+		return 0, errNativeSessionAuthenticationDenied
 	}
 	return sequence, nil
 }
@@ -164,7 +168,7 @@ func newBrokerNativeSessionAuthenticator(config NativeSessionConfig) (*brokerNat
 
 func (authenticator *brokerNativeSessionAuthenticator) Authenticate(ctx context.Context, credential string, binding guestenrollment.Binding) (authenticatedNativeSession, error) {
 	if authenticator == nil || authenticator.client == nil || ctx == nil || guestenrollment.ValidateBinding(binding) != nil {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		return authenticatedNativeSession{}, errNativeSessionAuthenticationDenied
 	}
 	sequence, err := nativeSessionCredentialSequence(credential)
 	if err != nil {
@@ -176,11 +180,11 @@ func (authenticator *brokerNativeSessionAuthenticator) Authenticate(ctx context.
 		Audience:        guestenrollment.NativeGuestControlAudience,
 	})
 	if err != nil || len(payload) > guestenrollment.MaxGuestSessionAuthRequestBytes {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, authenticator.baseURL+guestenrollment.GuestSessionIdentityAuthenticatePath, bytes.NewReader(payload))
 	if err != nil {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
 	}
 	request.Header.Set("Authorization", "Bearer "+credential)
 	request.Header.Set("Content-Type", "application/json")
@@ -189,34 +193,49 @@ func (authenticator *brokerNativeSessionAuthenticator) Authenticate(ctx context.
 	response, err := authenticator.client.Do(request)
 	request.Header.Del("Authorization")
 	if err != nil {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, guestenrollment.MaxGuestSessionResponseBytes+1))
+		return authenticatedNativeSession{}, errNativeSessionAuthenticationDenied
+	}
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/json" {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, guestenrollment.MaxGuestSessionResponseBytes+1))
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, guestenrollment.MaxGuestSessionResponseBytes+1))
 	if err != nil || len(body) == 0 || len(body) > guestenrollment.MaxGuestSessionResponseBytes {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		zeroNativeSessionBytes(body)
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
 	}
-	status, err := guestenrollment.DecodeGuestSessionStatus(body)
+	var status guestenrollment.GuestSessionStatus
+	err = guestenrollment.DecodeStrictJSON(body, guestenrollment.MaxGuestSessionResponseBytes, &status)
 	zeroNativeSessionBytes(body)
-	if err != nil || status.Binding != binding || status.Audience != guestenrollment.NativeGuestControlAudience {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+	if err != nil {
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
+	}
+	if guestenrollment.ValidateBinding(status.Binding) != nil {
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
+	}
+	if status.Binding != binding || status.Audience != guestenrollment.NativeGuestControlAudience {
+		return authenticatedNativeSession{}, errNativeSessionAuthenticationDenied
+	}
+	if guestenrollment.ValidateGuestSessionStatus(status) != nil {
+		return authenticatedNativeSession{}, errNativeSessionAuthorityUnavailable
 	}
 	issuedAt, issuedErr := time.Parse(time.RFC3339, status.IssuedAt)
 	expiresAt, expiresErr := time.Parse(time.RFC3339, status.ExpiresAt)
 	now := authenticator.now()
 	if issuedErr != nil || expiresErr != nil || !issuedAt.Before(expiresAt) || !now.Before(expiresAt) {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		return authenticatedNativeSession{}, errNativeSessionAuthenticationDenied
 	}
 	remaining := expiresAt.Sub(now)
 	if window := expiresAt.Sub(issuedAt); remaining > window {
 		remaining = window
 	}
 	if remaining <= 0 {
-		return authenticatedNativeSession{}, errors.New("native session authentication failed")
+		return authenticatedNativeSession{}, errNativeSessionAuthenticationDenied
 	}
 	return authenticatedNativeSession{
 		Binding: binding, Sequence: sequence, IssuedAt: issuedAt, ExpiresAt: expiresAt,

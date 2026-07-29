@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	maxNativeSessionConnections = 128
+	maxNativeSessionActiveBindings    = 128
+	maxNativeSessionPendingHandshakes = 32
 )
 
 var (
@@ -39,11 +40,11 @@ type NativeSessionRelay interface {
 // NativeSessionServer accepts the provider-neutral outbound guest transport.
 // The browser HTTP server remains a separate listener and routing path.
 type NativeSessionServer struct {
-	config          NativeSessionConfig
-	tlsConfig       *tls.Config
-	authenticator   nativeSessionAuthenticator
-	registry        *nativeSessionRegistry
-	connectionSlots chan struct{}
+	config         NativeSessionConfig
+	tlsConfig      *tls.Config
+	authenticator  nativeSessionAuthenticator
+	registry       *nativeSessionRegistry
+	handshakeSlots chan struct{}
 
 	lifetimeContext context.Context
 	cancelLifetime  context.CancelFunc
@@ -83,7 +84,7 @@ func newNativeSessionServer(config NativeSessionConfig, tlsConfig *tls.Config, a
 	registry := newNativeSessionRegistry()
 	return &NativeSessionServer{
 		config: config, tlsConfig: tlsConfig, authenticator: authenticator,
-		registry: registry, connectionSlots: make(chan struct{}, maxNativeSessionConnections),
+		registry: registry, handshakeSlots: make(chan struct{}, maxNativeSessionPendingHandshakes),
 		lifetimeContext: ctx, cancelLifetime: cancel, done: make(chan struct{}),
 	}
 }
@@ -134,12 +135,14 @@ func (server *NativeSessionServer) Serve(listener net.Listener) error {
 			break
 		}
 		select {
-		case server.connectionSlots <- struct{}{}:
+		case server.handshakeSlots <- struct{}{}:
 			server.handlers.Add(1)
 			go func() {
 				defer server.handlers.Done()
-				defer func() { <-server.connectionSlots }()
-				server.handleConnection(connection)
+				var releaseOnce sync.Once
+				releaseHandshake := func() { releaseOnce.Do(func() { <-server.handshakeSlots }) }
+				defer releaseHandshake()
+				server.handleConnection(connection, releaseHandshake)
 			}()
 		default:
 			_ = connection.Close()
@@ -184,7 +187,7 @@ func (server *NativeSessionServer) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (server *NativeSessionServer) handleConnection(raw net.Conn) {
+func (server *NativeSessionServer) handleConnection(raw net.Conn, releaseHandshake func()) {
 	connection := tls.Server(raw, server.tlsConfig.Clone())
 	defer connection.Close()
 	handshakeContext, cancelHandshake := context.WithTimeout(server.lifetimeContext, nativeSessionHandshakeLimit)
@@ -213,6 +216,9 @@ func (server *NativeSessionServer) handleConnection(raw net.Conn) {
 	cancelAuthentication()
 	credential = ""
 	if err != nil || authenticated.Binding != binding {
+		if err != nil && !errors.Is(err, errNativeSessionAuthenticationDenied) {
+			return
+		}
 		_ = writeNativeSessionFrame(connection, guestenrollment.NativeSessionMessage{
 			ContractVersion: guestenrollment.NativeSessionVersion,
 			Type:            guestenrollment.NativeSessionHelloReject,
@@ -223,14 +229,10 @@ func (server *NativeSessionServer) handleConnection(raw net.Conn) {
 	authenticated.Sequence = sequence
 	session := newNativeSessionConnection(server.registry, connection, reader, authenticated, server.config.RevalidationInterval)
 	if err := server.registry.reserve(session); err != nil {
-		_ = writeNativeSessionFrame(connection, guestenrollment.NativeSessionMessage{
-			ContractVersion: guestenrollment.NativeSessionVersion,
-			Type:            guestenrollment.NativeSessionHelloReject,
-			Reason:          "capacity-exceeded",
-		}, time.Now().Add(nativeSessionFrameTimeout), nil)
 		return
 	}
 	defer session.terminate()
+	releaseHandshake()
 	if err := session.write(guestenrollment.NativeSessionMessage{
 		ContractVersion: guestenrollment.NativeSessionVersion,
 		Type:            guestenrollment.NativeSessionHelloAck,
@@ -268,6 +270,9 @@ func (registry *nativeSessionRegistry) reserve(session *nativeSessionConnection)
 	}
 	slot := registry.bindings[session.authenticated.Binding]
 	if slot == nil {
+		if len(registry.bindings) >= maxNativeSessionActiveBindings {
+			return ErrNativeSessionCapacity
+		}
 		slot = &nativeSessionBindingSlot{}
 		registry.bindings[session.authenticated.Binding] = slot
 	}
@@ -278,7 +283,7 @@ func (registry *nativeSessionRegistry) reserve(session *nativeSessionConnection)
 	if slot.active == nil || slot.replacement != nil {
 		return ErrNativeSessionCapacity
 	}
-	if session.authenticated.Sequence <= slot.active.authenticated.Sequence {
+	if session.authenticated.Sequence < slot.active.authenticated.Sequence {
 		return ErrNativeSessionUnavailable
 	}
 	slot.replacement = session
