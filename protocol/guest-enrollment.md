@@ -34,7 +34,9 @@ credentials in its isolated driver-host workload. Those credentials never
 enter the envelope or guest. The returned **runtime identity** authenticates the
 NVT guest to future control-plane services. It is distinct from both provider
 credentials and the separate egress identity used by mediated outbound traffic.
-This contract does not issue or deliver an egress identity.
+The purpose-separated [native VM mediated-egress contract](native-egress.md)
+now defines that future identity/session boundary. This enrollment contract
+still does not issue or deliver an egress identity.
 
 ## Non-possession boundary
 

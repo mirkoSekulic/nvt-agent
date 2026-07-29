@@ -149,6 +149,23 @@ type Failure struct {
 	Retryable bool   `json:"retryable"`
 }
 
+type EgressConfinementBoundary string
+
+const (
+	// EgressConfinementBoundaryInfrastructure means bypass prevention is owned
+	// outside the guest by the trusted execution driver/provider. Guest-local
+	// routes, firewall rules, or proxy settings never satisfy this assertion.
+	EgressConfinementBoundaryInfrastructure EgressConfinementBoundary = "infrastructure"
+)
+
+// EgressConfinementStatus is a non-secret portable provider observation. It is
+// optional for backward compatibility and non-mediated executions. A future
+// external-VM mediated-egress gate requires it to be present and Ready.
+type EgressConfinementStatus struct {
+	Boundary EgressConfinementBoundary `json:"boundary"`
+	Ready    bool                      `json:"ready"`
+}
+
 // Status is the complete portable observation returned by reconcile, observe,
 // and delete. It is not an AgentRun condition: the operator remains the sole
 // owner of AgentRun status and maps validated observations according to its
@@ -157,13 +174,14 @@ type Failure struct {
 // storage, network enforcement, required egress attachment, and a reachable
 // endpoint. The operator combines that assertion with its own readiness gates.
 type Status struct {
-	Phase              Phase     `json:"phase"`
-	Ready              bool      `json:"ready"`
-	Endpoint           *Endpoint `json:"endpoint,omitempty"`
-	ExternalResourceID string    `json:"external_resource_id,omitempty"`
-	ObservedGeneration int64     `json:"observed_generation"`
-	RetryAfterSeconds  *int32    `json:"retry_after_seconds,omitempty"`
-	Failure            *Failure  `json:"failure,omitempty"`
+	Phase              Phase                    `json:"phase"`
+	Ready              bool                     `json:"ready"`
+	Endpoint           *Endpoint                `json:"endpoint,omitempty"`
+	ExternalResourceID string                   `json:"external_resource_id,omitempty"`
+	ObservedGeneration int64                    `json:"observed_generation"`
+	RetryAfterSeconds  *int32                   `json:"retry_after_seconds,omitempty"`
+	Failure            *Failure                 `json:"failure,omitempty"`
+	EgressConfinement  *EgressConfinementStatus `json:"egress_confinement,omitempty"`
 }
 
 type ShutdownResult struct{}
@@ -258,6 +276,14 @@ func ValidateStatus(value Status) error {
 	if value.Ready && (value.Phase != PhaseRunning || value.Endpoint == nil) {
 		return errors.New("status ready requires a running phase and endpoint")
 	}
+	if value.EgressConfinement != nil {
+		if value.EgressConfinement.Boundary != EgressConfinementBoundaryInfrastructure {
+			return errors.New("status egress_confinement boundary is invalid")
+		}
+		if value.Ready && !value.EgressConfinement.Ready {
+			return errors.New("status ready requires reported egress confinement")
+		}
+	}
 	if value.Endpoint != nil {
 		if err := validateEndpoint(*value.Endpoint); err != nil {
 			return err
@@ -280,7 +306,7 @@ func ValidateStatus(value Status) error {
 		return errors.New("status failure is only valid for the failed phase")
 	}
 	if value.Phase == PhaseDeleted {
-		if value.Ready || value.Endpoint != nil || value.ExternalResourceID != "" || value.Failure != nil {
+		if value.Ready || value.Endpoint != nil || value.ExternalResourceID != "" || value.Failure != nil || value.EgressConfinement != nil {
 			return errors.New("deleted status must not retain runtime resource data")
 		}
 	}

@@ -276,3 +276,15 @@ See [Kubernetes smoke tests](../tests/operator/kind/README.md), the
   boundary.
 - Direct and non-enforced mediated modes remain available for compatibility;
   they must not be described as enforced transparent egress.
+
+## Independently managed VMs
+
+Kubernetes NetworkPolicy is the bypass-prevention boundary for Pod/Kata runs;
+it does not confine an independently managed VM. A root-capable VM agent can
+replace guest-local capture and firewall state. The provider-neutral
+[native VM egress contract](../protocol/native-egress.md) therefore requires a
+trusted execution driver/provider to enforce default-deny NIC/network policy
+outside the guest, plus an exact-binding authenticated outbound tunnel into the
+run's separate trusted egress path. Both gates are required. The contract and
+conformance proof exist, but no production VM tunnel or provider confinement is
+wired yet.

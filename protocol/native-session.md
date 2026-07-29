@@ -5,12 +5,15 @@ Status: versioned provider-neutral contract (`nvt.native-session/v1`).
 This contract defines the first authenticated outbound connection from a
 native NVT guest to a trusted gateway implementation. The guest is always the
 network initiator. The production gateway has an opt-in acceptor and bounded
-process-local registry for this contract. It does not yet add a browser route,
-HTTP/WebSocket reverse-tunnel multiplexing, mediated VM networking, or a
-production provider implementation. The separate
+process-local registry for this contract. It does not multiplex browser
+HTTP/WebSocket traffic, carry mediated VM egress, or implement a provider. The
+separate
 [`nvt.native-workspace/v1`](native-workspace.md) yamux data-plane contract and
 trusted guest forwarder and production acceptor now exist, but this control
-connection is not multiplexed and production browser routing is still not wired.
+connection is not multiplexed. Authorized external-VM browser routing uses the
+separate workspace connection. The provider-neutral
+[`nvt.native-egress/v1`](native-egress.md) contract is also separate and has no
+production tunnel/provider enforcement yet.
 
 ## Trust boundary
 

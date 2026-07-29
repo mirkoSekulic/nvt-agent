@@ -44,9 +44,46 @@ func TestValidateProtocolTypes(t *testing.T) {
 		Endpoint:           &Endpoint{Scheme: EndpointSchemeHTTPS, Host: "driver.invalid", Port: 443},
 		ExternalResourceID: "provider/resource/123",
 		ObservedGeneration: 1,
+		EgressConfinement: &EgressConfinementStatus{
+			Boundary: EgressConfinementBoundaryInfrastructure,
+			Ready:    true,
+		},
 	}
 	if err := ValidateStatus(status); err != nil {
 		t.Fatalf("valid status: %v", err)
+	}
+}
+
+func TestEgressConfinementStatusIsOptionalCompatibleAndNonSecret(t *testing.T) {
+	t.Parallel()
+	legacy := Status{Phase: PhaseProvisioning, ObservedGeneration: 1}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"phase":"provisioning","ready":false,"observed_generation":1}` {
+		t.Fatalf("legacy status wire shape changed: %s", encoded)
+	}
+	if err := ValidateStatus(legacy); err != nil {
+		t.Fatalf("legacy status rejected: %v", err)
+	}
+	confined := Status{
+		Phase: PhaseRunning, Ready: true, ObservedGeneration: 2,
+		Endpoint:          &Endpoint{Scheme: EndpointSchemeHTTPS, Host: "guest.invalid", Port: 443},
+		EgressConfinement: &EgressConfinementStatus{Boundary: EgressConfinementBoundaryInfrastructure, Ready: true},
+	}
+	encoded, err = json.Marshal(confined)
+	if err != nil || !bytes.Contains(encoded, []byte(`"egress_confinement":{"boundary":"infrastructure","ready":true}`)) {
+		t.Fatalf("portable confinement status=%s error=%v", encoded, err)
+	}
+	confinementEncoded, err := json.Marshal(confined.EgressConfinement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"token", "credential", "identity", "endpoint", "provider_state"} {
+		if bytes.Contains(bytes.ToLower(confinementEncoded), []byte(forbidden)) {
+			t.Fatalf("confinement assertion contains forbidden field %q: %s", forbidden, confinementEncoded)
+		}
 	}
 }
 
@@ -150,6 +187,27 @@ func TestValidateProtocolTypesFailClosed(t *testing.T) {
 		{
 			name: "ready without endpoint",
 			err:  ValidateStatus(Status{Phase: PhaseRunning, Ready: true}),
+		},
+		{
+			name: "provider-specific confinement boundary",
+			err: ValidateStatus(Status{Phase: PhaseProvisioning, EgressConfinement: &EgressConfinementStatus{
+				Boundary: EgressConfinementBoundary("azure-vnet"),
+			}}),
+		},
+		{
+			name: "ready without confinement convergence",
+			err: ValidateStatus(Status{
+				Phase: PhaseRunning, Ready: true,
+				Endpoint:          &Endpoint{Scheme: EndpointSchemeHTTPS, Host: "guest.invalid", Port: 443},
+				EgressConfinement: &EgressConfinementStatus{Boundary: EgressConfinementBoundaryInfrastructure},
+			}),
+		},
+		{
+			name: "deleted with confinement assertion",
+			err: ValidateStatus(Status{
+				Phase:             PhaseDeleted,
+				EgressConfinement: &EgressConfinementStatus{Boundary: EgressConfinementBoundaryInfrastructure},
+			}),
 		},
 		{
 			name: "failure outside failed phase",

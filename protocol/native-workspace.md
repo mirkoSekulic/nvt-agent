@@ -208,5 +208,7 @@ guesses or enumerates bindings. After browser authentication and AgentRun
 authorization, the production HTTP reverse proxy uses only that exact
 `StreamOpener`. Its dial boundary ignores browser network/authority input and
 cannot fall back to a Pod for an external VM. Production native code-server
-browser access is therefore wired. VM mediated egress, cloud providers, and
-public VM listeners remain later reviewed production gates.
+browser access is therefore wired. The provider-neutral native VM mediated
+egress contract and conformance boundary are frozen separately, but its
+production tunnel/provider enforcement, cloud providers, and public VM
+listeners remain later reviewed production gates.

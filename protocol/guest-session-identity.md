@@ -205,7 +205,9 @@ test-only QEMU fixture exercises that listener. The separate
 [`nvt.native-workspace/v1`](native-workspace.md) contract proves bounded yamux
 multiplexing with this same identity and fixed audience, without adding a
 second credential or arbitrary scope. The production guest and gateway
-workspace endpoints now use it, but it is not wired to a gateway browser
-handler. There is still no production browser route,
-mediated VM egress, cloud provider, or production VM runtime. Pod, Kata,
-Compose, agentd, and runtime plugins remain unchanged.
+workspace endpoints and authorized external-VM browser routes now use it. The
+separate provider-neutral [native VM mediated-egress contract](native-egress.md)
+is frozen with a conformance proof, but its broker identity endpoints, tunnel,
+guest client, and provider enforcement are not implemented. There is still no
+production mediated VM egress or cloud provider. Pod, Kata, Compose, agentd,
+and runtime plugins remain unchanged.

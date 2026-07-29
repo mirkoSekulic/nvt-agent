@@ -221,5 +221,8 @@ derived short-lived session credential over a root-only local socket; it never
 receives this bearer. The production gateway accepts that bounded control
 session. The production guest and gateway also establish the separate
 [`nvt.native-workspace/v1`](native-workspace.md) yamux transport using the same
-derived credential. No browser handler consumes its active stream boundary;
-browser routing and mediated VM networking remain separate future gates.
+derived credential, and authorized external-VM browser routing consumes its
+exact active stream boundary. The purpose-separated
+[`nvt.native-egress/v1`](native-egress.md) identity/session/confinement contract
+is frozen separately; no production native egress client, broker API, relay, or
+provider network enforcement consumes this runtime bearer yet.
