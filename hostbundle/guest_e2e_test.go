@@ -65,7 +65,10 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		ContractVersion: contract.Version, OS: "linux", Architecture: runtime.GOARCH,
 		BundleVersion: "0.8.33-e2e", BuildID: strings.Repeat("a", 40),
 		NativeEntrypoint: "bin/nvt-guest-supervisor", ServiceIdentity: "nvt-agent-guest.service",
-		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion},
+		Compatibility: contract.Compatibility{
+			AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion,
+			NativeWorkspaceProtocol: contract.NativeWorkspaceProtocolVersion,
+		},
 	}
 	inputs := []bundle.InputFile{
 		{Path: "bin/nvt-guest-supervisor", Source: filepath.Join(binaries, "nvt-guest-supervisor"), Mode: 0o755},
@@ -81,6 +84,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		{Path: "share/examples/guest.json", Source: filepath.Join(moduleRoot, "files", "guest.json"), Mode: 0o644},
 		{Path: "share/examples/identity.json", Source: filepath.Join(moduleRoot, "files", "identity.json"), Mode: 0o644},
 		{Path: "share/examples/session.json", Source: filepath.Join(moduleRoot, "files", "session.json"), Mode: 0o644},
+		{Path: "share/examples/session-workspace.json", Source: filepath.Join(moduleRoot, "files", "session-workspace.json"), Mode: 0o644},
 	}
 	if _, err := bundle.BuildArchive(archive, manifest, inputs); err != nil {
 		t.Fatal(err)
@@ -257,6 +261,14 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		!bytes.Contains(sessionService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(sessionService, []byte("CapabilityBoundingSet=\n")) || !bytes.Contains(sessionService, []byte("nvt-guest-sessiond")) ||
 		!bytes.Contains(sessionService, []byte("Requires=nvt-guest-identity.service nvt-agent-guest.service")) {
 		t.Fatal("installed systemd boundaries are missing")
+	}
+	workspaceExample, workspaceExampleErr := os.ReadFile(filepath.Join(current, "share", "examples", "session-workspace.json"))
+	if workspaceExampleErr != nil || !bytes.Contains(workspaceExample, []byte(`"gateway_endpoint": "tls://workspace-gateway.example.invalid:444"`)) ||
+		!bytes.Contains(workspaceExample, []byte(`"loopback_endpoint": "127.0.0.1:4090"`)) {
+		t.Fatal("installed bundle is missing the non-secret optional workspace example")
+	}
+	if _, err := os.Stat(filepath.Join(root, "etc")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bundle install wrote configuration outside the immutable release: %v", err)
 	}
 	canary := []byte("NVT_TEST_SECRET_CANARY")
 	archiveBytes, _ := os.ReadFile(archive)

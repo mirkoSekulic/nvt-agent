@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/contract"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/workspacetunnel"
 )
 
 const (
@@ -29,12 +30,18 @@ const (
 )
 
 type Configuration struct {
-	Version            int    `json:"version"`
-	RuntimeDirectory   string `json:"runtime_directory"`
-	IdentitySocketPath string `json:"identity_socket_path"`
-	AgentdSocketPath   string `json:"agentd_socket_path"`
-	GatewayEndpoint    string `json:"gateway_endpoint"`
-	CAPEMPath          string `json:"ca_pem_path"`
+	Version            int                     `json:"version"`
+	RuntimeDirectory   string                  `json:"runtime_directory"`
+	IdentitySocketPath string                  `json:"identity_socket_path"`
+	AgentdSocketPath   string                  `json:"agentd_socket_path"`
+	GatewayEndpoint    string                  `json:"gateway_endpoint"`
+	CAPEMPath          string                  `json:"ca_pem_path"`
+	Workspace          *WorkspaceConfiguration `json:"workspace,omitempty"`
+}
+
+type WorkspaceConfiguration struct {
+	GatewayEndpoint  string `json:"gateway_endpoint"`
+	LoopbackEndpoint string `json:"loopback_endpoint"`
 }
 
 type Reason string
@@ -83,6 +90,10 @@ func validateConfiguration(value Configuration) error {
 		filepath.Dir(value.IdentitySocketPath) == value.RuntimeDirectory || filepath.Dir(value.AgentdSocketPath) == value.RuntimeDirectory ||
 		value.IdentitySocketPath == value.AgentdSocketPath || validateGatewayEndpoint(value.GatewayEndpoint) != nil {
 		return errors.New("native session configuration is invalid")
+	}
+	if value.Workspace != nil && (validateGatewayEndpoint(value.Workspace.GatewayEndpoint) != nil ||
+		workspacetunnel.ValidateLoopbackEndpoint(value.Workspace.LoopbackEndpoint) != nil) {
+		return errors.New("native session workspace configuration is invalid")
 	}
 	return nil
 }

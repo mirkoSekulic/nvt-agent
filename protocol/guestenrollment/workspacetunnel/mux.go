@@ -114,7 +114,7 @@ func NewGatewaySession(connection io.ReadWriteCloser, authentication Authenticat
 }
 
 func NewGuestForwarder(connection io.ReadWriteCloser, binding guestenrollment.Binding, localTrustDeadline time.Time, endpoint string) (*GuestForwarder, error) {
-	if connection == nil || guestenrollment.ValidateBinding(binding) != nil || validateLocalTrustDeadline(localTrustDeadline, time.Now()) != nil || validateLoopbackEndpoint(endpoint) != nil {
+	if connection == nil || guestenrollment.ValidateBinding(binding) != nil || validateLocalTrustDeadline(localTrustDeadline, time.Now()) != nil || ValidateLoopbackEndpoint(endpoint) != nil {
 		return nil, ErrProtocol
 	}
 	multiplexer, err := yamux.Server(connection, yamuxConfig())
@@ -164,6 +164,32 @@ func (session *GuestForwarder) Binding() guestenrollment.Binding {
 		return guestenrollment.Binding{}
 	}
 	return session.binding
+}
+
+// Done closes as soon as the authenticated workspace lifetime begins
+// teardown. Callers use it to withdraw external readiness before closing
+// another required transport in the same lifecycle.
+func (session *GuestForwarder) Done() <-chan struct{} {
+	if session == nil {
+		return nil
+	}
+	return session.lifetime.Done()
+}
+
+// CheckDestination verifies that the one trusted configured loopback service
+// is reachable before a caller publishes session readiness. It neither sends
+// application data nor accepts a caller-selected destination.
+func (session *GuestForwarder) CheckDestination(ctx context.Context) error {
+	if session == nil || ctx == nil || ctx.Err() != nil || session.closed.Load() || !time.Now().Before(session.trustDeadline) {
+		return ErrUnavailable
+	}
+	dialContext, cancel := context.WithTimeout(ctx, LocalDialTimeout)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(dialContext, "tcp", session.endpoint)
+	if err != nil {
+		return ErrUnavailable
+	}
+	return connection.Close()
 }
 
 func (session *GatewaySession) OpenStream(ctx context.Context) (net.Conn, error) {
@@ -490,7 +516,9 @@ func (connection *idleConn) CloseWrite() error {
 	return connection.Conn.Close()
 }
 
-func validateLoopbackEndpoint(endpoint string) error {
+// ValidateLoopbackEndpoint validates the sole canonical fixed-destination
+// form accepted by the guest forwarder.
+func ValidateLoopbackEndpoint(endpoint string) error {
 	host, portValue, err := net.SplitHostPort(endpoint)
 	if err != nil || (host != "127.0.0.1" && host != "::1") || net.JoinHostPort(host, portValue) != endpoint {
 		return ErrProtocol

@@ -16,19 +16,20 @@ import (
 )
 
 const (
-	Version                      = "nvt.host-bundle/v1"
-	AgentdProtocolVersion        = "nvt.agentd/v1"
-	NativeSessionProtocolVersion = "nvt.native-session/v1"
-	ArtifactType                 = "application/vnd.nvt.host-bundle.v1"
-	LayerMediaType               = "application/vnd.nvt.host-bundle.layer.v1.tar+gzip"
-	OCIManifestMediaType         = "application/vnd.oci.image.manifest.v1+json"
-	OCIIndexMediaType            = "application/vnd.oci.image.index.v1+json"
-	OCIEmptyConfigMediaType      = "application/vnd.oci.empty.v1+json"
-	ManifestPath                 = "manifest.json"
-	MaxManifestBytes             = 256 * 1024
-	MaxBundleBytes               = 128 * 1024 * 1024
-	MaxExtractedBytes            = 256 * 1024 * 1024
-	MaxFiles                     = 1024
+	Version                        = "nvt.host-bundle/v1"
+	AgentdProtocolVersion          = "nvt.agentd/v1"
+	NativeSessionProtocolVersion   = "nvt.native-session/v1"
+	NativeWorkspaceProtocolVersion = "nvt.native-workspace/v1"
+	ArtifactType                   = "application/vnd.nvt.host-bundle.v1"
+	LayerMediaType                 = "application/vnd.nvt.host-bundle.layer.v1.tar+gzip"
+	OCIManifestMediaType           = "application/vnd.oci.image.manifest.v1+json"
+	OCIIndexMediaType              = "application/vnd.oci.image.index.v1+json"
+	OCIEmptyConfigMediaType        = "application/vnd.oci.empty.v1+json"
+	ManifestPath                   = "manifest.json"
+	MaxManifestBytes               = 256 * 1024
+	MaxBundleBytes                 = 128 * 1024 * 1024
+	MaxExtractedBytes              = 256 * 1024 * 1024
+	MaxFiles                       = 1024
 )
 
 var (
@@ -50,8 +51,9 @@ type Manifest struct {
 }
 
 type Compatibility struct {
-	AgentdProtocol        string `json:"agentd_protocol"`
-	NativeSessionProtocol string `json:"native_session_protocol,omitempty"`
+	AgentdProtocol          string `json:"agentd_protocol"`
+	NativeSessionProtocol   string `json:"native_session_protocol,omitempty"`
+	NativeWorkspaceProtocol string `json:"native_workspace_protocol,omitempty"`
 }
 
 type File struct {
@@ -96,8 +98,9 @@ func ValidateManifest(manifest Manifest) error {
 		return errors.New("host bundle service identity is invalid")
 	}
 	if manifest.Compatibility.AgentdProtocol != AgentdProtocolVersion ||
-		(manifest.Compatibility.NativeSessionProtocol != "" && manifest.Compatibility.NativeSessionProtocol != NativeSessionProtocolVersion) {
-		return errors.New("host bundle agentd protocol is incompatible")
+		(manifest.Compatibility.NativeSessionProtocol != "" && manifest.Compatibility.NativeSessionProtocol != NativeSessionProtocolVersion) ||
+		(manifest.Compatibility.NativeWorkspaceProtocol != "" && manifest.Compatibility.NativeWorkspaceProtocol != NativeWorkspaceProtocolVersion) {
+		return errors.New("host bundle protocol compatibility is invalid")
 	}
 	if len(manifest.Files) == 0 || len(manifest.Files) > MaxFiles {
 		return errors.New("host bundle file count is invalid")

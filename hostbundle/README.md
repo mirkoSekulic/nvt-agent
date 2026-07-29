@@ -11,9 +11,9 @@ bash hostbundle/build.sh 0.8.33-test 0123456789abcdef0123456789abcdef01234567 di
 
 The layout tag resolves to an OCI index. `digest.txt` is its immutable digest.
 The archive contains only the static bootstrap, root-owned runtime-identity
-daemon, root-owned native session client, non-root supervisor/session fixture,
-the real repository `agentd`/`agentdctl`, three systemd units, and example
-path-only configurations.
+daemon, root-owned native control/optional workspace session client, non-root
+supervisor/session fixture, the real repository `agentd`/`agentdctl`, three
+systemd units, and non-secret example path/endpoint configurations.
 It does not copy the runtime container rootfs.
 
 The initial native target is Linux amd64. The manifest, builder, OCI index, and
@@ -24,8 +24,8 @@ The guest OS supplies Python 3, tmux, systemd (when the units are used), the
 `nvt-agent` user, and writable `/workspace`, `/run/nvt-agent`, and
 `/var/lib/nvt-agent` paths. The included session executable is deliberately a
 bounded lifecycle fixture, not a production AI runtime. Provider provisioning,
-code-server, plugins, a production gateway listener/routing path, and mediated
-VM egress remain later phases.
+the optional fixed loopback workspace service, plugins, a production workspace
+gateway listener/routing path, and mediated VM egress remain later phases.
 
 The separate provider-neutral enrollment and runtime-identity boundaries are
 documented in [`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md)
@@ -50,6 +50,15 @@ existing container and Compose paths. The version-1 `session_readiness_path`
 member is additive: older guest configurations that omit it retain their
 original agentd/tmux readiness behavior, while newly provisioned native-session
 guests enable the outbound-session readiness gate.
+
+`share/examples/session.json` remains the control-only example. Providers may
+instead resolve the non-secret `share/examples/session-workspace.json` example
+into the root-owned `/etc/nvt-agent/session.json`. Its optional `workspace`
+block contains only a canonical TLS gateway endpoint and one literal loopback
+destination. The same short-lived credential and explicit CA trust are used
+for separate control and workspace TLS connections; neither the gateway nor a
+stream can choose the local target. Readiness requires both legs, and renewal
+switches only after both replacements authenticate.
 
 After the bootstrap has installed and activated a release, guest provisioning
 may install the repository-owned unit and its separately supplied non-secret

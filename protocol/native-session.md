@@ -9,8 +9,9 @@ process-local registry for this contract. It does not yet add a browser route,
 HTTP/WebSocket reverse-tunnel multiplexing, mediated VM networking, or a
 production provider implementation. The separate
 [`nvt.native-workspace/v1`](native-workspace.md) yamux data-plane contract and
-conformance proof now exist, but this control connection is not multiplexed and
-production browser routing is still not wired.
+trusted guest forwarder now exist, but this control connection is not
+multiplexed and production gateway workspace/browser routing is still not
+wired.
 
 ## Trust boundary
 
@@ -157,3 +158,12 @@ make-before-break renewal and removes it before an actual disconnect or
 failure. The non-root supervisor waits for and continuously monitors this
 file, so a disappeared gateway session or agentd cannot leave stale overall
 guest readiness.
+
+When the optional workspace configuration is enabled, the control connection
+and the separate workspace TLS/yamux connection form one readiness unit. Both
+must authenticate with the same current credential before readiness appears.
+Renewal builds both replacement legs with one pending credential before
+switching; a partial replacement is closed while the ready predecessor pair is
+retained. A temporary leg loss removes readiness, closes the pair, and retries
+the same still-live credential before requesting another. Omission retains
+the original control-only lifecycle and wire behavior.

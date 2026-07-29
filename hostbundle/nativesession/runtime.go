@@ -10,26 +10,30 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/workspacetunnel"
 )
 
 var (
-	credentialRenewalAge     = 3 * time.Minute
-	credentialRecoveryWindow = time.Minute
-	credentialRenewalJitter  = 30 * time.Second
-	reconnectDelay           = time.Second
-	renewalRetryDelay        = 5 * time.Second
-	idleProbeInterval        = 5 * time.Second
+	credentialRenewalAge          = 3 * time.Minute
+	credentialRecoveryWindow      = time.Minute
+	credentialRenewalJitter       = 30 * time.Second
+	reconnectDelay                = time.Second
+	renewalRetryDelay             = 5 * time.Second
+	idleProbeInterval             = 5 * time.Second
+	replacementPreparationTimeout = 50 * time.Second
 )
 
 type Runtime struct {
-	Configuration Configuration
-	Identity      CredentialIssuer
-	Connector     Connector
-	Now           func() time.Time
-	MonotonicNow  func() time.Time
+	Configuration    Configuration
+	Identity         CredentialIssuer
+	Connector        Connector
+	Now              func() time.Time
+	MonotonicNow     func() time.Time
+	readinessChanged func(bool)
 }
 
 type CredentialIssuer interface {
@@ -53,6 +57,32 @@ type credentialState struct {
 	nextRenewalAttemptAt time.Time
 }
 
+type sessionPair struct {
+	control         net.Conn
+	reader          *bufio.Reader
+	workspace       *workspacetunnel.GuestForwarder
+	workspaceCancel context.CancelFunc
+	workspaceDone   chan error
+	readWorkers     sync.WaitGroup
+}
+
+type controlReadResult struct {
+	frame guestenrollment.NativeSessionMessage
+	err   error
+}
+
+type replacementResult struct {
+	pair        *sessionPair
+	issued      *sessionCredential
+	err         error
+	issueFailed bool
+}
+
+type replacementAttempt struct {
+	cancel context.CancelFunc
+	done   chan replacementResult
+}
+
 func (state *credentialState) clear() {
 	if state == nil {
 		return
@@ -68,6 +98,60 @@ func (state *credentialState) clear() {
 
 func (sessionCredential) String() string   { return "[sensitive guest session credential]" }
 func (sessionCredential) GoString() string { return "[sensitive guest session credential]" }
+
+func (pair *sessionPair) Close() {
+	if pair == nil {
+		return
+	}
+	if pair.workspaceCancel != nil {
+		pair.workspaceCancel()
+	}
+	if pair.control != nil {
+		_ = pair.control.Close()
+	}
+	pair.readWorkers.Wait()
+	if pair.workspace != nil {
+		_ = pair.workspace.Close()
+	}
+	if pair.workspaceDone != nil {
+		select {
+		case <-pair.workspaceDone:
+		case <-time.After(workspacetunnel.StreamCloseTimeout):
+		}
+	}
+}
+
+func (pair *sessionPair) workspaceStopped() <-chan struct{} {
+	if pair == nil || pair.workspace == nil {
+		return nil
+	}
+	return pair.workspace.Done()
+}
+
+func (pair *sessionPair) readControl(deadline time.Time) <-chan controlReadResult {
+	result := make(chan controlReadResult, 1)
+	pair.readWorkers.Add(1)
+	go func() {
+		defer pair.readWorkers.Done()
+		frame, err := readFrame(pair.reader, pair.control, deadline)
+		result <- controlReadResult{frame: frame, err: err}
+	}()
+	return result
+}
+
+func (result *replacementResult) discard() {
+	if result == nil {
+		return
+	}
+	if result.pair != nil {
+		result.pair.Close()
+		result.pair = nil
+	}
+	if result.issued != nil {
+		result.issued.Opaque = ""
+		result.issued = nil
+	}
+}
 
 func NewRuntime(configuration Configuration, identity CredentialIssuer, connector Connector) (*Runtime, error) {
 	if validateConfiguration(configuration) != nil || identity == nil || connector == nil {
@@ -180,16 +264,30 @@ func (runtime *Runtime) serveCredential(ctx context.Context, state *credentialSt
 	if state == nil || state.current == nil || !runtime.credentialCurrent(*state.current) {
 		return fail(ReasonCredentialExpired, false, false)
 	}
-	connection, reader, err := runtime.openCredential(ctx, *state.current)
+	pair, err := runtime.openCredentialPair(ctx, *state.current)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = connection.Close() }()
+	var replacement *replacementAttempt
+	var retiredPairDone <-chan struct{}
+	defer func() {
+		if replacement != nil {
+			replacement.cancel()
+			result := <-replacement.done
+			result.discard()
+		}
+		pair.Close()
+		if retiredPairDone != nil {
+			<-retiredPairDone
+		}
+	}()
 	if err := runtime.writeReadiness(true); err != nil {
 		return err
 	}
 	defer runtime.writeReadiness(false)
 	requestIDs := make(map[string]struct{}, guestenrollment.MaxNativeSessionRequestsPerConnection)
+	var controlRead <-chan controlReadResult
+	var pongDeadline time.Time
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -197,55 +295,195 @@ func (runtime *Runtime) serveCredential(ctx context.Context, state *credentialSt
 		if state.current == nil || !runtime.credentialCurrent(*state.current) {
 			return fail(ReasonCredentialExpired, false, false)
 		}
-		if runtime.credentialRenewalDue(*state.current) && runtime.renewalAttemptDue(state) {
-			replacement, replacementReader, switched, renewalErr := runtime.prepareReplacement(ctx, state)
-			if renewalErr != nil {
-				return renewalErr
-			}
-			if switched {
-				previous := connection
-				connection, reader = replacement, replacementReader
-				requestIDs = make(map[string]struct{}, guestenrollment.MaxNativeSessionRequestsPerConnection)
-				_ = previous.Close()
-				continue
-			}
+		if !pongDeadline.IsZero() && deadlineElapsed(pongDeadline) {
+			return fail(ReasonGatewayUnavailable, true, false)
 		}
-		deadline := runtime.nextReadDeadline(state)
-		frame, readErr := readFrame(reader, connection, deadline)
-		if readErr != nil {
+		if replacement == nil && retiredPairDone == nil && runtime.credentialRenewalDue(*state.current) && runtime.renewalAttemptDue(state) {
+			replacement = runtime.startReplacement(ctx, state)
+		}
+		if controlRead == nil {
+			deadline := runtime.nextReadDeadline(state)
+			if !pongDeadline.IsZero() && pongDeadline.Before(deadline) {
+				deadline = pongDeadline
+			}
+			controlRead = pair.readControl(deadline)
+		}
+		var replacementDone <-chan replacementResult
+		if replacement != nil {
+			replacementDone = replacement.done
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-pair.workspaceStopped():
 			if ctx.Err() != nil {
 				return nil
-			}
-			_, temporary, _ := FailureDetails(readErr)
-			if !temporary {
-				return readErr
 			}
 			if state.current == nil || !runtime.credentialCurrent(*state.current) {
 				return fail(ReasonCredentialExpired, false, false)
 			}
-			if runtime.credentialRenewalDue(*state.current) && runtime.renewalAttemptDue(state) {
+			return fail(ReasonGatewayUnavailable, true, false)
+		case <-retiredPairDone:
+			retiredPairDone = nil
+			continue
+		case result := <-replacementDone:
+			replacement.cancel()
+			replacement = nil
+			prepared, switched, renewalErr := runtime.completeReplacement(state, &result)
+			result.discard()
+			if renewalErr != nil {
+				return renewalErr
+			}
+			if !switched {
 				continue
+			}
+			previous := pair
+			pair = prepared
+			controlRead = nil
+			pongDeadline = time.Time{}
+			requestIDs = make(map[string]struct{}, guestenrollment.MaxNativeSessionRequestsPerConnection)
+			closed := make(chan struct{})
+			retiredPairDone = closed
+			go func() {
+				previous.Close()
+				close(closed)
+			}()
+			continue
+		case result := <-controlRead:
+			controlRead = nil
+			if result.err == nil {
+				operationDeadline := time.Now().Add(frameTimeout)
+				if !pongDeadline.IsZero() && pongDeadline.Before(operationDeadline) {
+					operationDeadline = pongDeadline
+				}
+				if deadlineElapsed(operationDeadline) {
+					return fail(ReasonGatewayUnavailable, true, false)
+				}
+				pong, handleErr := runtime.handleFrame(result.frame, pair.control, requestIDs, operationDeadline)
+				if handleErr != nil {
+					return handleErr
+				}
+				if deadlineElapsed(operationDeadline) {
+					return fail(ReasonGatewayUnavailable, true, false)
+				}
+				if pong && !pongDeadline.IsZero() {
+					pongDeadline = time.Time{}
+				}
+				continue
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			select {
+			case <-pair.workspaceStopped():
+				if state.current == nil || !runtime.credentialCurrent(*state.current) {
+					return fail(ReasonCredentialExpired, false, false)
+				}
+				return fail(ReasonGatewayUnavailable, true, false)
+			default:
+			}
+			_, temporary, _ := FailureDetails(result.err)
+			if !temporary {
+				return result.err
+			}
+			if state.current == nil || !runtime.credentialCurrent(*state.current) {
+				return fail(ReasonCredentialExpired, false, false)
+			}
+			if !pongDeadline.IsZero() {
+				return fail(ReasonGatewayUnavailable, true, false)
 			}
 			if err := runtime.checkAgentd(); err != nil {
 				return err
 			}
-			if err := writeFrame(connection, guestenrollment.NativeSessionMessage{
+			pongDeadline = time.Now().Add(frameTimeout)
+			if err := writeFrame(pair.control, guestenrollment.NativeSessionMessage{
 				ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPing,
-			}, time.Now().Add(frameTimeout)); err != nil {
+			}, pongDeadline); err != nil {
 				return err
 			}
-			if err := runtime.awaitPong(reader, connection, requestIDs, time.Now().Add(frameTimeout)); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := runtime.handleFrame(frame, connection, requestIDs, time.Now().Add(frameTimeout)); err != nil {
-			return err
 		}
 	}
 }
 
-func (runtime *Runtime) openCredential(ctx context.Context, credential sessionCredential) (net.Conn, *bufio.Reader, error) {
+func (runtime *Runtime) openCredentialPair(ctx context.Context, credential sessionCredential) (*sessionPair, error) {
+	if runtime.Configuration.Workspace == nil {
+		connection, reader, err := runtime.openControlCredential(ctx, credential)
+		if err != nil {
+			return nil, err
+		}
+		return &sessionPair{control: connection, reader: reader}, nil
+	}
+
+	// Prepare and start the workspace leg before opening the control standby.
+	// A control connection that has completed hello is subject to the gateway's
+	// heartbeat deadline, while workspace authentication and destination probing
+	// can legitimately consume the rest of the bounded preparation budget. By
+	// opening control last, no accepted control standby is left unread while the
+	// other required leg is still being prepared.
+	pair := &sessionPair{}
+	workspaceConnection, err := runtime.Connector.Connect(ctx, runtime.Configuration.Workspace.GatewayEndpoint)
+	if err != nil {
+		pair.Close()
+		return nil, err
+	}
+	if err := workspacetunnel.Establish(ctx, workspaceConnection, credential.Binding, credential.Opaque); err != nil {
+		_ = workspaceConnection.Close()
+		pair.Close()
+		return nil, mapWorkspaceError(err)
+	}
+	forwarder, err := workspacetunnel.NewGuestForwarder(
+		workspaceConnection, credential.Binding, credential.LocalExpiresAt, runtime.Configuration.Workspace.LoopbackEndpoint,
+	)
+	if err != nil {
+		_ = workspaceConnection.Close()
+		pair.Close()
+		return nil, mapWorkspaceError(err)
+	}
+	if err := forwarder.CheckDestination(ctx); err != nil {
+		_ = forwarder.Close()
+		pair.Close()
+		return nil, mapWorkspaceError(err)
+	}
+	// Establishment observes the caller's bounded context, but the accepted
+	// workspace leg belongs to the returned pair. In particular, a replacement
+	// preparation context is cancelled as soon as the pair is handed to the
+	// active loop and must not tear down the newly promoted session.
+	workspaceContext, cancel := context.WithCancel(context.Background())
+	pair.workspace = forwarder
+	pair.workspaceCancel = cancel
+	pair.workspaceDone = make(chan error, 1)
+	go func() {
+		err := forwarder.Serve(workspaceContext)
+		pair.workspaceDone <- err
+	}()
+	select {
+	case err := <-pair.workspaceDone:
+		pair.workspaceDone = nil
+		pair.Close()
+		if err == nil {
+			err = workspacetunnel.ErrUnavailable
+		}
+		return nil, mapWorkspaceError(err)
+	default:
+	}
+
+	connection, reader, err := runtime.openControlCredential(ctx, credential)
+	if err != nil {
+		pair.Close()
+		return nil, err
+	}
+	pair.control = connection
+	pair.reader = reader
+	select {
+	case <-pair.workspaceStopped():
+		pair.Close()
+		return nil, fail(ReasonGatewayUnavailable, true, false)
+	default:
+		return pair, nil
+	}
+}
+
+func (runtime *Runtime) openControlCredential(ctx context.Context, credential sessionCredential) (net.Conn, *bufio.Reader, error) {
 	if !runtime.credentialCurrent(credential) {
 		return nil, nil, fail(ReasonCredentialExpired, false, false)
 	}
@@ -285,39 +523,71 @@ func (runtime *Runtime) openCredential(ctx context.Context, credential sessionCr
 	return connection, reader, nil
 }
 
-func (runtime *Runtime) prepareReplacement(ctx context.Context, state *credentialState) (net.Conn, *bufio.Reader, bool, error) {
-	if state.renewalUncertain {
-		return nil, nil, false, nil
-	}
+func (runtime *Runtime) startReplacement(ctx context.Context, state *credentialState) *replacementAttempt {
 	if state.pending != nil && !runtime.credentialCurrent(*state.pending) {
 		state.pending.Opaque = ""
 		state.pending = nil
 	}
-	if state.pending == nil {
-		issued, err := runtime.issueCredential(ctx)
-		if err != nil {
-			_, temporary, uncertain := FailureDetails(err)
-			if uncertain {
-				state.renewalUncertain = true
-				return nil, nil, false, nil
-			}
-			if temporary {
-				state.nextRenewalAttemptAt = runtime.monotonicNow().Add(renewalRetryDelay)
-				return nil, nil, false, nil
-			}
-			return nil, nil, false, err
-		}
-		state.pending = &issued
+	attemptContext, cancel := context.WithTimeout(ctx, replacementPreparationTimeout)
+	attempt := &replacementAttempt{cancel: cancel, done: make(chan replacementResult, 1)}
+	var pending *sessionCredential
+	if state.pending != nil {
+		value := *state.pending
+		pending = &value
 	}
-	connection, reader, err := runtime.openCredential(ctx, *state.pending)
-	if err != nil {
-		_, temporary, _ := FailureDetails(err)
+	go func() {
+		result := replacementResult{}
+		credential := pending
+		if credential == nil {
+			issued, err := runtime.issueCredential(attemptContext)
+			if err != nil {
+				result.err = err
+				result.issueFailed = true
+				attempt.done <- result
+				return
+			}
+			credential = &issued
+			result.issued = &issued
+		}
+		result.pair, result.err = runtime.openCredentialPair(attemptContext, *credential)
+		attempt.done <- result
+	}()
+	return attempt
+}
+
+func (runtime *Runtime) completeReplacement(state *credentialState, result *replacementResult) (*sessionPair, bool, error) {
+	if state == nil || result == nil {
+		return nil, false, fail(ReasonProtocolInvalid, false, false)
+	}
+	if result.issueFailed {
+		_, temporary, uncertain := FailureDetails(result.err)
+		if uncertain {
+			state.renewalUncertain = true
+			return nil, false, nil
+		}
 		if temporary {
 			state.nextRenewalAttemptAt = runtime.monotonicNow().Add(renewalRetryDelay)
-			return nil, nil, false, nil
+			return nil, false, nil
 		}
-		return nil, nil, false, err
+		return nil, false, result.err
 	}
+	if result.issued != nil && state.pending == nil {
+		state.pending = result.issued
+		result.issued = nil
+	}
+	if result.err != nil {
+		_, temporary, _ := FailureDetails(result.err)
+		if temporary {
+			state.nextRenewalAttemptAt = runtime.monotonicNow().Add(renewalRetryDelay)
+			return nil, false, nil
+		}
+		return nil, false, result.err
+	}
+	if result.pair == nil || state.pending == nil {
+		return nil, false, fail(ReasonProtocolInvalid, false, false)
+	}
+	replacement := result.pair
+	result.pair = nil
 	previous := state.current
 	state.current = state.pending
 	state.pending = nil
@@ -326,7 +596,7 @@ func (runtime *Runtime) prepareReplacement(ctx context.Context, state *credentia
 	if previous != nil {
 		previous.Opaque = ""
 	}
-	return connection, reader, true, nil
+	return replacement, true, nil
 }
 
 func (runtime *Runtime) renewalAttemptDue(state *credentialState) bool {
@@ -358,33 +628,6 @@ func (runtime *Runtime) nextReadDeadline(state *credentialState) time.Time {
 		wait = time.Millisecond
 	}
 	return time.Now().Add(wait)
-}
-
-func (runtime *Runtime) awaitPong(reader *bufio.Reader, connection net.Conn, requestIDs map[string]struct{}, deadline time.Time) error {
-	for {
-		if deadlineElapsed(deadline) {
-			return fail(ReasonGatewayUnavailable, true, false)
-		}
-		frame, err := readFrame(reader, connection, deadline)
-		if err != nil {
-			return err
-		}
-		// A buffered reader can return a complete queued frame without touching
-		// the socket deadline. Enforce the same absolute budget in user space.
-		if deadlineElapsed(deadline) {
-			return fail(ReasonGatewayUnavailable, true, false)
-		}
-		pong, err := runtime.handleFrame(frame, connection, requestIDs, deadline)
-		if err != nil {
-			return err
-		}
-		if deadlineElapsed(deadline) {
-			return fail(ReasonGatewayUnavailable, true, false)
-		}
-		if pong {
-			return nil
-		}
-	}
 }
 
 func (runtime *Runtime) handleFrame(frame guestenrollment.NativeSessionMessage, connection net.Conn, requestIDs map[string]struct{}, deadline time.Time) (bool, error) {
@@ -451,6 +694,9 @@ func (runtime *Runtime) writeReadiness(ready bool) error {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fail(ReasonConfiguration, false, false)
 		}
+		if runtime.readinessChanged != nil {
+			runtime.readinessChanged(false)
+		}
 		return nil
 	}
 	temporary, err := os.CreateTemp(runtime.Configuration.RuntimeDirectory, ".session-ready-*.tmp")
@@ -473,6 +719,9 @@ func (runtime *Runtime) writeReadiness(ready bool) error {
 	defer directory.Close()
 	if err := directory.Sync(); err != nil {
 		return fail(ReasonConfiguration, false, false)
+	}
+	if runtime.readinessChanged != nil {
+		runtime.readinessChanged(true)
 	}
 	return nil
 }
@@ -506,6 +755,17 @@ func (runtime *Runtime) untilRenewal(credential sessionCredential) time.Duration
 		return local
 	}
 	return wall
+}
+
+func mapWorkspaceError(err error) error {
+	switch {
+	case errors.Is(err, workspacetunnel.ErrDenied):
+		return fail(ReasonGatewayDenied, false, false)
+	case errors.Is(err, workspacetunnel.ErrProtocol):
+		return fail(ReasonProtocolInvalid, false, false)
+	default:
+		return fail(ReasonGatewayUnavailable, true, false)
+	}
 }
 
 func waitContext(ctx context.Context, duration time.Duration) error {
