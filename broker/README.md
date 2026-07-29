@@ -87,6 +87,12 @@ digests and non-secret windows; issue returns plaintext once. Existing and
 native-egress binding/execution revocation share one transaction and tombstone
 domain, so no stale egress credential survives guest cleanup.
 
+The shared 64-operation admission is acquired before bearer lookup; guest issue
+and authenticate use a 48-operation subset so revocation retains headroom. Its
+30-second monotonic deadline bounds SQLite lock waits and every transaction up
+to the final pre-commit check. A synchronous commit already begun after that
+check is treated as a committed response loss rather than replaying plaintext.
+
 Each enrollment atomically reserves its complete 20,000-rotation allowance at
 issue time. The default aggregate capacity is 2,000,000 entries (100 admitted
 lifecycles) and may be configured from 20,000 through 10,000,000; a new issue

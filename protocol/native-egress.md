@@ -190,7 +190,7 @@ reviewed multiplexing or packet transport behind this interface.
 | exact active bindings per process | 128 |
 | durable identity bindings per authority | 10,000 |
 | concurrent identity-authority operations | 64 |
-| identity-authority operation | 30 seconds absolute |
+| identity-authority operation | 30 seconds monotonic absolute, from admission through the final pre-commit authorization point |
 | active flows per authenticated session | 64 |
 | concurrent pending flow opens per session | 8 |
 | flow ID | 128 bytes, restricted token syntax |
@@ -215,6 +215,18 @@ Shutdown initiates closing all bounded sessions/flows concurrently and returns
 within the five-second absolute deadline even if a transport's `Close`
 implementation does not return; such a transport is failed and cannot retain
 registry readiness.
+
+The authority deadline is active before bearer-backed storage lookup. SQLite
+busy waits use only its remaining budget, and the operation checks the same
+deadline after lock acquisition and immediately before commit. Expiry before
+that final authorization point rolls the transaction back and promptly returns
+its bounded admission. Once the final check has passed and SQLite's synchronous
+commit system call has begun, the broker cannot safely interrupt the filesystem
+commit; a commit completed across the client cutoff has the ordinary
+committed-response-loss semantics and consumes one of the two live slots. The
+broker never begins a commit after observing deadline expiry. Only that already
+authorized OS commit may retain its operation admission past the deadline, and
+it releases the admission as soon as the commit system call returns.
 
 ## Provisioning and readiness choreography
 

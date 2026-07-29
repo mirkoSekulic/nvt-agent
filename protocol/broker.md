@@ -185,15 +185,21 @@ the existing orchestrator authority and the same enrollment/tombstone
 transactions, so existing guest-enrollment revocation also removes every
 native-egress credential atomically.
 
-Native-egress authority requests have a shared 64-operation cap and a
-30-second monotonic absolute client-visible deadline. Guest-authenticated issue
-and authenticate traffic can occupy at most 48 HTTP body slots, retaining
-headroom for orchestrator revocation beneath the shared bound. Unknown egress
-bearers are rejected by indexed digest lookup before body admission and use
-per-credential rate/concurrency isolation after authentication. Requests are
-at most 8 KiB and responses at most 16 KiB. Maintenance removes only expired
-credential rows; it never evicts live credentials or lifecycle/tombstone
-authority.
+Native-egress authority requests have one issuer-owned shared 64-operation cap
+and a 30-second monotonic absolute deadline. Guest-authenticated issue and
+authenticate traffic acquire the shared lease and one of only 48 guest leases
+before any bearer-backed SQLite lookup, retaining sixteen shared slots for
+orchestrator revocation. Bearers are authenticated before request bodies are
+read. Unknown egress bearers are rejected by indexed digest lookup and use
+per-credential rate/concurrency isolation after authentication. The same
+deadline bounds SQLite busy waits and is checked after lock acquisition and at
+the final pre-commit authorization point; expiry before that point rolls back
+and releases admission. A synchronous SQLite commit already begun after the
+final check is the sole uninterruptible OS boundary, may retain its lease only
+until that system call returns, and retains the documented
+committed-response-loss semantics. Requests are at most 8 KiB and responses at
+most 16 KiB. Maintenance removes only expired credential rows; it never evicts
+live credentials or lifecycle/tombstone authority.
 
 Errors are bounded stable classes from the guest-enrollment contract. Responses,
 audit entries, readiness, and process logs never contain a request body,

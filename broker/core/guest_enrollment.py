@@ -64,6 +64,7 @@ GUEST_SESSION_RATE_PER_SECOND = 8.0
 GUEST_SESSION_RATE_BURST = 16.0
 MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS = 64
 MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS = 48
+NATIVE_EGRESS_IDENTITY_OPERATION_TIMEOUT_SECONDS = 30.0
 MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS_PER_CREDENTIAL = 4
 NATIVE_EGRESS_IDENTITY_RATE_PER_SECOND = 8.0
 NATIVE_EGRESS_IDENTITY_RATE_BURST = 16.0
@@ -165,6 +166,15 @@ class EnrollmentFaults:
     def after_native_egress_commit(self):
         return None
 
+    def before_native_egress_runtime_lookup(self, operation):
+        return None
+
+    def before_native_egress_credential_lookup(self, operation):
+        return None
+
+    def before_native_egress_transaction(self, operation):
+        return None
+
 
 class _RateLimiter:
     def __init__(self, rate, burst, monotonic=time.monotonic):
@@ -251,6 +261,64 @@ class NativeEgressAdmission:
         self._state.slots.release()
 
 
+class NativeEgressOperation:
+    """One bounded native-egress authority operation and absolute deadline."""
+
+    def __init__(self, issuer, guest, timeout):
+        self._issuer = issuer
+        self.guest = guest
+        self._expires_at = issuer.monotonic() + timeout
+        self._lock = threading.Lock()
+        self._released = False
+        self._expired = False
+        self._timer = threading.Timer(timeout, self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def remaining(self):
+        return max(0.0, self._expires_at - self._issuer.monotonic())
+
+    def check(self):
+        if self.remaining() <= 0:
+            self._finish(expired=True)
+        with self._lock:
+            expired = self._expired
+            released = self._released
+        if expired or released:
+            raise EnrollmentFailure("issuer-storage-failed", 503)
+
+    def release(self):
+        self._finish(expired=False)
+
+    def commit(self, connection):
+        with self._lock:
+            if self._released or self._expired or self._issuer.monotonic() >= self._expires_at:
+                authorized = False
+            else:
+                authorized = True
+                connection.set_progress_handler(None, 0)
+                connection.commit()
+        if not authorized:
+            self._finish(expired=True)
+            raise EnrollmentFailure("issuer-storage-failed", 503)
+
+    def _expire(self):
+        self._finish(expired=True)
+
+    def _finish(self, *, expired):
+        with self._lock:
+            if expired:
+                self._expired = True
+            if self._released:
+                return
+            self._released = True
+            timer = self._timer
+        timer.cancel()
+        if self.guest:
+            self._issuer.native_egress_guest_slots.release()
+        self._issuer.native_egress_operation_slots.release()
+
+
 class OrchestratorAuthenticator:
     def __init__(self, token_file):
         path = Path(token_file)
@@ -289,6 +357,8 @@ class GuestEnrollmentIssuer:
         runtime_identity_concurrency=MAX_CONCURRENT_RUNTIME_IDENTITY_REQUESTS_PER_IDENTITY,
         max_runtime_identity_history_per_enrollment=MAX_RUNTIME_IDENTITY_HISTORY_PER_ENROLLMENT,
         max_runtime_identity_history_entries=DEFAULT_RUNTIME_IDENTITY_HISTORY_CAPACITY,
+        monotonic=None,
+        native_egress_operation_timeout=NATIVE_EGRESS_IDENTITY_OPERATION_TIMEOUT_SECONDS,
     ):
         self.database_path = _validate_database_path(database_path)
         self.exchange_url = validate_exchange_url(exchange_url)
@@ -296,6 +366,7 @@ class GuestEnrollmentIssuer:
             raise EnrollmentConfigError("guest enrollment durable entry limit is invalid")
         self.max_entries = max_entries
         self.now = now or (lambda: datetime.now(timezone.utc).replace(microsecond=0))
+        self.monotonic = monotonic or time.monotonic
         self.random_bytes = random_bytes or secrets.token_bytes
         self.faults = faults or EnrollmentFaults()
         self.exchange_slots = threading.BoundedSemaphore(MAX_CONCURRENT_EXCHANGES)
@@ -320,6 +391,10 @@ class GuestEnrollmentIssuer:
             or isinstance(max_runtime_identity_history_entries, bool)
             or max_runtime_identity_history_entries < max_runtime_identity_history_per_enrollment
             or max_runtime_identity_history_entries > MAX_RUNTIME_IDENTITY_HISTORY_CAPACITY
+            or not isinstance(native_egress_operation_timeout, (int, float))
+            or isinstance(native_egress_operation_timeout, bool)
+            or native_egress_operation_timeout <= 0
+            or native_egress_operation_timeout > NATIVE_EGRESS_IDENTITY_OPERATION_TIMEOUT_SECONDS
         ):
             raise EnrollmentConfigError("guest runtime identity admission limits are invalid")
         self.runtime_identity_admission_rate = float(runtime_identity_rate)
@@ -327,6 +402,7 @@ class GuestEnrollmentIssuer:
         self.runtime_identity_admission_concurrency = runtime_identity_concurrency
         self.max_runtime_identity_history_per_enrollment = max_runtime_identity_history_per_enrollment
         self.max_runtime_identity_history_entries = max_runtime_identity_history_entries
+        self.native_egress_operation_timeout = float(native_egress_operation_timeout)
         self.runtime_identity_admissions = {}
         self.runtime_identity_admissions_lock = threading.Lock()
         self.guest_session_issue_slots = threading.BoundedSemaphore(MAX_CONCURRENT_GUEST_SESSION_REQUESTS)
@@ -584,12 +660,21 @@ class GuestEnrollmentIssuer:
         finally:
             connection.close()
 
-    def admit_runtime_identity(self, identity):
+    def admit_runtime_identity(self, identity, operation=None):
         """Authenticate one bearer before its HTTP body is admitted."""
         identity_digest = _runtime_identity_digest(identity)
+        if operation is not None:
+            operation, _ = self._native_egress_operation(operation, guest=True)
+            try:
+                self.faults.before_native_egress_runtime_lookup(operation)
+            except EnrollmentFailure:
+                raise
+            except Exception as error:
+                self._raise_runtime_storage_failure(error)
+            operation.check()
         self._require_store_healthy()
         now = self._now()
-        connection = self._runtime_connect_or_failure()
+        connection = self._runtime_connect_or_failure(operation)
         try:
             connection.execute("BEGIN")
             row = connection.execute(
@@ -598,12 +683,14 @@ class GuestEnrollmentIssuer:
             ).fetchone()
             self._authenticated_runtime_identity_record(connection, row, None, now, validate_history=False)
             token_digest = row["token_digest"]
+            if operation is not None:
+                operation.check()
         except EnrollmentFailure:
             _rollback(connection)
             raise
         except sqlite3.Error as error:
             _rollback(connection)
-            self._raise_runtime_storage_failure(error)
+            self._raise_runtime_storage_or_deadline(error, operation)
         finally:
             connection.close()
 
@@ -621,7 +708,9 @@ class GuestEnrollmentIssuer:
         # Close the lookup/allocation race with authoritative revocation. If
         # cleanup committed before this admission state was published, do not
         # retain an orphan quota entry or admit a body for the removed bearer.
-        connection = self._runtime_connect_or_failure()
+        if operation is not None:
+            operation.check()
+        connection = self._runtime_connect_or_failure(operation)
         try:
             row = connection.execute(
                 """
@@ -636,12 +725,20 @@ class GuestEnrollmentIssuer:
                     if self.runtime_identity_admissions.get(token_digest) is state:
                         self.runtime_identity_admissions.pop(token_digest, None)
                 raise EnrollmentFailure("unauthorized", 401)
+            if operation is not None:
+                operation.check()
         except sqlite3.Error as error:
-            self._raise_runtime_storage_failure(error)
+            self._raise_runtime_storage_or_deadline(error, operation)
         finally:
             connection.close()
         if not state.rate.allow() or not state.slots.acquire(blocking=False):
             raise EnrollmentFailure("capacity-exceeded", 429)
+        if operation is not None:
+            try:
+                operation.check()
+            except EnrollmentFailure:
+                state.slots.release()
+                raise
         return RuntimeIdentityAdmission(self, state, token_digest, identity_digest)
 
     def runtime_identity_status(self, identity, request, admission=None):
@@ -813,9 +910,11 @@ class GuestEnrollmentIssuer:
             row["runtime_identity_expires_at"],
         )
 
-    def _runtime_identity_admission(self, identity, identity_digest, admission):
+    def _runtime_identity_admission(self, identity, identity_digest, admission, operation=None):
         if admission is None:
-            return self.admit_runtime_identity(identity), True
+            return self.admit_runtime_identity(identity, operation=operation), True
+        if operation is not None:
+            operation.check()
         if (
             not isinstance(admission, RuntimeIdentityAdmission)
             or admission._issuer is not self
@@ -1099,38 +1198,48 @@ class GuestEnrollmentIssuer:
         ).fetchone() is not None:
             raise sqlite3.DatabaseError("guest session credential conflicts with a runtime identity")
 
-    def issue_native_egress(self, runtime_identity, request, admission=None):
-        binding = validate_native_egress_issue_request(request)
-        identity_digest = _runtime_identity_digest(runtime_identity)
-        admission, owned_admission = self._runtime_identity_admission(
-            runtime_identity,
-            identity_digest,
-            admission,
-        )
-        if not self.native_egress_guest_slots.acquire(blocking=False):
-            if owned_admission:
-                admission.release()
-            raise EnrollmentFailure("capacity-exceeded", 429)
+    def admit_native_egress_operation(self, *, guest):
+        if not isinstance(guest, bool):
+            raise EnrollmentFailure("invalid-request", 400)
+        # Acquire the shared ceiling first. Guest work must also acquire the
+        # smaller pool, leaving sixteen shared slots for authoritative revoke.
         if not self.native_egress_operation_slots.acquire(blocking=False):
-            self.native_egress_guest_slots.release()
-            if owned_admission:
-                admission.release()
+            raise EnrollmentFailure("capacity-exceeded", 429)
+        if guest and not self.native_egress_guest_slots.acquire(blocking=False):
+            self.native_egress_operation_slots.release()
             raise EnrollmentFailure("capacity-exceeded", 429)
         try:
+            return NativeEgressOperation(self, guest, self.native_egress_operation_timeout)
+        except Exception as error:
+            if guest:
+                self.native_egress_guest_slots.release()
+            self.native_egress_operation_slots.release()
+            raise EnrollmentFailure("issuer-storage-failed", 503) from error
+
+    def _native_egress_operation(self, operation, *, guest):
+        if operation is None:
+            return self.admit_native_egress_operation(guest=guest), True
+        if not isinstance(operation, NativeEgressOperation) or operation._issuer is not self or operation.guest != guest:
+            raise EnrollmentFailure("unauthorized", 401)
+        operation.check()
+        return operation, False
+
+    def issue_native_egress(self, runtime_identity, request, admission=None, operation=None):
+        binding = validate_native_egress_issue_request(request)
+        identity_digest = _runtime_identity_digest(runtime_identity)
+        operation, owned_operation = self._native_egress_operation(operation, guest=True)
+        provided_admission = admission
+        admission = None
+        owned_admission = False
+        try:
+            admission, owned_admission = self._runtime_identity_admission(
+                runtime_identity,
+                identity_digest,
+                provided_admission,
+                operation=operation,
+            )
             self._require_store_healthy()
-            now = self._now()
-            connection = self._runtime_connect_or_failure()
-            try:
-                live = connection.execute(
-                    "SELECT COUNT(*) FROM native_egress_credentials WHERE token_digest = ? AND expires_at > ?",
-                    (admission.token_digest, format_timestamp(now)),
-                ).fetchone()[0]
-            except sqlite3.Error as error:
-                self._raise_runtime_storage_failure(error)
-            finally:
-                connection.close()
-            if live >= MAX_LIVE_NATIVE_EGRESS_CREDENTIALS_PER_BINDING:
-                raise EnrollmentFailure("capacity-exceeded", 429)
+            operation.check()
             try:
                 credential_random = self.random_bytes(TOKEN_BYTES)
                 if not isinstance(credential_random, bytes) or len(credential_random) != TOKEN_BYTES:
@@ -1142,19 +1251,28 @@ class GuestEnrollmentIssuer:
                 identity_digest,
                 admission.token_digest,
                 credential_random,
-                now,
+                operation,
             )
         finally:
-            self.native_egress_operation_slots.release()
-            self.native_egress_guest_slots.release()
-            if owned_admission:
+            if owned_admission and admission is not None:
                 admission.release()
+            if owned_operation:
+                operation.release()
 
-    def _issue_native_egress_locked(self, binding, identity_digest, token_digest, credential_random, now):
-        connection = self._runtime_connect_or_failure()
+    def _issue_native_egress_locked(self, binding, identity_digest, token_digest, credential_random, operation):
+        try:
+            self.faults.before_native_egress_transaction(operation)
+        except EnrollmentFailure:
+            raise
+        except Exception as error:
+            self._raise_runtime_storage_failure(error)
+        operation.check()
+        connection = self._runtime_connect_or_failure(operation)
         committed = False
         try:
-            connection.execute("BEGIN IMMEDIATE")
+            operation.check()
+            self._begin_native_egress_transaction(connection, operation, write=True)
+            now = self._now()
             self._require_store_healthy()
             if self._scope_tombstoned(connection, binding) or self._binding_tombstoned(connection, binding):
                 raise EnrollmentFailure("unauthorized", 401)
@@ -1268,10 +1386,11 @@ class GuestEnrollmentIssuer:
                 self.faults.before_native_egress_commit()
             except Exception as error:
                 self._raise_runtime_storage_failure(error)
-            connection.commit()
+            self._commit_native_egress_transaction(connection, operation)
             committed = True
             self._discard_native_egress_admissions(expired_digests)
             self.faults.after_native_egress_commit()
+            operation.check()
             return _native_egress_issue_result(binding, credential, issued_at, expires_at)
         except EnrollmentFailure:
             if not committed:
@@ -1280,14 +1399,23 @@ class GuestEnrollmentIssuer:
         except sqlite3.Error as error:
             if not committed:
                 _rollback(connection)
-            self._raise_runtime_storage_failure(error)
+            self._raise_runtime_storage_or_deadline(error, operation)
         finally:
             connection.close()
 
-    def admit_native_egress_identity(self, credential):
+    def admit_native_egress_identity(self, credential, operation=None):
+        if operation is not None:
+            operation, _ = self._native_egress_operation(operation, guest=True)
+            try:
+                self.faults.before_native_egress_credential_lookup(operation)
+            except EnrollmentFailure:
+                raise
+            except Exception as error:
+                self._raise_runtime_storage_failure(error)
+            operation.check()
         self._require_store_healthy()
         credential_digest, issuance_sequence = _native_egress_credential_digest_and_sequence(credential)
-        connection = self._runtime_connect_or_failure()
+        connection = self._runtime_connect_or_failure(operation)
         try:
             row = connection.execute(_NATIVE_EGRESS_RECORD_QUERY, (credential_digest,)).fetchone()
             self._validate_native_egress_role_separation(connection, credential_digest)
@@ -1297,6 +1425,8 @@ class GuestEnrollmentIssuer:
             ):
                 raise EnrollmentFailure("unauthorized", 401)
             _authenticated_native_egress_record(row, None, self._now(), issuance_sequence)
+            if operation is not None:
+                operation.check()
             token_digest = row["token_digest"]
             with self.native_egress_admissions_lock:
                 state = self.native_egress_admissions.get(credential_digest)
@@ -1316,36 +1446,39 @@ class GuestEnrollmentIssuer:
         except EnrollmentFailure:
             raise
         except sqlite3.Error as error:
-            self._raise_runtime_storage_failure(error)
+            self._raise_runtime_storage_or_deadline(error, operation)
         finally:
             connection.close()
         if not state.rate.allow() or not state.slots.acquire(blocking=False):
             raise EnrollmentFailure("capacity-exceeded", 429)
+        if operation is not None:
+            try:
+                operation.check()
+            except EnrollmentFailure:
+                state.slots.release()
+                raise
         return NativeEgressAdmission(self, state, token_digest, credential_digest, issuance_sequence)
 
-    def authenticate_native_egress(self, credential, request, admission=None):
+    def authenticate_native_egress(self, credential, request, admission=None, operation=None):
         binding = validate_native_egress_authenticate_request(request)
         credential_digest, issuance_sequence = _native_egress_credential_digest_and_sequence(credential)
-        admission, owned_admission = self._native_egress_admission(
-            credential,
-            credential_digest,
-            issuance_sequence,
-            admission,
-        )
-        if not self.native_egress_guest_slots.acquire(blocking=False):
-            if owned_admission:
-                admission.release()
-            raise EnrollmentFailure("capacity-exceeded", 429)
-        if not self.native_egress_operation_slots.acquire(blocking=False):
-            self.native_egress_guest_slots.release()
-            if owned_admission:
-                admission.release()
-            raise EnrollmentFailure("capacity-exceeded", 429)
+        operation, owned_operation = self._native_egress_operation(operation, guest=True)
+        provided_admission = admission
+        admission = None
+        owned_admission = False
         try:
+            admission, owned_admission = self._native_egress_admission(
+                credential,
+                credential_digest,
+                issuance_sequence,
+                provided_admission,
+                operation=operation,
+            )
             self._require_store_healthy()
-            connection = self._runtime_connect_or_failure()
+            operation.check()
+            connection = self._runtime_connect_or_failure(operation)
             try:
-                connection.execute("BEGIN")
+                self._begin_native_egress_transaction(connection, operation, write=False)
                 row = connection.execute(_NATIVE_EGRESS_RECORD_QUERY, (credential_digest,)).fetchone()
                 self._validate_native_egress_role_separation(connection, credential_digest)
                 if row is not None and (
@@ -1353,24 +1486,28 @@ class GuestEnrollmentIssuer:
                     or self._binding_tombstoned(connection, _row_binding(row))
                 ):
                     raise EnrollmentFailure("unauthorized", 401)
-                return _authenticated_native_egress_record(row, binding, self._now(), issuance_sequence)
+                result = _authenticated_native_egress_record(row, binding, self._now(), issuance_sequence)
+                operation.check()
+                return result
             except EnrollmentFailure:
                 _rollback(connection)
                 raise
             except sqlite3.Error as error:
                 _rollback(connection)
-                self._raise_runtime_storage_failure(error)
+                self._raise_runtime_storage_or_deadline(error, operation)
             finally:
                 connection.close()
         finally:
-            self.native_egress_operation_slots.release()
-            self.native_egress_guest_slots.release()
-            if owned_admission:
+            if owned_admission and admission is not None:
                 admission.release()
+            if owned_operation:
+                operation.release()
 
-    def _native_egress_admission(self, credential, credential_digest, issuance_sequence, admission):
+    def _native_egress_admission(self, credential, credential_digest, issuance_sequence, admission, operation=None):
         if admission is None:
-            return self.admit_native_egress_identity(credential), True
+            return self.admit_native_egress_identity(credential, operation=operation), True
+        if operation is not None:
+            operation.check()
         if (
             not isinstance(admission, NativeEgressAdmission)
             or admission._issuer is not self
@@ -1394,38 +1531,48 @@ class GuestEnrollmentIssuer:
         ).fetchone() is not None:
             raise sqlite3.DatabaseError("native egress credential conflicts with another identity role")
 
-    def revoke_native_egress_binding(self, request):
+    def revoke_native_egress_binding(self, request, operation=None):
         binding = validate_native_egress_revoke_binding_request(request)
-        if not self.native_egress_operation_slots.acquire(blocking=False):
-            raise EnrollmentFailure("capacity-exceeded", 429)
+        operation, owned_operation = self._native_egress_operation(operation, guest=False)
         try:
-            self._revoke_binding(binding)
+            self._revoke_binding(binding, operation=operation)
+            operation.check()
         finally:
-            self.native_egress_operation_slots.release()
+            if owned_operation:
+                operation.release()
 
-    def revoke_native_egress_execution(self, request):
+    def revoke_native_egress_execution(self, request, operation=None):
         scope = validate_native_egress_revoke_execution_request(request)
-        if not self.native_egress_operation_slots.acquire(blocking=False):
-            raise EnrollmentFailure("capacity-exceeded", 429)
+        operation, owned_operation = self._native_egress_operation(operation, guest=False)
         try:
-            self._revoke_execution(scope)
+            self._revoke_execution(scope, operation=operation)
+            operation.check()
         finally:
-            self.native_egress_operation_slots.release()
+            if owned_operation:
+                operation.release()
 
     def revoke_binding(self, request):
         self._revoke_binding(validate_revoke_binding_request(request))
 
-    def _revoke_binding(self, binding):
-        now = self._now()
-        connection = self._connect_or_failure()
+    def _revoke_binding(self, binding, operation=None):
+        if operation is not None:
+            operation.check()
+        connection = self._connect_or_failure(operation)
         removed_tokens = []
         removed_sessions = []
         removed_egress = []
         try:
-            connection.execute("BEGIN IMMEDIATE")
+            if operation is None:
+                connection.execute("BEGIN IMMEDIATE")
+            else:
+                self._begin_native_egress_transaction(connection, operation, write=True)
+            now = self._now()
             self._validate_store_health(connection)
             if self._scope_tombstoned(connection, binding):
-                connection.commit()
+                if operation is not None:
+                    self._commit_native_egress_transaction(connection, operation)
+                else:
+                    connection.commit()
                 return
             matching = self._binding_record_count(connection, binding)
             tombstone_present = self._binding_tombstoned(connection, binding)
@@ -1454,7 +1601,10 @@ class GuestEnrollmentIssuer:
                 """,
                 _binding_values(binding),
             )
-            connection.commit()
+            if operation is not None:
+                self._commit_native_egress_transaction(connection, operation)
+            else:
+                connection.commit()
             self._discard_runtime_identity_admissions(removed_tokens)
             self._discard_guest_session_admissions(removed_sessions)
             self._discard_native_egress_admissions(removed_egress)
@@ -1470,14 +1620,19 @@ class GuestEnrollmentIssuer:
     def revoke_execution(self, request):
         self._revoke_execution(validate_revoke_execution_request(request))
 
-    def _revoke_execution(self, scope):
-        now = self._now()
-        connection = self._connect_or_failure()
+    def _revoke_execution(self, scope, operation=None):
+        if operation is not None:
+            operation.check()
+        connection = self._connect_or_failure(operation)
         removed_tokens = []
         removed_sessions = []
         removed_egress = []
         try:
-            connection.execute("BEGIN IMMEDIATE")
+            if operation is None:
+                connection.execute("BEGIN IMMEDIATE")
+            else:
+                self._begin_native_egress_transaction(connection, operation, write=True)
+            now = self._now()
             self._validate_store_health(connection)
             scope_values = _scope_values(scope)
             scope_present = connection.execute(
@@ -1531,7 +1686,10 @@ class GuestEnrollmentIssuer:
                 """,
                 scope_values,
             )
-            connection.commit()
+            if operation is not None:
+                self._commit_native_egress_transaction(connection, operation)
+            else:
+                connection.commit()
             self._discard_runtime_identity_admissions(removed_tokens)
             self._discard_guest_session_admissions(removed_sessions)
             self._discard_native_egress_admissions(removed_egress)
@@ -1990,26 +2148,68 @@ class GuestEnrollmentIssuer:
             )
         connection.execute("DELETE FROM enrollment_meta WHERE key = 'runtime_identity_history_count'")
 
-    def _connect(self):
-        connection = sqlite3.connect(self.database_path, timeout=5.0, isolation_level=None)
+    def _begin_native_egress_transaction(self, connection, operation, *, write):
+        operation.check()
+        connection.execute(f"PRAGMA busy_timeout = {max(0, int(operation.remaining() * 1000))}")
+        connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        operation.check()
+
+    def _commit_native_egress_transaction(self, connection, operation):
+        # SQLite's synchronous commit is the sole deliberately uninterruptible
+        # boundary. A completed commit after this final check is response loss.
+        operation.commit(connection)
+
+    def _connect(self, operation=None):
+        timeout = 5.0
+        if operation is not None:
+            operation.check()
+            timeout = min(timeout, operation.remaining())
+        connection = sqlite3.connect(self.database_path, timeout=timeout, isolation_level=None)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 5000")
+        if operation is not None:
+            connection.set_progress_handler(lambda: 1 if operation.remaining() <= 0 else 0, 1000)
+        connection.execute(f"PRAGMA busy_timeout = {max(0, int(timeout * 1000))}")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute("PRAGMA trusted_schema = OFF")
         return connection
 
-    def _connect_or_failure(self):
+    def _connect_or_failure(self, operation=None):
+        connection = None
         try:
-            return self._connect()
+            connection = self._connect() if operation is None else self._connect(operation)
+            if operation is not None:
+                operation.check()
+            return connection
+        except EnrollmentFailure:
+            if connection is not None:
+                connection.close()
+            raise
         except sqlite3.Error as error:
+            if connection is not None:
+                connection.close()
             raise EnrollmentFailure("issuer-storage-failed", 503) from error
 
-    def _runtime_connect_or_failure(self):
+    def _runtime_connect_or_failure(self, operation=None):
+        connection = None
         try:
-            return self._connect()
+            connection = self._connect() if operation is None else self._connect(operation)
+            if operation is not None:
+                operation.check()
+            return connection
+        except EnrollmentFailure:
+            if connection is not None:
+                connection.close()
+            raise
         except sqlite3.Error as error:
-            self._raise_runtime_storage_failure(error)
+            if connection is not None:
+                connection.close()
+            self._raise_runtime_storage_or_deadline(error, operation)
+
+    def _raise_runtime_storage_or_deadline(self, error, operation=None):
+        if operation is not None:
+            operation.check()
+        self._raise_runtime_storage_failure(error)
 
     def _raise_runtime_storage_failure(self, error):
         self._set_store_health(False)
