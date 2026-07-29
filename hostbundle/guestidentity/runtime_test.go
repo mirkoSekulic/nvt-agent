@@ -1,19 +1,24 @@
 package guestidentity
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -37,20 +42,21 @@ const (
 )
 
 type testBroker struct {
-	mu          sync.Mutex
-	binding     guestenrollment.Binding
-	token       string
-	current     string
-	issuedAt    time.Time
-	expiresAt   time.Time
-	mode        brokerMode
-	modeUsed    bool
-	rotateCount int
-	statusCount int
-	statusIDs   []string
-	proposals   []string
-	redirectURL string
-	statusHook  func()
+	mu              sync.Mutex
+	binding         guestenrollment.Binding
+	token           string
+	current         string
+	issuedAt        time.Time
+	expiresAt       time.Time
+	mode            brokerMode
+	modeUsed        bool
+	rotateCount     int
+	sessionSequence uint64
+	statusCount     int
+	statusIDs       []string
+	proposals       []string
+	redirectURL     string
+	statusHook      func()
 }
 
 func (broker *testBroker) serve(writer http.ResponseWriter, request *http.Request) {
@@ -91,9 +97,42 @@ func (broker *testBroker) serve(writer http.ResponseWriter, request *http.Reques
 		broker.status(writer, request)
 	case guestenrollment.RuntimeIdentityRotatePath:
 		broker.rotate(writer, request)
+	case guestenrollment.GuestSessionIdentityIssuePath:
+		broker.issueSession(writer, request)
 	default:
 		writer.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (broker *testBroker) issueSession(writer http.ResponseWriter, request *http.Request) {
+	var value guestenrollment.GuestSessionIssueRequest
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if json.NewDecoder(request.Body).Decode(&value) != nil || value.Binding != broker.binding ||
+		value.Audience != guestenrollment.NativeGuestControlAudience || bearer(request) != broker.current {
+		writer.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	broker.sessionSequence++
+	credential, err := guestenrollment.GenerateGuestSessionCredential(broker.sessionSequence)
+	if err != nil {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	issuedAt := time.Now().UTC().Truncate(time.Second)
+	expiresAt := issuedAt.Add(guestenrollment.MaxGuestSessionCredentialLifetime)
+	if expiresAt.After(broker.expiresAt) {
+		expiresAt = broker.expiresAt
+	}
+	writeJSON(writer, guestenrollment.GuestSessionIssueResult{
+		ContractVersion: guestenrollment.GuestSessionIdentityVersion,
+		Binding:         broker.binding,
+		Credential: guestenrollment.GuestSessionCredential{
+			Type: guestenrollment.GuestSessionCredentialType, Opaque: credential,
+			Audience: guestenrollment.NativeGuestControlAudience,
+			IssuedAt: guestenrollment.FormatTimestamp(issuedAt), ExpiresAt: guestenrollment.FormatTimestamp(expiresAt),
+		},
+	})
 }
 
 func (broker *testBroker) status(writer http.ResponseWriter, request *http.Request) {
@@ -982,4 +1021,163 @@ func TestProductionScheduleNeverRotatesBeforePlanningInterval(t *testing.T) {
 	if first == rotationJitter(binding, opaque(0x11)) {
 		t.Fatal("distinct guests synchronize their rotation jitter")
 	}
+}
+
+func TestRuntimeIssuesGuestSessionWithoutExposingRuntimeBearer(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Second)
+	fixture := newRuntimeFixture(t, clock, clock.Add(time.Hour), modeNormal)
+	if err := fixture.runtime.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := fixture.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.runtime.IssueGuestSession(context.Background())
+	if err != nil || result.Binding != fixture.broker.binding || guestenrollment.ValidateGuestSessionIssueResult(result) != nil {
+		t.Fatalf("guest session issue = %#v, %v", result, err)
+	}
+	if result.Credential.Opaque == state.RuntimeIdentity.Opaque || strings.Contains(fmtSprint(result), state.RuntimeIdentity.Opaque) {
+		t.Fatal("runtime identity escaped through guest session issuance")
+	}
+
+	state.PendingSuccessor = opaque(0x71)
+	if err := fixture.store.save(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.runtime.IssueGuestSession(context.Background()); err == nil {
+		t.Fatal("guest session issuance raced an unresolved runtime rotation")
+	}
+}
+
+func TestSessionCredentialIPCIsBoundedOwnerRestrictedAndRemoved(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Second)
+	fixture := newRuntimeFixture(t, clock, clock.Add(time.Hour), modeNormal)
+	if err := fixture.runtime.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ServeSessionCredentials(ctx, fixture.runtime, fixture.configuration.RuntimeDirectory) }()
+	socketPath := SessionCredentialSocketPath(fixture.configuration.RuntimeDirectory)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if info, err := os.Lstat(socketPath); err == nil && info.Mode()&os.ModeSocket != 0 {
+			if info.Mode().Perm() != 0o600 {
+				t.Fatalf("session credential socket mode = %o", info.Mode().Perm())
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	connection, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := guestenrollment.EncodeNativeSessionCredentialRequest(guestenrollment.NativeSessionCredentialRequest{
+		ContractVersion: guestenrollment.NativeSessionLocalVersion, Type: guestenrollment.NativeSessionCredentialIssue,
+	})
+	if _, err := connection.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if unix, ok := connection.(*net.UnixConn); !ok || unix.CloseWrite() != nil {
+		t.Fatal("could not finish the local IPC request")
+	}
+	line, err := bufio.NewReader(io.LimitReader(connection, guestenrollment.MaxNativeSessionLocalMessageBytes+1)).ReadBytes('\n')
+	connection.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := guestenrollment.DecodeNativeSessionCredentialResponse(line)
+	if err != nil || response.Result == nil || response.Result.Binding != fixture.broker.binding {
+		t.Fatalf("IPC response = %#v, %v", response, err)
+	}
+	credential := response.Result.Credential.Opaque
+	if credential == "" || strings.Contains(fmtSprint(response), credential) {
+		t.Fatal("IPC response formatting disclosed or omitted credential")
+	}
+	if os.Geteuid() == 0 {
+		helperSource, err := os.Open(os.Args[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer helperSource.Close()
+		helperBinary, err := os.CreateTemp("/tmp", "nvt-guestidentity-helper-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		helperPath := helperBinary.Name()
+		defer os.Remove(helperPath)
+		if _, err := io.Copy(helperBinary, helperSource); err != nil || helperBinary.Chmod(0o755) != nil || helperBinary.Close() != nil {
+			t.Fatal("prepare non-root IPC helper")
+		}
+		nonRoot := exec.Command(helperPath, "-test.run=^TestSessionCredentialIPCNonRootHelper$")
+		nonRoot.Env = append(os.Environ(), "NVT_TEST_SESSION_CREDENTIAL_SOCKET="+socketPath)
+		nonRoot.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532}}
+		if output, err := nonRoot.CombinedOutput(); err != nil {
+			t.Fatalf("non-owner IPC peer was not denied cleanly: %v %s", err, output)
+		}
+	}
+
+	malformed, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = malformed.Write([]byte(`{"contract_version":"nvt.native-session-local/v1","type":"issue_guest_session","binding":{}}` + "\n"))
+	if unix, ok := malformed.(*net.UnixConn); ok {
+		_ = unix.CloseWrite()
+	}
+	_ = malformed.SetReadDeadline(time.Now().Add(time.Second))
+	if line, _ := bufio.NewReader(malformed).ReadBytes('\n'); len(line) != 0 {
+		t.Fatal("malformed local request received a response")
+	}
+	malformed.Close()
+	extra, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = extra.Write(append(append([]byte(nil), request...), request...))
+	if unix, ok := extra.(*net.UnixConn); ok {
+		_ = unix.CloseWrite()
+	}
+	_ = extra.SetReadDeadline(time.Now().Add(time.Second))
+	if line, _ := bufio.NewReader(extra).ReadBytes('\n'); len(line) != 0 {
+		t.Fatal("multiple local requests received a response")
+	}
+	extra.Close()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session credential socket remained after shutdown: %v", err)
+	}
+}
+
+func TestSessionCredentialIPCNonRootHelper(t *testing.T) {
+	path := os.Getenv("NVT_TEST_SESSION_CREDENTIAL_SOCKET")
+	if path == "" {
+		return
+	}
+	connection, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return
+	}
+	defer connection.Close()
+	request, _ := guestenrollment.EncodeNativeSessionCredentialRequest(guestenrollment.NativeSessionCredentialRequest{
+		ContractVersion: guestenrollment.NativeSessionLocalVersion, Type: guestenrollment.NativeSessionCredentialIssue,
+	})
+	_, _ = connection.Write(request)
+	if unix, ok := connection.(*net.UnixConn); ok {
+		_ = unix.CloseWrite()
+	}
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	line, _ := bufio.NewReader(connection).ReadBytes('\n')
+	if len(line) != 0 {
+		os.Exit(2)
+	}
+}
+
+func fmtSprint(value any) string {
+	return fmt.Sprintf("%#v", value)
 }

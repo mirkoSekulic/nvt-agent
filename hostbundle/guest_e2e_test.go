@@ -1,12 +1,14 @@
 package hostbundle_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -52,6 +54,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	buildBinary(t, moduleRoot, "./cmd/nvt-guest-supervisor", filepath.Join(binaries, "nvt-guest-supervisor"))
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-identityd", filepath.Join(binaries, "nvt-guest-identityd"), "hostbundleidentitytest")
+	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-sessiond", filepath.Join(binaries, "nvt-guest-sessiond"), "hostbundlesessiontest")
 	buildBinary(t, moduleRoot, "./cmd/nvt-host-bootstrap", filepath.Join(binaries, "nvt-host-bootstrap"))
 	testBootstrap := filepath.Join(binaries, "nvt-host-bootstrap-test")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-host-bootstrap", testBootstrap, "hostbundletest")
@@ -62,19 +65,22 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		ContractVersion: contract.Version, OS: "linux", Architecture: runtime.GOARCH,
 		BundleVersion: "0.8.33-e2e", BuildID: strings.Repeat("a", 40),
 		NativeEntrypoint: "bin/nvt-guest-supervisor", ServiceIdentity: "nvt-agent-guest.service",
-		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion},
+		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion},
 	}
 	inputs := []bundle.InputFile{
 		{Path: "bin/nvt-guest-supervisor", Source: filepath.Join(binaries, "nvt-guest-supervisor"), Mode: 0o755},
 		{Path: "bin/nvt-guest-identityd", Source: filepath.Join(binaries, "nvt-guest-identityd"), Mode: 0o755},
+		{Path: "bin/nvt-guest-sessiond", Source: filepath.Join(binaries, "nvt-guest-sessiond"), Mode: 0o755},
 		{Path: "bin/nvt-host-bootstrap", Source: filepath.Join(binaries, "nvt-host-bootstrap"), Mode: 0o755},
 		{Path: "bin/nvt-guest-session-fixture", Source: filepath.Join(binaries, "nvt-guest-session-fixture"), Mode: 0o755},
 		{Path: "bin/agentd", Source: filepath.Join(repositoryRoot, "runtime", "agentd", "agentd.py"), Mode: 0o755},
 		{Path: "bin/agentdctl", Source: filepath.Join(repositoryRoot, "runtime", "agentd", "agentdctl.py"), Mode: 0o755},
 		{Path: "share/systemd/nvt-agent-guest.service", Source: filepath.Join(moduleRoot, "files", "nvt-agent-guest.service"), Mode: 0o644},
 		{Path: "share/systemd/nvt-guest-identity.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-identity.service"), Mode: 0o644},
+		{Path: "share/systemd/nvt-guest-session.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-session.service"), Mode: 0o644},
 		{Path: "share/examples/guest.json", Source: filepath.Join(moduleRoot, "files", "guest.json"), Mode: 0o644},
 		{Path: "share/examples/identity.json", Source: filepath.Join(moduleRoot, "files", "identity.json"), Mode: 0o644},
+		{Path: "share/examples/session.json", Source: filepath.Join(moduleRoot, "files", "session.json"), Mode: 0o644},
 	}
 	if _, err := bundle.BuildArchive(archive, manifest, inputs); err != nil {
 		t.Fatal(err)
@@ -137,22 +143,28 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 
 	identityLogs, identityCanaries := exerciseInstalledIdentityDaemon(t, filepath.Join(root, "current"), work)
+	nativeSessionLogs, nativeSessionCanaries := exerciseInstalledNativeSession(t, filepath.Join(root, "current"), work)
 
 	state := filepath.Join(work, "state")
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "run")
-	for _, directory := range []string{state, workspace, runtimeDir} {
+	sessionRuntimeDir := filepath.Join(work, "supervisor-session-run")
+	for _, directory := range []string{state, workspace, runtimeDir, sessionRuntimeDir} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	socket := filepath.Join(runtimeDir, "agentd.sock")
+	sessionReadiness := filepath.Join(sessionRuntimeDir, "session-ready")
+	if err := os.WriteFile(sessionReadiness, []byte("ready\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	capture := filepath.Join(state, "session-input.log")
 	session := fmt.Sprintf("guest%d", time.Now().UnixNano())
 	config := map[string]any{
 		"version": 1, "python_path": python, "tmux_path": tmux,
 		"state_dir": state, "socket_path": socket, "workspace": workspace,
-		"session_name": session, "session_startup_grace_seconds": 0,
+		"session_name": session, "session_readiness_path": sessionReadiness, "session_startup_grace_seconds": 0,
 		"session_command": []string{"@release/bin/nvt-guest-session-fixture", "--output", capture},
 	}
 	configBytes, _ := json.Marshal(config)
@@ -161,7 +173,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	current := filepath.Join(root, "current")
-	var logs bytes.Buffer
+	var logs synchronizedBuffer
 	start := func() (*exec.Cmd, chan error) {
 		command := exec.Command(filepath.Join(current, "bin", "nvt-guest-supervisor"), "--config", configPath)
 		command.Env = append(os.Environ(), "NVT_TEST_SECRET_CANARY=must-not-propagate")
@@ -191,6 +203,9 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 
 	command, done := start()
+	if info, err := os.Stat(socket); err != nil || info.Mode().Perm() != 0o660 {
+		t.Fatalf("native agentd socket permission contract = %v, %v", info, err)
+	}
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "first-native-prompt")
 	stop(command, done)
 	command, done = start()
@@ -213,6 +228,20 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		t.Fatal("supervisor did not exit after session loss")
 	}
 	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
+	delete(config, "session_readiness_path")
+	legacyConfigBytes, _ := json.Marshal(config)
+	if err := os.WriteFile(configPath, append(legacyConfigBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(sessionReadiness); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	command, done = start()
+	if info, err := os.Stat(socket); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("legacy agentd socket permission contract = %v, %v", info, err)
+	}
+	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "legacy-v1-native-prompt")
+	stop(command, done)
 
 	repeatedOutput, err := runBootstrap(testBootstrap, bootstrapEnvironment, bootstrapArguments...)
 	if err != nil || !bytes.Contains(repeatedOutput, []byte("verified host bundle")) {
@@ -220,31 +249,42 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	service, err := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-agent-guest.service"))
 	identityService, identityServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-identity.service"))
-	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || identityServiceErr != nil ||
+	sessionService, sessionServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-session.service"))
+	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || !bytes.Contains(service, []byte("RuntimeDirectoryMode=0750")) || identityServiceErr != nil ||
 		!bytes.Contains(identityService, []byte("User=root")) || !bytes.Contains(identityService, []byte("Type=notify")) ||
-		!bytes.Contains(identityService, []byte("TimeoutStartSec=0")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) {
+		!bytes.Contains(identityService, []byte("TimeoutStartSec=0")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) ||
+		sessionServiceErr != nil || !bytes.Contains(sessionService, []byte("User=root")) || !bytes.Contains(sessionService, []byte("Group=nvt-agent")) ||
+		!bytes.Contains(sessionService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(sessionService, []byte("CapabilityBoundingSet=\n")) || !bytes.Contains(sessionService, []byte("nvt-guest-sessiond")) ||
+		!bytes.Contains(sessionService, []byte("Requires=nvt-guest-identity.service nvt-agent-guest.service")) {
 		t.Fatal("installed systemd boundaries are missing")
 	}
 	canary := []byte("NVT_TEST_SECRET_CANARY")
 	archiveBytes, _ := os.ReadFile(archive)
-	if bytes.Contains(archiveBytes, canary) || bytes.Contains(logs.Bytes(), canary) || bytes.Contains(identityLogs, canary) || treeContains(t, state, canary) {
+	if bytes.Contains(archiveBytes, canary) || bytes.Contains(logs.Bytes(), canary) || bytes.Contains(identityLogs, canary) || bytes.Contains(nativeSessionLogs, canary) || treeContains(t, state, canary) {
 		t.Fatal("credential canary entered the bundle or normal logs")
 	}
 	for _, identityCanary := range identityCanaries {
-		if bytes.Contains(archiveBytes, identityCanary) || bytes.Contains(logs.Bytes(), identityCanary) || bytes.Contains(identityLogs, identityCanary) {
+		if bytes.Contains(archiveBytes, identityCanary) || bytes.Contains(logs.Bytes(), identityCanary) || bytes.Contains(identityLogs, identityCanary) || bytes.Contains(nativeSessionLogs, identityCanary) {
 			t.Fatal("runtime identity canary entered the bundle or normal logs")
+		}
+	}
+	for _, sessionCanary := range nativeSessionCanaries {
+		if bytes.Contains(archiveBytes, sessionCanary) || bytes.Contains(logs.Bytes(), sessionCanary) || bytes.Contains(identityLogs, sessionCanary) || bytes.Contains(nativeSessionLogs, sessionCanary) {
+			t.Fatal("session credential canary entered the bundle or normal logs")
 		}
 	}
 }
 
 type identityE2EBroker struct {
-	mu          sync.Mutex
-	binding     guestenrollment.Binding
-	token       string
-	current     string
-	issuedAt    time.Time
-	expiresAt   time.Time
-	rotateCount int
+	mu                 sync.Mutex
+	binding            guestenrollment.Binding
+	token              string
+	current            string
+	issuedAt           time.Time
+	expiresAt          time.Time
+	rotateCount        int
+	sessionIssueCount  uint64
+	sessionCredentials map[string]time.Time
 }
 
 func (broker *identityE2EBroker) serve(writer http.ResponseWriter, request *http.Request) {
@@ -294,9 +334,51 @@ func (broker *identityE2EBroker) serve(writer http.ResponseWriter, request *http
 		status := broker.statusLocked()
 		broker.mu.Unlock()
 		writeIdentityJSON(writer, status)
+	case guestenrollment.GuestSessionIdentityIssuePath:
+		var value guestenrollment.GuestSessionIssueRequest
+		broker.mu.Lock()
+		valid := json.NewDecoder(request.Body).Decode(&value) == nil && value.Binding == broker.binding &&
+			identityBearer(request) == broker.current && guestenrollment.ValidateGuestSessionIssueRequest(value) == nil
+		if !valid {
+			broker.mu.Unlock()
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		broker.sessionIssueCount++
+		credential, credentialErr := guestenrollment.GenerateGuestSessionCredential(broker.sessionIssueCount)
+		issuedAt := time.Now().UTC().Truncate(time.Second)
+		expiresAt := issuedAt.Add(5 * time.Minute)
+		if expiresAt.After(broker.expiresAt) {
+			expiresAt = broker.expiresAt
+		}
+		if broker.sessionCredentials == nil {
+			broker.sessionCredentials = make(map[string]time.Time)
+		}
+		broker.sessionCredentials[credential] = expiresAt
+		broker.mu.Unlock()
+		if credentialErr != nil {
+			writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeIdentityJSON(writer, guestenrollment.GuestSessionIssueResult{
+			ContractVersion: guestenrollment.GuestSessionIdentityVersion,
+			Binding:         broker.binding,
+			Credential: guestenrollment.GuestSessionCredential{
+				Type: guestenrollment.GuestSessionCredentialType, Opaque: credential,
+				Audience: guestenrollment.NativeGuestControlAudience,
+				IssuedAt: guestenrollment.FormatTimestamp(issuedAt), ExpiresAt: guestenrollment.FormatTimestamp(expiresAt),
+			},
+		})
 	default:
 		writer.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (broker *identityE2EBroker) authenticateSession(binding guestenrollment.Binding, credential string) bool {
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	expiresAt, found := broker.sessionCredentials[credential]
+	return found && binding == broker.binding && time.Now().UTC().Before(expiresAt)
 }
 
 func (broker *identityE2EBroker) statusLocked() guestenrollment.RuntimeIdentityStatus {
@@ -345,7 +427,7 @@ func exerciseInstalledIdentityDaemon(t *testing.T, current, work string) ([]byte
 	if err := os.WriteFile(configuration.EnrollmentPath, append(envelopeBytes, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var logs bytes.Buffer
+	var logs synchronizedBuffer
 	start := func() (*exec.Cmd, chan error) {
 		command := exec.Command(filepath.Join(current, "bin", "nvt-guest-identityd"), "--config", configPath)
 		command.Env = append(os.Environ(), "NVT_GUEST_IDENTITY_TEST_EUID=0")
@@ -410,6 +492,285 @@ func exerciseInstalledIdentityDaemon(t *testing.T, current, work string) ([]byte
 		t.Fatalf("non-root identity daemon boundary = %v %s", err, output)
 	}
 	return logs.Bytes(), [][]byte{[]byte(broker.token), []byte(identityCanary)}
+}
+
+func exerciseInstalledNativeSession(t *testing.T, current, work string) ([]byte, [][]byte) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	binding := guestenrollment.Binding{
+		AgentRunUID: "22222222-2222-2222-2222-222222222222", ExecutionID: "nvt-session-e2e",
+		DriverRegistration: "test-driver", DesiredGeneration: 1, GuestInstanceID: "guest-session-e2e",
+	}
+	broker := &identityE2EBroker{
+		binding: binding, token: identityOpaque(0x41), current: identityOpaque(0x51),
+		issuedAt: now, expiresAt: now.Add(time.Hour), sessionCredentials: make(map[string]time.Time),
+	}
+	brokerServer := httptest.NewTLSServer(http.HandlerFunc(broker.serve))
+	defer brokerServer.Close()
+	caBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: brokerServer.Certificate().Raw})
+	caPath := filepath.Join(work, "session-e2e-ca.pem")
+	if err := os.WriteFile(caPath, caBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	identityState := filepath.Join(work, "session-identity-state")
+	identityRun := filepath.Join(work, "session-identity-run")
+	if err := os.Mkdir(identityState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identityConfiguration := guestidentity.Configuration{
+		Version: guestidentity.ConfigurationVersion, StateDirectory: identityState, RuntimeDirectory: identityRun,
+		EnrollmentPath: filepath.Join(identityState, "enrollment.json"), CAPEMPath: caPath,
+	}
+	identityConfigBytes, _ := json.Marshal(identityConfiguration)
+	identityConfigPath := filepath.Join(work, "session-identity.json")
+	if err := os.WriteFile(identityConfigPath, append(identityConfigBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envelope := guestenrollment.BootstrapEnvelope{
+		ContractVersion: guestenrollment.Version, Binding: binding,
+		ExchangeURL: brokerServer.URL + guestenrollment.EnrollmentExchangePath, Token: broker.token,
+		IssuedAt: guestenrollment.FormatTimestamp(now.Add(-time.Minute)), ExpiresAt: guestenrollment.FormatTimestamp(now.Add(time.Minute)),
+	}
+	envelopeBytes, _ := json.Marshal(envelope)
+	if err := os.WriteFile(identityConfiguration.EnrollmentPath, append(envelopeBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agentdSocket := filepath.Join(work, "session-agentd.sock")
+	stopAgentd := serveNativeSessionE2EAgentd(t, agentdSocket)
+	defer stopAgentd()
+	gatewayListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsListener := tls.NewListener(gatewayListener, brokerServer.TLS.Clone())
+	defer tlsListener.Close()
+	relayed := make(chan struct{}, 4)
+	gatewayDone := make(chan struct{})
+	go func() {
+		defer close(gatewayDone)
+		for {
+			connection, acceptErr := tlsListener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go serveNativeSessionE2EGateway(connection, broker, binding, relayed)
+		}
+	}()
+
+	sessionRun := filepath.Join(work, "native-session-run")
+	if err := os.Mkdir(sessionRun, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	sessionConfiguration := map[string]any{
+		"version": 1, "runtime_directory": sessionRun,
+		"identity_socket_path": guestidentity.SessionCredentialSocketPath(identityRun),
+		"agentd_socket_path":   agentdSocket, "gateway_endpoint": "tls://example.com:443", "ca_pem_path": caPath,
+	}
+	sessionConfigBytes, _ := json.Marshal(sessionConfiguration)
+	sessionConfigPath := filepath.Join(work, "native-session.json")
+	if err := os.WriteFile(sessionConfigPath, append(sessionConfigBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs synchronizedBuffer
+	startProcess := func(binary string, arguments []string, environment []string) (*exec.Cmd, chan error) {
+		command := exec.Command(filepath.Join(current, "bin", binary), arguments...)
+		command.Env = append(os.Environ(), environment...)
+		command.Stdout, command.Stderr = &logs, &logs
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- command.Wait() }()
+		return command, done
+	}
+	stopProcess := func(name string, command *exec.Cmd, done chan error) {
+		if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatalf("stop %s: %v", name, err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s stop failed: %v %s", name, err, logs.String())
+			}
+		case <-time.After(8 * time.Second):
+			_ = command.Process.Kill()
+			t.Fatalf("%s did not stop", name)
+		}
+	}
+	identityCommand, identityDone := startProcess("nvt-guest-identityd", []string{"--config", identityConfigPath}, []string{"NVT_GUEST_IDENTITY_TEST_EUID=0"})
+	waitForFile(t, filepath.Join(identityRun, guestidentity.ReadinessFileName), 10*time.Second)
+	waitForSocket(t, guestidentity.SessionCredentialSocketPath(identityRun), 10*time.Second)
+
+	startSession := func() (*exec.Cmd, chan error) {
+		command, done := startProcess("nvt-guest-sessiond", []string{"--config", sessionConfigPath}, []string{
+			"NVT_GUEST_SESSION_TEST_EUID=0", "NVT_GUEST_SESSION_TEST_DIAL_ADDRESS=" + gatewayListener.Addr().String(),
+		})
+		readinessPath := filepath.Join(sessionRun, "session-ready")
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if info, err := os.Stat(readinessPath); err == nil && info.Mode().IsRegular() {
+				break
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("native session exited before readiness: %v %s", err, logs.String())
+			default:
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if _, err := os.Stat(readinessPath); err != nil {
+			_ = command.Process.Kill()
+			t.Fatalf("native session did not become ready: %v %s", err, logs.String())
+		}
+		select {
+		case <-relayed:
+		case <-time.After(5 * time.Second):
+			_ = command.Process.Kill()
+			t.Fatal("installed native session did not relay agentd traffic")
+		}
+		return command, done
+	}
+	sessionCommand, sessionDone := startSession()
+	stopProcess("native session", sessionCommand, sessionDone)
+	waitForAbsent(t, filepath.Join(sessionRun, "session-ready"), 5*time.Second)
+	sessionCommand, sessionDone = startSession()
+	stopProcess("native session", sessionCommand, sessionDone)
+	stopProcess("identity", identityCommand, identityDone)
+
+	nonRoot := exec.Command(filepath.Join(current, "bin", "nvt-guest-sessiond"), "--config", sessionConfigPath)
+	nonRoot.Env = append(os.Environ(), "NVT_GUEST_SESSION_TEST_EUID=65532", "NVT_GUEST_SESSION_TEST_DIAL_ADDRESS="+gatewayListener.Addr().String())
+	if output, err := nonRoot.CombinedOutput(); err == nil || !bytes.Contains(output, []byte("invalid startup configuration")) {
+		t.Fatalf("non-root native session boundary = %v %s", err, output)
+	}
+	broker.mu.Lock()
+	canaries := make([][]byte, 0, len(broker.sessionCredentials)+2)
+	canaries = append(canaries, []byte(broker.token), []byte(broker.current))
+	for credential := range broker.sessionCredentials {
+		canaries = append(canaries, []byte(credential))
+	}
+	broker.mu.Unlock()
+	for _, canary := range canaries {
+		if bytes.Contains(logs.Bytes(), canary) || treeContains(t, sessionRun, canary) {
+			t.Fatal("native session disclosed credential material")
+		}
+	}
+	_ = tlsListener.Close()
+	<-gatewayDone
+	return logs.Bytes(), canaries
+}
+
+type synchronizedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(data)
+}
+
+func (b *synchronizedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.buffer.Bytes())
+}
+
+func (b *synchronizedBuffer) String() string {
+	return string(b.Bytes())
+}
+
+func serveNativeSessionE2EAgentd(t *testing.T, path string) func() {
+	t.Helper()
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() {
+				defer connection.Close()
+				buffer := make([]byte, guestenrollment.MaxNativeSessionAgentdPayloadBytes)
+				count, _ := connection.Read(buffer)
+				if count != 0 {
+					_, _ = connection.Write([]byte("{\"status\":\"ready\"}\n"))
+				}
+			}()
+		}
+	}()
+	return func() { _ = listener.Close(); <-done }
+}
+
+func serveNativeSessionE2EGateway(connection net.Conn, broker *identityE2EBroker, binding guestenrollment.Binding, relayed chan<- struct{}) {
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(10 * time.Second))
+	reader := bufio.NewReaderSize(connection, guestenrollment.MaxNativeSessionFrameBytes)
+	helloLine, err := reader.ReadSlice('\n')
+	if err != nil {
+		return
+	}
+	hello, err := guestenrollment.DecodeNativeSessionMessage(helloLine)
+	if err != nil || hello.Type != guestenrollment.NativeSessionHello || hello.Binding == nil ||
+		*hello.Binding != binding || hello.Audience != guestenrollment.NativeGuestControlAudience ||
+		!broker.authenticateSession(binding, hello.Credential) {
+		writeNativeSessionE2EFrame(connection, guestenrollment.NativeSessionMessage{
+			ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHelloReject, Reason: "unauthorized",
+		})
+		return
+	}
+	hello.Credential = ""
+	writeNativeSessionE2EFrame(connection, guestenrollment.NativeSessionMessage{
+		ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionHelloAck,
+		Binding: &binding, Audience: guestenrollment.NativeGuestControlAudience,
+	})
+	writeNativeSessionE2EFrame(connection, guestenrollment.NativeSessionMessage{
+		ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionAgentdRequest,
+		RequestID: "installed-health", Payload: json.RawMessage(`{"type":"health"}`),
+	})
+	responseLine, err := reader.ReadSlice('\n')
+	if err != nil {
+		return
+	}
+	response, err := guestenrollment.DecodeNativeSessionMessage(responseLine)
+	if err != nil || response.Type != guestenrollment.NativeSessionAgentdResponse || response.RequestID != "installed-health" ||
+		!bytes.Contains(response.Payload, []byte(`"status":"ready"`)) {
+		return
+	}
+	select {
+	case relayed <- struct{}{}:
+	default:
+	}
+	for {
+		line, readErr := reader.ReadSlice('\n')
+		if readErr != nil {
+			return
+		}
+		frame, decodeErr := guestenrollment.DecodeNativeSessionMessage(line)
+		if decodeErr != nil {
+			return
+		}
+		if frame.Type == guestenrollment.NativeSessionPing {
+			writeNativeSessionE2EFrame(connection, guestenrollment.NativeSessionMessage{
+				ContractVersion: guestenrollment.NativeSessionVersion, Type: guestenrollment.NativeSessionPong,
+			})
+		}
+	}
+}
+
+func writeNativeSessionE2EFrame(connection net.Conn, value guestenrollment.NativeSessionMessage) {
+	encoded, err := guestenrollment.EncodeNativeSessionMessage(value)
+	if err == nil {
+		_, _ = connection.Write(encoded)
+	}
 }
 
 func identityBearer(request *http.Request) string {
@@ -517,6 +878,18 @@ func waitForAbsent(t *testing.T, path string, timeout time.Duration) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s removal", filepath.Base(path))
+}
+
+func waitForSocket(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", filepath.Base(path))
 }
 
 func assertAgentdHealthAndPrompt(t *testing.T, current, socket, state, capture, prompt string) {

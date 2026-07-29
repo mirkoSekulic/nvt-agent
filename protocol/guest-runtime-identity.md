@@ -215,5 +215,8 @@ authenticate issuance under the separate
 [`nvt.guest-session-identity/v1`](guest-session-identity.md) contract, but it is
 not itself exposed to a gateway, agent session, or egress path. The test-only
 QEMU reference is only a real-guest conformance consumer; no provider-specific
-branch is present in the daemon or protocol. Native session transport, gateway
-routing, and mediated VM networking remain separate future gates.
+branch is present in the daemon or protocol. The separate
+[`nvt.native-session/v1`](native-session.md) guest client obtains only a
+derived short-lived session credential over a root-only local socket; it never
+receives this bearer. A production gateway route and mediated VM networking
+remain separate future gates.

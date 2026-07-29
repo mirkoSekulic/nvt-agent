@@ -76,10 +76,17 @@ spec:
         - name: registry
           image: nvt-host-bundle-registry:qemu-kind
           imagePullPolicy: IfNotPresent
-          ports: [{name: https, containerPort: 443}]
+          env:
+            - {name: NVT_TEST_BROKER_URL, value: "https://nvt-broker.${NAMESPACE}.svc.cluster.local:7347"}
+            - {name: NVT_TEST_BROKER_CA_FILE, value: /broker-ca/ca.crt}
+          ports: [{name: https, containerPort: 443}, {name: native-session, containerPort: 7443}]
+          volumeMounts: [{name: broker-ca, mountPath: /broker-ca, readOnly: true}]
           readinessProbe:
             tcpSocket: {port: https}
             periodSeconds: 1
+      volumes:
+        - name: broker-ca
+          secret: {secretName: nvt-broker-tls, optional: true, items: [{key: ca.crt, path: ca.crt}]}
 ---
 apiVersion: v1
 kind: Service
@@ -88,7 +95,7 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   selector: {app: nvt-host-bundle-registry}
-  ports: [{name: https, port: 443, targetPort: https}]
+  ports: [{name: https, port: 443, targetPort: https}, {name: native-session, port: 7443, targetPort: native-session}]
 YAML
   kubectl_smoke rollout status deployment/nvt-host-bundle-registry -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
 
@@ -150,6 +157,8 @@ configuration={
   "host_bundle":{"repository":f"https://nvt-host-bundle-registry.{sys.argv[5]}.svc.cluster.local/nvt/host-bundle","digest":sys.argv[4]},
   "registry_ca_pem":registry_ca,
   "enrollment_ca_pem":broker_ca,
+  "native_session_endpoint":f"tls://nvt-host-bundle-registry.{sys.argv[5]}.svc.cluster.local:7443",
+  "native_session_ca_pem":registry_ca,
   "cpus":1,"memory_mib":512,"acceleration":"tcg","boot_timeout_seconds":110,
 }
 run={
@@ -203,12 +212,9 @@ capture_qemu_identity() {
 }
 
 wait_for_qemu_running() {
-  local deadline=$((SECONDS + QEMU_EXECUTION_TIMEOUT_SECONDS)) phase ready enrollment
+  local deadline=$((SECONDS + QEMU_EXECUTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    phase="$(kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    ready="$(kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="ExternalExecutionReady")].status}' 2>/dev/null || true)"
-    enrollment="$(kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="ExecutionBackendAvailable")].reason}' 2>/dev/null || true)"
-    if [[ "${phase}" == Running && "${ready}" == True && "${enrollment}" == ExternalBootstrapAccepted ]]; then
+    if qemu_agentrun_ready; then
       return
     fi
     sleep 2
@@ -258,15 +264,30 @@ print(len(items), items[0]["metadata"]["uid"] if len(items)==1 else "")
 }
 
 wait_for_qemu_recovery() {
-  local deadline=$((SECONDS + QEMU_EXECUTION_TIMEOUT_SECONDS))
+  local deadline=$((SECONDS + QEMU_EXECUTION_TIMEOUT_SECONDS)) consecutive=0
   while (( SECONDS < deadline )); do
-    if qemu_provider_ready; then
-      wait_for_qemu_running
-      return
+    if qemu_provider_ready && qemu_agentrun_ready; then
+      consecutive=$((consecutive + 1))
+      # Span a complete five-second native-session heartbeat interval. This
+      # proves the new owner restored durable state, QEMU remains live, and
+      # guest readiness is stable rather than a single transient sample.
+      if (( consecutive >= 4 )); then
+        return
+      fi
+    else
+      consecutive=0
     fi
     sleep 2
   done
   die "QEMU guest did not recover from durable state after driver restart"
+}
+
+qemu_agentrun_ready() {
+  local phase ready enrollment
+  phase="$(kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  ready="$(kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="ExternalExecutionReady")].status}' 2>/dev/null || true)"
+  enrollment="$(kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="ExecutionBackendAvailable")].reason}' 2>/dev/null || true)"
+  [[ "${phase}" == Running && "${ready}" == True && "${enrollment}" == ExternalBootstrapAccepted ]]
 }
 
 qemu_provider_ready() {
@@ -313,6 +334,9 @@ assert len(rows)==1 and rows[0][0]=="consumed" and rows[0][1]==1
 assert rows[0][2].startswith("sha256:") and rows[0][3].startswith("sha256:")
 history=db.execute("SELECT runtime_identity_digest FROM runtime_identity_history WHERE token_digest=?",(rows[0][2],)).fetchall()
 assert len(history)>=1 and all(value[0].startswith("sha256:") for value in history)
+sessions=db.execute("SELECT credential_digest,audience,expires_at FROM guest_session_credentials WHERE token_digest=?",(rows[0][2],)).fetchall()
+assert 1 <= len(sessions) <= 2
+assert all(value[0].startswith("sha256:") and value[1]=="nvt.native-guest-control/v1" and value[2] for value in sessions)
 ' "${QEMU_AGENTRUN_UID}" "${QEMU_EXECUTION_ID}" >/dev/null 2>&1; then
       return
     fi
@@ -329,6 +353,7 @@ import sqlite3,sys
 db=sqlite3.connect("/state/guest-enrollment.sqlite3")
 key=(sys.argv[1],sys.argv[2],"qemu-reference")
 assert not db.execute("SELECT 1 FROM enrollments WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",key).fetchall()
+assert not db.execute("SELECT 1 FROM guest_session_credentials").fetchall()
 row=db.execute("SELECT cleanup_completed_at FROM execution_tombstones WHERE agent_run_uid=? AND execution_id=? AND driver_registration=?",key).fetchone()
 assert row is not None and row[0] is not None
 ' "${QEMU_AGENTRUN_UID}" "${QEMU_EXECUTION_ID}"

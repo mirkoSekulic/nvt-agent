@@ -44,6 +44,10 @@ func main() {
 func run(ctx context.Context, runtime *guestidentity.Runtime, runtimeDirectory string, notifyReady func() error) error {
 	_ = guestidentity.WriteReadiness(runtimeDirectory, false)
 	defer guestidentity.WriteReadiness(runtimeDirectory, false)
+	serverContext, stopServer := context.WithCancel(ctx)
+	defer stopServer()
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- guestidentity.ServeSessionCredentials(serverContext, runtime, runtimeDirectory) }()
 	notified := false
 	for {
 		snapshot, wait, err := runtime.Reconcile(ctx)
@@ -76,6 +80,11 @@ func run(ctx context.Context, runtime *guestidentity.Runtime, runtimeDirectory s
 				<-timer.C
 			}
 			return nil
+		case serverErr := <-serverDone:
+			if serverErr == nil && ctx.Err() != nil {
+				return nil
+			}
+			return serverErr
 		case <-timer.C:
 		}
 	}

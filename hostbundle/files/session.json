@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "runtime_directory": "/run/nvt-agent-session",
+  "identity_socket_path": "/run/nvt-agent-identity/session-credential.sock",
+  "agentd_socket_path": "/run/nvt-agent/agentd.sock",
+  "gateway_endpoint": "tls://gateway.example.invalid:443",
+  "ca_pem_path": "/etc/nvt-agent/native-session-ca.pem"
+}

@@ -146,6 +146,30 @@ func (client *Client) Rotate(ctx context.Context, brokerURL, identity, successor
 	return status, nil
 }
 
+func (client *Client) IssueGuestSession(ctx context.Context, brokerURL, identity string, binding guestenrollment.Binding) (guestenrollment.GuestSessionIssueResult, error) {
+	request := guestenrollment.GuestSessionIssueRequest{
+		ContractVersion: guestenrollment.GuestSessionIdentityVersion,
+		Binding:         binding,
+		Audience:        guestenrollment.NativeGuestControlAudience,
+	}
+	if validateBrokerURL(brokerURL) != nil || !validRuntimeIdentity(identity) || guestenrollment.ValidateGuestSessionIssueRequest(request) != nil {
+		return guestenrollment.GuestSessionIssueResult{}, failure(ReasonProtocolInvalid, false, false)
+	}
+	payload, _ := json.Marshal(request)
+	body, err := client.post(ctx, brokerURL+guestenrollment.GuestSessionIdentityIssuePath, identity, payload, guestenrollment.MaxGuestSessionResponseBytes, true)
+	zero(payload)
+	if err != nil {
+		return guestenrollment.GuestSessionIssueResult{}, err
+	}
+	defer zero(body)
+	result, err := guestenrollment.DecodeGuestSessionIssueResult(body)
+	if err != nil || result.Binding != binding {
+		result.Credential.Opaque = ""
+		return guestenrollment.GuestSessionIssueResult{}, failure(ReasonProtocolInvalid, false, true)
+	}
+	return result, nil
+}
+
 func (client *Client) post(ctx context.Context, endpoint, bearer string, payload []byte, maximum int, mutation bool) ([]byte, error) {
 	if ctx == nil || client == nil || client.doer == nil {
 		return nil, failure(ReasonProtocolInvalid, false, false)

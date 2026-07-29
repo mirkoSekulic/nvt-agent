@@ -64,7 +64,8 @@ func (machine *fakeMachines) Observe(_ context.Context, state *State) (MachineOb
 	return machine.provider.resources[state.ExecutionID], nil
 }
 func (machine *fakeMachines) Configure(_ context.Context, _ *State, configuration wire.BootConfiguration) error {
-	if guestenrollment.ValidateBinding(configuration.Binding) != nil || configuration.ContractVersion != wire.Version {
+	if guestenrollment.ValidateBinding(configuration.Binding) != nil || configuration.ContractVersion != wire.Version ||
+		config.ValidateNativeSessionEndpoint(configuration.NativeSessionEndpoint) != nil || config.ValidateCAPEM(configuration.NativeSessionCAPEM) != nil {
 		return errors.New("invalid boot configuration")
 	}
 	machine.provider.mu.Lock()
@@ -420,7 +421,8 @@ func testConfiguration(t *testing.T) config.Configuration {
 		ContractVersion: config.Version,
 		GuestImage:      config.GuestImage{Digest: "sha256:" + strings.Repeat("a", 64)},
 		HostBundle:      config.Artifact{Repository: "https://registry.example/nvt/host-bundle", Digest: "sha256:" + strings.Repeat("b", 64)},
-		EnrollmentCAPEM: testCertificate(t), CPUs: 1, MemoryMiB: 512, Acceleration: "tcg", BootTimeoutSec: 30,
+		EnrollmentCAPEM: testCertificate(t), NativeSessionEndpoint: "tls://gateway.example:7443", NativeSessionCAPEM: testCertificate(t),
+		CPUs: 1, MemoryMiB: 512, Acceleration: "tcg", BootTimeoutSec: 30,
 	}
 }
 

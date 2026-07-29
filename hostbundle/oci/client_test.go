@@ -141,7 +141,7 @@ func buildTestLayout(t *testing.T) (string, string) {
 		ContractVersion: contract.Version, OS: "linux", Architecture: "amd64",
 		BundleVersion: "0.8.33-test", BuildID: strings.Repeat("a", 40),
 		NativeEntrypoint: "bin/nvt-guest-supervisor", ServiceIdentity: "nvt-agent-guest.service",
-		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion},
+		Compatibility: contract.Compatibility{AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion},
 	}
 	if _, err := bundle.BuildArchive(archive, manifest, []bundle.InputFile{{Path: "bin/nvt-guest-supervisor", Source: source, Mode: 0o755}}); err != nil {
 		t.Fatal(err)

@@ -22,11 +22,13 @@ const (
 )
 
 type BootConfiguration struct {
-	ContractVersion string                  `json:"contract_version"`
-	Binding         guestenrollment.Binding `json:"binding"`
-	HostBundle      config.Artifact         `json:"host_bundle"`
-	RegistryCAPEM   string                  `json:"registry_ca_pem,omitempty"`
-	EnrollmentCAPEM string                  `json:"enrollment_ca_pem"`
+	ContractVersion       string                  `json:"contract_version"`
+	Binding               guestenrollment.Binding `json:"binding"`
+	HostBundle            config.Artifact         `json:"host_bundle"`
+	RegistryCAPEM         string                  `json:"registry_ca_pem,omitempty"`
+	EnrollmentCAPEM       string                  `json:"enrollment_ca_pem"`
+	NativeSessionEndpoint string                  `json:"native_session_endpoint"`
+	NativeSessionCAPEM    string                  `json:"native_session_ca_pem"`
 }
 
 type Request struct {

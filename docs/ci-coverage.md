@@ -97,6 +97,9 @@ precise and every hermetic suite has a clear home.
   `session_identity_conformance_test.go` → fixed-audience session issuance and
   authentication, exact binding, bounded concurrent/lost-response reissue,
   restart, expiry, revocation, strict framing, and sensitive formatting.
+- `protocol/guestenrollment/native_session_test.go` → strict outbound hello,
+  exact binding/audience, local credential IPC framing, recursive duplicate-key
+  rejection, message bounds, and redacted sensitive formatting.
 - `broker/core/guest_enrollment_test.py` and
   `tests/broker/guest_enrollment_conformance_test.go` → the SQLite and real HTTP
   implementations of runtime-identity and guest-session authority, including
@@ -105,7 +108,11 @@ precise and every hermetic suite has a clear home.
 - `hostbundle/guestidentity` → the native root-only client/store/state machine:
   strict TLS and files, initial exchange, status, scheduled rotation,
   successor-first ambiguous-response recovery, restart, revocation/expiry,
-  atomic persistence faults, bounds, and redacted output.
+  atomic persistence faults, root-peer-only session credential IPC, bounds,
+  and redacted output.
+- `hostbundle/nativesession` → fixed-audience credential issuance, direct TLS
+  establishment, bounded JSONL/agentd relay, reconnect/renewal, first-response
+  loss, gateway denial, absolute framing deadlines, readiness, and redaction.
 
 The `kubernetes.yml / operator-helm` job also runs the shell-level chart and
 helper coverage aggregated by `tests/operator/helm/test.sh`:
@@ -170,9 +177,11 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
   OCI layout, runs the real bootstrap CLI against a hermetic TLS registry by
   digest, installs and activates natively, starts the installed supervisor and
   real `agentd`, exchanges and rotates a synthetic-TLS-broker runtime identity
-  through the installed root-owned daemon, restarts both native boundaries,
+  through the installed root-owned daemon, requests a short-lived session
+  credential over the real root-only socket, establishes and restarts the
+  installed outbound client against a TLS fake gateway, relays agentd traffic,
   delivers a prompt, proves fail-closed session loss, and proves idempotent
-  reuse. This is guest-side Linux coverage, not a real provider VM proof.
+  reuse. This is guest-side Linux coverage, not a production gateway proof.
 - `hostbundle/build-test.sh` → `host-bundle.yml / build-contract (ubuntu-latest,
   macos-latest)`; it pins cleaned repository-relative and absolute outputs,
   deterministic tar/layout content, and non-empty/root output rejection using
@@ -190,8 +199,10 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `tests/operator/kind/cases/qemu-external-execution.sh` → `qemu.yml /
   real-guest-e2e`; it boots an actual amd64 Linux guest under bounded TCG,
   performs production broker one-time enrollment, pulls and activates the real
-  digest-pinned host bundle, performs a real runtime-identity rotation, reaches
-  real identity-daemon/supervisor/agentd/tmux readiness, restarts the driver
+  digest-pinned host bundle, performs a real runtime-identity rotation, obtains
+  and authenticates a short-lived session credential against a synthetic TLS
+  gateway, reaches real identity-daemon/session-daemon/supervisor/agentd/tmux
+  readiness, restarts the driver
   host, and proves QEMU disk/process/state cleanup. It is a
   hermetic reference-provider proof, not a production gateway or mediated-VM
   networking claim.

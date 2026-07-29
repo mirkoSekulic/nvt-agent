@@ -56,7 +56,7 @@ func TestMaximumSessionStartupGraceHasCallerMargin(t *testing.T) {
 	temp := t.TempDir()
 	script := `import runpy,sys
 m=runpy.run_path(sys.argv[1])
-a=m["Agentd"](sys.argv[2],sys.argv[3],"test","buffer",30,sys.argv[4])
+a=m["Agentd"](sys.argv[2],sys.argv[3],"test","buffer",30,sys.argv[4],0o600)
 assert a.session_ready_wait_seconds > 30, a.session_ready_wait_seconds
 `
 	cmd := exec.Command("python3", "-c", script,
@@ -311,6 +311,25 @@ func TestSocketModeAndSigtermCleanup(t *testing.T) {
 	waitFor(t, 3*time.Second, func() bool {
 		return countEvents(t, f.eventsPath(), "agentd.stopped") > 0
 	})
+}
+
+func TestExplicitNativeSocketModeIsGroupScoped(t *testing.T) {
+	f := startFixture(t, true)
+	f.stop()
+	cmd := commandWithEnv(t, agentdBin(f.root), append(f.env(), "TERM=screen"), "--socket-mode", "0660")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	f.cmd = cmd
+	waitFor(t, 3*time.Second, func() bool {
+		info, err := os.Stat(f.socket)
+		return err == nil && info.Mode().Perm() == 0o660
+	})
+	if info, err := os.Stat(f.socket); err != nil || info.Mode().Perm() != 0o660 {
+		t.Fatalf("native socket mode = %v, %v", info, err)
+	}
 }
 
 func TestAgentdctlAndPromptAgentClients(t *testing.T) {

@@ -4,9 +4,10 @@ Status: versioned provider-neutral contract (`nvt.guest-session-identity/v1`).
 
 This contract derives a short-lived, purpose-scoped session credential from the
 root-owned guest runtime identity in [guest-runtime-identity.md](guest-runtime-identity.md).
-It is the authentication foundation for a future guest-initiated native control
-or gateway session. This contract does not define a gateway route, tunnel,
-application protocol, agent session, or mediated VM network.
+It authenticates the outbound guest hello defined by the separate
+[native-session transport](native-session.md). Neither contract defines or
+ships a production gateway route, reverse tunnel, browser publication path, or
+mediated VM network.
 
 ## Security boundary
 
@@ -128,8 +129,8 @@ credential whose response was not completely validated.
 
 `POST /v1/guest-session-identity/authenticate`
 
-The transport uses `Authorization: Bearer <session-credential>`. A future
-trusted native relay presents:
+The transport uses `Authorization: Bearer <session-credential>`. A trusted
+gateway-side relay presents:
 
 ```json
 {
@@ -195,10 +196,11 @@ request bodies, bearer values, digests, SQLite diagnostics, or provider data.
 Detected semantic or SQLite corruption latches the issuer unhealthy; recovery
 requires a successful complete integrity validation.
 
-## Explicitly not implemented here
+## Implementation boundary
 
-This protocol and broker authority do not add a native gateway connection,
-reverse tunnel, downstream session transport, guest daemon integration,
-gateway authorization, mediated VM egress, cloud provider, or production VM
-runtime. They do not change Pod, Kata, Compose, agentd, runtime plugins,
-execution drivers, or gateway behavior.
+The host bundle implements the trusted guest-side credential request and
+outbound native-session client. Hermetic and test-only QEMU fixtures provide a
+synthetic gateway-side authenticator. There is still no production gateway
+listener, reverse tunnel, browser route publication, mediated VM egress, cloud
+provider, or production VM runtime. Pod, Kata, Compose, agentd, runtime
+plugins, and the production gateway remain unchanged.

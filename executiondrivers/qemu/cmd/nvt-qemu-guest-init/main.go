@@ -31,6 +31,10 @@ const (
 	identityEnrollmentPath = identityStateRoot + "/enrollment.json"
 	identityConfigPath     = "/etc/nvt-agent/identity.json"
 	identityCAPath         = "/etc/nvt-agent/runtime-identity-ca.pem"
+	sessionConfigPath      = "/etc/nvt-agent/session.json"
+	sessionCAPath          = "/etc/nvt-agent/native-session-ca.pem"
+	sessionRuntimeRoot     = "/run/nvt-agent-session"
+	sessionReadinessPath   = sessionRuntimeRoot + "/session-ready"
 )
 
 type guest struct {
@@ -366,7 +370,8 @@ func identityConfiguration() guestidentity.Configuration {
 
 func validateBootConfiguration(value wire.BootConfiguration) error {
 	if value.ContractVersion != wire.Version || guestenrollment.ValidateBinding(value.Binding) != nil || config.ValidateArtifact(value.HostBundle) != nil ||
-		(value.RegistryCAPEM != "" && config.ValidateCAPEM(value.RegistryCAPEM) != nil) || config.ValidateCAPEM(value.EnrollmentCAPEM) != nil {
+		(value.RegistryCAPEM != "" && config.ValidateCAPEM(value.RegistryCAPEM) != nil) || config.ValidateCAPEM(value.EnrollmentCAPEM) != nil ||
+		config.ValidateCAPEM(value.NativeSessionCAPEM) != nil || config.ValidateNativeSessionEndpoint(value.NativeSessionEndpoint) != nil {
 		return errors.New("boot configuration is invalid")
 	}
 	return nil
@@ -440,6 +445,9 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 			return errors.New("native runtime directory setup failed")
 		}
 	}
+	if err := os.Chmod("/run/nvt-agent", 0o750); err != nil {
+		return errors.New("native runtime directory permissions failed")
+	}
 	if err := os.MkdirAll("/etc/nvt-agent", 0o755); err != nil {
 		return err
 	}
@@ -490,7 +498,8 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	}
 	guestConfig := map[string]any{
 		"version": 1, "python_path": "/usr/bin/python3", "tmux_path": "/usr/bin/tmux", "state_dir": "/var/lib/nvt-agent",
-		"socket_path": "/run/nvt-agent/agentd.sock", "workspace": "/workspace", "session_name": "agent", "session_startup_grace_seconds": 0,
+		"socket_path": "/run/nvt-agent/agentd.sock", "workspace": "/workspace", "session_name": "agent",
+		"session_readiness_path": sessionReadinessPath, "session_startup_grace_seconds": 0,
 		"session_command": []string{"@release/bin/nvt-guest-session-fixture", "--output", "/var/lib/nvt-agent/session-input.log"},
 	}
 	encoded, _ := json.Marshal(guestConfig)
@@ -507,6 +516,52 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	done := make(chan struct{})
 	go func() { _ = supervisor.Wait(); close(done) }()
 	defer stopNativeProcess(supervisor, done)
+	agentdSocketDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(agentdSocketDeadline) {
+		info, statErr := os.Lstat("/run/nvt-agent/agentd.sock")
+		stat, statOK := identityStateInfoSys(info)
+		if statErr == nil && info.Mode()&os.ModeSocket != 0 && info.Mode().Perm() == 0o660 && statOK && stat.Uid == 65532 && stat.Gid == 65532 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	agentdSocketInfo, agentdSocketErr := os.Lstat("/run/nvt-agent/agentd.sock")
+	agentdSocketStat, agentdSocketStatOK := identityStateInfoSys(agentdSocketInfo)
+	if agentdSocketErr != nil || agentdSocketInfo.Mode()&os.ModeSocket == 0 || agentdSocketInfo.Mode().Perm() != 0o660 ||
+		!agentdSocketStatOK || agentdSocketStat.Uid != 65532 || agentdSocketStat.Gid != 65532 {
+		return errors.New("native agentd socket permission contract failed")
+	}
+	agentdGroupProbe := exec.Command("/usr/bin/python3", "-c", "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/run/nvt-agent/agentd.sock'); s.sendall(b'{\"type\":\"health\"}\\n'); data=s.recv(4096); raise SystemExit(0 if b'\"status\":\"ready\"' in data else 1)")
+	agentdGroupProbe.Stdout, agentdGroupProbe.Stderr = io.Discard, io.Discard
+	agentdGroupProbe.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65531, Gid: 65532}}
+	if agentdGroupProbe.Run() != nil {
+		return errors.New("native agentd group access contract failed")
+	}
+	if err := atomicWrite(sessionCAPath, []byte(configuration.NativeSessionCAPEM), 0o600); err != nil {
+		return errors.New("native session trust setup failed")
+	}
+	sessionConfig := map[string]any{
+		"version": 1, "runtime_directory": sessionRuntimeRoot,
+		"identity_socket_path": filepath.Join(identityRuntimeRoot, guestidentity.SessionCredentialSocketName),
+		"agentd_socket_path":   "/run/nvt-agent/agentd.sock", "gateway_endpoint": configuration.NativeSessionEndpoint,
+		"ca_pem_path": sessionCAPath,
+	}
+	sessionEncoded, _ := json.Marshal(sessionConfig)
+	if err := atomicWrite(sessionConfigPath, append(sessionEncoded, '\n'), 0o600); err != nil {
+		return errors.New("native session configuration failed")
+	}
+	sessionDaemon := exec.Command("/opt/nvt/current/bin/nvt-guest-sessiond", "--config", sessionConfigPath)
+	sessionDaemon.Env = []string{"PATH=/usr/bin:/bin"}
+	sessionDaemon.Stdout, sessionDaemon.Stderr = io.Discard, io.Discard
+	sessionDaemon.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: 0, Gid: 65532}, Setpgid: true,
+	}
+	if err := sessionDaemon.Start(); err != nil {
+		return errors.New("native session daemon could not start")
+	}
+	sessionDone := make(chan struct{})
+	go func() { _ = sessionDaemon.Wait(); close(sessionDone) }()
+	defer stopNativeProcess(sessionDaemon, sessionDone)
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
@@ -514,6 +569,8 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 			return errors.New("native guest supervisor exited")
 		case <-identityDone:
 			return errors.New("native identity daemon exited")
+		case <-sessionDone:
+			return errors.New("native session daemon exited")
 		default:
 		}
 		if data, err := os.ReadFile("/var/lib/nvt-agent/guest-ready"); err == nil && bytes.Equal(data, []byte("ready\n")) {
@@ -531,6 +588,11 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 				guest.failed, guest.ready = true, false
 				guest.mu.Unlock()
 				return errors.New("native guest supervisor exited")
+			case <-sessionDone:
+				guest.mu.Lock()
+				guest.failed, guest.ready = true, false
+				guest.mu.Unlock()
+				return errors.New("native session daemon exited")
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
