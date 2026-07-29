@@ -57,14 +57,16 @@ one gateway replica. See the chart's `gateway.nativeSession` example. The
 separate [`nvt.native-workspace/v1`](../protocol/native-workspace.md) listener
 authenticates the same exact binding and exposes only a bounded,
 implementation-neutral active `StreamOpener` registry. It reuses the native
-session TLS identity and broker authority. No HTTP/browser/code-server handler
-consumes that registry yet. A separate implementation-neutral resolver can
+session TLS identity and broker authority. An implementation-neutral resolver
 match an already-authorized external VM AgentRun only through its
 operator-published complete `status.nativeGuestBinding`, exact current
 generation/driver/execution identity, control readiness, and workspace lookup.
 It never enumerates registries, guesses a guest instance, or falls back to a
-Pod target. Attaching this resolver to HTTP/browser routing remains a later
-reviewed change.
+Pod target. After the existing browser authentication and AgentRun
+authorization, external VM HTTP and Upgrade traffic is proxied through that
+exact opener to the fixed guest-side loopback workspace. The transport ignores
+browser-selected network/authority input and has no environment-proxy or DNS
+fallback. Existing Pod/Kata routes retain their Pod-IP path.
 Restart the gateway after rotating its serving identity or broker CA Secret;
 both are loaded once at process startup.
 

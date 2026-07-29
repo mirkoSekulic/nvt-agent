@@ -15,8 +15,8 @@ var (
 )
 
 // NativeWorkspaceResolver is the implementation-neutral exact-routing seam
-// for a later authorized browser handler. It does not scan registries or
-// provide a Pod fallback.
+// consumed only after browser authentication and AgentRun authorization. It
+// does not scan registries or provide a Pod fallback.
 type NativeWorkspaceResolver interface {
 	Resolve(*nvtv1alpha1.AgentRun) (workspacetunnel.StreamOpener, error)
 }

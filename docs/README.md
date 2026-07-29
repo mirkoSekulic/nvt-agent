@@ -43,7 +43,7 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   guest-initiated control transport and bounded agentd relay.
 - [Native workspace tunnel](../protocol/native-workspace.md): separate bounded
   yamux data-plane contract and conformance proof for fixed loopback workspace
-  services; production browser routing is not wired.
+  services, including authorized production external-VM browser routing.
 
 ## Operations And Testing
 
