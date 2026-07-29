@@ -20,6 +20,7 @@ const (
 	AgentdProtocolVersion          = "nvt.agentd/v1"
 	NativeSessionProtocolVersion   = "nvt.native-session/v1"
 	NativeWorkspaceProtocolVersion = "nvt.native-workspace/v1"
+	NativeEgressProtocolVersion    = "nvt.native-egress/v1"
 	ArtifactType                   = "application/vnd.nvt.host-bundle.v1"
 	LayerMediaType                 = "application/vnd.nvt.host-bundle.layer.v1.tar+gzip"
 	OCIManifestMediaType           = "application/vnd.oci.image.manifest.v1+json"
@@ -54,6 +55,7 @@ type Compatibility struct {
 	AgentdProtocol          string `json:"agentd_protocol"`
 	NativeSessionProtocol   string `json:"native_session_protocol,omitempty"`
 	NativeWorkspaceProtocol string `json:"native_workspace_protocol,omitempty"`
+	NativeEgressProtocol    string `json:"native_egress_protocol,omitempty"`
 }
 
 type File struct {
@@ -99,7 +101,8 @@ func ValidateManifest(manifest Manifest) error {
 	}
 	if manifest.Compatibility.AgentdProtocol != AgentdProtocolVersion ||
 		(manifest.Compatibility.NativeSessionProtocol != "" && manifest.Compatibility.NativeSessionProtocol != NativeSessionProtocolVersion) ||
-		(manifest.Compatibility.NativeWorkspaceProtocol != "" && manifest.Compatibility.NativeWorkspaceProtocol != NativeWorkspaceProtocolVersion) {
+		(manifest.Compatibility.NativeWorkspaceProtocol != "" && manifest.Compatibility.NativeWorkspaceProtocol != NativeWorkspaceProtocolVersion) ||
+		(manifest.Compatibility.NativeEgressProtocol != "" && manifest.Compatibility.NativeEgressProtocol != NativeEgressProtocolVersion) {
 		return errors.New("host bundle protocol compatibility is invalid")
 	}
 	if len(manifest.Files) == 0 || len(manifest.Files) > MaxFiles {

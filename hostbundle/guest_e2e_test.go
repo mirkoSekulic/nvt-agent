@@ -55,6 +55,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	buildBinary(t, moduleRoot, "./cmd/nvt-guest-supervisor", filepath.Join(binaries, "nvt-guest-supervisor"))
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-identityd", filepath.Join(binaries, "nvt-guest-identityd"), "hostbundleidentitytest")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-sessiond", filepath.Join(binaries, "nvt-guest-sessiond"), "hostbundlesessiontest")
+	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-egressd", filepath.Join(binaries, "nvt-guest-egressd"), "hostbundleegresstest")
 	buildBinary(t, moduleRoot, "./cmd/nvt-host-bootstrap", filepath.Join(binaries, "nvt-host-bootstrap"))
 	testBootstrap := filepath.Join(binaries, "nvt-host-bootstrap-test")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-host-bootstrap", testBootstrap, "hostbundletest")
@@ -67,13 +68,14 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		NativeEntrypoint: "bin/nvt-guest-supervisor", ServiceIdentity: "nvt-agent-guest.service",
 		Compatibility: contract.Compatibility{
 			AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion,
-			NativeWorkspaceProtocol: contract.NativeWorkspaceProtocolVersion,
+			NativeWorkspaceProtocol: contract.NativeWorkspaceProtocolVersion, NativeEgressProtocol: contract.NativeEgressProtocolVersion,
 		},
 	}
 	inputs := []bundle.InputFile{
 		{Path: "bin/nvt-guest-supervisor", Source: filepath.Join(binaries, "nvt-guest-supervisor"), Mode: 0o755},
 		{Path: "bin/nvt-guest-identityd", Source: filepath.Join(binaries, "nvt-guest-identityd"), Mode: 0o755},
 		{Path: "bin/nvt-guest-sessiond", Source: filepath.Join(binaries, "nvt-guest-sessiond"), Mode: 0o755},
+		{Path: "bin/nvt-guest-egressd", Source: filepath.Join(binaries, "nvt-guest-egressd"), Mode: 0o755},
 		{Path: "bin/nvt-host-bootstrap", Source: filepath.Join(binaries, "nvt-host-bootstrap"), Mode: 0o755},
 		{Path: "bin/nvt-guest-session-fixture", Source: filepath.Join(binaries, "nvt-guest-session-fixture"), Mode: 0o755},
 		{Path: "bin/agentd", Source: filepath.Join(repositoryRoot, "runtime", "agentd", "agentd.py"), Mode: 0o755},
@@ -81,10 +83,12 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		{Path: "share/systemd/nvt-agent-guest.service", Source: filepath.Join(moduleRoot, "files", "nvt-agent-guest.service"), Mode: 0o644},
 		{Path: "share/systemd/nvt-guest-identity.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-identity.service"), Mode: 0o644},
 		{Path: "share/systemd/nvt-guest-session.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-session.service"), Mode: 0o644},
+		{Path: "share/systemd/nvt-guest-egress.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-egress.service"), Mode: 0o644},
 		{Path: "share/examples/guest.json", Source: filepath.Join(moduleRoot, "files", "guest.json"), Mode: 0o644},
 		{Path: "share/examples/identity.json", Source: filepath.Join(moduleRoot, "files", "identity.json"), Mode: 0o644},
 		{Path: "share/examples/session.json", Source: filepath.Join(moduleRoot, "files", "session.json"), Mode: 0o644},
 		{Path: "share/examples/session-workspace.json", Source: filepath.Join(moduleRoot, "files", "session-workspace.json"), Mode: 0o644},
+		{Path: "share/examples/native-egress.json", Source: filepath.Join(moduleRoot, "files", "native-egress.json"), Mode: 0o644},
 	}
 	if _, err := bundle.BuildArchive(archive, manifest, inputs); err != nil {
 		t.Fatal(err)
@@ -254,18 +258,37 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	service, err := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-agent-guest.service"))
 	identityService, identityServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-identity.service"))
 	sessionService, sessionServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-session.service"))
+	egressService, egressServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-egress.service"))
 	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || !bytes.Contains(service, []byte("RuntimeDirectoryMode=0750")) || identityServiceErr != nil ||
 		!bytes.Contains(identityService, []byte("User=root")) || !bytes.Contains(identityService, []byte("Type=notify")) ||
 		!bytes.Contains(identityService, []byte("TimeoutStartSec=0")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) ||
 		sessionServiceErr != nil || !bytes.Contains(sessionService, []byte("User=root")) || !bytes.Contains(sessionService, []byte("Group=nvt-agent")) ||
 		!bytes.Contains(sessionService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(sessionService, []byte("CapabilityBoundingSet=\n")) || !bytes.Contains(sessionService, []byte("nvt-guest-sessiond")) ||
-		!bytes.Contains(sessionService, []byte("Requires=nvt-guest-identity.service nvt-agent-guest.service")) {
+		!bytes.Contains(sessionService, []byte("Requires=nvt-guest-identity.service nvt-agent-guest.service")) ||
+		egressServiceErr != nil || !bytes.Contains(egressService, []byte("User=root")) || !bytes.Contains(egressService, []byte("Group=root")) ||
+		!bytes.Contains(egressService, []byte("RuntimeDirectoryMode=0700")) || !bytes.Contains(egressService, []byte("CapabilityBoundingSet=\n")) ||
+		!bytes.Contains(egressService, []byte("nvt-guest-egressd")) || !bytes.Contains(egressService, []byte("Requires=nvt-guest-identity.service")) {
 		t.Fatal("installed systemd boundaries are missing")
 	}
 	workspaceExample, workspaceExampleErr := os.ReadFile(filepath.Join(current, "share", "examples", "session-workspace.json"))
 	if workspaceExampleErr != nil || !bytes.Contains(workspaceExample, []byte(`"gateway_endpoint": "tls://workspace-gateway.example.invalid:444"`)) ||
 		!bytes.Contains(workspaceExample, []byte(`"loopback_endpoint": "127.0.0.1:4090"`)) {
 		t.Fatal("installed bundle is missing the non-secret optional workspace example")
+	}
+	egressExample, egressExampleErr := os.ReadFile(filepath.Join(current, "share", "examples", "native-egress.json"))
+	if egressExampleErr != nil || !bytes.Contains(egressExample, []byte(`"relay_endpoint": "tls://native-egress.example.invalid:7445"`)) ||
+		bytes.Contains(egressExample, []byte("nvt_eg1_")) || bytes.Contains(egressExample, []byte("runtime_identity")) ||
+		bytes.Contains(egressExample, []byte("binding")) || bytes.Contains(egressExample, []byte("audience")) {
+		t.Fatal("installed bundle is missing the non-secret optional native-egress example")
+	}
+	if bytes.Contains(egressService, []byte("Environment=")) || bytes.Contains(egressService, []byte("nvt_eg1_")) ||
+		bytes.Contains(egressService, []byte("runtime_identity")) {
+		t.Fatal("native-egress unit contains credential-bearing configuration")
+	}
+	nonRootEgress := exec.Command(filepath.Join(current, "bin", "nvt-guest-egressd"), "--config", filepath.Join(work, "missing-egress.json"))
+	nonRootEgress.Env = append(os.Environ(), "NVT_GUEST_EGRESS_TEST_EUID=65532")
+	if output, err := nonRootEgress.CombinedOutput(); err == nil || !bytes.Contains(output, []byte("invalid startup configuration")) || bytes.Contains(output, []byte("nvt_eg1_")) {
+		t.Fatalf("non-root native egress boundary = %v %s", err, output)
 	}
 	if _, err := os.Stat(filepath.Join(root, "etc")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("bundle install wrote configuration outside the immutable release: %v", err)

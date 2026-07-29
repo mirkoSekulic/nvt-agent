@@ -1,9 +1,10 @@
 # Native VM mediated-egress contract
 
 Status: versioned provider-neutral contract and hermetic conformance proof
-(`nvt.native-egress/v1`) with a production broker identity authority. No
-production tunnel, host-bundle client, provider network implementation, or VM
-egress wiring exists yet.
+(`nvt.native-egress/v1`) with a production broker identity authority and a
+trusted host-bundle guest client that establishes the authenticated outbound
+session. No production relay/target adapter, agent traffic forwarding,
+provider network implementation, or operator readiness wiring exists yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -117,6 +118,19 @@ environment, or ordinary agent workspace/configuration. No provider credential
 or real injected secret enters the VM. The short-lived egress credential exists
 only at the trusted identity/session boundary for the time needed to establish
 or replace an exact session.
+
+The root identity daemon exposes the purpose-separated local IPC contract
+`nvt.native-egress-local/v1` on its existing root-owned mode `0600` Unix
+socket. The only request is the exact JSONL object
+`{"contract_version":"nvt.native-egress-local/v1","type":"issue_native_egress"}`.
+It deliberately has no identity, binding, audience, broker URL, target,
+destination, or provider member. The daemon serializes issuance with runtime
+identity rotation and derives the complete binding, current active runtime
+bearer, broker URL, and fixed audience from protected state. The bounded reply
+is either one strict broker issue result or a stable reason with temporary and
+uncertain flags. Caller UID must equal the identity daemon UID; production
+command gates require UID 0. Messages are at most 32 KiB and complete within
+five seconds. Unknown, duplicate, or trailing input closes without a response.
 
 Only equal-sequence reconnect or a higher sequence may stand by. Older replay
 is rejected. One active plus one already-authenticated standby is the maximum;
@@ -243,7 +257,8 @@ For a mediated external VM, the trusted owners converge in this order:
    bootstrap network; no provider or egress credential is carried in the
    envelope, desired fingerprint, driver status, or provider tags.
 4. The active runtime identity obtains the short-lived egress credential under
-   the fixed purpose. The future guest client authenticates the outbound tunnel.
+   the fixed purpose. The trusted guest client authenticates the outbound
+   session but does not yet forward agent traffic.
 5. The relay resolves only the exact binding to its already-ready separate
    trusted per-run egress target. A test flow/readiness exchange confirms the
    complete route.
@@ -286,9 +301,13 @@ detector.
 
 The production broker implements the four identity operations and shares their
 SQLite lifecycle, exact revocation, tombstones, and maintenance with guest
-enrollment/runtime identity. This phase does not implement a production relay
-or guest client, host-bundle wiring, egressd/captured behavior, provider network
-policy, Azure/AWS/QEMU support, or operator readiness/cleanup orchestration.
+enrollment/runtime identity. The host bundle includes a separate opt-in trusted
+client/service which obtains only the short-lived purpose credential through
+root-only IPC, validates explicit relay CA/SNI/TLS, reconnects with the current
+credential, and renews make-before-break with at most current plus pending in
+memory. This phase does not implement a production relay, egressd/captured
+behavior, provider network policy, Azure/AWS/QEMU support, or operator
+readiness/cleanup orchestration.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed
 implementation gates and a real provider enforcement proof.

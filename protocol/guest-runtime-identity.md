@@ -226,5 +226,8 @@ exact active stream boundary. The purpose-separated
 [`nvt.native-egress/v1`](native-egress.md) identity/session/confinement contract
 is frozen separately. Its production broker authority consumes this runtime
 bearer only to issue the purpose-separated short-lived egress credential; no
-production native egress client, relay, or provider network enforcement exists
-yet.
+other process receives this runtime bearer. The host bundle now includes the
+separate opt-in native-egress client that obtains only that derived credential
+over root-only IPC and establishes a strictly trusted outbound session. A
+production relay/target, agent traffic forwarding, provider network
+enforcement, and operator readiness gate do not exist yet.

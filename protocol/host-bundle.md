@@ -29,7 +29,8 @@ manifest. Its schema is:
   "compatibility": {
     "agentd_protocol": "nvt.agentd/v1",
     "native_session_protocol": "nvt.native-session/v1",
-    "native_workspace_protocol": "nvt.native-workspace/v1"
+    "native_workspace_protocol": "nvt.native-workspace/v1",
+    "native_egress_protocol": "nvt.native-egress/v1"
   },
   "files": [
     {
@@ -54,6 +55,13 @@ valid for every bundle published before the trusted workspace forwarder was
 packaged. When present it must equal `nvt.native-workspace/v1`; unknown values
 fail closed. The separate marker does not change `nvt.native-session/v1` or
 make workspace forwarding mandatory for a guest configuration.
+
+`native_egress_protocol` is also optional and additive. Its absence preserves
+every immutable bundle produced before the purpose-separated native-egress
+client was packaged. When present it must equal `nvt.native-egress/v1`.
+Presence describes compatible trusted session-establishment code; it does not
+assert provider confinement, a production relay, traffic forwarding, or
+mediated-VM readiness.
 
 `bundle_version` is the coordinated release identity. `build_id` is the full
 source revision. Files are sorted by path and have deterministic content,
@@ -107,7 +115,7 @@ broker token, provider credential, or one-time enrollment secret.
 
 ## Guest service boundary
 
-The bundle includes three independent native service boundaries:
+The bundle includes four independent native service boundaries:
 
 - `nvt-guest-identity.service` runs the static root-owned
   `nvt-guest-identityd`. It consumes the separately delivered one-time
@@ -133,6 +141,14 @@ The bundle includes three independent native service boundaries:
   the same current short-lived credential and forwards streams only to the
   configured literal loopback service. It never receives or persists the root
   runtime identity.
+- `nvt-guest-egress.service` runs the separate static root-owned
+  `nvt-guest-egressd` only when a trusted provider explicitly installs its
+  non-secret configuration and enables the unit. It requests a short-lived
+  purpose-separated `nvt_eg1_` credential through the same root-only identity
+  socket, establishes [`nvt.native-egress/v1`](native-egress.md) over a
+  separate explicitly trusted TLS connection, and retains current/pending
+  credentials only in bounded process memory. It does not receive the runtime
+  identity, forward agent traffic, or assert provider confinement/readiness.
 
 The agent service requires the identity service. The identity unit uses
 systemd `Type=notify` and becomes active only after durable state has been
@@ -149,9 +165,10 @@ non-zero so systemd stops/restarts the dependent lifecycle without exposing
 bearer state to the agent user.
 
 The current bundle includes the real `agentd` and `agentdctl` sources, the
-trusted native control-session and optional workspace clients, plus a bounded
-session fixture for the guest-side lifecycle gate. It does not package
-code-server, an AI runtime, plugins, or mediated VM egress. The loopback
+trusted native control-session and optional workspace clients, the optional
+native-egress session-establishment client, plus a bounded session fixture for
+the guest-side lifecycle gate. It does not package code-server, an AI runtime,
+plugins, a production egress relay, or agent traffic forwarding. The loopback
 workspace service remains an explicit provider-installed prerequisite; the
 production gateway can route an already-authorized external VM browser session
 to it through the exact native workspace binding.
@@ -175,7 +192,7 @@ used. The containerized CI harness invokes the exact same supervisor and files
 without pretending to be a provider VM or systemd proof.
 
 The installer does not write `/etc`, deliver an enrollment envelope, or enable
-services. Guest provisioning copies both fixed units from
+services. Guest provisioning copies the required fixed units from
 `/opt/nvt/current/share/systemd/`, installs the non-secret broker CA at
 `/etc/nvt-agent/runtime-identity-ca.pem`, writes the root-owned mode `0600`
 identity path configuration at `/etc/nvt-agent/identity.json`, and delivers
@@ -187,6 +204,15 @@ and enables the services. The identity state directory is root-owned mode
 `0700`; neither the `nvt-agent` user nor its workspace can read it. These explicit steps are
 provider-owned and are not archive hooks. No bearer is accepted through argv,
 environment, systemd unit content, or ordinary guest configuration.
+
+Mediated-VM providers may additionally copy
+`share/systemd/nvt-guest-egress.service`, resolve the non-secret
+`share/examples/native-egress.json` paths and canonical TLS relay endpoint into
+root-owned `/etc/nvt-agent/native-egress.json`, install the explicit relay CA,
+and enable the unit only after their infrastructure confinement prerequisites
+are met. The client configuration contains no binding, audience, bearer,
+destination, target, or provider credential. The bundle never enables this
+unit itself, and its readiness is not yet part of operator VM readiness.
 
 The bundled `share/examples/session.json` remains the unchanged control-only
 example. `share/examples/session-workspace.json` demonstrates the optional
@@ -234,7 +260,9 @@ establishment, relay, and restart. The separate
 [`nvt.native-workspace/v1`](native-workspace.md) guest forwarder and production
 gateway acceptor now establish the authenticated TLS/yamux transport and
 expose the bounded active stream boundary consumed by authorized external-VM
-browser routing. The provider-neutral native VM mediated-egress contract and
-conformance proof are frozen, but its host-bundle client, production tunnel,
-broker endpoints, and provider enforcement remain future gates before a
-mediated external VM can be ready.
+browser routing. The provider-neutral native VM mediated-egress contract,
+production broker identity endpoints, and trusted host-bundle
+session-establishment client now exist. A production relay/target adapter,
+captured agent traffic, operator readiness wiring, and provider-owned external
+network confinement remain future gates before a mediated external VM can be
+ready.
