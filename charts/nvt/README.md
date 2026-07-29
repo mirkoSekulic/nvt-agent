@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.43`; otherwise the API server may prune the
+of, upgrading to chart `0.8.44`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.43 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.44 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.43 --namespace nvt --create-namespace
+  --version 0.8.44 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -420,7 +420,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. External drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.43`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.44`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -831,11 +831,13 @@ the HTTP container port and HTTP Service port. Temporary broker or bounded
 capacity failures close without a definitive rejection so the guest retries
 the same credential; only an authenticated denial or exact status mismatch is
 terminal. Missing Secrets or keys fail at Kubernetes volume
-setup; invalid TLS or CA material fails gateway startup. This phase exposes
-the bounded agentd relay and an implementation-neutral active workspace
-`StreamOpener`. It does not publish a browser/code-server route or attach the
-HTTP gateway to workspace streams. The gateway loads both TLS identity and
-broker trust once at startup;
+setup; invalid TLS or CA material fails gateway startup. For an authorized
+external VM, the HTTP gateway requires the exact operator-published native
+guest binding plus ready control and workspace registries, then opens only the
+fixed guest loopback workspace through `StreamOpener`. It never derives a
+destination from browser, AgentRun, or driver input and never falls back to a
+Pod. Pod/Kata routes keep their existing Pod-IP behavior. The gateway loads
+both TLS identity and broker trust once at startup;
 restart its Deployment after rotating either referenced Secret.
 
 ### OIDC

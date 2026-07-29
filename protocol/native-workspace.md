@@ -1,8 +1,8 @@
 # Native workspace reverse-tunnel contract
 
 Status: versioned provider-neutral contract, conformance proof, trusted
-host-bundle guest forwarder, and opt-in production gateway acceptor
-(`nvt.native-workspace/v1`). Browser routing is not wired.
+host-bundle guest forwarder, opt-in production gateway acceptor, and authorized
+external-VM browser routing (`nvt.native-workspace/v1`).
 
 This contract defines a separate guest-initiated data-plane connection through
 which a trusted gateway may open bounded raw TCP streams to one fixed native
@@ -204,6 +204,9 @@ only the complete non-secret routing binding of the currently accepted guest
 in the AgentRun status subresource and clears it before that guest ceases to be
 authoritative. A gateway resolver requires exact status, desired generation,
 driver and execution identity plus ready control/workspace registries; it never
-guesses or enumerates bindings. The resolver is not connected to an HTTP
-handler. Browser/code-server routing, VM egress, cloud providers, and public VM
-listeners remain later reviewed production gates.
+guesses or enumerates bindings. After browser authentication and AgentRun
+authorization, the production HTTP reverse proxy uses only that exact
+`StreamOpener`. Its dial boundary ignores browser network/authority input and
+cannot fall back to a Pod for an external VM. Production native code-server
+browser access is therefore wired. VM mediated egress, cloud providers, and
+public VM listeners remain later reviewed production gates.

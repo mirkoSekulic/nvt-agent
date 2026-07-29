@@ -112,10 +112,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("create kubernetes client: %v", err)
 	}
-	server, err := gateway.NewServer(cfg, client, namespace)
-	if err != nil {
-		log.Fatalf("create gateway server: %v", err)
-	}
 	nativeSessionServer, err := gateway.NewNativeSessionServer(cfg.NativeSession)
 	if err != nil {
 		log.Fatalf("create native session listener: %v", err)
@@ -123,6 +119,14 @@ func main() {
 	nativeWorkspaceServer, err := gateway.NewNativeWorkspaceServer(cfg.NativeWorkspace, cfg.NativeSession)
 	if err != nil {
 		log.Fatalf("create native workspace listener: %v", err)
+	}
+	var nativeWorkspaceResolver gateway.NativeWorkspaceResolver
+	if nativeSessionServer != nil && nativeWorkspaceServer != nil {
+		nativeWorkspaceResolver = gateway.NewNativeWorkspaceResolver(nativeSessionServer.Registry(), nativeWorkspaceServer.Registry())
+	}
+	server, err := gateway.NewServerWithNativeWorkspaceResolver(cfg, client, namespace, nativeWorkspaceResolver)
+	if err != nil {
+		log.Fatalf("create gateway server: %v", err)
 	}
 	if err := serve(cfg, namespace, server, nativeSessionServer, nativeWorkspaceServer); err != nil {
 		log.Fatalf("serve gateway: %v", err)

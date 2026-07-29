@@ -397,11 +397,12 @@ func isLoopbackHost(host string) bool {
 }
 
 type Server struct {
-	config    Config
-	client    ctrlclient.Client
-	namespace string
-	auth      *Authenticator
-	branding  brandAssets
+	config                  Config
+	client                  ctrlclient.Client
+	namespace               string
+	auth                    *Authenticator
+	branding                brandAssets
+	nativeWorkspaceResolver NativeWorkspaceResolver
 }
 
 type routeKind int
@@ -418,6 +419,13 @@ type route struct {
 }
 
 func NewServer(config Config, client ctrlclient.Client, namespace string) (*Server, error) {
+	return NewServerWithNativeWorkspaceResolver(config, client, namespace, nil)
+}
+
+// NewServerWithNativeWorkspaceResolver constructs the HTTP gateway with the
+// optional exact native-VM routing seam. A nil resolver preserves the existing
+// Pod-only server and makes external VM routes unavailable without fallback.
+func NewServerWithNativeWorkspaceResolver(config Config, client ctrlclient.Client, namespace string, resolver NativeWorkspaceResolver) (*Server, error) {
 	if config.Routing.Mode == "" {
 		config.Routing.Mode = routingModeSubdomain
 	}
@@ -436,7 +444,10 @@ func NewServer(config Config, client ctrlclient.Client, namespace string) (*Serv
 	if err != nil {
 		return nil, err
 	}
-	return &Server{config: config, client: client, namespace: namespace, auth: auth, branding: branding}, nil
+	return &Server{
+		config: config, client: client, namespace: namespace, auth: auth, branding: branding,
+		nativeWorkspaceResolver: resolver,
+	}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -563,6 +574,21 @@ func (s *Server) proxyAgentRun(w http.ResponseWriter, r *http.Request, accessKey
 }
 
 func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, run nvtv1alpha1.AgentRun, accessKey string) {
+	if isExternalVMRun(run) {
+		if s.nativeWorkspaceResolver == nil {
+			http.Error(w, "AgentRun session unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		opener, err := s.nativeWorkspaceResolver.Resolve(&run)
+		if err != nil || opener == nil {
+			http.Error(w, "AgentRun session unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		transport := nativeWorkspaceHTTPTransport(opener)
+		defer transport.CloseIdleConnections()
+		s.proxyAgentRunToUpstream(w, r, accessKey, nativeWorkspaceUpstreamURL(), transport)
+		return
+	}
 	target, err := s.resolveTargetForRun(r.Context(), run)
 	if err == errNoRunningPod {
 		http.Error(w, "AgentRun has no ready running pod with a pod IP", http.StatusServiceUnavailable)
@@ -574,7 +600,14 @@ func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, r
 	}
 
 	targetURL := &url.URL{Scheme: "http", Host: net.JoinHostPort(target.PodIP, strconv.Itoa(target.Port))}
+	s.proxyAgentRunToUpstream(w, r, accessKey, targetURL, nil)
+}
+
+func (s *Server) proxyAgentRunToUpstream(w http.ResponseWriter, r *http.Request, accessKey string, targetURL *url.URL, transport http.RoundTripper) {
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	if transport != nil {
+		proxy.Transport = transport
+	}
 	ownedCookies := gatewayCookieNames(s.config.Auth.Session.CookieName)
 	responseCookiePath := ""
 	if s.config.routingMode() == routingModePath {
@@ -605,6 +638,10 @@ func (s *Server) proxyResolvedAgentRun(w http.ResponseWriter, r *http.Request, r
 		http.Error(rw, "proxy AgentRun session", http.StatusBadGateway)
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func isExternalVMRun(run nvtv1alpha1.AgentRun) bool {
+	return run.Spec.Execution != nil && run.Spec.Execution.Kind == nvtv1alpha1.AgentRunExecutionVM
 }
 
 var errNoRunningPod = fmt.Errorf("no running pod")
@@ -715,6 +752,13 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 			continue
 		}
 		routable := routableRuns[run.Name]
+		if isExternalVMRun(run) {
+			routable = false
+			if s.nativeWorkspaceResolver != nil {
+				_, resolveErr := s.nativeWorkspaceResolver.Resolve(&run)
+				routable = resolveErr == nil
+			}
+		}
 		if view == dashboardViewActive && !routable {
 			continue
 		}
