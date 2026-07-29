@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.40" || "${CHART_APP_VERSION}" != "0.8.40" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.40, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.41" || "${CHART_APP_VERSION}" != "0.8.41" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.41, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.40' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.41' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -31,6 +31,8 @@ SCHEDULE_LEGACY_RENDER="${WORKDIR}/schedule-legacy.yaml"
 PACKAGED_SCHEDULE_RENDER="${WORKDIR}/packaged-schedule.yaml"
 EGRESS_POLICY_RENDER="${WORKDIR}/egress-policy.yaml"
 GATEWAY_RENDER="${WORKDIR}/gateway.yaml"
+GATEWAY_NATIVE_SESSION_RENDER="${WORKDIR}/gateway-native-session.yaml"
+GATEWAY_NATIVE_SESSION_FAILURE="${WORKDIR}/gateway-native-session-failure.txt"
 GATEWAY_OIDC_RENDER="${WORKDIR}/gateway-oidc.yaml"
 GATEWAY_OIDC_MISSING_SECRET_FAILURE="${WORKDIR}/gateway-oidc-missing-secret-failure.txt"
 GATEWAY_OIDC_REPLICAS_FAILURE="${WORKDIR}/gateway-oidc-replicas-failure.txt"
@@ -130,6 +132,20 @@ helm template nvt "${CHART}" -n custom-ns \
   --set 'egress.denyCIDRs={10.240.0.0/16,fd00:1234::/48}' \
   > "${EGRESS_POLICY_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set gateway.enabled=true --set gateway.port=8091 > "${GATEWAY_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  --set gateway.enabled=true \
+  --set gateway.nativeSession.enabled=true \
+  --set gateway.nativeSession.port=7443 \
+  --set-string gateway.nativeSession.tls.existingSecret=nvt-gateway-native-session-tls \
+  --set-string gateway.nativeSession.tls.certificateKey=server.crt \
+  --set-string gateway.nativeSession.tls.privateKeyKey=server.key \
+  --set-string gateway.nativeSession.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
+  --set-string gateway.nativeSession.serverName=nvt-broker.custom-ns.svc.cluster.local \
+  --set-string gateway.nativeSession.ca.existingSecret=nvt-broker-tls \
+  --set-string gateway.nativeSession.ca.key=ca.crt \
+  --set gateway.nativeSession.authenticationTimeoutSeconds=7 \
+  --set gateway.nativeSession.revalidationIntervalSeconds=45 \
+  > "${GATEWAY_NATIVE_SESSION_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
   --set branding.existingConfigMap=company-agent-branding \
@@ -807,7 +823,7 @@ try:
     os.chown(directory, 0, 65532)
     os.chmod(directory, 0o750)
     paths = []
-    for name in ("registrations.json", "ca.crt", "auth-token"):
+    for name in ("registrations.json", "ca.crt", "auth-token", "gateway-tls.crt", "gateway-tls.key", "gateway-broker-ca.crt"):
         path = os.path.join(directory, name)
         with open(path, "wb") as value:
             value.write(name.encode())
@@ -1122,6 +1138,74 @@ if grep -q 'secretKeyRef:' "${GATEWAY_RENDER}"; then
   echo "gateway auth.mode=none must not render auth Secret refs" >&2
   exit 1
 fi
+if grep -q 'native-session\|NVT_GATEWAY_NATIVE_SESSION\|/var/run/nvt-agent/native-session' "${GATEWAY_RENDER}"; then
+  echo "default gateway rendering unexpectedly enabled native sessions" >&2
+  exit 1
+fi
+
+python3 - "${GATEWAY_NATIVE_SESSION_RENDER}" <<'PY'
+import sys
+import yaml
+
+documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+deployment = next(item for item in documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-agent-gateway")
+service = next(item for item in documents if item.get("kind") == "Service" and item["metadata"]["name"] == "nvt-agent-gateway")
+pod = deployment["spec"]["template"]["spec"]
+assert pod["securityContext"] == {
+    "runAsNonRoot": True,
+    "runAsUser": 65532,
+    "runAsGroup": 65532,
+    "fsGroup": 65532,
+    "fsGroupChangePolicy": "OnRootMismatch",
+    "seccompProfile": {"type": "RuntimeDefault"},
+}
+volumes = {item["name"]: item for item in pod["volumes"]}
+assert volumes["native-session-tls"]["secret"] == {
+    "secretName": "nvt-gateway-native-session-tls",
+    "defaultMode": 0o440,
+    "items": [{"key": "server.crt", "path": "tls.crt"}, {"key": "server.key", "path": "tls.key"}],
+}
+assert volumes["native-session-broker-ca"]["secret"] == {
+    "secretName": "nvt-broker-tls",
+    "defaultMode": 0o440,
+    "items": [{"key": "ca.crt", "path": "ca.crt"}],
+}
+container = pod["containers"][0]
+assert container["securityContext"] == {
+    "allowPrivilegeEscalation": False,
+    "readOnlyRootFilesystem": True,
+    "capabilities": {"drop": ["ALL"]},
+}
+args = container["args"]
+for expected in (
+    "--native-session-enabled=true",
+    "--native-session-listen-addr=:7443",
+    "--native-session-broker-url=https://nvt-broker.custom-ns.svc.cluster.local:7347",
+    "--native-session-broker-server-name=nvt-broker.custom-ns.svc.cluster.local",
+    "--native-session-authentication-timeout-seconds=7",
+    "--native-session-revalidation-interval-seconds=45",
+):
+    assert expected in args
+assert not any("credential" in item or "bearer" in item or "token" in item for item in args)
+assert {item["name"] for item in container["ports"]} == {"http", "native-session"}
+ports = {item["name"]: item for item in service["spec"]["ports"]}
+assert ports["native-session"] == {"name": "native-session", "port": 7443, "targetPort": 7443, "appProtocol": "tls"}
+PY
+
+for invalid_args in \
+  '--set gateway.nativeSession.enabled=true' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.replicas=2 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.port=8080 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=http://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:99999 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=other.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca --set gateway.nativeSession.authenticationTimeoutSeconds=0' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca --set gateway.nativeSession.revalidationIntervalSeconds=61'; do
+  if helm template nvt "${CHART}" -n custom-ns ${invalid_args} > /dev/null 2> "${GATEWAY_NATIVE_SESSION_FAILURE}"; then
+    echo "expected invalid gateway native-session configuration to fail: ${invalid_args}" >&2
+    exit 1
+  fi
+done
 
 require_resource "${GATEWAY_PATH_RENDER}" Deployment nvt-agent-gateway
 require_resource "${GATEWAY_PATH_RENDER}" Service nvt-agent-gateway

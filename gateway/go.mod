@@ -5,7 +5,9 @@ go 1.25.0
 require (
 	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/gorilla/securecookie v1.1.2
+	github.com/mirkoSekulic/nvt-agent/hostbundle v0.0.0-00010101000000-000000000000
 	github.com/mirkoSekulic/nvt-agent/operator v0.0.0
+	github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment v0.0.0
 	golang.org/x/oauth2 v0.36.0
 	k8s.io/api v0.34.2
 	k8s.io/apimachinery v0.34.2
@@ -57,3 +59,7 @@ require (
 )
 
 replace github.com/mirkoSekulic/nvt-agent/operator => ../operator
+
+replace github.com/mirkoSekulic/nvt-agent/hostbundle => ../hostbundle
+
+replace github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment => ../protocol/guestenrollment

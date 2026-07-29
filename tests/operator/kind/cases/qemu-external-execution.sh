@@ -14,7 +14,7 @@ case_render() {
 }
 
 case_kind_setup() {
-  make -C "${ROOT}" operator-build execution-driver-host-build broker-build
+  make -C "${ROOT}" operator-build execution-driver-host-build broker-build gateway-build
 
   KIND_BUILDX_BUILDER="nvt-kind-qemu-${CLUSTER}"
   docker buildx create --name "${KIND_BUILDX_BUILDER}" --driver docker-container --use >/dev/null
@@ -42,6 +42,7 @@ case_kind_setup() {
     -t nvt-host-bundle-registry:qemu-kind "${ROOT}" >/dev/null
   docker run --rm --entrypoint cat nvt-host-bundle-registry:qemu-kind /fixture/digest.txt >"${SMOKE_TMPDIR}/host-bundle-digest.txt"
   docker run --rm --entrypoint cat nvt-host-bundle-registry:qemu-kind /fixture/tls.crt >"${SMOKE_TMPDIR}/registry-ca.crt"
+  docker run --rm --entrypoint cat nvt-host-bundle-registry:qemu-kind /fixture/tls.key >"${SMOKE_TMPDIR}/gateway-tls.key"
   HOST_BUNDLE_DIGEST="$(tr -d '\n' <"${SMOKE_TMPDIR}/host-bundle-digest.txt")"
   [[ "${HOST_BUNDLE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "host-bundle fixture has no immutable OCI index digest"
 
@@ -56,8 +57,13 @@ case_kind_setup() {
   kind load docker-image nvt-operator:latest --name "${CLUSTER}"
   kind load docker-image nvt-execution-driver-host:latest --name "${CLUSTER}"
   kind load docker-image nvt-broker:latest --name "${CLUSTER}"
+  kind load docker-image nvt-agent-gateway:latest --name "${CLUSTER}"
 
   kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
+  kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-gateway-native-session-tls \
+    --from-file=tls.crt="${SMOKE_TMPDIR}/registry-ca.crt" \
+    --from-file=tls.key="${SMOKE_TMPDIR}/gateway-tls.key" \
+    --dry-run=client -o yaml | kubectl_smoke apply -f -
   kubectl_smoke apply -f - <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -76,17 +82,10 @@ spec:
         - name: registry
           image: nvt-host-bundle-registry:qemu-kind
           imagePullPolicy: IfNotPresent
-          env:
-            - {name: NVT_TEST_BROKER_URL, value: "https://nvt-broker.${NAMESPACE}.svc.cluster.local:7347"}
-            - {name: NVT_TEST_BROKER_CA_FILE, value: /broker-ca/ca.crt}
-          ports: [{name: https, containerPort: 443}, {name: native-session, containerPort: 7443}]
-          volumeMounts: [{name: broker-ca, mountPath: /broker-ca, readOnly: true}]
+          ports: [{name: https, containerPort: 443}]
           readinessProbe:
             tcpSocket: {port: https}
             periodSeconds: 1
-      volumes:
-        - name: broker-ca
-          secret: {secretName: nvt-broker-tls, optional: true, items: [{key: ca.crt, path: ca.crt}]}
 ---
 apiVersion: v1
 kind: Service
@@ -95,7 +94,7 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   selector: {app: nvt-host-bundle-registry}
-  ports: [{name: https, port: 443, targetPort: https}, {name: native-session, port: 7443, targetPort: native-session}]
+  ports: [{name: https, port: 443, targetPort: https}]
 YAML
   kubectl_smoke rollout status deployment/nvt-host-bundle-registry -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
 
@@ -115,6 +114,18 @@ broker:
     enabled: true
     exchangeURL: https://nvt-broker.${NAMESPACE}.svc.cluster.local:7347/v1/guest-enrollment/exchange
     orchestratorAuth: {existingSecret: nvt-enrollment-orchestrator, tokenKey: token}
+gateway:
+  enabled: true
+  image: {repository: nvt-agent-gateway, tag: latest, pullPolicy: IfNotPresent}
+  nativeSession:
+    enabled: true
+    port: 7443
+    tls: {existingSecret: nvt-gateway-native-session-tls, certificateKey: tls.crt, privateKeyKey: tls.key}
+    brokerURL: https://nvt-broker.${NAMESPACE}.svc.cluster.local:7347
+    serverName: nvt-broker.${NAMESPACE}.svc.cluster.local
+    ca: {existingSecret: nvt-broker-tls, key: ca.crt}
+    authenticationTimeoutSeconds: 5
+    revalidationIntervalSeconds: 30
 executionDrivers:
   hostImage: {repository: nvt-execution-driver-host, tag: latest, pullPolicy: IfNotPresent}
   guestEnrollment:
@@ -141,6 +152,7 @@ YAML
     -n "${NAMESPACE}" --timeout "${ROLLOUT_TIMEOUT}" -f "${SMOKE_TMPDIR}/qemu-values.yaml"
   kubectl_smoke rollout status deployment/nvt-execution-driver-qemu-reference -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
   kubectl_smoke rollout status deployment/nvt-broker -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
+  kubectl_smoke rollout status deployment/nvt-agent-gateway -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
   kubectl_smoke rollout status deployment/nvt-operator -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
   kubectl_smoke get secret nvt-broker-tls -n "${NAMESPACE}" -o jsonpath='{.data.ca\.crt}' | base64 -d >"${SMOKE_TMPDIR}/broker-ca.crt"
 }
@@ -157,7 +169,7 @@ configuration={
   "host_bundle":{"repository":f"https://nvt-host-bundle-registry.{sys.argv[5]}.svc.cluster.local/nvt/host-bundle","digest":sys.argv[4]},
   "registry_ca_pem":registry_ca,
   "enrollment_ca_pem":broker_ca,
-  "native_session_endpoint":f"tls://nvt-host-bundle-registry.{sys.argv[5]}.svc.cluster.local:7443",
+  "native_session_endpoint":f"tls://nvt-agent-gateway.{sys.argv[5]}.svc.cluster.local:7443",
   "native_session_ca_pem":registry_ca,
   "cpus":1,"memory_mib":512,"acceleration":"tcg","boot_timeout_seconds":110,
 }
@@ -235,6 +247,7 @@ case_diagnostics() {
       'find /var/lib/nvt-execution-driver -maxdepth 3 -type f -not -name guest.qcow2 -print -exec sh -c '\''echo "--- $1"; cat "$1"'\'' sh {} \;' >&2 || true
   fi
   kubectl_smoke logs deployment/nvt-broker -n "${NAMESPACE}" --all-containers --tail=300 >&2 || true
+  kubectl_smoke logs deployment/nvt-agent-gateway -n "${NAMESPACE}" --all-containers --tail=300 >&2 || true
 }
 
 restart_qemu_driver_without_overlap() {
@@ -363,7 +376,7 @@ assert_sensitive_material_absent() {
   local pod run_json logs
   pod="$(qemu_driver_pod)"
   run_json="$(kubectl_smoke get agentrun qemu-external-lifecycle -n "${NAMESPACE}" -o json 2>/dev/null || true)"
-  logs="$(kubectl_smoke logs -n "${NAMESPACE}" "${pod}" -c driver-host --tail=200 2>/dev/null || true)$(kubectl_smoke logs -n "${NAMESPACE}" deployment/nvt-operator --tail=200 2>/dev/null || true)$(kubectl_smoke logs -n "${NAMESPACE}" deployment/nvt-broker --tail=200 2>/dev/null || true)"
+  logs="$(kubectl_smoke logs -n "${NAMESPACE}" "${pod}" -c driver-host --tail=200 2>/dev/null || true)$(kubectl_smoke logs -n "${NAMESPACE}" deployment/nvt-operator --tail=200 2>/dev/null || true)$(kubectl_smoke logs -n "${NAMESPACE}" deployment/nvt-broker --tail=200 2>/dev/null || true)$(kubectl_smoke logs -n "${NAMESPACE}" deployment/nvt-agent-gateway --tail=200 2>/dev/null || true)"
   [[ "${run_json}${logs}" != *"${ENROLLMENT_ORCHESTRATOR_CANARY}"* ]] || die "orchestrator credential entered status or logs"
   kubectl_smoke exec -n "${NAMESPACE}" "${pod}" -c driver-host -- sh -eu -c \
     'if [ -d /var/lib/nvt-execution-driver/executions ]; then ! grep -R -F "$1" /var/lib/nvt-execution-driver/executions >/dev/null 2>&1; fi' \

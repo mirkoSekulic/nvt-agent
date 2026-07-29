@@ -16,6 +16,35 @@ loaded once at startup. The Helm chart's `branding.existingConfigMap` mounts
 this contract without allowing arbitrary gateway asset paths. See the chart
 README for the complete key list and rollout behavior.
 
+## Native VM guest sessions
+
+The gateway can optionally listen on a separate TLS port for the outbound
+`nvt.native-session/v1` connection documented in
+[`protocol/native-session.md`](../protocol/native-session.md). This listener is
+disabled by default and is independent from browser HTTP routing. It accepts a
+bounded hello, authenticates the short-lived bearer against the broker's exact
+`/v1/guest-session-identity/authenticate` endpoint, validates the returned
+binding, audience, and window, and then discards the bearer.
+
+The live registry is keyed by the complete enrollment binding and permits one
+active connection plus one authenticated make-before-break replacement. It
+supports only the bounded existing agentd JSON request/response relay. It does
+not publish code-server, HTTP, or WebSocket routes. Connections close at the
+earlier of broker-owned credential expiry and the configured revalidation
+interval, forcing bounded broker reauthentication without retaining the
+credential. Broker denial, unavailability, malformed status, TLS failure, or
+protocol failure removes readiness before closing the connection.
+
+Production configuration requires a dedicated serving certificate/key Secret
+and an explicit broker CA Secret. The broker URL is one canonical HTTPS origin
+whose DNS host exactly matches `serverName`; no ambient CA, proxy, redirect, or
+plaintext fallback is used. The gateway process reads only mounted Secret
+files. Because this first registry is process-local, native sessions require
+one gateway replica. See the chart's `gateway.nativeSession` example. A future
+reviewed contract will add browser/code-server reverse-tunnel multiplexing.
+Restart the gateway after rotating its serving identity or broker CA Secret;
+both are loaded once at process startup.
+
 ## Routing modes
 
 `routing.mode=subdomain` is the default and preserves the original routing

@@ -17,11 +17,11 @@ RUN GOFLAGS=-tags=hostbundleidentitytest NVT_HOST_BUNDLE_ARCH=amd64 \
       -o /fixture/nvt-host-bundle-registry . && \
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 -sha256 \
       -subj /CN=nvt-host-bundle-registry.nvt.svc.cluster.local \
-      -addext subjectAltName=DNS:nvt-host-bundle-registry.nvt.svc,DNS:nvt-host-bundle-registry.nvt.svc.cluster.local \
+      -addext subjectAltName=DNS:nvt-host-bundle-registry.nvt.svc,DNS:nvt-host-bundle-registry.nvt.svc.cluster.local,DNS:nvt-agent-gateway.nvt.svc,DNS:nvt-agent-gateway.nvt.svc.cluster.local \
       -keyout /fixture/tls.key -out /fixture/tls.crt >/dev/null 2>&1 && \
     chmod 0755 /fixture/nvt-host-bundle-registry && chmod 0600 /fixture/tls.key && chmod 0644 /fixture/tls.crt
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 COPY --from=builder /fixture /fixture
-EXPOSE 443 7443
+EXPOSE 443
 ENTRYPOINT ["/fixture/nvt-host-bundle-registry"]

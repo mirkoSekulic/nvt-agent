@@ -5,6 +5,7 @@ on:
     paths:
       - "executiondrivers/qemu/**"
       - "hostbundle/**"
+      - "gateway/**"
       - "broker/**"
       - "operator/**"
       - "protocol/guestenrollment/**"

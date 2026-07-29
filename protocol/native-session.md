@@ -4,9 +4,10 @@ Status: versioned provider-neutral contract (`nvt.native-session/v1`).
 
 This contract defines the first authenticated outbound connection from a
 native NVT guest to a trusted gateway implementation. The guest is always the
-network initiator. This phase ships a guest client and a hermetic fake gateway;
-it does not add a production gateway listener, browser route, reverse-tunnel
-routing, mediated VM networking, or a provider implementation.
+network initiator. The production gateway has an opt-in acceptor and bounded
+process-local registry for this contract. It does not yet add a browser route,
+HTTP/WebSocket reverse-tunnel multiplexing, mediated VM networking, or a
+production provider implementation.
 
 ## Trust boundary
 
@@ -22,6 +23,13 @@ The trusted gateway authenticates the hello credential through the broker's
 `POST /v1/guest-session-identity/authenticate` operation and requires the exact
 binding and fixed `nvt.native-guest-control/v1` audience. Network reachability
 alone is never authentication.
+
+The gateway does not retain the bearer after authentication. It enforces the
+broker-owned expiry locally and closes an established connection at a bounded
+administrator-configured revalidation interval. Reconnect presents the same
+still-live credential to the broker again; a revoked, expired, malformed, or
+unreachable authority fails closed. The v1 registry is process-local and
+therefore requires exactly one gateway replica.
 
 ## Root-only credential issuance socket
 

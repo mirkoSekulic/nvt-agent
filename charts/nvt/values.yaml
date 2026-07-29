@@ -163,6 +163,25 @@ gateway:
     mode: subdomain
   port: 8080
   defaultTargetPort: 4090
+  # Opt-in provider-neutral native VM guest session listener. The separate TLS
+  # port accepts only broker-authenticated nvt.native-session/v1 connections;
+  # it does not publish browser/code-server routes.
+  nativeSession:
+    enabled: false
+    port: 7443
+    tls:
+      existingSecret: ""
+      certificateKey: tls.crt
+      privateKeyKey: tls.key
+    brokerURL: ""
+    serverName: ""
+    ca:
+      existingSecret: ""
+      key: ca.crt
+    authenticationTimeoutSeconds: 5
+    # Established connections are closed and must reauthenticate through the
+    # broker at this bound. The gateway never retains the session bearer.
+    revalidationIntervalSeconds: 30
   auth:
     mode: none
     session:
