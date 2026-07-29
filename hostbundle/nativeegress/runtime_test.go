@@ -241,6 +241,165 @@ func TestFirstIssuanceResponseLossIsBoundedToTwoCandidates(t *testing.T) {
 	}
 }
 
+func TestReplacementCredentialRequiresExactBindingAndHigherSequence(t *testing.T) {
+	binding := nativeEgressBinding()
+	newCredential := func(binding guestenrollment.Binding, sequence uint64) *credential {
+		opaque, err := guestenrollment.GenerateNativeEgressCredential(sequence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &credential{Binding: binding, Opaque: opaque, Sequence: sequence}
+	}
+	for name, candidate := range map[string]*credential{
+		"older sequence": newCredential(binding, 4),
+		"equal sequence": newCredential(binding, 5),
+		"changed binding": func() *credential {
+			changed := binding
+			changed.GuestInstanceID = "replacement-guest"
+			return newCredential(changed, 6)
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			current := newCredential(binding, 5)
+			state := &credentialState{current: current}
+			result := preparationResult{issued: candidate}
+			if replacement, switched, err := (&Runtime{}).completePreparation(state, &result); err == nil || switched || replacement != nil {
+				t.Fatalf("unsafe replacement result=%v switched=%v replacement=%v", err, switched, replacement)
+			} else if reason, temporary, uncertain := FailureDetails(err); reason != ReasonProtocolInvalid || temporary || uncertain {
+				t.Fatalf("unsafe replacement classification=%s temporary=%v uncertain=%v", reason, temporary, uncertain)
+			}
+			if candidate.Opaque != "" || state.pending != nil || state.current != current {
+				t.Fatal("rejected replacement was retained or changed current authority")
+			}
+		})
+	}
+
+	current := newCredential(binding, 5)
+	skipped := newCredential(binding, 8)
+	client, server := net.Pipe()
+	state := &credentialState{current: current}
+	result := preparationResult{
+		issued:  skipped,
+		session: &relaySession{connection: client, done: make(chan error, 1)},
+	}
+	replacement, switched, err := (&Runtime{}).completePreparation(state, &result)
+	if err != nil || !switched || replacement == nil || state.current == nil || state.current.Sequence != 8 || state.current.Binding != binding {
+		_ = server.Close()
+		t.Fatalf("valid skipped sequence was rejected: state=%#v switched=%v error=%v", state, switched, err)
+	}
+	if current.Opaque != "" {
+		replacement.Close()
+		_ = server.Close()
+		t.Fatal("promoted replacement did not clear predecessor")
+	}
+	replacement.Close()
+	_ = server.Close()
+}
+
+func TestRenewalResponseLossAtTwoLiveCapacityRetainsPredecessor(t *testing.T) {
+	originalAge, originalRecovery, originalJitter := credentialRenewalAge, credentialRecoveryWindow, credentialRenewalJitter
+	originalReconnect, originalRetry := reconnectDelay, renewalRetryDelay
+	credentialRenewalAge, credentialRecoveryWindow, credentialRenewalJitter = 50*time.Millisecond, 20*time.Millisecond, 0
+	reconnectDelay, renewalRetryDelay = 5*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() {
+		credentialRenewalAge, credentialRecoveryWindow, credentialRenewalJitter = originalAge, originalRecovery, originalJitter
+		reconnectDelay, renewalRetryDelay = originalReconnect, originalRetry
+	})
+
+	binding := nativeEgressBinding()
+	now := time.Now().UTC().Truncate(time.Second)
+	issuer := &fakeIssuer{
+		binding: binding,
+		now:     now,
+		errors: []error{
+			nil,
+			fail(ReasonIdentityUnavailable, true, true),  // committed candidate, response lost
+			fail(ReasonIdentityUnavailable, true, false), // two-live capacity denial
+		},
+	}
+	authenticator := &fakeAuthenticator{binding: binding, issuedAt: now}
+	accepted := make(chan struct{}, 1)
+	closed := make(chan struct{}, 1)
+	connector := &pipeConnector{handler: func(_ int, connection net.Conn) {
+		defer connection.Close()
+		if _, err := protocol.Accept(context.Background(), connection, authenticator); err != nil {
+			return
+		}
+		accepted <- struct{}{}
+		var one [1]byte
+		_, _ = connection.Read(one[:])
+		closed <- struct{}{}
+	}}
+	work := t.TempDir()
+	runtime, err := NewRuntime(Configuration{
+		Version: ConfigurationVersion, RuntimeDirectory: filepath.Join(work, "run"),
+		IdentitySocketPath: filepath.Join(work, "identity.sock"), RelayEndpoint: "tls://relay.example:7445",
+		CAPEMPath: filepath.Join(work, "ca.pem"),
+	}, issuer, connector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.Now = func() time.Time { return now }
+	runtime.MonotonicNow = time.Now
+	var readinessMu sync.Mutex
+	readiness := []bool{}
+	runtime.readinessChanged = func(value bool) {
+		readinessMu.Lock()
+		readiness = append(readiness, value)
+		readinessMu.Unlock()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	select {
+	case <-accepted:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("predecessor session did not authenticate")
+	}
+	waitForFile(t, filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName))
+	readinessMu.Lock()
+	baseline := len(readiness)
+	readinessMu.Unlock()
+	waitForIssuerCalls(t, issuer, 3)
+	time.Sleep(10 * renewalRetryDelay)
+	issuer.mu.Lock()
+	issueCalls := issuer.calls
+	issuer.mu.Unlock()
+	connector.mu.Lock()
+	connectionCalls := connector.calls
+	connector.mu.Unlock()
+	authenticator.mu.Lock()
+	authenticated := append([]string(nil), authenticator.credentials...)
+	authenticator.mu.Unlock()
+	if issueCalls != 3 || connectionCalls != 1 || len(authenticated) != 1 {
+		cancel()
+		t.Fatalf("two-live edge issued=%d connected=%d authenticated=%d", issueCalls, connectionCalls, len(authenticated))
+	}
+	if _, err := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); err != nil {
+		cancel()
+		t.Fatalf("usable predecessor lost readiness: %v", err)
+	}
+	readinessMu.Lock()
+	for _, value := range readiness[baseline:] {
+		if !value {
+			readinessMu.Unlock()
+			cancel()
+			t.Fatal("uncertain renewal withdrew predecessor readiness")
+		}
+	}
+	readinessMu.Unlock()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close predecessor")
+	}
+}
+
 func TestRuntimeFailsClosedOnDenialExpiryAndSecretFormatting(t *testing.T) {
 	binding := nativeEgressBinding()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -415,6 +574,21 @@ func waitInt(t *testing.T, values <-chan int, name string) int {
 		t.Fatalf("timed out waiting for %s", name)
 		return 0
 	}
+}
+
+func waitForIssuerCalls(t *testing.T, issuer *fakeIssuer, minimum int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		issuer.mu.Lock()
+		calls := issuer.calls
+		issuer.mu.Unlock()
+		if calls >= minimum {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("issuer calls did not reach %d", minimum)
 }
 
 func waitForFile(t *testing.T, path string) {

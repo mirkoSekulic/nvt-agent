@@ -177,6 +177,7 @@ func TestRelayEndpointIsCanonicalAndSecretFree(t *testing.T) {
 	for _, value := range []string{
 		"http://relay.example:7445", "tls://127.0.0.1:7445", "tls://[::1]:7445",
 		"tls://relay.example", "tls://relay.example:0", "tls://relay.example:65536",
+		"tls://relay.example:07445",
 		"tls://user@relay.example:7445", "tls://relay.example:7445/path", "TLS://relay.example:7445",
 		"tls://Relay.example:7445", "tls://-relay.example:7445", "tls://relay_.example:7445",
 		"tls://relay.example.:7445",

@@ -362,7 +362,14 @@ func (runtime *Runtime) completePreparation(state *credentialState, result *prep
 	if state == nil || result == nil {
 		return nil, false, fail(ReasonProtocolInvalid, false, false)
 	}
-	if result.issued != nil && state.pending == nil {
+	if result.issued != nil {
+		if state.pending != nil {
+			result.issued.Opaque = ""
+			return nil, false, fail(ReasonProtocolInvalid, false, false)
+		}
+		if err := validateReplacementCredential(state.current, result.issued); err != nil {
+			return nil, false, err
+		}
 		state.pending = result.issued
 		result.issued = nil
 	}
@@ -401,6 +408,10 @@ func (runtime *Runtime) completePreparation(state *credentialState, result *prep
 	if result.session == nil || state.pending == nil {
 		return nil, false, fail(ReasonProtocolInvalid, false, false)
 	}
+	if err := validateReplacementCredential(state.current, state.pending); err != nil {
+		state.pending = nil
+		return nil, false, err
+	}
 	replacement := result.session
 	result.session = nil
 	previous := state.current
@@ -421,8 +432,10 @@ func (runtime *Runtime) cancelPreparation(state *credentialState, attempt *prepa
 	attempt.cancel()
 	result := <-attempt.done
 	if result.issued != nil && state != nil && state.pending == nil {
-		state.pending = result.issued
-		result.issued = nil
+		if validateReplacementCredential(state.current, result.issued) == nil {
+			state.pending = result.issued
+			result.issued = nil
+		}
 	}
 	if result.issueFailed {
 		_, _, uncertain := FailureDetails(result.err)
@@ -431,6 +444,16 @@ func (runtime *Runtime) cancelPreparation(state *credentialState, attempt *prepa
 		}
 	}
 	result.discard()
+}
+
+func validateReplacementCredential(current, replacement *credential) error {
+	if current == nil || replacement == nil || replacement.Binding != current.Binding || replacement.Sequence <= current.Sequence {
+		if replacement != nil {
+			replacement.Opaque = ""
+		}
+		return fail(ReasonProtocolInvalid, false, false)
+	}
+	return nil
 }
 
 func (runtime *Runtime) renewalAttemptDue(state *credentialState) bool {

@@ -98,7 +98,7 @@ func validateRelayEndpoint(value string) error {
 		return errors.New("native egress relay endpoint must use DNS")
 	}
 	port, err := strconv.Atoi(parsed.Port())
-	if err != nil || port < 1 || port > 65535 {
+	if err != nil || port < 1 || port > 65535 || parsed.Port() != strconv.Itoa(port) {
 		return errors.New("native egress relay endpoint is invalid")
 	}
 	return nil
