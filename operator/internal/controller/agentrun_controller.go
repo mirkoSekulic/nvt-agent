@@ -323,6 +323,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	backend, available := r.executionBackendFor(selection)
 	if !available {
+		if selection.Driver != builtInKubernetesDriver {
+			if cleared, clearErr := r.clearNativeGuestBindingStatus(ctx, &agentRun); clearErr != nil || cleared {
+				return ctrl.Result{Requeue: cleared}, clearErr
+			}
+		}
 		if selection.Driver != builtInKubernetesDriver && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) &&
 			(!agentRun.DeletionTimestamp.IsZero() || externalTerminalCleanupDue(&agentRun, r.now())) {
 			if result, complete, revokeErr := r.revokeGuestEnrollmentScope(ctx, &agentRun, selection.Driver); revokeErr != nil || !complete {

@@ -465,6 +465,27 @@ status:
   conditions: []
 ```
 
+For an external VM only, the operator may publish the exact current non-secret
+native guest routing identity after the selected driver has durably accepted
+that guest's bootstrap handoff:
+
+```yaml
+status:
+  nativeGuestBinding:
+    agentRunUID: "..."
+    executionID: nvt-agentrun-...
+    driverRegistration: example-vm
+    desiredGeneration: 1
+    guestInstanceID: guest-...
+```
+
+This status-subresource field is operator-owned. Producers cannot set or
+override it. It contains the complete provider-neutral binding and no token,
+runtime/session identity, endpoint, provider state, or opaque driver data. The
+operator clears it before replacement, revocation, terminal cleanup, deletion,
+or any failure that makes the exact guest non-authoritative. Built-in Pod/Kata
+runs leave it absent.
+
 Phases are `Pending`, `Running`, `Completed`, `Failed`, and
 `DeadlineExceeded`. Persistent runs expose `WorkspaceReady`. Enforced runs
 expose provisioning conditions including `BrokerPolicyReady`,

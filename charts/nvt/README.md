@@ -24,11 +24,11 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.42`; otherwise the API server will prune or reject
-new AgentRun and schedule fields such as container capabilities, required
-Docker networks, the Docker kernel-log device control, dedicated Docker
-storage size, broker grant preparations, profile workspace instructions, or
-workflow producer policies.
+of, upgrading to chart `0.8.43`; otherwise the API server may prune the
+operator-owned native guest routing status or reject new AgentRun and schedule
+fields such as container capabilities, required Docker networks, the Docker
+kernel-log device control, dedicated Docker storage size, broker grant
+preparations, profile workspace instructions, or workflow producer policies.
 
 For Flux, configure the `HelmRelease` to create or replace CRDs consistently on
 install and upgrade:
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.42 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.43 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.42 --namespace nvt --create-namespace
+  --version 0.8.43 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -417,13 +417,19 @@ projected ServiceAccount token with audience `nvt-operator`; see the
 
 Omitted profile execution keeps the existing Kubernetes Pod path. Operators
 may spell that selection explicitly as `execution: {kind: pod, driver:
-kubernetes}`. Future external drivers select one exact entry from
+kubernetes}`. External drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.42`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.43`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
+
+After a VM driver's exact guest bootstrap handoff is accepted, the operator
+publishes only that guest's non-secret complete routing identity in
+`AgentRun.status.nativeGuestBinding`. It clears the field before replacement
+or cleanup. No enrollment/runtime/session credential, endpoint, or provider
+state enters status, and Pod/Kata runs leave the field absent.
 
 ```yaml
 agentSchedule:

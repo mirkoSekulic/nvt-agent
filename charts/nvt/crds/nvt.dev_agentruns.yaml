@@ -469,6 +469,37 @@ spec:
                   format: date-time
                 reason:
                   type: string
+                nativeGuestBinding:
+                  description: Operator-owned non-secret exact native guest routing identity.
+                  type: object
+                  required:
+                    - agentRunUID
+                    - executionID
+                    - driverRegistration
+                    - desiredGeneration
+                    - guestInstanceID
+                  properties:
+                    agentRunUID:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                    executionID:
+                      type: string
+                      minLength: 1
+                      maxLength: 256
+                    driverRegistration:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                    desiredGeneration:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                    guestInstanceID:
+                      type: string
+                      minLength: 1
+                      maxLength: 256
                 conditions:
                   type: array
                   items:

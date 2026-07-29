@@ -868,12 +868,17 @@ func TestExecutionProfileDeepCopyIsolation(t *testing.T) {
 	run.Spec.ProfileProvenance = &nvtv1alpha1.AgentRunProfileProvenance{
 		AuthenticatedProducer: "producer", Principal: &nvtv1alpha1.AgentRunPrincipal{Issuer: "issuer", Subject: "subject"},
 	}
+	run.Status.NativeGuestBinding = &nvtv1alpha1.AgentRunNativeGuestBinding{GuestInstanceID: "guest-original"}
 	runCopy := run.DeepCopyObject().(*nvtv1alpha1.AgentRun)
 	runCopy.Spec.ProfileProvenance.Principal.Subject = "changed"
+	runCopy.Status.NativeGuestBinding.GuestInstanceID = "guest-changed"
 	runCopy.Spec.Tolerations[0].Key = "changed"
 	*runCopy.Spec.Tolerations[0].TolerationSeconds = 1
 	if run.Spec.ProfileProvenance.Principal.Subject == "changed" {
 		t.Fatal("AgentRun provenance deepcopy shares principal")
+	}
+	if run.Status.NativeGuestBinding.GuestInstanceID == "guest-changed" {
+		t.Fatal("AgentRun status deepcopy shares native guest binding")
 	}
 	if run.Spec.Tolerations[0].Key == "changed" || *run.Spec.Tolerations[0].TolerationSeconds == 1 {
 		t.Fatal("AgentRun deepcopy shares tolerations")

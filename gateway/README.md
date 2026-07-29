@@ -58,7 +58,13 @@ separate [`nvt.native-workspace/v1`](../protocol/native-workspace.md) listener
 authenticates the same exact binding and exposes only a bounded,
 implementation-neutral active `StreamOpener` registry. It reuses the native
 session TLS identity and broker authority. No HTTP/browser/code-server handler
-consumes that registry yet.
+consumes that registry yet. A separate implementation-neutral resolver can
+match an already-authorized external VM AgentRun only through its
+operator-published complete `status.nativeGuestBinding`, exact current
+generation/driver/execution identity, control readiness, and workspace lookup.
+It never enumerates registries, guesses a guest instance, or falls back to a
+Pod target. Attaching this resolver to HTTP/browser routing remains a later
+reviewed change.
 Restart the gateway after rotating its serving identity or broker CA Secret;
 both are loaded once at process startup.
 
