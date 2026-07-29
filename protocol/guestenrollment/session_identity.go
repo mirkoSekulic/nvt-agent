@@ -103,6 +103,16 @@ func GuestSessionCredentialDigest(credential string) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// ValidateGuestSessionCredential validates the canonical opaque wire form
+// without deriving or retaining a credential digest. Sensitive transports use
+// this before handing the bearer to their authority boundary.
+func ValidateGuestSessionCredential(credential string) error {
+	if validateGuestSessionCredential(credential) != nil {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
 func ValidateGuestSessionIssueRequest(value GuestSessionIssueRequest) error {
 	if value.ContractVersion != GuestSessionIdentityVersion || value.Audience != NativeGuestControlAudience ||
 		ValidateBinding(value.Binding) != nil {

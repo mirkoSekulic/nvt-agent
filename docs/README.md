@@ -39,6 +39,11 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   lifecycle, status, and cleanup contract.
 - [Native host bundle](../protocol/host-bundle.md): digest-pinned OCI artifact,
   native guest installation, activation, and service boundary.
+- [Native guest control session](../protocol/native-session.md): authenticated
+  guest-initiated control transport and bounded agentd relay.
+- [Native workspace tunnel](../protocol/native-workspace.md): separate bounded
+  yamux data-plane contract and conformance proof for fixed loopback workspace
+  services; production browser routing is not wired.
 
 ## Operations And Testing
 

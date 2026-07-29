@@ -346,7 +346,11 @@ the separate runtime-identity contract, and the native host bundle contains a
 provider-neutral root-owned daemon that consumes, validates, persists, rotates,
 and recovers that identity. The broker also implements the separate short-lived
 [`nvt.guest-session-identity/v1`](guest-session-identity.md) authority for the
-single native-control audience. No guest daemon consumes that session
-credential and no gateway route or transport exists yet. Gateway routing, a
-production native session runtime, broker identity use, and mediated VM
-networking remain separate future production gates.
+single native-control audience. The host bundle consumes that credential only
+through its root-owned identity boundary, and the production gateway accepts
+the separate bounded [`nvt.native-session/v1`](native-session.md) control
+transport. The [`nvt.native-workspace/v1`](native-workspace.md) yamux contract
+and conformance proof now define the workspace data-plane seam without wiring
+it to a production guest or browser handler. Production workspace routing,
+broker identity use beyond authentication, and mediated VM networking remain
+separate future production gates.

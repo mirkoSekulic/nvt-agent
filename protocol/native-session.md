@@ -7,7 +7,10 @@ native NVT guest to a trusted gateway implementation. The guest is always the
 network initiator. The production gateway has an opt-in acceptor and bounded
 process-local registry for this contract. It does not yet add a browser route,
 HTTP/WebSocket reverse-tunnel multiplexing, mediated VM networking, or a
-production provider implementation.
+production provider implementation. The separate
+[`nvt.native-workspace/v1`](native-workspace.md) yamux data-plane contract and
+conformance proof now exist, but this control connection is not multiplexed and
+production browser routing is still not wired.
 
 ## Trust boundary
 

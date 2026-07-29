@@ -137,9 +137,10 @@ non-zero so systemd stops/restarts the dependent lifecycle without exposing
 bearer state to the agent user.
 
 The current bundle includes the real `agentd` and `agentdctl` sources, the
-trusted native session client, plus a bounded session fixture for the
-guest-side lifecycle gate. It does not yet package code-server, an AI runtime,
-plugins, a production gateway listener/route, or mediated VM egress.
+trusted native control-session client, plus a bounded session fixture for the
+guest-side lifecycle gate. It does not package the native workspace yamux
+forwarder, code-server, an AI runtime, plugins, a browser route, or mediated VM
+egress.
 
 Readiness is owned by the supervisor. It publishes `guest-ready` only after
 agentd, the tmux session, and the native outbound session are stable,
@@ -197,8 +198,10 @@ and cleanup in a real TCG guest. That driver is not published or supported as a
 production provider. The broker implements the separate
 [guest session identity contract](guest-session-identity.md), and this bundle
 now requests a short-lived credential only through the root-only identity
-authority and holds it only in trusted session-process memory. A synthetic TLS
-gateway and the test-only real QEMU/TCG guest prove establishment, relay, and
-restart; no production gateway listener, browser route, or reverse tunnel is
-shipped. Production gateway routing and mediated VM networking remain future
-gates before VM execution is ready.
+authority and holds it only in trusted session-process memory. The production
+gateway acceptor and test-only real QEMU/TCG guest prove authenticated control
+establishment, relay, and restart. The separate
+[`nvt.native-workspace/v1`](native-workspace.md) contract proves bounded yamux
+workspace streams hermetically, but no workspace forwarder or browser route is
+packaged or wired. Production workspace routing and mediated VM networking
+remain future gates before VM execution is ready.
