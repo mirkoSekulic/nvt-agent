@@ -23,6 +23,7 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/nativesession"
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/workspacetunnel"
 )
 
 type integrationSessionAuthority struct {
@@ -259,37 +260,58 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 		t.Fatalf("agentd requests=%d, want local readiness plus relay", count)
 	}
 	workspaceStream := waitForWorkspaceStream(t, workspaceGateway.Registry(), binding)
+	if workspaceStream.Sequence() != 1 {
+		t.Fatalf("initial workspace sequence=%d want=1", workspaceStream.Sequence())
+	}
 	if got := authority.bearerAuthenticationCount(nativeSessionTestCredential(1)); got < 2 {
 		t.Fatalf("control/workspace did not authenticate with the same first credential: calls=%d", got)
 	}
-	opened, err := workspaceStream.OpenStream(t.Context())
-	if err != nil {
-		t.Fatal(err)
+	assertProductionWorkspaceEcho(t, workspaceStream, "production-workspace")
+	revalidationDeadline := time.Now().Add(2 * time.Second)
+	var revalidatedWorkspace workspacetunnel.StreamOpener
+	for time.Now().Before(revalidationDeadline) {
+		candidate, ready := workspaceGateway.Registry().Lookup(binding)
+		if ready && candidate.Sequence() == 1 && candidate != workspaceStream {
+			revalidatedWorkspace = candidate
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if _, err := opened.Write([]byte("production-workspace")); err != nil {
-		t.Fatal(err)
+	if revalidatedWorkspace == nil {
+		t.Fatal("workspace did not reconnect with its first credential after bounded revalidation")
 	}
-	responseBytes := make([]byte, len("production-workspace"))
-	if _, err := io.ReadFull(opened, responseBytes); err != nil || string(responseBytes) != "production-workspace" {
-		t.Fatalf("workspace relay response=%q error=%v", responseBytes, err)
-	}
-	_ = opened.Close()
+	assertProductionWorkspaceEcho(t, revalidatedWorkspace, "revalidated-production-workspace")
 
 	deadline := time.Now().Add(5 * time.Second)
+	var renewedWorkspace workspacetunnel.StreamOpener
 	for time.Now().Before(deadline) {
-		issued, authenticated := authority.counts()
-		if issued >= 2 && authenticated >= 3 && gateway.registry.Ready(binding) {
+		gateway.registry.mu.Lock()
+		controlSlot := gateway.registry.bindings[binding]
+		controlRenewed := controlSlot != nil && controlSlot.active != nil && controlSlot.active.ready &&
+			!controlSlot.active.closed.Load() && controlSlot.active.authenticated.Sequence == 2
+		gateway.registry.mu.Unlock()
+		candidate, workspaceReady := workspaceGateway.Registry().Lookup(binding)
+		if controlRenewed && workspaceReady && candidate.Sequence() == 2 &&
+			authority.bearerAuthenticationCount(nativeSessionTestCredential(2)) >= 2 {
+			renewedWorkspace = candidate
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	issued, authenticated := authority.counts()
-	if issued < 2 || authenticated < 3 {
-		t.Fatalf("make-before-break/reconnect proof incomplete: issued=%d authenticated=%d", issued, authenticated)
+	if renewedWorkspace == nil {
+		stream, ready := workspaceGateway.Registry().Lookup(binding)
+		sequence := uint64(0)
+		if ready {
+			sequence = stream.Sequence()
+		}
+		t.Fatalf("paired renewal/reconnect proof incomplete: issued=%d authenticated=%d workspace_sequence=%d second_bearer_calls=%d",
+			issued, authenticated, sequence, authority.bearerAuthenticationCount(nativeSessionTestCredential(2)))
 	}
 	if issued > guestenrollment.MaxLiveGuestSessionsPerBinding {
 		t.Fatalf("guest issued too many live credentials: %d", issued)
 	}
+	assertProductionWorkspaceEcho(t, renewedWorkspace, "renewed-production-workspace")
 
 	authority.revoke()
 	select {
@@ -318,6 +340,22 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(runtimeDirectory, nativesession.ReadinessFileName)); !os.IsNotExist(err) {
 		t.Fatal("revocation left guest session readiness")
+	}
+}
+
+func assertProductionWorkspaceEcho(t *testing.T, stream workspacetunnel.StreamOpener, payload string) {
+	t.Helper()
+	opened, err := stream.OpenStream(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	if _, err := opened.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	if _, err := io.ReadFull(opened, response); err != nil || string(response) != payload {
+		t.Fatalf("workspace relay response=%q error=%v", response, err)
 	}
 }
 

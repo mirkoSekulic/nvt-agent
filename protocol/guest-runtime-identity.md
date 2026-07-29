@@ -219,7 +219,7 @@ branch is present in the daemon or protocol. The separate
 [`nvt.native-session/v1`](native-session.md) guest client obtains only a
 derived short-lived session credential over a root-only local socket; it never
 receives this bearer. The production gateway accepts that bounded control
-session. The separate [`nvt.native-workspace/v1`](native-workspace.md) yamux
-contract is proven hermetically but is not wired to a production guest or
-browser route. Production workspace routing and mediated VM networking remain
-separate future gates.
+session. The production guest and gateway also establish the separate
+[`nvt.native-workspace/v1`](native-workspace.md) yamux transport using the same
+derived credential. No browser handler consumes its active stream boundary;
+browser routing and mediated VM networking remain separate future gates.
