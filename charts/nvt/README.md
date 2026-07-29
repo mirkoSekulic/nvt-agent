@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.40`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.41`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.40 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.41 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.40 --namespace nvt --create-namespace
+  --version 0.8.41 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -420,7 +420,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.40`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.41`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -783,6 +783,48 @@ gateway:
 
 The chart creates a ClusterIP Service, not an external Ingress. Configure the
 cluster's ingress layer separately.
+
+### Native VM guest session listener
+
+The provider-neutral native guest listener is separately opt-in and remains
+unrelated to browser ingress. Supply an existing TLS Secret whose certificate
+covers the in-cluster gateway DNS name and an explicit CA Secret for the
+broker. The chart never generates or embeds private key material:
+
+```yaml
+gateway:
+  enabled: true
+  replicas: 1
+  nativeSession:
+    enabled: true
+    port: 7443
+    tls:
+      existingSecret: nvt-gateway-native-session-tls
+      certificateKey: tls.crt
+      privateKeyKey: tls.key
+    brokerURL: https://nvt-broker.nvt.svc.cluster.local:7347
+    serverName: nvt-broker.nvt.svc.cluster.local
+    ca:
+      existingSecret: nvt-broker-tls
+      key: ca.crt
+    authenticationTimeoutSeconds: 5
+    revalidationIntervalSeconds: 30
+```
+
+The Service exposes `native-session` as TLS. The gateway validates each hello
+through the broker, discards the session bearer, and closes the connection at
+the bounded revalidation interval so reconnect must authenticate again. The
+registry is process-local, so Helm requires exactly one gateway replica while
+this feature is enabled. The native listener port must also differ from both
+the HTTP container port and HTTP Service port. Temporary broker or bounded
+capacity failures close without a definitive rejection so the guest retries
+the same credential; only an authenticated denial or exact status mismatch is
+terminal. Missing Secrets or keys fail at Kubernetes volume
+setup; invalid TLS or CA material fails gateway startup. This phase exposes
+only the bounded agentd relay used by the native control contract. It does not
+publish a browser/code-server route or implement an HTTP/WebSocket reverse
+tunnel. The gateway loads both TLS identity and broker trust once at startup;
+restart its Deployment after rotating either referenced Secret.
 
 ### OIDC
 

@@ -7,6 +7,45 @@
 {{- if and (eq .Values.gateway.routing.mode "subdomain") (not .Values.gateway.baseDomain) }}
 {{- fail "gateway.baseDomain is required when gateway.routing.mode=subdomain" }}
 {{- end }}
+{{- $nativeSession := .Values.gateway.nativeSession }}
+{{- if $nativeSession.enabled }}
+{{- if ne (int .Values.gateway.replicas) 1 }}
+{{- fail "gateway.replicas must be exactly 1 when gateway.nativeSession.enabled=true because the registry is process-local" }}
+{{- end }}
+{{- if or (lt (int $nativeSession.port) 1) (gt (int $nativeSession.port) 65535) (eq (int $nativeSession.port) (int .Values.gateway.port)) (eq (int $nativeSession.port) (int .Values.gateway.service.port)) }}
+{{- fail "gateway.nativeSession.port must be between 1 and 65535 and differ from gateway.port and gateway.service.port" }}
+{{- end }}
+{{- if or (not (regexMatch `^https://[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?(?::[0-9]{1,5})?$` $nativeSession.brokerURL)) (gt (len $nativeSession.brokerURL) 2048) }}
+{{- fail "gateway.nativeSession.brokerURL must be one canonical HTTPS origin" }}
+{{- end }}
+{{- $nativeBrokerPortMatch := regexFind `:[0-9]{1,5}$` $nativeSession.brokerURL }}
+{{- if $nativeBrokerPortMatch }}{{- $nativeBrokerPort := int (trimPrefix ":" $nativeBrokerPortMatch) }}{{- if or (lt $nativeBrokerPort 1) (gt $nativeBrokerPort 65535) }}{{- fail "gateway.nativeSession.brokerURL port must be between 1 and 65535" }}{{- end }}{{- end }}
+{{- if or (gt (len $nativeSession.serverName) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $nativeSession.serverName)) }}
+{{- fail "gateway.nativeSession.serverName must be a DNS name" }}
+{{- end }}
+{{- if not (regexMatch (printf `^https://%s(?::[0-9]{1,5})?$` (regexQuoteMeta $nativeSession.serverName)) $nativeSession.brokerURL) }}
+{{- fail "gateway.nativeSession.serverName must exactly match gateway.nativeSession.brokerURL" }}
+{{- end }}
+{{- range $secret := list $nativeSession.tls.existingSecret $nativeSession.ca.existingSecret }}
+{{- if or (gt (len $secret) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$` $secret)) }}
+{{- fail "gateway.nativeSession existing Secret references must be valid names" }}
+{{- end }}
+{{- end }}
+{{- range $key := list $nativeSession.tls.certificateKey $nativeSession.tls.privateKeyKey $nativeSession.ca.key }}
+{{- if or (gt (len $key) 253) (not (regexMatch `^[A-Za-z0-9._-]+$` $key)) }}
+{{- fail "gateway.nativeSession Secret keys are invalid" }}
+{{- end }}
+{{- end }}
+{{- if eq $nativeSession.tls.certificateKey $nativeSession.tls.privateKeyKey }}
+{{- fail "gateway.nativeSession TLS certificate and private key keys must differ" }}
+{{- end }}
+{{- if or (lt (int $nativeSession.authenticationTimeoutSeconds) 1) (gt (int $nativeSession.authenticationTimeoutSeconds) 30) }}
+{{- fail "gateway.nativeSession.authenticationTimeoutSeconds must be between 1 and 30" }}
+{{- end }}
+{{- if or (lt (int $nativeSession.revalidationIntervalSeconds) 1) (gt (int $nativeSession.revalidationIntervalSeconds) 60) }}
+{{- fail "gateway.nativeSession.revalidationIntervalSeconds must be between 1 and 60" }}
+{{- end }}
+{{- end }}
 {{- if eq .Values.gateway.routing.mode "path" }}
 {{- if not .Values.gateway.publicURL }}
 {{- fail "gateway.publicURL is required when gateway.routing.mode=path" }}
@@ -153,8 +192,19 @@ spec:
         {{- include "nvt.gatewaySelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: nvt-agent-gateway
-      {{- if $brandingConfigMap }}
+      {{- if $nativeSession.enabled }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- end }}
+      {{- if or $brandingConfigMap $nativeSession.enabled }}
       volumes:
+        {{- if $brandingConfigMap }}
         - name: nvt-branding
           configMap:
             name: {{ $brandingConfigMap | quote }}
@@ -169,16 +219,52 @@ spec:
                 path: nvt-agent-mark-192.png
               - key: nvt-agent-mark-512.png
                 path: nvt-agent-mark-512.png
+        {{- end }}
+        {{- if $nativeSession.enabled }}
+        - name: native-session-tls
+          secret:
+            secretName: {{ $nativeSession.tls.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ $nativeSession.tls.certificateKey | quote }}
+                path: tls.crt
+              - key: {{ $nativeSession.tls.privateKeyKey | quote }}
+                path: tls.key
+        - name: native-session-broker-ca
+          secret:
+            secretName: {{ $nativeSession.ca.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ $nativeSession.ca.key | quote }}
+                path: ca.crt
+        {{- end }}
       {{- end }}
       containers:
         - name: gateway
           image: {{ include "nvt.image" (dict "root" . "name" "gateway.image" "image" .Values.gateway.image) | quote }}
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
-          {{- if $brandingConfigMap }}
+          {{- if or $brandingConfigMap $nativeSession.enabled }}
           volumeMounts:
+            {{- if $brandingConfigMap }}
             - name: nvt-branding
               mountPath: /usr/local/share/nvt-agent/branding
               readOnly: true
+            {{- end }}
+            {{- if $nativeSession.enabled }}
+            - name: native-session-tls
+              mountPath: /var/run/nvt-agent/native-session-tls
+              readOnly: true
+            - name: native-session-broker-ca
+              mountPath: /var/run/nvt-agent/native-session-broker
+              readOnly: true
+            {{- end }}
+          {{- end }}
+          {{- if $nativeSession.enabled }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           {{- end }}
           args:
             - --base-domain={{ .Values.gateway.baseDomain }}
@@ -188,6 +274,17 @@ spec:
             {{- end }}
             - --listen-addr=:{{ .Values.gateway.port }}
             - --default-target-port={{ .Values.gateway.defaultTargetPort }}
+            {{- if $nativeSession.enabled }}
+            - --native-session-enabled=true
+            - --native-session-listen-addr=:{{ $nativeSession.port }}
+            - --native-session-tls-certificate-file=/var/run/nvt-agent/native-session-tls/tls.crt
+            - --native-session-tls-key-file=/var/run/nvt-agent/native-session-tls/tls.key
+            - --native-session-broker-url={{ $nativeSession.brokerURL }}
+            - --native-session-broker-server-name={{ $nativeSession.serverName }}
+            - --native-session-broker-ca-file=/var/run/nvt-agent/native-session-broker/ca.crt
+            - --native-session-authentication-timeout-seconds={{ $nativeSession.authenticationTimeoutSeconds }}
+            - --native-session-revalidation-interval-seconds={{ $nativeSession.revalidationIntervalSeconds }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -280,6 +377,10 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.gateway.port }}
+            {{- if $nativeSession.enabled }}
+            - name: native-session
+              containerPort: {{ $nativeSession.port }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

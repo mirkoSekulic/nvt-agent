@@ -14,4 +14,10 @@ spec:
     - name: http
       port: {{ .Values.gateway.service.port }}
       targetPort: {{ .Values.gateway.port }}
+    {{- if .Values.gateway.nativeSession.enabled }}
+    - name: native-session
+      port: {{ .Values.gateway.nativeSession.port }}
+      targetPort: {{ .Values.gateway.nativeSession.port }}
+      appProtocol: tls
+    {{- end }}
 {{- end }}

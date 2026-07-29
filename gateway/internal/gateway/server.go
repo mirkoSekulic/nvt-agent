@@ -41,6 +41,7 @@ type Config struct {
 	Routing           RoutingConfig
 	Auth              AuthConfig
 	BrandingDir       string
+	NativeSession     NativeSessionConfig
 	basePathValue     string
 	publicOriginValue string
 	publicURLParsed   bool
@@ -155,6 +156,16 @@ func (c Config) Validate() error {
 	}
 	if c.DefaultTargetPort <= 0 || c.DefaultTargetPort > 65535 {
 		return fmt.Errorf("defaultTargetPort must be between 1 and 65535")
+	}
+	if err := c.NativeSession.validate(); err != nil {
+		return err
+	}
+	if c.NativeSession.Enabled {
+		_, httpPort, httpErr := net.SplitHostPort(c.ListenAddr)
+		_, nativePort, nativeErr := net.SplitHostPort(c.NativeSession.ListenAddr)
+		if httpErr == nil && nativeErr == nil && httpPort == nativePort {
+			return fmt.Errorf("nativeSession.listenAddr must use a separate port from listenAddr")
+		}
 	}
 	authMode := c.Auth.Mode
 	if authMode == "" {

@@ -199,8 +199,9 @@ requires a successful complete integrity validation.
 ## Implementation boundary
 
 The host bundle implements the trusted guest-side credential request and
-outbound native-session client. Hermetic and test-only QEMU fixtures provide a
-synthetic gateway-side authenticator. There is still no production gateway
-listener, reverse tunnel, browser route publication, mediated VM egress, cloud
-provider, or production VM runtime. Pod, Kata, Compose, agentd, runtime
-plugins, and the production gateway remain unchanged.
+outbound native-session client. The production gateway now implements the
+opt-in TLS acceptor and bounded process-local registry, and the hermetic
+test-only QEMU fixture exercises that listener. There is still no reverse
+tunnel, browser route publication, mediated VM egress, cloud provider, or
+production VM runtime. Pod, Kata, Compose, agentd, and runtime plugins remain
+unchanged.

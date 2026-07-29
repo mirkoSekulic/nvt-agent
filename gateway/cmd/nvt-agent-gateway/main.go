@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/gateway/internal/gateway"
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -26,6 +30,8 @@ func main() {
 	var authorizationRaw string
 	var admissionRaw string
 	var claimEnrichmentRaw string
+	var nativeSessionAuthenticationTimeoutSeconds int
+	var nativeSessionRevalidationIntervalSeconds int
 	flag.StringVar(&cfg.BaseDomain, "base-domain", envString("NVT_GATEWAY_BASE_DOMAIN", "agents.localhost"), "base DNS domain for AgentRun access")
 	flag.StringVar(&cfg.PublicURL, "public-url", envString("NVT_GATEWAY_PUBLIC_URL", ""), "externally visible base URL for dashboard and OAuth callbacks")
 	flag.StringVar(&cfg.Routing.Mode, "routing-mode", envString("NVT_GATEWAY_ROUTING_MODE", "subdomain"), "routing mode: subdomain or path")
@@ -59,8 +65,19 @@ func main() {
 	flag.StringVar(&authorizationRaw, "authorization", envString("NVT_GATEWAY_AUTHORIZATION", ""), "gateway authorization policy JSON")
 	flag.StringVar(&admissionRaw, "admission", envString("NVT_GATEWAY_ADMISSION", ""), "gateway login admission policy JSON")
 	flag.StringVar(&claimEnrichmentRaw, "claim-enrichment", envString("NVT_GATEWAY_CLAIM_ENRICHMENT", ""), "gateway OAuth claim enrichment JSON")
+	flag.BoolVar(&cfg.NativeSession.Enabled, "native-session-enabled", strictEnvBool("NVT_GATEWAY_NATIVE_SESSION_ENABLED", false), "enable the native guest session TLS listener")
+	flag.StringVar(&cfg.NativeSession.ListenAddr, "native-session-listen-addr", envString("NVT_GATEWAY_NATIVE_SESSION_LISTEN_ADDR", ":7443"), "native guest session TLS listen address")
+	flag.StringVar(&cfg.NativeSession.TLSCertificateFile, "native-session-tls-certificate-file", envString("NVT_GATEWAY_NATIVE_SESSION_TLS_CERTIFICATE_FILE", ""), "native guest session TLS certificate file")
+	flag.StringVar(&cfg.NativeSession.TLSKeyFile, "native-session-tls-key-file", envString("NVT_GATEWAY_NATIVE_SESSION_TLS_KEY_FILE", ""), "native guest session TLS key file")
+	flag.StringVar(&cfg.NativeSession.BrokerURL, "native-session-broker-url", envString("NVT_GATEWAY_NATIVE_SESSION_BROKER_URL", ""), "canonical HTTPS broker origin for native session authentication")
+	flag.StringVar(&cfg.NativeSession.BrokerServerName, "native-session-broker-server-name", envString("NVT_GATEWAY_NATIVE_SESSION_BROKER_SERVER_NAME", ""), "exact broker TLS DNS server name")
+	flag.StringVar(&cfg.NativeSession.BrokerCAFile, "native-session-broker-ca-file", envString("NVT_GATEWAY_NATIVE_SESSION_BROKER_CA_FILE", ""), "explicit broker CA file")
+	flag.IntVar(&nativeSessionAuthenticationTimeoutSeconds, "native-session-authentication-timeout-seconds", strictEnvInt("NVT_GATEWAY_NATIVE_SESSION_AUTHENTICATION_TIMEOUT_SECONDS", 5), "native session broker authentication timeout")
+	flag.IntVar(&nativeSessionRevalidationIntervalSeconds, "native-session-revalidation-interval-seconds", strictEnvInt("NVT_GATEWAY_NATIVE_SESSION_REVALIDATION_INTERVAL_SECONDS", 30), "maximum native session trust interval before broker reauthentication")
 	flag.StringVar(&kubeconfig, "kubeconfig", envString("KUBECONFIG", ""), "path to kubeconfig, optional")
 	flag.Parse()
+	cfg.NativeSession.AuthenticationTimeout = time.Duration(nativeSessionAuthenticationTimeoutSeconds) * time.Second
+	cfg.NativeSession.RevalidationInterval = time.Duration(nativeSessionRevalidationIntervalSeconds) * time.Second
 
 	cfg.Auth.OIDC.Scopes = gateway.SplitScopes(envString("NVT_GATEWAY_OIDC_SCOPES", ""))
 	cfg.Auth.OAuth2.Scopes = gateway.SplitScopes(envString("NVT_GATEWAY_OAUTH2_SCOPES", ""))
@@ -97,10 +114,53 @@ func main() {
 	if err != nil {
 		log.Fatalf("create gateway server: %v", err)
 	}
-	log.Printf("nvt-agent-gateway listening on %s with routing mode %s in namespace %s", cfg.ListenAddr, cfg.Routing.Mode, namespace)
-	if err := http.ListenAndServe(cfg.ListenAddr, server); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	nativeSessionServer, err := gateway.NewNativeSessionServer(cfg.NativeSession)
+	if err != nil {
+		log.Fatalf("create native session listener: %v", err)
+	}
+	if err := serve(cfg, namespace, server, nativeSessionServer); err != nil {
 		log.Fatalf("serve gateway: %v", err)
 	}
+}
+
+func serve(cfg gateway.Config, namespace string, handler http.Handler, nativeSessionServer *gateway.NativeSessionServer) error {
+	lifetime, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: handler}
+	errorCount := 1
+	if nativeSessionServer != nil {
+		errorCount++
+	}
+	errorsChannel := make(chan error, errorCount)
+	go func() {
+		log.Printf("nvt-agent-gateway listening on %s with routing mode %s in namespace %s", cfg.ListenAddr, cfg.Routing.Mode, namespace)
+		errorsChannel <- httpServer.ListenAndServe()
+	}()
+	if nativeSessionServer != nil {
+		go func() {
+			log.Printf("nvt-agent-gateway native session listener enabled on %s", cfg.NativeSession.ListenAddr)
+			errorsChannel <- nativeSessionServer.ListenAndServe()
+		}()
+	}
+	var serveError error
+	select {
+	case <-lifetime.Done():
+	case serveError = <-errorsChannel:
+		if errors.Is(serveError, http.ErrServerClosed) {
+			serveError = nil
+		}
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if nativeSessionServer != nil {
+		if err := nativeSessionServer.Shutdown(shutdownContext); err != nil && serveError == nil {
+			serveError = errors.New("native session shutdown failed")
+		}
+	}
+	if err := httpServer.Shutdown(shutdownContext); err != nil && serveError == nil {
+		serveError = errors.New("HTTP shutdown failed")
+	}
+	return serveError
 }
 
 func kubernetesClient(kubeconfig string) (ctrlclient.Client, string, error) {
@@ -169,6 +229,30 @@ func envBool(name string, fallback bool) bool {
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fallback
+	}
+	return parsed
+}
+
+func strictEnvInt(name string, fallback int) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Fatalf("invalid config: %s must be an integer", name)
+	}
+	return parsed
+}
+
+func strictEnvBool(name string, fallback bool) bool {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Fatalf("invalid config: %s must be a boolean", name)
 	}
 	return parsed
 }
