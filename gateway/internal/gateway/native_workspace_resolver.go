@@ -32,6 +32,7 @@ func NewNativeWorkspaceResolver(control NativeSessionRelay, workspace NativeWork
 
 func (resolver *nativeWorkspaceResolver) Resolve(agentRun *nvtv1alpha1.AgentRun) (workspacetunnel.StreamOpener, error) {
 	if resolver == nil || agentRun == nil || agentRun.Spec.Execution == nil ||
+		!agentRun.DeletionTimestamp.IsZero() ||
 		agentRun.Spec.Execution.Kind != nvtv1alpha1.AgentRunExecutionVM ||
 		agentRun.Spec.Execution.Driver == "" || agentRun.Spec.Execution.Driver == "kubernetes" ||
 		agentRun.Status.Phase != nvtv1alpha1.AgentRunPhaseRunning {

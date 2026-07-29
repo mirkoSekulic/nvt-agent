@@ -70,6 +70,22 @@ func TestNativeWorkspaceResolverExactBinding(t *testing.T) {
 	}
 }
 
+func TestNativeWorkspaceResolverRejectsDeletingRunBeforeRegistryLookup(t *testing.T) {
+	run, binding := nativeWorkspaceResolverFixture(t)
+	now := metav1.Now()
+	run.DeletionTimestamp = &now
+	control := &resolverControl{ready: true}
+	workspace := &resolverWorkspace{ready: true, opener: &resolverOpener{binding: binding, sequence: 1}}
+
+	_, err := NewNativeWorkspaceResolver(control, workspace).Resolve(run)
+	if !errors.Is(err, ErrNativeWorkspaceRouteNotFound) {
+		t.Fatalf("deleting run error=%v, want not found", err)
+	}
+	if len(control.seen) != 0 || len(workspace.seen) != 0 {
+		t.Fatalf("deleting run queried registries: control=%#v workspace=%#v", control.seen, workspace.seen)
+	}
+}
+
 func TestNativeWorkspaceResolverRejectsEveryBindingMismatch(t *testing.T) {
 	mutations := map[string]func(*nvtv1alpha1.AgentRunNativeGuestBinding){
 		"agent run UID":       func(value *nvtv1alpha1.AgentRunNativeGuestBinding) { value.AgentRunUID = "different-uid" },
