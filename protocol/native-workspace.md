@@ -1,7 +1,8 @@
 # Native workspace reverse-tunnel contract
 
-Status: versioned provider-neutral contract and conformance proof
-(`nvt.native-workspace/v1`). Production gateway/browser routing is not wired.
+Status: versioned provider-neutral contract, conformance proof, and trusted
+host-bundle guest forwarder (`nvt.native-workspace/v1`). Production gateway
+workspace/browser routing is not wired.
 
 This contract defines a separate guest-initiated data-plane connection through
 which a trusted gateway may open bounded raw TCP streams to one fixed native
@@ -187,14 +188,17 @@ that yamux has QUIC-like loss isolation.
 
 ## Current implementation boundary
 
-The repository includes a hermetic race-tested conformance adapter using the
-real pinned yamux library. It proves the synthetic TLS boundary, exact
+The repository includes a hermetic race-tested conformance adapter and the
+optional trusted `nvt-guest-sessiond` guest integration using the real pinned
+yamux library. They prove the synthetic TLS boundary, exact
 authentication/window derivation, older/equal/newer standby selection, Go
 reverse-proxy/custom `DialContext` HTTP, Upgrade-style bidirectional traffic,
 concurrent streams, payloads larger than one window, bidirectional inactivity,
-limits, direction enforcement, teardown/promotion, and redacted observability.
+limits, direction enforcement, teardown/promotion, same-credential paired
+control/workspace renewal, fixed-target reachability, and redacted
+observability.
 
-No production gateway HTTP handler, browser/code-server route, host-bundle
-workspace forwarder, chart value, VM egress path, cloud provider, or public VM
-listener is added by this contract phase. Production gateway routing and the
-trusted guest workspace component are later reviewed changes.
+No production gateway workspace listener or HTTP handler,
+browser/code-server route, chart value, VM egress path, cloud provider, or
+public VM listener is added by the guest integration phase. Production gateway
+workspace acceptance and browser routing are later reviewed changes.

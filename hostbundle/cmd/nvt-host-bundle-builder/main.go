@@ -32,6 +32,7 @@ func main() {
 	config := flag.String("config", "", "example guest supervisor config")
 	identityConfig := flag.String("identity-config", "", "example guest runtime identity config")
 	sessionConfig := flag.String("session-config", "", "example native guest session config")
+	workspaceSessionConfig := flag.String("workspace-session-config", "", "example native guest session config with workspace forwarding")
 	flag.Parse()
 	if flag.NArg() != 0 || *version == "" || *buildID == "" || *archive == "" || *layout == "" || *tag == "" || *source == "" {
 		fmt.Fprintln(os.Stderr, "nvt-host-bundle-builder: all release/output flags are required")
@@ -51,6 +52,7 @@ func main() {
 		{Path: "share/examples/guest.json", Source: *config, Mode: 0o644},
 		{Path: "share/examples/identity.json", Source: *identityConfig, Mode: 0o644},
 		{Path: "share/examples/session.json", Source: *sessionConfig, Mode: 0o644},
+		{Path: "share/examples/session-workspace.json", Source: *workspaceSessionConfig, Mode: 0o644},
 	}
 	if err := os.MkdirAll(filepath.Dir(*archive), 0o755); err != nil {
 		fatal("create output directory")
@@ -65,6 +67,7 @@ func main() {
 		ServiceIdentity:  "nvt-agent-guest.service",
 		Compatibility: contract.Compatibility{
 			AgentdProtocol: contract.AgentdProtocolVersion, NativeSessionProtocol: contract.NativeSessionProtocolVersion,
+			NativeWorkspaceProtocol: contract.NativeWorkspaceProtocolVersion,
 		},
 	}
 	if _, err := bundle.BuildArchive(*archive, manifest, inputs); err != nil {

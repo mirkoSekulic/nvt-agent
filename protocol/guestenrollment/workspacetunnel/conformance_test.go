@@ -544,15 +544,46 @@ func startEchoBackend(t *testing.T) string {
 
 func TestLoopbackEndpointIsFixedAndStrict(t *testing.T) {
 	for _, valid := range []string{"127.0.0.1:4090", "[::1]:4090"} {
-		if err := validateLoopbackEndpoint(valid); err != nil {
+		if err := ValidateLoopbackEndpoint(valid); err != nil {
 			t.Fatalf("valid endpoint %q: %v", valid, err)
 		}
 	}
 	for _, invalid := range []string{"localhost:4090", "0.0.0.0:4090", "127.0.0.1:0", "127.0.0.1:99999", "http://127.0.0.1:4090", "/tmp/workspace.sock"} {
-		if err := validateLoopbackEndpoint(invalid); err == nil {
+		if err := ValidateLoopbackEndpoint(invalid); err == nil {
 			t.Fatalf("invalid endpoint %q accepted", invalid)
 		}
 	}
+}
+
+func TestGuestForwarderChecksOnlyItsValidatedFixedDestination(t *testing.T) {
+	backend := startEchoBackend(t)
+	gatewayConnection, guestConnection := net.Pipe()
+	forwarder, err := NewGuestForwarder(guestConnection, testBinding(), time.Now().Add(time.Minute), backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := forwarder.CheckDestination(t.Context()); err != nil {
+		t.Fatalf("reachable fixed destination was rejected: %v", err)
+	}
+	_ = gatewayConnection.Close()
+	_ = forwarder.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreachable := listener.Addr().String()
+	_ = listener.Close()
+	gatewayConnection, guestConnection = net.Pipe()
+	forwarder, err = NewGuestForwarder(guestConnection, testBinding(), time.Now().Add(time.Minute), unreachable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := forwarder.CheckDestination(t.Context()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("unreachable fixed destination error=%v", err)
+	}
+	_ = gatewayConnection.Close()
+	_ = forwarder.Close()
 }
 
 var _ StreamOpener = (*GatewaySession)(nil)

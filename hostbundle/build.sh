@@ -100,7 +100,8 @@ build_static ./cmd/nvt-guest-session-fixture "${OUTPUT}/bin/nvt-guest-session-fi
     --session-service "${ROOT}/hostbundle/files/nvt-guest-session.service" \
     --config "${ROOT}/hostbundle/files/guest.json" \
     --identity-config "${ROOT}/hostbundle/files/identity.json" \
-    --session-config "${ROOT}/hostbundle/files/session.json" >"${OUTPUT}/digest.txt"
+    --session-config "${ROOT}/hostbundle/files/session.json" \
+    --workspace-session-config "${ROOT}/hostbundle/files/session-workspace.json" >"${OUTPUT}/digest.txt"
 )
 
 printf 'Built NVT host bundle %s for linux/%s at %s\n' "${VERSION}" "${ARCHITECTURE}" "${OUTPUT}"

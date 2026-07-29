@@ -28,7 +28,8 @@ manifest. Its schema is:
   "service_identity": "nvt-agent-guest.service",
   "compatibility": {
     "agentd_protocol": "nvt.agentd/v1",
-    "native_session_protocol": "nvt.native-session/v1"
+    "native_session_protocol": "nvt.native-session/v1",
+    "native_workspace_protocol": "nvt.native-workspace/v1"
   },
   "files": [
     {
@@ -47,6 +48,12 @@ valid; such a bundle provides only the original agentd/supervisor lifecycle.
 When present it must equal `nvt.native-session/v1`. Unknown values fail closed.
 This preserves decoding of already published `nvt.host-bundle/v1` digests
 without silently changing their requirements.
+
+`native_workspace_protocol` is likewise optional and additive. Its absence is
+valid for every bundle published before the trusted workspace forwarder was
+packaged. When present it must equal `nvt.native-workspace/v1`; unknown values
+fail closed. The separate marker does not change `nvt.native-session/v1` or
+make workspace forwarding mandatory for a guest configuration.
 
 `bundle_version` is the coordinated release identity. `build_id` is the full
 source revision. Files are sorted by path and have deterministic content,
@@ -119,8 +126,13 @@ The bundle includes three independent native service boundaries:
   `nvt-guest-sessiond`. It requests only a short-lived fixed-audience session
   credential over the identity daemon's root-only Unix socket, establishes
   the provider-neutral outbound [`nvt.native-session/v1`](native-session.md)
-  transport, and relays bounded JSON to the unchanged agentd socket. It never
-  receives or persists the root runtime identity.
+  transport, and relays bounded JSON to the unchanged agentd socket. When its
+  optional root-owned workspace configuration is present, the same trusted
+  process also establishes a separate
+  [`nvt.native-workspace/v1`](native-workspace.md) TLS/yamux connection using
+  the same current short-lived credential and forwards streams only to the
+  configured literal loopback service. It never receives or persists the root
+  runtime identity.
 
 The agent service requires the identity service. The identity unit uses
 systemd `Type=notify` and becomes active only after durable state has been
@@ -137,10 +149,11 @@ non-zero so systemd stops/restarts the dependent lifecycle without exposing
 bearer state to the agent user.
 
 The current bundle includes the real `agentd` and `agentdctl` sources, the
-trusted native control-session client, plus a bounded session fixture for the
-guest-side lifecycle gate. It does not package the native workspace yamux
-forwarder, code-server, an AI runtime, plugins, a browser route, or mediated VM
-egress.
+trusted native control-session and optional workspace clients, plus a bounded
+session fixture for the guest-side lifecycle gate. It does not package
+code-server, an AI runtime, plugins, a browser route, or mediated VM egress.
+The loopback workspace service remains an explicit provider-installed
+prerequisite.
 
 Readiness is owned by the supervisor. It publishes `guest-ready` only after
 agentd, the tmux session, and the native outbound session are stable,
@@ -174,6 +187,22 @@ and enables the services. The identity state directory is root-owned mode
 provider-owned and are not archive hooks. No bearer is accepted through argv,
 environment, systemd unit content, or ordinary guest configuration.
 
+The bundled `share/examples/session.json` remains the unchanged control-only
+example. `share/examples/session-workspace.json` demonstrates the optional
+non-secret additive block:
+
+```json
+"workspace": {
+  "gateway_endpoint": "tls://workspace-gateway.example.invalid:444",
+  "loopback_endpoint": "127.0.0.1:4090"
+}
+```
+
+Only canonical TLS/DNS endpoints and literal loopback targets are accepted.
+The target never comes from a gateway stream, browser request, AgentRun, or
+driver response. The same configured CA bundle is used for exact server-name
+validation of both outbound connections.
+
 An administrator-owned VM execution class can already carry the opaque,
 non-secret reference without a new core API field:
 
@@ -201,7 +230,7 @@ now requests a short-lived credential only through the root-only identity
 authority and holds it only in trusted session-process memory. The production
 gateway acceptor and test-only real QEMU/TCG guest prove authenticated control
 establishment, relay, and restart. The separate
-[`nvt.native-workspace/v1`](native-workspace.md) contract proves bounded yamux
-workspace streams hermetically, but no workspace forwarder or browser route is
-packaged or wired. Production workspace routing and mediated VM networking
-remain future gates before VM execution is ready.
+[`nvt.native-workspace/v1`](native-workspace.md) guest forwarder is now
+packaged and covered by hermetic TLS/yamux lifecycle tests. A production
+gateway workspace listener, browser route, and mediated VM networking remain
+future gates before VM execution is ready.

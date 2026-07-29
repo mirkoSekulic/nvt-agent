@@ -2,10 +2,12 @@ package nativesession
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -49,6 +51,27 @@ func TestConfigurationRejectsUnsafeEndpointAndFiles(t *testing.T) {
 		IdentitySocketPath: filepath.Join(root, "identity.sock"), AgentdSocketPath: filepath.Join(root, "agentd.sock"),
 		GatewayEndpoint: "tls://gateway.example:7443", CAPEMPath: filepath.Join(root, "ca.pem"),
 	}
+	if validateConfiguration(configuration) != nil {
+		t.Fatal("legacy control-only configuration was rejected")
+	}
+	encoded, err := json.Marshal(configuration)
+	if err != nil || bytes.Contains(encoded, []byte("workspace")) {
+		t.Fatalf("omitted workspace changed control-only encoding: %s error=%v", encoded, err)
+	}
+	configurationPath := filepath.Join(root, "session.json")
+	if err := os.WriteFile(configurationPath, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfiguration(configurationPath)
+	if err != nil || loaded.Workspace != nil || !reflect.DeepEqual(loaded, configuration) {
+		t.Fatalf("control-only round trip=%#v error=%v", loaded, err)
+	}
+	configuration.Workspace = &WorkspaceConfiguration{
+		GatewayEndpoint: "tls://workspace.example:7444", LoopbackEndpoint: "127.0.0.1:4090",
+	}
+	if validateConfiguration(configuration) != nil {
+		t.Fatal("valid workspace configuration was rejected")
+	}
 	for _, endpoint := range []string{
 		"http://gateway.example:7443", "tls://127.0.0.1:7443", "tls://gateway.example:0",
 		"tls://gateway.example:99999", "tls://user@gateway.example:7443", "tls://gateway.example:7443/path",
@@ -57,6 +80,24 @@ func TestConfigurationRejectsUnsafeEndpointAndFiles(t *testing.T) {
 		value.GatewayEndpoint = endpoint
 		if validateConfiguration(value) == nil {
 			t.Fatalf("unsafe endpoint accepted: %s", endpoint)
+		}
+	}
+	for _, target := range []string{"localhost:4090", "0.0.0.0:4090", "127.0.0.1:0", "127.0.0.1:99999", "/tmp/workspace.sock"} {
+		value := configuration
+		workspace := *configuration.Workspace
+		workspace.LoopbackEndpoint = target
+		value.Workspace = &workspace
+		if validateConfiguration(value) == nil {
+			t.Fatalf("unsafe workspace target accepted: %s", target)
+		}
+	}
+	for _, endpoint := range []string{"http://workspace.example:7444", "tls://127.0.0.1:7444", "tls://workspace.example:0", "tls://workspace.example:7444/path"} {
+		value := configuration
+		workspace := *configuration.Workspace
+		workspace.GatewayEndpoint = endpoint
+		value.Workspace = &workspace
+		if validateConfiguration(value) == nil {
+			t.Fatalf("unsafe workspace gateway accepted: %s", endpoint)
 		}
 	}
 	if err := os.Mkdir(runtimeDirectory, 0o750); err != nil {
