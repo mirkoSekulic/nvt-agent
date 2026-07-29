@@ -60,10 +60,15 @@ type Message struct {
 	Reason          string                   `json:"reason,omitempty"`
 }
 
-// Authentication is non-secret authority output. LocalExpiresAt is a
-// conservative monotonic deadline derived from the broker-owned window.
+// Authentication is non-secret authority output. Authenticators return the
+// broker-owned IssuedAt and ExpiresAt values and the validated issuance
+// Sequence. Accept derives LocalExpiresAt conservatively; authenticators must
+// not choose it.
 type Authentication struct {
 	Binding        guestenrollment.Binding
+	Sequence       uint64
+	IssuedAt       time.Time
+	ExpiresAt      time.Time
 	LocalExpiresAt time.Time
 }
 
@@ -136,12 +141,20 @@ func Accept(ctx context.Context, connection net.Conn, authenticator Authenticato
 	binding := *message.Binding
 	credential := message.Credential
 	message.Credential = ""
+	sequence, err := guestenrollment.GuestSessionCredentialSequence(credential)
+	if err != nil {
+		credential = ""
+		return Authentication{}, ErrProtocol
+	}
 	authenticationContext, cancelAuthentication := context.WithDeadline(ctx, deadline)
 	authenticated, err := authenticator.AuthenticateWorkspace(authenticationContext, credential, binding)
 	cancelAuthentication()
 	credential = ""
-	if err != nil || authenticated.Binding != binding || !time.Now().Before(authenticated.LocalExpiresAt) {
-		if errors.Is(err, ErrAuthenticationDenied) || (err == nil && authenticated.Binding != binding) {
+	if err == nil {
+		authenticated, err = deriveAuthentication(authenticated, binding, sequence, time.Now())
+	}
+	if err != nil {
+		if errors.Is(err, ErrAuthenticationDenied) {
 			_ = writeMessage(connection, Message{ContractVersion: Version, Type: HelloReject, Reason: "unauthorized"}, deadline)
 			return Authentication{}, ErrDenied
 		}
@@ -157,6 +170,58 @@ func Accept(ctx context.Context, connection net.Conn, authenticator Authenticato
 	}
 	_ = connection.SetDeadline(time.Time{})
 	return authenticated, nil
+}
+
+func deriveAuthentication(value Authentication, binding guestenrollment.Binding, sequence uint64, now time.Time) (Authentication, error) {
+	if value.Binding != binding || value.Sequence != sequence || sequence == 0 || sequence > guestenrollment.MaxGuestSessionIssuanceSequence {
+		return Authentication{}, ErrAuthenticationDenied
+	}
+	if !value.LocalExpiresAt.IsZero() || value.IssuedAt.IsZero() || value.ExpiresAt.IsZero() || !value.IssuedAt.Before(value.ExpiresAt) {
+		return Authentication{}, ErrAuthenticationTemporary
+	}
+	if !now.Before(value.ExpiresAt) {
+		return Authentication{}, ErrAuthenticationDenied
+	}
+	window := value.ExpiresAt.Sub(value.IssuedAt)
+	if window <= 0 || window > guestenrollment.MaxGuestSessionCredentialLifetime {
+		return Authentication{}, ErrAuthenticationTemporary
+	}
+	remaining := value.ExpiresAt.Sub(now)
+	if remaining > window {
+		remaining = window
+	}
+	if remaining <= 0 {
+		return Authentication{}, ErrAuthenticationDenied
+	}
+	value.LocalExpiresAt = now.Add(remaining)
+	return value, nil
+}
+
+func validateAcceptedAuthentication(value Authentication, now time.Time) error {
+	if guestenrollment.ValidateBinding(value.Binding) != nil || value.Sequence == 0 || value.Sequence > guestenrollment.MaxGuestSessionIssuanceSequence ||
+		value.IssuedAt.IsZero() || value.ExpiresAt.IsZero() || value.LocalExpiresAt.IsZero() ||
+		!value.IssuedAt.Before(value.ExpiresAt) || !now.Before(value.ExpiresAt) || !now.Before(value.LocalExpiresAt) {
+		return ErrProtocol
+	}
+	window := value.ExpiresAt.Sub(value.IssuedAt)
+	localRemaining := value.LocalExpiresAt.Sub(now)
+	authoritativeRemaining := value.ExpiresAt.Sub(now)
+	if authoritativeRemaining > window {
+		authoritativeRemaining = window
+	}
+	if window <= 0 || window > guestenrollment.MaxGuestSessionCredentialLifetime ||
+		localRemaining <= 0 || localRemaining > guestenrollment.MaxGuestSessionCredentialLifetime ||
+		localRemaining > window || localRemaining > authoritativeRemaining {
+		return ErrProtocol
+	}
+	return nil
+}
+
+func validateLocalTrustDeadline(deadline time.Time, now time.Time) error {
+	if deadline.IsZero() || !now.Before(deadline) || deadline.Sub(now) > guestenrollment.MaxGuestSessionCredentialLifetime {
+		return ErrProtocol
+	}
+	return nil
 }
 
 // Establish sends the sensitive hello and waits for the exact acknowledgement.

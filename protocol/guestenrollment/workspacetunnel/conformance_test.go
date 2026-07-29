@@ -44,7 +44,7 @@ func newTunnelHarness(t *testing.T, endpoint string) *tunnelHarness {
 			gatewayResultChannel <- gatewayResult{err: err}
 			return
 		}
-		session, err := NewGatewaySession(gatewayConnection, binding, authenticated.LocalExpiresAt)
+		session, err := NewGatewaySession(gatewayConnection, authenticated)
 		gatewayResultChannel <- gatewayResult{session: session, err: err}
 	}()
 	if err := Establish(t.Context(), guestConnection, binding, credential); err != nil {
@@ -242,7 +242,7 @@ func TestYamuxConcurrentIndependentStreamsAndLimits(t *testing.T) {
 
 func TestYamuxPendingOpenBoundAndCancellationRelease(t *testing.T) {
 	gatewayConnection, peer := net.Pipe()
-	gateway, err := NewGatewaySession(gatewayConnection, testBinding(), time.Now().Add(time.Minute))
+	gateway, err := NewGatewaySession(gatewayConnection, testAcceptedAuthentication(testBinding(), 1, time.Now().Add(time.Minute)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestYamuxPendingOpenBoundAndCancellationRelease(t *testing.T) {
 
 func TestYamuxCancellationReturnsPromptlyAndReleasesAfterBoundedOpen(t *testing.T) {
 	gatewayConnection, peer := net.Pipe()
-	gateway, err := NewGatewaySession(gatewayConnection, testBinding(), time.Now().Add(time.Minute))
+	gateway, err := NewGatewaySession(gatewayConnection, testAcceptedAuthentication(testBinding(), 1, time.Now().Add(time.Minute)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,6 +332,51 @@ func TestYamuxCancellationReturnsPromptlyAndReleasesAfterBoundedOpen(t *testing.
 	_ = gateway.Close()
 }
 
+func TestBidirectionalInactivityDeadlineRefreshesOnOneWayTraffic(t *testing.T) {
+	const timeout = 100 * time.Millisecond
+	gatewaySide, streamSide := net.Pipe()
+	localSide, backendSide := net.Pipe()
+	defer gatewaySide.Close()
+	defer backendSide.Close()
+	done := make(chan struct{})
+	go func() {
+		bridge(&idleConn{Conn: streamSide, timeout: timeout}, &idleConn{Conn: localSide, timeout: timeout})
+		close(done)
+	}()
+
+	for index := range 12 {
+		payload := []byte{byte(index + 1)}
+		writeResult := make(chan error, 1)
+		go func() {
+			_, err := gatewaySide.Write(payload)
+			writeResult <- err
+		}()
+		received := make([]byte, 1)
+		if _, err := io.ReadFull(backendSide, received); err != nil || !bytes.Equal(received, payload) {
+			t.Fatalf("one-way payload %d=%v error=%v", index, received, err)
+		}
+		if err := <-writeResult; err != nil {
+			t.Fatalf("one-way write %d: %v", index, err)
+		}
+		select {
+		case <-done:
+			t.Fatal("sustained one-way activity was treated as idle")
+		default:
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("active bidirectional deadline closed before inactivity")
+	case <-time.After(timeout / 2):
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * timeout):
+		t.Fatal("truly idle bridge did not close within its inactivity bound")
+	}
+}
+
 func TestPinnedYamuxConfigurationIsExplicit(t *testing.T) {
 	config := yamuxConfig()
 	if YamuxVersion != "github.com/hashicorp/yamux/v0.1.2" ||
@@ -349,7 +394,7 @@ func TestPinnedYamuxConfigurationIsExplicit(t *testing.T) {
 
 func TestYamuxRejectsGuestInitiatedStreamWithoutBreakingGatewayStream(t *testing.T) {
 	gatewayConnection, guestConnection := net.Pipe()
-	gateway, err := NewGatewaySession(gatewayConnection, testBinding(), time.Now().Add(time.Minute))
+	gateway, err := NewGatewaySession(gatewayConnection, testAcceptedAuthentication(testBinding(), 1, time.Now().Add(time.Minute)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +467,7 @@ func TestYamuxDisconnectExpiryAndReplacementCloseStreams(t *testing.T) {
 
 	gatewayConnection, guestConnection := net.Pipe()
 	expires := time.Now().Add(80 * time.Millisecond)
-	expiringGateway, err := NewGatewaySession(gatewayConnection, testBinding(), expires)
+	expiringGateway, err := NewGatewaySession(gatewayConnection, testAcceptedAuthentication(testBinding(), 1, expires))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +496,7 @@ func TestYamuxContractMetadataAndErrorsExcludeCanaries(t *testing.T) {
 	headerCanary := "authorization-header-canary"
 	binding := testBinding()
 	gatewayConnection, peer := net.Pipe()
-	gateway, err := NewGatewaySession(gatewayConnection, binding, time.Now().Add(time.Minute))
+	gateway, err := NewGatewaySession(gatewayConnection, testAcceptedAuthentication(binding, 99, time.Now().Add(time.Minute)))
 	if err != nil {
 		t.Fatal(err)
 	}

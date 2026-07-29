@@ -25,8 +25,12 @@ new credential type or audience.
 
 The trusted gateway authenticates that bearer through the broker before
 acknowledging the workspace hello. It requires the returned binding, audience,
-and broker-owned window to match exactly, drops the bearer before creating the
-multiplexer, and enforces a conservative local trust deadline. A definitive
+broker-owned window, and non-secret positive issuance sequence to match
+exactly. The authentication boundary returns that sequence with the binding
+and authoritative issued/expiry timestamps; `Accept` derives the conservative
+local deadline and drops the bearer before creating the multiplexer. Neither
+an authority adapter nor a yamux constructor may extend local trust beyond the
+broker-owned window or the five-minute credential maximum. A definitive
 authority denial may receive `hello_reject`; transport, TLS, DNS, timeout,
 `429`, `5xx`, or malformed-authority failures close silently so a guest may
 retry the same still-live credential. Network reachability is never
@@ -72,6 +76,12 @@ pipeline yamux bytes before validating `hello_ack`; the gateway rejects bytes
 buffered beyond the hello newline. Immediately after the acknowledgement the
 same connection switches to the yamux wire format. There are no later NVT
 JSON frames on this connection.
+
+The conformance suite composes this handshake with a synthetic guest-initiated
+TLS connection and explicit CA/server-name trust. It proves success with TLS
+1.2 or newer and rejection of an untrusted CA, wrong server name, and a
+TLS-1.1-only peer. Production certificate/Secret mounting remains part of the
+later wiring phase.
 
 ## Pinned yamux profile
 
@@ -122,8 +132,10 @@ The guest copies bytes incrementally in both directions with fixed 32 KiB
 buffers and TCP/yamux half-close behavior. It preserves backpressure and does
 not buffer an HTTP body, WebSocket message, or stream as a whole. A stream is
 closed on local dial failure, inactivity, cancellation, either-side failure,
-or session teardown. At most 32 forwarding workers and 64 copy operations may
-exist for one authenticated session.
+or session teardown. Any successful traffic in either direction refreshes the
+single connection-wide inactivity deadline; a quiet read side cannot expire
+while the opposite direction remains active. At most 32 forwarding workers
+and 64 copy operations may exist for one authenticated session.
 
 The gateway exposes only an implementation-neutral `OpenStream(context)`
 boundary returning `net.Conn`; gateway routing must not depend on yamux types.
@@ -144,6 +156,15 @@ cannot preempt active. Existing streams stay on the active connection. Only
 after active closes may the registry promote the ready standby. Streams are
 never migrated between yamux sessions. A new active session can open new
 streams only after exact authentication.
+
+The implementation-neutral registry is bounded to 128 complete bindings. Its
+`StreamOpener` boundary exposes only the complete binding, validated non-secret
+issuance sequence, stream open, and close operations; it does not expose a
+credential or yamux type. Equal sequence permits an overlapping ordinary
+reconnect, newer sequence permits make-before-break renewal, older sequence is
+rejected, and a third connection is rejected while the standby slot is held.
+Activating a standby never preempts active; removal of active atomically
+promotes an already-ready standby.
 
 The conformance adapter receives a conservative local trust deadline and
 closes itself at that deadline. A production registry must additionally apply
@@ -167,10 +188,11 @@ that yamux has QUIC-like loss isolation.
 ## Current implementation boundary
 
 The repository includes a hermetic race-tested conformance adapter using the
-real pinned yamux library. It proves Go reverse-proxy/custom `DialContext` HTTP,
-Upgrade-style bidirectional traffic, concurrent streams, payloads larger than
-one window, limits, direction enforcement, teardown/replacement, and redacted
-observability.
+real pinned yamux library. It proves the synthetic TLS boundary, exact
+authentication/window derivation, older/equal/newer standby selection, Go
+reverse-proxy/custom `DialContext` HTTP, Upgrade-style bidirectional traffic,
+concurrent streams, payloads larger than one window, bidirectional inactivity,
+limits, direction enforcement, teardown/promotion, and redacted observability.
 
 No production gateway HTTP handler, browser/code-server route, host-bundle
 workspace forwarder, chart value, VM egress path, cloud provider, or public VM

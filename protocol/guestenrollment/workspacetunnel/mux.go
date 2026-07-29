@@ -18,11 +18,13 @@ import (
 type StreamOpener interface {
 	OpenStream(context.Context) (net.Conn, error)
 	Binding() guestenrollment.Binding
+	Sequence() uint64
 	Close() error
 }
 
 type GatewaySession struct {
 	binding       guestenrollment.Binding
+	sequence      uint64
 	mux           *yamux.Session
 	base          io.ReadWriteCloser
 	trustDeadline time.Time
@@ -78,8 +80,8 @@ type streamOpenResult struct {
 	err    error
 }
 
-func NewGatewaySession(connection io.ReadWriteCloser, binding guestenrollment.Binding, localTrustDeadline time.Time) (*GatewaySession, error) {
-	if connection == nil || guestenrollment.ValidateBinding(binding) != nil || !time.Now().Before(localTrustDeadline) {
+func NewGatewaySession(connection io.ReadWriteCloser, authentication Authentication) (*GatewaySession, error) {
+	if connection == nil || validateAcceptedAuthentication(authentication, time.Now()) != nil {
 		return nil, ErrProtocol
 	}
 	multiplexer, err := yamux.Client(connection, yamuxConfig())
@@ -88,11 +90,11 @@ func NewGatewaySession(connection io.ReadWriteCloser, binding guestenrollment.Bi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	value := &GatewaySession{
-		binding: binding, mux: multiplexer, base: connection, trustDeadline: localTrustDeadline,
+		binding: authentication.Binding, sequence: authentication.Sequence, mux: multiplexer, base: connection, trustDeadline: authentication.LocalExpiresAt,
 		pending: make(chan struct{}, MaxPendingStreamOpens), active: make(chan struct{}, MaxActiveStreams),
 		lifetime: ctx, cancel: cancel, streams: make(map[*managedConn]struct{}, MaxActiveStreams),
 	}
-	value.timer = time.NewTimer(time.Until(localTrustDeadline))
+	value.timer = time.NewTimer(time.Until(authentication.LocalExpiresAt))
 	value.workers.Add(3)
 	go func() {
 		defer value.workers.Done()
@@ -112,7 +114,7 @@ func NewGatewaySession(connection io.ReadWriteCloser, binding guestenrollment.Bi
 }
 
 func NewGuestForwarder(connection io.ReadWriteCloser, binding guestenrollment.Binding, localTrustDeadline time.Time, endpoint string) (*GuestForwarder, error) {
-	if connection == nil || guestenrollment.ValidateBinding(binding) != nil || !time.Now().Before(localTrustDeadline) || validateLoopbackEndpoint(endpoint) != nil {
+	if connection == nil || guestenrollment.ValidateBinding(binding) != nil || validateLocalTrustDeadline(localTrustDeadline, time.Now()) != nil || validateLoopbackEndpoint(endpoint) != nil {
 		return nil, ErrProtocol
 	}
 	multiplexer, err := yamux.Server(connection, yamuxConfig())
@@ -148,6 +150,13 @@ func (session *GatewaySession) Binding() guestenrollment.Binding {
 		return guestenrollment.Binding{}
 	}
 	return session.binding
+}
+
+func (session *GatewaySession) Sequence() uint64 {
+	if session == nil {
+		return 0
+	}
+	return session.sequence
 }
 
 func (session *GuestForwarder) Binding() guestenrollment.Binding {
@@ -453,17 +462,25 @@ type idleConn struct {
 }
 
 func (connection *idleConn) Read(value []byte) (int, error) {
-	if connection.Conn.SetReadDeadline(time.Now().Add(connection.timeout)) != nil {
+	if connection.Conn.SetDeadline(time.Now().Add(connection.timeout)) != nil {
 		return 0, ErrUnavailable
 	}
-	return connection.Conn.Read(value)
+	count, err := connection.Conn.Read(value)
+	if count > 0 && connection.Conn.SetDeadline(time.Now().Add(connection.timeout)) != nil {
+		return count, ErrUnavailable
+	}
+	return count, err
 }
 
 func (connection *idleConn) Write(value []byte) (int, error) {
-	if connection.Conn.SetWriteDeadline(time.Now().Add(connection.timeout)) != nil {
+	if connection.Conn.SetDeadline(time.Now().Add(connection.timeout)) != nil {
 		return 0, ErrUnavailable
 	}
-	return connection.Conn.Write(value)
+	count, err := connection.Conn.Write(value)
+	if count > 0 && connection.Conn.SetDeadline(time.Now().Add(connection.timeout)) != nil {
+		return count, ErrUnavailable
+	}
+	return count, err
 }
 
 func (connection *idleConn) CloseWrite() error {
