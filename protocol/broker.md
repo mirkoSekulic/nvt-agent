@@ -193,10 +193,12 @@ orchestrator revocation. Bearers are authenticated before request bodies are
 read. Unknown egress bearers are rejected by indexed digest lookup and use
 per-credential rate/concurrency isolation after authentication. The same
 deadline bounds SQLite busy waits and is checked after lock acquisition and at
-the final pre-commit authorization point; expiry before that point rolls back
-and releases admission. A synchronous SQLite commit already begun after the
-final check is the sole uninterruptible OS boundary, may retain its lease only
-until that system call returns, and retains the documented
+the final pre-commit authorization point. Deadline expiry withdraws commit
+authority and closes the client connection, but only the owning request's
+unwind releases its leases; stalled work therefore cannot let replacement work
+exceed the 48/64 concurrency ceilings. Expiry before the commit point rolls the
+transaction back. A synchronous SQLite commit already begun after the final
+check is the sole uninterruptible OS boundary and retains the documented
 committed-response-loss semantics. Requests are at most 8 KiB and responses at
 most 16 KiB. Maintenance removes only expired credential rows; it never evicts
 live credentials or lifecycle/tombstone authority.

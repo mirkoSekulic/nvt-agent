@@ -219,14 +219,16 @@ registry readiness.
 The authority deadline is active before bearer-backed storage lookup. SQLite
 busy waits use only its remaining budget, and the operation checks the same
 deadline after lock acquisition and immediately before commit. Expiry before
-that final authorization point rolls the transaction back and promptly returns
-its bounded admission. Once the final check has passed and SQLite's synchronous
-commit system call has begun, the broker cannot safely interrupt the filesystem
-commit; a commit completed across the client cutoff has the ordinary
-committed-response-loss semantics and consumes one of the two live slots. The
-broker never begins a commit after observing deadline expiry. Only that already
-authorized OS commit may retain its operation admission past the deadline, and
-it releases the admission as soon as the commit system call returns.
+that final authorization point withdraws commit authority and rolls the
+transaction back. The timer does not return the operation's capacity lease:
+only the owning request releases it after all of its work has unwound. A
+blocked hook or OS call can therefore retain a lease past the client cutoff,
+but cannot allow replacement work to exceed the bounded concurrency ceiling.
+Once the final check has passed and SQLite's synchronous commit system call has
+begun, the broker cannot safely interrupt the filesystem commit; a commit
+completed across the client cutoff has the ordinary committed-response-loss
+semantics and consumes one of the two live slots. The broker never begins a
+commit after observing deadline expiry.
 
 ## Provisioning and readiness choreography
 

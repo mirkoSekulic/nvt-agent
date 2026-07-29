@@ -92,6 +92,9 @@ and authenticate use a 48-operation subset so revocation retains headroom. Its
 30-second monotonic deadline bounds SQLite lock waits and every transaction up
 to the final pre-commit check. A synchronous commit already begun after that
 check is treated as a committed response loss rather than replaying plaintext.
+Expiry withdraws authority and closes the client connection, while the owner
+retains its admission leases until its work has actually unwound; stalled work
+cannot make the 48/64 concurrency ceilings over-admit replacement requests.
 
 Each enrollment atomically reserves its complete 20,000-rotation allowance at
 issue time. The default aggregate capacity is 2,000,000 entries (100 admitted

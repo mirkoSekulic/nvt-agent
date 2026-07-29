@@ -280,7 +280,7 @@ class NativeEgressOperation:
 
     def check(self):
         if self.remaining() <= 0:
-            self._finish(expired=True)
+            self._expire()
         with self._lock:
             expired = self._expired
             released = self._released
@@ -288,27 +288,7 @@ class NativeEgressOperation:
             raise EnrollmentFailure("issuer-storage-failed", 503)
 
     def release(self):
-        self._finish(expired=False)
-
-    def commit(self, connection):
         with self._lock:
-            if self._released or self._expired or self._issuer.monotonic() >= self._expires_at:
-                authorized = False
-            else:
-                authorized = True
-                connection.set_progress_handler(None, 0)
-                connection.commit()
-        if not authorized:
-            self._finish(expired=True)
-            raise EnrollmentFailure("issuer-storage-failed", 503)
-
-    def _expire(self):
-        self._finish(expired=True)
-
-    def _finish(self, *, expired):
-        with self._lock:
-            if expired:
-                self._expired = True
             if self._released:
                 return
             self._released = True
@@ -317,6 +297,22 @@ class NativeEgressOperation:
         if self.guest:
             self._issuer.native_egress_guest_slots.release()
         self._issuer.native_egress_operation_slots.release()
+
+    def commit(self, connection):
+        with self._lock:
+            if self._released or self._expired or self._issuer.monotonic() >= self._expires_at:
+                authorized = False
+                self._expired = True
+            else:
+                authorized = True
+                connection.set_progress_handler(None, 0)
+                connection.commit()
+        if not authorized:
+            raise EnrollmentFailure("issuer-storage-failed", 503)
+
+    def _expire(self):
+        with self._lock:
+            self._expired = True
 
 
 class OrchestratorAuthenticator:
@@ -2209,6 +2205,16 @@ class GuestEnrollmentIssuer:
     def _raise_runtime_storage_or_deadline(self, error, operation=None):
         if operation is not None:
             operation.check()
+            error_code = getattr(error, "sqlite_errorcode", None)
+            if isinstance(error_code, int) and (error_code & 0xff) in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            ):
+                # Expected lock contention is an operation-local availability
+                # failure, not evidence that durable state is corrupt. SQLite
+                # can return it just before the absolute timer boundary because
+                # busy_timeout is represented in whole milliseconds.
+                raise EnrollmentFailure("issuer-storage-failed", 503) from error
         self._raise_runtime_storage_failure(error)
 
     def _raise_runtime_storage_failure(self, error):

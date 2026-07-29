@@ -34,6 +34,7 @@ from broker.core.guest_enrollment import (
     NATIVE_EGRESS_IDENTITY_VERSION,
     MAX_LIVE_NATIVE_EGRESS_CREDENTIALS_PER_BINDING,
     MAX_NATIVE_EGRESS_CREDENTIAL_LIFETIME,
+    MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS,
     MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS,
     TOMBSTONE_RETENTION,
     VERSION,
@@ -2289,7 +2290,7 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
 
     def test_native_egress_http_lookup_saturation_returns_429_and_preserves_revoke(self):
         faults = BlockingNativeEgressLookup()
-        issuer = self.issuer(faults=faults, native_egress_operation_timeout=5)
+        issuer = self.issuer(faults=faults, native_egress_operation_timeout=0.1)
         orchestrator_token = "orchestrator-authority-token-0001"
         token_path = Path(self.temporary.name) / "orchestrator.token"
         token_path.write_text(orchestrator_token, encoding="utf-8")
@@ -2371,7 +2372,11 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
                     wait=False,
                 )
         self.assertTrue(faults.wait_for_calls(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS))
-        self.assertTrue(all(0 < value <= 5 for value in faults.deadline_remaining))
+        self.assertTrue(all(0 < value <= 0.1 for value in faults.deadline_remaining))
+        # The client-visible deadline has expired, but every handler remains
+        # inside the injected lookup. Capacity must stay owned until those
+        # handlers actually unwind.
+        time.sleep(0.15)
         calls_at_capacity = faults.calls
         self.assertEqual(
             send(
@@ -2400,7 +2405,24 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
         self.assertEqual(len(issuer.snapshot()["binding_tombstones"]), 1)
         release_blocked()
 
-    def test_native_egress_lookup_deadline_releases_admission_before_lookup_resumes(self):
+        # Do not let the temporary audit/database directory disappear while
+        # expired handlers are still unwinding. Full lease availability is the
+        # observable proof that every owner has passed its finally block.
+        unwind_deadline = time.monotonic() + 3
+        while time.monotonic() < unwind_deadline:
+            acquired = 0
+            for _ in range(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS):
+                if issuer.native_egress_operation_slots.acquire(blocking=False):
+                    acquired += 1
+            for _ in range(acquired):
+                issuer.native_egress_operation_slots.release()
+            if acquired == MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("expired HTTP native-egress handlers did not unwind")
+
+    def test_native_egress_lookup_deadline_retains_admission_until_owner_unwinds(self):
         faults = BlockingNativeEgressLookup()
         issuer = self.issuer(faults=faults, native_egress_operation_timeout=0.1)
         target = binding(uid="lookup-deadline", execution="lookup-deadline", guest="lookup-deadline")
@@ -2423,19 +2445,54 @@ class GuestEnrollmentIssuerTest(unittest.TestCase):
             self.assertTrue(faults.wait_for_calls(1))
             time.sleep(0.15)
 
-            acquired_guest_slots = 0
-            for _ in range(MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS):
-                if issuer.native_egress_guest_slots.acquire(blocking=False):
-                    acquired_guest_slots += 1
-            self.assertEqual(acquired_guest_slots, MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS)
+            def acquire_available(semaphore, maximum):
+                acquired = 0
+                for _ in range(maximum):
+                    if semaphore.acquire(blocking=False):
+                        acquired += 1
+                return acquired
+
+            acquired_guest_slots = acquire_available(
+                issuer.native_egress_guest_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS,
+            )
+            acquired_operation_slots = acquire_available(
+                issuer.native_egress_operation_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS,
+            )
+            self.assertEqual(
+                acquired_guest_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS - 1,
+            )
+            self.assertEqual(
+                acquired_operation_slots,
+                MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS - 1,
+            )
             for _ in range(acquired_guest_slots):
                 issuer.native_egress_guest_slots.release()
+            for _ in range(acquired_operation_slots):
+                issuer.native_egress_operation_slots.release()
 
             faults.release.set()
             with self.assertRaises(EnrollmentFailure) as caught:
                 future.result(timeout=3)
             self.assertEqual(caught.exception.reason, "issuer-storage-failed")
         self.assertEqual(connect_calls, 0)
+
+        acquired_guest_slots = acquire_available(
+            issuer.native_egress_guest_slots,
+            MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS,
+        )
+        acquired_operation_slots = acquire_available(
+            issuer.native_egress_operation_slots,
+            MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS,
+        )
+        self.assertEqual(acquired_guest_slots, MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_GUEST_REQUESTS)
+        self.assertEqual(acquired_operation_slots, MAX_CONCURRENT_NATIVE_EGRESS_IDENTITY_REQUESTS)
+        for _ in range(acquired_guest_slots):
+            issuer.native_egress_guest_slots.release()
+        for _ in range(acquired_operation_slots):
+            issuer.native_egress_operation_slots.release()
 
     def test_native_egress_transaction_uses_current_clock_for_authority_and_capacity(self):
         issuer = self.issuer()
