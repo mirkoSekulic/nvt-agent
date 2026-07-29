@@ -109,6 +109,9 @@ func TestGenerateGuestSessionCredentialUsesCanonicalRandomShape(t *testing.T) {
 	if _, err := GuestSessionCredentialDigest(credential); err != nil {
 		t.Fatal(err)
 	}
+	if decodedSequence, err := GuestSessionCredentialSequence(credential); err != nil || decodedSequence != sequence {
+		t.Fatalf("credential sequence=%d error=%v", decodedSequence, err)
+	}
 	zeroSequence := make([]byte, GuestSessionCredentialBytes)
 	copy(zeroSequence[8:], bytes.Repeat([]byte{0x72}, GuestSessionCredentialRandomBytes))
 	overflowSequence := make([]byte, GuestSessionCredentialBytes)
@@ -131,6 +134,9 @@ func TestGenerateGuestSessionCredentialUsesCanonicalRandomShape(t *testing.T) {
 	} {
 		if _, err := GuestSessionCredentialDigest(invalid); err == nil {
 			t.Fatalf("accepted invalid credential %q", invalid)
+		}
+		if _, err := GuestSessionCredentialSequence(invalid); err == nil {
+			t.Fatalf("decoded invalid credential %q", invalid)
 		}
 	}
 	if MaxLiveGuestSessionsPerBinding != 2 || MaxGuestSessionCredentialLifetime > 5*time.Minute {

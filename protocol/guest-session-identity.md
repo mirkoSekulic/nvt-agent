@@ -199,9 +199,12 @@ requires a successful complete integrity validation.
 ## Implementation boundary
 
 The host bundle implements the trusted guest-side credential request and
-outbound native-session client. The production gateway now implements the
-opt-in TLS acceptor and bounded process-local registry, and the hermetic
-test-only QEMU fixture exercises that listener. There is still no reverse
-tunnel, browser route publication, mediated VM egress, cloud provider, or
-production VM runtime. Pod, Kata, Compose, agentd, and runtime plugins remain
-unchanged.
+outbound native-session client. The production gateway implements the opt-in
+TLS acceptor and bounded process-local control registry, and the hermetic
+test-only QEMU fixture exercises that listener. The separate
+[`nvt.native-workspace/v1`](native-workspace.md) contract proves bounded yamux
+multiplexing with this same identity and fixed audience, without adding a
+second credential or arbitrary scope. It is not wired to the production guest
+or gateway browser handler yet. There is still no production browser route,
+mediated VM egress, cloud provider, or production VM runtime. Pod, Kata,
+Compose, agentd, and runtime plugins remain unchanged.

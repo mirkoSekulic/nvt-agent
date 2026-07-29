@@ -53,8 +53,10 @@ and an explicit broker CA Secret. The broker URL is one canonical HTTPS origin
 whose DNS host exactly matches `serverName`; no ambient CA, proxy, redirect, or
 plaintext fallback is used. The gateway process reads only mounted Secret
 files. Because this first registry is process-local, native sessions require
-one gateway replica. See the chart's `gateway.nativeSession` example. A future
-reviewed contract will add browser/code-server reverse-tunnel multiplexing.
+one gateway replica. See the chart's `gateway.nativeSession` example. The
+separate [`nvt.native-workspace/v1`](../protocol/native-workspace.md) yamux
+contract and conformance proof now exist, but this production gateway does not
+yet accept that data-plane connection or route browser/code-server traffic.
 Restart the gateway after rotating its serving identity or broker CA Secret;
 both are loaded once at process startup.
 

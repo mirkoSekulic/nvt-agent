@@ -9,7 +9,8 @@ precise and every hermetic suite has a clear home.
 - `egressd/go.mod` → `network.yml / egressd`
 - `gateway/go.mod` → `kubernetes.yml / gateway`
 - `hostbundle/go.mod` → `host-bundle.yml / host-bundle`
-- `protocol/guestenrollment/go.mod` → `kubernetes.yml / guest-enrollment`
+- `protocol/guestenrollment/go.mod` → `kubernetes.yml / guest-enrollment`,
+  including the real-yamux native workspace contract/conformance package
 - `operator/go.mod` → `kubernetes.yml / operator` and `kubernetes.yml / operator-helm`
 - `executiondrivers/qemu/go.mod` → `qemu.yml / real-guest-e2e` and
   `images.yml / build (qemu-execution-driver)`; both build the unpublished
@@ -248,7 +249,8 @@ The harness and helper scripts are not standalone cases:
 - `broker.yml`: broker conformance suite
 - `network.yml`: egressd, captured, and transparent Compose smoke
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage
-  plus the provider-neutral guest-enrollment contract/conformance module
+  plus the provider-neutral guest-enrollment and native-workspace yamux
+  contract/conformance packages
 - `images.yml`: shipped images plus local test/reference and fixture images,
   the runtime git-credentials smoke, and the execution-driver host's private
   enrollment-handoff smoke

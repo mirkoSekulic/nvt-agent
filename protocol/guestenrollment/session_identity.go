@@ -103,6 +103,27 @@ func GuestSessionCredentialDigest(credential string) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// GuestSessionCredentialSequence returns only the durable, non-secret
+// issuance sequence encoded into a canonical session credential. Callers must
+// still treat and promptly discard the credential itself as sensitive.
+func GuestSessionCredentialSequence(credential string) (uint64, error) {
+	sequence, err := decodeGuestSessionCredentialSequence(credential)
+	if err != nil {
+		return 0, errors.New("guest session credential is invalid")
+	}
+	return sequence, nil
+}
+
+// ValidateGuestSessionCredential validates the canonical opaque wire form
+// without deriving or retaining a credential digest. Sensitive transports use
+// this before handing the bearer to their authority boundary.
+func ValidateGuestSessionCredential(credential string) error {
+	if validateGuestSessionCredential(credential) != nil {
+		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
 func ValidateGuestSessionIssueRequest(value GuestSessionIssueRequest) error {
 	if value.ContractVersion != GuestSessionIdentityVersion || value.Audience != NativeGuestControlAudience ||
 		ValidateBinding(value.Binding) != nil {
@@ -126,18 +147,28 @@ func ValidateGuestSessionIssueResult(value GuestSessionIssueResult) error {
 }
 
 func validateGuestSessionCredential(credential string) error {
+	_, err := decodeGuestSessionCredentialSequence(credential)
+	return err
+}
+
+func decodeGuestSessionCredentialSequence(credential string) (uint64, error) {
 	if err := validateOpaque(credential, GuestSessionCredentialBytes, GuestSessionCredentialBytes); err != nil {
-		return err
+		return 0, err
 	}
 	value, err := base64.RawURLEncoding.DecodeString(credential)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	defer func() {
+		for index := range value {
+			value[index] = 0
+		}
+	}()
 	issuanceSequence := binary.BigEndian.Uint64(value[:8])
 	if issuanceSequence == 0 || issuanceSequence > MaxGuestSessionIssuanceSequence {
-		return errors.New("guest session credential issuance sequence is invalid")
+		return 0, errors.New("guest session credential issuance sequence is invalid")
 	}
-	return nil
+	return issuanceSequence, nil
 }
 
 func ValidateGuestSessionAuthenticateRequest(value GuestSessionAuthenticateRequest) error {
