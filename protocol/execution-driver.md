@@ -24,6 +24,13 @@ desired fingerprints, portable status, or ordinary driver state. A provider
 driver may deliver only the opaque encoded envelope through the separately
 versioned exact-registration handoff; reconcile remains credential-free.
 
+The provider-neutral [native VM mediated-egress contract](native-egress.md)
+adds one optional non-secret portable status assertion for infrastructure-level
+network confinement. It never carries an egress identity, target, endpoint, or
+provider state. Existing drivers may omit it; a future mediated external-VM
+operator gate requires it explicitly and combines it with exact tunnel/target
+readiness.
+
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
 not expose credentials, provider response bodies, request headers, or other
@@ -345,6 +352,7 @@ request; it closes the client and terminates that process generation directly.
 | `observed_generation` | Non-negative desired generation represented by this observation; zero is allowed when no desired resource exists. |
 | `retry_after_seconds` | Optional bounded convergence hint from 1 through 3600. The operator decides the actual requeue. |
 | `failure` | Required only for `failed`; the same bounded sanitized `{reason,message,retryable}` shape as error data. |
+| `egress_confinement` | Optional non-secret `{boundary:"infrastructure",ready:<bool>}` provider assertion. `true` means the trusted driver/provider has durably read back bypass prevention outside the guest. Guest-local proxy, route, or firewall configuration never satisfies it. Existing Pod/non-mediated drivers omit it. |
 
 `deleted` must not retain readiness, endpoint, external resource ID, or failure
 data. These portable phases are driver observations, not AgentRun conditions.
@@ -353,6 +361,15 @@ whether a reported failure is terminal under the authorized lifecycle policy.
 The driver's `ready` assertion is necessary but not sufficient for an AgentRun
 to become routable: the operator combines it with operator-owned broker grants,
 gateway routing, and workload-readiness conditions.
+
+When `egress_confinement` is present, `ready:true` requires its `ready` member
+to be true. A deleted status must omit it. For a future mediated external VM,
+the operator must additionally require the field to be present, use the exact
+`infrastructure` boundary token, and combine it with current egress identity,
+tunnel, and per-run target readiness. The assertion's trusted owner is the
+execution driver/provider; a guest report, class value, endpoint, opaque
+resource ID, or ordinary driver diagnostic cannot synthesize it. Omission
+preserves existing `nvt.execution-driver/v1` JSON and behavior.
 
 ## Conformance fixture
 

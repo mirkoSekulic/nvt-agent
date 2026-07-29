@@ -44,6 +44,10 @@ Files under [`protocol/`](../protocol/) are normative contracts:
 - [Native workspace tunnel](../protocol/native-workspace.md): separate bounded
   yamux data-plane contract and conformance proof for fixed loopback workspace
   services, including authorized production external-VM browser routing.
+- [Native VM mediated egress](../protocol/native-egress.md): provider-neutral
+  infrastructure-confinement, exact identity, flow-routing, readiness, and
+  cleanup contract with a hermetic conformance proof; production wiring is not
+  implemented.
 
 ## Operations And Testing
 

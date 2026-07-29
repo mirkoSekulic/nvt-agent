@@ -151,9 +151,10 @@ bearer state to the agent user.
 The current bundle includes the real `agentd` and `agentdctl` sources, the
 trusted native control-session and optional workspace clients, plus a bounded
 session fixture for the guest-side lifecycle gate. It does not package
-code-server, an AI runtime, plugins, a browser route, or mediated VM egress.
-The loopback workspace service remains an explicit provider-installed
-prerequisite.
+code-server, an AI runtime, plugins, or mediated VM egress. The loopback
+workspace service remains an explicit provider-installed prerequisite; the
+production gateway can route an already-authorized external VM browser session
+to it through the exact native workspace binding.
 
 Readiness is owned by the supervisor. It publishes `guest-ready` only after
 agentd, the tmux session, and the native outbound session are stable,
@@ -232,5 +233,8 @@ gateway acceptor and test-only real QEMU/TCG guest prove authenticated control
 establishment, relay, and restart. The separate
 [`nvt.native-workspace/v1`](native-workspace.md) guest forwarder and production
 gateway acceptor now establish the authenticated TLS/yamux transport and
-expose a bounded active stream boundary. Browser routing and mediated VM
-networking remain future gates before VM execution is ready.
+expose the bounded active stream boundary consumed by authorized external-VM
+browser routing. The provider-neutral native VM mediated-egress contract and
+conformance proof are frozen, but its host-bundle client, production tunnel,
+broker endpoints, and provider enforcement remain future gates before a
+mediated external VM can be ready.
