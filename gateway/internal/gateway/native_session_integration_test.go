@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/nativesession"
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/workspacetunnel"
 )
 
 type integrationSessionAuthority struct {
@@ -33,6 +35,7 @@ type integrationSessionAuthority struct {
 	revoked                bool
 	authCalls              int
 	authAttempts           int
+	authenticatedByBearer  map[string]int
 	authenticationFailures []integrationBrokerAuthenticationFailure
 }
 
@@ -43,7 +46,7 @@ type integrationBrokerAuthenticationFailure struct {
 
 func newIntegrationSessionAuthority(binding guestenrollment.Binding) *integrationSessionAuthority {
 	return &integrationSessionAuthority{
-		binding: binding, credentials: make(map[string]guestenrollment.GuestSessionStatus),
+		binding: binding, credentials: make(map[string]guestenrollment.GuestSessionStatus), authenticatedByBearer: make(map[string]int),
 		credentialLifetime: 62 * time.Second,
 	}
 }
@@ -100,6 +103,7 @@ func (authority *integrationSessionAuthority) ServeHTTP(response http.ResponseWr
 			failure = &value
 		} else if !revoked {
 			authority.authCalls++
+			authority.authenticatedByBearer[credential]++
 		}
 	}
 	authority.mu.Unlock()
@@ -144,6 +148,12 @@ func (authority *integrationSessionAuthority) attempts() int {
 	return authority.authAttempts
 }
 
+func (authority *integrationSessionAuthority) bearerAuthenticationCount(credential string) int {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	return authority.authenticatedByBearer[credential]
+}
+
 func (authority *integrationSessionAuthority) failAuthentication(failures ...integrationBrokerAuthenticationFailure) {
 	authority.mu.Lock()
 	authority.authenticationFailures = append(authority.authenticationFailures, failures...)
@@ -183,10 +193,21 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 	}, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{gatewayCertificate}}, authenticator)
 	gatewayDone := make(chan error, 1)
 	go func() { gatewayDone <- gateway.Serve(listener) }()
+	workspaceListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceGateway := newNativeWorkspaceServer(NativeWorkspaceConfig{
+		Enabled: true, ListenAddr: workspaceListener.Addr().String(),
+	}, 200*time.Millisecond, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{gatewayCertificate}}, authenticator)
+	workspaceDone := make(chan error, 1)
+	go func() { workspaceDone <- workspaceGateway.Serve(workspaceListener) }()
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
+		_ = workspaceGateway.Shutdown(ctx)
 		_ = gateway.Shutdown(ctx)
+		<-workspaceDone
 		<-gatewayDone
 	}()
 
@@ -201,15 +222,26 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actualAddress := listener.Addr().String()
-	connector.Dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, actualAddress)
+	controlAddress := listener.Addr().String()
+	workspaceAddress := workspaceListener.Addr().String()
+	workspacePort := workspaceListener.Addr().(*net.TCPAddr).Port
+	connector.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		_, port, _ := net.SplitHostPort(address)
+		target := controlAddress
+		if port == fmt.Sprint(workspacePort) {
+			target = workspaceAddress
+		}
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, target)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
+	workspaceBackend := startWorkspaceEchoServer(t)
 	runtime, err := nativesession.NewRuntime(nativesession.Configuration{
 		Version: 1, RuntimeDirectory: runtimeDirectory, IdentitySocketPath: identitySocket,
 		AgentdSocketPath: agentdSocket, GatewayEndpoint: fmt.Sprintf("tls://gateway.test:%d", port),
 		CAPEMPath: filepath.Join(work, "unused-ca-path.pem"),
+		Workspace: &nativesession.WorkspaceConfiguration{
+			GatewayEndpoint: fmt.Sprintf("tls://gateway.test:%d", workspacePort), LoopbackEndpoint: workspaceBackend,
+		},
 	}, authority, connector)
 	if err != nil {
 		t.Fatal(err)
@@ -227,22 +259,59 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 	if count := agentdRequestCount(); count < 2 { // local readiness plus gateway relay
 		t.Fatalf("agentd requests=%d, want local readiness plus relay", count)
 	}
+	workspaceStream := waitForWorkspaceStream(t, workspaceGateway.Registry(), binding)
+	if workspaceStream.Sequence() != 1 {
+		t.Fatalf("initial workspace sequence=%d want=1", workspaceStream.Sequence())
+	}
+	if got := authority.bearerAuthenticationCount(nativeSessionTestCredential(1)); got < 2 {
+		t.Fatalf("control/workspace did not authenticate with the same first credential: calls=%d", got)
+	}
+	assertProductionWorkspaceEcho(t, workspaceStream, "production-workspace")
+	revalidationDeadline := time.Now().Add(2 * time.Second)
+	var revalidatedWorkspace workspacetunnel.StreamOpener
+	for time.Now().Before(revalidationDeadline) {
+		candidate, ready := workspaceGateway.Registry().Lookup(binding)
+		if ready && candidate.Sequence() == 1 && candidate != workspaceStream {
+			revalidatedWorkspace = candidate
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if revalidatedWorkspace == nil {
+		t.Fatal("workspace did not reconnect with its first credential after bounded revalidation")
+	}
+	assertProductionWorkspaceEcho(t, revalidatedWorkspace, "revalidated-production-workspace")
 
 	deadline := time.Now().Add(5 * time.Second)
+	var renewedWorkspace workspacetunnel.StreamOpener
 	for time.Now().Before(deadline) {
-		issued, authenticated := authority.counts()
-		if issued >= 2 && authenticated >= 3 && gateway.registry.Ready(binding) {
+		gateway.registry.mu.Lock()
+		controlSlot := gateway.registry.bindings[binding]
+		controlRenewed := controlSlot != nil && controlSlot.active != nil && controlSlot.active.ready &&
+			!controlSlot.active.closed.Load() && controlSlot.active.authenticated.Sequence == 2
+		gateway.registry.mu.Unlock()
+		candidate, workspaceReady := workspaceGateway.Registry().Lookup(binding)
+		if controlRenewed && workspaceReady && candidate.Sequence() == 2 &&
+			authority.bearerAuthenticationCount(nativeSessionTestCredential(2)) >= 2 {
+			renewedWorkspace = candidate
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	issued, authenticated := authority.counts()
-	if issued < 2 || authenticated < 3 {
-		t.Fatalf("make-before-break/reconnect proof incomplete: issued=%d authenticated=%d", issued, authenticated)
+	if renewedWorkspace == nil {
+		stream, ready := workspaceGateway.Registry().Lookup(binding)
+		sequence := uint64(0)
+		if ready {
+			sequence = stream.Sequence()
+		}
+		t.Fatalf("paired renewal/reconnect proof incomplete: issued=%d authenticated=%d workspace_sequence=%d second_bearer_calls=%d",
+			issued, authenticated, sequence, authority.bearerAuthenticationCount(nativeSessionTestCredential(2)))
 	}
 	if issued > guestenrollment.MaxLiveGuestSessionsPerBinding {
 		t.Fatalf("guest issued too many live credentials: %d", issued)
 	}
+	assertProductionWorkspaceEcho(t, renewedWorkspace, "renewed-production-workspace")
 
 	authority.revoke()
 	select {
@@ -259,8 +328,34 @@ func TestProductionNativeSessionAcceptorWithGuestRuntime(t *testing.T) {
 	if gateway.registry.Ready(binding) {
 		t.Fatal("revocation left production gateway registry ready")
 	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ready := workspaceGateway.Registry().Lookup(binding); !ready {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ready := workspaceGateway.Registry().Lookup(binding); ready {
+		t.Fatal("revocation left production workspace registry ready")
+	}
 	if _, err := os.Stat(filepath.Join(runtimeDirectory, nativesession.ReadinessFileName)); !os.IsNotExist(err) {
 		t.Fatal("revocation left guest session readiness")
+	}
+}
+
+func assertProductionWorkspaceEcho(t *testing.T, stream workspacetunnel.StreamOpener, payload string) {
+	t.Helper()
+	opened, err := stream.OpenStream(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	if _, err := opened.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	if _, err := io.ReadFull(opened, response); err != nil || string(response) != payload {
+		t.Fatalf("workspace relay response=%q error=%v", response, err)
 	}
 }
 

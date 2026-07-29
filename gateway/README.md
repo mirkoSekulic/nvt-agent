@@ -54,9 +54,11 @@ whose DNS host exactly matches `serverName`; no ambient CA, proxy, redirect, or
 plaintext fallback is used. The gateway process reads only mounted Secret
 files. Because this first registry is process-local, native sessions require
 one gateway replica. See the chart's `gateway.nativeSession` example. The
-separate [`nvt.native-workspace/v1`](../protocol/native-workspace.md) yamux
-contract and conformance proof now exist, but this production gateway does not
-yet accept that data-plane connection or route browser/code-server traffic.
+separate [`nvt.native-workspace/v1`](../protocol/native-workspace.md) listener
+authenticates the same exact binding and exposes only a bounded,
+implementation-neutral active `StreamOpener` registry. It reuses the native
+session TLS identity and broker authority. No HTTP/browser/code-server handler
+consumes that registry yet.
 Restart the gateway after rotating its serving identity or broker CA Secret;
 both are loaded once at process startup.
 

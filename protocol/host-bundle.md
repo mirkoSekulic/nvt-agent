@@ -230,7 +230,7 @@ now requests a short-lived credential only through the root-only identity
 authority and holds it only in trusted session-process memory. The production
 gateway acceptor and test-only real QEMU/TCG guest prove authenticated control
 establishment, relay, and restart. The separate
-[`nvt.native-workspace/v1`](native-workspace.md) guest forwarder is now
-packaged and covered by hermetic TLS/yamux lifecycle tests. A production
-gateway workspace listener, browser route, and mediated VM networking remain
-future gates before VM execution is ready.
+[`nvt.native-workspace/v1`](native-workspace.md) guest forwarder and production
+gateway acceptor now establish the authenticated TLS/yamux transport and
+expose a bounded active stream boundary. Browser routing and mediated VM
+networking remain future gates before VM execution is ready.

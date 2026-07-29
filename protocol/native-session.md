@@ -9,9 +9,8 @@ process-local registry for this contract. It does not yet add a browser route,
 HTTP/WebSocket reverse-tunnel multiplexing, mediated VM networking, or a
 production provider implementation. The separate
 [`nvt.native-workspace/v1`](native-workspace.md) yamux data-plane contract and
-trusted guest forwarder now exist, but this control connection is not
-multiplexed and production gateway workspace/browser routing is still not
-wired.
+trusted guest forwarder and production acceptor now exist, but this control
+connection is not multiplexed and production browser routing is still not wired.
 
 ## Trust boundary
 

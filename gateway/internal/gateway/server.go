@@ -42,6 +42,7 @@ type Config struct {
 	Auth              AuthConfig
 	BrandingDir       string
 	NativeSession     NativeSessionConfig
+	NativeWorkspace   NativeWorkspaceConfig
 	basePathValue     string
 	publicOriginValue string
 	publicURLParsed   bool
@@ -165,6 +166,20 @@ func (c Config) Validate() error {
 		_, nativePort, nativeErr := net.SplitHostPort(c.NativeSession.ListenAddr)
 		if httpErr == nil && nativeErr == nil && httpPort == nativePort {
 			return fmt.Errorf("nativeSession.listenAddr must use a separate port from listenAddr")
+		}
+	}
+	if err := c.NativeWorkspace.validate(c.NativeSession); err != nil {
+		return err
+	}
+	if c.NativeWorkspace.Enabled {
+		_, httpPort, httpErr := net.SplitHostPort(c.ListenAddr)
+		_, controlPort, controlErr := net.SplitHostPort(c.NativeSession.ListenAddr)
+		_, workspacePort, workspaceErr := net.SplitHostPort(c.NativeWorkspace.ListenAddr)
+		if httpErr == nil && workspaceErr == nil && httpPort == workspacePort {
+			return fmt.Errorf("nativeWorkspace.listenAddr must use a separate port from listenAddr")
+		}
+		if controlErr == nil && workspaceErr == nil && controlPort == workspacePort {
+			return fmt.Errorf("nativeWorkspace.listenAddr must use a separate port from nativeSession.listenAddr")
 		}
 	}
 	authMode := c.Auth.Mode

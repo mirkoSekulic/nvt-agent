@@ -8,6 +8,15 @@
 {{- fail "gateway.baseDomain is required when gateway.routing.mode=subdomain" }}
 {{- end }}
 {{- $nativeSession := .Values.gateway.nativeSession }}
+{{- $nativeWorkspace := .Values.gateway.nativeWorkspace }}
+{{- if $nativeWorkspace.enabled }}
+{{- if not $nativeSession.enabled }}
+{{- fail "gateway.nativeWorkspace.enabled requires gateway.nativeSession.enabled=true" }}
+{{- end }}
+{{- if or (lt (int $nativeWorkspace.port) 1) (gt (int $nativeWorkspace.port) 65535) (eq (int $nativeWorkspace.port) (int .Values.gateway.port)) (eq (int $nativeWorkspace.port) (int .Values.gateway.service.port)) (eq (int $nativeWorkspace.port) (int $nativeSession.port)) }}
+{{- fail "gateway.nativeWorkspace.port must be between 1 and 65535 and differ from gateway.port, gateway.service.port, and gateway.nativeSession.port" }}
+{{- end }}
+{{- end }}
 {{- if $nativeSession.enabled }}
 {{- if ne (int .Values.gateway.replicas) 1 }}
 {{- fail "gateway.replicas must be exactly 1 when gateway.nativeSession.enabled=true because the registry is process-local" }}
@@ -285,6 +294,10 @@ spec:
             - --native-session-authentication-timeout-seconds={{ $nativeSession.authenticationTimeoutSeconds }}
             - --native-session-revalidation-interval-seconds={{ $nativeSession.revalidationIntervalSeconds }}
             {{- end }}
+            {{- if $nativeWorkspace.enabled }}
+            - --native-workspace-enabled=true
+            - --native-workspace-listen-addr=:{{ $nativeWorkspace.port }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -380,6 +393,10 @@ spec:
             {{- if $nativeSession.enabled }}
             - name: native-session
               containerPort: {{ $nativeSession.port }}
+            {{- end }}
+            {{- if $nativeWorkspace.enabled }}
+            - name: native-workspace
+              containerPort: {{ $nativeWorkspace.port }}
             {{- end }}
           livenessProbe:
             httpGet:
