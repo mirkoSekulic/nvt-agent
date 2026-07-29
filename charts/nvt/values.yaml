@@ -182,6 +182,12 @@ gateway:
     # Established connections are closed and must reauthenticate through the
     # broker at this bound. The gateway never retains the session bearer.
     revalidationIntervalSeconds: 30
+  # Optional, separate nvt.native-workspace/v1 TLS/yamux data plane. It reuses
+  # the nativeSession serving identity and broker authority. No browser route
+  # is published by enabling this listener.
+  nativeWorkspace:
+    enabled: false
+    port: 7444
   auth:
     mode: none
     session:

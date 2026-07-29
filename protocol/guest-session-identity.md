@@ -204,7 +204,8 @@ TLS acceptor and bounded process-local control registry, and the hermetic
 test-only QEMU fixture exercises that listener. The separate
 [`nvt.native-workspace/v1`](native-workspace.md) contract proves bounded yamux
 multiplexing with this same identity and fixed audience, without adding a
-second credential or arbitrary scope. It is not wired to the production guest
-or gateway browser handler yet. There is still no production browser route,
+second credential or arbitrary scope. The production guest and gateway
+workspace endpoints now use it, but it is not wired to a gateway browser
+handler. There is still no production browser route,
 mediated VM egress, cloud provider, or production VM runtime. Pod, Kata,
 Compose, agentd, and runtime plugins remain unchanged.

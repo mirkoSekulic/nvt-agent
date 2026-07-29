@@ -159,6 +159,16 @@ func (session *GatewaySession) Sequence() uint64 {
 	return session.sequence
 }
 
+// Done closes when the authenticated outer workspace connection begins
+// teardown. Gateway acceptors use it to remove registry readiness before
+// releasing the bounded handler.
+func (session *GatewaySession) Done() <-chan struct{} {
+	if session == nil {
+		return nil
+	}
+	return session.lifetime.Done()
+}
+
 func (session *GuestForwarder) Binding() guestenrollment.Binding {
 	if session == nil {
 		return guestenrollment.Binding{}

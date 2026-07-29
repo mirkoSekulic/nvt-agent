@@ -1,8 +1,8 @@
 # Native workspace reverse-tunnel contract
 
-Status: versioned provider-neutral contract, conformance proof, and trusted
-host-bundle guest forwarder (`nvt.native-workspace/v1`). Production gateway
-workspace/browser routing is not wired.
+Status: versioned provider-neutral contract, conformance proof, trusted
+host-bundle guest forwarder, and opt-in production gateway acceptor
+(`nvt.native-workspace/v1`). Browser routing is not wired.
 
 This contract defines a separate guest-initiated data-plane connection through
 which a trusted gateway may open bounded raw TCP streams to one fixed native
@@ -198,7 +198,8 @@ limits, direction enforcement, teardown/promotion, same-credential paired
 control/workspace renewal, fixed-target reachability, and redacted
 observability.
 
-No production gateway workspace listener or HTTP handler,
-browser/code-server route, chart value, VM egress path, cloud provider, or
-public VM listener is added by the guest integration phase. Production gateway
-workspace acceptance and browser routing are later reviewed changes.
+The production gateway has an opt-in workspace listener and bounded
+process-local active/standby `StreamOpener` registry. It has no HTTP handler,
+browser/code-server route, VM egress path, cloud provider, or public VM
+listener. Connecting browser routing to this implementation-neutral boundary
+is a later reviewed change.

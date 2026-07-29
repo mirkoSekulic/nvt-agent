@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.41`; otherwise the API server will prune or reject
+of, upgrading to chart `0.8.42`; otherwise the API server will prune or reject
 new AgentRun and schedule fields such as container capabilities, required
 Docker networks, the Docker kernel-log device control, dedicated Docker
 storage size, broker grant preparations, profile workspace instructions, or
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.41 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.42 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.41 --namespace nvt --create-namespace
+  --version 0.8.42 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -420,7 +420,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. Future external drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.41`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.42`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -809,9 +809,14 @@ gateway:
       key: ca.crt
     authenticationTimeoutSeconds: 5
     revalidationIntervalSeconds: 30
+  nativeWorkspace:
+    enabled: true
+    port: 7444
 ```
 
-The Service exposes `native-session` as TLS. The gateway validates each hello
+The Service exposes `native-session` and, when selected, `native-workspace` as
+separate TLS ports using the same serving identity and broker authority. The
+gateway validates each hello
 through the broker, discards the session bearer, and closes the connection at
 the bounded revalidation interval so reconnect must authenticate again. The
 registry is process-local, so Helm requires exactly one gateway replica while
@@ -821,9 +826,10 @@ capacity failures close without a definitive rejection so the guest retries
 the same credential; only an authenticated denial or exact status mismatch is
 terminal. Missing Secrets or keys fail at Kubernetes volume
 setup; invalid TLS or CA material fails gateway startup. This phase exposes
-only the bounded agentd relay used by the native control contract. It does not
-publish a browser/code-server route or implement an HTTP/WebSocket reverse
-tunnel. The gateway loads both TLS identity and broker trust once at startup;
+the bounded agentd relay and an implementation-neutral active workspace
+`StreamOpener`. It does not publish a browser/code-server route or attach the
+HTTP gateway to workspace streams. The gateway loads both TLS identity and
+broker trust once at startup;
 restart its Deployment after rotating either referenced Secret.
 
 ### OIDC

@@ -3,6 +3,9 @@
 {{- if and .Values.gateway.nativeSession.enabled (not .Values.gateway.enabled) -}}
 {{- fail "gateway.nativeSession.enabled requires gateway.enabled=true" -}}
 {{- end -}}
+{{- if and .Values.gateway.nativeWorkspace.enabled (not .Values.gateway.nativeSession.enabled) -}}
+{{- fail "gateway.nativeWorkspace.enabled requires gateway.nativeSession.enabled=true" -}}
+{{- end -}}
 {{- if and .Values.broker.guestEnrollment.enabled (not .Values.broker.enabled) -}}
 {{- fail "broker.guestEnrollment.enabled requires broker.enabled=true" -}}
 {{- end -}}

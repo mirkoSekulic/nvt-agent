@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/workspacetunnel"
 )
 
 const maxNativeSessionTrustFileBytes = 1 << 20
@@ -240,6 +241,25 @@ func (authenticator *brokerNativeSessionAuthenticator) Authenticate(ctx context.
 	return authenticatedNativeSession{
 		Binding: binding, Sequence: sequence, IssuedAt: issuedAt, ExpiresAt: expiresAt,
 		LocalExpiresAt: time.Now().Add(remaining),
+	}, nil
+}
+
+// AuthenticateWorkspace adapts the one strict broker authority to the
+// separate workspace handshake. The returned value is non-secret and leaves
+// LocalExpiresAt unset so workspacetunnel.Accept derives it conservatively.
+func (authenticator *brokerNativeSessionAuthenticator) AuthenticateWorkspace(ctx context.Context, credential string, binding guestenrollment.Binding) (workspacetunnel.Authentication, error) {
+	authenticated, err := authenticator.Authenticate(ctx, credential, binding)
+	if err != nil {
+		if errors.Is(err, errNativeSessionAuthenticationDenied) {
+			return workspacetunnel.Authentication{}, workspacetunnel.ErrAuthenticationDenied
+		}
+		return workspacetunnel.Authentication{}, workspacetunnel.ErrAuthenticationTemporary
+	}
+	return workspacetunnel.Authentication{
+		Binding:   authenticated.Binding,
+		Sequence:  authenticated.Sequence,
+		IssuedAt:  authenticated.IssuedAt,
+		ExpiresAt: authenticated.ExpiresAt,
 	}, nil
 }
 

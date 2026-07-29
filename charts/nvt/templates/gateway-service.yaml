@@ -20,4 +20,10 @@ spec:
       targetPort: {{ .Values.gateway.nativeSession.port }}
       appProtocol: tls
     {{- end }}
+    {{- if .Values.gateway.nativeWorkspace.enabled }}
+    - name: native-workspace
+      port: {{ .Values.gateway.nativeWorkspace.port }}
+      targetPort: {{ .Values.gateway.nativeWorkspace.port }}
+      appProtocol: tls
+    {{- end }}
 {{- end }}

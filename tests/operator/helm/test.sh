@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.41" || "${CHART_APP_VERSION}" != "0.8.41" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.41, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.42" || "${CHART_APP_VERSION}" != "0.8.42" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.42, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.41' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.42' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -145,6 +145,8 @@ helm template nvt "${CHART}" -n custom-ns \
   --set-string gateway.nativeSession.ca.key=ca.crt \
   --set gateway.nativeSession.authenticationTimeoutSeconds=7 \
   --set gateway.nativeSession.revalidationIntervalSeconds=45 \
+  --set gateway.nativeWorkspace.enabled=true \
+  --set gateway.nativeWorkspace.port=7444 \
   > "${GATEWAY_NATIVE_SESSION_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   --set gateway.enabled=true \
@@ -1138,7 +1140,7 @@ if grep -q 'secretKeyRef:' "${GATEWAY_RENDER}"; then
   echo "gateway auth.mode=none must not render auth Secret refs" >&2
   exit 1
 fi
-if grep -q 'native-session\|NVT_GATEWAY_NATIVE_SESSION\|/var/run/nvt-agent/native-session' "${GATEWAY_RENDER}"; then
+if grep -q 'native-session\|native-workspace\|NVT_GATEWAY_NATIVE_SESSION\|NVT_GATEWAY_NATIVE_WORKSPACE\|/var/run/nvt-agent/native-session' "${GATEWAY_RENDER}"; then
   echo "default gateway rendering unexpectedly enabled native sessions" >&2
   exit 1
 fi
@@ -1184,13 +1186,29 @@ for expected in (
     "--native-session-broker-server-name=nvt-broker.custom-ns.svc.cluster.local",
     "--native-session-authentication-timeout-seconds=7",
     "--native-session-revalidation-interval-seconds=45",
+    "--native-workspace-enabled=true",
+    "--native-workspace-listen-addr=:7444",
 ):
     assert expected in args
 assert not any("credential" in item or "bearer" in item or "token" in item for item in args)
-assert {item["name"] for item in container["ports"]} == {"http", "native-session"}
+assert {item["name"] for item in container["ports"]} == {"http", "native-session", "native-workspace"}
 ports = {item["name"]: item for item in service["spec"]["ports"]}
 assert ports["native-session"] == {"name": "native-session", "port": 7443, "targetPort": 7443, "appProtocol": "tls"}
+assert ports["native-workspace"] == {"name": "native-workspace", "port": 7444, "targetPort": 7444, "appProtocol": "tls"}
 PY
+
+for invalid_workspace_args in \
+  '--set gateway.nativeWorkspace.enabled=true' \
+  '--set gateway.enabled=true --set gateway.nativeWorkspace.enabled=true' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=0 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=7443 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=8080 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca' \
+  '--set gateway.enabled=true --set gateway.nativeSession.enabled=true --set gateway.nativeWorkspace.enabled=true --set gateway.nativeWorkspace.port=80 --set gateway.service.port=80 --set gateway.nativeSession.tls.existingSecret=tls --set-string gateway.nativeSession.brokerURL=https://broker.example:7347 --set-string gateway.nativeSession.serverName=broker.example --set gateway.nativeSession.ca.existingSecret=ca'; do
+  if helm template nvt "${CHART}" -n custom-ns ${invalid_workspace_args} > /dev/null 2> "${GATEWAY_NATIVE_SESSION_FAILURE}"; then
+    echo "expected invalid gateway native-workspace configuration to fail: ${invalid_workspace_args}" >&2
+    exit 1
+  fi
+done
 
 for invalid_args in \
   '--set gateway.nativeSession.enabled=true' \
