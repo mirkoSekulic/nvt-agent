@@ -185,6 +185,17 @@ func TestNativeEgressCoordinatorRejectsMalformedCurrentWithoutAuthorityCall(t *t
 	}
 }
 
+func TestNativeEgressPublicationOmittedLeavesControllerDisabled(t *testing.T) {
+	reconciler := &AgentRunReconciler{}
+	ConfigureNativeEgressTargetPublication(reconciler, nil, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	if reconciler.nativeEgressTargets != nil {
+		t.Fatal("omitted publication configuration installed an authority")
+	}
+	if err := BootstrapNativeEgressTargetPublication(context.Background(), reconciler); err != nil {
+		t.Fatalf("disabled publication bootstrap failed: %v", err)
+	}
+}
+
 func TestNativeEgressCoordinatorFailsClosedOnAuthorityFailure(t *testing.T) {
 	coordinator := &nativeEgressTargetCoordinator{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), authority: failingTargetAuthority{}}
 	if err := coordinator.Reconcile(context.Background(), nil, ""); err == nil || err.Error() != "native egress publication is unavailable" {

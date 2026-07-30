@@ -96,14 +96,16 @@ func main() {
 		ExecutionDrivers: driverRegistry,
 		GuestEnrollment:  guestEnrollment,
 	}
-	controller.ConfigureNativeEgressTargetPublication(reconciler, nativeEgressPublication, mgr.GetAPIReader())
-	bootstrapContext, cancelBootstrap := context.WithTimeout(context.Background(), 2*nativeegress.TargetPublicationTimeout)
-	if err = controller.BootstrapNativeEgressTargetPublication(bootstrapContext, reconciler); err != nil {
+	if nativeEgressPublication != nil {
+		controller.ConfigureNativeEgressTargetPublication(reconciler, nativeEgressPublication, mgr.GetAPIReader())
+		bootstrapContext, cancelBootstrap := context.WithTimeout(context.Background(), 2*nativeegress.TargetPublicationTimeout)
+		if err = controller.BootstrapNativeEgressTargetPublication(bootstrapContext, reconciler); err != nil {
+			cancelBootstrap()
+			ctrl.Log.Error(err, "unable to restore native egress target publication")
+			os.Exit(1)
+		}
 		cancelBootstrap()
-		ctrl.Log.Error(err, "unable to restore native egress target publication")
-		os.Exit(1)
 	}
-	cancelBootstrap()
 	if err = reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)

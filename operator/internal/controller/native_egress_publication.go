@@ -51,8 +51,8 @@ func newNativeEgressTargetCoordinator(kubernetes client.Reader, authority public
 
 // ConfigureNativeEgressTargetPublication installs the optional trusted relay
 // publication boundary without exporting its reconciliation interface.
-func ConfigureNativeEgressTargetPublication(reconciler *AgentRunReconciler, authority publicationclient.Interface, reader client.Reader) {
-	if reconciler == nil {
+func ConfigureNativeEgressTargetPublication(reconciler *AgentRunReconciler, authority *publicationclient.Client, reader client.Reader) {
+	if reconciler == nil || authority == nil {
 		return
 	}
 	if reader == nil {
