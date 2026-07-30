@@ -18,7 +18,7 @@ failure removes its reservation.
 The command constructs a production `EgressdTargetRegistry` with no targets.
 Every process start is unpublished and deny-all. A distinct authenticated TLS
 control listener accepts only complete, monotonically versioned snapshots from
-the future trusted operator publisher. Each entry maps one complete five-field
+the trusted operator publisher. Each entry maps one complete five-field
 Binding to exactly one canonical per-run egressd CONNECT listener. Each
 canonical listener may appear for only one Binding; sharing it would cross the
 per-run grant and credential boundary. Target lookup is exact-only, and guest
@@ -35,6 +35,33 @@ registration API.
 Configuration version 2 makes the separate control listener mandatory and
 removes the version-1 startup `egressd_targets` member. Version 1 is rejected
 rather than silently carrying target authority across a process restart.
+
+The Helm chart can deploy this command only when explicitly enabled. It copies
+administrator-owned projected TLS and control material into a memory-backed
+owner-only volume for the non-root process, exposes separate ClusterIP data and
+control Services, and restricts the control port to the operator. The operator
+uses authenticated status after restart and republishes the complete snapshot
+before setting per-run native-egress readiness. Provider ingress routing and
+infrastructure confinement remain separate future gates.
+
+The copy step runs as root and handles the serving private keys and control
+bearer. Its chart default is therefore an exact multi-architecture image
+digest, and an enabled installation rejects an init-image override without a
+canonical `sha256` digest. Repository/digest changes are trusted-supply-chain
+changes that must be reviewed with the fixed copy script; mutable tags are not
+supported for this boundary.
+
+Relay and operator clients load control credentials, serving identities, and
+CA trust once at process start. The chart requires one shared non-secret
+`nativeEgressRelay.rolloutRevision`; administrators MUST change it with every
+control-token, control/data TLS, control CA, or broker CA rotation so both
+Deployments roll as one fail-closed credential generation. Secret projection
+alone is not a supported hot-reload mechanism. Both Deployments use `Recreate`
+while this process-local single-replica contract is enabled, so old and new
+publication/session owners never overlap.
+The init-image digest is independent of credential generations: changing it
+rolls the Pod template but does not replace the requirement to increment
+`rolloutRevision` whenever any credential or CA rotates.
 
 ## Configuration
 
@@ -115,10 +142,8 @@ go test -race -count=1 ./...
 
 The coordinated `nvt-native-egress-relay` image is a static binary in a
 distroless non-root runtime with no shell, package manager, Git, Go toolchain,
-or cloud SDK. This phase publishes the image but adds no Helm deployment,
-Service, RBAC, Secret, or operator reconciliation. The opt-in host-bundle
-capture boundary can feed this relay after a snapshot is published, but
-operator publication wiring, provider-owned guest redirect installation,
-mediated-VM readiness, provider confinement, and cloud/provider integration
-remain separate future gates; this adapter alone does not make production VM
-mediation complete.
+or cloud SDK. The opt-in chart deployment and operator exact-snapshot
+publication are implemented, including withdrawal-before-cleanup ordering.
+Provider-owned guest redirect installation, infrastructure confinement,
+cloud/provider integration, and the final provider E2E remain separate future
+gates; this integration alone does not make production VM mediation complete.

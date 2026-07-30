@@ -47,6 +47,13 @@ app.kubernetes.io/part-of: nvt
 {{- printf "%s:%s" .image.repository (default $defaultTag .image.tag) -}}
 {{- end -}}
 
+{{- define "nvt.digestImage" -}}
+{{- if not (kindIs "map" .image) -}}
+{{- fail (printf "%s must use a repository/digest/pullPolicy map" .name) -}}
+{{- end -}}
+{{- printf "%s@%s" .image.repository .image.digest -}}
+{{- end -}}
+
 {{- define "nvt.validateImageValues" -}}
 {{- $images := list
   (dict "name" "runtime.image" "value" .Values.runtime.image)
@@ -55,6 +62,8 @@ app.kubernetes.io/part-of: nvt
   (dict "name" "egress.captured.image" "value" .Values.egress.captured.image)
   (dict "name" "broker.image" "value" .Values.broker.image)
   (dict "name" "operator.image" "value" .Values.operator.image)
+  (dict "name" "nativeEgressRelay.image" "value" .Values.nativeEgressRelay.image)
+  (dict "name" "nativeEgressRelay.initImage" "value" .Values.nativeEgressRelay.initImage)
   (dict "name" "executionDrivers.hostImage" "value" .Values.executionDrivers.hostImage)
   (dict "name" "gateway.image" "value" .Values.gateway.image)
   (dict "name" "producer.image" "value" .Values.producer.image) -}}

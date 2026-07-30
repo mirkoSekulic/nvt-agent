@@ -157,12 +157,13 @@ the connection with no fallback. The provider still owns the redirect into
 the literal loopback listener and the external network confinement that makes
 that redirect non-bypassable.
 
-The cluster relay now accepts only an authenticated, monotonically generated
+The opt-in cluster relay accepts only an authenticated, monotonically generated
 complete snapshot from its distinct TLS control listener. Every restart is
 unpublished deny-all until the trusted operator republishes exact five-field
-Binding-to-egressd targets. That operator deployment/publication loop and its
-readiness/finalizer ordering are not wired yet; the API and coordinated relay
-image alone do not establish mediated-VM readiness.
+Binding-to-egressd targets. The operator now owns that level-triggered loop and
+withdraws a mapping before identity revocation or driver cleanup. Provider-owned
+default-deny confinement and a production provider remain separate gates, so
+this wiring alone does not establish production mediated-VM readiness.
 
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
@@ -307,6 +308,7 @@ exist. Guest capture is a separate credential-less process: transparent flows
 carry no provider hint, while its explicit CONNECT listener consumes the
 existing per-flow provider selector before forwarding raw bytes. It reuses
 bounded Host/SNI/original-destination inspection and never falls back to direct
-networking, but it is not a root-adversary boundary. Dynamic operator target
-publication/readiness, provider-owned redirect installation, and provider
-confinement are not wired yet, so production VM mediation remains incomplete.
+networking, but it is not a root-adversary boundary. Operator target
+publication/readiness and cleanup ordering are now wired; provider-owned
+redirect installation and provider confinement are not, so production VM
+mediation remains incomplete.

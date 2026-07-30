@@ -217,11 +217,12 @@ type brokerAgentQuota struct {
 type AgentRunReconciler struct {
 	client.Client
 
-	Scheme           *runtime.Scheme
-	Now              func() metav1.Time
-	BrokerHTTPClient *http.Client
-	ExecutionDrivers executionDriverClientRegistry
-	GuestEnrollment  guestEnrollmentIssuer
+	Scheme              *runtime.Scheme
+	Now                 func() metav1.Time
+	BrokerHTTPClient    *http.Client
+	ExecutionDrivers    executionDriverClientRegistry
+	GuestEnrollment     guestEnrollmentIssuer
+	nativeEgressTargets nativeEgressTargetPublication
 
 	externalExecutionCallsMu sync.Mutex
 	externalExecutionCalls   chan struct{}

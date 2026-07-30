@@ -9,6 +9,27 @@
 {{- if and .Values.broker.guestEnrollment.enabled (not .Values.broker.enabled) -}}
 {{- fail "broker.guestEnrollment.enabled requires broker.enabled=true" -}}
 {{- end -}}
+{{- $relay := .Values.nativeEgressRelay -}}
+{{- if $relay.enabled -}}
+{{- if ne (int $relay.replicas) 1 -}}{{ fail "nativeEgressRelay.replicas must be exactly 1 because publication and session registries are process-local" }}{{- end -}}
+{{- if ne (int .Values.operator.replicas) 1 -}}{{ fail "nativeEgressRelay.enabled requires operator.replicas=1 for serialized complete-snapshot publication" }}{{- end -}}
+{{- if not (regexMatch `^[a-z0-9][a-z0-9._-]{0,62}$` $relay.rolloutRevision) -}}{{ fail "nativeEgressRelay.rolloutRevision must be a non-empty canonical rollout epoch" }}{{- end -}}
+{{- if or (not $relay.initImage.repository) (not (regexMatch `^sha256:[a-f0-9]{64}$` (default "" $relay.initImage.digest))) -}}{{ fail "nativeEgressRelay.initImage must use a non-empty repository and canonical sha256 digest" }}{{- end -}}
+{{- if not .Values.executionDrivers.guestEnrollment.enabled -}}{{ fail "nativeEgressRelay.enabled requires executionDrivers.guestEnrollment.enabled=true" }}{{- end -}}
+{{- if not .Values.egress.networkPolicyCapable -}}{{ fail "nativeEgressRelay.enabled requires egress.networkPolicyCapable=true" }}{{- end -}}
+{{- if or (not .Values.broker.enabled) (not .Values.broker.tls.enabled) -}}{{ fail "nativeEgressRelay.enabled requires the TLS broker" }}{{- end -}}
+{{- if or (not .Values.broker.guestEnrollment.enabled) (not .Values.broker.persistence.enabled) -}}{{ fail "nativeEgressRelay.enabled requires persistent broker guest enrollment/native identity authority" }}{{- end -}}
+{{- if or (lt (int $relay.data.port) 1) (gt (int $relay.data.port) 65535) (lt (int $relay.control.port) 1) (gt (int $relay.control.port) 65535) (eq (int $relay.data.port) (int $relay.control.port)) -}}{{ fail "nativeEgressRelay data/control ports must be distinct and between 1 and 65535" }}{{- end -}}
+{{- if or (not (regexMatch `^https://[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?(?::[0-9]{1,5})?$` $relay.brokerURL)) (gt (len $relay.brokerURL) 2048) -}}{{ fail "nativeEgressRelay.brokerURL must be one canonical HTTPS origin" }}{{- end -}}
+{{- if or (gt (len $relay.brokerServerName) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $relay.brokerServerName)) -}}{{ fail "nativeEgressRelay.brokerServerName must be a canonical DNS name" }}{{- end -}}
+{{- if not (regexMatch (printf `^https://%s(?::[0-9]{1,5})?$` (regexQuoteMeta $relay.brokerServerName)) $relay.brokerURL) -}}{{ fail "nativeEgressRelay.brokerServerName must exactly match nativeEgressRelay.brokerURL" }}{{- end -}}
+{{- $controlServerName := default (printf "nvt-native-egress-relay-control.%s.svc.cluster.local" (include "nvt.namespace" .)) $relay.control.serverName -}}
+{{- if or (gt (len $controlServerName) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $controlServerName)) -}}{{ fail "nativeEgressRelay.control.serverName must be a canonical DNS name" }}{{- end -}}
+{{- range $name := list $relay.credentials.existingSecret $relay.brokerCA.existingSecret -}}{{- if or (eq $name "") (gt (len $name) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$` $name)) -}}{{ fail "nativeEgressRelay existing Secret references must be valid names" }}{{- end -}}{{- end -}}
+{{- range $key := list $relay.credentials.dataCertificateKey $relay.credentials.dataPrivateKeyKey $relay.credentials.controlCAKey $relay.credentials.controlCertificateKey $relay.credentials.controlPrivateKeyKey $relay.credentials.controlTokenKey $relay.brokerCA.key -}}{{- if or (eq $key "") (gt (len $key) 253) (not (regexMatch `^[A-Za-z0-9._-]+$` $key)) -}}{{ fail "nativeEgressRelay Secret keys are invalid" }}{{- end -}}{{- end -}}
+{{- if or (lt (int $relay.authenticationTimeoutSeconds) 1) (gt (int $relay.authenticationTimeoutSeconds) 5) (lt (int $relay.revalidationIntervalSeconds) 1) (gt (int $relay.revalidationIntervalSeconds) 30) (lt (int $relay.control.timeoutSeconds) 1) (gt (int $relay.control.timeoutSeconds) 10) -}}{{ fail "nativeEgressRelay deadlines exceed the frozen contract" }}{{- end -}}
+{{- range $cidr := $relay.data.ingressCIDRs -}}{{- if not (regexMatch `^(?:[0-9A-Fa-f:.]+)/[0-9]{1,3}$` $cidr) -}}{{ fail "nativeEgressRelay.data.ingressCIDRs contains an invalid CIDR" }}{{- end -}}{{- end -}}
+{{- end -}}
 {{- $enrollment := .Values.executionDrivers.guestEnrollment -}}
 {{- if $enrollment.enabled -}}
 {{- if eq (len .Values.executionDrivers.registrations) 0 -}}{{ fail "executionDrivers.guestEnrollment.enabled requires at least one execution-driver registration" }}{{- end -}}

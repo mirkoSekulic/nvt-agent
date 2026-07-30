@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"net/http"
 	"os"
@@ -19,6 +20,8 @@ import (
 	driverregistry "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/registry"
 	"github.com/mirkoSekulic/nvt-agent/operator/guestenrollment/brokerclient"
 	"github.com/mirkoSekulic/nvt-agent/operator/internal/controller"
+	"github.com/mirkoSekulic/nvt-agent/operator/nativeegresspublication"
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
 
 var scheme = runtime.NewScheme()
@@ -68,6 +71,11 @@ func main() {
 		ctrl.Log.Error(err, "invalid guest enrollment broker configuration")
 		os.Exit(1)
 	}
+	nativeEgressPublication, err := nativeegresspublication.LoadConfigured()
+	if err != nil {
+		ctrl.Log.Error(err, "invalid native egress publication configuration")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -82,12 +90,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.AgentRunReconciler{
+	reconciler := &controller.AgentRunReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		ExecutionDrivers: driverRegistry,
 		GuestEnrollment:  guestEnrollment,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if nativeEgressPublication != nil {
+		if err = controller.ConfigureNativeEgressTargetPublication(reconciler, nativeEgressPublication, mgr.GetAPIReader(), os.Getenv("POD_NAMESPACE")); err != nil {
+			ctrl.Log.Error(err, "invalid native egress publication namespace")
+			os.Exit(1)
+		}
+		bootstrapContext, cancelBootstrap := context.WithTimeout(context.Background(), 2*nativeegress.TargetPublicationTimeout)
+		if err = controller.BootstrapNativeEgressTargetPublication(bootstrapContext, reconciler); err != nil {
+			cancelBootstrap()
+			ctrl.Log.Error(err, "unable to restore native egress target publication")
+			os.Exit(1)
+		}
+		cancelBootstrap()
+	}
+	if err = reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}

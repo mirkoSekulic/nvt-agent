@@ -1,0 +1,269 @@
+{{- if .Values.nativeEgressRelay.enabled }}
+{{- $relay := .Values.nativeEgressRelay -}}
+{{- $namespace := include "nvt.namespace" . -}}
+{{- $controlServerName := default (printf "nvt-native-egress-relay-control.%s.svc.cluster.local" $namespace) $relay.control.serverName -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-native-egress-relay
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "nvt.labels" . | nindent 4 }}
+    app.kubernetes.io/name: nvt-native-egress-relay
+    app.kubernetes.io/component: native-egress
+data:
+  config.json: |
+    {
+      "version": 2,
+      "listen_address": ":{{ $relay.data.port }}",
+      "tls_certificate_file": "/var/run/nvt-native-egress-relay/data-tls.crt",
+      "tls_key_file": "/var/run/nvt-native-egress-relay/data-tls.key",
+      "control_listen_address": ":{{ $relay.control.port }}",
+      "control_tls_certificate_file": "/var/run/nvt-native-egress-relay/control-tls.crt",
+      "control_tls_key_file": "/var/run/nvt-native-egress-relay/control-tls.key",
+      "control_credential_file": "/var/run/nvt-native-egress-relay/control-token",
+      "control_timeout_seconds": {{ $relay.control.timeoutSeconds }},
+      "broker_url": {{ $relay.brokerURL | quote }},
+      "broker_server_name": {{ $relay.brokerServerName | quote }},
+      "broker_ca_file": "/var/run/nvt-native-egress-relay/broker-ca.crt",
+      "authentication_timeout_seconds": {{ $relay.authenticationTimeoutSeconds }},
+      "revalidation_interval_seconds": {{ $relay.revalidationIntervalSeconds }}
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-native-egress-publication-client
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "nvt.operatorLabels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "version": 1,
+      "baseURL": "https://{{ $controlServerName }}:{{ $relay.control.port }}",
+      "serverName": {{ $controlServerName | quote }},
+      "caFile": "/var/run/nvt-native-egress-publication/control-ca.crt",
+      "credentialFile": "/var/run/nvt-native-egress-publication/control-token",
+      "timeoutSeconds": {{ $relay.control.timeoutSeconds }}
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvt-native-egress-relay
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "nvt.labels" . | nindent 4 }}
+    app.kubernetes.io/name: nvt-native-egress-relay
+    app.kubernetes.io/component: native-egress
+spec:
+  replicas: {{ $relay.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvt-native-egress-relay
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ $relay | toJson | sha256sum | quote }}
+        nvt.dev/native-egress-rollout-revision: {{ $relay.rolloutRevision | quote }}
+      labels:
+        {{- include "nvt.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/name: nvt-native-egress-relay
+        app.kubernetes.io/component: native-egress
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: install-owned-configuration
+          image: {{ include "nvt.digestImage" (dict "name" "nativeEgressRelay.initImage" "image" $relay.initImage) | quote }}
+          imagePullPolicy: {{ $relay.initImage.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              umask 077
+              cp /projected/config.json /owned/config.json
+              cp /projected/data-tls.crt /owned/data-tls.crt
+              cp /projected/data-tls.key /owned/data-tls.key
+              cp /projected/control-tls.crt /owned/control-tls.crt
+              cp /projected/control-tls.key /owned/control-tls.key
+              cp /projected/control-token /owned/control-token
+              cp /projected/broker-ca.crt /owned/broker-ca.crt
+              chown 65532:65532 /owned/*
+              chmod 0600 /owned/*
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - name: projected
+              mountPath: /projected
+              readOnly: true
+            - name: owned
+              mountPath: /owned
+      containers:
+        - name: relay
+          image: {{ include "nvt.image" (dict "root" . "name" "nativeEgressRelay.image" "image" $relay.image) | quote }}
+          imagePullPolicy: {{ $relay.image.pullPolicy }}
+          args: ["--config=/var/run/nvt-native-egress-relay/config.json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: data
+              containerPort: {{ $relay.data.port }}
+            - name: control
+              containerPort: {{ $relay.control.port }}
+          readinessProbe:
+            tcpSocket:
+              port: control
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: data
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: owned
+              mountPath: /var/run/nvt-native-egress-relay
+              readOnly: true
+      volumes:
+        - name: projected
+          projected:
+            defaultMode: 0400
+            sources:
+              - configMap:
+                  name: nvt-native-egress-relay
+                  items:
+                    - key: config.json
+                      path: config.json
+              - secret:
+                  name: {{ $relay.credentials.existingSecret | quote }}
+                  items:
+                    - key: {{ $relay.credentials.dataCertificateKey | quote }}
+                      path: data-tls.crt
+                    - key: {{ $relay.credentials.dataPrivateKeyKey | quote }}
+                      path: data-tls.key
+                    - key: {{ $relay.credentials.controlCertificateKey | quote }}
+                      path: control-tls.crt
+                    - key: {{ $relay.credentials.controlPrivateKeyKey | quote }}
+                      path: control-tls.key
+                    - key: {{ $relay.credentials.controlTokenKey | quote }}
+                      path: control-token
+              - secret:
+                  name: {{ $relay.brokerCA.existingSecret | quote }}
+                  items:
+                    - key: {{ $relay.brokerCA.key | quote }}
+                      path: broker-ca.crt
+        - name: owned
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvt-native-egress-relay
+  namespace: {{ $namespace | quote }}
+  labels:
+    app.kubernetes.io/name: nvt-native-egress-relay
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nvt-native-egress-relay
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  ports:
+    - name: data
+      port: {{ $relay.data.port }}
+      targetPort: data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvt-native-egress-relay-control
+  namespace: {{ $namespace | quote }}
+  labels:
+    app.kubernetes.io/name: nvt-native-egress-relay
+    app.kubernetes.io/component: control
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nvt-native-egress-relay
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  ports:
+    - name: control
+      port: {{ $relay.control.port }}
+      targetPort: control
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nvt-native-egress-relay
+  namespace: {{ $namespace | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nvt-native-egress-relay
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nvt-operator
+      ports:
+        - protocol: TCP
+          port: {{ $relay.control.port }}
+    {{- if $relay.data.ingressCIDRs }}
+    - from:
+        {{- range $cidr := $relay.data.ingressCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $relay.data.port }}
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nvt-broker
+      ports:
+        - {protocol: TCP, port: 7347}
+    - to:
+        - podSelector:
+            matchLabels:
+              nvt.dev/role: egressd
+      ports:
+        - {protocol: TCP, port: 8473}
+{{- end }}

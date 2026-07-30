@@ -51,9 +51,9 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   relay with bounded flow transport, a per-run egressd adapter, authenticated
   complete-snapshot target publication, and an opt-in credential-less host-
   bundle Linux TCP capture process with transparent and per-flow explicit-
-  provider paths. The coordinated relay image exists, but operator deployment/
-  publication, readiness, provider redirect installation, and provider
-  enforcement are not implemented.
+  provider paths. Opt-in operator deployment, exact publication, readiness,
+  and withdraw-before-cleanup ordering exist; provider redirect installation
+  and provider confinement are not implemented.
 
 ## Operations And Testing
 

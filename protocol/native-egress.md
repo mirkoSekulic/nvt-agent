@@ -6,9 +6,10 @@ host-bundle guest client, standalone cluster relay, bounded yamux flow
 transport, and an optional exact-binding adapter into an existing per-run
 `egressd` CONNECT listener. The opt-in native host bundle now separates a
 credential-less capture process from the credential-bearing tunnel process;
-captured guest TCP opens only authenticated native-egress flows. Dynamic
-operator publication/readiness, provider-owned redirect installation, and
-provider network enforcement do not exist yet.
+captured guest TCP opens only authenticated native-egress flows. Opt-in
+operator deployment, exact target publication, readiness, and cleanup ordering
+exist; provider-owned redirect installation and provider network enforcement
+do not exist yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -264,9 +265,15 @@ is never present in guest or agent configuration. The only endpoints are:
 Both require one purpose-specific `nvt_rc1_` bearer in HTTP Authorization.
 The relay reads that credential from a private process-owned file and compares
 it in constant time. It is never accepted in JSON, flags, argv, environment,
-logs, diagnostics, or status. The future operator publisher MUST use one
+logs, diagnostics, or status. The production operator publisher uses one
 explicit HTTPS origin, explicit CA roots, exact DNS server-name verification,
 TLS 1.2 or newer, no redirects, and no ambient proxy or credential helper.
+Relay and operator processes load the purpose bearer, serving identities, and
+CA roots only at startup. A deployment MUST coordinate their rotation as one
+fail-closed generation. The Helm integration requires a bounded non-secret
+rollout revision on both Pod templates; it MUST change whenever the control
+Secret, control/data TLS material, control CA, or broker CA changes. Projected
+Secret refresh without that coordinated restart is not credential reload.
 
 A snapshot request contains `contract_version`, `type=replace_snapshot`, a
 strictly positive and monotonically increasing 64-bit `generation`, a
@@ -301,7 +308,10 @@ zero means process-start unpublished deny-all. `published=true` with a positive
 generation, a digest, and count zero means an intentionally applied empty
 snapshot. Status never enumerates bindings, endpoints, target types, or
 listeners. Process restart always returns to the first state; the trusted
-operator must republish its current complete desired snapshot.
+operator lists current exact AgentRun bindings and republishes its complete
+desired snapshot before reporting native mediated egress ready. An acknowledged
+snapshot without the departing binding is required before identity revocation
+or driver cleanup.
 
 Failures use only the versioned `error` body and one of `not-found`,
 `capacity-exceeded`, `unauthorized`, `invalid-request`, `conflict`, or
@@ -441,8 +451,9 @@ bearer through that broker authority, resolves a target only by complete exact
 Binding, and owns the shared bounded active/standby registry. Its production
 command starts deny-all and exposes a distinct authenticated TLS publication
 surface for complete in-memory snapshots. The coordinated non-root relay OCI
-image contains only the static relay binary; no chart or operator deployment
-wiring consumes it yet. Once a current snapshot is applied, the relay routes
+image contains only the static relay binary. The opt-in chart deployment and
+operator publication loop now consume that boundary. Once a current snapshot
+is applied, the relay routes
 every flow only through the exact binding's selected adapter. Mapping
 replacement or removal synchronously stops new opens, withdraws the associated
 session, and does not migrate existing flows to another target. The relay sends
@@ -461,9 +472,12 @@ flow intent; no flow chooses a relay target. Session withdrawal closes local
 health leases and captured flows without fallback. The supervisor retains a
 live readiness socket lease rather than trusting a reusable marker.
 
-This phase does not implement operator publication reconciliation/deployment,
-provider-owned redirect rules, provider network policy, Azure/AWS/QEMU support,
-or operator readiness/cleanup orchestration.
+The operator now deploys the relay and per-run egressd target, republishes the
+complete snapshot after either process restarts, gates `NativeEgressReady` on
+the acknowledged exact mapping, and withdraws it before authority or driver
+cleanup. Provider-owned redirect rules and infrastructure network confinement,
+Azure/AWS/QEMU production support, and the final provider E2E remain future
+gates.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed
 implementation gates and a real provider enforcement proof.
