@@ -21,6 +21,12 @@ type testAuthenticator struct {
 	calls      atomic.Int32
 }
 
+type testAuthenticatorFunc func(context.Context, string, guestenrollment.Binding) (Authentication, error)
+
+func (authenticate testAuthenticatorFunc) AuthenticateNativeEgress(ctx context.Context, credential string, binding guestenrollment.Binding) (Authentication, error) {
+	return authenticate(ctx, credential, binding)
+}
+
 func (*testAuthenticator) String() string   { return "[native egress test authenticator]" }
 func (*testAuthenticator) GoString() string { return "[native egress test authenticator]" }
 
@@ -104,6 +110,65 @@ func TestHandshakeExactBindingPurposeAndFailureClasses(t *testing.T) {
 				t.Fatalf("temporary error=%v", err)
 			}
 		})
+	}
+
+	t.Run("contradictory success is temporary", func(t *testing.T) {
+		gateway, guest := net.Pipe()
+		go func() {
+			defer gateway.Close()
+			_, _ = Accept(t.Context(), gateway, testAuthenticatorFunc(func(_ context.Context, _ string, _ guestenrollment.Binding) (Authentication, error) {
+				now := time.Now()
+				wrong := binding
+				wrong.GuestInstanceID = "other-guest"
+				return Authentication{Binding: wrong, Sequence: 7, IssuedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}, nil
+			}))
+		}()
+		err := Establish(t.Context(), guest, binding, credential)
+		_ = guest.Close()
+		if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrDenied) {
+			t.Fatalf("contradictory authority result classification=%v", err)
+		}
+	})
+}
+
+func TestStagedHandshakeWithholdsAcknowledgementUntilAdmission(t *testing.T) {
+	binding := testBinding("staged")
+	credential := testCredential(t, 9)
+	authenticator := &testAuthenticator{credential: credential, binding: binding}
+	gateway, guest := net.Pipe()
+	defer gateway.Close()
+	defer guest.Close()
+
+	guestResult := make(chan error, 1)
+	go func() {
+		guestResult <- Establish(t.Context(), guest, binding, credential)
+	}()
+	pending, err := BeginAccept(t.Context(), gateway, authenticator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication, err := pending.Authentication()
+	if err != nil || authentication.Binding != binding || authentication.Sequence != 9 {
+		t.Fatalf("pending authentication=%#v error=%v", authentication, err)
+	}
+	select {
+	case err := <-guestResult:
+		t.Fatalf("guest completed before admission acknowledgement: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if err := pending.Acknowledge(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-guestResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := pending.Acknowledge(); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("second acknowledgement error=%v", err)
+	}
+	for _, formatted := range []string{fmt.Sprint(pending), fmt.Sprintf("%#v", pending)} {
+		if strings.Contains(formatted, credential) || strings.Contains(formatted, binding.GuestInstanceID) {
+			t.Fatalf("pending acceptance formatting exposed state: %q", formatted)
+		}
 	}
 }
 

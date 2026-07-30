@@ -310,7 +310,9 @@ memory. The standalone relay core terminates explicit TLS, authenticates the
 bearer through that broker authority, resolves a target only by complete exact
 Binding, and owns the shared bounded active/standby registry. Its production
 command is deliberately deny-all because no trusted target adapter is wired;
-any post-handshake guest payload is rejected.
+the relay sends `hello_ack` only after the authenticated session has secured
+its bounded active/standby reservation, and any post-handshake guest payload
+is rejected.
 
 This phase does not implement the flow transport, egressd/captured target
 adapter, provider network policy, Azure/AWS/QEMU support, or operator

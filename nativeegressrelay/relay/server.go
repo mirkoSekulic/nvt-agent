@@ -261,9 +261,14 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 	}
 	admission := &sessionAdmission{authenticator: server.authenticator, resolver: server.resolver}
 	handshakeContext, cancelHandshake := context.WithTimeout(server.lifetimeContext, nativeegress.HandshakeTimeout)
-	authentication, err := nativeegress.Accept(handshakeContext, connection, admission)
-	cancelHandshake()
+	pending, err := nativeegress.BeginAccept(handshakeContext, connection, admission)
 	if err != nil || admission.target == nil || server.lifetimeContext.Err() != nil {
+		cancelHandshake()
+		return
+	}
+	authentication, err := pending.Authentication()
+	if err != nil {
+		cancelHandshake()
 		return
 	}
 	localDeadline := time.Now().Add(server.revalidationInterval)
@@ -272,14 +277,21 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 	}
 	session, err := nativeegress.NewSession(authentication, admission.target)
 	if err != nil {
+		cancelHandshake()
 		return
 	}
 	defer session.Close()
 	reservation, err := server.registry.Reserve(session)
 	if err != nil {
+		cancelHandshake()
 		return
 	}
 	defer reservation.Remove()
+	if err := pending.Acknowledge(); err != nil {
+		cancelHandshake()
+		return
+	}
+	cancelHandshake()
 	if !reservation.Activate() {
 		return
 	}

@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
@@ -84,8 +85,8 @@ type Message struct {
 }
 
 // Authentication is the non-secret result of authoritative broker
-// authentication. LocalExpiresAt is derived by Accept, never supplied by the
-// authenticator.
+// authentication. LocalExpiresAt is derived by BeginAccept, never supplied by
+// the authenticator.
 type Authentication struct {
 	Binding        guestenrollment.Binding
 	Sequence       uint64
@@ -96,6 +97,17 @@ type Authentication struct {
 
 type Authenticator interface {
 	AuthenticateNativeEgress(context.Context, string, guestenrollment.Binding) (Authentication, error)
+}
+
+// PendingAcceptance is an authenticated, credential-free hello awaiting
+// caller-owned session admission. It deliberately keeps acknowledgement
+// separate so a bounded registry can reserve the exact session first.
+type PendingAcceptance struct {
+	mu             sync.Mutex
+	connection     net.Conn
+	authentication Authentication
+	deadline       time.Time
+	acknowledged   bool
 }
 
 func ValidateDestination(value Destination) error {
@@ -187,16 +199,18 @@ func DecodeMessage(data []byte) (Message, error) {
 	return value, nil
 }
 
-// Accept authenticates the exact session. Temporary authority failures close
-// silently; only definitive credential/binding/purpose denial sends a reject.
-func Accept(ctx context.Context, connection net.Conn, authenticator Authenticator) (Authentication, error) {
+// BeginAccept reads and authenticates the exact hello without acknowledging
+// it. Temporary authority failures close silently; only definitive
+// credential/binding/purpose denial sends a reject. The returned value retains
+// no credential and must be acknowledged only after caller-owned admission.
+func BeginAccept(ctx context.Context, connection net.Conn, authenticator Authenticator) (*PendingAcceptance, error) {
 	if ctx == nil || connection == nil || authenticator == nil {
-		return Authentication{}, ErrProtocol
+		return nil, ErrProtocol
 	}
 	deadline := operationDeadline(ctx, HandshakeTimeout)
 	message, err := readMessage(connection, deadline)
 	if err != nil || message.Type != Hello || message.Binding == nil {
-		return Authentication{}, ErrProtocol
+		return nil, ErrProtocol
 	}
 	binding := *message.Binding
 	credential := message.Credential
@@ -204,7 +218,7 @@ func Accept(ctx context.Context, connection net.Conn, authenticator Authenticato
 	sequence, err := guestenrollment.NativeEgressCredentialSequence(credential)
 	if err != nil {
 		credential = ""
-		return Authentication{}, ErrProtocol
+		return nil, ErrProtocol
 	}
 	authContext, cancel := context.WithDeadline(ctx, deadline)
 	authentication, err := authenticator.AuthenticateNativeEgress(authContext, credential, binding)
@@ -216,14 +230,58 @@ func Accept(ctx context.Context, connection net.Conn, authenticator Authenticato
 	if err != nil {
 		if errors.Is(err, ErrAuthenticationDenied) {
 			_ = writeMessage(connection, Message{ContractVersion: Version, Type: HelloReject, Reason: "unauthorized"}, deadline)
-			return Authentication{}, ErrDenied
+			return nil, ErrDenied
 		}
-		return Authentication{}, ErrUnavailable
+		return nil, ErrUnavailable
 	}
-	if err := writeMessage(connection, Message{ContractVersion: Version, Type: HelloAck, Binding: &binding, Audience: guestenrollment.NativeEgressAudience}, deadline); err != nil {
+	return &PendingAcceptance{connection: connection, authentication: authentication, deadline: deadline}, nil
+}
+
+// Authentication returns the validated non-secret authority result.
+func (pending *PendingAcceptance) Authentication() (Authentication, error) {
+	if pending == nil {
+		return Authentication{}, ErrProtocol
+	}
+	pending.mu.Lock()
+	defer pending.mu.Unlock()
+	return pending.authentication, nil
+}
+
+// Acknowledge completes the original absolute handshake only after the caller
+// has reserved its bounded session. It is deliberately one-shot.
+func (pending *PendingAcceptance) Acknowledge() error {
+	if pending == nil {
+		return ErrProtocol
+	}
+	pending.mu.Lock()
+	defer pending.mu.Unlock()
+	if pending.acknowledged || pending.connection == nil {
+		return ErrProtocol
+	}
+	pending.acknowledged = true
+	binding := pending.authentication.Binding
+	if err := writeMessage(pending.connection, Message{ContractVersion: Version, Type: HelloAck, Binding: &binding, Audience: guestenrollment.NativeEgressAudience}, pending.deadline); err != nil {
+		return err
+	}
+	_ = pending.connection.SetDeadline(time.Time{})
+	return nil
+}
+
+// Accept is the compatibility wrapper for callers that do not own a separate
+// admission registry. Relays with bounded admission use BeginAccept and send
+// the acknowledgement only after reservation succeeds.
+func Accept(ctx context.Context, connection net.Conn, authenticator Authenticator) (Authentication, error) {
+	pending, err := BeginAccept(ctx, connection, authenticator)
+	if err != nil {
 		return Authentication{}, err
 	}
-	_ = connection.SetDeadline(time.Time{})
+	authentication, err := pending.Authentication()
+	if err != nil {
+		return Authentication{}, err
+	}
+	if err := pending.Acknowledge(); err != nil {
+		return Authentication{}, err
+	}
 	return authentication, nil
 }
 
@@ -255,7 +313,7 @@ func Establish(ctx context.Context, connection net.Conn, binding guestenrollment
 
 func deriveAuthentication(value Authentication, binding guestenrollment.Binding, sequence uint64, now time.Time) (Authentication, error) {
 	if value.Binding != binding || value.Sequence != sequence || sequence == 0 || sequence > guestenrollment.MaxGuestSessionIssuanceSequence {
-		return Authentication{}, ErrAuthenticationDenied
+		return Authentication{}, ErrAuthenticationTemporary
 	}
 	if !value.LocalExpiresAt.IsZero() || value.IssuedAt.IsZero() || value.ExpiresAt.IsZero() || !value.IssuedAt.Before(value.ExpiresAt) {
 		return Authentication{}, ErrAuthenticationTemporary
@@ -344,6 +402,12 @@ func (Authentication) String() string {
 }
 func (Authentication) GoString() string {
 	return "[native egress authentication]"
+}
+func (*PendingAcceptance) String() string {
+	return "[native egress pending acceptance]"
+}
+func (*PendingAcceptance) GoString() string {
+	return "[native egress pending acceptance]"
 }
 
 func zero(value []byte) {

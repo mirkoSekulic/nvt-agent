@@ -117,7 +117,7 @@ func (authenticator *BrokerAuthenticator) AuthenticateNativeEgress(ctx context.C
 		return nativeegress.Authentication{}, nativeegress.ErrAuthenticationTemporary
 	}
 	if status.Binding != binding || status.Audience != guestenrollment.NativeEgressAudience || status.Sequence != sequence {
-		return nativeegress.Authentication{}, nativeegress.ErrAuthenticationDenied
+		return nativeegress.Authentication{}, nativeegress.ErrAuthenticationTemporary
 	}
 	issuedAt, issuedErr := time.Parse(time.RFC3339, status.IssuedAt)
 	expiresAt, expiresErr := time.Parse(time.RFC3339, status.ExpiresAt)

@@ -7,6 +7,12 @@ It accepts the guest-initiated TLS connection, authenticates the
 guest binding through an in-process `TargetResolver`, and admits the shared
 active/standby `SessionRegistry`.
 
+Authentication is staged: the relay reads and authenticates the bounded hello,
+resolves the exact target, and reserves the active/standby slot before sending
+`hello_ack`. Capacity rejection and older replay therefore close without an
+acknowledgement and cannot cause the guest to publish readiness. An ACK write
+failure removes its reservation.
+
 This phase intentionally has no flow transport or target adapter. The command
 uses `DenyAllTargetResolver`, so it starts safely but cannot acknowledge a
 session or report an exact binding active until a later operator-owned adapter

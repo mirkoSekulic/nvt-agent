@@ -126,6 +126,7 @@ func TestBrokerAuthenticatorFailureClassificationAndBounds(t *testing.T) {
 		context    func() (context.Context, context.CancelFunc)
 	}{
 		{name: "definitive denial", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }), binding: binding, credential: credential, wantDenied: true},
+		{name: "definitive forbidden", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }), binding: binding, credential: credential, wantDenied: true},
 		{name: "server unavailable", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }), binding: binding, credential: credential},
 		{name: "rate limited", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTooManyRequests) }), binding: binding, credential: credential},
 		{name: "redirect", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -180,17 +181,16 @@ func TestBrokerAuthenticatorFailureClassificationAndBounds(t *testing.T) {
 	}
 }
 
-func TestBrokerAuthenticatorRejectsCrossRecordStatusAndExpiry(t *testing.T) {
+func TestBrokerAuthenticatorTreatsContradictorySuccessAsTemporary(t *testing.T) {
 	binding := testBinding("cross-record")
 	credential := testCredential(t, 8)
 	now := time.Now().UTC().Truncate(time.Second)
 	for name, mutate := range map[string]func(*guestenrollment.NativeEgressStatus){
-		"wrong binding":  func(status *guestenrollment.NativeEgressStatus) { status.Binding.GuestInstanceID = "other-guest" },
-		"wrong sequence": func(status *guestenrollment.NativeEgressStatus) { status.Sequence++ },
-		"expired": func(status *guestenrollment.NativeEgressStatus) {
-			status.IssuedAt = guestenrollment.FormatTimestamp(now.Add(-2 * time.Minute))
-			status.ExpiresAt = guestenrollment.FormatTimestamp(now)
+		"wrong binding": func(status *guestenrollment.NativeEgressStatus) { status.Binding.GuestInstanceID = "other-guest" },
+		"wrong audience": func(status *guestenrollment.NativeEgressStatus) {
+			status.Audience = guestenrollment.NativeGuestControlAudience
 		},
+		"wrong sequence": func(status *guestenrollment.NativeEgressStatus) { status.Sequence++ },
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newBrokerFixture(t, http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -208,10 +208,32 @@ func TestBrokerAuthenticatorRejectsCrossRecordStatusAndExpiry(t *testing.T) {
 				t.Fatal(err)
 			}
 			authenticator.now = func() time.Time { return now }
-			if _, err := authenticator.AuthenticateNativeEgress(context.Background(), credential, binding); !errors.Is(err, nativeegress.ErrAuthenticationDenied) {
-				t.Fatalf("cross-record authority was not denied: %v", err)
+			if _, err := authenticator.AuthenticateNativeEgress(context.Background(), credential, binding); !errors.Is(err, nativeegress.ErrAuthenticationTemporary) {
+				t.Fatalf("contradictory success was not temporary: %v", err)
 			}
 		})
+	}
+}
+
+func TestBrokerAuthenticatorDeniesExactExpiredStatus(t *testing.T) {
+	binding := testBinding("expired")
+	credential := testCredential(t, 8)
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newBrokerFixture(t, http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(guestenrollment.NativeEgressStatus{
+			ContractVersion: guestenrollment.NativeEgressIdentityVersion, CredentialType: guestenrollment.NativeEgressCredentialType,
+			Binding: binding, Audience: guestenrollment.NativeEgressAudience, Sequence: 8,
+			IssuedAt: guestenrollment.FormatTimestamp(now.Add(-2 * time.Minute)), ExpiresAt: guestenrollment.FormatTimestamp(now),
+		})
+	}))
+	authenticator, err := NewBrokerAuthenticator(fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator.now = func() time.Time { return now }
+	if _, err := authenticator.AuthenticateNativeEgress(context.Background(), credential, binding); !errors.Is(err, nativeegress.ErrAuthenticationDenied) {
+		t.Fatalf("exact expired authority status was not denied: %v", err)
 	}
 }
 

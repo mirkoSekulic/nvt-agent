@@ -258,11 +258,12 @@ func TestRelayRegistryReconnectStandbyReplayCapacityAndPromotion(t *testing.T) {
 	if current := waitActive(t, server.Sessions(), binding, true); current != active {
 		t.Fatal("equal reconnect preempted active")
 	}
-	third, err := connectGuest(t, address, pki, binding, credential2)
-	if err != nil {
-		t.Fatalf("authenticated third handshake unexpectedly failed before registry admission: %v", err)
+	if third, err := connectGuest(t, address, pki, binding, credential2); err == nil {
+		_ = third.Close()
+		t.Fatal("third session received hello_ack before capacity admission")
+	} else if errors.Is(err, nativeegress.ErrDenied) {
+		t.Fatalf("temporary capacity rejection became definitive denial: %v", err)
 	}
-	waitConnectionClosed(t, third)
 	if current := waitActive(t, server.Sessions(), binding, true); current != active {
 		t.Fatal("third session changed active authority")
 	}
@@ -279,11 +280,12 @@ func TestRelayRegistryReconnectStandbyReplayCapacityAndPromotion(t *testing.T) {
 		t.Fatal(err)
 	}
 	activeTwo := waitActive(t, server.Sessions(), binding, true)
-	older, err := connectGuest(t, address, pki, binding, credential1)
-	if err != nil {
-		t.Fatalf("authenticated replay handshake unexpectedly failed before registry admission: %v", err)
+	if older, err := connectGuest(t, address, pki, binding, credential1); err == nil {
+		_ = older.Close()
+		t.Fatal("older replay received hello_ack before sequence admission")
+	} else if errors.Is(err, nativeegress.ErrDenied) {
+		t.Fatalf("registry replay rejection became authority denial: %v", err)
 	}
-	waitConnectionClosed(t, older)
 	if current := waitActive(t, server.Sessions(), binding, true); current != activeTwo {
 		t.Fatal("older replay changed active authority")
 	}
