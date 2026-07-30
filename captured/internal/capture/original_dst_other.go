@@ -3,10 +3,11 @@
 package capture
 
 import (
-	"errors"
 	"net"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress/captureinspect"
 )
 
-func originalDestination(*net.TCPConn) (string, error) {
-	return "", errors.New("SO_ORIGINAL_DST is only supported on Linux")
+func originalDestination(connection *net.TCPConn) (string, error) {
+	return captureinspect.OriginalDestination(connection)
 }

@@ -1,6 +1,7 @@
 // Package nativeegress owns the trusted native guest's purpose-separated
-// mediated-egress session establishment. It never reads or persists the root
-// runtime identity or an egress credential.
+// mediated-egress session establishment. It never reads the root runtime
+// identity and never persists its short-lived egress credential. Agent-facing
+// capture/parsing lives in the separate nativecapture process.
 package nativeegress
 
 import (
@@ -18,13 +19,14 @@ import (
 const (
 	ConfigurationVersion  = 1
 	MaxConfigurationBytes = 64 << 10
-	ReadinessFileName     = "egress-ready"
+	FlowSocketName        = "flow.sock"
 
 	ReasonIdentityUnavailable Reason = "identity-unavailable"
 	ReasonRelayUnavailable    Reason = "relay-unavailable"
 	ReasonRelayDenied         Reason = "relay-denied"
 	ReasonProtocolInvalid     Reason = "protocol-invalid"
 	ReasonCredentialExpired   Reason = "credential-expired"
+	ReasonCaptureUnavailable  Reason = "capture-unavailable"
 	ReasonConfiguration       Reason = "configuration-invalid"
 )
 
@@ -34,6 +36,7 @@ type Configuration struct {
 	IdentitySocketPath string `json:"identity_socket_path"`
 	RelayEndpoint      string `json:"relay_endpoint"`
 	CAPEMPath          string `json:"ca_pem_path"`
+	FlowSocketPath     string `json:"flow_socket_path,omitempty"`
 }
 
 type Reason string
@@ -81,7 +84,9 @@ func validateConfiguration(value Configuration) error {
 	if value.Version != ConfigurationVersion || !validDirectory(value.RuntimeDirectory) ||
 		!validFile(value.IdentitySocketPath) || !validFile(value.CAPEMPath) ||
 		filepath.Dir(value.IdentitySocketPath) == value.RuntimeDirectory ||
-		value.IdentitySocketPath == value.CAPEMPath || validateRelayEndpoint(value.RelayEndpoint) != nil {
+		value.IdentitySocketPath == value.CAPEMPath || validateRelayEndpoint(value.RelayEndpoint) != nil ||
+		(value.FlowSocketPath != "" && (!validFile(value.FlowSocketPath) || filepath.Dir(value.FlowSocketPath) != value.RuntimeDirectory ||
+			value.FlowSocketPath == value.IdentitySocketPath || value.FlowSocketPath == value.CAPEMPath)) {
 		return errors.New("native egress configuration is invalid")
 	}
 	return nil
@@ -132,15 +137,25 @@ func validFile(value string) bool {
 func (Configuration) String() string   { return "[non-secret native egress configuration]" }
 func (Configuration) GoString() string { return "[non-secret native egress configuration]" }
 
-func ensureRuntimeDirectory(path string) error {
+func ensureRuntimeDirectory(path string, shared bool) error {
 	if !validDirectory(path) {
 		return errors.New("native egress runtime directory is invalid")
 	}
-	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+	mode := os.FileMode(0o700)
+	if shared {
+		mode = 0o750
+	}
+	if err := os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 || info.Mode()&os.ModeSymlink != 0 || !ownedByProcess(info) {
+	if err != nil || info == nil {
+		return errors.New("native egress runtime directory is unsafe")
+	}
+	actualMode := info.Mode().Perm()
+	modeValid := actualMode == mode || (!shared && actualMode == 0o750)
+	if !info.IsDir() || !modeValid || info.Mode()&os.ModeSymlink != 0 || !ownedByProcess(info) ||
+		(actualMode == 0o750 && !groupOwnedByProcess(info)) {
 		return errors.New("native egress runtime directory is unsafe")
 	}
 	return nil

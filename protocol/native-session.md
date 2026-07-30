@@ -14,8 +14,9 @@ connection is not multiplexed. Authorized external-VM browser routing uses the
 separate workspace connection. The provider-neutral
 [`nvt.native-egress/v1`](native-egress.md) contract is also separate. Its
 purpose-specific guest/relay flow transport and optional exact-binding egressd
-adapter do not reuse this control connection; captured traffic, dynamic
-operator publication/readiness, and provider enforcement remain unwired.
+adapter do not reuse this control connection. Its opt-in host-bundle TCP
+capture boundary is also separate; dynamic operator publication/readiness,
+provider redirect installation, and provider enforcement remain unwired.
 
 ## Trust boundary
 

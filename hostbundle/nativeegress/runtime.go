@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -27,6 +25,7 @@ type Runtime struct {
 	Configuration    Configuration
 	Identity         CredentialIssuer
 	Connector        Connector
+	Flow             FlowLifecycle
 	Now              func() time.Time
 	MonotonicNow     func() time.Time
 	readinessChanged func(bool)
@@ -106,21 +105,38 @@ func NewRuntime(configuration Configuration, identity CredentialIssuer, connecto
 	if validateConfiguration(configuration) != nil || identity == nil || connector == nil {
 		return nil, fail(ReasonConfiguration, false, false)
 	}
+	var flow FlowLifecycle
+	if configuration.FlowSocketPath != "" {
+		server, err := NewFlowServer(configuration.FlowSocketPath)
+		if err != nil {
+			return nil, err
+		}
+		flow = server
+	}
 	return &Runtime{
 		Configuration: configuration,
 		Identity:      identity,
 		Connector:     connector,
+		Flow:          flow,
 		Now:           time.Now,
 		MonotonicNow:  time.Now,
 	}, nil
 }
 
 func (runtime *Runtime) Run(ctx context.Context) error {
-	if runtime == nil || ctx == nil || ensureRuntimeDirectory(runtime.Configuration.RuntimeDirectory) != nil {
+	if runtime == nil || ctx == nil || (runtime.Configuration.FlowSocketPath != "" && runtime.Flow == nil) ||
+		(runtime.Configuration.FlowSocketPath == "" && runtime.Flow != nil) {
 		return fail(ReasonConfiguration, false, false)
 	}
-	_ = runtime.writeReadiness(false)
-	defer runtime.writeReadiness(false)
+	if ensureRuntimeDirectory(runtime.Configuration.RuntimeDirectory, false) != nil {
+		return fail(ReasonConfiguration, false, false)
+	}
+	if runtime.Flow != nil {
+		if err := runtime.Flow.Start(ctx); err != nil {
+			return fail(ReasonCaptureUnavailable, false, false)
+		}
+		defer runtime.Flow.Close()
+	}
 	state := &credentialState{}
 	defer state.clear()
 	for {
@@ -185,13 +201,21 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 		return err
 	default:
 	}
-	if err := runtime.writeReadiness(true); err != nil {
+	if runtime.Flow != nil && !runtime.Flow.Activate(active.transport) {
 		active.Close()
-		return err
+		return fail(ReasonCaptureUnavailable, false, false)
+	}
+	if runtime.readinessChanged != nil {
+		runtime.readinessChanged(true)
 	}
 	var attempt *preparation
 	defer func() {
-		_ = runtime.writeReadiness(false)
+		if runtime.readinessChanged != nil {
+			runtime.readinessChanged(false)
+		}
+		if runtime.Flow != nil {
+			runtime.Flow.Withdraw()
+		}
 		active.Close()
 		if attempt != nil {
 			runtime.cancelPreparation(state, attempt)
@@ -213,6 +237,10 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 		if attempt != nil {
 			preparationDone = attempt.done
 		}
+		var flowDone <-chan error
+		if runtime.Flow != nil {
+			flowDone = runtime.Flow.Done()
+		}
 		select {
 		case <-ctx.Done():
 			stopTimer(timer)
@@ -226,6 +254,9 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 				err = fail(ReasonRelayUnavailable, true, false)
 			}
 			return err
+		case <-flowDone:
+			stopTimer(timer)
+			return fail(ReasonCaptureUnavailable, false, false)
 		case result := <-preparationDone:
 			stopTimer(timer)
 			attempt.cancel()
@@ -237,6 +268,10 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 			}
 			if !switched {
 				continue
+			}
+			if runtime.Flow != nil && !runtime.Flow.Activate(replacement.transport) {
+				replacement.Close()
+				return fail(ReasonCaptureUnavailable, false, false)
 			}
 			previous := active
 			active = replacement
@@ -571,44 +606,6 @@ func mapProtocolError(err error) error {
 	default:
 		return fail(ReasonRelayUnavailable, true, false)
 	}
-}
-
-func (runtime *Runtime) writeReadiness(ready bool) error {
-	path := filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)
-	if !ready {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fail(ReasonConfiguration, false, false)
-		}
-		if runtime.readinessChanged != nil {
-			runtime.readinessChanged(false)
-		}
-		return nil
-	}
-	temporary, err := os.CreateTemp(runtime.Configuration.RuntimeDirectory, ".egress-ready-*.tmp")
-	if err != nil {
-		return fail(ReasonConfiguration, false, false)
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return fail(ReasonConfiguration, false, false)
-	}
-	if _, err := temporary.Write([]byte("ready\n")); err != nil || temporary.Sync() != nil || temporary.Close() != nil || os.Rename(name, path) != nil {
-		return fail(ReasonConfiguration, false, false)
-	}
-	directory, err := os.Open(runtime.Configuration.RuntimeDirectory)
-	if err != nil {
-		return fail(ReasonConfiguration, false, false)
-	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
-		return fail(ReasonConfiguration, false, false)
-	}
-	if runtime.readinessChanged != nil {
-		runtime.readinessChanged(true)
-	}
-	return nil
 }
 
 func stopTimer(timer *time.Timer) {

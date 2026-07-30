@@ -77,6 +77,7 @@ build_static ./cmd/nvt-guest-supervisor "${OUTPUT}/bin/nvt-guest-supervisor"
 build_static ./cmd/nvt-guest-identityd "${OUTPUT}/bin/nvt-guest-identityd"
 build_static ./cmd/nvt-guest-sessiond "${OUTPUT}/bin/nvt-guest-sessiond"
 build_static ./cmd/nvt-guest-egressd "${OUTPUT}/bin/nvt-guest-egressd"
+build_static ./cmd/nvt-guest-captured "${OUTPUT}/bin/nvt-guest-captured"
 build_static ./cmd/nvt-guest-session-fixture "${OUTPUT}/bin/nvt-guest-session-fixture"
 
 (
@@ -93,6 +94,7 @@ build_static ./cmd/nvt-guest-session-fixture "${OUTPUT}/bin/nvt-guest-session-fi
     --identity-daemon "${OUTPUT}/bin/nvt-guest-identityd" \
     --session-daemon "${OUTPUT}/bin/nvt-guest-sessiond" \
     --egress-daemon "${OUTPUT}/bin/nvt-guest-egressd" \
+    --capture-daemon "${OUTPUT}/bin/nvt-guest-captured" \
     --bootstrap "${OUTPUT}/bin/nvt-host-bootstrap" \
     --session-fixture "${OUTPUT}/bin/nvt-guest-session-fixture" \
     --agentd "${ROOT}/runtime/agentd/agentd.py" \
@@ -101,11 +103,13 @@ build_static ./cmd/nvt-guest-session-fixture "${OUTPUT}/bin/nvt-guest-session-fi
     --identity-service "${ROOT}/hostbundle/files/nvt-guest-identity.service" \
     --session-service "${ROOT}/hostbundle/files/nvt-guest-session.service" \
     --egress-service "${ROOT}/hostbundle/files/nvt-guest-egress.service" \
+    --capture-service "${ROOT}/hostbundle/files/nvt-guest-captured.service" \
     --config "${ROOT}/hostbundle/files/guest.json" \
     --identity-config "${ROOT}/hostbundle/files/identity.json" \
     --session-config "${ROOT}/hostbundle/files/session.json" \
     --workspace-session-config "${ROOT}/hostbundle/files/session-workspace.json" \
-    --egress-config "${ROOT}/hostbundle/files/native-egress.json" >"${OUTPUT}/digest.txt"
+    --egress-config "${ROOT}/hostbundle/files/native-egress.json" \
+    --capture-config "${ROOT}/hostbundle/files/native-capture.json" >"${OUTPUT}/digest.txt"
 )
 
 printf 'Built NVT host bundle %s for linux/%s at %s\n' "${VERSION}" "${ARCHITECTURE}" "${OUTPUT}"

@@ -2,19 +2,17 @@ package capture
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"crypto/tls"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress/captureinspect"
 )
 
 const (
@@ -195,116 +193,10 @@ func (s *Server) log(format string, values ...any) {
 	}
 }
 
-var errHostnameUnavailable = errors.New("hostname unavailable")
+var errHostnameUnavailable = captureinspect.ErrHostnameUnavailable
 
 func inspectHostname(reader *bufio.Reader, limit int) (string, error) {
-	prefix, err := reader.Peek(1)
-	if err != nil {
-		return "", errHostnameUnavailable
-	}
-	if prefix[0] == 0x16 {
-		return inspectTLSSNI(reader, limit)
-	}
-	return inspectHTTPHost(reader, limit)
-}
-
-func inspectHTTPHost(reader *bufio.Reader, limit int) (string, error) {
-	const delimiter = "\r\n\r\n"
-	if limit <= 0 {
-		return "", fmt.Errorf("HTTP preface exceeds inspection limit")
-	}
-	scanned := 0
-	for {
-		// Scan everything already buffered before asking the socket for more.
-		// Peek only one byte beyond the buffered prefix so a complete short
-		// request never waits for a speculative chunk size or the deadline.
-		buffered := reader.Buffered()
-		if buffered > limit {
-			buffered = limit
-		}
-		if buffered > scanned {
-			peek, err := reader.Peek(buffered)
-			if err != nil {
-				return "", errHostnameUnavailable
-			}
-			start := scanned - (len(delimiter) - 1)
-			if start < 0 {
-				start = 0
-			}
-			if relative := bytes.Index(peek[start:], []byte(delimiter)); relative >= 0 {
-				end := start + relative
-				return parseHTTPHost(peek[:end+len(delimiter)])
-			}
-			scanned = buffered
-			if scanned >= limit {
-				return "", fmt.Errorf("HTTP preface exceeds inspection limit")
-			}
-		}
-
-		_, err := reader.Peek(reader.Buffered() + 1)
-		if err != nil {
-			// Peek can reveal a final partial prefix together with EOF or a
-			// deadline error. Give those bytes one scan before falling back.
-			if reader.Buffered() > scanned {
-				continue
-			}
-			return "", errHostnameUnavailable
-		}
-	}
-}
-
-func parseHTTPHost(preface []byte) (string, error) {
-	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(preface)))
-	if err != nil {
-		return "", fmt.Errorf("malformed HTTP preface")
-	}
-	host := request.Host
-	if split, _, splitErr := net.SplitHostPort(host); splitErr == nil {
-		host = split
-	}
-	if host == "" || strings.ContainsAny(host, "\r\n") {
-		return "", errHostnameUnavailable
-	}
-	return strings.ToLower(host), nil
-}
-
-func inspectTLSSNI(reader *bufio.Reader, limit int) (string, error) {
-	// Transparent credential injection requires readable SNI. Fragmented
-	// ClientHello records or ECH may leave the hostname unavailable; captured
-	// then relays only the original IP and egressd still applies destination
-	// policy, so a credential route cannot be selected accidentally.
-	header, err := reader.Peek(5)
-	if err != nil {
-		return "", errHostnameUnavailable
-	}
-	length := int(binary.BigEndian.Uint16(header[3:5]))
-	if length <= 0 || length+5 > limit {
-		return "", fmt.Errorf("invalid TLS record length")
-	}
-	record, err := reader.Peek(length + 5)
-	if err != nil {
-		return "", errHostnameUnavailable
-	}
-	var sni string
-	server, client := net.Pipe()
-	done := make(chan error, 1)
-	go func() {
-		tlsServer := tls.Server(server, &tls.Config{
-			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-				sni = hello.ServerName
-				return nil, errors.New("inspection complete")
-			},
-		})
-		done <- tlsServer.Handshake()
-		_ = server.Close()
-	}()
-	_, _ = client.Write(record)
-	_ = client.Close()
-	<-done
-	if sni == "" {
-		return "", errHostnameUnavailable
-	}
-	return strings.ToLower(sni), nil
+	return captureinspect.InspectHostname(reader, limit)
 }
 
 func relay(left, right net.Conn) { relayReaders(left, left, right) }

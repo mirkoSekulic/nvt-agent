@@ -104,6 +104,10 @@ func TestRuntimeEstablishesRelaysReconnectsAndRenews(t *testing.T) {
 	binding := testBinding()
 	now := time.Now().UTC().Truncate(time.Second)
 	issuer := &fakeIssuer{binding: binding, now: now}
+	localNow := time.Now()
+	var monotonicMu sync.Mutex
+	monotonicNow := localNow
+	advanceRenewal := sync.Once{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	credentials := make(chan string, 4)
@@ -134,6 +138,13 @@ func TestRuntimeEstablishesRelaysReconnectsAndRenews(t *testing.T) {
 			t.Errorf("relay response = %#v, %v", response, err)
 			return
 		}
+		if call == 2 {
+			advanceRenewal.Do(func() {
+				monotonicMu.Lock()
+				monotonicNow = localNow.Add(credentialRenewalAge)
+				monotonicMu.Unlock()
+			})
+		}
 		if call >= 3 {
 			cancel()
 			return
@@ -151,11 +162,15 @@ func TestRuntimeEstablishesRelaysReconnectsAndRenews(t *testing.T) {
 		}
 	}
 	runtime := newTestRuntime(t, work, agentdSocket, issuer, connector)
-	// Keep the authoritative wall clock fixed so the sub-second test renewal
-	// window cannot already be due solely because protocol timestamps have
-	// whole-second precision. Monotonic time still drives the planned renewal.
+	// Keep both clocks deterministic. The fixture advances the monotonic clock
+	// only after the same-credential reconnect has completed a real request, so
+	// runner load cannot turn that reconnect into an early renewal.
 	runtime.Now = func() time.Time { return now }
-	runtime.MonotonicNow = time.Now
+	runtime.MonotonicNow = func() time.Time {
+		monotonicMu.Lock()
+		defer monotonicMu.Unlock()
+		return monotonicNow
+	}
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
 	select {

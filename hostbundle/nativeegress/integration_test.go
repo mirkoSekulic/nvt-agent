@@ -101,12 +101,32 @@ func TestRuntimeComposesPurposeOnlyIPCWithStrictTLSRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if runtime.Flow != nil {
+		t.Fatal("omitted capture configuration changed the control-only runtime")
+	}
 	runtime.Now = func() time.Time { return now }
 	runtime.MonotonicNow = time.Now
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	ready := make(chan struct{}, 1)
+	runtime.readinessChanged = func(value bool) {
+		if value {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+		}
+	}
 	go func() { done <- runtime.Run(ctx) }()
-	waitForFile(t, filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName))
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("native egress did not become ready")
+	}
+	if info, err := os.Stat(runtime.Configuration.RuntimeDirectory); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("control-only runtime directory mode=%v error=%v", info, err)
+	}
 	if err := <-relayAccepted; err != nil {
 		cancel()
 		t.Fatal(err)
@@ -132,9 +152,6 @@ func TestRuntimeComposesPurposeOnlyIPCWithStrictTLSRelay(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); !os.IsNotExist(err) {
-		t.Fatalf("readiness remained after shutdown: %v", err)
 	}
 	if treeContainsNativeEgress(t, directory, []byte(credentialValue)) {
 		t.Fatal("native egress credential was persisted")

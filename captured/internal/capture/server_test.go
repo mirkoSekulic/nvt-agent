@@ -57,7 +57,7 @@ func TestInspectHTTPHostDelimiterNearLimit(t *testing.T) {
 	if len(preface) != limit-2 {
 		t.Fatalf("fixture length = %d", len(preface))
 	}
-	host, err := inspectHTTPHost(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
+	host, err := inspectHostname(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
 	if err != nil || host != "near-limit.example" {
 		t.Fatalf("near-limit host=%q err=%v", host, err)
 	}
@@ -66,7 +66,7 @@ func TestInspectHTTPHostDelimiterNearLimit(t *testing.T) {
 func TestInspectHTTPHostWithoutDelimiterAtLimit(t *testing.T) {
 	const limit = 16 << 10
 	preface := "GET / HTTP/1.1\r\nHost: no-end.example\r\nX-Fill: " + strings.Repeat("a", limit)
-	_, err := inspectHTTPHost(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
+	_, err := inspectHostname(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
 	if err == nil || errors.Is(err, errHostnameUnavailable) {
 		t.Fatalf("unterminated limit preface must hard-deny, err=%v", err)
 	}
@@ -78,7 +78,7 @@ func BenchmarkInspectHTTPHostNearLimit(b *testing.B) {
 	preface := prefix + strings.Repeat("a", limit-len(prefix)-4) + "\r\n\r\n"
 	b.ReportAllocs()
 	for range b.N {
-		_, _ = inspectHTTPHost(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
+		_, _ = inspectHostname(bufio.NewReaderSize(strings.NewReader(preface), limit), limit)
 	}
 }
 

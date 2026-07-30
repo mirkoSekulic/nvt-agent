@@ -103,6 +103,8 @@ go test -race -count=1 ./...
 ```
 
 No OCI image or coordinated release artifact is published by this phase.
-Dynamic operator publication, captured guest traffic, mediated-VM readiness,
-provider confinement, and cloud/provider integration remain separate future
-gates; this adapter alone does not make production VM mediation complete.
+The opt-in host-bundle capture boundary can now feed this relay, but dynamic
+operator publication, provider-owned guest redirect installation,
+mediated-VM readiness, provider confinement, and cloud/provider integration
+remain separate future gates; this adapter alone does not make production VM
+mediation complete.

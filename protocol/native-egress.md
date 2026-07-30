@@ -4,9 +4,11 @@ Status: versioned provider-neutral contract and hermetic conformance proof
 (`nvt.native-egress/v1`) with a production broker identity authority, trusted
 host-bundle guest client, standalone cluster relay, bounded yamux flow
 transport, and an optional exact-binding adapter into an existing per-run
-`egressd` CONNECT listener. Captured-agent traffic integration, dynamic
-operator publication/readiness, and provider network enforcement do not exist
-yet.
+`egressd` CONNECT listener. The opt-in native host bundle now separates a
+credential-less capture process from the credential-bearing tunnel process;
+captured guest TCP opens only authenticated native-egress flows. Dynamic
+operator publication/readiness, provider-owned redirect installation, and
+provider network enforcement do not exist yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -48,9 +50,14 @@ egress connections are guest-initiated outbound connections.
   identity and issues a purpose-separated short-lived
   `nvt.native-egress-credential/v1`. It persists only credential digests and
   non-secret lifecycle metadata.
-- **Trusted guest egress client:** retains the egress credential transiently,
-  establishes the outbound session, and turns locally captured TCP destinations
-  into bounded untrusted flow intent. It is not the bypass boundary.
+- **Trusted guest egress tunnel:** retains the egress credential transiently,
+  establishes the outbound session, and exposes a root-only local flow socket.
+  It never parses agent-controlled HTTP/TLS prefaces.
+- **Credential-less guest capture:** runs as a separate native process, recovers
+  transparent destinations or consumes a bounded explicit CONNECT, and sends
+  only canonical destination intent and raw bytes over the local flow socket.
+  The local wire cannot represent a bearer or exact binding. It is not the
+  bypass boundary.
 - **Native egress relay:** authenticates the credential and binding, keeps a
   bounded exact-binding registry, and selects the one preconfigured trusted
   target for that binding. It never resolves a target by partial scope or guest
@@ -266,6 +273,9 @@ pinning the same reviewed yamux release.
 | broker revalidation/reconnect | no later than 30 seconds |
 | target flow open | 5 seconds absolute |
 | bidirectional flow inactivity | 2 minutes |
+| guest capture TCP connections | 64 total across transparent and explicit CONNECT |
+| guest capture readiness lease | exactly one live lease |
+| guest capture preface inspection | 16 KiB / 2 seconds |
 | bounded shutdown | 5 seconds |
 | credential lifetime | at most 5 minutes |
 | live credentials/sessions per binding | two credentials; active plus standby |
@@ -309,15 +319,23 @@ For a mediated external VM, the trusted owners converge in this order:
    bootstrap network; no provider or egress credential is carried in the
    envelope, desired fingerprint, driver status, or provider tags.
 4. The active runtime identity obtains the short-lived egress credential under
-   the fixed purpose. The trusted guest client authenticates the outbound
-   session but does not yet forward agent traffic.
+   the fixed purpose. `nvt-guest-egressd` authenticates the outbound session
+   and activates its root-only local flow socket. The separate
+   `nvt-guest-captured` process accepts transparent traffic with no capability
+   hint or a bounded explicit CONNECT carrying the existing per-flow provider
+   selector, consumes that preface, and opens only through the current socket.
+   The provider still owns redirect installation; this guest-local plumbing is
+   not a confinement assertion.
 5. The relay resolves only the exact binding to its already-ready separate
    trusted per-run egress target. A test flow/readiness exchange confirms the
    complete route.
-6. The trusted guest supervisor may start the untrusted agent. The operator may
-   report mediated VM readiness only after the current driver generation's
-   confinement assertion, current exact tunnel, and current target are all
-   ready. Driver `ready` alone is insufficient.
+6. When configured, the trusted guest supervisor holds a live
+   capture-plus-tunnel readiness lease before starting the untrusted agent.
+   Capture process death or tunnel withdrawal closes the lease, removes guest
+   readiness, and stops the session; no stale file can remain authoritative.
+   The operator may report mediated VM readiness only after the
+   current driver generation's confinement assertion, current exact tunnel,
+   and current target are all ready. Driver `ready` alone is insufficient.
 
 `EgressConfinementStatus` is an optional additive field of
 `nvt.execution-driver/v1` portable status. Its only boundary token is
@@ -368,12 +386,21 @@ removal synchronously stops new opens, withdraws the associated session, and
 does not migrate existing flows to another target. The relay sends `hello_ack`
 only after the authenticated session has secured both the exact target and its
 bounded active/standby reservation, then switches the connection to the
-bounded flow data plane. The host-bundle client proves that yamux is live before
-publishing its transport readiness.
+bounded flow data plane. The host-bundle client proves that yamux is live and
+then exposes a strict root-only local stream socket. A separate credential-less
+Linux process recovers the kernel original TCP destination, optionally refines
+the hostname from bounded HTTP Host/TLS SNI, and preserves the preface bytes.
+Its transparent listener always carries an empty capability hint. Its explicit
+CONNECT listener accepts the same bounded per-flow provider selector as the
+Pod path, consumes CONNECT/proxy-auth framing, and forwards only raw bytes.
+The canonical host/IP, port, and optional explicit capability are untrusted
+flow intent; no flow chooses a relay target. Session withdrawal closes local
+health leases and captured flows without fallback. The supervisor retains a
+live readiness socket lease rather than trusting a reusable marker.
 
-This phase does not implement dynamic operator publication, captured agent
-traffic integration, provider network policy, Azure/AWS/QEMU support, or
-operator readiness/cleanup orchestration.
+This phase does not implement dynamic operator publication, provider-owned
+redirect rules, provider network policy, Azure/AWS/QEMU support, or operator
+readiness/cleanup orchestration.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed
 implementation gates and a real provider enforcement proof.

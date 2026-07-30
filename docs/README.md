@@ -49,8 +49,10 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   cleanup contract with a hermetic conformance proof and production broker
   identity authority, trusted guest flow client, and a standalone exact-binding
   relay with bounded flow transport plus an optional process-owned per-run
-  egressd adapter; captured traffic, dynamic operator publication/readiness,
-  and provider enforcement are not implemented.
+  egressd adapter and an opt-in, credential-less host-bundle Linux TCP capture
+  process with transparent and per-flow explicit-provider paths; dynamic
+  operator publication/readiness, provider redirect installation, and provider
+  enforcement are not implemented.
 
 ## Operations And Testing
 

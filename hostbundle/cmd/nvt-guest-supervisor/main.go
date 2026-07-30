@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,9 +20,18 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/contract"
+	"github.com/mirkoSekulic/nvt-agent/hostbundle/nativeegressipc"
 )
 
 const maxConfigBytes = 64 * 1024
+
+var (
+	agentdStartupTimeout       = 30 * time.Second
+	egressReadinessTimeout     = 90 * time.Second
+	sessionReadinessTimeout    = 90 * time.Second
+	sessionStartupStablePeriod = 500 * time.Millisecond
+	startupPollInterval        = 50 * time.Millisecond
+)
 
 var sessionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
@@ -33,6 +44,7 @@ type configuration struct {
 	Workspace                  string   `json:"workspace"`
 	SessionName                string   `json:"session_name"`
 	SessionReadinessPath       string   `json:"session_readiness_path"`
+	EgressReadinessSocketPath  string   `json:"egress_readiness_socket_path,omitempty"`
 	SessionStartupGraceSeconds int      `json:"session_startup_grace_seconds"`
 	SessionCommand             []string `json:"session_command"`
 }
@@ -100,8 +112,24 @@ func run(config configuration, releaseRoot string) error {
 	}
 	defer cleanup()
 
-	startupDeadline := time.Now().Add(30*time.Second + time.Duration(config.SessionStartupGraceSeconds)*time.Second)
-	if err := waitForAgentd(config.SocketPath, startupDeadline, agentdDone); err != nil {
+	startupDeadline := time.Now().Add(agentdStartupTimeout + time.Duration(config.SessionStartupGraceSeconds)*time.Second)
+	if err := waitForAgentd(config.SocketPath, startupDeadline, agentdDone, nil); err != nil {
+		return err
+	}
+	var egressLease net.Conn
+	var egressLeaseDone <-chan struct{}
+	if config.EgressReadinessSocketPath != "" {
+		var err error
+		egressLease, err = waitForEgressReadiness(config.EgressReadinessSocketPath, time.Now().Add(egressReadinessTimeout), agentdDone)
+		if err != nil {
+			return err
+		}
+		defer egressLease.Close()
+		closed := make(chan struct{})
+		egressLeaseDone = closed
+		go func() { nativeegressipc.WaitClosed(egressLease); close(closed) }()
+	}
+	if err := startupDependencyError(agentdDone, egressLeaseDone, "agentd exited before session startup"); err != nil {
 		return err
 	}
 	command := resolveReleaseCommand(config.SessionCommand, releaseRoot)
@@ -109,44 +137,77 @@ func run(config configuration, releaseRoot string) error {
 	arguments = append(arguments, command...)
 	session := exec.Command(config.TmuxPath, arguments...)
 	session.Env = []string{"HOME=" + config.StateDir, "PATH=/usr/bin:/bin"}
-	if output, err := session.CombinedOutput(); err != nil || len(output) > 4096 {
+	var output bytes.Buffer
+	session.Stdout = &output
+	session.Stderr = &output
+	if err := session.Start(); err != nil {
 		return errors.New("guest session could not be started")
 	}
-	stableUntil := time.Now().Add(500 * time.Millisecond)
+	sessionStartDone := make(chan error, 1)
+	go func() { sessionStartDone <- session.Wait() }()
+	var sessionStartErr error
+	select {
+	case sessionStartErr = <-sessionStartDone:
+	case <-agentdDone:
+		_ = session.Process.Kill()
+		<-sessionStartDone
+		return errors.New("agentd exited during session startup")
+	case <-egressLeaseDone:
+		_ = session.Process.Kill()
+		<-sessionStartDone
+		return errors.New("native egress capture exited during session startup")
+	}
+	if sessionStartErr != nil || output.Len() > 4096 {
+		return errors.New("guest session could not be started")
+	}
+	if err := startupDependencyError(agentdDone, egressLeaseDone, "agentd exited during session startup"); err != nil {
+		return err
+	}
+	stableUntil := time.Now().Add(sessionStartupStablePeriod)
 	for time.Now().Before(stableUntil) {
 		if !sessionExists(config) {
 			return errors.New("guest session exited during startup")
 		}
-		select {
-		case <-agentdDone:
-			return errors.New("agentd exited during startup")
-		case <-time.After(50 * time.Millisecond):
+		if err := waitForStartupInterval(startupPollInterval, agentdDone, egressLeaseDone, "agentd exited during startup"); err != nil {
+			return err
 		}
+	}
+	if err := startupDependencyError(agentdDone, egressLeaseDone, "agentd exited during startup"); err != nil {
+		return err
 	}
 	if err := atomicWrite(markerPath, []byte(strconv.FormatInt(time.Now().UnixNano(), 10)+"\n"), 0o600); err != nil {
 		return errors.New("guest session readiness marker could not be published")
+	}
+	if err := startupDependencyError(agentdDone, egressLeaseDone, "agentd exited before readiness"); err != nil {
+		return err
 	}
 	graceDeadline := time.Now().Add(time.Duration(config.SessionStartupGraceSeconds) * time.Second)
 	for time.Now().Before(graceDeadline) {
 		if !sessionExists(config) {
 			return errors.New("guest session exited before readiness")
 		}
-		select {
-		case <-agentdDone:
-			return errors.New("agentd exited before readiness")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-	if err := waitForAgentd(config.SocketPath, startupDeadline, agentdDone); err != nil {
-		return err
-	}
-	if config.SessionReadinessPath != "" {
-		if err := waitForSessionReadiness(config, time.Now().Add(90*time.Second), agentdDone); err != nil {
+		if err := waitForStartupInterval(startupPollInterval, agentdDone, egressLeaseDone, "agentd exited before readiness"); err != nil {
 			return err
 		}
 	}
+	postSessionDeadline := time.Now().Add(agentdStartupTimeout)
+	if err := waitForAgentd(config.SocketPath, postSessionDeadline, agentdDone, egressLeaseDone); err != nil {
+		return err
+	}
+	if config.SessionReadinessPath != "" {
+		if err := waitForSessionReadiness(config, time.Now().Add(sessionReadinessTimeout), agentdDone, egressLeaseDone); err != nil {
+			return err
+		}
+	}
+	if err := startupDependencyError(agentdDone, egressLeaseDone, "agentd exited before readiness publication"); err != nil {
+		return err
+	}
 	if err := atomicWrite(readinessPath, []byte("ready\n"), 0o600); err != nil {
 		return errors.New("guest readiness could not be published")
+	}
+	if err := startupDependencyError(agentdDone, egressLeaseDone, "agentd exited during readiness publication"); err != nil {
+		_ = os.Remove(readinessPath)
+		return err
 	}
 
 	signals := make(chan os.Signal, 1)
@@ -160,6 +221,8 @@ func run(config configuration, releaseRoot string) error {
 			return nil
 		case <-agentdDone:
 			return errors.New("agentd exited unexpectedly")
+		case <-egressLeaseDone:
+			return errors.New("native egress capture exited unexpectedly")
 		case <-sessionMonitor.C:
 			if !sessionExists(config) {
 				return errors.New("guest session exited unexpectedly")
@@ -180,7 +243,7 @@ func loadConfiguration(path string) (configuration, string, error) {
 	if contract.DecodeStrict(data, maxConfigBytes, &config) != nil {
 		return configuration{}, "", errors.New("guest supervisor configuration is invalid")
 	}
-	if config.Version != 1 || !absoluteRegularExecutable(config.PythonPath) || !absoluteRegularExecutable(config.TmuxPath) || !validAbsoluteDirectory(config.StateDir) || !validAbsolutePath(config.SocketPath) || !validSessionReadinessPath(config) || !validAbsoluteDirectory(config.Workspace) || !sessionPattern.MatchString(config.SessionName) || config.SessionStartupGraceSeconds < 0 || config.SessionStartupGraceSeconds > 30 || len(config.SessionCommand) == 0 || len(config.SessionCommand) > 32 {
+	if config.Version != 1 || !absoluteRegularExecutable(config.PythonPath) || !absoluteRegularExecutable(config.TmuxPath) || !validAbsoluteDirectory(config.StateDir) || !validAbsolutePath(config.SocketPath) || !validSessionReadinessPath(config) || !validEgressReadinessPath(config) || !validAbsoluteDirectory(config.Workspace) || !sessionPattern.MatchString(config.SessionName) || config.SessionStartupGraceSeconds < 0 || config.SessionStartupGraceSeconds > 30 || len(config.SessionCommand) == 0 || len(config.SessionCommand) > 32 {
 		return configuration{}, "", errors.New("guest supervisor configuration is invalid")
 	}
 	argumentBytes := 0
@@ -210,20 +273,49 @@ func validSessionReadinessPath(config configuration) bool {
 		(validAbsolutePath(config.SessionReadinessPath) && config.SessionReadinessPath != config.SocketPath)
 }
 
-func waitForSessionReadiness(config configuration, deadline time.Time, done <-chan struct{}) error {
+func validEgressReadinessPath(config configuration) bool {
+	return config.EgressReadinessSocketPath == "" ||
+		(validAbsolutePath(config.EgressReadinessSocketPath) && config.EgressReadinessSocketPath != config.SocketPath &&
+			config.EgressReadinessSocketPath != config.SessionReadinessPath)
+}
+
+func waitForEgressReadiness(path string, deadline time.Time, done <-chan struct{}) (net.Conn, error) {
+	client := nativeegressipc.Client{SocketPath: path, OwnerUID: trustedReadinessOwnerUID(), Shared: true}
 	for time.Now().Before(deadline) {
 		select {
 		case <-done:
-			return errors.New("agentd exited before native session readiness")
+			return nil, errors.New("agentd exited before native egress readiness")
 		default:
+		}
+		if nativeegressipc.ValidateReadinessSocket(path, trustedReadinessOwnerUID()) != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		attempt, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		connection, _, err := client.OpenHealth(attempt)
+		cancel()
+		if err == nil {
+			return connection, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, errors.New("native egress readiness timed out")
+}
+
+func waitForSessionReadiness(config configuration, deadline time.Time, done, egressDone <-chan struct{}) error {
+	for time.Now().Before(deadline) {
+		if err := startupDependencyError(done, egressDone, "agentd exited before native session readiness"); err != nil {
+			return err
 		}
 		if !sessionExists(config) {
 			return errors.New("guest session exited before native session readiness")
 		}
 		if sessionTransportReady(config.SessionReadinessPath) {
-			return nil
+			return startupDependencyError(done, egressDone, "agentd exited before native session readiness")
 		}
-		time.Sleep(50 * time.Millisecond)
+		if err := waitForStartupInterval(startupPollInterval, done, egressDone, "agentd exited before native session readiness"); err != nil {
+			return err
+		}
 	}
 	return errors.New("native session readiness timed out")
 }
@@ -241,12 +333,10 @@ func resolveReleaseCommand(command []string, releaseRoot string) []string {
 	return resolved
 }
 
-func waitForAgentd(socketPath string, deadline time.Time, done <-chan struct{}) error {
+func waitForAgentd(socketPath string, deadline time.Time, done, egressDone <-chan struct{}) error {
 	for time.Now().Before(deadline) {
-		select {
-		case <-done:
-			return errors.New("agentd exited before readiness")
-		default:
+		if err := startupDependencyError(done, egressDone, "agentd exited before readiness"); err != nil {
+			return err
 		}
 		connection, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
 		if err == nil {
@@ -255,12 +345,38 @@ func waitForAgentd(socketPath string, deadline time.Time, done <-chan struct{}) 
 			line, readErr := bufio.NewReader(io.LimitReader(connection, 4096)).ReadString('\n')
 			connection.Close()
 			if writeErr == nil && readErr == nil && strings.Contains(line, `"status":"ready"`) {
-				return nil
+				return startupDependencyError(done, egressDone, "agentd exited before readiness")
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		if err := waitForStartupInterval(startupPollInterval, done, egressDone, "agentd exited before readiness"); err != nil {
+			return err
+		}
 	}
 	return errors.New("agentd readiness timed out")
+}
+
+func startupDependencyError(agentdDone, egressDone <-chan struct{}, agentdMessage string) error {
+	select {
+	case <-agentdDone:
+		return errors.New(agentdMessage)
+	case <-egressDone:
+		return errors.New("native egress capture exited before readiness")
+	default:
+		return nil
+	}
+}
+
+func waitForStartupInterval(delay time.Duration, agentdDone, egressDone <-chan struct{}, agentdMessage string) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-agentdDone:
+		return errors.New(agentdMessage)
+	case <-egressDone:
+		return errors.New("native egress capture exited before readiness")
+	case <-timer.C:
+		return nil
+	}
 }
 
 func sessionExists(config configuration) bool {

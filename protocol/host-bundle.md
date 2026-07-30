@@ -115,7 +115,7 @@ broker token, provider credential, or one-time enrollment secret.
 
 ## Guest service boundary
 
-The bundle includes four independent native service boundaries:
+The bundle includes five independent native service boundaries:
 
 - `nvt-guest-identity.service` runs the static root-owned
   `nvt-guest-identityd`. It consumes the separately delivered one-time
@@ -148,9 +148,16 @@ The bundle includes four independent native service boundaries:
   socket, establishes [`nvt.native-egress/v1`](native-egress.md) over a
   separate explicitly trusted TLS connection, and retains current/pending
   credentials only in bounded process memory. After authentication it proves
-  the pinned bounded yamux flow transport is live before publishing its own
-  readiness. It does not receive the runtime identity, capture agent traffic,
-  or assert provider confinement/readiness.
+  the pinned bounded yamux flow transport is live and exposes a mode `0600`
+  root-only local flow socket. It does not receive the runtime identity,
+  install provider redirect rules, or assert provider confinement/readiness.
+- `nvt-guest-captured.service` runs a separate static credential-less process.
+  It owns all agent-controlled HTTP/TLS/original-destination parsing and can
+  send only canonical destination intent and raw bytes to the local flow
+  socket; exact binding and bearer fields are absent from that IPC. Its
+  transparent listener carries no capability hint. Its explicit CONNECT
+  listener consumes the existing per-flow provider selector and never forwards
+  CONNECT or proxy-auth framing upstream.
 
 The agent service requires the identity service. The identity unit uses
 systemd `Type=notify` and becomes active only after durable state has been
@@ -168,10 +175,11 @@ bearer state to the agent user.
 
 The current bundle includes the real `agentd` and `agentdctl` sources, the
 trusted native control-session and optional workspace clients, the optional
-native-egress session and flow-transport client, plus a bounded session fixture
-for the guest-side lifecycle gate. It does not package code-server, an AI
-runtime, plugins, the cluster-side egressd target adapter, or captured agent
-traffic.
+native-egress session/flow client and separate credential-less Linux capture
+process, plus a bounded
+session fixture for the guest-side lifecycle gate. It does not package
+code-server, an AI runtime, plugins, or the cluster-side egressd target
+adapter.
 The loopback workspace service remains an explicit provider-installed
 prerequisite; the production gateway can route an already-authorized external
 VM browser session to it through the exact native workspace binding.
@@ -188,6 +196,14 @@ version-1 guest configuration. An omitted member preserves the original v1
 agentd/tmux readiness and monitoring behavior. New native-session guests set
 the absolute path and thereby opt into the additional transport gate. A
 present malformed path still fails closed.
+
+`egress_readiness_socket_path` is a second additive optional version-1 member.
+When present, the supervisor validates a non-symlink mode `0660` root-owned
+socket below a mode `0750` root-owned runtime directory, authenticates the
+server peer, and holds a live capture-plus-tunnel lease before starting tmux.
+Capture death or transport withdrawal closes the lease; the supervisor removes
+`guest-ready` before stopping the session. Omission preserves the pre-egress
+behavior. A stale regular file or stale/unowned socket is never readiness.
 
 Guest prerequisites for v1 are Linux, Python 3, tmux, a dedicated `nvt-agent`
 user, writable runtime/state/workspace directories, and systemd when the unit is
@@ -208,14 +224,16 @@ and enables the services. The identity state directory is root-owned mode
 provider-owned and are not archive hooks. No bearer is accepted through argv,
 environment, systemd unit content, or ordinary guest configuration.
 
-Mediated-VM providers may additionally copy
-`share/systemd/nvt-guest-egress.service`, resolve the non-secret
-`share/examples/native-egress.json` paths and canonical TLS relay endpoint into
-root-owned `/etc/nvt-agent/native-egress.json`, install the explicit relay CA,
-and enable the unit only after their infrastructure confinement prerequisites
-are met. The client configuration contains no binding, audience, bearer,
-destination, target, or provider credential. The bundle never enables this
-unit itself, and its readiness is not yet part of operator VM readiness.
+Mediated-VM providers may additionally copy both native-egress units, resolve
+the non-secret `native-egress.json` and `native-capture.json` examples, install
+the explicit relay CA, and enable both only after infrastructure confinement
+prerequisites are met. The capture configuration contains two literal loopback
+listeners and local socket paths only; it contains no binding, audience,
+bearer, target endpoint, global capability, or provider credential. The
+provider owns redirect installation and explicit-proxy client configuration,
+and adds the root-owned `egress_readiness_socket_path` to `guest.json` when the
+agent lifecycle must be gated. The bundle never enables these units itself,
+and readiness is not yet part of operator VM readiness.
 
 The bundled `share/examples/session.json` remains the unchanged control-only
 example. `share/examples/session-workspace.json` demonstrates the optional
@@ -268,6 +286,7 @@ production broker identity endpoints, and trusted host-bundle
 session/flow-transport client now exist. A production relay core serves the
 corresponding bounded data plane and may use an explicit process-owned
 exact-binding adapter into per-run egressd. Captured agent traffic integration,
-dynamic operator target publication/readiness, and provider-owned external
-network confinement remain future gates before a mediated external VM can be
-ready.
+including fixed-destination recovery and no-fallback flow opening, now exists
+in the opt-in guest service. Dynamic operator target publication/readiness,
+provider-owned redirect installation, and provider-owned external network
+confinement remain future gates before a mediated external VM can be ready.

@@ -12,8 +12,9 @@ bash hostbundle/build.sh 0.8.33-test 0123456789abcdef0123456789abcdef01234567 di
 The layout tag resolves to an OCI index. `digest.txt` is its immutable digest.
 The archive contains only the static bootstrap, root-owned runtime-identity
 daemon, root-owned native control/optional workspace session client, the
-separate optional native-egress flow client, non-root supervisor/session
-fixture, the real repository `agentd`/`agentdctl`, four systemd units, and
+separate optional native-egress flow client, credential-less capture daemon,
+non-root supervisor/session fixture, the real repository `agentd`/`agentdctl`,
+five systemd units, and
 non-secret example path/endpoint configurations.
 It does not copy the runtime container rootfs.
 
@@ -25,9 +26,9 @@ The guest OS supplies Python 3, tmux, systemd (when the units are used), the
 `nvt-agent` user, and writable `/workspace`, `/run/nvt-agent`, and
 `/var/lib/nvt-agent` paths. The included session executable is deliberately a
 bounded lifecycle fixture, not a production AI runtime. Provider provisioning,
-the optional fixed loopback workspace service, plugins, a production native
-egress target adapter, captured agent traffic integration, provider
-confinement, and mediated-VM readiness remain later phases.
+the optional fixed loopback workspace service, plugins, dynamic native-egress
+target publication, provider redirect installation and confinement, and
+mediated-VM readiness remain later phases.
 
 The separate provider-neutral enrollment and runtime-identity boundaries are
 documented in [`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md)
@@ -52,6 +53,11 @@ existing container and Compose paths. The version-1 `session_readiness_path`
 member is additive: older guest configurations that omit it retain their
 original agentd/tmux readiness behavior, while newly provisioned native-session
 guests enable the outbound-session readiness gate.
+The optional version-1 `egress_readiness_socket_path` similarly gates tmux
+startup and ongoing guest readiness on a live root-owned
+capture-plus-transport lease. A reusable file cannot assert readiness: process
+loss or transport withdrawal closes the lease before the supervisor removes
+`guest-ready` and stops tmux. Omission preserves existing behavior.
 
 `share/examples/session.json` remains the control-only example. Providers may
 instead resolve the non-secret `share/examples/session-workspace.json` example
@@ -65,13 +71,21 @@ switches only after both replacements authenticate.
 `share/examples/native-egress.json` is a separate opt-in root-owned
 configuration for `nvt-guest-egressd`. It contains only private runtime/socket
 paths, one canonical TLS relay endpoint, and an explicit CA path. The process
-requests a fixed-purpose egress credential from `nvt-guest-identityd`; no
-runtime identity, binding, audience, target, destination, or provider value is
-caller-configurable. The credential is never persisted and reconnects reuse
-it; renewal retains at most a current and pending credential in trusted memory.
+requests a fixed-purpose egress credential from
+`nvt-guest-identityd`; no
+runtime identity, binding, audience, target endpoint, destination, or provider
+credential is caller-configurable. The credential is never persisted and
+reconnects reuse it; renewal retains at most a current and pending credential
+in trusted memory.
 After authentication the client proves the bounded yamux data plane is live
-before publishing transport readiness and exposes only the purpose-specific
-`FlowOpener` seam for later trusted capture integration.
+and exposes only a root-owned destination/byte-stream Unix socket. It retains
+the short-lived bearer and exact binding, while the separate
+`nvt-guest-captured` process owns agent-controlled HTTP/TLS parsing and cannot
+represent either authority value on its IPC. Transparent flows carry no
+capability hint. Proxy-aware clients use the bounded explicit CONNECT listener
+and select the existing non-secret provider capability per flow via
+`X-NVT-Capability` or the proxy username; CONNECT and proxy-auth framing is
+consumed locally and never reaches the upstream byte stream.
 
 After the bootstrap has installed and activated a release, guest provisioning
 may install the repository-owned unit and its separately supplied non-secret
@@ -96,11 +110,13 @@ systemctl enable --now nvt-guest-identity.service nvt-agent-guest.service nvt-gu
 ```
 
 A provider implementing the later mediated-VM enforcement gates may also copy
-`nvt-guest-egress.service`, write root-owned `native-egress.json` plus its
-explicit relay CA, and enable that unit. The bundle does not enable or require
-it, and the current client establishes only the authenticated bounded flow
-transport—it does not forward captured agent traffic or claim production
-mediated-egress readiness.
+`nvt-guest-egress.service` and `nvt-guest-captured.service`, write the two
+root-owned example configurations plus explicit relay CA, install its redirect
+into the configured transparent listener, configure proxy-aware clients for
+the explicit listener, add `egress_readiness_socket_path` to `guest.json`, and
+enable both units. The bundle does not enable or require them. Guest-local
+capture forwards traffic but does not prevent hostile guest root from
+bypassing it and does not claim production mediated-egress readiness.
 
 The bundle never writes `/etc` or enables a service implicitly. That remains a
 provider-owned provisioning step so activation cannot execute archive hooks.
