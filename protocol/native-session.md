@@ -16,7 +16,9 @@ separate workspace connection. The provider-neutral
 purpose-specific guest/relay flow transport and optional exact-binding egressd
 adapter do not reuse this control connection. Its opt-in host-bundle TCP
 capture boundary is also separate; dynamic operator publication/readiness,
-provider redirect installation, and provider enforcement remain unwired.
+provider redirect installation, and provider enforcement remain unwired. The
+relay-side authenticated complete-snapshot publication API exists, but no
+operator deployment or publication reconciliation consumes it yet.
 
 ## Trust boundary
 

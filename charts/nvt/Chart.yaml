@@ -2,5 +2,5 @@ apiVersion: v2
 name: nvt
 description: Core nvt Kubernetes stack
 type: application
-version: 0.8.44
-appVersion: "0.8.44"
+version: 0.8.45
+appVersion: "0.8.45"

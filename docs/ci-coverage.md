@@ -169,6 +169,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `tests/operator/execution-driver-host-image-smoke.sh` → `images.yml / build`
   (the host matrix entry copies the coordinated static host into the complete
   fake provider image and exercises authenticated protocol traffic)
+- `nativeegressrelay/image-test.sh` → `images.yml / build` (the coordinated
+  non-root relay image contains the static command and no shell, package
+  manager, Git, or Go toolchain)
 
 ### native host bundle
 
@@ -251,7 +254,8 @@ The harness and helper scripts are not standalone cases:
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage
   plus the provider-neutral guest-enrollment and native-workspace yamux
   contract/conformance packages
-- `images.yml`: shipped images plus local test/reference and fixture images,
+- `images.yml`: shipped images, including the coordinated native-egress relay,
+  plus local test/reference and fixture images,
   the runtime git-credentials smoke, and the execution-driver host's private
   enrollment-handoff smoke
 - `host-bundle.yml`: native bundle trusted-core tests and guest-side lifecycle

@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.44`; otherwise the API server may prune the
+of, upgrading to chart `0.8.45`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.44 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.45 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.44 --namespace nvt --create-namespace
+  --version 0.8.45 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -66,7 +66,8 @@ loopback and link-local/metadata ranges but cannot infer cluster-specific CIDRs.
 The published chart's `appVersion` is the immutable image tag for its tested
 platform bundle. Chart `0.2.0` published from commit `943d5ba...`, for example,
 uses `0.2.0-943d5ba` for runtime, DinD, broker, egressd, captured, operator,
-gateway, producer, and execution-driver-host images. Empty component tags
+gateway, producer, execution-driver-host, and the separately deployed native-
+egress-relay image. Empty chart component tags
 default to `Chart.AppVersion`; repository, tag, and pull policy remain
 independently overridable. The QEMU reference driver is a test implementation,
 not a coordinated product image.
@@ -76,7 +77,7 @@ loop-device tools used only when an AgentRun's Docker data root is backed by
 Kata virtiofs; it performs no per-run package installation.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all nine image manifests and the native host-bundle OCI
+published only after all ten image manifests and the native host-bundle OCI
 artifact exist and can be fetched anonymously with isolated credential-free
 clients. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
@@ -420,7 +421,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. External drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.44`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.45`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.

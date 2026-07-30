@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	ConfigurationVersion       = 1
+	ConfigurationVersion       = 2
 	MaxConfigurationBytes      = 64 << 10
 	maxTrustFileBytes          = 1 << 20
 	maxPendingTLSHandshakes    = 32
@@ -32,16 +32,20 @@ var dnsNamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?
 // Configuration contains only non-secret listener and trust-file metadata.
 // Private key and CA material are read from process-owned files.
 type Configuration struct {
-	Version                      int                       `json:"version"`
-	ListenAddress                string                    `json:"listen_address"`
-	TLSCertificateFile           string                    `json:"tls_certificate_file"`
-	TLSKeyFile                   string                    `json:"tls_key_file"`
-	BrokerURL                    string                    `json:"broker_url"`
-	BrokerServerName             string                    `json:"broker_server_name"`
-	BrokerCAFile                 string                    `json:"broker_ca_file"`
-	AuthenticationTimeoutSeconds int                       `json:"authentication_timeout_seconds"`
-	RevalidationIntervalSeconds  int                       `json:"revalidation_interval_seconds"`
-	EgressdTargets               []EgressdTargetDescriptor `json:"egressd_targets,omitempty"`
+	Version                      int    `json:"version"`
+	ListenAddress                string `json:"listen_address"`
+	TLSCertificateFile           string `json:"tls_certificate_file"`
+	TLSKeyFile                   string `json:"tls_key_file"`
+	ControlListenAddress         string `json:"control_listen_address"`
+	ControlTLSCertificateFile    string `json:"control_tls_certificate_file"`
+	ControlTLSKeyFile            string `json:"control_tls_key_file"`
+	ControlCredentialFile        string `json:"control_credential_file"`
+	ControlTimeoutSeconds        int    `json:"control_timeout_seconds"`
+	BrokerURL                    string `json:"broker_url"`
+	BrokerServerName             string `json:"broker_server_name"`
+	BrokerCAFile                 string `json:"broker_ca_file"`
+	AuthenticationTimeoutSeconds int    `json:"authentication_timeout_seconds"`
+	RevalidationIntervalSeconds  int    `json:"revalidation_interval_seconds"`
 }
 
 func LoadConfiguration(path string) (Configuration, error) {
@@ -58,10 +62,14 @@ func LoadConfiguration(path string) (Configuration, error) {
 }
 
 func (config Configuration) validate() error {
-	if config.Version != ConfigurationVersion || validateListenAddress(config.ListenAddress) != nil {
+	if config.Version != ConfigurationVersion || validateListenAddress(config.ListenAddress) != nil ||
+		validateListenAddress(config.ControlListenAddress) != nil || config.ListenAddress == config.ControlListenAddress {
 		return errors.New("native egress relay configuration is invalid")
 	}
-	paths := []string{config.TLSCertificateFile, config.TLSKeyFile, config.BrokerCAFile}
+	paths := []string{
+		config.TLSCertificateFile, config.TLSKeyFile, config.ControlTLSCertificateFile,
+		config.ControlTLSKeyFile, config.ControlCredentialFile, config.BrokerCAFile,
+	}
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		if !validFilePath(path) {
@@ -86,11 +94,10 @@ func (config Configuration) validate() error {
 	}
 	authenticationTimeout := time.Duration(config.AuthenticationTimeoutSeconds) * time.Second
 	revalidationInterval := time.Duration(config.RevalidationIntervalSeconds) * time.Second
+	controlTimeout := time.Duration(config.ControlTimeoutSeconds) * time.Second
 	if authenticationTimeout <= 0 || authenticationTimeout > nativeegress.HandshakeTimeout ||
-		revalidationInterval <= 0 || revalidationInterval > nativeegress.RevalidationInterval {
-		return errors.New("native egress relay configuration is invalid")
-	}
-	if _, err := validateEgressdTargetDescriptors(config.EgressdTargets); err != nil {
+		revalidationInterval <= 0 || revalidationInterval > nativeegress.RevalidationInterval ||
+		controlTimeout <= 0 || controlTimeout > nativeegress.TargetPublicationTimeout {
 		return errors.New("native egress relay configuration is invalid")
 	}
 	return nil
@@ -124,12 +131,20 @@ func validFilePath(value string) bool {
 }
 
 func loadServingTLS(config Configuration) (*tls.Config, error) {
-	certificatePEM, err := readProcessOwnedFile(config.TLSCertificateFile, maxTrustFileBytes, false)
+	return loadTLSIdentity(config.TLSCertificateFile, config.TLSKeyFile, nil)
+}
+
+func loadControlTLS(config Configuration) (*tls.Config, error) {
+	return loadTLSIdentity(config.ControlTLSCertificateFile, config.ControlTLSKeyFile, []string{"http/1.1"})
+}
+
+func loadTLSIdentity(certificateFile, keyFile string, nextProtocols []string) (*tls.Config, error) {
+	certificatePEM, err := readProcessOwnedFile(certificateFile, maxTrustFileBytes, false)
 	if err != nil {
 		return nil, errors.New("native egress relay TLS identity is invalid")
 	}
 	defer zero(certificatePEM)
-	keyPEM, err := readProcessOwnedFile(config.TLSKeyFile, maxTrustFileBytes, true)
+	keyPEM, err := readProcessOwnedFile(keyFile, maxTrustFileBytes, true)
 	if err != nil {
 		return nil, errors.New("native egress relay TLS identity is invalid")
 	}
@@ -138,7 +153,10 @@ func loadServingTLS(config Configuration) (*tls.Config, error) {
 	if err != nil {
 		return nil, errors.New("native egress relay TLS identity is invalid")
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}, nil
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate},
+		NextProtos: append([]string(nil), nextProtocols...),
+	}, nil
 }
 
 func (Configuration) String() string   { return "[native egress relay configuration]" }

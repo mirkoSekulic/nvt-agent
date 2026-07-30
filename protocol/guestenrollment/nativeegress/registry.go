@@ -176,6 +176,77 @@ func (registry *SessionRegistry) Active(binding guestenrollment.Binding) (*Sessi
 	return slot.active.session, true
 }
 
+// WithdrawBindings synchronously removes flow authority and registry
+// readiness for each complete binding, then closes the finite affected
+// sessions concurrently. The returned channel closes when teardown finishes
+// or the single bounded shutdown budget elapses. Callers may safely make a
+// replacement target snapshot visible immediately after this method returns:
+// no withdrawn session can open another flow or remain registry-ready.
+func (registry *SessionRegistry) WithdrawBindings(bindings []guestenrollment.Binding) (<-chan struct{}, error) {
+	if registry == nil || len(bindings) > MaxSessionBindings {
+		return nil, ErrProtocol
+	}
+	canonical := append([]guestenrollment.Binding(nil), bindings...)
+	seen := make(map[guestenrollment.Binding]struct{}, len(canonical))
+	for _, binding := range canonical {
+		if guestenrollment.ValidateBinding(binding) != nil {
+			return nil, ErrProtocol
+		}
+		if _, exists := seen[binding]; exists {
+			return nil, ErrProtocol
+		}
+		seen[binding] = struct{}{}
+	}
+
+	registry.mu.Lock()
+	if registry.closed {
+		registry.mu.Unlock()
+		return nil, ErrUnavailable
+	}
+	reservations := make([]*SessionReservation, 0, len(canonical)*2)
+	for _, binding := range canonical {
+		slot := registry.slots[binding]
+		if slot == nil {
+			continue
+		}
+		for _, reservation := range []*SessionReservation{slot.active, slot.standby} {
+			if reservation == nil || reservation.removed {
+				continue
+			}
+			reservation.removed = true
+			reservation.ready = false
+			reservation.session.setFlowAuthority(false)
+			reservations = append(reservations, reservation)
+		}
+		delete(registry.slots, binding)
+	}
+	registry.mu.Unlock()
+
+	done := make(chan struct{})
+	go finishWithdrawals(reservations, done)
+	return done, nil
+}
+
+func finishWithdrawals(reservations []*SessionReservation, done chan<- struct{}) {
+	defer close(done)
+	results := make(chan struct{}, len(reservations))
+	for _, reservation := range reservations {
+		go func() {
+			_ = reservation.session.Close()
+			results <- struct{}{}
+		}()
+	}
+	timer := time.NewTimer(ShutdownTimeout)
+	defer timer.Stop()
+	for range reservations {
+		select {
+		case <-results:
+		case <-timer.C:
+			return
+		}
+	}
+}
+
 func (registry *SessionRegistry) Close() error {
 	return registry.closeWithin(ShutdownTimeout)
 }

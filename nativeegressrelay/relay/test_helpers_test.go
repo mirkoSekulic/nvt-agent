@@ -99,6 +99,15 @@ func testCredential(t *testing.T, sequence uint64) string {
 	return credential
 }
 
+func mustControlCredential(t *testing.T) string {
+	t.Helper()
+	credential, err := nativeegress.GenerateRelayControlCredential()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return credential
+}
+
 type fakeAuthenticator struct {
 	mu        sync.Mutex
 	bindings  map[string]guestenrollment.Binding

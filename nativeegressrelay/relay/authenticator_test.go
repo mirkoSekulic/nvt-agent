@@ -37,11 +37,20 @@ func newBrokerFixture(t *testing.T, handler http.Handler) brokerFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	controlCredential, err := nativeegress.GenerateRelayControlCredential()
+	if err != nil {
+		t.Fatal(err)
+	}
 	config := Configuration{
 		Version: ConfigurationVersion, ListenAddress: "127.0.0.1:7445",
-		TLSCertificateFile: writeTestFile(t, directory, "relay.crt", pki.certificatePEM, 0o644),
-		TLSKeyFile:         writeTestFile(t, directory, "relay.key", pki.keyPEM, 0o600),
-		BrokerURL:          "https://localhost:" + parsed.Port(), BrokerServerName: "localhost",
+		TLSCertificateFile:        writeTestFile(t, directory, "relay.crt", pki.certificatePEM, 0o644),
+		TLSKeyFile:                writeTestFile(t, directory, "relay.key", pki.keyPEM, 0o600),
+		ControlListenAddress:      "127.0.0.1:7446",
+		ControlTLSCertificateFile: writeTestFile(t, directory, "control.crt", pki.certificatePEM, 0o644),
+		ControlTLSKeyFile:         writeTestFile(t, directory, "control.key", pki.keyPEM, 0o600),
+		ControlCredentialFile:     writeTestFile(t, directory, "control-token", []byte(controlCredential), 0o600),
+		ControlTimeoutSeconds:     5,
+		BrokerURL:                 "https://localhost:" + parsed.Port(), BrokerServerName: "localhost",
 		BrokerCAFile:                 writeTestFile(t, directory, "broker-ca.crt", pki.caPEM, 0o644),
 		AuthenticationTimeoutSeconds: 1, RevalidationIntervalSeconds: 30,
 	}
