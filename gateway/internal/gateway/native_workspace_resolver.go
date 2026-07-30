@@ -47,8 +47,16 @@ func (resolver *nativeWorkspaceResolver) Resolve(agentRun *nvtv1alpha1.AgentRun)
 		return nil, ErrNativeWorkspaceRouteNotFound
 	}
 	generation := agentRun.Generation
-	if generation < 1 {
-		generation = 1
+	attachmentGeneration := int64(0)
+	if attachment := agentRun.Status.NativeEgressAttachment; attachment != nil {
+		if attachment.Generation < 1 || executiondriver.ValidateDesiredFingerprint(attachment.Digest) != nil {
+			return nil, ErrNativeWorkspaceRouteNotFound
+		}
+		attachmentGeneration = attachment.Generation
+	}
+	generation, err = executiondriver.NativeEgressDesiredGeneration(generation, attachmentGeneration)
+	if err != nil {
+		return nil, ErrNativeWorkspaceRouteNotFound
 	}
 	if binding.AgentRunUID != string(agentRun.UID) || binding.ExecutionID != executionID ||
 		binding.DriverRegistration != agentRun.Spec.Execution.Driver || binding.DesiredGeneration != generation {

@@ -28,7 +28,10 @@ The guest OS supplies Python 3, tmux, systemd (when the units are used), the
 bounded lifecycle fixture, not a production AI runtime. Provider provisioning,
 the optional fixed loopback workspace service, plugins, dynamic native-egress
 target publication, provider redirect installation and confinement, and
-mediated-VM readiness remain later phases.
+mediated-VM readiness remain later phases. The execution-driver contract now
+carries the operator-owned public relay trust and fixed redirect ports needed
+to render this bundle's optional native-egress configuration, but no production
+provider consumes that plan yet and the bundle never treats it as confinement.
 
 The separate provider-neutral enrollment and runtime-identity boundaries are
 documented in [`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md)

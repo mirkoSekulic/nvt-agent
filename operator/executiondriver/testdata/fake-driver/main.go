@@ -560,6 +560,14 @@ func (d *driver) reconcile(params executiondriver.ReconcileParams) (executiondri
 	}
 	state.Status.ObservedGeneration = params.Desired.Generation
 	state.Status.Failure = nil
+	state.Status.EgressConfinement = nil
+	if params.Desired.NativeEgressAttachment != nil {
+		state.Status.EgressConfinement = &executiondriver.EgressConfinementStatus{
+			Boundary: executiondriver.EgressConfinementBoundaryInfrastructure,
+			Ready:    ready, AttachmentGeneration: params.Desired.NativeEgressAttachment.Generation,
+			AttachmentDigest: params.Desired.NativeEgressAttachment.Digest,
+		}
+	}
 	if ready {
 		state.Status.Phase = executiondriver.PhaseRunning
 		state.Status.Ready = true

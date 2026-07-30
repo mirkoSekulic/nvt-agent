@@ -2,6 +2,8 @@
 {{- $relay := .Values.nativeEgressRelay -}}
 {{- $namespace := include "nvt.namespace" . -}}
 {{- $controlServerName := default (printf "nvt-native-egress-relay-control.%s.svc.cluster.local" $namespace) $relay.control.serverName -}}
+{{- $dataServerName := default (printf "nvt-native-egress-relay.%s.svc.cluster.local" $namespace) $relay.attachment.relayServerName -}}
+{{- $dataHost := default $dataServerName $relay.attachment.relayHost -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -28,6 +30,26 @@ data:
       "broker_ca_file": "/var/run/nvt-native-egress-relay/broker-ca.crt",
       "authentication_timeout_seconds": {{ $relay.authenticationTimeoutSeconds }},
       "revalidation_interval_seconds": {{ $relay.revalidationIntervalSeconds }}
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-native-egress-attachment
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "nvt.operatorLabels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "version": 1,
+      "generation": {{ $relay.attachment.generation }},
+      "relayHost": {{ $dataHost | quote }},
+      "relayPort": {{ $relay.data.port }},
+      "relayServerName": {{ $dataServerName | quote }},
+      "caFile": "/var/run/nvt-native-egress-attachment/data-ca.crt",
+      "requiredDestinations": {{ $relay.attachment.requiredDestinations | toJson }},
+      "redirect": {{ $relay.attachment.redirect | toJson }}
     }
 ---
 apiVersion: v1

@@ -25,11 +25,12 @@ driver may deliver only the opaque encoded envelope through the separately
 versioned exact-registration handoff; reconcile remains credential-free.
 
 The provider-neutral [native VM mediated-egress contract](native-egress.md)
-adds one optional non-secret portable status assertion for infrastructure-level
-network confinement. It never carries an egress identity, target, endpoint, or
-provider state. Existing drivers may omit it; a future mediated external-VM
-operator gate requires it explicitly and combines it with exact tunnel/target
-readiness.
+adds one optional operator-owned non-secret attachment plan and one matching
+portable status assertion for infrastructure-level network confinement. The
+plan carries only public relay trust, exact required NVT destinations, fixed
+redirect intent, and its generation/digest. It never carries an egress
+identity, control bearer, private key, provider credential, arbitrary producer
+URL, command, or provider state. Existing drivers omit both fields exactly.
 
 An execution driver is trusted operator code, not an agent plugin or a sandbox
 boundary. A future driver host may give it provider credentials. Drivers must
@@ -245,8 +246,8 @@ capability. A version or capability mismatch fails initialization.
 ### `reconcile`
 
 `reconcile` is level-triggered. `generation` represents the complete desired
-tuple: `workload_kind`, `class_name`, and the fully resolved
-`configuration`. The trusted operator/driver host canonicalizes that tuple,
+tuple: `workload_kind`, `class_name`, the fully resolved `configuration`, and,
+when present, `native_egress_attachment`. The trusted operator/driver host canonicalizes that tuple,
 computes its SHA-256 fingerprint, and sends the lowercase
 `sha256:<64-hex-digits>` value as `desired_fingerprint`. The operator must
 increment generation and change the fingerprint whenever any tuple member
@@ -281,6 +282,51 @@ The configuration is a bounded JSON object resolved from administrator-owned
 class configuration. It is never an AgentRun producer surface and must not
 carry credentials; future driver hosts provide explicitly
 allowlisted provider credentials outside desired state.
+
+For an explicitly mediated external VM, `desired.native_egress_attachment`
+has this additive shape:
+
+```json
+{"contract_version":"nvt.native-egress-attachment/v1","generation":3,"relay":{"host":"relay.example","port":7445,"server_name":"relay.example","ca_pem":"<bounded public CA PEM>"},"required_destinations":[{"purpose":"bootstrap","host":"broker.example","port":7443},{"purpose":"control","host":"gateway.example","port":7444}],"redirect":{"mode":"capture-tcp","loopback_address":"127.0.0.1","transparent_tcp_port":15001,"explicit_connect_port":15002},"digest":"sha256:<64 lowercase hex>"}
+```
+
+The trusted installation owns every member. Producer input and execution-class
+configuration cannot replace or supplement it. Hosts are canonical lowercase
+DNS names or canonical unscoped global-unicast IP literals; private, reserved,
+transition, loopback, link-local, multicast, mapped, and scoped IP literals are
+rejected. Network endpoints are unique and
+sorted by purpose, host, and port. At least one `bootstrap` and one `control`
+destination are required, with at most 16 total. The relay serving name is a
+canonical DNS name, the CA bundle contains 1 through 8 CA certificates and at
+most 64 KiB, the complete plan is at most 96 KiB, and the two unprivileged
+loopback ports are distinct. Private keys and non-certificate PEM blocks are
+invalid.
+
+The plan digest is SHA-256 over the following domain-separated byte sequence:
+the ASCII contract version and one zero byte; generation as unsigned 64-bit
+big-endian; relay host as a 32-bit-length-prefixed UTF-8 string; relay port as
+unsigned 16-bit big-endian; server name and canonical CA PEM as length-prefixed
+strings; destination count as unsigned 16-bit big-endian; then each canonical
+destination's purpose and host as length-prefixed strings and port as unsigned
+16-bit; followed by redirect mode and loopback address as length-prefixed
+strings and its two unsigned 16-bit ports. The encoded result is lowercase
+`sha256:<hex>`. The ordinary `desired_fingerprint` preserves its exact legacy
+algorithm when the optional plan is absent; when present, its canonical compact
+JSON is one additional length-prefixed tuple member. Desired generation is the
+resource generation (minimum one) plus the monotonic attachment generation.
+Either change therefore creates a new convergence obligation without changing
+any legacy generation.
+
+For this plan, provider convergence has a strict lifecycle. Bootstrap may
+initially permit only the listed NVT destinations. Before `running` plus
+`ready`, the driver installs the fixed redirect/capture intent and durably
+reads back infrastructure-owned default deny outside the guest, such that
+ordinary VM traffic reaches external networks only through the relay path.
+Guest-local routes, firewall rules, proxy settings, or a guest report cannot
+satisfy that read-back. Reconcile/observe must keep this confinement active
+after relay withdrawal and throughout identity revocation and operator-owned
+target cleanup. Only the later level-triggered `delete` operation may relax or
+remove provider network confinement together with the VM/NIC.
 
 ```json
 {"jsonrpc":"2.0","id":"reconcile-4","method":"reconcile","params":{"desired":{"execution_id":"opaque-stable-id","generation":4,"desired_fingerprint":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","workload_kind":"vm","class_name":"approved-small","configuration":{"region":"example-1"}}}}
@@ -352,7 +398,7 @@ request; it closes the client and terminates that process generation directly.
 | `observed_generation` | Non-negative desired generation represented by this observation; zero is allowed when no desired resource exists. |
 | `retry_after_seconds` | Optional bounded convergence hint from 1 through 3600. The operator decides the actual requeue. |
 | `failure` | Required only for `failed`; the same bounded sanitized `{reason,message,retryable}` shape as error data. |
-| `egress_confinement` | Optional non-secret `{boundary:"infrastructure",ready:<bool>}` provider assertion. `true` means the trusted driver/provider has durably read back bypass prevention outside the guest. Guest-local proxy, route, or firewall configuration never satisfies it. Existing Pod/non-mediated drivers omit it. |
+| `egress_confinement` | Optional non-secret `{boundary:"infrastructure",ready:<bool>,attachment_generation:<positive integer>,attachment_digest:"sha256:<hex>"}` provider assertion. The two attachment members are paired and must exactly echo the current desired plan. `true` means the trusted driver/provider durably read back bypass prevention outside the guest. Guest-local proxy, route, or firewall configuration never satisfies it. Existing Pod/non-mediated drivers omit it. |
 
 `deleted` must not retain readiness, endpoint, external resource ID, or failure
 data. These portable phases are driver observations, not AgentRun conditions.
@@ -363,10 +409,11 @@ to become routable: the operator combines it with operator-owned broker grants,
 gateway routing, and workload-readiness conditions.
 
 When `egress_confinement` is present, `ready:true` requires its `ready` member
-to be true. A deleted status must omit it. For a future mediated external VM,
-the operator must additionally require the field to be present, use the exact
-`infrastructure` boundary token, and combine it with current egress identity,
-tunnel, and per-run target readiness. The assertion's trusted owner is the
+to be true. A deleted status must omit it. For a mediated external VM, the
+operator requires the field, the exact current attachment generation/digest,
+and the `infrastructure` boundary token before target publication can become
+Ready; it then combines that assertion with current egress identity, tunnel,
+and per-run target readiness. The assertion's trusted owner is the
 execution driver/provider; a guest report, class value, endpoint, opaque
 resource ID, or ordinary driver diagnostic cannot synthesize it. Omission
 preserves existing `nvt.execution-driver/v1` JSON and behavior.

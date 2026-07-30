@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	driverregistry "github.com/mirkoSekulic/nvt-agent/operator/executiondriver/registry"
 	"github.com/mirkoSekulic/nvt-agent/operator/guestenrollment/brokerclient"
 	"github.com/mirkoSekulic/nvt-agent/operator/internal/controller"
+	"github.com/mirkoSekulic/nvt-agent/operator/nativeegressattachment"
 	"github.com/mirkoSekulic/nvt-agent/operator/nativeegresspublication"
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
@@ -76,6 +78,14 @@ func main() {
 		ctrl.Log.Error(err, "invalid native egress publication configuration")
 		os.Exit(1)
 	}
+	nativeEgressAttachment, err := nativeegressattachment.LoadConfigured()
+	if err == nil && (nativeEgressPublication == nil) != (nativeEgressAttachment == nil) {
+		err = errors.New("native egress publication and attachment must be configured together")
+	}
+	if err != nil {
+		ctrl.Log.Error(err, "invalid native egress attachment configuration")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -91,10 +101,11 @@ func main() {
 	}
 
 	reconciler := &controller.AgentRunReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		ExecutionDrivers: driverRegistry,
-		GuestEnrollment:  guestEnrollment,
+		Client:                 mgr.GetClient(),
+		Scheme:                 mgr.GetScheme(),
+		ExecutionDrivers:       driverRegistry,
+		GuestEnrollment:        guestEnrollment,
+		NativeEgressAttachment: nativeEgressAttachment,
 	}
 	if nativeEgressPublication != nil {
 		if err = controller.ConfigureNativeEgressTargetPublication(reconciler, nativeEgressPublication, mgr.GetAPIReader(), os.Getenv("POD_NAMESPACE")); err != nil {

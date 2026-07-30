@@ -500,6 +500,20 @@ spec:
                       type: string
                       minLength: 1
                       maxLength: 256
+                nativeEgressAttachment:
+                  description: Operator-owned non-secret generation and digest of the current native egress attachment plan.
+                  type: object
+                  required:
+                    - generation
+                    - digest
+                  properties:
+                    generation:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                    digest:
+                      type: string
+                      pattern: '^sha256:[0-9a-f]{64}$'
                 conditions:
                   type: array
                   items:

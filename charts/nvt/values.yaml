@@ -142,6 +142,21 @@ nativeEgressRelay:
     # Source ranges permitted to reach the guest-facing listener. Empty keeps
     # the data listener fenced until provider routing is configured.
     ingressCIDRs: []
+  attachment:
+    # Monotonic installation-owned attachment generation. Increment whenever
+    # relay identity/trust, required bootstrap/control destinations, or
+    # redirect intent changes.
+    generation: 1
+    relayHost: ""
+    relayServerName: ""
+    # Complete provider bootstrap allowlist. Each entry has purpose
+    # "bootstrap" or "control", one canonical DNS/IP host, and one port.
+    requiredDestinations: []
+    redirect:
+      mode: capture-tcp
+      loopbackAddress: 127.0.0.1
+      transparentTCPPort: 15001
+      explicitCONNECTPort: 15002
   control:
     port: 7446
     serverName: ""
@@ -154,6 +169,9 @@ nativeEgressRelay:
     existingSecret: ""
     dataCertificateKey: data-tls.crt
     dataPrivateKeyKey: data-tls.key
+    # Public CA trust for the data listener. This is the only relay Secret
+    # item projected into the operator attachment-plan volume.
+    dataCAKey: data-ca.crt
     controlCAKey: control-ca.crt
     controlCertificateKey: control-tls.crt
     controlPrivateKeyKey: control-tls.key

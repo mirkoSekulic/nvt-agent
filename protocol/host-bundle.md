@@ -234,8 +234,12 @@ provider owns redirect installation and explicit-proxy client configuration,
 and adds the root-owned `egress_readiness_socket_path` to `guest.json` when the
 agent lifecycle must be gated. The bundle never enables these units itself.
 The operator now gates its native-mediated condition on the exact published
-relay target, but provider confinement and installed guest capture readiness
-remain provider-owned prerequisites.
+relay target and exact desired attachment observation. The attachment gives a
+provider the public relay trust, fixed capture ports, and bounded bootstrap
+destinations needed to resolve these files; it never carries a credential.
+Provider confinement and installed guest capture readiness remain
+provider-owned prerequisites, and no production provider consumes the plan in
+this phase.
 
 The bundled `share/examples/session.json` remains the unchanged control-only
 example. `share/examples/session-workspace.json` demonstrates the optional

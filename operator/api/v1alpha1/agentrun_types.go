@@ -321,6 +321,10 @@ type AgentRunStatus struct {
 	// identity for the currently accepted native guest. It is absent for the
 	// built-in Kubernetes backend and whenever no exact guest is authoritative.
 	NativeGuestBinding *AgentRunNativeGuestBinding `json:"nativeGuestBinding,omitempty"`
+	// NativeEgressAttachment records only the operator-owned generation and
+	// digest of the current non-secret provider attachment plan. Producers
+	// cannot write the status subresource or override this authority.
+	NativeEgressAttachment *AgentRunNativeEgressAttachmentStatus `json:"nativeEgressAttachment,omitempty"`
 	// Conditions surfaces portable execution selection failures and the
 	// enforcement-mode provisioning state machine (BrokerPolicyReady,
 	// EgressdCreated, EgressdReady, EgressCAPublished). The agent Pod is never
@@ -347,6 +351,16 @@ type AgentRunNativeGuestBinding struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	GuestInstanceID string `json:"guestInstanceID"`
+}
+
+// AgentRunNativeEgressAttachmentStatus is the durable operator observation
+// used to prevent a withdrawn or replaced attachment from being resurrected
+// after restart. It intentionally omits endpoints, trust, and provider state.
+type AgentRunNativeEgressAttachmentStatus struct {
+	// +kubebuilder:validation:Minimum=1
+	Generation int64 `json:"generation"`
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	Digest string `json:"digest"`
 }
 
 // AgentRunList contains a list of AgentRun resources.
@@ -649,6 +663,10 @@ func (in *AgentRunStatus) DeepCopy() *AgentRunStatus {
 	if in.NativeGuestBinding != nil {
 		out.NativeGuestBinding = new(AgentRunNativeGuestBinding)
 		*out.NativeGuestBinding = *in.NativeGuestBinding
+	}
+	if in.NativeEgressAttachment != nil {
+		out.NativeEgressAttachment = new(AgentRunNativeEgressAttachmentStatus)
+		*out.NativeEgressAttachment = *in.NativeEgressAttachment
 	}
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))

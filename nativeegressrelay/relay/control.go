@@ -272,14 +272,17 @@ func (server *ControlServer) Shutdown(ctx context.Context) error {
 	httpServer := server.httpServer
 	listener := server.listener
 	server.httpMu.Unlock()
-	if listener != nil {
-		_ = listener.Close()
-	}
 	if httpServer != nil {
+		// Once Serve has installed the http.Server, it owns the listener.
+		// Closing the raw listener first races http.Server.Shutdown's tracked
+		// close and can turn an otherwise clean shutdown into a double-close
+		// error. Shutdown closes the listener and drains handlers atomically.
 		if err := httpServer.Shutdown(ctx); err != nil {
 			_ = httpServer.Close()
 			return errTargetPublicationUnavailable
 		}
+	} else if listener != nil {
+		_ = listener.Close()
 	}
 	if !server.serveStarted.Load() {
 		server.finish()

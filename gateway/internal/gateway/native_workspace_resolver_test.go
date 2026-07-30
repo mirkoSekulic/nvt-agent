@@ -70,6 +70,28 @@ func TestNativeWorkspaceResolverExactBinding(t *testing.T) {
 	}
 }
 
+func TestNativeWorkspaceResolverUsesAttachmentComposedGeneration(t *testing.T) {
+	run, binding := nativeWorkspaceResolverFixture(t)
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{
+		Generation: 3, Digest: "sha256:" + strings.Repeat("0", 64),
+	}
+	binding.DesiredGeneration = run.Generation + 3
+	run.Status.NativeGuestBinding.DesiredGeneration = binding.DesiredGeneration
+	control := &resolverControl{ready: true}
+	opener := &resolverOpener{binding: binding, sequence: 2}
+	workspace := &resolverWorkspace{ready: true, opener: opener}
+	resolved, err := NewNativeWorkspaceResolver(control, workspace).Resolve(run)
+	if err != nil || resolved != opener {
+		t.Fatalf("resolve attachment binding: opener=%v error=%v", resolved, err)
+	}
+	run.Status.NativeEgressAttachment.Digest = "not-a-digest"
+	control.seen = nil
+	workspace.seen = nil
+	if _, err := NewNativeWorkspaceResolver(control, workspace).Resolve(run); !errors.Is(err, ErrNativeWorkspaceRouteNotFound) || len(control.seen) != 0 || len(workspace.seen) != 0 {
+		t.Fatalf("malformed attachment error=%v control=%v workspace=%v", err, control.seen, workspace.seen)
+	}
+}
+
 func TestNativeWorkspaceResolverRejectsDeletingRunBeforeRegistryLookup(t *testing.T) {
 	run, binding := nativeWorkspaceResolverFixture(t)
 	now := metav1.Now()

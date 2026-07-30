@@ -125,7 +125,16 @@ func (backend externalExecutionBackend) Reconcile(
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
 	}
-	desired, err := desiredExternalExecution(&agentRun)
+	if nativeMediatedExternalRun(&agentRun) {
+		changed, attachmentErr := reconciler.ensureNativeEgressAttachment(ctx, &agentRun)
+		if attachmentErr != nil {
+			return reconciler.recordExecutionSelectionFailure(ctx, &agentRun, executionSelectionInvalidReason, "native mediated egress attachment is unavailable")
+		}
+		if changed {
+			return ctrl.Result{Requeue: true}, nil
+		}
+	}
+	desired, err := desiredExternalExecution(&agentRun, reconciler.NativeEgressAttachment)
 	if err != nil {
 		return reconciler.recordExecutionSelectionFailure(ctx, &agentRun, executionSelectionInvalidReason, "resolved external execution state is invalid")
 	}
@@ -174,7 +183,11 @@ func (backend externalExecutionBackend) Reconcile(
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
 	}
-	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && status.ObservedGeneration == desired.Generation && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
+	enrollmentReady := status.ObservedGeneration == desired.Generation
+	if nativeMediatedExternalRun(&agentRun) {
+		enrollmentReady = nativeMediatedConfinementReady(&agentRun, reconciler.NativeEgressAttachment, status, desired.Generation)
+	}
+	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && enrollmentReady && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
 		enrollmentResult, enrollmentErr := backend.reconcileGuestEnrollment(ctx, reconciler, &agentRun, desired)
 		if enrollmentErr != nil {
 			return ctrl.Result{}, enrollmentErr
@@ -577,7 +590,7 @@ func staleTerminalExternalStatus(status executiondriver.Status, desiredGeneratio
 	return status.Phase == executiondriver.PhaseFailed && status.Failure != nil && !status.Failure.Retryable
 }
 
-func desiredExternalExecution(agentRun *nvtv1alpha1.AgentRun) (executiondriver.DesiredExecution, error) {
+func desiredExternalExecution(agentRun *nvtv1alpha1.AgentRun, configured *executiondriver.NativeEgressAttachment) (executiondriver.DesiredExecution, error) {
 	if agentRun.Spec.Execution == nil || agentRun.Spec.Execution.Driver == builtInKubernetesDriver {
 		return executiondriver.DesiredExecution{}, fmt.Errorf("external execution selection is absent")
 	}
@@ -590,15 +603,28 @@ func desiredExternalExecution(agentRun *nvtv1alpha1.AgentRun) (executiondriver.D
 		return executiondriver.DesiredExecution{}, err
 	}
 	workloadKind := executiondriver.WorkloadKind(agentRun.Spec.Execution.Kind)
-	generation := agentRun.Generation
-	if generation < 1 {
-		generation = 1
+	var attachment *executiondriver.NativeEgressAttachment
+	if nativeMediatedExternalRun(agentRun) {
+		if configured == nil || !nativeEgressAttachmentCurrent(agentRun, configured) {
+			return executiondriver.DesiredExecution{}, fmt.Errorf("native egress attachment is unavailable")
+		}
+		copy := *configured
+		copy.RequiredDestinations = append([]executiondriver.NativeEgressRequiredDestination(nil), configured.RequiredDestinations...)
+		attachment = &copy
+	}
+	attachmentGeneration := int64(0)
+	if attachment != nil {
+		attachmentGeneration = attachment.Generation
+	}
+	generation, err := executiondriver.NativeEgressDesiredGeneration(agentRun.Generation, attachmentGeneration)
+	if err != nil {
+		return executiondriver.DesiredExecution{}, err
 	}
 	desired := executiondriver.DesiredExecution{
 		ExecutionID: executionID, Generation: generation,
-		DesiredFingerprint: externalDesiredFingerprint(workloadKind, agentRun.Spec.Execution.ClassRef, configuration),
+		DesiredFingerprint: externalDesiredFingerprint(workloadKind, agentRun.Spec.Execution.ClassRef, configuration, attachment),
 		WorkloadKind:       workloadKind, ClassName: agentRun.Spec.Execution.ClassRef,
-		Configuration: configuration,
+		Configuration: configuration, NativeEgressAttachment: attachment,
 	}
 	if err := executiondriver.ValidateReconcileParams(executiondriver.ReconcileParams{Desired: desired}); err != nil {
 		return executiondriver.DesiredExecution{}, err
@@ -628,9 +654,17 @@ func canonicalExecutionConfiguration(raw []byte) (json.RawMessage, error) {
 	return canonical, nil
 }
 
-func externalDesiredFingerprint(kind executiondriver.WorkloadKind, className string, configuration []byte) string {
+func externalDesiredFingerprint(kind executiondriver.WorkloadKind, className string, configuration []byte, attachment *executiondriver.NativeEgressAttachment) string {
 	hash := sha256.New()
-	for _, value := range [][]byte{[]byte("nvt.external-desired/v1"), []byte(kind), []byte(className), configuration} {
+	values := [][]byte{[]byte("nvt.external-desired/v1"), []byte(kind), []byte(className), configuration}
+	if attachment != nil {
+		encoded, err := json.Marshal(attachment)
+		if err != nil {
+			return ""
+		}
+		values = append(values, encoded)
+	}
+	for _, value := range values {
 		_, _ = fmt.Fprintf(hash, "%d:", len(value))
 		_, _ = hash.Write(value)
 	}
@@ -685,6 +719,12 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 		r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
 	}
 	ready := status.Ready && status.ObservedGeneration == desiredGeneration
+	if nativeMediatedExternalRun(agentRun) {
+		attachment := agentRun.Status.NativeEgressAttachment
+		ready = ready && attachment != nil && status.EgressConfinement != nil &&
+			status.EgressConfinement.Boundary == executiondriver.EgressConfinementBoundaryInfrastructure && status.EgressConfinement.Ready &&
+			status.EgressConfinement.AttachmentGeneration == attachment.Generation && status.EgressConfinement.AttachmentDigest == attachment.Digest
+	}
 	reason := "ExternalExecutionPending"
 	phase := nvtv1alpha1.AgentRunPhasePending
 	conditionStatus := metav1.ConditionFalse
