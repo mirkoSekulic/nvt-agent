@@ -392,6 +392,10 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	replacementControlServed := make(chan struct{}, 1)
 	pendingWorkspaceStarted := make(chan struct{})
 	releasePendingWorkspace := make(chan struct{})
+	releaseRetriedWorkspace := make(chan struct{})
+	var releasePendingOnce, releaseRetriedOnce sync.Once
+	releasePending := func() { releasePendingOnce.Do(func() { close(releasePendingWorkspace) }) }
+	releaseRetried := func() { releaseRetriedOnce.Do(func() { close(releaseRetriedWorkspace) }) }
 	failedPendingWorkspace := make(chan struct{})
 	connector := &workspacePipeConnector{controlHandler: heartbeatWorkspaceControlGateway(binding, controlCredentials, activeControlPongs, replacementControlServed)}
 	connector.workspaceHandler = func(call int, connection net.Conn) {
@@ -411,6 +415,9 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 			close(failedPendingWorkspace)
 			return
 		}
+		if call == 3 {
+			<-releaseRetriedWorkspace
+		}
 		keepWorkspaceGateway(t, binding, workspaceCredentials, workspaceSessions)(call, connection)
 	}
 	runtime := newWorkspaceTestRuntime(t, work, agentdSocket, backend, issuer, connector)
@@ -423,7 +430,21 @@ func TestWorkspaceRenewalSwitchesOnlyAfterBothPendingLegsReady(t *testing.T) {
 	runtime.MonotonicNow = func() time.Time { return time.Unix(0, localClock.Load()) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runtime.Run(ctx) }()
+	runtimeStopped := make(chan struct{})
+	go func() {
+		defer close(runtimeStopped)
+		done <- runtime.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		releasePending()
+		releaseRetried()
+		cancel()
+		select {
+		case <-runtimeStopped:
+		case <-time.After(2 * time.Second):
+			t.Error("runtime did not stop before fixture cleanup")
+		}
+	})
 	first := waitWorkspaceSession(t, workspaceSessions)
 	waitForSessionReadiness(t, runtime.Configuration.RuntimeDirectory)
 	if ready := waitReadinessEvent(t, readinessEvents); ready {
@@ -483,7 +504,7 @@ drainPongs:
 		t.Fatalf("slow pending workspace removed current readiness: %v", err)
 	}
 	assertWorkspaceEcho(t, first, "predecessor-during-slow-replacement")
-	close(releasePendingWorkspace)
+	releasePending()
 	select {
 	case <-failedPendingWorkspace:
 	case <-time.After(2 * time.Second):
@@ -495,6 +516,7 @@ drainPongs:
 		t.Fatalf("one-leg pending failure removed current readiness: %v", err)
 	}
 	assertWorkspaceEcho(t, first, "predecessor-still-ready")
+	releaseRetried()
 	failedWorkspace := waitString(t, workspaceCredentials, "failed replacement workspace credential")
 	if failedWorkspace == initialControl {
 		cancel()
