@@ -16,8 +16,8 @@ type TargetResolver interface {
 	ResolveNativeEgressTarget(context.Context, guestenrollment.Binding) (nativeegress.EgressTarget, error)
 }
 
-// DenyAllTargetResolver is the safe production default until an
-// operator-owned in-process adapter is implemented.
+// DenyAllTargetResolver is the safe production default when no trusted
+// exact-binding egressd descriptor snapshot is configured.
 type DenyAllTargetResolver struct{}
 
 func (DenyAllTargetResolver) ResolveNativeEgressTarget(context.Context, guestenrollment.Binding) (nativeegress.EgressTarget, error) {
@@ -60,6 +60,36 @@ func bindingOfTarget(target nativeegress.EgressTarget) (binding guestenrollment.
 	}()
 	binding = target.Binding()
 	return binding, guestenrollment.ValidateBinding(binding) == nil
+}
+
+type guardedTargetAdmission interface {
+	acquireAdmission() (func(), bool)
+}
+
+type lifecycleTarget interface {
+	Done() <-chan struct{}
+}
+
+func acquireTargetAdmission(target nativeegress.EgressTarget) (func(), bool) {
+	guarded, ok := target.(guardedTargetAdmission)
+	if !ok {
+		return func() {}, true
+	}
+	return guarded.acquireAdmission()
+}
+
+func watchTargetLifecycle(session *nativeegress.Session, target nativeegress.EgressTarget) {
+	lifecycle, ok := target.(lifecycleTarget)
+	if !ok {
+		return
+	}
+	go func() {
+		select {
+		case <-lifecycle.Done():
+			_ = session.Close()
+		case <-session.Done():
+		}
+	}()
 }
 
 func (*sessionAdmission) String() string   { return "[native egress session admission]" }

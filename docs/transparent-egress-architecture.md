@@ -286,7 +286,8 @@ replace guest-local capture and firewall state. The provider-neutral
 trusted execution driver/provider to enforce default-deny NIC/network policy
 outside the guest, plus an exact-binding authenticated outbound tunnel into the
 run's separate trusted egress path. Both gates are required. The contract,
-conformance proof, identity authority, guest flow client, and cluster relay
-with bounded flow transport exist, but no trusted target adapter, captured
-traffic integration, operator readiness gate, or provider confinement is wired
-yet.
+conformance proof, identity authority, guest flow client, cluster relay, and an
+optional strict process-owned exact-binding adapter into per-run egressd exist.
+Captured traffic integration, dynamic operator target publication/readiness,
+and provider confinement are not wired yet, so production VM mediation remains
+incomplete.

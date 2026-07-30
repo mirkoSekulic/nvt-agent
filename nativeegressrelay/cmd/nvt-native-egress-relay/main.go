@@ -1,6 +1,7 @@
 // Command nvt-native-egress-relay runs the provider-neutral native-egress
-// authenticated session boundary. Until an operator-owned target adapter is
-// wired, the production command deliberately resolves no targets.
+// authenticated session boundary. It resolves only an optional process-owned
+// exact-binding egressd snapshot and remains deny-all when that snapshot is
+// omitted.
 package main
 
 import (
@@ -37,7 +38,7 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	server, err := relay.NewServer(config, relay.DenyAllTargetResolver{})
+	server, err := relay.NewServer(config, nil)
 	if err != nil {
 		return err
 	}

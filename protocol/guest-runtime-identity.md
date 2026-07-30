@@ -229,6 +229,7 @@ bearer only to issue the purpose-separated short-lived egress credential; no
 other process receives this runtime bearer. The host bundle now includes the
 separate opt-in native-egress client that obtains only that derived credential
 over root-only IPC and establishes the strictly trusted outbound flow session.
-The standalone relay terminates the matching bounded data plane. A production
-target adapter, captured agent traffic integration, provider network
-enforcement, and operator readiness gate do not exist yet.
+The standalone relay terminates the matching bounded data plane and may use an
+explicit process-owned exact-binding adapter into the run's existing egressd
+CONNECT listener. Captured agent traffic integration, dynamic operator target
+publication/readiness, and provider network enforcement do not exist yet.
