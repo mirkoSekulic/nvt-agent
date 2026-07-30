@@ -35,9 +35,8 @@ func (lookup *exactSessionLookup) Active(binding guestenrollment.Binding) (*nati
 func (*exactSessionLookup) String() string   { return "[native egress exact session lookup]" }
 func (*exactSessionLookup) GoString() string { return "[native egress exact session lookup]" }
 
-// Server accepts the guest-initiated authenticated TLS session. V1 relay-core
-// handlers deliberately reject every byte after hello_ack; flow transport is
-// a later reviewed implementation gate.
+// Server accepts the guest-initiated authenticated TLS session and switches the
+// admitted connection to the bounded native-egress flow transport.
 type Server struct {
 	listenAddress        string
 	revalidationInterval time.Duration
@@ -251,7 +250,12 @@ func (server *Server) closeTrackedConnections() {
 
 func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 	connection := tls.Server(raw, server.tlsConfig.Clone())
-	defer connection.Close()
+	connectionOwned := true
+	defer func() {
+		if connectionOwned {
+			_ = connection.Close()
+		}
+	}()
 	tlsContext, cancelTLS := context.WithTimeout(server.lifetimeContext, server.handshakeTimeout)
 	_ = connection.SetDeadline(time.Now().Add(server.handshakeTimeout))
 	err := connection.HandshakeContext(tlsContext)
@@ -280,28 +284,33 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		cancelHandshake()
 		return
 	}
-	defer session.Close()
 	reservation, err := server.registry.Reserve(session)
 	if err != nil {
 		cancelHandshake()
+		_ = session.Close()
 		return
 	}
-	defer reservation.Remove()
 	if err := pending.Acknowledge(); err != nil {
 		cancelHandshake()
+		reservation.Remove()
 		return
 	}
 	cancelHandshake()
+	transport, err := nativeegress.NewRelayFlowTransport(connection, session)
+	if err != nil {
+		reservation.Remove()
+		return
+	}
+	connectionOwned = false
+	// Session callbacks withdraw the exact registry reservation before the
+	// transport callback closes the outer connection and target flows. Close
+	// owns one shared absolute shutdown deadline across all of that work.
+	defer transport.Close()
 	if !reservation.Activate() {
 		return
 	}
 	releaseHandshake()
-	// Until the reviewed flow transport lands, any byte after hello_ack is a
-	// protocol violation. The local trust deadline also bounds a silent peer.
-	_ = connection.SetReadDeadline(authentication.LocalExpiresAt)
-	var unexpected [1]byte
-	_, _ = connection.Read(unexpected[:])
-	unexpected[0] = 0
+	_ = transport.Serve(server.lifetimeContext)
 }
 
 var _ SessionLookup = (*exactSessionLookup)(nil)

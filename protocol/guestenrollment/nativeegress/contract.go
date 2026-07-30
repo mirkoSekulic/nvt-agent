@@ -1,6 +1,7 @@
 // Package nativeegress defines the provider-neutral authenticated session and
 // flow-routing contract for mediated egress from independently managed guests.
-// It contains no provider, broker, tunnel-library, or Kubernetes implementation.
+// Its pinned transport remains behind NVT interfaces; it contains no provider,
+// broker, target-adapter, or Kubernetes implementation.
 package nativeegress
 
 import (
@@ -22,6 +23,7 @@ import (
 
 const (
 	Version        = "nvt.native-egress/v1"
+	YamuxVersion   = "github.com/hashicorp/yamux/v0.1.2"
 	Hello          = "hello"
 	HelloAck       = "hello_ack"
 	HelloReject    = "hello_reject"
@@ -37,12 +39,20 @@ const (
 	MaxActiveFlows          = 64
 	MaxPendingFlowOpens     = 8
 	MaxSessionBindings      = 128
+	MaxFlowIDsPerSession    = 1024
+	AcceptBacklog           = MaxPendingFlowOpens
+	StreamWindowBytes       = 256 << 10
+	CopyBufferBytes         = 32 << 10
 
-	HandshakeTimeout     = 5 * time.Second
-	RevalidationInterval = 30 * time.Second
-	FlowOpenTimeout      = 5 * time.Second
-	FlowIdleTimeout      = 2 * time.Minute
-	ShutdownTimeout      = 5 * time.Second
+	HandshakeTimeout       = 5 * time.Second
+	RevalidationInterval   = 30 * time.Second
+	FlowOpenTimeout        = 5 * time.Second
+	FlowIdleTimeout        = 2 * time.Minute
+	ShutdownTimeout        = 5 * time.Second
+	KeepAliveInterval      = 10 * time.Second
+	ConnectionWriteTimeout = 5 * time.Second
+	StreamOpenTimeout      = FlowOpenTimeout
+	StreamCloseTimeout     = ShutdownTimeout
 )
 
 var (
@@ -70,9 +80,9 @@ type Destination struct {
 	CapabilityHint string `json:"capability_hint,omitempty"`
 }
 
-// Message is the bounded pre-data-plane vocabulary. A future transport maps
-// one accepted flow_open to one backpressured byte stream; it must not expose
-// its implementation types through this package.
+// Message is the bounded session and per-stream vocabulary. The transport
+// maps one accepted flow_open to one backpressured byte stream without
+// exposing its implementation types through NVT interfaces.
 type Message struct {
 	ContractVersion string                   `json:"contract_version"`
 	Type            string                   `json:"type"`

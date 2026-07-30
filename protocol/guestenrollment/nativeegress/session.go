@@ -3,6 +3,7 @@ package nativeegress
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ type Session struct {
 	opening        int
 	active         map[*flowConn]struct{}
 	idleTimeout    time.Duration
+	flowAuthority  bool
 	closed         bool
 	done           chan struct{}
 	shutdownDone   chan struct{}
@@ -57,6 +59,7 @@ func newSession(authentication Authentication, target EgressTarget, idleTimeout 
 		pending:        make(chan struct{}, MaxPendingFlowOpens),
 		active:         make(map[*flowConn]struct{}, MaxActiveFlows),
 		idleTimeout:    idleTimeout,
+		flowAuthority:  true,
 		done:           make(chan struct{}),
 		shutdownDone:   make(chan struct{}),
 	}
@@ -105,7 +108,7 @@ func (session *Session) OpenFlow(ctx context.Context, destination Destination) (
 	}
 
 	session.mu.Lock()
-	if session.closed || !time.Now().Before(session.authentication.LocalExpiresAt) {
+	if session.closed || !session.flowAuthority || !time.Now().Before(session.authentication.LocalExpiresAt) {
 		session.mu.Unlock()
 		return nil, ErrUnavailable
 	}
@@ -127,7 +130,7 @@ func (session *Session) OpenFlow(ctx context.Context, destination Destination) (
 
 	session.mu.Lock()
 	session.opening--
-	if err != nil || deadlineExceeded || connection == nil || session.closed || !time.Now().Before(session.authentication.LocalExpiresAt) {
+	if err != nil || deadlineExceeded || connection == nil || session.closed || !session.flowAuthority || !time.Now().Before(session.authentication.LocalExpiresAt) {
 		session.mu.Unlock()
 		if connection != nil {
 			_ = connection.Close()
@@ -145,6 +148,19 @@ func (session *Session) OpenFlow(ctx context.Context, destination Destination) (
 	session.mu.Unlock()
 	flow.refreshDeadline()
 	return flow, nil
+}
+
+func (session *Session) setFlowAuthority(value bool) bool {
+	if session == nil {
+		return false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed {
+		return false
+	}
+	session.flowAuthority = value
+	return true
 }
 
 func (session *Session) Ready() bool {
@@ -271,7 +287,7 @@ func (flow *flowConn) Read(buffer []byte) (int, error) {
 	if count > 0 {
 		flow.refreshDeadline()
 	}
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		_ = flow.Close()
 	}
 	return count, err
@@ -296,6 +312,16 @@ func (flow *flowConn) Close() error {
 		flow.session.remove(flow)
 	})
 	return err
+}
+
+func (flow *flowConn) CloseWrite() error {
+	if flow == nil {
+		return net.ErrClosed
+	}
+	if connection, ok := flow.Conn.(interface{ CloseWrite() error }); ok {
+		return connection.CloseWrite()
+	}
+	return flow.Conn.Close()
 }
 
 func (flow *flowConn) refreshDeadline() {

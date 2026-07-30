@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -56,9 +55,9 @@ type credentialState struct {
 }
 
 type relaySession struct {
-	connection net.Conn
-	done       chan error
-	closeOnce  sync.Once
+	transport *protocol.GuestFlowTransport
+	done      chan error
+	closeOnce sync.Once
 }
 
 type preparation struct {
@@ -321,7 +320,16 @@ func (runtime *Runtime) openSession(ctx context.Context, value credential) (*rel
 		return nil, mapProtocolError(err)
 	}
 	value.Opaque = ""
-	session := &relaySession{connection: connection, done: make(chan error, 1)}
+	transport, err := protocol.NewGuestFlowTransport(connection)
+	if err != nil {
+		_ = connection.Close()
+		return nil, mapProtocolError(err)
+	}
+	if err := transport.AwaitReady(establishContext); err != nil {
+		_ = transport.Close()
+		return nil, mapProtocolError(err)
+	}
+	session := &relaySession{transport: transport, done: make(chan error, 1)}
 	go session.monitor()
 	return session, nil
 }
@@ -533,26 +541,18 @@ func renewalJitter(binding guestenrollment.Binding, sequence uint64) time.Durati
 }
 
 func (session *relaySession) monitor() {
-	buffer := make([]byte, 1)
-	count, err := session.connection.Read(buffer)
-	zero(buffer)
-	if count > 0 {
-		session.done <- fail(ReasonProtocolInvalid, false, false)
-		return
-	}
-	_ = err
+	<-session.transport.Done()
 	session.done <- fail(ReasonRelayUnavailable, true, false)
 }
 
 func (session *relaySession) Close() {
-	if session == nil || session.connection == nil {
+	if session == nil || session.transport == nil {
 		return
 	}
 	session.closeOnce.Do(func() {
 		closed := make(chan struct{})
 		go func() {
-			_ = session.connection.SetDeadline(time.Now())
-			_ = session.connection.Close()
+			_ = session.transport.Close()
 			close(closed)
 		}()
 		select {

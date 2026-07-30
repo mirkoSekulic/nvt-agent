@@ -2,10 +2,10 @@
 
 Status: versioned provider-neutral contract and hermetic conformance proof
 (`nvt.native-egress/v1`) with a production broker identity authority, trusted
-host-bundle guest client, and standalone cluster relay core for authenticated
-exact-binding session admission. No production target adapter, flow transport,
-agent traffic forwarding, provider network implementation, or operator
-readiness wiring exists yet.
+host-bundle guest client, standalone cluster relay, and bounded yamux flow
+transport for authenticated exact-binding sessions. No production target
+adapter, captured-agent traffic integration, provider network implementation,
+or operator readiness wiring exists yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -33,7 +33,7 @@ Consequently:
   may report a mediated external VM ready.
 
 The VM has no public inbound listener. Enrollment, control, workspace, and
-future egress connections are guest-initiated outbound connections.
+egress connections are guest-initiated outbound connections.
 
 ## Roles and exact identity
 
@@ -135,8 +135,9 @@ five seconds. Unknown, duplicate, or trailing input closes without a response.
 
 Only equal-sequence reconnect or a higher sequence may stand by. Older replay
 is rejected. One active plus one already-authenticated standby is the maximum;
-a third fails closed. A standby never preempts active. The obsolete transport
-session is withdrawn and closed after the ready replacement is promoted. Exact
+a third fails closed. A standby never preempts active and cannot open flows
+until atomic promotion. The obsolete transport session is withdrawn and closed
+after the ready replacement is promoted. Exact
 binding or execution-scope revocation atomically denies all current and future
 credentials/sessions for its ownership key.
 
@@ -172,10 +173,32 @@ the session and closes its flows; a still-valid guest reconnects with the same
 credential and the broker is consulted again. Denial, revocation, malformed
 authority status, or temporary revalidation failure stays fail closed.
 
-After authentication, the transport maps one validated `flow_open` intent to
-one backpressured byte stream. The generic interface deliberately does not
-select a multiplexing, packet, VPN, cloud, or overlay technology. No library
-type crosses the NVT interface.
+After `hello_ack`, that same TLS connection switches to the pinned
+`github.com/hashicorp/yamux` v0.1.2 protocol with explicit NVT-owned settings.
+The guest is the yamux client and sole application-stream opener; the relay is
+the yamux server and accepts streams. A relay-initiated stream is a protocol
+failure. Yamux types remain private to this package: callers receive only the
+transport-neutral `FlowOpener`/`net.Conn` boundary, and targets continue to
+implement only `EgressTarget`.
+
+Each logical stream starts with exactly one strict `flow_open` JSONL frame.
+The relay validates its session-unique flow ID and canonical Destination,
+opens only through the `EgressTarget` already selected by the authenticated
+five-field Binding, and returns the matching `flow_open_ack` before raw bytes
+begin. An authoritative target policy denial returns only the matching fixed
+`flow_open_reject` with reason `denied`; capacity, timeout, malformed framing,
+target unavailability, duplicate/replayed IDs, or transport faults close the
+stream or session without internal diagnostics. One stream is one TCP flow.
+Copies preserve backpressure and TCP half-close semantics; payloads are never
+whole-buffered. Closing a stream before sending any frame is an ordinary
+stream-local canceled open; a partial frame, malformed frame, duplicate ID, or
+extra buffered frame is session-fatal.
+
+The explicit yamux profile uses an eight-stream accept backlog, 256 KiB maximum
+stream window, five-second connection writes/stream opens/stream closes,
+ten-second keepalive, discarded library logs, and at most 1,024 remembered
+flow IDs per authenticated transport. Exhausting the non-evicting replay set
+requires reconnecting the exact session; IDs are never evicted and revived.
 
 The current Pod transparent path recovers TCP original destination and presents
 ordinary CONNECT host/port plus an optional provider capability hint to
@@ -194,8 +217,9 @@ run's target name or any internal service as intent cannot select that target.
 The workspace yamux purpose is not reused: workspace streams are initiated by
 the gateway toward one fixed guest loopback service, while egress flows are
 initiated by the guest toward untrusted requested destinations and terminate at
-a separately trusted policy service. A later implementation may choose a
-reviewed multiplexing or packet transport behind this interface.
+a separately trusted policy service. They use separate TLS sessions,
+registries, directional stream rules, and transport implementations despite
+pinning the same reviewed yamux release.
 
 ## Bounds and failure behavior
 
@@ -208,6 +232,9 @@ reviewed multiplexing or packet transport behind this interface.
 | identity-authority operation | 30 seconds monotonic absolute, from admission through the final pre-commit authorization point |
 | active flows per authenticated session | 64 |
 | concurrent pending flow opens per session | 8 |
+| yamux accept backlog / stream window | 8 / 256 KiB |
+| remembered flow IDs per session | 1,024, non-evicting |
+| yamux keepalive / connection write | 10 seconds / 5 seconds |
 | flow ID | 128 bytes, restricted token syntax |
 | destination hostname/IP | 253 canonical ASCII bytes; DNS labels at most 63 bytes, unscoped canonical IP |
 | capability hint | 128 bytes, restricted token syntax |
@@ -293,12 +320,13 @@ converges. No fallback binding, driver, target, or Pod may be tried.
 ## Conformance and current boundary
 
 `protocol/guestenrollment/nativeegress` provides strict framing, authentication,
-exact target routing, bounded sessions/flows, idle deadlines, and a concurrent
-active/standby registry. Its hermetic tests use real local byte streams and a
-fake policy target. They cover exact and mismatched bindings, wrong purpose,
-expiry/revocation, restart/response loss, cross-run/private intent, capacity,
-cancellation, replacement, shutdown, ordering, and redaction under the race
-detector.
+exact target routing, the pinned bounded yamux transport, idle deadlines, and a
+concurrent active/standby registry. Its hermetic tests use real multiplexed byte
+streams and a fake policy target. They cover exact and mismatched bindings,
+wrong purpose, expiry/revocation, restart/response loss, cross-run/private
+intent, flow framing, concurrent and large transfers, half-close, one-way
+activity, capacity, cancellation, replacement, shutdown, ordering, and
+redaction under the race detector.
 
 The production broker implements the four identity operations and shares their
 SQLite lifecycle, exact revocation, tombstones, and maintenance with guest
@@ -311,12 +339,13 @@ bearer through that broker authority, resolves a target only by complete exact
 Binding, and owns the shared bounded active/standby registry. Its production
 command is deliberately deny-all because no trusted target adapter is wired;
 the relay sends `hello_ack` only after the authenticated session has secured
-its bounded active/standby reservation, and any post-handshake guest payload
-is rejected.
+its bounded active/standby reservation, then switches the connection to the
+bounded flow data plane. The host-bundle client proves that yamux is live before
+publishing its transport readiness.
 
-This phase does not implement the flow transport, egressd/captured target
-adapter, provider network policy, Azure/AWS/QEMU support, or operator
-readiness/cleanup orchestration.
+This phase does not implement the egressd/captured target adapter, captured
+agent traffic integration, provider network policy, Azure/AWS/QEMU support, or
+operator readiness/cleanup orchestration.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed
 implementation gates and a real provider enforcement proof.

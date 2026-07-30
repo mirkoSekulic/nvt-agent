@@ -21,7 +21,7 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
 
-func TestProductionRelayAuthenticatesBrokerThenExactTargetAndRejectsPayload(t *testing.T) {
+func TestProductionRelayAuthenticatesBrokerThenExactTargetAndForwardsFlow(t *testing.T) {
 	binding := testBinding("production")
 	credential := testCredential(t, 11)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -52,7 +52,8 @@ func TestProductionRelayAuthenticatesBrokerThenExactTargetAndRejectsPayload(t *t
 			IssuedAt: guestenrollment.FormatTimestamp(now.Add(-time.Minute)), ExpiresAt: guestenrollment.FormatTimestamp(now.Add(4 * time.Minute)),
 		})
 	}))
-	target := &fakeTarget{binding: binding}
+	target := &fakeTarget{binding: binding, echo: true}
+	defer target.closePeers()
 	resolver := &fakeResolver{targets: map[guestenrollment.Binding]*fakeTarget{binding: target}, events: &events, eventsMu: &eventsMu}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -91,18 +92,33 @@ func TestProductionRelayAuthenticatesBrokerThenExactTargetAndRejectsPayload(t *t
 		_ = connection.Close()
 		t.Fatal("target resolver did not receive exactly the authenticated binding")
 	}
-	if _, err := connection.Write([]byte(`{"contract_version":"nvt.native-egress/v1","type":"flow_open"}` + "\n")); err != nil {
+	destination := nativeegress.Destination{Network: nativeegress.NetworkTCP, Host: "api.example", Port: 443, CapabilityHint: "codex-main"}
+	flow, err := connection.OpenFlow(t.Context(), destination)
+	if err != nil {
 		_ = connection.Close()
 		t.Fatal(err)
 	}
-	waitActive(t, server.Sessions(), binding, false)
-	waitConnectionClosed(t, connection)
+	const payload = "native-egress-flow-payload"
+	if _, err := flow.Write([]byte(payload)); err != nil {
+		_ = flow.Close()
+		_ = connection.Close()
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	if _, err := io.ReadFull(flow, response); err != nil || string(response) != payload {
+		_ = flow.Close()
+		_ = connection.Close()
+		t.Fatalf("flow response=%q error=%v", response, err)
+	}
+	_ = flow.Close()
 	target.mu.Lock()
 	opens := target.opens
+	destinations := append([]nativeegress.Destination(nil), target.destinations...)
 	target.mu.Unlock()
-	if opens != 0 {
-		t.Fatal("relay core forwarded a flow before the data-plane gate")
+	if opens != 1 || len(destinations) != 1 || destinations[0] != destination {
+		t.Fatalf("relay target opens=%d destinations=%#v", opens, destinations)
 	}
+	_ = connection.Close()
 
 	for _, formatted := range []string{fmt.Sprint(server), fmt.Sprintf("%#v", server), fmt.Sprint(server.Sessions())} {
 		if strings.Contains(formatted, credential) || strings.Contains(formatted, binding.GuestInstanceID) || strings.Contains(formatted, fixture.config.BrokerURL) {
@@ -243,8 +259,11 @@ func TestRelayRegistryReconnectStandbyReplayCapacityAndPromotion(t *testing.T) {
 	authenticator := &fakeAuthenticator{bindings: map[string]guestenrollment.Binding{
 		credential1: binding, credential2: binding, credential3: binding,
 	}}
-	resolver := &fakeResolver{targets: map[guestenrollment.Binding]*fakeTarget{binding: {binding: binding}}}
+	target := &fakeTarget{binding: binding, echo: true}
+	defer target.closePeers()
+	resolver := &fakeResolver{targets: map[guestenrollment.Binding]*fakeTarget{binding: target}}
 	server, address, pki, _ := startInjectedServer(t, authenticator, resolver, time.Second, 8)
+	destination := nativeegress.Destination{Network: nativeegress.NetworkTCP, Host: "api.example", Port: 443}
 
 	activeConnection, err := connectGuest(t, address, pki, binding, credential1)
 	if err != nil {
@@ -296,11 +315,37 @@ func TestRelayRegistryReconnectStandbyReplayCapacityAndPromotion(t *testing.T) {
 	if current := waitActive(t, server.Sessions(), binding, true); current != activeTwo {
 		t.Fatal("higher standby preempted active")
 	}
+	if flow, err := higherStandby.OpenFlow(t.Context(), destination); !errors.Is(err, nativeegress.ErrUnavailable) {
+		if flow != nil {
+			_ = flow.Close()
+		}
+		t.Fatalf("standby transported a flow before promotion: %v", err)
+	}
+	predecessorFlow, err := sequenceTwo.OpenFlow(t.Context(), destination)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = sequenceTwo.Close()
 	promotedHigher := waitActiveReplacement(t, server.Sessions(), binding, activeTwo)
 	if promotedHigher == activeTwo || promotedHigher.Sequence() != 3 {
 		t.Fatal("higher standby did not promote atomically")
 	}
+	_ = predecessorFlow.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := predecessorFlow.Read(make([]byte, 1)); err == nil {
+		t.Fatal("predecessor flow migrated or survived session replacement")
+	}
+	replacementFlow, err := higherStandby.OpenFlow(t.Context(), destination)
+	if err != nil {
+		t.Fatalf("promoted replacement did not open a flow: %v", err)
+	}
+	if _, err := replacementFlow.Write([]byte("replacement-flow")); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len("replacement-flow"))
+	if _, err := io.ReadFull(replacementFlow, response); err != nil || string(response) != "replacement-flow" {
+		t.Fatalf("replacement response=%q error=%v", response, err)
+	}
+	_ = replacementFlow.Close()
 	_ = higherStandby.Close()
 	waitActive(t, server.Sessions(), binding, false)
 }
@@ -309,7 +354,9 @@ func TestRelayRevalidationReconnectRevocationConnectionLossAndShutdown(t *testin
 	binding := testBinding("lifecycle")
 	credential := testCredential(t, 4)
 	authenticator := &fakeAuthenticator{bindings: map[string]guestenrollment.Binding{credential: binding}}
-	resolver := &fakeResolver{targets: map[guestenrollment.Binding]*fakeTarget{binding: {binding: binding}}}
+	target := &fakeTarget{binding: binding, echo: true}
+	defer target.closePeers()
+	resolver := &fakeResolver{targets: map[guestenrollment.Binding]*fakeTarget{binding: target}}
 	server, address, pki, serveDone := startInjectedServer(t, authenticator, resolver, 120*time.Millisecond, 4)
 
 	first, err := connectGuest(t, address, pki, binding, credential)
@@ -317,8 +364,16 @@ func TestRelayRevalidationReconnectRevocationConnectionLossAndShutdown(t *testin
 		t.Fatal(err)
 	}
 	waitActive(t, server.Sessions(), binding, true)
+	expiringFlow, err := first.OpenFlow(t.Context(), nativeegress.Destination{Network: nativeegress.NetworkTCP, Host: "api.example", Port: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
 	waitActive(t, server.Sessions(), binding, false)
-	waitConnectionClosed(t, first)
+	waitGuestClosed(t, first)
+	_ = expiringFlow.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := expiringFlow.Read(make([]byte, 1)); err == nil {
+		t.Fatal("revalidation cutoff retained an active flow")
+	}
 	second, err := connectGuest(t, address, pki, binding, credential)
 	if err != nil {
 		t.Fatal(err)
@@ -359,10 +414,63 @@ func TestRelayRevalidationReconnectRevocationConnectionLossAndShutdown(t *testin
 	if time.Since(started) > time.Second || func() bool { _, active := server.Sessions().Active(binding); return active }() {
 		t.Fatal("bounded shutdown retained readiness")
 	}
-	waitConnectionClosed(t, third)
+	waitGuestClosed(t, third)
 	if err := <-serveDone; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRelayCleanupSharesOneAbsoluteShutdownBudget(t *testing.T) {
+	binding := testBinding("single-shutdown-budget")
+	credential := testCredential(t, 1)
+	authenticator := &fakeAuthenticator{bindings: map[string]guestenrollment.Binding{credential: binding}}
+	closeStarted := make(chan struct{})
+	closeRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseClose := func() { releaseOnce.Do(func() { close(closeRelease) }) }
+	defer releaseClose()
+	target := &fakeTarget{binding: binding, closeStarted: closeStarted, closeRelease: closeRelease}
+	defer target.closePeers()
+	resolver := &fakeResolver{targets: map[guestenrollment.Binding]*fakeTarget{binding: target}}
+	server, address, pki, _ := startInjectedServer(t, authenticator, resolver, nativeegress.RevalidationInterval, 4)
+
+	connection, err := connectGuest(t, address, pki, binding, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	waitActive(t, server.Sessions(), binding, true)
+	flow, err := connection.OpenFlow(t.Context(), nativeegress.Destination{Network: nativeegress.NetworkTCP, Host: "api.example", Port: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer flow.Close()
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), nativeegress.ShutdownTimeout+3*time.Second)
+	defer cancelShutdown()
+	shutdownDone := make(chan error, 1)
+	started := time.Now()
+	go func() { shutdownDone <- server.Shutdown(shutdownContext) }()
+	select {
+	case <-closeStarted:
+		if _, ready := server.Sessions().Active(binding); ready {
+			t.Fatal("target flow close began before registry readiness withdrawal")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay cleanup did not begin target flow close")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(started); elapsed > nativeegress.ShutdownTimeout+2*time.Second {
+			t.Fatalf("relay cleanup exceeded one shutdown budget: %s", elapsed)
+		}
+	case <-shutdownContext.Done():
+		t.Fatal("relay cleanup consumed consecutive shutdown budgets")
+	}
+	releaseClose()
 }
 
 func TestRelayBoundsSlowTLSHandshakeAndReleasesAdmission(t *testing.T) {

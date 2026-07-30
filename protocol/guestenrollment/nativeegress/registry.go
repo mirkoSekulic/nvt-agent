@@ -71,6 +71,10 @@ func (registry *SessionRegistry) Reserve(session *Session) (*SessionReservation,
 		registry.mu.Unlock()
 		return nil, ErrUnavailable
 	}
+	if !session.setFlowAuthority(false) {
+		registry.mu.Unlock()
+		return nil, ErrUnavailable
+	}
 	if registry.slots[binding] == nil {
 		registry.slots[binding] = slot
 	}
@@ -104,6 +108,10 @@ func (reservation *SessionReservation) Activate() bool {
 		slot.active = reservation
 		slot.standby = nil
 	}
+	if slot.active == reservation && !reservation.session.setFlowAuthority(true) {
+		registry.mu.Unlock()
+		return false
+	}
 	registry.mu.Unlock()
 	return true
 }
@@ -129,6 +137,7 @@ func (reservation *SessionReservation) withdraw() bool {
 	}
 	reservation.removed = true
 	reservation.ready = false
+	reservation.session.setFlowAuthority(false)
 	slot := registry.slots[reservation.binding]
 	if slot != nil {
 		if slot.active == reservation {
@@ -136,6 +145,7 @@ func (reservation *SessionReservation) withdraw() bool {
 			if slot.standby != nil && slot.standby.ready && !slot.standby.removed && slot.standby.session.Ready() {
 				slot.active = slot.standby
 				slot.standby = nil
+				slot.active.session.setFlowAuthority(true)
 			}
 		} else if slot.standby == reservation {
 			slot.standby = nil
@@ -188,6 +198,7 @@ func (registry *SessionRegistry) closeWithin(timeout time.Duration) error {
 				}
 				reservation.removed = true
 				reservation.ready = false
+				reservation.session.setFlowAuthority(false)
 				reservations = append(reservations, reservation)
 			}
 		}

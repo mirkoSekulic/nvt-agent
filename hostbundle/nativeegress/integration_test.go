@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
-	protocol "github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
 
 func TestRuntimeComposesPurposeOnlyIPCWithStrictTLSRelay(t *testing.T) {
@@ -82,11 +81,10 @@ func TestRuntimeComposesPurposeOnlyIPCWithStrictTLSRelay(t *testing.T) {
 			return
 		}
 		defer connection.Close()
-		_, acceptErr = protocol.Accept(context.Background(), connection, authenticator)
+		transport, acceptErr := newRuntimeRelayTransport(connection, authenticator)
 		relayAccepted <- acceptErr
 		if acceptErr == nil {
-			var one [1]byte
-			_, _ = connection.Read(one[:])
+			_ = transport.Serve(context.Background())
 		}
 	}()
 	connector, err := NewTLSConnector(caPEM)

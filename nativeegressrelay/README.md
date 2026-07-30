@@ -5,7 +5,9 @@ session boundary for [`nvt.native-egress/v1`](../protocol/native-egress.md).
 It accepts the guest-initiated TLS connection, authenticates the
 `nvt_eg1_` bearer through the broker, resolves only the complete five-field
 guest binding through an in-process `TargetResolver`, and admits the shared
-active/standby `SessionRegistry`.
+active/standby `SessionRegistry`. After admission it serves the bounded pinned
+yamux flow transport and routes each validated stream only through that exact
+session's already-selected `EgressTarget`.
 
 Authentication is staged: the relay reads and authenticates the bounded hello,
 resolves the exact target, and reserves the active/standby slot before sending
@@ -13,13 +15,13 @@ resolves the exact target, and reserves the active/standby slot before sending
 acknowledgement and cannot cause the guest to publish readiness. An ACK write
 failure removes its reservation.
 
-This phase intentionally has no flow transport or target adapter. The command
+This phase intentionally has no production target adapter. The command
 uses `DenyAllTargetResolver`, so it starts safely but cannot acknowledge a
 session or report an exact binding active until a later operator-owned adapter
-is wired in process. Any byte received after an authenticated hello is a
-protocol failure and closes the session. There is no target-registration HTTP
-API, binding enumeration, partial lookup, provider endpoint, CONNECT proxy,
-yamux transport, egressd adapter, or Helm deployment here.
+is wired in process. Injected targets exercise the real TLS/authenticated yamux
+flow data plane in hermetic tests, but there is no target-registration HTTP API,
+binding enumeration, partial lookup, provider endpoint, CONNECT proxy, egressd
+adapter, or Helm deployment here.
 
 ## Configuration
 
@@ -57,7 +59,9 @@ broker handshakes run concurrently, while the frozen registry bounds 128 exact
 bindings with one active and one authenticated equal/newer standby each. Each
 broker-derived local trust interval is capped at 30 seconds. Registry readiness
 is withdrawn before transport teardown on expiry, connection loss, denial,
-replacement, or shutdown.
+replacement, or shutdown. Each admitted transport is additionally bounded to
+64 active flows, eight pending opens, a 256 KiB stream window, and the frozen
+flow/open/activity/shutdown deadlines.
 
 ## Development
 

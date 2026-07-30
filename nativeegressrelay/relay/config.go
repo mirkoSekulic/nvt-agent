@@ -1,6 +1,6 @@
-// Package relay implements the trusted cluster-side admission and lifecycle
-// boundary for nvt.native-egress/v1. It deliberately does not implement a
-// flow transport or an egress target adapter.
+// Package relay implements the trusted cluster-side admission, lifecycle, and
+// bounded flow-transport boundary for nvt.native-egress/v1. It deliberately
+// does not implement an egress target adapter.
 package relay
 
 import (
