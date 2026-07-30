@@ -195,6 +195,12 @@ func TestValidateProtocolTypesFailClosed(t *testing.T) {
 			}}),
 		},
 		{
+			name: "guest-local confinement boundary",
+			err: ValidateStatus(Status{Phase: PhaseProvisioning, EgressConfinement: &EgressConfinementStatus{
+				Boundary: EgressConfinementBoundary("guest"), Ready: true,
+			}}),
+		},
+		{
 			name: "ready without confinement convergence",
 			err: ValidateStatus(Status{
 				Phase: PhaseRunning, Ready: true,

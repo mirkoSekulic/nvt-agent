@@ -165,6 +165,16 @@ withdraws a mapping before identity revocation or driver cleanup. Provider-owned
 default-deny confinement and a production provider remain separate gates, so
 this wiring alone does not establish production mediated-VM readiness.
 
+The operator also derives one bounded, non-secret provider attachment plan only
+for mediated external VMs. It fixes relay data TLS identity/public trust,
+required bootstrap/control destinations, and loopback capture intent;
+producer/class configuration cannot override it. Its monotonic generation and
+digest enter the driver desired generation/fingerprint. Relay target
+publication waits for the driver's exact matching `infrastructure` read-back,
+and an attachment or AgentRun generation change first withdraws the old exact
+mapping. This is a lifecycle gate, not a provider implementation: no current
+driver installs the outside-guest redirect or NIC default deny.
+
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
 the same hostname. Workload-wide generic HTTP proxy variables remain unset in
@@ -310,5 +320,6 @@ existing per-flow provider selector before forwarding raw bytes. It reuses
 bounded Host/SNI/original-destination inspection and never falls back to direct
 networking, but it is not a root-adversary boundary. Operator target
 publication/readiness and cleanup ordering are now wired; provider-owned
-redirect installation and provider confinement are not, so production VM
+redirect installation and provider confinement receive a portable desired plan
+but are not implemented by a production provider, so production VM
 mediation remains incomplete.

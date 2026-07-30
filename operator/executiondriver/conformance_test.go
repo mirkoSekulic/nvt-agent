@@ -4,10 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -429,6 +436,55 @@ func TestFakeExecutionDriverLifecycleIdempotencyAndRestartRecovery(t *testing.T)
 	}
 }
 
+func TestFakeExecutionDriverReportsExactInfrastructureAttachment(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := startDriver(t, t.TempDir(), "")
+	if err := client.initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	attachment := conformanceNativeEgressAttachment(t)
+	desired := executiondriver.DesiredExecution{
+		ExecutionID: "issuer.example/subject/native-egress", Generation: 2,
+		WorkloadKind: executiondriver.WorkloadKindVM, ClassName: "fake-small",
+		Configuration: mustJSON(t, map[string]any{"ready": true}), NativeEgressAttachment: &attachment,
+	}
+	setTestDesiredFingerprint(t, &desired)
+	status, err := client.reconcile(ctx, "native-egress", desired)
+	if err != nil || !status.Ready || status.EgressConfinement == nil ||
+		status.EgressConfinement.Boundary != executiondriver.EgressConfinementBoundaryInfrastructure ||
+		status.EgressConfinement.AttachmentGeneration != attachment.Generation || status.EgressConfinement.AttachmentDigest != attachment.Digest {
+		t.Fatalf("status=%#v error=%v", status, err)
+	}
+}
+
+func conformanceNativeEgressAttachment(t *testing.T) executiondriver.NativeEgressAttachment {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "relay CA"}, NotBefore: time.Unix(1, 0), NotAfter: time.Unix(4_102_444_800, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := executiondriver.SealNativeEgressAttachment(executiondriver.NativeEgressAttachment{
+		ContractVersion: executiondriver.NativeEgressAttachmentVersion, Generation: 1,
+		Relay: executiondriver.NativeEgressRelayAttachment{Host: "relay.invalid", Port: 7445, ServerName: "relay.invalid", CAPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))},
+		RequiredDestinations: []executiondriver.NativeEgressRequiredDestination{
+			{Purpose: executiondriver.NativeEgressDestinationBootstrap, Host: "broker.invalid", Port: 7443},
+			{Purpose: executiondriver.NativeEgressDestinationControl, Host: "gateway.invalid", Port: 7444},
+		},
+		Redirect: executiondriver.NativeEgressRedirectIntent{Mode: executiondriver.NativeEgressRedirectModeCaptureTCP, LoopbackAddress: "127.0.0.1", TransparentTCPPort: 15001, ExplicitCONNECTPort: 15002},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sealed
+}
+
 func TestFakeExecutionDriverFailureIsSanitized(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -585,13 +641,13 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 func setTestDesiredFingerprint(t *testing.T, desired *executiondriver.DesiredExecution) {
 	t.Helper()
 	tuple := struct {
-		WorkloadKind  executiondriver.WorkloadKind `json:"workload_kind"`
-		ClassName     string                       `json:"class_name"`
-		Configuration json.RawMessage              `json:"configuration"`
+		WorkloadKind           executiondriver.WorkloadKind            `json:"workload_kind"`
+		ClassName              string                                  `json:"class_name"`
+		Configuration          json.RawMessage                         `json:"configuration"`
+		NativeEgressAttachment *executiondriver.NativeEgressAttachment `json:"native_egress_attachment,omitempty"`
 	}{
-		WorkloadKind:  desired.WorkloadKind,
-		ClassName:     desired.ClassName,
-		Configuration: desired.Configuration,
+		WorkloadKind: desired.WorkloadKind, ClassName: desired.ClassName,
+		Configuration: desired.Configuration, NativeEgressAttachment: desired.NativeEgressAttachment,
 	}
 	encoded, err := json.Marshal(tuple)
 	if err != nil {

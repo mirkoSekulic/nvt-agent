@@ -52,6 +52,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
 )
 
 const (
@@ -217,12 +218,13 @@ type brokerAgentQuota struct {
 type AgentRunReconciler struct {
 	client.Client
 
-	Scheme              *runtime.Scheme
-	Now                 func() metav1.Time
-	BrokerHTTPClient    *http.Client
-	ExecutionDrivers    executionDriverClientRegistry
-	GuestEnrollment     guestEnrollmentIssuer
-	nativeEgressTargets nativeEgressTargetPublication
+	Scheme                 *runtime.Scheme
+	Now                    func() metav1.Time
+	BrokerHTTPClient       *http.Client
+	ExecutionDrivers       executionDriverClientRegistry
+	GuestEnrollment        guestEnrollmentIssuer
+	NativeEgressAttachment *executiondriver.NativeEgressAttachment
+	nativeEgressTargets    nativeEgressTargetPublication
 
 	externalExecutionCallsMu sync.Mutex
 	externalExecutionCalls   chan struct{}

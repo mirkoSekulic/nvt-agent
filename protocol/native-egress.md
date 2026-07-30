@@ -8,8 +8,9 @@ transport, and an optional exact-binding adapter into an existing per-run
 credential-less capture process from the credential-bearing tunnel process;
 captured guest TCP opens only authenticated native-egress flows. Opt-in
 operator deployment, exact target publication, readiness, and cleanup ordering
-exist; provider-owned redirect installation and provider network enforcement
-do not exist yet.
+exist. The operator now emits the provider-neutral desired attachment and
+requires its exact infrastructure read-back. No production provider installs
+the redirect or enforces the outside-guest network boundary yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -380,11 +381,17 @@ commit after observing deadline expiry.
 
 For a mediated external VM, the trusted owners converge in this order:
 
-1. The exact driver provisions compute and a bootstrap-only NIC/network policy.
-   The untrusted agent has not started.
-2. The provider makes the infrastructure-level allowlist/default-deny policy
-   durable and reads it back. Only then may the driver report
-   `egress_confinement:{boundary:"infrastructure",ready:true}`.
+1. The operator resolves the installation-owned
+   `nvt.native-egress-attachment/v1` plan and durably records only its
+   generation/digest in AgentRun status. Missing/inconsistent configuration
+   fails before a provider mutation. The exact driver then provisions compute
+   with bootstrap networking limited to the relay data endpoint and the plan's
+   bounded NVT bootstrap/control destinations;
+   the untrusted agent has not started.
+2. The driver installs the provider-owned redirect/capture intent and makes
+   infrastructure-level allowlist/default-deny confinement durable outside the
+   guest. It reads back the exact current attachment before reporting
+   `egress_confinement:{boundary:"infrastructure",ready:true,attachment_generation:<current>,attachment_digest:<current>}`.
 3. The existing one-time exact guest enrollment completes inside that confined
    bootstrap network; no provider or egress credential is carried in the
    envelope, desired fingerprint, driver status, or provider tags.
@@ -403,16 +410,18 @@ For a mediated external VM, the trusted owners converge in this order:
    capture-plus-tunnel readiness lease before starting the untrusted agent.
    Capture process death or tunnel withdrawal closes the lease, removes guest
    readiness, and stops the session; no stale file can remain authoritative.
-   The operator may report mediated VM readiness only after the
-   current driver generation's confinement assertion, current exact tunnel,
+   The operator may report mediated VM readiness only after the current
+   attachment generation/digest and driver confinement assertion, current exact tunnel,
    and current target are all ready. Driver `ready` alone is insufficient.
 
-`EgressConfinementStatus` is an optional additive field of
-`nvt.execution-driver/v1` portable status. Its only boundary token is
-`infrastructure`; guest-local controls cannot assert it. Omission preserves the
-wire behavior of existing Pod and non-mediated drivers. A future mediated-VM
-operator gate must require presence and `ready:true`; it must never infer the
-assertion from an endpoint, provider ID, class configuration, or guest report.
+`NativeEgressAttachment` and `EgressConfinementStatus` are optional additive
+members of `nvt.execution-driver/v1` desired/status. Their provider-neutral
+shape, canonical digest, and bounds are frozen in
+[`execution-driver.md`](execution-driver.md). The only confinement boundary
+token is `infrastructure`; guest-local controls cannot assert it. Omission
+preserves the wire behavior of existing Pod and non-mediated drivers. The
+operator gate requires the exact current desired observation and never infers
+it from an endpoint, provider ID, class configuration, or guest report.
 
 Provider state, execution desired state, the binding status, and broker durable
 identity state—not in-memory call history—must recover convergence after an
@@ -474,9 +483,11 @@ live readiness socket lease rather than trusting a reusable marker.
 
 The operator now deploys the relay and per-run egressd target, republishes the
 complete snapshot after either process restarts, gates `NativeEgressReady` on
-the acknowledged exact mapping, and withdraws it before authority or driver
-cleanup. Provider-owned redirect rules and infrastructure network confinement,
-Azure/AWS/QEMU production support, and the final provider E2E remain future
+the acknowledged exact mapping and the current attachment/confinement
+observation, and withdraws it before authority or driver cleanup. The optional
+desired plan now tells a provider what it must attach without vendor fields.
+No production driver implements those redirect rules or infrastructure network
+confinement yet; Azure/AWS/QEMU support and the final provider E2E remain future
 gates.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed

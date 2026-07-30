@@ -117,16 +117,18 @@ type InitializeResult struct {
 // DesiredExecution is an operator-owned, level-triggered desired state. The
 // driver-specific configuration must be a JSON object resolved exclusively
 // from operator-owned execution selection; producers cannot supply it.
-// Generation and DesiredFingerprint identify the complete workload-kind, class-name, and
-// resolved-configuration tuple and must change together whenever any tuple
-// member changes. The driver treats DesiredFingerprint as opaque.
+// Generation and DesiredFingerprint identify the complete workload-kind,
+// class-name, resolved-configuration, and optional native-egress-attachment
+// tuple and must change together whenever any tuple member changes. The driver
+// treats DesiredFingerprint as opaque.
 type DesiredExecution struct {
-	ExecutionID        string          `json:"execution_id"`
-	Generation         int64           `json:"generation"`
-	DesiredFingerprint string          `json:"desired_fingerprint"`
-	WorkloadKind       WorkloadKind    `json:"workload_kind"`
-	ClassName          string          `json:"class_name"`
-	Configuration      json.RawMessage `json:"configuration"`
+	ExecutionID            string                  `json:"execution_id"`
+	Generation             int64                   `json:"generation"`
+	DesiredFingerprint     string                  `json:"desired_fingerprint"`
+	WorkloadKind           WorkloadKind            `json:"workload_kind"`
+	ClassName              string                  `json:"class_name"`
+	Configuration          json.RawMessage         `json:"configuration"`
+	NativeEgressAttachment *NativeEgressAttachment `json:"native_egress_attachment,omitempty"`
 }
 
 type ReconcileParams struct {
@@ -159,11 +161,14 @@ const (
 )
 
 // EgressConfinementStatus is a non-secret portable provider observation. It is
-// optional for backward compatibility and non-mediated executions. A future
-// external-VM mediated-egress gate requires it to be present and Ready.
+// optional for backward compatibility and non-mediated executions. The
+// external-VM mediated-egress gate requires it to be present, Ready, and to
+// echo the exact current attachment generation and digest.
 type EgressConfinementStatus struct {
-	Boundary EgressConfinementBoundary `json:"boundary"`
-	Ready    bool                      `json:"ready"`
+	Boundary             EgressConfinementBoundary `json:"boundary"`
+	Ready                bool                      `json:"ready"`
+	AttachmentGeneration int64                     `json:"attachment_generation,omitempty"`
+	AttachmentDigest     string                    `json:"attachment_digest,omitempty"`
 }
 
 // Status is the complete portable observation returned by reconcile, observe,
@@ -250,6 +255,14 @@ func ValidateReconcileParams(value ReconcileParams) error {
 	if _, object := configuration.(map[string]any); !object {
 		return errors.New("reconcile desired configuration must be a JSON object")
 	}
+	if value.Desired.NativeEgressAttachment != nil {
+		if value.Desired.WorkloadKind != WorkloadKindVM {
+			return errors.New("reconcile native egress attachment requires a VM workload")
+		}
+		if err := ValidateNativeEgressAttachment(*value.Desired.NativeEgressAttachment); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -279,6 +292,11 @@ func ValidateStatus(value Status) error {
 	if value.EgressConfinement != nil {
 		if value.EgressConfinement.Boundary != EgressConfinementBoundaryInfrastructure {
 			return errors.New("status egress_confinement boundary is invalid")
+		}
+		if (value.EgressConfinement.AttachmentGeneration == 0) != (value.EgressConfinement.AttachmentDigest == "") ||
+			(value.EgressConfinement.AttachmentGeneration < 0) ||
+			(value.EgressConfinement.AttachmentDigest != "" && ValidateDesiredFingerprint(value.EgressConfinement.AttachmentDigest) != nil) {
+			return errors.New("status egress_confinement attachment observation is invalid")
 		}
 		if value.Ready && !value.EgressConfinement.Ready {
 			return errors.New("status ready requires reported egress confinement")

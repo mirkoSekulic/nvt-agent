@@ -108,6 +108,8 @@ spec:
             {{- if .Values.nativeEgressRelay.enabled }}
             - name: NVT_NATIVE_EGRESS_PUBLICATION_CONFIG_FILE
               value: /var/run/nvt-native-egress-publication/config.json
+            - name: NVT_NATIVE_EGRESS_ATTACHMENT_CONFIG_FILE
+              value: /var/run/nvt-native-egress-attachment/config.json
             {{- end }}
             {{- if .Values.egress.allowInsecureUpstreams }}
             - name: NVT_ALLOW_INSECURE_UPSTREAMS
@@ -149,6 +151,9 @@ spec:
             {{- if .Values.nativeEgressRelay.enabled }}
             - name: native-egress-publication
               mountPath: /var/run/nvt-native-egress-publication
+              readOnly: true
+            - name: native-egress-attachment
+              mountPath: /var/run/nvt-native-egress-attachment
               readOnly: true
             {{- end }}
           {{- end }}
@@ -213,5 +218,19 @@ spec:
                       path: control-ca.crt
                     - key: {{ .Values.nativeEgressRelay.credentials.controlTokenKey | quote }}
                       path: control-token
+        - name: native-egress-attachment
+          projected:
+            defaultMode: 0440
+            sources:
+              - configMap:
+                  name: nvt-native-egress-attachment
+                  items:
+                    - key: config.json
+                      path: config.json
+              - secret:
+                  name: {{ .Values.nativeEgressRelay.credentials.existingSecret | quote }}
+                  items:
+                    - key: {{ .Values.nativeEgressRelay.credentials.dataCAKey | quote }}
+                      path: data-ca.crt
         {{- end }}
       {{- end }}

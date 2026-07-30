@@ -144,6 +144,9 @@ The coordinated `nvt-native-egress-relay` image is a static binary in a
 distroless non-root runtime with no shell, package manager, Git, Go toolchain,
 or cloud SDK. The opt-in chart deployment and operator exact-snapshot
 publication are implemented, including withdrawal-before-cleanup ordering.
-Provider-owned guest redirect installation, infrastructure confinement,
-cloud/provider integration, and the final provider E2E remain separate future
-gates; this integration alone does not make production VM mediation complete.
+The operator also supplies the exact selected driver a bounded public
+attachment plan and waits for its matching infrastructure-confinement
+observation before publication readiness. Provider-owned guest redirect
+installation, infrastructure confinement, cloud/provider integration, and the
+final provider E2E remain separate future gates; this integration alone does
+not make production VM mediation complete.

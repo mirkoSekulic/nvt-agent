@@ -38,17 +38,27 @@ type nativeEgressTargetPublication interface {
 // one operator process. Relay status remains the generation authority across
 // operator restarts; AgentRun status reconstructs the complete desired set.
 type nativeEgressTargetCoordinator struct {
-	client    client.Reader
-	authority publicationclient.Interface
-	namespace string
-	mu        sync.Mutex
+	client     client.Reader
+	authority  publicationclient.Interface
+	namespace  string
+	attachment *executiondriver.NativeEgressAttachment
+	mu         sync.Mutex
 }
 
-func newNativeEgressTargetCoordinator(kubernetes client.Reader, authority publicationclient.Interface, namespace string) (nativeEgressTargetPublication, error) {
+func newNativeEgressTargetCoordinator(kubernetes client.Reader, authority publicationclient.Interface, namespace string, configured *executiondriver.NativeEgressAttachment) (nativeEgressTargetPublication, error) {
 	if kubernetes == nil || authority == nil || len(validation.IsDNS1123Label(namespace)) != 0 {
 		return nil, errors.New("native egress publication configuration is invalid")
 	}
-	return &nativeEgressTargetCoordinator{client: kubernetes, authority: authority, namespace: namespace}, nil
+	var attachment *executiondriver.NativeEgressAttachment
+	if configured != nil && executiondriver.ValidateNativeEgressAttachment(*configured) != nil {
+		return nil, errors.New("native egress publication configuration is invalid")
+	}
+	if configured != nil {
+		copy := *configured
+		copy.RequiredDestinations = append([]executiondriver.NativeEgressRequiredDestination(nil), configured.RequiredDestinations...)
+		attachment = &copy
+	}
+	return &nativeEgressTargetCoordinator{client: kubernetes, authority: authority, namespace: namespace, attachment: attachment}, nil
 }
 
 // ConfigureNativeEgressTargetPublication installs the optional trusted relay
@@ -60,7 +70,10 @@ func ConfigureNativeEgressTargetPublication(reconciler *AgentRunReconciler, auth
 	if reader == nil {
 		reader = reconciler.Client
 	}
-	coordinator, err := newNativeEgressTargetCoordinator(reader, authority, namespace)
+	if reconciler.NativeEgressAttachment == nil {
+		return errors.New("native egress publication attachment is unavailable")
+	}
+	coordinator, err := newNativeEgressTargetCoordinator(reader, authority, namespace, reconciler.NativeEgressAttachment)
 	if err != nil {
 		return err
 	}
@@ -97,6 +110,9 @@ func (coordinator *nativeEgressTargetCoordinator) Reconcile(ctx context.Context,
 			continue
 		}
 		if !meta.IsStatusConditionTrue(run.Status.Conditions, ConditionNativeEgressReady) || !nativeMediatedExternalRun(run) || run.DeletionTimestamp != nil || run.Status.Phase != nvtv1alpha1.AgentRunPhaseRunning {
+			continue
+		}
+		if coordinator.attachment != nil && !nativeEgressAttachmentCurrent(run, coordinator.attachment) {
 			continue
 		}
 		binding, err := exactNativeEgressBinding(run)
@@ -183,11 +199,72 @@ func exactNativeEgressBinding(run *nvtv1alpha1.AgentRun) (guestenrollment.Bindin
 		return guestenrollment.Binding{}, err
 	}
 	executionID, err := externalExecutionID(run.UID)
-	if err != nil || binding.AgentRunUID != string(run.UID) || binding.ExecutionID != executionID ||
-		binding.DriverRegistration != run.Spec.Execution.Driver || binding.DesiredGeneration != run.Generation {
+	expectedGeneration, generationErr := nativeEgressDesiredGeneration(run)
+	if err != nil || generationErr != nil || binding.AgentRunUID != string(run.UID) || binding.ExecutionID != executionID ||
+		binding.DriverRegistration != run.Spec.Execution.Driver || binding.DesiredGeneration != expectedGeneration {
 		return guestenrollment.Binding{}, errors.New("native egress binding is unavailable")
 	}
 	return binding, nil
+}
+
+func nativeEgressAttachmentCurrent(run *nvtv1alpha1.AgentRun, attachment *executiondriver.NativeEgressAttachment) bool {
+	return run != nil && attachment != nil && executiondriver.ValidateNativeEgressAttachment(*attachment) == nil &&
+		run.Status.NativeEgressAttachment != nil && run.Status.NativeEgressAttachment.Generation == attachment.Generation &&
+		run.Status.NativeEgressAttachment.Digest == attachment.Digest
+}
+
+func nativeEgressDesiredGeneration(run *nvtv1alpha1.AgentRun) (int64, error) {
+	if run == nil {
+		return 0, errors.New("native egress attachment is unavailable")
+	}
+	// Legacy in-process tests and pre-attachment status remain readable. The
+	// production coordinator carries a configured attachment and filters these
+	// rows before this helper is reached; reconciliation durably installs the
+	// attachment status before any provider call.
+	if run.Status.NativeEgressAttachment == nil {
+		return executiondriver.NativeEgressDesiredGeneration(run.Generation, 0)
+	}
+	return executiondriver.NativeEgressDesiredGeneration(run.Generation, run.Status.NativeEgressAttachment.Generation)
+}
+
+func (r *AgentRunReconciler) ensureNativeEgressAttachment(ctx context.Context, run *nvtv1alpha1.AgentRun) (bool, error) {
+	attachment := r.NativeEgressAttachment
+	if run == nil || !nativeMediatedExternalRun(run) || attachment == nil || executiondriver.ValidateNativeEgressAttachment(*attachment) != nil {
+		return false, errors.New("native egress attachment is unavailable")
+	}
+	current := run.Status.NativeEgressAttachment
+	if current != nil && current.Digest != attachment.Digest && current.Generation >= attachment.Generation {
+		return false, errors.New("native egress attachment generation did not advance")
+	}
+	desiredGeneration, err := executiondriver.NativeEgressDesiredGeneration(run.Generation, attachment.Generation)
+	if err != nil {
+		return false, err
+	}
+	bindingCurrent := false
+	if binding, bindingErr := nativeGuestBindingFromStatus(run.Status.NativeGuestBinding); bindingErr == nil {
+		bindingCurrent = binding.DesiredGeneration == desiredGeneration
+	}
+	staleReadyWithoutBinding := run.Status.NativeGuestBinding == nil && meta.IsStatusConditionTrue(run.Status.Conditions, ConditionNativeEgressReady)
+	if nativeEgressAttachmentCurrent(run, attachment) && (run.Status.NativeGuestBinding == nil || bindingCurrent) && !staleReadyWithoutBinding {
+		return false, nil
+	}
+	if run.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, run); err != nil {
+			return false, err
+		}
+	}
+	previous := run.Status.DeepCopy()
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: attachment.Generation, Digest: attachment.Digest}
+	run.Status.NativeGuestBinding = nil
+	nativeEgressCondition(run, metav1.ConditionFalse, "NativeEgressAttachmentPending", "the provider has not observed the current native egress attachment")
+	r.setRunCondition(run, ConditionExternalExecutionReady, metav1.ConditionFalse, "NativeEgressAttachmentPending", "external execution is waiting for the current native egress attachment")
+	if equalAgentRunStatus(previous, &run.Status) {
+		return false, nil
+	}
+	if err := r.Status().Update(ctx, run); err != nil {
+		return false, fmt.Errorf("persist native egress attachment: %w", err)
+	}
+	return true, nil
 }
 
 func nativeEgressPublishedTarget(run *nvtv1alpha1.AgentRun, binding guestenrollment.Binding) nativeegress.PublishedTarget {
@@ -283,7 +360,11 @@ func (r *AgentRunReconciler) reconcileNativeEgress(
 		}
 		return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
 	}
-	if status.Phase != executiondriver.PhaseRunning || !status.Ready || status.ObservedGeneration != run.Generation || status.EgressConfinement == nil ||
+	desiredGeneration, generationErr := nativeEgressDesiredGeneration(run)
+	attachmentCurrent := nativeEgressAttachmentCurrent(run, r.NativeEgressAttachment)
+	if generationErr != nil || !attachmentCurrent || status.Phase != executiondriver.PhaseRunning || !status.Ready || status.ObservedGeneration != desiredGeneration || status.EgressConfinement == nil ||
+		status.EgressConfinement.AttachmentGeneration != run.Status.NativeEgressAttachment.Generation ||
+		status.EgressConfinement.AttachmentDigest != run.Status.NativeEgressAttachment.Digest ||
 		!nativeEgressConfinementReady(status.EgressConfinement.Ready, string(status.EgressConfinement.Boundary)) {
 		return pending("NativeEgressConfinementPending")
 	}

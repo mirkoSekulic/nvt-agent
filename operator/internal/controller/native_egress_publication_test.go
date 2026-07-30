@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -232,9 +234,20 @@ func TestNativeEgressPublicationEnabledRequiresInstallationNamespace(t *testing.
 	}
 }
 
+func TestNativeEgressPublicationEnabledRequiresAttachmentPlan(t *testing.T) {
+	reconciler := &AgentRunReconciler{}
+	reader := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	if err := ConfigureNativeEgressTargetPublication(reconciler, &publicationclient.Client{}, reader, "nvt"); err == nil {
+		t.Fatal("enabled publication accepted a missing installation attachment plan")
+	}
+	if reconciler.nativeEgressTargets != nil {
+		t.Fatal("missing attachment plan installed an authority")
+	}
+}
+
 func mustNativeEgressTargetCoordinator(t *testing.T, reader client.Reader, authority publicationclient.Interface) nativeEgressTargetPublication {
 	t.Helper()
-	coordinator, err := newNativeEgressTargetCoordinator(reader, authority, "nvt")
+	coordinator, err := newNativeEgressTargetCoordinator(reader, authority, "nvt", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,6 +558,195 @@ func TestPodRunNeverUsesNativeEgressPublication(t *testing.T) {
 	}
 	if boundary.calls != 0 {
 		t.Fatal("Pod path touched native egress publication")
+	}
+}
+
+func testControllerNativeEgressAttachment(t *testing.T, generation int64) *executiondriver.NativeEgressAttachment {
+	t.Helper()
+	ca, err := generateEgressCASecretData([]string{"relay.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := executiondriver.SealNativeEgressAttachment(executiondriver.NativeEgressAttachment{
+		ContractVersion: executiondriver.NativeEgressAttachmentVersion, Generation: generation,
+		Relay: executiondriver.NativeEgressRelayAttachment{Host: "relay.invalid", Port: 7445, ServerName: "relay.invalid", CAPEM: string(ca[egressCACertKey])},
+		RequiredDestinations: []executiondriver.NativeEgressRequiredDestination{
+			{Purpose: executiondriver.NativeEgressDestinationBootstrap, Host: "broker.invalid", Port: 7443},
+			{Purpose: executiondriver.NativeEgressDestinationControl, Host: "gateway.invalid", Port: 7444},
+		},
+		Redirect: executiondriver.NativeEgressRedirectIntent{Mode: executiondriver.NativeEgressRedirectModeCaptureTCP, LoopbackAddress: "127.0.0.1", TransparentTCPPort: 15001, ExplicitCONNECTPort: 15002},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &sealed
+}
+
+func TestNativeEgressAttachmentReplacementWithdrawsBeforeDesiredPublication(t *testing.T) {
+	ctx := context.Background()
+	run := readyNativeEgressRun("attachment-replace", "dddddddd-dddd-dddd-dddd-dddddddddddd", "old-guest")
+	run.Spec.Execution.ClassRef = "vm-standard"
+	run.Spec.Execution.Configuration = rawJSON(`{"relayHost":"guest-selected.invalid"}`)
+	old := testControllerNativeEgressAttachment(t, 2)
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: old.Generation, Digest: old.Digest}
+	run.Status.NativeGuestBinding.DesiredGeneration = 3
+	next := testControllerNativeEgressAttachment(t, 4)
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	boundary := &recordingPublicationBoundary{check: func(target *nativeegress.PublishedTarget, exclude string) error {
+		if target != nil || exclude != string(run.UID) {
+			t.Fatal("replacement did not withdraw the exact old binding")
+		}
+		current := &nvtv1alpha1.AgentRun{}
+		if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Status.NativeGuestBinding == nil || meta.IsStatusConditionTrue(current.Status.Conditions, ConditionNativeEgressReady) {
+			t.Fatal("old binding was not made unready durably before relay withdrawal")
+		}
+		return nil
+	}}
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, NativeEgressAttachment: next, nativeEgressTargets: boundary}
+	current := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := reconciler.ensureNativeEgressAttachment(ctx, current)
+	if err != nil || !changed || boundary.calls != 1 {
+		t.Fatalf("changed=%v calls=%d err=%v", changed, boundary.calls, err)
+	}
+	stored := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.NativeGuestBinding != nil || stored.Status.NativeEgressAttachment == nil ||
+		stored.Status.NativeEgressAttachment.Generation != next.Generation || stored.Status.NativeEgressAttachment.Digest != next.Digest {
+		t.Fatalf("replacement status=%#v", stored.Status)
+	}
+	encodedStatus, _ := json.Marshal(stored.Status.NativeEgressAttachment)
+	for _, forbidden := range []string{"relay", "endpoint", "ca_pem", "credential", "provider", "redirect"} {
+		if strings.Contains(strings.ToLower(string(encodedStatus)), forbidden) {
+			t.Fatalf("attachment status exposed %q: %s", forbidden, encodedStatus)
+		}
+	}
+	if changed, err := reconciler.ensureNativeEgressAttachment(ctx, stored); err != nil || changed || boundary.calls != 1 {
+		t.Fatalf("idempotent attachment changed=%v calls=%d err=%v", changed, boundary.calls, err)
+	}
+	desired, err := desiredExternalExecution(stored, next)
+	if err != nil || desired.NativeEgressAttachment == nil || desired.Generation != stored.Generation+next.Generation || desired.NativeEgressAttachment.Digest != next.Digest {
+		t.Fatalf("desired=%#v err=%v", desired, err)
+	}
+	if desired.NativeEgressAttachment.Relay.Host == "guest-selected.invalid" {
+		t.Fatal("producer/class configuration overrode installation attachment")
+	}
+}
+
+func TestNativeEgressAttachmentIsOmittedOutsideMediatedExternalVM(t *testing.T) {
+	attachment := testControllerNativeEgressAttachment(t, 2)
+	direct := externalTestAgentRun()
+	legacyGeneration, _ := executiondriver.NativeEgressDesiredGeneration(direct.Generation, 0)
+	desired, err := desiredExternalExecution(direct, attachment)
+	if err != nil || desired.NativeEgressAttachment != nil || desired.Generation != legacyGeneration {
+		t.Fatalf("direct VM desired=%#v err=%v", desired, err)
+	}
+	pod := externalTestAgentRun()
+	pod.Spec.Execution.Kind = nvtv1alpha1.AgentRunExecutionPod
+	legacyGeneration, _ = executiondriver.NativeEgressDesiredGeneration(pod.Generation, 0)
+	desired, err = desiredExternalExecution(pod, attachment)
+	if err != nil || desired.NativeEgressAttachment != nil || desired.Generation != legacyGeneration {
+		t.Fatalf("external Pod desired=%#v err=%v", desired, err)
+	}
+}
+
+func TestNativeEgressAttachmentContentChangeRequiresHigherGeneration(t *testing.T) {
+	currentPlan := testControllerNativeEgressAttachment(t, 5)
+	conflicting := *currentPlan
+	conflicting.Digest = ""
+	conflicting.Relay.Host = "replacement-relay.invalid"
+	conflicting.Relay.ServerName = "replacement-relay.invalid"
+	sealed, err := executiondriver.SealNativeEgressAttachment(conflicting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := readyNativeEgressRun("attachment-conflict", "abababab-abab-abab-abab-abababababab", "guest")
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: currentPlan.Generation, Digest: currentPlan.Digest}
+	run.Status.NativeGuestBinding = nil
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, NativeEgressAttachment: &sealed, nativeEgressTargets: &recordingPublicationBoundary{}}
+	stored := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(context.Background(), client.ObjectKeyFromObject(run), stored); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := reconciler.ensureNativeEgressAttachment(context.Background(), stored); err == nil || changed {
+		t.Fatalf("same-generation conflict changed=%v err=%v", changed, err)
+	}
+}
+
+func TestNativeEgressPublicationRequiresExactAttachmentObservation(t *testing.T) {
+	ctx := context.Background()
+	attachment := testControllerNativeEgressAttachment(t, 3)
+	run := readyNativeEgressRun("attachment-ready", "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", "guest")
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: attachment.Generation, Digest: attachment.Digest}
+	run.Status.NativeGuestBinding.DesiredGeneration = run.Generation + attachment.Generation
+	pod, service := readyTargetObjects(run)
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run, pod, service).Build()
+	authority := &recordingTargetAuthority{status: nativeegress.TargetStatus{ContractVersion: nativeegress.TargetPublicationVersion, Type: nativeegress.TargetPublicationStatusResponse}}
+	coordinatorValue, err := newNativeEgressTargetCoordinator(kubernetes, authority, "nvt", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator := coordinatorValue.(*nativeEgressTargetCoordinator)
+	if err := coordinator.Reconcile(ctx, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(authority.snapshots) != 1 || len(authority.snapshots[0].Targets) != 1 {
+		t.Fatalf("exact attachment target not published: %#v", authority.snapshots)
+	}
+	run.Status.NativeEgressAttachment.Digest = "sha256:" + strings.Repeat("0", 64)
+	if err := kubernetes.Update(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Reconcile(ctx, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := authority.snapshots[len(authority.snapshots)-1].Targets; len(got) != 0 {
+		t.Fatalf("stale attachment remained published: %#v", got)
+	}
+}
+
+func TestNativeEgressStaleConfinementObservationFailsBeforePublication(t *testing.T) {
+	ctx := context.Background()
+	attachment := testControllerNativeEgressAttachment(t, 2)
+	run := readyNativeEgressRun("stale-confinement", "ffffffff-ffff-ffff-ffff-ffffffffffff", "guest")
+	run.Status.Conditions = nil
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: attachment.Generation, Digest: attachment.Digest}
+	run.Status.NativeGuestBinding.DesiredGeneration = run.Generation + attachment.Generation
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	boundary := &recordingPublicationBoundary{}
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, NativeEgressAttachment: attachment, nativeEgressTargets: boundary}
+	current := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reconciler.reconcileNativeEgress(ctx, current, executiondriver.Status{
+		Phase: executiondriver.PhaseRunning, Ready: true, ObservedGeneration: run.Generation + attachment.Generation,
+		EgressConfinement: &executiondriver.EgressConfinementStatus{
+			Boundary: executiondriver.EgressConfinementBoundaryInfrastructure, Ready: true,
+			AttachmentGeneration: attachment.Generation - 1, AttachmentDigest: attachment.Digest,
+		},
+	})
+	if err != nil || result.RequeueAfter == 0 || boundary.calls != 0 {
+		t.Fatalf("result=%#v calls=%d err=%v", result, boundary.calls, err)
+	}
+	stored := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), stored); err != nil {
+		t.Fatal(err)
+	}
+	if meta.IsStatusConditionTrue(stored.Status.Conditions, ConditionNativeEgressReady) {
+		t.Fatal("stale provider observation became ready")
 	}
 }
 
