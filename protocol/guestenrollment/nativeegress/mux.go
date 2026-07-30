@@ -84,8 +84,10 @@ type RelayFlowTransport struct {
 	flowIDsMu sync.Mutex
 	flowIDs   map[string]struct{}
 
-	workerMu sync.Mutex
-	workers  sync.WaitGroup
+	workerMu         sync.Mutex
+	workers          sync.WaitGroup
+	shutdownMu       sync.Mutex
+	shutdownDeadline time.Time
 
 	closeFinished chan struct{}
 }
@@ -412,8 +414,15 @@ func (transport *RelayFlowTransport) handleStream(stream net.Conn) {
 	defer func() { <-transport.handlers }()
 	defer stream.Close()
 	deadline := operationDeadline(transport.lifetime, FlowOpenTimeout)
-	message, reader, err := readFlowResponse(stream, deadline)
-	if err != nil || reader.Buffered() != 0 || message.Type != FlowOpen || message.Destination == nil {
+	message, reader, empty, err := readStreamMessage(stream, deadline)
+	if err != nil {
+		if empty {
+			return
+		}
+		_ = transport.session.Close()
+		return
+	}
+	if reader.Buffered() != 0 || message.Type != FlowOpen || message.Destination == nil {
 		_ = transport.session.Close()
 		return
 	}
@@ -528,28 +537,35 @@ func closeNow(connection net.Conn) {
 }
 
 func readFlowResponse(connection net.Conn, deadline time.Time) (Message, *bufio.Reader, error) {
+	message, reader, _, err := readStreamMessage(connection, deadline)
+	return message, reader, err
+}
+
+func readStreamMessage(connection net.Conn, deadline time.Time) (Message, *bufio.Reader, bool, error) {
 	if deadline.IsZero() || !time.Now().Before(deadline) || connection.SetReadDeadline(deadline) != nil {
-		return Message{}, nil, ErrUnavailable
+		return Message{}, nil, false, ErrUnavailable
 	}
 	reader := bufio.NewReaderSize(connection, MaxFrameBytes)
 	line, err := reader.ReadSlice('\n')
 	if err != nil {
+		empty := len(line) == 0
+		emptyCanceled := empty && errors.Is(err, io.EOF)
 		zero(line)
-		if len(line) == 0 {
-			return Message{}, nil, ErrUnavailable
+		if empty {
+			return Message{}, nil, emptyCanceled, ErrUnavailable
 		}
-		return Message{}, nil, ErrProtocol
+		return Message{}, nil, false, ErrProtocol
 	}
 	if len(line) == 0 || len(line) > MaxFrameBytes {
 		zero(line)
-		return Message{}, nil, ErrProtocol
+		return Message{}, nil, false, ErrProtocol
 	}
 	defer zero(line)
 	message, err := DecodeMessage(line)
 	if err != nil {
-		return Message{}, nil, err
+		return Message{}, nil, false, err
 	}
-	return message, reader, nil
+	return message, reader, false, nil
 }
 
 func (transport *GuestFlowTransport) beginShutdown() {
@@ -586,6 +602,7 @@ func (transport *RelayFlowTransport) beginShutdown() {
 	if transport == nil {
 		return
 	}
+	transport.closeDeadline()
 	transport.once.Do(func() {
 		transport.closed.Store(true)
 		transport.cancel()
@@ -640,8 +657,11 @@ func (transport *RelayFlowTransport) Close() error {
 	if transport == nil {
 		return nil
 	}
-	deadline := time.Now().Add(transport.profile.shutdownTimeout)
-	_ = transport.session.closeWithin(transport.profile.shutdownTimeout)
+	deadline := transport.closeDeadline()
+	remaining := time.Until(deadline)
+	if remaining > 0 {
+		_ = transport.session.closeWithin(remaining)
+	}
 	transport.beginShutdown()
 	workersDone := make(chan struct{})
 	go func() {
@@ -650,7 +670,7 @@ func (transport *RelayFlowTransport) Close() error {
 		transport.workers.Wait()
 		close(workersDone)
 	}()
-	remaining := time.Until(deadline)
+	remaining = time.Until(deadline)
 	if remaining <= 0 {
 		return ErrUnavailable
 	}
@@ -672,6 +692,15 @@ func (transport *RelayFlowTransport) Close() error {
 		}
 	}
 	return nil
+}
+
+func (transport *RelayFlowTransport) closeDeadline() time.Time {
+	transport.shutdownMu.Lock()
+	defer transport.shutdownMu.Unlock()
+	if transport.shutdownDeadline.IsZero() {
+		transport.shutdownDeadline = time.Now().Add(transport.profile.shutdownTimeout)
+	}
+	return transport.shutdownDeadline
 }
 
 func yamuxConfig() *yamux.Config {

@@ -150,6 +150,8 @@ type fakeTarget struct {
 	echo         bool
 	deny         bool
 	err          error
+	closeStarted chan struct{}
+	closeRelease <-chan struct{}
 }
 
 func (target *fakeTarget) Binding() guestenrollment.Binding { return target.binding }
@@ -168,6 +170,10 @@ func (target *fakeTarget) OpenFlow(_ context.Context, destination nativeegress.D
 		return nil, failure
 	}
 	client, peer := net.Pipe()
+	var result net.Conn = client
+	if target.closeRelease != nil {
+		result = &blockingTargetConnection{Conn: client, started: target.closeStarted, release: target.closeRelease}
+	}
 	target.mu.Lock()
 	target.peers = append(target.peers, peer)
 	target.mu.Unlock()
@@ -177,7 +183,7 @@ func (target *fakeTarget) OpenFlow(_ context.Context, destination nativeegress.D
 			_ = peer.Close()
 		}()
 	}
-	return client, nil
+	return result, nil
 }
 
 func (target *fakeTarget) closePeers() {
@@ -188,6 +194,25 @@ func (target *fakeTarget) closePeers() {
 	for _, peer := range peers {
 		_ = peer.Close()
 	}
+}
+
+type blockingTargetConnection struct {
+	net.Conn
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+	result  error
+}
+
+func (connection *blockingTargetConnection) Close() error {
+	connection.once.Do(func() {
+		if connection.started != nil {
+			close(connection.started)
+		}
+		<-connection.release
+		connection.result = connection.Conn.Close()
+	})
+	return connection.result
 }
 
 type fakeResolver struct {

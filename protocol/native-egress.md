@@ -190,7 +190,9 @@ begin. An authoritative target policy denial returns only the matching fixed
 target unavailability, duplicate/replayed IDs, or transport faults close the
 stream or session without internal diagnostics. One stream is one TCP flow.
 Copies preserve backpressure and TCP half-close semantics; payloads are never
-whole-buffered.
+whole-buffered. Closing a stream before sending any frame is an ordinary
+stream-local canceled open; a partial frame, malformed frame, duplicate ID, or
+extra buffered frame is session-fatal.
 
 The explicit yamux profile uses an eight-stream accept backlog, 256 KiB maximum
 stream window, five-second connection writes/stream opens/stream closes,

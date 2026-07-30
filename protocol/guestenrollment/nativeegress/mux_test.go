@@ -284,6 +284,67 @@ func TestYamuxFlowTransportOneWayActivityAndTrueIdle(t *testing.T) {
 	}
 }
 
+func TestCanceledPreFrameStreamIsLocalAndPreservesSession(t *testing.T) {
+	binding := testBinding("mux-empty-canceled")
+	target := &fakeTarget{binding: binding, echo: true}
+	defer target.closePeers()
+	pair := newTestFlowPair(t, target, defaultTransportProfile())
+	destination := Destination{Network: NetworkTCP, Host: "api.example", Port: 443}
+	active, err := pair.guest.OpenFlow(t.Context(), destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	assertEcho := func(flow net.Conn, payload string) {
+		t.Helper()
+		if _, err := flow.Write([]byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+		response := make([]byte, len(payload))
+		if _, err := io.ReadFull(flow, response); err != nil || string(response) != payload {
+			t.Fatalf("echo response=%q error=%v", response, err)
+		}
+	}
+	assertEcho(active, "before-cancellation")
+
+	baselineHandlers := len(pair.relay.handlers)
+	empty, err := pair.guest.mux.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(pair.relay.handlers) != baselineHandlers+1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(pair.relay.handlers) != baselineHandlers+1 {
+		t.Fatal("relay did not begin reading the empty pre-frame stream")
+	}
+	_ = empty.Close()
+	deadline = time.Now().Add(time.Second)
+	for len(pair.relay.handlers) != baselineHandlers && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(pair.relay.handlers) != baselineHandlers {
+		t.Fatal("relay did not finish the canceled pre-frame stream locally")
+	}
+	if !pair.session.Ready() {
+		t.Fatal("empty canceled stream closed the authenticated session")
+	}
+	select {
+	case <-pair.guest.Done():
+		t.Fatal("empty canceled stream closed the guest transport")
+	default:
+	}
+	assertEcho(active, "after-cancellation")
+
+	subsequent, err := pair.guest.OpenFlow(t.Context(), destination)
+	if err != nil {
+		t.Fatalf("subsequent valid flow failed: %v", err)
+	}
+	defer subsequent.Close()
+	assertEcho(subsequent, "subsequent-flow")
+}
+
 type dialingTarget struct {
 	binding guestenrollment.Binding
 	address string
@@ -402,6 +463,14 @@ func TestRelayRejectsMalformedOversizedAndDuplicateFlowOpen(t *testing.T) {
 			}
 			_, _ = stream.Write([]byte("{not-json}\n"))
 		},
+		"partial": func(t *testing.T, mux *yamux.Session) {
+			stream, err := mux.OpenStream()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = stream.Write([]byte("{"))
+			_ = stream.Close()
+		},
 		"oversized": func(t *testing.T, mux *yamux.Session) {
 			stream, err := mux.OpenStream()
 			if err != nil {
@@ -430,7 +499,10 @@ func TestRelayRejectsMalformedOversizedAndDuplicateFlowOpen(t *testing.T) {
 				}
 				deadline := time.Now().Add(time.Second)
 				if err := writeMessage(stream, Message{ContractVersion: Version, Type: FlowOpen, FlowID: "replayed-flow", Destination: &destination}, deadline); err != nil {
-					t.Fatal(err)
+					if index == 0 {
+						t.Fatal(err)
+					}
+					return
 				}
 				if index == 0 {
 					response, _, err := readFlowResponse(stream, deadline)

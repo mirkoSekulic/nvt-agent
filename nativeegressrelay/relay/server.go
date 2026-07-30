@@ -250,7 +250,12 @@ func (server *Server) closeTrackedConnections() {
 
 func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 	connection := tls.Server(raw, server.tlsConfig.Clone())
-	defer connection.Close()
+	connectionOwned := true
+	defer func() {
+		if connectionOwned {
+			_ = connection.Close()
+		}
+	}()
 	tlsContext, cancelTLS := context.WithTimeout(server.lifetimeContext, server.handshakeTimeout)
 	_ = connection.SetDeadline(time.Now().Add(server.handshakeTimeout))
 	err := connection.HandshakeContext(tlsContext)
@@ -279,10 +284,10 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		cancelHandshake()
 		return
 	}
-	defer session.Close()
 	reservation, err := server.registry.Reserve(session)
 	if err != nil {
 		cancelHandshake()
+		_ = session.Close()
 		return
 	}
 	if err := pending.Acknowledge(); err != nil {
@@ -296,12 +301,11 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		reservation.Remove()
 		return
 	}
-	defer func() {
-		// Withdraw exact-binding readiness and close target flows before the
-		// authenticated outer transport is torn down.
-		reservation.Remove()
-		_ = transport.Close()
-	}()
+	connectionOwned = false
+	// Session callbacks withdraw the exact registry reservation before the
+	// transport callback closes the outer connection and target flows. Close
+	// owns one shared absolute shutdown deadline across all of that work.
+	defer transport.Close()
 	if !reservation.Activate() {
 		return
 	}

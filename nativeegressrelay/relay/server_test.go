@@ -420,6 +420,59 @@ func TestRelayRevalidationReconnectRevocationConnectionLossAndShutdown(t *testin
 	}
 }
 
+func TestRelayCleanupSharesOneAbsoluteShutdownBudget(t *testing.T) {
+	binding := testBinding("single-shutdown-budget")
+	credential := testCredential(t, 1)
+	authenticator := &fakeAuthenticator{bindings: map[string]guestenrollment.Binding{credential: binding}}
+	closeStarted := make(chan struct{})
+	closeRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseClose := func() { releaseOnce.Do(func() { close(closeRelease) }) }
+	defer releaseClose()
+	target := &fakeTarget{binding: binding, closeStarted: closeStarted, closeRelease: closeRelease}
+	defer target.closePeers()
+	resolver := &fakeResolver{targets: map[guestenrollment.Binding]*fakeTarget{binding: target}}
+	server, address, pki, _ := startInjectedServer(t, authenticator, resolver, nativeegress.RevalidationInterval, 4)
+
+	connection, err := connectGuest(t, address, pki, binding, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	waitActive(t, server.Sessions(), binding, true)
+	flow, err := connection.OpenFlow(t.Context(), nativeegress.Destination{Network: nativeegress.NetworkTCP, Host: "api.example", Port: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer flow.Close()
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), nativeegress.ShutdownTimeout+3*time.Second)
+	defer cancelShutdown()
+	shutdownDone := make(chan error, 1)
+	started := time.Now()
+	go func() { shutdownDone <- server.Shutdown(shutdownContext) }()
+	select {
+	case <-closeStarted:
+		if _, ready := server.Sessions().Active(binding); ready {
+			t.Fatal("target flow close began before registry readiness withdrawal")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay cleanup did not begin target flow close")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(started); elapsed > nativeegress.ShutdownTimeout+2*time.Second {
+			t.Fatalf("relay cleanup exceeded one shutdown budget: %s", elapsed)
+		}
+	case <-shutdownContext.Done():
+		t.Fatal("relay cleanup consumed consecutive shutdown budgets")
+	}
+	releaseClose()
+}
+
 func TestRelayBoundsSlowTLSHandshakeAndReleasesAdmission(t *testing.T) {
 	binding := testBinding("slow")
 	credential := testCredential(t, 1)
