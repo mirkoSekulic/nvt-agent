@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -339,6 +340,38 @@ func TestEgressdTargetFailuresAreBoundedSanitizedAndReleaseSessionCapacity(t *te
 	}
 }
 
+func TestProductionRelayMapsRealEgressdHTTPDenialToFixedFlowRejection(t *testing.T) {
+	const diagnosticCanary = "SECRET-EGRESSD-DENIAL-CANARY"
+	egressd := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, diagnosticCanary, http.StatusForbidden)
+	}))
+	defer egressd.Close()
+	binding := testBinding("egressd-real-denial")
+	credential := testCredential(t, 7)
+	registry, err := NewEgressdTargetRegistry([]EgressdTargetDescriptor{{Binding: binding, ConnectURL: egressd.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := &fakeAuthenticator{bindings: map[string]guestenrollment.Binding{credential: binding}}
+	server, address, pki, _ := startInjectedServer(t, authenticator, registry, nativeegress.RevalidationInterval, 4)
+	guest, err := connectGuest(t, address, pki, binding, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guest.Close()
+	waitActive(t, server.Sessions(), binding, true)
+	flow, err := guest.OpenFlow(t.Context(), nativeegress.Destination{Network: nativeegress.NetworkTCP, Host: "denied.example", Port: 443})
+	if flow != nil || !errors.Is(err, nativeegress.ErrDenied) {
+		t.Fatalf("real egressd denial flow=%v error=%v", flow, err)
+	}
+	if strings.Contains(err.Error(), diagnosticCanary) {
+		t.Fatal("egressd denial diagnostics reached the guest")
+	}
+	if _, ready := server.Sessions().Active(binding); !ready {
+		t.Fatal("authoritative flow denial closed the authenticated session")
+	}
+}
+
 func TestEgressdTargetSnapshotReplacementWithdrawsSessionsWithoutMigratingFlows(t *testing.T) {
 	fixtureA := newEchoConnectFixture(t, nil)
 	fixtureB := newEchoConnectFixture(t, nil)
@@ -497,6 +530,22 @@ func TestEgressdTargetDescriptorsRejectMalformedDuplicateAndUnboundedInput(t *te
 	}
 	if _, err := NewEgressdTargetRegistry([]EgressdTargetDescriptor{valid, valid}); err == nil {
 		t.Fatal("duplicate exact binding was accepted")
+	}
+	registry, err := NewEgressdTargetRegistry([]EgressdTargetDescriptor{valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := resolveTarget(t, registry, binding)
+	other := valid
+	other.Binding = testBinding("egressd-config-other")
+	if err := registry.Reconcile([]EgressdTargetDescriptor{valid, other}); err == nil {
+		t.Fatal("duplicate canonical egressd endpoint across bindings was accepted")
+	}
+	if current := resolveTarget(t, registry, binding); current != previous {
+		t.Fatal("rejected duplicate endpoint snapshot disturbed the previous mapping")
+	}
+	if target, err := registry.ResolveNativeEgressTarget(t.Context(), other.Binding); target != nil || !errors.Is(err, ErrTargetUnavailable) {
+		t.Fatal("rejected duplicate endpoint snapshot partially installed another binding")
 	}
 	invalidBinding := valid
 	invalidBinding.Binding.GuestInstanceID = ""

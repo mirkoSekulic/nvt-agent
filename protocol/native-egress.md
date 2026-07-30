@@ -223,7 +223,9 @@ restart. The in-process registry exposes atomic level-triggered replacement
 only as an implementation seam for a future trusted operator adapter. There is
 no target-registration HTTP endpoint, partial lookup, enumeration, fallback,
 guest-supplied endpoint, or configuration watcher. Malformed, duplicate, or
-over-capacity descriptors reject the complete configuration.
+over-capacity descriptors reject the complete configuration. Two different
+Bindings MUST NOT name the same canonical egressd listener: the target is a
+per-run authority and cannot be shared across exact bindings.
 
 For this adapter, each validated Destination becomes exactly one HTTP/1.1
 `CONNECT` request whose request authority and `Host` are the canonical

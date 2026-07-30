@@ -128,6 +128,7 @@ func validateEgressdTargetDescriptors(descriptors []EgressdTargetDescriptor) (ma
 		return nil, errors.New("native egress target configuration is invalid")
 	}
 	parsed := make(map[guestenrollment.Binding]parsedEgressdTargetDescriptor, len(descriptors))
+	addresses := make(map[string]struct{}, len(descriptors))
 	for _, descriptor := range descriptors {
 		if guestenrollment.ValidateBinding(descriptor.Binding) != nil {
 			return nil, errors.New("native egress target configuration is invalid")
@@ -139,6 +140,10 @@ func validateEgressdTargetDescriptors(descriptors []EgressdTargetDescriptor) (ma
 		if _, exists := parsed[descriptor.Binding]; exists {
 			return nil, errors.New("native egress target configuration is invalid")
 		}
+		if _, exists := addresses[address]; exists {
+			return nil, errors.New("native egress target configuration is invalid")
+		}
+		addresses[address] = struct{}{}
 		parsed[descriptor.Binding] = parsedEgressdTargetDescriptor{descriptor: descriptor, address: address}
 	}
 	return parsed, nil
@@ -239,13 +244,16 @@ func (target *egressdTarget) connect(ctx context.Context, destination nativeegre
 	if err != nil {
 		return nil, ErrTargetUnavailable
 	}
-	if response.ProtoMajor != 1 || response.ProtoMinor != 1 || response.ContentLength > 0 || len(response.TransferEncoding) != 0 {
+	if response.ProtoMajor != 1 || response.ProtoMinor != 1 {
 		return nil, ErrTargetUnavailable
 	}
 	if response.StatusCode == http.StatusForbidden {
 		return nil, nativeegress.ErrDenied
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, ErrTargetUnavailable
+	}
+	if response.ContentLength > 0 || len(response.TransferEncoding) != 0 {
 		return nil, ErrTargetUnavailable
 	}
 	bounded.unbound()

@@ -18,6 +18,8 @@ failure removes its reservation.
 The command optionally constructs a production `EgressdTargetRegistry` from a
 strict process-owned `egressd_targets` snapshot. Each entry maps one complete
 five-field Binding to exactly one canonical per-run egressd CONNECT listener.
+Each canonical listener may appear for only one Binding in the complete
+snapshot; sharing it would cross the per-run grant and credential boundary.
 Target lookup is exact-only; guest destination input can never choose an
 endpoint, run, or driver. If the snapshot is omitted, the command retains its
 safe `DenyAllTargetResolver` behavior and acknowledges no sessions.
