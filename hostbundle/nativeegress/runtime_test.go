@@ -81,6 +81,67 @@ type pipeConnector struct {
 	handler func(int, net.Conn)
 }
 
+type recordingCapture struct {
+	mu          sync.Mutex
+	done        chan error
+	starts      int
+	activations int
+	withdrawals int
+	closes      int
+	events      []string
+	record      func(string)
+}
+
+func newRecordingCapture() *recordingCapture { return &recordingCapture{done: make(chan error, 1)} }
+
+func (capture *recordingCapture) Start(context.Context) error {
+	capture.mu.Lock()
+	capture.starts++
+	capture.events = append(capture.events, "start")
+	if capture.record != nil {
+		capture.record("capture:start")
+	}
+	capture.mu.Unlock()
+	return nil
+}
+
+func (capture *recordingCapture) Activate(opener protocol.FlowOpener) bool {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if opener == nil {
+		return false
+	}
+	capture.activations++
+	capture.events = append(capture.events, "activate")
+	if capture.record != nil {
+		capture.record("capture:activate")
+	}
+	return true
+}
+
+func (capture *recordingCapture) Withdraw() {
+	capture.mu.Lock()
+	capture.withdrawals++
+	capture.events = append(capture.events, "withdraw")
+	if capture.record != nil {
+		capture.record("capture:withdraw")
+	}
+	capture.mu.Unlock()
+}
+
+func (capture *recordingCapture) Done() <-chan error { return capture.done }
+
+func (capture *recordingCapture) Close() error {
+	capture.mu.Lock()
+	capture.closes++
+	capture.events = append(capture.events, "close")
+	if capture.record != nil {
+		capture.record("capture:close")
+	}
+	capture.mu.Unlock()
+	return nil
+}
+
 type runtimeRelayTarget struct {
 	binding guestenrollment.Binding
 }
@@ -156,18 +217,30 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 		Version: ConfigurationVersion, RuntimeDirectory: runtimeDirectory,
 		IdentitySocketPath: filepath.Join(work, "identity.sock"),
 		RelayEndpoint:      "tls://relay.example:7445", CAPEMPath: filepath.Join(work, "ca.pem"),
+		Capture: &CaptureConfiguration{ListenAddress: "127.0.0.1:15001"},
 	}, issuer, connector)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runtime.Now = func() time.Time { return now }
 	runtime.MonotonicNow = time.Now
+	captureLifecycle := newRecordingCapture()
+	runtime.Capture = captureLifecycle
+	var orderedMu sync.Mutex
+	ordered := []string{}
+	recordOrdered := func(value string) {
+		orderedMu.Lock()
+		ordered = append(ordered, value)
+		orderedMu.Unlock()
+	}
+	captureLifecycle.record = recordOrdered
 	var readinessMu sync.Mutex
 	readiness := []bool{}
 	runtime.readinessChanged = func(value bool) {
 		readinessMu.Lock()
 		readiness = append(readiness, value)
 		readinessMu.Unlock()
+		recordOrdered(fmt.Sprintf("ready:%t", value))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -180,6 +253,12 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 		t.Fatalf("reconnect accepted call=%d", call)
 	}
 	waitForFile(t, filepath.Join(runtimeDirectory, ReadinessFileName))
+	if info, err := os.Stat(runtimeDirectory); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("shared capture runtime directory mode=%v error=%v", info, err)
+	}
+	if info, err := os.Stat(filepath.Join(runtimeDirectory, ReadinessFileName)); err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("shared capture readiness mode=%v error=%v", info, err)
+	}
 	readinessMu.Lock()
 	baseline := len(readiness)
 	readinessMu.Unlock()
@@ -215,11 +294,46 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 		}
 	}
 	readinessMu.Unlock()
+	captureLifecycle.mu.Lock()
+	atomicReplacement := false
+	for index := 1; index < len(captureLifecycle.events); index++ {
+		if captureLifecycle.events[index-1] == "activate" && captureLifecycle.events[index] == "activate" {
+			atomicReplacement = true
+		}
+	}
+	if captureLifecycle.starts != 1 || captureLifecycle.activations < 2 || !atomicReplacement {
+		captureLifecycle.mu.Unlock()
+		t.Fatalf("capture lifecycle before shutdown start=%d activate=%d withdraw=%d events=%v", captureLifecycle.starts, captureLifecycle.activations, captureLifecycle.withdrawals, captureLifecycle.events)
+	}
+	captureLifecycle.mu.Unlock()
 
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+	captureLifecycle.mu.Lock()
+	if captureLifecycle.withdrawals < 1 || captureLifecycle.closes != 1 || len(captureLifecycle.events) < 2 ||
+		captureLifecycle.events[len(captureLifecycle.events)-2] != "withdraw" || captureLifecycle.events[len(captureLifecycle.events)-1] != "close" {
+		captureLifecycle.mu.Unlock()
+		t.Fatalf("capture shutdown withdraw=%d close=%d events=%v", captureLifecycle.withdrawals, captureLifecycle.closes, captureLifecycle.events)
+	}
+	captureLifecycle.mu.Unlock()
+	orderedMu.Lock()
+	ready := false
+	for _, event := range ordered {
+		switch event {
+		case "ready:true":
+			ready = true
+		case "ready:false":
+			ready = false
+		case "capture:withdraw":
+			if ready {
+				orderedMu.Unlock()
+				t.Fatalf("capture withdrew before readiness: %v", ordered)
+			}
+		}
+	}
+	orderedMu.Unlock()
 	if _, err := os.Stat(filepath.Join(runtimeDirectory, ReadinessFileName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("egress readiness remained after shutdown: %v", err)
 	}

@@ -157,13 +157,15 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "run")
 	sessionRuntimeDir := filepath.Join(work, "supervisor-session-run")
-	for _, directory := range []string{state, workspace, runtimeDir, sessionRuntimeDir} {
+	egressRuntimeDir := filepath.Join(work, "supervisor-egress-run")
+	for _, directory := range []string{state, workspace, runtimeDir, sessionRuntimeDir, egressRuntimeDir} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	socket := filepath.Join(runtimeDir, "agentd.sock")
 	sessionReadiness := filepath.Join(sessionRuntimeDir, "session-ready")
+	egressReadiness := filepath.Join(egressRuntimeDir, "egress-ready")
 	if err := os.WriteFile(sessionReadiness, []byte("ready\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +174,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	config := map[string]any{
 		"version": 1, "python_path": python, "tmux_path": tmux,
 		"state_dir": state, "socket_path": socket, "workspace": workspace,
-		"session_name": session, "session_readiness_path": sessionReadiness, "session_startup_grace_seconds": 0,
+		"session_name": session, "session_readiness_path": sessionReadiness, "egress_readiness_path": egressReadiness, "session_startup_grace_seconds": 0,
 		"session_command": []string{"@release/bin/nvt-guest-session-fixture", "--output", capture},
 	}
 	configBytes, _ := json.Marshal(config)
@@ -182,7 +184,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	current := filepath.Join(root, "current")
 	var logs synchronizedBuffer
-	start := func() (*exec.Cmd, chan error) {
+	launch := func() (*exec.Cmd, chan error) {
 		command := exec.Command(filepath.Join(current, "bin", "nvt-guest-supervisor"), "--config", configPath)
 		command.Env = append(os.Environ(), "NVT_TEST_SECRET_CANARY=must-not-propagate")
 		command.Stdout = &logs
@@ -192,6 +194,10 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() { done <- command.Wait() }()
+		return command, done
+	}
+	start := func() (*exec.Cmd, chan error) {
+		command, done := launch()
 		waitForFile(t, filepath.Join(state, "guest-ready"), 15*time.Second)
 		return command, done
 	}
@@ -210,7 +216,38 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		}
 	}
 
-	command, done := start()
+	// Native egress capture readiness is an optional pre-session gate. Agentd
+	// may start, but the untrusted tmux session and guest readiness remain absent
+	// until the root-owned marker appears.
+	command, done := launch()
+	socketDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(socket); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("supervisor exited before egress readiness gate: %v\n%s", err, logs.String())
+		default:
+		}
+		if time.Now().After(socketDeadline) {
+			t.Fatalf("agentd socket was not published before egress gate\n%s", logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+	probe := exec.Command(tmux, "has-session", "-t", session)
+	probe.Env = []string{"HOME=" + state, "PATH=/usr/bin:/bin"}
+	if probe.Run() == nil {
+		t.Fatal("agent session started before native egress capture readiness")
+	}
+	if _, err := os.Stat(filepath.Join(state, "guest-ready")); !os.IsNotExist(err) {
+		t.Fatal("guest readiness was published before native egress capture readiness")
+	}
+	if err := os.WriteFile(egressReadiness, []byte("ready\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, filepath.Join(state, "guest-ready"), 15*time.Second)
 	if info, err := os.Stat(socket); err != nil || info.Mode().Perm() != 0o660 {
 		t.Fatalf("native agentd socket permission contract = %v, %v", info, err)
 	}
@@ -219,6 +256,23 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	command, done = start()
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "restart-native-prompt")
 	stop(command, done)
+	command, done = start()
+	if err := os.Remove(egressReadiness); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("supervisor exited successfully after native egress withdrawal")
+		}
+	case <-time.After(10 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatal("supervisor did not stop after native egress withdrawal")
+	}
+	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
+	if err := os.WriteFile(egressReadiness, []byte("ready\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	command, done = start()
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "session-exit-prompt")
 	kill := exec.Command(tmux, "kill-session", "-t", session)
@@ -237,6 +291,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
 	delete(config, "session_readiness_path")
+	delete(config, "egress_readiness_path")
 	legacyConfigBytes, _ := json.Marshal(config)
 	if err := os.WriteFile(configPath, append(legacyConfigBytes, '\n'), 0o600); err != nil {
 		t.Fatal(err)
@@ -265,8 +320,8 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		sessionServiceErr != nil || !bytes.Contains(sessionService, []byte("User=root")) || !bytes.Contains(sessionService, []byte("Group=nvt-agent")) ||
 		!bytes.Contains(sessionService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(sessionService, []byte("CapabilityBoundingSet=\n")) || !bytes.Contains(sessionService, []byte("nvt-guest-sessiond")) ||
 		!bytes.Contains(sessionService, []byte("Requires=nvt-guest-identity.service nvt-agent-guest.service")) ||
-		egressServiceErr != nil || !bytes.Contains(egressService, []byte("User=root")) || !bytes.Contains(egressService, []byte("Group=root")) ||
-		!bytes.Contains(egressService, []byte("RuntimeDirectoryMode=0700")) || !bytes.Contains(egressService, []byte("CapabilityBoundingSet=\n")) ||
+		egressServiceErr != nil || !bytes.Contains(egressService, []byte("User=root")) || !bytes.Contains(egressService, []byte("Group=nvt-agent")) ||
+		!bytes.Contains(egressService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(egressService, []byte("CapabilityBoundingSet=\n")) ||
 		!bytes.Contains(egressService, []byte("nvt-guest-egressd")) || !bytes.Contains(egressService, []byte("Requires=nvt-guest-identity.service")) {
 		t.Fatal("installed systemd boundaries are missing")
 	}
@@ -277,6 +332,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	egressExample, egressExampleErr := os.ReadFile(filepath.Join(current, "share", "examples", "native-egress.json"))
 	if egressExampleErr != nil || !bytes.Contains(egressExample, []byte(`"relay_endpoint": "tls://native-egress.example.invalid:7445"`)) ||
+		!bytes.Contains(egressExample, []byte(`"listen_address": "127.0.0.1:15001"`)) ||
 		bytes.Contains(egressExample, []byte("nvt_eg1_")) || bytes.Contains(egressExample, []byte("runtime_identity")) ||
 		bytes.Contains(egressExample, []byte("binding")) || bytes.Contains(egressExample, []byte("audience")) {
 		t.Fatal("installed bundle is missing the non-secret optional native-egress example")

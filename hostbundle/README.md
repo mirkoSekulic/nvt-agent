@@ -26,8 +26,8 @@ The guest OS supplies Python 3, tmux, systemd (when the units are used), the
 `/var/lib/nvt-agent` paths. The included session executable is deliberately a
 bounded lifecycle fixture, not a production AI runtime. Provider provisioning,
 the optional fixed loopback workspace service, plugins, a production native
-egress target adapter, captured agent traffic integration, provider
-confinement, and mediated-VM readiness remain later phases.
+egress target adapter, provider redirect installation and confinement, and
+mediated-VM readiness remain later phases.
 
 The separate provider-neutral enrollment and runtime-identity boundaries are
 documented in [`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md)
@@ -52,6 +52,9 @@ existing container and Compose paths. The version-1 `session_readiness_path`
 member is additive: older guest configurations that omit it retain their
 original agentd/tmux readiness behavior, while newly provisioned native-session
 guests enable the outbound-session readiness gate.
+The optional version-1 `egress_readiness_path` similarly gates tmux startup and
+ongoing guest readiness on the root-owned native-egress capture-plus-transport
+marker; omission preserves existing supervisor behavior.
 
 `share/examples/session.json` remains the control-only example. Providers may
 instead resolve the non-secret `share/examples/session-workspace.json` example
@@ -64,14 +67,19 @@ switches only after both replacements authenticate.
 
 `share/examples/native-egress.json` is a separate opt-in root-owned
 configuration for `nvt-guest-egressd`. It contains only private runtime/socket
-paths, one canonical TLS relay endpoint, and an explicit CA path. The process
-requests a fixed-purpose egress credential from `nvt-guest-identityd`; no
-runtime identity, binding, audience, target, destination, or provider value is
-caller-configurable. The credential is never persisted and reconnects reuse
-it; renewal retains at most a current and pending credential in trusted memory.
+paths, one canonical TLS relay endpoint, an explicit CA path, and an optional
+literal-loopback capture address plus bounded non-secret capability hint. The
+process requests a fixed-purpose egress credential from
+`nvt-guest-identityd`; no
+runtime identity, binding, audience, target endpoint, destination, or provider
+credential is caller-configurable. The credential is never persisted and
+reconnects reuse it; renewal retains at most a current and pending credential
+in trusted memory.
 After authentication the client proves the bounded yamux data plane is live
-before publishing transport readiness and exposes only the purpose-specific
-`FlowOpener` seam for later trusted capture integration.
+before publishing transport readiness. Its bounded Linux capture boundary
+recovers original TCP destination plus bounded HTTP Host/TLS SNI intent and
+opens only through that current purpose-specific `FlowOpener`; there is no
+direct-network fallback.
 
 After the bootstrap has installed and activated a release, guest provisioning
 may install the repository-owned unit and its separately supplied non-secret
@@ -97,10 +105,11 @@ systemctl enable --now nvt-guest-identity.service nvt-agent-guest.service nvt-gu
 
 A provider implementing the later mediated-VM enforcement gates may also copy
 `nvt-guest-egress.service`, write root-owned `native-egress.json` plus its
-explicit relay CA, and enable that unit. The bundle does not enable or require
-it, and the current client establishes only the authenticated bounded flow
-transport—it does not forward captured agent traffic or claim production
-mediated-egress readiness.
+explicit relay CA, install the provider-owned redirect into the configured
+loopback listener, add `egress_readiness_path` to `guest.json`, and enable that
+unit. The bundle does not enable or require it. Guest-local capture forwards
+traffic but does not prevent hostile guest root from bypassing it and does not
+claim production mediated-egress readiness.
 
 The bundle never writes `/etc` or enables a service implicitly. That remains a
 provider-owned provisioning step so activation cannot execute archive hooks.

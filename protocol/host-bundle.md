@@ -148,9 +148,11 @@ The bundle includes four independent native service boundaries:
   socket, establishes [`nvt.native-egress/v1`](native-egress.md) over a
   separate explicitly trusted TLS connection, and retains current/pending
   credentials only in bounded process memory. After authentication it proves
-  the pinned bounded yamux flow transport is live before publishing its own
-  readiness. It does not receive the runtime identity, capture agent traffic,
-  or assert provider confinement/readiness.
+  the pinned bounded yamux flow transport is live, activates the optional
+  bounded loopback TCP capture boundary, and only then publishes its own
+  readiness. Captured connections can open only through that current
+  authenticated transport. It does not receive the runtime identity, install
+  provider redirect rules, or assert provider confinement/readiness.
 
 The agent service requires the identity service. The identity unit uses
 systemd `Type=notify` and becomes active only after durable state has been
@@ -168,10 +170,10 @@ bearer state to the agent user.
 
 The current bundle includes the real `agentd` and `agentdctl` sources, the
 trusted native control-session and optional workspace clients, the optional
-native-egress session and flow-transport client, plus a bounded session fixture
-for the guest-side lifecycle gate. It does not package code-server, an AI
-runtime, plugins, the cluster-side egressd target adapter, or captured agent
-traffic.
+native-egress session/flow client and Linux capture boundary, plus a bounded
+session fixture for the guest-side lifecycle gate. It does not package
+code-server, an AI runtime, plugins, or the cluster-side egressd target
+adapter.
 The loopback workspace service remains an explicit provider-installed
 prerequisite; the production gateway can route an already-authorized external
 VM browser session to it through the exact native workspace binding.
@@ -188,6 +190,14 @@ version-1 guest configuration. An omitted member preserves the original v1
 agentd/tmux readiness and monitoring behavior. New native-session guests set
 the absolute path and thereby opt into the additional transport gate. A
 present malformed path still fails closed.
+
+`egress_readiness_path` is a second additive optional version-1 member. When
+present, the supervisor waits for the root-owned capture-plus-tunnel marker
+before starting the untrusted tmux session, continuously monitors it, and
+removes `guest-ready` before stopping the session on withdrawal. Omission
+preserves the pre-egress supervisor behavior. The egress unit exposes the
+marker through a `0750` root:`nvt-agent` runtime directory and a `0640`
+root:`nvt-agent` file; the agent user has no write access.
 
 Guest prerequisites for v1 are Linux, Python 3, tmux, a dedicated `nvt-agent`
 user, writable runtime/state/workspace directories, and systemd when the unit is
@@ -213,9 +223,13 @@ Mediated-VM providers may additionally copy
 `share/examples/native-egress.json` paths and canonical TLS relay endpoint into
 root-owned `/etc/nvt-agent/native-egress.json`, install the explicit relay CA,
 and enable the unit only after their infrastructure confinement prerequisites
-are met. The client configuration contains no binding, audience, bearer,
-destination, target, or provider credential. The bundle never enables this
-unit itself, and its readiness is not yet part of operator VM readiness.
+are met. Its optional `capture` block contains only a canonical literal
+loopback listener and optional bounded capability hint. It contains no binding,
+audience, bearer, target endpoint, or provider credential. The provider owns
+the redirect into that listener and adds the root-owned `egress_readiness_path`
+to `guest.json` when the agent lifecycle must be gated. The bundle never
+enables this unit itself, and its readiness is not yet part of operator VM
+readiness.
 
 The bundled `share/examples/session.json` remains the unchanged control-only
 example. `share/examples/session-workspace.json` demonstrates the optional
@@ -268,6 +282,7 @@ production broker identity endpoints, and trusted host-bundle
 session/flow-transport client now exist. A production relay core serves the
 corresponding bounded data plane and may use an explicit process-owned
 exact-binding adapter into per-run egressd. Captured agent traffic integration,
-dynamic operator target publication/readiness, and provider-owned external
-network confinement remain future gates before a mediated external VM can be
-ready.
+including fixed-destination recovery and no-fallback flow opening, now exists
+in the opt-in guest service. Dynamic operator target publication/readiness,
+provider-owned redirect installation, and provider-owned external network
+confinement remain future gates before a mediated external VM can be ready.

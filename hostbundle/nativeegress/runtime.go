@@ -27,6 +27,7 @@ type Runtime struct {
 	Configuration    Configuration
 	Identity         CredentialIssuer
 	Connector        Connector
+	Capture          CaptureLifecycle
 	Now              func() time.Time
 	MonotonicNow     func() time.Time
 	readinessChanged func(bool)
@@ -106,21 +107,40 @@ func NewRuntime(configuration Configuration, identity CredentialIssuer, connecto
 	if validateConfiguration(configuration) != nil || identity == nil || connector == nil {
 		return nil, fail(ReasonConfiguration, false, false)
 	}
+	var capture CaptureLifecycle
+	if configuration.Capture != nil {
+		server, err := NewCaptureServer(*configuration.Capture)
+		if err != nil {
+			return nil, err
+		}
+		capture = server
+	}
 	return &Runtime{
 		Configuration: configuration,
 		Identity:      identity,
 		Connector:     connector,
+		Capture:       capture,
 		Now:           time.Now,
 		MonotonicNow:  time.Now,
 	}, nil
 }
 
 func (runtime *Runtime) Run(ctx context.Context) error {
-	if runtime == nil || ctx == nil || ensureRuntimeDirectory(runtime.Configuration.RuntimeDirectory) != nil {
+	if runtime == nil || ctx == nil || (runtime.Configuration.Capture != nil && runtime.Capture == nil) ||
+		(runtime.Configuration.Capture == nil && runtime.Capture != nil) {
+		return fail(ReasonConfiguration, false, false)
+	}
+	if ensureRuntimeDirectory(runtime.Configuration.RuntimeDirectory, runtime.Configuration.Capture != nil) != nil {
 		return fail(ReasonConfiguration, false, false)
 	}
 	_ = runtime.writeReadiness(false)
 	defer runtime.writeReadiness(false)
+	if runtime.Capture != nil {
+		if err := runtime.Capture.Start(ctx); err != nil {
+			return fail(ReasonCaptureUnavailable, false, false)
+		}
+		defer runtime.Capture.Close()
+	}
 	state := &credentialState{}
 	defer state.clear()
 	for {
@@ -185,13 +205,23 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 		return err
 	default:
 	}
+	if runtime.Capture != nil && !runtime.Capture.Activate(active.transport) {
+		active.Close()
+		return fail(ReasonCaptureUnavailable, false, false)
+	}
 	if err := runtime.writeReadiness(true); err != nil {
+		if runtime.Capture != nil {
+			runtime.Capture.Withdraw()
+		}
 		active.Close()
 		return err
 	}
 	var attempt *preparation
 	defer func() {
 		_ = runtime.writeReadiness(false)
+		if runtime.Capture != nil {
+			runtime.Capture.Withdraw()
+		}
 		active.Close()
 		if attempt != nil {
 			runtime.cancelPreparation(state, attempt)
@@ -213,6 +243,10 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 		if attempt != nil {
 			preparationDone = attempt.done
 		}
+		var captureDone <-chan error
+		if runtime.Capture != nil {
+			captureDone = runtime.Capture.Done()
+		}
 		select {
 		case <-ctx.Done():
 			stopTimer(timer)
@@ -226,6 +260,9 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 				err = fail(ReasonRelayUnavailable, true, false)
 			}
 			return err
+		case <-captureDone:
+			stopTimer(timer)
+			return fail(ReasonCaptureUnavailable, false, false)
 		case result := <-preparationDone:
 			stopTimer(timer)
 			attempt.cancel()
@@ -237,6 +274,10 @@ func (runtime *Runtime) serveSession(ctx context.Context, state *credentialState
 			}
 			if !switched {
 				continue
+			}
+			if runtime.Capture != nil && !runtime.Capture.Activate(replacement.transport) {
+				replacement.Close()
+				return fail(ReasonCaptureUnavailable, false, false)
 			}
 			previous := active
 			active = replacement
@@ -590,7 +631,11 @@ func (runtime *Runtime) writeReadiness(ready bool) error {
 	}
 	name := temporary.Name()
 	defer os.Remove(name)
-	if err := temporary.Chmod(0o600); err != nil {
+	mode := os.FileMode(0o600)
+	if runtime.Configuration.Capture != nil {
+		mode = 0o640
+	}
+	if err := temporary.Chmod(mode); err != nil {
 		temporary.Close()
 		return fail(ReasonConfiguration, false, false)
 	}

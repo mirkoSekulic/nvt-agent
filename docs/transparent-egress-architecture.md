@@ -149,6 +149,14 @@ recover the hostname when available, then opens a CONNECT tunnel to the paired
 egress endpoint. It does not terminate TLS, inspect application payloads, or
 hold credentials.
 
+The opt-in native-VM host-bundle capture boundary reuses this same bounded
+original-destination and Host/SNI inspector. Instead of dialing CONNECT
+directly, it passes the canonical destination only to the current
+authenticated native-egress `FlowOpener`; absent or withdrawn transport closes
+the connection with no fallback. The provider still owns the redirect into
+the literal loopback listener and the external network confinement that makes
+that redirect non-bypassable.
+
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
 the same hostname. Workload-wide generic HTTP proxy variables remain unset in
@@ -286,8 +294,10 @@ replace guest-local capture and firewall state. The provider-neutral
 trusted execution driver/provider to enforce default-deny NIC/network policy
 outside the guest, plus an exact-binding authenticated outbound tunnel into the
 run's separate trusted egress path. Both gates are required. The contract,
-conformance proof, identity authority, guest flow client, cluster relay, and an
-optional strict process-owned exact-binding adapter into per-run egressd exist.
-Captured traffic integration, dynamic operator target publication/readiness,
-and provider confinement are not wired yet, so production VM mediation remains
-incomplete.
+conformance proof, identity authority, guest flow client with opt-in Linux TCP
+capture, cluster relay, and an optional strict process-owned exact-binding
+adapter into per-run egressd exist. The guest capture reuses the same bounded
+Host/SNI/original-destination inspection and never falls back to direct
+networking, but it is not a root-adversary boundary. Dynamic operator target
+publication/readiness, provider-owned redirect installation, and provider
+confinement are not wired yet, so production VM mediation remains incomplete.

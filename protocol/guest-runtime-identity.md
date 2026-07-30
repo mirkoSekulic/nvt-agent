@@ -231,5 +231,7 @@ separate opt-in native-egress client that obtains only that derived credential
 over root-only IPC and establishes the strictly trusted outbound flow session.
 The standalone relay terminates the matching bounded data plane and may use an
 explicit process-owned exact-binding adapter into the run's existing egressd
-CONNECT listener. Captured agent traffic integration, dynamic operator target
-publication/readiness, and provider network enforcement do not exist yet.
+CONNECT listener. The opt-in host-bundle service now captures redirected guest
+TCP only through that flow client. Dynamic operator target
+publication/readiness, provider redirect installation, and provider network
+enforcement do not exist yet.

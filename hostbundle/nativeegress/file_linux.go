@@ -49,3 +49,8 @@ func ownedByProcess(info os.FileInfo) bool {
 	stat, ok := infoSys(info)
 	return ok && stat.Uid == uint32(os.Geteuid())
 }
+
+func groupOwnedByProcess(info os.FileInfo) bool {
+	stat, ok := infoSys(info)
+	return ok && stat.Gid == uint32(os.Getegid())
+}

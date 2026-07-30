@@ -33,6 +33,7 @@ type configuration struct {
 	Workspace                  string   `json:"workspace"`
 	SessionName                string   `json:"session_name"`
 	SessionReadinessPath       string   `json:"session_readiness_path"`
+	EgressReadinessPath        string   `json:"egress_readiness_path,omitempty"`
 	SessionStartupGraceSeconds int      `json:"session_startup_grace_seconds"`
 	SessionCommand             []string `json:"session_command"`
 }
@@ -104,6 +105,11 @@ func run(config configuration, releaseRoot string) error {
 	if err := waitForAgentd(config.SocketPath, startupDeadline, agentdDone); err != nil {
 		return err
 	}
+	if config.EgressReadinessPath != "" {
+		if err := waitForEgressReadiness(config.EgressReadinessPath, time.Now().Add(90*time.Second), agentdDone); err != nil {
+			return err
+		}
+	}
 	command := resolveReleaseCommand(config.SessionCommand, releaseRoot)
 	arguments := []string{"new-session", "-d", "-s", config.SessionName, "-c", config.Workspace, "--"}
 	arguments = append(arguments, command...)
@@ -164,6 +170,9 @@ func run(config configuration, releaseRoot string) error {
 			if !sessionExists(config) {
 				return errors.New("guest session exited unexpectedly")
 			}
+			if config.EgressReadinessPath != "" && !sessionTransportReady(config.EgressReadinessPath) {
+				return errors.New("native egress capture exited unexpectedly")
+			}
 			if config.SessionReadinessPath != "" && !sessionTransportReady(config.SessionReadinessPath) {
 				return errors.New("native session transport exited unexpectedly")
 			}
@@ -180,7 +189,7 @@ func loadConfiguration(path string) (configuration, string, error) {
 	if contract.DecodeStrict(data, maxConfigBytes, &config) != nil {
 		return configuration{}, "", errors.New("guest supervisor configuration is invalid")
 	}
-	if config.Version != 1 || !absoluteRegularExecutable(config.PythonPath) || !absoluteRegularExecutable(config.TmuxPath) || !validAbsoluteDirectory(config.StateDir) || !validAbsolutePath(config.SocketPath) || !validSessionReadinessPath(config) || !validAbsoluteDirectory(config.Workspace) || !sessionPattern.MatchString(config.SessionName) || config.SessionStartupGraceSeconds < 0 || config.SessionStartupGraceSeconds > 30 || len(config.SessionCommand) == 0 || len(config.SessionCommand) > 32 {
+	if config.Version != 1 || !absoluteRegularExecutable(config.PythonPath) || !absoluteRegularExecutable(config.TmuxPath) || !validAbsoluteDirectory(config.StateDir) || !validAbsolutePath(config.SocketPath) || !validSessionReadinessPath(config) || !validEgressReadinessPath(config) || !validAbsoluteDirectory(config.Workspace) || !sessionPattern.MatchString(config.SessionName) || config.SessionStartupGraceSeconds < 0 || config.SessionStartupGraceSeconds > 30 || len(config.SessionCommand) == 0 || len(config.SessionCommand) > 32 {
 		return configuration{}, "", errors.New("guest supervisor configuration is invalid")
 	}
 	argumentBytes := 0
@@ -208,6 +217,27 @@ func loadConfiguration(path string) (configuration, string, error) {
 func validSessionReadinessPath(config configuration) bool {
 	return config.SessionReadinessPath == "" ||
 		(validAbsolutePath(config.SessionReadinessPath) && config.SessionReadinessPath != config.SocketPath)
+}
+
+func validEgressReadinessPath(config configuration) bool {
+	return config.EgressReadinessPath == "" ||
+		(validAbsolutePath(config.EgressReadinessPath) && config.EgressReadinessPath != config.SocketPath &&
+			config.EgressReadinessPath != config.SessionReadinessPath)
+}
+
+func waitForEgressReadiness(path string, deadline time.Time, done <-chan struct{}) error {
+	for time.Now().Before(deadline) {
+		select {
+		case <-done:
+			return errors.New("agentd exited before native egress readiness")
+		default:
+		}
+		if sessionTransportReady(path) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return errors.New("native egress readiness timed out")
 }
 
 func waitForSessionReadiness(config configuration, deadline time.Time, done <-chan struct{}) error {

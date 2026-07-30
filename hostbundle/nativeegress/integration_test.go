@@ -101,12 +101,21 @@ func TestRuntimeComposesPurposeOnlyIPCWithStrictTLSRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if runtime.Capture != nil {
+		t.Fatal("omitted capture configuration changed the control-only runtime")
+	}
 	runtime.Now = func() time.Time { return now }
 	runtime.MonotonicNow = time.Now
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
 	waitForFile(t, filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName))
+	if info, err := os.Stat(runtime.Configuration.RuntimeDirectory); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("control-only runtime directory mode=%v error=%v", info, err)
+	}
+	if info, err := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("control-only readiness mode=%v error=%v", info, err)
+	}
 	if err := <-relayAccepted; err != nil {
 		cancel()
 		t.Fatal(err)

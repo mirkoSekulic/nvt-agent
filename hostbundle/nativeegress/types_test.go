@@ -25,11 +25,13 @@ func TestConfigurationIsStrictRootOwnedAndNonSecret(t *testing.T) {
 	}
 
 	for name, contents := range map[string]string{
-		"unknown":   strings.TrimSuffix(configuration, "}") + `,"credential":"nvt_eg1_canary"}`,
-		"duplicate": strings.Replace(configuration, `"version":1`, `"version":1,"version":1`, 1),
-		"trailing":  configuration + "\n{}",
-		"non TLS":   strings.Replace(configuration, "tls://", "http://", 1),
-		"IP relay":  strings.Replace(configuration, "egress-relay.example", "127.0.0.1", 1),
+		"unknown":           strings.TrimSuffix(configuration, "}") + `,"credential":"nvt_eg1_canary"}`,
+		"duplicate":         strings.Replace(configuration, `"version":1`, `"version":1,"version":1`, 1),
+		"trailing":          configuration + "\n{}",
+		"non TLS":           strings.Replace(configuration, "tls://", "http://", 1),
+		"IP relay":          strings.Replace(configuration, "egress-relay.example", "127.0.0.1", 1),
+		"capture unknown":   strings.TrimSuffix(configuration, "}") + `,"capture":{"listen_address":"127.0.0.1:15001","credential":"nvt_eg1_canary"}}`,
+		"capture duplicate": strings.TrimSuffix(configuration, "}") + `,"capture":{"listen_address":"127.0.0.1:15001","listen_address":"127.0.0.1:15001"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(directory, strings.ReplaceAll(name, " ", "-")+".json")
@@ -40,6 +42,17 @@ func TestConfigurationIsStrictRootOwnedAndNonSecret(t *testing.T) {
 				t.Fatal("invalid configuration was accepted")
 			}
 		})
+	}
+
+	captureConfiguration := strings.TrimSuffix(configuration, "}") + `,"capture":{"listen_address":"127.0.0.1:15001","capability_hint":"provider-main"}}`
+	capturePath := filepath.Join(directory, "capture.json")
+	if err := os.WriteFile(capturePath, []byte(captureConfiguration+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	captureValue, err := LoadConfiguration(capturePath)
+	if err != nil || captureValue.Capture == nil || captureValue.Capture.ListenAddress != "127.0.0.1:15001" ||
+		captureValue.Capture.CapabilityHint != "provider-main" {
+		t.Fatalf("capture configuration=%#v error=%v", captureValue, err)
 	}
 
 	if err := os.Chmod(configurationPath, 0o666); err != nil {
