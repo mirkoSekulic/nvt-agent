@@ -130,7 +130,11 @@ nativeEgressRelay:
     pullPolicy: IfNotPresent
   initImage:
     repository: docker.io/library/busybox
-    tag: "1.36.1"
+    # This root init container handles every relay private key and control
+    # bearer. Keep its multi-architecture image immutable; enabled installs
+    # reject missing or non-canonical digests, including administrator
+    # overrides.
+    digest: sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
     pullPolicy: IfNotPresent
   replicas: 1
   data:

@@ -149,6 +149,16 @@ if helm template nvt "${CHART}" -n custom-ns --set nativeEgressRelay.enabled=tru
   exit 1
 fi
 grep -q 'nativeEgressRelay.rolloutRevision must be a non-empty canonical rollout epoch' "${WORKDIR}/native-relay-rollout.txt"
+if helm template nvt "${CHART}" -n custom-ns \
+  --set nativeEgressRelay.enabled=true \
+  --set-string nativeEgressRelay.rolloutRevision=test-1 \
+  --set-string nativeEgressRelay.initImage.tag=1.36.1 \
+  --set-string nativeEgressRelay.initImage.digest= \
+  >/dev/null 2>"${WORKDIR}/native-relay-init-image.txt"; then
+  echo "expected unpinned native relay init image to fail" >&2
+  exit 1
+fi
+grep -q 'nativeEgressRelay.initImage must use a non-empty repository and canonical sha256 digest' "${WORKDIR}/native-relay-init-image.txt"
 if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set nativeEgressRelay.enabled=true --set nativeEgressRelay.replicas=2 >/dev/null 2>"${WORKDIR}/native-relay-replicas.txt"; then
   echo "expected multi-replica native relay to fail" >&2
@@ -699,6 +709,7 @@ assert deployment["spec"]["template"]["metadata"]["annotations"]["nvt.dev/native
 assert pod["securityContext"]["runAsUser"] == 65532
 assert pod["containers"][0]["image"].endswith(":" + version)
 assert pod["containers"][0]["securityContext"]["capabilities"]["drop"] == ["ALL"]
+assert pod["initContainers"][0]["image"] == "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 assert pod["initContainers"][0]["securityContext"]["runAsUser"] == 0
 assert pod["initContainers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["CHOWN"]}
 assert pod["volumes"][1]["emptyDir"]["medium"] == "Memory"

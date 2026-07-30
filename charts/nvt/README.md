@@ -443,6 +443,15 @@ the relay and operator Pods; the control Service is restricted to the operator
 and is never exposed through the gateway or ingress. Empty
 `data.ingressCIDRs` keeps the guest listener fenced.
 
+That root init container reads every relay private key and the control bearer,
+so its default multi-architecture BusyBox image is pinned by an exact
+`sha256` manifest digest. Enabled installs reject an unpinned
+`nativeEgressRelay.initImage` override. Treat any repository/digest change as
+a trusted-supply-chain update and review it together with the init script; a
+mutable tag is not an accepted override. The pin also avoids an implicit
+mutable Docker Hub runtime dependency in coordinated or offline installs once
+the digest-addressed image is mirrored into the installation registry.
+
 The relay and operator load their serving certificates, private keys, control
 bearer, and CA bundles only at process start. Set the required non-secret
 `nativeEgressRelay.rolloutRevision` to one canonical epoch and change it in the
@@ -453,6 +462,9 @@ Both use `Recreate` in this single-process mode, preventing an old and new
 publisher or process-local relay registry from overlapping during the epoch.
 Rotating an external Secret without changing the epoch is unsupported because
 projected-file refresh cannot update already-loaded trust or credentials.
+Changing the init image does not rotate credentials, but it changes the Pod
+template and must remain digest-pinned; credential or CA rotation still
+requires a new rollout epoch in the same upgrade.
 
 This integration does not provide provider NIC confinement or redirect wiring;
 those remain required before a VM can resist bypass by a root-capable guest.

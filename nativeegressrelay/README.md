@@ -44,6 +44,13 @@ uses authenticated status after restart and republishes the complete snapshot
 before setting per-run native-egress readiness. Provider ingress routing and
 infrastructure confinement remain separate future gates.
 
+The copy step runs as root and handles the serving private keys and control
+bearer. Its chart default is therefore an exact multi-architecture image
+digest, and an enabled installation rejects an init-image override without a
+canonical `sha256` digest. Repository/digest changes are trusted-supply-chain
+changes that must be reviewed with the fixed copy script; mutable tags are not
+supported for this boundary.
+
 Relay and operator clients load control credentials, serving identities, and
 CA trust once at process start. The chart requires one shared non-secret
 `nativeEgressRelay.rolloutRevision`; administrators MUST change it with every
@@ -52,6 +59,9 @@ Deployments roll as one fail-closed credential generation. Secret projection
 alone is not a supported hot-reload mechanism. Both Deployments use `Recreate`
 while this process-local single-replica contract is enabled, so old and new
 publication/session owners never overlap.
+The init-image digest is independent of credential generations: changing it
+rolls the Pod template but does not replace the requirement to increment
+`rolloutRevision` whenever any credential or CA rotates.
 
 ## Configuration
 

@@ -85,7 +85,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: install-owned-configuration
-          image: {{ include "nvt.image" (dict "root" . "name" "nativeEgressRelay.initImage" "image" $relay.initImage) | quote }}
+          image: {{ include "nvt.digestImage" (dict "name" "nativeEgressRelay.initImage" "image" $relay.initImage) | quote }}
           imagePullPolicy: {{ $relay.initImage.pullPolicy }}
           command: ["/bin/sh", "-ec"]
           args:
