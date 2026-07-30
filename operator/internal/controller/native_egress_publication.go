@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -39,26 +40,32 @@ type nativeEgressTargetPublication interface {
 type nativeEgressTargetCoordinator struct {
 	client    client.Reader
 	authority publicationclient.Interface
+	namespace string
 	mu        sync.Mutex
 }
 
-func newNativeEgressTargetCoordinator(kubernetes client.Reader, authority publicationclient.Interface) nativeEgressTargetPublication {
-	if kubernetes == nil || authority == nil {
-		return nil
+func newNativeEgressTargetCoordinator(kubernetes client.Reader, authority publicationclient.Interface, namespace string) (nativeEgressTargetPublication, error) {
+	if kubernetes == nil || authority == nil || len(validation.IsDNS1123Label(namespace)) != 0 {
+		return nil, errors.New("native egress publication configuration is invalid")
 	}
-	return &nativeEgressTargetCoordinator{client: kubernetes, authority: authority}
+	return &nativeEgressTargetCoordinator{client: kubernetes, authority: authority, namespace: namespace}, nil
 }
 
 // ConfigureNativeEgressTargetPublication installs the optional trusted relay
 // publication boundary without exporting its reconciliation interface.
-func ConfigureNativeEgressTargetPublication(reconciler *AgentRunReconciler, authority *publicationclient.Client, reader client.Reader) {
+func ConfigureNativeEgressTargetPublication(reconciler *AgentRunReconciler, authority *publicationclient.Client, reader client.Reader, namespace string) error {
 	if reconciler == nil || authority == nil {
-		return
+		return nil
 	}
 	if reader == nil {
 		reader = reconciler.Client
 	}
-	reconciler.nativeEgressTargets = newNativeEgressTargetCoordinator(reader, authority)
+	coordinator, err := newNativeEgressTargetCoordinator(reader, authority, namespace)
+	if err != nil {
+		return err
+	}
+	reconciler.nativeEgressTargets = coordinator
+	return nil
 }
 
 // BootstrapNativeEgressTargetPublication restores the relay's process-local
@@ -71,7 +78,7 @@ func BootstrapNativeEgressTargetPublication(ctx context.Context, reconciler *Age
 }
 
 func (coordinator *nativeEgressTargetCoordinator) Reconcile(ctx context.Context, current *nativeegress.PublishedTarget, excludeUID string) error {
-	if coordinator == nil || coordinator.client == nil || coordinator.authority == nil || ctx == nil {
+	if coordinator == nil || coordinator.client == nil || coordinator.authority == nil || ctx == nil || len(validation.IsDNS1123Label(coordinator.namespace)) != 0 {
 		return errors.New("native egress publication is unavailable")
 	}
 	if current != nil && nativeegress.ValidatePublishedTarget(*current) != nil {
@@ -80,7 +87,7 @@ func (coordinator *nativeEgressTargetCoordinator) Reconcile(ctx context.Context,
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
 	runs := &nvtv1alpha1.AgentRunList{}
-	if err := coordinator.client.List(ctx, runs); err != nil {
+	if err := coordinator.client.List(ctx, runs, client.InNamespace(coordinator.namespace)); err != nil {
 		return errors.New("native egress publication is unavailable")
 	}
 	targets := make([]nativeegress.PublishedTarget, 0, len(runs.Items)+1)
@@ -198,13 +205,40 @@ func (r *AgentRunReconciler) withdrawNativeEgressTarget(ctx context.Context, run
 	if r.nativeEgressTargets == nil {
 		return errors.New("native egress publication is unavailable")
 	}
+	condition := meta.FindStatusCondition(run.Status.Conditions, ConditionNativeEgressReady)
+	if condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == "NativeEgressWithdrawn" {
+		return nil
+	}
+	changed := meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type: ConditionNativeEgressReady, Status: metav1.ConditionFalse, Reason: "NativeEgressWithdrawalPending",
+		Message: "the exact native egress target is being withdrawn", ObservedGeneration: run.Generation,
+	})
+	changed = meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type: ConditionExternalExecutionReady, Status: metav1.ConditionFalse, Reason: "NativeEgressWithdrawalPending",
+		Message: "external execution is waiting for native mediated egress withdrawal", ObservedGeneration: run.Generation,
+	}) || changed
+	objectGone := false
+	if changed {
+		if err := r.Status().Update(ctx, run); apierrors.IsNotFound(err) {
+			objectGone = true
+		} else if err != nil {
+			return fmt.Errorf("persist native egress withdrawal: %w", err)
+		}
+	}
 	if err := r.nativeEgressTargets.Reconcile(ctx, nil, string(run.UID)); err != nil {
 		return err
 	}
-	changed := meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+	if objectGone {
+		return nil
+	}
+	changed = meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type: ConditionNativeEgressReady, Status: metav1.ConditionFalse, Reason: "NativeEgressWithdrawn",
 		Message: "the exact native egress target is withdrawn", ObservedGeneration: run.Generation,
 	})
+	changed = meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type: ConditionExternalExecutionReady, Status: metav1.ConditionFalse, Reason: "NativeEgressWithdrawn",
+		Message: "external execution is waiting for native mediated egress withdrawal", ObservedGeneration: run.Generation,
+	}) || changed
 	if changed {
 		if err := r.Status().Update(ctx, run); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("withdraw native egress readiness: %w", err)
@@ -233,17 +267,12 @@ func (r *AgentRunReconciler) reconcileNativeEgress(
 	}
 	previous := run.Status.DeepCopy()
 	pending := func(reason string) (ctrl.Result, error) {
-		if meta.IsStatusConditionTrue(previous.Conditions, ConditionNativeEgressReady) {
-			if r.nativeEgressTargets == nil || r.nativeEgressTargets.Reconcile(ctx, nil, string(run.UID)) != nil {
-				nativeEgressCondition(run, metav1.ConditionFalse, "NativeEgressWithdrawalPending", "native mediated egress is not ready")
-				r.setRunCondition(run, ConditionExternalExecutionReady, metav1.ConditionFalse, "NativeEgressWithdrawalPending", "external execution is waiting for native mediated egress")
-				if !equalAgentRunStatus(previous, &run.Status) {
-					if err := r.Status().Update(ctx, run); err != nil {
-						return ctrl.Result{}, fmt.Errorf("update native egress status: %w", err)
-					}
-				}
-				return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
+		condition := meta.FindStatusCondition(previous.Conditions, ConditionNativeEgressReady)
+		if condition != nil && (condition.Status == metav1.ConditionTrue || condition.Reason == "NativeEgressWithdrawalPending") {
+			if err := r.withdrawNativeEgressTarget(ctx, run); err != nil {
+				return ctrl.Result{}, err
 			}
+			return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
 		}
 		nativeEgressCondition(run, metav1.ConditionFalse, reason, "native mediated egress is not ready")
 		r.setRunCondition(run, ConditionExternalExecutionReady, metav1.ConditionFalse, reason, "external execution is waiting for native mediated egress")

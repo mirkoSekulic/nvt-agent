@@ -59,6 +59,8 @@ metadata:
     app.kubernetes.io/component: native-egress
 spec:
   replicas: {{ $relay.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: nvt-native-egress-relay
@@ -67,6 +69,7 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ $relay | toJson | sha256sum | quote }}
+        nvt.dev/native-egress-rollout-revision: {{ $relay.rolloutRevision | quote }}
       labels:
         {{- include "nvt.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/name: nvt-native-egress-relay

@@ -443,6 +443,17 @@ the relay and operator Pods; the control Service is restricted to the operator
 and is never exposed through the gateway or ingress. Empty
 `data.ingressCIDRs` keeps the guest listener fenced.
 
+The relay and operator load their serving certificates, private keys, control
+bearer, and CA bundles only at process start. Set the required non-secret
+`nativeEgressRelay.rolloutRevision` to one canonical epoch and change it in the
+same Helm upgrade that rotates any referenced control Secret, data-plane TLS
+Secret, control CA, or broker CA. That epoch is stamped onto both Pod templates
+so the two Deployments replace together and fail closed during convergence.
+Both use `Recreate` in this single-process mode, preventing an old and new
+publisher or process-local relay registry from overlapping during the epoch.
+Rotating an external Secret without changing the epoch is unsupported because
+projected-file refresh cannot update already-loaded trust or credentials.
+
 This integration does not provide provider NIC confinement or redirect wiring;
 those remain required before a VM can resist bypass by a root-capable guest.
 

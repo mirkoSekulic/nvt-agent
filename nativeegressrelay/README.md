@@ -44,6 +44,15 @@ uses authenticated status after restart and republishes the complete snapshot
 before setting per-run native-egress readiness. Provider ingress routing and
 infrastructure confinement remain separate future gates.
 
+Relay and operator clients load control credentials, serving identities, and
+CA trust once at process start. The chart requires one shared non-secret
+`nativeEgressRelay.rolloutRevision`; administrators MUST change it with every
+control-token, control/data TLS, control CA, or broker CA rotation so both
+Deployments roll as one fail-closed credential generation. Secret projection
+alone is not a supported hot-reload mechanism. Both Deployments use `Recreate`
+while this process-local single-replica contract is enabled, so old and new
+publication/session owners never overlap.
+
 ## Configuration
 
 The command reads one strict process-owned JSON file. It does not read
@@ -123,10 +132,8 @@ go test -race -count=1 ./...
 
 The coordinated `nvt-native-egress-relay` image is a static binary in a
 distroless non-root runtime with no shell, package manager, Git, Go toolchain,
-or cloud SDK. This phase publishes the image but adds no Helm deployment,
-Service, RBAC, Secret, or operator reconciliation. The opt-in host-bundle
-capture boundary can feed this relay after a snapshot is published, but
-operator publication wiring, provider-owned guest redirect installation,
-mediated-VM readiness, provider confinement, and cloud/provider integration
-remain separate future gates; this adapter alone does not make production VM
-mediation complete.
+or cloud SDK. The opt-in chart deployment and operator exact-snapshot
+publication are implemented, including withdrawal-before-cleanup ordering.
+Provider-owned guest redirect installation, infrastructure confinement,
+cloud/provider integration, and the final provider E2E remain separate future
+gates; this integration alone does not make production VM mediation complete.

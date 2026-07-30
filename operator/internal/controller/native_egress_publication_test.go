@@ -27,6 +27,17 @@ type recordingTargetAuthority struct {
 	responseLost bool
 }
 
+type namespaceRecordingReader struct {
+	client.Reader
+	listNamespaces []string
+}
+
+func (reader *namespaceRecordingReader) List(ctx context.Context, list client.ObjectList, options ...client.ListOption) error {
+	resolved := (&client.ListOptions{}).ApplyOptions(options)
+	reader.listNamespaces = append(reader.listNamespaces, resolved.Namespace)
+	return reader.Reader.List(ctx, list, options...)
+}
+
 func (authority *recordingTargetAuthority) Status(context.Context) (nativeegress.TargetStatus, error) {
 	return authority.status, nil
 }
@@ -54,7 +65,7 @@ func TestNativeEgressCoordinatorPublishesCanonicalCompleteSnapshotAndWithdraws(t
 	secondPod, secondService := readyTargetObjects(second)
 	kubernetes := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(first, second, firstPod, firstService, secondPod, secondService).Build()
 	authority := &recordingTargetAuthority{status: nativeegress.TargetStatus{ContractVersion: nativeegress.TargetPublicationVersion, Type: nativeegress.TargetPublicationStatusResponse}, conflictOnce: true}
-	coordinator := newNativeEgressTargetCoordinator(kubernetes, authority)
+	coordinator := mustNativeEgressTargetCoordinator(t, kubernetes, authority)
 	if err := coordinator.Reconcile(ctx, nil, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +90,18 @@ func TestNativeEgressCoordinatorPublishesCanonicalCompleteSnapshotAndWithdraws(t
 	}
 }
 
+func TestNativeEgressCoordinatorAlwaysListsOnlyInstallationNamespace(t *testing.T) {
+	reader := &namespaceRecordingReader{Reader: fake.NewClientBuilder().WithScheme(testScheme(t)).Build()}
+	authority := &recordingTargetAuthority{status: nativeegress.TargetStatus{ContractVersion: nativeegress.TargetPublicationVersion, Type: nativeegress.TargetPublicationStatusResponse}}
+	coordinator := mustNativeEgressTargetCoordinator(t, reader, authority)
+	if err := coordinator.Reconcile(context.Background(), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.listNamespaces) != 1 || reader.listNamespaces[0] != "nvt" {
+		t.Fatalf("list namespaces=%q, want only nvt", reader.listNamespaces)
+	}
+}
+
 func TestNativeEgressCoordinatorRetriesExactSnapshotAfterLostAcknowledgement(t *testing.T) {
 	run := readyNativeEgressRun("lost-ack", "77777777-7777-7777-7777-777777777777", "guest-lost-ack")
 	pod, service := readyTargetObjects(run)
@@ -87,7 +110,7 @@ func TestNativeEgressCoordinatorRetriesExactSnapshotAfterLostAcknowledgement(t *
 		status:       nativeegress.TargetStatus{ContractVersion: nativeegress.TargetPublicationVersion, Type: nativeegress.TargetPublicationStatusResponse},
 		responseLost: true,
 	}
-	coordinator := newNativeEgressTargetCoordinator(kubernetes, authority)
+	coordinator := mustNativeEgressTargetCoordinator(t, kubernetes, authority)
 	if err := coordinator.Reconcile(context.Background(), nil, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +168,7 @@ func TestNativeEgressCoordinatorSerializesConcurrentCompleteSnapshots(t *testing
 		status:     nativeegress.TargetStatus{ContractVersion: nativeegress.TargetPublicationVersion, Type: nativeegress.TargetPublicationStatusResponse},
 		requestLag: time.Millisecond,
 	}
-	coordinator := newNativeEgressTargetCoordinator(fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), authority)
+	coordinator := mustNativeEgressTargetCoordinator(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), authority)
 	const reconciles = 12
 	errorsSeen := make(chan error, reconciles)
 	var group sync.WaitGroup
@@ -175,7 +198,7 @@ func TestNativeEgressCoordinatorSerializesConcurrentCompleteSnapshots(t *testing
 
 func TestNativeEgressCoordinatorRejectsMalformedCurrentWithoutAuthorityCall(t *testing.T) {
 	authority := &recordingTargetAuthority{}
-	coordinator := newNativeEgressTargetCoordinator(fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), authority)
+	coordinator := mustNativeEgressTargetCoordinator(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), authority)
 	target := nativeegress.PublishedTarget{}
 	if err := coordinator.Reconcile(context.Background(), &target, ""); err == nil {
 		t.Fatal("expected malformed current target rejection")
@@ -187,13 +210,35 @@ func TestNativeEgressCoordinatorRejectsMalformedCurrentWithoutAuthorityCall(t *t
 
 func TestNativeEgressPublicationOmittedLeavesControllerDisabled(t *testing.T) {
 	reconciler := &AgentRunReconciler{}
-	ConfigureNativeEgressTargetPublication(reconciler, nil, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	if err := ConfigureNativeEgressTargetPublication(reconciler, nil, fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), ""); err != nil {
+		t.Fatal(err)
+	}
 	if reconciler.nativeEgressTargets != nil {
 		t.Fatal("omitted publication configuration installed an authority")
 	}
 	if err := BootstrapNativeEgressTargetPublication(context.Background(), reconciler); err != nil {
 		t.Fatalf("disabled publication bootstrap failed: %v", err)
 	}
+}
+
+func TestNativeEgressPublicationEnabledRequiresInstallationNamespace(t *testing.T) {
+	reconciler := &AgentRunReconciler{}
+	reader := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	if err := ConfigureNativeEgressTargetPublication(reconciler, &publicationclient.Client{}, reader, ""); err == nil {
+		t.Fatal("enabled publication accepted an empty installation namespace")
+	}
+	if reconciler.nativeEgressTargets != nil {
+		t.Fatal("invalid enabled publication installed an authority")
+	}
+}
+
+func mustNativeEgressTargetCoordinator(t *testing.T, reader client.Reader, authority publicationclient.Interface) nativeEgressTargetPublication {
+	t.Helper()
+	coordinator, err := newNativeEgressTargetCoordinator(reader, authority, "nvt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coordinator
 }
 
 func TestNativeEgressCoordinatorFailsClosedOnAuthorityFailure(t *testing.T) {
@@ -215,6 +260,29 @@ func (failingTargetAuthority) Publish(context.Context, nativeegress.TargetSnapsh
 type recordingPublicationBoundary struct {
 	calls int
 	check func(*nativeegress.PublishedTarget, string) error
+}
+
+type failNthStatusClient struct {
+	client.Client
+	failAt  int
+	updates int
+}
+
+func (kubernetes *failNthStatusClient) Status() client.SubResourceWriter {
+	return &failNthStatusWriter{SubResourceWriter: kubernetes.Client.Status(), client: kubernetes}
+}
+
+type failNthStatusWriter struct {
+	client.SubResourceWriter
+	client *failNthStatusClient
+}
+
+func (writer *failNthStatusWriter) Update(ctx context.Context, object client.Object, options ...client.SubResourceUpdateOption) error {
+	writer.client.updates++
+	if writer.client.updates == writer.client.failAt {
+		return errors.New("injected status conflict")
+	}
+	return writer.SubResourceWriter.Update(ctx, object, options...)
 }
 
 func (boundary *recordingPublicationBoundary) Reconcile(_ context.Context, target *nativeegress.PublishedTarget, exclude string) error {
@@ -242,6 +310,10 @@ func TestNativeEgressWithdrawalIsAcknowledgedBeforeBindingClear(t *testing.T) {
 		if current.Status.NativeGuestBinding == nil {
 			t.Fatal("binding cleared before relay acknowledgement")
 		}
+		condition := meta.FindStatusCondition(current.Status.Conditions, ConditionNativeEgressReady)
+		if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "NativeEgressWithdrawalPending" {
+			t.Fatalf("withdrawal intent was not durable before relay mutation: %#v", condition)
+		}
 		return nil
 	}
 	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, nativeEgressTargets: boundary}
@@ -259,6 +331,90 @@ func TestNativeEgressWithdrawalIsAcknowledgedBeforeBindingClear(t *testing.T) {
 	}
 	if updated.Status.NativeGuestBinding != nil {
 		t.Fatal("binding remained after acknowledged withdrawal")
+	}
+}
+
+func TestNativeEgressWithdrawalCrashCannotResurrectTargetOnBootstrap(t *testing.T) {
+	ctx := context.Background()
+	run := readyNativeEgressRun("crash-withdraw", "88888888-8888-8888-8888-888888888888", "guest-crash-withdraw")
+	pod, service := readyTargetObjects(run)
+	scheme := testScheme(t)
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run, pod, service).Build()
+	kubernetes := &failNthStatusClient{Client: base, failAt: 2}
+	binding, err := exactNativeEgressBinding(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialTargets, initialDigest, err := nativeegress.CanonicalTargetSnapshot([]nativeegress.PublishedTarget{nativeEgressPublishedTarget(run, binding)})
+	if err != nil || len(initialTargets) != 1 {
+		t.Fatalf("initial target: %#v, %v", initialTargets, err)
+	}
+	authority := &recordingTargetAuthority{status: nativeegress.TargetStatus{
+		ContractVersion: nativeegress.TargetPublicationVersion, Type: nativeegress.TargetPublicationStatusResponse,
+		Published: true, Generation: 1, Digest: initialDigest, TargetCount: 1,
+	}}
+	coordinator := mustNativeEgressTargetCoordinator(t, kubernetes, authority)
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, nativeEgressTargets: coordinator}
+	current := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.withdrawNativeEgressTarget(ctx, current); err == nil {
+		t.Fatal("expected injected failure after relay acknowledgement")
+	}
+	stored := &nvtv1alpha1.AgentRun{}
+	if err := base.Get(ctx, client.ObjectKeyFromObject(run), stored); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(stored.Status.Conditions, ConditionNativeEgressReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "NativeEgressWithdrawalPending" {
+		t.Fatalf("durable withdrawal intent was lost: %#v", condition)
+	}
+	if len(authority.snapshots) != 1 || len(authority.snapshots[0].Targets) != 0 {
+		t.Fatalf("relay withdrawal was not acknowledged: %#v", authority.snapshots)
+	}
+	restarted := mustNativeEgressTargetCoordinator(t, base, authority)
+	if err := restarted.Reconcile(ctx, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if last := authority.snapshots[len(authority.snapshots)-1]; len(last.Targets) != 0 {
+		t.Fatalf("bootstrap resurrected withdrawn target: %#v", last)
+	}
+}
+
+func TestNativeEgressTerminalEntryPersistsWithdrawalBeforeRelay(t *testing.T) {
+	ctx := context.Background()
+	run := readyNativeEgressRun("terminal", "99999999-9999-9999-9999-999999999999", "guest-terminal")
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	boundary := &recordingPublicationBoundary{check: func(target *nativeegress.PublishedTarget, exclude string) error {
+		current := &nvtv1alpha1.AgentRun{}
+		if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+			t.Fatal(err)
+		}
+		condition := meta.FindStatusCondition(current.Status.Conditions, ConditionNativeEgressReady)
+		if target != nil || exclude != string(run.UID) || condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "NativeEgressWithdrawalPending" {
+			t.Fatalf("terminal withdrawal ordering is invalid: target=%#v exclude=%q condition=%#v", target, exclude, condition)
+		}
+		return nil
+	}}
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, nativeEgressTargets: boundary}
+	current := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.recordExternalExecutionStatus(ctx, current, executiondriver.Status{Phase: executiondriver.PhaseSucceeded, ObservedGeneration: 1}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if boundary.calls != 1 {
+		t.Fatalf("terminal withdrawal calls=%d", boundary.calls)
+	}
+	stored := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.NativeGuestBinding != nil || stored.Status.Phase != nvtv1alpha1.AgentRunPhaseCompleted {
+		t.Fatalf("terminal status did not complete after acknowledged withdrawal: %#v", stored.Status)
 	}
 }
 
@@ -297,6 +453,14 @@ func TestNativeEgressConfinementLossWithdrawsPublishedBinding(t *testing.T) {
 		if target != nil || exclude != string(run.UID) {
 			t.Fatal("confinement loss did not withdraw the exact target")
 		}
+		current := &nvtv1alpha1.AgentRun{}
+		if err := kubernetes.Get(context.Background(), client.ObjectKeyFromObject(run), current); err != nil {
+			t.Fatal(err)
+		}
+		condition := meta.FindStatusCondition(current.Status.Conditions, ConditionNativeEgressReady)
+		if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "NativeEgressWithdrawalPending" {
+			t.Fatalf("confinement withdrawal was not durable before relay mutation: %#v", condition)
+		}
 		return nil
 	}}
 	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, nativeEgressTargets: boundary}
@@ -319,6 +483,54 @@ func TestNativeEgressConfinementLossWithdrawsPublishedBinding(t *testing.T) {
 	}
 	if meta.IsStatusConditionTrue(updated.Status.Conditions, ConditionNativeEgressReady) {
 		t.Fatal("native egress remained ready after confinement loss")
+	}
+}
+
+func TestNativeEgressPendingWithdrawalRetriesRelayUntilAcknowledged(t *testing.T) {
+	ctx := context.Background()
+	run := readyNativeEgressRun("retry-withdraw", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "guest-retry-withdraw")
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	boundary := &recordingPublicationBoundary{}
+	boundary.check = func(*nativeegress.PublishedTarget, string) error {
+		if boundary.calls == 1 {
+			return errors.New("relay unavailable")
+		}
+		return nil
+	}
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, nativeEgressTargets: boundary}
+	status := executiondriver.Status{
+		Phase: executiondriver.PhaseRunning, Ready: false, ObservedGeneration: 1,
+		EgressConfinement: &executiondriver.EgressConfinementStatus{Boundary: executiondriver.EgressConfinementBoundaryInfrastructure, Ready: false},
+	}
+	current := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.reconcileNativeEgress(ctx, current, status); err == nil {
+		t.Fatal("expected first withdrawal attempt to fail")
+	}
+	pending := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), pending); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(pending.Status.Conditions, ConditionNativeEgressReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "NativeEgressWithdrawalPending" {
+		t.Fatalf("failed withdrawal did not stay durably pending: %#v", condition)
+	}
+	if _, err := reconciler.reconcileNativeEgress(ctx, pending, status); err != nil {
+		t.Fatal(err)
+	}
+	if boundary.calls != 2 {
+		t.Fatalf("withdrawal calls=%d, want retry", boundary.calls)
+	}
+	withdrawn := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), withdrawn); err != nil {
+		t.Fatal(err)
+	}
+	condition = meta.FindStatusCondition(withdrawn.Status.Conditions, ConditionNativeEgressReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "NativeEgressWithdrawn" {
+		t.Fatalf("retried withdrawal was not acknowledged: %#v", condition)
 	}
 }
 

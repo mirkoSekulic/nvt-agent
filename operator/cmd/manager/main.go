@@ -97,7 +97,10 @@ func main() {
 		GuestEnrollment:  guestEnrollment,
 	}
 	if nativeEgressPublication != nil {
-		controller.ConfigureNativeEgressTargetPublication(reconciler, nativeEgressPublication, mgr.GetAPIReader())
+		if err = controller.ConfigureNativeEgressTargetPublication(reconciler, nativeEgressPublication, mgr.GetAPIReader(), os.Getenv("POD_NAMESPACE")); err != nil {
+			ctrl.Log.Error(err, "invalid native egress publication namespace")
+			os.Exit(1)
+		}
 		bootstrapContext, cancelBootstrap := context.WithTimeout(context.Background(), 2*nativeegress.TargetPublicationTimeout)
 		if err = controller.BootstrapNativeEgressTargetPublication(bootstrapContext, reconciler); err != nil {
 			cancelBootstrap()

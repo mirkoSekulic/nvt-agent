@@ -31,6 +31,10 @@ metadata:
     {{- include "nvt.operatorLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.operator.replicas }}
+  {{- if .Values.nativeEgressRelay.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "nvt.operatorSelectorLabels" . | nindent 6 }}
@@ -43,6 +47,7 @@ spec:
         {{- end }}
         {{- if .Values.nativeEgressRelay.enabled }}
         checksum/native-egress-publication: {{ .Values.nativeEgressRelay | toJson | sha256sum | quote }}
+        nvt.dev/native-egress-rollout-revision: {{ .Values.nativeEgressRelay.rolloutRevision | quote }}
         {{- end }}
       {{- end }}
       labels:

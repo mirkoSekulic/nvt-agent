@@ -121,6 +121,7 @@ helm template nvt "${CHART}" -n custom-ns \
   > "${EXECUTION_DRIVER_ENROLLMENT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set nativeEgressRelay.enabled=true \
+  --set-string nativeEgressRelay.rolloutRevision=credentials-1 \
   --set egress.networkPolicyCapable=true \
   --set broker.persistence.enabled=true \
   --set broker.guestEnrollment.enabled=true \
@@ -138,11 +139,16 @@ helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execut
   --set-string nativeEgressRelay.brokerCA.existingSecret=nvt-broker-tls \
   --set-string nativeEgressRelay.data.ingressCIDRs[0]=10.40.0.0/16 \
   > "${NATIVE_EGRESS_RELAY_RENDER}"
-if helm template nvt "${CHART}" -n custom-ns --set nativeEgressRelay.enabled=true >/dev/null 2>"${WORKDIR}/native-relay-missing.txt"; then
+if helm template nvt "${CHART}" -n custom-ns --set nativeEgressRelay.enabled=true --set-string nativeEgressRelay.rolloutRevision=test-1 >/dev/null 2>"${WORKDIR}/native-relay-missing.txt"; then
   echo "expected native relay without trusted dependencies to fail" >&2
   exit 1
 fi
 grep -q 'nativeEgressRelay.enabled requires executionDrivers.guestEnrollment.enabled=true' "${WORKDIR}/native-relay-missing.txt"
+if helm template nvt "${CHART}" -n custom-ns --set nativeEgressRelay.enabled=true --set-string nativeEgressRelay.rolloutRevision=INVALID >/dev/null 2>"${WORKDIR}/native-relay-rollout.txt"; then
+  echo "expected invalid native relay rollout revision to fail" >&2
+  exit 1
+fi
+grep -q 'nativeEgressRelay.rolloutRevision must be a non-empty canonical rollout epoch' "${WORKDIR}/native-relay-rollout.txt"
 if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set nativeEgressRelay.enabled=true --set nativeEgressRelay.replicas=2 >/dev/null 2>"${WORKDIR}/native-relay-replicas.txt"; then
   echo "expected multi-replica native relay to fail" >&2
@@ -688,6 +694,8 @@ by = {(doc.get("kind"), doc.get("metadata", {}).get("name")): doc for doc in doc
 deployment = by[("Deployment", "nvt-native-egress-relay")]
 pod = deployment["spec"]["template"]["spec"]
 assert deployment["spec"]["replicas"] == 1
+assert deployment["spec"]["strategy"]["type"] == "Recreate"
+assert deployment["spec"]["template"]["metadata"]["annotations"]["nvt.dev/native-egress-rollout-revision"] == "credentials-1"
 assert pod["securityContext"]["runAsUser"] == 65532
 assert pod["containers"][0]["image"].endswith(":" + version)
 assert pod["containers"][0]["securityContext"]["capabilities"]["drop"] == ["ALL"]
@@ -695,8 +703,18 @@ assert pod["initContainers"][0]["securityContext"]["runAsUser"] == 0
 assert pod["initContainers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["CHOWN"]}
 assert pod["volumes"][1]["emptyDir"]["medium"] == "Memory"
 operator = by[("Deployment", "nvt-operator")]
-env = {item["name"]: item.get("value") for item in operator["spec"]["template"]["spec"]["containers"][0]["env"]}
+assert operator["spec"]["strategy"]["type"] == "Recreate"
+assert operator["spec"]["template"]["metadata"]["annotations"]["nvt.dev/native-egress-rollout-revision"] == "credentials-1"
+operator_env = operator["spec"]["template"]["spec"]["containers"][0]["env"]
+env = {item["name"]: item.get("value") for item in operator_env}
 assert env["NVT_NATIVE_EGRESS_PUBLICATION_CONFIG_FILE"] == "/var/run/nvt-native-egress-publication/config.json"
+pod_namespace = next(item for item in operator_env if item["name"] == "POD_NAMESPACE")
+assert pod_namespace["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.namespace"
+role = by[("Role", "nvt-operator")]
+assert any("agentruns" in rule.get("resources", []) and "list" in rule.get("verbs", []) for rule in role["rules"])
+for document in docs:
+    if document.get("kind") == "ClusterRole":
+        assert all("agentruns" not in rule.get("resources", []) for rule in document.get("rules", []))
 data = by[("Service", "nvt-native-egress-relay")]
 control = by[("Service", "nvt-native-egress-relay-control")]
 assert [p["name"] for p in data["spec"]["ports"]] == ["data"]
@@ -731,6 +749,8 @@ accounts = resources("ServiceAccount")
 configmaps = resources("ConfigMap")
 default_operator = next(item for item in default_documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-operator")
 assert "securityContext" not in default_operator["spec"]["template"]["spec"]
+assert "strategy" not in default_operator["spec"]
+assert "nvt.dev/native-egress-rollout-revision" not in default_operator["spec"]["template"].get("metadata", {}).get("annotations", {})
 expected = {"fake-east", "fake-west"}
 driver_names = {f"nvt-execution-driver-{name}" for name in expected}
 assert driver_names <= deployments.keys()

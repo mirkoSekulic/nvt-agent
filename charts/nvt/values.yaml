@@ -119,6 +119,11 @@ operator:
 # key material comes from existing administrator-owned Secrets.
 nativeEgressRelay:
   enabled: false
+  # Non-secret administrator-controlled rollout epoch for every externally
+  # managed relay TLS/control credential and CA. Increment atomically whenever
+  # any referenced Secret material rotates so relay and operator restart
+  # together instead of loading incompatible generations.
+  rolloutRevision: ""
   image:
     repository: ghcr.io/mirkosekulic/nvt-native-egress-relay
     tag: ""

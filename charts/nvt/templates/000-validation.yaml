@@ -13,6 +13,7 @@
 {{- if $relay.enabled -}}
 {{- if ne (int $relay.replicas) 1 -}}{{ fail "nativeEgressRelay.replicas must be exactly 1 because publication and session registries are process-local" }}{{- end -}}
 {{- if ne (int .Values.operator.replicas) 1 -}}{{ fail "nativeEgressRelay.enabled requires operator.replicas=1 for serialized complete-snapshot publication" }}{{- end -}}
+{{- if not (regexMatch `^[a-z0-9][a-z0-9._-]{0,62}$` $relay.rolloutRevision) -}}{{ fail "nativeEgressRelay.rolloutRevision must be a non-empty canonical rollout epoch" }}{{- end -}}
 {{- if not .Values.executionDrivers.guestEnrollment.enabled -}}{{ fail "nativeEgressRelay.enabled requires executionDrivers.guestEnrollment.enabled=true" }}{{- end -}}
 {{- if not .Values.egress.networkPolicyCapable -}}{{ fail "nativeEgressRelay.enabled requires egress.networkPolicyCapable=true" }}{{- end -}}
 {{- if or (not .Values.broker.enabled) (not .Values.broker.tls.enabled) -}}{{ fail "nativeEgressRelay.enabled requires the TLS broker" }}{{- end -}}

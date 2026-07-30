@@ -268,6 +268,12 @@ it in constant time. It is never accepted in JSON, flags, argv, environment,
 logs, diagnostics, or status. The production operator publisher uses one
 explicit HTTPS origin, explicit CA roots, exact DNS server-name verification,
 TLS 1.2 or newer, no redirects, and no ambient proxy or credential helper.
+Relay and operator processes load the purpose bearer, serving identities, and
+CA roots only at startup. A deployment MUST coordinate their rotation as one
+fail-closed generation. The Helm integration requires a bounded non-secret
+rollout revision on both Pod templates; it MUST change whenever the control
+Secret, control/data TLS material, control CA, or broker CA changes. Projected
+Secret refresh without that coordinated restart is not credential reload.
 
 A snapshot request contains `contract_version`, `type=replace_snapshot`, a
 strictly positive and monotonically increasing 64-bit `generation`, a
