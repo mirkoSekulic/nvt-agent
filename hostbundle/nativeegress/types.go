@@ -1,12 +1,12 @@
 // Package nativeegress owns the trusted native guest's purpose-separated
-// mediated-egress session establishment. It never reads or persists the root
-// runtime identity or an egress credential.
+// mediated-egress session establishment. It never reads the root runtime
+// identity and never persists its short-lived egress credential. Agent-facing
+// capture/parsing lives in the separate nativecapture process.
 package nativeegress
 
 import (
 	"errors"
 	"net"
-	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,15 +14,12 @@ import (
 	"strings"
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/contract"
-	protocol "github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
 
 const (
 	ConfigurationVersion  = 1
 	MaxConfigurationBytes = 64 << 10
-	ReadinessFileName     = "egress-ready"
-	CaptureInspectBytes   = 16 << 10
-	CaptureMaxConnections = protocol.MaxActiveFlows
+	FlowSocketName        = "flow.sock"
 
 	ReasonIdentityUnavailable Reason = "identity-unavailable"
 	ReasonRelayUnavailable    Reason = "relay-unavailable"
@@ -34,21 +31,12 @@ const (
 )
 
 type Configuration struct {
-	Version            int                   `json:"version"`
-	RuntimeDirectory   string                `json:"runtime_directory"`
-	IdentitySocketPath string                `json:"identity_socket_path"`
-	RelayEndpoint      string                `json:"relay_endpoint"`
-	CAPEMPath          string                `json:"ca_pem_path"`
-	Capture            *CaptureConfiguration `json:"capture,omitempty"`
-}
-
-// CaptureConfiguration is non-secret provider-owned transport plumbing. The
-// listener is a literal guest loopback address; destination authority comes
-// only from the kernel original-destination record and bounded preface
-// inspection, never from this configuration.
-type CaptureConfiguration struct {
-	ListenAddress  string `json:"listen_address"`
-	CapabilityHint string `json:"capability_hint,omitempty"`
+	Version            int    `json:"version"`
+	RuntimeDirectory   string `json:"runtime_directory"`
+	IdentitySocketPath string `json:"identity_socket_path"`
+	RelayEndpoint      string `json:"relay_endpoint"`
+	CAPEMPath          string `json:"ca_pem_path"`
+	FlowSocketPath     string `json:"flow_socket_path,omitempty"`
 }
 
 type Reason string
@@ -97,33 +85,9 @@ func validateConfiguration(value Configuration) error {
 		!validFile(value.IdentitySocketPath) || !validFile(value.CAPEMPath) ||
 		filepath.Dir(value.IdentitySocketPath) == value.RuntimeDirectory ||
 		value.IdentitySocketPath == value.CAPEMPath || validateRelayEndpoint(value.RelayEndpoint) != nil ||
-		validateCaptureConfiguration(value.Capture) != nil {
+		(value.FlowSocketPath != "" && (!validFile(value.FlowSocketPath) || filepath.Dir(value.FlowSocketPath) != value.RuntimeDirectory ||
+			value.FlowSocketPath == value.IdentitySocketPath || value.FlowSocketPath == value.CAPEMPath)) {
 		return errors.New("native egress configuration is invalid")
-	}
-	return nil
-}
-
-func validateCaptureConfiguration(value *CaptureConfiguration) error {
-	if value == nil {
-		return nil
-	}
-	host, portText, err := net.SplitHostPort(value.ListenAddress)
-	if err != nil {
-		return errors.New("native egress capture configuration is invalid")
-	}
-	address, err := netip.ParseAddr(host)
-	port, portErr := strconv.Atoi(portText)
-	if err != nil || address.Zone() != "" || !address.IsLoopback() || address.String() != host || portErr != nil ||
-		port < 1024 || port > 65535 || portText != strconv.Itoa(port) {
-		return errors.New("native egress capture configuration is invalid")
-	}
-	if protocol.ValidateDestination(protocol.Destination{
-		Network:        protocol.NetworkTCP,
-		Host:           "capture.invalid",
-		Port:           443,
-		CapabilityHint: value.CapabilityHint,
-	}) != nil {
-		return errors.New("native egress capture configuration is invalid")
 	}
 	return nil
 }

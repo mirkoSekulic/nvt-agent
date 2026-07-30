@@ -26,6 +26,7 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/bundle"
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/contract"
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/guestidentity"
+	"github.com/mirkoSekulic/nvt-agent/hostbundle/nativeegressipc"
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/oci"
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment"
 )
@@ -52,10 +53,11 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	if err := os.MkdirAll(binaries, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	buildBinary(t, moduleRoot, "./cmd/nvt-guest-supervisor", filepath.Join(binaries, "nvt-guest-supervisor"))
+	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-supervisor", filepath.Join(binaries, "nvt-guest-supervisor"), "hostbundlesupervisortest")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-identityd", filepath.Join(binaries, "nvt-guest-identityd"), "hostbundleidentitytest")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-sessiond", filepath.Join(binaries, "nvt-guest-sessiond"), "hostbundlesessiontest")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-guest-egressd", filepath.Join(binaries, "nvt-guest-egressd"), "hostbundleegresstest")
+	buildBinary(t, moduleRoot, "./cmd/nvt-guest-captured", filepath.Join(binaries, "nvt-guest-captured"))
 	buildBinary(t, moduleRoot, "./cmd/nvt-host-bootstrap", filepath.Join(binaries, "nvt-host-bootstrap"))
 	testBootstrap := filepath.Join(binaries, "nvt-host-bootstrap-test")
 	buildBinaryWithTags(t, moduleRoot, "./cmd/nvt-host-bootstrap", testBootstrap, "hostbundletest")
@@ -76,6 +78,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		{Path: "bin/nvt-guest-identityd", Source: filepath.Join(binaries, "nvt-guest-identityd"), Mode: 0o755},
 		{Path: "bin/nvt-guest-sessiond", Source: filepath.Join(binaries, "nvt-guest-sessiond"), Mode: 0o755},
 		{Path: "bin/nvt-guest-egressd", Source: filepath.Join(binaries, "nvt-guest-egressd"), Mode: 0o755},
+		{Path: "bin/nvt-guest-captured", Source: filepath.Join(binaries, "nvt-guest-captured"), Mode: 0o755},
 		{Path: "bin/nvt-host-bootstrap", Source: filepath.Join(binaries, "nvt-host-bootstrap"), Mode: 0o755},
 		{Path: "bin/nvt-guest-session-fixture", Source: filepath.Join(binaries, "nvt-guest-session-fixture"), Mode: 0o755},
 		{Path: "bin/agentd", Source: filepath.Join(repositoryRoot, "runtime", "agentd", "agentd.py"), Mode: 0o755},
@@ -84,11 +87,13 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		{Path: "share/systemd/nvt-guest-identity.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-identity.service"), Mode: 0o644},
 		{Path: "share/systemd/nvt-guest-session.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-session.service"), Mode: 0o644},
 		{Path: "share/systemd/nvt-guest-egress.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-egress.service"), Mode: 0o644},
+		{Path: "share/systemd/nvt-guest-captured.service", Source: filepath.Join(moduleRoot, "files", "nvt-guest-captured.service"), Mode: 0o644},
 		{Path: "share/examples/guest.json", Source: filepath.Join(moduleRoot, "files", "guest.json"), Mode: 0o644},
 		{Path: "share/examples/identity.json", Source: filepath.Join(moduleRoot, "files", "identity.json"), Mode: 0o644},
 		{Path: "share/examples/session.json", Source: filepath.Join(moduleRoot, "files", "session.json"), Mode: 0o644},
 		{Path: "share/examples/session-workspace.json", Source: filepath.Join(moduleRoot, "files", "session-workspace.json"), Mode: 0o644},
 		{Path: "share/examples/native-egress.json", Source: filepath.Join(moduleRoot, "files", "native-egress.json"), Mode: 0o644},
+		{Path: "share/examples/native-capture.json", Source: filepath.Join(moduleRoot, "files", "native-capture.json"), Mode: 0o644},
 	}
 	if _, err := bundle.BuildArchive(archive, manifest, inputs); err != nil {
 		t.Fatal(err)
@@ -163,9 +168,12 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.Chmod(egressRuntimeDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
 	socket := filepath.Join(runtimeDir, "agentd.sock")
 	sessionReadiness := filepath.Join(sessionRuntimeDir, "session-ready")
-	egressReadiness := filepath.Join(egressRuntimeDir, "egress-ready")
+	egressReadiness := filepath.Join(egressRuntimeDir, "ready.sock")
 	if err := os.WriteFile(sessionReadiness, []byte("ready\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +182,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	config := map[string]any{
 		"version": 1, "python_path": python, "tmux_path": tmux,
 		"state_dir": state, "socket_path": socket, "workspace": workspace,
-		"session_name": session, "session_readiness_path": sessionReadiness, "egress_readiness_path": egressReadiness, "session_startup_grace_seconds": 0,
+		"session_name": session, "session_readiness_path": sessionReadiness, "egress_readiness_socket_path": egressReadiness, "session_startup_grace_seconds": 0,
 		"session_command": []string{"@release/bin/nvt-guest-session-fixture", "--output", capture},
 	}
 	configBytes, _ := json.Marshal(config)
@@ -216,9 +224,12 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		}
 	}
 
-	// Native egress capture readiness is an optional pre-session gate. Agentd
-	// may start, but the untrusted tmux session and guest readiness remain absent
-	// until the root-owned marker appears.
+	// A stale file is never authority. Agentd may start, but the untrusted tmux
+	// session and guest readiness remain absent until a current root-owned live
+	// capture lease exists.
+	if err := os.WriteFile(egressReadiness, []byte("ready\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	command, done := launch()
 	socketDeadline := time.Now().Add(10 * time.Second)
 	for {
@@ -244,9 +255,10 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(state, "guest-ready")); !os.IsNotExist(err) {
 		t.Fatal("guest readiness was published before native egress capture readiness")
 	}
-	if err := os.WriteFile(egressReadiness, []byte("ready\n"), 0o640); err != nil {
+	if err := os.Remove(egressReadiness); err != nil {
 		t.Fatal(err)
 	}
+	egressFixture := startEgressReadinessFixture(t, egressReadiness)
 	waitForFile(t, filepath.Join(state, "guest-ready"), 15*time.Second)
 	if info, err := os.Stat(socket); err != nil || info.Mode().Perm() != 0o660 {
 		t.Fatalf("native agentd socket permission contract = %v, %v", info, err)
@@ -257,9 +269,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "restart-native-prompt")
 	stop(command, done)
 	command, done = start()
-	if err := os.Remove(egressReadiness); err != nil {
-		t.Fatal(err)
-	}
+	egressFixture.stop()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -270,9 +280,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		t.Fatal("supervisor did not stop after native egress withdrawal")
 	}
 	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
-	if err := os.WriteFile(egressReadiness, []byte("ready\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
+	egressFixture = startEgressReadinessFixture(t, egressReadiness)
 	command, done = start()
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "session-exit-prompt")
 	kill := exec.Command(tmux, "kill-session", "-t", session)
@@ -291,7 +299,8 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
 	delete(config, "session_readiness_path")
-	delete(config, "egress_readiness_path")
+	egressFixture.stop()
+	delete(config, "egress_readiness_socket_path")
 	legacyConfigBytes, _ := json.Marshal(config)
 	if err := os.WriteFile(configPath, append(legacyConfigBytes, '\n'), 0o600); err != nil {
 		t.Fatal(err)
@@ -314,15 +323,19 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	identityService, identityServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-identity.service"))
 	sessionService, sessionServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-session.service"))
 	egressService, egressServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-egress.service"))
+	captureService, captureServiceErr := os.ReadFile(filepath.Join(current, "share", "systemd", "nvt-guest-captured.service"))
 	if err != nil || !bytes.Contains(service, []byte("nvt-guest-supervisor")) || !bytes.Contains(service, []byte("Requires=nvt-guest-identity.service")) || !bytes.Contains(service, []byte("RuntimeDirectoryMode=0750")) || identityServiceErr != nil ||
 		!bytes.Contains(identityService, []byte("User=root")) || !bytes.Contains(identityService, []byte("Type=notify")) ||
 		!bytes.Contains(identityService, []byte("TimeoutStartSec=0")) || !bytes.Contains(identityService, []byte("nvt-guest-identityd")) ||
 		sessionServiceErr != nil || !bytes.Contains(sessionService, []byte("User=root")) || !bytes.Contains(sessionService, []byte("Group=nvt-agent")) ||
 		!bytes.Contains(sessionService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(sessionService, []byte("CapabilityBoundingSet=\n")) || !bytes.Contains(sessionService, []byte("nvt-guest-sessiond")) ||
 		!bytes.Contains(sessionService, []byte("Requires=nvt-guest-identity.service nvt-agent-guest.service")) ||
-		egressServiceErr != nil || !bytes.Contains(egressService, []byte("User=root")) || !bytes.Contains(egressService, []byte("Group=nvt-agent")) ||
-		!bytes.Contains(egressService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(egressService, []byte("CapabilityBoundingSet=\n")) ||
-		!bytes.Contains(egressService, []byte("nvt-guest-egressd")) || !bytes.Contains(egressService, []byte("Requires=nvt-guest-identity.service")) {
+		egressServiceErr != nil || !bytes.Contains(egressService, []byte("User=root")) || !bytes.Contains(egressService, []byte("Group=root")) ||
+		!bytes.Contains(egressService, []byte("RuntimeDirectoryMode=0700")) || !bytes.Contains(egressService, []byte("CapabilityBoundingSet=\n")) ||
+		!bytes.Contains(egressService, []byte("nvt-guest-egressd")) || !bytes.Contains(egressService, []byte("Requires=nvt-guest-identity.service")) ||
+		captureServiceErr != nil || !bytes.Contains(captureService, []byte("User=root")) || !bytes.Contains(captureService, []byte("Group=nvt-agent")) ||
+		!bytes.Contains(captureService, []byte("RuntimeDirectoryMode=0750")) || !bytes.Contains(captureService, []byte("CapabilityBoundingSet=\n")) ||
+		!bytes.Contains(captureService, []byte("Requires=nvt-guest-egress.service")) {
 		t.Fatal("installed systemd boundaries are missing")
 	}
 	workspaceExample, workspaceExampleErr := os.ReadFile(filepath.Join(current, "share", "examples", "session-workspace.json"))
@@ -332,10 +345,16 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	egressExample, egressExampleErr := os.ReadFile(filepath.Join(current, "share", "examples", "native-egress.json"))
 	if egressExampleErr != nil || !bytes.Contains(egressExample, []byte(`"relay_endpoint": "tls://native-egress.example.invalid:7445"`)) ||
-		!bytes.Contains(egressExample, []byte(`"listen_address": "127.0.0.1:15001"`)) ||
+		!bytes.Contains(egressExample, []byte(`"flow_socket_path": "/run/nvt-agent-egress/flow.sock"`)) ||
 		bytes.Contains(egressExample, []byte("nvt_eg1_")) || bytes.Contains(egressExample, []byte("runtime_identity")) ||
 		bytes.Contains(egressExample, []byte("binding")) || bytes.Contains(egressExample, []byte("audience")) {
 		t.Fatal("installed bundle is missing the non-secret optional native-egress example")
+	}
+	captureExample, captureExampleErr := os.ReadFile(filepath.Join(current, "share", "examples", "native-capture.json"))
+	if captureExampleErr != nil || !bytes.Contains(captureExample, []byte(`"transparent_listen_address": "127.0.0.1:15001"`)) ||
+		!bytes.Contains(captureExample, []byte(`"explicit_listen_address": "127.0.0.1:15002"`)) ||
+		bytes.Contains(captureExample, []byte("nvt_eg1_")) || bytes.Contains(captureExample, []byte("binding")) {
+		t.Fatal("installed bundle is missing the credential-less native capture example")
 	}
 	if bytes.Contains(egressService, []byte("Environment=")) || bytes.Contains(egressService, []byte("nvt_eg1_")) ||
 		bytes.Contains(egressService, []byte("runtime_identity")) {
@@ -364,6 +383,76 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 			t.Fatal("session credential canary entered the bundle or normal logs")
 		}
 	}
+}
+
+type egressReadinessFixture struct {
+	listener    *net.UnixListener
+	mu          sync.Mutex
+	connections map[net.Conn]struct{}
+	done        chan struct{}
+}
+
+func startEgressReadinessFixture(t *testing.T, path string) *egressReadinessFixture {
+	t.Helper()
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := os.Chmod(path, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &egressReadinessFixture{listener: listener, connections: make(map[net.Conn]struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(fixture.done)
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			fixture.mu.Lock()
+			fixture.connections[connection] = struct{}{}
+			fixture.mu.Unlock()
+			go func() {
+				defer func() {
+					fixture.mu.Lock()
+					delete(fixture.connections, connection)
+					fixture.mu.Unlock()
+					_ = connection.Close()
+				}()
+				line, readErr := bufio.NewReader(connection).ReadBytes('\n')
+				request, decodeErr := nativeegressipc.DecodeRequest(line)
+				if readErr != nil || decodeErr != nil || request.Type != nativeegressipc.Health {
+					return
+				}
+				response, _ := nativeegressipc.EncodeResponse(nativeegressipc.Response{Version: nativeegressipc.Version, Type: nativeegressipc.Ready, Epoch: 1})
+				if _, err := connection.Write(response); err != nil {
+					return
+				}
+				<-fixture.done
+			}()
+		}
+	}()
+	return fixture
+}
+
+func (fixture *egressReadinessFixture) stop() {
+	if fixture == nil || fixture.listener == nil {
+		return
+	}
+	_ = fixture.listener.Close()
+	fixture.mu.Lock()
+	connections := make([]net.Conn, 0, len(fixture.connections))
+	for connection := range fixture.connections {
+		connections = append(connections, connection)
+	}
+	fixture.mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	<-fixture.done
+	_ = os.Remove(fixture.listener.Addr().String())
+	fixture.listener = nil
 }
 
 type identityE2EBroker struct {

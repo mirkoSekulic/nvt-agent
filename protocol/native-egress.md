@@ -4,8 +4,9 @@ Status: versioned provider-neutral contract and hermetic conformance proof
 (`nvt.native-egress/v1`) with a production broker identity authority, trusted
 host-bundle guest client, standalone cluster relay, bounded yamux flow
 transport, and an optional exact-binding adapter into an existing per-run
-`egressd` CONNECT listener. The opt-in native host-bundle client now captures
-redirected guest TCP and opens only authenticated native-egress flows. Dynamic
+`egressd` CONNECT listener. The opt-in native host bundle now separates a
+credential-less capture process from the credential-bearing tunnel process;
+captured guest TCP opens only authenticated native-egress flows. Dynamic
 operator publication/readiness, provider-owned redirect installation, and
 provider network enforcement do not exist yet.
 
@@ -49,9 +50,14 @@ egress connections are guest-initiated outbound connections.
   identity and issues a purpose-separated short-lived
   `nvt.native-egress-credential/v1`. It persists only credential digests and
   non-secret lifecycle metadata.
-- **Trusted guest egress client:** retains the egress credential transiently,
-  establishes the outbound session, and turns locally captured TCP destinations
-  into bounded untrusted flow intent. It is not the bypass boundary.
+- **Trusted guest egress tunnel:** retains the egress credential transiently,
+  establishes the outbound session, and exposes a root-only local flow socket.
+  It never parses agent-controlled HTTP/TLS prefaces.
+- **Credential-less guest capture:** runs as a separate native process, recovers
+  transparent destinations or consumes a bounded explicit CONNECT, and sends
+  only canonical destination intent and raw bytes over the local flow socket.
+  The local wire cannot represent a bearer or exact binding. It is not the
+  bypass boundary.
 - **Native egress relay:** authenticates the credential and binding, keeps a
   bounded exact-binding registry, and selects the one preconfigured trusted
   target for that binding. It never resolves a target by partial scope or guest
@@ -267,7 +273,8 @@ pinning the same reviewed yamux release.
 | broker revalidation/reconnect | no later than 30 seconds |
 | target flow open | 5 seconds absolute |
 | bidirectional flow inactivity | 2 minutes |
-| guest capture connections | 64 total accepted TCP connections |
+| guest capture TCP connections | 64 total across transparent and explicit CONNECT |
+| guest capture readiness lease | exactly one live lease |
 | guest capture preface inspection | 16 KiB / 2 seconds |
 | bounded shutdown | 5 seconds |
 | credential lifetime | at most 5 minutes |
@@ -312,17 +319,21 @@ For a mediated external VM, the trusted owners converge in this order:
    bootstrap network; no provider or egress credential is carried in the
    envelope, desired fingerprint, driver status, or provider tags.
 4. The active runtime identity obtains the short-lived egress credential under
-   the fixed purpose. The trusted guest client authenticates the outbound
-   session, activates its bounded loopback capture listener, and forwards each
-   recovered TCP destination only through the current `FlowOpener`. The
-   provider still owns redirect installation; this guest-local plumbing is not
-   a confinement assertion.
+   the fixed purpose. `nvt-guest-egressd` authenticates the outbound session
+   and activates its root-only local flow socket. The separate
+   `nvt-guest-captured` process accepts transparent traffic with no capability
+   hint or a bounded explicit CONNECT carrying the existing per-flow provider
+   selector, consumes that preface, and opens only through the current socket.
+   The provider still owns redirect installation; this guest-local plumbing is
+   not a confinement assertion.
 5. The relay resolves only the exact binding to its already-ready separate
    trusted per-run egress target. A test flow/readiness exchange confirms the
    complete route.
-6. When configured, the trusted guest supervisor observes capture-plus-tunnel
-   readiness before starting the untrusted agent and withdraws guest readiness
-   on loss. The operator may report mediated VM readiness only after the
+6. When configured, the trusted guest supervisor holds a live
+   capture-plus-tunnel readiness lease before starting the untrusted agent.
+   Capture process death or tunnel withdrawal closes the lease, removes guest
+   readiness, and stops the session; no stale file can remain authoritative.
+   The operator may report mediated VM readiness only after the
    current driver generation's confinement assertion, current exact tunnel,
    and current target are all ready. Driver `ready` alone is insufficient.
 
@@ -375,17 +386,17 @@ removal synchronously stops new opens, withdraws the associated session, and
 does not migrate existing flows to another target. The relay sends `hello_ack`
 only after the authenticated session has secured both the exact target and its
 bounded active/standby reservation, then switches the connection to the
-bounded flow data plane. The host-bundle client proves that yamux is live before
-publishing its transport readiness. The host-bundle service now installs that
-current opener into a bounded Linux capture boundary before publishing the
-marker. It recovers the kernel original TCP destination, optionally refines
-the hostname from a bounded HTTP Host or TLS SNI preface, and preserves the
-preface bytes. The canonical host/IP, port, and optional process-owned
-capability hint are untrusted flow intent; no browser, payload, agent, or flow
-frame chooses a relay target. Session withdrawal removes readiness and closes
-captured flows without a direct-network fallback. An additive supervisor
-readiness path prevents the agent session from starting or remaining ready
-while configured capture transport is absent.
+bounded flow data plane. The host-bundle client proves that yamux is live and
+then exposes a strict root-only local stream socket. A separate credential-less
+Linux process recovers the kernel original TCP destination, optionally refines
+the hostname from bounded HTTP Host/TLS SNI, and preserves the preface bytes.
+Its transparent listener always carries an empty capability hint. Its explicit
+CONNECT listener accepts the same bounded per-flow provider selector as the
+Pod path, consumes CONNECT/proxy-auth framing, and forwards only raw bytes.
+The canonical host/IP, port, and optional explicit capability are untrusted
+flow intent; no flow chooses a relay target. Session withdrawal closes local
+health leases and captured flows without fallback. The supervisor retains a
+live readiness socket lease rather than trusting a reusable marker.
 
 This phase does not implement dynamic operator publication, provider-owned
 redirect rules, provider network policy, Azure/AWS/QEMU support, or operator

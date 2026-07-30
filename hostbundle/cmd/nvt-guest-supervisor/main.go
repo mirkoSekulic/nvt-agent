@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/hostbundle/contract"
+	"github.com/mirkoSekulic/nvt-agent/hostbundle/nativeegressipc"
 )
 
 const maxConfigBytes = 64 * 1024
@@ -33,7 +35,7 @@ type configuration struct {
 	Workspace                  string   `json:"workspace"`
 	SessionName                string   `json:"session_name"`
 	SessionReadinessPath       string   `json:"session_readiness_path"`
-	EgressReadinessPath        string   `json:"egress_readiness_path,omitempty"`
+	EgressReadinessSocketPath  string   `json:"egress_readiness_socket_path,omitempty"`
 	SessionStartupGraceSeconds int      `json:"session_startup_grace_seconds"`
 	SessionCommand             []string `json:"session_command"`
 }
@@ -105,10 +107,18 @@ func run(config configuration, releaseRoot string) error {
 	if err := waitForAgentd(config.SocketPath, startupDeadline, agentdDone); err != nil {
 		return err
 	}
-	if config.EgressReadinessPath != "" {
-		if err := waitForEgressReadiness(config.EgressReadinessPath, time.Now().Add(90*time.Second), agentdDone); err != nil {
+	var egressLease net.Conn
+	var egressLeaseDone <-chan struct{}
+	if config.EgressReadinessSocketPath != "" {
+		var err error
+		egressLease, err = waitForEgressReadiness(config.EgressReadinessSocketPath, time.Now().Add(90*time.Second), agentdDone)
+		if err != nil {
 			return err
 		}
+		defer egressLease.Close()
+		closed := make(chan struct{})
+		egressLeaseDone = closed
+		go func() { nativeegressipc.WaitClosed(egressLease); close(closed) }()
 	}
 	command := resolveReleaseCommand(config.SessionCommand, releaseRoot)
 	arguments := []string{"new-session", "-d", "-s", config.SessionName, "-c", config.Workspace, "--"}
@@ -166,12 +176,11 @@ func run(config configuration, releaseRoot string) error {
 			return nil
 		case <-agentdDone:
 			return errors.New("agentd exited unexpectedly")
+		case <-egressLeaseDone:
+			return errors.New("native egress capture exited unexpectedly")
 		case <-sessionMonitor.C:
 			if !sessionExists(config) {
 				return errors.New("guest session exited unexpectedly")
-			}
-			if config.EgressReadinessPath != "" && !sessionTransportReady(config.EgressReadinessPath) {
-				return errors.New("native egress capture exited unexpectedly")
 			}
 			if config.SessionReadinessPath != "" && !sessionTransportReady(config.SessionReadinessPath) {
 				return errors.New("native session transport exited unexpectedly")
@@ -220,24 +229,32 @@ func validSessionReadinessPath(config configuration) bool {
 }
 
 func validEgressReadinessPath(config configuration) bool {
-	return config.EgressReadinessPath == "" ||
-		(validAbsolutePath(config.EgressReadinessPath) && config.EgressReadinessPath != config.SocketPath &&
-			config.EgressReadinessPath != config.SessionReadinessPath)
+	return config.EgressReadinessSocketPath == "" ||
+		(validAbsolutePath(config.EgressReadinessSocketPath) && config.EgressReadinessSocketPath != config.SocketPath &&
+			config.EgressReadinessSocketPath != config.SessionReadinessPath)
 }
 
-func waitForEgressReadiness(path string, deadline time.Time, done <-chan struct{}) error {
+func waitForEgressReadiness(path string, deadline time.Time, done <-chan struct{}) (net.Conn, error) {
+	client := nativeegressipc.Client{SocketPath: path, OwnerUID: trustedReadinessOwnerUID(), Shared: true}
 	for time.Now().Before(deadline) {
 		select {
 		case <-done:
-			return errors.New("agentd exited before native egress readiness")
+			return nil, errors.New("agentd exited before native egress readiness")
 		default:
 		}
-		if sessionTransportReady(path) {
-			return nil
+		if nativeegressipc.ValidateReadinessSocket(path, trustedReadinessOwnerUID()) != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		attempt, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		connection, _, err := client.OpenHealth(attempt)
+		cancel()
+		if err == nil {
+			return connection, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return errors.New("native egress readiness timed out")
+	return nil, errors.New("native egress readiness timed out")
 }
 
 func waitForSessionReadiness(config configuration, deadline time.Time, done <-chan struct{}) error {

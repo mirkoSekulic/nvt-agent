@@ -7,10 +7,10 @@ Requires=nvt-guest-identity.service
 [Service]
 Type=simple
 User=root
-Group=nvt-agent
-UMask=0027
+Group=root
+UMask=0077
 RuntimeDirectory=nvt-agent-egress
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0700
 ExecStart=/opt/nvt/current/bin/nvt-guest-egressd --config /etc/nvt-agent/native-egress.json
 Restart=on-failure
 RestartSec=5s

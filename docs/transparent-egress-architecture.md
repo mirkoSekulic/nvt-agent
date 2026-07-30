@@ -294,10 +294,12 @@ replace guest-local capture and firewall state. The provider-neutral
 trusted execution driver/provider to enforce default-deny NIC/network policy
 outside the guest, plus an exact-binding authenticated outbound tunnel into the
 run's separate trusted egress path. Both gates are required. The contract,
-conformance proof, identity authority, guest flow client with opt-in Linux TCP
-capture, cluster relay, and an optional strict process-owned exact-binding
-adapter into per-run egressd exist. The guest capture reuses the same bounded
-Host/SNI/original-destination inspection and never falls back to direct
+conformance proof, identity authority, guest flow client, cluster relay, and an
+optional strict process-owned exact-binding adapter into per-run egressd
+exist. Guest capture is a separate credential-less process: transparent flows
+carry no provider hint, while its explicit CONNECT listener consumes the
+existing per-flow provider selector before forwarding raw bytes. It reuses
+bounded Host/SNI/original-destination inspection and never falls back to direct
 networking, but it is not a root-adversary boundary. Dynamic operator target
 publication/readiness, provider-owned redirect installation, and provider
 confinement are not wired yet, so production VM mediation remains incomplete.

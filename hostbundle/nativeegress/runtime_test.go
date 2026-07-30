@@ -3,7 +3,6 @@ package nativeegress
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -217,7 +216,7 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 		Version: ConfigurationVersion, RuntimeDirectory: runtimeDirectory,
 		IdentitySocketPath: filepath.Join(work, "identity.sock"),
 		RelayEndpoint:      "tls://relay.example:7445", CAPEMPath: filepath.Join(work, "ca.pem"),
-		Capture: &CaptureConfiguration{ListenAddress: "127.0.0.1:15001"},
+		FlowSocketPath: filepath.Join(runtimeDirectory, FlowSocketName),
 	}, issuer, connector)
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +224,7 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 	runtime.Now = func() time.Time { return now }
 	runtime.MonotonicNow = time.Now
 	captureLifecycle := newRecordingCapture()
-	runtime.Capture = captureLifecycle
+	runtime.Flow = captureLifecycle
 	var orderedMu sync.Mutex
 	ordered := []string{}
 	recordOrdered := func(value string) {
@@ -252,12 +251,9 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 	if call := waitInt(t, accepted, "same-credential reconnect"); call != 2 {
 		t.Fatalf("reconnect accepted call=%d", call)
 	}
-	waitForFile(t, filepath.Join(runtimeDirectory, ReadinessFileName))
-	if info, err := os.Stat(runtimeDirectory); err != nil || info.Mode().Perm() != 0o750 {
-		t.Fatalf("shared capture runtime directory mode=%v error=%v", info, err)
-	}
-	if info, err := os.Stat(filepath.Join(runtimeDirectory, ReadinessFileName)); err != nil || info.Mode().Perm() != 0o640 {
-		t.Fatalf("shared capture readiness mode=%v error=%v", info, err)
+	waitForReadiness(t, &readinessMu, &readiness, true)
+	if info, err := os.Stat(runtimeDirectory); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("private flow runtime directory mode=%v error=%v", info, err)
 	}
 	readinessMu.Lock()
 	baseline := len(readiness)
@@ -334,9 +330,6 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 		}
 	}
 	orderedMu.Unlock()
-	if _, err := os.Stat(filepath.Join(runtimeDirectory, ReadinessFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("egress readiness remained after shutdown: %v", err)
-	}
 	readinessMu.Lock()
 	if len(readiness) == 0 || readiness[len(readiness)-1] {
 		readinessMu.Unlock()
@@ -381,6 +374,44 @@ func TestFirstIssuanceResponseLossIsBoundedToTwoCandidates(t *testing.T) {
 	issuer.mu.Unlock()
 	if calls != guestenrollment.MaxLiveNativeEgressCredentials {
 		t.Fatalf("ambiguous issue calls=%d", calls)
+	}
+}
+
+func TestRuntimeRejectsUnsafeStaleFlowSocketBeforeAuthorityWork(t *testing.T) {
+	work := t.TempDir()
+	runtimeDirectory := filepath.Join(work, "run")
+	if err := os.Mkdir(runtimeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	flowPath := filepath.Join(runtimeDirectory, FlowSocketName)
+	if err := os.WriteFile(flowPath, []byte("stale-ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	issuer := &fakeIssuer{binding: nativeEgressBinding(), now: time.Now().UTC().Truncate(time.Second)}
+	connector := &pipeConnector{handler: func(int, net.Conn) {}}
+	runtime, err := NewRuntime(Configuration{
+		Version: ConfigurationVersion, RuntimeDirectory: runtimeDirectory, IdentitySocketPath: filepath.Join(work, "identity.sock"),
+		RelayEndpoint: "tls://relay.example:7445", CAPEMPath: filepath.Join(work, "ca.pem"), FlowSocketPath: flowPath,
+	}, issuer, connector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runtime.Run(context.Background())
+	reason, temporary, _ := FailureDetails(err)
+	if reason != ReasonCaptureUnavailable || temporary {
+		t.Fatalf("stale flow socket result=%v reason=%s", err, reason)
+	}
+	issuer.mu.Lock()
+	calls := issuer.calls
+	issuer.mu.Unlock()
+	connector.mu.Lock()
+	connects := connector.calls
+	connector.mu.Unlock()
+	if calls != 0 || connects != 0 {
+		t.Fatalf("unsafe startup reached authority=%d relay=%d", calls, connects)
+	}
+	if content, readErr := os.ReadFile(flowPath); readErr != nil || string(content) != "stale-ready\n" {
+		t.Fatal("unsafe stale marker was mutated")
 	}
 }
 
@@ -506,7 +537,7 @@ func TestRenewalResponseLossAtTwoLiveCapacityRetainsPredecessor(t *testing.T) {
 		cancel()
 		t.Fatal("predecessor session did not authenticate")
 	}
-	waitForFile(t, filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName))
+	waitForReadiness(t, &readinessMu, &readiness, true)
 	readinessMu.Lock()
 	baseline := len(readiness)
 	readinessMu.Unlock()
@@ -524,10 +555,6 @@ func TestRenewalResponseLossAtTwoLiveCapacityRetainsPredecessor(t *testing.T) {
 	if issueCalls != 3 || connectionCalls != 1 || len(authenticated) != 1 {
 		cancel()
 		t.Fatalf("two-live edge issued=%d connected=%d authenticated=%d", issueCalls, connectionCalls, len(authenticated))
-	}
-	if _, err := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); err != nil {
-		cancel()
-		t.Fatalf("usable predecessor lost readiness: %v", err)
 	}
 	readinessMu.Lock()
 	for _, value := range readiness[baseline:] {
@@ -572,9 +599,6 @@ func TestRuntimeFailsClosedOnDenialExpiryAndSecretFormatting(t *testing.T) {
 	reason, temporary, _ := FailureDetails(err)
 	if reason != ReasonRelayDenied || temporary {
 		t.Fatalf("denial result=%v reason=%s temporary=%v", err, reason, temporary)
-	}
-	if _, statErr := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("denied session retained readiness: %v", statErr)
 	}
 
 	credentialValue, _ := guestenrollment.GenerateNativeEgressCredential(9)
@@ -702,7 +726,13 @@ func TestActiveCredentialExpiryWithdrawsReadinessAndClosesRelay(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(context.Background()) }()
-	waitForFile(t, filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName))
+	deadline := time.Now().Add(3 * time.Second)
+	for !readinessPublished.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !readinessPublished.Load() {
+		t.Fatal("session readiness was not published")
+	}
 	wall.Store(now.Add(guestenrollment.MaxNativeEgressCredentialLifetime).Unix())
 	select {
 	case err := <-done:
@@ -712,9 +742,6 @@ func TestActiveCredentialExpiryWithdrawsReadinessAndClosesRelay(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("expired session remained ready")
-	}
-	if _, err := os.Stat(filepath.Join(runtime.Configuration.RuntimeDirectory, ReadinessFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expiry retained readiness: %v", err)
 	}
 	select {
 	case withdrawn := <-closedAfterWithdrawal:
@@ -770,6 +797,21 @@ func waitForIssuerCalls(t *testing.T, issuer *fakeIssuer, minimum int) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("issuer calls did not reach %d", minimum)
+}
+
+func waitForReadiness(t *testing.T, mu *sync.Mutex, values *[]bool, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		matched := len(*values) > 0 && (*values)[len(*values)-1] == want
+		mu.Unlock()
+		if matched {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("readiness did not become %t", want)
 }
 
 func waitForFile(t *testing.T, path string) {

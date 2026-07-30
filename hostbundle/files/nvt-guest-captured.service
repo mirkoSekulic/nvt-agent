@@ -1,0 +1,29 @@
+[Unit]
+Description=NVT native guest credential-less traffic capture
+After=network-online.target nvt-guest-egress.service
+Wants=network-online.target
+Requires=nvt-guest-egress.service
+
+[Service]
+Type=simple
+User=root
+Group=nvt-agent
+UMask=0027
+RuntimeDirectory=nvt-agent-capture
+RuntimeDirectoryMode=0750
+ExecStart=/opt/nvt/current/bin/nvt-guest-captured --config /etc/nvt-agent/native-capture.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+ReadOnlyPaths=/opt/nvt /etc/nvt-agent /run/nvt-agent-egress
+ReadWritePaths=/run/nvt-agent-capture
+
+# This unit is deliberately not enabled by the bundle. A trusted provider may
+# enable it only with nvt-guest-egress.service and infrastructure confinement.
+[Install]
+WantedBy=multi-user.target

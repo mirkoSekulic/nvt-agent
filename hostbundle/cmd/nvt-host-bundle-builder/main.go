@@ -23,6 +23,7 @@ func main() {
 	identityDaemon := flag.String("identity-daemon", "", "compiled guest runtime identity daemon")
 	sessionDaemon := flag.String("session-daemon", "", "compiled native guest session daemon")
 	egressDaemon := flag.String("egress-daemon", "", "compiled native guest egress daemon")
+	captureDaemon := flag.String("capture-daemon", "", "compiled native guest capture daemon")
 	bootstrap := flag.String("bootstrap", "", "compiled bootstrap for future updates")
 	sessionFixture := flag.String("session-fixture", "", "compiled bounded session fixture")
 	agentd := flag.String("agentd", "", "agentd source")
@@ -31,11 +32,13 @@ func main() {
 	identityService := flag.String("identity-service", "", "guest runtime identity systemd service unit")
 	sessionService := flag.String("session-service", "", "native guest session systemd service unit")
 	egressService := flag.String("egress-service", "", "native guest egress systemd service unit")
+	captureService := flag.String("capture-service", "", "native guest capture systemd service unit")
 	config := flag.String("config", "", "example guest supervisor config")
 	identityConfig := flag.String("identity-config", "", "example guest runtime identity config")
 	sessionConfig := flag.String("session-config", "", "example native guest session config")
 	workspaceSessionConfig := flag.String("workspace-session-config", "", "example native guest session config with workspace forwarding")
 	egressConfig := flag.String("egress-config", "", "example native guest egress config")
+	captureConfig := flag.String("capture-config", "", "example native guest capture config")
 	flag.Parse()
 	if flag.NArg() != 0 || *version == "" || *buildID == "" || *archive == "" || *layout == "" || *tag == "" || *source == "" {
 		fmt.Fprintln(os.Stderr, "nvt-host-bundle-builder: all release/output flags are required")
@@ -46,6 +49,7 @@ func main() {
 		{Path: "bin/nvt-guest-identityd", Source: *identityDaemon, Mode: 0o755},
 		{Path: "bin/nvt-guest-sessiond", Source: *sessionDaemon, Mode: 0o755},
 		{Path: "bin/nvt-guest-egressd", Source: *egressDaemon, Mode: 0o755},
+		{Path: "bin/nvt-guest-captured", Source: *captureDaemon, Mode: 0o755},
 		{Path: "bin/nvt-host-bootstrap", Source: *bootstrap, Mode: 0o755},
 		{Path: "bin/nvt-guest-session-fixture", Source: *sessionFixture, Mode: 0o755},
 		{Path: "bin/agentd", Source: *agentd, Mode: 0o755},
@@ -54,11 +58,13 @@ func main() {
 		{Path: "share/systemd/nvt-guest-identity.service", Source: *identityService, Mode: 0o644},
 		{Path: "share/systemd/nvt-guest-session.service", Source: *sessionService, Mode: 0o644},
 		{Path: "share/systemd/nvt-guest-egress.service", Source: *egressService, Mode: 0o644},
+		{Path: "share/systemd/nvt-guest-captured.service", Source: *captureService, Mode: 0o644},
 		{Path: "share/examples/guest.json", Source: *config, Mode: 0o644},
 		{Path: "share/examples/identity.json", Source: *identityConfig, Mode: 0o644},
 		{Path: "share/examples/session.json", Source: *sessionConfig, Mode: 0o644},
 		{Path: "share/examples/session-workspace.json", Source: *workspaceSessionConfig, Mode: 0o644},
 		{Path: "share/examples/native-egress.json", Source: *egressConfig, Mode: 0o644},
+		{Path: "share/examples/native-capture.json", Source: *captureConfig, Mode: 0o644},
 	}
 	if err := os.MkdirAll(filepath.Dir(*archive), 0o755); err != nil {
 		fatal("create output directory")
