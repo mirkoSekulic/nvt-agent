@@ -39,6 +39,7 @@ const (
 	modeOversizeExchange brokerMode = "oversized-exchange"
 	modeThrottleExchange brokerMode = "throttled-exchange"
 	modeRejectRotate     brokerMode = "reject-rotate"
+	modeMalformedEgress  brokerMode = "malformed-native-egress"
 )
 
 type testBroker struct {
@@ -52,6 +53,7 @@ type testBroker struct {
 	modeUsed        bool
 	rotateCount     int
 	sessionSequence uint64
+	egressSequence  uint64
 	statusCount     int
 	statusIDs       []string
 	proposals       []string
@@ -99,9 +101,46 @@ func (broker *testBroker) serve(writer http.ResponseWriter, request *http.Reques
 		broker.rotate(writer, request)
 	case guestenrollment.GuestSessionIdentityIssuePath:
 		broker.issueSession(writer, request)
+	case guestenrollment.NativeEgressIdentityIssuePath:
+		broker.issueNativeEgress(writer, request)
 	default:
 		writer.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (broker *testBroker) issueNativeEgress(writer http.ResponseWriter, request *http.Request) {
+	var value guestenrollment.NativeEgressIssueRequest
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if json.NewDecoder(request.Body).Decode(&value) != nil || value.Binding != broker.binding ||
+		guestenrollment.ValidateNativeEgressIssueRequest(value) != nil || bearer(request) != broker.current {
+		writer.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	broker.egressSequence++
+	credential, err := guestenrollment.GenerateNativeEgressCredential(broker.egressSequence)
+	if err != nil {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	issuedAt := time.Now().UTC().Truncate(time.Second)
+	expiresAt := issuedAt.Add(guestenrollment.MaxNativeEgressCredentialLifetime)
+	if expiresAt.After(broker.expiresAt) {
+		expiresAt = broker.expiresAt
+	}
+	binding := broker.binding
+	if broker.mode == modeMalformedEgress {
+		binding.GuestInstanceID = "wrong-guest-instance"
+	}
+	writeJSON(writer, guestenrollment.NativeEgressIssueResult{
+		ContractVersion: guestenrollment.NativeEgressIdentityVersion,
+		Binding:         binding,
+		Credential: guestenrollment.NativeEgressCredential{
+			Type: guestenrollment.NativeEgressCredentialType, Opaque: credential,
+			Audience: guestenrollment.NativeEgressAudience,
+			IssuedAt: guestenrollment.FormatTimestamp(issuedAt), ExpiresAt: guestenrollment.FormatTimestamp(expiresAt),
+		},
+	})
 }
 
 func (broker *testBroker) issueSession(writer http.ResponseWriter, request *http.Request) {
@@ -1050,6 +1089,49 @@ func TestRuntimeIssuesGuestSessionWithoutExposingRuntimeBearer(t *testing.T) {
 	}
 }
 
+func TestRuntimeIssuesNativeEgressWithoutExposingRuntimeBearer(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Second)
+	fixture := newRuntimeFixture(t, clock, clock.Add(time.Hour), modeNormal)
+	if err := fixture.runtime.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := fixture.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.runtime.IssueNativeEgress(context.Background())
+	if err != nil || result.Binding != fixture.broker.binding || guestenrollment.ValidateNativeEgressIssueResult(result) != nil {
+		t.Fatalf("native egress issue = %#v, %v", result, err)
+	}
+	if result.Credential.Opaque == state.RuntimeIdentity.Opaque || strings.Contains(fmtSprint(result), state.RuntimeIdentity.Opaque) {
+		t.Fatal("runtime identity escaped through native egress issuance")
+	}
+	state.PendingSuccessor = opaque(0x72)
+	if err := fixture.store.save(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.runtime.IssueNativeEgress(context.Background()); err == nil {
+		t.Fatal("native egress issuance raced an unresolved runtime rotation")
+	}
+}
+
+func TestRuntimeRejectsMalformedNativeEgressBrokerSuccess(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Second)
+	fixture := newRuntimeFixture(t, clock, clock.Add(time.Hour), modeMalformedEgress)
+	if err := fixture.runtime.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.runtime.IssueNativeEgress(context.Background())
+	result.Credential.Opaque = ""
+	if err == nil {
+		t.Fatal("wrong-binding native egress success was accepted")
+	}
+	reason, temporary, uncertain := FailureDetails(err)
+	if reason != ReasonProtocolInvalid || temporary || !uncertain {
+		t.Fatalf("malformed success classification = %s temporary=%v uncertain=%v", reason, temporary, uncertain)
+	}
+}
+
 func TestSessionCredentialIPCIsBoundedOwnerRestrictedAndRemoved(t *testing.T) {
 	clock := time.Now().UTC().Truncate(time.Second)
 	fixture := newRuntimeFixture(t, clock, clock.Add(time.Hour), modeNormal)
@@ -1095,6 +1177,34 @@ func TestSessionCredentialIPCIsBoundedOwnerRestrictedAndRemoved(t *testing.T) {
 	credential := response.Result.Credential.Opaque
 	if credential == "" || strings.Contains(fmtSprint(response), credential) {
 		t.Fatal("IPC response formatting disclosed or omitted credential")
+	}
+	egressConnection, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	egressRequest, _ := guestenrollment.EncodeNativeEgressCredentialRequest(guestenrollment.NativeEgressCredentialRequest{
+		ContractVersion: guestenrollment.NativeEgressLocalVersion,
+		Type:            guestenrollment.NativeEgressCredentialIssue,
+	})
+	if _, err := egressConnection.Write(egressRequest); err != nil {
+		t.Fatal(err)
+	}
+	if unix, ok := egressConnection.(*net.UnixConn); !ok || unix.CloseWrite() != nil {
+		t.Fatal("could not finish the local native egress IPC request")
+	}
+	egressLine, err := bufio.NewReader(io.LimitReader(egressConnection, guestenrollment.MaxNativeEgressLocalMessageBytes+1)).ReadBytes('\n')
+	egressConnection.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	egressResponse, err := guestenrollment.DecodeNativeEgressCredentialResponse(egressLine)
+	if err != nil || egressResponse.Result == nil || egressResponse.Result.Binding != fixture.broker.binding {
+		t.Fatalf("native egress IPC response = %#v, %v", egressResponse, err)
+	}
+	egressCredential := egressResponse.Result.Credential.Opaque
+	if egressCredential == "" || strings.Contains(fmtSprint(egressResponse), egressCredential) ||
+		strings.Contains(string(egressRequest), fixture.broker.current) {
+		t.Fatal("native egress IPC disclosed a credential or runtime identity")
 	}
 	if os.Geteuid() == 0 {
 		helperSource, err := os.Open(os.Args[0])

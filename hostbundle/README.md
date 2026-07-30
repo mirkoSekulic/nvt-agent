@@ -11,9 +11,10 @@ bash hostbundle/build.sh 0.8.33-test 0123456789abcdef0123456789abcdef01234567 di
 
 The layout tag resolves to an OCI index. `digest.txt` is its immutable digest.
 The archive contains only the static bootstrap, root-owned runtime-identity
-daemon, root-owned native control/optional workspace session client, non-root
-supervisor/session fixture, the real repository `agentd`/`agentdctl`, three
-systemd units, and non-secret example path/endpoint configurations.
+daemon, root-owned native control/optional workspace session client, the
+separate optional native-egress session client, non-root supervisor/session
+fixture, the real repository `agentd`/`agentdctl`, four systemd units, and
+non-secret example path/endpoint configurations.
 It does not copy the runtime container rootfs.
 
 The initial native target is Linux amd64. The manifest, builder, OCI index, and
@@ -24,8 +25,9 @@ The guest OS supplies Python 3, tmux, systemd (when the units are used), the
 `nvt-agent` user, and writable `/workspace`, `/run/nvt-agent`, and
 `/var/lib/nvt-agent` paths. The included session executable is deliberately a
 bounded lifecycle fixture, not a production AI runtime. Provider provisioning,
-the optional fixed loopback workspace service, plugins, a production workspace
-gateway listener/routing path, and mediated VM egress remain later phases.
+the optional fixed loopback workspace service, plugins, a production native
+egress relay/target, agent traffic forwarding, provider confinement, and
+mediated-VM readiness remain later phases.
 
 The separate provider-neutral enrollment and runtime-identity boundaries are
 documented in [`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md)
@@ -60,6 +62,14 @@ for separate control and workspace TLS connections; neither the gateway nor a
 stream can choose the local target. Readiness requires both legs, and renewal
 switches only after both replacements authenticate.
 
+`share/examples/native-egress.json` is a separate opt-in root-owned
+configuration for `nvt-guest-egressd`. It contains only private runtime/socket
+paths, one canonical TLS relay endpoint, and an explicit CA path. The process
+requests a fixed-purpose egress credential from `nvt-guest-identityd`; no
+runtime identity, binding, audience, target, destination, or provider value is
+caller-configurable. The credential is never persisted and reconnects reuse
+it; renewal retains at most a current and pending credential in trusted memory.
+
 After the bootstrap has installed and activated a release, guest provisioning
 may install the repository-owned unit and its separately supplied non-secret
 configuration using the stable `current` path:
@@ -81,6 +91,12 @@ install -d -o root -g root -m 0755 /etc/nvt-agent
 systemctl daemon-reload
 systemctl enable --now nvt-guest-identity.service nvt-agent-guest.service nvt-guest-session.service
 ```
+
+A provider implementing the later mediated-VM enforcement gates may also copy
+`nvt-guest-egress.service`, write root-owned `native-egress.json` plus its
+explicit relay CA, and enable that unit. The bundle does not enable or require
+it, and the current client establishes/authenticates only—it does not forward
+agent traffic or claim production mediated-egress readiness.
 
 The bundle never writes `/etc` or enables a service implicitly. That remains a
 provider-owned provisioning step so activation cannot execute archive hooks.

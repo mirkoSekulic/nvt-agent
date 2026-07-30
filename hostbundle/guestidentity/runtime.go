@@ -253,6 +253,48 @@ func (runtime *Runtime) IssueGuestSession(ctx context.Context) (guestenrollment.
 	return result, nil
 }
 
+// IssueNativeEgress is the only runtime-bearer use exposed to the local native
+// egress IPC request. The caller supplies no identity, binding, audience,
+// broker endpoint, destination, target, or provider. Rotation and issuance are
+// serialized so a retired predecessor cannot be copied into another process.
+func (runtime *Runtime) IssueNativeEgress(ctx context.Context) (guestenrollment.NativeEgressIssueResult, error) {
+	if err := runtime.acquire(ctx); err != nil {
+		return guestenrollment.NativeEgressIssueResult{}, err
+	}
+	defer runtime.release()
+	state, exists, err := runtime.Store.load()
+	if err != nil || !exists || state.FailureReason != "" || state.RuntimeIdentity == nil {
+		return guestenrollment.NativeEgressIssueResult{}, failure(ReasonReplacementRequired, false, false)
+	}
+	now := runtime.now()
+	if state.PendingSuccessor != "" {
+		return guestenrollment.NativeEgressIssueResult{}, failure(ReasonBrokerUnavailable, true, false)
+	}
+	if !localIdentityCurrent(state, now) {
+		_, _, replacementErr := runtime.markReplacement(&state)
+		return guestenrollment.NativeEgressIssueResult{}, replacementErr
+	}
+	result, err := runtime.Client.IssueNativeEgress(ctx, state.BrokerURL, state.RuntimeIdentity.Opaque, state.Binding)
+	if err != nil {
+		reason, _, _ := FailureDetails(err)
+		if reason == ReasonReplacementRequired {
+			_, _, replacementErr := runtime.markReplacement(&state)
+			return guestenrollment.NativeEgressIssueResult{}, replacementErr
+		}
+		return guestenrollment.NativeEgressIssueResult{}, err
+	}
+	issuedAt, issuedErr := time.Parse(time.RFC3339, result.Credential.IssuedAt)
+	expiresAt, expiresErr := time.Parse(time.RFC3339, result.Credential.ExpiresAt)
+	runtimeExpiresAt, runtimeExpiresErr := time.Parse(time.RFC3339, state.RuntimeIdentity.ExpiresAt)
+	if guestenrollment.ValidateNativeEgressIssueResult(result) != nil || result.Binding != state.Binding ||
+		issuedErr != nil || expiresErr != nil || runtimeExpiresErr != nil || !issuedAt.Before(expiresAt) ||
+		!now.Before(expiresAt) || expiresAt.After(runtimeExpiresAt) {
+		result.Credential.Opaque = ""
+		return guestenrollment.NativeEgressIssueResult{}, failure(ReasonProtocolInvalid, false, true)
+	}
+	return result, nil
+}
+
 func (runtime *Runtime) acquire(ctx context.Context) error {
 	if runtime == nil || runtime.operation == nil || ctx == nil {
 		return failure(ReasonStateUnavailable, false, false)

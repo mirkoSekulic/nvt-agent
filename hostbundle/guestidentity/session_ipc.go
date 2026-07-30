@@ -25,9 +25,10 @@ func SessionCredentialSocketPath(runtimeDirectory string) string {
 	return filepath.Join(runtimeDirectory, SessionCredentialSocketName)
 }
 
-// ServeSessionCredentials exposes a same-daemon-UID issuance boundary. Both
-// production callers independently require UID 0 before reaching this code.
-// The request accepts no bearer, binding, audience, or endpoint input.
+// ServeSessionCredentials exposes the established same-daemon-UID credential
+// issuance boundary. Production callers independently require UID 0 before
+// reaching this code. Purpose-separated requests accept no bearer, binding,
+// audience, endpoint, target, or provider input.
 func ServeSessionCredentials(ctx context.Context, runtime *Runtime, runtimeDirectory string) error {
 	if ctx == nil || runtime == nil || !validAbsoluteDirectory(runtimeDirectory) {
 		return failure(ReasonStateInvalid, false, false)
@@ -97,24 +98,36 @@ func handleSessionCredentialConnection(ctx context.Context, runtime *Runtime, co
 	}
 	deadline := time.Now().Add(sessionCredentialIPCDeadline)
 	_ = connection.SetDeadline(deadline)
-	reader := bufio.NewReader(io.LimitReader(connection, int64(guestenrollment.MaxNativeSessionLocalMessageBytes)+1))
+	maximum := guestenrollment.MaxNativeSessionLocalMessageBytes
+	if guestenrollment.MaxNativeEgressLocalMessageBytes > maximum {
+		maximum = guestenrollment.MaxNativeEgressLocalMessageBytes
+	}
+	reader := bufio.NewReader(io.LimitReader(connection, int64(maximum)+1))
 	line, err := reader.ReadBytes('\n')
-	if err != nil || len(line) == 0 || len(line) > guestenrollment.MaxNativeSessionLocalMessageBytes {
+	if err != nil || len(line) == 0 || len(line) > maximum {
 		zero(line)
 		return
 	}
-	request, err := guestenrollment.DecodeNativeSessionCredentialRequest(line)
+	_, sessionRequestErr := guestenrollment.DecodeNativeSessionCredentialRequest(line)
+	_, egressRequestErr := guestenrollment.DecodeNativeEgressCredentialRequest(line)
 	zero(line)
-	if err != nil {
+	if (sessionRequestErr == nil) == (egressRequestErr == nil) {
 		return
 	}
 	if _, trailingErr := reader.ReadByte(); !errors.Is(trailingErr, io.EOF) {
 		return
 	}
-	_ = request
 	operationContext, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	result, issueErr := runtime.IssueGuestSession(operationContext)
+	if sessionRequestErr == nil {
+		handleGuestSessionCredentialRequest(operationContext, runtime, connection)
+		return
+	}
+	handleNativeEgressCredentialRequest(operationContext, runtime, connection)
+}
+
+func handleGuestSessionCredentialRequest(ctx context.Context, runtime *Runtime, connection net.Conn) {
+	result, issueErr := runtime.IssueGuestSession(ctx)
 	response := guestenrollment.NativeSessionCredentialResponse{
 		ContractVersion: guestenrollment.NativeSessionLocalVersion,
 	}
@@ -129,6 +142,34 @@ func handleSessionCredentialConnection(ctx context.Context, runtime *Runtime, co
 		}
 	}
 	encoded, encodeErr := guestenrollment.EncodeNativeSessionCredentialResponse(response)
+	result.Credential.Opaque = ""
+	if response.Result != nil {
+		response.Result.Credential.Opaque = ""
+	}
+	if encodeErr != nil {
+		zero(encoded)
+		return
+	}
+	defer zero(encoded)
+	_, _ = io.Copy(connection, bytes.NewReader(encoded))
+}
+
+func handleNativeEgressCredentialRequest(ctx context.Context, runtime *Runtime, connection net.Conn) {
+	result, issueErr := runtime.IssueNativeEgress(ctx)
+	response := guestenrollment.NativeEgressCredentialResponse{
+		ContractVersion: guestenrollment.NativeEgressLocalVersion,
+	}
+	if issueErr == nil {
+		response.Type = guestenrollment.NativeEgressCredentialResult
+		response.Result = &result
+	} else {
+		reason, temporary, uncertain := FailureDetails(issueErr)
+		response.Type = guestenrollment.NativeEgressCredentialError
+		response.Error = &guestenrollment.NativeEgressLocalError{
+			Reason: string(reason), Temporary: temporary, Uncertain: uncertain,
+		}
+	}
+	encoded, encodeErr := guestenrollment.EncodeNativeEgressCredentialResponse(response)
 	result.Credential.Opaque = ""
 	if response.Result != nil {
 		response.Result.Credential.Opaque = ""

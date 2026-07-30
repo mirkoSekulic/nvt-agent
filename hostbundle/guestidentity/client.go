@@ -170,6 +170,30 @@ func (client *Client) IssueGuestSession(ctx context.Context, brokerURL, identity
 	return result, nil
 }
 
+func (client *Client) IssueNativeEgress(ctx context.Context, brokerURL, identity string, binding guestenrollment.Binding) (guestenrollment.NativeEgressIssueResult, error) {
+	request := guestenrollment.NativeEgressIssueRequest{
+		ContractVersion: guestenrollment.NativeEgressIdentityVersion,
+		Binding:         binding,
+		Audience:        guestenrollment.NativeEgressAudience,
+	}
+	if validateBrokerURL(brokerURL) != nil || !validRuntimeIdentity(identity) || guestenrollment.ValidateNativeEgressIssueRequest(request) != nil {
+		return guestenrollment.NativeEgressIssueResult{}, failure(ReasonProtocolInvalid, false, false)
+	}
+	payload, _ := json.Marshal(request)
+	body, err := client.post(ctx, brokerURL+guestenrollment.NativeEgressIdentityIssuePath, identity, payload, guestenrollment.MaxNativeEgressIdentityResponseBytes, true)
+	zero(payload)
+	if err != nil {
+		return guestenrollment.NativeEgressIssueResult{}, err
+	}
+	defer zero(body)
+	result, err := guestenrollment.DecodeNativeEgressIssueResult(body)
+	if err != nil || result.Binding != binding {
+		result.Credential.Opaque = ""
+		return guestenrollment.NativeEgressIssueResult{}, failure(ReasonProtocolInvalid, false, true)
+	}
+	return result, nil
+}
+
 func (client *Client) post(ctx context.Context, endpoint, bearer string, payload []byte, maximum int, mutation bool) ([]byte, error) {
 	if ctx == nil || client == nil || client.doer == nil {
 		return nil, failure(ReasonProtocolInvalid, false, false)

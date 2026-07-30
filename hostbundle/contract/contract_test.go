@@ -17,6 +17,7 @@ func validManifest() Manifest {
 		Compatibility: Compatibility{
 			AgentdProtocol: AgentdProtocolVersion, NativeSessionProtocol: NativeSessionProtocolVersion,
 			NativeWorkspaceProtocol: NativeWorkspaceProtocolVersion,
+			NativeEgressProtocol:    NativeEgressProtocolVersion,
 		},
 		Files: []File{{Path: "bin/nvt-guest-supervisor", SHA256: "sha256:" + strings.Repeat("b", 64), Size: 1, Mode: 0o755}},
 	}
@@ -52,6 +53,7 @@ func TestLegacyV1ManifestWithoutNativeSessionRemainsValid(t *testing.T) {
 	manifest := validManifest()
 	manifest.Compatibility.NativeSessionProtocol = ""
 	manifest.Compatibility.NativeWorkspaceProtocol = ""
+	manifest.Compatibility.NativeEgressProtocol = ""
 	encoded, err := EncodeManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -67,6 +69,7 @@ func TestLegacyV1ManifestWithoutNativeSessionRemainsValid(t *testing.T) {
 func TestLegacyNativeSessionManifestWithoutWorkspaceRemainsValid(t *testing.T) {
 	manifest := validManifest()
 	manifest.Compatibility.NativeWorkspaceProtocol = ""
+	manifest.Compatibility.NativeEgressProtocol = ""
 	encoded, err := EncodeManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +79,21 @@ func TestLegacyNativeSessionManifestWithoutWorkspaceRemainsValid(t *testing.T) {
 	}
 	if _, err := DecodeManifest(encoded); err != nil {
 		t.Fatalf("existing native-session v1 manifest was rejected: %v", err)
+	}
+}
+
+func TestExistingWorkspaceManifestWithoutNativeEgressRemainsValid(t *testing.T) {
+	manifest := validManifest()
+	manifest.Compatibility.NativeEgressProtocol = ""
+	encoded, err := EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "native_egress_protocol") {
+		t.Fatal("existing workspace manifest gained a native-egress requirement")
+	}
+	if _, err := DecodeManifest(encoded); err != nil {
+		t.Fatalf("existing workspace v1 manifest was rejected: %v", err)
 	}
 }
 
@@ -89,6 +107,7 @@ func TestManifestValidationRejectsUnsafeAndAmbiguousFiles(t *testing.T) {
 		func(manifest *Manifest) { manifest.Compatibility.AgentdProtocol = "nvt.agentd/v2" },
 		func(manifest *Manifest) { manifest.Compatibility.NativeSessionProtocol = "nvt.native-session/v2" },
 		func(manifest *Manifest) { manifest.Compatibility.NativeWorkspaceProtocol = "nvt.native-workspace/v2" },
+		func(manifest *Manifest) { manifest.Compatibility.NativeEgressProtocol = "nvt.native-egress/v2" },
 	}
 	for index, mutate := range tests {
 		manifest := validManifest()
