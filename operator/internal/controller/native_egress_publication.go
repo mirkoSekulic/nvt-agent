@@ -213,6 +213,18 @@ func nativeEgressAttachmentCurrent(run *nvtv1alpha1.AgentRun, attachment *execut
 		run.Status.NativeEgressAttachment.Digest == attachment.Digest
 }
 
+// nativeMediatedConfinementReady is the single portable provider gate for
+// both one-time guest enrollment and exact relay-target publication. A guest
+// cannot receive bootstrap authority until the driver has read back the
+// current infrastructure-owned attachment and confinement state.
+func nativeMediatedConfinementReady(run *nvtv1alpha1.AgentRun, attachment *executiondriver.NativeEgressAttachment, status executiondriver.Status, desiredGeneration int64) bool {
+	return nativeMediatedExternalRun(run) && nativeEgressAttachmentCurrent(run, attachment) &&
+		status.Phase == executiondriver.PhaseRunning && status.Ready && status.ObservedGeneration == desiredGeneration &&
+		status.EgressConfinement != nil && status.EgressConfinement.AttachmentGeneration == run.Status.NativeEgressAttachment.Generation &&
+		status.EgressConfinement.AttachmentDigest == run.Status.NativeEgressAttachment.Digest &&
+		nativeEgressConfinementReady(status.EgressConfinement.Ready, string(status.EgressConfinement.Boundary))
+}
+
 func nativeEgressDesiredGeneration(run *nvtv1alpha1.AgentRun) (int64, error) {
 	if run == nil {
 		return 0, errors.New("native egress attachment is unavailable")
@@ -361,11 +373,7 @@ func (r *AgentRunReconciler) reconcileNativeEgress(
 		return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
 	}
 	desiredGeneration, generationErr := nativeEgressDesiredGeneration(run)
-	attachmentCurrent := nativeEgressAttachmentCurrent(run, r.NativeEgressAttachment)
-	if generationErr != nil || !attachmentCurrent || status.Phase != executiondriver.PhaseRunning || !status.Ready || status.ObservedGeneration != desiredGeneration || status.EgressConfinement == nil ||
-		status.EgressConfinement.AttachmentGeneration != run.Status.NativeEgressAttachment.Generation ||
-		status.EgressConfinement.AttachmentDigest != run.Status.NativeEgressAttachment.Digest ||
-		!nativeEgressConfinementReady(status.EgressConfinement.Ready, string(status.EgressConfinement.Boundary)) {
+	if generationErr != nil || !nativeMediatedConfinementReady(run, r.NativeEgressAttachment, status, desiredGeneration) {
 		return pending("NativeEgressConfinementPending")
 	}
 	binding, err := exactNativeEgressBinding(run)

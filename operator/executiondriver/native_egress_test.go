@@ -186,10 +186,16 @@ func TestNativeEgressAttachmentAcceptsCanonicalPublicIPLiteral(t *testing.T) {
 	value := testNativeEgressAttachment(t)
 	value.Digest = ""
 	value.Relay.Host = "8.8.8.8"
-	value.Relay.ServerName = "8.8.8.8"
+	value.Relay.ServerName = "relay.invalid"
 	value.RequiredDestinations[0].Host = "1.1.1.1"
 	sealed, err := SealNativeEgressAttachment(value)
 	if err != nil || ValidateNativeEgressAttachment(sealed) != nil {
 		t.Fatalf("canonical public IP attachment=%#v err=%v", sealed, err)
+	}
+	value = sealed
+	value.Digest = ""
+	value.Relay.ServerName = "8.8.8.8"
+	if _, err := SealNativeEgressAttachment(value); err == nil {
+		t.Fatal("IP literal relay server name unexpectedly accepted")
 	}
 }

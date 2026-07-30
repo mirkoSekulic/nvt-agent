@@ -28,7 +28,8 @@
 {{- $dataServerName := default (printf "nvt-native-egress-relay.%s.svc.cluster.local" (include "nvt.namespace" .)) $relay.attachment.relayServerName -}}
 {{- $dataHost := default $dataServerName $relay.attachment.relayHost -}}
 {{- if or (lt (int $relay.attachment.generation) 1) (gt (int $relay.attachment.generation) 2147483647) -}}{{ fail "nativeEgressRelay.attachment.generation must be a positive bounded integer" }}{{- end -}}
-{{- range $name := list $dataHost $dataServerName -}}{{- if or (gt (len $name) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $name)) -}}{{ fail "nativeEgressRelay.attachment relay identity must use canonical DNS names" }}{{- end -}}{{- end -}}
+{{- if or (gt (len $dataServerName) 253) (regexMatch `^[0-9.]+$` $dataServerName) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $dataServerName)) -}}{{ fail "nativeEgressRelay.attachment.relayServerName must be a canonical DNS name" }}{{- end -}}
+{{- if or (gt (len $dataHost) 253) (and (not (regexMatch `^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$` $dataHost)) (not (regexMatch `^[0-9a-f:]+$` $dataHost))) -}}{{ fail "nativeEgressRelay.attachment.relayHost must be a canonical DNS name or public IP address" }}{{- end -}}
 {{- if or (lt (len $relay.attachment.requiredDestinations) 2) (gt (len $relay.attachment.requiredDestinations) 16) -}}{{ fail "nativeEgressRelay.attachment.requiredDestinations must contain 2 to 16 exact endpoints" }}{{- end -}}
 {{- $attachmentEndpoints := dict -}}{{- $attachmentPurposes := dict -}}
 {{- range $destination := $relay.attachment.requiredDestinations -}}

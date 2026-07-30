@@ -183,7 +183,11 @@ func (backend externalExecutionBackend) Reconcile(
 	if IsTerminalAgentRunPhase(agentRun.Status.Phase) {
 		return backend.reconcileTerminalLifecycle(ctx, reconciler, &agentRun)
 	}
-	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && status.ObservedGeneration == desired.Generation && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
+	enrollmentReady := status.ObservedGeneration == desired.Generation
+	if nativeMediatedExternalRun(&agentRun) {
+		enrollmentReady = nativeMediatedConfinementReady(&agentRun, reconciler.NativeEgressAttachment, status, desired.Generation)
+	}
+	if backend.kind == nvtv1alpha1.AgentRunExecutionVM && enrollmentReady && controllerutil.ContainsFinalizer(&agentRun, guestEnrollmentFinalizer) {
 		enrollmentResult, enrollmentErr := backend.reconcileGuestEnrollment(ctx, reconciler, &agentRun, desired)
 		if enrollmentErr != nil {
 			return ctrl.Result{}, enrollmentErr

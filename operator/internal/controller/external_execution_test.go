@@ -611,6 +611,104 @@ func TestExternalExecutionStaleNonTerminalGenerationClearsRoutingBinding(t *test
 	}
 }
 
+func TestNativeMediatedGuestEnrollmentWaitsForExactInfrastructureConfinement(t *testing.T) {
+	attachment := testControllerNativeEgressAttachment(t, 2)
+	endpoint := &executiondriver.Endpoint{Scheme: executiondriver.EndpointSchemeHTTPS, Host: "vm.invalid", Port: 443}
+	tests := map[string]executiondriver.Status{
+		"provisioning": {
+			Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1,
+		},
+		"missing confinement": {
+			Phase: executiondriver.PhaseRunning, Ready: true, ObservedGeneration: -1, Endpoint: endpoint,
+		},
+		"stale confinement": {
+			Phase: executiondriver.PhaseRunning, Ready: true, ObservedGeneration: -1, Endpoint: endpoint,
+			EgressConfinement: &executiondriver.EgressConfinementStatus{
+				Boundary: executiondriver.EgressConfinementBoundaryInfrastructure, Ready: true,
+				AttachmentGeneration: attachment.Generation - 1, AttachmentDigest: attachment.Digest,
+			},
+		},
+	}
+	for name, status := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			run := externalTestAgentRun()
+			run.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+			run.Spec.EgressEnforcement = true
+			run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
+			run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+			run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: attachment.Generation, Digest: attachment.Digest}
+			driver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{status}}}
+			issuer := &recordingEnrollmentIssuer{}
+			kubernetes, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+			reconciler.GuestEnrollment = issuer
+			reconciler.NativeEgressAttachment = attachment
+			reconciler.nativeEgressTargets = &recordingPublicationBoundary{}
+
+			if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			stored := getExternalRun(t, ctx, kubernetes, run)
+			if driver.prepareCalls != 0 || driver.deliverCalls != 0 || len(issuer.issues) != 0 || stored.Status.NativeGuestBinding != nil {
+				t.Fatalf("enrollment crossed confinement gate: prepares=%d delivers=%d issues=%d binding=%#v", driver.prepareCalls, driver.deliverCalls, len(issuer.issues), stored.Status.NativeGuestBinding)
+			}
+		})
+	}
+}
+
+func TestNativeMediatedGuestEnrollmentStartsAfterExactInfrastructureConfinement(t *testing.T) {
+	ctx := context.Background()
+	attachment := testControllerNativeEgressAttachment(t, 2)
+	run := externalTestAgentRun()
+	run.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	run.Spec.EgressEnforcement = true
+	run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: attachment.Generation, Digest: attachment.Digest}
+	driver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{
+		Phase: executiondriver.PhaseRunning, Ready: true, ObservedGeneration: -1,
+		Endpoint: &executiondriver.Endpoint{Scheme: executiondriver.EndpointSchemeHTTPS, Host: "vm.invalid", Port: 443},
+		EgressConfinement: &executiondriver.EgressConfinementStatus{
+			Boundary: executiondriver.EgressConfinementBoundaryInfrastructure, Ready: true,
+			AttachmentGeneration: attachment.Generation, AttachmentDigest: attachment.Digest,
+		},
+	}}}}
+	issuer := &recordingEnrollmentIssuer{}
+	kubernetes, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+	reconciler.NativeEgressAttachment = attachment
+	reconciler.nativeEgressTargets = &recordingPublicationBoundary{}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	stored := getExternalRun(t, ctx, kubernetes, run)
+	if driver.prepareCalls != 1 || driver.deliverCalls != 1 || len(issuer.issues) != 1 || stored.Status.NativeGuestBinding == nil {
+		t.Fatalf("exact confinement did not release enrollment: prepares=%d delivers=%d issues=%d binding=%#v", driver.prepareCalls, driver.deliverCalls, len(issuer.issues), stored.Status.NativeGuestBinding)
+	}
+	expectedGeneration, err := executiondriver.NativeEgressDesiredGeneration(run.Generation, attachment.Generation)
+	if err != nil || issuer.issues[0].Binding.DesiredGeneration != expectedGeneration {
+		t.Fatalf("enrollment used stale desired generation: %#v", issuer.issues[0].Binding)
+	}
+}
+
+func TestNonMediatedVMGuestEnrollmentKeepsLegacyProvisioningTiming(t *testing.T) {
+	ctx := context.Background()
+	run := externalTestAgentRun()
+	run.Finalizers = []string{externalExecutionFinalizer, guestEnrollmentFinalizer}
+	driver := &recordingEnrollmentDriver{recordingExecutionDriver: &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseProvisioning, ObservedGeneration: -1}}}}
+	issuer := &recordingEnrollmentIssuer{}
+	_, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.GuestEnrollment = issuer
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if driver.prepareCalls != 1 || driver.deliverCalls != 1 || len(issuer.issues) != 1 {
+		t.Fatalf("legacy enrollment timing changed: prepares=%d delivers=%d issues=%d", driver.prepareCalls, driver.deliverCalls, len(issuer.issues))
+	}
+}
+
 func TestStalledExternalDriversReserveWorkerForKubernetesBackend(t *testing.T) {
 	ctx := context.Background()
 	blocked := make(chan struct{})

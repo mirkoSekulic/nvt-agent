@@ -117,7 +117,7 @@ func validateNativeEgressAttachmentFields(value NativeEgressAttachment) error {
 	if value.ContractVersion != NativeEgressAttachmentVersion || value.Generation < 1 {
 		return errors.New("native egress attachment version or generation is invalid")
 	}
-	if !canonicalNetworkHost(value.Relay.Host) || !canonicalNetworkHost(value.Relay.ServerName) || value.Relay.Port == 0 {
+	if !canonicalNetworkHost(value.Relay.Host) || !canonicalDNS(value.Relay.ServerName) || value.Relay.Port == 0 {
 		return errors.New("native egress relay attachment is invalid")
 	}
 	canonicalCA, err := CanonicalNativeEgressCAPEM([]byte(value.Relay.CAPEM))
@@ -283,13 +283,13 @@ func writeUint64(target hash.Hash, value uint64) {
 }
 
 func canonicalDNS(value string) bool {
-	return len(value) <= 253 && canonicalDNSPattern.MatchString(value)
+	return len(value) <= 253 && !numericAddressLikePattern.MatchString(value) && canonicalDNSPattern.MatchString(value)
 }
 
 func canonicalNetworkHost(value string) bool {
 	address, err := netip.ParseAddr(value)
 	if err != nil {
-		return !strings.Contains(value, ":") && !numericAddressLikePattern.MatchString(value) && canonicalDNS(value)
+		return !strings.Contains(value, ":") && canonicalDNS(value)
 	}
 	if address.Zone() != "" || address.String() != value || address.Unmap() != address ||
 		!address.IsGlobalUnicast() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
