@@ -177,6 +177,39 @@ if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/exe
   exit 1
 fi
 grep -q 'nativeEgressRelay.attachment.relayServerName must be a canonical DNS name' "${WORKDIR}/native-relay-server-name.txt"
+for invalid_relay_host in a..b aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.invalid 999.999.999.999 10.0.0.1; do
+  if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+    --set nativeEgressRelay.enabled=true \
+    --set-string nativeEgressRelay.rolloutRevision=credentials-1 \
+    --set egress.networkPolicyCapable=true \
+    --set broker.persistence.enabled=true \
+    --set broker.guestEnrollment.enabled=true \
+    --set-string broker.guestEnrollment.exchangeURL=https://nvt-broker.custom-ns.svc.cluster.local:7347/v1/guest-enrollment/exchange \
+    --set-string broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
+    --set executionDrivers.guestEnrollment.enabled=true \
+    --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
+    --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
+    --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc.cluster.local \
+    --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
+    --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
+    --set-string nativeEgressRelay.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
+    --set-string nativeEgressRelay.brokerServerName=nvt-broker.custom-ns.svc.cluster.local \
+    --set-string nativeEgressRelay.credentials.existingSecret=nvt-native-egress-relay-credentials \
+    --set-string nativeEgressRelay.brokerCA.existingSecret=nvt-broker-tls \
+    --set-string nativeEgressRelay.data.ingressCIDRs[0]=10.40.0.0/16 \
+    --set-string nativeEgressRelay.attachment.relayHost="${invalid_relay_host}" \
+    --set-string nativeEgressRelay.attachment.requiredDestinations[0].purpose=bootstrap \
+    --set-string nativeEgressRelay.attachment.requiredDestinations[0].host=nvt-broker.custom-ns.svc.cluster.local \
+    --set nativeEgressRelay.attachment.requiredDestinations[0].port=7347 \
+    --set-string nativeEgressRelay.attachment.requiredDestinations[1].purpose=control \
+    --set-string nativeEgressRelay.attachment.requiredDestinations[1].host=nvt-gateway.custom-ns.svc.cluster.local \
+    --set nativeEgressRelay.attachment.requiredDestinations[1].port=7443 \
+    >/dev/null 2>"${WORKDIR}/native-relay-host.txt"; then
+    echo "expected invalid native relay host to fail: ${invalid_relay_host}" >&2
+    exit 1
+  fi
+  grep -q 'nativeEgressRelay.attachment.relayHost must be a canonical DNS name' "${WORKDIR}/native-relay-host.txt"
+done
 if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set nativeEgressRelay.enabled=true \
   --set-string nativeEgressRelay.rolloutRevision=credentials-1 \
