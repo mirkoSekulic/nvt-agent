@@ -48,10 +48,11 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   infrastructure-confinement, exact identity, flow-routing, readiness, and
   cleanup contract with a hermetic conformance proof and production broker
   identity authority, trusted guest flow client, and a standalone exact-binding
-  relay with bounded flow transport plus an optional process-owned per-run
-  egressd adapter and an opt-in, credential-less host-bundle Linux TCP capture
-  process with transparent and per-flow explicit-provider paths; dynamic
-  operator publication/readiness, provider redirect installation, and provider
+  relay with bounded flow transport, a per-run egressd adapter, authenticated
+  complete-snapshot target publication, and an opt-in credential-less host-
+  bundle Linux TCP capture process with transparent and per-flow explicit-
+  provider paths. The coordinated relay image exists, but operator deployment/
+  publication, readiness, provider redirect installation, and provider
   enforcement are not implemented.
 
 ## Operations And Testing

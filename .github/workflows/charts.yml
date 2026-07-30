@@ -155,6 +155,7 @@ jobs:
           - nvt-operator
           - nvt-execution-driver-host
           - nvt-agent-gateway
+          - nvt-native-egress-relay
           - nvt-github-comments-producer
     concurrency:
       group: nvt-coordinated-release-${{ needs.release_metadata.outputs.version }}-${{ matrix.image }}
@@ -289,5 +290,5 @@ jobs:
           fi
 
           # The preceding jobs have verified coordinated metadata and anonymous
-          # access for all nine images and the native host-bundle artifact.
+          # access for all ten images and the native host-bundle artifact.
           helm push "${package}" "oci://${repository}"

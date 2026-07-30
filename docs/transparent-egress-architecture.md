@@ -157,6 +157,13 @@ the connection with no fallback. The provider still owns the redirect into
 the literal loopback listener and the external network confinement that makes
 that redirect non-bypassable.
 
+The cluster relay now accepts only an authenticated, monotonically generated
+complete snapshot from its distinct TLS control listener. Every restart is
+unpublished deny-all until the trusted operator republishes exact five-field
+Binding-to-egressd targets. That operator deployment/publication loop and its
+readiness/finalizer ordering are not wired yet; the API and coordinated relay
+image alone do not establish mediated-VM readiness.
+
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
 the same hostname. Workload-wide generic HTTP proxy variables remain unset in

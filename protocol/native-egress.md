@@ -222,17 +222,15 @@ target first. That target independently resolves and validates the destination
 and rejects cluster/private/metadata/control-plane addresses. Supplying another
 run's target name or any internal service as intent cannot select that target.
 
-The production relay may load a bounded process-owned snapshot mapping each
-complete exact Binding to one canonical `http://host:port` per-run `egressd`
-CONNECT listener. Omission preserves deny-all behavior. The command loads this
-strict snapshot once at startup; changing it requires a coordinated relay
-restart. The in-process registry exposes atomic level-triggered replacement
-only as an implementation seam for a future trusted operator adapter. There is
-no target-registration HTTP endpoint, partial lookup, enumeration, fallback,
-guest-supplied endpoint, or configuration watcher. Malformed, duplicate, or
-over-capacity descriptors reject the complete configuration. Two different
-Bindings MUST NOT name the same canonical egressd listener: the target is a
-per-run authority and cannot be shared across exact bindings.
+The production relay owns a bounded in-memory snapshot mapping each complete
+exact Binding to one canonical `http://host:port` per-run `egressd` CONNECT
+listener. It starts unpublished and deny-all after every process start. Only
+the separate authenticated target-publication contract below can replace the
+complete snapshot. No topology is persisted, patched, discovered, or accepted
+from a guest. Malformed, duplicate, or over-capacity descriptors reject the
+complete publication. Two different Bindings MUST NOT name the same canonical
+egressd listener: the target is a per-run authority and cannot be shared
+across exact bindings.
 
 For this adapter, each validated Destination becomes exactly one HTTP/1.1
 `CONNECT` request whose request authority and `Host` are the canonical
@@ -251,6 +249,64 @@ initiated by the guest toward untrusted requested destinations and terminate at
 a separately trusted policy service. They use separate TLS sessions,
 registries, directional stream rules, and transport implementations despite
 pinning the same reviewed yamux release.
+
+## Authenticated target publication
+
+`nvt.native-egress-target-publication/v1` is the implementation-neutral,
+operator-to-relay control contract. It is served on a distinct TLS listener and
+is never present in guest or agent configuration. The only endpoints are:
+
+| Operation | Method and path |
+| --- | --- |
+| replace complete snapshot | `POST /v1/native-egress-targets/snapshot` |
+| read applied state | `POST /v1/native-egress-targets/status` |
+
+Both require one purpose-specific `nvt_rc1_` bearer in HTTP Authorization.
+The relay reads that credential from a private process-owned file and compares
+it in constant time. It is never accepted in JSON, flags, argv, environment,
+logs, diagnostics, or status. The future operator publisher MUST use one
+explicit HTTPS origin, explicit CA roots, exact DNS server-name verification,
+TLS 1.2 or newer, no redirects, and no ambient proxy or credential helper.
+
+A snapshot request contains `contract_version`, `type=replace_snapshot`, a
+strictly positive and monotonically increasing 64-bit `generation`, a
+`sha256:<lowercase-hex>` content digest, and the complete `targets` array. Each
+target contains the complete five-field Binding, fixed target type
+`nvt.egressd-connect/v1`, and one canonical CONNECT URL. The array MUST be in
+lexicographic raw UTF-8 byte order (AgentRun UID, execution ID, driver
+registration, numeric desired generation, guest instance ID; target type and
+URL break any remaining tie). The digest is SHA-256 over
+the ASCII contract version, one zero byte, the target count as unsigned
+32-bit big-endian, then every canonical target. Each string is its UTF-8 byte
+length as unsigned 32-bit big-endian followed by those exact bytes. Target
+fields are AgentRun UID, execution ID, driver registration, desired generation
+as unsigned 64-bit big-endian, guest instance ID, target type, and CONNECT URL.
+This binary digest input is independent of JSON escaping and implementation
+language. The empty array is valid and intentionally applies deny-all.
+
+Only complete replacement exists. An applied generation may advance with an
+identical digest. Equal generation and identical digest is idempotent success;
+equal generation with another digest and every lower generation fail closed.
+The acknowledgement repeats the exact active generation, digest, and bounded
+target count only after target replacement is active and every removed or
+replaced exact session has synchronously lost registry readiness and flow-open
+authority. An invalid entry or pre-commit cancellation leaves both the prior
+complete mapping and publication metadata unchanged. A client disconnect after
+the in-memory atomic commit is ordinary response loss: authenticated status or
+an idempotent retry confirms the applied pair.
+
+Authenticated status exposes only `published`, the applied generation/digest,
+and target count. `published=false`, generation zero, empty digest, and count
+zero means process-start unpublished deny-all. `published=true` with a positive
+generation, a digest, and count zero means an intentionally applied empty
+snapshot. Status never enumerates bindings, endpoints, target types, or
+listeners. Process restart always returns to the first state; the trusted
+operator must republish its current complete desired snapshot.
+
+Failures use only the versioned `error` body and one of `not-found`,
+`capacity-exceeded`, `unauthorized`, `invalid-request`, `conflict`, or
+`unavailable`. They do not include a credential, binding, target, digest
+diagnostic, parser detail, path, or backend error.
 
 ## Bounds and failure behavior
 
@@ -276,6 +332,10 @@ pinning the same reviewed yamux release.
 | guest capture TCP connections | 64 total across transparent and explicit CONNECT |
 | guest capture readiness lease | exactly one live lease |
 | guest capture preface inspection | 16 KiB / 2 seconds |
+| target publication snapshot / response | 256 KiB / 4 KiB |
+| target publication HTTP headers | 8 KiB |
+| target publication targets / concurrent connections | 128 / 16 |
+| target publication operation | 10 seconds absolute |
 | bounded shutdown | 5 seconds |
 | credential lifetime | at most 5 minutes |
 | live credentials/sessions per binding | two credentials; active plus standby |
@@ -379,16 +439,19 @@ credential, and renews make-before-break with at most current plus pending in
 memory. The standalone relay core terminates explicit TLS, authenticates the
 bearer through that broker authority, resolves a target only by complete exact
 Binding, and owns the shared bounded active/standby registry. Its production
-command remains deny-all unless the trusted process-owned egressd target
-snapshot is explicitly configured. When configured, the relay routes every
-flow only through the exact binding's selected adapter. Mapping replacement or
-removal synchronously stops new opens, withdraws the associated session, and
-does not migrate existing flows to another target. The relay sends `hello_ack`
-only after the authenticated session has secured both the exact target and its
-bounded active/standby reservation, then switches the connection to the
-bounded flow data plane. The host-bundle client proves that yamux is live and
-then exposes a strict root-only local stream socket. A separate credential-less
-Linux process recovers the kernel original TCP destination, optionally refines
+command starts deny-all and exposes a distinct authenticated TLS publication
+surface for complete in-memory snapshots. The coordinated non-root relay OCI
+image contains only the static relay binary; no chart or operator deployment
+wiring consumes it yet. Once a current snapshot is applied, the relay routes
+every flow only through the exact binding's selected adapter. Mapping
+replacement or removal synchronously stops new opens, withdraws the associated
+session, and does not migrate existing flows to another target. The relay sends
+`hello_ack` only after the authenticated session has secured both the exact
+target and its bounded active/standby reservation, then switches the connection
+to the bounded flow data plane. The host-bundle client proves that yamux is
+live and then exposes a strict root-only local stream socket. A separate
+credential-less Linux process recovers the kernel original TCP destination,
+optionally refines
 the hostname from bounded HTTP Host/TLS SNI, and preserves the preface bytes.
 Its transparent listener always carries an empty capability hint. Its explicit
 CONNECT listener accepts the same bounded per-flow provider selector as the
@@ -398,9 +461,9 @@ flow intent; no flow chooses a relay target. Session withdrawal closes local
 health leases and captured flows without fallback. The supervisor retains a
 live readiness socket lease rather than trusting a reusable marker.
 
-This phase does not implement dynamic operator publication, provider-owned
-redirect rules, provider network policy, Azure/AWS/QEMU support, or operator
-readiness/cleanup orchestration.
+This phase does not implement operator publication reconciliation/deployment,
+provider-owned redirect rules, provider network policy, Azure/AWS/QEMU support,
+or operator readiness/cleanup orchestration.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed
 implementation gates and a real provider enforcement proof.

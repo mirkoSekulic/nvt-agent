@@ -16,6 +16,7 @@ on:
       - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
+      - "nativeegressrelay/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
       - "tests/fixtures/execution-driver/**"
@@ -39,6 +40,7 @@ on:
       - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
+      - "nativeegressrelay/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
       - "tests/fixtures/execution-driver/**"
@@ -98,6 +100,10 @@ jobs:
           - name: gateway
             dockerfile: gateway/Dockerfile
             image: nvt-agent-gateway:test
+          - name: native-egress-relay
+            dockerfile: nativeegressrelay/Dockerfile
+            image: nvt-native-egress-relay:test
+            nativeEgressRelayIntegration: true
           - name: producer
             dockerfile: producers/github-comments/Dockerfile
             image: nvt-github-comments-producer:test
@@ -134,3 +140,8 @@ jobs:
         env:
           NVT_QEMU_DRIVER_IMAGE: ${{ matrix.image }}
         run: bash executiondrivers/qemu/image-smoke.sh
+      - name: Run native-egress relay OCI contract
+        if: matrix.nativeEgressRelayIntegration
+        env:
+          NVT_NATIVE_EGRESS_RELAY_IMAGE: ${{ matrix.image }}
+        run: bash nativeegressrelay/image-test.sh

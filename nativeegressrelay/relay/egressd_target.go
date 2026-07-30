@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"strconv"
 	"sync"
@@ -38,9 +37,10 @@ type parsedEgressdTargetDescriptor struct {
 // source. Reconcile replaces the complete trusted snapshot atomically; it
 // exposes no lookup by partial scope and no enumeration API.
 type EgressdTargetRegistry struct {
-	mu      sync.RWMutex
-	targets map[guestenrollment.Binding]*egressdTarget
-	dial    dialContextFunc
+	mu               sync.RWMutex
+	targets          map[guestenrollment.Binding]*egressdTarget
+	dial             dialContextFunc
+	withdrawSessions func([]guestenrollment.Binding) (<-chan struct{}, error)
 }
 
 type egressdTarget struct {
@@ -77,7 +77,18 @@ func newEgressdTargetRegistry(descriptors []EgressdTargetDescriptor, dial dialCo
 // their Done channel lets the relay withdraw exact session readiness before
 // closing existing flows.
 func (registry *EgressdTargetRegistry) Reconcile(descriptors []EgressdTargetDescriptor) error {
+	return registry.ReconcileContext(context.Background(), descriptors)
+}
+
+// ReconcileContext validates the complete snapshot before taking the registry
+// lock. Once commit begins, affected exact sessions synchronously lose flow
+// authority and readiness before replacement targets become visible. Teardown
+// completes concurrently under the one existing shutdown budget.
+func (registry *EgressdTargetRegistry) ReconcileContext(ctx context.Context, descriptors []EgressdTargetDescriptor) error {
 	if registry == nil || registry.dial == nil {
+		return errors.New("native egress target configuration is invalid")
+	}
+	if ctx == nil || ctx.Err() != nil {
 		return errors.New("native egress target configuration is invalid")
 	}
 	parsed, err := validateEgressdTargetDescriptors(descriptors)
@@ -85,13 +96,20 @@ func (registry *EgressdTargetRegistry) Reconcile(descriptors []EgressdTargetDesc
 		return err
 	}
 	registry.mu.Lock()
-	defer registry.mu.Unlock()
+	if ctx.Err() != nil {
+		registry.mu.Unlock()
+		return errors.New("native egress target configuration is invalid")
+	}
 	next := make(map[guestenrollment.Binding]*egressdTarget, len(parsed))
+	changed := make([]guestenrollment.Binding, 0, len(registry.targets))
 	for binding, descriptor := range parsed {
 		current := registry.targets[binding]
 		if current != nil && current.active && current.connectURL == descriptor.descriptor.ConnectURL {
 			next[binding] = current
 			continue
+		}
+		if current != nil && current.active {
+			changed = append(changed, binding)
 		}
 		next[binding] = &egressdTarget{
 			registry: registry, binding: binding, connectURL: descriptor.descriptor.ConnectURL,
@@ -102,10 +120,50 @@ func (registry *EgressdTargetRegistry) Reconcile(descriptors []EgressdTargetDesc
 		if next[binding] == current || !current.active {
 			continue
 		}
+		if _, remains := parsed[binding]; !remains {
+			changed = append(changed, binding)
+		}
+	}
+	withdrawn := closedSignal()
+	if len(changed) != 0 && registry.withdrawSessions != nil {
+		withdrawn, err = registry.withdrawSessions(changed)
+		if err != nil || withdrawn == nil {
+			registry.mu.Unlock()
+			return errors.New("native egress target configuration is invalid")
+		}
+	}
+	for binding, current := range registry.targets {
+		if next[binding] == current || !current.active {
+			continue
+		}
 		current.active = false
 		close(current.done)
 	}
 	registry.targets = next
+	registry.mu.Unlock()
+	timer := time.NewTimer(nativeegress.ShutdownTimeout)
+	defer timer.Stop()
+	select {
+	case <-withdrawn:
+	case <-timer.C:
+	case <-ctx.Done():
+		// The complete map and readiness withdrawal already committed. Return
+		// success so the publisher records the applied generation/digest; a
+		// lost HTTP response is recovered through status or idempotent retry.
+	}
+	return nil
+}
+
+func (registry *EgressdTargetRegistry) bindSessionWithdrawal(withdraw func([]guestenrollment.Binding) (<-chan struct{}, error)) error {
+	if registry == nil || withdraw == nil {
+		return errors.New("native egress target configuration is invalid")
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if registry.withdrawSessions != nil {
+		return errors.New("native egress target configuration is invalid")
+	}
+	registry.withdrawSessions = withdraw
 	return nil
 }
 
@@ -150,28 +208,10 @@ func validateEgressdTargetDescriptors(descriptors []EgressdTargetDescriptor) (ma
 }
 
 func parseEgressdConnectURL(value string) (string, error) {
-	endpoint, err := url.Parse(value)
-	if err != nil || endpoint.Scheme != "http" || endpoint.Host == "" || endpoint.User != nil || endpoint.Opaque != "" ||
-		endpoint.Path != "" || endpoint.RawPath != "" || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" {
+	if nativeegress.ValidateEgressdConnectURL(value) != nil {
 		return "", errors.New("native egress target configuration is invalid")
 	}
-	host, portText := endpoint.Hostname(), endpoint.Port()
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 || portText != strconv.Itoa(port) {
-		return "", errors.New("native egress target configuration is invalid")
-	}
-	if address, parseErr := netip.ParseAddr(host); parseErr == nil {
-		if address.Zone() != "" || address.String() != host {
-			return "", errors.New("native egress target configuration is invalid")
-		}
-	} else if !canonicalDNSName(host) {
-		return "", errors.New("native egress target configuration is invalid")
-	}
-	address := net.JoinHostPort(host, portText)
-	if value != "http://"+address {
-		return "", errors.New("native egress target configuration is invalid")
-	}
-	return address, nil
+	return value[len("http://"):], nil
 }
 
 func (target *egressdTarget) Binding() guestenrollment.Binding {
@@ -347,6 +387,12 @@ func (*EgressdTargetRegistry) String() string    { return "[native egress egress
 func (*EgressdTargetRegistry) GoString() string  { return "[native egress egressd target registry]" }
 func (*egressdTarget) String() string            { return "[native egress egressd target]" }
 func (*egressdTarget) GoString() string          { return "[native egress egressd target]" }
+
+func closedSignal() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
 
 var _ TargetResolver = (*EgressdTargetRegistry)(nil)
 var _ nativeegress.EgressTarget = (*egressdTarget)(nil)

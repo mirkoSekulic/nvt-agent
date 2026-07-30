@@ -1,7 +1,7 @@
 // Command nvt-native-egress-relay runs the provider-neutral native-egress
-// authenticated session boundary. It resolves only an optional process-owned
-// exact-binding egressd snapshot and remains deny-all when that snapshot is
-// omitted.
+// authenticated session boundary. It remains deny-all after every process
+// start until its separate authenticated control listener applies a complete
+// exact-binding egressd target snapshot.
 package main
 
 import (
@@ -38,14 +38,14 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	server, err := relay.NewServer(config, nil)
+	service, err := relay.NewService(config)
 	if err != nil {
 		return err
 	}
 	lifetime, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errorsChannel := make(chan error, 1)
-	go func() { errorsChannel <- server.ListenAndServe() }()
+	go func() { errorsChannel <- service.ListenAndServe() }()
 	select {
 	case err := <-errorsChannel:
 		return err
@@ -53,7 +53,7 @@ func run(arguments []string) error {
 	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), nativeegress.ShutdownTimeout)
 	defer cancel()
-	if err := server.Shutdown(shutdownContext); err != nil {
+	if err := service.Shutdown(shutdownContext); err != nil {
 		return errors.New("native egress relay shutdown failed")
 	}
 	return nil

@@ -64,7 +64,7 @@ type Server struct {
 }
 
 func NewServer(config Configuration, resolver TargetResolver) (*Server, error) {
-	if config.validate() != nil || (resolver != nil && len(config.EgressdTargets) != 0) {
+	if config.validate() != nil {
 		return nil, errors.New("native egress relay configuration is invalid")
 	}
 	tlsConfig, err := loadServingTLS(config)
@@ -76,23 +76,22 @@ func NewServer(config Configuration, resolver TargetResolver) (*Server, error) {
 		return nil, err
 	}
 	if resolver == nil {
-		if len(config.EgressdTargets) == 0 {
-			resolver = DenyAllTargetResolver{}
-		} else {
-			resolver, err = NewEgressdTargetRegistry(config.EgressdTargets)
-			if err != nil {
-				return nil, errors.New("native egress relay configuration is invalid")
-			}
-		}
+		resolver = DenyAllTargetResolver{}
 	}
-	return newServer(
+	server := newServer(
 		config.ListenAddress,
 		time.Duration(config.RevalidationIntervalSeconds)*time.Second,
 		tlsConfig,
 		authenticator,
 		resolver,
 		maxPendingTLSHandshakes,
-	), nil
+	)
+	if targetRegistry, ok := resolver.(*EgressdTargetRegistry); ok {
+		if err := targetRegistry.bindSessionWithdrawal(server.registry.WithdrawBindings); err != nil {
+			return nil, errors.New("native egress relay configuration is invalid")
+		}
+	}
+	return server, nil
 }
 
 func newServer(listenAddress string, revalidationInterval time.Duration, tlsConfig *tls.Config, authenticator nativeegress.Authenticator, resolver TargetResolver, handshakeCapacity int) *Server {

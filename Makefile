@@ -16,6 +16,7 @@ PRODUCER_IMAGE ?= nvt-github-comments-producer:latest
 GATEWAY_IMAGE ?= nvt-agent-gateway:latest
 EGRESSD_IMAGE ?= nvt-egressd:latest
 CAPTURED_IMAGE ?= nvt-captured:latest
+NATIVE_EGRESS_RELAY_IMAGE ?= nvt-native-egress-relay:latest
 DIND_IMAGE ?= nvt-dind:latest
 ECHO_IMAGE ?= nvt-smoke-echo:latest
 PRODUCER_VALUES ?= values.nvt-local.yaml
@@ -36,7 +37,7 @@ OPERATOR_KIND_EXTRA_IMAGE_TARGETS := gateway-kind-load
 OPERATOR_KIND_GATEWAY_HELM_ARGS := --set gateway.enabled=true --set gateway.image.repository=$(word 1,$(subst :, ,$(GATEWAY_IMAGE))) --set gateway.image.tag=$(word 2,$(subst :, ,$(GATEWAY_IMAGE)))
 endif
 
-.PHONY: runtime-build dind-build broker-build egressd-build captured-build transparent-compose-smoke echo-build echo-kind-load operator-build execution-driver-host-build qemu-execution-driver-build qemu-execution-driver-test host-bundle-build host-bundle-test guest-enrollment-test producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret codex-mediated-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
+.PHONY: runtime-build dind-build broker-build egressd-build captured-build native-egress-relay-build transparent-compose-smoke echo-build echo-kind-load operator-build execution-driver-host-build qemu-execution-driver-build qemu-execution-driver-test host-bundle-build host-bundle-test guest-enrollment-test producer-build gateway-build operator-helm-test operator-kind-cluster operator-kind-cluster-enforced operator-kind-images operator-kind-install operator-kind-setup operator-kind-delete operator-kind-smoke operator-kind-smoke-render gateway-kind-load producer-kind-load producer-kind-install producer-kind-setup operator-codex-auth-secret codex-mediated-proof github-comments-producer-secret broker-env-secret operator-smoke-schedule infra-up infra-down infra-network-rm agent-init agent-copy agent-cp agent-grant agent-up agent-logs agent-shell agent-doctor agent-ps agent-forward forward agent-down agent-down-all agent-rm agent-rm-all plugin-init down-all clean nuke
 
 runtime-build:
 	bash scripts/runtime-build.sh $(if $(NO_CACHE),--no-cache)
@@ -52,6 +53,9 @@ egressd-build:
 
 captured-build:
 	docker build -f captured/Dockerfile -t "$(CAPTURED_IMAGE)" .
+
+native-egress-relay-build:
+	docker build -f nativeegressrelay/Dockerfile -t "$(NATIVE_EGRESS_RELAY_IMAGE)" .
 
 transparent-compose-smoke:
 	bash tests/runtime/compose-transparent-smoke.sh

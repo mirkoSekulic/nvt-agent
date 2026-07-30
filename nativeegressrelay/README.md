@@ -15,22 +15,26 @@ resolves the exact target, and reserves the active/standby slot before sending
 acknowledgement and cannot cause the guest to publish readiness. An ACK write
 failure removes its reservation.
 
-The command optionally constructs a production `EgressdTargetRegistry` from a
-strict process-owned `egressd_targets` snapshot. Each entry maps one complete
-five-field Binding to exactly one canonical per-run egressd CONNECT listener.
-Each canonical listener may appear for only one Binding in the complete
-snapshot; sharing it would cross the per-run grant and credential boundary.
-Target lookup is exact-only; guest destination input can never choose an
-endpoint, run, or driver. If the snapshot is omitted, the command retains its
-safe `DenyAllTargetResolver` behavior and acknowledges no sessions.
+The command constructs a production `EgressdTargetRegistry` with no targets.
+Every process start is unpublished and deny-all. A distinct authenticated TLS
+control listener accepts only complete, monotonically versioned snapshots from
+the future trusted operator publisher. Each entry maps one complete five-field
+Binding to exactly one canonical per-run egressd CONNECT listener. Each
+canonical listener may appear for only one Binding; sharing it would cross the
+per-run grant and credential boundary. Target lookup is exact-only, and guest
+destination input can never choose an endpoint, run, or driver.
 
-The snapshot is trusted control-plane input loaded once at process start.
-Changing it currently requires a coordinated relay restart. The registry's
-atomic level-triggered `Reconcile` method is an in-process seam for later
-authenticated operator publication; this phase adds no watcher or target-
-registration HTTP API. Removed or replaced mappings stop new flow opens and
-withdraw their exact sessions without moving established flows to another
-target.
+Publication is atomic and in-memory only. Invalid or pre-commit canceled
+requests preserve the complete prior map and generation/digest. Removed or
+replaced mappings synchronously lose flow-open authority and exact session
+readiness before the ACK; unchanged bindings stay active. Restart discards all
+topology and requires a fresh complete publication. There is no patch,
+enumeration, fallback, endpoint discovery, persistence, or unauthenticated
+registration API.
+
+Configuration version 2 makes the separate control listener mandatory and
+removes the version-1 startup `egressd_targets` member. Version 1 is rejected
+rather than silently carrying target authority across a process restart.
 
 ## Configuration
 
@@ -39,41 +43,48 @@ credentials from flags or environment variables:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "listen_address": "0.0.0.0:7445",
   "tls_certificate_file": "/run/nvt-native-egress-relay/tls.crt",
   "tls_key_file": "/run/nvt-native-egress-relay/tls.key",
+  "control_listen_address": "0.0.0.0:7446",
+  "control_tls_certificate_file": "/run/nvt-native-egress-relay/control-tls.crt",
+  "control_tls_key_file": "/run/nvt-native-egress-relay/control-tls.key",
+  "control_credential_file": "/run/nvt-native-egress-relay/control-token",
+  "control_timeout_seconds": 10,
   "broker_url": "https://nvt-broker.nvt.svc.cluster.local:8443",
   "broker_server_name": "nvt-broker.nvt.svc.cluster.local",
   "broker_ca_file": "/run/nvt-native-egress-relay/broker-ca.crt",
   "authentication_timeout_seconds": 5,
-  "revalidation_interval_seconds": 30,
-  "egressd_targets": [
-    {
-      "binding": {
-        "agent_run_uid": "00000000-0000-4000-8000-000000000001",
-        "execution_id": "execution-id",
-        "driver_registration": "external-vm-driver",
-        "desired_generation": 1,
-        "guest_instance_id": "provider-owned-instance-id"
-      },
-      "connect_url": "http://run-egressd.example:8470"
-    }
-  ]
+  "revalidation_interval_seconds": 30
 }
 ```
 
 The default path is `/etc/nvt-agent/native-egress-relay.json`; `--config` may
-select another absolute file. The configuration and private key must be
-owner-only, regular, non-symlink, single-link files owned by the process
-effective UID. The serving certificate and broker CA may be group/world
-readable but must be process-owned and not group/world writable. All paths are
-absolute and canonical. The broker is one canonical HTTPS origin with exact
-explicit DNS SNI and CA trust; system roots, redirects, environment proxies,
-plaintext fallback, and credential helpers are not used.
+select another absolute file. The configuration, both private keys, and the
+control credential must be owner-only, regular, non-symlink, single-link files
+owned by the process effective UID. Serving certificates and the broker CA may
+be group/world readable but must be process-owned and not group/world
+writable. All paths are absolute and canonical. The broker is one canonical
+HTTPS origin with exact explicit DNS SNI and CA trust; system roots, redirects,
+environment proxies, plaintext fallback, and credential helpers are not used.
 
 Authentication timeout is positive and at most the frozen five-second
-handshake deadline. Revalidation is positive and at most 30 seconds.
+handshake deadline. Revalidation is positive and at most 30 seconds. The
+control timeout is positive and at most ten seconds. Guest and control listen
+addresses and serving identities are distinct. The purpose credential is
+canonical `nvt_rc1_` material loaded only from its mode `0600` file and is
+compared in constant time.
+
+The operator-side publisher contract requires explicit TLS 1.2+ CA and exact
+server-name trust, forbids redirects and ambient proxies, and uses only:
+
+- `POST /v1/native-egress-targets/snapshot` for a complete canonical snapshot;
+- `POST /v1/native-egress-targets/status` for bounded non-topological state.
+
+An applied empty snapshot is published deny-all. It differs from process-start
+unpublished deny-all through the authenticated `published` status bit and
+positive generation/digest. Status never lists bindings or listeners.
 
 Each target URL is canonical `http://host:port`. The adapter sends the
 validated Destination as HTTP/1.1 CONNECT authority and `Host`, and sends the
@@ -102,9 +113,12 @@ go vet ./...
 go test -race -count=1 ./...
 ```
 
-No OCI image or coordinated release artifact is published by this phase.
-The opt-in host-bundle capture boundary can now feed this relay, but dynamic
-operator publication, provider-owned guest redirect installation,
+The coordinated `nvt-native-egress-relay` image is a static binary in a
+distroless non-root runtime with no shell, package manager, Git, Go toolchain,
+or cloud SDK. This phase publishes the image but adds no Helm deployment,
+Service, RBAC, Secret, or operator reconciliation. The opt-in host-bundle
+capture boundary can feed this relay after a snapshot is published, but
+operator publication wiring, provider-owned guest redirect installation,
 mediated-VM readiness, provider confinement, and cloud/provider integration
 remain separate future gates; this adapter alone does not make production VM
 mediation complete.

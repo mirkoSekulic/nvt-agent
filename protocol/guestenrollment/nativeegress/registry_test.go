@@ -239,6 +239,56 @@ func TestRegistryWithdrawsReadinessBeforeClosingFlows(t *testing.T) {
 	target.closePeers()
 }
 
+func TestRegistryWithdrawBindingsRemovesExactActiveAndStandbyOnly(t *testing.T) {
+	registry := NewSessionRegistry()
+	defer registry.Close()
+	removedBinding := testBinding("run-published-remove")
+	unaffectedBinding := testBinding("run-published-unaffected")
+
+	removedActive := mustSession(t, removedBinding, 1)
+	removedReservation, err := registry.Reserve(removedActive)
+	if err != nil || !removedReservation.Activate() {
+		t.Fatal(err)
+	}
+	removedStandby := mustSession(t, removedBinding, 2)
+	standbyReservation, err := registry.Reserve(removedStandby)
+	if err != nil || !standbyReservation.Activate() {
+		t.Fatal(err)
+	}
+	unaffected := mustSession(t, unaffectedBinding, 1)
+	unaffectedReservation, err := registry.Reserve(unaffected)
+	if err != nil || !unaffectedReservation.Activate() {
+		t.Fatal(err)
+	}
+
+	done, err := registry.WithdrawBindings([]guestenrollment.Binding{removedBinding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ready := registry.Active(removedBinding); ready {
+		t.Fatal("withdrawn binding remained ready when withdrawal returned")
+	}
+	if current, ready := registry.Active(unaffectedBinding); !ready || current != unaffected {
+		t.Fatal("exact withdrawal disturbed an unaffected binding")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("withdrawn sessions did not close")
+	}
+	for name, session := range map[string]*Session{"active": removedActive, "standby": removedStandby} {
+		select {
+		case <-session.Done():
+		default:
+			t.Fatalf("withdrawn %s session remained live", name)
+		}
+	}
+	if _, err := registry.WithdrawBindings([]guestenrollment.Binding{removedBinding, removedBinding}); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("duplicate withdrawal error=%v", err)
+	}
+	unaffectedReservation.Remove()
+}
+
 func TestSessionOriginatedCloseWithdrawsRegistryBeforeFlows(t *testing.T) {
 	binding := testBinding("run-session-close-order")
 	registry := NewSessionRegistry()
