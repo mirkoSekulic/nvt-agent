@@ -1,10 +1,11 @@
 # Native VM mediated-egress contract
 
 Status: versioned provider-neutral contract and hermetic conformance proof
-(`nvt.native-egress/v1`) with a production broker identity authority and a
-trusted host-bundle guest client that establishes the authenticated outbound
-session. No production relay/target adapter, agent traffic forwarding,
-provider network implementation, or operator readiness wiring exists yet.
+(`nvt.native-egress/v1`) with a production broker identity authority, trusted
+host-bundle guest client, and standalone cluster relay core for authenticated
+exact-binding session admission. No production target adapter, flow transport,
+agent traffic forwarding, provider network implementation, or operator
+readiness wiring exists yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -305,8 +306,14 @@ enrollment/runtime identity. The host bundle includes a separate opt-in trusted
 client/service which obtains only the short-lived purpose credential through
 root-only IPC, validates explicit relay CA/SNI/TLS, reconnects with the current
 credential, and renews make-before-break with at most current plus pending in
-memory. This phase does not implement a production relay, egressd/captured
-behavior, provider network policy, Azure/AWS/QEMU support, or operator
+memory. The standalone relay core terminates explicit TLS, authenticates the
+bearer through that broker authority, resolves a target only by complete exact
+Binding, and owns the shared bounded active/standby registry. Its production
+command is deliberately deny-all because no trusted target adapter is wired;
+any post-handshake guest payload is rejected.
+
+This phase does not implement the flow transport, egressd/captured target
+adapter, provider network policy, Azure/AWS/QEMU support, or operator
 readiness/cleanup orchestration.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed
