@@ -210,7 +210,8 @@ separate provider-neutral [native VM mediated-egress contract](native-egress.md)
 is frozen with a conformance proof, production broker identity endpoints, and
 a separate purpose-specific host-bundle flow client. It does not reuse this
 control/workspace credential. A standalone relay serves the matching bounded
-data plane, but a production target adapter, captured agent traffic, provider
-enforcement, and operator readiness are not implemented. There is still no
-production mediated VM egress or cloud provider. Pod, Kata, Compose, agentd,
-and runtime plugins remain unchanged.
+data plane and may use an explicit process-owned exact-binding adapter into the
+run's existing egressd CONNECT listener. Captured agent traffic, dynamic
+operator target publication/readiness, and provider enforcement are not
+implemented. There is still no production mediated VM egress or cloud provider.
+Pod, Kata, Compose, agentd, and runtime plugins remain unchanged.

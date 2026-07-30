@@ -1,10 +1,12 @@
 package relay
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -16,6 +18,7 @@ func TestConfigurationIsStrictCanonicalProcessOwnedAndRedacted(t *testing.T) {
 		TLSCertificateFile: filepath.Join(directory, "relay.crt"), TLSKeyFile: filepath.Join(directory, "relay.key"),
 		BrokerURL: "https://broker.example:8443", BrokerServerName: "broker.example", BrokerCAFile: filepath.Join(directory, "broker-ca.crt"),
 		AuthenticationTimeoutSeconds: 5, RevalidationIntervalSeconds: 30,
+		EgressdTargets: []EgressdTargetDescriptor{{Binding: testBinding("configured"), ConnectURL: "http://egressd.example:8470"}},
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
@@ -23,11 +26,12 @@ func TestConfigurationIsStrictCanonicalProcessOwnedAndRedacted(t *testing.T) {
 	}
 	configPath := writeTestFile(t, directory, "config.json", encoded, 0o600)
 	loaded, err := LoadConfiguration(configPath)
-	if err != nil || loaded != config {
+	if err != nil || !reflect.DeepEqual(loaded, config) {
 		t.Fatalf("valid configuration failed: %#v %v", loaded, err)
 	}
 	for _, formatted := range []string{fmt.Sprint(config), fmt.Sprintf("%+v", config), fmt.Sprintf("%#v", config)} {
-		if strings.Contains(formatted, config.BrokerURL) || strings.Contains(formatted, config.TLSKeyFile) {
+		if strings.Contains(formatted, config.BrokerURL) || strings.Contains(formatted, config.TLSKeyFile) ||
+			strings.Contains(formatted, config.EgressdTargets[0].ConnectURL) || strings.Contains(formatted, config.EgressdTargets[0].Binding.GuestInstanceID) {
 			t.Fatalf("configuration formatting exposed internals: %q", formatted)
 		}
 	}
@@ -43,6 +47,17 @@ func TestConfigurationIsStrictCanonicalProcessOwnedAndRedacted(t *testing.T) {
 		func() Configuration { value := config; value.TLSKeyFile = value.TLSCertificateFile; return value }(),
 		func() Configuration { value := config; value.AuthenticationTimeoutSeconds = 6; return value }(),
 		func() Configuration { value := config; value.RevalidationIntervalSeconds = 31; return value }(),
+		func() Configuration {
+			value := config
+			value.EgressdTargets = append(append([]EgressdTargetDescriptor(nil), value.EgressdTargets...), value.EgressdTargets[0])
+			return value
+		}(),
+		func() Configuration {
+			value := config
+			value.EgressdTargets = append([]EgressdTargetDescriptor(nil), value.EgressdTargets...)
+			value.EgressdTargets[0].ConnectURL = "http://egressd.example:08470"
+			return value
+		}(),
 	}
 	for index, invalid := range invalidValues {
 		if invalid.validate() == nil {
@@ -52,11 +67,16 @@ func TestConfigurationIsStrictCanonicalProcessOwnedAndRedacted(t *testing.T) {
 
 	unknown := append([]byte(nil), encoded[:len(encoded)-1]...)
 	unknown = append(unknown, []byte(`,"credential":"forbidden"}`)...)
+	targetField := []byte(`"connect_url":"http://egressd.example:8470"`)
+	duplicateTarget := bytes.Replace(encoded, targetField, []byte(`"connect_url":"http://egressd.example:8470","connect_url":"http://other.example:8470"`), 1)
+	unknownTarget := bytes.Replace(encoded, targetField, []byte(`"connect_url":"http://egressd.example:8470","provider_token":"forbidden"`), 1)
 	for name, value := range map[string][]byte{
-		"duplicate": []byte(`{"version":1,"version":1}`),
-		"unknown":   unknown,
-		"trailing":  append(append([]byte(nil), encoded...), []byte(` {}`)...),
-		"oversized": append(make([]byte, MaxConfigurationBytes), 'x'),
+		"duplicate":        []byte(`{"version":1,"version":1}`),
+		"duplicate target": duplicateTarget,
+		"unknown":          unknown,
+		"unknown target":   unknownTarget,
+		"trailing":         append(append([]byte(nil), encoded...), []byte(` {}`)...),
+		"oversized":        append(make([]byte, MaxConfigurationBytes), 'x'),
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeTestFile(t, directory, name+".json", value, 0o600)
@@ -97,6 +117,25 @@ func TestServerRejectsUnsafeServingAndTrustFiles(t *testing.T) {
 	}
 	if _, err := NewServer(config, nil); err != nil {
 		t.Fatal(err)
+	}
+	defaultServer, err := NewServer(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := defaultServer.resolver.(DenyAllTargetResolver); !ok {
+		t.Fatal("omitted egressd targets did not preserve deny-all default")
+	}
+	configured := config
+	configured.EgressdTargets = []EgressdTargetDescriptor{{Binding: testBinding("configured-server"), ConnectURL: "http://egressd.example:8470"}}
+	configuredServer, err := NewServer(configured, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := configuredServer.resolver.(*EgressdTargetRegistry); !ok {
+		t.Fatal("explicit egressd target snapshot did not configure adapter")
+	}
+	if _, err := NewServer(configured, DenyAllTargetResolver{}); err == nil {
+		t.Fatal("multiple target sources were accepted")
 	}
 	if err := os.Chmod(keyPath, 0o640); err != nil {
 		t.Fatal(err)

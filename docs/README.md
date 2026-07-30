@@ -48,8 +48,9 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   infrastructure-confinement, exact identity, flow-routing, readiness, and
   cleanup contract with a hermetic conformance proof and production broker
   identity authority, trusted guest flow client, and a standalone exact-binding
-  relay with bounded flow transport; target adaptation, captured traffic,
-  operator readiness, and provider enforcement are not implemented.
+  relay with bounded flow transport plus an optional process-owned per-run
+  egressd adapter; captured traffic, dynamic operator publication/readiness,
+  and provider enforcement are not implemented.
 
 ## Operations And Testing
 

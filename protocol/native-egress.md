@@ -2,10 +2,11 @@
 
 Status: versioned provider-neutral contract and hermetic conformance proof
 (`nvt.native-egress/v1`) with a production broker identity authority, trusted
-host-bundle guest client, standalone cluster relay, and bounded yamux flow
-transport for authenticated exact-binding sessions. No production target
-adapter, captured-agent traffic integration, provider network implementation,
-or operator readiness wiring exists yet.
+host-bundle guest client, standalone cluster relay, bounded yamux flow
+transport, and an optional exact-binding adapter into an existing per-run
+`egressd` CONNECT listener. Captured-agent traffic integration, dynamic
+operator publication/readiness, and provider network enforcement do not exist
+yet.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -56,9 +57,9 @@ egress connections are guest-initiated outbound connections.
   destination.
 - **Per-run trusted egress target:** remains authoritative for hostname/DNS and
   IP validation, private-address denial, broker grants, quotas, audit, TLS
-  mediation, and credential injection. A future adapter may use the current
-  per-run `egressd` service, but no Kubernetes Service name is part of this
-  generic contract.
+  mediation, and credential injection. The optional relay adapter can use the
+  current per-run `egressd` CONNECT service from trusted configuration, but no
+  endpoint or Kubernetes Service name is part of this protocol or guest input.
 
 Every identity and session is bound by exact equality to all five existing
 `guestenrollment.Binding` fields:
@@ -214,6 +215,29 @@ target first. That target independently resolves and validates the destination
 and rejects cluster/private/metadata/control-plane addresses. Supplying another
 run's target name or any internal service as intent cannot select that target.
 
+The production relay may load a bounded process-owned snapshot mapping each
+complete exact Binding to one canonical `http://host:port` per-run `egressd`
+CONNECT listener. Omission preserves deny-all behavior. The command loads this
+strict snapshot once at startup; changing it requires a coordinated relay
+restart. The in-process registry exposes atomic level-triggered replacement
+only as an implementation seam for a future trusted operator adapter. There is
+no target-registration HTTP endpoint, partial lookup, enumeration, fallback,
+guest-supplied endpoint, or configuration watcher. Malformed, duplicate, or
+over-capacity descriptors reject the complete configuration. Two different
+Bindings MUST NOT name the same canonical egressd listener: the target is a
+per-run authority and cannot be shared across exact bindings.
+
+For this adapter, each validated Destination becomes exactly one HTTP/1.1
+`CONNECT` request whose request authority and `Host` are the canonical
+destination host and port. The optional canonical capability hint is copied
+only to `X-NVT-Capability`. The adapter sends no proxy authorization, broker
+bearer, runtime identity, session credential, provider credential, or injected
+secret. It uses structured HTTP request/response handling with a bounded
+response header and flow-open deadline. An authoritative egressd `403` maps to
+the fixed flow denial; malformed, unavailable, timeout, or other non-success
+responses fail closed generically. Only an accepted CONNECT yields the raw
+backpressured connection, including TCP half-close semantics.
+
 The workspace yamux purpose is not reused: workspace streams are initiated by
 the gateway toward one fixed guest loopback service, while egress flows are
 initiated by the guest toward untrusted requested destinations and terminate at
@@ -337,14 +361,18 @@ credential, and renews make-before-break with at most current plus pending in
 memory. The standalone relay core terminates explicit TLS, authenticates the
 bearer through that broker authority, resolves a target only by complete exact
 Binding, and owns the shared bounded active/standby registry. Its production
-command is deliberately deny-all because no trusted target adapter is wired;
-the relay sends `hello_ack` only after the authenticated session has secured
-its bounded active/standby reservation, then switches the connection to the
+command remains deny-all unless the trusted process-owned egressd target
+snapshot is explicitly configured. When configured, the relay routes every
+flow only through the exact binding's selected adapter. Mapping replacement or
+removal synchronously stops new opens, withdraws the associated session, and
+does not migrate existing flows to another target. The relay sends `hello_ack`
+only after the authenticated session has secured both the exact target and its
+bounded active/standby reservation, then switches the connection to the
 bounded flow data plane. The host-bundle client proves that yamux is live before
 publishing its transport readiness.
 
-This phase does not implement the egressd/captured target adapter, captured
-agent traffic integration, provider network policy, Azure/AWS/QEMU support, or
+This phase does not implement dynamic operator publication, captured agent
+traffic integration, provider network policy, Azure/AWS/QEMU support, or
 operator readiness/cleanup orchestration.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. Production VM mediated egress requires those later reviewed

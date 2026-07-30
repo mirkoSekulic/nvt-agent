@@ -64,7 +64,7 @@ type Server struct {
 }
 
 func NewServer(config Configuration, resolver TargetResolver) (*Server, error) {
-	if config.validate() != nil {
+	if config.validate() != nil || (resolver != nil && len(config.EgressdTargets) != 0) {
 		return nil, errors.New("native egress relay configuration is invalid")
 	}
 	tlsConfig, err := loadServingTLS(config)
@@ -76,7 +76,14 @@ func NewServer(config Configuration, resolver TargetResolver) (*Server, error) {
 		return nil, err
 	}
 	if resolver == nil {
-		resolver = DenyAllTargetResolver{}
+		if len(config.EgressdTargets) == 0 {
+			resolver = DenyAllTargetResolver{}
+		} else {
+			resolver, err = NewEgressdTargetRegistry(config.EgressdTargets)
+			if err != nil {
+				return nil, errors.New("native egress relay configuration is invalid")
+			}
+		}
 	}
 	return newServer(
 		config.ListenAddress,
@@ -284,6 +291,18 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		cancelHandshake()
 		return
 	}
+	releaseTargetAdmission, targetReady := acquireTargetAdmission(admission.target)
+	if !targetReady {
+		cancelHandshake()
+		_ = session.Close()
+		return
+	}
+	targetAdmissionHeld := true
+	defer func() {
+		if targetAdmissionHeld {
+			releaseTargetAdmission()
+		}
+	}()
 	reservation, err := server.registry.Reserve(session)
 	if err != nil {
 		cancelHandshake()
@@ -309,6 +328,9 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 	if !reservation.Activate() {
 		return
 	}
+	watchTargetLifecycle(session, admission.target)
+	releaseTargetAdmission()
+	targetAdmissionHeld = false
 	releaseHandshake()
 	_ = transport.Serve(server.lifetimeContext)
 }

@@ -12,9 +12,10 @@ separate
 trusted guest forwarder and production acceptor now exist, but this control
 connection is not multiplexed. Authorized external-VM browser routing uses the
 separate workspace connection. The provider-neutral
-[`nvt.native-egress/v1`](native-egress.md) contract is also separate and has no
-production target adapter or provider enforcement yet; its purpose-specific
-guest/relay flow transport does not reuse this control connection.
+[`nvt.native-egress/v1`](native-egress.md) contract is also separate. Its
+purpose-specific guest/relay flow transport and optional exact-binding egressd
+adapter do not reuse this control connection; captured traffic, dynamic
+operator publication/readiness, and provider enforcement remain unwired.
 
 ## Trust boundary
 

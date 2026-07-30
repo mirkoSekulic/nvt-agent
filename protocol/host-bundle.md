@@ -170,7 +170,8 @@ The current bundle includes the real `agentd` and `agentdctl` sources, the
 trusted native control-session and optional workspace clients, the optional
 native-egress session and flow-transport client, plus a bounded session fixture
 for the guest-side lifecycle gate. It does not package code-server, an AI
-runtime, plugins, a production egress target adapter, or captured agent traffic.
+runtime, plugins, the cluster-side egressd target adapter, or captured agent
+traffic.
 The loopback workspace service remains an explicit provider-installed
 prerequisite; the production gateway can route an already-authorized external
 VM browser session to it through the exact native workspace binding.
@@ -265,7 +266,8 @@ expose the bounded active stream boundary consumed by authorized external-VM
 browser routing. The provider-neutral native VM mediated-egress contract,
 production broker identity endpoints, and trusted host-bundle
 session/flow-transport client now exist. A production relay core serves the
-corresponding bounded data plane, but a trusted target adapter, captured agent
-traffic integration, operator readiness wiring, and provider-owned external
+corresponding bounded data plane and may use an explicit process-owned
+exact-binding adapter into per-run egressd. Captured agent traffic integration,
+dynamic operator target publication/readiness, and provider-owned external
 network confinement remain future gates before a mediated external VM can be
 ready.

@@ -1,6 +1,6 @@
 // Package relay implements the trusted cluster-side admission, lifecycle, and
-// bounded flow-transport boundary for nvt.native-egress/v1. It deliberately
-// does not implement an egress target adapter.
+// bounded flow-transport boundary for nvt.native-egress/v1, including an
+// optional exact-binding adapter to the existing per-run egressd CONNECT path.
 package relay
 
 import (
@@ -32,15 +32,16 @@ var dnsNamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?
 // Configuration contains only non-secret listener and trust-file metadata.
 // Private key and CA material are read from process-owned files.
 type Configuration struct {
-	Version                      int    `json:"version"`
-	ListenAddress                string `json:"listen_address"`
-	TLSCertificateFile           string `json:"tls_certificate_file"`
-	TLSKeyFile                   string `json:"tls_key_file"`
-	BrokerURL                    string `json:"broker_url"`
-	BrokerServerName             string `json:"broker_server_name"`
-	BrokerCAFile                 string `json:"broker_ca_file"`
-	AuthenticationTimeoutSeconds int    `json:"authentication_timeout_seconds"`
-	RevalidationIntervalSeconds  int    `json:"revalidation_interval_seconds"`
+	Version                      int                       `json:"version"`
+	ListenAddress                string                    `json:"listen_address"`
+	TLSCertificateFile           string                    `json:"tls_certificate_file"`
+	TLSKeyFile                   string                    `json:"tls_key_file"`
+	BrokerURL                    string                    `json:"broker_url"`
+	BrokerServerName             string                    `json:"broker_server_name"`
+	BrokerCAFile                 string                    `json:"broker_ca_file"`
+	AuthenticationTimeoutSeconds int                       `json:"authentication_timeout_seconds"`
+	RevalidationIntervalSeconds  int                       `json:"revalidation_interval_seconds"`
+	EgressdTargets               []EgressdTargetDescriptor `json:"egressd_targets,omitempty"`
 }
 
 func LoadConfiguration(path string) (Configuration, error) {
@@ -87,6 +88,9 @@ func (config Configuration) validate() error {
 	revalidationInterval := time.Duration(config.RevalidationIntervalSeconds) * time.Second
 	if authenticationTimeout <= 0 || authenticationTimeout > nativeegress.HandshakeTimeout ||
 		revalidationInterval <= 0 || revalidationInterval > nativeegress.RevalidationInterval {
+		return errors.New("native egress relay configuration is invalid")
+	}
+	if _, err := validateEgressdTargetDescriptors(config.EgressdTargets); err != nil {
 		return errors.New("native egress relay configuration is invalid")
 	}
 	return nil
