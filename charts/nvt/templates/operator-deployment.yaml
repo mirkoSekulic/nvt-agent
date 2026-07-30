@@ -36,15 +36,20 @@ spec:
       {{- include "nvt.operatorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- if .Values.executionDrivers.guestEnrollment.enabled }}
+      {{- if or .Values.executionDrivers.guestEnrollment.enabled .Values.nativeEgressRelay.enabled }}
       annotations:
+        {{- if .Values.executionDrivers.guestEnrollment.enabled }}
         checksum/guest-enrollment-client: {{ .Values.executionDrivers.guestEnrollment | toJson | sha256sum | quote }}
+        {{- end }}
+        {{- if .Values.nativeEgressRelay.enabled }}
+        checksum/native-egress-publication: {{ .Values.nativeEgressRelay | toJson | sha256sum | quote }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "nvt.operatorSelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: nvt-operator
-      {{- if .Values.executionDrivers.registrations }}
+      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -95,6 +100,10 @@ spec:
             - name: NVT_GUEST_ENROLLMENT_CONFIG_FILE
               value: /var/run/nvt-guest-enrollment/config.json
             {{- end }}
+            {{- if .Values.nativeEgressRelay.enabled }}
+            - name: NVT_NATIVE_EGRESS_PUBLICATION_CONFIG_FILE
+              value: /var/run/nvt-native-egress-publication/config.json
+            {{- end }}
             {{- if .Values.egress.allowInsecureUpstreams }}
             - name: NVT_ALLOW_INSECURE_UPSTREAMS
               value: "1"
@@ -120,8 +129,9 @@ spec:
             httpGet:
               path: /readyz
               port: 8081
-          {{- if .Values.executionDrivers.registrations }}
+          {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled }}
           volumeMounts:
+            {{- if .Values.executionDrivers.registrations }}
             - name: execution-driver-registrations
               mountPath: /var/run/nvt-execution-drivers
               readOnly: true
@@ -130,9 +140,16 @@ spec:
               mountPath: /var/run/nvt-guest-enrollment
               readOnly: true
             {{- end }}
+            {{- end }}
+            {{- if .Values.nativeEgressRelay.enabled }}
+            - name: native-egress-publication
+              mountPath: /var/run/nvt-native-egress-publication
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if .Values.executionDrivers.registrations }}
+      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled }}
       volumes:
+        {{- if .Values.executionDrivers.registrations }}
         - name: execution-driver-registrations
           projected:
             defaultMode: 0440
@@ -172,5 +189,24 @@ spec:
                   items:
                     - key: {{ .Values.executionDrivers.guestEnrollment.orchestratorAuth.tokenKey | quote }}
                       path: orchestrator-token
+        {{- end }}
+        {{- end }}
+        {{- if .Values.nativeEgressRelay.enabled }}
+        - name: native-egress-publication
+          projected:
+            defaultMode: 0440
+            sources:
+              - configMap:
+                  name: nvt-native-egress-publication-client
+                  items:
+                    - key: config.json
+                      path: config.json
+              - secret:
+                  name: {{ .Values.nativeEgressRelay.credentials.existingSecret | quote }}
+                  items:
+                    - key: {{ .Values.nativeEgressRelay.credentials.controlCAKey | quote }}
+                      path: control-ca.crt
+                    - key: {{ .Values.nativeEgressRelay.credentials.controlTokenKey | quote }}
+                      path: control-token
         {{- end }}
       {{- end }}

@@ -18,7 +18,7 @@ failure removes its reservation.
 The command constructs a production `EgressdTargetRegistry` with no targets.
 Every process start is unpublished and deny-all. A distinct authenticated TLS
 control listener accepts only complete, monotonically versioned snapshots from
-the future trusted operator publisher. Each entry maps one complete five-field
+the trusted operator publisher. Each entry maps one complete five-field
 Binding to exactly one canonical per-run egressd CONNECT listener. Each
 canonical listener may appear for only one Binding; sharing it would cross the
 per-run grant and credential boundary. Target lookup is exact-only, and guest
@@ -35,6 +35,14 @@ registration API.
 Configuration version 2 makes the separate control listener mandatory and
 removes the version-1 startup `egressd_targets` member. Version 1 is rejected
 rather than silently carrying target authority across a process restart.
+
+The Helm chart can deploy this command only when explicitly enabled. It copies
+administrator-owned projected TLS and control material into a memory-backed
+owner-only volume for the non-root process, exposes separate ClusterIP data and
+control Services, and restricts the control port to the operator. The operator
+uses authenticated status after restart and republishes the complete snapshot
+before setting per-run native-egress readiness. Provider ingress routing and
+infrastructure confinement remain separate future gates.
 
 ## Configuration
 

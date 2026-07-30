@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.45`; otherwise the API server may prune the
+of, upgrading to chart `0.8.46`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.45 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.46 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.45 --namespace nvt --create-namespace
+  --version 0.8.46 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -421,7 +421,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. External drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.45`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.46`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -431,6 +431,20 @@ publishes only that guest's non-secret complete routing identity in
 `AgentRun.status.nativeGuestBinding`. It clears the field before replacement
 or cleanup. No enrollment/runtime/session credential, endpoint, or provider
 state enters status, and Pod/Kata runs leave the field absent.
+
+Native VM mediated-egress relay deployment and target publication are
+separately opt-in through `nativeEgressRelay.enabled`. The relay starts
+unpublished and deny-all, and the operator publishes only Ready per-run egressd
+targets keyed by the complete accepted guest binding. Existing administrator
+Secrets provide the guest/control TLS identities, control bearer, and broker
+CA. An init container copies projected material into a memory-backed volume
+with owner-only mode for the non-root relay. The bearer is mounted only into
+the relay and operator Pods; the control Service is restricted to the operator
+and is never exposed through the gateway or ingress. Empty
+`data.ingressCIDRs` keeps the guest listener fenced.
+
+This integration does not provide provider NIC confinement or redirect wiring;
+those remain required before a VM can resist bypass by a root-capable guest.
 
 ```yaml
 agentSchedule:

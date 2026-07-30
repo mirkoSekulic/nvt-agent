@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -180,6 +181,13 @@ func (backend externalExecutionBackend) Reconcile(
 		}
 		result = earliestRequeue(result, enrollmentResult)
 	}
+	if nativeMediatedExternalRun(&agentRun) {
+		nativeEgressResult, nativeEgressErr := reconciler.reconcileNativeEgress(ctx, &agentRun, status)
+		if nativeEgressErr != nil {
+			return ctrl.Result{}, nativeEgressErr
+		}
+		result = earliestRequeue(result, nativeEgressResult)
+	}
 	deadlineResult, deadlineExceeded, err = reconciler.reconcileExternalActiveDeadline(ctx, &agentRun)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -245,6 +253,11 @@ func (backend externalExecutionBackend) reconcileOperationalCleanup(
 ) (ctrl.Result, error) {
 	if cleared, err := reconciler.clearNativeGuestBindingStatus(ctx, agentRun); err != nil || cleared {
 		return ctrl.Result{Requeue: cleared}, err
+	}
+	if nativeMediatedExternalRun(agentRun) {
+		if err := reconciler.cleanupNativeEgressResources(ctx, agentRun); err != nil {
+			return reconciler.recordExternalCleanupFailure(ctx, agentRun, "NativeEgressCleanupPending", externalExecutionCleanupRetry)
+		}
 	}
 	executionID, err := externalExecutionID(agentRun.UID)
 	if err != nil {
@@ -471,6 +484,11 @@ func (r *AgentRunReconciler) recordGuestEnrollmentCondition(
 	binding *guestenrollment.Binding,
 	reason string,
 ) (ctrl.Result, error) {
+	if binding == nil && agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	previous := agentRun.Status.DeepCopy()
 	conditionStatus := metav1.ConditionFalse
 	message := "external guest bootstrap has not completed"
@@ -523,6 +541,9 @@ func nativeGuestBindingFromStatus(status *nvtv1alpha1.AgentRunNativeGuestBinding
 func (r *AgentRunReconciler) clearNativeGuestBindingStatus(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (bool, error) {
 	if agentRun.Status.NativeGuestBinding == nil {
 		return false, nil
+	}
+	if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+		return false, err
 	}
 	agentRun.Status.NativeGuestBinding = nil
 	if err := r.Status().Update(ctx, agentRun); err != nil {
@@ -647,6 +668,13 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 	status executiondriver.Status,
 	desiredGeneration int64,
 ) (ctrl.Result, error) {
+	willClearBinding := status.ObservedGeneration != desiredGeneration || status.Phase == executiondriver.PhaseSucceeded ||
+		(status.Phase == executiondriver.PhaseFailed && (status.Failure == nil || !status.Failure.Retryable))
+	if willClearBinding && agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	previous := agentRun.Status.DeepCopy()
 	InitializeAgentRunStatus(agentRun)
 	// When the guest-bootstrap cleanup obligation is present, the separate
@@ -705,6 +733,15 @@ func (r *AgentRunReconciler) recordExternalExecutionStatus(
 			agentRun.Status.FinishedAt = &now
 		}
 	}
+	if nativeMediatedExternalRun(agentRun) {
+		if ready && phase == nvtv1alpha1.AgentRunPhaseRunning && meta.IsStatusConditionTrue(agentRun.Status.Conditions, ConditionNativeEgressReady) {
+			conditionStatus = metav1.ConditionTrue
+			reason = executionDriverReadyReason
+		} else {
+			conditionStatus = metav1.ConditionFalse
+			reason = nativeEgressPendingReason
+		}
+	}
 	r.setRunCondition(agentRun, ConditionExternalExecutionReady, conditionStatus, reason, "external execution state is not a gateway routing assertion")
 	if !reflect.DeepEqual(*previous, agentRun.Status) {
 		if err := r.Status().Update(ctx, agentRun); err != nil {
@@ -718,6 +755,11 @@ func (r *AgentRunReconciler) recordExternalExecutionRejected(
 	ctx context.Context,
 	agentRun *nvtv1alpha1.AgentRun,
 ) error {
+	if agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return err
+		}
+	}
 	previous := agentRun.Status.DeepCopy()
 	InitializeAgentRunStatus(agentRun)
 	now := r.now()
@@ -741,6 +783,11 @@ func (r *AgentRunReconciler) recordExternalStaleTerminalStatus(
 	ctx context.Context,
 	agentRun *nvtv1alpha1.AgentRun,
 ) (ctrl.Result, error) {
+	if agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	previous := agentRun.Status.DeepCopy()
 	InitializeAgentRunStatus(agentRun)
 	agentRun.Status.PodName = ""
@@ -761,6 +808,11 @@ func (r *AgentRunReconciler) recordExternalCleanupProgress(
 	agentRun *nvtv1alpha1.AgentRun,
 	status executiondriver.Status,
 ) (ctrl.Result, error) {
+	if agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	previous := agentRun.Status.DeepCopy()
 	agentRun.Status.NativeGuestBinding = nil
 	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionTrue, "ExecutionDriverAvailable", "selected execution driver host responded with a valid status")
@@ -783,6 +835,11 @@ func (r *AgentRunReconciler) recordExternalCleanupFailure(
 	reason string,
 	requeue time.Duration,
 ) (ctrl.Result, error) {
+	if agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	previous := agentRun.Status.DeepCopy()
 	agentRun.Status.NativeGuestBinding = nil
 	r.setRunCondition(agentRun, ConditionExecutionBackendAvailable, metav1.ConditionFalse, reason, "selected execution driver could not complete cleanup")
@@ -806,6 +863,11 @@ func (r *AgentRunReconciler) reconcileExternalActiveDeadline(
 	}
 	if !exceeded {
 		return ctrl.Result{}, false, nil
+	}
+	if agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return ctrl.Result{}, true, err
+		}
 	}
 	previous := agentRun.Status.DeepCopy()
 	agentRun.Status.Phase = nvtv1alpha1.AgentRunPhaseDeadlineExceeded
@@ -865,6 +927,11 @@ func (r *AgentRunReconciler) recordExecutionSelectionFailure(
 	reason string,
 	message string,
 ) (ctrl.Result, error) {
+	if agentRun.Status.NativeGuestBinding != nil {
+		if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	changed := InitializeAgentRunStatus(agentRun)
 	if agentRun.Status.NativeGuestBinding != nil {
 		agentRun.Status.NativeGuestBinding = nil

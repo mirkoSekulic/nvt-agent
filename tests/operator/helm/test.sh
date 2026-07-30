@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.45" || "${CHART_APP_VERSION}" != "0.8.45" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.45, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.46" || "${CHART_APP_VERSION}" != "0.8.46" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.46, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.45' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.46' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -82,6 +82,7 @@ EXECUTION_DRIVER_EXISTING_STORAGE_RENDER="${WORKDIR}/execution-driver-existing-s
 EXECUTION_DRIVER_ENROLLMENT_RENDER="${WORKDIR}/execution-driver-enrollment.yaml"
 EXECUTION_DRIVER_LONG_NAME_RENDER="${WORKDIR}/execution-driver-long-name.yaml"
 EXECUTION_DRIVER_FAILURE="${WORKDIR}/execution-driver-failure.txt"
+NATIVE_EGRESS_RELAY_RENDER="${WORKDIR}/native-egress-relay.yaml"
 OAUTH2_ARGS=(
   --set gateway.auth.oauth2.credentials.existingSecret=nvt-agent-gateway-oauth2
   --set gateway.auth.oauth2.credentials.clientIDKey=oauth2-client-id
@@ -118,6 +119,36 @@ helm template nvt "${CHART}" -n custom-ns \
   --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
   --set-string executionDrivers.guestEnrollment.orchestratorAuth.tokenKey=control-token \
   > "${EXECUTION_DRIVER_ENROLLMENT_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set nativeEgressRelay.enabled=true \
+  --set egress.networkPolicyCapable=true \
+  --set broker.persistence.enabled=true \
+  --set broker.guestEnrollment.enabled=true \
+  --set-string broker.guestEnrollment.exchangeURL=https://nvt-broker.custom-ns.svc.cluster.local:7347/v1/guest-enrollment/exchange \
+  --set-string broker.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
+  --set executionDrivers.guestEnrollment.enabled=true \
+  --set 'executionDrivers.guestEnrollment.registrations={fake-east}' \
+  --set-string executionDrivers.guestEnrollment.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
+  --set-string executionDrivers.guestEnrollment.serverName=nvt-broker.custom-ns.svc.cluster.local \
+  --set-string executionDrivers.guestEnrollment.ca.existingSecret=nvt-broker-tls \
+  --set-string executionDrivers.guestEnrollment.orchestratorAuth.existingSecret=nvt-enrollment-orchestrator \
+  --set-string nativeEgressRelay.brokerURL=https://nvt-broker.custom-ns.svc.cluster.local:7347 \
+  --set-string nativeEgressRelay.brokerServerName=nvt-broker.custom-ns.svc.cluster.local \
+  --set-string nativeEgressRelay.credentials.existingSecret=nvt-native-egress-relay-credentials \
+  --set-string nativeEgressRelay.brokerCA.existingSecret=nvt-broker-tls \
+  --set-string nativeEgressRelay.data.ingressCIDRs[0]=10.40.0.0/16 \
+  > "${NATIVE_EGRESS_RELAY_RENDER}"
+if helm template nvt "${CHART}" -n custom-ns --set nativeEgressRelay.enabled=true >/dev/null 2>"${WORKDIR}/native-relay-missing.txt"; then
+  echo "expected native relay without trusted dependencies to fail" >&2
+  exit 1
+fi
+grep -q 'nativeEgressRelay.enabled requires executionDrivers.guestEnrollment.enabled=true' "${WORKDIR}/native-relay-missing.txt"
+if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
+  --set nativeEgressRelay.enabled=true --set nativeEgressRelay.replicas=2 >/dev/null 2>"${WORKDIR}/native-relay-replicas.txt"; then
+  echo "expected multi-replica native relay to fail" >&2
+  exit 1
+fi
+grep -q 'nativeEgressRelay.replicas must be exactly 1' "${WORKDIR}/native-relay-replicas.txt"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
   --set agentSchedule.template.workspace.mode=Ephemeral > "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
@@ -630,10 +661,54 @@ missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-github-comments-producer
 missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-github-comments-producer
 missing_resource "${DEFAULT_RENDER}" ConfigMap nvt-execution-driver-registrations
+missing_resource "${DEFAULT_RENDER}" Deployment nvt-native-egress-relay
+missing_resource "${DEFAULT_RENDER}" Service nvt-native-egress-relay
+missing_resource "${DEFAULT_RENDER}" Service nvt-native-egress-relay-control
+missing_resource "${DEFAULT_RENDER}" NetworkPolicy nvt-native-egress-relay
 if grep -q 'app.kubernetes.io/component: execution-driver-host\|NVT_EXECUTION_DRIVER_REGISTRATIONS_FILE\|NVT_GUEST_ENROLLMENT_CONFIG_FILE\|nvt-execution-driver-host:' "${DEFAULT_RENDER}"; then
   echo "default render unexpectedly creates or wires an execution-driver host" >&2
   exit 1
 fi
+
+for resource in \
+  "Deployment nvt-native-egress-relay" \
+  "Service nvt-native-egress-relay" \
+  "Service nvt-native-egress-relay-control" \
+  "NetworkPolicy nvt-native-egress-relay" \
+  "ConfigMap nvt-native-egress-relay" \
+  "ConfigMap nvt-native-egress-publication-client"; do
+  read -r kind name <<<"${resource}"
+  require_resource "${NATIVE_EGRESS_RELAY_RENDER}" "${kind}" "${name}"
+done
+python3 - "${NATIVE_EGRESS_RELAY_RENDER}" "${CHART_APP_VERSION}" <<'PY'
+import sys, yaml
+docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1])) if doc]
+version = sys.argv[2]
+by = {(doc.get("kind"), doc.get("metadata", {}).get("name")): doc for doc in docs}
+deployment = by[("Deployment", "nvt-native-egress-relay")]
+pod = deployment["spec"]["template"]["spec"]
+assert deployment["spec"]["replicas"] == 1
+assert pod["securityContext"]["runAsUser"] == 65532
+assert pod["containers"][0]["image"].endswith(":" + version)
+assert pod["containers"][0]["securityContext"]["capabilities"]["drop"] == ["ALL"]
+assert pod["initContainers"][0]["securityContext"]["runAsUser"] == 0
+assert pod["initContainers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["CHOWN"]}
+assert pod["volumes"][1]["emptyDir"]["medium"] == "Memory"
+operator = by[("Deployment", "nvt-operator")]
+env = {item["name"]: item.get("value") for item in operator["spec"]["template"]["spec"]["containers"][0]["env"]}
+assert env["NVT_NATIVE_EGRESS_PUBLICATION_CONFIG_FILE"] == "/var/run/nvt-native-egress-publication/config.json"
+data = by[("Service", "nvt-native-egress-relay")]
+control = by[("Service", "nvt-native-egress-relay-control")]
+assert [p["name"] for p in data["spec"]["ports"]] == ["data"]
+assert [p["name"] for p in control["spec"]["ports"]] == ["control"]
+policy = by[("NetworkPolicy", "nvt-native-egress-relay")]
+assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+assert policy["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "nvt-operator"}
+assert policy["spec"]["ingress"][1]["from"][0]["ipBlock"]["cidr"] == "10.40.0.0/16"
+render = open(sys.argv[1]).read()
+assert "control-token" in render
+assert "nvt_rc1_" not in render
+PY
 
 python3 - "${EXECUTION_DRIVERS_RENDER}" "${CHART_APP_VERSION}" "${DEFAULT_RENDER}" <<'PY'
 import json

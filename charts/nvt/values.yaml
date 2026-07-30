@@ -114,6 +114,45 @@ operator:
     pullPolicy: IfNotPresent
   replicas: 1
 
+# Opt-in standalone native-VM egress relay. The relay remains unpublished and
+# deny-all until the operator applies a complete exact-binding snapshot. All
+# key material comes from existing administrator-owned Secrets.
+nativeEgressRelay:
+  enabled: false
+  image:
+    repository: ghcr.io/mirkosekulic/nvt-native-egress-relay
+    tag: ""
+    pullPolicy: IfNotPresent
+  initImage:
+    repository: docker.io/library/busybox
+    tag: "1.36.1"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  data:
+    port: 7445
+    # Source ranges permitted to reach the guest-facing listener. Empty keeps
+    # the data listener fenced until provider routing is configured.
+    ingressCIDRs: []
+  control:
+    port: 7446
+    serverName: ""
+    timeoutSeconds: 10
+  brokerURL: ""
+  brokerServerName: ""
+  authenticationTimeoutSeconds: 5
+  revalidationIntervalSeconds: 30
+  credentials:
+    existingSecret: ""
+    dataCertificateKey: data-tls.crt
+    dataPrivateKeyKey: data-tls.key
+    controlCAKey: control-ca.crt
+    controlCertificateKey: control-tls.crt
+    controlPrivateKeyKey: control-tls.key
+    controlTokenKey: control-token
+  brokerCA:
+    existingSecret: ""
+    key: ca.crt
+
 # Administrator-owned external execution-driver registrations. Each entry
 # creates one isolated host workload. AgentRuns select only the exact matching
 # logical name; empty preserves the built-in Kubernetes-only deployment.

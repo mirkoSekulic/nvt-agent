@@ -232,8 +232,10 @@ listeners and local socket paths only; it contains no binding, audience,
 bearer, target endpoint, global capability, or provider credential. The
 provider owns redirect installation and explicit-proxy client configuration,
 and adds the root-owned `egress_readiness_socket_path` to `guest.json` when the
-agent lifecycle must be gated. The bundle never enables these units itself,
-and readiness is not yet part of operator VM readiness.
+agent lifecycle must be gated. The bundle never enables these units itself.
+The operator now gates its native-mediated condition on the exact published
+relay target, but provider confinement and installed guest capture readiness
+remain provider-owned prerequisites.
 
 The bundled `share/examples/session.json` remains the unchanged control-only
 example. `share/examples/session-workspace.json` demonstrates the optional
@@ -287,6 +289,7 @@ session/flow-transport client now exist. A production relay core serves the
 corresponding bounded data plane and may use an explicit process-owned
 exact-binding adapter into per-run egressd. Captured agent traffic integration,
 including fixed-destination recovery and no-fallback flow opening, now exists
-in the opt-in guest service. Dynamic operator target publication/readiness,
-provider-owned redirect installation, and provider-owned external network
-confinement remain future gates before a mediated external VM can be ready.
+in the opt-in guest service. Dynamic operator target publication/readiness and
+withdraw-before-cleanup ordering are now implemented. Provider-owned redirect
+installation and external network confinement remain future gates before a
+mediated external VM can be ready.

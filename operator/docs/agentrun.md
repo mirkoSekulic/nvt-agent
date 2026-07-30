@@ -486,6 +486,14 @@ operator clears it before replacement, revocation, terminal cleanup, deletion,
 or any failure that makes the exact guest non-authoritative. Built-in Pod/Kata
 runs leave it absent.
 
+An opt-in mediated external VM additionally exposes `NativeEgressReady` only
+after the driver reports infrastructure-owned confinement, its distinct
+per-run egressd Pod/Service are Ready, and the relay acknowledges the complete
+snapshot containing this exact binding. Relay restart resets publication to
+deny-all and the operator republishes before restoring the condition. Cleanup
+withdraws and acknowledges the mapping before broker revocation or driver
+deletion. The condition and binding contain no relay credential or target URL.
+
 Phases are `Pending`, `Running`, `Completed`, `Failed`, and
 `DeadlineExceeded`. Persistent runs expose `WorkspaceReady`. Enforced runs
 expose provisioning conditions including `BrokerPolicyReady`,

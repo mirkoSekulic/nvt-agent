@@ -55,6 +55,8 @@ app.kubernetes.io/part-of: nvt
   (dict "name" "egress.captured.image" "value" .Values.egress.captured.image)
   (dict "name" "broker.image" "value" .Values.broker.image)
   (dict "name" "operator.image" "value" .Values.operator.image)
+  (dict "name" "nativeEgressRelay.image" "value" .Values.nativeEgressRelay.image)
+  (dict "name" "nativeEgressRelay.initImage" "value" .Values.nativeEgressRelay.initImage)
   (dict "name" "executionDrivers.hostImage" "value" .Values.executionDrivers.hostImage)
   (dict "name" "gateway.image" "value" .Values.gateway.image)
   (dict "name" "producer.image" "value" .Values.producer.image) -}}
