@@ -12,7 +12,7 @@ bash hostbundle/build.sh 0.8.33-test 0123456789abcdef0123456789abcdef01234567 di
 The layout tag resolves to an OCI index. `digest.txt` is its immutable digest.
 The archive contains only the static bootstrap, root-owned runtime-identity
 daemon, root-owned native control/optional workspace session client, the
-separate optional native-egress session client, non-root supervisor/session
+separate optional native-egress flow client, non-root supervisor/session
 fixture, the real repository `agentd`/`agentdctl`, four systemd units, and
 non-secret example path/endpoint configurations.
 It does not copy the runtime container rootfs.
@@ -26,8 +26,8 @@ The guest OS supplies Python 3, tmux, systemd (when the units are used), the
 `/var/lib/nvt-agent` paths. The included session executable is deliberately a
 bounded lifecycle fixture, not a production AI runtime. Provider provisioning,
 the optional fixed loopback workspace service, plugins, a production native
-egress relay/target, agent traffic forwarding, provider confinement, and
-mediated-VM readiness remain later phases.
+egress target adapter, captured agent traffic integration, provider
+confinement, and mediated-VM readiness remain later phases.
 
 The separate provider-neutral enrollment and runtime-identity boundaries are
 documented in [`protocol/guest-enrollment.md`](../protocol/guest-enrollment.md)
@@ -69,6 +69,9 @@ requests a fixed-purpose egress credential from `nvt-guest-identityd`; no
 runtime identity, binding, audience, target, destination, or provider value is
 caller-configurable. The credential is never persisted and reconnects reuse
 it; renewal retains at most a current and pending credential in trusted memory.
+After authentication the client proves the bounded yamux data plane is live
+before publishing transport readiness and exposes only the purpose-specific
+`FlowOpener` seam for later trusted capture integration.
 
 After the bootstrap has installed and activated a release, guest provisioning
 may install the repository-owned unit and its separately supplied non-secret
@@ -95,8 +98,9 @@ systemctl enable --now nvt-guest-identity.service nvt-agent-guest.service nvt-gu
 A provider implementing the later mediated-VM enforcement gates may also copy
 `nvt-guest-egress.service`, write root-owned `native-egress.json` plus its
 explicit relay CA, and enable that unit. The bundle does not enable or require
-it, and the current client establishes/authenticates only—it does not forward
-agent traffic or claim production mediated-egress readiness.
+it, and the current client establishes only the authenticated bounded flow
+transport—it does not forward captured agent traffic or claim production
+mediated-egress readiness.
 
 The bundle never writes `/etc` or enables a service implicitly. That remains a
 provider-owned provisioning step so activation cannot execute archive hooks.

@@ -9,7 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -142,18 +142,52 @@ func (authenticator *fakeAuthenticator) AuthenticateNativeEgress(_ context.Conte
 }
 
 type fakeTarget struct {
-	binding guestenrollment.Binding
-	mu      sync.Mutex
-	opens   int
+	binding      guestenrollment.Binding
+	mu           sync.Mutex
+	opens        int
+	destinations []nativeegress.Destination
+	peers        []net.Conn
+	echo         bool
+	deny         bool
+	err          error
 }
 
 func (target *fakeTarget) Binding() guestenrollment.Binding { return target.binding }
 
-func (target *fakeTarget) OpenFlow(context.Context, nativeegress.Destination) (net.Conn, error) {
+func (target *fakeTarget) OpenFlow(_ context.Context, destination nativeegress.Destination) (net.Conn, error) {
 	target.mu.Lock()
 	target.opens++
+	target.destinations = append(target.destinations, destination)
+	denied := target.deny
+	failure := target.err
 	target.mu.Unlock()
-	return nil, errors.New("flow transport is not implemented")
+	if denied {
+		return nil, nativeegress.ErrDenied
+	}
+	if failure != nil {
+		return nil, failure
+	}
+	client, peer := net.Pipe()
+	target.mu.Lock()
+	target.peers = append(target.peers, peer)
+	target.mu.Unlock()
+	if target.echo {
+		go func() {
+			_, _ = io.Copy(peer, peer)
+			_ = peer.Close()
+		}()
+	}
+	return client, nil
+}
+
+func (target *fakeTarget) closePeers() {
+	target.mu.Lock()
+	peers := append([]net.Conn(nil), target.peers...)
+	target.peers = nil
+	target.mu.Unlock()
+	for _, peer := range peers {
+		_ = peer.Close()
+	}
 }
 
 type fakeResolver struct {
@@ -211,7 +245,20 @@ func startInjectedServer(t *testing.T, authenticator nativeegress.Authenticator,
 	return server, listener.Addr().String(), pki, serveDone
 }
 
-func connectGuest(t *testing.T, address string, pki testPKI, binding guestenrollment.Binding, credential string) (*tls.Conn, error) {
+type guestRelayConnection struct {
+	transport *nativeegress.GuestFlowTransport
+}
+
+func (connection *guestRelayConnection) OpenFlow(ctx context.Context, destination nativeegress.Destination) (net.Conn, error) {
+	return connection.transport.OpenFlow(ctx, destination)
+}
+
+func (connection *guestRelayConnection) Close() error { return connection.transport.Close() }
+func (connection *guestRelayConnection) Done() <-chan struct{} {
+	return connection.transport.Done()
+}
+
+func connectGuest(t *testing.T, address string, pki testPKI, binding guestenrollment.Binding, credential string) (*guestRelayConnection, error) {
 	t.Helper()
 	dialer := &tls.Dialer{Config: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pki.rootPool, ServerName: "localhost"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -225,7 +272,18 @@ func connectGuest(t *testing.T, address string, pki testPKI, binding guestenroll
 		_ = tlsConnection.Close()
 		return nil, err
 	}
-	return tlsConnection, nil
+	transport, err := nativeegress.NewGuestFlowTransport(tlsConnection)
+	if err != nil {
+		_ = tlsConnection.Close()
+		return nil, err
+	}
+	readyContext, cancelReady := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelReady()
+	if err := transport.AwaitReady(readyContext); err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
+	return &guestRelayConnection{transport: transport}, nil
 }
 
 func waitActive(t *testing.T, lookup SessionLookup, binding guestenrollment.Binding, expected bool) *nativeegress.Session {
@@ -248,6 +306,15 @@ func waitConnectionClosed(t *testing.T, connection net.Conn) {
 	var one [1]byte
 	if _, err := connection.Read(one[:]); err == nil {
 		t.Fatal("native egress connection remained open")
+	}
+}
+
+func waitGuestClosed(t *testing.T, connection *guestRelayConnection) {
+	t.Helper()
+	select {
+	case <-connection.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("native egress guest transport remained open")
 	}
 }
 

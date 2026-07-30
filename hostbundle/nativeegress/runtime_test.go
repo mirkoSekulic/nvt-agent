@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -80,6 +81,33 @@ type pipeConnector struct {
 	handler func(int, net.Conn)
 }
 
+type runtimeRelayTarget struct {
+	binding guestenrollment.Binding
+}
+
+func (target runtimeRelayTarget) Binding() guestenrollment.Binding { return target.binding }
+
+func (runtimeRelayTarget) OpenFlow(context.Context, protocol.Destination) (net.Conn, error) {
+	return nil, protocol.ErrUnavailable
+}
+
+func newRuntimeRelayTransport(connection net.Conn, authenticator protocol.Authenticator) (*protocol.RelayFlowTransport, error) {
+	authentication, err := protocol.Accept(context.Background(), connection, authenticator)
+	if err != nil {
+		return nil, err
+	}
+	session, err := protocol.NewSession(authentication, runtimeRelayTarget{binding: authentication.Binding})
+	if err != nil {
+		return nil, err
+	}
+	transport, err := protocol.NewRelayFlowTransport(connection, session)
+	if err != nil {
+		_ = session.Close()
+		return nil, err
+	}
+	return transport, nil
+}
+
 func (connector *pipeConnector) Connect(context.Context, string) (net.Conn, error) {
 	client, server := net.Pipe()
 	connector.mu.Lock()
@@ -109,15 +137,16 @@ func TestRuntimeReconnectsRenewsMakeBeforeBreakAndReusesPendingCredential(t *tes
 	connector := &pipeConnector{}
 	connector.handler = func(call int, connection net.Conn) {
 		defer connection.Close()
-		if _, err := protocol.Accept(context.Background(), connection, authenticator); err != nil {
+		transport, err := newRuntimeRelayTransport(connection, authenticator)
+		if err != nil {
 			return
 		}
 		accepted <- call
 		if call == 1 {
+			_ = transport.Close()
 			return
 		}
-		var one [1]byte
-		_, _ = connection.Read(one[:])
+		_ = transport.Serve(context.Background())
 		closed <- call
 	}
 
@@ -277,10 +306,16 @@ func TestReplacementCredentialRequiresExactBindingAndHigherSequence(t *testing.T
 	current := newCredential(binding, 5)
 	skipped := newCredential(binding, 8)
 	client, server := net.Pipe()
+	transport, err := protocol.NewGuestFlowTransport(client)
+	if err != nil {
+		_ = client.Close()
+		_ = server.Close()
+		t.Fatal(err)
+	}
 	state := &credentialState{current: current}
 	result := preparationResult{
 		issued:  skipped,
-		session: &relaySession{connection: client, done: make(chan error, 1)},
+		session: &relaySession{transport: transport, done: make(chan error, 1)},
 	}
 	replacement, switched, err := (&Runtime{}).completePreparation(state, &result)
 	if err != nil || !switched || replacement == nil || state.current == nil || state.current.Sequence != 8 || state.current.Binding != binding {
@@ -322,12 +357,12 @@ func TestRenewalResponseLossAtTwoLiveCapacityRetainsPredecessor(t *testing.T) {
 	closed := make(chan struct{}, 1)
 	connector := &pipeConnector{handler: func(_ int, connection net.Conn) {
 		defer connection.Close()
-		if _, err := protocol.Accept(context.Background(), connection, authenticator); err != nil {
+		transport, err := newRuntimeRelayTransport(connection, authenticator)
+		if err != nil {
 			return
 		}
 		accepted <- struct{}{}
-		var one [1]byte
-		_, _ = connection.Read(one[:])
+		_ = transport.Serve(context.Background())
 		closed <- struct{}{}
 	}}
 	work := t.TempDir()
@@ -482,6 +517,38 @@ func TestRuntimeRejectsMalformedWrongBindingAndAudienceAcknowledgements(t *testi
 	}
 }
 
+func TestRuntimeRequiresUsableYamuxBeforeRelayReadiness(t *testing.T) {
+	binding := nativeEgressBinding()
+	now := time.Now().UTC().Truncate(time.Second)
+	authenticator := &fakeAuthenticator{binding: binding, issuedAt: now}
+	connector := &pipeConnector{handler: func(_ int, connection net.Conn) {
+		defer connection.Close()
+		if _, err := protocol.Accept(context.Background(), connection, authenticator); err != nil {
+			return
+		}
+		// Deliberately acknowledge the authenticated preface without switching
+		// to yamux. The guest must not treat this as transport readiness.
+		_, _ = io.Copy(io.Discard, connection)
+	}}
+	runtime := &Runtime{Connector: connector, Configuration: Configuration{RelayEndpoint: "tls://relay.example:7445"}, Now: func() time.Time { return now }, MonotonicNow: time.Now}
+	opaque, err := guestenrollment.GenerateNativeEgressCredential(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := runtime.validateCredential(nativeEgressIssueResult(binding, opaque, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	if session, err := runtime.openSession(ctx, value); err == nil {
+		session.Close()
+		t.Fatal("hello-only relay was reported transport-ready")
+	} else if reason, temporary, _ := FailureDetails(err); reason != ReasonRelayUnavailable || !temporary {
+		t.Fatalf("hello-only relay result=%v reason=%s temporary=%v", err, reason, temporary)
+	}
+}
+
 func TestActiveCredentialExpiryWithdrawsReadinessAndClosesRelay(t *testing.T) {
 	binding := nativeEgressBinding()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -492,11 +559,11 @@ func TestActiveCredentialExpiryWithdrawsReadinessAndClosesRelay(t *testing.T) {
 	var readinessWithdrawn atomic.Bool
 	connector := &pipeConnector{handler: func(_ int, connection net.Conn) {
 		defer connection.Close()
-		if _, err := protocol.Accept(context.Background(), connection, authenticator); err != nil {
+		transport, err := newRuntimeRelayTransport(connection, authenticator)
+		if err != nil {
 			return
 		}
-		var one [1]byte
-		_, _ = connection.Read(one[:])
+		_ = transport.Serve(context.Background())
 		closedAfterWithdrawal <- readinessWithdrawn.Load()
 	}}
 	work := t.TempDir()

@@ -35,9 +35,8 @@ func (lookup *exactSessionLookup) Active(binding guestenrollment.Binding) (*nati
 func (*exactSessionLookup) String() string   { return "[native egress exact session lookup]" }
 func (*exactSessionLookup) GoString() string { return "[native egress exact session lookup]" }
 
-// Server accepts the guest-initiated authenticated TLS session. V1 relay-core
-// handlers deliberately reject every byte after hello_ack; flow transport is
-// a later reviewed implementation gate.
+// Server accepts the guest-initiated authenticated TLS session and switches the
+// admitted connection to the bounded native-egress flow transport.
 type Server struct {
 	listenAddress        string
 	revalidationInterval time.Duration
@@ -286,22 +285,28 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		cancelHandshake()
 		return
 	}
-	defer reservation.Remove()
 	if err := pending.Acknowledge(); err != nil {
 		cancelHandshake()
+		reservation.Remove()
 		return
 	}
 	cancelHandshake()
+	transport, err := nativeegress.NewRelayFlowTransport(connection, session)
+	if err != nil {
+		reservation.Remove()
+		return
+	}
+	defer func() {
+		// Withdraw exact-binding readiness and close target flows before the
+		// authenticated outer transport is torn down.
+		reservation.Remove()
+		_ = transport.Close()
+	}()
 	if !reservation.Activate() {
 		return
 	}
 	releaseHandshake()
-	// Until the reviewed flow transport lands, any byte after hello_ack is a
-	// protocol violation. The local trust deadline also bounds a silent peer.
-	_ = connection.SetReadDeadline(authentication.LocalExpiresAt)
-	var unexpected [1]byte
-	_, _ = connection.Read(unexpected[:])
-	unexpected[0] = 0
+	_ = transport.Serve(server.lifetimeContext)
 }
 
 var _ SessionLookup = (*exactSessionLookup)(nil)

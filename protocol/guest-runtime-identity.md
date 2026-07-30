@@ -228,6 +228,7 @@ is frozen separately. Its production broker authority consumes this runtime
 bearer only to issue the purpose-separated short-lived egress credential; no
 other process receives this runtime bearer. The host bundle now includes the
 separate opt-in native-egress client that obtains only that derived credential
-over root-only IPC and establishes a strictly trusted outbound session. A
-production relay/target, agent traffic forwarding, provider network
+over root-only IPC and establishes the strictly trusted outbound flow session.
+The standalone relay terminates the matching bounded data plane. A production
+target adapter, captured agent traffic integration, provider network
 enforcement, and operator readiness gate do not exist yet.

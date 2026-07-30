@@ -15,7 +15,17 @@ func TestRegistryMakeBeforeBreakMonotonicPromotionAndCleanup(t *testing.T) {
 	defer registry.Close()
 	active := mustSession(t, binding, 2)
 	activeReservation, err := registry.Reserve(active)
-	if err != nil || !activeReservation.Activate() {
+	if err != nil {
+		t.Fatalf("reserve initial: %v", err)
+	}
+	destination := Destination{Network: NetworkTCP, Host: "api.example", Port: 443}
+	if flow, err := active.OpenFlow(t.Context(), destination); !errors.Is(err, ErrUnavailable) {
+		if flow != nil {
+			_ = flow.Close()
+		}
+		t.Fatalf("pre-activation reservation opened a flow: %v", err)
+	}
+	if !activeReservation.Activate() {
 		t.Fatalf("activate initial: %v", err)
 	}
 	if got, ok := registry.Active(binding); !ok || got != active {
@@ -35,6 +45,12 @@ func TestRegistryMakeBeforeBreakMonotonicPromotionAndCleanup(t *testing.T) {
 	if got, _ := registry.Active(binding); got != active {
 		t.Fatal("standby preempted active")
 	}
+	if flow, err := standby.OpenFlow(t.Context(), destination); !errors.Is(err, ErrUnavailable) {
+		if flow != nil {
+			_ = flow.Close()
+		}
+		t.Fatalf("standby opened a flow before promotion: %v", err)
+	}
 	third := mustSession(t, binding, 3)
 	if _, err := registry.Reserve(third); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("third session error=%v", err)
@@ -45,6 +61,11 @@ func TestRegistryMakeBeforeBreakMonotonicPromotionAndCleanup(t *testing.T) {
 	if got, ok := registry.Active(binding); !ok || got != standby || got.Sequence() != 2 {
 		t.Fatalf("standby was not promoted: %#v %t", got, ok)
 	}
+	flow, err := standby.OpenFlow(t.Context(), destination)
+	if err != nil {
+		t.Fatalf("promoted standby could not open a flow: %v", err)
+	}
+	_ = flow.Close()
 	select {
 	case <-active.Done():
 	case <-time.After(time.Second):

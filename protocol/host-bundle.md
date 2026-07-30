@@ -147,8 +147,10 @@ The bundle includes four independent native service boundaries:
   purpose-separated `nvt_eg1_` credential through the same root-only identity
   socket, establishes [`nvt.native-egress/v1`](native-egress.md) over a
   separate explicitly trusted TLS connection, and retains current/pending
-  credentials only in bounded process memory. It does not receive the runtime
-  identity, forward agent traffic, or assert provider confinement/readiness.
+  credentials only in bounded process memory. After authentication it proves
+  the pinned bounded yamux flow transport is live before publishing its own
+  readiness. It does not receive the runtime identity, capture agent traffic,
+  or assert provider confinement/readiness.
 
 The agent service requires the identity service. The identity unit uses
 systemd `Type=notify` and becomes active only after durable state has been
@@ -166,12 +168,12 @@ bearer state to the agent user.
 
 The current bundle includes the real `agentd` and `agentdctl` sources, the
 trusted native control-session and optional workspace clients, the optional
-native-egress session-establishment client, plus a bounded session fixture for
-the guest-side lifecycle gate. It does not package code-server, an AI runtime,
-plugins, a production egress relay, or agent traffic forwarding. The loopback
-workspace service remains an explicit provider-installed prerequisite; the
-production gateway can route an already-authorized external VM browser session
-to it through the exact native workspace binding.
+native-egress session and flow-transport client, plus a bounded session fixture
+for the guest-side lifecycle gate. It does not package code-server, an AI
+runtime, plugins, a production egress target adapter, or captured agent traffic.
+The loopback workspace service remains an explicit provider-installed
+prerequisite; the production gateway can route an already-authorized external
+VM browser session to it through the exact native workspace binding.
 
 Readiness is owned by the supervisor. It publishes `guest-ready` only after
 agentd, the tmux session, and the native outbound session are stable,
@@ -262,7 +264,8 @@ gateway acceptor now establish the authenticated TLS/yamux transport and
 expose the bounded active stream boundary consumed by authorized external-VM
 browser routing. The provider-neutral native VM mediated-egress contract,
 production broker identity endpoints, and trusted host-bundle
-session-establishment client now exist. A production relay/target adapter,
-captured agent traffic, operator readiness wiring, and provider-owned external
+session/flow-transport client now exist. A production relay core serves the
+corresponding bounded data plane, but a trusted target adapter, captured agent
+traffic integration, operator readiness wiring, and provider-owned external
 network confinement remain future gates before a mediated external VM can be
 ready.
