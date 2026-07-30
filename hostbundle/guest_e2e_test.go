@@ -192,9 +192,9 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	current := filepath.Join(root, "current")
 	var logs synchronizedBuffer
-	launch := func() (*exec.Cmd, chan error) {
+	launchWithEnvironment := func(extra ...string) (*exec.Cmd, chan error) {
 		command := exec.Command(filepath.Join(current, "bin", "nvt-guest-supervisor"), "--config", configPath)
-		command.Env = append(os.Environ(), "NVT_TEST_SECRET_CANARY=must-not-propagate")
+		command.Env = append(os.Environ(), append([]string{"NVT_TEST_SECRET_CANARY=must-not-propagate"}, extra...)...)
 		command.Stdout = &logs
 		command.Stderr = &logs
 		if err := command.Start(); err != nil {
@@ -204,6 +204,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		go func() { done <- command.Wait() }()
 		return command, done
 	}
+	launch := func() (*exec.Cmd, chan error) { return launchWithEnvironment() }
 	start := func() (*exec.Cmd, chan error) {
 		command, done := launch()
 		waitForFile(t, filepath.Join(state, "guest-ready"), 15*time.Second)
@@ -230,7 +231,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	if err := os.WriteFile(egressReadiness, []byte("ready\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	command, done := launch()
+	command, done := launchWithEnvironment("NVT_TEST_SUPERVISOR_SHORT_DEADLINES=1")
 	socketDeadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(socket); err == nil {
@@ -246,7 +247,7 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2500 * time.Millisecond)
 	probe := exec.Command(tmux, "has-session", "-t", session)
 	probe.Env = []string{"HOME=" + state, "PATH=/usr/bin:/bin"}
 	if probe.Run() == nil {
@@ -265,6 +266,43 @@ func TestNativeGuestLifecycleEndToEnd(t *testing.T) {
 	}
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "first-native-prompt")
 	stop(command, done)
+
+	// Withdrawal after tmux is launched but before its stability window ends is
+	// part of startup cancellation. It must never publish or retain guest-ready.
+	command, done = launch()
+	sessionDeadline := time.Now().Add(10 * time.Second)
+	for {
+		probe := exec.Command(tmux, "has-session", "-t", session)
+		probe.Env = []string{"HOME=" + state, "PATH=/usr/bin:/bin"}
+		if probe.Run() == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("supervisor exited before startup withdrawal: %v\n%s", err, logs.String())
+		default:
+		}
+		if time.Now().After(sessionDeadline) {
+			_ = command.Process.Kill()
+			t.Fatalf("tmux did not start before withdrawal test\n%s", logs.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	egressFixture.stop()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("supervisor exited successfully after startup egress withdrawal")
+		}
+	case <-time.After(10 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatal("supervisor did not stop after startup egress withdrawal")
+	}
+	waitForAbsent(t, filepath.Join(state, "guest-ready"), 5*time.Second)
+	if _, err := os.Stat(filepath.Join(state, "agentd", "session-launched")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup crossed the session-ready boundary after egress withdrawal: %v", err)
+	}
+	egressFixture = startEgressReadinessFixture(t, egressReadiness)
 	command, done = start()
 	assertAgentdHealthAndPrompt(t, current, socket, state, capture, "restart-native-prompt")
 	stop(command, done)

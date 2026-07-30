@@ -171,12 +171,16 @@ func newHarness(t *testing.T) *harness {
 
 func TestCredentiallessCaptureSelectsCapabilityPerExplicitFlow(t *testing.T) {
 	harness := newHarness(t)
-	type request struct{ capability, authorization, payload string }
+	type request struct {
+		capability, authorization, payload, hint string
+		observed                                 chan struct{}
+	}
 	requests := []request{
-		{capability: "github-main-app", payload: "git-required-hint"},
-		{authorization: "Basic " + base64.StdEncoding.EncodeToString([]byte("codex-main:provider-secret-canary")), payload: "codex-injectable"},
+		{capability: "github-main-app", hint: "github-main-app", payload: "git-required-hint", observed: make(chan struct{})},
+		{authorization: "Basic " + base64.StdEncoding.EncodeToString([]byte("codex-main:provider-secret-canary")), hint: "codex-main", payload: "codex-injectable", observed: make(chan struct{})},
 	}
 	wantPayload := map[string]string{"github-main-app": "git-required-hint", "codex-main": "codex-injectable"}
+	observedByHint := map[string]chan struct{}{requests[0].hint: requests[0].observed, requests[1].hint: requests[1].observed}
 	responses := make(chan string, len(requests))
 	for _, value := range requests {
 		value := value
@@ -195,11 +199,23 @@ func TestCredentiallessCaptureSelectsCapabilityPerExplicitFlow(t *testing.T) {
 				header = "Proxy-Authorization: " + value.authorization + "\r\n"
 			}
 			_, _ = io.WriteString(connection, "CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n"+header+"\r\n"+value.payload)
-			response, err := bufio.NewReader(connection).ReadString('\n')
+			reader := bufio.NewReader(connection)
+			response, err := reader.ReadString('\n')
 			if err != nil {
 				responses <- "read"
 				return
 			}
+			for {
+				line, readErr := reader.ReadString('\n')
+				if readErr != nil {
+					responses <- "read"
+					return
+				}
+				if line == "\r\n" {
+					break
+				}
+			}
+			<-value.observed
 			responses <- response
 		}()
 	}
@@ -224,6 +240,7 @@ func TestCredentiallessCaptureSelectsCapabilityPerExplicitFlow(t *testing.T) {
 				t.Fatal("CONNECT preface entered the tunneled stream")
 			}
 			seen[opened.destination.CapabilityHint] = value
+			close(observedByHint[opened.destination.CapabilityHint])
 			_ = opened.peer.Close()
 		case <-time.After(2 * time.Second):
 			t.Fatal("explicit flow was not opened")
