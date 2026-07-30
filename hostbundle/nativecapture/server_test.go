@@ -176,6 +176,7 @@ func TestCredentiallessCaptureSelectsCapabilityPerExplicitFlow(t *testing.T) {
 		{capability: "github-main-app", payload: "git-required-hint"},
 		{authorization: "Basic " + base64.StdEncoding.EncodeToString([]byte("codex-main:provider-secret-canary")), payload: "codex-injectable"},
 	}
+	wantPayload := map[string]string{"github-main-app": "git-required-hint", "codex-main": "codex-injectable"}
 	responses := make(chan string, len(requests))
 	for _, value := range requests {
 		value := value
@@ -209,13 +210,16 @@ func TestCredentiallessCaptureSelectsCapabilityPerExplicitFlow(t *testing.T) {
 			if opened.destination.Host != "api.github.com" || opened.destination.Port != 443 {
 				t.Fatalf("destination=%#v", opened.destination)
 			}
-			payload := make([]byte, 18)
+			expected, ok := wantPayload[opened.destination.CapabilityHint]
+			if !ok {
+				t.Fatalf("unexpected capability=%q", opened.destination.CapabilityHint)
+			}
+			payload := make([]byte, len(expected))
 			_ = opened.peer.SetReadDeadline(time.Now().Add(time.Second))
-			count, err := opened.peer.Read(payload)
-			if err != nil {
+			if _, err := io.ReadFull(opened.peer, payload); err != nil {
 				t.Fatal(err)
 			}
-			value := string(payload[:count])
+			value := string(payload)
 			if strings.Contains(value, "CONNECT") || strings.Contains(value, "Proxy-Authorization") {
 				t.Fatal("CONNECT preface entered the tunneled stream")
 			}
@@ -225,7 +229,7 @@ func TestCredentiallessCaptureSelectsCapabilityPerExplicitFlow(t *testing.T) {
 			t.Fatal("explicit flow was not opened")
 		}
 	}
-	if seen["github-main-app"] != "git-required-hint" || seen["codex-main"] != "codex-injectable" {
+	if seen["github-main-app"] != wantPayload["github-main-app"] || seen["codex-main"] != wantPayload["codex-main"] {
 		t.Fatalf("per-flow capabilities/payloads=%#v", seen)
 	}
 	for range requests {
