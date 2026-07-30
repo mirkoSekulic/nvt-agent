@@ -285,6 +285,7 @@ replace guest-local capture and firewall state. The provider-neutral
 [native VM egress contract](../protocol/native-egress.md) therefore requires a
 trusted execution driver/provider to enforce default-deny NIC/network policy
 outside the guest, plus an exact-binding authenticated outbound tunnel into the
-run's separate trusted egress path. Both gates are required. The contract and
-conformance proof exist, but no production VM tunnel or provider confinement is
-wired yet.
+run's separate trusted egress path. Both gates are required. The contract,
+conformance proof, identity authority, guest session client, and cluster relay
+admission core exist, but no production flow transport, trusted target adapter,
+operator readiness gate, or provider confinement is wired yet.
