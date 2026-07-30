@@ -231,6 +231,7 @@ func TestLocalExecutableTerminatesOnIdleUnsolicitedOutput(t *testing.T) {
 	pid := waitForPID(t, pidFile)
 	waitForPath(t, markerFile)
 	requireProcessGone(t, pid)
+	waitForHostNotReady(t, client)
 	if _, err := client.Reconcile(testContext(t), testDesired(t, "run-unsolicited", map[string]any{})); !errors.Is(err, driverhost.ErrUnavailable) {
 		t.Fatalf("call after unsolicited output error=%v", err)
 	}
@@ -651,6 +652,18 @@ func requireProcessGone(t *testing.T, pid int) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("driver process %d was not reaped", pid)
+}
+
+func waitForHostNotReady(t *testing.T, client *driverhost.LocalExecutable) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !client.Ready() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("execution driver host retained readiness after process exit")
 }
 
 func unsetEnvironment(t *testing.T, name string) {
