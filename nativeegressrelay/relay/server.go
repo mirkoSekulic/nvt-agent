@@ -290,25 +290,46 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		cancelHandshake()
 		return
 	}
-	releaseTargetAdmission, targetReady := acquireTargetAdmission(admission.target)
-	if !targetReady {
-		cancelHandshake()
-		_ = session.Close()
-		return
-	}
-	targetAdmissionHeld := true
-	defer func() {
-		if targetAdmissionHeld {
-			releaseTargetAdmission()
-		}
-	}()
 	reservation, err := server.registry.Reserve(session)
 	if err != nil {
 		cancelHandshake()
 		_ = session.Close()
 		return
 	}
+	targetAdmission, targetReady := acquireTargetAdmission(admission.target)
+	if !targetReady {
+		cancelHandshake()
+		reservation.Remove()
+		return
+	}
+	targetAdmissionHeld := true
+	defer func() {
+		if targetAdmissionHeld {
+			targetAdmission.Release()
+		}
+	}()
+	stopTargetCancellation := context.AfterFunc(targetAdmission.Context(), func() {
+		if !targetAdmission.Pending() {
+			return
+		}
+		// Set the deadline on the underlying transport. A TLS write may hold
+		// internal connection state while the guest is not reading its ACK;
+		// the raw deadline still interrupts that write immediately.
+		_ = raw.SetDeadline(time.Now())
+		_ = session.Close()
+	})
+	defer stopTargetCancellation()
+	if !targetAdmission.Active() {
+		cancelHandshake()
+		reservation.Remove()
+		return
+	}
 	if err := pending.Acknowledge(); err != nil {
+		cancelHandshake()
+		reservation.Remove()
+		return
+	}
+	if !targetAdmission.Active() {
 		cancelHandshake()
 		reservation.Remove()
 		return
@@ -324,12 +345,15 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 	// transport callback closes the outer connection and target flows. Close
 	// owns one shared absolute shutdown deadline across all of that work.
 	defer transport.Close()
-	if !reservation.Activate() {
+	if !targetAdmission.Activate(reservation.Activate) {
 		return
 	}
-	watchTargetLifecycle(session, admission.target)
-	releaseTargetAdmission()
+	// The admission cancellation hook owns only pending ACK/activation. Once
+	// the reservation is active, exact withdrawal belongs to WithdrawBindings.
+	stopTargetCancellation()
+	targetAdmission.Release()
 	targetAdmissionHeld = false
+	watchTargetLifecycle(session, admission.target)
 	releaseHandshake()
 	_ = transport.Serve(server.lifetimeContext)
 }

@@ -63,17 +63,38 @@ func bindingOfTarget(target nativeegress.EgressTarget) (binding guestenrollment.
 }
 
 type guardedTargetAdmission interface {
-	acquireAdmission() (func(), bool)
+	acquireAdmission() (targetAdmissionLease, bool)
 }
+
+// targetAdmissionLease is internal to the relay. It keeps one target epoch
+// alive across the small admission operation without exposing implementation
+// details through the provider-neutral native-egress contract.
+type targetAdmissionLease interface {
+	Context() context.Context
+	Active() bool
+	Activate(func() bool) bool
+	Pending() bool
+	Release()
+}
+
+type unguardedTargetAdmission struct{}
+
+func (unguardedTargetAdmission) Context() context.Context { return context.Background() }
+func (unguardedTargetAdmission) Active() bool             { return true }
+func (unguardedTargetAdmission) Activate(activate func() bool) bool {
+	return activate != nil && activate()
+}
+func (unguardedTargetAdmission) Pending() bool { return false }
+func (unguardedTargetAdmission) Release()      {}
 
 type lifecycleTarget interface {
 	Done() <-chan struct{}
 }
 
-func acquireTargetAdmission(target nativeegress.EgressTarget) (func(), bool) {
+func acquireTargetAdmission(target nativeegress.EgressTarget) (targetAdmissionLease, bool) {
 	guarded, ok := target.(guardedTargetAdmission)
 	if !ok {
-		return func() {}, true
+		return unguardedTargetAdmission{}, true
 	}
 	return guarded.acquireAdmission()
 }
