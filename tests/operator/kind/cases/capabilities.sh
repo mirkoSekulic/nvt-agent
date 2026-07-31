@@ -33,8 +33,26 @@ case_run() {
   if [[ "$(agentrun_phase capabilities-smoke)" == "Failed" ]]; then
     die "capability attach AgentRun failed during startup"
   fi
+  assert_egress_shape_immutable
   wait_for_attach_marker
   assert_agent_only_capability
+}
+
+assert_egress_shape_immutable() {
+  log "checking AgentRun egress security shape immutability"
+  kubectl_smoke annotate agentrun capabilities-smoke -n "${NAMESPACE}" \
+    nvt.dev/immutability-smoke=unchanged --overwrite >/dev/null
+
+  local mutation
+  for mutation in \
+    '{"spec":{"egress":"mediated"}}' \
+    '{"spec":{"egressEnforcement":true}}' \
+    '{"spec":{"egressTransport":"forward-proxy"}}'; do
+    if kubectl_smoke patch agentrun capabilities-smoke -n "${NAMESPACE}" \
+      --type merge -p "${mutation}" >/dev/null 2>&1; then
+      die "AgentRun accepted an immutable egress security-shape mutation"
+    fi
+  done
 }
 
 apply_capability_run() {

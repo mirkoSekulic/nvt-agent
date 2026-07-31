@@ -45,11 +45,11 @@ spec:
                   message: spec.execution is immutable
                 - rule: "self.workspace == oldSelf.workspace"
                   message: spec.workspace is immutable
-                - rule: "self.egress == oldSelf.egress"
+                - rule: "has(self.egress) == has(oldSelf.egress) && (!has(self.egress) || self.egress == oldSelf.egress)"
                   message: spec.egress is immutable
-                - rule: "self.egressEnforcement == oldSelf.egressEnforcement"
+                - rule: "has(self.egressEnforcement) == has(oldSelf.egressEnforcement) && (!has(self.egressEnforcement) || self.egressEnforcement == oldSelf.egressEnforcement)"
                   message: spec.egressEnforcement is immutable
-                - rule: "self.egressTransport == oldSelf.egressTransport"
+                - rule: "has(self.egressTransport) == has(oldSelf.egressTransport) && (!has(self.egressTransport) || self.egressTransport == oldSelf.egressTransport)"
                   message: spec.egressTransport is immutable
               properties:
                 execution:

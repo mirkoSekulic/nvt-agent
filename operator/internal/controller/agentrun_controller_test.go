@@ -5139,9 +5139,9 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 		t.Fatalf("missing transport CEL for tunnel capacity: %#v", validations)
 	}
 	for _, immutable := range []struct{ rule, message string }{
-		{"self.egress == oldSelf.egress", "spec.egress is immutable"},
-		{"self.egressEnforcement == oldSelf.egressEnforcement", "spec.egressEnforcement is immutable"},
-		{"self.egressTransport == oldSelf.egressTransport", "spec.egressTransport is immutable"},
+		{"has(self.egress) == has(oldSelf.egress) && (!has(self.egress) || self.egress == oldSelf.egress)", "spec.egress is immutable"},
+		{"has(self.egressEnforcement) == has(oldSelf.egressEnforcement) && (!has(self.egressEnforcement) || self.egressEnforcement == oldSelf.egressEnforcement)", "spec.egressEnforcement is immutable"},
+		{"has(self.egressTransport) == has(oldSelf.egressTransport) && (!has(self.egressTransport) || self.egressTransport == oldSelf.egressTransport)", "spec.egressTransport is immutable"},
 	} {
 		if !hasCRDValidation(validations, immutable.rule, immutable.message) {
 			t.Fatalf("missing immutable egress CEL %q: %#v", immutable.rule, validations)

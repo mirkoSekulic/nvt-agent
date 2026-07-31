@@ -293,10 +293,8 @@ func ValidateStatus(value Status) error {
 		if value.EgressConfinement.Boundary != EgressConfinementBoundaryInfrastructure {
 			return errors.New("status egress_confinement boundary is invalid")
 		}
-		if (value.EgressConfinement.AttachmentGeneration == 0) != (value.EgressConfinement.AttachmentDigest == "") ||
-			value.EgressConfinement.AttachmentGeneration < 0 ||
-			(value.EgressConfinement.AttachmentDigest != "" && ValidateDesiredFingerprint(value.EgressConfinement.AttachmentDigest) != nil) ||
-			(value.EgressConfinement.Ready && (value.EgressConfinement.AttachmentGeneration < 1 || value.EgressConfinement.AttachmentDigest == "")) {
+		if value.EgressConfinement.AttachmentGeneration < 1 ||
+			ValidateDesiredFingerprint(value.EgressConfinement.AttachmentDigest) != nil {
 			return errors.New("status egress_confinement attachment observation is invalid")
 		}
 		if value.Ready && !value.EgressConfinement.Ready {

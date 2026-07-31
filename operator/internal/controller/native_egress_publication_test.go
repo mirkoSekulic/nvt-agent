@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -373,6 +374,53 @@ func TestNativeEgressWithdrawalUsesDurableBindingAfterSpecClassificationChanges(
 	}
 	if updated.Status.NativeGuestBinding != nil {
 		t.Fatal("binding was cleared without acknowledged withdrawal")
+	}
+}
+
+func TestNativeEgressOwnedResourcesRequireWithdrawalWithoutStatusBinding(t *testing.T) {
+	ctx := context.Background()
+	run := readyNativeEgressRun("owned-withdraw", "14141414-1414-1414-1414-141414141414", "guest-owned-withdraw")
+	run.Status.NativeGuestBinding = nil
+	run.Status.NativeEgressAttachment = nil
+	run.Status.Conditions = nil
+	pod, service := readyTargetObjects(run)
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run, pod, service).Build()
+	boundary := &recordingPublicationBoundary{check: func(target *nativeegress.PublishedTarget, exclude string) error {
+		if target != nil || exclude != string(run.UID) {
+			t.Fatalf("owned-resource withdrawal target=%#v exclude=%q", target, exclude)
+		}
+		for _, object := range []client.Object{&corev1.Pod{}, &corev1.Service{}} {
+			key := client.ObjectKey{Namespace: run.Namespace}
+			switch object.(type) {
+			case *corev1.Pod:
+				key.Name = EgressdPodName(run.Name)
+			case *corev1.Service:
+				key.Name = EgressdServiceName(run.Name)
+			}
+			if err := kubernetes.Get(ctx, key, object); err != nil {
+				t.Fatalf("owned resource was removed before relay acknowledgement: %v", err)
+			}
+		}
+		return nil
+	}}
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, nativeEgressTargets: boundary}
+	current := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := reconciler.clearNativeGuestBindingStatus(ctx, current)
+	if err != nil || cleared || boundary.calls != 1 {
+		t.Fatalf("owned-resource withdrawal cleared=%v calls=%d err=%v", cleared, boundary.calls, err)
+	}
+	if err := reconciler.cleanupNativeEgressResources(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned egress pod remained after acknowledged cleanup: %v", err)
+	}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(service), &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned egress service remained after acknowledged cleanup: %v", err)
 	}
 }
 

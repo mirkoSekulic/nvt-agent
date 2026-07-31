@@ -190,15 +190,14 @@ func nativeMediatedExternalRun(run *nvtv1alpha1.AgentRun) bool {
 		run.Spec.Execution.Driver != "" && run.Spec.Execution.Driver != builtInKubernetesDriver && AgentRunEgressForwardProxy(run)
 }
 
-// nativeEgressStatePresent is deliberately status/state based. A live run can
-// be observed with a legacy or mutated spec after native authority was
-// published; cleanup must still withdraw that exact target before clearing
-// status or deleting owned egress resources.
+// nativeEgressStatePresent is deliberately egress-specific and status based.
+// NativeGuestBinding alone is shared by direct/non-mediated external VMs and
+// is therefore not proof that a relay target was ever published.
 func nativeEgressStatePresent(run *nvtv1alpha1.AgentRun) bool {
 	if run == nil {
 		return false
 	}
-	return run.Status.NativeGuestBinding != nil || run.Status.NativeEgressAttachment != nil ||
+	return run.Status.NativeEgressAttachment != nil ||
 		meta.FindStatusCondition(run.Status.Conditions, ConditionNativeEgressReady) != nil
 }
 
@@ -263,7 +262,7 @@ func (r *AgentRunReconciler) ensureNativeEgressAttachment(ctx context.Context, r
 		return false, errors.New("native egress attachment is unavailable")
 	}
 	current := run.Status.NativeEgressAttachment
-	if current == nil && nativeEgressStatePresent(run) {
+	if current == nil && (nativeEgressStatePresent(run) || run.Status.NativeGuestBinding != nil) {
 		return false, errors.New("native egress attachment state disappeared")
 	}
 	if current != nil && (current.Generation < 1 || executiondriver.ValidateDesiredFingerprint(current.Digest) != nil) {
@@ -312,7 +311,14 @@ func nativeEgressPublishedTarget(run *nvtv1alpha1.AgentRun, binding guestenrollm
 }
 
 func (r *AgentRunReconciler) withdrawNativeEgressTarget(ctx context.Context, run *nvtv1alpha1.AgentRun) error {
-	if run == nil || run.Status.NativeGuestBinding == nil {
+	if !nativeEgressStatePresent(run) {
+		return nil
+	}
+	return r.withdrawNativeEgressTargetRequired(ctx, run)
+}
+
+func (r *AgentRunReconciler) withdrawNativeEgressTargetRequired(ctx context.Context, run *nvtv1alpha1.AgentRun) error {
+	if run == nil {
 		return nil
 	}
 	if r.nativeEgressTargets == nil {
@@ -531,10 +537,11 @@ func (r *AgentRunReconciler) cleanupNativeEgressResources(ctx context.Context, r
 	return nil
 }
 
-// nativeEgressCleanupRequired also inspects the operator-owned resource names.
-// This covers a crash/status-loss window where the relay target was published
-// and resources exist but the in-memory/spec classification no longer says
-// mediated. Ownership is checked by cleanupNativeEgressResources itself.
+// nativeEgressCleanupRequired also inspects operator-owned resources. This
+// covers a crash/status-loss window where the relay target was published and
+// resources exist but the current spec/status no longer classifies the run as
+// mediated. Exact ownership is required; a colliding object is not authority
+// to mutate the relay snapshot.
 func (r *AgentRunReconciler) nativeEgressCleanupRequired(ctx context.Context, run *nvtv1alpha1.AgentRun) (bool, error) {
 	if nativeEgressStatePresent(run) {
 		return true, nil
@@ -553,10 +560,9 @@ func (r *AgentRunReconciler) nativeEgressCleanupRequired(ctx context.Context, ru
 	}
 	for _, object := range objects {
 		if err := r.Get(ctx, client.ObjectKeyFromObject(object), object); err == nil {
-			if run.Status.NativeGuestBinding == nil && run.Status.NativeEgressAttachment == nil {
-				return false, errors.New("native egress binding evidence is unavailable")
+			if metav1.IsControlledBy(object, run) {
+				return true, nil
 			}
-			return true, nil
 		} else if !apierrors.IsNotFound(err) {
 			return false, errors.New("native egress cleanup is unavailable")
 		}

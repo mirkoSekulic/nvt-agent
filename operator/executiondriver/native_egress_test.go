@@ -211,12 +211,14 @@ func TestCanonicalNativeEgressDestinationsRejectsCrossPurposeDuplicate(t *testin
 	}
 }
 
-func TestValidateStatusRejectsReadyConfinementWithoutAttachmentPair(t *testing.T) {
+func TestValidateStatusRejectsConfinementWithoutAttachmentPair(t *testing.T) {
 	t.Parallel()
-	status := Status{Phase: PhaseProvisioning, EgressConfinement: &EgressConfinementStatus{
-		Boundary: EgressConfinementBoundaryInfrastructure, Ready: true,
-	}}
-	if err := ValidateStatus(status); err == nil {
-		t.Fatal("ready confinement without attachment generation/digest unexpectedly accepted")
+	for _, ready := range []bool{false, true} {
+		status := Status{Phase: PhaseProvisioning, EgressConfinement: &EgressConfinementStatus{
+			Boundary: EgressConfinementBoundaryInfrastructure, Ready: ready,
+		}}
+		if err := ValidateStatus(status); err == nil {
+			t.Fatalf("confinement ready=%v without attachment generation/digest unexpectedly accepted", ready)
+		}
 	}
 }

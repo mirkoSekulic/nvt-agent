@@ -637,6 +637,44 @@ func TestNativeEgressAttachmentDisappearanceFailsBeforeDriverCall(t *testing.T) 
 	}
 }
 
+func TestNativeEgressLegacyShapeTransitionWithdrawsBeforeDriverCall(t *testing.T) {
+	ctx := context.Background()
+	attachment := testControllerNativeEgressAttachment(t, 4)
+	run := externalTestAgentRun()
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{
+		Generation: attachment.Generation, Digest: attachment.Digest,
+	}
+	run.Status.NativeGuestBinding = &nvtv1alpha1.AgentRunNativeGuestBinding{
+		AgentRunUID: string(run.UID), ExecutionID: "nvt-exec-" + string(run.UID), DriverRegistration: "example-vm",
+		DesiredGeneration: run.Generation + attachment.Generation, GuestInstanceID: "guest-legacy-shape",
+	}
+	driver := &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseRunning, ObservedGeneration: run.Generation}}}
+	kubernetes, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	boundary := &recordingPublicationBoundary{check: func(target *nativeegress.PublishedTarget, exclude string) error {
+		if target != nil || exclude != string(run.UID) {
+			t.Fatalf("legacy shape withdrawal target=%#v exclude=%q", target, exclude)
+		}
+		current := getExternalRun(t, ctx, kubernetes, run)
+		if current.Status.NativeGuestBinding == nil {
+			t.Fatal("legacy binding cleared before relay acknowledgement")
+		}
+		return nil
+	}}
+	reconciler.nativeEgressTargets = boundary
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	driver.mu.Lock()
+	desiredCalls := len(driver.desired)
+	driver.mu.Unlock()
+	stored := getExternalRun(t, ctx, kubernetes, run)
+	condition := meta.FindStatusCondition(stored.Status.Conditions, ConditionExecutionBackendAvailable)
+	if desiredCalls != 0 || boundary.calls != 1 || stored.Status.NativeGuestBinding != nil ||
+		condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != executionSelectionInvalidReason {
+		t.Fatalf("legacy shape desired=%d withdrawals=%d binding=%#v condition=%#v", desiredCalls, boundary.calls, stored.Status.NativeGuestBinding, condition)
+	}
+}
+
 func TestNativeMediatedGuestEnrollmentWaitsForExactInfrastructureConfinement(t *testing.T) {
 	attachment := testControllerNativeEgressAttachment(t, 2)
 	endpoint := &executiondriver.Endpoint{Scheme: executiondriver.EndpointSchemeHTTPS, Host: "vm.invalid", Port: 443}
