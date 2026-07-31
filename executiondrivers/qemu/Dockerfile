@@ -9,7 +9,7 @@ ARG TARGETARCH
 WORKDIR /src
 COPY protocol/guestenrollment/go.mod protocol/guestenrollment/go.mod
 COPY operator/go.mod operator/go.sum operator/
-COPY executiondrivers/qemu/go.mod executiondrivers/qemu/
+COPY executiondrivers/qemu/go.mod executiondrivers/qemu/go.sum executiondrivers/qemu/
 COPY hostbundle/go.mod hostbundle/go.mod
 RUN cd /src/executiondrivers/qemu && go mod download
 COPY protocol/guestenrollment/ protocol/guestenrollment/
@@ -22,16 +22,20 @@ RUN cd /src/executiondrivers/qemu && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
       go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
       -o /out/nvt-qemu-guest-init ./cmd/nvt-qemu-guest-init && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+      go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+      -o /out/nvt-qemu-agent-fixture ./cmd/nvt-qemu-agent-fixture && \
     cd /src/hostbundle && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
       go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
       -o /out/nvt-host-bootstrap ./cmd/nvt-host-bootstrap
 
 FROM --platform=${GUEST_PLATFORM} alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS guest-image
 RUN apk add --no-cache \
-      busybox ca-certificates e2fsprogs linux-virt python3 qemu-img tmux && \
+      busybox ca-certificates e2fsprogs iptables linux-virt python3 qemu-img tmux && \
     addgroup -g 65532 -S nvt-agent && \
     adduser -u 65532 -S -D -H -G nvt-agent nvt-agent
 COPY --from=builder /out/nvt-qemu-guest-init /sbin/nvt-qemu-guest-init
+COPY --from=builder /out/nvt-qemu-agent-fixture /usr/local/bin/nvt-qemu-agent-fixture
 COPY --from=builder /out/nvt-host-bootstrap /usr/local/bin/nvt-host-bootstrap
 RUN rm -f /sbin/init && ln -s /sbin/nvt-qemu-guest-init /sbin/init && \
     mkdir -p /guest-root /out /workspace /run/nvt-agent /var/lib/nvt-agent /var/lib/nvt-agent-identity && \
@@ -52,7 +56,7 @@ RUN rm -f /sbin/init && ln -s /sbin/nvt-qemu-guest-init /sbin/init && \
       | sha256sum | awk '{print "sha256:" $1}' > /out/digest
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
-RUN apk add --no-cache qemu-img qemu-system-x86_64 && \
+RUN apk add --no-cache qemu-img qemu-system-x86_64 tini && \
     addgroup -g 65532 -S nvt-driver && \
     adduser -u 65532 -S -D -H -G nvt-driver nvt-driver
 COPY --from=builder /out/nvt-qemu-driver /usr/local/bin/nvt-qemu-driver

@@ -393,8 +393,12 @@ For a mediated external VM, the trusted owners converge in this order:
    guest. It reads back the exact current attachment before reporting
    `egress_confinement:{boundary:"infrastructure",ready:true,attachment_generation:<current>,attachment_digest:<current>}`.
 3. The existing one-time exact guest enrollment completes inside that confined
-   bootstrap network; no provider or egress credential is carried in the
-   envelope, desired fingerprint, driver status, or provider tags.
+   bootstrap network. Its separately authenticated handoff may carry the
+   operator-owned public per-run interception CA (certificate PEM only, at
+   most 16 KiB) to the exact guest after the confinement read-back. The CA
+   private key remains solely with egressd. No provider or egress credential is
+   carried in the envelope, desired fingerprint, driver status, or provider
+   tags.
 4. The active runtime identity obtains the short-lived egress credential under
    the fixed purpose. `nvt-guest-egressd` authenticates the outbound session
    and activates its root-only local flow socket. The separate
@@ -486,9 +490,16 @@ complete snapshot after either process restarts, gates `NativeEgressReady` on
 the acknowledged exact mapping and the current attachment/confinement
 observation, and withdraws it before authority or driver cleanup. The optional
 desired plan now tells a provider what it must attach without vendor fields.
-No production driver implements those redirect rules or infrastructure network
-confinement yet; Azure/AWS/QEMU support and the final provider E2E remain future
+The unpublished QEMU reference driver now consumes that plan and provides the
+final hermetic provider proof: `restrict=on` is enforced by QEMU outside the
+guest, exact host-owned forward rules admit only the relay/bootstrap/control
+destinations, and live process-argument read-back gates enrollment. Its guest
+redirect is explicitly non-authoritative. The TCG lifecycle reaches the
+hermetic upstream only through capture, the authenticated relay, and the exact
+per-run egressd; it also proves revocation, restart, and cleanup. Azure, AWS,
+other production providers, and production public relay ingress remain future
 gates.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
-remain unchanged. Production VM mediated egress requires those later reviewed
-implementation gates and a real provider enforcement proof.
+remain unchanged. Production VM mediated egress still requires a separately
+reviewed production provider implementation and its infrastructure enforcement
+proof; the QEMU reference is deliberately not such a provider.

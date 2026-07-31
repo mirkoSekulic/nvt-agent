@@ -48,11 +48,12 @@ func TestLoadConfiguredIsStrictOperatorOwnedAndOptional(t *testing.T) {
 	directory := t.TempDir()
 	document := configDocument{
 		Version: 1, Generation: 2,
-		RelayHost: "nvt-native-egress-relay.nvt.svc", RelayPort: 7445,
-		RelayServerName: "nvt-native-egress-relay.nvt.svc", CAFile: writeTestCA(t, directory),
+		RelayHost: "nvt-native-egress-relay.nvt.svc.cluster.local", RelayPort: 7445,
+		RelayServerName: "nvt-native-egress-relay.nvt.svc.cluster.local", CAFile: writeTestCA(t, directory),
 		RequiredDestinations: []executiondriver.NativeEgressRequiredDestination{
-			{Purpose: executiondriver.NativeEgressDestinationControl, Host: "nvt-gateway.nvt.svc", Port: 7444},
-			{Purpose: executiondriver.NativeEgressDestinationBootstrap, Host: "nvt-broker.nvt.svc", Port: 7443},
+			{Purpose: executiondriver.NativeEgressDestinationBootstrap, Host: "nvt-broker.nvt.svc.cluster.local", Port: 7347},
+			{Purpose: executiondriver.NativeEgressDestinationBootstrap, Host: "nvt-host-bundle-registry.nvt.svc.cluster.local", Port: 443},
+			{Purpose: executiondriver.NativeEgressDestinationControl, Host: "nvt-agent-gateway.nvt.svc.cluster.local", Port: 7443},
 		},
 		Redirect: executiondriver.NativeEgressRedirectIntent{
 			Mode: executiondriver.NativeEgressRedirectModeCaptureTCP, LoopbackAddress: "127.0.0.1",

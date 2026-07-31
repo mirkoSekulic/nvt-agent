@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
+	protocol "github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
 
 const (
@@ -25,17 +26,27 @@ const (
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type Configuration struct {
-	ContractVersion       string     `json:"contract_version"`
-	GuestImage            GuestImage `json:"guest_image"`
-	HostBundle            Artifact   `json:"host_bundle"`
-	RegistryCAPEM         string     `json:"registry_ca_pem,omitempty"`
-	EnrollmentCAPEM       string     `json:"enrollment_ca_pem"`
-	NativeSessionEndpoint string     `json:"native_session_endpoint"`
-	NativeSessionCAPEM    string     `json:"native_session_ca_pem"`
-	CPUs                  int        `json:"cpus"`
-	MemoryMiB             int        `json:"memory_mib"`
-	Acceleration          string     `json:"acceleration"`
-	BootTimeoutSec        int        `json:"boot_timeout_seconds"`
+	ContractVersion       string             `json:"contract_version"`
+	GuestImage            GuestImage         `json:"guest_image"`
+	HostBundle            Artifact           `json:"host_bundle"`
+	RegistryCAPEM         string             `json:"registry_ca_pem,omitempty"`
+	EnrollmentCAPEM       string             `json:"enrollment_ca_pem"`
+	NativeSessionEndpoint string             `json:"native_session_endpoint"`
+	NativeSessionCAPEM    string             `json:"native_session_ca_pem"`
+	CPUs                  int                `json:"cpus"`
+	MemoryMiB             int                `json:"memory_mib"`
+	Acceleration          string             `json:"acceleration"`
+	BootTimeoutSec        int                `json:"boot_timeout_seconds"`
+	NativeEgressProbe     *NativeEgressProbe `json:"native_egress_probe,omitempty"`
+}
+
+// NativeEgressProbe is a QEMU-reference-only, non-secret acceptance input.
+// It is never part of the provider-neutral execution-driver contract and is
+// ignored unless the operator supplies a native egress attachment.
+type NativeEgressProbe struct {
+	Host       string `json:"host"`
+	Port       uint16 `json:"port"`
+	Capability string `json:"capability"`
 }
 
 type GuestImage struct {
@@ -71,6 +82,24 @@ func Validate(value Configuration) error {
 		(value.Acceleration != "auto" && value.Acceleration != "kvm" && value.Acceleration != "tcg") ||
 		value.BootTimeoutSec < 10 || value.BootTimeoutSec > MaxBootTimeoutSeconds {
 		return errors.New("QEMU execution class resource settings are invalid")
+	}
+	if value.NativeEgressProbe != nil {
+		if ValidateNativeEgressProbe(*value.NativeEgressProbe) != nil {
+			return errors.New("QEMU native egress probe is invalid")
+		}
+	}
+	return nil
+}
+
+func ValidateNativeEgressProbe(value NativeEgressProbe) error {
+	destination := protocol.Destination{
+		Network: protocol.NetworkTCP, Host: value.Host,
+		Port: value.Port, CapabilityHint: value.Capability,
+	}
+	lowerCapability := strings.ToLower(value.Capability)
+	if protocol.ValidateDestination(destination) != nil || net.ParseIP(value.Host) != nil || value.Capability == "" ||
+		strings.Contains(lowerCapability, "nvt_eg1_") || strings.Contains(lowerCapability, "nvt_ri1_") {
+		return errors.New("QEMU native egress probe is invalid")
 	}
 	return nil
 }

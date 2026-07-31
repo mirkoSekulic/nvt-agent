@@ -2,9 +2,16 @@ package guestenrollment
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -110,7 +117,7 @@ func TestSensitiveHandoffContractIsSeparateStrictAndRedacted(t *testing.T) {
 	deliver := HandoffDeliverRequest{ContractVersion: HandoffVersion, Envelope: BootstrapEnvelope{
 		ContractVersion: Version, Binding: binding, ExchangeURL: "https://issuer.example/v1/guest-enrollment/exchange",
 		Token: opaqueValue(TokenBytes, 0x66), IssuedAt: FormatTimestamp(now), ExpiresAt: FormatTimestamp(now.Add(time.Minute)),
-	}}
+	}, NativeEgressCAPEM: testNativeEgressCAPEM(t)}
 	ack := HandoffAcknowledgement{ContractVersion: HandoffVersion}
 	for name, value := range map[string]any{"prepare": prepare, "prepared": prepared, "replace": replace, "deliver": deliver, "ack": ack} {
 		encoded, err := json.Marshal(value)
@@ -145,6 +152,33 @@ func TestSensitiveHandoffContractIsSeparateStrictAndRedacted(t *testing.T) {
 	if _, err := DecodeHandoffDeliverRequest([]byte(`{"contract_version":"nvt.guest-enrollment-handoff/v1","envelope":null,"token":"forbidden"}`)); err == nil {
 		t.Fatal("credential field outside the envelope was accepted")
 	}
+	invalidCA := deliver
+	invalidCA.NativeEgressCAPEM = "-----BEGIN PRIVATE KEY-----\nZm9yYmlkZGVu\n-----END PRIVATE KEY-----\n"
+	if ValidateHandoffDeliverRequest(invalidCA) == nil {
+		t.Fatal("private key material was accepted as public native egress trust")
+	}
+	invalidCA.NativeEgressCAPEM = strings.Repeat("x", MaxNativeEgressCAPEMBytes+1)
+	if ValidateHandoffDeliverRequest(invalidCA) == nil {
+		t.Fatal("oversized native egress trust was accepted")
+	}
+}
+
+func testNativeEgressCAPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test native egress CA"}, IsCA: true,
+		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
 func TestContractRejectsInvalidFieldsAndBounds(t *testing.T) {

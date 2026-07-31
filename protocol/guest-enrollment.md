@@ -68,15 +68,21 @@ The handoff has three bounded operations:
   may return that bit.
 - `replace(binding)` is valid only after exact-binding revocation. It must
   return a distinct freshly prepared guest instance.
-- `deliver(envelope)` atomically makes the envelope available to exactly the
-  bound bootstrap instance before acknowledging. A later `prepare` must report
+- `deliver(envelope, native_egress_ca_pem?)` atomically makes the envelope
+  available to exactly the bound bootstrap instance before acknowledging. For
+  a mediated VM, the optional member carries only the bounded public per-run
+  egress interception CA after exact infrastructure confinement has been read
+  back. It contains certificate PEM only, never the CA private key, and remains
+  absent for legacy/non-mediated handoffs. A later `prepare` must report
   `accepted`, including when the acknowledgement was lost.
 
 The driver checks the execution ID and desired generation on every operation,
 and checks the complete delivered/replaced binding byte-for-byte against the
 durably prepared instance. A mismatched operation fails without mutation.
 
-Requests are at most 20 KiB and responses at most 4 KiB. They use strict JSON,
+Requests are at most 36 KiB and responses at most 4 KiB. The optional public
+native-egress CA is at most 16 KiB and contains at most 16 CA certificates.
+They use strict JSON,
 the versioned shapes in `protocol/guestenrollment`, bounded deadlines, and
 sanitized errors. The provider-side prepared/accepted marker is non-secret but
 durable; the envelope is not ordinary provider state and must be discarded

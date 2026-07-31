@@ -27,6 +27,7 @@ import (
 
 type QEMUConfig struct {
 	Binary       string
+	ReaperBinary string
 	Kernel       string
 	Initramfs    string
 	DiskTemplate string
@@ -35,17 +36,23 @@ type QEMUConfig struct {
 }
 
 type QEMUManager struct {
-	config         QEMUConfig
-	imageDigest    string
-	mu             sync.Mutex
-	active         map[string]*activeMachine
-	terminateGrace time.Duration
-	killGrace      time.Duration
+	config                 QEMUConfig
+	imageDigest            string
+	mu                     sync.Mutex
+	active                 map[string]*activeMachine
+	terminateGrace         time.Duration
+	killGrace              time.Duration
+	recoveryControlTimeout time.Duration
+	processArguments       func(int) ([]string, error)
 }
 
 type activeMachine struct {
-	command *exec.Cmd
-	done    chan struct{}
+	command              *exec.Cmd
+	done                 chan struct{}
+	processPID           int
+	netdevArgument       string
+	attachmentGeneration int64
+	attachmentDigest     string
 }
 
 func NewQEMUManager(value QEMUConfig) (*QEMUManager, error) {
@@ -53,6 +60,9 @@ func NewQEMUManager(value QEMUConfig) (*QEMUManager, error) {
 		if !regularFile(path) {
 			return nil, errors.New("QEMU runtime artifact is unavailable")
 		}
+	}
+	if value.ReaperBinary != "" && !regularFile(value.ReaperBinary) {
+		return nil, errors.New("QEMU process reaper is unavailable")
 	}
 	if value.StateRoot == "" {
 		return nil, errors.New("QEMU state root is unavailable")
@@ -73,6 +83,7 @@ func NewQEMUManager(value QEMUConfig) (*QEMUManager, error) {
 	return &QEMUManager{
 		config: value, imageDigest: digest, active: map[string]*activeMachine{},
 		terminateGrace: 3 * time.Second, killGrace: 2 * time.Second,
+		recoveryControlTimeout: 5 * time.Second, processArguments: readProcessArguments,
 	}, nil
 }
 
@@ -86,7 +97,17 @@ func (manager *QEMUManager) Ensure(ctx context.Context, state *State) error {
 		case <-machine.done:
 			delete(manager.active, state.ExecutionID)
 		default:
-			return nil
+			if state.NativeEgressAttachment == nil {
+				return nil
+			}
+			arguments, argumentsErr := manager.processArguments(machine.processPID)
+			confinement := qemuConfinementStatus(*state, machine, arguments)
+			if argumentsErr == nil && confinement != nil && confinement.Ready {
+				return nil
+			}
+			if manager.stopLocked(state.ExecutionID) != nil {
+				return errors.New("QEMU confinement repair is pending")
+			}
 		}
 	}
 	runDirectory := (Store{Root: manager.config.StateRoot}).RunDir(state.ExecutionID)
@@ -113,6 +134,10 @@ func (manager *QEMUManager) Ensure(ctx context.Context, state *State) error {
 		return err
 	}
 	cpuModel := cpuModelForAcceleration(acceleration)
+	netdevArgument, err := qemuNetworkArgumentWithResolver(ctx, *state, resolveQEMUNetworkHost)
+	if err != nil {
+		return err
+	}
 	args := []string{
 		"-nodefaults", "-no-reboot", "-nographic", "-monitor", "none", "-serial", "file:" + console,
 		"-machine", "q35,accel=" + acceleration, "-cpu", cpuModel, "-smp", strconv.Itoa(state.Configuration.CPUs),
@@ -124,10 +149,21 @@ func (manager *QEMUManager) Ensure(ctx context.Context, state *State) error {
 		"-device", "virtio-serial-pci",
 		"-chardev", "socket,id=nvtcontrol,path=" + control + ",server=on,wait=off",
 		"-device", "virtserialport,chardev=nvtcontrol,name=org.nvt.control",
-		"-netdev", fmt.Sprintf("user,id=nvtnet,hostfwd=tcp:127.0.0.1:%d-:8080", state.HostPort),
+		"-netdev", netdevArgument,
 		"-device", "virtio-net-pci,netdev=nvtnet",
 	}
-	command := exec.CommandContext(context.WithoutCancel(ctx), manager.config.Binary, args...)
+	executable, processArguments := manager.config.Binary, args
+	if state.NativeEgressAttachment != nil {
+		if manager.config.ReaperBinary == "" {
+			return errors.New("QEMU mediated process reaper is unavailable")
+		}
+		executable = manager.config.ReaperBinary
+		// SIGTERM on driver-parent death lets tini forward to the complete QEMU
+		// process group and reap it. SIGKILL would terminate the subreaper first
+		// and orphan the VM and per-flow guestfwd helpers in the host container.
+		processArguments = append([]string{"-s", "-g", "-p", "SIGTERM", "--", manager.config.Binary}, args...)
+	}
+	command := exec.CommandContext(context.WithoutCancel(ctx), executable, processArguments...)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	command.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
@@ -139,10 +175,30 @@ func (manager *QEMUManager) Ensure(ctx context.Context, state *State) error {
 		_ = command.Wait()
 		close(done)
 	}()
-	manager.active[state.ExecutionID] = &activeMachine{command: command, done: done}
+	machine := &activeMachine{command: command, done: done, netdevArgument: netdevArgument, processPID: command.Process.Pid}
+	if state.NativeEgressAttachment != nil {
+		machine.processPID = 0
+		machine.attachmentGeneration = state.NativeEgressAttachment.Generation
+		machine.attachmentDigest = state.NativeEgressAttachment.Digest
+	}
+	manager.active[state.ExecutionID] = machine
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		if machine.processPID == 0 {
+			pid, childErr := readSingleChildProcess(command.Process.Pid, manager.config.Binary)
+			if childErr == nil {
+				machine.processPID = pid
+			}
+		}
 		if _, err := os.Stat(control); err == nil {
+			if state.NativeEgressAttachment != nil {
+				arguments, argumentsErr := manager.processArguments(machine.processPID)
+				confinement := qemuConfinementStatus(*state, machine, arguments)
+				if argumentsErr != nil || confinement == nil || !confinement.Ready {
+					_ = manager.stopLocked(state.ExecutionID)
+					return errors.New("QEMU infrastructure confinement could not be read back")
+				}
+			}
 			return nil
 		}
 		select {
@@ -179,11 +235,20 @@ func (manager *QEMUManager) Observe(ctx context.Context, state *State) (MachineO
 		return MachineObservation{}, nil
 	default:
 	}
+	observation := MachineObservation{Running: true}
+	if machine.attachmentGeneration != 0 {
+		arguments, argumentsErr := manager.processArguments(machine.processPID)
+		if argumentsErr != nil {
+			arguments = nil
+		}
+		observation.EgressConfinement = qemuConfinementStatus(*state, machine, arguments)
+	}
 	response, err := manager.call(ctx, state, wire.Request{ContractVersion: wire.Version, Type: wire.RequestStatus})
 	if err != nil {
-		return MachineObservation{Running: true}, err
+		return observation, err
 	}
-	observation := MachineObservation{Running: true, Enrolled: response.State == wire.StateEnrolled || response.State == wire.StateReady, Ready: response.State == wire.StateReady}
+	observation.Enrolled = response.State == wire.StateEnrolled || response.State == wire.StateReady
+	observation.Ready = response.State == wire.StateReady
 	if observation.Ready {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/ready", state.HostPort), nil)
 		client := http.Client{Timeout: time.Second}
@@ -198,10 +263,13 @@ func (manager *QEMUManager) Observe(ctx context.Context, state *State) (MachineO
 	return observation, nil
 }
 
-func (manager *QEMUManager) Deliver(ctx context.Context, state *State, envelope guestenrollment.BootstrapEnvelope) (MachineObservation, error) {
-	request := wire.Request{ContractVersion: wire.Version, Type: wire.RequestDeliver, Envelope: &envelope}
+func (manager *QEMUManager) Deliver(ctx context.Context, state *State, envelope guestenrollment.BootstrapEnvelope, nativeEgressCAPEM string) (MachineObservation, error) {
+	request := wire.Request{
+		ContractVersion: wire.Version, Type: wire.RequestDeliver, Envelope: &envelope, NativeEgressCAPEM: nativeEgressCAPEM,
+	}
 	response, err := manager.call(ctx, state, request)
 	request.Envelope = nil
+	request.NativeEgressCAPEM = ""
 	envelope.Token = ""
 	if err != nil || (response.State != wire.StateEnrolled && response.State != wire.StateReady) {
 		return MachineObservation{}, errors.New("QEMU guest enrollment did not complete")
@@ -345,7 +413,18 @@ func (manager *QEMUManager) call(ctx context.Context, state *State, request wire
 	}
 	defer zero(payload)
 	socket := manager.controlSocketPath(state.ExecutionID)
-	deadline := time.Now().Add(time.Duration(state.Configuration.BootTimeoutSec) * time.Second)
+	operationTimeout := time.Duration(state.Configuration.BootTimeoutSec) * time.Second
+	// A first configuration or enrollment exchange may legitimately span the
+	// complete guest boot/install window. Status and an idempotent configuration
+	// of an already accepted guest must not: a lost virtio exchange must unwind
+	// before the execution-driver host's outer RPC deadline so the durable driver
+	// process can retry without orphaning the live VM process tree.
+	if request.Type == wire.RequestStatus || (request.Type == wire.RequestConfigure && state.EnrollmentAccepted) {
+		if manager.recoveryControlTimeout > 0 && manager.recoveryControlTimeout < operationTimeout {
+			operationTimeout = manager.recoveryControlTimeout
+		}
+	}
+	deadline := time.Now().Add(operationTimeout)
 	for time.Now().Before(deadline) {
 		connection, dialErr := (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext(ctx, "unix", socket)
 		if dialErr == nil {

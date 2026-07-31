@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,7 @@ type fakeProvider struct {
 	deletes      int
 	configs      int
 	deliveries   int
+	deliveredCA  string
 	block        bool
 	configureErr bool
 	digest       string
@@ -77,14 +79,17 @@ func (machine *fakeMachines) Configure(_ context.Context, _ *State, configuratio
 	machine.provider.mu.Unlock()
 	return nil
 }
-func (machine *fakeMachines) Deliver(_ context.Context, state *State, envelope guestenrollment.BootstrapEnvelope) (MachineObservation, error) {
+func (machine *fakeMachines) Deliver(_ context.Context, state *State, envelope guestenrollment.BootstrapEnvelope, nativeEgressCAPEM string) (MachineObservation, error) {
 	if envelope.Token != secretCanary {
 		return MachineObservation{}, errors.New("wrong token")
 	}
 	machine.provider.mu.Lock()
 	defer machine.provider.mu.Unlock()
 	machine.provider.deliveries++
-	observation := MachineObservation{Running: true, Enrolled: true}
+	machine.provider.deliveredCA = nativeEgressCAPEM
+	observation := machine.provider.resources[state.ExecutionID]
+	observation.Running = true
+	observation.Enrolled = true
 	machine.provider.resources[state.ExecutionID] = observation
 	return observation, nil
 }
@@ -172,6 +177,253 @@ func TestExecutionDriverConformanceLifecycleAndRestart(t *testing.T) {
 		t.Fatal("repeated deletion is not idempotent")
 	}
 }
+
+func TestNativeEgressConfinementGatesEnrollmentAndGuestReadiness(t *testing.T) {
+	root := t.TempDir()
+	configuration := testConfiguration(t)
+	configuration.NativeEgressProbe = &config.NativeEgressProbe{Host: "echo.example", Port: 443, Capability: "github-main"}
+	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest}
+	implementation, err := New(root, registration, &fakeMachines{provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredExecution(t, configuration)
+	attachment := testNativeEgressAttachment(t)
+	desired.NativeEgressAttachment = &attachment
+	status, err := implementation.Reconcile(context.Background(), desired)
+	if err != nil || status.Ready || status.EgressConfinement != nil {
+		t.Fatalf("unconfined reconcile = %#v, %v", status, err)
+	}
+	scope := guestenrollment.ExecutionScope{AgentRunUID: "abababab-abab-abab-abab-abababababab", ExecutionID: desired.ExecutionID, DriverRegistration: registration}
+	prepare := guestenrollment.HandoffPrepareRequest{ContractVersion: guestenrollment.HandoffVersion, ExecutionScope: scope, DesiredGeneration: desired.Generation}
+	if _, err := implementation.Prepare(context.Background(), prepare); err == nil || provider.configs != 0 || provider.deliveries != 0 {
+		t.Fatal("missing provider confinement reached enrollment handoff")
+	}
+	state, err := implementation.store.Load(desired.ExecutionID)
+	if err != nil || state.ExecutionScope != nil {
+		t.Fatal("failed confinement created a durable enrollment binding")
+	}
+
+	provider.mu.Lock()
+	provider.resources[desired.ExecutionID] = MachineObservation{Running: true, EgressConfinement: &executiondriver.EgressConfinementStatus{
+		Boundary: "guest", Ready: true, AttachmentGeneration: attachment.Generation, AttachmentDigest: attachment.Digest,
+	}}
+	provider.mu.Unlock()
+	if _, err := implementation.Prepare(context.Background(), prepare); err == nil || provider.configs != 0 {
+		t.Fatal("guest-asserted confinement reached enrollment handoff")
+	}
+
+	provider.mu.Lock()
+	provider.resources[desired.ExecutionID] = MachineObservation{Running: true, EgressConfinement: &executiondriver.EgressConfinementStatus{
+		Boundary: executiondriver.EgressConfinementBoundaryInfrastructure, Ready: true,
+		AttachmentGeneration: attachment.Generation - 1, AttachmentDigest: attachment.Digest,
+	}}
+	provider.mu.Unlock()
+	if _, err := implementation.Prepare(context.Background(), prepare); err == nil || provider.configs != 0 {
+		t.Fatal("stale provider confinement reached enrollment handoff")
+	}
+
+	provider.mu.Lock()
+	provider.resources[desired.ExecutionID] = MachineObservation{Running: true, EgressConfinement: exactConfinement(attachment)}
+	provider.mu.Unlock()
+	status, err = implementation.Reconcile(context.Background(), desired)
+	if err != nil || !status.Ready || status.Phase != executiondriver.PhaseRunning || status.EgressConfinement == nil || !status.EgressConfinement.Ready {
+		t.Fatalf("exact pre-enrollment confinement = %#v, %v", status, err)
+	}
+	prepared, err := implementation.Prepare(context.Background(), prepare)
+	if err != nil || !prepared.NewlyPrepared || provider.configs != 1 {
+		t.Fatalf("exact confined preparation = %#v, configs=%d, %v", prepared, provider.configs, err)
+	}
+	binding := guestenrollment.Binding{
+		AgentRunUID: scope.AgentRunUID, ExecutionID: scope.ExecutionID, DriverRegistration: scope.DriverRegistration,
+		DesiredGeneration: desired.Generation, GuestInstanceID: prepared.GuestInstanceID,
+	}
+	wrongEndpoint := testEnvelope(binding)
+	wrongEndpoint.ExchangeURL = "https://unlisted.example/v1/guest-enrollment/exchange"
+	publicCA := testCertificate(t)
+	if err := implementation.Deliver(context.Background(), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: wrongEndpoint, NativeEgressCAPEM: publicCA}); err == nil || provider.deliveries != 0 {
+		t.Fatal("unlisted enrollment endpoint reached the confined guest")
+	}
+	if err := implementation.Deliver(context.Background(), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: testEnvelope(binding), NativeEgressCAPEM: publicCA}); err != nil || provider.deliveries != 1 || provider.deliveredCA != publicCA {
+		t.Fatalf("confined enrollment delivery = deliveries=%d, %v", provider.deliveries, err)
+	}
+	status, err = implementation.Reconcile(context.Background(), desired)
+	if err != nil || !status.Ready || status.Phase != executiondriver.PhaseRunning {
+		t.Fatalf("accepted guest lost its infrastructure-ready provider boundary: %#v, %v", status, err)
+	}
+	provider.mu.Lock()
+	provider.configureErr = true
+	provider.mu.Unlock()
+	recovered, err := implementation.Prepare(context.Background(), prepare)
+	if err != nil || recovered.State != guestenrollment.HandoffStateAccepted || recovered.NewlyPrepared {
+		t.Fatalf("accepted mediated handoff depended on unpublished guest data plane: %#v, %v", recovered, err)
+	}
+	status, err = implementation.Reconcile(context.Background(), desired)
+	if err != nil || !status.Ready || status.Phase != executiondriver.PhaseRunning || status.EgressConfinement == nil || !status.EgressConfinement.Ready {
+		t.Fatalf("guest control failure erased live infrastructure confinement: %#v, %v", status, err)
+	}
+	provider.mu.Lock()
+	provider.configureErr = false
+	provider.mu.Unlock()
+	provider.mu.Lock()
+	observation := provider.resources[desired.ExecutionID]
+	observation.Ready = true
+	provider.resources[desired.ExecutionID] = observation
+	provider.mu.Unlock()
+	status, err = implementation.Reconcile(context.Background(), desired)
+	if err != nil || !status.Ready || status.Endpoint == nil {
+		t.Fatalf("live confined guest did not become ready: %#v, %v", status, err)
+	}
+	assertTreeExcludes(t, root, []byte(secretCanary))
+}
+
+func TestNativeEgressNetworkReadbackIsExactAndLegacyArgumentIsUnchanged(t *testing.T) {
+	legacy, err := qemuNetworkArgument(State{HostPort: 23456})
+	if err != nil || legacy != "user,id=nvtnet,hostfwd=tcp:127.0.0.1:23456-:8080" {
+		t.Fatalf("legacy network argument changed: %q, %v", legacy, err)
+	}
+	attachment := testNativeEgressAttachment(t)
+	state := State{HostPort: 23456, NativeEgressAttachment: &attachment}
+	argument, err := qemuNetworkArgument(state)
+	if err != nil || !strings.Contains(argument, ",restrict=on,") || strings.Contains(argument, attachment.Relay.CAPEM) || strings.Contains(argument, attachment.Digest) {
+		t.Fatalf("mediated network argument is unsafe: %q, %v", argument, err)
+	}
+	for _, required := range []string{
+		"hostfwd=tcp:127.0.0.1:23456-:8080",
+		"guestfwd=tcp:10.0.2.100:443-cmd:/bin/busybox nc broker.example 443",
+		"guestfwd=tcp:10.0.2.101:7443-cmd:/bin/busybox nc gateway.example 7443",
+		"guestfwd=tcp:10.0.2.102:443-cmd:/bin/busybox nc registry.example 443",
+		"guestfwd=tcp:10.0.2.103:7444-cmd:/bin/busybox nc relay.example 7444",
+	} {
+		if !strings.Contains(argument, required) {
+			t.Fatalf("mediated network omitted %q: %q", required, argument)
+		}
+	}
+	machine := &activeMachine{netdevArgument: argument, attachmentGeneration: attachment.Generation, attachmentDigest: attachment.Digest}
+	exact := qemuConfinementStatus(state, machine, []string{"qemu-system-x86_64", "-netdev", argument})
+	if exact == nil || !exact.Ready || exact.Boundary != executiondriver.EgressConfinementBoundaryInfrastructure {
+		t.Fatalf("exact host readback was not ready: %#v", exact)
+	}
+	for name, arguments := range map[string][]string{
+		"guest claim": nil,
+		"relaxed":     {"qemu-system-x86_64", "-netdev", strings.Replace(argument, ",restrict=on,", ",", 1)},
+		"duplicate":   {"qemu-system-x86_64", "-netdev", argument, "-netdev", argument},
+		"stale":       {"qemu-system-x86_64", "-netdev", argument + ",guestfwd=tcp:10.0.2.200:443-cmd:/bin/busybox nc 192.0.2.10 443"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status := qemuConfinementStatus(state, machine, arguments)
+			if status == nil || status.Ready {
+				t.Fatalf("non-exact host readback was accepted: %#v", status)
+			}
+		})
+	}
+	staleGeneration := *machine
+	staleGeneration.attachmentGeneration--
+	if status := qemuConfinementStatus(state, &staleGeneration, []string{"qemu-system-x86_64", "-netdev", argument}); status == nil || status.Ready {
+		t.Fatalf("stale attachment generation was accepted: %#v", status)
+	}
+	staleDigest := *machine
+	staleDigest.attachmentDigest = "sha256:" + strings.Repeat("0", 64)
+	if status := qemuConfinementStatus(state, &staleDigest, []string{"qemu-system-x86_64", "-netdev", argument}); status == nil || status.Ready {
+		t.Fatalf("stale attachment digest was accepted: %#v", status)
+	}
+	resolved, err := qemuNetworkArgumentWithResolver(context.Background(), state, func(_ context.Context, host string) (string, error) {
+		addresses := map[string]string{
+			"broker.example": "192.0.2.10", "gateway.example": "192.0.2.11",
+			"registry.example": "192.0.2.12", "relay.example": "192.0.2.13",
+		}
+		return addresses[host], nil
+	})
+	if err != nil || strings.Contains(resolved, "-cmd:/bin/busybox nc relay.example ") ||
+		!strings.Contains(resolved, "guestfwd=tcp:10.0.2.103:7444-cmd:/bin/busybox nc 192.0.2.13 7444") {
+		t.Fatalf("provider did not resolve the exact forward targets: %q, %v", resolved, err)
+	}
+}
+
+func TestNativeEgressAttachmentFailsBeforeProviderMutation(t *testing.T) {
+	configuration := testConfiguration(t)
+	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest}
+	implementation, err := New(t.TempDir(), registration, &fakeMachines{provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredExecution(t, configuration)
+	attachment := testNativeEgressAttachment(t)
+	attachment.Digest = "sha256:" + strings.Repeat("0", 64)
+	desired.NativeEgressAttachment = &attachment
+	if _, err := implementation.Reconcile(context.Background(), desired); err == nil || provider.creates != 0 {
+		t.Fatal("malformed attachment reached provider mutation")
+	}
+	configuration.NativeEgressProbe = &config.NativeEgressProbe{Host: "relay.example", Port: 443, Capability: "provider-main"}
+	desired = desiredExecution(t, configuration)
+	attachment = testNativeEgressAttachment(t)
+	desired.NativeEgressAttachment = &attachment
+	if _, err := implementation.Reconcile(context.Background(), desired); err == nil || provider.creates != 0 {
+		t.Fatal("probe overlapping trusted infrastructure reached provider mutation")
+	}
+
+	configuration = testConfiguration(t)
+	desired = desiredExecution(t, configuration)
+	attachment = testNativeEgressAttachment(t)
+	attachment.Relay.Host = "2606:4700:4700::1111"
+	attachment, err = executiondriver.SealNativeEgressAttachment(attachment)
+	if err != nil {
+		t.Fatalf("generic public IPv6 attachment: %v", err)
+	}
+	desired.NativeEgressAttachment = &attachment
+	if _, err := implementation.Reconcile(context.Background(), desired); err == nil || provider.creates != 0 {
+		t.Fatal("QEMU-unsupported relay IP reached provider mutation")
+	}
+}
+
+func TestGuestControlBoundsAreValidatedBeforeStateOrProviderMutation(t *testing.T) {
+	if wire.MaxMessageBytes < config.MaxConfigBytes+executiondriver.MaxNativeEgressAttachmentBytes+(8<<10) {
+		t.Fatal("guest-control bound does not cover both independently accepted desired payload bounds")
+	}
+	configuration := testConfiguration(t)
+	attachment := testNativeEgressAttachment(t)
+	if config.Validate(configuration) != nil || executiondriver.ValidateNativeEgressAttachment(attachment) != nil || validateGuestControlBounds(configuration, &attachment) != nil {
+		t.Fatal("accepted complete QEMU desired configuration is not guest-control encodable")
+	}
+
+	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest}
+	root := t.TempDir()
+	implementation, err := New(root, registration, &fakeMachines{provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredExecution(t, configuration)
+	desired.NativeEgressAttachment = &attachment
+	desired.Configuration = append(append([]byte(nil), desired.Configuration...), bytes.Repeat([]byte{' '}, config.MaxConfigBytes)...)
+	if _, err := implementation.Reconcile(context.Background(), desired); err == nil || provider.creates != 0 {
+		t.Fatal("over-bound complete configuration reached provider mutation")
+	}
+	if _, err := implementation.store.Load(desired.ExecutionID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("over-bound complete configuration mutated durable state: %v", err)
+	}
+}
+
+func TestOptionalNativeEgressStateAndBootMembersRemainAbsentForLegacyRuns(t *testing.T) {
+	configuration := testConfiguration(t)
+	state := State{
+		Version: stateVersion, ExecutionID: "legacy-execution", Generation: 3,
+		DesiredFingerprint: "sha256:" + strings.Repeat("c", 64), ClassName: "qemu-small", Configuration: configuration,
+		Attempt: 1, GuestInstanceID: guestInstanceID("legacy-execution", 3, 1), HostPort: 23456,
+		ExecutionScope: &guestenrollment.ExecutionScope{
+			AgentRunUID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", ExecutionID: "legacy-execution", DriverRegistration: registration,
+		},
+	}
+	encodedState, err := json.Marshal(state)
+	if err != nil || bytes.Contains(encodedState, []byte("native_egress")) {
+		t.Fatalf("legacy durable state changed: %s, %v", encodedState, err)
+	}
+	encodedBoot, err := wire.Encode(wire.Request{ContractVersion: wire.Version, Type: wire.RequestConfigure, Configuration: ptrBoot(bootConfiguration(state))})
+	if err != nil || bytes.Contains(encodedBoot, []byte("native_egress")) {
+		t.Fatalf("legacy guest control wire changed: %s, %v", encodedBoot, err)
+	}
+}
+
+func ptrBoot(value wire.BootConfiguration) *wire.BootConfiguration { return &value }
 
 func TestPreparedUnacceptedGuestRemainsReplaceableAfterBecomingUnhealthy(t *testing.T) {
 	root := t.TempDir()
@@ -348,6 +600,50 @@ func TestProductionStateRootUsesShortScratchSocket(t *testing.T) {
 	}
 }
 
+func TestRecoveredGuestControlExchangeUnwindsBeforeOuterHostDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		accepted bool
+		request  wire.Request
+	}{
+		{name: "status", request: wire.Request{ContractVersion: wire.Version, Type: wire.RequestStatus}},
+		{name: "accepted configure", accepted: true, request: wire.Request{ContractVersion: wire.Version, Type: wire.RequestConfigure}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := testQEMUManager(t, t.TempDir(), "/tmp")
+			manager.recoveryControlTimeout = 40 * time.Millisecond
+			state := State{
+				ExecutionID:        "bounded-recovered-" + strings.ReplaceAll(test.name, " ", "-"),
+				EnrollmentAccepted: test.accepted,
+				Configuration:      config.Configuration{BootTimeoutSec: 30},
+			}
+			listener, err := net.Listen("unix", manager.controlSocketPath(state.ExecutionID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			release := make(chan struct{})
+			defer close(release)
+			go func() {
+				connection, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					return
+				}
+				defer connection.Close()
+				<-release
+			}()
+
+			started := time.Now()
+			if _, err := manager.call(context.Background(), &state, test.request); err == nil {
+				t.Fatal("unresponsive recovered guest control exchange succeeded")
+			}
+			if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+				t.Fatalf("recovered guest control retained its owner for %s", elapsed)
+			}
+		})
+	}
+}
+
 func TestAcceptedGuestNeverRecreatesMissingDisk(t *testing.T) {
 	root := t.TempDir()
 	manager := testQEMUManager(t, root, "/tmp")
@@ -432,6 +728,37 @@ func testEnvelope(binding guestenrollment.Binding) guestenrollment.BootstrapEnve
 		ContractVersion: guestenrollment.Version, Binding: binding,
 		ExchangeURL: "https://broker.example/v1/guest-enrollment/exchange", Token: secretCanary,
 		IssuedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(time.Minute).Format(time.RFC3339),
+	}
+}
+
+func testNativeEgressAttachment(t *testing.T) executiondriver.NativeEgressAttachment {
+	t.Helper()
+	value, err := executiondriver.SealNativeEgressAttachment(executiondriver.NativeEgressAttachment{
+		ContractVersion: executiondriver.NativeEgressAttachmentVersion,
+		Generation:      7,
+		Relay: executiondriver.NativeEgressRelayAttachment{
+			Host: "relay.example", Port: 7444, ServerName: "relay.example", CAPEM: testCertificate(t),
+		},
+		RequiredDestinations: []executiondriver.NativeEgressRequiredDestination{
+			{Purpose: executiondriver.NativeEgressDestinationBootstrap, Host: "broker.example", Port: 443},
+			{Purpose: executiondriver.NativeEgressDestinationBootstrap, Host: "registry.example", Port: 443},
+			{Purpose: executiondriver.NativeEgressDestinationControl, Host: "gateway.example", Port: 7443},
+		},
+		Redirect: executiondriver.NativeEgressRedirectIntent{
+			Mode: executiondriver.NativeEgressRedirectModeCaptureTCP, LoopbackAddress: "127.0.0.1",
+			TransparentTCPPort: 15001, ExplicitCONNECTPort: 15002,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func exactConfinement(attachment executiondriver.NativeEgressAttachment) *executiondriver.EgressConfinementStatus {
+	return &executiondriver.EgressConfinementStatus{
+		Boundary: executiondriver.EgressConfinementBoundaryInfrastructure, Ready: true,
+		AttachmentGeneration: attachment.Generation, AttachmentDigest: attachment.Digest,
 	}
 }
 

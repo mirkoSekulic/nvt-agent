@@ -52,8 +52,10 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   complete-snapshot target publication, and an opt-in credential-less host-
   bundle Linux TCP capture process with transparent and per-flow explicit-
   provider paths. Opt-in operator deployment, exact publication, readiness,
-  and withdraw-before-cleanup ordering exist; provider redirect installation
-  and provider confinement are not implemented.
+  and withdraw-before-cleanup ordering exist. The unpublished QEMU reference
+  now proves host-owned default deny, fixed guest redirect, and the complete
+  relay-to-egressd path under TCG. No production cloud provider implements the
+  confinement plan yet.
 
 ## Operations And Testing
 

@@ -49,7 +49,12 @@ data:
       "relayServerName": {{ $dataServerName | quote }},
       "caFile": "/var/run/nvt-native-egress-attachment/data-ca.crt",
       "requiredDestinations": {{ $relay.attachment.requiredDestinations | toJson }},
-      "redirect": {{ $relay.attachment.redirect | toJson }}
+      "redirect": {
+        "mode": {{ $relay.attachment.redirect.mode | quote }},
+        "loopback_address": {{ $relay.attachment.redirect.loopbackAddress | quote }},
+        "transparent_tcp_port": {{ $relay.attachment.redirect.transparentTCPPort }},
+        "explicit_connect_port": {{ $relay.attachment.redirect.explicitCONNECTPort }}
+      }
     }
 ---
 apiVersion: v1
@@ -120,8 +125,8 @@ spec:
               cp /projected/control-tls.key /owned/control-tls.key
               cp /projected/control-token /owned/control-token
               cp /projected/broker-ca.crt /owned/broker-ca.crt
-              chown 65532:65532 /owned/*
               chmod 0600 /owned/*
+              chown 65532:65532 /owned/*
           securityContext:
             runAsNonRoot: false
             runAsUser: 0

@@ -11,10 +11,12 @@ import (
 	"reflect"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
@@ -411,6 +413,14 @@ func (backend externalExecutionBackend) reconcileGuestEnrollment(
 	if handoffTimeout <= 0 || handoffTimeout > guestenrollment.MaxOperationDuration {
 		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapInvalid")
 	}
+	var nativeEgressCAPEM string
+	if nativeMediatedExternalRun(agentRun) {
+		var trustErr error
+		nativeEgressCAPEM, trustErr = reconciler.nativeEgressHandoffCAPEM(ctx, agentRun)
+		if trustErr != nil {
+			return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapTrustUnavailable")
+		}
+	}
 	release, acquired := reconciler.tryAcquireExternalExecutionCall()
 	if !acquired {
 		return ctrl.Result{RequeueAfter: externalExecutionDefaultRequeue}, nil
@@ -474,12 +484,37 @@ func (backend externalExecutionBackend) reconcileGuestEnrollment(
 	}
 	defer clearBootstrapEnvelope(&envelope)
 	handoffContext, cancelHandoff = context.WithTimeout(ctx, handoffTimeout)
-	err = handoff.Deliver(handoffContext, guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: envelope})
+	err = handoff.Deliver(handoffContext, guestenrollment.HandoffDeliverRequest{
+		ContractVersion: guestenrollment.HandoffVersion, Envelope: envelope, NativeEgressCAPEM: nativeEgressCAPEM,
+	})
 	cancelHandoff()
 	if err != nil {
 		return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, nil, "ExternalBootstrapDeliveryUncertain")
 	}
 	return reconciler.recordGuestEnrollmentCondition(ctx, agentRun, &binding, "ExternalBootstrapAccepted")
+}
+
+// nativeEgressHandoffCAPEM returns only the operator-owned public interception
+// CA after validating the complete durable keypair. The key remains in the
+// per-run Secret mounted solely into egressd; only the bounded certificate PEM
+// crosses the authenticated enrollment handoff.
+func (r *AgentRunReconciler) nativeEgressHandoffCAPEM(ctx context.Context, run *nvtv1alpha1.AgentRun) (string, error) {
+	if run == nil || !nativeMediatedExternalRun(run) {
+		return "", errors.New("native egress trust is unavailable")
+	}
+	if err := r.reconcileEgressCASecret(ctx, run); err != nil {
+		return "", errors.New("native egress trust is unavailable")
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: EgressCASecretName(run.Name)}, secret); err != nil ||
+		!metav1.IsControlledBy(secret, run) || validateCAKeyPairPEM(secret.Data[egressCACertKey], secret.Data[egressCAKeyKey]) != nil {
+		return "", errors.New("native egress trust is unavailable")
+	}
+	publicCA := string(secret.Data[egressCACertKey])
+	if guestenrollment.ValidateNativeEgressCAPEM(publicCA) != nil {
+		return "", errors.New("native egress trust is unavailable")
+	}
+	return publicCA, nil
 }
 
 func clearBootstrapEnvelope(envelope *guestenrollment.BootstrapEnvelope) {
