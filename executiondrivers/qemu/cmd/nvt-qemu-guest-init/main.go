@@ -81,6 +81,10 @@ func (diagnostic *boundedDiagnostic) String() string { return string(diagnostic.
 var (
 	controlDiscoveryPendingLog sync.Once
 	controlDeviceReadyLog      sync.Once
+	// These seams keep the single-use enrollment ordering testable without
+	// weakening the production identity or filesystem implementations.
+	persistNativeEgressCA = persistNativeEgressCAFile
+	acceptEnrollmentCall  = acceptEnrollment
 )
 
 func main() {
@@ -378,9 +382,17 @@ func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope, nativeE
 		(configuration.NativeEgressAttachment != nil && guestenrollment.ValidateNativeEgressCAPEM(nativeEgressCAPEM) != nil) {
 		return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "trust-invalid"}
 	}
+	if configuration.NativeEgressAttachment != nil {
+		// Stage and durably persist public interception trust before consuming the
+		// single-use enrollment token. A failed CA write must leave enrollment
+		// untouched so a retry can complete the pair atomically.
+		if err := persistNativeEgressCA(nativeEgressCAPEM); err != nil {
+			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "trust-unavailable"}
+		}
+	}
 	if !alreadyEnrolled {
 		guestLog("enrollment exchange starting")
-		err := acceptEnrollment(*envelope, configuration.EnrollmentCAPEM)
+		err := acceptEnrollmentCall(*envelope, configuration.EnrollmentCAPEM)
 		envelope.Token = ""
 		if err != nil {
 			guestLog("enrollment exchange failed")
@@ -392,21 +404,20 @@ func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope, nativeE
 		guest.mu.Unlock()
 		guestLog("enrollment accepted")
 	}
-	if configuration.NativeEgressAttachment != nil {
-		// This is public per-run trust, delivered only with the authenticated
-		// handoff after the driver proved infrastructure confinement. The CA key
-		// never enters the driver or guest.
-		if err := os.MkdirAll(filepath.Dir(egressInterceptCAPath), 0o755); err != nil {
-			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "trust-unavailable"}
-		}
-		if err := atomicWrite(egressInterceptCAPath, []byte(nativeEgressCAPEM), 0o644); err != nil {
-			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "trust-unavailable"}
-		}
-	}
 	guest.triggerBootstrap()
 	guest.mu.Lock()
 	defer guest.mu.Unlock()
 	return guest.responseLocked()
+}
+
+func persistNativeEgressCAFile(nativeEgressCAPEM string) error {
+	// This is public per-run trust, delivered only with the authenticated
+	// handoff after the driver proved infrastructure confinement. The CA key
+	// never enters the driver or guest.
+	if err := os.MkdirAll(filepath.Dir(egressInterceptCAPath), 0o755); err != nil {
+		return err
+	}
+	return atomicWrite(egressInterceptCAPath, []byte(nativeEgressCAPEM), 0o644)
 }
 
 func loadEnrollmentBinding() (*guestenrollment.Binding, error) {
@@ -1005,7 +1016,7 @@ func removeNativeEgressRedirect(port uint16) {
 }
 
 func guestObservabilityIsClean() bool {
-	return observabilityRootsAreClean([]string{"/workspace", "/var/lib/nvt-agent", "/etc/nvt-agent", "/tmp"}, "/proc")
+	return observabilityRootsAreClean([]string{"/workspace", "/var/lib/nvt-agent", "/etc/nvt-agent", "/run/nvt-agent", "/tmp"}, "/proc")
 }
 
 func observabilityRootsAreClean(roots []string, processRoot string) bool {
