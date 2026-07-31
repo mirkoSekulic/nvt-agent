@@ -190,6 +190,18 @@ func nativeMediatedExternalRun(run *nvtv1alpha1.AgentRun) bool {
 		run.Spec.Execution.Driver != "" && run.Spec.Execution.Driver != builtInKubernetesDriver && AgentRunEgressForwardProxy(run)
 }
 
+// nativeEgressStatePresent is deliberately status/state based. A live run can
+// be observed with a legacy or mutated spec after native authority was
+// published; cleanup must still withdraw that exact target before clearing
+// status or deleting owned egress resources.
+func nativeEgressStatePresent(run *nvtv1alpha1.AgentRun) bool {
+	if run == nil {
+		return false
+	}
+	return run.Status.NativeGuestBinding != nil || run.Status.NativeEgressAttachment != nil ||
+		meta.FindStatusCondition(run.Status.Conditions, ConditionNativeEgressReady) != nil
+}
+
 func exactNativeEgressBinding(run *nvtv1alpha1.AgentRun) (guestenrollment.Binding, error) {
 	if run == nil || !nativeMediatedExternalRun(run) {
 		return guestenrollment.Binding{}, errors.New("native egress binding is unavailable")
@@ -234,7 +246,13 @@ func nativeEgressDesiredGeneration(run *nvtv1alpha1.AgentRun) (int64, error) {
 	// rows before this helper is reached; reconciliation durably installs the
 	// attachment status before any provider call.
 	if run.Status.NativeEgressAttachment == nil {
+		if run.Status.NativeGuestBinding != nil || meta.FindStatusCondition(run.Status.Conditions, ConditionNativeEgressReady) != nil {
+			return 0, errors.New("native egress attachment state disappeared")
+		}
 		return executiondriver.NativeEgressDesiredGeneration(run.Generation, 0)
+	}
+	if run.Status.NativeEgressAttachment.Generation < 1 || executiondriver.ValidateDesiredFingerprint(run.Status.NativeEgressAttachment.Digest) != nil {
+		return 0, errors.New("native egress attachment state is invalid")
 	}
 	return executiondriver.NativeEgressDesiredGeneration(run.Generation, run.Status.NativeEgressAttachment.Generation)
 }
@@ -245,6 +263,12 @@ func (r *AgentRunReconciler) ensureNativeEgressAttachment(ctx context.Context, r
 		return false, errors.New("native egress attachment is unavailable")
 	}
 	current := run.Status.NativeEgressAttachment
+	if current == nil && nativeEgressStatePresent(run) {
+		return false, errors.New("native egress attachment state disappeared")
+	}
+	if current != nil && (current.Generation < 1 || executiondriver.ValidateDesiredFingerprint(current.Digest) != nil) {
+		return false, errors.New("native egress attachment state is invalid")
+	}
 	if current != nil && current.Digest != attachment.Digest && current.Generation >= attachment.Generation {
 		return false, errors.New("native egress attachment generation did not advance")
 	}
@@ -288,7 +312,7 @@ func nativeEgressPublishedTarget(run *nvtv1alpha1.AgentRun, binding guestenrollm
 }
 
 func (r *AgentRunReconciler) withdrawNativeEgressTarget(ctx context.Context, run *nvtv1alpha1.AgentRun) error {
-	if run == nil || run.Status.NativeGuestBinding == nil || !nativeMediatedExternalRun(run) {
+	if run == nil || run.Status.NativeGuestBinding == nil {
 		return nil
 	}
 	if r.nativeEgressTargets == nil {
@@ -505,4 +529,37 @@ func (r *AgentRunReconciler) cleanupNativeEgressResources(ctx context.Context, r
 		}
 	}
 	return nil
+}
+
+// nativeEgressCleanupRequired also inspects the operator-owned resource names.
+// This covers a crash/status-loss window where the relay target was published
+// and resources exist but the in-memory/spec classification no longer says
+// mediated. Ownership is checked by cleanupNativeEgressResources itself.
+func (r *AgentRunReconciler) nativeEgressCleanupRequired(ctx context.Context, run *nvtv1alpha1.AgentRun) (bool, error) {
+	if nativeEgressStatePresent(run) {
+		return true, nil
+	}
+	if r == nil || run == nil {
+		return false, nil
+	}
+	objects := []client.Object{
+		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: EgressdNetworkPolicyName(run.Name), Namespace: run.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: EgressdServiceName(run.Name), Namespace: run.Namespace}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: EgressdPodName(run.Name), Namespace: run.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: EgressdConfigMapName(run.Name), Namespace: run.Namespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: EgressCASecretName(run.Name), Namespace: run.Namespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: EgressTokenSecretName(run.Name), Namespace: run.Namespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: BrokerTokenSecretName(run.Name), Namespace: run.Namespace}},
+	}
+	for _, object := range objects {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(object), object); err == nil {
+			if run.Status.NativeGuestBinding == nil && run.Status.NativeEgressAttachment == nil {
+				return false, errors.New("native egress binding evidence is unavailable")
+			}
+			return true, nil
+		} else if !apierrors.IsNotFound(err) {
+			return false, errors.New("native egress cleanup is unavailable")
+		}
+	}
+	return false, nil
 }

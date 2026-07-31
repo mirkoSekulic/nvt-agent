@@ -347,6 +347,49 @@ func TestNativeEgressWithdrawalIsAcknowledgedBeforeBindingClear(t *testing.T) {
 	}
 }
 
+func TestNativeEgressWithdrawalUsesDurableBindingAfterSpecClassificationChanges(t *testing.T) {
+	ctx := context.Background()
+	run := readyNativeEgressRun("legacy-withdraw", "12121212-1212-1212-1212-121212121212", "guest-legacy-withdraw")
+	// Simulate a legacy/mutated object whose current spec no longer selects
+	// native mediated egress while status still carries the live authority.
+	run.Spec.Egress = nvtv1alpha1.AgentRunEgressDirect
+	run.Spec.EgressEnforcement = false
+	run.Spec.EgressTransport = ""
+	scheme := testScheme(t)
+	kubernetes := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	boundary := &recordingPublicationBoundary{}
+	reconciler := &AgentRunReconciler{Client: kubernetes, Scheme: scheme, nativeEgressTargets: boundary}
+	current := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := reconciler.clearNativeGuestBindingStatus(ctx, current)
+	if err != nil || !cleared || boundary.calls != 1 {
+		t.Fatalf("legacy withdrawal cleared=%v calls=%d err=%v", cleared, boundary.calls, err)
+	}
+	updated := &nvtv1alpha1.AgentRun{}
+	if err := kubernetes.Get(ctx, client.ObjectKeyFromObject(run), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.NativeGuestBinding != nil {
+		t.Fatal("binding was cleared without acknowledged withdrawal")
+	}
+}
+
+func TestNativeEgressDesiredGenerationRejectsAttachmentDisappearance(t *testing.T) {
+	run := readyNativeEgressRun("generation-disappears", "13131313-1313-1313-1313-131313131313", "guest-generation")
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: 2, Digest: "sha256:" + strings.Repeat("a", 64)}
+	if got, err := nativeEgressDesiredGeneration(run); err != nil || got != 3 {
+		t.Fatalf("valid attachment generation=%d err=%v", got, err)
+	}
+	// The synthetic digest is structurally valid; removing the attachment
+	// below is the impossible transition this guard protects.
+	run.Status.NativeEgressAttachment = nil
+	if _, err := nativeEgressDesiredGeneration(run); err == nil {
+		t.Fatal("attachment disappearance regressed desired generation")
+	}
+}
+
 func TestNativeEgressWithdrawalCrashCannotResurrectTargetOnBootstrap(t *testing.T) {
 	ctx := context.Background()
 	run := readyNativeEgressRun("crash-withdraw", "88888888-8888-8888-8888-888888888888", "guest-crash-withdraw")
@@ -760,8 +803,9 @@ func readyNativeEgressRun(name, uid, guest string) *nvtv1alpha1.AgentRun {
 		Status: nvtv1alpha1.AgentRunStatus{Phase: nvtv1alpha1.AgentRunPhaseRunning},
 	}
 	executionID, _ := externalExecutionID(run.UID)
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{Generation: 1, Digest: "sha256:" + strings.Repeat("0", 64)}
 	run.Status.NativeGuestBinding = &nvtv1alpha1.AgentRunNativeGuestBinding{
-		AgentRunUID: uid, ExecutionID: executionID, DriverRegistration: "example-vm", DesiredGeneration: 1, GuestInstanceID: guest,
+		AgentRunUID: uid, ExecutionID: executionID, DriverRegistration: "example-vm", DesiredGeneration: 2, GuestInstanceID: guest,
 	}
 	nativeEgressCondition(run, metav1.ConditionTrue, nativeEgressReadyReason, "ready")
 	return run

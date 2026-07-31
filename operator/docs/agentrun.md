@@ -247,6 +247,11 @@ egressMaxConcurrentTunnels: 512 # optional; default 256
   egressd applies bounded burst queueing rather than an unbounded backlog.
 - `egressAllowInsecureBroker` permits local plaintext broker traffic only.
 
+The egress mode, enforcement request, and transport are immutable after
+creation. Changing the security shape requires creating a new AgentRun; this
+prevents a live execution from changing the policy that governs its mediated
+egress.
+
 Pre-1.0 migration: replace `egressForwardProxy: true` with
 `egressTransport: forward-proxy`. Remove `egressForwardProxy: false` or use
 `egressTransport: redirect` explicitly. A deprecated pointer tombstone remains

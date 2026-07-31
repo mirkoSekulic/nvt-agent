@@ -269,7 +269,11 @@ func (backend externalExecutionBackend) reconcileOperationalCleanup(
 	if cleared, err := reconciler.clearNativeGuestBindingStatus(ctx, agentRun); err != nil || cleared {
 		return ctrl.Result{Requeue: cleared}, err
 	}
-	if nativeMediatedExternalRun(agentRun) {
+	cleanupNativeEgress, cleanupErr := reconciler.nativeEgressCleanupRequired(ctx, agentRun)
+	if cleanupErr != nil {
+		return reconciler.recordExternalCleanupFailure(ctx, agentRun, "NativeEgressCleanupPending", externalExecutionCleanupRetry)
+	}
+	if cleanupNativeEgress {
 		if err := reconciler.cleanupNativeEgressResources(ctx, agentRun); err != nil {
 			return reconciler.recordExternalCleanupFailure(ctx, agentRun, "NativeEgressCleanupPending", externalExecutionCleanupRetry)
 		}

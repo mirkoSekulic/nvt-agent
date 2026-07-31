@@ -199,3 +199,24 @@ func TestNativeEgressAttachmentAcceptsCanonicalPublicIPLiteral(t *testing.T) {
 		t.Fatal("IP literal relay server name unexpectedly accepted")
 	}
 }
+
+func TestCanonicalNativeEgressDestinationsRejectsCrossPurposeDuplicate(t *testing.T) {
+	t.Parallel()
+	_, err := CanonicalNativeEgressDestinations([]NativeEgressRequiredDestination{
+		{Purpose: NativeEgressDestinationBootstrap, Host: "bootstrap.example", Port: 443},
+		{Purpose: NativeEgressDestinationControl, Host: "bootstrap.example", Port: 443},
+	})
+	if err == nil {
+		t.Fatal("duplicate host/port across purposes unexpectedly accepted")
+	}
+}
+
+func TestValidateStatusRejectsReadyConfinementWithoutAttachmentPair(t *testing.T) {
+	t.Parallel()
+	status := Status{Phase: PhaseProvisioning, EgressConfinement: &EgressConfinementStatus{
+		Boundary: EgressConfinementBoundaryInfrastructure, Ready: true,
+	}}
+	if err := ValidateStatus(status); err == nil {
+		t.Fatal("ready confinement without attachment generation/digest unexpectedly accepted")
+	}
+}

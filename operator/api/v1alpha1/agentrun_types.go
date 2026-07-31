@@ -74,6 +74,10 @@ type AgentRun struct {
 
 // AgentRunSpec describes how an agent execution should be started.
 //
+// +kubebuilder:validation:XValidation:rule="self.egress == oldSelf.egress",message="spec.egress is immutable"
+// +kubebuilder:validation:XValidation:rule="self.egressEnforcement == oldSelf.egressEnforcement",message="spec.egressEnforcement is immutable"
+// +kubebuilder:validation:XValidation:rule="self.egressTransport == oldSelf.egressTransport",message="spec.egressTransport is immutable"
+//
 //nolint:govet // Field order follows the CRD schema for readability.
 type AgentRunSpec struct {
 	// Execution is the immutable, operator-resolved execution backend selection.

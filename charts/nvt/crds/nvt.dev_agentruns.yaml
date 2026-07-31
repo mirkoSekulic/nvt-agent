@@ -45,6 +45,12 @@ spec:
                   message: spec.execution is immutable
                 - rule: "self.workspace == oldSelf.workspace"
                   message: spec.workspace is immutable
+                - rule: "self.egress == oldSelf.egress"
+                  message: spec.egress is immutable
+                - rule: "self.egressEnforcement == oldSelf.egressEnforcement"
+                  message: spec.egressEnforcement is immutable
+                - rule: "self.egressTransport == oldSelf.egressTransport"
+                  message: spec.egressTransport is immutable
               properties:
                 execution:
                   description: Immutable operator-resolved execution backend selection. Omitted means the built-in Kubernetes Pod backend.
