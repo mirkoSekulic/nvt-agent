@@ -269,7 +269,11 @@ func (backend externalExecutionBackend) reconcileOperationalCleanup(
 	if cleared, err := reconciler.clearNativeGuestBindingStatus(ctx, agentRun); err != nil || cleared {
 		return ctrl.Result{Requeue: cleared}, err
 	}
-	if nativeMediatedExternalRun(agentRun) {
+	cleanupNativeEgress, cleanupErr := reconciler.nativeEgressCleanupRequired(ctx, agentRun)
+	if cleanupErr != nil {
+		return reconciler.recordExternalCleanupFailure(ctx, agentRun, "NativeEgressCleanupPending", externalExecutionCleanupRetry)
+	}
+	if cleanupNativeEgress {
 		if err := reconciler.cleanupNativeEgressResources(ctx, agentRun); err != nil {
 			return reconciler.recordExternalCleanupFailure(ctx, agentRun, "NativeEgressCleanupPending", externalExecutionCleanupRetry)
 		}
@@ -587,11 +591,17 @@ func nativeGuestBindingFromStatus(status *nvtv1alpha1.AgentRunNativeGuestBinding
 }
 
 func (r *AgentRunReconciler) clearNativeGuestBindingStatus(ctx context.Context, agentRun *nvtv1alpha1.AgentRun) (bool, error) {
+	cleanupRequired, err := r.nativeEgressCleanupRequired(ctx, agentRun)
+	if err != nil {
+		return false, err
+	}
+	if cleanupRequired {
+		if err := r.withdrawNativeEgressTargetRequired(ctx, agentRun); err != nil {
+			return false, err
+		}
+	}
 	if agentRun.Status.NativeGuestBinding == nil {
 		return false, nil
-	}
-	if err := r.withdrawNativeEgressTarget(ctx, agentRun); err != nil {
-		return false, err
 	}
 	agentRun.Status.NativeGuestBinding = nil
 	if err := r.Status().Update(ctx, agentRun); err != nil {
@@ -628,6 +638,9 @@ func staleTerminalExternalStatus(status executiondriver.Status, desiredGeneratio
 func desiredExternalExecution(agentRun *nvtv1alpha1.AgentRun, configured *executiondriver.NativeEgressAttachment) (executiondriver.DesiredExecution, error) {
 	if agentRun.Spec.Execution == nil || agentRun.Spec.Execution.Driver == builtInKubernetesDriver {
 		return executiondriver.DesiredExecution{}, fmt.Errorf("external execution selection is absent")
+	}
+	if !nativeMediatedExternalRun(agentRun) && nativeEgressStatePresent(agentRun) {
+		return executiondriver.DesiredExecution{}, fmt.Errorf("native egress execution shape is inconsistent")
 	}
 	executionID, err := externalExecutionID(agentRun.UID)
 	if err != nil {

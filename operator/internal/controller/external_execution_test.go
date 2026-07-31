@@ -613,6 +613,68 @@ func TestExternalExecutionStaleNonTerminalGenerationClearsRoutingBinding(t *test
 	}
 }
 
+func TestNativeEgressAttachmentDisappearanceFailsBeforeDriverCall(t *testing.T) {
+	ctx := context.Background()
+	attachment := testControllerNativeEgressAttachment(t, 4)
+	run := externalTestAgentRun()
+	run.Spec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	run.Spec.EgressEnforcement = true
+	run.Spec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportTransparent
+	run.Status.NativeGuestBinding = &nvtv1alpha1.AgentRunNativeGuestBinding{
+		AgentRunUID: string(run.UID), ExecutionID: "nvt-exec-" + string(run.UID), DriverRegistration: "example-vm",
+		DesiredGeneration: run.Generation + attachment.Generation, GuestInstanceID: "guest-impossible-transition",
+	}
+	driver := &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseRunning, ObservedGeneration: run.Generation}}}
+	_, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	reconciler.NativeEgressAttachment = attachment
+	if _, err := reconciler.ensureNativeEgressAttachment(ctx, run); err == nil {
+		t.Fatal("attachment disappearance was silently converted to a lower-generation desired state")
+	}
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	if len(driver.desired) != 0 || len(driver.reconcile) != 1 {
+		t.Fatalf("impossible transition reached driver: desired=%d reconcile=%d", len(driver.desired), len(driver.reconcile))
+	}
+}
+
+func TestNativeEgressLegacyShapeTransitionWithdrawsBeforeDriverCall(t *testing.T) {
+	ctx := context.Background()
+	attachment := testControllerNativeEgressAttachment(t, 4)
+	run := externalTestAgentRun()
+	run.Status.NativeEgressAttachment = &nvtv1alpha1.AgentRunNativeEgressAttachmentStatus{
+		Generation: attachment.Generation, Digest: attachment.Digest,
+	}
+	run.Status.NativeGuestBinding = &nvtv1alpha1.AgentRunNativeGuestBinding{
+		AgentRunUID: string(run.UID), ExecutionID: "nvt-exec-" + string(run.UID), DriverRegistration: "example-vm",
+		DesiredGeneration: run.Generation + attachment.Generation, GuestInstanceID: "guest-legacy-shape",
+	}
+	driver := &recordingExecutionDriver{reconcile: []executiondriver.Status{{Phase: executiondriver.PhaseRunning, ObservedGeneration: run.Generation}}}
+	kubernetes, reconciler := externalReconcileFixture(t, run, fakeExecutionDriverRegistry{"example-vm": driver})
+	boundary := &recordingPublicationBoundary{check: func(target *nativeegress.PublishedTarget, exclude string) error {
+		if target != nil || exclude != string(run.UID) {
+			t.Fatalf("legacy shape withdrawal target=%#v exclude=%q", target, exclude)
+		}
+		current := getExternalRun(t, ctx, kubernetes, run)
+		if current.Status.NativeGuestBinding == nil {
+			t.Fatal("legacy binding cleared before relay acknowledgement")
+		}
+		return nil
+	}}
+	reconciler.nativeEgressTargets = boundary
+	if _, err := reconciler.Reconcile(ctx, requestFor(run)); err != nil {
+		t.Fatal(err)
+	}
+	driver.mu.Lock()
+	desiredCalls := len(driver.desired)
+	driver.mu.Unlock()
+	stored := getExternalRun(t, ctx, kubernetes, run)
+	condition := meta.FindStatusCondition(stored.Status.Conditions, ConditionExecutionBackendAvailable)
+	if desiredCalls != 0 || boundary.calls != 1 || stored.Status.NativeGuestBinding != nil ||
+		condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != executionSelectionInvalidReason {
+		t.Fatalf("legacy shape desired=%d withdrawals=%d binding=%#v condition=%#v", desiredCalls, boundary.calls, stored.Status.NativeGuestBinding, condition)
+	}
+}
+
 func TestNativeMediatedGuestEnrollmentWaitsForExactInfrastructureConfinement(t *testing.T) {
 	attachment := testControllerNativeEgressAttachment(t, 2)
 	endpoint := &executiondriver.Endpoint{Scheme: executiondriver.EndpointSchemeHTTPS, Host: "vm.invalid", Port: 443}
@@ -1451,7 +1513,7 @@ func externalReconcileFixture(t *testing.T, run *nvtv1alpha1.AgentRun, registry 
 	scheme := testScheme(t)
 	objects := []client.Object{run, testBrokerAgentsConfigMap(run.Namespace)}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&nvtv1alpha1.AgentRun{}).WithObjects(objects...).Build()
-	return k8sClient, &AgentRunReconciler{Client: k8sClient, Scheme: scheme, ExecutionDrivers: registry}
+	return k8sClient, &AgentRunReconciler{Client: k8sClient, Scheme: scheme, ExecutionDrivers: registry, nativeEgressTargets: &recordingPublicationBoundary{}}
 }
 
 func getExternalRun(t *testing.T, ctx context.Context, k8sClient client.Client, run *nvtv1alpha1.AgentRun) nvtv1alpha1.AgentRun {

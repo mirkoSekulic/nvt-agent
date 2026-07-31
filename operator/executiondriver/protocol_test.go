@@ -46,7 +46,7 @@ func TestValidateProtocolTypes(t *testing.T) {
 		ObservedGeneration: 1,
 		EgressConfinement: &EgressConfinementStatus{
 			Boundary: EgressConfinementBoundaryInfrastructure,
-			Ready:    true,
+			Ready:    true, AttachmentGeneration: 1, AttachmentDigest: validDesiredFingerprint,
 		},
 	}
 	if err := ValidateStatus(status); err != nil {
@@ -70,10 +70,10 @@ func TestEgressConfinementStatusIsOptionalCompatibleAndNonSecret(t *testing.T) {
 	confined := Status{
 		Phase: PhaseRunning, Ready: true, ObservedGeneration: 2,
 		Endpoint:          &Endpoint{Scheme: EndpointSchemeHTTPS, Host: "guest.invalid", Port: 443},
-		EgressConfinement: &EgressConfinementStatus{Boundary: EgressConfinementBoundaryInfrastructure, Ready: true},
+		EgressConfinement: &EgressConfinementStatus{Boundary: EgressConfinementBoundaryInfrastructure, Ready: true, AttachmentGeneration: 1, AttachmentDigest: validDesiredFingerprint},
 	}
 	encoded, err = json.Marshal(confined)
-	if err != nil || !bytes.Contains(encoded, []byte(`"egress_confinement":{"boundary":"infrastructure","ready":true}`)) {
+	if err != nil || !bytes.Contains(encoded, []byte(`"egress_confinement":{"boundary":"infrastructure","ready":true,"attachment_generation":1,"attachment_digest":"sha256:`)) {
 		t.Fatalf("portable confinement status=%s error=%v", encoded, err)
 	}
 	confinementEncoded, err := json.Marshal(confined.EgressConfinement)

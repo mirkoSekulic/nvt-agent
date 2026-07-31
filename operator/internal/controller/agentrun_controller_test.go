@@ -5138,6 +5138,15 @@ func TestAgentRunCRDSchemaIncludesEgressAndMaterialization(t *testing.T) {
 	if !hasCRDValidation(validations, "!has(self.egressMaxConcurrentTunnels) || (has(self.egressTransport) && self.egressTransport in ['forward-proxy', 'transparent'])", "requires spec.egressTransport") {
 		t.Fatalf("missing transport CEL for tunnel capacity: %#v", validations)
 	}
+	for _, immutable := range []struct{ rule, message string }{
+		{"has(self.egress) == has(oldSelf.egress) && (!has(self.egress) || self.egress == oldSelf.egress)", "spec.egress is immutable"},
+		{"has(self.egressEnforcement) == has(oldSelf.egressEnforcement) && (!has(self.egressEnforcement) || self.egressEnforcement == oldSelf.egressEnforcement)", "spec.egressEnforcement is immutable"},
+		{"has(self.egressTransport) == has(oldSelf.egressTransport) && (!has(self.egressTransport) || self.egressTransport == oldSelf.egressTransport)", "spec.egressTransport is immutable"},
+	} {
+		if !hasCRDValidation(validations, immutable.rule, immutable.message) {
+			t.Fatalf("missing immutable egress CEL %q: %#v", immutable.rule, validations)
+		}
+	}
 	transport := crdPath(t, spec, "egressTransport").(map[string]any)
 	if !reflect.DeepEqual(transport["enum"], []any{"redirect", "forward-proxy", "transparent"}) {
 		t.Fatalf("expected egressTransport to be the sole transport selector, got %#v", transport)

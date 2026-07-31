@@ -170,13 +170,23 @@ func CanonicalNativeEgressDestinations(values []NativeEgressRequiredDestination)
 	if len(values) > MaxNativeEgressRequiredDestinations {
 		return nil, errors.New("native egress required destinations are invalid")
 	}
-	result := append([]NativeEgressRequiredDestination(nil), values...)
-	sort.Slice(result, func(left, right int) bool { return nativeEgressDestinationLess(result[left], result[right]) })
-	for index := 1; index < len(result); index++ {
-		if result[index-1].Host == result[index].Host && result[index-1].Port == result[index].Port {
+	type endpointKey struct {
+		host string
+		port uint16
+	}
+	seen := make(map[endpointKey]struct{}, len(values))
+	for _, destination := range values {
+		if destination.Port == 0 || !canonicalNetworkHost(destination.Host) {
+			return nil, errors.New("native egress destination is invalid")
+		}
+		key := endpointKey{host: destination.Host, port: destination.Port}
+		if _, duplicate := seen[key]; duplicate {
 			return nil, errors.New("native egress required destinations contain a duplicate endpoint")
 		}
+		seen[key] = struct{}{}
 	}
+	result := append([]NativeEgressRequiredDestination(nil), values...)
+	sort.Slice(result, func(left, right int) bool { return nativeEgressDestinationLess(result[left], result[right]) })
 	return result, nil
 }
 
