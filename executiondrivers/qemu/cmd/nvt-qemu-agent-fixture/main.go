@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -40,10 +41,19 @@ func main() {
 	host := flag.String("host", "", "test upstream host")
 	port := flag.Int("port", 0, "test upstream port")
 	capability := flag.String("capability", "", "non-secret capability selector")
+	caFile := flag.String("ca-file", "", "public per-run egress CA file")
 	explicit := flag.String("explicit-proxy", "", "explicit capture listener")
 	output := flag.String("output", "", "non-secret proof output")
 	flag.Parse()
-	if flag.NArg() != 0 || *host == "" || *port < 1 || *port > 65535 || *capability == "" || *explicit == "" || *output == "" || authorityMaterialPresent(os.Args, os.Environ()) {
+	if flag.NArg() != 0 || *host == "" || *port < 1 || *port > 65535 || *capability == "" || *caFile == "" || *explicit == "" || *output == "" || authorityMaterialPresent(os.Args, os.Environ()) {
+		os.Exit(1)
+	}
+	caPEM, err := os.ReadFile(*caFile)
+	if err != nil || len(caPEM) == 0 || len(caPEM) > maximumResponseBytes {
+		os.Exit(1)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
 		os.Exit(1)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -54,7 +64,7 @@ func main() {
 		}
 	}
 	explicitResult, err := retryProbe(ctx, func(operation context.Context) (echoResponse, error) {
-		response, probeErr := probeExplicit(operation, *explicit, *host, *port, *capability)
+		response, probeErr := probeExplicit(operation, *explicit, *host, *port, *capability, roots)
 		if probeErr != nil {
 			_ = writeProof(*output, result{Failure: "explicit-" + failureClass(probeErr)})
 		}
@@ -66,7 +76,7 @@ func main() {
 	}
 	_ = writeProof(*output, result{Failure: "transparent-pending"})
 	transparent, err := retryProbe(ctx, func(operation context.Context) (echoResponse, error) {
-		response, probeErr := probeTransparent(operation, *host, *port)
+		response, probeErr := probeTransparent(operation, *host, *port, roots)
 		if probeErr != nil {
 			_ = writeProof(*output, result{Failure: "transparent-" + failureClass(probeErr)})
 		}
@@ -112,7 +122,7 @@ func retryProbe(ctx context.Context, operation func(context.Context) (echoRespon
 	return echoResponse{}, lastError
 }
 
-func probeTransparent(ctx context.Context, host string, port int) (echoResponse, error) {
+func probeTransparent(ctx context.Context, host string, port int, roots *x509.CertPool) (echoResponse, error) {
 	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
 	if err != nil || len(addresses) == 0 {
 		return echoResponse{}, errors.New("resolve-unavailable")
@@ -122,10 +132,10 @@ func probeTransparent(ctx context.Context, host string, port int) (echoResponse,
 	if err != nil {
 		return echoResponse{}, errors.New("dial-unavailable")
 	}
-	return exchange(ctx, connection, host, "/transparent")
+	return exchange(ctx, connection, host, "/transparent", roots)
 }
 
-func probeExplicit(ctx context.Context, proxy, host string, port int, capability string) (echoResponse, error) {
+func probeExplicit(ctx context.Context, proxy, host string, port int, capability string, roots *x509.CertPool) (echoResponse, error) {
 	dialer := &net.Dialer{}
 	connection, err := dialer.DialContext(ctx, "tcp", proxy)
 	if err != nil {
@@ -147,15 +157,12 @@ func probeExplicit(ctx context.Context, proxy, host string, port int, capability
 		connection.Close()
 		return echoResponse{}, errors.New("connect-unavailable")
 	}
-	return exchange(ctx, &bufferedConn{Conn: connection, reader: reader}, host, "/explicit")
+	return exchange(ctx, &bufferedConn{Conn: connection, reader: reader}, host, "/explicit", roots)
 }
 
-func exchange(ctx context.Context, raw net.Conn, host, path string) (echoResponse, error) {
+func exchange(ctx context.Context, raw net.Conn, host, path string, roots *x509.CertPool) (echoResponse, error) {
 	defer raw.Close()
-	// The per-run MITM CA is deliberately not part of the portable attachment.
-	// This unpublished fixture validates only the mediated transport/injection
-	// proof and never makes this test-only trust relaxation agent configuration.
-	tlsConnection := tls.Client(raw, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}) //nolint:gosec
+	tlsConnection := tls.Client(raw, &tls.Config{ServerName: host, RootCAs: roots, MinVersion: tls.VersionTLS12})
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = tlsConnection.SetDeadline(deadline)
 	}

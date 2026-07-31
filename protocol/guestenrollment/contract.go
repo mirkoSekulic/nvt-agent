@@ -8,9 +8,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net/url"
@@ -42,7 +44,8 @@ const (
 	MaxDurableEntries          = 10_000
 	MaxTombstoneRetention      = 24 * time.Hour
 	HandoffVersion             = "nvt.guest-enrollment-handoff/v1"
-	MaxHandoffRequestBytes     = MaxBootstrapEnvelopeBytes + (4 << 10)
+	MaxNativeEgressCAPEMBytes  = 16 << 10
+	MaxHandoffRequestBytes     = MaxBootstrapEnvelopeBytes + MaxNativeEgressCAPEMBytes + (4 << 10)
 	MaxHandoffResponseBytes    = 4 << 10
 	EnrollmentExchangePath     = "/v1/guest-enrollment/exchange"
 )
@@ -187,8 +190,9 @@ type HandoffReplaceRequest struct {
 // HandoffDeliverRequest is the dedicated sensitive channel. It is never part
 // of DesiredExecution, its fingerprint, portable status, or ordinary state.
 type HandoffDeliverRequest struct {
-	ContractVersion string            `json:"contract_version"`
-	Envelope        BootstrapEnvelope `json:"envelope"`
+	ContractVersion   string            `json:"contract_version"`
+	Envelope          BootstrapEnvelope `json:"envelope"`
+	NativeEgressCAPEM string            `json:"native_egress_ca_pem,omitempty"`
 }
 
 type HandoffAcknowledgement struct {
@@ -397,8 +401,40 @@ func ValidateHandoffReplaceRequest(value HandoffReplaceRequest) error {
 }
 
 func ValidateHandoffDeliverRequest(value HandoffDeliverRequest) error {
-	if value.ContractVersion != HandoffVersion || ValidateBootstrapEnvelope(value.Envelope) != nil {
+	if value.ContractVersion != HandoffVersion || ValidateBootstrapEnvelope(value.Envelope) != nil ||
+		(value.NativeEgressCAPEM != "" && ValidateNativeEgressCAPEM(value.NativeEgressCAPEM) != nil) {
 		return NewFailure(ReasonInvalidRequest)
+	}
+	return nil
+}
+
+// ValidateNativeEgressCAPEM accepts only a bounded public CA certificate
+// bundle. The optional bundle is delivered with the one-time authenticated
+// handoff after infrastructure confinement; private key PEM can never cross
+// this boundary.
+func ValidateNativeEgressCAPEM(value string) error {
+	if len(value) == 0 || len(value) > MaxNativeEgressCAPEMBytes || strings.ContainsRune(value, 0) {
+		return errors.New("native egress CA is invalid")
+	}
+	rest := []byte(value)
+	count := 0
+	for len(rest) != 0 {
+		block, remaining := pem.Decode(rest)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return errors.New("native egress CA is invalid")
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || !certificate.IsCA {
+			return errors.New("native egress CA is invalid")
+		}
+		count++
+		if count > 16 {
+			return errors.New("native egress CA is invalid")
+		}
+		rest = remaining
+	}
+	if count == 0 {
+		return errors.New("native egress CA is invalid")
 	}
 	return nil
 }

@@ -121,7 +121,10 @@ YAML
   kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-enrollment-orchestrator \
     --from-literal="token=${ENROLLMENT_ORCHESTRATOR_CANARY}" \
     --dry-run=client -o yaml | kubectl_smoke apply -f -
-  QEMU_PROVIDER_CANARY="qemu-provider-${RANDOM}-${RANDOM}"
+  # The guest knows only this non-secret scanner prefix. The complete random
+  # provider value remains cluster-side, so any file/argv/environment leak is
+  # detected without delivering the expected secret to the guest.
+  QEMU_PROVIDER_CANARY="nvt_provider_secret_canary_${RANDOM}_${RANDOM}"
   ECHO_EXPECTED_CREDENTIAL_SHA256="$(printf 'Bearer %s' "${QEMU_PROVIDER_CANARY}" | sha256sum | cut -d' ' -f1)"
   printf 'NVT_SMOKE_STATIC_TOKEN=%s\n' "${QEMU_PROVIDER_CANARY}" | \
     kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-smoke-broker-env \

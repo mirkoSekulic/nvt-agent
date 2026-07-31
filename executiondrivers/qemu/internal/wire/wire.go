@@ -12,8 +12,12 @@ import (
 )
 
 const (
-	Version          = "nvt.qemu-guest-control/v1"
-	MaxMessageBytes  = 64 << 10
+	Version = "nvt.qemu-guest-control/v1"
+	// A configure message may contain one independently bounded 64 KiB QEMU
+	// class configuration plus the 96 KiB portable attachment. Keep the whole
+	// private guest-control exchange finite while leaving explicit framing
+	// headroom for the exact binding and request envelope.
+	MaxMessageBytes  = 192 << 10
 	StateConnected   = "connected"
 	StateWaiting     = "waiting"
 	StateEnrolled    = "enrolled"
@@ -76,10 +80,11 @@ func NativeEgressHostAliases(attachment executiondriver.NativeEgressAttachment) 
 }
 
 type Request struct {
-	ContractVersion string                             `json:"contract_version"`
-	Type            string                             `json:"type"`
-	Configuration   *BootConfiguration                 `json:"configuration,omitempty"`
-	Envelope        *guestenrollment.BootstrapEnvelope `json:"envelope,omitempty"`
+	ContractVersion   string                             `json:"contract_version"`
+	Type              string                             `json:"type"`
+	Configuration     *BootConfiguration                 `json:"configuration,omitempty"`
+	Envelope          *guestenrollment.BootstrapEnvelope `json:"envelope,omitempty"`
+	NativeEgressCAPEM string                             `json:"native_egress_ca_pem,omitempty"`
 }
 
 type Response struct {

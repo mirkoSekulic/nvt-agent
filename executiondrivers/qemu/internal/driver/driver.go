@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/mirkoSekulic/nvt-agent/executiondrivers/qemu/internal/config"
@@ -33,7 +34,7 @@ type MachineManager interface {
 	Ensure(context.Context, *State) error
 	Observe(context.Context, *State) (MachineObservation, error)
 	Configure(context.Context, *State, wire.BootConfiguration) error
-	Deliver(context.Context, *State, guestenrollment.BootstrapEnvelope) (MachineObservation, error)
+	Deliver(context.Context, *State, guestenrollment.BootstrapEnvelope, string) (MachineObservation, error)
 	Replace(context.Context, *State) error
 	Delete(context.Context, *State) error
 	Shutdown(context.Context) error
@@ -74,6 +75,9 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 	}
 	if validateNativeEgressDesired(resolved, desired.NativeEgressAttachment) != nil {
 		return executiondriver.Status{}, reject("invalid-native-egress", "QEMU native egress attachment is invalid")
+	}
+	if validateGuestControlBounds(resolved, desired.NativeEgressAttachment) != nil {
+		return executiondriver.Status{}, reject("invalid-configuration", "QEMU guest control configuration is too large")
 	}
 	imageDigest, err := driver.machines.GuestImageDigest()
 	if err != nil || imageDigest != resolved.GuestImage.Digest {
@@ -298,12 +302,17 @@ func (driver *Driver) Deliver(ctx context.Context, request guestenrollment.Hando
 		return nil
 	}
 	if state.NativeEgressAttachment != nil {
+		if guestenrollment.ValidateNativeEgressCAPEM(request.NativeEgressCAPEM) != nil {
+			return errors.New("QEMU enrollment delivery is unavailable")
+		}
 		observation, observeErr := driver.machines.Observe(ctx, &state)
 		if observeErr != nil || !nativeEgressConfinementCurrent(state, observation) || !nativeEgressEnrollmentEndpointAllowed(state, request.Envelope.ExchangeURL) {
 			return errors.New("QEMU enrollment delivery is unavailable")
 		}
+	} else if request.NativeEgressCAPEM != "" {
+		return errors.New("QEMU enrollment delivery was rejected")
 	}
-	observation, err := driver.machines.Deliver(ctx, &state, request.Envelope)
+	observation, err := driver.machines.Deliver(ctx, &state, request.Envelope, request.NativeEgressCAPEM)
 	if err != nil || !observation.Enrolled {
 		return errors.New("QEMU enrollment delivery is unavailable")
 	}
@@ -382,6 +391,12 @@ func validateNativeEgressDesired(configuration config.Configuration, attachment 
 	if executiondriver.ValidateNativeEgressAttachment(*attachment) != nil {
 		return errors.New("QEMU native egress attachment is invalid")
 	}
+	// The reference backend deliberately uses an IPv4-only slirp network and
+	// DNS host aliases. Reject every relay IP literal before state or provider
+	// mutation instead of rendering an unusable guestfwd helper command.
+	if net.ParseIP(attachment.Relay.Host) != nil {
+		return errors.New("QEMU native egress relay host is unsupported")
+	}
 	if attachment.Redirect.LoopbackAddress != "127.0.0.1" {
 		return errors.New("QEMU native egress redirect is unsupported")
 	}
@@ -407,6 +422,23 @@ func validateNativeEgressDesired(configuration config.Configuration, attachment 
 				return errors.New("QEMU native egress probe overlaps trusted infrastructure")
 			}
 		}
+	}
+	return nil
+}
+
+func validateGuestControlBounds(configuration config.Configuration, attachment *executiondriver.NativeEgressAttachment) error {
+	state := State{
+		Configuration: configuration, ExecutionID: strings.Repeat("e", guestenrollment.MaxExecutionIDBytes), Generation: 9_223_372_036_854_775_807,
+		GuestInstanceID: strings.Repeat("g", guestenrollment.MaxGuestInstanceIDBytes), NativeEgressAttachment: cloneNativeEgressAttachment(attachment),
+		ExecutionScope: &guestenrollment.ExecutionScope{
+			AgentRunUID: strings.Repeat("u", guestenrollment.MaxAgentRunUIDBytes), ExecutionID: strings.Repeat("e", guestenrollment.MaxExecutionIDBytes),
+			DriverRegistration: strings.Repeat("d", guestenrollment.MaxDriverNameBytes),
+		},
+	}
+	configurationValue := bootConfiguration(state)
+	_, err := wire.Encode(wire.Request{ContractVersion: wire.Version, Type: wire.RequestConfigure, Configuration: &configurationValue})
+	if err != nil {
+		return errors.New("QEMU guest control configuration is too large")
 	}
 	return nil
 }

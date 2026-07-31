@@ -38,6 +38,7 @@ type fakeProvider struct {
 	deletes      int
 	configs      int
 	deliveries   int
+	deliveredCA  string
 	block        bool
 	configureErr bool
 	digest       string
@@ -78,13 +79,14 @@ func (machine *fakeMachines) Configure(_ context.Context, _ *State, configuratio
 	machine.provider.mu.Unlock()
 	return nil
 }
-func (machine *fakeMachines) Deliver(_ context.Context, state *State, envelope guestenrollment.BootstrapEnvelope) (MachineObservation, error) {
+func (machine *fakeMachines) Deliver(_ context.Context, state *State, envelope guestenrollment.BootstrapEnvelope, nativeEgressCAPEM string) (MachineObservation, error) {
 	if envelope.Token != secretCanary {
 		return MachineObservation{}, errors.New("wrong token")
 	}
 	machine.provider.mu.Lock()
 	defer machine.provider.mu.Unlock()
 	machine.provider.deliveries++
+	machine.provider.deliveredCA = nativeEgressCAPEM
 	observation := machine.provider.resources[state.ExecutionID]
 	observation.Running = true
 	observation.Enrolled = true
@@ -238,10 +240,11 @@ func TestNativeEgressConfinementGatesEnrollmentAndGuestReadiness(t *testing.T) {
 	}
 	wrongEndpoint := testEnvelope(binding)
 	wrongEndpoint.ExchangeURL = "https://unlisted.example/v1/guest-enrollment/exchange"
-	if err := implementation.Deliver(context.Background(), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: wrongEndpoint}); err == nil || provider.deliveries != 0 {
+	publicCA := testCertificate(t)
+	if err := implementation.Deliver(context.Background(), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: wrongEndpoint, NativeEgressCAPEM: publicCA}); err == nil || provider.deliveries != 0 {
 		t.Fatal("unlisted enrollment endpoint reached the confined guest")
 	}
-	if err := implementation.Deliver(context.Background(), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: testEnvelope(binding)}); err != nil || provider.deliveries != 1 {
+	if err := implementation.Deliver(context.Background(), guestenrollment.HandoffDeliverRequest{ContractVersion: guestenrollment.HandoffVersion, Envelope: testEnvelope(binding), NativeEgressCAPEM: publicCA}); err != nil || provider.deliveries != 1 || provider.deliveredCA != publicCA {
 		t.Fatalf("confined enrollment delivery = deliveries=%d, %v", provider.deliveries, err)
 	}
 	status, err = implementation.Reconcile(context.Background(), desired)
@@ -357,6 +360,46 @@ func TestNativeEgressAttachmentFailsBeforeProviderMutation(t *testing.T) {
 	desired.NativeEgressAttachment = &attachment
 	if _, err := implementation.Reconcile(context.Background(), desired); err == nil || provider.creates != 0 {
 		t.Fatal("probe overlapping trusted infrastructure reached provider mutation")
+	}
+
+	configuration = testConfiguration(t)
+	desired = desiredExecution(t, configuration)
+	attachment = testNativeEgressAttachment(t)
+	attachment.Relay.Host = "2606:4700:4700::1111"
+	attachment, err = executiondriver.SealNativeEgressAttachment(attachment)
+	if err != nil {
+		t.Fatalf("generic public IPv6 attachment: %v", err)
+	}
+	desired.NativeEgressAttachment = &attachment
+	if _, err := implementation.Reconcile(context.Background(), desired); err == nil || provider.creates != 0 {
+		t.Fatal("QEMU-unsupported relay IP reached provider mutation")
+	}
+}
+
+func TestGuestControlBoundsAreValidatedBeforeStateOrProviderMutation(t *testing.T) {
+	if wire.MaxMessageBytes < config.MaxConfigBytes+executiondriver.MaxNativeEgressAttachmentBytes+(8<<10) {
+		t.Fatal("guest-control bound does not cover both independently accepted desired payload bounds")
+	}
+	configuration := testConfiguration(t)
+	attachment := testNativeEgressAttachment(t)
+	if config.Validate(configuration) != nil || executiondriver.ValidateNativeEgressAttachment(attachment) != nil || validateGuestControlBounds(configuration, &attachment) != nil {
+		t.Fatal("accepted complete QEMU desired configuration is not guest-control encodable")
+	}
+
+	provider := &fakeProvider{resources: map[string]MachineObservation{}, digest: configuration.GuestImage.Digest}
+	root := t.TempDir()
+	implementation, err := New(root, registration, &fakeMachines{provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredExecution(t, configuration)
+	desired.NativeEgressAttachment = &attachment
+	desired.Configuration = append(append([]byte(nil), desired.Configuration...), bytes.Repeat([]byte{' '}, config.MaxConfigBytes)...)
+	if _, err := implementation.Reconcile(context.Background(), desired); err == nil || provider.creates != 0 {
+		t.Fatal("over-bound complete configuration reached provider mutation")
+	}
+	if _, err := implementation.store.Load(desired.ExecutionID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("over-bound complete configuration mutated durable state: %v", err)
 	}
 }
 

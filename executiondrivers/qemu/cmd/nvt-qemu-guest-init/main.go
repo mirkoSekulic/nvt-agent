@@ -43,6 +43,7 @@ const (
 	sessionReadinessPath   = sessionRuntimeRoot + "/session-ready"
 	egressConfigPath       = "/etc/nvt-agent/native-egress.json"
 	egressCAPath           = "/etc/nvt-agent/native-egress-ca.pem"
+	egressInterceptCAPath  = "/etc/nvt-agent/egress-interception-ca.pem"
 	egressRuntimeRoot      = "/run/nvt-agent-egress"
 	egressFlowSocketPath   = egressRuntimeRoot + "/flow.sock"
 	captureConfigPath      = "/etc/nvt-agent/native-capture.json"
@@ -294,7 +295,7 @@ func (guest *guest) handle(data []byte) wire.Response {
 	}
 	switch request.Type {
 	case wire.RequestConfigure:
-		if request.Configuration == nil || request.Envelope != nil || validateBootConfiguration(*request.Configuration) != nil {
+		if request.Configuration == nil || request.Envelope != nil || request.NativeEgressCAPEM != "" || validateBootConfiguration(*request.Configuration) != nil {
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "invalid-configuration"}
 		}
 		guest.mu.Lock()
@@ -349,7 +350,7 @@ func (guest *guest) handle(data []byte) wire.Response {
 		guestLog("control configuration accepted")
 		return state
 	case wire.RequestStatus:
-		if request.Configuration != nil || request.Envelope != nil {
+		if request.Configuration != nil || request.Envelope != nil || request.NativeEgressCAPEM != "" {
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "invalid-request"}
 		}
 		guest.mu.Lock()
@@ -359,19 +360,23 @@ func (guest *guest) handle(data []byte) wire.Response {
 		if request.Envelope == nil || request.Configuration != nil {
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "invalid-envelope"}
 		}
-		return guest.deliver(request.Envelope)
+		return guest.deliver(request.Envelope, request.NativeEgressCAPEM)
 	default:
 		return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "invalid-request"}
 	}
 }
 
-func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope) wire.Response {
+func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope, nativeEgressCAPEM string) wire.Response {
 	guest.mu.Lock()
 	configuration := guest.configuration
 	alreadyEnrolled := guest.enrolled
 	guest.mu.Unlock()
 	if configuration == nil || guestenrollment.ValidateBootstrapEnvelope(*envelope) != nil || envelope.Binding != configuration.Binding {
 		return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "binding-mismatch"}
+	}
+	if (configuration.NativeEgressAttachment == nil && nativeEgressCAPEM != "") ||
+		(configuration.NativeEgressAttachment != nil && guestenrollment.ValidateNativeEgressCAPEM(nativeEgressCAPEM) != nil) {
+		return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "trust-invalid"}
 	}
 	if !alreadyEnrolled {
 		guestLog("enrollment exchange starting")
@@ -386,8 +391,19 @@ func (guest *guest) deliver(envelope *guestenrollment.BootstrapEnvelope) wire.Re
 		guest.failed = false
 		guest.mu.Unlock()
 		guestLog("enrollment accepted")
-		guest.triggerBootstrap()
 	}
+	if configuration.NativeEgressAttachment != nil {
+		// This is public per-run trust, delivered only with the authenticated
+		// handoff after the driver proved infrastructure confinement. The CA key
+		// never enters the driver or guest.
+		if err := os.MkdirAll(filepath.Dir(egressInterceptCAPath), 0o755); err != nil {
+			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "trust-unavailable"}
+		}
+		if err := atomicWrite(egressInterceptCAPath, []byte(nativeEgressCAPEM), 0o644); err != nil {
+			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "trust-unavailable"}
+		}
+	}
+	guest.triggerBootstrap()
 	guest.mu.Lock()
 	defer guest.mu.Unlock()
 	return guest.responseLocked()
@@ -633,6 +649,7 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 		if configuration.NativeEgressProbe != nil {
 			guestConfig["session_command"] = []string{
 				"/usr/local/bin/nvt-qemu-agent-fixture",
+				"--ca-file", egressInterceptCAPath,
 				"--host", configuration.NativeEgressProbe.Host,
 				"--port", fmt.Sprintf("%d", configuration.NativeEgressProbe.Port),
 				"--capability", configuration.NativeEgressProbe.Capability,
@@ -988,7 +1005,11 @@ func removeNativeEgressRedirect(port uint16) {
 }
 
 func guestObservabilityIsClean() bool {
-	for _, root := range []string{"/workspace", "/var/lib/nvt-agent"} {
+	return observabilityRootsAreClean([]string{"/workspace", "/var/lib/nvt-agent", "/etc/nvt-agent", "/tmp"}, "/proc")
+}
+
+func observabilityRootsAreClean(roots []string, processRoot string) bool {
+	for _, root := range roots {
 		if filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil || entry.IsDir() || !entry.Type().IsRegular() {
 				return err
@@ -1002,7 +1023,7 @@ func guestObservabilityIsClean() bool {
 			return false
 		}
 	}
-	processes, err := filepath.Glob("/proc/[0-9]*")
+	processes, err := filepath.Glob(filepath.Join(processRoot, "[0-9]*"))
 	if err != nil {
 		return false
 	}
@@ -1019,7 +1040,10 @@ func guestObservabilityIsClean() bool {
 
 func containsAuthorityMaterial(data []byte) bool {
 	lower := bytes.ToLower(data)
-	for _, value := range [][]byte{[]byte("nvt_eg1_"), []byte("nvt_ri1_"), []byte("nvt_e1_"), []byte("nvt_egress_broker_token"), []byte("relay-control-canary")} {
+	for _, value := range [][]byte{
+		[]byte("nvt_eg1_"), []byte("nvt_ri1_"), []byte("nvt_e1_"), []byte("nvt_egress_broker_token"),
+		[]byte("relay-control-canary"), []byte("nvt_provider_secret_canary_"),
+	} {
 		if bytes.Contains(lower, value) {
 			return true
 		}

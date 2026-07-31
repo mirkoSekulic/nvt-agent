@@ -263,10 +263,13 @@ func (manager *QEMUManager) Observe(ctx context.Context, state *State) (MachineO
 	return observation, nil
 }
 
-func (manager *QEMUManager) Deliver(ctx context.Context, state *State, envelope guestenrollment.BootstrapEnvelope) (MachineObservation, error) {
-	request := wire.Request{ContractVersion: wire.Version, Type: wire.RequestDeliver, Envelope: &envelope}
+func (manager *QEMUManager) Deliver(ctx context.Context, state *State, envelope guestenrollment.BootstrapEnvelope, nativeEgressCAPEM string) (MachineObservation, error) {
+	request := wire.Request{
+		ContractVersion: wire.Version, Type: wire.RequestDeliver, Envelope: &envelope, NativeEgressCAPEM: nativeEgressCAPEM,
+	}
 	response, err := manager.call(ctx, state, request)
 	request.Envelope = nil
+	request.NativeEgressCAPEM = ""
 	envelope.Token = ""
 	if err != nil || (response.State != wire.StateEnrolled && response.State != wire.StateReady) {
 		return MachineObservation{}, errors.New("QEMU guest enrollment did not complete")

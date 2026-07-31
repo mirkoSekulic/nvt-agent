@@ -323,6 +323,9 @@ networking, but it is not a root-adversary boundary. Operator target
 publication/readiness and cleanup ordering are now wired. The unpublished QEMU
 reference consumes the portable plan: QEMU `restrict=on` plus exact host-owned
 forward rules are the outside-guest read-back boundary, while the guest TCP
-redirect remains only routing. Its TCG gate proves the complete mediated path.
+redirect remains only routing. After that read-back, the authenticated
+enrollment handoff delivers only the public per-run interception CA; the guest
+proof uses normal TLS chain and hostname verification while the CA private key
+stays in egressd. Its TCG gate proves the complete mediated path.
 No production cloud provider consumes the plan yet, so production VM mediation
 remains incomplete.

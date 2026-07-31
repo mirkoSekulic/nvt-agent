@@ -393,8 +393,12 @@ For a mediated external VM, the trusted owners converge in this order:
    guest. It reads back the exact current attachment before reporting
    `egress_confinement:{boundary:"infrastructure",ready:true,attachment_generation:<current>,attachment_digest:<current>}`.
 3. The existing one-time exact guest enrollment completes inside that confined
-   bootstrap network; no provider or egress credential is carried in the
-   envelope, desired fingerprint, driver status, or provider tags.
+   bootstrap network. Its separately authenticated handoff may carry the
+   operator-owned public per-run interception CA (certificate PEM only, at
+   most 16 KiB) to the exact guest after the confinement read-back. The CA
+   private key remains solely with egressd. No provider or egress credential is
+   carried in the envelope, desired fingerprint, driver status, or provider
+   tags.
 4. The active runtime identity obtains the short-lived egress credential under
    the fixed purpose. `nvt-guest-egressd` authenticates the outbound session
    and activates its root-only local flow socket. The separate

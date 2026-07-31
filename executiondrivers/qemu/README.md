@@ -72,7 +72,11 @@ execution hash. Storage-backed registrations use one `Recreate` Deployment and
 must not share an existing claim with another registration, so two driver
 processes never intentionally operate the same disks. Enrollment envelopes are
 streamed once over the private virtio channel and are never written to ordinary
-driver state or seed media. The guest passes the envelope to the generic
+driver state or seed media. For mediated runs, the same bounded authenticated
+handoff carries only the operator-owned public per-run egress interception CA
+after exact infrastructure confinement has been read back. Its private key
+remains mounted only in egressd; public trust is not desired state or seed
+media. The guest passes the envelope to the generic
 host-bundle identity package, which commits the exact binding and current
 runtime identity in root-only atomic state. The installed daemon authenticates
 and rotates it independently of the agent session. The QEMU-only bundle
@@ -102,7 +106,8 @@ excluding the protected loopback and bounded bootstrap/control networks, but
 that redirect is routing plumbing and is never accepted as the confinement
 assertion. The QEMU fixture receives no
 runtime identity, egress bearer, broker token, relay-control token, or provider
-credential.
+credential. It performs ordinary TLS 1.2+ hostname and certificate-chain
+verification against the delivered public CA, with no insecure TLS bypass.
 
 The real TCG gate proves provisioning, outside-guest confinement before
 enrollment, native bundle installation, broker-backed identity rotation,

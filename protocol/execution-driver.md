@@ -302,6 +302,12 @@ most 64 KiB, the complete plan is at most 96 KiB, and the two unprivileged
 loopback ports are distinct. Private keys and non-certificate PEM blocks are
 invalid.
 
+`relay.ca_pem` authenticates the native-egress relay data listener; it is not
+the per-run egressd interception CA. After the exact infrastructure
+confinement assertion, the operator may deliver that separate public per-run
+CA only through the bounded authenticated guest-enrollment handoff. Neither CA
+private key is part of desired state, portable status, or provider state.
+
 The plan digest is SHA-256 over the following domain-separated byte sequence:
 the ASCII contract version and one zero byte; generation as unsigned 64-bit
 big-endian; relay host as a 32-bit-length-prefixed UTF-8 string; relay port as

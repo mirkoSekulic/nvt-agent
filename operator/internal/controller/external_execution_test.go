@@ -64,6 +64,7 @@ type recordingEnrollmentDriver struct {
 	deliverBlock      bool
 	acceptBeforeError bool
 	deliveredToken    string
+	deliveredEgressCA string
 	operationSequence *[]string
 }
 
@@ -126,6 +127,7 @@ func (d *recordingEnrollmentDriver) Deliver(ctx context.Context, request guesten
 	d.mu.Lock()
 	d.deliverCalls++
 	d.deliveredToken = request.Envelope.Token
+	d.deliveredEgressCA = request.NativeEgressCAPEM
 	if request.Envelope.Binding.GuestInstanceID != d.guestID {
 		d.mu.Unlock()
 		return errors.New("wrong guest")
@@ -686,6 +688,9 @@ func TestNativeMediatedGuestEnrollmentStartsAfterExactInfrastructureConfinement(
 	if driver.prepareCalls != 1 || driver.deliverCalls != 1 || len(issuer.issues) != 1 || stored.Status.NativeGuestBinding == nil {
 		t.Fatalf("exact confinement did not release enrollment: prepares=%d delivers=%d issues=%d binding=%#v", driver.prepareCalls, driver.deliverCalls, len(issuer.issues), stored.Status.NativeGuestBinding)
 	}
+	if guestenrollment.ValidateNativeEgressCAPEM(driver.deliveredEgressCA) != nil || strings.Contains(driver.deliveredEgressCA, "PRIVATE KEY") {
+		t.Fatal("mediated enrollment did not deliver only bounded public egress trust")
+	}
 	expectedGeneration, err := executiondriver.NativeEgressDesiredGeneration(run.Generation, attachment.Generation)
 	if err != nil || issuer.issues[0].Binding.DesiredGeneration != expectedGeneration {
 		t.Fatalf("enrollment used stale desired generation: %#v", issuer.issues[0].Binding)
@@ -706,6 +711,9 @@ func TestNonMediatedVMGuestEnrollmentKeepsLegacyProvisioningTiming(t *testing.T)
 	}
 	if driver.prepareCalls != 1 || driver.deliverCalls != 1 || len(issuer.issues) != 1 {
 		t.Fatalf("legacy enrollment timing changed: prepares=%d delivers=%d issues=%d", driver.prepareCalls, driver.deliverCalls, len(issuer.issues))
+	}
+	if driver.deliveredEgressCA != "" {
+		t.Fatal("non-mediated enrollment wire gained native egress trust")
 	}
 }
 
