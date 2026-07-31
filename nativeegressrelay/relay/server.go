@@ -309,6 +309,9 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		}
 	}()
 	stopTargetCancellation := context.AfterFunc(targetAdmission.Context(), func() {
+		if !targetAdmission.Pending() {
+			return
+		}
 		// Set the deadline on the underlying transport. A TLS write may hold
 		// internal connection state while the guest is not reading its ACK;
 		// the raw deadline still interrupts that write immediately.
@@ -342,12 +345,15 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 	// transport callback closes the outer connection and target flows. Close
 	// owns one shared absolute shutdown deadline across all of that work.
 	defer transport.Close()
-	if !reservation.Activate() {
+	if !targetAdmission.Activate(reservation.Activate) {
 		return
 	}
-	watchTargetLifecycle(session, admission.target)
+	// The admission cancellation hook owns only pending ACK/activation. Once
+	// the reservation is active, exact withdrawal belongs to WithdrawBindings.
+	stopTargetCancellation()
 	targetAdmission.Release()
 	targetAdmissionHeld = false
+	watchTargetLifecycle(session, admission.target)
 	releaseHandshake()
 	_ = transport.Serve(server.lifetimeContext)
 }

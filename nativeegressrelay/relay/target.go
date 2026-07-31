@@ -72,6 +72,8 @@ type guardedTargetAdmission interface {
 type targetAdmissionLease interface {
 	Context() context.Context
 	Active() bool
+	Activate(func() bool) bool
+	Pending() bool
 	Release()
 }
 
@@ -79,7 +81,11 @@ type unguardedTargetAdmission struct{}
 
 func (unguardedTargetAdmission) Context() context.Context { return context.Background() }
 func (unguardedTargetAdmission) Active() bool             { return true }
-func (unguardedTargetAdmission) Release()                 {}
+func (unguardedTargetAdmission) Activate(activate func() bool) bool {
+	return activate != nil && activate()
+}
+func (unguardedTargetAdmission) Pending() bool { return false }
+func (unguardedTargetAdmission) Release()      {}
 
 type lifecycleTarget interface {
 	Done() <-chan struct{}

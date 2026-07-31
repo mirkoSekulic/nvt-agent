@@ -70,10 +70,11 @@ type egressdTarget struct {
 }
 
 type egressdTargetAdmission struct {
-	target  *egressdTarget
-	epoch   uint64
-	context context.Context
-	once    sync.Once
+	target   *egressdTarget
+	epoch    uint64
+	context  context.Context
+	complete bool
+	once     sync.Once
 }
 
 func NewEgressdTargetRegistry(descriptors []EgressdTargetDescriptor) (*EgressdTargetRegistry, error) {
@@ -120,6 +121,12 @@ func (registry *EgressdTargetRegistry) Reconcile(descriptors []EgressdTargetDesc
 // withdrawal followed by replacement map visibility. A failed pre-commit
 // drain restores the prior complete snapshot.
 func (registry *EgressdTargetRegistry) ReconcileContext(ctx context.Context, descriptors []EgressdTargetDescriptor) error {
+	return registry.reconcileContext(ctx, descriptors, nil)
+}
+
+// afterDrain is an internal deterministic-test seam. Production callers
+// always pass nil; it performs no protocol or lifecycle work.
+func (registry *EgressdTargetRegistry) reconcileContext(ctx context.Context, descriptors []EgressdTargetDescriptor, afterDrain func()) error {
 	if registry == nil || registry.dial == nil {
 		return errors.New("native egress target configuration is invalid")
 	}
@@ -180,8 +187,11 @@ func (registry *EgressdTargetRegistry) ReconcileContext(ctx context.Context, des
 		rollbackTargetDrains(draining)
 		return errors.New("native egress target configuration is invalid")
 	}
+	if afterDrain != nil {
+		afterDrain()
+	}
 	registry.mu.Lock()
-	if registry.revision != baseRevision {
+	if ctx.Err() != nil || registry.revision != baseRevision {
 		rollbackTargetDrains(draining)
 		registry.mu.Unlock()
 		return errors.New("native egress target configuration is invalid")
@@ -517,6 +527,33 @@ func (admission *egressdTargetAdmission) Active() bool {
 	target.lifecycleMu.Lock()
 	defer target.lifecycleMu.Unlock()
 	return target.state == egressdTargetActive && target.epoch == admission.epoch && admission.context.Err() == nil
+}
+
+func (admission *egressdTargetAdmission) Activate(activate func() bool) bool {
+	if admission == nil || admission.target == nil || activate == nil {
+		return false
+	}
+	target := admission.target
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	if admission.complete || target.state != egressdTargetActive || target.epoch != admission.epoch || admission.context.Err() != nil {
+		return false
+	}
+	if !activate() {
+		return false
+	}
+	admission.complete = true
+	return true
+}
+
+func (admission *egressdTargetAdmission) Pending() bool {
+	if admission == nil || admission.target == nil {
+		return false
+	}
+	target := admission.target
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	return !admission.complete
 }
 
 func (admission *egressdTargetAdmission) Release() {

@@ -246,6 +246,126 @@ func TestCanceledTargetDrainRollsBackWithoutLeakingAdmission(t *testing.T) {
 	assertEgressdTargetLifecycle(t, target, egressdTargetClosed, 0)
 }
 
+func TestCanceledPreCommitDrainPreservesActiveSessionAndReadiness(t *testing.T) {
+	fixture := newEchoConnectFixture(t, nil)
+	replacementFixture := newEchoConnectFixture(t, nil)
+	binding := testBinding("active-rollback")
+	credential := testCredential(t, 4)
+	registry, err := NewEgressdTargetRegistry([]EgressdTargetDescriptor{targetDescriptor(binding, fixture)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := &fakeAuthenticator{bindings: map[string]guestenrollment.Binding{credential: binding}}
+	server, address, pki, _ := startInjectedServer(t, authenticator, registry, time.Second, 4)
+	if err := registry.bindSessionWithdrawal(server.registry.WithdrawBindings); err != nil {
+		t.Fatal(err)
+	}
+	guest, err := connectGuest(t, address, pki, binding, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guest.Close()
+	active := waitActive(t, server.Sessions(), binding, true)
+	target := resolveTarget(t, registry, binding).(*egressdTarget)
+	blockingAdmission, ok := target.acquireAdmission()
+	if !ok {
+		t.Fatal("blocking admission was unavailable")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- registry.ReconcileContext(ctx, []EgressdTargetDescriptor{targetDescriptor(binding, replacementFixture)})
+	}()
+	waitForCondition(t, func() bool { return !target.isActive() }, "active target pre-commit drain")
+	cancel()
+	if err := <-reconcileDone; err == nil {
+		t.Fatal("canceled pre-commit drain unexpectedly committed")
+	}
+	blockingAdmission.Release()
+
+	select {
+	case <-active.Done():
+		t.Fatal("canceled pre-commit drain closed the active session")
+	case <-time.After(25 * time.Millisecond):
+	}
+	if current, ready := server.Sessions().Active(binding); !ready || current != active {
+		t.Fatal("canceled pre-commit drain withdrew active readiness")
+	}
+	destination := nativeegress.Destination{Network: nativeegress.NetworkTCP, Host: "api.example", Port: 443}
+	flow, err := guest.OpenFlow(t.Context(), destination)
+	if err != nil {
+		t.Fatalf("rolled-back active session could not open a flow: %v", err)
+	}
+	assertFlowEcho(t, flow, []byte("active-after-rollback"))
+	_ = flow.Close()
+	if current := resolveTarget(t, registry, binding); current != target {
+		t.Fatal("canceled pre-commit drain replaced the target")
+	}
+}
+
+func TestCancellationWhileWaitingForCommitLockRollsBackBeforeWithdrawal(t *testing.T) {
+	fixture := newEchoConnectFixture(t, nil)
+	replacementFixture := newEchoConnectFixture(t, nil)
+	binding := testBinding("commit-lock-cancel")
+	registry, err := NewEgressdTargetRegistry([]EgressdTargetDescriptor{targetDescriptor(binding, fixture)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTarget := resolveTarget(t, registry, binding).(*egressdTarget)
+	var withdrawalMu sync.Mutex
+	withdrawals := 0
+	if err := registry.bindSessionWithdrawal(func([]guestenrollment.Binding) (<-chan struct{}, error) {
+		withdrawalMu.Lock()
+		withdrawals++
+		withdrawalMu.Unlock()
+		return closedSignal(), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	afterDrain := make(chan struct{})
+	continueToCommit := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- registry.reconcileContext(ctx, []EgressdTargetDescriptor{targetDescriptor(binding, replacementFixture)}, func() {
+			close(afterDrain)
+			<-continueToCommit
+		})
+	}()
+	select {
+	case <-afterDrain:
+	case <-time.After(time.Second):
+		t.Fatal("target drain did not complete")
+	}
+
+	// Force the exact race: drain has completed, but reconciliation cannot run
+	// its commit-time validation until this test releases the global map lock.
+	registry.mu.Lock()
+	close(continueToCommit)
+	cancel()
+	registry.mu.Unlock()
+	if err := <-reconcileDone; err == nil {
+		t.Fatal("canceled publication committed after waiting for the map lock")
+	}
+	withdrawalMu.Lock()
+	gotWithdrawals := withdrawals
+	withdrawalMu.Unlock()
+	if gotWithdrawals != 0 {
+		t.Fatalf("canceled publication withdrew sessions %d times", gotWithdrawals)
+	}
+	if current := resolveTarget(t, registry, binding); current != oldTarget {
+		t.Fatal("canceled publication replaced the old target")
+	}
+	assertEgressdTargetLifecycle(t, oldTarget, egressdTargetActive, 0)
+	select {
+	case <-oldTarget.Done():
+		t.Fatal("canceled publication closed the old target lifecycle")
+	default:
+	}
+}
+
 func egressdTargetAdmissions(target *egressdTarget) int {
 	if target == nil {
 		return 0
