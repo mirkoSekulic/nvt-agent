@@ -10,6 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/executiondrivers/qemu/internal/driver"
@@ -29,11 +32,31 @@ func main() {
 	machines, err := driver.NewQEMUManager(driver.QEMUConfig{
 		Binary: "/usr/bin/qemu-system-x86_64", Kernel: "/opt/nvt-qemu/guest/vmlinuz",
 		Initramfs: "/opt/nvt-qemu/guest/initramfs", DiskTemplate: "/opt/nvt-qemu/guest/root.qcow2",
-		StateRoot: stateRoot, ScratchRoot: "/tmp",
+		StateRoot: stateRoot, ScratchRoot: "/tmp", ReaperBinary: "/sbin/tini",
 	})
 	if err != nil || stateRoot == "" {
 		fatal("runtime artifacts are unavailable")
 	}
+	var shutdownOnce sync.Once
+	shutdownMachines := func() {
+		shutdownOnce.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = machines.Shutdown(ctx)
+			cancel()
+		})
+	}
+	termination := make(chan os.Signal, 1)
+	signal.Notify(termination, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(termination)
+	go func() {
+		<-termination
+		// The execution-driver host cancels an in-flight child exchange by
+		// terminating this process group. Reap the independently grouped QEMU,
+		// its tini subreaper, and guestfwd helpers before this parent exits.
+		// Pdeathsig remains the fail-closed fallback for an uncatchable exit.
+		shutdownMachines()
+		os.Exit(0)
+	}()
 	process := &process{machines: machines, stopHandoff: func() {}}
 	defer process.stopHandoff()
 	scanner := bufio.NewScanner(os.Stdin)
@@ -44,8 +67,13 @@ func main() {
 		}
 	}
 	if scanner.Err() != nil {
+		shutdownMachines()
 		fatal("protocol framing failed")
 	}
+	// The host closes stdin before delivering SIGTERM when an in-flight call is
+	// canceled. Treat clean EOF as the same authoritative shutdown path so the
+	// QEMU process tree is reaped before this parent returns.
+	shutdownMachines()
 }
 
 func (process *process) handle(line []byte) bool {

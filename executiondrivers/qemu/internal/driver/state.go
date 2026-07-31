@@ -25,17 +25,18 @@ const (
 )
 
 type State struct {
-	Version            int                             `json:"version"`
-	ExecutionID        string                          `json:"execution_id"`
-	Generation         int64                           `json:"generation"`
-	DesiredFingerprint string                          `json:"desired_fingerprint"`
-	ClassName          string                          `json:"class_name"`
-	Configuration      config.Configuration            `json:"configuration"`
-	Attempt            int                             `json:"attempt"`
-	GuestInstanceID    string                          `json:"guest_instance_id"`
-	ExecutionScope     *guestenrollment.ExecutionScope `json:"execution_scope,omitempty"`
-	EnrollmentAccepted bool                            `json:"enrollment_accepted"`
-	HostPort           int                             `json:"host_port"`
+	Version                int                                     `json:"version"`
+	ExecutionID            string                                  `json:"execution_id"`
+	Generation             int64                                   `json:"generation"`
+	DesiredFingerprint     string                                  `json:"desired_fingerprint"`
+	ClassName              string                                  `json:"class_name"`
+	Configuration          config.Configuration                    `json:"configuration"`
+	Attempt                int                                     `json:"attempt"`
+	GuestInstanceID        string                                  `json:"guest_instance_id"`
+	ExecutionScope         *guestenrollment.ExecutionScope         `json:"execution_scope,omitempty"`
+	EnrollmentAccepted     bool                                    `json:"enrollment_accepted"`
+	HostPort               int                                     `json:"host_port"`
+	NativeEgressAttachment *executiondriver.NativeEgressAttachment `json:"native_egress_attachment,omitempty"`
 }
 
 func (state State) Validate() error {
@@ -46,6 +47,13 @@ func (state State) Validate() error {
 	if state.Version != stateVersion || executiondriver.ValidateReconcileParams(executiondriver.ReconcileParams{Desired: desired}) != nil ||
 		config.Validate(state.Configuration) != nil || state.Attempt < 1 || state.Attempt > 1_000_000 ||
 		state.GuestInstanceID != guestInstanceID(state.ExecutionID, state.Generation, state.Attempt) || state.HostPort < minimumHostPort || state.HostPort > maximumHostPort {
+		return errors.New("QEMU durable state is invalid")
+	}
+	if state.NativeEgressAttachment != nil {
+		if executiondriver.ValidateNativeEgressAttachment(*state.NativeEgressAttachment) != nil {
+			return errors.New("QEMU durable state is invalid")
+		}
+	} else if state.Configuration.NativeEgressProbe != nil {
 		return errors.New("QEMU durable state is invalid")
 	}
 	if state.ExecutionScope != nil {

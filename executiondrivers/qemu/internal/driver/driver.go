@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/mirkoSekulic/nvt-agent/executiondrivers/qemu/internal/config"
@@ -15,13 +18,18 @@ import (
 )
 
 type MachineObservation struct {
-	Running  bool
-	Enrolled bool
-	Ready    bool
+	Running           bool
+	Enrolled          bool
+	Ready             bool
+	EgressConfinement *executiondriver.EgressConfinementStatus
 }
 
 type MachineManager interface {
 	GuestImageDigest() (string, error)
+	// Ensure must not succeed for a mediated execution until the provider-owned
+	// network boundary has been read back as the exact current attachment. The
+	// portable assertion remains valid if the independent guest control channel
+	// is temporarily unavailable later in the same reconciliation.
 	Ensure(context.Context, *State) error
 	Observe(context.Context, *State) (MachineObservation, error)
 	Configure(context.Context, *State, wire.BootConfiguration) error
@@ -64,6 +72,9 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 	if err != nil {
 		return executiondriver.Status{}, reject("invalid-configuration", "QEMU execution class configuration is invalid")
 	}
+	if validateNativeEgressDesired(resolved, desired.NativeEgressAttachment) != nil {
+		return executiondriver.Status{}, reject("invalid-native-egress", "QEMU native egress attachment is invalid")
+	}
 	imageDigest, err := driver.machines.GuestImageDigest()
 	if err != nil || imageDigest != resolved.GuestImage.Digest {
 		return executiondriver.Status{}, reject("guest-image-mismatch", "QEMU guest image digest does not match the execution class")
@@ -78,6 +89,7 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 			Version: stateVersion, ExecutionID: desired.ExecutionID, Generation: desired.Generation,
 			DesiredFingerprint: desired.DesiredFingerprint, ClassName: desired.ClassName, Configuration: resolved,
 			Attempt: 1, GuestInstanceID: guestInstanceID(desired.ExecutionID, desired.Generation, 1), HostPort: hostPort,
+			NativeEgressAttachment: cloneNativeEgressAttachment(desired.NativeEgressAttachment),
 		}
 		if err := driver.store.Save(state); err != nil {
 			return executiondriver.Status{}, retry("state-unavailable", "QEMU durable state is unavailable")
@@ -106,6 +118,7 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 				Version: stateVersion, ExecutionID: desired.ExecutionID, Generation: desired.Generation,
 				DesiredFingerprint: desired.DesiredFingerprint, ClassName: desired.ClassName, Configuration: resolved,
 				Attempt: 1, GuestInstanceID: guestInstanceID(desired.ExecutionID, desired.Generation, 1), HostPort: hostPort,
+				NativeEgressAttachment: cloneNativeEgressAttachment(desired.NativeEgressAttachment),
 			}
 			if err := driver.store.Save(state); err != nil {
 				return executiondriver.Status{}, retry("state-unavailable", "QEMU durable state is unavailable")
@@ -117,12 +130,12 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 	}
 	if state.ExecutionScope != nil {
 		if err := driver.machines.Configure(ctx, &state, bootConfiguration(state)); err != nil {
-			return statusFor(state, MachineObservation{Running: true}), nil
+			return statusFor(state, observationAfterEnsure(state)), nil
 		}
 	}
 	observation, err := driver.machines.Observe(ctx, &state)
 	if err != nil {
-		return statusFor(state, MachineObservation{Running: true}), nil
+		return statusFor(state, observationAfterEnsure(state)), nil
 	}
 	if observation.Enrolled && !state.EnrollmentAccepted {
 		state.EnrollmentAccepted = true
@@ -131,6 +144,19 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 		}
 	}
 	return statusFor(state, observation), nil
+}
+
+func observationAfterEnsure(state State) MachineObservation {
+	observation := MachineObservation{Running: true}
+	if state.NativeEgressAttachment == nil {
+		return observation
+	}
+	attachment := state.NativeEgressAttachment
+	observation.EgressConfinement = &executiondriver.EgressConfinementStatus{
+		Boundary: executiondriver.EgressConfinementBoundaryInfrastructure, Ready: true,
+		AttachmentGeneration: attachment.Generation, AttachmentDigest: attachment.Digest,
+	}
+	return observation
 }
 
 func (driver *Driver) Observe(ctx context.Context, executionID string) (executiondriver.Status, error) {
@@ -185,6 +211,23 @@ func (driver *Driver) Prepare(ctx context.Context, request guestenrollment.Hando
 	state, err := driver.store.Load(request.ExecutionScope.ExecutionID)
 	if err != nil || state.Generation != request.DesiredGeneration {
 		return guestenrollment.HandoffPrepareResult{}, errors.New("QEMU enrollment handoff is unavailable")
+	}
+	if state.NativeEgressAttachment != nil {
+		observation, observeErr := driver.machines.Observe(ctx, &state)
+		if observeErr != nil || !nativeEgressConfinementCurrent(state, observation) {
+			return guestenrollment.HandoffPrepareResult{}, errors.New("QEMU enrollment handoff is unavailable")
+		}
+		// Accepted is durable provider state. Reconstruct it after the exact
+		// infrastructure fence is read back without requiring the guest data
+		// plane to be ready: relay target publication itself depends on this
+		// accepted binding, so reconfiguring the not-yet-published guest here
+		// would create a circular readiness dependency after operator restart.
+		if state.EnrollmentAccepted && state.ExecutionScope != nil && *state.ExecutionScope == request.ExecutionScope {
+			return guestenrollment.HandoffPrepareResult{
+				ContractVersion: guestenrollment.HandoffVersion, GuestInstanceID: state.GuestInstanceID,
+				State: guestenrollment.HandoffStateAccepted, NewlyPrepared: false,
+			}, nil
+		}
 	}
 	fresh := false
 	if state.ExecutionScope == nil {
@@ -254,6 +297,12 @@ func (driver *Driver) Deliver(ctx context.Context, request guestenrollment.Hando
 	if state.EnrollmentAccepted {
 		return nil
 	}
+	if state.NativeEgressAttachment != nil {
+		observation, observeErr := driver.machines.Observe(ctx, &state)
+		if observeErr != nil || !nativeEgressConfinementCurrent(state, observation) || !nativeEgressEnrollmentEndpointAllowed(state, request.Envelope.ExchangeURL) {
+			return errors.New("QEMU enrollment delivery is unavailable")
+		}
+	}
 	observation, err := driver.machines.Deliver(ctx, &state, request.Envelope)
 	if err != nil || !observation.Enrolled {
 		return errors.New("QEMU enrollment delivery is unavailable")
@@ -272,7 +321,7 @@ func (driver *Driver) Shutdown(ctx context.Context) error {
 }
 
 func bootConfiguration(state State) wire.BootConfiguration {
-	return wire.BootConfiguration{
+	value := wire.BootConfiguration{
 		ContractVersion: wire.Version,
 		Binding: guestenrollment.Binding{
 			AgentRunUID: state.ExecutionScope.AgentRunUID, ExecutionID: state.ExecutionID, DriverRegistration: state.ExecutionScope.DriverRegistration,
@@ -281,6 +330,12 @@ func bootConfiguration(state State) wire.BootConfiguration {
 		HostBundle: state.Configuration.HostBundle, RegistryCAPEM: state.Configuration.RegistryCAPEM, EnrollmentCAPEM: state.Configuration.EnrollmentCAPEM,
 		NativeSessionEndpoint: state.Configuration.NativeSessionEndpoint, NativeSessionCAPEM: state.Configuration.NativeSessionCAPEM,
 	}
+	value.NativeEgressAttachment = cloneNativeEgressAttachment(state.NativeEgressAttachment)
+	if state.Configuration.NativeEgressProbe != nil {
+		probe := *state.Configuration.NativeEgressProbe
+		value.NativeEgressProbe = &probe
+	}
+	return value
 }
 
 func statusFor(state State, observation MachineObservation) executiondriver.Status {
@@ -289,6 +344,16 @@ func statusFor(state State, observation MachineObservation) executiondriver.Stat
 		Phase: executiondriver.PhaseProvisioning, ObservedGeneration: state.Generation,
 		ExternalResourceID: "qemu-vm/" + state.GuestInstanceID, RetryAfterSeconds: &retryAfter,
 	}
+	if state.NativeEgressAttachment != nil {
+		status.EgressConfinement = observation.EgressConfinement
+		if observation.Running && nativeEgressConfinementCurrent(state, observation) {
+			status.Phase = executiondriver.PhaseRunning
+			status.Ready = true
+			status.Endpoint = &executiondriver.Endpoint{Scheme: executiondriver.EndpointSchemeHTTP, Host: "127.0.0.1", Port: uint16(state.HostPort)}
+			status.RetryAfterSeconds = nil
+		}
+		return status
+	}
 	if observation.Ready && state.EnrollmentAccepted {
 		status.Phase = executiondriver.PhaseRunning
 		status.Ready = true
@@ -296,6 +361,94 @@ func statusFor(state State, observation MachineObservation) executiondriver.Stat
 		status.RetryAfterSeconds = nil
 	}
 	return status
+}
+
+func cloneNativeEgressAttachment(value *executiondriver.NativeEgressAttachment) *executiondriver.NativeEgressAttachment {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.RequiredDestinations = append([]executiondriver.NativeEgressRequiredDestination(nil), value.RequiredDestinations...)
+	return &copy
+}
+
+func validateNativeEgressDesired(configuration config.Configuration, attachment *executiondriver.NativeEgressAttachment) error {
+	if attachment == nil {
+		if configuration.NativeEgressProbe != nil {
+			return errors.New("QEMU native egress probe requires an attachment")
+		}
+		return nil
+	}
+	if executiondriver.ValidateNativeEgressAttachment(*attachment) != nil {
+		return errors.New("QEMU native egress attachment is invalid")
+	}
+	if attachment.Redirect.LoopbackAddress != "127.0.0.1" {
+		return errors.New("QEMU native egress redirect is unsupported")
+	}
+	for _, destination := range attachment.RequiredDestinations {
+		if net.ParseIP(destination.Host) != nil {
+			return errors.New("QEMU native egress bootstrap destination is unsupported")
+		}
+	}
+	repository, err := url.Parse(configuration.HostBundle.Repository)
+	if err != nil || !nativeEgressDestinationPresent(*attachment, executiondriver.NativeEgressDestinationBootstrap, repository.Hostname(), effectivePort(repository, 443)) {
+		return errors.New("QEMU host-bundle endpoint is not confined")
+	}
+	session, err := url.Parse(configuration.NativeSessionEndpoint)
+	if err != nil || !nativeEgressDestinationPresent(*attachment, executiondriver.NativeEgressDestinationControl, session.Hostname(), effectivePort(session, 0)) {
+		return errors.New("QEMU native-session endpoint is not confined")
+	}
+	if configuration.NativeEgressProbe != nil {
+		if configuration.NativeEgressProbe.Host == attachment.Relay.Host || configuration.NativeEgressProbe.Host == attachment.Relay.ServerName {
+			return errors.New("QEMU native egress probe overlaps trusted infrastructure")
+		}
+		for _, destination := range attachment.RequiredDestinations {
+			if configuration.NativeEgressProbe.Host == destination.Host {
+				return errors.New("QEMU native egress probe overlaps trusted infrastructure")
+			}
+		}
+	}
+	return nil
+}
+
+func nativeEgressDestinationPresent(attachment executiondriver.NativeEgressAttachment, purpose executiondriver.NativeEgressDestinationPurpose, host string, port int) bool {
+	if port < 1 || port > 65535 {
+		return false
+	}
+	for _, destination := range attachment.RequiredDestinations {
+		if destination.Purpose == purpose && destination.Host == host && destination.Port == uint16(port) {
+			return true
+		}
+	}
+	return false
+}
+
+func effectivePort(endpoint *url.URL, fallback int) int {
+	if endpoint == nil {
+		return 0
+	}
+	if endpoint.Port() == "" {
+		return fallback
+	}
+	port, err := strconv.Atoi(endpoint.Port())
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
+func nativeEgressConfinementCurrent(state State, observation MachineObservation) bool {
+	value := observation.EgressConfinement
+	return state.NativeEgressAttachment != nil && value != nil && value.Boundary == executiondriver.EgressConfinementBoundaryInfrastructure && value.Ready &&
+		value.AttachmentGeneration == state.NativeEgressAttachment.Generation && value.AttachmentDigest == state.NativeEgressAttachment.Digest
+}
+
+func nativeEgressEnrollmentEndpointAllowed(state State, exchangeURL string) bool {
+	if state.NativeEgressAttachment == nil {
+		return true
+	}
+	endpoint, err := url.Parse(exchangeURL)
+	return err == nil && nativeEgressDestinationPresent(*state.NativeEgressAttachment, executiondriver.NativeEgressDestinationBootstrap, endpoint.Hostname(), effectivePort(endpoint, 443))
 }
 
 func reject(reason, message string) error {

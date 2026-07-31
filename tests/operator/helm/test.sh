@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.47" || "${CHART_APP_VERSION}" != "0.8.47" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.47, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.48" || "${CHART_APP_VERSION}" != "0.8.48" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.48, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.47' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.48' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -808,6 +808,8 @@ assert pod["containers"][0]["securityContext"]["capabilities"]["drop"] == ["ALL"
 assert pod["initContainers"][0]["image"] == "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 assert pod["initContainers"][0]["securityContext"]["runAsUser"] == 0
 assert pod["initContainers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["CHOWN"]}
+init_script = pod["initContainers"][0]["args"][0]
+assert init_script.index("chmod 0600 /owned/*") < init_script.index("chown 65532:65532 /owned/*")
 assert pod["volumes"][1]["emptyDir"]["medium"] == "Memory"
 operator = by[("Deployment", "nvt-operator")]
 assert operator["spec"]["strategy"]["type"] == "Recreate"
@@ -825,6 +827,10 @@ assert attachment_config["requiredDestinations"] == [
     {"purpose": "bootstrap", "host": "nvt-broker.custom-ns.svc.cluster.local", "port": 7347},
     {"purpose": "control", "host": "nvt-gateway.custom-ns.svc.cluster.local", "port": 7443},
 ]
+assert attachment_config["redirect"] == {
+    "mode": "capture-tcp", "loopback_address": "127.0.0.1",
+    "transparent_tcp_port": 15001, "explicit_connect_port": 15002,
+}
 operator_volumes = {volume["name"]: volume for volume in operator["spec"]["template"]["spec"]["volumes"]}
 attachment_sources = operator_volumes["native-egress-attachment"]["projected"]["sources"]
 assert attachment_sources[1]["secret"]["items"] == [{"key": "data-ca.crt", "path": "data-ca.crt"}]
@@ -851,6 +857,7 @@ assert policy["spec"]["ingress"][1]["from"][0]["ipBlock"]["cidr"] == "10.40.0.0/
 render = open(sys.argv[1]).read()
 assert "control-token" in render
 assert "nvt_rc1_" not in render
+assert "loopbackAddress" not in attachment["data"]["config.json"]
 PY
 
 python3 - "${EXECUTION_DRIVERS_RENDER}" "${CHART_APP_VERSION}" "${DEFAULT_RENDER}" <<'PY'

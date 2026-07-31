@@ -486,9 +486,16 @@ complete snapshot after either process restarts, gates `NativeEgressReady` on
 the acknowledged exact mapping and the current attachment/confinement
 observation, and withdraws it before authority or driver cleanup. The optional
 desired plan now tells a provider what it must attach without vendor fields.
-No production driver implements those redirect rules or infrastructure network
-confinement yet; Azure/AWS/QEMU support and the final provider E2E remain future
+The unpublished QEMU reference driver now consumes that plan and provides the
+final hermetic provider proof: `restrict=on` is enforced by QEMU outside the
+guest, exact host-owned forward rules admit only the relay/bootstrap/control
+destinations, and live process-argument read-back gates enrollment. Its guest
+redirect is explicitly non-authoritative. The TCG lifecycle reaches the
+hermetic upstream only through capture, the authenticated relay, and the exact
+per-run egressd; it also proves revocation, restart, and cleanup. Azure, AWS,
+other production providers, and production public relay ingress remain future
 gates.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
-remain unchanged. Production VM mediated egress requires those later reviewed
-implementation gates and a real provider enforcement proof.
+remain unchanged. Production VM mediated egress still requires a separately
+reviewed production provider implementation and its infrastructure enforcement
+proof; the QEMU reference is deliberately not such a provider.

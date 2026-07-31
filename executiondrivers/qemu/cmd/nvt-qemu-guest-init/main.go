@@ -4,14 +4,20 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +41,14 @@ const (
 	sessionCAPath          = "/etc/nvt-agent/native-session-ca.pem"
 	sessionRuntimeRoot     = "/run/nvt-agent-session"
 	sessionReadinessPath   = sessionRuntimeRoot + "/session-ready"
+	egressConfigPath       = "/etc/nvt-agent/native-egress.json"
+	egressCAPath           = "/etc/nvt-agent/native-egress-ca.pem"
+	egressRuntimeRoot      = "/run/nvt-agent-egress"
+	egressFlowSocketPath   = egressRuntimeRoot + "/flow.sock"
+	captureConfigPath      = "/etc/nvt-agent/native-capture.json"
+	captureRuntimeRoot     = "/run/nvt-agent-capture"
+	captureReadinessPath   = captureRuntimeRoot + "/ready.sock"
+	nativeEgressProofPath  = "/workspace/native-egress-proof.json"
 )
 
 type guest struct {
@@ -43,8 +57,25 @@ type guest struct {
 	enrolled      bool
 	ready         bool
 	failed        bool
+	bypassDenied  bool
 	bootstrap     chan struct{}
 }
+
+type boundedDiagnostic struct{ data []byte }
+
+func (diagnostic *boundedDiagnostic) Write(value []byte) (int, error) {
+	written := len(value)
+	remaining := 512 - len(diagnostic.data)
+	if remaining > 0 {
+		if len(value) > remaining {
+			value = value[:remaining]
+		}
+		diagnostic.data = append(diagnostic.data, value...)
+	}
+	return written, nil
+}
+
+func (diagnostic *boundedDiagnostic) String() string { return string(diagnostic.data) }
 
 var (
 	controlDiscoveryPendingLog sync.Once
@@ -129,6 +160,13 @@ func initializeOS() error {
 	defer cancel()
 	if err := exec.CommandContext(networkContext, "/bin/busybox", "udhcpc", "-i", "eth0", "-q", "-n", "-t", "10", "-T", "1").Run(); err != nil {
 		guestLog("native network configuration failed")
+		return err
+	}
+	// restrict=on owns forwarding outside the guest, but the guest still needs
+	// a route for arbitrary destinations so OUTPUT DNAT can capture them before
+	// slirp applies that external default-deny boundary.
+	if err := exec.Command("/bin/busybox", "ip", "route", "replace", "default", "via", "10.0.2.2", "dev", "eth0").Run(); err != nil {
+		guestLog("native network route configuration failed")
 		return err
 	}
 	// QEMU user networking owns this stable DNS forwarder. Do not retain the
@@ -264,6 +302,10 @@ func (guest *guest) handle(data []byte) wire.Response {
 			guest.mu.Unlock()
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "binding-mismatch"}
 		}
+		if guest.configuration != nil && !reflect.DeepEqual(*guest.configuration, *request.Configuration) {
+			guest.mu.Unlock()
+			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "invalid-configuration"}
+		}
 		persisted, loadErr := loadEnrollmentBinding()
 		if loadErr != nil {
 			guest.mu.Unlock()
@@ -273,8 +315,31 @@ func (guest *guest) handle(data []byte) wire.Response {
 			guest.mu.Unlock()
 			return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "binding-mismatch"}
 		}
+		if guest.configuration != nil {
+			state := guest.responseLocked()
+			enrolled := guest.enrolled
+			guest.mu.Unlock()
+			if enrolled {
+				guest.triggerBootstrap()
+			}
+			return state
+		}
+		guest.mu.Unlock()
+		// Install only the attachment's public host aliases before the one-time
+		// enrollment exchange. The restrict=on backend deliberately provides no
+		// ambient DNS; this guest-local routing is required plumbing but is never
+		// consumed as the infrastructure-confinement assertion. Identical later
+		// Configure calls return above, so this direct-bypass probe can never be
+		// confused with an already-active capture path.
+		if request.Configuration.NativeEgressAttachment != nil {
+			if configureNativeEgressHosts(*request.Configuration) != nil || !directEgressIsConfined(*request.Configuration) {
+				return wire.Response{ContractVersion: wire.Version, State: wire.StateFailed, Error: "network-unavailable"}
+			}
+		}
+		guest.mu.Lock()
 		copy := *request.Configuration
 		guest.configuration = &copy
+		guest.bypassDenied = request.Configuration.NativeEgressAttachment != nil
 		state := guest.responseLocked()
 		enrolled := guest.enrolled
 		guest.mu.Unlock()
@@ -374,6 +439,21 @@ func validateBootConfiguration(value wire.BootConfiguration) error {
 		config.ValidateCAPEM(value.NativeSessionCAPEM) != nil || config.ValidateNativeSessionEndpoint(value.NativeSessionEndpoint) != nil {
 		return errors.New("boot configuration is invalid")
 	}
+	if value.NativeEgressAttachment == nil {
+		if value.NativeEgressProbe != nil {
+			return errors.New("boot configuration is invalid")
+		}
+		return nil
+	}
+	if executiondriver.ValidateNativeEgressAttachment(*value.NativeEgressAttachment) != nil {
+		return errors.New("boot configuration is invalid")
+	}
+	if _, err := wire.NativeEgressHostAliases(*value.NativeEgressAttachment); err != nil {
+		return errors.New("boot configuration is invalid")
+	}
+	if value.NativeEgressProbe != nil && config.ValidateNativeEgressProbe(*value.NativeEgressProbe) != nil {
+		return errors.New("boot configuration is invalid")
+	}
 	return nil
 }
 
@@ -413,6 +493,12 @@ func (guest *guest) bootstrapLoop() {
 			}
 			if err := runNativeGuest(*configuration, guest); err == nil {
 				break
+			} else {
+				// This reference-only console records a bounded, sanitized stage
+				// reason so the real-guest proof cannot turn an unavailable data
+				// plane into an opaque readiness timeout. The errors below are
+				// fixed diagnostics and never contain configuration or authority.
+				guestLog("native runtime setup retrying: " + err.Error())
 			}
 			guest.mu.Lock()
 			guest.failed, guest.ready = true, false
@@ -423,6 +509,17 @@ func (guest *guest) bootstrapLoop() {
 }
 
 func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
+	if configuration.NativeEgressAttachment != nil {
+		// Revalidate the guest-side plumbing after enrollment. This is a defense
+		// against accidental local drift, not the confinement authority; the
+		// driver reports only its independent live QEMU process read-back.
+		if err := configureNativeEgressHosts(configuration); err != nil || !directEgressIsConfined(configuration) {
+			return errors.New("native egress infrastructure confinement failed")
+		}
+		guest.mu.Lock()
+		guest.bypassDenied = true
+		guest.mu.Unlock()
+	}
 	caFile := "/run/nvt-agent/registry-ca.pem"
 	if err := os.MkdirAll(filepath.Dir(caFile), 0o755); err != nil {
 		return err
@@ -434,12 +531,21 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	if err := os.WriteFile(caFile, ca, 0o600); err != nil {
 		return err
 	}
+	if err := probeRegistryTLS(configuration.HostBundle.Repository, ca); err != nil {
+		guestLog("native host bundle trust probe failed (" + err.Error() + ")")
+		return errors.New("host bundle trust probe failed")
+	}
+	guestLog("native host bundle trust probe complete")
 	command := exec.Command("/usr/local/bin/nvt-host-bootstrap", "--repository", configuration.HostBundle.Repository, "--digest", configuration.HostBundle.Digest, "--root", "/opt/nvt", "--os", "linux", "--arch", "amd64", "--timeout", "5m")
 	command.Env = []string{"PATH=/usr/bin:/bin:/usr/local/bin", "SSL_CERT_FILE=" + caFile}
-	command.Stdout, command.Stderr = io.Discard, io.Discard
+	var bootstrapDiagnostic boundedDiagnostic
+	command.Stdout, command.Stderr = io.Discard, &bootstrapDiagnostic
+	guestLog("native host bundle installation starting")
 	if err := command.Run(); err != nil {
+		guestLog("native host bundle installation failed (" + hostBundleFailureClass(bootstrapDiagnostic.String()) + ")")
 		return errors.New("host bundle installation failed")
 	}
+	guestLog("native host bundle installation complete")
 	for _, directory := range []string{"/workspace", "/run/nvt-agent", "/var/lib/nvt-agent"} {
 		if err := os.MkdirAll(directory, 0o700); err != nil || os.Chown(directory, 65532, 65532) != nil {
 			return errors.New("native runtime directory setup failed")
@@ -462,6 +568,7 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	identityDaemon.Env = []string{"PATH=/usr/bin:/bin"}
 	identityDaemon.Stdout, identityDaemon.Stderr = io.Discard, io.Discard
 	identityDaemon.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	guestLog("native identity daemon starting")
 	if err := identityDaemon.Start(); err != nil {
 		return errors.New("native identity daemon could not start")
 	}
@@ -483,6 +590,7 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	if data, err := os.ReadFile(filepath.Join(identityRuntimeRoot, guestidentity.ReadinessFileName)); err != nil || !bytes.Equal(data, []byte("ready\n")) {
 		return errors.New("native identity readiness timed out")
 	}
+	guestLog("native identity daemon ready")
 	identityStatePath := filepath.Join(identityStateRoot, guestidentity.StateFileName)
 	identityStateInfo, identityStateErr := os.Lstat(identityStatePath)
 	identityStateStat, identityStateStatOK := identityStateInfoSys(identityStateInfo)
@@ -496,11 +604,42 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	if identityAccessProbe.Run() == nil {
 		return errors.New("agent user can read native identity state")
 	}
+	var egressDaemon, captureDaemon *exec.Cmd
+	var egressDone, captureDone <-chan struct{}
+	if configuration.NativeEgressAttachment != nil {
+		var startErr error
+		guestLog("native egress transport and capture starting")
+		egressDaemon, egressDone, captureDaemon, captureDone, startErr = startNativeEgress(configuration)
+		if startErr != nil {
+			return startErr
+		}
+		defer func() {
+			// Stop routing new ordinary flows before withdrawing the local
+			// capture/transport pair. QEMU's host-owned restrict=on boundary
+			// remains active throughout and prevents a direct fallback.
+			removeNativeEgressRedirect(configuration.NativeEgressAttachment.Redirect.TransparentTCPPort)
+			stopNativeProcess(captureDaemon, captureDone)
+			stopNativeProcess(egressDaemon, egressDone)
+		}()
+	}
 	guestConfig := map[string]any{
 		"version": 1, "python_path": "/usr/bin/python3", "tmux_path": "/usr/bin/tmux", "state_dir": "/var/lib/nvt-agent",
 		"socket_path": "/run/nvt-agent/agentd.sock", "workspace": "/workspace", "session_name": "agent",
 		"session_readiness_path": sessionReadinessPath, "session_startup_grace_seconds": 0,
 		"session_command": []string{"@release/bin/nvt-guest-session-fixture", "--output", "/var/lib/nvt-agent/session-input.log"},
+	}
+	if configuration.NativeEgressAttachment != nil {
+		guestConfig["egress_readiness_socket_path"] = captureReadinessPath
+		if configuration.NativeEgressProbe != nil {
+			guestConfig["session_command"] = []string{
+				"/usr/local/bin/nvt-qemu-agent-fixture",
+				"--host", configuration.NativeEgressProbe.Host,
+				"--port", fmt.Sprintf("%d", configuration.NativeEgressProbe.Port),
+				"--capability", configuration.NativeEgressProbe.Capability,
+				"--explicit-proxy", net.JoinHostPort(configuration.NativeEgressAttachment.Redirect.LoopbackAddress, fmt.Sprintf("%d", configuration.NativeEgressAttachment.Redirect.ExplicitCONNECTPort)),
+				"--output", nativeEgressProofPath,
+			}
+		}
 	}
 	encoded, _ := json.Marshal(guestConfig)
 	if err := atomicWrite("/etc/nvt-agent/guest.json", append(encoded, '\n'), 0o644); err != nil {
@@ -510,6 +649,7 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	supervisor.Env = []string{"PATH=/usr/bin:/bin", "HOME=/var/lib/nvt-agent"}
 	supervisor.Stdout, supervisor.Stderr = io.Discard, io.Discard
 	supervisor.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532}, Setpgid: true}
+	guestLog("native guest supervisor starting")
 	if err := supervisor.Start(); err != nil {
 		return errors.New("native guest supervisor could not start")
 	}
@@ -556,12 +696,14 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	sessionDaemon.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: 0, Gid: 65532}, Setpgid: true,
 	}
+	guestLog("native control session starting")
 	if err := sessionDaemon.Start(); err != nil {
 		return errors.New("native session daemon could not start")
 	}
 	sessionDone := make(chan struct{})
 	go func() { _ = sessionDaemon.Wait(); close(sessionDone) }()
 	defer stopNativeProcess(sessionDaemon, sessionDone)
+	guestLog("native guest readiness pending")
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
@@ -571,6 +713,10 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 			return errors.New("native identity daemon exited")
 		case <-sessionDone:
 			return errors.New("native session daemon exited")
+		case <-egressDone:
+			return errors.New("native egress daemon exited")
+		case <-captureDone:
+			return errors.New("native capture daemon exited")
 		default:
 		}
 		if data, err := os.ReadFile("/var/lib/nvt-agent/guest-ready"); err == nil && bytes.Equal(data, []byte("ready\n")) {
@@ -593,6 +739,16 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 				guest.failed, guest.ready = true, false
 				guest.mu.Unlock()
 				return errors.New("native session daemon exited")
+			case <-egressDone:
+				guest.mu.Lock()
+				guest.failed, guest.ready = true, false
+				guest.mu.Unlock()
+				return errors.New("native egress daemon exited")
+			case <-captureDone:
+				guest.mu.Lock()
+				guest.failed, guest.ready = true, false
+				guest.mu.Unlock()
+				return errors.New("native capture daemon exited")
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -601,12 +757,274 @@ func runNativeGuest(configuration wire.BootConfiguration, guest *guest) error {
 	return errors.New("native guest readiness timed out")
 }
 
+func probeRegistryTLS(repository string, caPEM []byte) error {
+	endpoint, err := url.Parse(repository)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" {
+		return errors.New("endpoint-invalid")
+	}
+	pool := x509.NewCertPool()
+	if len(caPEM) == 0 || !pool.AppendCertsFromPEM(caPEM) {
+		return errors.New("trust-invalid")
+	}
+	port := endpoint.Port()
+	if port == "" {
+		port = "443"
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	connection, err := tls.DialWithDialer(dialer, "tcp", net.JoinHostPort(endpoint.Hostname(), port), &tls.Config{
+		MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: endpoint.Hostname(),
+	})
+	if err != nil {
+		var verificationError *tls.CertificateVerificationError
+		if errors.As(err, &verificationError) {
+			return errors.New("trust-invalid")
+		}
+		return errors.New("connection-unavailable")
+	}
+	return connection.Close()
+}
+
+func hostBundleFailureClass(diagnostic string) string {
+	for _, class := range []string{
+		"invalid bootstrap configuration",
+		"host-bundle acquisition failed",
+		"host-bundle archive platform does not match the selected OCI platform",
+		"host-bundle manifest could not be read after extraction",
+		"host-bundle install directory is unavailable",
+		"host-bundle install directory is unsafe",
+	} {
+		if strings.Contains(diagnostic, class) {
+			return strings.ReplaceAll(class, " ", "-")
+		}
+	}
+	return "installation-error"
+}
+
 func identityStateInfoSys(info os.FileInfo) (*syscall.Stat_t, bool) {
 	if info == nil {
 		return nil, false
 	}
 	value, ok := info.Sys().(*syscall.Stat_t)
 	return value, ok
+}
+
+func configureNativeEgressHosts(configuration wire.BootConfiguration) error {
+	if configuration.NativeEgressAttachment == nil {
+		return nil
+	}
+	aliases, err := wire.NativeEgressHostAliases(*configuration.NativeEgressAttachment)
+	if err != nil {
+		return err
+	}
+	var content strings.Builder
+	content.WriteString("127.0.0.1 localhost\n::1 localhost\n")
+	for _, alias := range aliases {
+		fmt.Fprintf(&content, "%s %s\n", alias.Address, alias.Host)
+	}
+	if configuration.NativeEgressProbe != nil {
+		fmt.Fprintf(&content, "192.0.2.200 %s\n", configuration.NativeEgressProbe.Host)
+	}
+	return atomicWrite("/etc/hosts", []byte(content.String()), 0o644)
+}
+
+func directEgressIsConfined(configuration wire.BootConfiguration) bool {
+	targets := []string{"1.1.1.1:443"}
+	if configuration.NativeEgressProbe != nil {
+		targets = append(targets, net.JoinHostPort(configuration.NativeEgressProbe.Host, fmt.Sprintf("%d", configuration.NativeEgressProbe.Port)))
+	}
+	for _, target := range targets {
+		connection, err := net.DialTimeout("tcp", target, 500*time.Millisecond)
+		if err == nil {
+			_ = connection.Close()
+			return false
+		}
+	}
+	return true
+}
+
+func startNativeEgress(configuration wire.BootConfiguration) (*exec.Cmd, <-chan struct{}, *exec.Cmd, <-chan struct{}, error) {
+	attachment := configuration.NativeEgressAttachment
+	if attachment == nil || attachment.Redirect.LoopbackAddress != "127.0.0.1" {
+		return nil, nil, nil, nil, errors.New("native egress configuration is unavailable")
+	}
+	if err := atomicWrite(egressCAPath, []byte(attachment.Relay.CAPEM), 0o600); err != nil {
+		return nil, nil, nil, nil, errors.New("native egress trust setup failed")
+	}
+	egressConfig := map[string]any{
+		"version": 1, "runtime_directory": egressRuntimeRoot,
+		"identity_socket_path": filepath.Join(identityRuntimeRoot, guestidentity.SessionCredentialSocketName),
+		// Connect through the host-owned guestfwd alias while retaining the
+		// attachment's exact DNS serving identity for TLS verification.
+		"relay_endpoint": fmt.Sprintf("tls://%s:%d", attachment.Relay.ServerName, attachment.Relay.Port),
+		"ca_pem_path":    egressCAPath, "flow_socket_path": egressFlowSocketPath,
+	}
+	encoded, _ := json.Marshal(egressConfig)
+	if err := atomicWrite(egressConfigPath, append(encoded, '\n'), 0o600); err != nil {
+		return nil, nil, nil, nil, errors.New("native egress configuration failed")
+	}
+	egress := exec.Command("/opt/nvt/current/bin/nvt-guest-egressd", "--config", egressConfigPath)
+	egress.Env = []string{"PATH=/usr/bin:/bin"}
+	egress.Stdout, egress.Stderr = io.Discard, io.Discard
+	egress.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := egress.Start(); err != nil {
+		return nil, nil, nil, nil, errors.New("native egress daemon could not start")
+	}
+	egressDone := make(chan struct{})
+	go func() { _ = egress.Wait(); close(egressDone) }()
+	fail := func(message string) (*exec.Cmd, <-chan struct{}, *exec.Cmd, <-chan struct{}, error) {
+		stopNativeProcess(egress, egressDone)
+		return nil, nil, nil, nil, errors.New(message)
+	}
+	if !waitForSocket(egressFlowSocketPath, 0o600, egressDone, 10*time.Second) {
+		return fail("native egress flow socket is unavailable")
+	}
+	captureConfig := map[string]any{
+		"version": 1, "runtime_directory": captureRuntimeRoot,
+		"transparent_listen_address": net.JoinHostPort(attachment.Redirect.LoopbackAddress, fmt.Sprintf("%d", attachment.Redirect.TransparentTCPPort)),
+		"explicit_listen_address":    net.JoinHostPort(attachment.Redirect.LoopbackAddress, fmt.Sprintf("%d", attachment.Redirect.ExplicitCONNECTPort)),
+		"flow_socket_path":           egressFlowSocketPath, "readiness_socket_path": captureReadinessPath,
+	}
+	captureEncoded, _ := json.Marshal(captureConfig)
+	if err := atomicWrite(captureConfigPath, append(captureEncoded, '\n'), 0o600); err != nil {
+		return fail("native capture configuration failed")
+	}
+	capture := exec.Command("/opt/nvt/current/bin/nvt-guest-captured", "--config", captureConfigPath)
+	capture.Env = []string{"PATH=/usr/bin:/bin"}
+	capture.Stdout, capture.Stderr = io.Discard, io.Discard
+	capture.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 0, Gid: 65532}, Setpgid: true}
+	if err := capture.Start(); err != nil {
+		return fail("native capture daemon could not start")
+	}
+	captureDone := make(chan struct{})
+	go func() { _ = capture.Wait(); close(captureDone) }()
+	failBoth := func(message string) (*exec.Cmd, <-chan struct{}, *exec.Cmd, <-chan struct{}, error) {
+		stopNativeProcess(capture, captureDone)
+		stopNativeProcess(egress, egressDone)
+		return nil, nil, nil, nil, errors.New(message)
+	}
+	if !waitForSocket(captureReadinessPath, 0o660, captureDone, 10*time.Second) {
+		return failBoth("native capture readiness socket is unavailable")
+	}
+	if err := installNativeEgressRedirect(attachment.Redirect.TransparentTCPPort); err != nil {
+		removeNativeEgressRedirect(attachment.Redirect.TransparentTCPPort)
+		return failBoth("native egress redirect setup failed")
+	}
+	return egress, egressDone, capture, captureDone, nil
+}
+
+func waitForSocket(path string, mode os.FileMode, done <-chan struct{}, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-done:
+			return false
+		default:
+		}
+		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSocket != 0 && info.Mode().Perm() == mode {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+func installNativeEgressRedirect(port uint16) error {
+	for _, module := range []string{"nf_tables", "nft_chain_nat", "nft_compat", "xt_nat"} {
+		if err := exec.Command("/sbin/modprobe", module).Run(); err != nil {
+			guestLog("native egress redirect module unavailable")
+			return err
+		}
+	}
+	binary := "/usr/sbin/iptables"
+	if _, err := os.Stat(binary); err != nil {
+		guestLog("native egress redirect tool unavailable")
+		return err
+	}
+	// This is guest routing plumbing, never the enforcement assertion. Keep the
+	// QEMU-owned pseudo-network endpoints outside the redirect so the protected
+	// identity/control/relay clients cannot recurse; every other guest TCP flow
+	// enters the credential-less capture process. restrict=on remains the
+	// independently read-back bypass-prevention boundary.
+	rules := [][]string{
+		{"-p", "tcp", "-d", "127.0.0.0/8", "-j", "RETURN"},
+		{"-p", "tcp", "-d", "10.0.2.0/24", "-j", "RETURN"},
+		{"-p", "tcp", "-j", "DNAT", "--to-destination", net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", port))},
+	}
+	for _, rule := range rules {
+		check := append([]string{"-t", "nat", "-C", "OUTPUT"}, rule...)
+		if exec.Command(binary, check...).Run() == nil {
+			continue
+		}
+		add := append([]string{"-t", "nat", "-A", "OUTPUT"}, rule...)
+		if err := exec.Command(binary, add...).Run(); err != nil {
+			guestLog("native egress redirect rule rejected")
+			return err
+		}
+	}
+	return nil
+}
+
+func removeNativeEgressRedirect(port uint16) {
+	binary := "/usr/sbin/iptables"
+	if _, err := os.Stat(binary); err != nil {
+		return
+	}
+	// Delete only the exact rules owned by installNativeEgressRedirect. Work in
+	// reverse order so no new ordinary flow is redirected after the catch-all
+	// rule is removed. Missing rules are already the desired fail-closed state.
+	rules := [][]string{
+		{"-p", "tcp", "-d", "127.0.0.0/8", "-j", "RETURN"},
+		{"-p", "tcp", "-d", "10.0.2.0/24", "-j", "RETURN"},
+		{"-p", "tcp", "-j", "DNAT", "--to-destination", net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", port))},
+	}
+	for index := len(rules) - 1; index >= 0; index-- {
+		for {
+			remove := append([]string{"-t", "nat", "-D", "OUTPUT"}, rules[index]...)
+			if exec.Command(binary, remove...).Run() != nil {
+				break
+			}
+		}
+	}
+}
+
+func guestObservabilityIsClean() bool {
+	for _, root := range []string{"/workspace", "/var/lib/nvt-agent"} {
+		if filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() || !entry.Type().IsRegular() {
+				return err
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil || containsAuthorityMaterial(data) {
+				return errors.New("authority material is visible")
+			}
+			return nil
+		}) != nil {
+			return false
+		}
+	}
+	processes, err := filepath.Glob("/proc/[0-9]*")
+	if err != nil {
+		return false
+	}
+	for _, process := range processes {
+		for _, name := range []string{"cmdline", "environ"} {
+			data, readErr := os.ReadFile(filepath.Join(process, name))
+			if readErr == nil && containsAuthorityMaterial(data) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func containsAuthorityMaterial(data []byte) bool {
+	lower := bytes.ToLower(data)
+	for _, value := range [][]byte{[]byte("nvt_eg1_"), []byte("nvt_ri1_"), []byte("nvt_e1_"), []byte("nvt_egress_broker_token"), []byte("relay-control-canary")} {
+		if bytes.Contains(lower, value) {
+			return true
+		}
+	}
+	return false
 }
 
 func stopNativeProcess(command *exec.Cmd, done <-chan struct{}) {
@@ -638,8 +1056,86 @@ func (guest *guest) serveHealth() {
 		}
 		response.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("/native-egress-proof", func(response http.ResponseWriter, request *http.Request) {
+		guest.mu.Lock()
+		ready, bypassDenied := guest.ready, guest.bypassDenied
+		configured := guest.configuration != nil && guest.configuration.NativeEgressAttachment != nil
+		guest.mu.Unlock()
+		if request.Method != http.MethodGet || !ready || !configured || !bypassDenied {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		data, err := os.ReadFile(nativeEgressProofPath)
+		var proof struct {
+			TransparentCredentialMatch bool   `json:"transparent_credential_match"`
+			ExplicitCredentialMatch    bool   `json:"explicit_credential_match"`
+			AuthorityMaterialAbsent    bool   `json:"authority_material_absent"`
+			Failure                    string `json:"failure,omitempty"`
+		}
+		if err != nil || len(data) > 4096 || executiondriver.DecodeStrictJSON(data, &proof) != nil ||
+			!proof.TransparentCredentialMatch || !proof.ExplicitCredentialMatch || !proof.AuthorityMaterialAbsent || !guestObservabilityIsClean() {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(map[string]bool{
+			"mediated": true, "credential_match": true, "infrastructure_bypass_denied": true, "authority_material_absent": true,
+		})
+	})
+	mux.HandleFunc("/native-egress-diagnostic", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
+		data, err := os.ReadFile(nativeEgressProofPath)
+		var proof struct {
+			TransparentCredentialMatch bool   `json:"transparent_credential_match"`
+			ExplicitCredentialMatch    bool   `json:"explicit_credential_match"`
+			AuthorityMaterialAbsent    bool   `json:"authority_material_absent"`
+			Failure                    string `json:"failure,omitempty"`
+		}
+		if err != nil || len(data) > 4096 || executiondriver.DecodeStrictJSON(data, &proof) != nil || !validProofFailure(proof.Failure) {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(response, proof.Failure+"\n")
+	})
+	mux.HandleFunc("/native-egress-routing-diagnostic", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
+		output, err := exec.Command("/usr/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-v", "-n", "-x").Output()
+		if err != nil || len(output) > 16<<10 {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 || fields[2] != "DNAT" || !strings.Contains(line, "to:127.0.0.1:") {
+				continue
+			}
+			packets, parseErr := strconv.ParseUint(fields[0], 10, 64)
+			if parseErr == nil && packets > 0 {
+				_, _ = io.WriteString(response, "redirect-hit\n")
+				return
+			}
+		}
+		_, _ = io.WriteString(response, "redirect-miss\n")
+	})
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	_ = server.ListenAndServe()
+}
+
+func validProofFailure(value string) bool {
+	for _, phase := range []string{"transparent", "explicit"} {
+		for _, class := range []string{"pending", "resolve-unavailable", "dial-unavailable", "request-unavailable", "connect-unavailable", "tls-unavailable", "response-unavailable", "response-invalid", "unavailable"} {
+			if value == phase+"-"+class {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func atomicWrite(path string, content []byte, mode os.FileMode) error {

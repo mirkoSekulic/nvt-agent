@@ -62,6 +62,35 @@ func TestValidateArtifactAcceptsExplicitHTTPSPort(t *testing.T) {
 	}
 }
 
+func TestNativeEgressProbeIsStrictBoundedAndNonSecret(t *testing.T) {
+	valid := validConfiguration(t)
+	valid.NativeEgressProbe = &NativeEgressProbe{Host: "echo.example", Port: 443, Capability: "github-main"}
+	encoded, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil || decoded.NativeEgressProbe == nil || *decoded.NativeEgressProbe != *valid.NativeEgressProbe {
+		t.Fatalf("valid native egress proof rejected: %#v, %v", decoded.NativeEgressProbe, err)
+	}
+	for name, mutate := range map[string]func(*NativeEgressProbe){
+		"missing host":       func(value *NativeEgressProbe) { value.Host = "" },
+		"noncanonical host":  func(value *NativeEgressProbe) { value.Host = "Echo.example" },
+		"IP fixture host":    func(value *NativeEgressProbe) { value.Host = "8.8.8.8" },
+		"missing port":       func(value *NativeEgressProbe) { value.Port = 0 },
+		"missing capability": func(value *NativeEgressProbe) { value.Capability = "" },
+		"secret-shaped hint": func(value *NativeEgressProbe) { value.Capability = "nvt_eg1_secret" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := *valid.NativeEgressProbe
+			mutate(&copy)
+			if ValidateNativeEgressProbe(copy) == nil {
+				t.Fatal("invalid QEMU proof input was accepted")
+			}
+		})
+	}
+}
+
 func validConfiguration(t *testing.T) Configuration {
 	t.Helper()
 	return Configuration{

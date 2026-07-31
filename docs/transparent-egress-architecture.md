@@ -173,7 +173,8 @@ digest enter the driver desired generation/fingerprint. Relay target
 publication waits for the driver's exact matching `infrastructure` read-back,
 and an attachment or AgentRun generation change first withdraws the old exact
 mapping. This is a lifecycle gate, not a provider implementation: no current
-driver installs the outside-guest redirect or NIC default deny.
+production driver installs the outside-guest redirect or NIC default deny. The
+unpublished QEMU reference does so only for the hermetic provider proof.
 
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
@@ -319,7 +320,9 @@ carry no provider hint, while its explicit CONNECT listener consumes the
 existing per-flow provider selector before forwarding raw bytes. It reuses
 bounded Host/SNI/original-destination inspection and never falls back to direct
 networking, but it is not a root-adversary boundary. Operator target
-publication/readiness and cleanup ordering are now wired; provider-owned
-redirect installation and provider confinement receive a portable desired plan
-but are not implemented by a production provider, so production VM
-mediation remains incomplete.
+publication/readiness and cleanup ordering are now wired. The unpublished QEMU
+reference consumes the portable plan: QEMU `restrict=on` plus exact host-owned
+forward rules are the outside-guest read-back boundary, while the guest TCP
+redirect remains only routing. Its TCG gate proves the complete mediated path.
+No production cloud provider consumes the plan yet, so production VM mediation
+remains incomplete.
