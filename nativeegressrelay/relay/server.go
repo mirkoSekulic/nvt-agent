@@ -290,25 +290,43 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		cancelHandshake()
 		return
 	}
-	releaseTargetAdmission, targetReady := acquireTargetAdmission(admission.target)
-	if !targetReady {
-		cancelHandshake()
-		_ = session.Close()
-		return
-	}
-	targetAdmissionHeld := true
-	defer func() {
-		if targetAdmissionHeld {
-			releaseTargetAdmission()
-		}
-	}()
 	reservation, err := server.registry.Reserve(session)
 	if err != nil {
 		cancelHandshake()
 		_ = session.Close()
 		return
 	}
+	targetAdmission, targetReady := acquireTargetAdmission(admission.target)
+	if !targetReady {
+		cancelHandshake()
+		reservation.Remove()
+		return
+	}
+	targetAdmissionHeld := true
+	defer func() {
+		if targetAdmissionHeld {
+			targetAdmission.Release()
+		}
+	}()
+	stopTargetCancellation := context.AfterFunc(targetAdmission.Context(), func() {
+		// Set the deadline on the underlying transport. A TLS write may hold
+		// internal connection state while the guest is not reading its ACK;
+		// the raw deadline still interrupts that write immediately.
+		_ = raw.SetDeadline(time.Now())
+		_ = session.Close()
+	})
+	defer stopTargetCancellation()
+	if !targetAdmission.Active() {
+		cancelHandshake()
+		reservation.Remove()
+		return
+	}
 	if err := pending.Acknowledge(); err != nil {
+		cancelHandshake()
+		reservation.Remove()
+		return
+	}
+	if !targetAdmission.Active() {
 		cancelHandshake()
 		reservation.Remove()
 		return
@@ -328,7 +346,7 @@ func (server *Server) handleConnection(raw net.Conn, releaseHandshake func()) {
 		return
 	}
 	watchTargetLifecycle(session, admission.target)
-	releaseTargetAdmission()
+	targetAdmission.Release()
 	targetAdmissionHeld = false
 	releaseHandshake()
 	_ = transport.Serve(server.lifetimeContext)

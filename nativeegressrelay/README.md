@@ -32,6 +32,15 @@ topology and requires a fresh complete publication. There is no patch,
 enumeration, fallback, endpoint discovery, persistence, or unauthenticated
 registration API.
 
+Target admission uses a per-target active/draining epoch. The global snapshot
+lock protects only bounded map transitions; it is never retained while a guest
+receives its acknowledgement or while egressd dial/CONNECT I/O runs. A changed
+target first rejects and cancels new admissions, then drains its finite
+admission references. Exact session flow authority is synchronously withdrawn
+before the replacement snapshot becomes visible; that visibility transition
+is the revocation linearization point. Unchanged target epochs remain
+independently usable while another binding drains.
+
 Configuration version 2 makes the separate control listener mandatory and
 removes the version-1 startup `egressd_targets` member. Version 1 is rejected
 rather than silently carrying target authority across a process restart.

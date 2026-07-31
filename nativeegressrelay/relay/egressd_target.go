@@ -39,17 +39,41 @@ type parsedEgressdTargetDescriptor struct {
 type EgressdTargetRegistry struct {
 	mu               sync.RWMutex
 	targets          map[guestenrollment.Binding]*egressdTarget
+	revision         uint64
 	dial             dialContextFunc
 	withdrawSessions func([]guestenrollment.Binding) (<-chan struct{}, error)
 }
+
+type egressdTargetState uint8
+
+const (
+	egressdTargetActive egressdTargetState = iota + 1
+	egressdTargetDraining
+	egressdTargetClosed
+)
 
 type egressdTarget struct {
 	registry   *EgressdTargetRegistry
 	binding    guestenrollment.Binding
 	connectURL string
 	address    string
-	active     bool
-	done       chan struct{}
+
+	lifecycleMu      sync.Mutex
+	state            egressdTargetState
+	epoch            uint64
+	admissions       int
+	drained          chan struct{}
+	drainedClosed    bool
+	admissionContext context.Context
+	cancelAdmission  context.CancelFunc
+	done             chan struct{}
+}
+
+type egressdTargetAdmission struct {
+	target  *egressdTarget
+	epoch   uint64
+	context context.Context
+	once    sync.Once
 }
 
 func NewEgressdTargetRegistry(descriptors []EgressdTargetDescriptor) (*EgressdTargetRegistry, error) {
@@ -71,6 +95,15 @@ func newEgressdTargetRegistry(descriptors []EgressdTargetDescriptor, dial dialCo
 	return registry, nil
 }
 
+func newEgressdTarget(registry *EgressdTargetRegistry, binding guestenrollment.Binding, descriptor parsedEgressdTargetDescriptor) *egressdTarget {
+	admissionContext, cancelAdmission := context.WithCancel(context.Background())
+	return &egressdTarget{
+		registry: registry, binding: binding, connectURL: descriptor.descriptor.ConnectURL, address: descriptor.address,
+		state: egressdTargetActive, epoch: 1, admissionContext: admissionContext, cancelAdmission: cancelAdmission,
+		done: make(chan struct{}),
+	}
+}
+
 // Reconcile atomically replaces the complete bounded target snapshot. An
 // unchanged descriptor retains its target identity and does not churn live
 // sessions. Removed or replaced targets are withdrawn before future opens;
@@ -80,10 +113,12 @@ func (registry *EgressdTargetRegistry) Reconcile(descriptors []EgressdTargetDesc
 	return registry.ReconcileContext(context.Background(), descriptors)
 }
 
-// ReconcileContext validates the complete snapshot before taking the registry
-// lock. Once commit begins, affected exact sessions synchronously lose flow
-// authority and readiness before replacement targets become visible. Teardown
-// completes concurrently under the one existing shutdown budget.
+// ReconcileContext validates the complete snapshot before taking any lock.
+// Changed targets first enter a per-target draining epoch, which rejects and
+// cancels admission without coupling unrelated targets through the global map
+// lock. The commit linearization point is synchronous exact-session authority
+// withdrawal followed by replacement map visibility. A failed pre-commit
+// drain restores the prior complete snapshot.
 func (registry *EgressdTargetRegistry) ReconcileContext(ctx context.Context, descriptors []EgressdTargetDescriptor) error {
 	if registry == nil || registry.dial == nil {
 		return errors.New("native egress target configuration is invalid")
@@ -101,47 +136,80 @@ func (registry *EgressdTargetRegistry) ReconcileContext(ctx context.Context, des
 		return errors.New("native egress target configuration is invalid")
 	}
 	next := make(map[guestenrollment.Binding]*egressdTarget, len(parsed))
+	baseRevision := registry.revision
 	changed := make([]guestenrollment.Binding, 0, len(registry.targets))
+	draining := make([]*egressdTarget, 0, len(registry.targets))
 	for binding, descriptor := range parsed {
 		current := registry.targets[binding]
-		if current != nil && current.active && current.connectURL == descriptor.descriptor.ConnectURL {
+		if current != nil && current.isActive() && current.connectURL == descriptor.descriptor.ConnectURL {
 			next[binding] = current
 			continue
 		}
-		if current != nil && current.active {
+		if current != nil {
+			if _, ok := current.beginDrain(); !ok {
+				rollbackTargetDrains(draining)
+				registry.mu.Unlock()
+				return errors.New("native egress target configuration is invalid")
+			}
+			draining = append(draining, current)
 			changed = append(changed, binding)
 		}
-		next[binding] = &egressdTarget{
-			registry: registry, binding: binding, connectURL: descriptor.descriptor.ConnectURL,
-			address: descriptor.address, active: true, done: make(chan struct{}),
-		}
+		next[binding] = newEgressdTarget(registry, binding, descriptor)
 	}
 	for binding, current := range registry.targets {
-		if next[binding] == current || !current.active {
+		if next[binding] == current {
 			continue
 		}
 		if _, remains := parsed[binding]; !remains {
+			if _, ok := current.beginDrain(); !ok {
+				rollbackTargetDrains(draining)
+				registry.mu.Unlock()
+				return errors.New("native egress target configuration is invalid")
+			}
+			draining = append(draining, current)
 			changed = append(changed, binding)
 		}
+	}
+	registry.mu.Unlock()
+
+	drainDeadline := time.Now().Add(nativeegress.ShutdownTimeout)
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(drainDeadline) {
+		drainDeadline = callerDeadline
+	}
+	if !waitTargetDrains(ctx, draining, drainDeadline) {
+		rollbackTargetDrains(draining)
+		return errors.New("native egress target configuration is invalid")
+	}
+	registry.mu.Lock()
+	if registry.revision != baseRevision {
+		rollbackTargetDrains(draining)
+		registry.mu.Unlock()
+		return errors.New("native egress target configuration is invalid")
 	}
 	withdrawn := closedSignal()
 	if len(changed) != 0 && registry.withdrawSessions != nil {
 		withdrawn, err = registry.withdrawSessions(changed)
 		if err != nil || withdrawn == nil {
+			rollbackTargetDrains(draining)
 			registry.mu.Unlock()
 			return errors.New("native egress target configuration is invalid")
 		}
 	}
-	for binding, current := range registry.targets {
-		if next[binding] == current || !current.active {
-			continue
-		}
-		current.active = false
-		close(current.done)
+	// Exact session flow authority is now synchronously absent. Committing each
+	// drained epoch and publishing the complete replacement map is the
+	// withdrawal linearization point.
+	for _, target := range draining {
+		target.commitDrain()
 	}
 	registry.targets = next
+	registry.revision++
 	registry.mu.Unlock()
-	timer := time.NewTimer(nativeegress.ShutdownTimeout)
+
+	remaining := time.Until(drainDeadline)
+	if remaining <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(remaining)
 	defer timer.Stop()
 	select {
 	case <-withdrawn:
@@ -152,6 +220,35 @@ func (registry *EgressdTargetRegistry) ReconcileContext(ctx context.Context, des
 		// lost HTTP response is recovered through status or idempotent retry.
 	}
 	return nil
+}
+
+func waitTargetDrains(ctx context.Context, targets []*egressdTarget, deadline time.Time) bool {
+	if len(targets) == 0 {
+		return ctx.Err() == nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return false
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	for _, target := range targets {
+		drained := target.drainedSignal()
+		select {
+		case <-drained:
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
+}
+
+func rollbackTargetDrains(targets []*egressdTarget) {
+	for _, target := range targets {
+		target.rollbackDrain()
+	}
 }
 
 func (registry *EgressdTargetRegistry) bindSessionWithdrawal(withdraw func([]guestenrollment.Binding) (<-chan struct{}, error)) error {
@@ -173,11 +270,14 @@ func (registry *EgressdTargetRegistry) ResolveNativeEgressTarget(_ context.Conte
 	}
 	registry.mu.RLock()
 	target := registry.targets[binding]
-	if target == nil || !target.active {
+	if target == nil {
 		registry.mu.RUnlock()
 		return nil, ErrTargetUnavailable
 	}
 	registry.mu.RUnlock()
+	if !target.isActive() {
+		return nil, ErrTargetUnavailable
+	}
 	return target, nil
 }
 
@@ -225,19 +325,31 @@ func (target *egressdTarget) OpenFlow(ctx context.Context, destination nativeegr
 	if target == nil || ctx == nil || nativeegress.ValidateDestination(destination) != nil {
 		return nil, ErrTargetUnavailable
 	}
+	admission, ok := target.acquireAdmission()
+	if !ok {
+		return nil, ErrTargetUnavailable
+	}
+	defer admission.Release()
 	deadline := time.Now().Add(nativeegress.FlowOpenTimeout)
 	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(deadline) {
 		deadline = callerDeadline
 	}
-	operationContext, cancel := context.WithDeadline(ctx, deadline)
+	operationContext, cancel := context.WithDeadline(admission.Context(), deadline)
+	stopCallerCancellation := context.AfterFunc(ctx, cancel)
+	defer stopCallerCancellation()
 	defer cancel()
 
-	target.registry.mu.RLock()
-	defer target.registry.mu.RUnlock()
-	if !target.active || target.registry.targets[target.binding] != target {
+	connection, err := target.connect(operationContext, destination)
+	if err != nil || connection == nil || operationContext.Err() != nil || !admission.Active() {
+		if connection != nil {
+			_ = connection.Close()
+		}
+		if errors.Is(err, nativeegress.ErrDenied) && operationContext.Err() == nil && admission.Active() {
+			return nil, nativeegress.ErrDenied
+		}
 		return nil, ErrTargetUnavailable
 	}
-	return target.connect(operationContext, destination)
+	return connection, nil
 }
 
 func (target *egressdTarget) connect(ctx context.Context, destination nativeegress.Destination) (net.Conn, error) {
@@ -307,16 +419,122 @@ func (target *egressdTarget) connect(ctx context.Context, destination nativeegre
 	return &bufferedEgressdConn{Conn: connection, reader: reader}, nil
 }
 
-func (target *egressdTarget) acquireAdmission() (func(), bool) {
-	if target == nil || target.registry == nil {
+func (target *egressdTarget) acquireAdmission() (targetAdmissionLease, bool) {
+	if target == nil {
 		return nil, false
 	}
-	target.registry.mu.RLock()
-	if !target.active || target.registry.targets[target.binding] != target {
-		target.registry.mu.RUnlock()
+	target.lifecycleMu.Lock()
+	if target.state != egressdTargetActive || target.admissionContext == nil || target.admissionContext.Err() != nil {
+		target.lifecycleMu.Unlock()
 		return nil, false
 	}
-	return target.registry.mu.RUnlock, true
+	target.admissions++
+	admission := &egressdTargetAdmission{target: target, epoch: target.epoch, context: target.admissionContext}
+	target.lifecycleMu.Unlock()
+	return admission, true
+}
+
+func (target *egressdTarget) isActive() bool {
+	if target == nil {
+		return false
+	}
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	return target.state == egressdTargetActive
+}
+
+func (target *egressdTarget) beginDrain() (<-chan struct{}, bool) {
+	if target == nil {
+		return nil, false
+	}
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	if target.state != egressdTargetActive {
+		return nil, false
+	}
+	target.state = egressdTargetDraining
+	target.epoch++
+	target.drained = make(chan struct{})
+	target.drainedClosed = false
+	target.cancelAdmission()
+	if target.admissions == 0 {
+		close(target.drained)
+		target.drainedClosed = true
+	}
+	return target.drained, true
+}
+
+func (target *egressdTarget) drainedSignal() <-chan struct{} {
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	if target.drained == nil {
+		return closedSignal()
+	}
+	return target.drained
+}
+
+func (target *egressdTarget) rollbackDrain() {
+	if target == nil {
+		return
+	}
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	if target.state != egressdTargetDraining {
+		return
+	}
+	target.epoch++
+	target.admissionContext, target.cancelAdmission = context.WithCancel(context.Background())
+	target.state = egressdTargetActive
+	target.drained = nil
+	target.drainedClosed = false
+}
+
+func (target *egressdTarget) commitDrain() {
+	if target == nil {
+		return
+	}
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	if target.state != egressdTargetDraining {
+		return
+	}
+	target.state = egressdTargetClosed
+	close(target.done)
+}
+
+func (admission *egressdTargetAdmission) Context() context.Context {
+	if admission == nil || admission.context == nil {
+		return context.Background()
+	}
+	return admission.context
+}
+
+func (admission *egressdTargetAdmission) Active() bool {
+	if admission == nil || admission.target == nil {
+		return false
+	}
+	target := admission.target
+	target.lifecycleMu.Lock()
+	defer target.lifecycleMu.Unlock()
+	return target.state == egressdTargetActive && target.epoch == admission.epoch && admission.context.Err() == nil
+}
+
+func (admission *egressdTargetAdmission) Release() {
+	if admission == nil || admission.target == nil {
+		return
+	}
+	admission.once.Do(func() {
+		target := admission.target
+		target.lifecycleMu.Lock()
+		if target.admissions > 0 {
+			target.admissions--
+		}
+		if target.state == egressdTargetDraining && target.admissions == 0 && target.drained != nil && !target.drainedClosed {
+			close(target.drained)
+			target.drainedClosed = true
+		}
+		target.lifecycleMu.Unlock()
+	})
 }
 
 func (target *egressdTarget) Done() <-chan struct{} {
