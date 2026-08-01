@@ -180,27 +180,6 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   }
 }
 
-resource osDisk 'Microsoft.Compute/disks@2024-03-02' = {
-  name: diskName
-  location: location
-  tags: tags
-  sku: {
-    name: diskStorageAccountType
-  }
-  properties: {
-    osType: 'Linux'
-    diskSizeGB: diskSizeGiB
-    networkAccessPolicy: 'DenyAll'
-    publicNetworkAccess: 'Disabled'
-    creationData: {
-      createOption: 'FromImage'
-      imageReference: {
-        id: imageVersionResourceId
-      }
-    }
-  }
-}
-
 resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   name: vmName
   location: location
@@ -231,13 +210,17 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
       }
     }
     storageProfile: {
+      imageReference: {
+        id: imageVersionResourceId
+      }
       osDisk: {
-        createOption: 'Attach'
+        name: diskName
+        createOption: 'FromImage'
         deleteOption: 'Detach'
+        diskSizeGB: diskSizeGiB
         managedDisk: {
-          id: osDisk.id
+          storageAccountType: diskStorageAccountType
         }
-        osType: 'Linux'
       }
     }
     networkProfile: {
@@ -257,4 +240,32 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
       }
     }
   }
+}
+
+// A generalized gallery image must be selected by the VM with FromImage while
+// osProfile is present. The VM creates the deterministically named managed OS
+// disk; this dependent resource then applies the owned tags and disables disk
+// export without changing the immutable creation source.
+resource osDisk 'Microsoft.Compute/disks@2024-03-02' = {
+  name: diskName
+  location: location
+  tags: tags
+  sku: {
+    name: diskStorageAccountType
+  }
+  properties: {
+    osType: 'Linux'
+    diskSizeGB: diskSizeGiB
+    networkAccessPolicy: 'DenyAll'
+    publicNetworkAccess: 'Disabled'
+    creationData: {
+      createOption: 'FromImage'
+      imageReference: {
+        id: imageVersionResourceId
+      }
+    }
+  }
+  dependsOn: [
+    vm
+  ]
 }

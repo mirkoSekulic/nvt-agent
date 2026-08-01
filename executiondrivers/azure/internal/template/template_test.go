@@ -17,6 +17,23 @@ func TestCompiledTemplateIsBoundedCredentialFreeGraph(t *testing.T) {
 	if !ok || len(resources) != 4 {
 		t.Fatalf("unexpected Azure graph: %#v", value["resources"])
 	}
+	var vm, disk map[string]any
+	for _, raw := range resources {
+		resource, _ := raw.(map[string]any)
+		switch resource["type"] {
+		case "Microsoft.Compute/virtualMachines":
+			vm = resource
+		case "Microsoft.Compute/disks":
+			disk = resource
+		}
+	}
+	vmJSON, _ := json.Marshal(vm)
+	diskJSON, _ := json.Marshal(disk)
+	if vm == nil || disk == nil || !bytes.Contains(vmJSON, []byte(`"osProfile"`)) ||
+		!bytes.Contains(vmJSON, []byte(`"imageReference"`)) || !bytes.Contains(vmJSON, []byte(`"createOption":"FromImage"`)) ||
+		bytes.Contains(vmJSON, []byte(`"createOption":"Attach"`)) || !bytes.Contains(diskJSON, []byte(`"dependsOn"`)) {
+		t.Fatal("compiled template does not use generalized-image VM provisioning followed by owned disk lockdown")
+	}
 	encoded := strings.ToLower(string(Bytes()))
 	for _, forbidden := range []string{"publicipaddresses", "customdata", "userdata", "clientsecret", "enrollment_token", "private_key"} {
 		if strings.Contains(encoded, forbidden) {

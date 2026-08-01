@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/mirkoSekulic/nvt-agent/executiondrivers/azure/internal/config"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
@@ -30,6 +32,41 @@ type executionLock struct {
 	refs  int
 }
 
+const stateDirectoryName = "azure"
+
+// PrepareStateRoot creates the Azure driver's owned state directory beneath a
+// mounted volume root. Kubernetes may expose the volume root as root-owned and
+// fsGroup-writable, so the non-root driver must never chmod or claim that mount
+// point itself.
+func PrepareStateRoot(volumeRoot string) (string, error) {
+	if volumeRoot == "" || !filepath.IsAbs(volumeRoot) || filepath.Clean(volumeRoot) != volumeRoot {
+		return "", errors.New("Azure driver state volume is invalid")
+	}
+	rootInfo, err := os.Lstat(volumeRoot)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("Azure driver state volume is unavailable")
+	}
+	stateRoot := filepath.Join(volumeRoot, stateDirectoryName)
+	if err := os.Mkdir(stateRoot, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", errors.New("Azure driver state is unavailable")
+	}
+	info, err := os.Lstat(stateRoot)
+	stat, ok := infoSysStat(info)
+	if err != nil || !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || int(stat.Uid) != os.Geteuid() ||
+		os.Chmod(stateRoot, 0o700) != nil {
+		return "", errors.New("Azure driver state is unavailable")
+	}
+	return stateRoot, nil
+}
+
+func infoSysStat(info os.FileInfo) (*syscall.Stat_t, bool) {
+	if info == nil {
+		return nil, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return stat, ok
+}
+
 type Error struct{ Failure executiondriver.Failure }
 
 func (*Error) Error() string { return "Azure execution driver request failed" }
@@ -39,7 +76,10 @@ func New(stateRoot, registration string, cloud Cloud, bootstrap Bootstrapper, re
 		executiondriver.ValidateInitializeParams(executiondriver.InitializeParams{ProtocolVersion: executiondriver.ProtocolVersion, DriverInstanceName: registration}) != nil {
 		return nil, errors.New("Azure driver configuration is invalid")
 	}
-	if err := os.MkdirAll(stateRoot, 0o700); err != nil || os.Chmod(stateRoot, 0o700) != nil {
+	info, err := os.Lstat(stateRoot)
+	stat, owned := infoSysStat(info)
+	if err != nil || !owned || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || int(stat.Uid) != os.Geteuid() ||
+		os.Chmod(stateRoot, 0o700) != nil {
 		return nil, errors.New("Azure driver state is unavailable")
 	}
 	return &Driver{store: Store{Root: stateRoot}, cloud: cloud, bootstrap: bootstrap, resolver: resolver, registration: registration, locks: make(map[string]*executionLock)}, nil
@@ -89,7 +129,7 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 	defer unlock()
 	state, err := driver.store.Load(desired.ExecutionID)
 	if errors.Is(err, os.ErrNotExist) {
-		destinations, resolveErr := resolveAttachment(ctx, driver.resolver, desired.NativeEgressAttachment)
+		destinations, resolveErr := resolveAttachment(ctx, driver.resolver, configuration.Network.DNSServer, desired.NativeEgressAttachment)
 		if resolveErr != nil {
 			return executiondriver.Status{}, retry("network-resolution-pending", "Azure trusted endpoint resolution is unavailable")
 		}
@@ -117,7 +157,7 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 			if driver.cloud.Delete(ctx, state) != nil || driver.store.RemoveKey(state.ExecutionID) != nil || driver.store.Remove(state.ExecutionID) != nil {
 				return deletingStatus(state), retry("replacement-pending", "Azure prior desired state cleanup is pending")
 			}
-			destinations, resolveErr := resolveAttachment(ctx, driver.resolver, desired.NativeEgressAttachment)
+			destinations, resolveErr := resolveAttachment(ctx, driver.resolver, configuration.Network.DNSServer, desired.NativeEgressAttachment)
 			if resolveErr != nil {
 				return executiondriver.Status{}, retry("network-resolution-pending", "Azure trusted endpoint resolution is unavailable")
 			}
@@ -143,6 +183,18 @@ func (driver *Driver) Reconcile(ctx context.Context, desired executiondriver.Des
 	}
 	if !observation.Exact {
 		return statusFor(state, observation), reject("resource-collision", "Azure resource ownership or configuration conflicts")
+	}
+	if !observation.Running {
+		if err := driver.cloud.Start(ctx, state); err != nil {
+			return providerFailureStatus(state, observation, err), nil
+		}
+		observation, err = driver.cloud.Observe(ctx, state)
+		if err != nil {
+			return providerFailureStatus(state, observation, err), nil
+		}
+		if !observation.Exact {
+			return statusFor(state, observation), reject("resource-collision", "Azure resource ownership or configuration conflicts")
+		}
 	}
 	if observation.PrivateIP != state.PrivateIPAddress {
 		state.PrivateIPAddress = observation.PrivateIP

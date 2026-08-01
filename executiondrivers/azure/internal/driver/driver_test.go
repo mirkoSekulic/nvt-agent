@@ -30,6 +30,8 @@ type fakeCloud struct {
 	deployments []bool
 	apply       bool
 	deployError error
+	startError  error
+	starts      int
 	deleteError error
 	deleted     bool
 }
@@ -49,6 +51,18 @@ func (cloud *fakeCloud) Observe(context.Context, State) (CloudObservation, error
 	cloud.mu.Lock()
 	defer cloud.mu.Unlock()
 	return cloud.observation, nil
+}
+func (cloud *fakeCloud) Start(context.Context, State) error {
+	cloud.mu.Lock()
+	defer cloud.mu.Unlock()
+	cloud.starts++
+	if cloud.startError != nil {
+		err := cloud.startError
+		cloud.startError = nil
+		return err
+	}
+	cloud.observation.Running = true
+	return nil
 }
 func (cloud *fakeCloud) Delete(context.Context, State) error {
 	cloud.mu.Lock()
@@ -108,9 +122,13 @@ func (value *fakeBootstrap) Lock(context.Context, State) error {
 	return nil
 }
 
-type fakeResolver struct{ addresses map[string][]netip.Addr }
+type fakeResolver struct {
+	addresses map[string][]netip.Addr
+	servers   []string
+}
 
-func (resolver fakeResolver) LookupNetIP(_ context.Context, _ string, host string) ([]netip.Addr, error) {
+func (resolver *fakeResolver) LookupIPv4(_ context.Context, dnsServer, host string) ([]netip.Addr, error) {
+	resolver.servers = append(resolver.servers, dnsServer)
 	values := resolver.addresses[host]
 	if len(values) == 0 {
 		return nil, errors.New("missing")
@@ -186,6 +204,34 @@ func TestMediatedConfinementCannotDowngradeOrEnrollBeforeReadback(t *testing.T) 
 	}
 	if bootstrap.configured != 0 {
 		t.Fatal("guest mutated before exact confinement")
+	}
+}
+
+func TestReconcileStartsExactOwnedStoppedVMAndRetriesFailure(t *testing.T) {
+	cloud := &fakeCloud{apply: true}
+	driver := newTestDriver(t, t.TempDir(), cloud, &fakeBootstrap{})
+	desired := testDesired(t, true)
+	if status, err := driver.Reconcile(context.Background(), desired); err != nil || !status.Ready {
+		t.Fatalf("initial Azure VM did not become ready: %#v %v", status, err)
+	}
+	cloud.mu.Lock()
+	cloud.apply = false
+	cloud.observation.Running = false
+	cloud.startError = &cloudError{retryable: true}
+	cloud.mu.Unlock()
+	failed, err := driver.Reconcile(context.Background(), desired)
+	if err != nil || failed.Phase != executiondriver.PhaseFailed || failed.Failure == nil || !failed.Failure.Retryable || failed.Ready {
+		t.Fatalf("start failure was not a bounded retryable status: %#v %v", failed, err)
+	}
+	recovered, err := driver.Reconcile(context.Background(), desired)
+	if err != nil || !recovered.Ready || recovered.Phase != executiondriver.PhaseRunning {
+		t.Fatalf("exact stopped VM did not recover through Start: %#v %v", recovered, err)
+	}
+	cloud.mu.Lock()
+	starts := cloud.starts
+	cloud.mu.Unlock()
+	if starts != 2 {
+		t.Fatalf("unexpected Azure Start attempts: %d", starts)
 	}
 }
 
@@ -337,16 +383,26 @@ func TestResolverPreservesDistinctTrustedEndpointsSharingAddressAndPort(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := fakeResolver{addresses: map[string][]netip.Addr{
+	resolver := &fakeResolver{addresses: map[string][]netip.Addr{
 		"relay.example": {netip.MustParseAddr("20.1.1.3")}, "broker.example": {netip.MustParseAddr("20.1.1.4")},
 		"registry.example": {netip.MustParseAddr("20.1.1.9")}, "gateway.example": {netip.MustParseAddr("20.1.1.9")},
 	}}
-	pinned, err := resolveAttachment(context.Background(), resolver, &sealed)
+	pinned, err := resolveAttachment(context.Background(), resolver, "10.50.0.53", &sealed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pinned) != 4 {
 		t.Fatalf("co-located exact endpoints were collapsed: %#v", pinned)
+	}
+	for _, server := range resolver.servers {
+		if server != "10.50.0.53" {
+			t.Fatalf("resolution used a DNS server other than the VM's configured server: %q", server)
+		}
+	}
+
+	resolver.addresses["relay.example"] = []netip.Addr{netip.MustParseAddr("20.1.1.3"), netip.MustParseAddr("169.254.169.254")}
+	if _, err := resolveAttachment(context.Background(), resolver, "10.50.0.53", &sealed); err == nil {
+		t.Fatal("mixed public and metadata answers did not fail closed")
 	}
 }
 
@@ -429,9 +485,28 @@ func TestOperationLocksAreBoundedAndReleased(t *testing.T) {
 	}
 }
 
+func TestPrepareStateRootPreservesVolumeRoot(t *testing.T) {
+	volumeRoot := t.TempDir()
+	if err := os.Chmod(volumeRoot, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	stateRoot, err := PrepareStateRoot(volumeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateRoot != volumeRoot+"/azure" {
+		t.Fatalf("unexpected owned state root %q", stateRoot)
+	}
+	volumeInfo, _ := os.Stat(volumeRoot)
+	stateInfo, _ := os.Stat(stateRoot)
+	if volumeInfo.Mode().Perm() != 0o770 || stateInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("state preparation changed the volume boundary: volume=%o child=%o", volumeInfo.Mode().Perm(), stateInfo.Mode().Perm())
+	}
+}
+
 func newTestDriver(t *testing.T, root string, cloud Cloud, bootstrap Bootstrapper) *Driver {
 	t.Helper()
-	value, err := New(root, "azure-prod", cloud, bootstrap, fakeResolver{addresses: map[string][]netip.Addr{
+	value, err := New(root, "azure-prod", cloud, bootstrap, &fakeResolver{addresses: map[string][]netip.Addr{
 		"registry.example": {netip.MustParseAddr("20.1.1.1")}, "gateway.example": {netip.MustParseAddr("20.1.1.2")},
 		"relay.example": {netip.MustParseAddr("20.1.1.3")}, "broker.example": {netip.MustParseAddr("20.1.1.4")},
 	}})

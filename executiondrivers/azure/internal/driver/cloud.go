@@ -43,6 +43,7 @@ type CloudObservation struct {
 type Cloud interface {
 	Deploy(context.Context, State, bool) error
 	Observe(context.Context, State) (CloudObservation, error)
+	Start(context.Context, State) error
 	Delete(context.Context, State) error
 }
 
@@ -107,12 +108,30 @@ func (cloud *multiplexCloud) Observe(ctx context.Context, state State) (CloudObs
 	}
 	return client.Observe(ctx, state)
 }
+func (cloud *multiplexCloud) Start(ctx context.Context, state State) error {
+	client, err := cloud.client(state.Configuration.SubscriptionID)
+	if err != nil {
+		return err
+	}
+	return client.Start(ctx, state)
+}
 func (cloud *multiplexCloud) Delete(ctx context.Context, state State) error {
 	client, err := cloud.client(state.Configuration.SubscriptionID)
 	if err != nil {
 		return err
 	}
 	return client.Delete(ctx, state)
+}
+
+func (cloud *sdkCloud) Start(ctx context.Context, state State) error {
+	poller, err := cloud.virtualMachines.BeginStart(ctx, state.Configuration.ResourceGroup, resourceName(state.Resources.VM), nil)
+	if err != nil {
+		return sanitizeAzureError(err)
+	}
+	if _, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: time.Second}); err != nil {
+		return sanitizeAzureError(err)
+	}
+	return nil
 }
 
 func NewSDKCloud(subscriptionID string, credential azcore.TokenCredential, options *arm.ClientOptions) (Cloud, error) {
@@ -362,7 +381,7 @@ func ownedDeployment(state State, deployment armresources.DeploymentExtended) bo
 }
 
 func ownedDeploymentIdentity(state State, deployment armresources.DeploymentExtended) bool {
-	if deployment.ID == nil || !strings.EqualFold(*deployment.ID, state.Resources.Deployment) ||
+	if deployment.ID == nil || !sameResourceID(*deployment.ID, state.Resources.Deployment) ||
 		deployment.Properties == nil || deployment.Properties.Mode == nil || *deployment.Properties.Mode != armresources.DeploymentModeIncremental || len(deployment.Tags) < 4 {
 		return false
 	}
@@ -385,7 +404,7 @@ func validateReadback(state State, resources map[string]map[string]any) (CloudOb
 	nsgReference, _ := properties["networkSecurityGroup"].(map[string]any)
 	dnsSettings, _ := properties["dnsSettings"].(map[string]any)
 	dnsServers, _ := dnsSettings["dnsServers"].([]any)
-	if referenceID(nsgReference) != state.Resources.NSG || properties["enableIPForwarding"] != false ||
+	if !sameResourceID(referenceID(nsgReference), state.Resources.NSG) || properties["enableIPForwarding"] != false ||
 		properties["enableAcceleratedNetworking"] != false || len(dnsServers) != 1 || dnsServers[0] != state.Configuration.Network.DNSServer {
 		return CloudObservation{}, errors.New("Azure NIC network boundary drifted")
 	}
@@ -397,13 +416,14 @@ func validateReadback(state State, resources map[string]map[string]any) (CloudOb
 	ipProperties, _ := ipConfig["properties"].(map[string]any)
 	privateIP, _ := ipProperties["privateIPAddress"].(string)
 	subnet, _ := ipProperties["subnet"].(map[string]any)
-	if net.ParseIP(privateIP) == nil || net.ParseIP(privateIP).To4() == nil || ipProperties["publicIPAddress"] != nil || referenceID(subnet) != state.Configuration.SubnetResourceID ||
+	if net.ParseIP(privateIP) == nil || net.ParseIP(privateIP).To4() == nil || ipProperties["publicIPAddress"] != nil || !sameResourceID(referenceID(subnet), state.Configuration.SubnetResourceID) ||
 		ipProperties["privateIPAllocationMethod"] != "Dynamic" || ipProperties["primary"] != true {
 		return CloudObservation{}, errors.New("Azure NIC address configuration drifted")
 	}
 	vmProperties, _ := resources[state.Resources.VM]["properties"].(map[string]any)
 	hardware, _ := vmProperties["hardwareProfile"].(map[string]any)
 	storage, _ := vmProperties["storageProfile"].(map[string]any)
+	vmImageReference, _ := storage["imageReference"].(map[string]any)
 	osDisk, _ := storage["osDisk"].(map[string]any)
 	managedDisk, _ := osDisk["managedDisk"].(map[string]any)
 	networkProfile, _ := vmProperties["networkProfile"].(map[string]any)
@@ -423,9 +443,11 @@ func validateReadback(state State, resources map[string]map[string]any) (CloudOb
 		expectedKeys = 0
 	}
 	if !noVMIdentity(resources[state.Resources.VM]["identity"]) || vmProperties["provisioningState"] != "Succeeded" ||
-		hardware["vmSize"] != state.Configuration.VMSize || referenceID(managedDisk) != state.Resources.OSDisk ||
-		osDisk["createOption"] != "Attach" || osDisk["deleteOption"] != "Detach" || osDisk["osType"] != "Linux" ||
-		len(interfaces) != 1 || referenceID(asMap(interfaces[0])) != state.Resources.NIC ||
+		hardware["vmSize"] != state.Configuration.VMSize || !sameResourceID(referenceID(vmImageReference), state.Configuration.VMImageResourceID) ||
+		!sameResourceID(referenceID(managedDisk), state.Resources.OSDisk) || managedDisk["storageAccountType"] != state.Configuration.OSDisk.StorageAccountType ||
+		osDisk["name"] != resourceName(state.Resources.OSDisk) || osDisk["createOption"] != "FromImage" || osDisk["deleteOption"] != "Detach" ||
+		osDisk["osType"] != "Linux" || numericInt32(osDisk["diskSizeGB"]) != state.Configuration.OSDisk.SizeGiB ||
+		len(interfaces) != 1 || !sameResourceID(referenceID(asMap(interfaces[0])), state.Resources.NIC) ||
 		interfaceProperties["deleteOption"] != "Detach" || interfaceProperties["primary"] != true ||
 		osProfile["adminUsername"] != "nvt-bootstrap" || osProfile["allowExtensionOperations"] != false || osProfile["requireGuestProvisionSignal"] != false ||
 		linuxConfiguration["disablePasswordAuthentication"] != true || linuxConfiguration["provisionVMAgent"] != false ||
@@ -443,7 +465,8 @@ func validateReadback(state State, resources map[string]map[string]any) (CloudOb
 	creation, _ := diskProperties["creationData"].(map[string]any)
 	imageReference, _ := creation["imageReference"].(map[string]any)
 	sku, _ := disk["sku"].(map[string]any)
-	if referenceID(imageReference) != state.Configuration.VMImageResourceID || diskProperties["networkAccessPolicy"] != "DenyAll" ||
+	if !sameResourceID(referenceID(imageReference), state.Configuration.VMImageResourceID) || creation["createOption"] != "FromImage" ||
+		diskProperties["networkAccessPolicy"] != "DenyAll" ||
 		diskProperties["publicNetworkAccess"] != "Disabled" || diskProperties["osType"] != "Linux" ||
 		numericInt32(diskProperties["diskSizeGB"]) != state.Configuration.OSDisk.SizeGiB ||
 		sku["name"] != state.Configuration.OSDisk.StorageAccountType {
@@ -469,7 +492,7 @@ func ownedResource(state State, expectedID string, value map[string]any) bool {
 	id, _ := value["id"].(string)
 	location, _ := value["location"].(string)
 	tagsAny, _ := value["tags"].(map[string]any)
-	if !strings.EqualFold(id, expectedID) || location != state.Configuration.Location || len(tagsAny) < 4 {
+	if !sameResourceID(id, expectedID) || location != state.Configuration.Location || len(tagsAny) < 4 {
 		return false
 	}
 	for key, expected := range ownershipTags(state) {
@@ -557,7 +580,10 @@ func rulePropertiesEqual(actual, expected map[string]any) bool {
 }
 
 func referenceID(value map[string]any) string { id, _ := value["id"].(string); return id }
-func asMap(value any) map[string]any          { result, _ := value.(map[string]any); return result }
+func sameResourceID(left, right string) bool {
+	return left != "" && right != "" && strings.EqualFold(left, right)
+}
+func asMap(value any) map[string]any { result, _ := value.(map[string]any); return result }
 func numericInt(value any) int {
 	if number, ok := value.(float64); ok {
 		return int(number)

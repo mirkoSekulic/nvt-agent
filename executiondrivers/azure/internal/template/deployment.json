@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.45.15.27210",
-      "templateHash": "13184975695321279214"
+      "templateHash": "7067280039778786126"
     }
   },
   "parameters": {
@@ -134,28 +134,6 @@
       ]
     },
     {
-      "type": "Microsoft.Compute/disks",
-      "apiVersion": "2024-03-02",
-      "name": "[parameters('diskName')]",
-      "location": "[parameters('location')]",
-      "tags": "[parameters('tags')]",
-      "sku": {
-        "name": "[parameters('diskStorageAccountType')]"
-      },
-      "properties": {
-        "osType": "Linux",
-        "diskSizeGB": "[parameters('diskSizeGiB')]",
-        "networkAccessPolicy": "DenyAll",
-        "publicNetworkAccess": "Disabled",
-        "creationData": {
-          "createOption": "FromImage",
-          "imageReference": {
-            "id": "[parameters('imageVersionResourceId')]"
-          }
-        }
-      }
-    },
-    {
       "type": "Microsoft.Compute/virtualMachines",
       "apiVersion": "2024-07-01",
       "name": "[parameters('vmName')]",
@@ -182,13 +160,17 @@
           }
         },
         "storageProfile": {
+          "imageReference": {
+            "id": "[parameters('imageVersionResourceId')]"
+          },
           "osDisk": {
-            "createOption": "Attach",
+            "name": "[parameters('diskName')]",
+            "createOption": "FromImage",
             "deleteOption": "Detach",
+            "diskSizeGB": "[parameters('diskSizeGiB')]",
             "managedDisk": {
-              "id": "[resourceId('Microsoft.Compute/disks', parameters('diskName'))]"
-            },
-            "osType": "Linux"
+              "storageAccountType": "[parameters('diskStorageAccountType')]"
+            }
           }
         },
         "networkProfile": {
@@ -209,8 +191,32 @@
         }
       },
       "dependsOn": [
-        "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]",
-        "[resourceId('Microsoft.Compute/disks', parameters('diskName'))]"
+        "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2024-03-02",
+      "name": "[parameters('diskName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "sku": {
+        "name": "[parameters('diskStorageAccountType')]"
+      },
+      "properties": {
+        "osType": "Linux",
+        "diskSizeGB": "[parameters('diskSizeGiB')]",
+        "networkAccessPolicy": "DenyAll",
+        "publicNetworkAccess": "Disabled",
+        "creationData": {
+          "createOption": "FromImage",
+          "imageReference": {
+            "id": "[parameters('imageVersionResourceId')]"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
       ]
     }
   ]

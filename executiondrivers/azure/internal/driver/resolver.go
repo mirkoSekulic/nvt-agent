@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/executiondrivers/azure/internal/config"
 	"github.com/mirkoSekulic/nvt-agent/operator/executiondriver"
@@ -16,18 +17,24 @@ import (
 const maxAddressesPerDestination = 4
 
 type Resolver interface {
-	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
+	LookupIPv4(context.Context, string, string) ([]netip.Addr, error)
 }
 
-type netResolver struct{ value *net.Resolver }
+type netResolver struct{}
 
-func (resolver netResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
-	return resolver.value.LookupNetIP(ctx, network, host)
+func (netResolver) LookupIPv4(ctx context.Context, dnsServer, host string) ([]netip.Addr, error) {
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, net.JoinHostPort(dnsServer, "53"))
+		},
+	}
+	return resolver.LookupNetIP(ctx, "ip4", host)
 }
 
-func DefaultResolver() Resolver { return netResolver{value: net.DefaultResolver} }
+func DefaultResolver() Resolver { return netResolver{} }
 
-func resolveAttachment(ctx context.Context, resolver Resolver, attachment *executiondriver.NativeEgressAttachment) ([]PinnedDestination, error) {
+func resolveAttachment(ctx context.Context, resolver Resolver, dnsServer string, attachment *executiondriver.NativeEgressAttachment) ([]PinnedDestination, error) {
 	if attachment == nil {
 		return nil, nil
 	}
@@ -45,7 +52,7 @@ func resolveAttachment(ctx context.Context, resolver Resolver, attachment *execu
 	result := make([]PinnedDestination, 0, len(endpoints))
 	seen := map[string]struct{}{}
 	for _, value := range endpoints {
-		addresses, err := resolveIPv4(ctx, resolver, value.host)
+		addresses, err := resolveIPv4(ctx, resolver, dnsServer, value.host)
 		if err != nil {
 			return nil, errors.New("Azure native egress destination resolution failed")
 		}
@@ -61,23 +68,24 @@ func resolveAttachment(ctx context.Context, resolver Resolver, attachment *execu
 	return canonicalPinned(result), nil
 }
 
-func resolveIPv4(ctx context.Context, resolver Resolver, host string) ([]netip.Addr, error) {
+func resolveIPv4(ctx context.Context, resolver Resolver, dnsServer, host string) ([]netip.Addr, error) {
 	if address, err := netip.ParseAddr(host); err == nil {
 		if !validFenceAddress(address) {
 			return nil, errors.New("destination address is unsupported")
 		}
 		return []netip.Addr{address}, nil
 	}
-	addresses, err := resolver.LookupNetIP(ctx, "ip4", host)
+	addresses, err := resolver.LookupIPv4(ctx, dnsServer, host)
 	if err != nil {
 		return nil, err
 	}
 	unique := map[netip.Addr]struct{}{}
 	for _, address := range addresses {
 		address = address.Unmap()
-		if validFenceAddress(address) {
-			unique[address] = struct{}{}
+		if !validFenceAddress(address) {
+			return nil, errors.New("destination address set is invalid")
 		}
+		unique[address] = struct{}{}
 	}
 	ordered := make([]netip.Addr, 0, len(unique))
 	for address := range unique {

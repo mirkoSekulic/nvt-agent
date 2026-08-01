@@ -35,6 +35,9 @@ type fakeARM struct {
 	foreignDeploy   bool
 	asyncDeploy     bool
 	polls           int
+	stopped         bool
+	starts          int
+	startPolls      int
 	deploymentState string
 }
 
@@ -135,6 +138,36 @@ func TestSDKCloudRefusesForeignResourceDeletion(t *testing.T) {
 	}
 }
 
+func TestSDKCloudStartsStoppedExactOwnedVMAndPolls(t *testing.T) {
+	desired := testDesired(t, true)
+	state := newState(testConfiguration(t), desired, 1, testPinnedDestinations())
+	_, public, fingerprint, _ := generateBootstrapKey()
+	state.BootstrapPublicKey, state.BootstrapKeyFingerprint = public, fingerprint
+	fixture := &fakeARM{state: state, deployment: true, stopped: true}
+	fixture.resources = fixture.readback(true)
+	server := httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
+	defer server.Close()
+	client, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(server.URL))
+
+	observation, err := client.Observe(context.Background(), state)
+	if err != nil || !observation.Exact || observation.Running {
+		t.Fatalf("stopped exact-owned VM was not observed correctly: %#v %v", observation, err)
+	}
+	if err := client.Start(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	observation, err = client.Observe(context.Background(), state)
+	if err != nil || !observation.Running {
+		t.Fatalf("started VM did not converge to running: %#v %v", observation, err)
+	}
+	fixture.mu.Lock()
+	starts, polls := fixture.starts, fixture.startPolls
+	fixture.mu.Unlock()
+	if starts != 1 || polls == 0 {
+		t.Fatalf("Azure Start LRO was not called and polled: starts=%d polls=%d", starts, polls)
+	}
+}
+
 func TestSDKCloudRefusesOrphanResourceBeforeDeploymentMutation(t *testing.T) {
 	desired := testDesired(t, true)
 	state := newState(testConfiguration(t), desired, 1, testPinnedDestinations())
@@ -204,6 +237,28 @@ func TestSDKCloudPartialCreationAndReadbackDriftFailClosed(t *testing.T) {
 	}
 }
 
+func TestReadbackUsesOneCaseInsensitiveResourceIDComparator(t *testing.T) {
+	state := newState(testConfiguration(t), testDesired(t, true), 1, testPinnedDestinations())
+	_, public, fingerprint, _ := generateBootstrapKey()
+	state.BootstrapPublicKey, state.BootstrapKeyFingerprint = public, fingerprint
+	fixture := &fakeARM{state: state}
+	resources := fixture.readback(true)
+	for _, value := range resources {
+		value["id"] = strings.ToUpper(value["id"].(string))
+	}
+	nicProperties := resources[state.Resources.NIC]["properties"].(map[string]any)
+	nicProperties["networkSecurityGroup"].(map[string]any)["id"] = strings.ToUpper(state.Resources.NSG)
+	nicProperties["ipConfigurations"].([]any)[0].(map[string]any)["properties"].(map[string]any)["subnet"].(map[string]any)["id"] = strings.ToUpper(state.Configuration.SubnetResourceID)
+	vmStorage := resources[state.Resources.VM]["properties"].(map[string]any)["storageProfile"].(map[string]any)
+	vmStorage["imageReference"].(map[string]any)["id"] = strings.ToUpper(state.Configuration.VMImageResourceID)
+	vmStorage["osDisk"].(map[string]any)["managedDisk"].(map[string]any)["id"] = strings.ToUpper(state.Resources.OSDisk)
+	resources[state.Resources.VM]["properties"].(map[string]any)["networkProfile"].(map[string]any)["networkInterfaces"].([]any)[0].(map[string]any)["id"] = strings.ToUpper(state.Resources.NIC)
+	resources[state.Resources.OSDisk]["properties"].(map[string]any)["creationData"].(map[string]any)["imageReference"].(map[string]any)["id"] = strings.ToUpper(state.Configuration.VMImageResourceID)
+	if observation, err := validateReadback(state, resources); err != nil || !observation.Exact {
+		t.Fatalf("case-only Azure resource IDs caused false drift: %#v %v", observation, err)
+	}
+}
+
 func TestSDKCloudCleansPartialResourcesFromFailedOwnedDeployment(t *testing.T) {
 	state := newState(testConfiguration(t), testDesired(t, true), 1, testPinnedDestinations())
 	_, public, fingerprint, _ := generateBootstrapKey()
@@ -269,6 +324,18 @@ func (fixture *fakeARM) serveHTTP(response http.ResponseWriter, request *http.Re
 		writeJSON(response, http.StatusOK, map[string]any{"status": "Succeeded"})
 		return
 	}
+	if request.Method == http.MethodGet && path == "/operations/start" {
+		fixture.startPolls++
+		fixture.stopped = false
+		writeJSON(response, http.StatusOK, map[string]any{"status": "Succeeded"})
+		return
+	}
+	if request.Method == http.MethodPost && strings.HasSuffix(path, "/start") {
+		fixture.starts++
+		response.Header().Set("Azure-AsyncOperation", "https://management.azure.com/operations/start")
+		writeJSON(response, http.StatusAccepted, map[string]any{"status": "InProgress"})
+		return
+	}
 	if request.Method == http.MethodPut && strings.Contains(path, "/providers/Microsoft.Resources/deployments/") {
 		var body map[string]any
 		if json.NewDecoder(request.Body).Decode(&body) != nil {
@@ -297,7 +364,11 @@ func (fixture *fakeARM) serveHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	if request.Method == http.MethodGet && strings.HasSuffix(path, "/instanceView") {
-		writeJSON(response, http.StatusOK, map[string]any{"statuses": []any{map[string]any{"code": "PowerState/running"}}})
+		powerState := "PowerState/running"
+		if fixture.stopped {
+			powerState = "PowerState/deallocated"
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"statuses": []any{map[string]any{"code": powerState}}})
 		return
 	}
 	if request.Method == http.MethodGet && strings.Contains(path, "/providers/Microsoft.Resources/deployments/") {
@@ -343,7 +414,7 @@ func (fixture *fakeARM) readback(bootstrap bool) map[string]map[string]any {
 	}
 	nsg := resource(fixture.state.Resources.NSG, map[string]any{"securityRules": rules})
 	nic := resource(fixture.state.Resources.NIC, map[string]any{"enableAcceleratedNetworking": false, "enableIPForwarding": false, "dnsSettings": map[string]any{"dnsServers": []any{fixture.state.Configuration.Network.DNSServer}}, "networkSecurityGroup": map[string]any{"id": fixture.state.Resources.NSG}, "ipConfigurations": []any{map[string]any{"properties": map[string]any{"privateIPAddress": "10.42.0.7", "privateIPAllocationMethod": "Dynamic", "primary": true, "subnet": map[string]any{"id": fixture.state.Configuration.SubnetResourceID}}}}})
-	disk := resource(fixture.state.Resources.OSDisk, map[string]any{"osType": "Linux", "diskSizeGB": float64(fixture.state.Configuration.OSDisk.SizeGiB), "networkAccessPolicy": "DenyAll", "publicNetworkAccess": "Disabled", "creationData": map[string]any{"imageReference": map[string]any{"id": fixture.state.Configuration.VMImageResourceID}}})
+	disk := resource(fixture.state.Resources.OSDisk, map[string]any{"osType": "Linux", "diskSizeGB": float64(fixture.state.Configuration.OSDisk.SizeGiB), "networkAccessPolicy": "DenyAll", "publicNetworkAccess": "Disabled", "creationData": map[string]any{"createOption": "FromImage", "imageReference": map[string]any{"id": fixture.state.Configuration.VMImageResourceID}}})
 	disk["sku"] = map[string]any{"name": fixture.state.Configuration.OSDisk.StorageAccountType}
 	publicKeys := []any{}
 	if bootstrap {
@@ -358,9 +429,10 @@ func (fixture *fakeARM) readback(bootstrap bool) map[string]map[string]any {
 				"disablePasswordAuthentication": true, "provisionVMAgent": false, "ssh": map[string]any{"publicKeys": publicKeys},
 			},
 		},
-		"storageProfile": map[string]any{"osDisk": map[string]any{
-			"createOption": "Attach", "deleteOption": "Detach", "osType": "Linux",
-			"managedDisk": map[string]any{"id": fixture.state.Resources.OSDisk},
+		"storageProfile": map[string]any{"imageReference": map[string]any{"id": fixture.state.Configuration.VMImageResourceID}, "osDisk": map[string]any{
+			"name": resourceName(fixture.state.Resources.OSDisk), "createOption": "FromImage", "deleteOption": "Detach", "osType": "Linux",
+			"diskSizeGB":  float64(fixture.state.Configuration.OSDisk.SizeGiB),
+			"managedDisk": map[string]any{"id": fixture.state.Resources.OSDisk, "storageAccountType": fixture.state.Configuration.OSDisk.StorageAccountType},
 		}},
 		"networkProfile": map[string]any{"networkInterfaces": []any{map[string]any{
 			"id": fixture.state.Resources.NIC, "properties": map[string]any{"deleteOption": "Detach", "primary": true},

@@ -970,6 +970,8 @@ pod = azure["spec"]["template"]["spec"]
 assert azure["spec"]["strategy"] == {"type": "Recreate"}
 assert pod["serviceAccountName"] == "nvt-execution-driver-azure-production"
 assert pod["automountServiceAccountToken"] is False
+assert pod["securityContext"]["fsGroup"] == 65532
+assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
 template_labels = azure["spec"]["template"]["metadata"]["labels"]
 assert template_labels["azure.workload.identity/use"] == "true"
 annotations = accounts["nvt-execution-driver-azure-production"]["metadata"]["annotations"]
@@ -981,6 +983,8 @@ assert container["command"] == ["/nvt-host/nvt-execution-driver-host"]
 assert "--driver-command=/usr/local/bin/nvt-azure-driver" in container["args"]
 for name in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE", "NVT_EXECUTION_DRIVER_STATE_DIR"):
     assert "--pass-env=" + name in container["args"]
+assert next(item for item in container["env"] if item["name"] == "NVT_EXECUTION_DRIVER_STATE_DIR")["value"] == "/var/lib/nvt-execution-driver"
+assert next(item for item in container["volumeMounts"] if item["name"] == "driver-state")["mountPath"] == "/var/lib/nvt-execution-driver"
 operator = deployments["nvt-operator"]
 operator_text = json.dumps(operator, sort_keys=True)
 for name in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"):

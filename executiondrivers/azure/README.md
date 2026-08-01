@@ -13,7 +13,10 @@ uses only `azidentity.WorkloadIdentityCredential`, requiring exactly
 `AZURE_FEDERATED_TOKEN_FILE`. It deliberately does not use
 `DefaultAzureCredential`, Azure CLI, a client secret, or a guest managed
 identity. The registration PVC holds bounded convergence metadata and the
-temporary bootstrap key; it must use `Recreate` and must not be shared.
+temporary bootstrap key; it must use `Recreate` and must not be shared. The
+configured state path is the volume root. The non-root driver creates and owns
+only its `azure/` child, leaving the root-owned, fsGroup-writable PVC mount
+unchanged.
 
 The strict administrator-owned class configuration is versioned as
 `nvt.azure-driver/v1`:
@@ -52,16 +55,23 @@ only to SSH stdin. It never enters ARM, Bicep, tags, state JSON, command lines,
 environment, or status.
 
 `deployment.bicep` defines one NSG, NIC, managed OS disk, and VM with no public
-IP and no VM identity. CI recompiles it with the pinned Bicep compiler and
+IP and no VM identity. The generalized gallery image is applied through the
+VM's `imageReference`; its named OS disk is created `FromImage`, never attached
+as a specialized disk while an `osProfile` is present. CI recompiles the
+template with the pinned Bicep compiler and
 compares it byte-for-byte with the embedded ARM JSON. Runtime uses the Azure Go
 SDK to submit an incremental resource-group deployment; the image contains no
 Azure CLI, Bicep, Terraform, shell, Git, or package manager. Every owned
 resource and the deployment record are identified and read back by exact ID
-plus the stable execution/generation tags before adoption or deletion.
+plus the stable execution/generation tags before adoption or deletion. Azure
+resource-ID comparisons are uniformly case-insensitive. An exact-owned stopped
+or deallocated VM is recovered through the Azure Start long-running operation
+and authoritative readback rather than deployment replay alone.
 
 For a portable native-egress attachment, the driver resolves its bounded
-relay/bootstrap/control DNS names once per execution and programs their exact
-IPv4 addresses into the per-run NSG. A higher-priority deny-all rule prevents
+relay/bootstrap/control DNS names once per execution through the same explicit
+DNS server configured on the VM NIC, validates every returned address, and
+programs their exact IPv4 addresses into the per-run NSG. A higher-priority deny-all rule prevents
 the Azure default Internet/VNet rules from providing a bypass; explicit
 `AzurePlatformIMDS`, `AzurePlatformLKM`, and `AzurePlatformDNS` deny rules cover
 platform traffic that ordinary NSG rules do not override, while the selected
@@ -108,5 +118,7 @@ executionDrivers:
 
 The later infrastructure installation supplies the resource group/subnet
 fence, immutable image, UAMI/federated identity, custom role, and public relay
-ingress. CI uses fake ARM/LRO servers and does not claim a live Azure proof.
+ingress. CI uses pinned Bicep compilation plus fake ARM/LRO servers. It validates
+the compiled resource graph but does not perform or claim a live Azure template
+deployment proof.
 `real-smoke.sh` is an explicit opt-in lifecycle runner for a prepared cluster.

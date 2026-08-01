@@ -21,22 +21,23 @@ import (
 type process struct {
 	cloud          driver.Cloud
 	bootstrap      driver.Bootstrapper
+	stateRoot      string
 	implementation *driver.Driver
 	initialized    bool
 	stopHandoff    func()
 }
 
 func main() {
-	stateRoot := os.Getenv("NVT_EXECUTION_DRIVER_STATE_DIR")
+	stateRoot, stateErr := driver.PrepareStateRoot(os.Getenv("NVT_EXECUTION_DRIVER_STATE_DIR"))
 	cloud, err := driver.NewWorkloadIdentityCloud()
-	if err != nil || stateRoot == "" {
+	if err != nil || stateErr != nil {
 		fatal("Workload Identity or state is unavailable")
 	}
 	bootstrap, err := driver.NewSSHBootstrapper(stateRoot)
 	if err != nil {
 		fatal("protected bootstrap input is unavailable")
 	}
-	process := &process{cloud: cloud, bootstrap: bootstrap, stopHandoff: func() {}}
+	process := &process{cloud: cloud, bootstrap: bootstrap, stateRoot: stateRoot, stopHandoff: func() {}}
 	defer process.stopHandoff()
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), executiondriver.MaxMessageBytes)
@@ -67,7 +68,7 @@ func (process *process) handle(line []byte) bool {
 			respondError(request.ID, executiondriver.Failure{Reason: "invalid-initialize", Message: "initialize request is invalid", Retryable: false})
 			return false
 		}
-		instance, err := driver.New(os.Getenv("NVT_EXECUTION_DRIVER_STATE_DIR"), params.DriverInstanceName, process.cloud, process.bootstrap, driver.DefaultResolver())
+		instance, err := driver.New(process.stateRoot, params.DriverInstanceName, process.cloud, process.bootstrap, driver.DefaultResolver())
 		if err != nil {
 			respondError(request.ID, executiondriver.Failure{Reason: "driver-unavailable", Message: "Azure driver could not initialize", Retryable: true})
 			return false
