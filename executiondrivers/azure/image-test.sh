@@ -34,8 +34,10 @@ set -e
 # root-owned but is group-writable by the non-root driver. The driver must
 # create and own a private child instead of attempting to chmod the mount root.
 mkdir "${workdir}/state"
-chown 0:65532 "${workdir}/state"
-chmod 0770 "${workdir}/state"
+docker run --rm \
+  -v "${workdir}/state:/var/lib/nvt-execution-driver" \
+  --entrypoint /bin/sh "${INSPECT_IMAGE}" -c \
+  'chown 0:65532 /var/lib/nvt-execution-driver && chmod 0770 /var/lib/nvt-execution-driver'
 printf '%s' 'projected-workload-identity-token' >"${workdir}/token"
 chmod 0644 "${workdir}/token"
 docker run --rm \
