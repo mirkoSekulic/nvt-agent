@@ -25,7 +25,7 @@ published producer chart.
 
 Chart versions are immutable. Pull-request validation requires a SemVer bump
 whenever `charts/nvt` changes and rejects versions already present in GHCR.
-The coordinated release builds or verifies all ten production image tags and
+The coordinated release builds or verifies all eleven production image tags and
 the architecture-aware native host-bundle OCI artifact from the same commit,
 proves that each is anonymously readable, and publishes the chart last.
 Host-bundle verification performs a credential-free digest-pinned linux/amd64

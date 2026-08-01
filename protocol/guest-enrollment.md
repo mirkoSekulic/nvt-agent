@@ -349,6 +349,11 @@ the private handoff, performs the one-time exchange, installs the pinned native
 host bundle, proves agentd/session readiness and restart recovery, and removes
 its resources during cleanup. It is built only for repository conformance and
 is neither published nor supported as a production execution provider.
+The separately packaged Azure driver implements the same protected handoff over
+a fixed host-key-pinned private SSH receiver. It streams the envelope only on
+stdin, persists no envelope, locks the bootstrap account, erases the per-attempt
+private key, and removes the SSH NSG rule before acceptance. Fake ARM/LRO tests
+cover this lifecycle; live Azure remains an opt-in installation proof.
 The broker now authenticates and atomically rotates the runtime identity under
 the separate runtime-identity contract, and the native host bundle contains a
 provider-neutral root-owned daemon that consumes, validates, persists, rotates,

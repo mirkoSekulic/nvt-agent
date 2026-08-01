@@ -1,0 +1,217 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.45.15.27210",
+      "templateHash": "13184975695321279214"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure region selected by the administrator-owned execution class."
+      }
+    },
+    "vmName": {
+      "type": "string"
+    },
+    "nicName": {
+      "type": "string"
+    },
+    "nsgName": {
+      "type": "string"
+    },
+    "diskName": {
+      "type": "string"
+    },
+    "subnetResourceId": {
+      "type": "string"
+    },
+    "imageVersionResourceId": {
+      "type": "string"
+    },
+    "vmSize": {
+      "type": "string"
+    },
+    "diskSizeGiB": {
+      "type": "int"
+    },
+    "diskStorageAccountType": {
+      "type": "string"
+    },
+    "sshPublicKey": {
+      "type": "string"
+    },
+    "bootstrapSSHEnabled": {
+      "type": "bool"
+    },
+    "mediated": {
+      "type": "bool"
+    },
+    "driverSourceCIDR": {
+      "type": "string"
+    },
+    "dnsServer": {
+      "type": "string"
+    },
+    "outboundRules": {
+      "type": "array"
+    },
+    "tags": {
+      "type": "object"
+    },
+    "adminUsername": {
+      "type": "string"
+    }
+  },
+  "variables": {
+    "copy": [
+      {
+        "name": "nvtOutboundRules",
+        "count": "[length(parameters('outboundRules'))]",
+        "input": {
+          "name": "[format('allow-nvt-{0}', copyIndex('nvtOutboundRules'))]",
+          "properties": {
+            "protocol": "Tcp",
+            "sourcePortRange": "*",
+            "destinationPortRange": "[string(parameters('outboundRules')[copyIndex('nvtOutboundRules')].port)]",
+            "sourceAddressPrefix": "*",
+            "destinationAddressPrefix": "[parameters('outboundRules')[copyIndex('nvtOutboundRules')].address]",
+            "access": "Allow",
+            "priority": "[add(200, copyIndex('nvtOutboundRules'))]",
+            "direction": "Outbound"
+          }
+        }
+      }
+    ]
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[parameters('nsgName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "securityRules": "[concat(if(parameters('bootstrapSSHEnabled'), createArray(createObject('name', 'allow-bootstrap-ssh', 'properties', createObject('protocol', 'Tcp', 'sourcePortRange', '*', 'destinationPortRange', '22', 'sourceAddressPrefix', parameters('driverSourceCIDR'), 'destinationAddressPrefix', '*', 'access', 'Allow', 'priority', 100, 'direction', 'Inbound'))), createArray()), createArray(createObject('name', 'deny-all-inbound', 'properties', createObject('protocol', '*', 'sourcePortRange', '*', 'destinationPortRange', '*', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', '*', 'access', 'Deny', 'priority', 4095, 'direction', 'Inbound'))), if(parameters('mediated'), concat(variables('nvtOutboundRules'), createArray(createObject('name', 'allow-dns-tcp', 'properties', createObject('protocol', 'Tcp', 'sourcePortRange', '*', 'destinationPortRange', '53', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', parameters('dnsServer'), 'access', 'Allow', 'priority', 500, 'direction', 'Outbound')), createObject('name', 'allow-dns-udp', 'properties', createObject('protocol', 'Udp', 'sourcePortRange', '*', 'destinationPortRange', '53', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', parameters('dnsServer'), 'access', 'Allow', 'priority', 501, 'direction', 'Outbound')), createObject('name', 'deny-azure-platform-imds', 'properties', createObject('protocol', '*', 'sourcePortRange', '*', 'destinationPortRange', '*', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', 'AzurePlatformIMDS', 'access', 'Deny', 'priority', 600, 'direction', 'Outbound')), createObject('name', 'deny-azure-platform-lkm', 'properties', createObject('protocol', '*', 'sourcePortRange', '*', 'destinationPortRange', '*', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', 'AzurePlatformLKM', 'access', 'Deny', 'priority', 601, 'direction', 'Outbound')), createObject('name', 'deny-azure-platform-dns', 'properties', createObject('protocol', '*', 'sourcePortRange', '*', 'destinationPortRange', '*', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', 'AzurePlatformDNS', 'access', 'Deny', 'priority', 602, 'direction', 'Outbound')), createObject('name', 'deny-all-outbound', 'properties', createObject('protocol', '*', 'sourcePortRange', '*', 'destinationPortRange', '*', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', '*', 'access', 'Deny', 'priority', 4096, 'direction', 'Outbound')))), createArray()))]"
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2024-05-01",
+      "name": "[parameters('nicName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "enableAcceleratedNetworking": false,
+        "enableIPForwarding": false,
+        "dnsSettings": {
+          "dnsServers": [
+            "[parameters('dnsServer')]"
+          ]
+        },
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgName'))]"
+        },
+        "ipConfigurations": [
+          {
+            "name": "primary",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "primary": true,
+              "subnet": {
+                "id": "[parameters('subnetResourceId')]"
+              }
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2024-03-02",
+      "name": "[parameters('diskName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "sku": {
+        "name": "[parameters('diskStorageAccountType')]"
+      },
+      "properties": {
+        "osType": "Linux",
+        "diskSizeGB": "[parameters('diskSizeGiB')]",
+        "networkAccessPolicy": "DenyAll",
+        "publicNetworkAccess": "Disabled",
+        "creationData": {
+          "createOption": "FromImage",
+          "imageReference": {
+            "id": "[parameters('imageVersionResourceId')]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-07-01",
+      "name": "[parameters('vmName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "None"
+      },
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[parameters('vmName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "allowExtensionOperations": false,
+          "requireGuestProvisionSignal": false,
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "provisionVMAgent": false,
+            "ssh": {
+              "publicKeys": "[if(parameters('bootstrapSSHEnabled'), createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))), createArray())]"
+            }
+          }
+        },
+        "storageProfile": {
+          "osDisk": {
+            "createOption": "Attach",
+            "deleteOption": "Detach",
+            "managedDisk": {
+              "id": "[resourceId('Microsoft.Compute/disks', parameters('diskName'))]"
+            },
+            "osType": "Linux"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]",
+              "properties": {
+                "deleteOption": "Detach",
+                "primary": true
+              }
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": false
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]",
+        "[resourceId('Microsoft.Compute/disks', parameters('diskName'))]"
+      ]
+    }
+  ]
+}

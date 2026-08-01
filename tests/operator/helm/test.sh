@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.49" || "${CHART_APP_VERSION}" != "0.8.49" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.49, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.50" || "${CHART_APP_VERSION}" != "0.8.50" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.50, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.49' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.50' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -78,6 +78,7 @@ SOURCE_GLOBAL_TAG_RENDER="${WORKDIR}/source-global-tag.yaml"
 COMPONENT_TAG_RENDER="${WORKDIR}/component-tag.yaml"
 LEGACY_IMAGE_FAILURE="${WORKDIR}/legacy-image-failure.txt"
 EXECUTION_DRIVERS_RENDER="${WORKDIR}/execution-drivers.yaml"
+AZURE_EXECUTION_DRIVER_RENDER="${WORKDIR}/azure-execution-driver.yaml"
 EXECUTION_DRIVER_EXISTING_STORAGE_RENDER="${WORKDIR}/execution-driver-existing-storage.yaml"
 EXECUTION_DRIVER_ENROLLMENT_RENDER="${WORKDIR}/execution-driver-enrollment.yaml"
 EXECUTION_DRIVER_LONG_NAME_RENDER="${WORKDIR}/execution-driver-long-name.yaml"
@@ -103,6 +104,8 @@ if grep -q 'NVT_EXECUTION_DRIVER_STATE_DIR\|name: driver-state\|component: execu
 fi
 helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" > "${EXECUTION_DRIVERS_RENDER}"
+helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/azure-execution-driver-values.yaml" > "${AZURE_EXECUTION_DRIVER_RENDER}"
 helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/execution-drivers-values.yaml" \
   --set-string executionDrivers.registrations[0].storage.size= \
@@ -952,6 +955,36 @@ for name, credential in (("fake-east", "fake-east-cloud"), ("fake-west", "fake-w
 
 assert deployments["nvt-execution-driver-fake-east"]["spec"]["template"]["spec"]["serviceAccountName"] == "nvt-execution-driver-fake-east"
 assert deployments["nvt-execution-driver-fake-west"]["spec"]["template"]["spec"]["serviceAccountName"] == "fake-west-workload-identity"
+PY
+
+python3 - "${AZURE_EXECUTION_DRIVER_RENDER}" <<'PY'
+import json
+import sys
+import yaml
+
+documents = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+deployments = {item["metadata"]["name"]: item for item in documents if item.get("kind") == "Deployment"}
+accounts = {item["metadata"]["name"]: item for item in documents if item.get("kind") == "ServiceAccount"}
+azure = deployments["nvt-execution-driver-azure-production"]
+pod = azure["spec"]["template"]["spec"]
+assert azure["spec"]["strategy"] == {"type": "Recreate"}
+assert pod["serviceAccountName"] == "nvt-execution-driver-azure-production"
+assert pod["automountServiceAccountToken"] is False
+template_labels = azure["spec"]["template"]["metadata"]["labels"]
+assert template_labels["azure.workload.identity/use"] == "true"
+annotations = accounts["nvt-execution-driver-azure-production"]["metadata"]["annotations"]
+assert annotations["azure.workload.identity/client-id"] == "11111111-1111-4111-8111-111111111111"
+assert annotations["azure.workload.identity/tenant-id"] == "22222222-2222-4222-8222-222222222222"
+container = pod["containers"][0]
+assert container["image"].endswith("@sha256:" + "b" * 64)
+assert container["command"] == ["/nvt-host/nvt-execution-driver-host"]
+assert "--driver-command=/usr/local/bin/nvt-azure-driver" in container["args"]
+for name in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE", "NVT_EXECUTION_DRIVER_STATE_DIR"):
+    assert "--pass-env=" + name in container["args"]
+operator = deployments["nvt-operator"]
+operator_text = json.dumps(operator, sort_keys=True)
+for name in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"):
+    assert name not in operator_text
 PY
 
 python3 - "${EXECUTION_DRIVER_EXISTING_STORAGE_RENDER}" <<'PY'

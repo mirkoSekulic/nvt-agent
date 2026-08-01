@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.49`; otherwise the API server may prune the
+of, upgrading to chart `0.8.50`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.49 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.50 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.49 --namespace nvt --create-namespace
+  --version 0.8.50 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -77,7 +77,7 @@ loop-device tools used only when an AgentRun's Docker data root is backed by
 Kata virtiofs; it performs no per-run package installation.
 
 All default repositories are under `ghcr.io/mirkosekulic`. The chart is
-published only after all ten image manifests and the native host-bundle OCI
+published only after all eleven image manifests and the native host-bundle OCI
 artifact exist and can be fetched anonymously with isolated credential-free
 clients. The release reuses an
 existing image tag only when its OCI source, full revision, and version labels
@@ -421,7 +421,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. External drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.49`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.50`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -462,8 +462,8 @@ For mediated external VMs the operator adds this plan only to the exact
 selected driver's desired state and requires its matching infrastructure
 confinement observation before publishing the per-run relay target Ready.
 Direct/non-mediated external runs and Pod/Kata paths omit the member exactly.
-This chart does not add a production provider implementation for redirect
-installation or network confinement.
+This chart does not enable the separately packaged Azure provider or create
+its image, subnet fence, workload identity, role, or relay ingress.
 
 That root init container reads every relay private key and the control bearer,
 so its default multi-architecture BusyBox image is pinned by an exact
@@ -556,6 +556,15 @@ own chart-managed CA; NetworkPolicy admits only the operator Pod. These drivers
 are trusted control-plane extensions, not sandboxes. Infrastructure credentials
 must be scoped to the matching registration. The operator receives only host
 transport CA/token material, never provider credentials.
+
+The coordinated Azure driver is an opt-in example of this boundary. Its
+ServiceAccount carries the installation's Azure Workload Identity annotations,
+its Pod template opts into that webhook, and its only workload-identity
+environment allowlist is `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_FEDERATED_TOKEN_FILE`. See
+[`executiondrivers/azure/README.md`](../../executiondrivers/azure/README.md)
+for the digest-pinned registration. The chart creates no Azure registration by
+default, and provider credentials never enter the operator Pod.
 
 Registrations are an operational lifecycle commitment. Do not remove or rename
 a registration while an AgentRun still references it: deletion keeps the

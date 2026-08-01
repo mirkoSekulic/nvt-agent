@@ -54,8 +54,10 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   provider paths. Opt-in operator deployment, exact publication, readiness,
   and withdraw-before-cleanup ordering exist. The unpublished QEMU reference
   now proves host-owned default deny, fixed guest redirect, and the complete
-  relay-to-egressd path under TCG. No production cloud provider implements the
-  confinement plan yet.
+  relay-to-egressd path under TCG. The separately packaged Azure driver is the
+  first production-shaped consumer of that confinement plan, with fake-ARM
+  conformance and an opt-in live smoke; repository CI does not claim a live
+  Azure infrastructure proof.
 
 ## Operations And Testing
 

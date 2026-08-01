@@ -13,6 +13,7 @@ on:
       - "captured/**"
       - "operator/**"
       - "executiondrivers/qemu/**"
+      - "executiondrivers/azure/**"
       - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
@@ -37,6 +38,7 @@ on:
       - "captured/**"
       - "operator/**"
       - "executiondrivers/qemu/**"
+      - "executiondrivers/azure/**"
       - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
@@ -97,6 +99,10 @@ jobs:
             dockerfile: executiondrivers/qemu/Dockerfile
             image: nvt-qemu-execution-driver:test
             qemuIntegration: true
+          - name: azure-execution-driver
+            dockerfile: executiondrivers/azure/Dockerfile
+            image: nvt-azure-execution-driver:test
+            azureIntegration: true
           - name: gateway
             dockerfile: gateway/Dockerfile
             image: nvt-agent-gateway:test
@@ -140,6 +146,11 @@ jobs:
         env:
           NVT_QEMU_DRIVER_IMAGE: ${{ matrix.image }}
         run: bash executiondrivers/qemu/image-smoke.sh
+      - name: Run Azure execution-driver OCI contract
+        if: matrix.azureIntegration
+        env:
+          NVT_AZURE_DRIVER_IMAGE: ${{ matrix.image }}
+        run: bash executiondrivers/azure/image-test.sh
       - name: Run native-egress relay OCI contract
         if: matrix.nativeEgressRelayIntegration
         env:
