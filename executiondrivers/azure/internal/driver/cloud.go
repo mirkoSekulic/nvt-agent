@@ -51,6 +51,7 @@ type sdkCloud struct {
 	resources       *armresources.Client
 	deployments     *armresources.DeploymentsClient
 	virtualMachines *armcompute.VirtualMachinesClient
+	disks           *armcompute.DisksClient
 }
 
 func NewWorkloadIdentityCloud() (Cloud, error) {
@@ -147,7 +148,11 @@ func NewSDKCloud(subscriptionID string, credential azcore.TokenCredential, optio
 	if err != nil {
 		return nil, errors.New("Azure compute client is unavailable")
 	}
-	return &sdkCloud{resources: resources, deployments: deployments, virtualMachines: virtualMachines}, nil
+	disks, err := armcompute.NewDisksClient(subscriptionID, credential, options)
+	if err != nil {
+		return nil, errors.New("Azure disk client is unavailable")
+	}
+	return &sdkCloud{resources: resources, deployments: deployments, virtualMachines: virtualMachines, disks: disks}, nil
 }
 
 func (cloud *sdkCloud) Deploy(ctx context.Context, state State, bootstrap bool) error {
@@ -170,7 +175,7 @@ func (cloud *sdkCloud) Deploy(ctx context.Context, state State, bootstrap bool) 
 	if _, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: time.Second}); err != nil {
 		return sanitizeAzureError(err)
 	}
-	return nil
+	return cloud.ensureDiskLockdown(ctx, state)
 }
 
 func (cloud *sdkCloud) preflightDeploy(ctx context.Context, state State) error {
@@ -182,27 +187,110 @@ func (cloud *sdkCloud) preflightDeploy(ctx context.Context, state State) error {
 	if deploymentExists && !ownedDeploymentIdentity(state, deployment.DeploymentExtended) {
 		return &cloudError{retryable: false}
 	}
-	resources := []struct{ id, version string }{
+	read := make(map[string]map[string]any, 4)
+	for _, resource := range []struct{ id, version string }{
 		{state.Resources.NSG, "2024-05-01"}, {state.Resources.NIC, "2024-05-01"},
-		{state.Resources.OSDisk, "2024-03-02"}, {state.Resources.VM, "2024-07-01"},
+		{state.Resources.VM, "2024-07-01"}, {state.Resources.OSDisk, "2024-03-02"},
+	} {
+		value, exists, readErr := cloud.readResource(ctx, resource.id, resource.version)
+		if readErr != nil {
+			return readErr
+		}
+		if exists {
+			read[resource.id] = value
+		}
 	}
-	for _, resource := range resources {
-		response, err := cloud.resources.GetByID(ctx, resource.id, resource.version, nil)
-		if isNotFound(err) {
-			continue
+	for _, id := range []string{state.Resources.NSG, state.Resources.NIC, state.Resources.VM} {
+		if value := read[id]; value != nil && (!deploymentExists || !ownedResource(state, id, value)) {
+			return &cloudError{retryable: false}
 		}
-		if err != nil {
-			return sanitizeAzureError(err)
+	}
+	if disk := read[state.Resources.OSDisk]; disk != nil {
+		if !deploymentExists {
+			return &cloudError{retryable: false}
 		}
-		encoded, _ := json.Marshal(response.GenericResource)
-		var value map[string]any
-		// A resource cannot be adopted from tags alone. Existing resources
-		// are accepted only when the exact deployment record is also durable.
-		if !deploymentExists || json.Unmarshal(encoded, &value) != nil || !ownedResource(state, resource.id, value) {
+		if exactDiskLockdown(state, disk) {
+			return nil
+		}
+		// Before the PATCH establishes durable disk ownership, recognize the
+		// deterministic disk only through an exact owned deployment and an
+		// exact owned VM attachment. A matching name or disk tags alone never
+		// authorize adoption.
+		vm := read[state.Resources.VM]
+		if !ownedDeploymentIdentity(state, deployment.DeploymentExtended) ||
+			vm == nil || validateVMReadback(state, vm) != nil || !pendingDiskLockdown(state, disk) {
 			return &cloudError{retryable: false}
 		}
 	}
 	return nil
+}
+
+func (cloud *sdkCloud) readResource(ctx context.Context, id, version string) (map[string]any, bool, error) {
+	response, err := cloud.resources.GetByID(ctx, id, version, nil)
+	if isNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, sanitizeAzureError(err)
+	}
+	encoded, err := json.Marshal(response.GenericResource)
+	if err != nil {
+		return nil, false, errors.New("Azure resource readback is invalid")
+	}
+	var value map[string]any
+	if json.Unmarshal(encoded, &value) != nil {
+		return nil, false, errors.New("Azure resource readback is invalid")
+	}
+	return value, true, nil
+}
+
+func (cloud *sdkCloud) ensureDiskLockdown(ctx context.Context, state State) error {
+	deployment, err := cloud.deployments.Get(ctx, state.Configuration.ResourceGroup, resourceName(state.Resources.Deployment), nil)
+	if err != nil {
+		return sanitizeAzureError(err)
+	}
+	vm, vmExists, err := cloud.readResource(ctx, state.Resources.VM, "2024-07-01")
+	if err != nil {
+		return err
+	}
+	disk, diskExists, err := cloud.readResource(ctx, state.Resources.OSDisk, "2024-03-02")
+	if err != nil {
+		return err
+	}
+	if !ownedDeploymentIdentity(state, deployment.DeploymentExtended) || !vmExists || validateVMReadback(state, vm) != nil || !diskExists {
+		return &cloudError{retryable: false}
+	}
+	if exactDiskLockdown(state, disk) {
+		return nil
+	}
+	if !pendingDiskLockdown(state, disk) {
+		return &cloudError{retryable: false}
+	}
+	denyAll := armcompute.NetworkAccessPolicyDenyAll
+	publicDisabled := armcompute.PublicNetworkAccessDisabled
+	poller, updateErr := cloud.disks.BeginUpdate(ctx, state.Configuration.ResourceGroup, resourceName(state.Resources.OSDisk), armcompute.DiskUpdate{
+		Tags: ownershipTagPointers(state),
+		Properties: &armcompute.DiskUpdateProperties{
+			NetworkAccessPolicy: &denyAll,
+			PublicNetworkAccess: &publicDisabled,
+		},
+	}, nil)
+	if updateErr == nil {
+		_, updateErr = poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: time.Second})
+	}
+	// A committed PATCH whose response was lost is recovered by exact
+	// authoritative readback. Plaintext replay state is unnecessary.
+	locked, exists, readErr := cloud.readResource(ctx, state.Resources.OSDisk, "2024-03-02")
+	if readErr == nil && exists && exactDiskLockdown(state, locked) {
+		return nil
+	}
+	if updateErr != nil {
+		return sanitizeAzureError(updateErr)
+	}
+	if readErr != nil {
+		return readErr
+	}
+	return &cloudError{retryable: false}
 }
 
 func (cloud *sdkCloud) Observe(ctx context.Context, state State) (CloudObservation, error) {
@@ -253,6 +341,16 @@ func (cloud *sdkCloud) Observe(ctx context.Context, state State) (CloudObservati
 }
 
 func (cloud *sdkCloud) Delete(ctx context.Context, state State) error {
+	if disk, exists, err := cloud.readResource(ctx, state.Resources.OSDisk, "2024-03-02"); err != nil {
+		return err
+	} else if exists && !exactDiskLockdown(state, disk) {
+		// Establish durable ownership while the exact deployment and attached
+		// VM still provide recovery authority. Once the VM is removed, an
+		// untagged deterministic disk is deliberately not adoptable.
+		if err := cloud.ensureDiskLockdown(ctx, state); err != nil {
+			return errors.New("Azure cleanup ownership could not be verified")
+		}
+	}
 	resources := []struct{ id, version string }{
 		{state.Resources.VM, "2024-07-01"}, {state.Resources.OSDisk, "2024-03-02"},
 		{state.Resources.NIC, "2024-05-01"}, {state.Resources.NSG, "2024-05-01"},
@@ -395,6 +493,12 @@ func ownedDeploymentIdentity(state State, deployment armresources.DeploymentExte
 
 func validateReadback(state State, resources map[string]map[string]any) (CloudObservation, error) {
 	for id, value := range resources {
+		if id == state.Resources.OSDisk {
+			if !exactDiskLockdown(state, value) {
+				return CloudObservation{}, errors.New("Azure resource ownership or configuration drifted")
+			}
+			continue
+		}
 		if !ownedResource(state, id, value) {
 			return CloudObservation{}, errors.New("Azure resource ownership or configuration drifted")
 		}
@@ -420,7 +524,31 @@ func validateReadback(state State, resources map[string]map[string]any) (CloudOb
 		ipProperties["privateIPAllocationMethod"] != "Dynamic" || ipProperties["primary"] != true {
 		return CloudObservation{}, errors.New("Azure NIC address configuration drifted")
 	}
-	vmProperties, _ := resources[state.Resources.VM]["properties"].(map[string]any)
+	if err := validateVMReadback(state, resources[state.Resources.VM]); err != nil {
+		return CloudObservation{}, err
+	}
+	disk := resources[state.Resources.OSDisk]
+	diskProperties, _ := disk["properties"].(map[string]any)
+	creation, _ := diskProperties["creationData"].(map[string]any)
+	imageReference, _ := creation["imageReference"].(map[string]any)
+	sku, _ := disk["sku"].(map[string]any)
+	if !sameResourceID(referenceID(imageReference), state.Configuration.VMImageResourceID) || creation["createOption"] != "FromImage" ||
+		diskProperties["networkAccessPolicy"] != "DenyAll" ||
+		diskProperties["publicNetworkAccess"] != "Disabled" || diskProperties["osType"] != "Linux" ||
+		numericInt32(diskProperties["diskSizeGB"]) != state.Configuration.OSDisk.SizeGiB ||
+		sku["name"] != state.Configuration.OSDisk.StorageAccountType {
+		return CloudObservation{}, errors.New("Azure OS disk configuration drifted")
+	}
+	steady := nsgMatches(state, resources[state.Resources.NSG], false)
+	bootstrap := nsgMatches(state, resources[state.Resources.NSG], true)
+	return CloudObservation{Exists: true, Exact: true, PrivateIP: privateIP, SteadyFence: steady, BootstrapFence: bootstrap}, nil
+}
+
+func validateVMReadback(state State, vm map[string]any) error {
+	if !ownedResource(state, state.Resources.VM, vm) {
+		return errors.New("Azure VM ownership drifted")
+	}
+	vmProperties, _ := vm["properties"].(map[string]any)
 	hardware, _ := vmProperties["hardwareProfile"].(map[string]any)
 	storage, _ := vmProperties["storageProfile"].(map[string]any)
 	vmImageReference, _ := storage["imageReference"].(map[string]any)
@@ -438,11 +566,7 @@ func validateReadback(state State, resources map[string]map[string]any) (CloudOb
 	publicKeys, _ := sshConfiguration["publicKeys"].([]any)
 	diagnostics, _ := vmProperties["diagnosticsProfile"].(map[string]any)
 	bootDiagnostics, _ := diagnostics["bootDiagnostics"].(map[string]any)
-	expectedKeys := 1
-	if state.BootstrapLocked {
-		expectedKeys = 0
-	}
-	if !noVMIdentity(resources[state.Resources.VM]["identity"]) || vmProperties["provisioningState"] != "Succeeded" ||
+	if !noVMIdentity(vm["identity"]) || vmProperties["provisioningState"] != "Succeeded" ||
 		hardware["vmSize"] != state.Configuration.VMSize || !sameResourceID(referenceID(vmImageReference), state.Configuration.VMImageResourceID) ||
 		!sameResourceID(referenceID(managedDisk), state.Resources.OSDisk) || managedDisk["storageAccountType"] != state.Configuration.OSDisk.StorageAccountType ||
 		osDisk["name"] != resourceName(state.Resources.OSDisk) || osDisk["createOption"] != "FromImage" || osDisk["deleteOption"] != "Detach" ||
@@ -451,30 +575,54 @@ func validateReadback(state State, resources map[string]map[string]any) (CloudOb
 		interfaceProperties["deleteOption"] != "Detach" || interfaceProperties["primary"] != true ||
 		osProfile["adminUsername"] != "nvt-bootstrap" || osProfile["allowExtensionOperations"] != false || osProfile["requireGuestProvisionSignal"] != false ||
 		linuxConfiguration["disablePasswordAuthentication"] != true || linuxConfiguration["provisionVMAgent"] != false ||
-		len(publicKeys) != expectedKeys || bootDiagnostics["enabled"] != false {
-		return CloudObservation{}, errors.New("Azure VM identity or provisioning state drifted")
+		len(publicKeys) != 1 || bootDiagnostics["enabled"] != false {
+		return errors.New("Azure VM identity or provisioning state drifted")
 	}
-	if expectedKeys == 1 {
-		key := asMap(publicKeys[0])
-		if key["path"] != "/home/nvt-bootstrap/.ssh/authorized_keys" || key["keyData"] != state.BootstrapPublicKey {
-			return CloudObservation{}, errors.New("Azure VM bootstrap identity drifted")
+	key := asMap(publicKeys[0])
+	if key["path"] != "/home/nvt-bootstrap/.ssh/authorized_keys" || key["keyData"] != state.BootstrapPublicKey {
+		return errors.New("Azure VM bootstrap identity drifted")
+	}
+	return nil
+}
+
+func exactDiskLockdown(state State, disk map[string]any) bool {
+	return ownedResource(state, state.Resources.OSDisk, disk) && diskConfigurationMatches(state, disk) && diskLockdownMatches(disk)
+}
+
+func pendingDiskLockdown(state State, disk map[string]any) bool {
+	if !diskConfigurationMatches(state, disk) {
+		return false
+	}
+	tags, _ := disk["tags"].(map[string]any)
+	if len(tags) == 0 {
+		return true
+	}
+	// A lost PATCH can leave exact tags visible before the final readback sees
+	// every property. Conflicting or partial tags are never adopted.
+	for key, expected := range ownershipTags(state) {
+		if actual, _ := tags[key].(string); actual != expected {
+			return false
 		}
 	}
-	disk := resources[state.Resources.OSDisk]
+	return len(tags) == len(ownershipTags(state))
+}
+
+func diskConfigurationMatches(state State, disk map[string]any) bool {
+	id, _ := disk["id"].(string)
+	location, _ := disk["location"].(string)
 	diskProperties, _ := disk["properties"].(map[string]any)
 	creation, _ := diskProperties["creationData"].(map[string]any)
 	imageReference, _ := creation["imageReference"].(map[string]any)
 	sku, _ := disk["sku"].(map[string]any)
-	if !sameResourceID(referenceID(imageReference), state.Configuration.VMImageResourceID) || creation["createOption"] != "FromImage" ||
-		diskProperties["networkAccessPolicy"] != "DenyAll" ||
-		diskProperties["publicNetworkAccess"] != "Disabled" || diskProperties["osType"] != "Linux" ||
-		numericInt32(diskProperties["diskSizeGB"]) != state.Configuration.OSDisk.SizeGiB ||
-		sku["name"] != state.Configuration.OSDisk.StorageAccountType {
-		return CloudObservation{}, errors.New("Azure OS disk configuration drifted")
-	}
-	steady := nsgMatches(state, resources[state.Resources.NSG], false)
-	bootstrap := nsgMatches(state, resources[state.Resources.NSG], true)
-	return CloudObservation{Exists: true, Exact: true, PrivateIP: privateIP, SteadyFence: steady, BootstrapFence: bootstrap}, nil
+	return sameResourceID(id, state.Resources.OSDisk) && location == state.Configuration.Location &&
+		sameResourceID(referenceID(imageReference), state.Configuration.VMImageResourceID) && creation["createOption"] == "FromImage" &&
+		diskProperties["osType"] == "Linux" && numericInt32(diskProperties["diskSizeGB"]) == state.Configuration.OSDisk.SizeGiB &&
+		sku["name"] == state.Configuration.OSDisk.StorageAccountType
+}
+
+func diskLockdownMatches(disk map[string]any) bool {
+	properties, _ := disk["properties"].(map[string]any)
+	return properties["networkAccessPolicy"] == "DenyAll" && properties["publicNetworkAccess"] == "Disabled"
 }
 
 func noVMIdentity(value any) bool {

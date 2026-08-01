@@ -14,25 +14,24 @@ func TestCompiledTemplateIsBoundedCredentialFreeGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	resources, ok := value["resources"].([]any)
-	if !ok || len(resources) != 4 {
+	if !ok || len(resources) != 3 {
 		t.Fatalf("unexpected Azure graph: %#v", value["resources"])
 	}
-	var vm, disk map[string]any
+	var vm map[string]any
 	for _, raw := range resources {
 		resource, _ := raw.(map[string]any)
 		switch resource["type"] {
 		case "Microsoft.Compute/virtualMachines":
 			vm = resource
 		case "Microsoft.Compute/disks":
-			disk = resource
+			t.Fatal("managed OS disk must be created only through the VM FromImage model")
 		}
 	}
 	vmJSON, _ := json.Marshal(vm)
-	diskJSON, _ := json.Marshal(disk)
-	if vm == nil || disk == nil || !bytes.Contains(vmJSON, []byte(`"osProfile"`)) ||
+	if vm == nil || !bytes.Contains(vmJSON, []byte(`"osProfile"`)) ||
 		!bytes.Contains(vmJSON, []byte(`"imageReference"`)) || !bytes.Contains(vmJSON, []byte(`"createOption":"FromImage"`)) ||
-		bytes.Contains(vmJSON, []byte(`"createOption":"Attach"`)) || !bytes.Contains(diskJSON, []byte(`"dependsOn"`)) {
-		t.Fatal("compiled template does not use generalized-image VM provisioning followed by owned disk lockdown")
+		bytes.Contains(vmJSON, []byte(`"createOption":"Attach"`)) || bytes.Contains(vmJSON, []byte("bootstrapSSHEnabled")) {
+		t.Fatal("compiled template does not use generalized-image VM provisioning")
 	}
 	encoded := strings.ToLower(string(Bytes()))
 	for _, forbidden := range []string{"publicipaddresses", "customdata", "userdata", "clientsecret", "enrollment_token", "private_key"} {
@@ -48,7 +47,7 @@ func TestCompiledTemplateIsBoundedCredentialFreeGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, err := os.ReadFile("deployment.bicep")
-	if err != nil || !bytes.Contains(source, []byte("deny-all-outbound")) || !bytes.Contains(source, []byte("deny-all-inbound")) || !bytes.Contains(source, []byte("publicNetworkAccess: 'Disabled'")) {
+	if err != nil || !bytes.Contains(source, []byte("deny-all-outbound")) || !bytes.Contains(source, []byte("deny-all-inbound")) || bytes.Contains(source, []byte("Microsoft.Compute/disks")) {
 		t.Fatal("reviewed Bicep source does not contain the required network boundary")
 	}
 }

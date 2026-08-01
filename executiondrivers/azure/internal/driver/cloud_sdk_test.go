@@ -39,6 +39,10 @@ type fakeARM struct {
 	starts          int
 	startPolls      int
 	deploymentState string
+	diskUpdates     int
+	diskPolls       int
+	lostDiskUpdate  bool
+	deploymentsSeen []map[string]any
 }
 
 func TestSDKCloudIncrementalDeployLostResponseReadbackAndExactDelete(t *testing.T) {
@@ -74,6 +78,7 @@ func TestSDKCloudIncrementalDeployLostResponseReadbackAndExactDelete(t *testing.
 	body := fixture.lastDeployment
 	seenAfterDeploy := append([]string(nil), fixture.seen...)
 	polls := fixture.polls
+	diskUpdates, diskPolls := fixture.diskUpdates, fixture.diskPolls
 	fixture.mu.Unlock()
 	putCount := 0
 	for _, request := range seenAfterDeploy {
@@ -86,6 +91,9 @@ func TestSDKCloudIncrementalDeployLostResponseReadbackAndExactDelete(t *testing.
 	}
 	if polls == 0 {
 		t.Fatal("Azure long-running deployment was not polled")
+	}
+	if diskUpdates != 1 || diskPolls == 0 {
+		t.Fatalf("managed disk lockdown was not PATCHed and polled: updates=%d polls=%d", diskUpdates, diskPolls)
 	}
 	properties, _ := body["properties"].(map[string]any)
 	if properties["mode"] != "Incremental" {
@@ -114,6 +122,180 @@ func TestSDKCloudIncrementalDeployLostResponseReadbackAndExactDelete(t *testing.
 			t.Fatalf("resource not deleted: %s (%#v)", expected, deletes)
 		}
 	}
+}
+
+func TestSDKCloudRecoversLostDiskUpdateResponseByExactReadback(t *testing.T) {
+	state := testSDKState(t)
+	fixture := &fakeARM{state: state, lostDiskUpdate: true}
+	server := httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
+	defer server.Close()
+	client, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(server.URL))
+	if err := client.Deploy(context.Background(), state, true); err != nil {
+		t.Fatalf("committed disk update with lost response was not recovered: %v", err)
+	}
+	observation, err := client.Observe(context.Background(), state)
+	if err != nil || !observation.Exact || !observation.BootstrapFence {
+		t.Fatalf("disk lockdown did not converge after lost response: %#v %v", observation, err)
+	}
+	fixture.mu.Lock()
+	updates := fixture.diskUpdates
+	fixture.mu.Unlock()
+	if updates < 1 || updates > 2 {
+		t.Fatalf("unexpected disk update replay count: %d", updates)
+	}
+}
+
+func TestSDKCloudRecoversDiskCreatedBeforeLockdownOnlyThroughExactVM(t *testing.T) {
+	state := testSDKState(t)
+	fixture := &fakeARM{state: state, deployment: true}
+	fixture.resources = fixture.deployedReadback(true)
+	server := httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
+	defer server.Close()
+	client, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(server.URL))
+	if err := client.Deploy(context.Background(), state, true); err != nil {
+		t.Fatalf("restart did not finish disk lockdown: %v", err)
+	}
+	fixture.mu.Lock()
+	updates := fixture.diskUpdates
+	fixture.mu.Unlock()
+	if updates != 1 {
+		t.Fatalf("restart did not perform one disk lockdown update: %d", updates)
+	}
+
+	foreign := &fakeARM{state: state, deployment: true}
+	foreign.resources = foreign.deployedReadback(true)
+	foreign.resources[state.Resources.VM]["tags"].(map[string]any)["nvt-execution-id"] = "another-run"
+	foreignServer := httptest.NewServer(http.HandlerFunc(foreign.serveHTTP))
+	defer foreignServer.Close()
+	foreignClient, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(foreignServer.URL))
+	if err := foreignClient.Deploy(context.Background(), state, true); err == nil {
+		t.Fatal("an unowned VM attachment authorized disk adoption")
+	}
+	foreign.mu.Lock()
+	foreignUpdates := foreign.diskUpdates
+	foreign.mu.Unlock()
+	if foreignUpdates != 0 {
+		t.Fatal("disk mutation occurred before exact VM attachment validation")
+	}
+}
+
+func TestSDKCloudRejectsForeignDeterministicDiskBeforeMutation(t *testing.T) {
+	state := testSDKState(t)
+	fixture := &fakeARM{state: state, deployment: true}
+	fixture.resources = fixture.deployedReadback(true)
+	fixture.resources[state.Resources.OSDisk]["tags"] = map[string]any{"owner": "another-run"}
+	server := httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
+	defer server.Close()
+	client, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(server.URL))
+	if err := client.Deploy(context.Background(), state, true); err == nil {
+		t.Fatal("foreign deterministic disk was adopted")
+	}
+	fixture.mu.Lock()
+	updates := fixture.diskUpdates
+	seen := append([]string(nil), fixture.seen...)
+	fixture.mu.Unlock()
+	if updates != 0 {
+		t.Fatal("foreign disk was patched")
+	}
+	for _, request := range seen {
+		if strings.HasPrefix(request, "PUT ") {
+			t.Fatalf("deployment mutated before foreign disk rejection: %#v", seen)
+		}
+	}
+
+	orphan := &fakeARM{state: state}
+	orphan.resources = map[string]map[string]any{state.Resources.OSDisk: orphan.readback(true)[state.Resources.OSDisk]}
+	orphanServer := httptest.NewServer(http.HandlerFunc(orphan.serveHTTP))
+	defer orphanServer.Close()
+	orphanClient, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(orphanServer.URL))
+	if err := orphanClient.Deploy(context.Background(), state, true); err == nil {
+		t.Fatal("tagged deterministic disk was adopted without the exact deployment")
+	}
+	orphan.mu.Lock()
+	orphanSeen := append([]string(nil), orphan.seen...)
+	orphan.mu.Unlock()
+	for _, request := range orphanSeen {
+		if strings.HasPrefix(request, "PUT ") || strings.HasPrefix(request, "PATCH ") {
+			t.Fatalf("orphan disk caused control-plane mutation: %#v", orphanSeen)
+		}
+	}
+}
+
+func TestSDKCloudLocksPendingExactDiskBeforeCleanup(t *testing.T) {
+	state := testSDKState(t)
+	fixture := &fakeARM{state: state, deployment: true}
+	fixture.resources = fixture.deployedReadback(true)
+	server := httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
+	defer server.Close()
+	client, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(server.URL))
+	if err := client.Delete(context.Background(), state); err != nil {
+		t.Fatalf("crash-window disk could not be safely locked and cleaned: %v", err)
+	}
+	fixture.mu.Lock()
+	updates := fixture.diskUpdates
+	deletes := append([]string(nil), fixture.deletes...)
+	fixture.mu.Unlock()
+	if updates != 1 {
+		t.Fatalf("cleanup did not establish durable disk ownership first: %d", updates)
+	}
+	foundDisk := false
+	for _, id := range deletes {
+		foundDisk = foundDisk || strings.EqualFold(id, state.Resources.OSDisk)
+	}
+	if !foundDisk {
+		t.Fatal("owned locked disk was not deleted")
+	}
+}
+
+func TestSDKCloudKeepsVMSSHModelStableWhileRemovingSteadySSHRule(t *testing.T) {
+	state := testSDKState(t)
+	fixture := &fakeARM{state: state}
+	server := httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
+	defer server.Close()
+	client, _ := NewSDKCloud(state.Configuration.SubscriptionID, testCredential{"authority"}, testARMOptions(server.URL))
+	if err := client.Deploy(context.Background(), state, true); err != nil {
+		t.Fatal(err)
+	}
+	state.BootstrapLocked = true
+	if err := client.Deploy(context.Background(), state, false); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	deployments := append([]map[string]any(nil), fixture.deploymentsSeen...)
+	resources := fixture.resources
+	diskUpdates := fixture.diskUpdates
+	fixture.mu.Unlock()
+	if len(deployments) != 2 {
+		t.Fatalf("unexpected deployment count: %d", len(deployments))
+	}
+	if diskUpdates != 1 {
+		t.Fatalf("steady convergence unnecessarily rewrote the locked disk: %d", diskUpdates)
+	}
+	for index, body := range deployments {
+		properties := asMap(body["properties"])
+		parameters := asMap(properties["parameters"])
+		keyParameter := asMap(parameters["sshPublicKey"])
+		if keyParameter["value"] != state.BootstrapPublicKey {
+			t.Fatalf("deployment %d changed the VM SSH public key", index)
+		}
+	}
+	if nsgMatches(state, resources[state.Resources.NSG], true) || !nsgMatches(state, resources[state.Resources.NSG], false) {
+		t.Fatal("steady deployment retained the inbound SSH rule")
+	}
+	if err := validateVMReadback(state, resources[state.Resources.VM]); err != nil {
+		t.Fatalf("steady finalization changed immutable VM osProfile: %v", err)
+	}
+}
+
+func testSDKState(t *testing.T) State {
+	t.Helper()
+	state := newState(testConfiguration(t), testDesired(t, true), 1, testPinnedDestinations())
+	_, public, fingerprint, err := generateBootstrapKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.BootstrapPublicKey, state.BootstrapKeyFingerprint = public, fingerprint
+	return state
 }
 
 func TestSDKCloudRefusesForeignResourceDeletion(t *testing.T) {
@@ -330,6 +512,11 @@ func (fixture *fakeARM) serveHTTP(response http.ResponseWriter, request *http.Re
 		writeJSON(response, http.StatusOK, map[string]any{"status": "Succeeded"})
 		return
 	}
+	if request.Method == http.MethodGet && path == "/operations/disk" {
+		fixture.diskPolls++
+		writeJSON(response, http.StatusOK, map[string]any{"status": "Succeeded"})
+		return
+	}
 	if request.Method == http.MethodPost && strings.HasSuffix(path, "/start") {
 		fixture.starts++
 		response.Header().Set("Azure-AsyncOperation", "https://management.azure.com/operations/start")
@@ -343,8 +530,14 @@ func (fixture *fakeARM) serveHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 		fixture.lastDeployment = body
+		fixture.deploymentsSeen = append(fixture.deploymentsSeen, body)
 		fixture.deployment = true
-		fixture.resources = fixture.readback(true)
+		bootstrap := deploymentBootstrapEnabled(body)
+		previousDisk := fixture.resources[fixture.state.Resources.OSDisk]
+		fixture.resources = fixture.deployedReadback(bootstrap)
+		if previousDisk != nil && exactDiskLockdown(fixture.state, previousDisk) {
+			fixture.resources[fixture.state.Resources.OSDisk] = previousDisk
+		}
 		if fixture.lostOnce {
 			fixture.lostOnce = false
 			if hijacker, ok := response.(http.Hijacker); ok {
@@ -361,6 +554,37 @@ func (fixture *fakeARM) serveHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 		writeJSON(response, http.StatusOK, fixture.deploymentReadback())
+		return
+	}
+	if request.Method == http.MethodPatch && strings.EqualFold(path, fixture.state.Resources.OSDisk) {
+		var body map[string]any
+		if json.NewDecoder(request.Body).Decode(&body) != nil {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		disk := fixture.resources[fixture.state.Resources.OSDisk]
+		if disk == nil {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fixture.diskUpdates++
+		if tags, ok := body["tags"].(map[string]any); ok {
+			disk["tags"] = cloneAnyMap(tags)
+		}
+		properties, _ := disk["properties"].(map[string]any)
+		updates, _ := body["properties"].(map[string]any)
+		properties["networkAccessPolicy"] = updates["networkAccessPolicy"]
+		properties["publicNetworkAccess"] = updates["publicNetworkAccess"]
+		if fixture.lostDiskUpdate {
+			fixture.lostDiskUpdate = false
+			if hijacker, ok := response.(http.Hijacker); ok {
+				connection, _, _ := hijacker.Hijack()
+				_ = connection.Close()
+				return
+			}
+		}
+		response.Header().Set("Azure-AsyncOperation", "https://management.azure.com/operations/disk")
+		writeJSON(response, http.StatusAccepted, disk)
 		return
 	}
 	if request.Method == http.MethodGet && strings.HasSuffix(path, "/instanceView") {
@@ -416,10 +640,7 @@ func (fixture *fakeARM) readback(bootstrap bool) map[string]map[string]any {
 	nic := resource(fixture.state.Resources.NIC, map[string]any{"enableAcceleratedNetworking": false, "enableIPForwarding": false, "dnsSettings": map[string]any{"dnsServers": []any{fixture.state.Configuration.Network.DNSServer}}, "networkSecurityGroup": map[string]any{"id": fixture.state.Resources.NSG}, "ipConfigurations": []any{map[string]any{"properties": map[string]any{"privateIPAddress": "10.42.0.7", "privateIPAllocationMethod": "Dynamic", "primary": true, "subnet": map[string]any{"id": fixture.state.Configuration.SubnetResourceID}}}}})
 	disk := resource(fixture.state.Resources.OSDisk, map[string]any{"osType": "Linux", "diskSizeGB": float64(fixture.state.Configuration.OSDisk.SizeGiB), "networkAccessPolicy": "DenyAll", "publicNetworkAccess": "Disabled", "creationData": map[string]any{"createOption": "FromImage", "imageReference": map[string]any{"id": fixture.state.Configuration.VMImageResourceID}}})
 	disk["sku"] = map[string]any{"name": fixture.state.Configuration.OSDisk.StorageAccountType}
-	publicKeys := []any{}
-	if bootstrap {
-		publicKeys = append(publicKeys, map[string]any{"path": "/home/nvt-bootstrap/.ssh/authorized_keys", "keyData": fixture.state.BootstrapPublicKey})
-	}
+	publicKeys := []any{map[string]any{"path": "/home/nvt-bootstrap/.ssh/authorized_keys", "keyData": fixture.state.BootstrapPublicKey}}
 	vm := resource(fixture.state.Resources.VM, map[string]any{
 		"provisioningState": "Succeeded",
 		"hardwareProfile":   map[string]any{"vmSize": fixture.state.Configuration.VMSize},
@@ -440,6 +661,24 @@ func (fixture *fakeARM) readback(bootstrap bool) map[string]map[string]any {
 		"diagnosticsProfile": map[string]any{"bootDiagnostics": map[string]any{"enabled": false}},
 	})
 	return map[string]map[string]any{fixture.state.Resources.NSG: nsg, fixture.state.Resources.NIC: nic, fixture.state.Resources.OSDisk: disk, fixture.state.Resources.VM: vm}
+}
+
+func (fixture *fakeARM) deployedReadback(bootstrap bool) map[string]map[string]any {
+	resources := fixture.readback(bootstrap)
+	disk := resources[fixture.state.Resources.OSDisk]
+	disk["tags"] = map[string]any{}
+	properties := disk["properties"].(map[string]any)
+	delete(properties, "networkAccessPolicy")
+	delete(properties, "publicNetworkAccess")
+	return resources
+}
+
+func deploymentBootstrapEnabled(body map[string]any) bool {
+	properties, _ := body["properties"].(map[string]any)
+	parameters, _ := properties["parameters"].(map[string]any)
+	parameter, _ := parameters["bootstrapSSHEnabled"].(map[string]any)
+	value, _ := parameter["value"].(bool)
+	return value
 }
 
 func (fixture *fakeARM) deploymentReadback() map[string]any {

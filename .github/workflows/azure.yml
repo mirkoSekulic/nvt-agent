@@ -23,6 +23,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  provider-boundary-macos:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Verify provider-neutral core boundary with macOS Bash
+        run: /bin/bash executiondrivers/azure/provider-boundary-test.sh
+
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 20

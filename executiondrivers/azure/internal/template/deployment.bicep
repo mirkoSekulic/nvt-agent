@@ -200,12 +200,16 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
         disablePasswordAuthentication: true
         provisionVMAgent: false
         ssh: {
-          publicKeys: bootstrapSSHEnabled ? [
+          // Azure VM SSH model state is creation-time authority. Keep the
+          // original public key stable; steady-state revocation is enforced
+          // by the guest account lock, NSG rule removal, and private-key
+          // destruction in the driver.
+          publicKeys: [
             {
               path: '/home/${adminUsername}/.ssh/authorized_keys'
               keyData: sshPublicKey
             }
-          ] : []
+          ]
         }
       }
     }
@@ -240,32 +244,4 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
       }
     }
   }
-}
-
-// A generalized gallery image must be selected by the VM with FromImage while
-// osProfile is present. The VM creates the deterministically named managed OS
-// disk; this dependent resource then applies the owned tags and disables disk
-// export without changing the immutable creation source.
-resource osDisk 'Microsoft.Compute/disks@2024-03-02' = {
-  name: diskName
-  location: location
-  tags: tags
-  sku: {
-    name: diskStorageAccountType
-  }
-  properties: {
-    osType: 'Linux'
-    diskSizeGB: diskSizeGiB
-    networkAccessPolicy: 'DenyAll'
-    publicNetworkAccess: 'Disabled'
-    creationData: {
-      createOption: 'FromImage'
-      imageReference: {
-        id: imageVersionResourceId
-      }
-    }
-  }
-  dependsOn: [
-    vm
-  ]
 }

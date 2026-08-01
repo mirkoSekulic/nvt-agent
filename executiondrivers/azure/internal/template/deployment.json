@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.45.15.27210",
-      "templateHash": "7067280039778786126"
+      "templateHash": "14499841247766064399"
     }
   },
   "parameters": {
@@ -155,7 +155,12 @@
             "disablePasswordAuthentication": true,
             "provisionVMAgent": false,
             "ssh": {
-              "publicKeys": "[if(parameters('bootstrapSSHEnabled'), createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))), createArray())]"
+              "publicKeys": [
+                {
+                  "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                  "keyData": "[parameters('sshPublicKey')]"
+                }
+              ]
             }
           }
         },
@@ -192,31 +197,6 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
-      ]
-    },
-    {
-      "type": "Microsoft.Compute/disks",
-      "apiVersion": "2024-03-02",
-      "name": "[parameters('diskName')]",
-      "location": "[parameters('location')]",
-      "tags": "[parameters('tags')]",
-      "sku": {
-        "name": "[parameters('diskStorageAccountType')]"
-      },
-      "properties": {
-        "osType": "Linux",
-        "diskSizeGB": "[parameters('diskSizeGiB')]",
-        "networkAccessPolicy": "DenyAll",
-        "publicNetworkAccess": "Disabled",
-        "creationData": {
-          "createOption": "FromImage",
-          "imageReference": {
-            "id": "[parameters('imageVersionResourceId')]"
-          }
-        }
-      },
-      "dependsOn": [
-        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
       ]
     }
   ]

@@ -54,10 +54,17 @@ host bundle by exact OCI digest. The one-time enrollment envelope is written
 only to SSH stdin. It never enters ARM, Bicep, tags, state JSON, command lines,
 environment, or status.
 
-`deployment.bicep` defines one NSG, NIC, managed OS disk, and VM with no public
-IP and no VM identity. The generalized gallery image is applied through the
-VM's `imageReference`; its named OS disk is created `FromImage`, never attached
-as a specialized disk while an `osProfile` is present. CI recompiles the
+`deployment.bicep` defines one NSG, NIC, and VM with no public IP and no VM
+identity. The generalized gallery image is applied through the VM's
+`imageReference`; its deterministically named OS disk is created only by that
+VM with `FromImage`, never redeclared as a specialized disk while an
+`osProfile` is present. After the deployment succeeds, the driver uses the
+managed-disk PATCH API to add exact ownership tags and set
+`networkAccessPolicy=DenyAll` plus `publicNetworkAccess=Disabled`, polls the
+operation, and requires authoritative readback. A crash before that PATCH can
+recover the untagged disk only through the exact succeeded deployment and the
+exact owned VM's deterministic attachment; its name or tags alone are never
+authority. CI recompiles the
 template with the pinned Bicep compiler and
 compares it byte-for-byte with the embedded ARM JSON. Runtime uses the Azure Go
 SDK to submit an incremental resource-group deployment; the image contains no
@@ -78,7 +85,10 @@ platform traffic that ordinary NSG rules do not override, while the selected
 DNS server remains allowed only on TCP/UDP 53. Enrollment is unavailable until
 that infrastructure-owned bootstrap fence is read back.
 After acceptance the driver locks the bootstrap account, removes the SSH and
-one-time registry allowance, erases the private key, and reports the exact
+one-time registry allowance, and erases the private key. The VM model retains
+the original public key because Azure SSH model state is creation-time state;
+the locked account, absent NSG rule, and destroyed private key revoke its
+authority. The driver reports the exact
 current attachment confinement only after steady-fence readback. The configured
 broker remains pinned because runtime/session/egress identity rotation requires
 it. The guest redirect is routing plumbing and is never accepted as the
