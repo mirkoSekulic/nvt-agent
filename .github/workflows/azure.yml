@@ -36,5 +36,7 @@ jobs:
             operator/go.sum
       - name: Vet and race-test Azure driver
         run: cd executiondrivers/azure && go vet ./... && go test -race -count=1 ./...
+      - name: Verify provider-neutral core boundary
+        run: bash executiondrivers/azure/provider-boundary-test.sh
       - name: Verify reviewed Bicep compilation
         run: bash executiondrivers/azure/bicep-check.sh

@@ -13,7 +13,10 @@ requires its exact infrastructure read-back. The separately packaged Azure
 driver is the first production-shaped consumer: it supplies the plan to an
 immutable guest-image receiver, installs a per-run NSG deny boundary, and
 requires exact Azure read-back. Live image/network infrastructure and its
-credentialed proof remain installation-owned gates rather than CI claims.
+credentialed proof remain installation-owned gates rather than CI claims. The
+provider-neutral core chart does not deploy/register Azure, and this phase adds
+no untrusted-producer selection path; a separate provider chart and authorized
+execution-profile integration remain required.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -509,5 +512,6 @@ credentialed live-Azure proof.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
 remain unchanged. A production Azure deployment still requires the separate
 resource group/subnet fence, immutable image, UAMI/federated identity, custom
-role, and relay ingress created by installation infrastructure. The QEMU
+role, relay ingress, provider-owned deployment chart, and server-authorized
+execution-profile selection created by follow-up installation work. The QEMU
 reference remains deliberately unpublished.

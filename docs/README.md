@@ -57,7 +57,9 @@ Files under [`protocol/`](../protocol/) are normative contracts:
   relay-to-egressd path under TCG. The separately packaged Azure driver is the
   first production-shaped consumer of that confinement plan, with fake-ARM
   conformance and an opt-in live smoke; repository CI does not claim a live
-  Azure infrastructure proof.
+  Azure infrastructure proof. The provider-neutral core chart does not deploy
+  or register it, and this phase adds no producer-selectable Azure execution
+  profile; those require a separate Azure chart and admission-policy PR.
 
 ## Operations And Testing
 

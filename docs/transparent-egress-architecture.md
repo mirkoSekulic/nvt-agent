@@ -175,7 +175,10 @@ and an attachment or AgentRun generation change first withdraws the old exact
 mapping. The separately packaged Azure driver consumes this plan and reads back
 an exact per-run NSG boundary; its immutable guest image owns the protected
 receiver that installs capture. Live Azure infrastructure is opt-in and is not
-exercised by repository CI. The unpublished QEMU reference remains the
+exercised by repository CI. The core chart contains no Azure workload or
+values, and no untrusted request can select this driver in this phase. A
+separate Azure deployment chart and producer-authorized execution-profile
+integration remain required. The unpublished QEMU reference remains the
 hermetic provider proof.
 
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This

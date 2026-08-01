@@ -91,34 +91,31 @@ before deletion, and confirms VM, disk, NIC, NSG, and deployment record are all
 absent before removing local state. The driver never deletes the shared
 resource group, subnet, image, workload identity, or other infrastructure.
 
-## Installation registration
+## Deployment and selection boundary
 
-The chart does not enable this driver. A prepared Azure installation can add a
-digest-pinned registration like this:
+This PR publishes the digest-pinned driver image but deliberately adds no Azure
+values, validation, Deployment, ServiceAccount, PVC, or Workload Identity
+branch to the provider-neutral `nvt` chart or operator. A following deployment
+PR must provide a separate `nvt-execution-driver-azure` chart (or Azure-owned
+manifests) for those provider-specific resources. It must also supply the
+resource group/subnet fence, immutable image, UAMI/federated identity, custom
+role, and public relay ingress. The core chart must remain unaware of those
+details.
 
-```yaml
-executionDrivers:
-  registrations:
-    - name: azure-production
-      image: ghcr.io/example/nvt-azure-execution-driver@sha256:<64-lowercase-hex>
-      command: [/usr/local/bin/nvt-azure-driver]
-      storage: {size: 20Gi}
-      serviceAccount:
-        create: true
-        annotations:
-          azure.workload.identity/client-id: <UAMI client ID>
-          azure.workload.identity/tenant-id: <tenant ID>
-        podLabels:
-          azure.workload.identity/use: "true"
-      passEnv:
-        - AZURE_CLIENT_ID
-        - AZURE_TENANT_ID
-        - AZURE_FEDERATED_TOKEN_FILE
-```
+Registration alone must not make Azure producer-selectable. The required
+admission follow-up separates administrator-owned execution-profile selection
+from workflow and authentication profiles. A request may then carry only a
+bounded execution-profile name; server-side producer policy resolves an
+allowlisted choice or fixed default to a provider-neutral `driverRef` and its
+trusted class configuration. Subscription/resource-group IDs, VM sizes,
+images, driver endpoints, and opaque Azure parameters remain impossible in
+producer input. Policy may, for example, fix `github-comments` to `kata-pod`
+and `vm-workstations` to `azure-standard` while authorizing only explicit
+alternatives. Omitted selection continues to mean the built-in Kubernetes
+Pod/Kata path. Until that reviewed integration lands, this PR adds no path by
+which an untrusted producer request can select Azure.
 
-The later infrastructure installation supplies the resource group/subnet
-fence, immutable image, UAMI/federated identity, custom role, and public relay
-ingress. CI uses pinned Bicep compilation plus fake ARM/LRO servers. It validates
-the compiled resource graph but does not perform or claim a live Azure template
-deployment proof.
-`real-smoke.sh` is an explicit opt-in lifecycle runner for a prepared cluster.
+CI uses pinned Bicep compilation plus fake ARM/LRO servers. It validates the
+compiled resource graph but does not perform or claim a live Azure template
+deployment proof. `real-smoke.sh` is an explicit opt-in driver lifecycle runner
+for a prepared installation; it is not generic chart wiring.
