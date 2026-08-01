@@ -14,7 +14,17 @@ fi
 # the shared workspace so this exercises the actual ownership and modes.
 workdir="$(mktemp -d "${PWD}/.azure-image-test.XXXXXX")"
 container="$(docker create "${IMAGE}")"
-trap 'docker rm -f "${container}" >/dev/null 2>&1 || true; rm -rf "${workdir}"' EXIT
+cleanup() {
+  docker rm -f "${container}" >/dev/null 2>&1 || true
+  if [[ -d "${workdir}/state" ]]; then
+    docker run --rm \
+      -v "${workdir}/state:/var/lib/nvt-execution-driver" \
+      --entrypoint /bin/sh "${INSPECT_IMAGE}" -c \
+      "chown -R $(id -u):$(id -g) /var/lib/nvt-execution-driver" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${workdir}"
+}
+trap cleanup EXIT
 docker cp "${container}:/opt/nvt-azure/nvt-host-bootstrap" "${workdir}/nvt-host-bootstrap"
 [[ -s "${workdir}/nvt-host-bootstrap" && -x "${workdir}/nvt-host-bootstrap" ]]
 for forbidden in /bin/sh /bin/bash /usr/bin/az /usr/local/bin/bicep /usr/bin/terraform /usr/bin/git; do
