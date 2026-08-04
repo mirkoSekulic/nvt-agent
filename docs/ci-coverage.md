@@ -211,6 +211,19 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
   hermetic reference-provider proof, not a production gateway or mediated-VM
   networking claim.
 
+### Azure execution driver
+
+- `executiondrivers/azure/internal/config`, `internal/template`, and
+  `internal/driver` -> strict class configuration, pinned Bicep/ARM identity,
+  fake ARM/LRO convergence, lost-response recovery, protected handoff,
+  confinement read-back, collision, restart, and exact deletion tests under
+  `-race`.
+- `executiondrivers/azure/image-test.sh` -> `images.yml / build
+  (azure-execution-driver)`; it verifies the coordinated non-root image has the
+  driver and repository-owned bootstrap input but no shell, Azure CLI, Bicep,
+  Terraform, Git, or build tool. Live Azure is intentionally opt-in and absent
+  from CI.
+
 ### kind workflow case files
 
 `kind.yml` uses a PR tier for the three fast/representative cases and a full

@@ -9,8 +9,14 @@ credential-less capture process from the credential-bearing tunnel process;
 captured guest TCP opens only authenticated native-egress flows. Opt-in
 operator deployment, exact target publication, readiness, and cleanup ordering
 exist. The operator now emits the provider-neutral desired attachment and
-requires its exact infrastructure read-back. No production provider installs
-the redirect or enforces the outside-guest network boundary yet.
+requires its exact infrastructure read-back. The separately packaged Azure
+driver is the first production-shaped consumer: it supplies the plan to an
+immutable guest-image receiver, installs a per-run NSG deny boundary, and
+requires exact Azure read-back. Live image/network infrastructure and its
+credentialed proof remain installation-owned gates rather than CI claims. The
+provider-neutral core chart does not deploy/register Azure, and this phase adds
+no untrusted-producer selection path; a separate provider chart and authorized
+execution-profile integration remain required.
 
 This contract freezes the boundary needed to carry an independently managed
 VM's outbound TCP flows into that exact AgentRun's trusted cluster egress path.
@@ -490,16 +496,22 @@ complete snapshot after either process restarts, gates `NativeEgressReady` on
 the acknowledged exact mapping and the current attachment/confinement
 observation, and withdraws it before authority or driver cleanup. The optional
 desired plan now tells a provider what it must attach without vendor fields.
-The unpublished QEMU reference driver now consumes that plan and provides the
-final hermetic provider proof: `restrict=on` is enforced by QEMU outside the
+The unpublished QEMU reference driver consumes that plan and provides the
+hermetic provider proof: `restrict=on` is enforced by QEMU outside the
 guest, exact host-owned forward rules admit only the relay/bootstrap/control
 destinations, and live process-argument read-back gates enrollment. Its guest
 redirect is explicitly non-authoritative. The TCG lifecycle reaches the
 hermetic upstream only through capture, the authenticated relay, and the exact
-per-run egressd; it also proves revocation, restart, and cleanup. Azure, AWS,
-other production providers, and production public relay ingress remain future
-gates.
+per-run egressd; it also proves revocation, restart, and cleanup. The
+separately packaged Azure driver is the first production-shaped provider
+implementation: it uses Workload Identity, an embedded reviewed ARM template,
+protected SSH bootstrap, and exact Azure NSG/resource readback. Its fake-ARM
+conformance is automated, while live Azure infrastructure and public relay
+ingress remain explicit installation gates; repository CI does not claim a
+credentialed live-Azure proof.
 Existing Pod/Kata/Compose egress and native control/workspace/browser routing
-remain unchanged. Production VM mediated egress still requires a separately
-reviewed production provider implementation and its infrastructure enforcement
-proof; the QEMU reference is deliberately not such a provider.
+remain unchanged. A production Azure deployment still requires the separate
+resource group/subnet fence, immutable image, UAMI/federated identity, custom
+role, relay ingress, provider-owned deployment chart, and server-authorized
+execution-profile selection created by follow-up installation work. The QEMU
+reference remains deliberately unpublished.

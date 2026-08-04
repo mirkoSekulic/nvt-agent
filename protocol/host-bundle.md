@@ -238,8 +238,9 @@ relay target and exact desired attachment observation. The attachment gives a
 provider the public relay trust, fixed capture ports, and bounded bootstrap
 destinations needed to resolve these files; it never carries a credential.
 Provider confinement and installed guest capture readiness remain
-provider-owned prerequisites, and no production provider consumes the plan in
-this phase.
+provider-owned prerequisites. The separately packaged Azure driver consumes
+the plan through its immutable-image protected receiver and exact Azure NSG
+read-back; the chart does not enable that provider or create its infrastructure.
 
 The bundled `share/examples/session.json` remains the unchanged control-only
 example. `share/examples/session-workspace.json` demonstrates the optional
@@ -278,7 +279,10 @@ implemented, and the bundle now contains the provider-neutral native identity
 daemon. A test-only QEMU reference driver proves one-time exchange, bundle
 installation, a real rotation, daemon/guest restart recovery, native readiness,
 and cleanup in a real TCG guest. That driver is not published or supported as a
-production provider. The broker implements the separate
+production provider. The separately packaged Azure driver transfers the same
+repository-owned bootstrap input through a fixed host-key-pinned private SSH
+receiver, then installs the selected bundle by exact OCI digest; its one-time
+enrollment envelope is carried only on SSH stdin. The broker implements the separate
 [guest session identity contract](guest-session-identity.md), and this bundle
 now requests a short-lived credential only through the root-only identity
 authority and holds it only in trusted session-process memory. The production

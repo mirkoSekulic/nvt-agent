@@ -95,8 +95,9 @@ mkdir -p "${PARALLEL_DIR}"
 
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
 [[ -f "${PARALLEL_DIR}/witnessed" ]]
-[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "10" ]]
-[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "10" ]]
+[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "11" ]]
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "11" ]]
+grep -q 'nvt-azure-execution-driver' "${DOCKER_LOG}"
 if grep -q 'nvt-qemu-execution-driver' "${DOCKER_LOG}"; then
   echo "test-only QEMU reference driver entered the production release" >&2
   exit 1
@@ -130,8 +131,8 @@ grep -q 'coordinated image worker failed' "${WORKDIR}/worker.err"
 unset FAIL_BUILD_MATCH
 : >"${DOCKER_LOG}"
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
-[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "7" ]]
-[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "7" ]]
+[[ "$(grep -c '^docker build ' "${DOCKER_LOG}")" == "8" ]]
+[[ "$(grep -c '^docker push ' "${DOCKER_LOG}")" == "8" ]]
 : >"${DOCKER_LOG}"
 bash "${ROOT}/.github/scripts/release-images.sh" mirkoSekulic "${FAKE_VERSION}" "${SHA}" "${FAKE_SOURCE}"
 if grep -Eq '^docker (build|push) ' "${DOCKER_LOG}"; then
@@ -166,7 +167,8 @@ export REQUIRE_ANONYMOUS=1
 : >"${DOCKER_LOG}"
 NVT_PUBLIC_VERIFY_ATTEMPTS=1 NVT_PUBLIC_VERIFY_DELAY_SECONDS=0 \
   bash "${ROOT}/.github/scripts/verify-public-images.sh" mirkoSekulic "${FAKE_VERSION}"
-[[ "$(grep -c '^docker manifest inspect ' "${DOCKER_LOG}")" == "10" ]]
+[[ "$(grep -c '^docker manifest inspect ' "${DOCKER_LOG}")" == "11" ]]
+grep -q 'nvt-azure-execution-driver' "${DOCKER_LOG}"
 if grep -q 'nvt-qemu-execution-driver' "${DOCKER_LOG}"; then
   echo "test-only QEMU reference driver entered public release verification" >&2
   exit 1
@@ -200,6 +202,7 @@ grep -Fq 'group: nvt-coordinated-release-${{ needs.release_metadata.outputs.vers
 grep -A10 '^  publish_image:' "${workflow}" | grep -q 'max-parallel: 8'
 grep -A30 '^  publish_image:' "${workflow}" | grep -q 'nvt-github-comments-producer'
 grep -A30 '^  publish_image:' "${workflow}" | grep -q 'nvt-execution-driver-host'
+grep -A35 '^  publish_image:' "${workflow}" | grep -q 'nvt-azure-execution-driver'
 grep -A32 '^  publish_image:' "${workflow}" | grep -q 'nvt-native-egress-relay'
 if grep -A35 '^  publish_image:' "${workflow}" | grep -q 'nvt-qemu-execution-driver'; then
   echo "test-only QEMU reference driver entered the coordinated release matrix" >&2

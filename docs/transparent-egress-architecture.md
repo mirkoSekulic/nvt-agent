@@ -162,8 +162,8 @@ complete snapshot from its distinct TLS control listener. Every restart is
 unpublished deny-all until the trusted operator republishes exact five-field
 Binding-to-egressd targets. The operator now owns that level-triggered loop and
 withdraws a mapping before identity revocation or driver cleanup. Provider-owned
-default-deny confinement and a production provider remain separate gates, so
-this wiring alone does not establish production mediated-VM readiness.
+default-deny confinement remains a separate gate, so this wiring alone does
+not establish production mediated-VM readiness.
 
 The operator also derives one bounded, non-secret provider attachment plan only
 for mediated external VMs. It fixes relay data TLS identity/public trust,
@@ -172,9 +172,14 @@ producer/class configuration cannot override it. Its monotonic generation and
 digest enter the driver desired generation/fingerprint. Relay target
 publication waits for the driver's exact matching `infrastructure` read-back,
 and an attachment or AgentRun generation change first withdraws the old exact
-mapping. This is a lifecycle gate, not a provider implementation: no current
-production driver installs the outside-guest redirect or NIC default deny. The
-unpublished QEMU reference does so only for the hermetic provider proof.
+mapping. The separately packaged Azure driver consumes this plan and reads back
+an exact per-run NSG boundary; its immutable guest image owns the protected
+receiver that installs capture. Live Azure infrastructure is opt-in and is not
+exercised by repository CI. The core chart contains no Azure workload or
+values, and no untrusted request can select this driver in this phase. A
+separate Azure deployment chart and producer-authorized execution-profile
+integration remain required. The unpublished QEMU reference remains the
+hermetic provider proof.
 
 Proxy-aware clients may use `captured`'s explicit listener on port 15002. This
 path preserves an explicit provider selector when more than one provider uses
@@ -326,6 +331,7 @@ forward rules are the outside-guest read-back boundary, while the guest TCP
 redirect remains only routing. After that read-back, the authenticated
 enrollment handoff delivers only the public per-run interception CA; the guest
 proof uses normal TLS chain and hostname verification while the CA private key
-stays in egressd. Its TCG gate proves the complete mediated path.
-No production cloud provider consumes the plan yet, so production VM mediation
-remains incomplete.
+stays in egressd. Its TCG gate proves the complete mediated path. The Azure
+driver is the first production-shaped cloud consumer, but a real deployment
+still depends on installation-owned image, identity, subnet, role, and relay
+infrastructure and therefore is not claimed complete by CI.
