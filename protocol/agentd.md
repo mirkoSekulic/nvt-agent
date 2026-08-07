@@ -41,9 +41,10 @@ retry.
 When generic runtime startup configures a durable prompt queue, `agentd`
 atomically persists the complete prompt before returning `status: queued`.
 Pending prompts are restored in FIFO order after an `agentd` process restart
-and remain behind the same session-readiness gate. Each entry is removed after
-its injection attempt. This is at-least-once across a crash: interruption after
-terminal injection but before durable acknowledgement can redeliver a prompt.
+and remain behind the same session-readiness gate. Each entry is removed only
+after successful terminal injection; a failed attempt remains durable for the
+next restart. This is at-least-once across a crash: interruption after terminal
+injection but before durable acknowledgement can redeliver a prompt.
 Without a configured queue directory, v1 retains its in-memory queue behavior.
 
 ### status

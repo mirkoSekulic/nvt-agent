@@ -276,10 +276,6 @@ class Agentd:
                 self.last_error = None
                 self.log_event("prompt.injected", prompt_id=item["id"], source=item["source"])
             except Exception as error:
-                try:
-                    self.remove_persisted_prompt(item)
-                except Exception as cleanup_error:
-                    error = RuntimeError(f"{error}; could not remove durable prompt: {cleanup_error}")
                 self.last_error = str(error)
                 self.log_event("prompt.failed", prompt_id=item["id"], source=item["source"], error=str(error))
             finally:

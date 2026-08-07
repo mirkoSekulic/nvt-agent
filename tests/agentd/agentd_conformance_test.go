@@ -227,6 +227,88 @@ esac
 	}
 }
 
+func TestDurablePromptQueueRetainsFailedInjectionForRestart(t *testing.T) {
+	binDir := t.TempDir()
+	failInjection := filepath.Join(binDir, "fail-injection")
+	captured := filepath.Join(binDir, "captured-prompts")
+	tmux := filepath.Join(binDir, "tmux")
+	tmuxScript := `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  has-session)
+    exit 0
+    ;;
+  load-buffer)
+    if [ -f "$NVT_TEST_FAIL_INJECTION" ]; then
+      exit 42
+    fi
+    cat "$4" >> "$NVT_TEST_CAPTURED_PROMPTS"
+    printf '\n' >> "$NVT_TEST_CAPTURED_PROMPTS"
+    ;;
+esac
+`
+	if err := os.WriteFile(tmux, []byte(tmuxScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(failInjection, []byte("fail\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	promptQueueDir := filepath.Join(t.TempDir(), "prompt-queue")
+	f := startFixtureWithGraceAndEnv(t, false, "0", []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_AGENTD_PROMPT_QUEUE_DIR=" + promptQueueDir,
+		"NVT_TEST_FAIL_INJECTION=" + failInjection,
+		"NVT_TEST_CAPTURED_PROMPTS=" + captured,
+	})
+	writeSessionReadyMarker(t, f.readyMarker)
+
+	sentinel := "durable failed injection " + uniqueID()
+	assertOK(t, f.request(map[string]any{
+		"type":     "prompt",
+		"source":   "plugin:durable-failure-test",
+		"external": false,
+		"message":  sentinel,
+	}))
+	waitFor(t, 3*time.Second, func() bool {
+		return countEvents(t, f.eventsPath(), "prompt.failed") == 1
+	})
+	entries, err := os.ReadDir(promptQueueDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("failed injection did not retain one durable prompt entry: %v", entries)
+	}
+	if _, err := os.Stat(captured); !os.IsNotExist(err) {
+		t.Fatalf("failed injection unexpectedly delivered prompt, stat error = %v", err)
+	}
+
+	f.stop()
+	if err := os.Remove(failInjection); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	waitFor(t, 3*time.Second, func() bool {
+		return countEvents(t, f.eventsPath(), "prompt.injected") == 1
+	})
+
+	contents, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), sentinel) {
+		t.Fatalf("restart did not restore failed durable prompt:\n%s", contents)
+	}
+	entries, err = os.ReadDir(promptQueueDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("successfully restored prompt was not acknowledged: %v", entries)
+	}
+}
+
 func TestPromptWaitsForContinuouslyReadySession(t *testing.T) {
 	f := startFixtureWithGrace(t, false, "0.8")
 	readyMarker := filepath.Join(f.state, "target-ready")

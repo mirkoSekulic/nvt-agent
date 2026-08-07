@@ -70,7 +70,8 @@ and event logging.
 When `runtime.resume` is configured, generic startup gives `agentd` a durable
 queue directory under `$NVT_STATE_DIR/agentd/prompt-queue`. `agentd` persists a
 prompt before acknowledging it as queued, restores pending entries in FIFO
-order after restart, and removes each entry after its injection attempt. The
+order after restart, and removes each entry only after successful terminal
+injection. A failed injection remains durable for the next restart. The
 queue is released only after the resumed session passes the normal readiness
 gate. A failed resume therefore leaves pending prompts for a later restart and
 never redirects them into a new session.
