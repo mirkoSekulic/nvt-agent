@@ -36,6 +36,9 @@ map is inherited by the fresh and resume runtime children, and a configured
 value overrides the corresponding inherited process value. It is not exported
 to the container entrypoint, plugins, `agentd`, code-server, or plugin
 supervisors. When `runtime.env` is absent, runtime launch behavior is unchanged.
+This scoping applies to the `runtime.env` map itself; other bootstrap features
+may independently install system trust or persist their own environment values
+for components that source the generated container environment.
 
 These values are deployment configuration stored inside the agent container
 and in its generated runtime command document. They must not contain real,

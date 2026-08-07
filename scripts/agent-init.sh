@@ -596,9 +596,11 @@ config_file.write_text(text, encoding="utf-8")
 print(f"rendered preseed config into {config_file}")
 PY
 
-# Local compose needs runtime.proxy.provider for mediated forward-proxy mode.
-# The default generated runtime command is tool-specific, so agent-init owns
-# this small preset and keeps bootstrap generic.
+# Local compose needs runtime.proxy.provider plus child-process CA-path/bypass
+# entries for mediated forward-proxy mode. Bootstrap separately installs and
+# persists the required public CA trust for components that source its generated
+# environment. Agent-init owns this tool-specific preset so bootstrap stays
+# generic. Existing runtime.env maps are user-owned and are never changed.
 python3 - "$agent_config_file" "$broker_agents_file" "$name" "$egress_mode" "$agent_type" <<'PY'
 import sys
 from pathlib import Path
@@ -626,18 +628,21 @@ runtime = parsed.get("runtime") or {}
 if not isinstance(runtime, dict):
     raise SystemExit("agent-init: runtime must be a YAML object")
 proxy = runtime.get("proxy")
-if isinstance(proxy, dict) and proxy.get("provider"):
+has_proxy_provider = isinstance(proxy, dict) and proxy.get("provider")
+needs_runtime_env = "env" not in runtime
+if has_proxy_provider and not needs_runtime_env:
     raise SystemExit(0)
 
-data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
-agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
-providers = {
-    grant.get("provider")
-    for grant in (agent or {}).get("grants", []) or []
-    if isinstance(grant, dict)
-}
-if default_provider not in providers:
-    raise SystemExit(f"agent-init: mediated {agent_type} agent requires broker grant {default_provider} or an explicit runtime.proxy.provider")
+if not has_proxy_provider:
+    data = yaml.safe_load(agents_file.read_text(encoding="utf-8")) or {}
+    agent = next((item for item in data.get("agents", []) if isinstance(item, dict) and item.get("id") == name), None)
+    providers = {
+        grant.get("provider")
+        for grant in (agent or {}).get("grants", []) or []
+        if isinstance(grant, dict)
+    }
+    if default_provider not in providers:
+        raise SystemExit(f"agent-init: mediated {agent_type} agent requires broker grant {default_provider} or an explicit runtime.proxy.provider")
 
 lines = text.splitlines()
 runtime_index = next((index for index, line in enumerate(lines) if line == "runtime:"), None)
@@ -648,9 +653,21 @@ for index in range(runtime_index + 1, len(lines)):
     if lines[index] and not lines[index].startswith((" ", "\t", "#")):
         insert_at = index
         break
-lines[insert_at:insert_at] = ["  proxy:", f"    provider: {default_provider}"]
+managed_lines = []
+if needs_runtime_env:
+    managed_lines.extend([
+        "  env:",
+        "    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt",
+        "    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd",
+    ])
+if not has_proxy_provider:
+    managed_lines.extend(["  proxy:", f"    provider: {default_provider}"])
+lines[insert_at:insert_at] = managed_lines
 config_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-print(f"rendered runtime proxy provider {default_provider} into {config_file}")
+if needs_runtime_env:
+    print(f"rendered mediated runtime environment into {config_file}")
+if not has_proxy_provider:
+    print(f"rendered runtime proxy provider {default_provider} into {config_file}")
 PY
 
 # Manage the marker-owned egress block without touching user-authored config.

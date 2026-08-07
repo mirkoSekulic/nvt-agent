@@ -1131,6 +1131,80 @@ func TestAgentInitMediatedUsesDirectCommandAndRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestAgentInitMediatedMigratesOnlyMissingRuntimeEnv(t *testing.T) {
+	root := repoRoot(t)
+	agentsFile := preserveBrokerAgentsFile(t, root)
+	caInitBin := buildEgressCAInit(t, root)
+	tests := []struct {
+		name            string
+		existingEnv     string
+		wantManagedEnv  bool
+		wantUserEnvLine string
+	}{
+		{name: "runtime-env-migration", wantManagedEnv: true},
+		{
+			name:            "runtime-env-user-owned",
+			existingEnv:     "  env:\n    USER_AUTHORED_VALUE: keep-me\n",
+			wantUserEnvLine: "    USER_AUTHORED_VALUE: keep-me",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentDir := filepath.Join(root, ".agents", tt.name)
+			_ = os.RemoveAll(agentDir)
+			t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteFile(t, agentsFile, fmt.Sprintf(`agents:
+- id: %s
+  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  grants:
+    - provider: codex-main
+      materialization: placeholder-file
+      egress-hosts: [provider.example.test:443]
+    - provider: api-main
+      materialization: header-inject
+      egress-hosts: [api.example.test:443]
+`, tt.name))
+			mustWriteFile(t, filepath.Join(agentDir, "agent.yaml"), "runtime:\n  command: codex\n  args: []\n"+tt.existingEnv+"  user: root\n  proxy:\n    provider: codex-main\ntools: {packages: [], mise: [], additional-paths: [], shell: []}\ncode-server: {extensions: []}\nplugins: []\n")
+
+			home := t.TempDir()
+			command := "HOME=" + shellQuote(home) + " NVT_EGRESS_CA_INIT_BIN=" + shellQuote(caInitBin) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+			for attempt := range 2 {
+				cmd := commandWithEnv(command, nil, "--name", tt.name, "--type", "codex")
+				cmd.Dir = root
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("agent-init attempt %d failed: %v\n%s", attempt+1, err, output)
+				}
+			}
+
+			config := mustReadFile(t, filepath.Join(agentDir, "agent.yaml"))
+			if got := strings.Count(config, "\n  env:\n"); got != 1 {
+				t.Fatalf("agent-init rendered %d runtime.env maps:\n%s", got, config)
+			}
+			if tt.wantManagedEnv {
+				for _, want := range []string{
+					"    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt",
+					"    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd",
+				} {
+					if !strings.Contains(config, want) {
+						t.Fatalf("migrated config missing %q:\n%s", want, config)
+					}
+				}
+			} else {
+				if !strings.Contains(config, tt.wantUserEnvLine) {
+					t.Fatalf("user-authored runtime.env was not preserved:\n%s", config)
+				}
+				if strings.Contains(config, "NODE_EXTRA_CA_CERTS") || strings.Contains(config, "NO_PROXY") {
+					t.Fatalf("agent-init overwrote user-authored runtime.env:\n%s", config)
+				}
+			}
+		})
+	}
+}
+
 func TestAgentInitRendersToolPreseed(t *testing.T) {
 	root := repoRoot(t)
 	tests := []struct {
