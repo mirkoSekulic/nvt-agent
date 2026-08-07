@@ -72,6 +72,7 @@ COPY runtime/core/write-agent-instructions.sh /usr/local/bin/write-agent-instruc
 COPY runtime/core/start-code-server.sh /usr/local/bin/start-code-server
 COPY runtime/core/start-agent-session.sh /usr/local/bin/start-agent-session
 COPY runtime/core/start-agent-session.py /usr/local/bin/start-agent-session-exec
+COPY runtime/core/session-resume-state.py /usr/local/bin/session-resume-state
 COPY runtime/core/supervise-agent-session.sh /usr/local/bin/supervise-agent-session
 COPY runtime/core/ensure-docker-networks.py /usr/local/bin/ensure-docker-networks
 COPY runtime/core/docker-wrapper.sh /usr/local/bin/docker
@@ -95,6 +96,7 @@ RUN chmod +x \
   /usr/local/bin/start-code-server \
   /usr/local/bin/start-agent-session \
   /usr/local/bin/start-agent-session-exec \
+  /usr/local/bin/session-resume-state \
   /usr/local/bin/supervise-agent-session \
   /usr/local/bin/ensure-docker-networks \
   /usr/local/bin/docker \

@@ -258,12 +258,31 @@ def runtime_initial_prompt(runtime):
     return text
 
 
-def persist_agent_command(command, args, initial_prompt=None):
+def runtime_resume(runtime):
+    if "resume" not in runtime:
+        return None
+    config = runtime.get("resume")
+    if not isinstance(config, dict):
+        raise SystemExit("runtime.resume must be a YAML object")
+    unknown = sorted(set(config) - {"command", "args"})
+    if unknown:
+        raise SystemExit(f"runtime.resume has unsupported fields: {', '.join(unknown)}")
+    command = optional_string(config.get("command"), "runtime.resume.command")
+    if not command or not command.strip():
+        raise SystemExit("runtime.resume.command must be a non-empty string")
+    args = optional_string_list(config.get("args"), "runtime.resume.args")
+    return {"command": command, "args": args}
+
+
+def persist_agent_command(command, args, initial_prompt=None, resume=None):
     if initial_prompt is not None:
         args = [*args, initial_prompt]
     target = Path.home() / ".nvt-agent" / "agent-command.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({"command": command, "args": args}, separators=(",", ":")) + "\n", encoding="utf-8")
+    document = {"command": command, "args": args}
+    if resume is not None:
+        document["resume"] = resume
+    target.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 def setup_tmux_config():
@@ -849,8 +868,11 @@ def main():
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
     command = optional_string(runtime.get("command"), "runtime.command")
     initial_prompt = runtime_initial_prompt(runtime)
+    resume = runtime_resume(runtime)
     if initial_prompt is not None and not command:
         raise SystemExit("runtime.command is required when runtime.initial-prompt is configured")
+    if resume is not None and not command:
+        raise SystemExit("runtime.command is required when runtime.resume is configured")
     effective_command = command or "codex"
 
     # Validate the selector before making any runtime changes, including for a
@@ -870,7 +892,7 @@ def main():
         # agent-command.json so runtime.args are passed without shell parsing.
         persist_env_var("AGENT_COMMAND", command)
         args = optional_string_list(runtime.get("args"), "runtime.args")
-        persist_agent_command(command, args, initial_prompt)
+        persist_agent_command(command, args, initial_prompt, resume)
     setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_packages(configured_packages(tools))

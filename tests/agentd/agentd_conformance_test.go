@@ -25,6 +25,7 @@ type fixture struct {
 	session      string
 	readyMarker  string
 	startupGrace string
+	extraEnv     []string
 	cmd          *exec.Cmd
 }
 
@@ -120,6 +121,109 @@ func TestPromptInjectionExternalTrueAndFIFO(t *testing.T) {
 	}
 	if strings.Index(pane, first) > strings.Index(pane, second) {
 		t.Fatalf("expected FIFO prompt order:\n%s", pane)
+	}
+}
+
+func TestDurablePromptQueueRestoresPendingPrompts(t *testing.T) {
+	binDir := t.TempDir()
+	gate := filepath.Join(binDir, "allow-injection")
+	blocked := filepath.Join(binDir, "injection-blocked")
+	captured := filepath.Join(binDir, "captured-prompts")
+	tmux := filepath.Join(binDir, "tmux")
+	tmuxScript := `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  has-session)
+    exit 0
+    ;;
+  load-buffer)
+    touch "$NVT_TEST_INJECTION_BLOCKED"
+    while [ ! -f "$NVT_TEST_INJECTION_GATE" ]; do
+      sleep 0.02
+    done
+    cat "$4" >> "$NVT_TEST_CAPTURED_PROMPTS"
+    printf '\n' >> "$NVT_TEST_CAPTURED_PROMPTS"
+    ;;
+esac
+`
+	if err := os.WriteFile(tmux, []byte(tmuxScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	promptQueueDir := filepath.Join(t.TempDir(), "prompt-queue")
+	f := startFixtureWithGraceAndEnv(t, false, "0", []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NVT_AGENTD_PROMPT_QUEUE_DIR=" + promptQueueDir,
+		"NVT_TEST_INJECTION_GATE=" + gate,
+		"NVT_TEST_INJECTION_BLOCKED=" + blocked,
+		"NVT_TEST_CAPTURED_PROMPTS=" + captured,
+	})
+	writeSessionReadyMarker(t, f.readyMarker)
+
+	for _, message := range []string{"pending prompt one", "pending prompt two"} {
+		assertOK(t, f.request(map[string]any{
+			"type":     "prompt",
+			"source":   "plugin:durable-test",
+			"external": true,
+			"message":  message,
+		}))
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		_, err := os.Stat(blocked)
+		return err == nil
+	})
+	waitFor(t, 3*time.Second, func() bool {
+		entries, err := os.ReadDir(promptQueueDir)
+		return err == nil && len(entries) == 2
+	})
+	queueInfo, err := os.Stat(promptQueueDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := queueInfo.Mode().Perm(); mode != 0o700 {
+		t.Fatalf("durable prompt queue mode = %04o, want 0700", mode)
+	}
+	queuedEntries, err := os.ReadDir(promptQueueDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range queuedEntries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Fatalf("durable prompt entry %s mode = %04o, want 0600", entry.Name(), mode)
+		}
+	}
+
+	f.kill()
+	if err := os.WriteFile(gate, []byte("continue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	waitFor(t, 3*time.Second, func() bool {
+		return countEvents(t, f.eventsPath(), "prompt.injected") == 2
+	})
+
+	contents, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []string{"pending prompt one", "pending prompt two"} {
+		if !strings.Contains(string(contents), message) {
+			t.Fatalf("restored queue did not inject %q:\n%s", message, contents)
+		}
+	}
+	if strings.Index(string(contents), "pending prompt one") > strings.Index(string(contents), "pending prompt two") {
+		t.Fatalf("restored durable prompts were not FIFO:\n%s", contents)
+	}
+	entries, err := os.ReadDir(promptQueueDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("injected durable prompts were not acknowledged: %v", entries)
 	}
 }
 
@@ -511,6 +615,10 @@ func startFixture(t *testing.T, startTmux bool) *fixture {
 }
 
 func startFixtureWithGrace(t *testing.T, startTmux bool, startupGrace string) *fixture {
+	return startFixtureWithGraceAndEnv(t, startTmux, startupGrace, nil)
+}
+
+func startFixtureWithGraceAndEnv(t *testing.T, startTmux bool, startupGrace string, extraEnv []string) *fixture {
 	t.Helper()
 	root := repoRoot(t)
 	temp, err := os.MkdirTemp("", "nvt-agentd-*")
@@ -526,6 +634,7 @@ func startFixtureWithGrace(t *testing.T, startTmux bool, startupGrace string) *f
 		session:      "nvt-agentd-" + uniqueID(),
 		readyMarker:  filepath.Join(temp, "state", "agentd", "session-launched"),
 		startupGrace: startupGrace,
+		extraEnv:     extraEnv,
 	}
 
 	if startTmux {
@@ -536,20 +645,24 @@ func startFixtureWithGrace(t *testing.T, startTmux bool, startupGrace string) *f
 		})
 	}
 
-	cmd := commandWithEnv(t, agentdBin(root), f.env())
+	f.start()
+	t.Cleanup(func() { f.stop() })
+	return f
+}
+
+func (f *fixture) start() {
+	f.t.Helper()
+	cmd := commandWithEnv(f.t, agentdBin(f.root), f.env())
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start agentd: %v", err)
+		f.t.Fatalf("start agentd: %v", err)
 	}
 	f.cmd = cmd
-	t.Cleanup(func() { f.stop() })
-
-	waitFor(t, 3*time.Second, func() bool {
+	waitFor(f.t, 3*time.Second, func() bool {
 		response, err := f.tryRequest(map[string]any{"type": "health"})
 		return err == nil && response["ok"] == true
 	})
-	return f
 }
 
 func (f *fixture) publishPluginEvent(event string, payload map[string]any) {
@@ -563,14 +676,14 @@ func (f *fixture) publishPluginEvent(event string, payload map[string]any) {
 }
 
 func (f *fixture) env() []string {
-	return []string{
+	return append([]string{
 		"NVT_AGENTD_SOCKET=" + f.socket,
 		"NVT_STATE_DIR=" + f.state,
 		"AGENT_SESSION=" + f.session,
 		"NVT_AGENT_SESSION_READY_MARKER=" + f.readyMarker,
 		"NVT_AGENT_SESSION_STARTUP_GRACE_SECONDS=" + f.startupGrace,
 		"TERM=screen",
-	}
+	}, f.extraEnv...)
 }
 
 func writeSessionReadyMarker(t *testing.T, path string) {
@@ -596,6 +709,15 @@ func (f *fixture) stop() {
 		signalProcessGroup(f.cmd, syscall.SIGKILL)
 		<-done
 	}
+	f.cmd = nil
+}
+
+func (f *fixture) kill() {
+	if f.cmd == nil || f.cmd.Process == nil {
+		return
+	}
+	signalProcessGroup(f.cmd, syscall.SIGKILL)
+	_ = f.cmd.Wait()
 	f.cmd = nil
 }
 

@@ -55,6 +55,17 @@ fi
 
 run-plugins before-agent "${NVT_AGENT_CONFIG_FILE:-/nvt-agent/agent.yaml}"
 
+# Durable prompt backing is paired with the generic resume contract so queued
+# input is restored only into a continued session, never an unrelated fresh
+# session. agentd receives a queue directory and does not make resume-policy
+# decisions itself.
+agent_command_file="$HOME/.nvt-agent/agent-command.json"
+if [ -f "$agent_command_file" ] && session-resume-state configured "$agent_command_file"; then
+  export NVT_AGENTD_PROMPT_QUEUE_DIR="${NVT_AGENTD_PROMPT_QUEUE_DIR:-$NVT_STATE_DIR/agentd/prompt-queue}"
+else
+  unset NVT_AGENTD_PROMPT_QUEUE_DIR
+fi
+
 agentd &
 start-code-server
 start-agent-session
