@@ -30,6 +30,7 @@ local quick start. The documents below are the maintained sources of truth.
 Files under [`protocol/`](../protocol/) are normative contracts:
 
 - [`agentd`](../protocol/agentd.md): session I/O and prompt queueing.
+- [Runtime session continuation](../runtime/README.md): optional generic fresh/resume commands, durable startup state, and pending-prompt recovery.
 - [Events](../protocol/events.md): JSONL event format.
 - [Broker](../protocol/broker.md): identities, grants, and provider material.
 - [Injection](../protocol/injection.md): mediated credential injection.

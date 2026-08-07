@@ -9,7 +9,7 @@ def fail(message):
     raise SystemExit(f"start-agent-session: {message}")
 
 
-def load_command(path):
+def load_command(path, launch_mode="fresh"):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -19,8 +19,16 @@ def load_command(path):
 
     if not isinstance(data, dict):
         fail("command file must contain an object")
-    command = data.get("command")
-    args = data.get("args", [])
+    if launch_mode == "fresh":
+        config = data
+    elif launch_mode == "resume":
+        config = data.get("resume")
+        if not isinstance(config, dict):
+            fail("resume command is not configured")
+    else:
+        fail(f"launch mode must be fresh or resume, got {launch_mode!r}")
+    command = config.get("command")
+    args = config.get("args", [])
     if not isinstance(command, str) or not command:
         fail("command must be a non-empty string")
     if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
@@ -29,9 +37,10 @@ def load_command(path):
 
 
 def main():
-    if len(sys.argv) != 2:
-        fail("usage: start-agent-session <command-file>")
-    command, args = load_command(Path(sys.argv[1]))
+    if len(sys.argv) not in {2, 3}:
+        fail("usage: start-agent-session <command-file> [fresh|resume]")
+    launch_mode = sys.argv[2] if len(sys.argv) == 3 else "fresh"
+    command, args = load_command(Path(sys.argv[1]), launch_mode)
     os.execvp(command, [command, *args])
 
 

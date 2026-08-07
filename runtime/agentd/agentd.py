@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import signal
 import socket
 import subprocess
@@ -19,6 +20,7 @@ MAX_SESSION_STARTUP_GRACE_SECONDS = 30.0
 MIN_SESSION_READY_WAIT_SECONDS = 1.0
 SESSION_READY_WAIT_MARGIN_RATIO = 0.2
 SESSION_MONITOR_INTERVAL_SECONDS = 0.1
+PROMPT_FILE_RE = re.compile(r"^(?P<sequence>[0-9]{20})-(?P<id>prm_[0-9a-f]{32})\.json$")
 
 
 class Agentd:
@@ -31,6 +33,7 @@ class Agentd:
         session_startup_grace_seconds,
         session_ready_marker,
         socket_mode,
+        prompt_queue_dir=None,
     ):
         self.socket_path = Path(socket_path)
         self.state_dir = Path(state_dir)
@@ -44,6 +47,9 @@ class Agentd:
         self.session_ready_marker = Path(session_ready_marker)
         self.socket_mode = socket_mode
         self.queue = queue.Queue()
+        self.prompt_queue_dir = Path(prompt_queue_dir) if prompt_queue_dir else None
+        self.prompt_files = {}
+        self.prompt_sequence = 0
         self.enqueue_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.session_ready_event = threading.Event()
@@ -56,6 +62,63 @@ class Agentd:
         self.stopped = False
         self.event_log = self.state_dir / "agentd" / "events.jsonl"
         self.event_log.parent.mkdir(parents=True, exist_ok=True)
+        self.restore_prompt_queue()
+
+    def restore_prompt_queue(self):
+        if self.prompt_queue_dir is None:
+            return
+        self.prompt_queue_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.prompt_queue_dir, 0o700)
+        for path in sorted(self.prompt_queue_dir.iterdir()):
+            if path.name.startswith(".prompt-") and path.name.endswith(".tmp"):
+                path.unlink()
+                continue
+            match = PROMPT_FILE_RE.fullmatch(path.name)
+            if match is None:
+                raise RuntimeError(f"invalid durable prompt queue entry: {path.name}")
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RuntimeError(f"invalid durable prompt queue entry {path.name}: {error}") from error
+            validate_prompt_item(item)
+            if item["id"] != match.group("id"):
+                raise RuntimeError(f"durable prompt queue entry id does not match its filename: {path.name}")
+            sequence = int(match.group("sequence"))
+            self.prompt_sequence = max(self.prompt_sequence, sequence)
+            self.prompt_files[item["id"]] = path
+            self.queue.put(item)
+
+    def persist_prompt(self, item):
+        if self.prompt_queue_dir is None:
+            return
+        self.prompt_sequence = max(self.prompt_sequence + 1, time.time_ns())
+        filename = f"{self.prompt_sequence:020d}-{item['id']}.json"
+        target = self.prompt_queue_dir / filename
+        payload = json.dumps(item, separators=(",", ":"), sort_keys=True) + "\n"
+        fd, temporary = tempfile.mkstemp(dir=self.prompt_queue_dir, prefix=".prompt-", suffix=".tmp")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            fsync_directory(self.prompt_queue_dir)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+        self.prompt_files[item["id"]] = target
+
+    def remove_persisted_prompt(self, item):
+        path = self.prompt_files.get(item["id"])
+        if path is None:
+            return
+        path.unlink()
+        fsync_directory(self.prompt_queue_dir)
+        del self.prompt_files[item["id"]]
 
     def log_event(self, event, **fields):
         record = {
@@ -160,6 +223,7 @@ class Agentd:
                 "message": message,
                 "created_at": time.time(),
             }
+            self.persist_prompt(item)
             self.queue.put(item)
             self.log_event("prompt.queued", prompt_id=prompt_id, source=source, external=external)
         return {"ok": True, "id": prompt_id, "status": "queued"}
@@ -201,8 +265,14 @@ class Agentd:
                 item = self.queue.get(timeout=0.25)
             except queue.Empty:
                 continue
+            while not self.stop_event.is_set() and not self.session_ready_event.wait(timeout=0.25):
+                pass
+            if self.stop_event.is_set():
+                self.queue.task_done()
+                return
             try:
                 self.inject_prompt(item)
+                self.remove_persisted_prompt(item)
                 self.last_error = None
                 self.log_event("prompt.injected", prompt_id=item["id"], source=item["source"])
             except Exception as error:
@@ -238,6 +308,28 @@ def string_value(value, field, required=False, default=None):
     if required and not value.strip():
         raise ValueError(f"{field} must not be empty")
     return value
+
+
+def validate_prompt_item(item):
+    if not isinstance(item, dict) or set(item) != {"id", "source", "external", "message", "created_at"}:
+        raise RuntimeError("durable prompt queue entry has unsupported fields")
+    if not isinstance(item["id"], str) or re.fullmatch(r"prm_[0-9a-f]{32}", item["id"]) is None:
+        raise RuntimeError("durable prompt queue entry has an invalid id")
+    string_value(item["source"], "source")
+    string_value(item["message"], "message", required=True)
+    if not isinstance(item["external"], bool):
+        raise RuntimeError("durable prompt queue entry external must be a boolean")
+    if not isinstance(item["created_at"], (int, float)):
+        raise RuntimeError("durable prompt queue entry created_at must be a number")
+
+
+def fsync_directory(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def tmux_session_exists(session):
@@ -300,6 +392,7 @@ def main():
     parser.add_argument("--state-dir", default=os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
     parser.add_argument("--session", default=os.environ.get("AGENT_SESSION", "agent"))
     parser.add_argument("--prompt-buffer", default=os.environ.get("AGENT_PROMPT_BUFFER", "agent-prompt"))
+    parser.add_argument("--prompt-queue-dir", default=os.environ.get("NVT_AGENTD_PROMPT_QUEUE_DIR"))
     parser.add_argument("--session-ready-marker", default=os.environ.get("NVT_AGENT_SESSION_READY_MARKER"))
     parser.add_argument(
         "--session-startup-grace-seconds",
@@ -319,6 +412,7 @@ def main():
         args.session_startup_grace_seconds,
         session_ready_marker,
         args.socket_mode,
+        args.prompt_queue_dir,
     )
 
     def handle_signal(_signum, _frame):
