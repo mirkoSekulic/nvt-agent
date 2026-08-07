@@ -6,6 +6,9 @@ Runtime bootstrap accepts a provider-neutral command contract:
 runtime:
   command: generic-fresh-command
   args: [--fresh-option]
+  env:
+    RUNTIME_MODE: deployment-value
+    SERVICE_ENDPOINT: https://service.example.test
   initial-prompt:
     delivery: argument
     text: Perform the initial task.
@@ -25,6 +28,22 @@ strings and default to empty. The initial prompt is appended only to the fresh
 arguments; it is never passed to the resume command. Commands and arguments are
 deployment configuration, not secrets, and must not contain credentials.
 Runtime core does not discover tool-owned sessions or add tool-specific flags.
+
+`runtime.env` is an optional object whose names must be portable environment
+variable names and whose values must be strings. Values are passed literally:
+there is no shell parsing, variable interpolation, or path expansion. The same
+map is inherited by the fresh and resume runtime children, and a configured
+value overrides the corresponding inherited process value. It is not exported
+to the container entrypoint, plugins, `agentd`, code-server, or plugin
+supervisors. When `runtime.env` is absent, runtime launch behavior is unchanged.
+This scoping applies to the `runtime.env` map itself; other bootstrap features
+may independently install system trust or persist their own environment values
+for components that source the generated container environment.
+
+These values are deployment configuration stored inside the agent container
+and in its generated runtime command document. They must not contain real,
+long-lived secrets; use the repository's credential and mediation mechanisms
+for sensitive material.
 
 ## Durable resume marker
 

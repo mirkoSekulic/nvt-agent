@@ -52,6 +52,7 @@ def optional_string_list(value, field):
 
 PLACEHOLDER = "NVT-PLACEHOLDER-NOT-A-KEY"
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+RUNTIME_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_EGRESS_CA_FILE = "/nvt-egress-ca/ca.crt"
 DEFAULT_EGRESS_CA_WAIT_SECONDS = 60
 DEFAULT_FORWARD_PROXY_URL = "http://127.0.0.1:8470"
@@ -274,12 +275,30 @@ def runtime_resume(runtime):
     return {"command": command, "args": args}
 
 
-def persist_agent_command(command, args, initial_prompt=None, resume=None):
+def runtime_environment(runtime):
+    if "env" not in runtime:
+        return None
+    config = runtime.get("env")
+    if not isinstance(config, dict):
+        raise SystemExit("runtime.env must be a YAML object")
+    environment = {}
+    for name, value in config.items():
+        if not isinstance(name, str) or not RUNTIME_ENV_NAME_RE.fullmatch(name):
+            raise SystemExit(f"runtime.env contains invalid environment variable name {name!r}")
+        if not isinstance(value, str):
+            raise SystemExit(f"runtime.env.{name} must be a string")
+        environment[name] = value
+    return environment
+
+
+def persist_agent_command(command, args, initial_prompt=None, resume=None, environment=None):
     if initial_prompt is not None:
         args = [*args, initial_prompt]
     target = Path.home() / ".nvt-agent" / "agent-command.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     document = {"command": command, "args": args}
+    if environment is not None:
+        document["env"] = environment
     if resume is not None:
         document["resume"] = resume
     target.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -869,10 +888,13 @@ def main():
     command = optional_string(runtime.get("command"), "runtime.command")
     initial_prompt = runtime_initial_prompt(runtime)
     resume = runtime_resume(runtime)
+    environment = runtime_environment(runtime)
     if initial_prompt is not None and not command:
         raise SystemExit("runtime.command is required when runtime.initial-prompt is configured")
     if resume is not None and not command:
         raise SystemExit("runtime.command is required when runtime.resume is configured")
+    if environment is not None and not command:
+        raise SystemExit("runtime.command is required when runtime.env is configured")
     effective_command = command or "codex"
 
     # Validate the selector before making any runtime changes, including for a
@@ -892,7 +914,7 @@ def main():
         # agent-command.json so runtime.args are passed without shell parsing.
         persist_env_var("AGENT_COMMAND", command)
         args = optional_string_list(runtime.get("args"), "runtime.args")
-        persist_agent_command(command, args, initial_prompt, resume)
+        persist_agent_command(command, args, initial_prompt, resume, environment)
     setup_code_server(code_server)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_packages(configured_packages(tools))

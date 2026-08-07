@@ -102,6 +102,20 @@ make agent-ps
 Edit `.agents/$AGENT/agent.yaml`. Generated defaults already contain the
 runtime, tools, code-server, and plugin sections.
 
+For mediated Compose agents, `agent-init` keeps the runtime command direct and
+places the public CA path and local bypass settings in `runtime.env`. The map is
+applied only to the runtime child, including its resume command. Separately,
+bootstrap installs the required public CA trust and persists
+`NODE_EXTRA_CA_CERTS` in the generated container environment for components
+that source it, including code-server. That independently installed CA trust
+is intentionally visible outside the runtime child; the certificate is public,
+non-secret trust material. `runtime.env` remains deployment configuration and
+must not contain real, long-lived secrets.
+
+Re-running `agent-init` upgrades an existing mediated config that has no
+`runtime.env` map by adding these managed defaults. If `runtime.env` already
+exists, it is treated as user-authored and left unchanged.
+
 Broker-backed repository access uses the public provider alias exported by
 `git-host-credentials`, then references that alias from checkout and watcher
 plugins:
