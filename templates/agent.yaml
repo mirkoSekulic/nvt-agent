@@ -1,6 +1,6 @@
 runtime:
   command: {{AGENT_TYPE}}
-  args: {{AGENT_ARGS}}
+  args: {{AGENT_ARGS}}{{AGENT_RUNTIME_ENV}}
   user: {{AGENT_USER}}
 
 tools:

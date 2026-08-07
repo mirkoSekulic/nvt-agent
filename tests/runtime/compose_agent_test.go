@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1066,8 +1067,65 @@ func TestAgentInitRendersAutonomyArgs(t *testing.T) {
 					t.Fatalf("agent.yaml missing %q\n%s", fragment, config)
 				}
 			}
+			if strings.Contains(config, "command: env") || strings.Contains(config, "NODE_EXTRA_CA_CERTS") || strings.Contains(config, "NO_PROXY") {
+				t.Fatalf("direct agent config unexpectedly contains mediated runtime environment:\n%s", config)
+			}
 			if !strings.Contains(string(localInstructions), "Add workspace-specific agent guidance here.") {
 				t.Fatalf("unexpected AGENTS.local.md:\n%s", localInstructions)
+			}
+		})
+	}
+}
+
+func TestAgentInitMediatedUsesDirectCommandAndRuntimeEnv(t *testing.T) {
+	root := repoRoot(t)
+	agentsFile := preserveBrokerAgentsFile(t, root)
+	caInitBin := buildEgressCAInit(t, root)
+	tests := []struct {
+		name     string
+		typ      string
+		provider string
+	}{
+		{name: "runtime-env-codex", typ: "codex", provider: "codex-main"},
+		{name: "runtime-env-claude", typ: "claude", provider: "claude-main"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.typ, func(t *testing.T) {
+			agentDir := filepath.Join(root, ".agents", tt.name)
+			_ = os.RemoveAll(agentDir)
+			t.Cleanup(func() { _ = os.RemoveAll(agentDir) })
+			mustWriteFile(t, agentsFile, fmt.Sprintf(`agents:
+- id: %s
+  token-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  grants:
+    - provider: %s
+      materialization: placeholder-file
+      egress-hosts: [provider.example.test:443]
+    - provider: api-main
+      materialization: header-inject
+      egress-hosts: [api.example.test:443]
+`, tt.name, tt.provider))
+			home := t.TempDir()
+			command := "HOME=" + shellQuote(home) + " NVT_EGRESS_CA_INIT_BIN=" + shellQuote(caInitBin) + " MEDIATED=1 NVT_EGRESS_ALLOW_INSECURE_BROKER=1 bash " + shellQuote(filepath.Join(root, "scripts", "agent-init.sh"))
+			cmd := commandWithEnv(command, nil, "--name", tt.name, "--type", tt.typ)
+			cmd.Dir = root
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("agent-init failed: %v\n%s", err, output)
+			}
+
+			config := mustReadFile(t, filepath.Join(agentDir, "agent.yaml"))
+			for _, want := range []string{
+				"runtime:\n  command: " + tt.typ,
+				"  env:\n    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt\n    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd",
+				"  proxy:\n    provider: " + tt.provider,
+			} {
+				if !strings.Contains(config, want) {
+					t.Fatalf("agent.yaml missing %q:\n%s", want, config)
+				}
+			}
+			if strings.Contains(config, "command: env") || strings.Contains(config, "NODE_EXTRA_CA_CERTS=/nvt-egress-ca/ca.crt") {
+				t.Fatalf("agent.yaml retained an env command wrapper:\n%s", config)
 			}
 		})
 	}

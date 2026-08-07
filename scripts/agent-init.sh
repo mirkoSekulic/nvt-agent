@@ -194,6 +194,13 @@ case "$mediated" in
   compose_profiles="mediated"
   ;;
 esac
+agent_runtime_env=""
+if [ "$egress_mode" = "mediated" ]; then
+  agent_runtime_env='
+  env:
+    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt
+    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd'
+fi
 egress_allow_insecure_broker="${NVT_EGRESS_ALLOW_INSECURE_BROKER:-0}"
 
 mkdir -p "$workspace_dir" "$custom_plugins_dir" "$claude_config_dir" "$codex_config_dir" "$broker_dir"
@@ -530,7 +537,7 @@ else
 fi
 
 if [ ! -f "$agent_config_file" ]; then
-  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" AGENT_USER="$runtime_user" render_template "$templates_dir/agent.yaml" "$agent_config_file"
+  AGENT_TYPE="$agent_type" AGENT_ARGS="$runtime_args" AGENT_RUNTIME_ENV="$agent_runtime_env" AGENT_USER="$runtime_user" render_template "$templates_dir/agent.yaml" "$agent_config_file"
   echo "created $agent_config_file"
 else
   # Keep the declared runtime.user in sync when re-running with --user, without
