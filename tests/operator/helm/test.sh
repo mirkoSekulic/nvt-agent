@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.52" || "${CHART_APP_VERSION}" != "0.8.52" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.52, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.53" || "${CHART_APP_VERSION}" != "0.8.53" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.53, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.52' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.53' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -461,6 +461,7 @@ bash -n "${ROOT}/tests/operator/kind/kind-command.sh"
 bash -n "${ROOT}/tests/operator/kind/producer-kind-targets-test.sh"
 bash "${ROOT}/tests/operator/kind/smoke-scheduler-job-test.sh"
 bash "${ROOT}/tests/operator/kind/producer-kind-targets-test.sh"
+bash "${ROOT}/tests/operator/helm/credential-portal-test.sh"
 
 grep -q 'value: "80,8443"' "${EGRESS_POLICY_RENDER}" || {
   echo "chart did not render configured external TCP ports" >&2
@@ -766,6 +767,9 @@ grep -q 'resources: \["persistentvolumeclaims"\]' "${DEFAULT_RENDER}"
 require_resource_namespace "${DEFAULT_RENDER}" AgentSchedule default custom-ns
 missing_resource "${DEFAULT_RENDER}" Namespace nvt
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-agent-gateway
+missing_resource "${DEFAULT_RENDER}" Deployment nvt-credential-portal
+missing_resource "${DEFAULT_RENDER}" Service nvt-credential-portal
+missing_resource "${DEFAULT_RENDER}" Role nvt-credential-portal
 missing_resource "${DEFAULT_RENDER}" Service nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Role nvt-agent-gateway
 missing_resource "${DEFAULT_RENDER}" Deployment nvt-github-comments-producer

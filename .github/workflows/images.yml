@@ -17,6 +17,7 @@ on:
       - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
+      - "credentialportal/**"
       - "nativeegressrelay/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
@@ -42,6 +43,7 @@ on:
       - "hostbundle/**"
       - "protocol/guestenrollment/**"
       - "gateway/**"
+      - "credentialportal/**"
       - "nativeegressrelay/**"
       - "producers/github-comments/**"
       - "tests/fixtures/echo/**"
@@ -106,6 +108,9 @@ jobs:
           - name: gateway
             dockerfile: gateway/Dockerfile
             image: nvt-agent-gateway:test
+          - name: credential-portal
+            dockerfile: credentialportal/Dockerfile
+            image: nvt-credential-portal:test
           - name: native-egress-relay
             dockerfile: nativeegressrelay/Dockerfile
             image: nvt-native-egress-relay:test

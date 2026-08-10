@@ -104,6 +104,56 @@ print("OK")
 	}
 }
 
+func TestBrokerIdenticalPortalSeedMigrationPreservesRotatedCanonicalThenImportsUpdate(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import tempfile
+from pathlib import Path
+
+from broker.seed_supervisor import SeedReconciler
+
+def reconcile(reconciler):
+    actions, _ = reconciler.plan()
+    recovery = reconciler.apply(actions)
+    reconciler.accept(recovery)
+    return actions
+
+with tempfile.TemporaryDirectory() as root_name:
+    root = Path(root_name)
+    original_seed = root / "original-seed"
+    portal_seed = root / "portal-seed"
+    state = root / "state"
+    original_seed.mkdir()
+    portal_seed.mkdir()
+    state.mkdir()
+
+    initial_seed = b"identical-seed-generation-A"
+    (original_seed / "auth.json").write_bytes(initial_seed)
+    original = SeedReconciler(original_seed, state, "credentials")
+    assert [item["action"] for item in reconcile(original)] == ["import"]
+
+    canonical = state / "credentials" / "auth.json"
+    canonical.write_bytes(b"newer-broker-rotated-generation-B")
+
+    # Migration copies the existing Kubernetes seed bytes into a separately
+    # named portal-owned Secret, then changes only the projected source path.
+    (portal_seed / "auth.json").write_bytes(initial_seed)
+    portal = SeedReconciler(portal_seed, state, "credentials")
+    assert reconcile(portal) == []
+    assert canonical.read_bytes() == b"newer-broker-rotated-generation-B"
+
+    # A later intentional portal replacement changes the source digest and
+    # enters the existing atomic import/acceptance path.
+    (portal_seed / "auth.json").write_bytes(b"intentional-portal-generation-C")
+    assert [item["action"] for item in reconcile(portal)] == ["import"]
+    assert canonical.read_bytes() == b"intentional-portal-generation-C"
+
+print("OK")
+`)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("portal seed migration contract failed: %v\n%s", err, out)
+	}
+}
+
 func TestBrokerSeedValidationAndProjectedSecretUpdates(t *testing.T) {
 	out, err := runBrokerPython(t, `
 import os

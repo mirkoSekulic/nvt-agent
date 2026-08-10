@@ -156,6 +156,7 @@ jobs:
           - nvt-execution-driver-host
           - nvt-azure-execution-driver
           - nvt-agent-gateway
+          - nvt-credential-portal
           - nvt-native-egress-relay
           - nvt-github-comments-producer
     concurrency:
@@ -291,5 +292,5 @@ jobs:
           fi
 
           # The preceding jobs have verified coordinated metadata and anonymous
-          # access for all eleven images and the native host-bundle artifact.
+          # access for all twelve images and the native host-bundle artifact.
           helm push "${package}" "oci://${repository}"

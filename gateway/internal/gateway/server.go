@@ -43,9 +43,15 @@ type Config struct {
 	BrandingDir       string
 	NativeSession     NativeSessionConfig
 	NativeWorkspace   NativeWorkspaceConfig
+	CredentialPortal  CredentialPortalLinkConfig
 	basePathValue     string
 	publicOriginValue string
 	publicURLParsed   bool
+}
+
+type CredentialPortalLinkConfig struct {
+	URL   string
+	Label string
 }
 
 type RoutingConfig struct {
@@ -103,6 +109,14 @@ type OAuth2IdentityConfig struct {
 }
 
 func (c Config) Validate() error {
+	if c.CredentialPortal.URL != "" {
+		parsed, err := url.Parse(c.CredentialPortal.URL)
+		rootRelative := strings.HasPrefix(c.CredentialPortal.URL, "/") && !strings.HasPrefix(c.CredentialPortal.URL, "//") && parsed != nil && parsed.IsAbs() == false
+		absoluteHTTPS := parsed != nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+		if err != nil || (!rootRelative && !absoluteHTTPS) || parsed.RawQuery != "" || parsed.Fragment != "" || path.Clean(parsed.Path) != parsed.Path || strings.ContainsAny(c.CredentialPortal.URL, "\\\r\n") || strings.TrimSpace(c.CredentialPortal.Label) == "" || len(c.CredentialPortal.Label) > 128 {
+			return fmt.Errorf("credentialPortal link requires a canonical root-relative or absolute HTTPS URL and a bounded label")
+		}
+	}
 	if c.BrandingDir != "" && (!filepath.IsAbs(c.BrandingDir) || filepath.Clean(c.BrandingDir) != c.BrandingDir) {
 		return fmt.Errorf("brandingDir must be an absolute canonical path")
 	}
@@ -782,15 +796,17 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := dashboardTemplate.Execute(w, dashboardData{
-		Items:         items,
-		View:          view,
-		ActiveURL:     s.dashboardViewURL(dashboardViewActive),
-		AllURL:        s.dashboardViewURL(dashboardViewAll),
-		ShowLogout:    s.auth != nil,
-		LogoutPath:    s.config.mountedPath("/oauth2/logout"),
-		BrandMarkPath: s.config.mountedPath(brandMarkPath),
-		TouchIconPath: s.config.mountedPath(brandTouchIconPath),
-		FaviconPath:   s.config.mountedPath(brandFaviconPath),
+		Items:                 items,
+		View:                  view,
+		ActiveURL:             s.dashboardViewURL(dashboardViewActive),
+		AllURL:                s.dashboardViewURL(dashboardViewAll),
+		ShowLogout:            s.auth != nil,
+		LogoutPath:            s.config.mountedPath("/oauth2/logout"),
+		BrandMarkPath:         s.config.mountedPath(brandMarkPath),
+		TouchIconPath:         s.config.mountedPath(brandTouchIconPath),
+		FaviconPath:           s.config.mountedPath(brandFaviconPath),
+		CredentialPortalURL:   s.config.CredentialPortal.URL,
+		CredentialPortalLabel: s.config.CredentialPortal.Label,
 		PrincipalName: func() string {
 			if principal == nil {
 				return ""
@@ -808,16 +824,18 @@ const (
 )
 
 type dashboardData struct {
-	Items         []dashboardItem
-	View          string
-	ActiveURL     string
-	AllURL        string
-	ShowLogout    bool
-	LogoutPath    string
-	PrincipalName string
-	BrandMarkPath string
-	TouchIconPath string
-	FaviconPath   string
+	Items                 []dashboardItem
+	View                  string
+	ActiveURL             string
+	AllURL                string
+	ShowLogout            bool
+	LogoutPath            string
+	PrincipalName         string
+	BrandMarkPath         string
+	TouchIconPath         string
+	FaviconPath           string
+	CredentialPortalURL   string
+	CredentialPortalLabel string
 }
 
 type dashboardItem struct {
@@ -941,6 +959,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   <nav aria-label="AgentRun view">
     <a href="{{ .ActiveURL }}"{{ if eq .View "active" }} aria-current="page"{{ end }}>Active</a>
     <a href="{{ .AllURL }}"{{ if eq .View "all" }} aria-current="page"{{ end }}>All</a>
+	{{ if .CredentialPortalURL }}<a href="{{ .CredentialPortalURL }}">{{ .CredentialPortalLabel }}</a>{{ end }}
   </nav>
   {{ if .Items }}
   <table>

@@ -273,6 +273,7 @@ gateway:
         - openid
         - profile
       callbackPath: /oauth2/callback
+      clientAuthMethod: ""
       acrValues: ""
       validIssuer: ""
       extraAuthParams: {}
@@ -283,6 +284,7 @@ gateway:
         clientIDKey: client-id
         clientSecretKey: client-secret
       callbackPath: /oauth2/callback
+      clientAuthMethod: client_secret_post
       issuer: ""
       authorizationURL: ""
       tokenURL: ""
@@ -308,6 +310,89 @@ gateway:
   service:
     type: ClusterIP
     port: 80
+  # Optional link only. The gateway does not proxy this service, share its
+  # session, inspect enrollment state, or depend on its health.
+  credentialPortal:
+    url: ""
+    label: Manage credentials
+
+# Optional standalone self-service provider login. It patches only pre-created
+# seed Secret keys; the broker remains the sole owner of writable canonical
+# credentials and refresh. Credential values must never be placed here.
+credentialPortal:
+  enabled: false
+  image:
+    repository: ghcr.io/mirkosekulic/nvt-credential-portal
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicas: 1
+  publicURL: ""
+  port: 8080
+  maxUploadBytes: 1048576
+  enrollment:
+    maxSessions: 64
+    maxConcurrent: 2
+    timeoutSeconds: 600
+    maxOutputBytes: 65536
+    # Codex's official device flow may require an account security setting and
+    # lacks completed real-account E2E proof for this service.
+    experimentalCodexDeviceAuth: false
+  # Secondary administrator recovery only. Provider Connect/Reconnect is the
+  # normal flow; enabling this exposes bounded raw credential-file upload.
+  recoveryUpload:
+    enabled: false
+  auth:
+    mode: oidc
+    session:
+      existingSecret: ""
+      secretKey: session-secret
+      cookieName: nvt_credential_portal
+      maxAgeSeconds: 3600
+      secure: true
+    oidc:
+      issuerURL: ""
+      clientID: ""
+      clientSecret:
+        existingSecret: ""
+        secretKey: client-secret
+      scopes:
+        - openid
+        - profile
+      callbackPath: /oauth2/callback
+    oauth2:
+      credentials:
+        existingSecret: ""
+        clientIDKey: client-id
+        clientSecretKey: client-secret
+      issuer: ""
+      authorizationURL: ""
+      tokenURL: ""
+      scopes: []
+      callbackPath: /oauth2/callback
+      identity:
+        endpoint: ""
+        allowedHosts: []
+        subjectPath: ""
+        displayNamePath: ""
+  # Every slot binds one exact issuer+subject owner to one adapter and one
+  # pre-created broker seed Secret key. Display names are presentation only.
+  slots: []
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 512Mi
+  networkPolicy:
+    enabled: true
+    # Kubernetes API and identity-provider HTTPS destination ports. Add a
+    # nonstandard configured HTTPS port explicitly.
+    egressTCPPorts:
+      - 443
 
 agentSchedule:
   enabled: true

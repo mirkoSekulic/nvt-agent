@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.52`; otherwise the API server may prune the
+of, upgrading to chart `0.8.53`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.52 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.53 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.52 --namespace nvt --create-namespace
+  --version 0.8.53 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -421,7 +421,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. External drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.52`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.53`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
@@ -837,6 +837,31 @@ See [Transparent mediated egress](../../docs/transparent-egress-architecture.md)
 for trust boundaries and traffic behavior.
 
 ## Gateway
+
+### Optional credential portal
+
+The chart can deploy the disabled-by-default standalone
+`nvt-credential-portal`. It provides authenticated, owner-bound Codex and Claude
+Connect/Reconnect flows through the official CLIs and writes their validated
+credential documents into a pre-created broker seed Secret. It never reads
+current values or participates in refresh/injection. A raw file recovery path
+is separately administrator-enabled and disabled by default. See
+[`docs/credential-portal.md`](https://github.com/mirkoSekulic/nvt-agent/blob/main/docs/credential-portal.md) for the security
+boundary, slot configuration, migration procedure, and removal behavior.
+
+The provider CLIs run in a separate tokenless sidecar. Only the portal
+container receives a manually projected Kubernetes API token; the runner gets
+no portal Secret environment or Kubernetes credential. Codex device
+authorization is experimental, separately gated, and not production-ready
+without the real-account proof described in the portal documentation.
+Generated results remain retrievable until the portal acknowledges a successful
+exact Secret patch; cancellation and bounded expiry wipe retained bytes and
+reclaim runner capacity. Portal readiness includes an authenticated runner
+dependency check but makes no provider-credential health claim.
+
+`gateway.credentialPortal.url` adds only a dashboard link. The gateway does not
+proxy the portal, share authentication state, or depend on its availability.
+Portal identity login and provider authorization use separate sessions.
 
 Enable the optional gateway to list and route browser sessions:
 
