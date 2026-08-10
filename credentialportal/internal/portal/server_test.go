@@ -219,7 +219,7 @@ func TestEnrollmentBindsPrincipalSlotAndDestinationAndDoesNotLeak(t *testing.T) 
 }
 
 func TestDashboardListsOnlyOwnedSlotsAndNeverExistingValueOrHealth(t *testing.T) {
-	server, cookie, _ := authenticatedServer(
+	server, cookie, csrf := authenticatedServer(
 		t,
 		Principal{Issuer: testIdentityIssuer, Subject: testAliceSubject, DisplayName: testAliceLabel},
 		&memoryPatcher{value: []byte("existing-value")},
@@ -229,6 +229,8 @@ func TestDashboardListsOnlyOwnedSlotsAndNeverExistingValueOrHealth(t *testing.T)
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, testAliceLabel) ||
 		!strings.Contains(response.Header().Get("Content-Security-Policy"), "connect-src 'self'") ||
+		!strings.Contains(body, `const csrf="`+csrf+`",base="/agents/credentials"`) ||
+		strings.Contains(body, `base="\"/agents/credentials\""`) ||
 		!strings.Contains(body, "Connect / reconnect") ||
 		!strings.Contains(body, "experimental device login") ||
 		strings.Contains(body, "Bob") ||
