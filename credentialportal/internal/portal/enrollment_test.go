@@ -202,6 +202,18 @@ func TestDefaultCommandAdaptersPinOfficialInvocationAndCredentialDiscovery(t *te
 	}
 }
 
+func TestCodexDeviceActionRecognizesANSIColoredHandoff(t *testing.T) {
+	output := []byte(
+		"Open \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m and enter " +
+			"\x1b[94mABCD-EFGHI\x1b[0m",
+	)
+	action, found, err := defaultEnrollmentAdapters()[AdapterCodexOAuthFile].action(output)
+	if err != nil || !found || action.AuthorizationURL != fakeCodexDeviceURL ||
+		action.UserCode != "ABCD-EFGHI" || action.NeedsCode {
+		t.Fatal("ANSI-colored Codex handoff was not recognized")
+	}
+}
+
 //nolint:gocyclo // This conformance test covers initial Connect and unconditional Reconnect in one lifecycle.
 func TestCodexConnectBindsSlotPatchesValidatedFileAndCleansUp(t *testing.T) {
 	t.Setenv("NVT_CREDENTIAL_PORTAL_SESSION_SECRET", "portal-session-secret-canary")
