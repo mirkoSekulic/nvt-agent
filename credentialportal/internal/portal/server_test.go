@@ -231,6 +231,11 @@ func TestDashboardListsOnlyOwnedSlotsAndNeverExistingValueOrHealth(t *testing.T)
 		!strings.Contains(response.Header().Get("Content-Security-Policy"), "connect-src 'self'") ||
 		!strings.Contains(body, `const csrf="`+csrf+`",base="/agents/credentials"`) ||
 		strings.Contains(body, `base="\"/agents/credentials\""`) ||
+		!strings.Contains(body, "Option 1: Sign in with provider") ||
+		!strings.Contains(body, "Option 2: Upload an existing credential file") ||
+		!strings.Contains(body, "Use this instead of provider sign-in") ||
+		!strings.Contains(body, "function setText(element,value)") ||
+		!strings.Contains(body, "setText(document.getElementById('device')") ||
 		!strings.Contains(body, "Connect / reconnect") ||
 		!strings.Contains(body, "experimental device login") ||
 		strings.Contains(body, "Bob") ||
@@ -273,7 +278,7 @@ func TestRecoveryUploadIsDisabledAndHiddenUnlessExplicitlyEnabled(t *testing.T) 
 	)
 	server.cfg.RecoveryUpload.Enabled = false
 	dashboard := request(t, server, cookie, "", http.MethodGet, "/agents/credentials/", "", nil)
-	if strings.Contains(dashboard.Body.String(), "Administrator recovery upload") ||
+	if strings.Contains(dashboard.Body.String(), "Option 2: Upload an existing credential file") ||
 		strings.Contains(dashboard.Body.String(), `id="credential"`) {
 		t.Fatal("disabled recovery upload appeared on the dashboard")
 	}
