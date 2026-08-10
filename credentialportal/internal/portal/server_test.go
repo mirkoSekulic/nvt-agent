@@ -41,6 +41,23 @@ type memoryPatcher struct {
 	calls     int
 }
 
+type readinessTestRunner struct {
+	err error
+}
+
+func (r *readinessTestRunner) Run(
+	_ context.Context,
+	_, _ string,
+	_ <-chan string,
+	_ func(providerAction),
+) ([]byte, string) {
+	return nil, reasonRunnerUnavailable
+}
+
+func (r *readinessTestRunner) Acknowledge(_ context.Context, _ string) error { return nil }
+func (r *readinessTestRunner) Cancel(_ context.Context, _ string) error      { return nil }
+func (r *readinessTestRunner) Ready(_ context.Context) error                 { return r.err }
+
 func (p *memoryPatcher) Patch(_ context.Context, namespace, name, key string, value []byte) error {
 	p.calls++
 	if p.err != nil {
@@ -217,6 +234,30 @@ func TestDashboardListsOnlyOwnedSlotsAndNeverExistingValueOrHealth(t *testing.T)
 		strings.Contains(body, "existing-value") ||
 		strings.Contains(strings.ToLower(body), "credential is healthy") {
 		t.Fatalf("owner-filtered dashboard failed with status %d", response.Code)
+	}
+}
+
+func TestPortalReadinessRequiresAuthenticatedRunnerDependency(t *testing.T) {
+	server, _, _ := authenticatedServer(
+		t,
+		Principal{Issuer: testIdentityIssuer, Subject: testAliceSubject},
+		&memoryPatcher{},
+		&bytes.Buffer{},
+	)
+	defer server.Close()
+	runner := &readinessTestRunner{err: errTestAPI}
+	server.runner = runner
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://portal.example/readyz", nil)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), errTestAPI.Error()) {
+		t.Fatal("portal readiness did not fail closed and sanitize runner failure")
+	}
+	runner.err = nil
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatal("portal readiness rejected a healthy runner")
 	}
 }
 

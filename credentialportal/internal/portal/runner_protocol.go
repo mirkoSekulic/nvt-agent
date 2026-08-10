@@ -30,6 +30,7 @@ const (
 	runnerStatusRunning     = "running"
 	runnerStatusSuccess     = "success"
 	runnerStatusFailure     = "failure"
+	runnerStatusReady       = "ready"
 	runnerMaxClockSkew      = 30 * time.Second
 	runnerMaxRequestBytes   = 12 * 1024
 	runnerPollInterval      = 20 * time.Millisecond
@@ -76,6 +77,8 @@ type runnerSession struct {
 	status           string
 	needsCode        bool
 	codeUsed         bool
+	expiresAt        time.Time
+	timer            *time.Timer
 }
 
 //nolint:govet // Keeping dependencies, state maps, and synchronization grouped makes the boundary auditable.
@@ -84,6 +87,7 @@ type RunnerServer struct {
 	key       []byte
 	sessions  map[string]*runnerSession
 	seenIDs   map[string]time.Time
+	ackedIDs  map[string]time.Time
 	nonces    map[string]time.Time
 	semaphore chan struct{}
 	config    EnrollmentConfig
@@ -111,7 +115,8 @@ func NewRunnerServer(key []byte, config EnrollmentConfig, runner CredentialRunne
 
 	return &RunnerServer{
 		runner: runner, key: bytes.Clone(key), config: config, now: time.Now,
-		sessions: map[string]*runnerSession{}, seenIDs: map[string]time.Time{}, nonces: map[string]time.Time{},
+		sessions: map[string]*runnerSession{}, seenIDs: map[string]time.Time{}, ackedIDs: map[string]time.Time{},
+		nonces:    map[string]time.Time{},
 		semaphore: make(chan struct{}, config.MaxConcurrent),
 	}, nil
 }
@@ -142,6 +147,7 @@ func (c *HTTPRunnerClient) Run(
 	}
 	start := runnerStartRequest{Adapter: adapter, ExpiresAt: deadline.Unix()}
 	if _, err := c.request(ctx, http.MethodPost, "/v1/sessions/"+sessionID, start); err != nil {
+		c.cancelRemote(ctx, sessionID)
 		return nil, reasonRunnerUnavailable
 	}
 	ticker := time.NewTicker(runnerPollInterval)
@@ -150,10 +156,7 @@ func (c *HTTPRunnerClient) Run(
 	for {
 		select {
 		case <-ctx.Done():
-			cancelContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-			_, cancelErr := c.request(cancelContext, http.MethodDelete, "/v1/sessions/"+sessionID, nil)
-			ignoreCleanupError(cancelErr)
-			cancel()
+			c.cancelRemote(ctx, sessionID)
 			return nil, reasonTimeout
 		case providedCode := <-code:
 			_, err := c.request(
@@ -164,11 +167,13 @@ func (c *HTTPRunnerClient) Run(
 			)
 			clearString(&providedCode)
 			if err != nil {
+				c.cancelRemote(ctx, sessionID)
 				return nil, reasonRunnerUnavailable
 			}
 		case <-ticker.C:
 			response, err := c.request(ctx, http.MethodGet, "/v1/sessions/"+sessionID, nil)
 			if err != nil {
+				c.cancelRemote(ctx, sessionID)
 				return nil, reasonRunnerUnavailable
 			}
 			switch response.Status {
@@ -184,13 +189,57 @@ func (c *HTTPRunnerClient) Run(
 			case runnerStatusSuccess:
 				return response.Document, ""
 			case runnerStatusFailure:
+				c.cancelRemote(ctx, sessionID)
 				return nil, response.Reason
 			default:
 				clearBytes(response.Document)
+				c.cancelRemote(ctx, sessionID)
 				return nil, reasonRunnerUnavailable
 			}
 		}
 	}
+}
+
+func (c *HTTPRunnerClient) Acknowledge(ctx context.Context, sessionID string) error {
+	var lastErr error
+	for range 3 {
+		_, err := c.request(ctx, http.MethodPost, "/v1/sessions/"+sessionID+"/ack", nil)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("acknowledge runner result: %w", ctx.Err())
+		case <-time.After(runnerPollInterval):
+		}
+	}
+
+	return lastErr
+}
+
+func (c *HTTPRunnerClient) Cancel(ctx context.Context, sessionID string) error {
+	_, err := c.request(ctx, http.MethodDelete, "/v1/sessions/"+sessionID, nil)
+
+	return err
+}
+
+func (c *HTTPRunnerClient) Ready(ctx context.Context) error {
+	response, err := c.request(ctx, http.MethodGet, "/readyz", nil)
+	if err != nil {
+		return err
+	}
+	if response.Status != runnerStatusReady {
+		return errRunnerRequestRejected
+	}
+
+	return nil
+}
+
+func (c *HTTPRunnerClient) cancelRemote(ctx context.Context, sessionID string) {
+	cancelContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	ignoreCleanupError(c.Cancel(cancelContext, sessionID))
+	cancel()
 }
 
 func (c *HTTPRunnerClient) request(
@@ -248,10 +297,14 @@ func (c *HTTPRunnerClient) request(
 	return result, nil
 }
 
-//nolint:gocyclo // Central routing keeps authentication and the four fixed protocol operations in one fail-closed gate.
+//nolint:cyclop,gocyclo // Central routing keeps authentication and the fixed protocol operations in one fail-closed gate.
 func (s *RunnerServer) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", jsonContentType)
 	response.Header().Set("X-Content-Type-Options", "nosniff")
+	if request.URL.RawQuery != "" {
+		http.NotFound(response, request)
+		return
+	}
 	if request.URL.Path == "/healthz" && request.Method == http.MethodGet {
 		response.WriteHeader(http.StatusOK)
 		return
@@ -263,6 +316,10 @@ func (s *RunnerServer) ServeHTTP(response http.ResponseWriter, request *http.Req
 	defer clearBytes(body)
 	if !s.authenticate(request, body) {
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if request.URL.Path == "/readyz" && request.Method == http.MethodGet && request.URL.RawQuery == "" {
+		writeRunnerJSON(response, http.StatusOK, runnerResponse{Status: runnerStatusReady})
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/v1/sessions/"), "/")
@@ -280,6 +337,8 @@ func (s *RunnerServer) ServeHTTP(response http.ResponseWriter, request *http.Req
 		s.cancel(response, parts[0])
 	case len(parts) == 2 && parts[1] == "code" && request.Method == http.MethodPost:
 		s.provideCode(response, parts[0], body)
+	case len(parts) == 2 && parts[1] == "ack" && request.Method == http.MethodPost:
+		s.acknowledge(response, parts[0])
 	default:
 		http.NotFound(response, request)
 	}
@@ -308,6 +367,7 @@ func (s *RunnerServer) start(baseContext context.Context, response http.Response
 	ctx, cancel := context.WithDeadline(baseContext, requestedDeadline)
 	session := &runnerSession{
 		cancel: cancel, code: make(chan string, 1), done: make(chan struct{}), status: runnerStatusRunning,
+		expiresAt: requestedDeadline,
 	}
 	s.mu.Lock()
 	s.pruneLocked(now)
@@ -318,9 +378,10 @@ func (s *RunnerServer) start(baseContext context.Context, response http.Response
 		http.Error(response, "rejected", http.StatusConflict)
 		return
 	}
-	s.seenIDs[id] = maximumDeadline.Add(runnerMaxClockSkew)
+	s.seenIDs[id] = requestedDeadline.Add(runnerMaxClockSkew)
 	s.sessions[id] = session
 	s.wg.Add(1)
+	session.timer = time.AfterFunc(time.Until(requestedDeadline), func() { s.expire(id, session) })
 	s.mu.Unlock()
 	go func() {
 		defer s.wg.Done()
@@ -336,6 +397,13 @@ func (s *RunnerServer) Close() {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
+	s.mu.Lock()
+	for id, session := range s.sessions {
+		s.removeSessionLocked(id, session)
+	}
+	clearBytes(s.key)
+	s.key = nil
+	s.mu.Unlock()
 }
 
 func (s *RunnerServer) run(ctx context.Context, id, adapter string, session *runnerSession) {
@@ -370,17 +438,18 @@ func (s *RunnerServer) status(response http.ResponseWriter, id string) {
 		http.NotFound(response, nil)
 		return
 	}
+	if !session.expiresAt.After(s.now()) {
+		s.mu.Unlock()
+		s.expire(id, session)
+		http.NotFound(response, nil)
+		return
+	}
 	result := runnerResponse{
 		Status: session.status, AuthorizationURL: session.authorizationURL, UserCode: session.userCode,
 		NeedsCode: session.needsCode, Reason: session.reason,
 	}
-	switch session.status {
-	case runnerStatusSuccess:
+	if session.status == runnerStatusSuccess {
 		result.Document = bytes.Clone(session.document)
-		clearBytes(session.document)
-		delete(s.sessions, id)
-	case runnerStatusFailure:
-		delete(s.sessions, id)
 	}
 	s.mu.Unlock()
 	defer clearBytes(result.Document)
@@ -420,7 +489,53 @@ func (s *RunnerServer) cancel(response http.ResponseWriter, id string) {
 		return
 	}
 	<-session.done
+	s.mu.Lock()
+	if current, exists := s.sessions[id]; exists && current == session {
+		s.removeSessionLocked(id, session)
+	}
+	s.mu.Unlock()
 	writeRunnerJSON(response, http.StatusOK, runnerResponse{Status: runnerStatusRunning})
+}
+
+func (s *RunnerServer) acknowledge(response http.ResponseWriter, id string) {
+	now := s.now()
+	s.mu.Lock()
+	s.pruneLocked(now)
+	if expiry, ok := s.ackedIDs[id]; ok && expiry.After(now) {
+		s.mu.Unlock()
+		writeRunnerJSON(response, http.StatusOK, runnerResponse{Status: runnerStatusSuccess})
+		return
+	}
+	session, ok := s.sessions[id]
+	if !ok || session.status != runnerStatusSuccess || !session.expiresAt.After(now) {
+		s.mu.Unlock()
+		http.Error(response, "rejected", http.StatusConflict)
+		return
+	}
+	expiry := session.expiresAt.Add(runnerMaxClockSkew)
+	s.removeSessionLocked(id, session)
+	s.ackedIDs[id] = expiry
+	s.mu.Unlock()
+	writeRunnerJSON(response, http.StatusOK, runnerResponse{Status: runnerStatusSuccess})
+}
+
+func (s *RunnerServer) expire(id string, session *runnerSession) {
+	session.cancel()
+	<-session.done
+	s.mu.Lock()
+	if current, ok := s.sessions[id]; ok && current == session {
+		s.removeSessionLocked(id, session)
+	}
+	s.mu.Unlock()
+}
+
+func (s *RunnerServer) removeSessionLocked(id string, session *runnerSession) {
+	if session.timer != nil {
+		session.timer.Stop()
+	}
+	clearBytes(session.document)
+	session.document = nil
+	delete(s.sessions, id)
 }
 
 func (s *RunnerServer) authenticate(request *http.Request, body []byte) bool {
@@ -467,6 +582,11 @@ func (s *RunnerServer) pruneLocked(now time.Time) {
 	for id, expiry := range s.seenIDs {
 		if !expiry.After(now) {
 			delete(s.seenIDs, id)
+		}
+	}
+	for id, expiry := range s.ackedIDs {
+		if !expiry.After(now) {
+			delete(s.ackedIDs, id)
 		}
 	}
 }

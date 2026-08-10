@@ -2,6 +2,7 @@ package portal
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ type Server struct {
 	auth        *Authenticator
 	audit       *AuditLogger
 	enrollments *EnrollmentManager
+	runner      CredentialRunner
 	cfg         Config
 }
 
@@ -29,7 +31,7 @@ func NewServer(
 	runner CredentialRunner,
 ) *Server {
 	return &Server{
-		cfg: cfg, auth: auth, patcher: patcher, audit: audit,
+		cfg: cfg, auth: auth, patcher: patcher, audit: audit, runner: runner,
 		enrollments: NewEnrollmentManager(cfg, patcher, audit, runner),
 	}
 }
@@ -59,6 +61,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/readyz":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.runner.Ready(ctx); err != nil {
+			http.Error(w, "dependency unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

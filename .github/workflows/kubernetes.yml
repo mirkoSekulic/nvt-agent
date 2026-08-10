@@ -87,7 +87,10 @@ jobs:
           go test -race -count=1 ./...
 
   credential-portal:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -101,6 +104,7 @@ jobs:
         run: |
           go vet ./...
           go test -race -count=1 ./...
+          go test -race -count=10 -run 'TestEnrollmentRejectsCrossOwnerStatusCodeAndCancellation|TestEnrollmentTimeoutAuthExpiryAndLogoutCancellation' ./internal/portal
 
   producer:
     runs-on: ubuntu-latest

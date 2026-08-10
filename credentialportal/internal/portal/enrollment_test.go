@@ -3,6 +3,7 @@ package portal
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -13,11 +14,35 @@ import (
 	"time"
 )
 
+type inProcessBlockingRunner struct{}
+
+func (r inProcessBlockingRunner) Run(
+	ctx context.Context,
+	_, adapter string,
+	_ <-chan string,
+	publish func(providerAction),
+) ([]byte, string) {
+	if adapter == AdapterClaudeOAuthFile {
+		publish(providerAction{AuthorizationURL: "https://claude.com/cai/oauth/authorize", NeedsCode: true})
+	} else {
+		publish(providerAction{AuthorizationURL: fakeCodexDeviceURL, UserCode: fakeDeviceCode})
+	}
+	<-ctx.Done()
+
+	return nil, reasonTimeout
+}
+
+func (r inProcessBlockingRunner) Acknowledge(_ context.Context, _ string) error { return nil }
+func (r inProcessBlockingRunner) Cancel(_ context.Context, _ string) error      { return nil }
+func (r inProcessBlockingRunner) Ready(_ context.Context) error                 { return nil }
+
 const (
-	fakeCLIAccess     = "fake-cli-access-must-not-leak"
-	fakeCLIRefresh    = "fake-cli-refresh-must-not-leak"
-	scenarioSymlink   = "symlink"
-	scenarioMalformed = "malformed"
+	fakeCLIAccess      = "fake-cli-access-must-not-leak"
+	fakeCLIRefresh     = "fake-cli-refresh-must-not-leak"
+	scenarioSymlink    = "symlink"
+	scenarioMalformed  = "malformed"
+	fakeDeviceCode     = "ABCD-EFGH"
+	fakeCodexDeviceURL = "https://auth.openai.com/codex/device"
 )
 
 //nolint:gocyclo // One subprocess fixture models every bounded CLI outcome used by conformance tests.
@@ -46,9 +71,9 @@ func TestEnrollmentCLIHelper(t *testing.T) {
 	}
 	switch scenario {
 	case "codex-success", scenarioSymlink:
-		fakeCLIPrint("Open https://auth.openai.com/codex/device and enter ABCD-EFGH")
+		fakeCLIPrint("Open " + fakeCodexDeviceURL + " and enter " + fakeDeviceCode)
 	case scenarioMalformed:
-		fakeCLIPrint("Open https://untrusted.example/device and enter ABCD-EFGH")
+		fakeCLIPrint("Open https://untrusted.example/device and enter " + fakeDeviceCode)
 	case "claude-success":
 		fakeCLIPrint("Open https://claude.com/cai/oauth/authorize?state=fake-state")
 		fakeCLIPrint("Paste code here if prompted")
@@ -57,14 +82,14 @@ func TestEnrollmentCLIHelper(t *testing.T) {
 			os.Exit(9)
 		}
 	case testOversized:
-		fakeCLIPrint("Open https://auth.openai.com/codex/device and enter ABCD-EFGH")
+		fakeCLIPrint("Open " + fakeCodexDeviceURL + " and enter " + fakeDeviceCode)
 		fakeCLIPrint(strings.Repeat("x", 8192))
 		select {}
 	case reasonTimeout:
 		if kind == claudeCommand {
 			fakeCLIPrint("Open https://claude.com/cai/oauth/authorize?state=fake-state")
 		} else {
-			fakeCLIPrint("Open https://auth.openai.com/codex/device and enter ABCD-EFGH")
+			fakeCLIPrint("Open " + fakeCodexDeviceURL + " and enter " + fakeDeviceCode)
 		}
 		select {}
 	case "failure":
@@ -126,6 +151,20 @@ func fakeEnrollmentManager(
 	return manager, patcher, audit, root
 }
 
+func blockingEnrollmentManager(t *testing.T) (*EnrollmentManager, *memoryPatcher) {
+	t.Helper()
+	cfg := testConfig()
+	patcher := &memoryPatcher{value: []byte("old-secret")}
+	manager := NewEnrollmentManager(
+		cfg,
+		patcher,
+		NewAuditLogger(&bytes.Buffer{}),
+		inProcessBlockingRunner{},
+	)
+
+	return manager, patcher
+}
+
 func waitEnrollmentStatus(
 	t *testing.T,
 	manager *EnrollmentManager,
@@ -178,7 +217,7 @@ func TestCodexConnectBindsSlotPatchesValidatedFileAndCleansUp(t *testing.T) {
 	}
 	action := waitEnrollmentStatus(t, manager, principal, status.ID, enrollmentActionRequired, enrollmentSucceeded)
 	if action.Status == enrollmentActionRequired &&
-		(action.AuthorizationURL != "https://auth.openai.com/codex/device" || action.UserCode != "ABCD-EFGH" || action.NeedsCode) {
+		(action.AuthorizationURL != fakeCodexDeviceURL || action.UserCode != fakeDeviceCode || action.NeedsCode) {
 		t.Fatal("unexpected Codex authorization handoff")
 	}
 	completed := waitEnrollmentStatus(t, manager, principal, status.ID, enrollmentSucceeded)
@@ -240,10 +279,7 @@ func TestClaudeConnectAcceptsOneCodeAndRejectsReplay(t *testing.T) {
 }
 
 func TestEnrollmentRejectsCrossOwnerStatusCodeAndCancellation(t *testing.T) {
-	manager, patcher, audit, root := fakeEnrollmentManager(t, AdapterClaudeOAuthFile, reasonTimeout)
-	if patcher == nil || audit == nil || root == "" {
-		t.Fatal("invalid fake enrollment manager")
-	}
+	manager, _ := blockingEnrollmentManager(t)
 	defer manager.Close()
 	owner := Principal{Issuer: testIdentityIssuer, Subject: testBobSubject}
 	other := Principal{Issuer: testIdentityIssuer, Subject: testAliceSubject}
@@ -276,7 +312,7 @@ func TestEnrollmentFailuresStaySanitizedAndPreserveSecret(t *testing.T) {
 		{scenarioMalformed, scenarioMalformed, reasonMalformedOutput, false},
 		{testOversized, testOversized, "output-too-large", false},
 		{scenarioSymlink, scenarioSymlink, reasonCredentialUnsafe, false},
-		{"Secret patch", "codex-success", "secret-update-failed", true},
+		{"Secret patch", "codex-success", reasonSecretUpdateFailed, true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -311,10 +347,7 @@ func TestEnrollmentFailuresStaySanitizedAndPreserveSecret(t *testing.T) {
 }
 
 func TestEnrollmentTimeoutAuthExpiryAndLogoutCancellation(t *testing.T) {
-	manager, patcher, audit, root := fakeEnrollmentManager(t, AdapterCodexOAuthFile, reasonTimeout)
-	if audit == nil || root == "" {
-		t.Fatal("invalid fake enrollment manager")
-	}
+	manager, patcher := blockingEnrollmentManager(t)
 	manager.config.TimeoutSeconds = 1
 	defer manager.Close()
 	principal := Principal{Issuer: testIdentityIssuer, Subject: testAliceSubject}
@@ -341,5 +374,42 @@ func TestEnrollmentTimeoutAuthExpiryAndLogoutCancellation(t *testing.T) {
 	waitEnrollmentStatus(t, manager, principal, second.ID, enrollmentCancelled)
 	if patcher.calls != 0 {
 		t.Fatal("timeout or logout cancellation patched a Secret")
+	}
+}
+
+func TestCLICredentialRunnerCancellationStopsProcessAndCleansHome(t *testing.T) {
+	cfg := testConfig()
+	runner := NewCLICredentialRunner(cfg.Enrollment)
+	root := t.TempDir()
+	runner.tempRoot = root
+	adapter := runner.adapters[AdapterCodexOAuthFile]
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.Command = executable
+	adapter.Args = []string{"-test.run=^TestEnrollmentCLIHelper$"}
+	adapter.Environment = []string{
+		"NVT_FAKE_CLI_SCENARIO=" + reasonTimeout,
+		"NVT_FAKE_CREDENTIAL_KIND=" + codexCommand,
+	}
+	runner.adapters[AdapterCodexOAuthFile] = adapter
+	ctx, cancel := context.WithCancel(t.Context())
+	actionSeen := make(chan struct{})
+	done := make(chan string, 1)
+	go func() {
+		_, reason := runner.Run(ctx, "pty-cancel-test", AdapterCodexOAuthFile, nil, func(providerAction) {
+			close(actionSeen)
+		})
+		done <- reason
+	}()
+	<-actionSeen
+	cancel()
+	if reason := <-done; reason != reasonTimeout {
+		t.Fatalf("cancelled PTY returned reason %q", reason)
+	}
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatal("cancelled PTY runner left its temporary home")
 	}
 }

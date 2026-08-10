@@ -34,8 +34,9 @@ const (
 	reasonProcessFailed      = "process-failed"
 	reasonMalformedOutput    = "malformed-cli-output"
 	//nolint:gosec // This is a fixed non-secret audit reason, not credential material.
-	reasonCredentialUnsafe = "credential-unsafe"
-	reasonTimeout          = "timeout"
+	reasonCredentialUnsafe   = "credential-unsafe"
+	reasonTimeout            = "timeout"
+	reasonSecretUpdateFailed = "secret-update-failed"
 )
 
 var (
@@ -98,6 +99,9 @@ type CredentialRunner interface {
 		code <-chan string,
 		publish func(providerAction),
 	) ([]byte, string)
+	Acknowledge(ctx context.Context, sessionID string) error
+	Cancel(ctx context.Context, sessionID string) error
+	Ready(ctx context.Context) error
 }
 
 //nolint:govet // Adapter, limits, and temp-root grouping keeps the trusted runner configuration easy to audit.
@@ -290,6 +294,7 @@ func (m *EnrollmentManager) cancelLocked(session *enrollmentSession, reason stri
 	session.Cancel()
 }
 
+//nolint:nestif // Validation, exact patching, acknowledgment, and cleanup form one ordered fail-closed transition.
 func (m *EnrollmentManager) run(ctx context.Context, session *enrollmentSession) {
 	document, reason := m.runner.Run(ctx, session.ID, session.Slot.Adapter, session.Code, func(action providerAction) {
 		m.publishAction(session, action)
@@ -314,8 +319,20 @@ func (m *EnrollmentManager) run(ctx context.Context, session *enrollmentSession)
 			session.Slot.DataKey,
 			document,
 		); err != nil {
-			status, reason = enrollmentFailed, "secret-update-failed"
+			status, reason = enrollmentFailed, reasonSecretUpdateFailed
+		} else {
+			ackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			ackErr := m.runner.Acknowledge(ackContext, session.ID)
+			cancel()
+			if ackErr != nil {
+				status, reason = enrollmentFailed, "runner-acknowledgment-failed"
+			}
 		}
+	}
+	if status != enrollmentSucceeded {
+		cancelContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		ignoreCleanupError(m.runner.Cancel(cancelContext, session.ID))
+		cancel()
 	}
 	// Capacity is available before the terminal state becomes observable. This
 	// makes terminal status imply that process teardown and cleanup completed.
@@ -326,6 +343,10 @@ func (m *EnrollmentManager) run(ctx context.Context, session *enrollmentSession)
 func NewCLICredentialRunner(config EnrollmentConfig) *CLICredentialRunner {
 	return &CLICredentialRunner{adapters: defaultEnrollmentAdapters(), config: config}
 }
+
+func (r *CLICredentialRunner) Acknowledge(_ context.Context, _ string) error { return nil }
+func (r *CLICredentialRunner) Cancel(_ context.Context, _ string) error      { return nil }
+func (r *CLICredentialRunner) Ready(_ context.Context) error                 { return nil }
 
 func (r *CLICredentialRunner) Run(
 	ctx context.Context,
