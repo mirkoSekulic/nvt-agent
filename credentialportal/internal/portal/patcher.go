@@ -3,6 +3,7 @@ package portal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 
@@ -11,7 +12,7 @@ import (
 )
 
 type SecretPatcher interface {
-	Patch(context.Context, string, string, string, []byte) error
+	Patch(ctx context.Context, namespace, name, key string, credential []byte) error
 }
 
 type KubernetesSecretPatcher struct{ Client rest.Interface }
@@ -26,7 +27,7 @@ func (p KubernetesSecretPatcher) Patch(ctx context.Context, namespace, name, key
 	}}
 	body, err := json.Marshal(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode Secret patch: %w", err)
 	}
 	defer func() {
 		for index := range body {
@@ -42,9 +43,8 @@ func (p KubernetesSecretPatcher) Patch(ctx context.Context, namespace, name, key
 		Body(body).
 		Stream(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("patch Secret: %w", err)
 	}
-	defer response.Close()
 	buffer := make([]byte, 32*1024)
 	defer func() {
 		for index := range buffer {
@@ -52,7 +52,14 @@ func (p KubernetesSecretPatcher) Patch(ctx context.Context, namespace, name, key
 		}
 		buffer = nil
 	}()
-	_, _ = io.CopyBuffer(io.Discard, io.LimitReader(response, 2*1024*1024), buffer)
+	_, copyErr := io.CopyBuffer(io.Discard, io.LimitReader(response, 2*1024*1024), buffer)
+	closeErr := response.Close()
+	if copyErr != nil {
+		return fmt.Errorf("discard Secret patch response: %w", copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close Secret patch response: %w", closeErr)
+	}
 	return nil
 }
 
