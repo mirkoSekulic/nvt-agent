@@ -854,6 +854,10 @@ container receives a manually projected Kubernetes API token; the runner gets
 no portal Secret environment or Kubernetes credential. Codex device
 authorization is experimental, separately gated, and not production-ready
 without the real-account proof described in the portal documentation.
+Generated results remain retrievable until the portal acknowledges a successful
+exact Secret patch; cancellation and bounded expiry wipe retained bytes and
+reclaim runner capacity. Portal readiness includes an authenticated runner
+dependency check but makes no provider-credential health claim.
 
 `gateway.credentialPortal.url` adds only a dashboard link. The gateway does not
 proxy the portal, share authentication state, or depend on its availability.

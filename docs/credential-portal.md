@@ -54,10 +54,12 @@ client Secret environment, or Kubernetes/workload credential. The containers
 communicate only on pod localhost using a per-pod random key generated into
 memory-backed storage. Every bounded protocol request has an HMAC, timestamp,
 and unique replay-rejected nonce; enrollment identifiers are opaque and
-single-use. The runner can invoke only compiled-in adapters and returns a
-generated document to the portal once. It cannot select or see a Secret
-destination or patch Kubernetes. The portal validates the document and performs
-the exact slot-bound patch.
+single-use. The runner can invoke only compiled-in adapters. It cannot select or
+see a Secret destination or patch Kubernetes. A completed document remains
+retrievable over the authenticated protocol until the portal validates it,
+successfully patches the exact slot-bound Secret key, and sends an explicit
+idempotent acknowledgment. A reset response can therefore be fetched again
+without starting another provider login.
 
 Portal login and provider authorization are separate sessions and callback
 paths. Each in-memory enrollment session binds the authenticated principal,
@@ -74,8 +76,13 @@ files are accepted only at the adapter's fixed path, must be regular bounded
 files, and are validated before patch. The temporary home is removed before the
 Secret is changed, and in-memory credential bytes are cleared as practical.
 Logout, timeout, cancellation, and shutdown terminate unfinished enrollment
-processes. The portal ServiceAccount still has only the configured Secret
-`patch` permission and has no workload-creation permission.
+processes. Cancellation removes the runner session after subprocess cleanup and
+immediately reclaims capacity. Every session has the same bounded enrollment
+expiry even after CLI success; an unacknowledged or abandoned result is wiped
+and removed at expiry. Validation or Secret-patch failure triggers best-effort
+remote cancellation and wiping instead of acknowledgment. The portal
+ServiceAccount still has only the configured Secret `patch` permission and has
+no workload-creation permission.
 
 The optional administrator recovery upload is disabled by default. When enabled,
 uploads are raw `application/json`, bounded to at most 1 MiB, protected by
@@ -94,9 +101,11 @@ OAuth endpoints are deployment configuration; they are not credentials. Do not
 place real long-lived credentials in Helm values, ConfigMaps, annotations,
 events, or command arguments.
 
-Liveness/readiness probes report only that the portal process was configured
-and started. They do not claim that a credential exists, is usable, was imported
-by the broker, or is healthy upstream.
+Liveness reports only that the portal process is running. Readiness additionally
+performs a bounded, authenticated localhost check of the credential runner, so
+a missing or wedged runner removes the portal Pod from service. Neither probe
+claims that a credential exists, is usable, was imported by the broker, or is
+healthy upstream.
 
 ## Enrollment adapters and proof status
 
