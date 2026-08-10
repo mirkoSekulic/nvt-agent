@@ -161,6 +161,7 @@ func TestDefaultCommandAdaptersPinOfficialInvocationAndCredentialDiscovery(t *te
 	}
 }
 
+//nolint:gocyclo // This conformance test covers initial Connect and unconditional Reconnect in one lifecycle.
 func TestCodexConnectBindsSlotPatchesValidatedFileAndCleansUp(t *testing.T) {
 	t.Setenv("NVT_CREDENTIAL_PORTAL_SESSION_SECRET", "portal-session-secret-canary")
 	t.Setenv("NVT_CREDENTIAL_PORTAL_CLIENT_SECRET", "portal-client-secret-canary")
@@ -191,6 +192,20 @@ func TestCodexConnectBindsSlotPatchesValidatedFileAndCleansUp(t *testing.T) {
 	combined := audit.String()
 	if strings.Contains(combined, fakeCLIAccess) || strings.Contains(combined, fakeCLIRefresh) {
 		t.Fatal("credential appeared in audit output")
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(manager.semaphore) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	reconnected, err := manager.Start(
+		t.Context(), principal, testConfig().Slots[0], time.Now().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitEnrollmentStatus(t, manager, principal, reconnected.ID, enrollmentSucceeded)
+	if patcher.calls != 2 {
+		t.Fatal("reconnect did not replace the same exact slot")
 	}
 }
 

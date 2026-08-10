@@ -331,7 +331,10 @@ func (m *EnrollmentManager) runCLI(
 			stopCLI(command, terminal)
 			return nil, reasonTimeout
 		case code := <-session.Code:
-			if _, err := io.WriteString(terminal, code+"\n"); err != nil {
+			input := append([]byte(code), '\n')
+			_, writeErr := terminal.Write(input)
+			clearBytes(input)
+			if writeErr != nil {
 				stopCLI(command, terminal)
 				return nil, reasonProcessFailed
 			}
