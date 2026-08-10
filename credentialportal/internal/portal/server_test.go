@@ -228,6 +228,7 @@ func TestDashboardListsOnlyOwnedSlotsAndNeverExistingValueOrHealth(t *testing.T)
 	response := request(t, server, cookie, "", http.MethodGet, "/agents/credentials/", "", nil)
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, testAliceLabel) ||
+		!strings.Contains(response.Header().Get("Content-Security-Policy"), "connect-src 'self'") ||
 		!strings.Contains(body, "Connect / reconnect") ||
 		!strings.Contains(body, "experimental device login") ||
 		strings.Contains(body, "Bob") ||
