@@ -47,6 +47,7 @@ var (
 
 	outputURLPattern  = regexp.MustCompile(`https://[^\s\x00-\x20\x7f]+`)
 	deviceCodePattern = regexp.MustCompile(`\b[A-Z0-9]{3,12}(?:-[A-Z0-9]{3,12})+\b`)
+	terminalCSI       = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 )
 
 type EnrollmentStatus struct {
@@ -559,7 +560,9 @@ func codexDeviceAction(output []byte, urls []*url.URL) (providerAction, bool, er
 		if parsed.Hostname() != "auth.openai.com" || parsed.Path != "/codex/device" || parsed.RawQuery != "" {
 			continue
 		}
-		code := deviceCodePattern.FindString(string(output))
+		plainOutput := terminalCSI.ReplaceAll(output, nil)
+		code := deviceCodePattern.FindString(string(plainOutput))
+		clearBytes(plainOutput)
 		if code == "" {
 			return providerAction{}, false, nil
 		}
