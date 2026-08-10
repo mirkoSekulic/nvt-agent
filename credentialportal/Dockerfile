@@ -9,8 +9,8 @@ FROM node:24-bookworm-slim AS cli
 
 # Keep these independent build arguments so enrollment and AgentRun CLI
 # versions can later be driven by one coordinated source of truth.
-ARG CODEX_CLI_VERSION=latest
-ARG CLAUDE_CODE_VERSION=latest
+ARG CODEX_CLI_VERSION=0.147.0
+ARG CLAUDE_CODE_VERSION=2.1.226
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
   "@openai/codex@${CODEX_CLI_VERSION}" \
   "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"

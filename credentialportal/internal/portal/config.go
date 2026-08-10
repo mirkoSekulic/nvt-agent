@@ -48,10 +48,11 @@ type Config struct {
 }
 
 type EnrollmentConfig struct {
-	MaxSessions    int `json:"maxSessions"`
-	MaxConcurrent  int `json:"maxConcurrent"`
-	TimeoutSeconds int `json:"timeoutSeconds"`
-	MaxOutputBytes int `json:"maxOutputBytes"`
+	MaxSessions                 int  `json:"maxSessions"`
+	MaxConcurrent               int  `json:"maxConcurrent"`
+	TimeoutSeconds              int  `json:"timeoutSeconds"`
+	MaxOutputBytes              int  `json:"maxOutputBytes"`
+	ExperimentalCodexDeviceAuth bool `json:"experimentalCodexDeviceAuth"`
 }
 
 type RecoveryUploadConfig struct {
@@ -241,6 +242,13 @@ func (c *Config) Validate() error {
 		}
 		if slot.Adapter != AdapterCodexOAuthFile && slot.Adapter != AdapterClaudeOAuthFile {
 			return fmt.Errorf("%w: slot %s adapter is unsupported", errInvalidConfig, slot.Name)
+		}
+		if slot.Adapter == AdapterCodexOAuthFile && !c.Enrollment.ExperimentalCodexDeviceAuth {
+			return fmt.Errorf(
+				"%w: slot %s requires explicit experimental Codex device authorization opt-in",
+				errInvalidConfig,
+				slot.Name,
+			)
 		}
 		if strings.TrimSpace(slot.BrokerProvider) == "" || len(slot.BrokerProvider) > 128 ||
 			strings.ContainsAny(slot.BrokerProvider, "\r\n") {

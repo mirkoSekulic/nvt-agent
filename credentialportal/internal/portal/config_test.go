@@ -39,9 +39,21 @@ func TestConfigRejectsSharedSecretDestinationAcrossOwners(t *testing.T) {
 	}
 }
 
+func TestConfigRequiresExplicitExperimentalCodexDeviceAuthorization(t *testing.T) {
+	cfg := testConfig()
+	cfg.Enrollment.ExperimentalCodexDeviceAuth = false
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "experimental Codex device") {
+		t.Fatal("ungated experimental Codex device authorization was accepted")
+	}
+	cfg.Slots = cfg.Slots[1:]
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Claude-only configuration incorrectly required the Codex gate: %v", err)
+	}
+}
+
 func TestConfigAppliesAndStrictlyValidatesEnrollmentBounds(t *testing.T) {
 	cfg := testConfig()
-	cfg.Enrollment = EnrollmentConfig{}
+	cfg.Enrollment = EnrollmentConfig{ExperimentalCodexDeviceAuth: true}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}

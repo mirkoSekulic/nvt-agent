@@ -21,10 +21,16 @@ type Server struct {
 	cfg         Config
 }
 
-func NewServer(cfg Config, auth *Authenticator, patcher SecretPatcher, audit *AuditLogger) *Server {
+func NewServer(
+	cfg Config,
+	auth *Authenticator,
+	patcher SecretPatcher,
+	audit *AuditLogger,
+	runner CredentialRunner,
+) *Server {
 	return &Server{
 		cfg: cfg, auth: auth, patcher: patcher, audit: audit,
-		enrollments: NewEnrollmentManager(cfg, patcher, audit),
+		enrollments: NewEnrollmentManager(cfg, patcher, audit, runner),
 	}
 }
 
@@ -357,7 +363,7 @@ var portalTemplate = template.Must(template.New("portal").Parse(`<!doctype html>
 <title>Credential enrollment</title><style>body{font:16px system-ui;margin:2rem;max-width:48rem;color:#17202a}fieldset{margin:1rem 0;padding:1rem}button,select,input{font:inherit;margin:.4rem 0}.status{min-height:1.5rem}.action{padding:1rem;background:#f4f6f7}.hidden{display:none}</style></head>
 <body><header><h1>Manage credentials</h1>{{if .PrincipalName}}<p>Signed in as {{.PrincipalName}}</p>{{end}}</header>
 <p>Connect or reconnect a configured provider account. The portal never reads or displays the current value and does not report provider health.</p>
-{{if gt (len .Slots) 1}}<label for="slot">Enrollment slot</label><select id="slot"><option value="">Select a slot</option>{{range .Slots}}<option value="{{.Name}}">{{.Label}}</option>{{end}}</select>{{else if eq (len .Slots) 1}}<input id="slot" type="hidden" value="{{(index .Slots 0).Name}}"><h2>{{(index .Slots 0).Label}}</h2>{{end}}
+{{if gt (len .Slots) 1}}<label for="slot">Enrollment slot</label><select id="slot"><option value="">Select a slot</option>{{range .Slots}}<option value="{{.Name}}">{{.Label}}{{if eq .Adapter "codex-oauth-file"}} (experimental device login){{end}}</option>{{end}}</select>{{else if eq (len .Slots) 1}}<input id="slot" type="hidden" value="{{(index .Slots 0).Name}}"><h2>{{(index .Slots 0).Label}}{{if eq (index .Slots 0).Adapter "codex-oauth-file"}} (experimental device login){{end}}</h2>{{end}}
 <fieldset><legend>Provider login</legend><button id="connect" type="button">Connect / reconnect</button><div id="action" class="action hidden"><a id="provider" href="#" target="_blank" rel="noopener noreferrer">Continue with provider</a><p id="device"></p><div id="paste" class="hidden"><label for="code">Authorization code</label><br><input id="code" type="password" autocomplete="off"><button id="submit-code" type="button">Submit code</button></div><button id="cancel" type="button">Cancel</button></div><p class="status" id="status" role="status"></p></fieldset>
 {{if .RecoveryUpload}}<fieldset><legend>Administrator recovery upload</legend><p>This secondary recovery path replaces the configured seed with a credential file.</p><input id="credential" type="file" accept="application/json,.json"><br><label><input id="confirm" type="checkbox"> I understand this replaces the configured enrollment seed.</label><br><button id="upload" type="button">Upload recovery file</button><p class="status" id="upload-status" role="status"></p></fieldset>{{end}}
 <button id="logout" type="button">Log out</button>

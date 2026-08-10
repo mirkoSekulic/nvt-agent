@@ -25,12 +25,47 @@ grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
 grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.53"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
-grep -Fq 'automountServiceAccountToken: true' "${RENDER}"
+grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
+grep -Fq 'enableServiceLinks: false' "${RENDER}"
 grep -Fq 'medium: Memory' "${RENDER}"
 grep -Fq 'mountPath: /tmp' "${RENDER}"
 grep -Fq '"maxConcurrent": 2' "${RENDER}"
 grep -Fq '"maxSessions": 64' "${RENDER}"
+grep -Fq '"experimentalCodexDeviceAuth": true' "${RENDER}"
 grep -Fq '"enabled": false' "${RENDER}"
+
+python3 - "${RENDER}" <<'PY'
+import sys
+
+import yaml
+
+documents = [document for document in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if document]
+deployment = next(
+    document
+    for document in documents
+    if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-credential-portal"
+)
+pod = deployment["spec"]["template"]["spec"]
+containers = {container["name"]: container for container in pod["containers"]}
+portal = containers["credential-portal"]
+runner = containers["credential-runner"]
+
+assert pod["automountServiceAccountToken"] is False
+assert pod["enableServiceLinks"] is False
+assert portal["securityContext"]["runAsUser"] != runner["securityContext"]["runAsUser"]
+assert any(mount["name"] == "kube-api-access" for mount in portal["volumeMounts"])
+assert not any(mount["name"] == "kube-api-access" for mount in runner["volumeMounts"])
+assert any(argument == "runner" for argument in runner["args"])
+assert not runner.get("env")
+assert not runner.get("envFrom")
+
+projected = next(volume for volume in pod["volumes"] if volume["name"] == "kube-api-access")
+assert any("serviceAccountToken" in source for source in projected["projected"]["sources"])
+assert not any(
+    mount["name"] == "config" or mount["mountPath"] == "/etc/nvt-credential-portal"
+    for mount in runner["volumeMounts"]
+)
+PY
 
 helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set-string credentialPortal.auth.mode=oauth2 \
@@ -87,6 +122,13 @@ if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credentia
   exit 1
 fi
 grep -Fq 'enrollment timeout must be' "${WORKDIR}/timeout.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.enrollment.experimentalCodexDeviceAuth=false >/dev/null 2>"${WORKDIR}/codex-device.txt"; then
+  echo "expected an ungated experimental Codex device slot to fail" >&2
+  exit 1
+fi
+grep -Fq 'requires enrollment.experimentalCodexDeviceAuth=true' "${WORKDIR}/codex-device.txt"
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set credentialPortal.enabled=false >"${WORKDIR}/disabled.yaml"; then :; fi

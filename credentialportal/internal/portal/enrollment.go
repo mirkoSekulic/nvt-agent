@@ -86,18 +86,34 @@ type enrollmentSession struct {
 	Reason           string
 	ID               string
 	Status           string
+	CancelReason     string
 	NeedsCode        bool
 	CodeUsed         bool
+}
+
+type CredentialRunner interface {
+	Run(
+		ctx context.Context,
+		sessionID, adapter string,
+		code <-chan string,
+		publish func(providerAction),
+	) ([]byte, string)
+}
+
+//nolint:govet // Adapter, limits, and temp-root grouping keeps the trusted runner configuration easy to audit.
+type CLICredentialRunner struct {
+	adapters map[string]cliEnrollmentAdapter
+	config   EnrollmentConfig
+	tempRoot string
 }
 
 type EnrollmentManager struct {
 	patcher   SecretPatcher
 	audit     *AuditLogger
-	adapters  map[string]cliEnrollmentAdapter
+	runner    CredentialRunner
 	sessions  map[string]*enrollmentSession
 	semaphore chan struct{}
 	now       func() time.Time
-	tempRoot  string
 	namespace string
 	config    EnrollmentConfig
 	mu        sync.Mutex
@@ -122,11 +138,16 @@ func defaultEnrollmentAdapters() map[string]cliEnrollmentAdapter {
 	}
 }
 
-func NewEnrollmentManager(cfg Config, patcher SecretPatcher, audit *AuditLogger) *EnrollmentManager {
+func NewEnrollmentManager(
+	cfg Config,
+	patcher SecretPatcher,
+	audit *AuditLogger,
+	runner CredentialRunner,
+) *EnrollmentManager {
 	return &EnrollmentManager{
 		patcher:   patcher,
 		audit:     audit,
-		adapters:  defaultEnrollmentAdapters(),
+		runner:    runner,
 		sessions:  map[string]*enrollmentSession{},
 		namespace: cfg.Namespace,
 		semaphore: make(chan struct{}, cfg.Enrollment.MaxConcurrent),
@@ -230,7 +251,7 @@ func (m *EnrollmentManager) Cancel(principal Principal, id string) error {
 		m.mu.Unlock()
 		return ErrEnrollmentNotFound
 	}
-	if terminalEnrollmentStatus(session.Status) {
+	if terminalEnrollmentStatus(session.Status) || session.CancelReason != "" {
 		m.mu.Unlock()
 		return ErrEnrollmentState
 	}
@@ -244,7 +265,8 @@ func (m *EnrollmentManager) CancelPrincipal(principal Principal) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, session := range m.sessions {
-		if samePrincipal(session.Principal, principal) && !terminalEnrollmentStatus(session.Status) {
+		if samePrincipal(session.Principal, principal) && !terminalEnrollmentStatus(session.Status) &&
+			session.CancelReason == "" {
 			m.cancelLocked(session, "logout")
 		}
 	}
@@ -253,7 +275,7 @@ func (m *EnrollmentManager) CancelPrincipal(principal Principal) {
 func (m *EnrollmentManager) Close() {
 	m.mu.Lock()
 	for _, session := range m.sessions {
-		if !terminalEnrollmentStatus(session.Status) {
+		if !terminalEnrollmentStatus(session.Status) && session.CancelReason == "" {
 			m.cancelLocked(session, "shutdown")
 		}
 	}
@@ -262,56 +284,82 @@ func (m *EnrollmentManager) Close() {
 }
 
 func (m *EnrollmentManager) cancelLocked(session *enrollmentSession, reason string) {
-	session.Status = enrollmentCancelled
-	session.Reason = reason
-	session.TerminalAt = m.now()
+	session.CancelReason = reason
 	session.AuthorizationURL = ""
 	session.UserCode = ""
 	session.Cancel()
-	m.audit.Enrollment(session.Principal, session.Slot, "failure", reason)
 }
 
 func (m *EnrollmentManager) run(ctx context.Context, session *enrollmentSession) {
-	defer func() { <-m.semaphore }()
-	adapter, ok := m.adapters[session.Slot.Adapter]
-	if !ok {
-		m.finish(session, enrollmentFailed, "adapter-unavailable")
-		return
-	}
-	home, err := os.MkdirTemp(m.tempRoot, "nvt-credential-enrollment-")
-	if err != nil {
-		m.finish(session, enrollmentFailed, "runner-start-failed")
-		return
-	}
-	document, reason := m.runCLI(ctx, session, adapter, home)
+	document, reason := m.runner.Run(ctx, session.ID, session.Slot.Adapter, session.Code, func(action providerAction) {
+		m.publishAction(session, action)
+	})
 	defer clearBytes(document)
-	if removeErr := os.RemoveAll(home); removeErr != nil {
-		m.finish(session, enrollmentFailed, "cleanup-failed")
-		return
-	}
+	status := enrollmentSucceeded
 	if reason != "" {
-		m.finish(session, enrollmentFailed, reason)
-		return
+		status = enrollmentFailed
 	}
-	if err := ValidateCredential(adapter.Name, document); err != nil {
-		m.finish(session, enrollmentFailed, "invalid-credential")
-		return
+	m.mu.Lock()
+	if session.CancelReason != "" {
+		status, reason = enrollmentCancelled, session.CancelReason
 	}
-	if err := m.patcher.Patch(ctx, m.namespace, session.Slot.SecretName, session.Slot.DataKey, document); err != nil {
-		m.finish(session, enrollmentFailed, "secret-update-failed")
-		return
+	m.mu.Unlock()
+	if status == enrollmentSucceeded {
+		if err := ValidateCredential(session.Slot.Adapter, document); err != nil {
+			status, reason = enrollmentFailed, "invalid-credential"
+		} else if err := m.patcher.Patch(
+			ctx,
+			m.namespace,
+			session.Slot.SecretName,
+			session.Slot.DataKey,
+			document,
+		); err != nil {
+			status, reason = enrollmentFailed, "secret-update-failed"
+		}
 	}
-	m.finish(session, enrollmentSucceeded, "")
+	// Capacity is available before the terminal state becomes observable. This
+	// makes terminal status imply that process teardown and cleanup completed.
+	<-m.semaphore
+	m.finish(session, status, reason)
+}
+
+func NewCLICredentialRunner(config EnrollmentConfig) *CLICredentialRunner {
+	return &CLICredentialRunner{adapters: defaultEnrollmentAdapters(), config: config}
+}
+
+func (r *CLICredentialRunner) Run(
+	ctx context.Context,
+	_ string,
+	adapterName string,
+	code <-chan string,
+	publish func(providerAction),
+) ([]byte, string) {
+	adapter, ok := r.adapters[adapterName]
+	if !ok {
+		return nil, "adapter-unavailable"
+	}
+	home, err := os.MkdirTemp(r.tempRoot, "nvt-credential-enrollment-")
+	if err != nil {
+		return nil, "runner-start-failed"
+	}
+	document, reason := r.runCLI(ctx, adapter, home, code, publish)
+	if removeErr := os.RemoveAll(home); removeErr != nil {
+		clearBytes(document)
+		return nil, "cleanup-failed"
+	}
+
+	return document, reason
 }
 
 //nolint:gocognit,gocyclo // The process state machine keeps output, input, timeout, and exit handling fail-closed.
-func (m *EnrollmentManager) runCLI(
+func (r *CLICredentialRunner) runCLI(
 	ctx context.Context,
-	session *enrollmentSession,
 	adapter cliEnrollmentAdapter,
 	home string,
+	code <-chan string,
+	publish func(providerAction),
 ) ([]byte, string) {
-	// #nosec G204 -- commands and arguments come only from compiled, trusted adapters.
+	// #nosec G204,G702 -- commands and arguments come only from compiled, trusted adapters.
 	command := exec.CommandContext(ctx, adapter.Command, adapter.Args...)
 	command.Dir = home
 	command.Env = isolatedCLIEnvironment(home, adapter.Environment)
@@ -330,18 +378,18 @@ func (m *EnrollmentManager) runCLI(
 		case <-ctx.Done():
 			stopCLI(command, terminal)
 			return nil, reasonTimeout
-		case code := <-session.Code:
-			input := append([]byte(code), '\n')
+		case providedCode := <-code:
+			input := append([]byte(providedCode), '\n')
 			_, writeErr := terminal.Write(input)
 			clearBytes(input)
 			if writeErr != nil {
 				stopCLI(command, terminal)
 				return nil, reasonProcessFailed
 			}
-			clearString(&code)
+			clearString(&providedCode)
 		case result := <-reads:
 			if len(result.Data) > 0 {
-				if len(output)+len(result.Data) > m.config.MaxOutputBytes {
+				if len(output)+len(result.Data) > r.config.MaxOutputBytes {
 					clearBytes(result.Data)
 					stopCLI(command, terminal)
 					clearBytes(output)
@@ -357,7 +405,7 @@ func (m *EnrollmentManager) runCLI(
 				}
 				if found && !actionSeen {
 					actionSeen = true
-					m.publishAction(session, action)
+					publish(action)
 				}
 			}
 			if result.Err == nil {
@@ -376,7 +424,7 @@ func (m *EnrollmentManager) runCLI(
 				return nil, reasonMalformedOutput
 			}
 
-			return readCredentialFile(home, adapter.CredentialRelative, int64(m.config.MaxOutputBytes))
+			return readCredentialFile(home, adapter.CredentialRelative, int64(r.config.MaxOutputBytes))
 		}
 	}
 }

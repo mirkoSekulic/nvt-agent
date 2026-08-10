@@ -102,13 +102,15 @@ func fakeEnrollmentManager(
 	cfg := testConfig()
 	patcher := &memoryPatcher{value: []byte("old-secret")}
 	audit := &bytes.Buffer{}
-	manager := NewEnrollmentManager(cfg, patcher, NewAuditLogger(audit))
+	runner := NewCLICredentialRunner(cfg.Enrollment)
+	manager := NewEnrollmentManager(cfg, patcher, NewAuditLogger(audit), runner)
 	if scenario == testOversized {
 		manager.config.MaxOutputBytes = 4096
+		runner.config.MaxOutputBytes = 4096
 	}
 	root := t.TempDir()
-	manager.tempRoot = root
-	adapter := manager.adapters[adapterName]
+	runner.tempRoot = root
+	adapter := runner.adapters[adapterName]
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +122,7 @@ func fakeEnrollmentManager(
 		kind = claudeCommand
 	}
 	adapter.Environment = []string{"NVT_FAKE_CLI_SCENARIO=" + scenario, "NVT_FAKE_CREDENTIAL_KIND=" + kind}
-	manager.adapters[adapterName] = adapter
+	runner.adapters[adapterName] = adapter
 	return manager, patcher, audit, root
 }
 
@@ -228,7 +230,7 @@ func TestClaudeConnectAcceptsOneCodeAndRejectsReplay(t *testing.T) {
 		t.Fatal("Claude callback code replay was accepted")
 	}
 	waitEnrollmentStatus(t, manager, principal, status.ID, enrollmentSucceeded)
-	if patcher.key != "credentials.json" || ValidateCredential(AdapterClaudeOAuthFile, patcher.value) != nil {
+	if patcher.key != testClaudeCredentialKey || ValidateCredential(AdapterClaudeOAuthFile, patcher.value) != nil {
 		t.Fatal("Claude enrollment did not patch the exact validated destination")
 	}
 	entries, readErr := os.ReadDir(root)

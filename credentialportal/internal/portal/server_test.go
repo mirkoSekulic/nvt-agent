@@ -18,15 +18,16 @@ import (
 )
 
 const (
-	testIdentityIssuer = "https://identity.example"
-	testAliceSubject   = "alice"
-	testBobSubject     = "bob"
-	testAliceLabel     = "Alice"
-	testCSRFToken      = "csrf-token"
-	testCodexAuthKey   = "auth.json"
-	testUploadPath     = "/agents/credentials/slots/alice/credential"
-	testOversized      = "oversized"
-	testPortalSeed     = "portal-seed"
+	testIdentityIssuer      = "https://identity.example"
+	testAliceSubject        = "alice"
+	testBobSubject          = "bob"
+	testAliceLabel          = "Alice"
+	testCSRFToken           = "csrf-token"
+	testCodexAuthKey        = "auth.json"
+	testClaudeCredentialKey = "credentials.json"
+	testUploadPath          = "/agents/credentials/slots/alice/credential"
+	testOversized           = "oversized"
+	testPortalSeed          = "portal-seed"
 )
 
 var errTestAPI = errors.New("api failed")
@@ -56,6 +57,7 @@ func testConfig() Config {
 		ListenAddr:     ":8080",
 		Namespace:      "nvt",
 		MaxUploadBytes: 4096,
+		Enrollment:     EnrollmentConfig{ExperimentalCodexDeviceAuth: true},
 		RecoveryUpload: RecoveryUploadConfig{Enabled: true},
 		Auth: AuthConfig{
 			Mode:    authModeOAuth2,
@@ -87,7 +89,7 @@ func testConfig() Config {
 				Adapter:        AdapterClaudeOAuthFile,
 				BrokerProvider: claudeCommand,
 				SecretName:     testPortalSeed,
-				DataKey:        "credentials.json",
+				DataKey:        testClaudeCredentialKey,
 			},
 		},
 	}
@@ -121,6 +123,7 @@ func authenticatedServer(
 			auth,
 			patcher,
 			NewAuditLogger(audit),
+			NewCLICredentialRunner(cfg.Enrollment),
 		), &http.Cookie{
 			Name:  cfg.Auth.Session.CookieName,
 			Value: encoded,
@@ -209,6 +212,7 @@ func TestDashboardListsOnlyOwnedSlotsAndNeverExistingValueOrHealth(t *testing.T)
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, testAliceLabel) ||
 		!strings.Contains(body, "Connect / reconnect") ||
+		!strings.Contains(body, "experimental device login") ||
 		strings.Contains(body, "Bob") ||
 		strings.Contains(body, "existing-value") ||
 		strings.Contains(strings.ToLower(body), "credential is healthy") {

@@ -334,6 +334,9 @@ credentialPortal:
     maxConcurrent: 2
     timeoutSeconds: 600
     maxOutputBytes: 65536
+    # Codex's official device flow may require an account security setting and
+    # lacks completed real-account E2E proof for this service.
+    experimentalCodexDeviceAuth: false
   # Secondary administrator recovery only. Provider Connect/Reconnect is the
   # normal flow; enabling this exposes bounded raw credential-file upload.
   recoveryUpload:
