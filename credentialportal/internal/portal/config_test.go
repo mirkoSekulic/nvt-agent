@@ -27,3 +27,14 @@ func TestConfigStrictlyRejectsUnknownDuplicateAndUnsafeSlotPolicy(t *testing.T) 
 		}
 	}
 }
+
+func TestConfigRejectsSharedSecretDestinationAcrossOwners(t *testing.T) {
+	cfg := testConfig()
+	cfg.Slots[1].DataKey = cfg.Slots[0].DataKey
+	if cfg.Slots[0].Name == cfg.Slots[1].Name || cfg.Slots[0].Owner.Subject == cfg.Slots[1].Owner.Subject {
+		t.Fatal("test requires distinct slot names and owners")
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "already assigned") {
+		t.Fatal("shared Secret destination was accepted")
+	}
+}

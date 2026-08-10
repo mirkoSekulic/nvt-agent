@@ -63,6 +63,13 @@ fi
 grep -Fq 'adapter is unsupported' "${WORKDIR}/adapter.txt"
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.slots[1].dataKey=codex-auth.json >/dev/null 2>"${WORKDIR}/duplicate-destination.txt"; then
+  echo "expected duplicate portal Secret destination to fail" >&2
+  exit 1
+fi
+grep -Fq 'Secret destination is already assigned to another slot' "${WORKDIR}/duplicate-destination.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set credentialPortal.enabled=false >"${WORKDIR}/disabled.yaml"; then :; fi
 if grep -Fq 'nvt-credential-portal' "${WORKDIR}/disabled.yaml"; then
   echo "disabled portal rendered workload resources" >&2

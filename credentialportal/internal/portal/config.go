@@ -155,6 +155,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("slots must contain 1..%d entries", maxSlots)
 	}
 	seen := map[string]bool{}
+	seenDestinations := map[string]bool{}
 	for i, slot := range c.Slots {
 		if !slotPattern.MatchString(slot.Name) || len(slot.Name) > 63 || seen[slot.Name] {
 			return fmt.Errorf("slots[%d].name must be a unique DNS label", i)
@@ -172,6 +173,11 @@ func (c *Config) Validate() error {
 		if !dnsNamePattern.MatchString(slot.SecretName) || len(slot.SecretName) > 253 || !dataKeyPattern.MatchString(slot.DataKey) || len(slot.DataKey) > 253 {
 			return fmt.Errorf("slot %s Secret destination is invalid", slot.Name)
 		}
+		destination := slot.SecretName + "\x00" + slot.DataKey
+		if seenDestinations[destination] {
+			return fmt.Errorf("slot %s Secret destination is already assigned to another slot", slot.Name)
+		}
+		seenDestinations[destination] = true
 	}
 	return nil
 }

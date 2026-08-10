@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/securecookie"
+	"golang.org/x/oauth2"
 )
 
 type oidcFixture struct {
@@ -92,7 +93,7 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 		t.Fatal("OIDC nonce missing")
 	}
 	cookies := loginResponse.Result().Cookies()
-	callback := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=oidc-code", nil)
+	callback := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=oidc-code&iss="+url.QueryEscape(fixture.URL)+"&session_state=provider-session", nil)
 	callback.AddCookie(cookies[0])
 	response := httptest.NewRecorder()
 	auth.Callback(response, callback)
@@ -114,7 +115,7 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 }
 
 func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
-	identitySubject := "alice"
+	identityBody := `{"id":424242,"login":"octocat"}`
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/token":
@@ -130,7 +131,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"identity": identitySubject, "display": "Alice"})
+			io.WriteString(w, identityBody)
 		default:
 			http.NotFound(w, r)
 		}
@@ -142,8 +143,9 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	cfg.Auth.OAuth2.TokenURL = provider.URL + "/token"
 	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL + "/identity"
 	cfg.Auth.OAuth2.AllowedHosts = []string{providerURL.Hostname()}
-	cfg.Auth.OAuth2.SubjectPath = "identity"
-	cfg.Auth.OAuth2.DisplayNamePath = "display"
+	cfg.Auth.OAuth2.SubjectPath = "id"
+	cfg.Auth.OAuth2.DisplayNamePath = "login"
+	cfg.Slots[0].Owner.Subject = "424242"
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +169,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 		t.Fatal("secure login cookie missing")
 	}
 
-	callbackURL := "https://portal.example/agents/credentials/oauth2/callback?state=" + url.QueryEscape(location.Query().Get("state")) + "&code=one-time-code"
+	callbackURL := "https://portal.example/agents/credentials/oauth2/callback?state=" + url.QueryEscape(location.Query().Get("state")) + "&code=one-time-code&iss=" + url.QueryEscape(cfg.Auth.OAuth2.Issuer) + "&session_state=provider-session&slot=bob"
 	callbackRequest := httptest.NewRequest(http.MethodGet, callbackURL, nil)
 	callbackRequest.AddCookie(loginCookies[0])
 	callbackResponse := httptest.NewRecorder()
@@ -187,11 +189,11 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	principalRequest := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/", nil)
 	principalRequest.AddCookie(sessionCookie)
 	principal, csrf, ok := auth.Session(principalRequest)
-	if !ok || principal.Issuer != "https://identity.example" || principal.Subject != "alice" || csrf == "" {
+	if !ok || principal.Issuer != "https://identity.example" || principal.Subject != "424242" || principal.DisplayName != "octocat" || csrf == "" {
 		t.Fatalf("unexpected principal: %#v ok=%v", principal, ok)
 	}
 
-	identitySubject = "unconfigured-user"
+	identityBody = `{"id":999,"login":"unconfigured"}`
 	loginResponse = httptest.NewRecorder()
 	auth.Login(loginResponse, loginRequest)
 	location, _ = url.Parse(loginResponse.Header().Get("Location"))
@@ -213,7 +215,13 @@ func TestCallbackRejectsDuplicateAndCraftedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{"?state=crafted&code=x", "?state=expected&state=crafted&code=x", "?state=expected&code=x&slot=bob"} {
+	for _, raw := range []string{
+		"?state=crafted&code=x",
+		"?state=expected&state=crafted&code=x",
+		"?state=expected&code=x&code=y",
+		"?state=expected&code=x&iss=https%3A%2F%2Fwrong.example",
+		"?state=expected&code=x&iss=https%3A%2F%2Fidentity.example&iss=https%3A%2F%2Fidentity.example",
+	} {
 		req := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/oauth2/callback"+raw, nil)
 		req.AddCookie(&http.Cookie{Name: cfg.Auth.Session.CookieName + "_login", Value: encoded})
 		response := httptest.NewRecorder()
@@ -221,5 +229,61 @@ func TestCallbackRejectsDuplicateAndCraftedState(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("crafted callback %q accepted: %d", raw, response.Code)
 		}
+	}
+}
+
+func fetchOAuth2TestPrincipal(t *testing.T, identityBody, accessToken string) (Principal, error) {
+	t.Helper()
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+accessToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, identityBody)
+	}))
+	defer provider.Close()
+	cfg := testConfig()
+	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL
+	cfg.Auth.OAuth2.SubjectPath = "id"
+	cfg.Auth.OAuth2.DisplayNamePath = "login"
+	auth := &Authenticator{cfg: cfg, client: noRedirectClient(provider.Client())}
+	return auth.principal(context.Background(), &oauth2.Token{AccessToken: accessToken}, "")
+}
+
+func TestOAuth2IdentityCanonicalizationAndTokenReflection(t *testing.T) {
+	const accessToken = "transient-login-token-canary"
+	valid := []struct {
+		name, body, subject, display string
+	}{
+		{"github integer", `{"id":424242,"login":"octocat"}`, "424242", "octocat"},
+		{"large exact integer", `{"id":92233720368547758081234567890,"login":"member"}`, "92233720368547758081234567890", "member"},
+		{"string", `{"id":"stable-subject","login":"member"}`, "stable-subject", "member"},
+	}
+	for _, test := range valid {
+		t.Run(test.name, func(t *testing.T) {
+			principal, err := fetchOAuth2TestPrincipal(t, test.body, accessToken)
+			if err != nil || principal.Subject != test.subject || principal.DisplayName != test.display {
+				t.Fatalf("valid identity was not canonicalized")
+			}
+		})
+	}
+	invalid := []struct{ name, body string }{
+		{"fraction", `{"id":42.5,"login":"member"}`},
+		{"exponent", `{"id":1e3,"login":"member"}`},
+		{"boolean", `{"id":true,"login":"member"}`},
+		{"object", `{"id":{"value":42},"login":"member"}`},
+		{"empty", `{"id":"","login":"member"}`},
+		{"numeric display", `{"id":42,"login":424242}`},
+		{"reflected subject", `{"id":"prefix-` + accessToken + `-suffix","login":"member"}`},
+		{"reflected display", `{"id":42,"login":"prefix-` + accessToken + `-suffix"}`},
+		{"oversized integer", `{"id":` + strings.Repeat("9", 513) + `,"login":"member"}`},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := fetchOAuth2TestPrincipal(t, test.body, accessToken); err == nil {
+				t.Fatal("invalid or reflected identity was accepted")
+			}
+		})
 	}
 }

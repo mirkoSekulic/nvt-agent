@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,12 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"mime"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
@@ -138,7 +141,8 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if len(r.URL.Query()) != 2 || len(r.URL.Query()["state"]) != 1 || len(r.URL.Query()["code"]) != 1 {
+	query := r.URL.Query()
+	if len(query["state"]) != 1 || query.Get("state") == "" || len(query["code"]) != 1 || query.Get("code") == "" || !a.validCallbackIssuer(query) {
 		a.authFailure(w)
 		return
 	}
@@ -190,6 +194,21 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, a.cfg.Path("/"), http.StatusFound)
 }
 
+func (a *Authenticator) validCallbackIssuer(query url.Values) bool {
+	values, present := query["iss"]
+	if !present {
+		return true
+	}
+	if len(values) != 1 || values[0] == "" {
+		return false
+	}
+	expected := a.cfg.Auth.OAuth2.Issuer
+	if a.cfg.Auth.Mode == "oidc" {
+		expected = a.cfg.Auth.OIDC.IssuerURL
+	}
+	return values[0] == expected
+}
+
 func (a *Authenticator) principal(ctx context.Context, token *oauth2.Token, nonce string) (Principal, error) {
 	if a.cfg.Auth.Mode == "oidc" {
 		raw, ok := token.Extra("id_token").(string)
@@ -232,16 +251,62 @@ func (a *Authenticator) principal(ctx context.Context, token *oauth2.Token, nonc
 	if err != nil || len(body) > 64*1024 {
 		return Principal{}, errors.New("identity lookup failed")
 	}
-	var identity any
-	if !json.Valid(body) || rejectDuplicateJSONKeys(body) != nil || json.Unmarshal(body, &identity) != nil {
+	if !json.Valid(body) || rejectDuplicateJSONKeys(body) != nil {
 		return Principal{}, errors.New("identity lookup failed")
 	}
-	subject, ok := jsonStringPath(identity, a.cfg.Auth.OAuth2.SubjectPath)
-	if !ok || !validPrincipalIdentity(a.cfg.Auth.OAuth2.Issuer, subject) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var identity any
+	if decoder.Decode(&identity) != nil {
+		return Principal{}, errors.New("identity lookup failed")
+	}
+	subjectValue, ok := jsonValuePath(identity, a.cfg.Auth.OAuth2.SubjectPath)
+	if !ok {
 		return Principal{}, errors.New("identity subject missing")
 	}
-	display, _ := jsonStringPath(identity, a.cfg.Auth.OAuth2.DisplayNamePath)
+	subject, ok := canonicalOAuth2Subject(subjectValue)
+	if !ok || !validPrincipalIdentity(a.cfg.Auth.OAuth2.Issuer, subject) || strings.Contains(subject, token.AccessToken) {
+		return Principal{}, errors.New("identity subject invalid")
+	}
+	display := ""
+	if a.cfg.Auth.OAuth2.DisplayNamePath != "" {
+		if displayValue, found := jsonValuePath(identity, a.cfg.Auth.OAuth2.DisplayNamePath); found {
+			display, ok = displayValue.(string)
+			if !ok || !validOAuth2IdentityString(display, 256) || strings.Contains(display, token.AccessToken) {
+				return Principal{}, errors.New("identity display name invalid")
+			}
+		}
+	}
 	return Principal{Issuer: a.cfg.Auth.OAuth2.Issuer, Subject: subject, DisplayName: safeDisplayName(display)}, nil
+}
+
+func canonicalOAuth2Subject(value any) (string, bool) {
+	var subject string
+	switch typed := value.(type) {
+	case string:
+		subject = typed
+	case json.Number:
+		integer := new(big.Int)
+		if _, ok := integer.SetString(typed.String(), 10); !ok {
+			return "", false
+		}
+		subject = integer.String()
+	default:
+		return "", false
+	}
+	return subject, validOAuth2IdentityString(subject, 512)
+}
+
+func validOAuth2IdentityString(value string, limit int) bool {
+	if value == "" || len(value) > limit || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validPrincipalIdentity(issuer, subject string) bool {
@@ -255,23 +320,22 @@ func safeDisplayName(value string) string {
 	return value
 }
 
-func jsonStringPath(value any, rawPath string) (string, bool) {
+func jsonValuePath(value any, rawPath string) (any, bool) {
 	if rawPath == "" {
-		return "", false
+		return nil, false
 	}
 	current := value
 	for _, segment := range strings.Split(rawPath, ".") {
 		object, ok := current.(map[string]any)
 		if !ok || segment == "" {
-			return "", false
+			return nil, false
 		}
 		current, ok = object[segment]
 		if !ok {
-			return "", false
+			return nil, false
 		}
 	}
-	result, ok := current.(string)
-	return result, ok
+	return current, true
 }
 
 func (a *Authenticator) Session(r *http.Request) (Principal, string, bool) {

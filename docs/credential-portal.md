@@ -21,7 +21,11 @@ Authentication is generic OIDC or OAuth2. The portal uses its own encrypted,
 HTTP-only, Secure session cookie, short-lived signed login state, PKCE, and a
 separate callback path. Admission is default-deny: a successfully authenticated
 issuer/subject pair receives a session only when it owns at least one configured
-slot. Display names are never authorization input.
+slot. Display names are never authorization input. OAuth2 identity subjects may
+be JSON strings or integers; integer subjects are converted to their exact
+canonical decimal form, so quote that value in slot configuration (for example,
+`subject: "424242"`). Fractional numbers and identity values containing the
+transient access token are rejected.
 
 Each slot binds a stable name and exact owner `(issuer, subject)` to one explicit
 adapter, broker provider name, pre-created Secret, and data key. The request
