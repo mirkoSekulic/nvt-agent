@@ -21,8 +21,14 @@ import (
 	"golang.org/x/oauth2"
 )
 
+const (
+	testLoginPath = "login"
+	testJWTAlg    = "RS256"
+)
+
 type oidcFixture struct {
 	*httptest.Server
+
 	key   *rsa.PrivateKey
 	nonce string
 }
@@ -39,15 +45,24 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks", "id_token_signing_alg_values_supported": []string{"RS256"}})
+			if err := json.NewEncoder(w).
+				Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks", "id_token_signing_alg_values_supported": []string{testJWTAlg}}); err != nil {
+				http.Error(w, "encode failed", http.StatusInternalServerError)
+			}
 		case "/jwks":
-			json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "kid": "portal-test", "use": "sig", "alg": "RS256", "n": base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()), "e": "AQAB"}}})
+			if err := json.NewEncoder(w).
+				Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "kid": "portal-test", "use": "sig", "alg": testJWTAlg, "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": "AQAB"}}}); err != nil {
+				http.Error(w, "encode failed", http.StatusInternalServerError)
+			}
 		case "/token":
 			if err := r.ParseForm(); err != nil || r.Form.Get("code_verifier") == "" {
 				http.Error(w, "invalid", http.StatusBadRequest)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"access_token": "transient-login-access", "token_type": "Bearer", "id_token": fixture.idToken(t, issuer)})
+			if err := json.NewEncoder(w).
+				Encode(map[string]any{"access_token": "transient-login-access", "token_type": "Bearer", "id_token": fixture.idToken(t, issuer)}); err != nil {
+				http.Error(w, "encode failed", http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -59,8 +74,23 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 
 func (f *oidcFixture) idToken(t *testing.T, issuer string) string {
 	t.Helper()
-	header, _ := json.Marshal(map[string]any{"alg": "RS256", "kid": "portal-test", "typ": "JWT"})
-	claims, _ := json.Marshal(map[string]any{"iss": issuer, "sub": "oidc-owner", "aud": "portal-client", "nonce": f.nonce, "iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix()})
+	header, err := json.Marshal(map[string]any{"alg": testJWTAlg, "kid": "portal-test", "typ": "JWT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := json.Marshal(
+		map[string]any{
+			"iss":   issuer,
+			"sub":   "oidc-owner",
+			"aud":   "portal-client",
+			"nonce": f.nonce,
+			"iat":   time.Now().Add(-time.Minute).Unix(),
+			"exp":   time.Now().Add(time.Hour).Unix(),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
 	digest := sha256.Sum256([]byte(input))
 	signature, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, digest[:])
@@ -73,27 +103,56 @@ func (f *oidcFixture) idToken(t *testing.T, issuer string) string {
 func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 	fixture := newOIDCFixture(t)
 	cfg := testConfig()
-	cfg.Auth.Mode = "oidc"
-	cfg.Auth.OIDC = OIDCConfig{IssuerURL: fixture.URL, ClientID: "portal-client", Scopes: []string{"openid", "profile"}, CallbackPath: "/oauth2/callback"}
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL:    fixture.URL,
+		ClientID:     "portal-client",
+		Scopes:       []string{"openid", "profile"},
+		CallbackPath: "/oauth2/callback",
+	}
 	cfg.Slots[0].Owner = Principal{Issuer: fixture.URL, Subject: "oidc-owner"}
 	cfg.Slots = cfg.Slots[:1]
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	auth, err := NewAuthenticator(context.Background(), cfg, strings.Repeat("s", 64), "", "client-secret", fixture.Client())
+	auth, err := NewAuthenticator(
+		context.Background(),
+		cfg,
+		strings.Repeat("s", 64),
+		"",
+		"client-secret",
+		fixture.Client(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	login := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/login", nil)
+	login := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"https://portal.example/agents/credentials/login",
+		nil,
+	)
 	loginResponse := httptest.NewRecorder()
 	auth.Login(loginResponse, login)
-	location, _ := url.Parse(loginResponse.Header().Get("Location"))
+	location, err := url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture.nonce = location.Query().Get("nonce")
 	if fixture.nonce == "" {
 		t.Fatal("OIDC nonce missing")
 	}
 	cookies := loginResponse.Result().Cookies()
-	callback := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=oidc-code&iss="+url.QueryEscape(fixture.URL)+"&session_state=provider-session", nil)
+	callback := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(
+			location.Query().Get("state"),
+		)+"&code=oidc-code&iss="+url.QueryEscape(
+			fixture.URL,
+		)+"&session_state=provider-session",
+		nil,
+	)
 	callback.AddCookie(cookies[0])
 	response := httptest.NewRecorder()
 	auth.Callback(response, callback)
@@ -103,9 +162,19 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 	fixture.nonce = "wrong-nonce"
 	loginResponse = httptest.NewRecorder()
 	auth.Login(loginResponse, login)
-	location, _ = url.Parse(loginResponse.Header().Get("Location"))
+	location, err = url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	cookies = loginResponse.Result().Cookies()
-	callback = httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=oidc-code", nil)
+	callback = httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(
+			location.Query().Get("state"),
+		)+"&code=oidc-code",
+		nil,
+	)
 	callback.AddCookie(cookies[0])
 	response = httptest.NewRecorder()
 	auth.Callback(response, callback)
@@ -114,53 +183,80 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 	}
 }
 
+//nolint:cyclop,gocyclo // This test deliberately exercises the complete OAuth admission lifecycle.
 func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	identityBody := `{"id":424242,"login":"octocat"}`
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/token":
-			if err := r.ParseForm(); err != nil || r.Form.Get("code_verifier") == "" || r.Form.Get("code") != "one-time-code" {
+			if err := r.ParseForm(); err != nil || r.Form.Get("code_verifier") == "" ||
+				r.Form.Get("code") != "one-time-code" {
 				http.Error(w, "invalid exchange", http.StatusBadRequest)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"access_token":"provider-access-value","token_type":"Bearer"}`)
+			if _, err := io.WriteString(
+				w,
+				`{"access_token":"provider-access-value","token_type":"Bearer"}`,
+			); err != nil {
+				http.Error(w, "write failed", http.StatusInternalServerError)
+			}
 		case "/identity":
 			if r.Header.Get("Authorization") != "Bearer provider-access-value" {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, identityBody)
+			if _, err := io.WriteString(w, identityBody); err != nil {
+				http.Error(w, "write failed", http.StatusInternalServerError)
+			}
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer provider.Close()
-	providerURL, _ := url.Parse(provider.URL)
+	providerURL, err := url.Parse(provider.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := testConfig()
 	cfg.Auth.OAuth2.AuthorizationURL = provider.URL + "/authorize"
 	cfg.Auth.OAuth2.TokenURL = provider.URL + "/token"
 	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL + "/identity"
 	cfg.Auth.OAuth2.AllowedHosts = []string{providerURL.Hostname()}
 	cfg.Auth.OAuth2.SubjectPath = "id"
-	cfg.Auth.OAuth2.DisplayNamePath = "login"
+	cfg.Auth.OAuth2.DisplayNamePath = testLoginPath
 	cfg.Slots[0].Owner.Subject = "424242"
-	if err := cfg.Validate(); err != nil {
-		t.Fatal(err)
+	if validateErr := cfg.Validate(); validateErr != nil {
+		t.Fatal(validateErr)
 	}
-	auth, err := NewAuthenticator(context.Background(), cfg, strings.Repeat("s", 64), "portal-client", "client-secret", provider.Client())
+	auth, err := NewAuthenticator(
+		context.Background(),
+		cfg,
+		strings.Repeat("s", 64),
+		"portal-client",
+		"client-secret",
+		provider.Client(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	loginRequest := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/login", nil)
+	loginRequest := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"https://portal.example/agents/credentials/login",
+		nil,
+	)
 	loginResponse := httptest.NewRecorder()
 	auth.Login(loginResponse, loginRequest)
 	if loginResponse.Code != http.StatusFound {
 		t.Fatalf("login code=%d", loginResponse.Code)
 	}
-	location, _ := url.Parse(loginResponse.Header().Get("Location"))
+	location, err := url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if location.Query().Get("code_challenge") == "" || location.Query().Get("code_challenge_method") != "S256" {
 		t.Fatalf("PKCE missing: %s", location.String())
 	}
@@ -169,8 +265,12 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 		t.Fatal("secure login cookie missing")
 	}
 
-	callbackURL := "https://portal.example/agents/credentials/oauth2/callback?state=" + url.QueryEscape(location.Query().Get("state")) + "&code=one-time-code&iss=" + url.QueryEscape(cfg.Auth.OAuth2.Issuer) + "&session_state=provider-session&slot=bob"
-	callbackRequest := httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	callbackURL := "https://portal.example/agents/credentials/oauth2/callback?state=" + url.QueryEscape(
+		location.Query().Get("state"),
+	) + "&code=one-time-code&iss=" + url.QueryEscape(
+		cfg.Auth.OAuth2.Issuer,
+	) + "&session_state=provider-session&slot=bob"
+	callbackRequest := httptest.NewRequestWithContext(t.Context(), http.MethodGet, callbackURL, nil)
 	callbackRequest.AddCookie(loginCookies[0])
 	callbackResponse := httptest.NewRecorder()
 	auth.Callback(callbackResponse, callbackRequest)
@@ -186,19 +286,36 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	if sessionCookie == nil || !sessionCookie.Secure || !sessionCookie.HttpOnly {
 		t.Fatal("separate secure portal session missing")
 	}
-	principalRequest := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/", nil)
+	principalRequest := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"https://portal.example/agents/credentials/",
+		nil,
+	)
 	principalRequest.AddCookie(sessionCookie)
-	principal, csrf, ok := auth.Session(principalRequest)
-	if !ok || principal.Issuer != "https://identity.example" || principal.Subject != "424242" || principal.DisplayName != "octocat" || csrf == "" {
+	principal, csrf, expiresAt, ok := auth.Session(principalRequest)
+	if !ok || principal.Issuer != testIdentityIssuer || principal.Subject != "424242" ||
+		principal.DisplayName != "octocat" ||
+		csrf == "" || expiresAt.IsZero() {
 		t.Fatalf("unexpected principal: %#v ok=%v", principal, ok)
 	}
 
 	identityBody = `{"id":999,"login":"unconfigured"}`
 	loginResponse = httptest.NewRecorder()
 	auth.Login(loginResponse, loginRequest)
-	location, _ = url.Parse(loginResponse.Header().Get("Location"))
+	location, err = url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	loginCookies = loginResponse.Result().Cookies()
-	callbackRequest = httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=one-time-code", nil)
+	callbackRequest = httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"https://portal.example/agents/credentials/oauth2/callback?state="+url.QueryEscape(
+			location.Query().Get("state"),
+		)+"&code=one-time-code",
+		nil,
+	)
 	callbackRequest.AddCookie(loginCookies[0])
 	callbackResponse = httptest.NewRecorder()
 	auth.Callback(callbackResponse, callbackRequest)
@@ -210,8 +327,16 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 func TestCallbackRejectsDuplicateAndCraftedState(t *testing.T) {
 	cfg := testConfig()
 	sum := sha512.Sum512([]byte(strings.Repeat("s", 64)))
-	auth := &Authenticator{cfg: cfg, cookies: securecookie.New(sum[:32], sum[32:]), sessions: map[string]session{}, now: time.Now}
-	encoded, err := auth.cookies.Encode(cfg.Auth.Session.CookieName+"_login", loginState{State: "expected", Verifier: "v", Nonce: "n", Expires: time.Now().Add(time.Minute).Unix()})
+	auth := &Authenticator{
+		cfg:      cfg,
+		cookies:  securecookie.New(sum[:32], sum[32:]),
+		sessions: map[string]session{},
+		now:      time.Now,
+	}
+	encoded, err := auth.cookies.Encode(
+		cfg.Auth.Session.CookieName+"_login",
+		loginState{State: "expected", Verifier: "v", Nonce: "n", Expires: time.Now().Add(time.Minute).Unix()},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +347,12 @@ func TestCallbackRejectsDuplicateAndCraftedState(t *testing.T) {
 		"?state=expected&code=x&iss=https%3A%2F%2Fwrong.example",
 		"?state=expected&code=x&iss=https%3A%2F%2Fidentity.example&iss=https%3A%2F%2Fidentity.example",
 	} {
-		req := httptest.NewRequest(http.MethodGet, "https://portal.example/agents/credentials/oauth2/callback"+raw, nil)
+		req := httptest.NewRequestWithContext(
+			t.Context(),
+			http.MethodGet,
+			"https://portal.example/agents/credentials/oauth2/callback"+raw,
+			nil,
+		)
 		req.AddCookie(&http.Cookie{Name: cfg.Auth.Session.CookieName + "_login", Value: encoded})
 		response := httptest.NewRecorder()
 		auth.Callback(response, req)
@@ -240,13 +370,15 @@ func fetchOAuth2TestPrincipal(t *testing.T, identityBody, accessToken string) (P
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, identityBody)
+		if _, err := io.WriteString(w, identityBody); err != nil {
+			http.Error(w, "write failed", http.StatusInternalServerError)
+		}
 	}))
 	defer provider.Close()
 	cfg := testConfig()
 	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL
 	cfg.Auth.OAuth2.SubjectPath = "id"
-	cfg.Auth.OAuth2.DisplayNamePath = "login"
+	cfg.Auth.OAuth2.DisplayNamePath = testLoginPath
 	auth := &Authenticator{cfg: cfg, client: noRedirectClient(provider.Client())}
 	return auth.principal(context.Background(), &oauth2.Token{AccessToken: accessToken}, "")
 }
@@ -257,7 +389,12 @@ func TestOAuth2IdentityCanonicalizationAndTokenReflection(t *testing.T) {
 		name, body, subject, display string
 	}{
 		{"github integer", `{"id":424242,"login":"octocat"}`, "424242", "octocat"},
-		{"large exact integer", `{"id":92233720368547758081234567890,"login":"member"}`, "92233720368547758081234567890", "member"},
+		{
+			"large exact integer",
+			`{"id":92233720368547758081234567890,"login":"member"}`,
+			"92233720368547758081234567890",
+			"member",
+		},
 		{"string", `{"id":"stable-subject","login":"member"}`, "stable-subject", "member"},
 	}
 	for _, test := range valid {

@@ -316,10 +316,9 @@ gateway:
     url: ""
     label: Manage credentials
 
-# Optional standalone, self-service credential-file enrollment service. It
-# patches only pre-created seed Secret keys; the broker remains the sole owner
-# of writable canonical credentials and refresh. Values uploaded here are
-# credentials and must never be placed in this values document.
+# Optional standalone self-service provider login. It patches only pre-created
+# seed Secret keys; the broker remains the sole owner of writable canonical
+# credentials and refresh. Credential values must never be placed here.
 credentialPortal:
   enabled: false
   image:
@@ -330,6 +329,15 @@ credentialPortal:
   publicURL: ""
   port: 8080
   maxUploadBytes: 1048576
+  enrollment:
+    maxSessions: 64
+    maxConcurrent: 2
+    timeoutSeconds: 600
+    maxOutputBytes: 65536
+  # Secondary administrator recovery only. Provider Connect/Reconnect is the
+  # normal flow; enabling this exposes bounded raw credential-file upload.
+  recoveryUpload:
+    enabled: false
   auth:
     mode: oidc
     session:
@@ -372,10 +380,10 @@ credentialPortal:
   resources:
     requests:
       cpu: 25m
-      memory: 32Mi
+      memory: 64Mi
     limits:
       cpu: 250m
-      memory: 128Mi
+      memory: 512Mi
   networkPolicy:
     enabled: true
     # Kubernetes API and identity-provider HTTPS destination ports. Add a

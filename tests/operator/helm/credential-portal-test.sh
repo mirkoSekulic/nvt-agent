@@ -26,6 +26,11 @@ grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.53"' "${RENDER}
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: true' "${RENDER}"
+grep -Fq 'medium: Memory' "${RENDER}"
+grep -Fq 'mountPath: /tmp' "${RENDER}"
+grep -Fq '"maxConcurrent": 2' "${RENDER}"
+grep -Fq '"maxSessions": 64' "${RENDER}"
+grep -Fq '"enabled": false' "${RENDER}"
 
 helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set-string credentialPortal.auth.mode=oauth2 \
@@ -68,6 +73,20 @@ if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credentia
   exit 1
 fi
 grep -Fq 'Secret destination is already assigned to another slot' "${WORKDIR}/duplicate-destination.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.enrollment.maxConcurrent=9 >/dev/null 2>"${WORKDIR}/concurrency.txt"; then
+  echo "expected unsafe portal concurrency to fail" >&2
+  exit 1
+fi
+grep -Fq 'enrollment session limits are invalid' "${WORKDIR}/concurrency.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.enrollment.timeoutSeconds=3601 >/dev/null 2>"${WORKDIR}/timeout.txt"; then
+  echo "expected portal enrollment longer than its login session to fail" >&2
+  exit 1
+fi
+grep -Fq 'enrollment timeout must be' "${WORKDIR}/timeout.txt"
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set credentialPortal.enabled=false >"${WORKDIR}/disabled.yaml"; then :; fi

@@ -38,3 +38,28 @@ func TestConfigRejectsSharedSecretDestinationAcrossOwners(t *testing.T) {
 		t.Fatal("shared Secret destination was accepted")
 	}
 }
+
+func TestConfigAppliesAndStrictlyValidatesEnrollmentBounds(t *testing.T) {
+	cfg := testConfig()
+	cfg.Enrollment = EnrollmentConfig{}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Enrollment.MaxSessions != 64 || cfg.Enrollment.MaxConcurrent != 2 || cfg.Enrollment.TimeoutSeconds != 600 ||
+		cfg.Enrollment.MaxOutputBytes != 64*1024 {
+		t.Fatal("enrollment defaults changed")
+	}
+	invalid := []EnrollmentConfig{
+		{MaxSessions: 1, MaxConcurrent: 2, TimeoutSeconds: 600, MaxOutputBytes: 4096},
+		{MaxSessions: 64, MaxConcurrent: 2, TimeoutSeconds: 59, MaxOutputBytes: 4096},
+		{MaxSessions: 64, MaxConcurrent: 2, TimeoutSeconds: 3601, MaxOutputBytes: 4096},
+		{MaxSessions: 64, MaxConcurrent: 2, TimeoutSeconds: 600, MaxOutputBytes: 4095},
+	}
+	for _, enrollment := range invalid {
+		cfg := testConfig()
+		cfg.Enrollment = enrollment
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("invalid enrollment limits were accepted")
+		}
+	}
+}

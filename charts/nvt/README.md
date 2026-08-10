@@ -841,15 +841,17 @@ for trust boundaries and traffic behavior.
 ### Optional credential portal
 
 The chart can deploy the disabled-by-default standalone
-`nvt-credential-portal`. It provides authenticated, owner-bound credential-file
-enrollment into a pre-created broker seed Secret; it never reads current values
-or participates in refresh/injection. See
+`nvt-credential-portal`. It provides authenticated, owner-bound Codex and Claude
+Connect/Reconnect flows through the official CLIs and writes their validated
+credential documents into a pre-created broker seed Secret. It never reads
+current values or participates in refresh/injection. A raw file recovery path
+is separately administrator-enabled and disabled by default. See
 [`docs/credential-portal.md`](https://github.com/mirkoSekulic/nvt-agent/blob/main/docs/credential-portal.md) for the security
 boundary, slot configuration, migration procedure, and removal behavior.
 
 `gateway.credentialPortal.url` adds only a dashboard link. The gateway does not
 proxy the portal, share authentication state, or depend on its availability.
-Direct provider browser OAuth is not included.
+Portal identity login and provider authorization use separate sessions.
 
 Enable the optional gateway to list and route browser sessions:
 
