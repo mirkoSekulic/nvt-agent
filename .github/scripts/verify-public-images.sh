@@ -24,6 +24,7 @@ images=(
   nvt-execution-driver-host
   nvt-azure-execution-driver
   nvt-agent-gateway
+  nvt-credential-portal
   nvt-native-egress-relay
   nvt-github-comments-producer
 )
@@ -50,4 +51,4 @@ for name in "${images[@]}"; do
   fi
 done
 
-echo "Verified anonymous manifest access for all eleven release images."
+echo "Verified anonymous manifest access for all twelve release images."

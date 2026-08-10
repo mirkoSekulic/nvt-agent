@@ -9,6 +9,14 @@ defaults to deny whenever authentication is enabled.
 `auth.mode=none` remains the default and preserves unrestricted access to all
 routable AgentRuns, including legacy runs.
 
+## Optional credential portal link
+
+`NVT_GATEWAY_CREDENTIAL_PORTAL_URL` (or `--credential-portal-url`) adds one
+dashboard link with the label from `NVT_GATEWAY_CREDENTIAL_PORTAL_LABEL`. The
+URL must be canonical root-relative or absolute HTTPS. When unset, dashboard
+output is unchanged. This is link-only: the gateway does not proxy portal APIs,
+share sessions, inspect credential state, or depend on portal availability.
+
 The gateway embeds its default public logo assets. Deployments may set
 `NVT_GATEWAY_BRANDING_DIR` (or `--branding-dir`) to an absolute directory
 containing the documented fixed branding files; assets are validated and

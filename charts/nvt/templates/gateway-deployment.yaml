@@ -7,6 +7,11 @@
 {{- if and (eq .Values.gateway.routing.mode "subdomain") (not .Values.gateway.baseDomain) }}
 {{- fail "gateway.baseDomain is required when gateway.routing.mode=subdomain" }}
 {{- end }}
+{{- if .Values.gateway.credentialPortal.url }}
+{{- if or (not (or (regexMatch `^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$` .Values.gateway.credentialPortal.url) (regexMatch `^https://[^/@?#]+(?::[0-9]+)?(?:/|/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?$` .Values.gateway.credentialPortal.url))) (not .Values.gateway.credentialPortal.label) (gt (len .Values.gateway.credentialPortal.label) 128) }}
+{{- fail "gateway.credentialPortal requires a canonical root-relative or absolute HTTPS URL and a bounded label" }}
+{{- end }}
+{{- end }}
 {{- $nativeSession := .Values.gateway.nativeSession }}
 {{- $nativeWorkspace := .Values.gateway.nativeWorkspace }}
 {{- if $nativeWorkspace.enabled }}
@@ -283,6 +288,10 @@ spec:
             {{- end }}
             - --listen-addr=:{{ .Values.gateway.port }}
             - --default-target-port={{ .Values.gateway.defaultTargetPort }}
+            {{- if .Values.gateway.credentialPortal.url }}
+            - --credential-portal-url={{ .Values.gateway.credentialPortal.url }}
+            - --credential-portal-label={{ .Values.gateway.credentialPortal.label }}
+            {{- end }}
             {{- if $nativeSession.enabled }}
             - --native-session-enabled=true
             - --native-session-listen-addr=:{{ $nativeSession.port }}

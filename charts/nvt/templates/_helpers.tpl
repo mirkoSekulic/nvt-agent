@@ -66,6 +66,7 @@ app.kubernetes.io/part-of: nvt
   (dict "name" "nativeEgressRelay.initImage" "value" .Values.nativeEgressRelay.initImage)
   (dict "name" "executionDrivers.hostImage" "value" .Values.executionDrivers.hostImage)
   (dict "name" "gateway.image" "value" .Values.gateway.image)
+  (dict "name" "credentialPortal.image" "value" .Values.credentialPortal.image)
   (dict "name" "producer.image" "value" .Values.producer.image) -}}
 {{- range $image := $images -}}
 {{- if not (kindIs "map" $image.value) -}}

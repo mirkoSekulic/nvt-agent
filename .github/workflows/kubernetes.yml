@@ -7,6 +7,7 @@ on:
     paths:
       - "operator/**"
       - "gateway/**"
+      - "credentialportal/**"
       - "producers/github-comments/**"
       - "charts/**"
       - "scripts/**"
@@ -18,6 +19,7 @@ on:
     paths:
       - "operator/**"
       - "gateway/**"
+      - "credentialportal/**"
       - "producers/github-comments/**"
       - "charts/**"
       - "scripts/**"
@@ -80,6 +82,22 @@ jobs:
             protocol/guestenrollment/go.mod
       - name: Run gateway tests
         working-directory: gateway
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+  credential-portal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: credentialportal/go.sum
+      - name: Run credential portal security and service tests
+        working-directory: credentialportal
         run: |
           go vet ./...
           go test -race -count=1 ./...

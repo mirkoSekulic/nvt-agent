@@ -165,6 +165,45 @@ func TestDashboardListsAgentRuns(t *testing.T) {
 	}
 }
 
+func TestDashboardCredentialPortalLinkIsOptionalAndLinkOnly(t *testing.T) {
+	config := Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090, CredentialPortal: CredentialPortalLinkConfig{URL: "/agents/credentials", Label: "Manage credentials"}}
+	server := mustNewServer(t, config, fakeClient(t))
+	request := httptest.NewRequest(http.MethodGet, "http://agents.localhost/", nil)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `href="/agents/credentials">Manage credentials</a>`) {
+		t.Fatalf("portal link missing: code=%d body=%s", response.Code, response.Body.String())
+	}
+	config.CredentialPortal = CredentialPortalLinkConfig{}
+	server = mustNewServer(t, config, fakeClient(t))
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if strings.Contains(response.Body.String(), "Manage credentials") {
+		t.Fatalf("unset portal changed dashboard: %s", response.Body.String())
+	}
+}
+
+func TestCredentialPortalLinkValidationRejectsUnsafeURLs(t *testing.T) {
+	for _, invalid := range []CredentialPortalLinkConfig{
+		{URL: "javascript:alert(1)", Label: "Manage"},
+		{URL: "//evil.example/credentials", Label: "Manage"},
+		{URL: "/agents/credentials?destination=other", Label: "Manage"},
+		{URL: "https://user@portal.example/credentials", Label: "Manage"},
+		{URL: "/agents/credentials", Label: ""},
+	} {
+		cfg := Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090, CredentialPortal: invalid}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("unsafe portal link accepted: %#v", invalid)
+		}
+	}
+	for _, valid := range []CredentialPortalLinkConfig{{URL: "/agents/credentials", Label: "Manage"}, {URL: "https://portal.example/agents/credentials", Label: "Manage"}} {
+		cfg := Config{BaseDomain: "agents.localhost", ListenAddr: ":8080", DefaultTargetPort: 4090, CredentialPortal: valid}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid portal link rejected: %v", err)
+		}
+	}
+}
+
 func TestDashboardRequestedByPrefersPrincipalDisplayName(t *testing.T) {
 	run := dashboardTestRun("profiled-run")
 	run.Annotations[RequestedByAnnotation] = "legacy-requester-canary"
