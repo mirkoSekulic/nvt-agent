@@ -4,9 +4,9 @@
 disabled by default. Its complete data path is:
 
 ```text
-browser -> credential portal -> pre-created Kubernetes seed Secret
-        -> existing broker seed supervisor -> broker PVC canonical file
-        -> existing broker provider refresh and injection
+browser -> credential portal -> tokenless credential runner -> credential portal
+        -> pre-created Kubernetes seed Secret -> existing broker seed supervisor
+        -> broker PVC canonical file -> existing provider refresh and injection
 ```
 
 The portal is not a second credential runtime. It never reads the current
@@ -16,8 +16,8 @@ remove the pre-created Secret or the broker PVC and does not interrupt running
 agents or broker refresh.
 
 The normal user flow is Connect/Reconnect. After portal authentication establishes
-the stable owner, the selected trusted adapter runs the official provider CLI in
-an isolated, private, memory-backed temporary home. Codex uses
+the stable owner, the portal asks a separate credential-runner sidecar to run the
+selected trusted adapter in an isolated, private, memory-backed temporary home. Codex uses
 `codex login --device-auth`; Claude uses `claude auth login --claudeai`. The
 browser receives only the provider-hosted authorization URL and, where the
 official flow requires it, a short-lived device or paste-back code. Provider
@@ -43,8 +43,21 @@ Account has only `patch` on the configured Secret name; it has no `get`, `list`,
 (which creates or replaces that member) for the configured `/data` key and
 never observes any other key. The pre-created Secret must contain a `data: {}`
 object, but its configured slot keys may initially be absent.
-The portal requests a metadata-only PATCH response and streams/discards the
+The portal container requests a metadata-only PATCH response and streams/discards the
 response rather than decoding a Secret object.
+
+The CLI runner is a separate container boundary. Pod ServiceAccount automounting
+and Kubernetes service-link environment injection are disabled. A short-lived
+projected Kubernetes API token is mounted only into the small portal container;
+the runner receives no Kubernetes token, portal configuration, session/OAuth
+client Secret environment, or Kubernetes/workload credential. The containers
+communicate only on pod localhost using a per-pod random key generated into
+memory-backed storage. Every bounded protocol request has an HMAC, timestamp,
+and unique replay-rejected nonce; enrollment identifiers are opaque and
+single-use. The runner can invoke only compiled-in adapters and returns a
+generated document to the portal once. It cannot select or see a Secret
+destination or patch Kubernetes. The portal validates the document and performs
+the exact slot-bound patch.
 
 Portal login and provider authorization are separate sessions and callback
 paths. Each in-memory enrollment session binds the authenticated principal,
@@ -53,15 +66,16 @@ single-use code handoff. Request parameters cannot override the provider,
 adapter, Secret, or key. Reconnect never relies on reported credential health
 or expiry and can be started at any time.
 
-Enrollment processes are capped and time-bounded. CLI output is bounded and
-never logged. Each process receives a small allowlisted environment and a fresh
-private `HOME`; portal session/OAuth client secrets are not inherited. Generated
+Enrollment processes are capped and time-bounded in both components. CLI output
+is bounded and never logged. Each process receives a small allowlisted
+environment and a fresh private `HOME`; portal session/OAuth client secrets are
+not mounted into the runner container and cannot be inherited. Generated
 files are accepted only at the adapter's fixed path, must be regular bounded
 files, and are validated before patch. The temporary home is removed before the
 Secret is changed, and in-memory credential bytes are cleared as practical.
 Logout, timeout, cancellation, and shutdown terminate unfinished enrollment
-processes. The ServiceAccount still has only the configured Secret `patch`
-permission and has no workload-creation permission.
+processes. The portal ServiceAccount still has only the configured Secret
+`patch` permission and has no workload-creation permission.
 
 The optional administrator recovery upload is disabled by default. When enabled,
 uploads are raw `application/json`, bounded to at most 1 MiB, protected by
@@ -89,7 +103,8 @@ by the broker, or is healthy upstream.
 The adapter is selected by the administrator, never inferred from provider
 output or a recovery file.
 
-- `codex-oauth-file` invokes `codex login --device-auth`, discovers
+- `codex-oauth-file` invokes the **experimental** `codex login --device-auth`
+  flow, discovers
   `$HOME/.codex/auth.json`, and accepts a top-level object with non-empty
   `tokens.access_token` and `tokens.refresh_token`; the access token must be a
   JWT with an integer `exp`, as required by the existing broker provider.
@@ -102,14 +117,19 @@ On 2026-08-10, sanitized lifecycle probes against installed Codex CLI 0.147.0
 and Claude Code 2.1.224 confirmed the official remote-safe handoffs: Codex
 emitted an `auth.openai.com` device URL and one-time code while polling, and
 Claude emitted a `claude.com` authorization URL and waited for paste-back code.
-The probes used empty temporary homes, did not complete authorization, and
+The Codex device flow can require an account security setting and has failed in
+deployments where that setting was unavailable. It therefore requires explicit
+`credentialPortal.enrollment.experimentalCodexDeviceAuth: true` opt-in. The
+probes used empty temporary homes, did not complete authorization, and
 created no credential file. End-to-end real-account completion and generated
 file validation therefore remain **unverified** and these adapters must not be
 described as production-ready until an authorized operator records that
 sanitized proof. The fake-CLI conformance suite covers the complete handoff,
 file discovery, validation, Secret patch, failure, and cleanup contracts without
-real credentials. CLI version parity with AgentRun images is deferred; separate
-image build arguments make later coordination explicit.
+real credentials. The image pins Codex CLI `0.147.0` and Claude Code `2.1.226`
+so rebuilding a commit cannot silently change command parsing or credential-file
+behavior. CLI version parity with AgentRun images is deferred; separate image
+build arguments make later coordinated sourcing explicit.
 
 ## Enabling the chart
 
@@ -124,8 +144,17 @@ Expose the portal Service through an HTTPS ingress at exactly
 and outbound DNS/HTTPS for Kubernetes, identity, and provider authorization;
 cluster policy may narrow peers while preserving those dependencies.
 
-Provider Connect/Reconnect is enabled whenever the portal is enabled. To expose
-the secondary recovery upload explicitly:
+Claude Connect/Reconnect is available when the portal and a Claude slot are
+enabled. A Codex slot additionally requires explicit acknowledgement of its
+unproven device flow:
+
+```yaml
+credentialPortal:
+  enrollment:
+    experimentalCodexDeviceAuth: true
+```
+
+To expose the secondary recovery upload explicitly:
 
 ```yaml
 credentialPortal:

@@ -849,6 +849,12 @@ is separately administrator-enabled and disabled by default. See
 [`docs/credential-portal.md`](https://github.com/mirkoSekulic/nvt-agent/blob/main/docs/credential-portal.md) for the security
 boundary, slot configuration, migration procedure, and removal behavior.
 
+The provider CLIs run in a separate tokenless sidecar. Only the portal
+container receives a manually projected Kubernetes API token; the runner gets
+no portal Secret environment or Kubernetes credential. Codex device
+authorization is experimental, separately gated, and not production-ready
+without the real-account proof described in the portal documentation.
+
 `gateway.credentialPortal.url` adds only a dashboard link. The gateway does not
 proxy the portal, share authentication state, or depend on its availability.
 Portal identity login and provider authorization use separate sessions.
