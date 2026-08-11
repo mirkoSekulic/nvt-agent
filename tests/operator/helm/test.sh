@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.60" || "${CHART_APP_VERSION}" != "0.8.60" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.60, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.61" || "${CHART_APP_VERSION}" != "0.8.61" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.61, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.60' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.61' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -24,6 +24,9 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 
 DEFAULT_RENDER="${WORKDIR}/default.yaml"
 PROFILE_RENDER="${WORKDIR}/profile.yaml"
+DYNAMIC_PRINCIPAL_RENDER="${WORKDIR}/dynamic-principal.yaml"
+DYNAMIC_PRINCIPAL_ROTATED_RENDER="${WORKDIR}/dynamic-principal-rotated.yaml"
+DYNAMIC_PRINCIPAL_FAILURE="${WORKDIR}/dynamic-principal-failure.txt"
 SCHEDULE_DEFAULT_IMAGE_RENDER="${WORKDIR}/schedule-default-image.yaml"
 SCHEDULE_EMPTY_IMAGE_RENDER="${WORKDIR}/schedule-empty-image.yaml"
 SCHEDULE_OVERRIDE_IMAGE_RENDER="${WORKDIR}/schedule-override-image.yaml"
@@ -305,6 +308,9 @@ if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/exe
 fi
 grep -q 'nativeEgressRelay.replicas must be exactly 1' "${WORKDIR}/native-relay-replicas.txt"
 helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/profile-values.yaml" > "${PROFILE_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" > "${DYNAMIC_PRINCIPAL_RENDER}"
+helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=epoch-2 > "${DYNAMIC_PRINCIPAL_ROTATED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
   --set agentSchedule.template.workspace.mode=Ephemeral > "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns -s templates/agentschedule.yaml \
@@ -1374,6 +1380,118 @@ grep -A5 'workspace:' "${PROFILE_RENDER}" | grep -q 'storageClassName: managed-c
 grep -A3 'preparations:' "${PROFILE_RENDER}" | grep -q 'operation: identity'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Follow the administrator-owned repository workflow.'
 grep -A3 'workspaceInstructions: |' "${PROFILE_RENDER}" | grep -q 'Keep changes focused and run repository checks.'
+if grep -Eq 'principalCredentialSelection|principal-account-client|NVT_PRINCIPAL_ACCOUNT' "${DEFAULT_RENDER}"; then
+  echo "default render unexpectedly enabled dynamic operator resolution" >&2
+  exit 1
+fi
+python3 - "${DYNAMIC_PRINCIPAL_RENDER}" "${DYNAMIC_PRINCIPAL_ROTATED_RENDER}" <<'PY'
+import sys
+import yaml
+
+def documents(path):
+    with open(path, encoding="utf-8") as stream:
+        return [item for item in yaml.safe_load_all(stream) if item]
+
+def resource(items, kind, name):
+    matches = [item for item in items if item.get("kind") == kind and item.get("metadata", {}).get("name") == name]
+    assert len(matches) == 1, (kind, name, len(matches))
+    return matches[0]
+
+current = documents(sys.argv[1])
+rotated = documents(sys.argv[2])
+schedule = resource(current, "AgentSchedule", "default")
+selection = schedule["spec"]["principalCredentialSelection"]
+assert selection == {
+    "enabled": True,
+    "onNoMatch": "deny",
+    "templateProfiles": [{"template": "approved-work", "profile": "dynamic-work"}],
+}
+assert schedule["spec"]["producerPolicies"][0]["allowedPrincipalIssuers"] == ["https://identity.example/tenant"]
+assert "profileSelection" not in schedule["spec"]
+
+config = resource(current, "ConfigMap", "nvt-principal-account-client")
+config_text = config["data"]["config.json"]
+assert "https://nvt-broker:7347" in config_text
+assert "assertion-key" in config_text
+assert "NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY" not in config_text
+
+annotation = "nvt.io/dynamic-account-assertion-rotation-epoch"
+for workload in ("nvt-broker", "nvt-operator"):
+    deployment = resource(current, "Deployment", workload)
+    changed = resource(rotated, "Deployment", workload)
+    assert deployment["spec"]["template"]["metadata"]["annotations"][annotation] == "epoch-1"
+    assert changed["spec"]["template"]["metadata"]["annotations"][annotation] == "epoch-2"
+
+operator = resource(current, "Deployment", "nvt-operator")
+manager = next(container for container in operator["spec"]["template"]["spec"]["containers"] if container["name"] == "manager")
+assert any(item.get("name") == "NVT_PRINCIPAL_ACCOUNT_BROKER_CONFIG_FILE" for item in manager["env"])
+mount = next(item for item in manager["volumeMounts"] if item["name"] == "principal-account-client")
+assert mount["readOnly"] is True
+volume = next(item for item in operator["spec"]["template"]["spec"]["volumes"] if item["name"] == "principal-account-client")
+secret_names = [source["secret"]["name"] for source in volume["projected"]["sources"] if "secret" in source]
+assert secret_names == ["nvt-broker-tls", "nvt-dynamic-assertions"]
+
+for item in current:
+    if item.get("kind") not in {"Deployment", "StatefulSet", "DaemonSet", "Job"}:
+        continue
+    pod = item.get("spec", {}).get("template", {}).get("spec", {})
+    rendered = yaml.safe_dump(pod)
+    if "nvt-dynamic-assertions" in rendered or "principal-account-client" in rendered:
+        assert item["metadata"]["name"] in {"nvt-broker", "nvt-operator"}, item["metadata"]["name"]
+
+rendered = open(sys.argv[1], encoding="utf-8").read()
+for needle in ("DYNAMIC-CREDENTIAL-SECRET-NEEDLE", "credential_base64", "dpa_0123456789abcdef0123456789abcdef"):
+    assert needle not in rendered
+PY
+
+expect_dynamic_principal_failure() {
+  local name="$1"
+  local expected="$2"
+  shift 2
+  if helm template nvt "${CHART}" -n custom-ns -f "${ROOT}/tests/operator/helm/dynamic-principal-values.yaml" "$@" \
+    >/dev/null 2>"${DYNAMIC_PRINCIPAL_FAILURE}"; then
+    echo "expected dynamic principal Helm validation failure: ${name}" >&2
+    exit 1
+  fi
+  grep -Fq "${expected}" "${DYNAMIC_PRINCIPAL_FAILURE}"
+}
+
+expect_dynamic_principal_failure operator-disabled \
+  'agentSchedule.principalCredentialSelection requires operator.principalAccounts.enabled=true' \
+  --set operator.principalAccounts.enabled=false
+expect_dynamic_principal_failure explicitly-disabled-selection \
+  'agentSchedule.principalCredentialSelection must set enabled=true when configured' \
+  --set agentSchedule.principalCredentialSelection.enabled=false
+expect_dynamic_principal_failure mixed-static-selection \
+  'agentSchedule.principalCredentialSelection cannot be combined with profileSelection' \
+  --set agentSchedule.profileSelection.onNoMatch=deny
+expect_dynamic_principal_failure unknown-profile \
+  'dynamic principal credential mapping references unknown profile' \
+  --set-string agentSchedule.principalCredentialSelection.templateProfiles[0].profile=missing
+expect_dynamic_principal_failure direct-profile \
+  'must use mediated egress and broker grants' \
+  --set-string agentSchedule.profiles[0].egress=direct
+expect_dynamic_principal_failure file-bundle \
+  'dynamic principal-account grants cannot use file-bundle' \
+  --set-string agentSchedule.profiles[0].broker.grants[0].materialization=file-bundle
+expect_dynamic_principal_failure missing-issuer-policy \
+  'allowedPrincipalIssuers must contain 1-32 issuers' \
+  --set-json 'agentSchedule.producerPolicies[0].allowedPrincipalIssuers=[]'
+expect_dynamic_principal_failure wrong-assertion-secret \
+  'authentication must reference the broker dynamic assertion key' \
+  --set-string operator.principalAccounts.authentication.existingSecret=wrong-secret
+expect_dynamic_principal_failure insecure-broker \
+  'brokerURL must be an HTTPS origin' \
+  --set-string operator.principalAccounts.brokerURL=http://nvt-broker:7347
+expect_dynamic_principal_failure malformed-broker-secret \
+  'Secret references must be valid Kubernetes names' \
+  --set-string operator.principalAccounts.authentication.existingSecret=invalid..secret
+expect_dynamic_principal_failure malformed-principal-issuer \
+  'allowedPrincipalIssuers must be canonical HTTPS issuers' \
+  --set-string 'agentSchedule.producerPolicies[0].allowedPrincipalIssuers[0]=https://identity.example/tenant bad'
+expect_dynamic_principal_failure missing-rotation-epoch \
+  'requires broker.dynamicAccountAssertionRotationEpoch' \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_DEFAULT_IMAGE_RENDER}"
 grep -q "image: ghcr.io/mirkosekulic/nvt-agent-runtime:${CHART_APP_VERSION}" "${SCHEDULE_EMPTY_IMAGE_RENDER}"
 grep -q 'image: registry.example/runtime:override' "${SCHEDULE_OVERRIDE_IMAGE_RENDER}"

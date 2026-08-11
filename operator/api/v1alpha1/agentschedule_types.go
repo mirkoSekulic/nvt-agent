@@ -29,8 +29,11 @@ type AgentScheduleSpec struct {
 	ExecutionClasses []AgentScheduleExecutionClass   `json:"executionClasses,omitempty"`
 	Profiles         []AgentScheduleExecutionProfile `json:"profiles,omitempty"`
 	ProfileSelection *AgentScheduleProfileSelection  `json:"profileSelection,omitempty"`
-	WorkflowProfiles []AgentScheduleWorkflowProfile  `json:"workflowProfiles,omitempty"`
-	ProducerPolicies []AgentScheduleProducerPolicy   `json:"producerPolicies,omitempty"`
+	// PrincipalCredentialSelection enables broker-resolved, principal-owned
+	// credential selection instead of static issuer/subject profile rules.
+	PrincipalCredentialSelection *AgentSchedulePrincipalCredentialSelection `json:"principalCredentialSelection,omitempty"`
+	WorkflowProfiles             []AgentScheduleWorkflowProfile             `json:"workflowProfiles,omitempty"`
+	ProducerPolicies             []AgentScheduleProducerPolicy              `json:"producerPolicies,omitempty"`
 	// AllowedProducers is the compatibility allowlist for schedules without
 	// workflow profiles. Workflow-enabled schedules use ProducerPolicies.
 	AllowedProducers []string `json:"allowedProducers,omitempty"`
@@ -126,6 +129,29 @@ type AgentScheduleProducerPolicy struct {
 	// +listType=set
 	Workflows       []string `json:"workflows,omitempty"`
 	DefaultWorkflow string   `json:"defaultWorkflow,omitempty"`
+	// AllowedPrincipalIssuers bounds which canonical immutable-principal
+	// issuers this authenticated producer may assert in dynamic mode.
+	// +listType=set
+	AllowedPrincipalIssuers []string `json:"allowedPrincipalIssuers,omitempty"`
+}
+
+// AgentSchedulePrincipalCredentialSelection maps broker-owned public
+// credential templates to administrator-owned execution profiles.
+type AgentSchedulePrincipalCredentialSelection struct {
+	Enabled bool `json:"enabled"`
+	// OnNoMatch is fixed to deny in this version. There is no static fallback.
+	OnNoMatch AgentScheduleOnNoMatch `json:"onNoMatch"`
+	// TemplateProfiles are administrator-owned exact mappings.
+	// +listType=map
+	// +listMapKey=template
+	TemplateProfiles []AgentSchedulePrincipalCredentialTemplateProfile `json:"templateProfiles"`
+}
+
+// AgentSchedulePrincipalCredentialTemplateProfile binds one approved broker
+// credential template to one existing execution profile.
+type AgentSchedulePrincipalCredentialTemplateProfile struct {
+	Template string `json:"template"`
+	Profile  string `json:"profile"`
 }
 
 // AgentScheduleProfileSelection defines deterministic static principal routing.
@@ -225,6 +251,9 @@ func (in *AgentScheduleSpec) DeepCopy() *AgentScheduleSpec {
 	if in.ProfileSelection != nil {
 		out.ProfileSelection = in.ProfileSelection.DeepCopy()
 	}
+	if in.PrincipalCredentialSelection != nil {
+		out.PrincipalCredentialSelection = in.PrincipalCredentialSelection.DeepCopy()
+	}
 	if in.WorkflowProfiles != nil {
 		out.WorkflowProfiles = make([]AgentScheduleWorkflowProfile, len(in.WorkflowProfiles))
 		copy(out.WorkflowProfiles, in.WorkflowProfiles)
@@ -237,9 +266,23 @@ func (in *AgentScheduleSpec) DeepCopy() *AgentScheduleSpec {
 				out.ProducerPolicies[i].Workflows = make([]string, len(in.ProducerPolicies[i].Workflows))
 				copy(out.ProducerPolicies[i].Workflows, in.ProducerPolicies[i].Workflows)
 			}
+			out.ProducerPolicies[i].AllowedPrincipalIssuers = append(
+				[]string(nil), in.ProducerPolicies[i].AllowedPrincipalIssuers...,
+			)
 		}
 	}
 	out.AllowedProducers = append([]string(nil), in.AllowedProducers...)
+	return out
+}
+
+// DeepCopy returns a copy of principal credential selection.
+func (in *AgentSchedulePrincipalCredentialSelection) DeepCopy() *AgentSchedulePrincipalCredentialSelection {
+	if in == nil {
+		return nil
+	}
+	out := new(AgentSchedulePrincipalCredentialSelection)
+	*out = *in
+	out.TemplateProfiles = append([]AgentSchedulePrincipalCredentialTemplateProfile(nil), in.TemplateProfiles...)
 	return out
 }
 

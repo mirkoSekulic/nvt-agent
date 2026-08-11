@@ -1,0 +1,356 @@
+package principalaccounts
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+const testAssertionKey = "0123456789abcdef0123456789abcdef"
+const readyResponse = `{"ok":true,"state":"ready","template":"work","generation":7}`
+
+type brokerFixture struct { //nolint:govet // Test fixture fields follow request/response flow for readability.
+	t              *testing.T
+	server         *httptest.Server
+	client         *Client
+	principal      Principal
+	mu             sync.Mutex
+	requests       []string
+	readinessCode  int
+	readinessBody  string
+	resolutionCode int
+	resolutionBody string
+}
+
+func newBrokerFixture(t *testing.T) *brokerFixture {
+	t.Helper()
+	fixture := &brokerFixture{
+		t: t,
+		principal: Principal{
+			Issuer: "https://issuer.example/tenant", Subject: "immutable-42",
+		},
+		readinessCode:  http.StatusOK,
+		readinessBody:  readyResponse,
+		resolutionCode: http.StatusOK,
+		resolutionBody: `{"ok":true,"template":"work","provider_instance_id":"dpa_0123456789abcdef0123456789abcdef","generation":7}`,
+	}
+	fixture.server = httptest.NewTLSServer(http.HandlerFunc(fixture.serveHTTP))
+	t.Cleanup(fixture.server.Close)
+	directory := t.TempDir()
+	certificate, err := x509.ParseCertificate(fixture.server.Certificate().Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(directory, "ca.pem")
+	keyPath := filepath.Join(directory, "key")
+	if writeErr := os.WriteFile(caPath, pemCertificate(certificate.Raw), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if writeErr := os.WriteFile(keyPath, []byte(testAssertionKey), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	fixture.client, err = New(Config{
+		Version: 1, BaseURL: fixture.server.URL, CAFile: caPath, AssertionKeyFile: keyPath,
+		AssertionTTLSeconds: 30, RequestTimeoutSeconds: 2, MaxResponseBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.client.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	t.Cleanup(fixture.client.Close)
+	return fixture
+}
+
+func (f *brokerFixture) serveHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost || request.Header.Get("Content-Type") != jsonContentType ||
+		request.Header.Get("Accept") != jsonContentType {
+		f.t.Errorf("unexpected request %s %s headers=%v", request.Method, request.URL.Path, request.Header)
+	}
+	f.verifyAssertion(request.Header.Get("Authorization"))
+	f.mu.Lock()
+	f.requests = append(f.requests, request.URL.Path)
+	f.mu.Unlock()
+	response.Header().Set("Content-Type", jsonContentType)
+	switch request.URL.Path {
+	case "/v1/principal-accounts/readiness":
+		response.WriteHeader(f.readinessCode)
+		if _, err := response.Write([]byte(f.readinessBody)); err != nil {
+			f.t.Errorf("write readiness response: %v", err)
+		}
+	case "/v1/principal-accounts/resolve":
+		response.WriteHeader(f.resolutionCode)
+		if _, err := response.Write([]byte(f.resolutionBody)); err != nil {
+			f.t.Errorf("write resolution response: %v", err)
+		}
+	default:
+		http.NotFound(response, request)
+	}
+}
+
+func (f *brokerFixture) verifyAssertion(header string) {
+	prefix := assertionScheme + " "
+	if !strings.HasPrefix(header, prefix) {
+		f.t.Errorf("missing assertion scheme")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(header, prefix), ".")
+	if len(parts) != 2 {
+		f.t.Errorf("invalid assertion structure")
+		return
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		f.t.Error(err)
+		return
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		f.t.Error(err)
+		return
+	}
+	mac := hmac.New(sha256.New, []byte(testAssertionKey))
+	_, _ = mac.Write(payload)
+	if !hmac.Equal(signature, mac.Sum(nil)) {
+		f.t.Errorf("invalid assertion signature")
+	}
+	var claims struct {
+		Issuer    string `json:"issuer"`
+		Subject   string `json:"subject"`
+		Audience  string `json:"audience"`
+		ExpiresAt int64  `json:"expires_at"`
+		Version   int    `json:"version"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		f.t.Error(err)
+	}
+	if claims.Audience != assertionAudience || claims.ExpiresAt != 1_700_000_030 || claims.Version != 1 ||
+		claims.Issuer != f.principal.Issuer || claims.Subject != f.principal.Subject {
+		f.t.Errorf("assertion is not exact-principal bounded: %#v", claims)
+	}
+}
+
+func (f *brokerFixture) requestPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requests...)
+}
+
+func TestResolveExactReadyAccount(t *testing.T) {
+	fixture := newBrokerFixture(t)
+	resolution, err := fixture.client.Resolve(context.Background(), fixture.principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution != (Resolution{Template: "work", ProviderInstanceID: "dpa_0123456789abcdef0123456789abcdef", Generation: 7}) {
+		t.Fatalf("unexpected resolution: %#v", resolution)
+	}
+	wantPaths := "/v1/principal-accounts/readiness,/v1/principal-accounts/resolve"
+	if got := strings.Join(fixture.requestPaths(), ","); got != wantPaths {
+		t.Fatalf("unexpected calls: %s", got)
+	}
+}
+
+func TestResolveStableAccountStates(t *testing.T) {
+	tests := []struct { //nolint:govet // Table fields follow the broker request sequence.
+		name           string
+		readinessCode  int
+		readinessBody  string
+		resolutionCode int
+		resolutionBody string
+		want           error
+	}{
+		{
+			name: "missing", readinessCode: 404,
+			readinessBody: `{"ok":false,"error":"account-not-found","message":"account-not-found"}`,
+			want:          ErrNotEnrolled,
+		},
+		{
+			name: "revoked", readinessCode: 200,
+			readinessBody: `{"ok":true,"state":"revoked","template":"work","generation":7}`,
+			want:          ErrNotEnrolled,
+		},
+		{
+			name: "unready", readinessCode: 200,
+			readinessBody: `{"ok":true,"state":"unready","template":"work","generation":7}`,
+			want:          ErrNotReady,
+		},
+		{
+			name: "raced-unready", readinessCode: 200, readinessBody: readyResponse, resolutionCode: 503,
+			resolutionBody: `{"ok":false,"error":"account-unready","message":"account-unready"}`,
+			want:           ErrNotReady,
+		},
+		{
+			name: "raced-missing", readinessCode: 200, readinessBody: readyResponse, resolutionCode: 404,
+			resolutionBody: `{"ok":false,"error":"account-not-found","message":"account-not-found"}`,
+			want:           ErrNotReady,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newBrokerFixture(t)
+			fixture.readinessCode, fixture.readinessBody = test.readinessCode, test.readinessBody
+			if test.resolutionCode != 0 {
+				fixture.resolutionCode, fixture.resolutionBody = test.resolutionCode, test.resolutionBody
+			}
+			_, err := fixture.client.Resolve(context.Background(), fixture.principal)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("got %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveFailsClosedForMalformedOrInconsistentBrokerResponses(t *testing.T) {
+	tests := []struct {
+		name      string
+		readiness string
+		resolved  string
+	}{
+		{
+			name: "unknown-readiness-field",
+			readiness: `{"ok":true,"state":"ready","template":"work","generation":7,` +
+				`"credential":"SECRET-NEEDLE"}`,
+		},
+		{
+			name:      "duplicate",
+			readiness: `{"ok":true,"state":"ready","state":"unready","template":"work","generation":7}`,
+		},
+		{
+			name:      "unknown-state",
+			readiness: `{"ok":true,"state":"healthy","template":"work","generation":7}`,
+		},
+		{
+			name: "generation-mismatch",
+			resolved: `{"ok":true,"template":"work",` +
+				`"provider_instance_id":"dpa_0123456789abcdef0123456789abcdef","generation":8}`,
+		},
+		{
+			name: "template-mismatch",
+			resolved: `{"ok":true,"template":"other",` +
+				`"provider_instance_id":"dpa_0123456789abcdef0123456789abcdef","generation":7}`,
+		},
+		{
+			name:     "invalid-provider",
+			resolved: `{"ok":true,"template":"work","provider_instance_id":"shared-provider","generation":7}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newBrokerFixture(t)
+			if test.readiness != "" {
+				fixture.readinessBody = test.readiness
+			}
+			if test.resolved != "" {
+				fixture.resolutionBody = test.resolved
+			}
+			_, err := fixture.client.Resolve(context.Background(), fixture.principal)
+			if !errors.Is(err, ErrUnavailable) || strings.Contains(fmt.Sprint(err), "SECRET-NEEDLE") {
+				t.Fatalf("expected redacted unavailable error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveRejectsOversizedResponseAndUnverifiedTLS(t *testing.T) {
+	fixture := newBrokerFixture(t)
+	fixture.readinessBody = `{"ok":true,"state":"ready","template":"` + strings.Repeat("x", 5000) + `","generation":7}`
+	if _, err := fixture.client.Resolve(context.Background(), fixture.principal); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected oversized response rejection, got %v", err)
+	}
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", jsonContentType)
+		if _, err := response.Write([]byte(`{"ok":true}`)); err != nil {
+			t.Errorf("write TLS fixture response: %v", err)
+		}
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.client.baseURL = parsed
+	if _, err := fixture.client.Resolve(context.Background(), fixture.principal); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected TLS failure, got %v", err)
+	}
+}
+
+func TestResolveRejectsInvalidPrincipalWithoutBrokerCall(t *testing.T) {
+	fixture := newBrokerFixture(t)
+	for _, principal := range []Principal{
+		{}, {Issuer: "http://issuer.example", Subject: "subject"},
+		{Issuer: fixture.principal.Issuer, Subject: " subject"},
+		{Issuer: fixture.principal.Issuer, Subject: "subject\nother"},
+	} {
+		if _, err := fixture.client.Resolve(context.Background(), principal); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("expected invalid principal rejection for %#v: %v", principal, err)
+		}
+	}
+	if len(fixture.requestPaths()) != 0 {
+		t.Fatalf("invalid principals reached broker: %v", fixture.requestPaths())
+	}
+}
+
+func TestConfigRejectsInsecureOrUnboundedValues(t *testing.T) {
+	base := Config{
+		Version: 1, BaseURL: "https://broker.example", CAFile: "ca", AssertionKeyFile: "key",
+		AssertionTTLSeconds: 30, RequestTimeoutSeconds: 5, MaxResponseBytes: 4096,
+	}
+	for _, mutate := range []func(*Config){
+		func(config *Config) { config.BaseURL = "http://broker.example" },
+		func(config *Config) { config.BaseURL = "https://broker.example/path" },
+		func(config *Config) { config.AssertionTTLSeconds = 901 },
+		func(config *Config) { config.RequestTimeoutSeconds = 0 },
+		func(config *Config) { config.MaxResponseBytes = 65537 },
+	} {
+		config := base
+		mutate(&config)
+		if err := config.validate(); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("expected invalid config rejection: %#v err=%v", config, err)
+		}
+	}
+}
+
+func TestLoadConfiguredPreservesAbsentCompatibilityAndRejectsMalformedConfig(t *testing.T) {
+	t.Setenv(ConfigFileEnv, "")
+	client, err := LoadConfigured()
+	if err != nil || client != nil {
+		t.Fatalf("absent optional configuration must return a nil client: client=%v err=%v", client, err)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if writeErr := os.WriteFile(path, []byte(`{"version":1,"unknown":"value"}`), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	t.Setenv(ConfigFileEnv, path)
+	client, err = LoadConfigured()
+	if client != nil || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("malformed optional configuration must fail closed: client=%v err=%v", client, err)
+	}
+}
+
+func pemCertificate(raw []byte) []byte {
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	var builder strings.Builder
+	builder.WriteString("-----BEGIN CERTIFICATE-----\n")
+	for len(encoded) > 64 {
+		builder.WriteString(encoded[:64] + "\n")
+		encoded = encoded[64:]
+	}
+	builder.WriteString(encoded + "\n-----END CERTIFICATE-----\n")
+	return []byte(builder.String())
+}

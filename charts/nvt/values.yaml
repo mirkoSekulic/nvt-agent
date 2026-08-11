@@ -117,6 +117,20 @@ operator:
     tag: ""
     pullPolicy: IfNotPresent
   replicas: 1
+  # Optional trusted resolver for dynamic principal-owned broker accounts.
+  # Secret values are mounted as files only into the operator manager.
+  principalAccounts:
+    enabled: false
+    brokerURL: https://nvt-broker:7347
+    ca:
+      existingSecret: ""
+      key: ca.crt
+    authentication:
+      existingSecret: ""
+      key: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+    assertionTTLSeconds: 60
+    requestTimeoutSeconds: 10
+    maxResponseBytes: 65536
 
 # Opt-in standalone native-VM egress relay. The relay remains unpublished and
 # deny-all until the operator applies a complete exact-binding snapshot. All
@@ -449,6 +463,10 @@ agentSchedule:
   executionClasses: []
   profiles: []
   profileSelection: {}
+  # Optional dynamic selection. When enabled, profileSelection must remain
+  # empty and every mapped profile uses the reserved $principal-account
+  # placeholder for broker/runtime provider references.
+  principalCredentialSelection: {}
   workflowProfiles: []
   producerPolicies: []
   allowedProducers: []

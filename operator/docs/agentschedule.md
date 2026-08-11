@@ -7,7 +7,7 @@ The operator core remains producer-agnostic.
 ## Profiled schedules
 
 A profiled schedule owns a typed common template, named execution profiles,
-static principal selection, optional workflow profiles, and the exact
+static or explicitly enabled dynamic principal selection, optional workflow profiles, and the exact
 Kubernetes producer identities that may submit work. See
 [`operator/examples/agentschedule-profiled.yaml`](../examples/agentschedule-profiled.yaml)
 for a complete resource.
@@ -174,6 +174,82 @@ selection. Duplicate selectors/profile names, missing references, invalid
 `onNoMatch`, and unusable selection paths fail closed. There are no
 producer-selectable profile names, candidates, or fallbacks.
 
+### Dynamic principal-owned credentials
+
+`principalCredentialSelection` is an additive, disabled-by-default alternative
+to `profileSelection`. It resolves a ready broker-owned account for the exact
+canonical issuer plus immutable subject supplied by an authenticated producer,
+then maps the broker-returned public credential template through an
+administrator-owned profile table:
+
+```yaml
+principalCredentialSelection:
+  enabled: true
+  onNoMatch: deny
+  templateProfiles:
+    - template: approved-work
+      profile: mediated-work
+producerPolicies:
+  - identity: system:serviceaccount:nvt:producer
+    workflows: [implement]
+    defaultWorkflow: implement
+    allowedPrincipalIssuers:
+      - https://identity.example/tenant
+profiles:
+  - name: mediated-work
+    runtime: {type: generic-agent, autonomy: trusted-local}
+    agentRuntimeConfig:
+      command: agent
+      proxy: {provider: $principal-account}
+    egress: mediated
+    egressEnforcement: true
+    egressTransport: forward-proxy
+    broker:
+      grants:
+        - provider: $principal-account
+          materialization: header-inject
+          repositories: [example/*]
+          egressHosts: [provider.example]
+```
+
+The authenticated producer identity comes from TokenReview as before. Each
+dynamic producer policy additionally lists 1–32 exact canonical HTTPS
+principal issuers. This is the operator's current admission eligibility gate;
+the credential portal's shared OAuth eligibility policy remains responsible
+for who may establish the broker account. Display name, login, and email are
+never ownership. A missing/malformed principal or disallowed issuer returns
+`principal-not-eligible` before the broker is contacted.
+
+The operator alone sends a short-lived exact-principal assertion to the broker
+over verified TLS. It requires consistent authenticated readiness and
+resolution responses, maps only the returned public template, and replaces the
+reserved exact scalar `$principal-account` in the mapped profile's broker
+grants and runtime config with the opaque resolved provider instance. Substring
+values are unchanged. The mapped profile must use mediated egress, have a
+broker grant containing that placeholder, and must not use file-bundle
+materialization for it. Static auxiliary grants remain unchanged.
+
+Producer JSON still accepts only workflow, work/principal facts, and prompt.
+Template, provider instance, generation, profile, grants, capabilities,
+runtime, and egress fields are rejected rather than ignored. There is no
+static/shared fallback. Stable failures are `principal-not-eligible`,
+`principal-not-enrolled`, `credential-not-ready`, and
+`credential-resolution-unavailable`; broker IDs and diagnostics are not
+returned.
+
+Resolution happens only before creating a new AgentRun. The exact principal,
+public template, opaque provider instance ID, credential generation, selected
+profile, and schedule provenance are frozen in the immutable run. Duplicate
+work retries are answered from existing Kubernetes state without re-resolving;
+reconnect, revoke, schedule changes, operator restart, or broker outage cannot
+rewrite an accepted run. Revoked/unready accounts cannot admit new runs.
+
+Template switching remains fail-closed. Broker revocation retains its durable
+template lock; this release does not add an operator API that unlocks it.
+Authoritative, race-safe no-active-AgentRun coordination is tracked in
+[#215](https://github.com/mirkoSekulic/nvt-agent/issues/215),
+and browser or producer input can never authorize a switch.
+
 Profiled requests contain only an optional workflow name, work metadata, and
 prompt input:
 
@@ -245,7 +321,9 @@ The operator resolves once, builds the complete `AgentRun`, generates its final
 name, injects lifecycle callback configuration, and creates it. The stored run
 contains the resolved configuration and `spec.profileProvenance`: authenticated
 producer, schedule identity/generation, selected execution profile, selected
-workflow when present, and principal. Profile and workflow instruction text are
+workflow when present, and principal. Dynamic admission also records the
+public credential template, opaque provider instance ID, and credential
+generation in `profileProvenance.principalCredential`. Profile and workflow instruction text are
 stored separately in the AgentRun snapshot. The runtime appends generated
 platform guidance, execution-profile guidance, workflow guidance, then local
 workspace guidance, in that order.
@@ -260,6 +338,7 @@ merged.
 ## Legacy migration mode
 
 A schedule with none of `template`, `profiles`, `profileSelection`,
+`principalCredentialSelection`,
 `workflowProfiles`, `producerPolicies`, or `allowedProducers` keeps the existing
 full-`AgentRun` request contract. It
 remains unauthenticated for compatibility in this PR and must stay
@@ -296,5 +375,7 @@ capacity, `401` for failed profiled authentication, `403` for unauthorized
 producer/profile denial, `400` for malformed or invalid requests/config, and
 `404` for a missing schedule.
 
-There is no external resolver, producer-selectable profile choice, repository
-templating, or gateway creator-only authorization in this version.
+When dynamic principal selection is absent there is no external resolver and
+the existing static and legacy behavior is unchanged. No mode permits a
+producer-selectable profile choice, repository templating, or gateway
+creator-only authorization.

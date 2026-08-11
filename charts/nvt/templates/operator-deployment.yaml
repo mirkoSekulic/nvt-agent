@@ -1,4 +1,20 @@
 {{- $brandingConfigMap := include "nvt.brandingConfigMap" . -}}
+{{- $principalAccounts := .Values.operator.principalAccounts -}}
+{{- $principalAccountsEnabled := default false $principalAccounts.enabled -}}
+{{- if $principalAccountsEnabled -}}
+{{- if or (not .Values.broker.enabled) (not .Values.broker.persistence.enabled) (not .Values.broker.tls.enabled) }}{{ fail "operator.principalAccounts requires the persistent TLS broker" }}{{ end -}}
+{{- if or (not (regexMatch `^https://[^/@?#[:space:]\\]+(?::[0-9]+)?$` $principalAccounts.brokerURL)) (hasSuffix "/" $principalAccounts.brokerURL) }}{{ fail "operator.principalAccounts.brokerURL must be an HTTPS origin without a path" }}{{ end -}}
+{{- range $name := list $principalAccounts.ca.existingSecret $principalAccounts.authentication.existingSecret }}{{ if or (not $name) (gt (len $name) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $name)) }}{{ fail "operator.principalAccounts Secret references must be valid Kubernetes names" }}{{ end }}{{ end -}}
+{{- range $key := list $principalAccounts.ca.key $principalAccounts.authentication.key }}{{ if or (not $key) (gt (len $key) 253) (not (regexMatch `^[A-Za-z0-9._-]+$` $key)) }}{{ fail "operator.principalAccounts Secret keys are invalid" }}{{ end }}{{ end -}}
+{{- if or (lt (int $principalAccounts.assertionTTLSeconds) 1) (gt (int $principalAccounts.assertionTTLSeconds) 900) (lt (int $principalAccounts.requestTimeoutSeconds) 1) (gt (int $principalAccounts.requestTimeoutSeconds) 30) (lt (int64 $principalAccounts.maxResponseBytes) 1024) (gt (int64 $principalAccounts.maxResponseBytes) 65536) }}{{ fail "operator.principalAccounts bounds are invalid" }}{{ end -}}
+{{- if not (regexMatch `^[A-Za-z0-9._-]{1,128}$` .Values.broker.dynamicAccountAssertionRotationEpoch) }}{{ fail "operator.principalAccounts requires broker.dynamicAccountAssertionRotationEpoch as a bounded non-secret rotation identifier" }}{{ end -}}
+{{- $dynamicAccounts := index .Values.broker.config "dynamic-accounts" -}}
+{{- if or (not (kindIs "map" $dynamicAccounts)) (not (eq true (index $dynamicAccounts "enabled"))) }}{{ fail "operator.principalAccounts requires broker.config.dynamic-accounts.enabled=true" }}{{ end -}}
+{{- $brokerAuth := index $dynamicAccounts "authentication" -}}
+{{- if or (not (kindIs "map" $brokerAuth)) (ne $principalAccounts.authentication.existingSecret .Values.broker.envSecretName) (ne $principalAccounts.authentication.key (index $brokerAuth "hmac-key-env")) }}{{ fail "operator.principalAccounts authentication must reference the broker dynamic assertion key" }}{{ end -}}
+{{- if or (ne $principalAccounts.ca.existingSecret (include "nvt.brokerTLSSecretName" .)) (ne $principalAccounts.ca.key "ca.crt") }}{{ fail "operator.principalAccounts CA must reference the broker TLS CA" }}{{ end -}}
+{{- if gt (int $principalAccounts.assertionTTLSeconds) (int (default 300 (index $brokerAuth "max-assertion-seconds"))) }}{{ fail "operator.principalAccounts assertion TTL must not exceed the broker assertion window" }}{{ end -}}
+{{- end -}}
 {{- if .Values.executionDrivers.guestEnrollment.enabled }}
 apiVersion: v1
 kind: ConfigMap
@@ -22,6 +38,27 @@ data:
     }
 ---
 {{- end }}
+{{- if $principalAccountsEnabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvt-principal-account-client
+  namespace: {{ include "nvt.namespace" . | quote }}
+  labels:
+    {{- include "nvt.operatorLabels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "version": 1,
+      "baseURL": {{ $principalAccounts.brokerURL | quote }},
+      "caFile": "/var/run/nvt-principal-accounts/ca.crt",
+      "assertionKeyFile": "/var/run/nvt-principal-accounts/assertion-key",
+      "assertionTTLSeconds": {{ $principalAccounts.assertionTTLSeconds }},
+      "requestTimeoutSeconds": {{ $principalAccounts.requestTimeoutSeconds }},
+      "maxResponseBytes": {{ $principalAccounts.maxResponseBytes }}
+    }
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,7 +77,7 @@ spec:
       {{- include "nvt.operatorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- if or .Values.executionDrivers.guestEnrollment.enabled .Values.nativeEgressRelay.enabled }}
+      {{- if or .Values.executionDrivers.guestEnrollment.enabled .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
       annotations:
         {{- if .Values.executionDrivers.guestEnrollment.enabled }}
         checksum/guest-enrollment-client: {{ .Values.executionDrivers.guestEnrollment | toJson | sha256sum | quote }}
@@ -49,12 +86,16 @@ spec:
         checksum/native-egress-publication: {{ .Values.nativeEgressRelay | toJson | sha256sum | quote }}
         nvt.dev/native-egress-rollout-revision: {{ .Values.nativeEgressRelay.rolloutRevision | quote }}
         {{- end }}
+        {{- if $principalAccountsEnabled }}
+        checksum/principal-account-client: {{ $principalAccounts | toJson | sha256sum | quote }}
+        nvt.io/dynamic-account-assertion-rotation-epoch: {{ .Values.broker.dynamicAccountAssertionRotationEpoch | quote }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "nvt.operatorSelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: nvt-operator
-      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled }}
+      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -111,6 +152,10 @@ spec:
             - name: NVT_NATIVE_EGRESS_ATTACHMENT_CONFIG_FILE
               value: /var/run/nvt-native-egress-attachment/config.json
             {{- end }}
+            {{- if $principalAccountsEnabled }}
+            - name: NVT_PRINCIPAL_ACCOUNT_BROKER_CONFIG_FILE
+              value: /var/run/nvt-principal-accounts/config.json
+            {{- end }}
             {{- if .Values.egress.allowInsecureUpstreams }}
             - name: NVT_ALLOW_INSECURE_UPSTREAMS
               value: "1"
@@ -136,7 +181,7 @@ spec:
             httpGet:
               path: /readyz
               port: 8081
-          {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled }}
+          {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
           volumeMounts:
             {{- if .Values.executionDrivers.registrations }}
             - name: execution-driver-registrations
@@ -156,8 +201,13 @@ spec:
               mountPath: /var/run/nvt-native-egress-attachment
               readOnly: true
             {{- end }}
+            {{- if $principalAccountsEnabled }}
+            - name: principal-account-client
+              mountPath: /var/run/nvt-principal-accounts
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled }}
+      {{- if or .Values.executionDrivers.registrations .Values.nativeEgressRelay.enabled $principalAccountsEnabled }}
       volumes:
         {{- if .Values.executionDrivers.registrations }}
         - name: execution-driver-registrations
@@ -232,5 +282,26 @@ spec:
                   items:
                     - key: {{ .Values.nativeEgressRelay.credentials.dataCAKey | quote }}
                       path: data-ca.crt
+        {{- end }}
+        {{- if $principalAccountsEnabled }}
+        - name: principal-account-client
+          projected:
+            defaultMode: 0440
+            sources:
+              - configMap:
+                  name: nvt-principal-account-client
+                  items:
+                    - key: config.json
+                      path: config.json
+              - secret:
+                  name: {{ $principalAccounts.ca.existingSecret | quote }}
+                  items:
+                    - key: {{ $principalAccounts.ca.key | quote }}
+                      path: ca.crt
+              - secret:
+                  name: {{ $principalAccounts.authentication.existingSecret | quote }}
+                  items:
+                    - key: {{ $principalAccounts.authentication.key | quote }}
+                      path: assertion-key
         {{- end }}
       {{- end }}

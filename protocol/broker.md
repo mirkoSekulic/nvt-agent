@@ -181,8 +181,12 @@ This broker contract deliberately contains no Kubernetes, portal UI, run,
 profile, grant, or egress coordination. The optional dynamic credential portal
 calls completion, reconnect, revoke, and readiness after its tokenless runner
 returns a validated document; it never exposes or consumes the resolved opaque
-provider id. Operator resolution remains #211. Coordinating an active run during
-template replacement is outside this version; no implicit switch or fallback is
+provider id. The separately enabled operator client calls authenticated
+readiness and resolution for an exact issuer plus immutable subject and freezes
+the consistent template, provider instance, and generation into an AgentRun;
+the broker remains unaware of schedules and profiles. Coordinating an active
+run during template replacement remains outside this version; the durable
+template lock stays fail-closed and no implicit switch or fallback is
 performed.
 
 ### Guest enrollment endpoints

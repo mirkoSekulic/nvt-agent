@@ -151,7 +151,9 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 		t.Fatalf("expected bounded workflow profile schema, got %#v", properties["workflowProfiles"])
 	}
 	if crdPath(t, properties, "producerPolicies", "items", "properties", "identity", "type") != "string" ||
-		crdPath(t, properties, "producerPolicies", "items", "properties", "workflows", "x-kubernetes-list-type") != "set" {
+		crdPath(t, properties, "producerPolicies", "items", "properties", "workflows", "x-kubernetes-list-type") != "set" ||
+		crdPath(t, properties, "producerPolicies", "items", "properties", "allowedPrincipalIssuers", "x-kubernetes-list-type") != "set" ||
+		fmt.Sprint(crdPath(t, properties, "producerPolicies", "items", "properties", "allowedPrincipalIssuers", "maxItems")) != "32" {
 		t.Fatalf("expected typed producer policy schema, got %#v", properties["producerPolicies"])
 	}
 	if strings.Contains(string(data), "uniqueItems:") {
@@ -179,6 +181,12 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	}
 	if crdPath(t, properties, "profileSelection", "properties", "onNoMatch", "type") != "string" {
 		t.Fatalf("expected profileSelection.onNoMatch schema, got %#v", properties["profileSelection"])
+	}
+	dynamicSelection := crdPath(t, properties, "principalCredentialSelection").(map[string]any)
+	if fmt.Sprint(crdPath(t, dynamicSelection, "properties", "templateProfiles", "maxItems")) != "64" ||
+		crdPath(t, dynamicSelection, "properties", "templateProfiles", "x-kubernetes-list-type") != "map" ||
+		crdPath(t, dynamicSelection, "properties", "templateProfiles", "items", "properties", "template", "pattern") == nil {
+		t.Fatalf("expected bounded dynamic principal selection schema, got %#v", dynamicSelection)
 	}
 	if crdPath(t, properties, "allowedProducers", "items", "type") != "string" {
 		t.Fatalf("expected allowedProducers string schema, got %#v", properties["allowedProducers"])

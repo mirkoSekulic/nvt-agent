@@ -23,6 +23,7 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/operator/internal/controller"
 	"github.com/mirkoSekulic/nvt-agent/operator/nativeegressattachment"
 	"github.com/mirkoSekulic/nvt-agent/operator/nativeegresspublication"
+	"github.com/mirkoSekulic/nvt-agent/operator/principalaccounts"
 	"github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment/nativeegress"
 )
 
@@ -86,6 +87,11 @@ func main() {
 		ctrl.Log.Error(err, "invalid native egress attachment configuration")
 		os.Exit(1)
 	}
+	principalAccountClient, err := principalaccounts.LoadConfigured()
+	if err != nil {
+		ctrl.Log.Error(err, "invalid principal account broker configuration")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -134,6 +140,12 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if principalAccountClient != nil {
+		if err = mgr.Add(principalAccountClient); err != nil {
+			ctrl.Log.Error(err, "unable to add principal account broker client lifecycle")
+			os.Exit(1)
+		}
+	}
 	if err = (&controller.AgentScheduleReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -141,7 +153,7 @@ func main() {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "AgentSchedule")
 		os.Exit(1)
 	}
-	if err = mgr.Add(callbackServer(callbackAddr, operatorHTTPHandler(mgr))); err != nil {
+	if err = mgr.Add(callbackServer(callbackAddr, operatorHTTPHandler(mgr, principalAccountClient))); err != nil {
 		ctrl.Log.Error(err, "unable to add operator HTTP server")
 		os.Exit(1)
 	}
@@ -174,10 +186,13 @@ func managerCacheOptions() cache.Options {
 	}
 }
 
-func operatorHTTPHandler(mgr manager.Manager) http.Handler {
+func operatorHTTPHandler(mgr manager.Manager, accounts principalaccounts.Resolver) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/v1/agentruns/", controller.NewAgentRunCallbackHandler(mgr.GetClient()))
-	mux.Handle("/v1/schedules/", controller.NewAgentScheduleAdmissionHandler(mgr.GetClient(), mgr.GetScheme()))
+	mux.Handle(
+		"/v1/schedules/",
+		controller.NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(mgr.GetClient(), mgr.GetScheme(), accounts),
+	)
 	return mux
 }
 

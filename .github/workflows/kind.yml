@@ -41,6 +41,7 @@ jobs:
           - enforced-egress
           - transparent-egress
           - profile-auth
+          - dynamic-credentials
           - broker-seed
           - capabilities
           - external-execution
@@ -108,6 +109,7 @@ jobs:
           - revocation
           - parallel-lifecycle
           - profile-auth
+          - dynamic-credentials
           - broker-seed
           - capabilities
           - external-execution

@@ -1,0 +1,81 @@
+broker:
+  envSecretName: nvt-dynamic-assertions
+  dynamicAccountAssertionRotationEpoch: epoch-1
+  persistence:
+    enabled: true
+  config:
+    providers: []
+    dynamic-accounts:
+      enabled: true
+      state-dir: /state/principal-accounts
+      authentication:
+        hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+        max-assertion-seconds: 300
+      provider-templates:
+        - name: approved-provider
+          plugin: synthetic
+          credential-config-key: credentials-file
+          config: {}
+      credential-templates:
+        - name: approved-work
+          label: Approved work
+          enrollment-adapter: synthetic-file
+          provider-template: approved-provider
+
+operator:
+  principalAccounts:
+    enabled: true
+    brokerURL: https://nvt-broker:7347
+    ca:
+      existingSecret: nvt-broker-tls
+      key: ca.crt
+    authentication:
+      existingSecret: nvt-dynamic-assertions
+      key: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+
+agentSchedule:
+  template:
+    image: runtime:test
+    workspace:
+      mode: Ephemeral
+    agent:
+      config:
+        plugins: []
+  profiles:
+    - name: dynamic-work
+      runtime:
+        type: generic-agent
+        autonomy: trusted-local
+      agentRuntimeConfig:
+        command: agent
+        proxy:
+          provider: $principal-account
+      egress: mediated
+      egressEnforcement: true
+      egressTransport: forward-proxy
+      broker:
+        grants:
+          - provider: $principal-account
+            repositories: [example/*]
+            materialization: header-inject
+            egressHosts: [provider.example]
+          - provider: source-control
+            repositories: [example/*]
+            materialization: header-inject
+            egressHosts: [source.example]
+            git: true
+  principalCredentialSelection:
+    enabled: true
+    onNoMatch: deny
+    templateProfiles:
+      - template: approved-work
+        profile: dynamic-work
+  workflowProfiles:
+    - name: implement
+      workspaceInstructions: Complete the authorized work.
+  producerPolicies:
+    - identity: system:serviceaccount:nvt:producer
+      workflows: [implement]
+      defaultWorkflow: implement
+      allowedPrincipalIssuers:
+        - https://identity.example/tenant

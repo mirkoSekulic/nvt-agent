@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,6 +13,7 @@ import (
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"github.com/mirkoSekulic/nvt-agent/operator/principalaccounts"
 )
 
 var (
@@ -18,14 +21,21 @@ var (
 	errExecutionProfileSelectionDenied      = errors.New("execution profile selection denied")
 	errProducerNotAllowed                   = errors.New("producer is not allowed")
 	errWorkflowSelectionDenied              = errors.New("workflow selection denied")
+	errPrincipalNotEnrolled                 = errors.New("principal not enrolled")
+	errPrincipalCredentialNotReady          = errors.New("principal credential not ready")
+	errPrincipalCredentialResolution        = errors.New("principal credential resolution unavailable")
 )
 
-const maxWorkspaceInstructionsBytes = 64 * 1024
+const (
+	maxWorkspaceInstructionsBytes       = 64 * 1024
+	principalAccountProviderPlaceholder = "$principal-account"
+)
 
 // ResolvedExecutionProfile is the single immutable profile selected for a request.
 type ResolvedExecutionProfile struct {
-	Profile   nvtv1alpha1.AgentScheduleExecutionProfile
-	Execution *nvtv1alpha1.AgentRunExecution
+	Profile             nvtv1alpha1.AgentScheduleExecutionProfile
+	Execution           *nvtv1alpha1.AgentRunExecution
+	PrincipalCredential *nvtv1alpha1.AgentRunPrincipalCredentialProvenance
 }
 
 // ResolvedWorkflowProfile is the independently authorized workflow snapshot.
@@ -53,7 +63,13 @@ func ScheduleUsesExecutionProfiles(schedule *nvtv1alpha1.AgentSchedule) bool {
 	return schedule.Spec.Template != nil || len(schedule.Spec.Profiles) != 0 ||
 		len(schedule.Spec.ExecutionClasses) != 0 ||
 		schedule.Spec.ProfileSelection != nil || len(schedule.Spec.AllowedProducers) != 0 ||
+		schedule.Spec.PrincipalCredentialSelection != nil ||
 		len(schedule.Spec.WorkflowProfiles) != 0 || len(schedule.Spec.ProducerPolicies) != 0
+}
+
+// ScheduleUsesPrincipalCredentials reports explicit dynamic principal mode.
+func ScheduleUsesPrincipalCredentials(schedule *nvtv1alpha1.AgentSchedule) bool {
+	return schedule.Spec.PrincipalCredentialSelection != nil && schedule.Spec.PrincipalCredentialSelection.Enabled
 }
 
 func (StaticExecutionProfileResolver) Resolve(
@@ -95,8 +111,11 @@ func (StaticExecutionProfileResolver) Resolve(
 }
 
 func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[string]nvtv1alpha1.AgentScheduleExecutionProfile, error) {
+	dynamicSelection := schedule.Spec.PrincipalCredentialSelection
 	if schedule.Spec.Template == nil || len(schedule.Spec.Profiles) == 0 ||
-		schedule.Spec.ProfileSelection == nil {
+		(dynamicSelection == nil && schedule.Spec.ProfileSelection == nil) ||
+		(dynamicSelection != nil && !dynamicSelection.Enabled) ||
+		(dynamicSelection != nil && schedule.Spec.ProfileSelection != nil) {
 		return nil, errInvalidExecutionProfileConfiguration
 	}
 	template := schedule.Spec.Template
@@ -161,6 +180,41 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 		profiles[profile.Name] = profile
 	}
 
+	if dynamicSelection != nil {
+		if dynamicSelection.OnNoMatch != nvtv1alpha1.AgentScheduleOnNoMatchDeny ||
+			len(dynamicSelection.TemplateProfiles) == 0 || len(dynamicSelection.TemplateProfiles) > 64 {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
+		templates := make(map[string]struct{}, len(dynamicSelection.TemplateProfiles))
+		for _, mapping := range dynamicSelection.TemplateProfiles {
+			if len(utilvalidation.IsDNS1123Label(mapping.Template)) != 0 ||
+				len(utilvalidation.IsDNS1123Label(mapping.Profile)) != 0 {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			if _, duplicate := templates[mapping.Template]; duplicate {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			templates[mapping.Template] = struct{}{}
+			profile, exists := profiles[mapping.Profile]
+			if !exists || profile.Egress != nvtv1alpha1.AgentRunEgressMediated || profile.Broker == nil {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			placeholderGrants := 0
+			for _, grant := range profile.Broker.Grants {
+				if grant.Provider == principalAccountProviderPlaceholder {
+					placeholderGrants++
+					if AgentRunGrantMaterialization(grant) == nvtv1alpha1.AgentRunGrantFileBundle {
+						return nil, errInvalidExecutionProfileConfiguration
+					}
+				}
+			}
+			if placeholderGrants == 0 {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+		}
+		return profiles, nil
+	}
+
 	selection := schedule.Spec.ProfileSelection
 	switch selection.OnNoMatch {
 	case nvtv1alpha1.AgentScheduleOnNoMatchUseDefault:
@@ -197,10 +251,115 @@ func validateExecutionProfileSchedule(schedule *nvtv1alpha1.AgentSchedule) (map[
 	return profiles, nil
 }
 
+func resolvePrincipalCredentialProfile(
+	ctx context.Context,
+	schedule *nvtv1alpha1.AgentSchedule,
+	principal *nvtv1alpha1.AgentRunPrincipal,
+	accounts principalaccounts.Resolver,
+) (*ResolvedExecutionProfile, error) {
+	profiles, err := validateExecutionProfileSchedule(schedule)
+	if err != nil {
+		return nil, err
+	}
+	if principal == nil || accounts == nil {
+		return nil, errPrincipalCredentialResolution
+	}
+	resolution, err := accounts.Resolve(ctx, principalaccounts.Principal{
+		Issuer: principal.Issuer, Subject: principal.Subject,
+	})
+	switch {
+	case errors.Is(err, principalaccounts.ErrNotEnrolled):
+		return nil, errPrincipalNotEnrolled
+	case errors.Is(err, principalaccounts.ErrNotReady):
+		return nil, errPrincipalCredentialNotReady
+	case err != nil:
+		return nil, errPrincipalCredentialResolution
+	}
+	selection := schedule.Spec.PrincipalCredentialSelection
+	selectedProfile := ""
+	for _, mapping := range selection.TemplateProfiles {
+		if mapping.Template == resolution.Template {
+			selectedProfile = mapping.Profile
+			break
+		}
+	}
+	profile, exists := profiles[selectedProfile]
+	if selectedProfile == "" || !exists {
+		return nil, errPrincipalCredentialResolution
+	}
+	bound := profile.DeepCopy()
+	for index := range bound.Broker.Grants {
+		if bound.Broker.Grants[index].Provider == principalAccountProviderPlaceholder {
+			bound.Broker.Grants[index].Provider = resolution.ProviderInstanceID
+		}
+	}
+	runtimeConfig, err := replacePrincipalAccountPlaceholder(bound.AgentRuntimeConfig, resolution.ProviderInstanceID)
+	if err != nil {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
+	bound.AgentRuntimeConfig = runtimeConfig
+	classes, err := validateExecutionClasses(schedule)
+	if err != nil {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
+	execution, err := resolveProfileExecution(bound, classes)
+	if err != nil {
+		return nil, errInvalidExecutionProfileConfiguration
+	}
+	return &ResolvedExecutionProfile{
+		Profile: *bound, Execution: execution.DeepCopy(),
+		PrincipalCredential: &nvtv1alpha1.AgentRunPrincipalCredentialProvenance{
+			Template: resolution.Template, ProviderInstanceID: resolution.ProviderInstanceID,
+			Generation: resolution.Generation,
+		},
+	}, nil
+}
+
+func replacePrincipalAccountPlaceholder(
+	configuration apiextensionsv1.JSON,
+	providerInstanceID string,
+) (apiextensionsv1.JSON, error) {
+	var value any
+	if err := json.Unmarshal(configuration.Raw, &value); err != nil {
+		return apiextensionsv1.JSON{}, err
+	}
+	var replace func(any) any
+	replace = func(current any) any {
+		switch typed := current.(type) {
+		case string:
+			if typed == principalAccountProviderPlaceholder {
+				return providerInstanceID
+			}
+			return typed
+		case []any:
+			for index := range typed {
+				typed[index] = replace(typed[index])
+			}
+			return typed
+		case map[string]any:
+			for key := range typed {
+				typed[key] = replace(typed[key])
+			}
+			return typed
+		default:
+			return current
+		}
+	}
+	value = replace(value)
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return apiextensionsv1.JSON{}, err
+	}
+	return apiextensionsv1.JSON{Raw: raw}, nil
+}
+
 func validateWorkflowConfiguration(schedule *nvtv1alpha1.AgentSchedule) (*validatedWorkflowConfiguration, error) {
 	configuration := &validatedWorkflowConfiguration{}
 	workflowMode := len(schedule.Spec.WorkflowProfiles) != 0 || len(schedule.Spec.ProducerPolicies) != 0
 	if !workflowMode {
+		if ScheduleUsesPrincipalCredentials(schedule) {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
 		if len(schedule.Spec.AllowedProducers) == 0 {
 			return nil, errInvalidExecutionProfileConfiguration
 		}
@@ -253,9 +412,59 @@ func validateWorkflowConfiguration(schedule *nvtv1alpha1.AgentSchedule) (*valida
 				return nil, errInvalidExecutionProfileConfiguration
 			}
 		}
+		if ScheduleUsesPrincipalCredentials(schedule) {
+			if len(policy.AllowedPrincipalIssuers) == 0 || len(policy.AllowedPrincipalIssuers) > 32 {
+				return nil, errInvalidExecutionProfileConfiguration
+			}
+			issuers := map[string]struct{}{}
+			for _, issuer := range policy.AllowedPrincipalIssuers {
+				if !canonicalPrincipalIssuer(issuer) {
+					return nil, errInvalidExecutionProfileConfiguration
+				}
+				if _, duplicate := issuers[issuer]; duplicate {
+					return nil, errInvalidExecutionProfileConfiguration
+				}
+				issuers[issuer] = struct{}{}
+			}
+		} else if len(policy.AllowedPrincipalIssuers) != 0 {
+			return nil, errInvalidExecutionProfileConfiguration
+		}
 		configuration.policies[policy.Identity] = policy
 	}
 	return configuration, nil
+}
+
+func producerAllowsDynamicPrincipal(
+	schedule *nvtv1alpha1.AgentSchedule,
+	producer string,
+	principal *nvtv1alpha1.AgentRunPrincipal,
+) bool {
+	if !ScheduleUsesPrincipalCredentials(schedule) || principal == nil ||
+		!canonicalPrincipalIssuer(principal.Issuer) || principal.Subject == "" || len(principal.Subject) > 512 ||
+		strings.TrimSpace(principal.Subject) != principal.Subject || strings.ContainsAny(principal.Subject, "\x00\r\n") {
+		return false
+	}
+	for _, policy := range schedule.Spec.ProducerPolicies {
+		if policy.Identity != producer {
+			continue
+		}
+		for _, issuer := range policy.AllowedPrincipalIssuers {
+			if issuer == principal.Issuer {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func canonicalPrincipalIssuer(value string) bool {
+	if value == "" || len(value) > 2048 || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil &&
+		parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value
 }
 
 func resolveWorkflowForProducer(
@@ -377,6 +586,7 @@ func buildProfiledAgentRun(
 				SelectedProfile:       profile.Name,
 				SelectedWorkflow:      selectedWorkflow,
 				Principal:             copyPrincipal(principal),
+				PrincipalCredential:   copyPrincipalCredential(resolved.PrincipalCredential),
 			},
 		},
 	}
@@ -449,6 +659,16 @@ func copyPrincipal(principal *nvtv1alpha1.AgentRunPrincipal) *nvtv1alpha1.AgentR
 		return nil
 	}
 	copy := *principal
+	return &copy
+}
+
+func copyPrincipalCredential(
+	credential *nvtv1alpha1.AgentRunPrincipalCredentialProvenance,
+) *nvtv1alpha1.AgentRunPrincipalCredentialProvenance {
+	if credential == nil {
+		return nil
+	}
+	copy := *credential
 	return &copy
 }
 
