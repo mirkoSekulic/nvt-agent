@@ -51,7 +51,6 @@ func run() error {
 	return runPortal()
 }
 
-//nolint:funlen // Startup keeps the authentication, token-bearing patcher, and tokenless runner wiring explicit.
 func runPortal() error {
 	configPath := os.Getenv("NVT_CREDENTIAL_PORTAL_CONFIG")
 	if configPath == "" {
@@ -70,13 +69,12 @@ func runPortal() error {
 	if decodeErr != nil {
 		return fmt.Errorf("validate config: %w", decodeErr)
 	}
-	restConfig, err := rest.InClusterConfig()
+	patcher, broker, err := configureCustody(cfg)
 	if err != nil {
-		return fmt.Errorf("create Kubernetes config: %w", err)
+		return err
 	}
-	coreClient, err := corev1client.NewForConfig(restConfig)
-	if err != nil {
-		return fmt.Errorf("create Kubernetes client: %w", err)
+	if broker != nil {
+		defer broker.Close()
 	}
 	auth, err := portal.NewAuthenticator(
 		context.Background(),
@@ -100,13 +98,7 @@ func runPortal() error {
 	if err != nil {
 		return fmt.Errorf("configure credential runner: %w", err)
 	}
-	handler := portal.NewServer(
-		cfg,
-		auth,
-		portal.KubernetesSecretPatcher{Client: coreClient.RESTClient()},
-		portal.NewAuditLogger(os.Stdout),
-		runner,
-	)
+	handler := portal.NewServer(cfg, auth, patcher, portal.NewAuditLogger(os.Stdout), runner, broker)
 	defer handler.Close()
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -137,6 +129,27 @@ func runPortal() error {
 		}
 	}
 	return nil
+}
+
+func configureCustody(
+	cfg portal.Config,
+) (portal.SecretPatcher, *portal.HTTPPrincipalAccountBroker, error) {
+	if cfg.Dynamic.Enabled {
+		broker, err := portal.NewHTTPPrincipalAccountBroker(cfg.Dynamic.Broker)
+		if err != nil {
+			return nil, nil, fmt.Errorf("configure principal account broker: %w", err)
+		}
+		return nil, broker, nil
+	}
+	restConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, nil, fmt.Errorf("create Kubernetes config: %w", err)
+	}
+	coreClient, err := corev1client.NewForConfig(restConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create Kubernetes client: %w", err)
+	}
+	return portal.KubernetesSecretPatcher{Client: coreClient.RESTClient()}, nil, nil
 }
 
 func runCredentialRunner(args []string) error {

@@ -23,7 +23,15 @@ const (
 	httpsScheme            = "https"
 	csrfHeader             = "X-Csrf-Token"
 	confirmHeader          = "X-Nvt-Confirm"
+	confirmationReplace    = "replace"
+	accountStateRevoked    = "revoked"
+	reasonAccountNotFound  = "account-not-found"
 	maxSlots               = 128
+	maxDynamicTemplates    = 64
+	defaultBrokerTimeout   = 10
+	defaultAssertionTTL    = 60
+	defaultBrokerResponse  = 64 * 1024
+	maxBrokerCredential    = 768 * 1024
 )
 
 var (
@@ -35,6 +43,7 @@ var (
 	slotPattern    = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 )
 
+//nolint:govet // JSON contract fields stay grouped for reviewability.
 type Config struct {
 	Auth           AuthConfig `json:"auth"`
 	PublicURL      string     `json:"publicURL"`
@@ -46,6 +55,29 @@ type Config struct {
 	Enrollment     EnrollmentConfig     `json:"enrollment"`
 	MaxUploadBytes int64                `json:"maxUploadBytes"`
 	RecoveryUpload RecoveryUploadConfig `json:"recoveryUpload"`
+	Dynamic        DynamicConfig        `json:"dynamic"`
+}
+
+//nolint:govet // JSON contract fields stay grouped for reviewability.
+type DynamicConfig struct {
+	Enabled   bool                        `json:"enabled"`
+	Broker    DynamicBrokerConfig         `json:"broker"`
+	Templates []DynamicCredentialTemplate `json:"templates"`
+}
+
+type DynamicBrokerConfig struct {
+	URL                   string `json:"url"`
+	CAFile                string `json:"caFile"`
+	AssertionKeyFile      string `json:"assertionKeyFile"`
+	AssertionTTLSeconds   int    `json:"assertionTTLSeconds"`
+	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
+	MaxResponseBytes      int    `json:"maxResponseBytes"`
+}
+
+type DynamicCredentialTemplate struct {
+	Name    string `json:"name"`
+	Label   string `json:"label"`
+	Adapter string `json:"adapter"`
 }
 
 type EnrollmentConfig struct {
@@ -76,6 +108,7 @@ type SessionConfig struct {
 	Secure        bool   `json:"secure"`
 }
 
+//nolint:govet // JSON contract fields stay grouped for reviewability.
 type OIDCConfig struct {
 	IssuerURL              string   `json:"issuerURL"`
 	ClientID               string   `json:"clientID"`
@@ -246,6 +279,12 @@ func (c *Config) Validate() error {
 			)
 		}
 	}
+	if c.Dynamic.Enabled {
+		return c.validateDynamic()
+	}
+	if len(c.Dynamic.Templates) != 0 || c.Dynamic.Broker != (DynamicBrokerConfig{}) {
+		return fmt.Errorf("%w: disabled dynamic mode must not carry broker or template configuration", errInvalidConfig)
+	}
 	if len(c.Slots) == 0 || len(c.Slots) > maxSlots {
 		return fmt.Errorf("%w: slots must contain 1..%d entries", errInvalidConfig, maxSlots)
 	}
@@ -299,6 +338,94 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+//nolint:cyclop,gocognit,gocyclo // Dynamic validation intentionally remains one linear fail-closed policy pass.
+func (c *Config) validateDynamic() error {
+	if len(c.Slots) != 0 {
+		return fmt.Errorf("%w: static slots and dynamic templates are mutually exclusive", errInvalidConfig)
+	}
+	if c.Auth.Eligibility == nil {
+		return fmt.Errorf("%w: dynamic mode requires an explicit eligibility policy", errInvalidConfig)
+	}
+	if c.basePath != "/agents/credentials" {
+		return fmt.Errorf("%w: dynamic publicURL path must be /agents/credentials", errInvalidConfig)
+	}
+	if len(c.Dynamic.Templates) == 0 || len(c.Dynamic.Templates) > maxDynamicTemplates {
+		return fmt.Errorf(
+			"%w: dynamic.templates must contain 1..%d entries",
+			errInvalidConfig,
+			maxDynamicTemplates,
+		)
+	}
+	if c.Enrollment.MaxOutputBytes > maxBrokerCredential {
+		return fmt.Errorf("%w: dynamic enrollment output exceeds the broker credential limit", errInvalidConfig)
+	}
+	if c.RecoveryUpload.Enabled && c.MaxUploadBytes > maxBrokerCredential {
+		return fmt.Errorf("%w: dynamic recovery upload exceeds the broker credential limit", errInvalidConfig)
+	}
+	brokerURL, err := url.Parse(c.Dynamic.Broker.URL)
+	if err != nil || brokerURL.Scheme != httpsScheme || brokerURL.Host == "" || brokerURL.User != nil ||
+		brokerURL.Path != "" || brokerURL.RawPath != "" || brokerURL.RawQuery != "" || brokerURL.Fragment != "" {
+		return fmt.Errorf("%w: dynamic broker URL must be an HTTPS origin without a path", errInvalidConfig)
+	}
+	for _, file := range []struct {
+		name  string
+		value string
+	}{
+		{name: "caFile", value: c.Dynamic.Broker.CAFile},
+		{name: "assertionKeyFile", value: c.Dynamic.Broker.AssertionKeyFile},
+	} {
+		if file.value == "" || !path.IsAbs(file.value) || path.Clean(file.value) != file.value ||
+			containsASCIIControl(file.value) {
+			return fmt.Errorf(
+				"%w: dynamic broker %s must be a canonical absolute file path",
+				errInvalidConfig,
+				file.name,
+			)
+		}
+	}
+	if c.Dynamic.Broker.AssertionTTLSeconds == 0 {
+		c.Dynamic.Broker.AssertionTTLSeconds = defaultAssertionTTL
+	}
+	if c.Dynamic.Broker.RequestTimeoutSeconds == 0 {
+		c.Dynamic.Broker.RequestTimeoutSeconds = defaultBrokerTimeout
+	}
+	if c.Dynamic.Broker.MaxResponseBytes == 0 {
+		c.Dynamic.Broker.MaxResponseBytes = defaultBrokerResponse
+	}
+	if c.Dynamic.Broker.AssertionTTLSeconds < 1 || c.Dynamic.Broker.AssertionTTLSeconds > 300 ||
+		c.Dynamic.Broker.RequestTimeoutSeconds < 1 || c.Dynamic.Broker.RequestTimeoutSeconds > 30 ||
+		c.Dynamic.Broker.MaxResponseBytes < 1024 || c.Dynamic.Broker.MaxResponseBytes > 1024*1024 {
+		return fmt.Errorf("%w: dynamic broker bounds are invalid", errInvalidConfig)
+	}
+	seen := map[string]bool{}
+	for index, template := range c.Dynamic.Templates {
+		if !slotPattern.MatchString(template.Name) || len(template.Name) > 63 || seen[template.Name] {
+			return fmt.Errorf(
+				"%w: dynamic.templates[%d].name must be a unique DNS label",
+				errInvalidConfig,
+				index,
+			)
+		}
+		seen[template.Name] = true
+		if strings.TrimSpace(template.Label) == "" || len(template.Label) > 128 ||
+			containsASCIIControl(template.Label) {
+			return fmt.Errorf("%w: dynamic template %s label is invalid", errInvalidConfig, template.Name)
+		}
+		if template.Adapter != AdapterCodexOAuthFile && template.Adapter != AdapterClaudeOAuthFile {
+			return fmt.Errorf("%w: dynamic template %s adapter is unsupported", errInvalidConfig, template.Name)
+		}
+		if template.Adapter == AdapterCodexOAuthFile && !c.Enrollment.ExperimentalCodexDeviceAuth {
+			return fmt.Errorf(
+				"%w: dynamic template %s requires explicit experimental Codex device authorization opt-in",
+				errInvalidConfig,
+				template.Name,
+			)
+		}
+	}
+
+	return nil
+}
+
 func DecodeConfig(reader io.Reader) (Config, error) {
 	body, err := io.ReadAll(io.LimitReader(reader, 1024*1024+1))
 	if err != nil || len(body) > 1024*1024 || !json.Valid(body) || rejectDuplicateJSONKeys(body) != nil {
@@ -323,6 +450,15 @@ func absoluteHTTPS(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Scheme == httpsScheme && u.Host != "" && u.User == nil && u.RawQuery == "" &&
 		u.Fragment == ""
+}
+
+func containsASCIIControl(value string) bool {
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Config) Path(suffix string) string { return c.basePath + suffix }
