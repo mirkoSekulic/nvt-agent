@@ -21,17 +21,22 @@ func main() {
 	url := mustEnv("ADMISSION_URL")
 	switch mustEnv("MODE") {
 	case "allowed":
-		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 11, http.StatusCreated)
-		expectProducerAdmission(url, "/var/run/nvt-tokens/wrong-audience", 12, http.StatusUnauthorized)
+		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 11, 424242, http.StatusCreated)
+		expectProducerAdmission(url, "/var/run/nvt-tokens/wrong-audience", 12, 424242, http.StatusUnauthorized)
 		expectInjectedRequestRejected(url, "/var/run/nvt-tokens/correct")
 	case "unlisted":
-		expectProducerAdmission(url, "/var/run/nvt-token/token", 13, http.StatusForbidden)
+		expectProducerAdmission(url, "/var/run/nvt-token/token", 13, 424242, http.StatusForbidden)
+	case "dynamic-isolation":
+		// The producer is authenticated and issuer-authorized, but this exact
+		// second immutable subject owns no broker account. Admission must not
+		// resolve or reuse the first principal's dynamic provider.
+		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 14, 424243, http.StatusForbidden)
 	default:
 		fatalf("unsupported MODE")
 	}
 }
 
-func expectProducerAdmission(url, tokenFile string, issueNumber, wantStatus int) {
+func expectProducerAdmission(url, tokenFile string, issueNumber int, userID int64, wantStatus int) {
 	baseURL, namespace, schedule := splitAdmissionURL(url)
 	cfg := producer.Config{
 		Submission: producer.SubmissionConfig{
@@ -59,7 +64,7 @@ func expectProducerAdmission(url, tokenFile string, issueNumber, wantStatus int)
 			ID:      int64(1000 + issueNumber),
 			Body:    "/nvtagent verify profile auth",
 			HTMLURL: fmt.Sprintf("https://github.example/fixture/profile-auth/issues/%d#issuecomment", issueNumber),
-			User:    producer.GitHubUser{ID: 424242, Login: "octocat"},
+			User:    producer.GitHubUser{ID: userID, Login: "octocat"},
 		},
 		producer.Command{Prefix: "/nvtagent", AdditionalInstructions: "verify profile auth"},
 	)

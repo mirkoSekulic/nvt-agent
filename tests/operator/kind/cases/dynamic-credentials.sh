@@ -35,6 +35,7 @@ case_kind_setup() {
     --from-file=NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY="${SMOKE_TMPDIR}/dynamic-assertion-key" \
     --dry-run=client -o yaml | kubectl_smoke apply -f -
 
+  prepare_dynamic_credential_fixture
   deploy_echo_fixture
   local fixture_label
   fixture_label="$(printf '%s' "${FIXTURE_HOST}" | sha256sum | cut -c1-32)"
@@ -51,6 +52,29 @@ case_kind_setup() {
     ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT}" \
     OPERATOR_KIND_HELM_ARGS="--set egress.allowInsecureUpstreams=true --set egress.networkPolicyCapable=true -f ${SMOKE_TMPDIR}/dynamic-values.yaml" \
     operator-kind-setup
+}
+
+prepare_dynamic_credential_fixture() {
+  python3 - "${SMOKE_TMPDIR}" <<'PY'
+import base64, json, pathlib, sys, time
+directory = pathlib.Path(sys.argv[1])
+header = base64.urlsafe_b64encode(b'{"alg":"none","typ":"JWT"}').rstrip(b"=").decode()
+payload = base64.urlsafe_b64encode(json.dumps({
+    "exp": int(time.time()) + 3600,
+    "canary": "DYNAMIC-KIND-ACCESS-TOKEN-CANARY",
+}, separators=(",", ":")).encode()).rstrip(b"=").decode()
+access_token = f"{header}.{payload}.DYNAMIC_KIND_SIGNATURE_CANARY"
+refresh = "DYNAMIC-KIND-REFRESH-TOKEN-SECRET-NEEDLE"
+identity = "DYNAMIC-KIND-ID-TOKEN-SECRET-NEEDLE"
+(directory / "access-token").write_text(access_token, encoding="utf-8")
+(directory / "refresh-needle").write_text(refresh, encoding="utf-8")
+(directory / "id-needle").write_text(identity, encoding="utf-8")
+(directory / "credential-needles").write_text("\n".join((access_token, refresh, identity)) + "\n", encoding="utf-8")
+PY
+  ECHO_EXPECTED_CREDENTIAL_SHA256="$(
+    { printf 'Bearer '; tr -d '\n' <"${SMOKE_TMPDIR}/access-token"; } | sha256sum | cut -d' ' -f1
+  )"
+  export ECHO_EXPECTED_CREDENTIAL_SHA256
 }
 
 build_dynamic_profile_auth_client() {
@@ -86,6 +110,7 @@ broker:
       state-dir: /state/principal-accounts
       authentication:
         hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+        max-eligibility-lease-seconds: 3600
       provider-templates:
         - name: dynamic-oauth
           plugin: codex-oauth
@@ -165,7 +190,7 @@ case_run() {
   run="$(wait_for_dynamic_run)"
   wait_for_phase_any "${run}" "${RUN_TIMEOUT_SECONDS}" Running
   wait_for_dynamic_proxy_ready "${run}"
-  assert_proxy_injects "${run}"
+  assert_dynamic_proxy_injects "${run}"
   assert_dynamic_snapshot "${run}"
   assert_dynamic_secret_absence "${run}"
 }
@@ -178,21 +203,38 @@ case_diagnostics() {
   kubectl_smoke -n "${NAMESPACE}" get agentrun "${run}" -o yaml >&2 || true
   kubectl_smoke -n "${NAMESPACE}" get pod,service,networkpolicy,configmap \
     -l "nvt.dev/agentrun=${run}" -o wide >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" get service,endpoints,endpointslice,networkpolicy -o wide >&2 || true
   kubectl_smoke -n "${NAMESPACE}" describe pod "${run}-agent" >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" describe pod "${run}-egressd" >&2 || true
   kubectl_smoke -n "${NAMESPACE}" logs "${run}-agent" --all-containers --tail=200 >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" logs "${run}-egressd" --all-containers --tail=200 >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" logs deployment/nvt-operator --all-containers --tail=200 >&2 || true
   kubectl_smoke -n "${NAMESPACE}" logs deployment/nvt-broker --all-containers --tail=200 >&2 || true
+}
+
+curl_dynamic_proxy() {
+  local run="$1"
+  kubectl_smoke exec "${run}-agent" -n "${NAMESPACE}" -c agent -- \
+    bash -lc "source ~/.nvt-agent/env 2>/dev/null; curl -s -o /tmp/dynamic-body -w '%{http_code}' --max-time 15 https://${FIXTURE_HOST}/dynamic-\${RANDOM} && python3 -c 'import json;value=json.load(open(\"/tmp/dynamic-body\"));print(value.get(\"authenticated\"),value.get(\"credential_match\"))' 2>/dev/null || true"
 }
 
 wait_for_dynamic_proxy_ready() {
   local run="$1"
   local deadline=$((SECONDS + RUN_TIMEOUT_SECONDS)) out
   while (( SECONDS < deadline )); do
-    out="$(curl_via_proxy "${run}" "${FIXTURE_HOST}" || true)"
-    [[ "${out}" == 200* ]] && { log "dynamic forward-proxy route ready"; return; }
+    out="$(curl_dynamic_proxy "${run}" || true)"
+    [[ "${out}" == 200*True*True* ]] && { log "dynamic forward-proxy route ready with exact credential"; return; }
     sleep 3
   done
   case_diagnostics
   die "dynamic forward-proxy route never became ready (last: ${out})"
+}
+
+assert_dynamic_proxy_injects() {
+  local run="$1" out
+  out="$(curl_dynamic_proxy "${run}")"
+  [[ "${out}" == 200*True*True* ]] || die "fixture did not receive the exact broker-owned credential: ${out}"
+  log "forward-proxy injected the exact credential the agent never held"
 }
 
 complete_synthetic_portal_enrollment() {
@@ -217,23 +259,23 @@ key = (directory / "dynamic-assertion-key").read_bytes()
 claims = {
     "audience": "nvt.broker.principal-accounts/v1",
     "expires_at": int(time.time()) + 60,
+    "eligibility_expires_at": int(time.time()) + 1800,
     "issuer": "https://github.com",
     "subject": "424242",
     "version": 1,
 }
 raw = json.dumps(claims, separators=(",", ":"), sort_keys=True).encode()
 token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode() + "." + base64.urlsafe_b64encode(hmac.digest(key, raw, "sha256")).rstrip(b"=").decode()
-header = base64.urlsafe_b64encode(b'{"alg":"none","typ":"JWT"}').rstrip(b"=").decode()
-payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 3600}, separators=(",", ":")).encode()).rstrip(b"=").decode()
-needle = "DYNAMIC-KIND-CREDENTIAL-SECRET-NEEDLE"
-credential = json.dumps({"tokens": {"access_token": f"{header}.{payload}.signature", "refresh_token": needle, "id_token": needle}}, separators=(",", ":")).encode()
+access_token = (directory / "access-token").read_text(encoding="utf-8")
+refresh = (directory / "refresh-needle").read_text(encoding="utf-8")
+identity = (directory / "id-needle").read_text(encoding="utf-8")
+credential = json.dumps({"tokens": {"access_token": access_token, "refresh_token": refresh, "id_token": identity}}, separators=(",", ":")).encode()
 request = {
     "template": "dynamic-work",
     "operation_id": "kind-enrollment-1",
     "credential_base64": base64.b64encode(credential).decode(),
 }
 (directory / "enrollment.json").write_text(json.dumps(request, separators=(",", ":")), encoding="utf-8")
-(directory / "credential-needle").write_text(needle + "\n", encoding="utf-8")
 config = "\n".join([
     'silent', 'show-error',
     'url = "https://nvt-broker:17347/v1/principal-accounts/complete-enrollment"',
@@ -248,7 +290,11 @@ config = "\n".join([
 (directory / "enrollment.curl").write_text(config + "\n", encoding="utf-8")
 PY
   local status
-  status="$(NO_PROXY=nvt-broker,127.0.0.1 HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= curl --config "${SMOKE_TMPDIR}/enrollment.curl")"
+  status="$(env \
+    -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY \
+    -u https_proxy -u http_proxy -u all_proxy \
+    NO_PROXY='*' no_proxy='*' \
+    curl --config "${SMOKE_TMPDIR}/enrollment.curl")"
   [[ "${status}" == "200" ]] || die "dynamic enrollment failed with HTTP ${status}"
   python3 - "${SMOKE_TMPDIR}/enrollment-response.json" <<'PY'
 import json, sys
@@ -289,6 +335,18 @@ spec:
           env:
             - name: MODE
               value: allowed
+            - name: ADMISSION_URL
+              value: http://nvt-operator:8082/v1/schedules/${NAMESPACE}/default/admissions
+          volumeMounts:
+            - name: producer-tokens
+              mountPath: /var/run/nvt-tokens
+              readOnly: true
+        - name: second-principal
+          image: nvt-profile-auth-client:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODE
+              value: dynamic-isolation
             - name: ADMISSION_URL
               value: http://nvt-operator:8082/v1/schedules/${NAMESPACE}/default/admissions
           volumeMounts:
@@ -352,18 +410,21 @@ assert_dynamic_secret_absence() {
     cat "${SMOKE_TMPDIR}/enrollment-response.json"
     kubectl_smoke -n "${NAMESPACE}" get agentrun "${run}" -o yaml
     kubectl_smoke -n "${NAMESPACE}" get pod "${run}-agent" -o yaml
+    kubectl_smoke -n "${NAMESPACE}" get pod "${run}-egressd" -o yaml
+    kubectl_smoke -n "${NAMESPACE}" get service,endpoints,endpointslice,networkpolicy -o yaml
     kubectl_smoke -n "${NAMESPACE}" get configmaps -o yaml
     kubectl_smoke -n "${NAMESPACE}" get events -o yaml
     kubectl_smoke -n "${NAMESPACE}" logs deployment/nvt-operator --all-containers
     kubectl_smoke -n "${NAMESPACE}" logs deployment/nvt-broker --all-containers
     kubectl_smoke -n "${NAMESPACE}" logs "${run}-agent" --all-containers
+    kubectl_smoke -n "${NAMESPACE}" logs "${run}-egressd" --all-containers
   } >"${observations}"
-  if grep -Fq -f "${SMOKE_TMPDIR}/credential-needle" "${observations}"; then
+  if grep -Fq -f "${SMOKE_TMPDIR}/credential-needles" "${observations}"; then
     die "dynamic credential appeared in an observable surface"
   fi
   if kubectl_smoke -n "${NAMESPACE}" exec "${run}-agent" -c agent -- \
     tar -C / -cf - root/.nvt-agent workspace 2>/dev/null | \
-    grep -a -Fq -f "${SMOKE_TMPDIR}/credential-needle"; then
+    grep -a -Fq -f "${SMOKE_TMPDIR}/credential-needles"; then
     die "dynamic credential appeared in an agent file"
   fi
   log "dynamic credential remained broker-owned"
