@@ -36,6 +36,11 @@ case_kind_setup() {
     --dry-run=client -o yaml | kubectl_smoke apply -f -
 
   deploy_echo_fixture
+  local fixture_label
+  fixture_label="$(printf '%s' "${FIXTURE_HOST}" | sha256sum | cut -c1-32)"
+  kubectl_smoke patch deployment "${ECHO_FIXTURE_NAME}" -n "${NAMESPACE}" --type merge \
+    -p '{"spec":{"template":{"metadata":{"labels":{"nvt.dev/egress-host":"'"${fixture_label}"'"}}}}}'
+  kubectl_smoke -n "${NAMESPACE}" rollout status "deployment/${ECHO_FIXTURE_NAME}" --timeout="${ROLLOUT_TIMEOUT}"
   install_fixture_dns_rewrite
   build_dynamic_profile_auth_client
   kind load docker-image nvt-profile-auth-client:latest --name "${CLUSTER}"
@@ -44,7 +49,7 @@ case_kind_setup() {
   make -C "${ROOT}" \
     CLUSTER="${CLUSTER}" NAMESPACE="${NAMESPACE}" CREATE_CLUSTER="${CREATE_CLUSTER}" \
     ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT}" \
-    OPERATOR_KIND_HELM_ARGS="--set egress.allowInsecureUpstreams=true -f ${SMOKE_TMPDIR}/dynamic-values.yaml" \
+    OPERATOR_KIND_HELM_ARGS="--set egress.allowInsecureUpstreams=true --set egress.networkPolicyCapable=true -f ${SMOKE_TMPDIR}/dynamic-values.yaml" \
     operator-kind-setup
 }
 
@@ -159,10 +164,35 @@ case_run() {
   local run
   run="$(wait_for_dynamic_run)"
   wait_for_phase_any "${run}" "${RUN_TIMEOUT_SECONDS}" Running
-  wait_for_proxy_ready "${run}"
+  wait_for_dynamic_proxy_ready "${run}"
   assert_proxy_injects "${run}"
   assert_dynamic_snapshot "${run}"
   assert_dynamic_secret_absence "${run}"
+}
+
+case_diagnostics() {
+  local run
+  run="$(kubectl_smoke -n "${NAMESPACE}" get agentruns -l nvt.dev/schedule=default \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "${run}" ]] || return
+  kubectl_smoke -n "${NAMESPACE}" get agentrun "${run}" -o yaml >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" get pod,service,networkpolicy,configmap \
+    -l "nvt.dev/agentrun=${run}" -o wide >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" describe pod "${run}-agent" >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" logs "${run}-agent" --all-containers --tail=200 >&2 || true
+  kubectl_smoke -n "${NAMESPACE}" logs deployment/nvt-broker --all-containers --tail=200 >&2 || true
+}
+
+wait_for_dynamic_proxy_ready() {
+  local run="$1"
+  local deadline=$((SECONDS + RUN_TIMEOUT_SECONDS)) out
+  while (( SECONDS < deadline )); do
+    out="$(curl_via_proxy "${run}" "${FIXTURE_HOST}" || true)"
+    [[ "${out}" == 200* ]] && { log "dynamic forward-proxy route ready"; return; }
+    sleep 3
+  done
+  case_diagnostics
+  die "dynamic forward-proxy route never became ready (last: ${out})"
 }
 
 complete_synthetic_portal_enrollment() {
