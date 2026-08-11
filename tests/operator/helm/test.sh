@@ -99,6 +99,10 @@ OAUTH2_ARGS=(
 )
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+if grep -q 'dynamic-accounts:' "${DEFAULT_RENDER}"; then
+  echo "default rendering unexpectedly enabled dynamic principal accounts" >&2
+  exit 1
+fi
 helm template nvt "${CHART}" -n custom-ns \
   -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" > "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
 grep -q 'dynamic-accounts:' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
