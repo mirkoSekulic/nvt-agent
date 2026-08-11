@@ -34,6 +34,7 @@ class FakeProvider:
         self.external = False
         self.validation_entered = None
         self.validation_release = None
+        self.validation_error = None
         if fail or self.path.read_bytes().startswith(b"invalid"):
             raise RuntimeError("provider rejected credential SECRET-NEEDLE")
 
@@ -42,6 +43,8 @@ class FakeProvider:
         return not self.closed
 
     def validate_state(self):
+        if self.validation_error is not None:
+            raise self.validation_error
         if self.validation_entered is not None:
             self.validation_entered.set()
             self.validation_release.wait(timeout=5)
@@ -363,6 +366,30 @@ class DynamicAccountsTest(unittest.TestCase):
                 operation(self.alice)
         with self.assertRaisesRegex(ProviderError, "account-unready"):
             manager.provider(provider_id)
+
+    def test_provider_validation_diagnostics_are_normalized_for_every_account_path(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        provider_id = manager.resolve(self.alice)["provider_instance_id"]
+        self.factory.created[-1].validation_error = ProviderError(
+            "auth-file-invalid",
+            "provider diagnostic SECRET-VALIDATION-NEEDLE",
+            502,
+        )
+
+        for operation in (
+            lambda: manager.readiness(self.alice),
+            lambda: manager.resolve(self.alice),
+            lambda: manager.provider(provider_id),
+        ):
+            with self.assertRaises(ProviderError) as denied:
+                operation()
+            self.assertEqual(denied.exception.reason, "account-unready")
+            self.assertEqual(denied.exception.message, "account-unready")
+            self.assertEqual(denied.exception.status, 503)
+            self.assertNotIn("SECRET-VALIDATION-NEEDLE", str(denied.exception))
+
+        self.assertTrue(manager.system_ready())
 
     def test_interrupted_replacement_orphan_is_removed_on_restart(self):
         manager = self.manager()

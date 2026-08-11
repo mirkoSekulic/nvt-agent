@@ -408,13 +408,9 @@ class DynamicAccountManager:
                 ):
                     raise ProviderError("account-unready", "account-unready", 503)
                 raise ProviderError("provider-not-found")
-            try:
-                if not provider.ready or not provider.validate_state():
-                    raise ProviderError("account-unready", "account-unready", 503)
-            except ProviderError:
-                raise
-            except Exception as error:
-                raise ProviderError("account-unready", "account-unready", 503) from error
+            ready = self._provider_is_ready(provider)
+            if not ready:
+                raise ProviderError("account-unready", "account-unready", 503)
             return provider
 
     def enroll(self, principal, template_name, operation_id, credential):
@@ -490,10 +486,7 @@ class DynamicAccountManager:
             self._require_healthy()
             current = self._own_active(principal)
             provider = self._providers.get(current["provider_instance_id"])
-            try:
-                ready = provider is not None and provider.ready and provider.validate_state()
-            except Exception:
-                ready = False
+            ready = self._provider_is_ready(provider)
             if not ready:
                 raise ProviderError("account-unready", "account-unready", 503)
             return {
@@ -508,19 +501,25 @@ class DynamicAccountManager:
             self._require_healthy()
             current = self._own_active(principal)
             provider = self._providers.get(current["provider_instance_id"])
-            try:
-                if provider is None or not provider.ready or not provider.validate_state():
-                    raise ProviderError("account-unready", "account-unready", 503)
-            except ProviderError:
-                raise
-            except Exception as error:
-                raise ProviderError("account-unready", "account-unready", 503) from error
+            ready = self._provider_is_ready(provider)
+            if not ready:
+                raise ProviderError("account-unready", "account-unready", 503)
             return {
                 "ok": True,
                 "template": current["template"],
                 "provider_instance_id": current["provider_instance_id"],
                 "generation": current["generation"],
             }
+
+    @staticmethod
+    def _provider_is_ready(provider):
+        try:
+            return provider is not None and provider.ready and provider.validate_state()
+        except Exception:
+            # Dynamic account APIs expose one provider-neutral failure. The
+            # trusted provider's diagnostic may contain implementation details
+            # or credential-derived text and must not escape this boundary.
+            return False
 
     def _replace(self, principal, current, template, operation_id, credential, action, provider_id):
         generation = (current or {}).get("generation", 0) + 1
