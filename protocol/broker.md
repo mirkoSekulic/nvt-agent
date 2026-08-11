@@ -169,11 +169,12 @@ provider and deleting its credential, so restart completes cleanup without
 restoring access.
 
 This broker contract deliberately contains no Kubernetes, portal UI, run,
-profile, grant, or egress coordination. The credential portal can call it in
-the #210 phase after its existing tokenless runner returns a validated document;
-the operator can resolve the opaque provider id in #211. Coordinating an active
-run during template replacement is outside this version; no implicit switch or
-fallback is performed.
+profile, grant, or egress coordination. The optional dynamic credential portal
+calls completion, reconnect, revoke, and readiness after its tokenless runner
+returns a validated document; it never exposes or consumes the resolved opaque
+provider id. Operator resolution remains #211. Coordinating an active run during
+template replacement is outside this version; no implicit switch or fallback is
+performed.
 
 ### Guest enrollment endpoints
 

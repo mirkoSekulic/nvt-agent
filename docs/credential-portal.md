@@ -1,7 +1,7 @@
 # Self-service provider credential enrollment
 
 `nvt-credential-portal` is an optional, standalone enrollment service. It is
-disabled by default. Its complete data path is:
+disabled by default. Static slots preserve the original seed path:
 
 ```text
 browser -> credential portal -> tokenless credential runner -> credential portal
@@ -9,11 +9,20 @@ browser -> credential portal -> tokenless credential runner -> credential portal
         -> broker PVC canonical file -> existing provider refresh and injection
 ```
 
+The separately enabled dynamic mode uses the broker-owned principal-account
+registry instead:
+
+```text
+browser -> credential portal -> tokenless credential runner -> credential portal
+        -> verified TLS + exact-principal assertion -> broker dynamic account state
+        -> existing provider plugin contract
+```
+
 The portal is not a second credential runtime. It never reads the current
-Secret, the broker PVC, provider health, AgentRuns, or Key Vault. It neither
-refreshes nor injects credentials. Removing the Deployment later does not
-remove the pre-created Secret or the broker PVC and does not interrupt running
-agents or broker refresh.
+Secret, broker credential files, AgentRuns, or Key Vault. It neither refreshes
+nor injects credentials. Removing the Deployment later does not remove static
+seed Secrets, the broker PVC, or broker-owned dynamic accounts and does not
+interrupt running agents or broker refresh.
 
 The normal user flow is Connect/Reconnect. After portal authentication establishes
 the stable owner, the portal asks a separate credential-runner sidecar to run the
@@ -31,10 +40,10 @@ separate callback path. By default, a successfully authenticated issuer/subject
 pair receives a session only when it owns at least one configured slot. Optional
 `auth.eligibility` and `auth.claimEnrichment` use the same provider-neutral,
 bounded default-deny contract as gateway login admission. With that policy set,
-an eligible principal may receive a session without a static slot, but exact
-issuer/subject ownership still protects every slot operation. This is admission
-groundwork only and does not dynamically create enrollment slots or broker
-accounts. See [generic OAuth2/OIDC eligibility](oauth-eligibility.md).
+an eligible principal may receive a session without a static slot. Static mode
+still protects every slot operation with the exact configured issuer/subject;
+dynamic mode uses that same exact principal for every self-only broker
+operation. See [generic OAuth2/OIDC eligibility](oauth-eligibility.md).
 OIDC deployments may explicitly choose eligibility claims from the verified ID
 token, a cryptographically verified JWT access token, or UserInfo; the ID token
 remains the default. This changes only login eligibility claims, never the
@@ -45,7 +54,7 @@ canonical decimal form, so quote that value in slot configuration (for example,
 `subject: "424242"`). Fractional numbers and identity values containing the
 transient access token are rejected.
 
-Each slot binds a stable name and exact owner `(issuer, subject)` to one explicit
+In static mode, each slot binds a stable name and exact owner `(issuer, subject)` to one explicit
 adapter, broker provider name, pre-created Secret, and data key. The request
 cannot supply or override the adapter, provider, Secret, or key. The Service
 Account has only `patch` on the configured Secret name; it has no `get`, `list`,
@@ -54,11 +63,14 @@ Account has only `patch` on the configured Secret name; it has no `get`, `list`,
 never observes any other key. The pre-created Secret must contain a `data: {}`
 object, but its configured slot keys may initially be absent.
 The portal container requests a metadata-only PATCH response and streams/discards the
-response rather than decoding a Secret object.
+response rather than decoding a Secret object. Dynamic mode does not initialize
+a Kubernetes client, mount a ServiceAccount token, or render portal Secret
+RBAC.
 
 The CLI runner is a separate container boundary. Pod ServiceAccount automounting
 and Kubernetes service-link environment injection are disabled. A short-lived
-projected Kubernetes API token is mounted only into the small portal container;
+projected Kubernetes API token is mounted only into the small portal container
+in static mode;
 the runner receives no Kubernetes token, portal configuration, session/OAuth
 client Secret environment, or Kubernetes/workload credential. The containers
 communicate only on pod localhost using a per-pod random key generated into
@@ -67,44 +79,51 @@ and unique replay-rejected nonce; enrollment identifiers are opaque and
 single-use. The runner can invoke only compiled-in adapters. It cannot select or
 see a Secret destination or patch Kubernetes. A completed document remains
 retrievable over the authenticated protocol until the portal validates it,
-successfully patches the exact slot-bound Secret key, and sends an explicit
-idempotent acknowledgment. A reset response can therefore be fetched again
-without starting another provider login.
+successfully transfers it to its configured custody target, and sends an
+explicit idempotent acknowledgment. Static custody is the exact Secret patch;
+dynamic custody is the broker's durable acceptance of the same opaque operation
+ID. A reset response can therefore be fetched again without starting another
+provider login, and the broker operation ID is preserved across a bounded
+transport/response-loss retry.
 
 Portal login and provider authorization are separate sessions and callback
 paths. Each in-memory enrollment session binds the authenticated principal,
-exact configured slot and adapter, an opaque one-time identifier, expiry, and
+exact configured slot or public template and adapter, an opaque one-time identifier, expiry, and
 single-use code handoff. Request parameters cannot override the provider,
-adapter, Secret, or key. Reconnect never relies on reported credential health
-or expiry and can be started at any time.
+adapter, Secret, broker provider, profile, grant, runtime policy, or key.
+Reconnect never relies on reported credential expiry and can be started at any
+time, including while the broker reports the caller's own account unready.
 
 Enrollment processes are capped and time-bounded in both components. CLI output
 is bounded and never logged. Each process receives a small allowlisted
 environment and a fresh private `HOME`; portal session/OAuth client secrets are
 not mounted into the runner container and cannot be inherited. Generated
 files are accepted only at the adapter's fixed path, must be regular bounded
-files, and are validated before patch. The temporary home is removed before the
-Secret is changed, and in-memory credential bytes are cleared as practical.
+files, and are validated before custody transfer. The temporary home is removed
+before the Secret or broker state is changed, and in-memory credential bytes are
+cleared as practical.
 Logout, timeout, cancellation, and shutdown terminate unfinished enrollment
 processes. Cancellation removes the runner session after subprocess cleanup and
 immediately reclaims capacity. Every session has the same bounded enrollment
 expiry even after CLI success; an unacknowledged or abandoned result is wiped
 and removed at expiry. Validation or Secret-patch failure triggers best-effort
 remote cancellation and wiping instead of acknowledgment. The portal
-ServiceAccount still has only the configured Secret `patch` permission and has
-no workload-creation permission.
+ServiceAccount still has only the configured Secret `patch` permission in
+static mode and has no workload-creation permission. Dynamic mode renders no
+Role or RoleBinding for the portal.
 
 The optional administrator recovery upload is disabled by default. When enabled,
 uploads are raw `application/json`, bounded to at most 1 MiB, protected by
 same-origin CSRF and explicit replacement confirmation, and parsed entirely in
-memory. Multipart input, duplicate JSON keys, cross-provider shapes, and
-documents below the current broker provider's minimum usable shape are rejected
-before a Secret patch. Accepted documents are otherwise preserved. Audit output
+memory. Dynamic mode further bounds recovery input to the broker's 768 KiB
+credential limit. Multipart input, duplicate JSON keys, cross-provider shapes, and
+documents below the selected adapter's minimum usable shape are rejected before
+the configured custody operation. Accepted documents are otherwise preserved. Audit output
 contains only timestamp, issuer, subject, slot, adapter, broker provider,
 outcome, and a fixed reason code. Credential content, token hashes,
 authorization codes, and raw provider errors are never returned or logged.
 
-The configured seed Secret still contains credentials. Back it up and protect
+In static mode the configured seed Secret still contains credentials. Back it up and protect
 it accordingly. Session and OAuth client secrets must come from existing
 Kubernetes Secrets. Slot configuration, issuer/subject identifiers, and public
 OAuth endpoints are deployment configuration; they are not credentials. Do not
@@ -113,7 +132,8 @@ events, or command arguments.
 
 Liveness reports only that the portal process is running. Readiness additionally
 performs a bounded, authenticated localhost check of the credential runner, so
-a missing or wedged runner removes the portal Pod from service. Neither probe
+a missing or wedged runner removes the portal Pod from service. Dynamic mode
+also requires the broker's shared readiness endpoint over verified TLS. Neither probe
 claims that a credential exists, is usable, was imported by the broker, or is
 healthy upstream.
 
@@ -150,7 +170,100 @@ so rebuilding a commit cannot silently change command parsing or credential-file
 behavior. CLI version parity with AgentRun images is deferred; separate image
 build arguments make later coordinated sourcing explicit.
 
-## Enabling the chart
+## Dynamic principal-owned mode
+
+Dynamic mode is additive, explicit, and disabled by default. It cannot be
+combined with static slots. An eligible authenticated principal sees only the
+administrator's bounded public template names and labels plus the broker's
+non-secret state for that exact issuer and immutable subject. The browser never
+chooses an executable, image, plugin, credential path, provider instance,
+Secret, profile, grant, capability, runtime setting, or egress policy.
+
+The portal calls only the broker principal-account completion, reconnect,
+revoke, and readiness endpoints. Each call carries a newly minted, short-lived
+HMAC assertion with audience `nvt.broker.principal-accounts/v1` and the exact
+session issuer/subject. The assertion key and broker CA are mounted from
+existing Secrets as files only into the portal container. TLS certificate
+verification, bounded deadlines and response bodies, duplicate-free response
+decoding, and redirect rejection are mandatory; there is no insecure fallback.
+The tokenless runner receives neither mount. Broker and portal configuration
+must agree on the assertion Secret/key and every public template-to-adapter
+mapping or Helm rendering fails.
+
+```yaml
+broker:
+  envSecretName: nvt-broker-dynamic-account-auth
+  tls:
+    enabled: true
+  persistence:
+    enabled: true
+  config:
+    dynamic-accounts:
+      enabled: true
+      state-dir: /state/principal-accounts
+      authentication:
+        hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+      provider-templates:
+        - name: approved-claude-provider
+          plugin: claude-oauth
+          credential-config-key: credentials-file
+          config: {}
+      credential-templates:
+        - name: claude-member
+          label: Claude member
+          enrollment-adapter: claude-oauth-file
+          provider-template: approved-claude-provider
+
+credentialPortal:
+  enabled: true
+  publicURL: https://agents.example.test/agents/credentials
+  slots: []
+  dynamic:
+    enabled: true
+    broker:
+      url: https://nvt-broker:7347
+      ca:
+        existingSecret: nvt-broker-tls
+        key: ca.crt
+      authentication:
+        existingSecret: nvt-broker-dynamic-account-auth
+        key: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+    templates:
+      - name: claude-member
+        label: Claude member
+        adapter: claude-oauth-file
+  auth:
+    eligibility:
+      default: deny
+      rules:
+        - id: eligible-member
+          effect: allow
+          authenticated: true
+  networkPolicy:
+    egressTCPPorts: [443, 7347]
+```
+
+The generic contract accepts only adapters compiled into the trusted runner;
+the current image provides the explicitly documented Codex and Claude adapter
+presets. Core selection and custody logic has no provider branch.
+
+First enrollment selects one approved template. Reconnect is permitted before
+expiry and while that account is unready, but it never changes the committed
+template. Selecting a different template while an account is active fails
+before runner execution; there is no fallback. Revoke is a separate explicit
+operation. This portal does not inspect or coordinate active AgentRuns, so a
+safe template-switch workflow requiring authoritative run coordination remains
+the bounded responsibility of #211. Dynamic account resolution to an opaque
+provider instance is likewise not exposed to the browser and remains operator
+work in #211.
+
+Eligibility is evaluated during portal login. If a principal no longer passes
+it, a new session and therefore new enrollment/reconnect is denied; an existing
+broker account is never reassigned or exposed. As with all in-memory portal
+sessions, logout or portal restart requires authentication and eligibility to
+be evaluated again.
+
+## Enabling static-slot mode
 
 First create the seed, session, and OAuth client Secrets out of band. The chart
 does not create credential-bearing Secrets. Then configure the persistent

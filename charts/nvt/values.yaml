@@ -343,6 +343,27 @@ credentialPortal:
   # normal flow; enabling this exposes bounded raw credential-file upload.
   recoveryUpload:
     enabled: false
+  # Optional principal-owned broker mode. When enabled, static slots must be
+  # empty and every credential is sent over verified TLS directly to the
+  # broker's dynamic principal-account API. Secret values are mounted files,
+  # never Helm values or runner environment.
+  dynamic:
+    enabled: false
+    broker:
+      url: ""
+      ca:
+        existingSecret: ""
+        key: ca.crt
+      authentication:
+        existingSecret: ""
+        key: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+      assertionTTLSeconds: 60
+      requestTimeoutSeconds: 10
+      maxResponseBytes: 65536
+    # Public template name/label -> one compiled trusted enrollment adapter.
+    # Provider plugins, ids, profiles, grants, capabilities, and runtime
+    # settings remain broker/operator administrator configuration.
+    templates: []
   auth:
     mode: oidc
     # Optional shared default-deny eligibility policy. When absent, the portal
@@ -406,8 +427,8 @@ credentialPortal:
       memory: 512Mi
   networkPolicy:
     enabled: true
-    # Kubernetes API and identity-provider HTTPS destination ports. Add a
-    # nonstandard configured HTTPS port explicitly.
+    # Kubernetes API, identity-provider, and optional dynamic broker HTTPS
+    # destination ports. Add every nonstandard configured HTTPS port explicitly.
     egressTCPPorts:
       - 443
 
