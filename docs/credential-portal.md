@@ -35,6 +35,10 @@ an eligible principal may receive a session without a static slot, but exact
 issuer/subject ownership still protects every slot operation. This is admission
 groundwork only and does not dynamically create enrollment slots or broker
 accounts. See [generic OAuth2/OIDC eligibility](oauth-eligibility.md).
+OIDC deployments may explicitly choose eligibility claims from the verified ID
+token, a cryptographically verified JWT access token, or UserInfo; the ID token
+remains the default. This changes only login eligibility claims, never the
+verified issuer/subject identity or OAuth2 identity behavior.
 Display names are never authorization input. OAuth2 identity subjects may
 be JSON strings or integers; integer subjects are converted to their exact
 canonical decimal form, so quote that value in slot configuration (for example,

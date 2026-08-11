@@ -9,6 +9,14 @@ claim enrichment.
 Principal identity is always the exact verified issuer plus immutable subject.
 Eligibility claims and display names never replace either identity field.
 
+For OIDC portal authentication, `auth.oidc.eligibilityClaimSource` explicitly
+selects `id_token` (the compatibility default), `access_token`, or `userinfo`.
+An access-token source must be a JWT whose signature, configured issuer, and
+audience are verified through OIDC discovery before any claims are evaluated;
+`accessTokenAudience` defaults to the portal client ID. UserInfo must return the
+same immutable subject as the verified ID token. Plain OAuth2 identity behavior
+is unchanged.
+
 ## Policy contract
 
 Rules are ORed. A scalar predicate matches any selected scalar value. A
@@ -49,7 +57,11 @@ fail login closed. Tokens and raw responses are never logged or stored in a
 session.
 
 The special `valuePath: $` selects the complete response, including a bounded
-top-level JSON array. Other paths select exactly one value. For example:
+top-level JSON array. Before retention, the complete selected structure is
+walked recursively and rejected if any field name can carry a personal
+identifier, token, secret, password, or credential. Legitimate declarative
+`authorization_details` and `authorized_parties` structures remain available.
+Other paths select exactly one non-sensitive value. For example:
 
 ```yaml
 claimEnrichment:
@@ -77,7 +89,12 @@ configuration; shared code contains no identity-provider-specific decisions.
 
 When gateway admission is absent, authenticated gateway login behaves as it did
 before. Existing scalar admission and static authorization rules retain their
-meaning. When portal eligibility is absent, portal login still requires an
+meaning. In particular, bounded printable rule IDs and JSON claim keys are not
+restricted to programming-language identifier syntax, duplicate IDs retain
+ordered first-match behavior, and duplicate expected values remain valid. The
+new resource ceilings (64 rules, 16 conditions and path segments, 64 values,
+and the documented byte/selection limits) fail startup closed; deployments
+exceeding them must reduce the policy before upgrading. When portal eligibility is absent, portal login still requires an
 exact configured static slot owner. When it is present, an eligible principal
 may receive a portal session without a per-principal slot, but can still view or
 address only slots whose configured owner exactly matches that principal.

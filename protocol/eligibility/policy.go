@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -23,9 +25,23 @@ const (
 )
 
 var (
-	ruleIDPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	claimPathPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(?:\[\])?(?:\.[A-Za-z_][A-Za-z0-9_-]*(?:\[\])?)*$`)
 )
+
+const (
+	ClaimSourceIDToken     = "id_token"
+	ClaimSourceAccessToken = "access_token"
+	ClaimSourceUserInfo    = "userinfo"
+)
+
+func ValidClaimSource(source string) bool {
+	switch source {
+	case ClaimSourceIDToken, ClaimSourceAccessToken, ClaimSourceUserInfo:
+		return true
+	default:
+		return false
+	}
+}
 
 // Policy is a provider-neutral, default-deny login eligibility contract.
 type Policy struct {
@@ -72,15 +88,10 @@ func (p Policy) Validate(prefix string) error {
 	if len(p.Rules) > maxRules {
 		return fmt.Errorf("%s.rules must contain at most %d entries", prefix, maxRules)
 	}
-	seen := make(map[string]struct{}, len(p.Rules))
 	for index, rule := range p.Rules {
-		if !ruleIDPattern.MatchString(rule.ID) {
-			return fmt.Errorf("%s.rules[%d].id must be a bounded identifier", prefix, index)
+		if strings.TrimSpace(rule.ID) == "" || len(rule.ID) > 128 || !utf8.ValidString(rule.ID) || containsControl(rule.ID) {
+			return fmt.Errorf("%s.rules[%d].id must be a bounded non-empty string without control characters", prefix, index)
 		}
-		if _, exists := seen[rule.ID]; exists {
-			return fmt.Errorf("%s.rules[%d].id is duplicated", prefix, index)
-		}
-		seen[rule.ID] = struct{}{}
 		if rule.Effect != EffectAllow {
 			return fmt.Errorf("%s.rules[%d].effect must be %q", prefix, index, EffectAllow)
 		}
@@ -104,7 +115,7 @@ func (p Policy) Validate(prefix string) error {
 			}
 			continue
 		}
-		if !validClaimPath(rule.Where.Array) || len(rule.Where.All) == 0 || len(rule.Where.All) > maxConditions {
+		if !validPolicyPath(rule.Where.Array) || len(rule.Where.All) == 0 || len(rule.Where.All) > maxConditions {
 			return fmt.Errorf("%s.rules[%d] requires a bounded where.array and 1..%d where.all conditions", prefix, index, maxConditions)
 		}
 		if isSensitivePath(rule.Where.Array) {
@@ -124,23 +135,42 @@ func validatePredicate(prefix string, ruleIndex, conditionIndex int, path string
 	if conditionIndex >= 0 {
 		field = fmt.Sprintf("%s.where.all[%d]", field, conditionIndex)
 	}
-	if !validClaimPath(path) || len(values) == 0 || len(values) > maxValues {
+	if !validPolicyPath(path) || len(values) == 0 || len(values) > maxValues {
 		return fmt.Errorf("%s requires a bounded claimPath and 1..%d values", field, maxValues)
 	}
 	if isSensitivePath(path) {
 		return fmt.Errorf("%s.claimPath must be a non-sensitive JSON path", field)
 	}
-	seen := make(map[string]struct{}, len(values))
 	for valueIndex, value := range values {
-		if value == "" || len(value) > maxRuleValueBytes || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") {
-			return fmt.Errorf("%s.values[%d] must be a bounded non-empty string", field, valueIndex)
+		if len(value) > maxRuleValueBytes || !utf8.ValidString(value) {
+			return fmt.Errorf("%s.values[%d] must be a bounded string", field, valueIndex)
 		}
-		if _, exists := seen[value]; exists {
-			return fmt.Errorf("%s.values[%d] is duplicated", field, valueIndex)
-		}
-		seen[value] = struct{}{}
 	}
 	return nil
+}
+
+// validPolicyPath preserves the gateway's existing scalar admission syntax
+// while adding only structural and resource bounds. Claim names are JSON object
+// keys, not identifiers, so spaces and other printable characters remain valid.
+func validPolicyPath(path string) bool {
+	if path == "" || len(path) > 2048 || !utf8.ValidString(path) || containsControl(path) {
+		return false
+	}
+	segments := strings.Split(path, ".")
+	if len(segments) > maxPathSegments {
+		return false
+	}
+	for _, raw := range segments {
+		segment := strings.TrimSuffix(raw, "[]")
+		if segment == "" || len(segment) > 128 || strings.Contains(segment, "[]") {
+			return false
+		}
+	}
+	return true
+}
+
+func containsControl(value string) bool {
+	return strings.IndexFunc(value, unicode.IsControl) >= 0
 }
 
 func validClaimPath(path string) bool {

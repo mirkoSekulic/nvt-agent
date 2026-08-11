@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 )
 
 func TestConfigStrictlyRejectsUnknownDuplicateAndUnsafeSlotPolicy(t *testing.T) {
@@ -48,6 +50,29 @@ func TestConfigRequiresExplicitExperimentalCodexDeviceAuthorization(t *testing.T
 	cfg.Slots = cfg.Slots[1:]
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Claude-only configuration incorrectly required the Codex gate: %v", err)
+	}
+}
+
+func TestConfigValidatesOIDCEligibilityClaimSource(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL: "https://identity.example.test", ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default ID-token claim source rejected: %v", err)
+	}
+	for _, source := range []string{
+		eligibility.ClaimSourceIDToken, eligibility.ClaimSourceAccessToken, eligibility.ClaimSourceUserInfo,
+	} {
+		cfg.Auth.OIDC.EligibilityClaimSource = source
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("claim source %q rejected: %v", source, err)
+		}
+	}
+	cfg.Auth.OIDC.EligibilityClaimSource = "unverified_jwt"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown OIDC eligibility claim source accepted")
 	}
 }
 

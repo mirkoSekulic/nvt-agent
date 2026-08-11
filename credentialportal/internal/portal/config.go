@@ -77,11 +77,13 @@ type SessionConfig struct {
 }
 
 type OIDCConfig struct {
-	IssuerURL        string   `json:"issuerURL"`
-	ClientID         string   `json:"clientID"`
-	CallbackPath     string   `json:"callbackPath"`
-	ClientAuthMethod string   `json:"clientAuthMethod"`
-	Scopes           []string `json:"scopes"`
+	IssuerURL              string   `json:"issuerURL"`
+	ClientID               string   `json:"clientID"`
+	CallbackPath           string   `json:"callbackPath"`
+	ClientAuthMethod       string   `json:"clientAuthMethod"`
+	Scopes                 []string `json:"scopes"`
+	EligibilityClaimSource string   `json:"eligibilityClaimSource"`
+	AccessTokenAudience    string   `json:"accessTokenAudience"`
 }
 
 type OAuth2Config struct {
@@ -201,6 +203,19 @@ func (c *Config) Validate() error {
 	if c.Auth.Mode == authModeOIDC {
 		if !absoluteHTTPS(c.Auth.OIDC.IssuerURL) || c.Auth.OIDC.ClientID == "" {
 			return fmt.Errorf("%w: OIDC issuerURL and clientID are required", errInvalidConfig)
+		}
+		claimSource := c.Auth.OIDC.EligibilityClaimSource
+		if claimSource == "" {
+			claimSource = eligibility.ClaimSourceIDToken
+		}
+		if !eligibility.ValidClaimSource(claimSource) {
+			return fmt.Errorf(
+				"%w: OIDC eligibilityClaimSource must be id_token, access_token, or userinfo",
+				errInvalidConfig,
+			)
+		}
+		if len(c.Auth.OIDC.AccessTokenAudience) > 512 || strings.ContainsAny(c.Auth.OIDC.AccessTokenAudience, "\x00\r\n") {
+			return fmt.Errorf("%w: OIDC accessTokenAudience must be a bounded string", errInvalidConfig)
 		}
 	} else {
 		if c.Auth.OAuth2.Issuer == "" || !absoluteHTTPS(c.Auth.OAuth2.AuthorizationURL) ||

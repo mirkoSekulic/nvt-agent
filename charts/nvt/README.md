@@ -1060,6 +1060,12 @@ gateway/portal behavior, bounded top-level array enrichment, limits, and
 fail-closed cases, and the [gateway README](../../gateway/README.md) for callback
 and session behavior.
 
+The credential portal keeps ID-token eligibility as its compatibility default.
+Set `credentialPortal.auth.oidc.eligibilityClaimSource` to `access_token` only
+for a JWT access token that can be verified against OIDC discovery; its audience
+defaults to the portal client ID or can be set with `accessTokenAudience`.
+`userinfo` is also supported and must return the ID token's exact subject.
+
 ### Generic OAuth2 owner login
 
 The generic OAuth2 adapter supports providers without OIDC. GitHub is one

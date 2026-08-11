@@ -364,6 +364,11 @@ credentialPortal:
     oidc:
       issuerURL: ""
       clientID: ""
+      # Claims evaluated by auth.eligibility. access_token is accepted only
+      # after JWT signature, issuer, and audience verification.
+      eligibilityClaimSource: id_token
+      # Defaults to clientID when eligibilityClaimSource is access_token.
+      accessTokenAudience: ""
       clientSecret:
         existingSecret: ""
         secretKey: client-secret

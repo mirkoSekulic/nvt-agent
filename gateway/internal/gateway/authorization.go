@@ -9,15 +9,16 @@ import (
 	"strings"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 )
 
 const (
 	authorizationDefaultDeny  = "deny"
 	authorizationEffectAllow  = "allow"
 	authorizationDecisionDeny = "deny"
-	claimSourceIDToken        = "id_token"
-	claimSourceAccessToken    = "access_token"
-	claimSourceUserInfo       = "userinfo"
+	claimSourceIDToken        = eligibility.ClaimSourceIDToken
+	claimSourceAccessToken    = eligibility.ClaimSourceAccessToken
+	claimSourceUserInfo       = eligibility.ClaimSourceUserInfo
 )
 
 type AuthorizationConfig struct {
@@ -72,9 +73,7 @@ func (c AuthorizationConfig) validate() error {
 	if claimSource == "" {
 		claimSource = claimSourceIDToken
 	}
-	switch claimSource {
-	case claimSourceIDToken, claimSourceAccessToken, claimSourceUserInfo:
-	default:
+	if !eligibility.ValidClaimSource(claimSource) {
 		return fmt.Errorf("auth.authorization.claimSource must be one of %q, %q, or %q", claimSourceIDToken, claimSourceAccessToken, claimSourceUserInfo)
 	}
 	for index, rule := range c.Rules {

@@ -189,9 +189,8 @@ func sensitiveEnrichmentPath(path string) bool {
 	if isSensitivePath(path) {
 		return true
 	}
-	compact := strings.NewReplacer(".", "", "[", "", "]", "", "-", "", "_", "").Replace(strings.ToLower(path))
-	for _, sensitive := range []string{"token", "secret", "password", "credential", "authorization"} {
-		if strings.Contains(compact, sensitive) {
+	for _, segment := range strings.Split(path, ".") {
+		if sensitiveDataKey(strings.TrimSuffix(segment, "[]")) {
 			return true
 		}
 	}
@@ -273,10 +272,47 @@ func fetchClaim(ctx context.Context, config EnrichmentConfig, source ClaimSource
 	if !ok || len(selected) != 1 || selected[0] == nil {
 		return nil, errors.New("OAuth claim source value is missing or ambiguous")
 	}
-	if containsToken(selected[0], accessToken) {
+	if containsSensitiveData(selected[0]) || containsToken(selected[0], accessToken) {
 		return nil, errors.New("OAuth claim source value is invalid")
 	}
 	return selected[0], nil
+}
+
+// sensitiveDataKey rejects secret-bearing or stable personal identifiers at
+// every depth of a selected enrichment result. The two authorization-structure
+// names are explicitly data, not credentials, and remain valid policy inputs.
+func sensitiveDataKey(key string) bool {
+	compact := strings.NewReplacer(".", "", "[", "", "]", "", "-", "", "_", "").
+		Replace(strings.ToLower(strings.ReplaceAll(key, "ø", "o")))
+	if compact == "authorizationdetails" || compact == "authorizedparties" {
+		return false
+	}
+	switch compact {
+	case "pid", "ssn", "fodselsnummer", "foedselsnummer", "authorization":
+		return true
+	}
+	return strings.HasSuffix(compact, "token") ||
+		strings.Contains(compact, "secret") ||
+		strings.Contains(compact, "password") ||
+		strings.Contains(compact, "credential")
+}
+
+func containsSensitiveData(value any) bool {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if containsSensitiveData(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range typed {
+			if sensitiveDataKey(key) || containsSensitiveData(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func decodeBoundedJSON(decoder *json.Decoder, depth int, limits ResponseLimits, nodes *int) (any, error) {

@@ -31,8 +31,10 @@ const (
 type oidcFixture struct {
 	*httptest.Server
 
-	key   *rsa.PrivateKey
-	nonce string
+	key            *rsa.PrivateKey
+	nonce          string
+	accessToken    func(*testing.T, string) string
+	userInfoClaims map[string]any
 }
 
 func newOIDCFixture(t *testing.T) *oidcFixture {
@@ -48,7 +50,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			if err := json.NewEncoder(w).
-				Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks", "id_token_signing_alg_values_supported": []string{testJWTAlg}}); err != nil {
+				Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "userinfo_endpoint": issuer + "/userinfo", "jwks_uri": issuer + "/jwks", "id_token_signing_alg_values_supported": []string{testJWTAlg}}); err != nil {
 				http.Error(w, "encode failed", http.StatusInternalServerError)
 			}
 		case "/jwks":
@@ -61,8 +63,20 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 				http.Error(w, "invalid", http.StatusBadRequest)
 				return
 			}
+			accessToken := "transient-login-access"
+			if fixture.accessToken != nil {
+				accessToken = fixture.accessToken(t, issuer)
+			}
 			if err := json.NewEncoder(w).
-				Encode(map[string]any{"access_token": "transient-login-access", "token_type": "Bearer", "id_token": fixture.idToken(t, issuer)}); err != nil {
+				Encode(map[string]any{"access_token": accessToken, "token_type": "Bearer", "id_token": fixture.idToken(t, issuer)}); err != nil {
+				http.Error(w, "encode failed", http.StatusInternalServerError)
+			}
+		case "/userinfo":
+			if fixture.userInfoClaims == nil {
+				http.Error(w, "unavailable", http.StatusNotFound)
+				return
+			}
+			if err := json.NewEncoder(w).Encode(fixture.userInfoClaims); err != nil {
 				http.Error(w, "encode failed", http.StatusInternalServerError)
 			}
 		default:
@@ -76,24 +90,23 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 
 func (f *oidcFixture) idToken(t *testing.T, issuer string) string {
 	t.Helper()
+	return f.signedToken(t, map[string]any{
+		"iss": issuer, "sub": "oidc-owner", "aud": "portal-client", "nonce": f.nonce,
+		"iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+	})
+}
+
+func (f *oidcFixture) signedToken(t *testing.T, claims map[string]any) string {
+	t.Helper()
 	header, err := json.Marshal(map[string]any{"alg": testJWTAlg, "kid": "portal-test", "typ": "JWT"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := json.Marshal(
-		map[string]any{
-			"iss":   issuer,
-			"sub":   "oidc-owner",
-			"aud":   "portal-client",
-			"nonce": f.nonce,
-			"iat":   time.Now().Add(-time.Minute).Unix(),
-			"exp":   time.Now().Add(time.Hour).Unix(),
-		},
-	)
+	claimsJSON, err := json.Marshal(claims)
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
+	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
 	digest := sha256.Sum256([]byte(input))
 	signature, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, digest[:])
 	if err != nil {
@@ -183,6 +196,120 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("mismatched OIDC nonce accepted")
 	}
+}
+
+func TestOIDCEligibilityUsesOnlyVerifiedConfiguredClaimSource(t *testing.T) {
+	fixture := newOIDCFixture(t)
+	cfg := testConfig()
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL: fixture.URL, ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+		EligibilityClaimSource: eligibility.ClaimSourceAccessToken,
+		AccessTokenAudience:    "portal-eligibility",
+	}
+	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
+		ID: "authorized detail", Effect: eligibility.EffectAllow,
+		Where: eligibility.Where{Array: "authorization_details[]", All: []eligibility.Condition{{
+			ClaimPath: "type", Values: []string{"configured-resource"},
+		}}},
+	}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(
+		t.Context(), cfg, strings.Repeat("s", 64), "", "client-secret", fixture.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validClaims := func(issuer, audience string) map[string]any {
+		return map[string]any{
+			"iss": issuer, "sub": "oidc-owner", "aud": audience,
+			"iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+			"authorization_details": []any{map[string]any{"type": "configured-resource"}},
+		}
+	}
+	tests := []struct {
+		name       string
+		access     func(*testing.T, string) string
+		wantStatus int
+	}{
+		{name: "verified access token", wantStatus: http.StatusFound, access: func(t *testing.T, issuer string) string {
+			return fixture.signedToken(t, validClaims(issuer, "portal-eligibility"))
+		}},
+		{name: "malformed access token", wantStatus: http.StatusUnauthorized, access: func(*testing.T, string) string {
+			return "not-a-jwt"
+		}},
+		{name: "wrong issuer", wantStatus: http.StatusUnauthorized, access: func(t *testing.T, _ string) string {
+			return fixture.signedToken(t, validClaims("https://wrong-issuer.example", "portal-eligibility"))
+		}},
+		{name: "wrong audience", wantStatus: http.StatusUnauthorized, access: func(t *testing.T, issuer string) string {
+			return fixture.signedToken(t, validClaims(issuer, "other-audience"))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture.accessToken = test.access
+			response := performOIDCCallback(t, auth, fixture, cfg.PublicURL)
+			if response.Code != test.wantStatus {
+				t.Fatalf("callback status=%d want=%d body=%q", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestOIDCEligibilitySupportsExactSubjectUserInfoClaims(t *testing.T) {
+	fixture := newOIDCFixture(t)
+	fixture.userInfoClaims = map[string]any{"sub": "oidc-owner", "groups": []any{"eligible"}}
+	cfg := testConfig()
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL: fixture.URL, ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+		EligibilityClaimSource: eligibility.ClaimSourceUserInfo,
+	}
+	cfg.Auth.Eligibility = &eligibility.Policy{Rules: []eligibility.Rule{{
+		ID: "userinfo", Effect: eligibility.EffectAllow, ClaimPath: "groups[]", Values: []string{"eligible"},
+	}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(
+		t.Context(), cfg, strings.Repeat("s", 64), "", "client-secret", fixture.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusFound {
+		t.Fatalf("userinfo eligibility callback status=%d body=%q", response.Code, response.Body.String())
+	}
+	fixture.userInfoClaims["sub"] = "different-subject"
+	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusUnauthorized {
+		t.Fatalf("mismatched userinfo subject admitted: status=%d", response.Code)
+	}
+}
+
+func performOIDCCallback(
+	t *testing.T,
+	auth *Authenticator,
+	fixture *oidcFixture,
+	publicURL string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	loginResponse := httptest.NewRecorder()
+	auth.Login(loginResponse, httptest.NewRequestWithContext(t.Context(), http.MethodGet, publicURL+"/login", nil))
+	location, err := url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.nonce = location.Query().Get("nonce")
+	callback := httptest.NewRequestWithContext(
+		t.Context(), http.MethodGet,
+		publicURL+"/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=oidc-code", nil,
+	)
+	callback.AddCookie(loginResponse.Result().Cookies()[0])
+	response := httptest.NewRecorder()
+	auth.Callback(response, callback)
+	return response
 }
 
 //nolint:cyclop,gocyclo // This test deliberately exercises the complete OAuth admission lifecycle.

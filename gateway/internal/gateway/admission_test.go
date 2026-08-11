@@ -225,7 +225,7 @@ func TestOAuthAdaptersShareEnrichmentAndAdmissionBoundary(t *testing.T) {
 
 func TestGatewayUsesSharedArrayEligibilityForTopLevelEnrichment(t *testing.T) {
 	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"organization":{"ID":"0192:123456789"},"resource":"approved-resource"}]`))
+		_, _ = w.Write([]byte(`{"authorization_details":[{"authorized_parties":[{"organization":{"ID":"0192:123456789"},"resource":"approved-resource"}]}]}`))
 	}))
 	t.Cleanup(claimServer.Close)
 	fixture := newOAuth2Fixture(t, "temporary-access-token", `{"id":42,"login":"member"}`)
@@ -235,7 +235,7 @@ func TestGatewayUsesSharedArrayEligibilityForTopLevelEnrichment(t *testing.T) {
 	config.Auth.ClaimEnrichment.Sources[0].ValuePath = "$"
 	config.Auth.Admission = &AdmissionConfig{Default: authorizationDefaultDeny, Rules: []AdmissionRule{{
 		ID: "eligible", Effect: authorizationEffectAllow,
-		Where: eligibility.Where{Array: "memberships[]", All: []eligibility.Condition{
+		Where: eligibility.Where{Array: "memberships.authorization_details[].authorized_parties[]", All: []eligibility.Condition{
 			{ClaimPath: "organization.ID", Values: []string{"0192:123456789"}},
 			{ClaimPath: "resource", Values: []string{"approved-resource"}},
 		}},
@@ -245,6 +245,31 @@ func TestGatewayUsesSharedArrayEligibilityForTopLevelEnrichment(t *testing.T) {
 	response := completeOAuth2Login(t, server)
 	if response.Code != http.StatusFound || len(server.auth.sessions) != 1 {
 		t.Fatalf("array eligibility status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
+	}
+}
+
+func TestGatewayDoesNotPersistSensitiveNestedWholeDocumentEnrichment(t *testing.T) {
+	const sensitiveCanary = "other-secret-canary"
+	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"resource":"allowed","nested":{"refresh_token":"` + sensitiveCanary + `"}}]`))
+	}))
+	t.Cleanup(claimServer.Close)
+	fixture := newOAuth2Fixture(t, "temporary-access-token", `{"id":42,"login":"member"}`)
+	config := oauth2TestConfig(fixture.URL)
+	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
+	config.Auth.ClaimEnrichment.Sources[0].OutputClaim = "memberships"
+	config.Auth.ClaimEnrichment.Sources[0].ValuePath = "$"
+	config.Auth.Admission = &AdmissionConfig{Rules: []AdmissionRule{{
+		ID: "authenticated", Effect: authorizationEffectAllow, Authenticated: true,
+	}}}
+	server := mustNewServer(t, config, fakeClient(t))
+	server.auth.httpClient = noRedirectClient(claimServer.Client())
+	response := completeOAuth2Login(t, server)
+	if response.Code != http.StatusUnauthorized || len(server.auth.sessions) != 0 {
+		t.Fatalf("sensitive whole document status=%d sessions=%d", response.Code, len(server.auth.sessions))
+	}
+	if strings.Contains(response.Body.String(), sensitiveCanary) || strings.Contains(fmt.Sprintf("%#v", server.auth.sessions), sensitiveCanary) {
+		t.Fatal("sensitive whole-document value escaped into response or session")
 	}
 }
 

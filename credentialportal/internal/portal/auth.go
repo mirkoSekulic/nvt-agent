@@ -52,14 +52,16 @@ type loginState struct {
 }
 
 type Authenticator struct {
-	oauth    oauth2.Config
-	verifier *oidc.IDTokenVerifier
-	cookies  *securecookie.SecureCookie
-	client   *http.Client
-	sessions map[string]session
-	now      func() time.Time
-	cfg      Config
-	mu       sync.Mutex
+	oauth               oauth2.Config
+	provider            *oidc.Provider
+	verifier            *oidc.IDTokenVerifier
+	accessTokenVerifier *oidc.IDTokenVerifier
+	cookies             *securecookie.SecureCookie
+	client              *http.Client
+	sessions            map[string]session
+	now                 func() time.Time
+	cfg                 Config
+	mu                  sync.Mutex
 }
 
 func NewAuthenticator(
@@ -93,7 +95,13 @@ func NewAuthenticator(
 		if err != nil {
 			return nil, fmt.Errorf("discover OIDC provider: %w", err)
 		}
+		a.provider = provider
 		a.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.Auth.OIDC.ClientID})
+		audience := cfg.Auth.OIDC.AccessTokenAudience
+		if audience == "" {
+			audience = cfg.Auth.OIDC.ClientID
+		}
+		a.accessTokenVerifier = provider.Verifier(&oidc.Config{ClientID: audience})
 		endpoint := provider.Endpoint()
 		endpoint.AuthStyle = authStyle(cfg.Auth.OIDC.ClientAuthMethod)
 		a.oauth = oauth2.Config{
@@ -228,7 +236,11 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal, claims, err := a.principal(ctx, token, login.Nonce)
+	if err == nil && a.cfg.Auth.Mode == authModeOIDC {
+		claims, err = a.oidcEligibilityClaims(ctx, token, principal, claims)
+	}
 	if err == nil {
+		sourceClaims := claims
 		claims, err = eligibility.Enrich(
 			ctx,
 			a.cfg.Auth.ClaimEnrichment,
@@ -236,6 +248,7 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 			claims,
 			eligibility.EnrichOptions{Client: a.client, UserAgent: "nvt-credential-portal"},
 		)
+		clear(sourceClaims)
 	}
 	admitted := err == nil && a.admits(principal, claims)
 	clear(claims)
@@ -334,6 +347,42 @@ func (a *Authenticator) oidcPrincipal(
 	return Principal{
 		Issuer: idToken.Issuer, Subject: idToken.Subject, DisplayName: safeDisplayName(name),
 	}, claims, nil
+}
+
+func (a *Authenticator) oidcEligibilityClaims(
+	ctx context.Context,
+	token *oauth2.Token,
+	principal Principal,
+	idTokenClaims map[string]any,
+) (map[string]any, error) {
+	source := a.cfg.Auth.OIDC.EligibilityClaimSource
+	if source == "" || source == eligibility.ClaimSourceIDToken {
+		return idTokenClaims, nil
+	}
+	defer clear(idTokenClaims)
+	if source == eligibility.ClaimSourceAccessToken {
+		verified, err := a.accessTokenVerifier.Verify(ctx, token.AccessToken)
+		if err != nil || verified.Subject == "" || verified.Subject != principal.Subject {
+			return nil, errInvalidIDToken
+		}
+		claims := map[string]any{}
+		if verified.Claims(&claims) != nil {
+			return nil, errInvalidIDToken
+		}
+		return claims, nil
+	}
+	if source == eligibility.ClaimSourceUserInfo {
+		userInfo, err := a.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+		if err != nil || userInfo.Subject == "" || userInfo.Subject != principal.Subject {
+			return nil, errInvalidIdentity
+		}
+		claims := map[string]any{}
+		if userInfo.Claims(&claims) != nil {
+			return nil, errInvalidIdentity
+		}
+		return claims, nil
+	}
+	return nil, errAuthConfiguration
 }
 
 //nolint:gocyclo // OAuth2 identity validation stays linear and fail-closed.

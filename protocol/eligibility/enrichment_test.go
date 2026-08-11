@@ -34,6 +34,50 @@ func TestEnrichmentPreservesBoundedTopLevelArrayForEligibility(t *testing.T) {
 	}
 }
 
+func TestWholeDocumentEnrichmentRejectsNestedSensitiveData(t *testing.T) {
+	for _, key := range []string{
+		"pid", "ssn", "access_token", "refresh_token", "secret", "client_secret", "password", "databasePassword", "credential",
+	} {
+		t.Run(key, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`[{"resource":"allowed","nested":{"` + key + `":"must-not-persist"}}]`))
+			}))
+			defer server.Close()
+			_, err := Enrich(
+				t.Context(), enrichmentForServer(t, server, "$"), "transient-token", nil,
+				EnrichOptions{Client: noRedirect(server.Client())},
+			)
+			if err == nil {
+				t.Fatalf("whole-document enrichment retained sensitive field %q", key)
+			}
+			if strings.Contains(err.Error(), "must-not-persist") {
+				t.Fatalf("error disclosed sensitive value: %v", err)
+			}
+		})
+	}
+}
+
+func TestWholeDocumentEnrichmentAllowsAuthorizationStructures(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"authorization_details":[{"authorized_parties":[{"resource":"allowed"}]}]}`))
+	}))
+	t.Cleanup(server.Close)
+	claims, err := Enrich(
+		t.Context(), enrichmentForServer(t, server, "$"), "transient-token", nil,
+		EnrichOptions{Client: noRedirect(server.Client())},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := Policy{Rules: []Rule{{ID: "authorization detail", Effect: EffectAllow, Where: Where{
+		Array: "memberships.authorization_details[].authorized_parties[]",
+		All:   []Condition{{ClaimPath: "resource", Values: []string{"allowed"}}},
+	}}}}
+	if !Evaluate(policy, claims).Allowed {
+		t.Fatalf("safe authorization structure did not satisfy eligibility: %#v", claims)
+	}
+}
+
 func TestEnrichmentFailsClosedWithoutLeakingInputs(t *testing.T) {
 	const token = "temporary-token-canary"
 	tests := []struct {
@@ -95,6 +139,12 @@ func TestEnrichmentValidationRejectsDisallowedHostAndUnsafeLimits(t *testing.T) 
 	if err := valid.Validate("auth.claimEnrichment"); err != nil {
 		t.Fatal(err)
 	}
+	authorizationPath := valid
+	authorizationPath.Sources = append([]ClaimSource(nil), valid.Sources...)
+	authorizationPath.Sources[0].ValuePath = "authorization_details"
+	if err := authorizationPath.Validate("auth.claimEnrichment"); err != nil {
+		t.Fatalf("legitimate authorization structure rejected: %v", err)
+	}
 	invalid := valid
 	invalid.Sources = append([]ClaimSource(nil), valid.Sources...)
 	invalid.Sources[0].Endpoint = "https://other.example.test/memberships"
@@ -110,6 +160,27 @@ func TestEnrichmentValidationRejectsDisallowedHostAndUnsafeLimits(t *testing.T) 
 	invalid.Limits.MaxTotalNodes = hardMaxTotalNodes + 1
 	if err := invalid.Validate("auth.claimEnrichment"); err == nil {
 		t.Fatal("unsafe response limit accepted")
+	}
+	invalid = valid
+	invalid.AllowedHosts = append(invalid.AllowedHosts, invalid.AllowedHosts[0])
+	if err := invalid.Validate("auth.claimEnrichment"); err == nil {
+		t.Fatal("duplicate allowed host accepted")
+	}
+	invalid = valid
+	invalid.Sources = append(invalid.Sources, invalid.Sources[0])
+	if err := invalid.Validate("auth.claimEnrichment"); err == nil {
+		t.Fatal("duplicate output claim accepted")
+	}
+	invalid = valid
+	invalid.AllowedHosts = []string{"-invalid.example.test"}
+	if err := invalid.Validate("auth.claimEnrichment"); err == nil {
+		t.Fatal("invalid DNS label accepted")
+	}
+	invalid = valid
+	invalid.Sources = append([]ClaimSource(nil), valid.Sources...)
+	invalid.Sources[0].ValuePath = "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q"
+	if err := invalid.Validate("auth.claimEnrichment"); err == nil {
+		t.Fatal("value path with too many segments accepted")
 	}
 }
 

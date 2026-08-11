@@ -47,6 +47,20 @@ func TestScalarEligibilityCompatibility(t *testing.T) {
 	}
 }
 
+func TestLegacyScalarPolicySyntaxRemainsCompatibleWithinSafetyBounds(t *testing.T) {
+	policy := Policy{Rules: []Rule{
+		{ID: "Legacy team members", Effect: EffectAllow, ClaimPath: "groups by role[]", Values: []string{"", "operators", "operators"}},
+		{ID: "Legacy team members", Effect: EffectAllow, ClaimPath: "1st group", Values: []string{"fallback"}},
+	}}
+	if err := policy.Validate("auth.admission"); err != nil {
+		t.Fatalf("bounded legacy scalar syntax rejected: %v", err)
+	}
+	claims := map[string]any{"groups by role": []any{"operators"}}
+	if decision := Evaluate(policy, claims); !decision.Allowed || decision.RuleID != "Legacy team members" {
+		t.Fatalf("bounded legacy scalar policy did not evaluate: %#v", decision)
+	}
+}
+
 func TestEligibilityFailsClosedForMalformedOrExcessiveArrays(t *testing.T) {
 	policy := Policy{Rules: []Rule{{
 		ID: "member", Effect: EffectAllow,
