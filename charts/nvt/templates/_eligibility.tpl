@@ -20,7 +20,7 @@
 {{- range $segment := splitList "." $path -}}
 {{- $key := lower (trimSuffix "[]" $segment) -}}
 {{- $compact := regexReplaceAll `[.\[\]_-]` $key "" -}}
-{{- if and (ne $compact "authorizationdetails") (ne $compact "authorizedparties") (or (eq $compact "authorization") (hasSuffix "token" $compact) (contains "secret" $compact) (contains "password" $compact) (contains "credential" $compact)) }}{{ fail (printf "%s must be a safe non-sensitive JSON path" $.field) }}{{ end -}}
+{{- if and (ne $compact "authorizationdetails") (ne $compact "authorizedparties") (or (contains "authorization" $compact) (contains "token" $compact) (contains "secret" $compact) (contains "password" $compact) (contains "credential" $compact)) }}{{ fail (printf "%s must be a safe non-sensitive JSON path" $.field) }}{{ end -}}
 {{- end -}}
 {{- end -}}
 

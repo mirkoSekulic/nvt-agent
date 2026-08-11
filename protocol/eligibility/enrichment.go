@@ -282,19 +282,23 @@ func fetchClaim(ctx context.Context, config EnrichmentConfig, source ClaimSource
 // every depth of a selected enrichment result. The two authorization-structure
 // names are explicitly data, not credentials, and remain valid policy inputs.
 func sensitiveDataKey(key string) bool {
+	if isSensitivePath(key) {
+		return true
+	}
 	compact := strings.NewReplacer(".", "", "[", "", "]", "", "-", "", "_", "").
 		Replace(strings.ToLower(strings.ReplaceAll(key, "ø", "o")))
 	if compact == "authorizationdetails" || compact == "authorizedparties" {
 		return false
 	}
 	switch compact {
-	case "pid", "ssn", "fodselsnummer", "foedselsnummer", "authorization":
+	case "pid", "ssn", "fodselsnummer", "foedselsnummer":
 		return true
 	}
-	return strings.HasSuffix(compact, "token") ||
+	return strings.Contains(compact, "token") ||
 		strings.Contains(compact, "secret") ||
 		strings.Contains(compact, "password") ||
-		strings.Contains(compact, "credential")
+		strings.Contains(compact, "credential") ||
+		strings.Contains(compact, "authorization")
 }
 
 func containsSensitiveData(value any) bool {

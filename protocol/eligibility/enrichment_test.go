@@ -36,7 +36,8 @@ func TestEnrichmentPreservesBoundedTopLevelArrayForEligibility(t *testing.T) {
 
 func TestWholeDocumentEnrichmentRejectsNestedSensitiveData(t *testing.T) {
 	for _, key := range []string{
-		"pid", "ssn", "access_token", "refresh_token", "secret", "client_secret", "password", "databasePassword", "credential",
+		"pid", "profile.pid", "ssn", "user_ssn_value", "access_token", "refresh_token", "token_value",
+		"secret", "client_secret", "password", "databasePassword", "credential", "authorization_code",
 	} {
 		t.Run(key, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
