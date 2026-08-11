@@ -76,6 +76,24 @@ func TestConfigValidatesOIDCEligibilityClaimSource(t *testing.T) {
 	}
 }
 
+func TestPortalEligibilityRejectsOwnerFieldEvenWhenFalse(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Eligibility = &eligibility.Policy{Rules: []eligibility.Rule{{
+		ID: "authenticated", Effect: eligibility.EffectAllow, Authenticated: true,
+	}}}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withOwner := strings.Replace(string(raw), `"authenticated":true`, `"authenticated":true,"owner":false`, 1)
+	if withOwner == string(raw) {
+		t.Fatal("test did not insert the compatibility field")
+	}
+	if _, err := DecodeConfig(strings.NewReader(withOwner)); err == nil {
+		t.Fatal("portal eligibility accepted gateway-only owner:false compatibility field")
+	}
+}
+
 func TestConfigAppliesAndStrictlyValidatesEnrollmentBounds(t *testing.T) {
 	cfg := testConfig()
 	cfg.Enrollment = EnrollmentConfig{ExperimentalCodexDeviceAuth: true}

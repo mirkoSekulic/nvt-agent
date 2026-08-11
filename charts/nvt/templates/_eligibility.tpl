@@ -27,6 +27,7 @@
 {{- define "nvt.validateEligibility" -}}
 {{- $policy := .policy -}}
 {{- $prefix := .prefix -}}
+{{- $allowFalseOwner := default false .allowFalseOwner -}}
 {{- if ne (toJson $policy) "null" -}}
 {{- if and $policy.default (ne $policy.default "deny") }}{{ fail (printf "%s.default must be deny" $prefix) }}{{ end -}}
 {{- $rules := default (list) $policy.rules -}}
@@ -34,7 +35,9 @@
 {{- range $index, $rule := $rules -}}
 {{- if or (not (kindIs "string" $rule.id)) (eq (trim $rule.id) "") (gt (len $rule.id) 128) (regexMatch `[[:cntrl:]]` $rule.id) }}{{ fail (printf "%s.rules[%d].id must be a bounded non-empty string without control characters" $prefix $index) }}{{ end -}}
 {{- if ne $rule.effect "allow" }}{{ fail (printf "%s.rules[%d].effect must be allow" $prefix $index) }}{{ end -}}
-{{- if hasKey $rule "owner" }}{{ fail (printf "%s.rules[%d].owner is not an eligibility predicate" $prefix $index) }}{{ end -}}
+{{- if hasKey $rule "owner" -}}
+{{- if or (not $allowFalseOwner) (not (kindIs "bool" $rule.owner)) $rule.owner }}{{ fail (printf "%s.rules[%d].owner is not an eligibility predicate" $prefix $index) }}{{ end -}}
+{{- end -}}
 {{- $hasScalar := or (not (empty $rule.claimPath)) (gt (len (default (list) $rule.values)) 0) -}}
 {{- $where := default (dict) $rule.where -}}
 {{- $hasWhere := or (not (empty $where.array)) (gt (len (default (list) $where.all)) 0) -}}

@@ -357,6 +357,7 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.admission.rules[0].effect=allow \
   --set gateway.auth.admission.rules[0].claimPath=organization_membership \
   --set gateway.auth.admission.rules[0].values[0]=active \
+  --set gateway.auth.admission.rules[0].owner=false \
   --set gateway.auth.authorization.rules[0].id=agent-owner \
   --set gateway.auth.authorization.rules[0].effect=allow \
   --set gateway.auth.authorization.rules[0].owner=true \
@@ -1596,6 +1597,7 @@ done
 grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_SESSION_MAX_AGE_SECONDS' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "3600"'
 grep -Fq '\"claimPath\":\"organization_membership\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"owner\":false' "${GATEWAY_ADMISSION_RENDER}"
 grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_OAUTH2_ISSUER' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://github.com"'
 grep -A1 'name: NVT_GATEWAY_OAUTH2_IDENTITY_ENDPOINT' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://api.github.com/user"'

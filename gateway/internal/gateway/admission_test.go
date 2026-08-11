@@ -277,6 +277,15 @@ func TestAdmissionValidationRejectsOwnerAndAmbiguousRules(t *testing.T) {
 	if _, err := ParseAdmissionConfig(`{"default":"deny","rules":[{"id":"owner","effect":"allow","owner":true}]}`); err == nil {
 		t.Fatal("admission accepted owner predicate")
 	}
+	compatible, err := ParseAdmissionConfig(
+		`{"default":"deny","rules":[{"id":"member","effect":"allow","authenticated":true,"owner":false}]}`,
+	)
+	if err != nil {
+		t.Fatalf("explicit legacy owner:false was rejected: %v", err)
+	}
+	if decision := EvaluateAdmission(*compatible, Principal{Claims: map[string]any{}}); !decision.Allowed {
+		t.Fatalf("owner:false changed authenticated admission semantics: %#v", decision)
+	}
 	policy := AdmissionConfig{Rules: []AdmissionRule{{
 		ID: "ambiguous", Effect: authorizationEffectAllow, Authenticated: true,
 		ClaimPath: "group", Values: []string{"member"},

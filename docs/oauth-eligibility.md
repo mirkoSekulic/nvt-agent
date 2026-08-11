@@ -92,10 +92,15 @@ before. Existing scalar admission and static authorization rules retain their
 meaning. In particular, bounded printable rule IDs and JSON claim keys are not
 restricted to programming-language identifier syntax, duplicate IDs retain
 ordered first-match behavior, and duplicate expected values remain valid. The
-new resource ceilings (64 rules, 16 conditions and path segments, 64 values,
+gateway parser also accepts the former authorization-shaped `owner: false`
+field as a no-op; `owner: true` is still invalid for login admission. This
+compatibility shim is gateway-only: portal eligibility rejects either value and
+the shared evaluator has no owner predicate. The new resource ceilings (64
+rules, 16 conditions and path segments, 64 values,
 and the documented byte/selection limits) fail startup closed; deployments
-exceeding them must reduce the policy before upgrading. When portal eligibility is absent, portal login still requires an
-exact configured static slot owner. When it is present, an eligible principal
+exceeding them must reduce the policy before upgrading. When portal eligibility
+is absent, portal login still requires an exact configured static slot owner.
+When it is present, an eligible principal
 may receive a portal session without a per-principal slot, but can still view or
 address only slots whose configured owner exactly matches that principal.
 

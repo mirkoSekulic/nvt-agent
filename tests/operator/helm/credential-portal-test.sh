@@ -144,6 +144,13 @@ fi
 grep -Fq 'must define exactly one eligibility predicate' "${WORKDIR}/ambiguous-eligibility.txt"
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.auth.eligibility.rules[0].owner=false >/dev/null 2>"${WORKDIR}/portal-owner-false.txt"; then
+  echo "expected portal eligibility owner:false to fail" >&2
+  exit 1
+fi
+grep -Fq 'owner is not an eligibility predicate' "${WORKDIR}/portal-owner-false.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set credentialPortal.auth.claimEnrichment.limits.maxArrayItems=257 >/dev/null 2>"${WORKDIR}/unsafe-eligibility-limit.txt"; then
   echo "expected unsafe portal enrichment limit to fail" >&2
   exit 1

@@ -93,7 +93,7 @@
 {{- fail "gateway.auth.session.existingSecret is required when gateway authentication is enabled" }}
 {{- end }}
 {{- if $admissionConfigured }}
-{{- include "nvt.validateEligibility" (dict "policy" .Values.gateway.auth.admission "prefix" "gateway.auth.admission") }}
+{{- include "nvt.validateEligibility" (dict "policy" .Values.gateway.auth.admission "prefix" "gateway.auth.admission" "allowFalseOwner" true) }}
 {{- end }}
 {{- include "nvt.validateClaimEnrichment" (dict "config" .Values.gateway.auth.claimEnrichment "prefix" "gateway.auth.claimEnrichment") }}
 {{- end }}
