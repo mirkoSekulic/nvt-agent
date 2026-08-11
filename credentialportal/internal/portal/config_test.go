@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 )
 
 func TestConfigStrictlyRejectsUnknownDuplicateAndUnsafeSlotPolicy(t *testing.T) {
@@ -48,6 +50,47 @@ func TestConfigRequiresExplicitExperimentalCodexDeviceAuthorization(t *testing.T
 	cfg.Slots = cfg.Slots[1:]
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Claude-only configuration incorrectly required the Codex gate: %v", err)
+	}
+}
+
+func TestConfigValidatesOIDCEligibilityClaimSource(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL: "https://identity.example.test", ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default ID-token claim source rejected: %v", err)
+	}
+	for _, source := range []string{
+		eligibility.ClaimSourceIDToken, eligibility.ClaimSourceAccessToken, eligibility.ClaimSourceUserInfo,
+	} {
+		cfg.Auth.OIDC.EligibilityClaimSource = source
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("claim source %q rejected: %v", source, err)
+		}
+	}
+	cfg.Auth.OIDC.EligibilityClaimSource = "unverified_jwt"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown OIDC eligibility claim source accepted")
+	}
+}
+
+func TestPortalEligibilityRejectsOwnerFieldEvenWhenFalse(t *testing.T) {
+	cfg := testConfig()
+	cfg.Auth.Eligibility = &eligibility.Policy{Rules: []eligibility.Rule{{
+		ID: "authenticated", Effect: eligibility.EffectAllow, Authenticated: true,
+	}}}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withOwner := strings.Replace(string(raw), `"authenticated":true`, `"authenticated":true,"owner":false`, 1)
+	if withOwner == string(raw) {
+		t.Fatal("test did not insert the compatibility field")
+	}
+	if _, err := DecodeConfig(strings.NewReader(withOwner)); err == nil {
+		t.Fatal("portal eligibility accepted gateway-only owner:false compatibility field")
 	}
 }
 

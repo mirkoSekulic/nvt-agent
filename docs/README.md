@@ -16,6 +16,8 @@ local quick start. The documents below are the maintained sources of truth.
 
 ## Architecture
 
+- [OAuth2/OIDC login eligibility](oauth-eligibility.md): shared bounded claim
+  enrichment and default-deny array/scalar policy for gateway and portal.
 - [Transparent mediated egress](transparent-egress-architecture.md): current
   trust boundaries, traffic paths, enforcement, and limitations.
 - [AgentRun API](../operator/docs/agentrun.md): workload specification and

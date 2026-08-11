@@ -5,10 +5,13 @@ go 1.25.0
 require (
 	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/gorilla/securecookie v1.1.2
+	github.com/mirkoSekulic/nvt-agent/protocol/eligibility v0.0.0
 	golang.org/x/oauth2 v0.36.0
 	k8s.io/apimachinery v0.34.2
 	k8s.io/client-go v0.34.1
 )
+
+replace github.com/mirkoSekulic/nvt-agent/protocol/eligibility => ../protocol/eligibility
 
 require (
 	github.com/creack/pty v1.1.24 // indirect

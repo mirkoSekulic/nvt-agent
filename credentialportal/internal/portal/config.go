@@ -10,6 +10,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 )
 
 const (
@@ -33,7 +35,6 @@ var (
 	slotPattern    = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 )
 
-//nolint:govet // JSON contract fields stay grouped for reviewability; the eight-byte saving is immaterial.
 type Config struct {
 	Auth           AuthConfig `json:"auth"`
 	PublicURL      string     `json:"publicURL"`
@@ -59,11 +60,14 @@ type RecoveryUploadConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+//nolint:govet // JSON contract fields stay grouped for reviewability.
 type AuthConfig struct {
-	OAuth2  OAuth2Config  `json:"oauth2"`
-	OIDC    OIDCConfig    `json:"oidc"`
-	Mode    string        `json:"mode"`
-	Session SessionConfig `json:"session"`
+	OAuth2          OAuth2Config                 `json:"oauth2"`
+	OIDC            OIDCConfig                   `json:"oidc"`
+	Mode            string                       `json:"mode"`
+	Session         SessionConfig                `json:"session"`
+	Eligibility     *eligibility.Policy          `json:"eligibility"`
+	ClaimEnrichment eligibility.EnrichmentConfig `json:"claimEnrichment"`
 }
 
 type SessionConfig struct {
@@ -73,11 +77,13 @@ type SessionConfig struct {
 }
 
 type OIDCConfig struct {
-	IssuerURL        string   `json:"issuerURL"`
-	ClientID         string   `json:"clientID"`
-	CallbackPath     string   `json:"callbackPath"`
-	ClientAuthMethod string   `json:"clientAuthMethod"`
-	Scopes           []string `json:"scopes"`
+	IssuerURL              string   `json:"issuerURL"`
+	ClientID               string   `json:"clientID"`
+	CallbackPath           string   `json:"callbackPath"`
+	ClientAuthMethod       string   `json:"clientAuthMethod"`
+	Scopes                 []string `json:"scopes"`
+	EligibilityClaimSource string   `json:"eligibilityClaimSource"`
+	AccessTokenAudience    string   `json:"accessTokenAudience"`
 }
 
 type OAuth2Config struct {
@@ -169,6 +175,14 @@ func (c *Config) Validate() error {
 	if c.Auth.Mode != authModeOIDC && c.Auth.Mode != authModeOAuth2 {
 		return fmt.Errorf("%w: auth.mode must be oidc or oauth2", errInvalidConfig)
 	}
+	if c.Auth.Eligibility != nil {
+		if err := c.Auth.Eligibility.Validate("auth.eligibility"); err != nil {
+			return fmt.Errorf("%w: %w", errInvalidConfig, err)
+		}
+	}
+	if err := c.Auth.ClaimEnrichment.Validate("auth.claimEnrichment"); err != nil {
+		return fmt.Errorf("%w: %w", errInvalidConfig, err)
+	}
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(c.Auth.Session.CookieName) {
 		return fmt.Errorf("%w: auth.session.cookieName is invalid", errInvalidConfig)
 	}
@@ -189,6 +203,19 @@ func (c *Config) Validate() error {
 	if c.Auth.Mode == authModeOIDC {
 		if !absoluteHTTPS(c.Auth.OIDC.IssuerURL) || c.Auth.OIDC.ClientID == "" {
 			return fmt.Errorf("%w: OIDC issuerURL and clientID are required", errInvalidConfig)
+		}
+		claimSource := c.Auth.OIDC.EligibilityClaimSource
+		if claimSource == "" {
+			claimSource = eligibility.ClaimSourceIDToken
+		}
+		if !eligibility.ValidClaimSource(claimSource) {
+			return fmt.Errorf(
+				"%w: OIDC eligibilityClaimSource must be id_token, access_token, or userinfo",
+				errInvalidConfig,
+			)
+		}
+		if len(c.Auth.OIDC.AccessTokenAudience) > 512 || strings.ContainsAny(c.Auth.OIDC.AccessTokenAudience, "\x00\r\n") {
+			return fmt.Errorf("%w: OIDC accessTokenAudience must be a bounded string", errInvalidConfig)
 		}
 	} else {
 		if c.Auth.OAuth2.Issuer == "" || !absoluteHTTPS(c.Auth.OAuth2.AuthorizationURL) ||

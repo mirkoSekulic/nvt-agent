@@ -18,19 +18,23 @@ import (
 	"time"
 
 	"github.com/gorilla/securecookie"
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 	"golang.org/x/oauth2"
 )
 
 const (
 	testLoginPath = "login"
 	testJWTAlg    = "RS256"
+	testTokenPath = "/token"
 )
 
 type oidcFixture struct {
 	*httptest.Server
 
-	key   *rsa.PrivateKey
-	nonce string
+	key            *rsa.PrivateKey
+	nonce          string
+	accessToken    func(*testing.T, string) string
+	userInfoClaims map[string]any
 }
 
 func newOIDCFixture(t *testing.T) *oidcFixture {
@@ -46,7 +50,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			if err := json.NewEncoder(w).
-				Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks", "id_token_signing_alg_values_supported": []string{testJWTAlg}}); err != nil {
+				Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "userinfo_endpoint": issuer + "/userinfo", "jwks_uri": issuer + "/jwks", "id_token_signing_alg_values_supported": []string{testJWTAlg}}); err != nil {
 				http.Error(w, "encode failed", http.StatusInternalServerError)
 			}
 		case "/jwks":
@@ -54,13 +58,25 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 				Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "kid": "portal-test", "use": "sig", "alg": testJWTAlg, "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": "AQAB"}}}); err != nil {
 				http.Error(w, "encode failed", http.StatusInternalServerError)
 			}
-		case "/token":
+		case testTokenPath:
 			if err := r.ParseForm(); err != nil || r.Form.Get("code_verifier") == "" {
 				http.Error(w, "invalid", http.StatusBadRequest)
 				return
 			}
+			accessToken := "transient-login-access"
+			if fixture.accessToken != nil {
+				accessToken = fixture.accessToken(t, issuer)
+			}
 			if err := json.NewEncoder(w).
-				Encode(map[string]any{"access_token": "transient-login-access", "token_type": "Bearer", "id_token": fixture.idToken(t, issuer)}); err != nil {
+				Encode(map[string]any{"access_token": accessToken, "token_type": "Bearer", "id_token": fixture.idToken(t, issuer)}); err != nil {
+				http.Error(w, "encode failed", http.StatusInternalServerError)
+			}
+		case "/userinfo":
+			if fixture.userInfoClaims == nil {
+				http.Error(w, "unavailable", http.StatusNotFound)
+				return
+			}
+			if err := json.NewEncoder(w).Encode(fixture.userInfoClaims); err != nil {
 				http.Error(w, "encode failed", http.StatusInternalServerError)
 			}
 		default:
@@ -74,24 +90,23 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 
 func (f *oidcFixture) idToken(t *testing.T, issuer string) string {
 	t.Helper()
+	return f.signedToken(t, map[string]any{
+		"iss": issuer, "sub": "oidc-owner", "aud": "portal-client", "nonce": f.nonce,
+		"iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+	})
+}
+
+func (f *oidcFixture) signedToken(t *testing.T, claims map[string]any) string {
+	t.Helper()
 	header, err := json.Marshal(map[string]any{"alg": testJWTAlg, "kid": "portal-test", "typ": "JWT"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := json.Marshal(
-		map[string]any{
-			"iss":   issuer,
-			"sub":   "oidc-owner",
-			"aud":   "portal-client",
-			"nonce": f.nonce,
-			"iat":   time.Now().Add(-time.Minute).Unix(),
-			"exp":   time.Now().Add(time.Hour).Unix(),
-		},
-	)
+	claimsJSON, err := json.Marshal(claims)
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
+	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
 	digest := sha256.Sum256([]byte(input))
 	signature, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, digest[:])
 	if err != nil {
@@ -183,12 +198,126 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 	}
 }
 
+func TestOIDCEligibilityUsesOnlyVerifiedConfiguredClaimSource(t *testing.T) {
+	fixture := newOIDCFixture(t)
+	cfg := testConfig()
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL: fixture.URL, ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+		EligibilityClaimSource: eligibility.ClaimSourceAccessToken,
+		AccessTokenAudience:    "portal-eligibility",
+	}
+	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
+		ID: "authorized detail", Effect: eligibility.EffectAllow,
+		Where: eligibility.Where{Array: "authorization_details[]", All: []eligibility.Condition{{
+			ClaimPath: "type", Values: []string{"configured-resource"},
+		}}},
+	}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(
+		t.Context(), cfg, strings.Repeat("s", 64), "", "client-secret", fixture.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validClaims := func(issuer, audience string) map[string]any {
+		return map[string]any{
+			"iss": issuer, "sub": "oidc-owner", "aud": audience,
+			"iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+			"authorization_details": []any{map[string]any{"type": "configured-resource"}},
+		}
+	}
+	tests := []struct {
+		name       string
+		access     func(*testing.T, string) string
+		wantStatus int
+	}{
+		{name: "verified access token", wantStatus: http.StatusFound, access: func(t *testing.T, issuer string) string {
+			return fixture.signedToken(t, validClaims(issuer, "portal-eligibility"))
+		}},
+		{name: "malformed access token", wantStatus: http.StatusUnauthorized, access: func(*testing.T, string) string {
+			return "not-a-jwt"
+		}},
+		{name: "wrong issuer", wantStatus: http.StatusUnauthorized, access: func(t *testing.T, _ string) string {
+			return fixture.signedToken(t, validClaims("https://wrong-issuer.example", "portal-eligibility"))
+		}},
+		{name: "wrong audience", wantStatus: http.StatusUnauthorized, access: func(t *testing.T, issuer string) string {
+			return fixture.signedToken(t, validClaims(issuer, "other-audience"))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture.accessToken = test.access
+			response := performOIDCCallback(t, auth, fixture, cfg.PublicURL)
+			if response.Code != test.wantStatus {
+				t.Fatalf("callback status=%d want=%d body=%q", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestOIDCEligibilitySupportsExactSubjectUserInfoClaims(t *testing.T) {
+	fixture := newOIDCFixture(t)
+	fixture.userInfoClaims = map[string]any{"sub": "oidc-owner", "groups": []any{"eligible"}}
+	cfg := testConfig()
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL: fixture.URL, ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+		EligibilityClaimSource: eligibility.ClaimSourceUserInfo,
+	}
+	cfg.Auth.Eligibility = &eligibility.Policy{Rules: []eligibility.Rule{{
+		ID: "userinfo", Effect: eligibility.EffectAllow, ClaimPath: "groups[]", Values: []string{"eligible"},
+	}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(
+		t.Context(), cfg, strings.Repeat("s", 64), "", "client-secret", fixture.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusFound {
+		t.Fatalf("userinfo eligibility callback status=%d body=%q", response.Code, response.Body.String())
+	}
+	fixture.userInfoClaims["sub"] = "different-subject"
+	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusUnauthorized {
+		t.Fatalf("mismatched userinfo subject admitted: status=%d", response.Code)
+	}
+}
+
+func performOIDCCallback(
+	t *testing.T,
+	auth *Authenticator,
+	fixture *oidcFixture,
+	publicURL string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	loginResponse := httptest.NewRecorder()
+	auth.Login(loginResponse, httptest.NewRequestWithContext(t.Context(), http.MethodGet, publicURL+"/login", nil))
+	location, err := url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.nonce = location.Query().Get("nonce")
+	callback := httptest.NewRequestWithContext(
+		t.Context(), http.MethodGet,
+		publicURL+"/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=oidc-code", nil,
+	)
+	callback.AddCookie(loginResponse.Result().Cookies()[0])
+	response := httptest.NewRecorder()
+	auth.Callback(response, callback)
+	return response
+}
+
 //nolint:cyclop,gocyclo // This test deliberately exercises the complete OAuth admission lifecycle.
 func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	identityBody := `{"id":424242,"login":"octocat"}`
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/token":
+		case testTokenPath:
 			if err := r.ParseForm(); err != nil || r.Form.Get("code_verifier") == "" ||
 				r.Form.Get("code") != "one-time-code" {
 				http.Error(w, "invalid exchange", http.StatusBadRequest)
@@ -221,7 +350,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Auth.OAuth2.AuthorizationURL = provider.URL + "/authorize"
-	cfg.Auth.OAuth2.TokenURL = provider.URL + "/token"
+	cfg.Auth.OAuth2.TokenURL = provider.URL + testTokenPath
 	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL + "/identity"
 	cfg.Auth.OAuth2.AllowedHosts = []string{providerURL.Hostname()}
 	cfg.Auth.OAuth2.SubjectPath = "id"
@@ -324,6 +453,102 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // One end-to-end fixture proves the complete configured login boundary.
+func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichment(t *testing.T) {
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case testTokenPath:
+			body := `{"access_token":"transient-eligibility-token","token_type":"Bearer"}`
+			if _, err := io.WriteString(w, body); err != nil {
+				t.Error(err)
+			}
+		case "/identity":
+			if _, err := io.WriteString(w, `{"id":"new-immutable-subject","login":"new-user"}`); err != nil {
+				t.Error(err)
+			}
+		case "/claims":
+			if r.Header.Get("Authorization") != "Bearer transient-eligibility-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if _, err := io.WriteString(
+				w,
+				`[{"organization":{"ID":"0192:123456789"},"resource":"approved-resource"}]`,
+			); err != nil {
+				t.Error(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(provider.Close)
+	providerURL, err := url.Parse(provider.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.Auth.OAuth2.AuthorizationURL = provider.URL + "/authorize"
+	cfg.Auth.OAuth2.TokenURL = provider.URL + testTokenPath
+	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL + "/identity"
+	cfg.Auth.OAuth2.AllowedHosts = []string{providerURL.Hostname()}
+	cfg.Auth.OAuth2.SubjectPath = "id"
+	cfg.Auth.OAuth2.DisplayNamePath = "login"
+	cfg.Auth.ClaimEnrichment = eligibility.EnrichmentConfig{
+		AllowedHosts: []string{providerURL.Hostname()},
+		Sources: []eligibility.ClaimSource{{
+			Endpoint: provider.URL + "/claims", OutputClaim: "memberships", ValuePath: "$",
+		}},
+	}
+	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
+		ID: "eligible", Effect: eligibility.EffectAllow,
+		Where: eligibility.Where{Array: "memberships[]", All: []eligibility.Condition{
+			{ClaimPath: "organization.ID", Values: []string{"0192:123456789"}},
+			{ClaimPath: "resource", Values: []string{"approved-resource"}},
+		}},
+	}}}
+	if validateErr := cfg.Validate(); validateErr != nil {
+		t.Fatal(validateErr)
+	}
+	auth, err := NewAuthenticator(
+		t.Context(), cfg, strings.Repeat("s", 64), "portal-client", "client-secret", provider.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRecorder()
+	auth.Login(login, httptest.NewRequestWithContext(t.Context(), http.MethodGet, cfg.PublicURL+"/login", nil))
+	location, err := url.Parse(login.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		cfg.PublicURL+"/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=one-time",
+		nil,
+	)
+	callback.AddCookie(login.Result().Cookies()[0])
+	response := httptest.NewRecorder()
+	auth.Callback(response, callback)
+	if response.Code != http.StatusFound {
+		t.Fatalf("eligible unknown principal denied: status=%d body=%q", response.Code, response.Body.String())
+	}
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, cfg.PublicURL+"/", nil)
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == cfg.Auth.Session.CookieName {
+			request.AddCookie(cookie)
+		}
+	}
+	principal, _, _, ok := auth.Session(request)
+	if !ok || principal.Issuer != cfg.Auth.OAuth2.Issuer || principal.Subject != "new-immutable-subject" {
+		t.Fatalf("unexpected eligible principal session: %#v ok=%v", principal, ok)
+	}
+	if auth.hasOwnedSlot(principal) {
+		t.Fatal("eligibility incorrectly granted ownership of a configured slot")
+	}
+}
+
 func TestCallbackRejectsDuplicateAndCraftedState(t *testing.T) {
 	cfg := testConfig()
 	sum := sha512.Sum512([]byte(strings.Repeat("s", 64)))
@@ -380,7 +605,8 @@ func fetchOAuth2TestPrincipal(t *testing.T, identityBody, accessToken string) (P
 	cfg.Auth.OAuth2.SubjectPath = "id"
 	cfg.Auth.OAuth2.DisplayNamePath = testLoginPath
 	auth := &Authenticator{cfg: cfg, client: noRedirectClient(provider.Client())}
-	return auth.principal(context.Background(), &oauth2.Token{AccessToken: accessToken}, "")
+	principal, _, err := auth.principal(context.Background(), &oauth2.Token{AccessToken: accessToken}, "")
+	return principal, err
 }
 
 func TestOAuth2IdentityCanonicalizationAndTokenReflection(t *testing.T) {

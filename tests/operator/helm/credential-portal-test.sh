@@ -22,7 +22,7 @@ if grep -Eq 'verbs:.*(get|list|create|delete)' "${PORTAL_ROLE}"; then
 fi
 grep -Fq 'resourceNames:' "${RENDER}"
 grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
-grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.57"' "${RENDER}"
+grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.58"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
@@ -34,6 +34,11 @@ grep -Fq '"maxConcurrent": 2' "${RENDER}"
 grep -Fq '"maxSessions": 64' "${RENDER}"
 grep -Fq '"experimentalCodexDeviceAuth": true' "${RENDER}"
 grep -Fq '"enabled": false' "${RENDER}"
+grep -Fq '"array": "memberships[]"' "${RENDER}"
+grep -Fq '"valuePath": "$"' "${RENDER}"
+grep -Fq '"timeoutSeconds": 5' "${RENDER}"
+grep -Fq '"eligibilityClaimSource": "access_token"' "${RENDER}"
+grep -Fq '"accessTokenAudience": "nvt-eligibility-api"' "${RENDER}"
 
 python3 - "${RENDER}" <<'PY'
 import sys
@@ -130,6 +135,84 @@ if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credentia
   exit 1
 fi
 grep -Fq 'requires enrollment.experimentalCodexDeviceAuth=true' "${WORKDIR}/codex-device.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string 'credentialPortal.auth.eligibility.rules[0].claimPath=groups[]' >/dev/null 2>"${WORKDIR}/ambiguous-eligibility.txt"; then
+  echo "expected ambiguous portal eligibility predicate to fail" >&2
+  exit 1
+fi
+grep -Fq 'must define exactly one eligibility predicate' "${WORKDIR}/ambiguous-eligibility.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.auth.eligibility.rules[0].owner=false >/dev/null 2>"${WORKDIR}/portal-owner-false.txt"; then
+  echo "expected portal eligibility owner:false to fail" >&2
+  exit 1
+fi
+grep -Fq 'owner is not an eligibility predicate' "${WORKDIR}/portal-owner-false.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.auth.claimEnrichment.limits.maxArrayItems=257 >/dev/null 2>"${WORKDIR}/unsafe-eligibility-limit.txt"; then
+  echo "expected unsafe portal enrichment limit to fail" >&2
+  exit 1
+fi
+grep -Fq 'limits.maxArrayItems exceeds safe bounds' "${WORKDIR}/unsafe-eligibility-limit.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.claimEnrichment.sources[0].endpoint=https://other.identity.example/v1/memberships >/dev/null 2>"${WORKDIR}/disallowed-eligibility-host.txt"; then
+  echo "expected disallowed portal enrichment host to fail" >&2
+  exit 1
+fi
+grep -Fq 'endpoint host is not allowed' "${WORKDIR}/disallowed-eligibility-host.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string 'credentialPortal.auth.eligibility.rules[0].where.array=pid[]' >/dev/null 2>"${WORKDIR}/sensitive-where-array.txt"; then
+  echo "expected sensitive where.array to fail" >&2
+  exit 1
+fi
+grep -Fq 'where.array must be a non-sensitive JSON path' "${WORKDIR}/sensitive-where-array.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string 'credentialPortal.auth.eligibility.rules[0].where.all[0].claimPath=a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q' >/dev/null 2>"${WORKDIR}/eligibility-path-segments.txt"; then
+  echo "expected an eligibility path with more than 16 segments to fail" >&2
+  exit 1
+fi
+grep -Fq 'claimPath must contain at most 16 segments' "${WORKDIR}/eligibility-path-segments.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.claimEnrichment.allowedHosts[1]=claims.identity.example >/dev/null 2>"${WORKDIR}/duplicate-enrichment-host.txt"; then
+  echo "expected a duplicate claim-enrichment host to fail" >&2
+  exit 1
+fi
+grep -Fq 'allowedHosts[1] is duplicated' "${WORKDIR}/duplicate-enrichment-host.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.claimEnrichment.sources[1].endpoint=https://claims.identity.example/v1/other \
+  --set-string credentialPortal.auth.claimEnrichment.sources[1].outputClaim=memberships \
+  --set-string credentialPortal.auth.claimEnrichment.sources[1].valuePath=state >/dev/null 2>"${WORKDIR}/duplicate-enrichment-output.txt"; then
+  echo "expected a duplicate claim-enrichment output to fail" >&2
+  exit 1
+fi
+grep -Fq 'outputClaim is duplicated' "${WORKDIR}/duplicate-enrichment-output.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.claimEnrichment.allowedHosts[0]=-invalid.example >/dev/null 2>"${WORKDIR}/invalid-enrichment-host.txt"; then
+  echo "expected an invalid DNS-label claim-enrichment host to fail" >&2
+  exit 1
+fi
+grep -Fq 'normalized lowercase DNS hostname' "${WORKDIR}/invalid-enrichment-host.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.oidc.eligibilityClaimSource=unverified_jwt >/dev/null 2>"${WORKDIR}/invalid-oidc-claim-source.txt"; then
+  echo "expected an invalid portal OIDC eligibility claim source to fail" >&2
+  exit 1
+fi
+grep -Fq 'eligibilityClaimSource must be id_token, access_token, or userinfo' "${WORKDIR}/invalid-oidc-claim-source.txt"
+
+# Duplicate scalar values and printable legacy IDs remain compatible with the
+# pre-existing gateway admission syntax when they stay within safety bounds.
+helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string 'credentialPortal.auth.eligibility.rules[0].id=Approved party legacy rule' \
+  --set-string 'credentialPortal.auth.eligibility.rules[0].where.all[0].values[1]=0192:123456789' >/dev/null
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set credentialPortal.enabled=false >"${WORKDIR}/disabled.yaml"; then :; fi

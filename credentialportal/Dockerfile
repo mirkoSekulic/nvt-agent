@@ -1,6 +1,7 @@
 FROM golang:1.25 AS build
 
 WORKDIR /src
+COPY protocol/eligibility ./protocol/eligibility
 COPY credentialportal ./credentialportal
 WORKDIR /src/credentialportal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/nvt-credential-portal ./cmd/nvt-credential-portal

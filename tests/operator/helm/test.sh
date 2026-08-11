@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.57" || "${CHART_APP_VERSION}" != "0.8.57" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.57, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.58" || "${CHART_APP_VERSION}" != "0.8.58" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.58, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.57' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.58' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -357,6 +357,7 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.admission.rules[0].effect=allow \
   --set gateway.auth.admission.rules[0].claimPath=organization_membership \
   --set gateway.auth.admission.rules[0].values[0]=active \
+  --set gateway.auth.admission.rules[0].owner=false \
   --set gateway.auth.authorization.rules[0].id=agent-owner \
   --set gateway.auth.authorization.rules[0].effect=allow \
   --set gateway.auth.authorization.rules[0].owner=true \
@@ -1596,6 +1597,7 @@ done
 grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_SESSION_MAX_AGE_SECONDS' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "3600"'
 grep -Fq '\"claimPath\":\"organization_membership\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"owner\":false' "${GATEWAY_ADMISSION_RENDER}"
 grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_OAUTH2_ISSUER' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://github.com"'
 grep -A1 'name: NVT_GATEWAY_OAUTH2_IDENTITY_ENDPOINT' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://api.github.com/user"'

@@ -7,47 +7,35 @@ import (
 	"io"
 	"log"
 	"strings"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 )
 
 // AdmissionConfig controls whether an authenticated principal may receive a
 // gateway session. It is deliberately independent from AgentRun authorization.
-type AdmissionConfig struct {
-	Default string              `json:"default"`
-	Rules   []AuthorizationRule `json:"rules"`
+type AdmissionConfig = eligibility.Policy
+type AdmissionRule = eligibility.Rule
+
+// admissionRuleDocument is a gateway-only decoding shim for the former
+// AuthorizationRule-shaped admission schema. Explicit owner:false had no
+// semantics and remains accepted; owner:true remains invalid.
+type admissionRuleDocument struct {
+	eligibility.Rule
+	Owner *bool `json:"owner,omitempty"`
 }
 
-func (c AdmissionConfig) validate() error {
-	defaultDecision := c.Default
-	if defaultDecision == "" {
-		defaultDecision = authorizationDefaultDeny
-	}
-	if defaultDecision != authorizationDefaultDeny {
-		return fmt.Errorf("auth.admission.default must be %q", authorizationDefaultDeny)
-	}
-	for index, rule := range c.Rules {
-		if err := validateAuthorizationRule("auth.admission", index, rule, false); err != nil {
-			return err
-		}
-	}
-	return nil
+type admissionPolicyDocument struct {
+	Default string                  `json:"default"`
+	Rules   []admissionRuleDocument `json:"rules"`
+}
+
+func validateAdmission(c AdmissionConfig) error {
+	return c.Validate("auth.admission")
 }
 
 func EvaluateAdmission(policy AdmissionConfig, principal Principal) AuthorizationDecision {
-	for _, rule := range policy.Rules {
-		if rule.Effect != authorizationEffectAllow || rule.Owner {
-			continue
-		}
-		if rule.Authenticated {
-			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
-		}
-		if rule.ClaimPath != "" && claimPathMatches(principal.Claims, rule.ClaimPath, rule.Values) {
-			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
-		}
-		if rule.Where.Array != "" && whereArrayMatches(principal.Claims, rule.Where) {
-			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
-		}
-	}
-	return AuthorizationDecision{Allowed: false}
+	decision := eligibility.Evaluate(policy, principal.Claims)
+	return AuthorizationDecision{Allowed: decision.Allowed, RuleID: decision.RuleID}
 }
 
 func logAdmissionDecision(decision AuthorizationDecision, principal Principal) {
@@ -68,15 +56,25 @@ func ParseAdmissionConfig(raw string) (*AdmissionConfig, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
 	}
-	var config AdmissionConfig
+	var document admissionPolicyDocument
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
+	if err := decoder.Decode(&document); err != nil {
 		return nil, fmt.Errorf("parse gateway admission policy: %w", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("parse gateway admission policy: trailing JSON value")
+		return nil, errors.New("parse gateway admission policy: trailing JSON value")
 	}
-	return &config, nil
+	policy := AdmissionConfig{Default: document.Default, Rules: make([]AdmissionRule, 0, len(document.Rules))}
+	for index, rule := range document.Rules {
+		if rule.Owner != nil && *rule.Owner {
+			return nil, fmt.Errorf("gateway admission policy.rules[%d].owner is not an eligibility predicate", index)
+		}
+		policy.Rules = append(policy.Rules, rule.Rule)
+	}
+	if err := validateAdmission(policy); err != nil {
+		return nil, err
+	}
+	return &policy, nil
 }

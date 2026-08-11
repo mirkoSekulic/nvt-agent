@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -222,14 +223,75 @@ func TestOAuthAdaptersShareEnrichmentAndAdmissionBoundary(t *testing.T) {
 	}
 }
 
+func TestGatewayUsesSharedArrayEligibilityForTopLevelEnrichment(t *testing.T) {
+	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"authorization_details":[{"authorized_parties":[{"organization":{"ID":"0192:123456789"},"resource":"approved-resource"}]}]}`))
+	}))
+	t.Cleanup(claimServer.Close)
+	fixture := newOAuth2Fixture(t, "temporary-access-token", `{"id":42,"login":"member"}`)
+	config := oauth2TestConfig(fixture.URL)
+	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
+	config.Auth.ClaimEnrichment.Sources[0].OutputClaim = "memberships"
+	config.Auth.ClaimEnrichment.Sources[0].ValuePath = "$"
+	config.Auth.Admission = &AdmissionConfig{Default: authorizationDefaultDeny, Rules: []AdmissionRule{{
+		ID: "eligible", Effect: authorizationEffectAllow,
+		Where: eligibility.Where{Array: "memberships.authorization_details[].authorized_parties[]", All: []eligibility.Condition{
+			{ClaimPath: "organization.ID", Values: []string{"0192:123456789"}},
+			{ClaimPath: "resource", Values: []string{"approved-resource"}},
+		}},
+	}}}
+	server := mustNewServer(t, config, fakeClient(t))
+	server.auth.httpClient = noRedirectClient(claimServer.Client())
+	response := completeOAuth2Login(t, server)
+	if response.Code != http.StatusFound || len(server.auth.sessions) != 1 {
+		t.Fatalf("array eligibility status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
+	}
+}
+
+func TestGatewayDoesNotPersistSensitiveNestedWholeDocumentEnrichment(t *testing.T) {
+	const sensitiveCanary = "other-secret-canary"
+	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"resource":"allowed","nested":{"refresh_token":"` + sensitiveCanary + `"}}]`))
+	}))
+	t.Cleanup(claimServer.Close)
+	fixture := newOAuth2Fixture(t, "temporary-access-token", `{"id":42,"login":"member"}`)
+	config := oauth2TestConfig(fixture.URL)
+	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
+	config.Auth.ClaimEnrichment.Sources[0].OutputClaim = "memberships"
+	config.Auth.ClaimEnrichment.Sources[0].ValuePath = "$"
+	config.Auth.Admission = &AdmissionConfig{Rules: []AdmissionRule{{
+		ID: "authenticated", Effect: authorizationEffectAllow, Authenticated: true,
+	}}}
+	server := mustNewServer(t, config, fakeClient(t))
+	server.auth.httpClient = noRedirectClient(claimServer.Client())
+	response := completeOAuth2Login(t, server)
+	if response.Code != http.StatusUnauthorized || len(server.auth.sessions) != 0 {
+		t.Fatalf("sensitive whole document status=%d sessions=%d", response.Code, len(server.auth.sessions))
+	}
+	if strings.Contains(response.Body.String(), sensitiveCanary) || strings.Contains(fmt.Sprintf("%#v", server.auth.sessions), sensitiveCanary) {
+		t.Fatal("sensitive whole-document value escaped into response or session")
+	}
+}
+
 func TestAdmissionValidationRejectsOwnerAndAmbiguousRules(t *testing.T) {
-	for _, policy := range []AdmissionConfig{
-		{Rules: []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}},
-		{Rules: []AuthorizationRule{{ID: "ambiguous", Effect: authorizationEffectAllow, Authenticated: true, ClaimPath: "group", Values: []string{"member"}}}},
-	} {
-		if err := policy.validate(); err == nil {
-			t.Fatalf("invalid admission policy passed: %#v", policy)
-		}
+	if _, err := ParseAdmissionConfig(`{"default":"deny","rules":[{"id":"owner","effect":"allow","owner":true}]}`); err == nil {
+		t.Fatal("admission accepted owner predicate")
+	}
+	compatible, err := ParseAdmissionConfig(
+		`{"default":"deny","rules":[{"id":"member","effect":"allow","authenticated":true,"owner":false}]}`,
+	)
+	if err != nil {
+		t.Fatalf("explicit legacy owner:false was rejected: %v", err)
+	}
+	if decision := EvaluateAdmission(*compatible, Principal{Claims: map[string]any{}}); !decision.Allowed {
+		t.Fatalf("owner:false changed authenticated admission semantics: %#v", decision)
+	}
+	policy := AdmissionConfig{Rules: []AdmissionRule{{
+		ID: "ambiguous", Effect: authorizationEffectAllow, Authenticated: true,
+		ClaimPath: "group", Values: []string{"member"},
+	}}}
+	if err := validateAdmission(policy); err == nil {
+		t.Fatalf("invalid admission policy passed: %#v", policy)
 	}
 }
 
@@ -268,7 +330,7 @@ func completeOAuth2Login(t *testing.T, server *Server) *httptest.ResponseRecorde
 }
 
 func memberAdmission() *AdmissionConfig {
-	return &AdmissionConfig{Default: authorizationDefaultDeny, Rules: []AuthorizationRule{{
+	return &AdmissionConfig{Default: authorizationDefaultDeny, Rules: []AdmissionRule{{
 		ID: "member", Effect: authorizationEffectAllow, ClaimPath: "organization_membership", Values: []string{"active"},
 	}}}
 }
