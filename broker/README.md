@@ -149,6 +149,54 @@ trusted executables. They are broker code, not sandboxed workloads. See
 [`protocol/broker-provider.md`](../protocol/broker-provider.md) for the complete
 configuration and wire contract.
 
+## Dynamic principal-owned accounts
+
+The optional dynamic registry is disabled by default. It does not change or
+fall back to any static `providers` entry. When enabled, administrators bind a
+public credential-template name to a trusted enrollment adapter name and an
+approved provider template. Only the credential template is selectable on a
+first enrollment; the provider plugin, credential path, provider settings, and
+grants remain administrator configuration.
+
+```yaml
+dynamic-accounts:
+  enabled: true
+  state-dir: /state/principal-accounts
+  max-accounts: 10000
+  authentication:
+    hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+    max-assertion-seconds: 300
+  provider-templates:
+    - name: company-oauth-provider
+      plugin: company-oauth
+      credential-config-key: credentials-file
+      config:
+        endpoint: https://identity.example.test
+      allow:
+        repositories: [example/*]
+  credential-templates:
+    - name: company-member
+      label: Company member
+      enrollment-adapter: company-oauth-file
+      provider-template: company-oauth-provider
+```
+
+`NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY` is a distinct random value of at least 32
+bytes shared only with the trusted identity frontend. It authenticates bounded
+issuer+immutable-subject assertions; it is not a user credential. The state
+directory must be durable and private to one broker writer. Credential bytes
+are stored only in generation files with mode `0600`; an atomic `metadata.json`
+manifest selects the committed generation. Broker startup recovers recognized
+interrupted replacements and fails global readiness closed on registry/storage
+corruption or writer uncertainty. Credential or provider initialization failure
+is isolated to that principal: its readiness and resolution fail closed, its
+owner can reconnect or revoke, and static providers plus healthy dynamic
+accounts remain available.
+
+The complete principal-bound API, storage algorithm, idempotency window, and
+future #210/#211 integration boundary are documented in
+[`protocol/broker.md`](../protocol/broker.md#dynamic-principal-account-endpoints).
+
 ```yaml
 provider-plugins:
   - name: company-oauth

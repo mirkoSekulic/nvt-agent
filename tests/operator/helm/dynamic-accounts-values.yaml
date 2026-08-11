@@ -1,0 +1,21 @@
+broker:
+  envSecretName: nvt-broker-dynamic-account-auth
+  persistence:
+    enabled: true
+  config:
+    providers: []
+    dynamic-accounts:
+      enabled: true
+      state-dir: /state/principal-accounts
+      authentication:
+        hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+      provider-templates:
+        - name: approved-oauth
+          plugin: codex-oauth
+          credential-config-key: auth-file
+          config: {}
+      credential-templates:
+        - name: approved-member
+          label: Approved member
+          enrollment-adapter: trusted-enrollment-adapter
+          provider-template: approved-oauth

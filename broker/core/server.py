@@ -14,6 +14,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from broker.core.audit import AuditLog
 from broker.core.agents import AgentRegistry
 from broker.core.config import BrokerConfigError, load_config
+from broker.core.dynamic_accounts import (
+    API_OPERATIONS as DYNAMIC_ACCOUNT_API_OPERATIONS,
+    API_PATHS as DYNAMIC_ACCOUNT_API_PATHS,
+    MAX_BODY_BYTES as MAX_DYNAMIC_ACCOUNT_BODY_BYTES,
+    DynamicAccountManager,
+    PrincipalAuthenticator,
+    decode_api_request as decode_dynamic_account_request,
+    is_dynamic_provider_id,
+    load_dynamic_accounts_config,
+)
 from broker.core.errors import ProviderError
 from broker.core.guest_enrollment import (
     COMPLETE_EXECUTION_CLEANUP_PATH as GUEST_ENROLLMENT_COMPLETE_EXECUTION_CLEANUP_PATH,
@@ -48,7 +58,7 @@ from broker.core.guest_enrollment import (
     load_guest_enrollment_from_environment,
     runtime_identity_from_authorization,
 )
-from broker.core.providers import load_providers
+from broker.core.providers import ProviderFactory, load_providers
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -203,12 +213,25 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 class Broker:
     def __init__(self, config_path=None, audit_path=None):
         self.config = load_config(config_path)
-        self.providers = load_providers(self.config)
+        self.provider_factory = ProviderFactory(self.config)
+        self.providers = load_providers(self.config, self.provider_factory)
         self.audit = AuditLog(audit_path)
         self.agents = AgentRegistry()
+        self.dynamic_accounts = None
+        self.dynamic_account_authenticator = None
         try:
+            dynamic_config = load_dynamic_accounts_config(self.config, self.provider_factory.supported_plugins)
+            if dynamic_config.enabled:
+                self.dynamic_account_authenticator = PrincipalAuthenticator(
+                    dynamic_config.hmac_key, dynamic_config.max_assertion_seconds
+                )
+                self.dynamic_accounts = DynamicAccountManager(
+                    dynamic_config, self.provider_factory, self.providers
+                )
             self.guest_enrollment, self.guest_enrollment_orchestrator = load_guest_enrollment_from_environment()
-        except EnrollmentConfigError as error:
+        except (EnrollmentConfigError, BrokerConfigError) as error:
+            if self.dynamic_accounts is not None:
+                self.dynamic_accounts.close()
             for provider in self.providers.values():
                 provider.close()
             raise BrokerConfigError(str(error)) from error
@@ -217,6 +240,9 @@ class Broker:
         guest_enrollment = getattr(self, "guest_enrollment", None)
         if guest_enrollment is not None:
             guest_enrollment.close()
+        dynamic_accounts = getattr(self, "dynamic_accounts", None)
+        if dynamic_accounts is not None:
+            dynamic_accounts.close()
         for provider in self.providers.values():
             provider.close()
 
@@ -235,6 +261,9 @@ class Broker:
 
     def readiness(self):
         """Provider-owned acceptance readiness without upstream operations."""
+        dynamic_accounts = getattr(self, "dynamic_accounts", None)
+        if dynamic_accounts is not None and not dynamic_accounts.system_ready():
+            return {"ok": False, "status": "unready"}
         guest_enrollment = getattr(self, "guest_enrollment", None)
         if guest_enrollment is not None and not guest_enrollment.ready():
             return {"ok": False, "status": "unready"}
@@ -476,10 +505,57 @@ class Broker:
             raise _guest_enrollment_provider_error(error) from error
 
     def provider(self, name):
+        dynamic_accounts = getattr(self, "dynamic_accounts", None)
+        if dynamic_accounts is not None and is_dynamic_provider_id(name):
+            return dynamic_accounts.provider(name)
         provider = self.providers.get(name)
         if provider is None:
             raise ProviderError("provider-not-found")
         return provider
+
+    def dynamic_account_request(self, request_id, path, raw_payload, principal):
+        if self.dynamic_accounts is None or self.dynamic_account_authenticator is None:
+            raise ProviderError("not-found", "not-found", 404)
+        operation = DYNAMIC_ACCOUNT_API_OPERATIONS.get(path)
+        if operation is None:
+            raise ProviderError("not-found", "not-found", 404)
+        payload, credential = decode_dynamic_account_request(raw_payload, operation)
+        try:
+            if operation == "enroll":
+                result = self.dynamic_accounts.enroll(
+                    principal, payload["template"], payload["operation_id"], credential
+                )
+            elif operation == "reconnect":
+                result = self.dynamic_accounts.reconnect(principal, payload["operation_id"], credential)
+            elif operation == "revoke":
+                result = self.dynamic_accounts.revoke(principal, payload["operation_id"])
+            elif operation == "readiness":
+                result = self.dynamic_accounts.readiness(principal)
+            elif operation == "resolve":
+                result = self.dynamic_accounts.resolve(principal)
+            else:
+                raise ProviderError("not-found", "not-found", 404)
+        finally:
+            if credential is not None:
+                for index in range(len(credential)):
+                    credential[index] = 0
+        self.audit.write(
+            request_id=request_id,
+            agent=principal.principal_id,
+            operation=f"principal-accounts.{operation}",
+            allowed=True,
+        )
+        return result
+
+    def dynamic_account_denied(self, request_id, path, reason, principal=None):
+        self.audit.write(
+            request_id=request_id,
+            agent=principal.principal_id if principal is not None else None,
+            operation=operation_from_path(path),
+            allowed=False,
+            reason=reason,
+        )
+        return {"ok": False, "error": reason, "message": reason}
 
     def authenticate_role(self, authorization, role):
         identity = self.agents.authenticate(authorization)
@@ -991,9 +1067,27 @@ def make_handler(broker):
             runtime_admission = None
             session_admission = None
             egress_admission = None
+            principal = None
             native_egress_operation = None
             native_egress_operation_deadline = None
             try:
+                if self.path in DYNAMIC_ACCOUNT_API_PATHS:
+                    # Authenticate before accepting credential material. The
+                    # body is decoded by the stricter duplicate-rejecting
+                    # dynamic-account codec, never the general API decoder.
+                    if broker.dynamic_account_authenticator is None:
+                        raise ProviderError("not-found", "not-found", 404)
+                    principal = broker.dynamic_account_authenticator.authenticate(self.headers.get("authorization"))
+                    raw_payload = bytearray(self.read_enrollment_body(MAX_DYNAMIC_ACCOUNT_BODY_BYTES))
+                    try:
+                        response = broker.dynamic_account_request(
+                            request_id, self.path, raw_payload, principal
+                        )
+                    finally:
+                        for index in range(len(raw_payload)):
+                            raw_payload[index] = 0
+                    self.write_json(200, response)
+                    return
                 if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS:
                     broker._require_guest_enrollment()
                     authorization = self.headers.get("authorization")
@@ -1154,10 +1248,26 @@ def make_handler(broker):
                     ),
                 )
             except ProviderError as error:
-                self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization"), operation_from_path(self.path)))
+                if self.path in DYNAMIC_ACCOUNT_API_PATHS:
+                    self.write_json(
+                        error.status,
+                        broker.dynamic_account_denied(request_id, self.path, error.reason, principal),
+                    )
+                else:
+                    self.write_json(error.status, broker.denied(request_id, payload, error.reason, error.message, self.headers.get("authorization"), operation_from_path(self.path)))
             except Exception as error:
-                message = "internal-error" if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS else str(error)
-                self.write_json(500, broker.denied(request_id, payload, "internal-error", message, self.headers.get("authorization"), operation_from_path(self.path)))
+                message = (
+                    "internal-error"
+                    if self.path in GUEST_ENROLLMENT_ENDPOINT_LIMITS or self.path in DYNAMIC_ACCOUNT_API_PATHS
+                    else str(error)
+                )
+                if self.path in DYNAMIC_ACCOUNT_API_PATHS:
+                    self.write_json(
+                        500,
+                        broker.dynamic_account_denied(request_id, self.path, "internal-error", principal),
+                    )
+                else:
+                    self.write_json(500, broker.denied(request_id, payload, "internal-error", message, self.headers.get("authorization"), operation_from_path(self.path)))
             finally:
                 if runtime_admission is not None:
                     runtime_admission.release()

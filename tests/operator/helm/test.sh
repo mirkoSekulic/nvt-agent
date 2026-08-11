@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.58" || "${CHART_APP_VERSION}" != "0.8.58" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.58, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.59" || "${CHART_APP_VERSION}" != "0.8.59" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.59, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.58' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.59' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -56,6 +56,8 @@ BROKER_SEED_WITHOUT_PERSISTENCE_FAILURE="${WORKDIR}/broker-seed-without-persiste
 BROKER_SEED_TARGET_FAILURE="${WORKDIR}/broker-seed-target-failure.txt"
 BROKER_ENROLLMENT_RENDER="${WORKDIR}/broker-enrollment.yaml"
 BROKER_ENROLLMENT_FAILURE="${WORKDIR}/broker-enrollment-failure.txt"
+BROKER_DYNAMIC_ACCOUNTS_RENDER="${WORKDIR}/broker-dynamic-accounts.yaml"
+BROKER_DYNAMIC_ACCOUNTS_FAILURE="${WORKDIR}/broker-dynamic-accounts-failure.txt"
 NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
@@ -97,6 +99,49 @@ OAUTH2_ARGS=(
 )
 
 helm template nvt "${CHART}" -n custom-ns > "${DEFAULT_RENDER}"
+if grep -q 'dynamic-accounts:' "${DEFAULT_RENDER}"; then
+  echo "default rendering unexpectedly enabled dynamic principal accounts" >&2
+  exit 1
+fi
+helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" > "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
+grep -q 'dynamic-accounts:' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
+grep -q 'state-dir: /state/principal-accounts' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
+grep -q 'secretRef:' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
+grep -q 'name: "nvt-broker-dynamic-account-auth"' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
+grep -q 'path: /ready' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"
+if grep -q 'credential_base64\|SECRET-NEEDLE' "${BROKER_DYNAMIC_ACCOUNTS_RENDER}"; then
+  echo "dynamic account render must not contain credential material" >&2
+  exit 1
+fi
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
+  --set broker.persistence.enabled=false > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
+  echo "dynamic accounts without persistent broker state unexpectedly rendered" >&2
+  exit 1
+fi
+grep -q 'dynamic-accounts.enabled requires broker.persistence.enabled=true' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
+  --set broker.tls.enabled=false > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
+  echo "dynamic accounts without broker TLS unexpectedly rendered" >&2
+  exit 1
+fi
+grep -q 'dynamic-accounts.enabled requires broker.tls.enabled=true' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
+  --set-string broker.envSecretName= > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
+  echo "dynamic accounts without assertion Secret unexpectedly rendered" >&2
+  exit 1
+fi
+grep -q 'dynamic-accounts.enabled requires broker.envSecretName' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
+if helm template nvt "${CHART}" -n custom-ns \
+  -f "${ROOT}/tests/operator/helm/dynamic-accounts-values.yaml" \
+  --set-string broker.config.dynamic-accounts.state-dir=/tmp/accounts > /dev/null 2> "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"; then
+  echo "dynamic accounts outside broker state unexpectedly rendered" >&2
+  exit 1
+fi
+grep -q 'dynamic-accounts.state-dir must be a normalized path below /state' "${BROKER_DYNAMIC_ACCOUNTS_FAILURE}"
 if grep -q 'NVT_EXECUTION_DRIVER_STATE_DIR\|name: driver-state\|component: execution-driver-host' "${DEFAULT_RENDER}"; then
   echo "default rendering unexpectedly added execution-driver storage/workloads" >&2
   exit 1

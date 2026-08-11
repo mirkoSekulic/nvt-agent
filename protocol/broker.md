@@ -54,14 +54,126 @@ Returns:
 
 ### GET /ready
 
-Returns HTTP 200 only when every configured provider has accepted its local
-configured state. Embedded providers own format validation and must not contact
-upstreams or refresh credentials from this probe; executable providers must
-have a successfully initialized live generation. Failures return a generic
-HTTP 503 without provider names, configuration, or credential diagnostics.
+Returns HTTP 200 only when every statically configured provider has accepted
+its local configured state. Embedded providers own format validation and must
+not contact upstreams or refresh credentials from this probe; executable
+providers must have a successfully initialized live generation. Failures return
+a generic HTTP 503 without provider names, configuration, or credential
+diagnostics.
 Seed replacement uses this stricter endpoint before discarding recovery state.
 When the optional guest-enrollment issuer is enabled, `/ready` also requires a
 readable v1 durable store; it performs no issuance and exposes no state.
+When dynamic principal accounts are enabled, `/ready` additionally validates
+the shared registry, storage, and single-writer boundary. Dynamic credential
+and provider health is account-local: an unavailable generation or failed
+provider initialization makes only that principal's authenticated readiness
+and resolution fail closed. Other dynamic accounts and static providers remain
+available, and the affected owner can still reconnect or revoke. Registry-wide
+corruption, collision, unknown templates, unsafe storage, or writer uncertainty
+still makes broker readiness fail closed.
+
+### Dynamic principal account endpoints
+
+Dynamic principal accounts are an optional broker-owned registry. They are
+absent unless `dynamic-accounts.enabled: true`; without that configuration all
+static provider loading, lookup, readiness, credential paths, and endpoint
+behavior are unchanged. This contract is provider-neutral. Administrator-owned
+credential templates select an administrator-owned provider template and a
+trusted enrollment-adapter name. API callers can select only a credential
+template on first enrollment. They cannot submit an adapter, plugin, command,
+path, Secret, provider instance id, provider config, grant, capability, profile,
+runtime option, or egress policy.
+
+Each request uses a short-lived assertion from a trusted identity frontend:
+
+```text
+Authorization: NVT-Principal-v1 <base64url(payload)>.<base64url(HMAC-SHA256)>
+```
+
+The duplicate-free JSON payload has exactly `version: 1`, audience
+`nvt.broker.principal-accounts/v1`, canonical `issuer`, immutable `subject`, and
+an integer `expires_at`. The configured HMAC key never appears in broker config;
+`authentication.hmac-key-env` names a Secret-sourced environment variable of at
+least 32 bytes. The frontend remains responsible for authenticating the
+identity before minting this assertion. Assertions are bounded to at most the
+configured 1–900 second window (300 seconds by default). Invalid encoding,
+signature, shape, identity, audience, expiry, or future window is
+`unauthorized`. Deployments must use TLS.
+
+The broker derives `p_` plus a domain-separated SHA-256 encoding of the exact
+length-prefixed issuer and subject. This deterministic opaque principal id is
+the storage/audit key; display names are never ownership. Every operation is
+self-only, so there is no principal id request parameter. A different principal
+receives the same `account-not-found` response as a principal with no account.
+
+| Endpoint | Exact request body | Non-secret result |
+| --- | --- | --- |
+| `POST /v1/principal-accounts/complete-enrollment` | `template`, `operation_id`, `credential_base64` | state, template, generation |
+| `POST /v1/principal-accounts/reconnect` | `operation_id`, `credential_base64` | state, template, generation |
+| `POST /v1/principal-accounts/revoke` | `operation_id` | revoked state |
+| `POST /v1/principal-accounts/readiness` | empty object | own state, template, generation |
+| `POST /v1/principal-accounts/resolve` | empty object | own template, opaque provider instance id, generation |
+
+Bodies are at most 1,028 KiB, credential documents at most 768 KiB, and JSON is
+strict UTF-8 with duplicate and unknown fields rejected. The bounded 4 KiB
+envelope allowance makes the documented maximum credential representable after
+base64 encoding. The enrollment
+frontend passes a credential document already accepted by its configured
+trusted adapter. Before commit the broker also instantiates the approved
+provider template through the existing
+[`nvt.broker-provider/v1`](broker-provider.md) boundary and requires that
+provider to accept its local state. A provider error is sanitized to
+`provider-initialization-failed`; no diagnostic may echo input.
+
+Exactly one template may be active for a principal. Reconnect always uses that
+committed template and provider instance id, and is permitted regardless of the
+current credential expiry. Switching is explicit: revoke, then complete a new
+enrollment with the new approved template. The last 32 mutation operation ids
+and their non-secret results are retained for bounded response-loss replay;
+callers must use a new id for a new mutation. Revoke is durable and idempotent.
+
+Provider instance ids use the reserved `dpa_` shape plus 192 random bits and
+are checked against static and loaded dynamic ids; enabling the feature rejects
+a static provider in that namespace. Resolution never guesses or falls back: an unavailable
+dynamic registry, missing account, unknown template, unavailable credential,
+or failed provider returns a stable failure. Static providers remain separately
+addressable, but are never substituted for a failed dynamic resolution.
+
+The configured state directory has a mode-`0700` per-principal directory.
+Credential generations and `metadata.json` are mode `0600`. Credential bytes
+exist only in the authenticated request, broker-owned credential file, and
+provider process protocol; they never enter metadata, operation results, HTTP
+responses, audit, errors, events, command arguments, or Kubernetes objects.
+Metadata contains only the exact ownership identity, opaque ids, approved
+template, generation, timestamps, state, active credential filename, and
+bounded idempotency records.
+
+Replacement writes and fsyncs a new unique credential generation, initializes
+the provider against it, then atomically replaces and fsyncs the metadata
+manifest. The opaque provider id is a stable leased handle: replacement
+publishes the new adapter, waits for operations already leased to the previous
+adapter, and only then closes it. Revoke closes the handle to new calls and
+waits for existing leases. The old provider and generation are removed only
+after the metadata commit and safe provider retirement.
+After interruption, the manifest therefore selects either the complete old or
+complete new generation. Creation and removal of a principal directory also
+fsync the parent account directory. Startup removes recognized orphan
+generations and never-committed first-enrollment directories. Unexpected files,
+symlinks, invalid modes, malformed metadata, unknown templates, collisions, or
+storage uncertainty latch the dynamic registry unavailable. A missing
+credential generation, invalid credential document, or provider initialization
+failure retains valid ownership metadata but publishes no provider handle for
+that account; its owner can reconnect or revoke while all resolution through
+that account fails closed. Revoke commits the tombstone before closing the
+provider and deleting its credential, so restart completes cleanup without
+restoring access.
+
+This broker contract deliberately contains no Kubernetes, portal UI, run,
+profile, grant, or egress coordination. The credential portal can call it in
+the #210 phase after its existing tokenless runner returns a validated document;
+the operator can resolve the opaque provider id in #211. Coordinating an active
+run during template replacement is outside this version; no implicit switch or
+fallback is performed.
 
 ### Guest enrollment endpoints
 
