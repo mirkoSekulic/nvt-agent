@@ -54,18 +54,23 @@ Returns:
 
 ### GET /ready
 
-Returns HTTP 200 only when every configured provider has accepted its local
-configured state. Embedded providers own format validation and must not contact
-upstreams or refresh credentials from this probe; executable providers must
-have a successfully initialized live generation. Failures return a generic
-HTTP 503 without provider names, configuration, or credential diagnostics.
+Returns HTTP 200 only when every statically configured provider has accepted
+its local configured state. Embedded providers own format validation and must
+not contact upstreams or refresh credentials from this probe; executable
+providers must have a successfully initialized live generation. Failures return
+a generic HTTP 503 without provider names, configuration, or credential
+diagnostics.
 Seed replacement uses this stricter endpoint before discarding recovery state.
 When the optional guest-enrollment issuer is enabled, `/ready` also requires a
 readable v1 durable store; it performs no issuance and exposes no state.
-When dynamic principal accounts are enabled, `/ready` also validates every
-loaded dynamic provider against its committed credential generation. A corrupt
-registry, unavailable credential, unknown template, or failed provider
-initialization makes dynamic resolution and broker readiness fail closed.
+When dynamic principal accounts are enabled, `/ready` additionally validates
+the shared registry, storage, and single-writer boundary. Dynamic credential
+and provider health is account-local: an unavailable generation or failed
+provider initialization makes only that principal's authenticated readiness
+and resolution fail closed. Other dynamic accounts and static providers remain
+available, and the affected owner can still reconnect or revoke. Registry-wide
+corruption, collision, unknown templates, unsafe storage, or writer uncertainty
+still makes broker readiness fail closed.
 
 ### Dynamic principal account endpoints
 
@@ -109,8 +114,10 @@ receives the same `account-not-found` response as a principal with no account.
 | `POST /v1/principal-accounts/readiness` | empty object | own state, template, generation |
 | `POST /v1/principal-accounts/resolve` | empty object | own template, opaque provider instance id, generation |
 
-Bodies are at most 1 MiB, credential documents at most 768 KiB, and JSON is
-strict UTF-8 with duplicate and unknown fields rejected. The enrollment
+Bodies are at most 1,028 KiB, credential documents at most 768 KiB, and JSON is
+strict UTF-8 with duplicate and unknown fields rejected. The bounded 4 KiB
+envelope allowance makes the documented maximum credential representable after
+base64 encoding. The enrollment
 frontend passes a credential document already accepted by its configured
 trusted adapter. Before commit the broker also instantiates the approved
 provider template through the existing
@@ -149,12 +156,17 @@ adapter, and only then closes it. Revoke closes the handle to new calls and
 waits for existing leases. The old provider and generation are removed only
 after the metadata commit and safe provider retirement.
 After interruption, the manifest therefore selects either the complete old or
-complete new generation. Startup removes recognized orphan generations and
-never-committed first-enrollment directories; unexpected files, symlinks,
-invalid modes, malformed metadata, unknown templates, collisions, or provider
-failures latch the dynamic registry unavailable. Revoke commits the tombstone
-before closing the provider and deleting its credential, so restart completes
-cleanup without restoring access.
+complete new generation. Creation and removal of a principal directory also
+fsync the parent account directory. Startup removes recognized orphan
+generations and never-committed first-enrollment directories. Unexpected files,
+symlinks, invalid modes, malformed metadata, unknown templates, collisions, or
+storage uncertainty latch the dynamic registry unavailable. A missing
+credential generation, invalid credential document, or provider initialization
+failure retains valid ownership metadata but publishes no provider handle for
+that account; its owner can reconnect or revoke while all resolution through
+that account fails closed. Revoke commits the tombstone before closing the
+provider and deleting its credential, so restart completes cleanup without
+restoring access.
 
 This broker contract deliberately contains no Kubernetes, portal UI, run,
 profile, grant, or egress coordination. The credential portal can call it in

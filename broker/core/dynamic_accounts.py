@@ -37,8 +37,11 @@ API_OPERATIONS = {
     API_PREFIX + "resolve": "resolve",
 }
 API_PATHS = frozenset(API_OPERATIONS)
-MAX_BODY_BYTES = 1024 * 1024
 MAX_CREDENTIAL_BYTES = 768 * 1024
+# A maximum-size credential encodes to exactly 1 MiB of base64. Reserve a
+# bounded 4 KiB for the strict JSON envelope instead of advertising a payload
+# that cannot pass the HTTP body limit.
+MAX_BODY_BYTES = 1028 * 1024
 MAX_IDENTITY_BYTES = 1024
 MAX_NAME_BYTES = 128
 MAX_OPERATION_BYTES = 128
@@ -302,6 +305,8 @@ def _strict_json(raw):
 
 
 def decode_api_request(raw, operation):
+    if len(raw) > MAX_BODY_BYTES:
+        raise ProviderError("invalid-request", "invalid-request", 400)
     try:
         payload = _strict_json(raw)
     except ValueError as error:
@@ -369,15 +374,12 @@ class DynamicAccountManager:
 
     def system_ready(self):
         with self._lock:
-            if not self._healthy:
-                return False
-            for provider in self._providers.values():
-                try:
-                    if not provider.ready or not provider.validate_state():
-                        return False
-                except Exception:
-                    return False
-            return True
+            # Kubernetes readiness represents the shared registry/storage
+            # boundary. A principal's credential/provider health is reported
+            # only by its authenticated readiness/resolve paths, so one bad
+            # account cannot remove every static and dynamic user from the
+            # broker Service or block that owner's reconnect.
+            return self._healthy
 
     def close(self):
         with self._lock:
@@ -400,7 +402,19 @@ class DynamicAccountManager:
                 raise ProviderError("dynamic-accounts-unavailable", "dynamic-accounts-unavailable", 503)
             provider = self._providers.get(provider_id)
             if provider is None:
+                if any(
+                    account["state"] == "active" and account["provider_instance_id"] == provider_id
+                    for account in self._accounts.values()
+                ):
+                    raise ProviderError("account-unready", "account-unready", 503)
                 raise ProviderError("provider-not-found")
+            try:
+                if not provider.ready or not provider.validate_state():
+                    raise ProviderError("account-unready", "account-unready", 503)
+            except ProviderError:
+                raise
+            except Exception as error:
+                raise ProviderError("account-unready", "account-unready", 503) from error
             return provider
 
     def enroll(self, principal, template_name, operation_id, credential):
@@ -514,12 +528,7 @@ class DynamicAccountManager:
         filename = f"credential-{generation}-{_b64url(secrets.token_bytes(18))}.bin"
         credential_path = account_dir / filename
         try:
-            if account_dir.is_symlink():
-                raise OSError("symlink")
-            account_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if account_dir.is_symlink() or not account_dir.is_dir():
-                raise OSError("invalid account directory")
-            os.chmod(account_dir, 0o700)
+            self._ensure_account_directory(account_dir)
             _atomic_write_new(credential_path, credential)
         except Exception as error:
             _safe_unlink(credential_path)
@@ -571,12 +580,15 @@ class DynamicAccountManager:
         old_file = None
         if current and current["state"] == "active":
             handle = self._providers.get(current["provider_instance_id"])
-            if handle is None:
-                provider.close()
-                self._latch_unhealthy()
-                raise ProviderError("dynamic-accounts-unavailable", "dynamic-accounts-unavailable", 503)
             old_file = current.get("credential_file")
-            handle.swap(provider)
+            if handle is None:
+                # Startup may have retained this valid account metadata while
+                # its previous credential/provider failed local validation.
+                # A successful owner-bound reconnect restores only this
+                # account; it is not a registry-wide recovery operation.
+                self._providers[provider_id] = DynamicProviderAdapter(provider)
+            else:
+                handle.swap(provider)
         else:
             self._providers[provider_id] = DynamicProviderAdapter(provider)
         self._accounts[principal.principal_id] = metadata
@@ -643,20 +655,39 @@ class DynamicAccountManager:
                 self._accounts[entry.name] = metadata
                 if metadata["state"] == "active":
                     credential = entry / metadata["credential_file"]
-                    _require_private_file(credential)
                     template = self.config.credential_templates.get(metadata["template"])
                     if template is None:
                         raise ValueError("unknown template")
-                    provider = self._create_provider(template, metadata["provider_instance_id"], credential)
-                    if not provider.ready or not provider.validate_state():
-                        provider.close()
-                        raise ValueError("provider unavailable")
-                    if metadata["provider_instance_id"] in self._providers:
-                        provider.close()
-                        raise ValueError("provider collision")
-                    handle = DynamicProviderAdapter(provider)
-                    self._providers[metadata["provider_instance_id"]] = handle
-                    loaded.append(handle)
+                    credential_available = True
+                    try:
+                        _require_private_file(credential)
+                    except FileNotFoundError:
+                        credential_available = False
+                    if credential_available:
+                        provider = None
+                        try:
+                            provider = self._create_provider(
+                                template, metadata["provider_instance_id"], credential
+                            )
+                            if not provider.ready or not provider.validate_state():
+                                raise ProviderError(
+                                    "provider-initialization-failed",
+                                    "provider-initialization-failed",
+                                    503,
+                                )
+                        except Exception:
+                            # The metadata/ownership registry is valid. Keep
+                            # this account addressable to its owner for
+                            # reconnect/revoke, but publish no provider handle.
+                            if provider is not None:
+                                provider.close()
+                        else:
+                            if metadata["provider_instance_id"] in self._providers:
+                                provider.close()
+                                raise ValueError("provider collision")
+                            handle = DynamicProviderAdapter(provider)
+                            self._providers[metadata["provider_instance_id"]] = handle
+                            loaded.append(handle)
                 self._cleanup_orphans(entry, metadata.get("credential_file"))
         except Exception:
             for provider in loaded:
@@ -708,6 +739,31 @@ class DynamicAccountManager:
                 raise ValueError("unexpected uncommitted account file")
             _safe_unlink(path)
         account_dir.rmdir()
+        _fsync_dir(self._accounts_dir)
+
+    def _ensure_account_directory(self, account_dir):
+        if account_dir.is_symlink():
+            raise OSError("symlink")
+        created = not account_dir.exists()
+        account_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if account_dir.is_symlink() or not account_dir.is_dir():
+            raise OSError("invalid account directory")
+        os.chmod(account_dir, 0o700)
+        if created:
+            # The credential and metadata fsyncs cannot make a newly created
+            # account durable unless its entry in accounts/ is durable too.
+            try:
+                _fsync_dir(self._accounts_dir)
+            except Exception:
+                # Do not leave an unconfirmed directory for a later request to
+                # mistake for an already durable entry. If even the cleanup
+                # cannot be made durable, storage integrity is uncertain.
+                try:
+                    account_dir.rmdir()
+                    _fsync_dir(self._accounts_dir)
+                except Exception:
+                    self._latch_unhealthy()
+                raise
 
     def _own_active(self, principal):
         current = self._own_account(principal)

@@ -187,8 +187,11 @@ issuer+immutable-subject assertions; it is not a user credential. The state
 directory must be durable and private to one broker writer. Credential bytes
 are stored only in generation files with mode `0600`; an atomic `metadata.json`
 manifest selects the committed generation. Broker startup recovers recognized
-interrupted replacements and fails readiness closed on corrupt or unavailable
-dynamic state.
+interrupted replacements and fails global readiness closed on registry/storage
+corruption or writer uncertainty. Credential or provider initialization failure
+is isolated to that principal: its readiness and resolution fail closed, its
+owner can reconnect or revoke, and static providers plus healthy dynamic
+accounts remain available.
 
 The complete principal-bound API, storage algorithm, idempotency window, and
 future #210/#211 integration boundary are documented in

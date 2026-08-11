@@ -9,9 +9,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import broker.core.dynamic_accounts as dynamic_accounts_module
 from broker.core.config import BrokerConfigError
 from broker.core.dynamic_accounts import (
     DynamicAccountManager,
+    MAX_BODY_BYTES,
+    MAX_CREDENTIAL_BYTES,
     Principal,
     PrincipalAuthenticator,
     decode_api_request,
@@ -20,6 +23,7 @@ from broker.core.dynamic_accounts import (
     sign_principal_assertion,
 )
 from broker.core.errors import ProviderError
+from broker.core.server import Broker
 
 
 class FakeProvider:
@@ -52,10 +56,11 @@ class FakeFactory:
 
     def __init__(self):
         self.fail = False
+        self.fail_provider_ids = set()
         self.created = []
 
     def create(self, entry):
-        provider = FakeProvider(entry, self.fail)
+        provider = FakeProvider(entry, self.fail or entry["name"] in self.fail_provider_ids)
         self.created.append(provider)
         return provider
 
@@ -164,6 +169,35 @@ class DynamicAccountsTest(unittest.TestCase):
         self.assertEqual(payload["template"], "member")
         self.assertEqual(credential, b"safe")
 
+    def test_request_and_credential_size_boundaries_are_reachable_and_strict(self):
+        credential = b"x" * MAX_CREDENTIAL_BYTES
+        raw = json.dumps(
+            {
+                "template": "member",
+                "operation_id": "maximum-credential",
+                "credential_base64": base64.b64encode(credential).decode(),
+            },
+            separators=(",", ":"),
+        ).encode()
+        self.assertLessEqual(len(raw), MAX_BODY_BYTES)
+        _, decoded = decode_api_request(raw, "enroll")
+        self.assertEqual(len(decoded), MAX_CREDENTIAL_BYTES)
+
+        oversized_credential = base64.b64encode(b"x" * (MAX_CREDENTIAL_BYTES + 1)).decode()
+        oversized_raw = json.dumps(
+            {
+                "template": "member",
+                "operation_id": "oversized-credential",
+                "credential_base64": oversized_credential,
+            },
+            separators=(",", ":"),
+        ).encode()
+        self.assertLessEqual(len(oversized_raw), MAX_BODY_BYTES)
+        with self.assertRaisesRegex(ProviderError, "invalid-request"):
+            decode_api_request(oversized_raw, "enroll")
+        with self.assertRaisesRegex(ProviderError, "invalid-request"):
+            decode_api_request(b" " * (MAX_BODY_BYTES + 1), "enroll")
+
     def test_enroll_resolve_reconnect_and_restart_recovery(self):
         manager = self.manager()
         first = manager.enroll(self.alice, "member", "enroll-1", bytearray(b"credential-one"))
@@ -185,6 +219,43 @@ class DynamicAccountsTest(unittest.TestCase):
         recovered = self.manager(factory=FakeFactory())
         self.assertEqual(recovered.resolve(self.alice)["provider_instance_id"], current_id)
         self.assertEqual(recovered.readiness(self.alice)["state"], "ready")
+
+    def test_first_enrollment_fsyncs_parent_directory_before_metadata_commit(self):
+        manager = self.manager()
+        with mock.patch(
+            "broker.core.dynamic_accounts._fsync_dir",
+            wraps=dynamic_accounts_module._fsync_dir,
+        ) as fsync_dir:
+            manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        synced = [call.args[0] for call in fsync_dir.call_args_list]
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        self.assertEqual(synced[0], self.root / "accounts")
+        self.assertIn(account_dir, synced)
+
+        with mock.patch(
+            "broker.core.dynamic_accounts._fsync_dir",
+            wraps=dynamic_accounts_module._fsync_dir,
+        ) as reconnect_fsync:
+            manager.reconnect(self.alice, "reconnect", bytearray(b"replacement"))
+        self.assertNotIn(self.root / "accounts", [call.args[0] for call in reconnect_fsync.call_args_list])
+
+    def test_parent_directory_fsync_failure_prevents_first_enrollment_commit(self):
+        manager = self.manager()
+        real_fsync = dynamic_accounts_module._fsync_dir
+
+        def fail_parent(path):
+            if path == self.root / "accounts":
+                raise OSError("parent fsync failed")
+            return real_fsync(path)
+
+        with mock.patch("broker.core.dynamic_accounts._fsync_dir", side_effect=fail_parent):
+            with self.assertRaisesRegex(ProviderError, "account-storage-unavailable"):
+                manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        self.assertFalse(manager.system_ready())
+        self.assertFalse(account_dir.exists())
+        self.assertFalse((account_dir / "metadata.json").exists())
+        self.assertEqual(list(account_dir.glob("credential-*.bin")), [])
 
     def test_concurrent_idempotent_enrollment_creates_one_account(self):
         manager = self.manager()
@@ -281,14 +352,17 @@ class DynamicAccountsTest(unittest.TestCase):
         self.assertEqual(manager.resolve(self.alice), before)
         self.assertEqual(list((self.root / "accounts" / self.alice.principal_id).glob("credential-*.bin")), before_files)
 
-    def test_missing_committed_credential_fails_account_and_system_readiness(self):
+    def test_missing_committed_credential_fails_only_account_readiness(self):
         manager = self.manager()
         manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        provider_id = manager.resolve(self.alice)["provider_instance_id"]
         self.factory.created[-1].path.unlink()
-        self.assertFalse(manager.system_ready())
+        self.assertTrue(manager.system_ready())
         for operation in (manager.readiness, manager.resolve):
             with self.assertRaisesRegex(ProviderError, "account-unready"):
                 operation(self.alice)
+        with self.assertRaisesRegex(ProviderError, "account-unready"):
+            manager.provider(provider_id)
 
     def test_interrupted_replacement_orphan_is_removed_on_restart(self):
         manager = self.manager()
@@ -308,9 +382,14 @@ class DynamicAccountsTest(unittest.TestCase):
         orphan = account_dir / "credential-1-abcdefghijklmnop.bin"
         orphan.write_bytes(b"SECRET-UNCOMMITTED")
         orphan.chmod(0o600)
-        manager = self.manager(factory=FakeFactory())
+        with mock.patch(
+            "broker.core.dynamic_accounts._fsync_dir",
+            wraps=dynamic_accounts_module._fsync_dir,
+        ) as fsync_dir:
+            manager = self.manager(factory=FakeFactory())
         self.assertTrue(manager.healthy)
         self.assertFalse(account_dir.exists())
+        self.assertIn(self.root / "accounts", [call.args[0] for call in fsync_dir.call_args_list])
         self.assertEqual(manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))["generation"], 1)
 
     def test_corrupt_and_unknown_template_storage_latch_unready(self):
@@ -336,16 +415,68 @@ class DynamicAccountsTest(unittest.TestCase):
         unknown = self.manager(config=changed, factory=FakeFactory())
         self.assertFalse(unknown.healthy)
 
-    def test_restart_provider_initialization_failure_latches_unready(self):
+    def test_restart_provider_failure_is_account_local_and_reconnect_recovers(self):
         manager = self.manager()
-        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        manager.enroll(self.alice, "member", "alice-enroll", bytearray(b"alice-usable"))
+        manager.enroll(self.bob, "member", "bob-enroll", bytearray(b"bob-usable"))
+        alice_resolution = manager.resolve(self.alice)
+        bob_resolution = manager.resolve(self.bob)
         manager.close()
         failing = FakeFactory()
-        failing.fail = True
+        failing.fail_provider_ids.add(alice_resolution["provider_instance_id"])
         recovered = self.manager(factory=failing)
-        self.assertFalse(recovered.healthy)
-        with self.assertRaisesRegex(ProviderError, "dynamic-accounts-unavailable"):
+        self.assertTrue(recovered.system_ready())
+        self.assertEqual(recovered.resolve(self.bob), bob_resolution)
+        for operation in (recovered.readiness, recovered.resolve):
+            with self.assertRaisesRegex(ProviderError, "account-unready"):
+                operation(self.alice)
+        with self.assertRaisesRegex(ProviderError, "account-unready"):
+            recovered.provider(alice_resolution["provider_instance_id"])
+
+        static = mock.Mock(ready=True)
+        static.validate_state.return_value = True
+        broker = Broker.__new__(Broker)
+        broker.dynamic_accounts = recovered
+        broker.guest_enrollment = None
+        broker.providers = {"shared-static": static}
+        self.assertEqual(Broker.readiness(broker), {"ok": True, "status": "ready"})
+        self.assertIs(Broker.provider(broker, "shared-static"), static)
+
+        failing.fail_provider_ids.clear()
+        restored = recovered.reconnect(self.alice, "alice-reconnect", bytearray(b"alice-restored"))
+        self.assertEqual(restored["generation"], 2)
+        self.assertEqual(
+            recovered.resolve(self.alice)["provider_instance_id"],
+            alice_resolution["provider_instance_id"],
+        )
+        self.assertEqual(recovered.resolve(self.bob), bob_resolution)
+
+        # A second degraded restart also keeps authenticated revoke available.
+        recovered.close()
+        degraded_again = FakeFactory()
+        degraded_again.fail_provider_ids.add(alice_resolution["provider_instance_id"])
+        revocable = self.manager(factory=degraded_again)
+        self.assertTrue(revocable.system_ready())
+        self.assertEqual(revocable.revoke(self.alice, "alice-revoke")["state"], "revoked")
+        self.assertEqual(revocable.resolve(self.bob), bob_resolution)
+
+    def test_restart_invalid_credential_is_account_local(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "alice-enroll", bytearray(b"alice-usable"))
+        manager.enroll(self.bob, "member", "bob-enroll", bytearray(b"bob-usable"))
+        alice_file = self.factory.created[0].path
+        bob_resolution = manager.resolve(self.bob)
+        manager.close()
+        alice_file.write_bytes(b"invalid credential")
+        alice_file.chmod(0o600)
+
+        recovered = self.manager(factory=FakeFactory())
+        self.assertTrue(recovered.system_ready())
+        with self.assertRaisesRegex(ProviderError, "account-unready"):
             recovered.resolve(self.alice)
+        self.assertEqual(recovered.resolve(self.bob), bob_resolution)
+        recovered.reconnect(self.alice, "alice-reconnect", bytearray(b"restored"))
+        self.assertEqual(recovered.readiness(self.alice)["state"], "ready")
 
     def test_account_capacity_counts_durable_revoked_tombstones(self):
         bounded = load_dynamic_accounts_config(configuration(self.root, maximum=1), self.factory.supported_plugins)

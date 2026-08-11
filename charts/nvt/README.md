@@ -292,6 +292,13 @@ unless explicitly enabled, and static provider paths are unchanged. See
 [`protocol/broker.md`](../../protocol/broker.md#dynamic-principal-account-endpoints)
 for the authenticated API and atomic recovery contract.
 
+The broker readiness probe treats registry/storage integrity as shared state,
+but does not aggregate every principal's credential or provider health. A
+degraded dynamic account fails only its authenticated readiness and resolution;
+its owner retains reconnect/revoke recovery while other accounts and static
+providers stay routable. Registry corruption or writer uncertainty still makes
+the pod unready.
+
 Optionally reconcile credential seeds from an existing Kubernetes Secret:
 
 ```yaml

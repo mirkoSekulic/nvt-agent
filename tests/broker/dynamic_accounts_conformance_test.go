@@ -154,6 +154,58 @@ func (f *dynamicAccountFixture) post(path, authorization string, body any) (map[
 	return decoded, response.StatusCode, string(responseBody)
 }
 
+func (f *dynamicAccountFixture) get(path string) (map[string]any, int) {
+	f.t.Helper()
+	response, err := http.Get(f.url + path)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	decoded := map[string]any{}
+	if err := json.Unmarshal(responseBody, &decoded); err != nil {
+		f.t.Fatalf("decode response: %v", err)
+	}
+	return decoded, response.StatusCode
+}
+
+func (f *dynamicAccountFixture) credentialPathForSubject(subject string) string {
+	f.t.Helper()
+	accountsDir := filepath.Join(f.home, "dynamic-state", "accounts")
+	entries, err := os.ReadDir(accountsDir)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		accountDir := filepath.Join(accountsDir, entry.Name())
+		raw, err := os.ReadFile(filepath.Join(accountDir, "metadata.json"))
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		metadata := struct {
+			Subject        string `json:"subject"`
+			CredentialFile string `json:"credential_file"`
+		}{}
+		if err := json.Unmarshal(raw, &metadata); err != nil {
+			f.t.Fatal(err)
+		}
+		if metadata.Subject == subject {
+			if metadata.CredentialFile == "" {
+				f.t.Fatalf("active account for %q has no credential filename", subject)
+			}
+			return filepath.Join(accountDir, metadata.CredentialFile)
+		}
+	}
+	f.t.Fatalf("account for %q not found", subject)
+	return ""
+}
+
 func dynamicCodexCredential(t *testing.T, marker string) string {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
@@ -240,6 +292,63 @@ func TestDynamicPrincipalAccountHTTPContract(t *testing.T) {
 	allObservable := string(audit) + f.output.String()
 	if strings.Contains(allObservable, dynamicAccountNeedle) || strings.Contains(allObservable, enrollBody["credential_base64"].(string)) {
 		t.Fatalf("credential appeared in logs or audit: %s", allObservable)
+	}
+}
+
+func TestDynamicPrincipalAccountRestartFailureIsAccountLocalAndReconnectable(t *testing.T) {
+	f := newDynamicAccountFixture(t, true)
+	alice := f.assertion("https://issuer.example", "alice-restart")
+	bob := f.assertion("https://issuer.example", "bob-restart")
+
+	for _, enrollment := range []struct {
+		authorization string
+		operationID   string
+		marker        string
+	}{
+		{alice, "alice-enroll", "alice-before-restart"},
+		{bob, "bob-enroll", "bob-before-restart"},
+	} {
+		_, status, body := f.post("/v1/principal-accounts/complete-enrollment", enrollment.authorization, map[string]any{
+			"template": "approved-member", "operation_id": enrollment.operationID,
+			"credential_base64": dynamicCodexCredential(t, enrollment.marker),
+		})
+		if status != http.StatusOK {
+			t.Fatalf("initial enrollment failed status=%d body=%s", status, body)
+		}
+	}
+
+	f.stop()
+	aliceCredential := f.credentialPathForSubject("alice-restart")
+	if err := os.WriteFile(aliceCredential, []byte("invalid credential document"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+
+	ready, status := f.get("/ready")
+	if status != http.StatusOK || ready["ok"] != true {
+		t.Fatalf("account-local failure changed global readiness status=%d payload=%v", status, ready)
+	}
+	for _, operation := range []string{"readiness", "resolve"} {
+		payload, operationStatus, _ := f.post("/v1/principal-accounts/"+operation, alice, map[string]any{})
+		if operationStatus != http.StatusServiceUnavailable || payload["error"] != "account-unready" {
+			t.Fatalf("degraded Alice %s did not fail closed status=%d payload=%v", operation, operationStatus, payload)
+		}
+	}
+	resolvedBob, status, _ := f.post("/v1/principal-accounts/resolve", bob, map[string]any{})
+	if status != http.StatusOK || resolvedBob["ok"] != true {
+		t.Fatalf("healthy Bob resolution failed status=%d payload=%v", status, resolvedBob)
+	}
+
+	reconnected, status, body := f.post("/v1/principal-accounts/reconnect", alice, map[string]any{
+		"operation_id":      "alice-recover",
+		"credential_base64": dynamicCodexCredential(t, "alice-after-restart"),
+	})
+	if status != http.StatusOK || reconnected["state"] != "ready" {
+		t.Fatalf("degraded owner reconnect failed status=%d body=%s", status, body)
+	}
+	resolvedAlice, status, _ := f.post("/v1/principal-accounts/resolve", alice, map[string]any{})
+	if status != http.StatusOK || resolvedAlice["ok"] != true {
+		t.Fatalf("reconnected Alice resolution failed status=%d payload=%v", status, resolvedAlice)
 	}
 }
 
