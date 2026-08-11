@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.58`; otherwise the API server may prune the
+of, upgrading to chart `0.8.59`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.58 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.59 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.58 --namespace nvt --create-namespace
+  --version 0.8.59 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -254,6 +254,44 @@ broker:
     existingClaim: ""
 ```
 
+Dynamic principal-owned accounts are a separate opt-in use of broker state.
+They require broker TLS, persistence, and a pre-created Secret exposed through
+`broker.envSecretName`. That Secret supplies only the short-lived principal
+assertion HMAC key; enrolled credential documents are never Helm values,
+ConfigMaps, Kubernetes Secrets, annotations, or events. For example:
+
+```yaml
+broker:
+  envSecretName: nvt-broker-dynamic-account-auth
+  tls:
+    enabled: true
+  persistence:
+    enabled: true
+  config:
+    providers: []
+    dynamic-accounts:
+      enabled: true
+      state-dir: /state/principal-accounts
+      authentication:
+        hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+      provider-templates:
+        - name: approved-provider
+          plugin: company-oauth
+          credential-config-key: credentials-file
+          config: {}
+      credential-templates:
+        - name: member
+          label: Member
+          enrollment-adapter: company-oauth-file
+          provider-template: approved-provider
+```
+
+The key named by `hmac-key-env` must exist in `broker.envSecretName` and contain
+at least 32 bytes. The chart does not create it. Dynamic accounts remain absent
+unless explicitly enabled, and static provider paths are unchanged. See
+[`protocol/broker.md`](../../protocol/broker.md#dynamic-principal-account-endpoints)
+for the authenticated API and atomic recovery contract.
+
 Optionally reconcile credential seeds from an existing Kubernetes Secret:
 
 ```yaml
@@ -421,7 +459,7 @@ may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. External drivers select one exact entry from
 `agentSchedule.executionClasses` by `kind`, logical `driver`, and `classRef`;
 the class's bounded opaque configuration is snapshotted into the AgentRun.
-Unknown/mismatched selections fail without Pod fallback. Chart `0.8.58`
+Unknown/mismatched selections fail without Pod fallback. Chart `0.8.59`
 reconciles external AgentRuns only through the exact matching registered host.
 Defaults remain Kubernetes-only and need no source access, cloud SDK, cloud
 credentials, or extra workload.
