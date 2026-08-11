@@ -193,6 +193,9 @@ mapping or Helm rendering fails.
 ```yaml
 broker:
   envSecretName: nvt-broker-dynamic-account-auth
+  # Change this non-secret epoch in the same rollout that rotates the
+  # externally managed assertion key.
+  dynamicAccountAssertionRotationEpoch: epoch-1
   tls:
     enabled: true
   persistence:
@@ -247,15 +250,27 @@ The generic contract accepts only adapters compiled into the trusted runner;
 the current image provides the explicitly documented Codex and Claude adapter
 presets. Core selection and custody logic has no provider branch.
 
-First enrollment selects one approved template. Reconnect is permitted before
-expiry and while that account is unready, but it never changes the committed
-template. Selecting a different template while an account is active fails
-before runner execution; there is no fallback. Revoke is a separate explicit
-operation. This portal does not inspect or coordinate active AgentRuns, so a
-safe template-switch workflow requiring authoritative run coordination remains
-the bounded responsibility of #211. Dynamic account resolution to an opaque
-provider instance is likewise not exposed to the browser and remains operator
-work in #211.
+First enrollment selects one approved template. The broker's authenticated
+readiness response retains that committed template and generation while the
+account is ready, unready, or revoked. Reconnect is permitted before expiry and
+while the account is unready, but selecting a different template fails before
+runner execution. Revoke remains an emergency access-removal operation; its
+durable broker tombstone keeps the prior template locked, and subsequent
+enrollment may use only that same template. Revoke therefore cannot be used as
+an uncoordinated template-switch path. This portal does not inspect or
+coordinate active AgentRuns, so authorizing a safe switch remains the bounded
+responsibility of #211. Dynamic account resolution to an opaque provider
+instance is likewise not exposed to the browser and remains operator work in
+#211.
+
+The portal and broker load their shared assertion key only at process startup.
+For a coordinated rotation, update the externally managed Secret and increment
+`broker.dynamicAccountAssertionRotationEpoch` in the same GitOps change. That
+non-secret epoch is placed on both Pod templates, rolling both workloads
+without hashing or rendering key material. Wait for both Deployments to
+complete rollout and verify they carry the same epoch. During a rolling
+mismatch assertions fail closed; do not rotate the Secret or restart only one
+workload without advancing the shared epoch.
 
 Eligibility is evaluated during portal login. If a principal no longer passes
 it, a new session and therefore new enrollment/reconnect is denied; an existing

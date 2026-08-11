@@ -125,9 +125,12 @@ func TestPrincipalAccountBrokerUsesVerifiedTLSExactPrincipalAndBoundedStates(t *
 				t, response, `{"ok":false,"error":"account-not-found","message":"account-not-found"}`,
 			)
 		case "degraded-principal":
-			response.WriteHeader(http.StatusServiceUnavailable)
 			writeBrokerTestResponse(
-				t, response, `{"ok":false,"error":"account-unready","message":"account-unready"}`,
+				t, response, `{"ok":true,"state":"unready","template":"approved","generation":3}`,
+			)
+		case "revoked-principal":
+			writeBrokerTestResponse(
+				t, response, `{"ok":true,"state":"revoked","template":"approved","generation":4}`,
 			)
 		default:
 			writeBrokerTestResponse(
@@ -145,7 +148,8 @@ func TestPrincipalAccountBrokerUsesVerifiedTLSExactPrincipalAndBoundedStates(t *
 		generation               int
 	}{
 		{"new-principal", accountStateNotEnrolled, "", 0},
-		{"degraded-principal", accountStateUnready, "", 0},
+		{"degraded-principal", accountStateUnready, testBrokerTemplate, 3},
+		{"revoked-principal", accountStateRevoked, testBrokerTemplate, 4},
 		{"ready-principal", accountStateReady, testBrokerTemplate, 2},
 	} {
 		state, err := client.Account(
@@ -154,6 +158,36 @@ func TestPrincipalAccountBrokerUsesVerifiedTLSExactPrincipalAndBoundedStates(t *
 		if err != nil || state.State != test.state || state.Template != test.template ||
 			state.Generation != test.generation {
 			t.Fatalf("unexpected account state for %s: %#v err=%v", test.subject, state, err)
+		}
+	}
+}
+
+func TestPrincipalAccountBrokerRejectsMutationResponseStateConfusion(t *testing.T) {
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", jsonContentType)
+		switch request.URL.Path {
+		case "/v1/principal-accounts/complete-enrollment", "/v1/principal-accounts/reconnect":
+			writeBrokerTestResponse(t, response, `{"ok":true,"state":"revoked"}`)
+		case "/v1/principal-accounts/revoke":
+			writeBrokerTestResponse(
+				t, response, `{"ok":true,"state":"ready","template":"approved","generation":2}`,
+			)
+		default:
+			response.WriteHeader(http.StatusNotFound)
+		}
+	})
+	client, _ := newTestPrincipalAccountBroker(t, handler)
+	principal := Principal{Issuer: testBrokerIssuer, Subject: "state-confusion"}
+	credential := []byte("credential")
+	for operation, err := range map[string]error{
+		"enroll": client.CompleteEnrollment(
+			t.Context(), principal, testBrokerTemplate, "wrong-enroll-state", credential,
+		),
+		"reconnect":  client.Reconnect(t.Context(), principal, "wrong-reconnect-state", credential),
+		"revocation": client.Revoke(t.Context(), principal, "wrong-revoke-state"),
+	} {
+		if !errors.Is(err, ErrBrokerUnavailable) {
+			t.Fatalf("%s accepted the wrong broker response state: %v", operation, err)
 		}
 	}
 }
@@ -258,8 +292,9 @@ func TestPrincipalAccountBrokerFailsClosedOnMalformedUnavailableAndAssertionReje
 	if _, err := client.Account(t.Context(), principal); !errors.Is(err, ErrBrokerUnavailable) {
 		t.Fatal("malformed broker response did not fail closed")
 	}
-	if err := client.Reconnect(t.Context(), principal, "malformed-completion", []byte("credential"));
-		!errors.Is(err, ErrBrokerUnavailable) {
+	if err := client.Reconnect(
+		t.Context(), principal, "malformed-completion", []byte("credential"),
+	); !errors.Is(err, ErrBrokerUnavailable) {
 		t.Fatal("malformed broker completion did not fail closed")
 	}
 	mode = "rejected"

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,9 +59,6 @@ func (b *memoryPrincipalAccountBroker) Account(
 	state, ok := b.accounts[principalMapKey(principal)]
 	if !ok {
 		return DynamicAccountState{State: accountStateNotEnrolled}, nil
-	}
-	if state.State == accountStateUnready {
-		return DynamicAccountState{State: accountStateUnready}, nil
 	}
 	return state, nil
 }
@@ -182,6 +180,12 @@ func (r *scriptedDynamicRunner) Acknowledge(_ context.Context, _ string) error {
 func (r *scriptedDynamicRunner) Cancel(_ context.Context, _ string) error { return nil }
 func (r *scriptedDynamicRunner) Ready(_ context.Context) error            { return nil }
 
+func (r *scriptedDynamicRunner) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
 func authenticatedDynamicServer(
 	t *testing.T,
 	principal Principal,
@@ -279,13 +283,43 @@ func TestDynamicEligibleUnknownPrincipalEnrollsAndReconnectsBeforeExpiryWithoutD
 
 func TestDynamicReconnectsAccountUnreadyAndSupportsAuthorizationCodeAdapter(t *testing.T) {
 	principal := Principal{Issuer: testIdentityIssuer, Subject: "degraded-user"}
-	broker := newMemoryPrincipalAccountBroker()
-	broker.accounts[principalMapKey(principal)] = DynamicAccountState{
-		State: accountStateUnready, Template: testDynamicTemplateTwo, Generation: 4,
-	}
+	var assertionKey []byte
+	var reconnects atomic.Int32
+	broker, assertionKey := newTestPrincipalAccountBroker(t, http.HandlerFunc(
+		func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", jsonContentType)
+			if verified := verifyTestPrincipalAssertion(
+				t, request.Header.Get("Authorization"), assertionKey,
+			); verified != principal {
+				t.Error("portal changed the authenticated principal on the broker request")
+			}
+			switch request.URL.Path {
+			case "/v1/principal-accounts/readiness":
+				writeBrokerTestResponse(
+					t, response,
+					`{"ok":true,"state":"unready","template":"`+testDynamicTemplateTwo+`","generation":4}`,
+				)
+			case "/v1/principal-accounts/reconnect":
+				reconnects.Add(1)
+				writeBrokerTestResponse(
+					t, response,
+					`{"ok":true,"state":"ready","template":"`+testDynamicTemplateTwo+`","generation":5}`,
+				)
+			default:
+				response.WriteHeader(http.StatusNotFound)
+			}
+		},
+	))
 	runner := &scriptedDynamicRunner{}
 	server, cookie, csrf, _ := authenticatedDynamicServer(t, principal, broker, runner, false)
 	defer server.Close()
+	wrongTemplate := request(
+		t, server, cookie, csrf, http.MethodPost,
+		"/agents/credentials/templates/"+testDynamicTemplateOne+"/connect", "", nil,
+	)
+	if wrongTemplate.Code != http.StatusConflict || runner.callCount() != 0 || reconnects.Load() != 0 {
+		t.Fatal("account-unready reconnect accepted a template other than the committed template")
+	}
 	started := request(
 		t, server, cookie, csrf, http.MethodPost,
 		"/agents/credentials/templates/"+testDynamicTemplateTwo+"/connect", "", nil,
@@ -316,6 +350,9 @@ func TestDynamicReconnectsAccountUnreadyAndSupportsAuthorizationCodeAdapter(t *t
 	); result.Status != enrollmentSucceeded {
 		t.Fatal("account-unready authorization-code reconnect failed")
 	}
+	if runner.callCount() != 1 || reconnects.Load() != 1 {
+		t.Fatal("matching-template reconnect did not run exactly once")
+	}
 }
 
 func TestDynamicPrincipalIsolationTemplateConflictRevokeAndRecoveryFallback(t *testing.T) {
@@ -335,7 +372,7 @@ func TestDynamicPrincipalIsolationTemplateConflictRevokeAndRecoveryFallback(t *t
 		t, aliceServer, aliceCookie, "", http.MethodPost,
 		"/agents/credentials/templates/"+testDynamicTemplateOne+"/connect", "", nil,
 	)
-	if csrfDenied.Code != http.StatusForbidden || runner.calls != 0 {
+	if csrfDenied.Code != http.StatusForbidden || runner.callCount() != 0 {
 		t.Fatal("dynamic enrollment did not fail closed before runner execution on CSRF")
 	}
 	conflict := request(
@@ -343,7 +380,7 @@ func TestDynamicPrincipalIsolationTemplateConflictRevokeAndRecoveryFallback(t *t
 		"/agents/credentials/templates/"+testDynamicTemplateTwo+"/connect", "", nil,
 	)
 	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "template-conflict") ||
-		runner.calls != 0 {
+		runner.callCount() != 0 {
 		t.Fatal("active template switch did not fail before runner execution")
 	}
 	cross := request(t, bobServer, bobCookie, "", http.MethodGet, "/agents/credentials/account", "", nil)
@@ -380,6 +417,13 @@ func TestDynamicPrincipalIsolationTemplateConflictRevokeAndRecoveryFallback(t *t
 	if revokeResponse.Code != http.StatusOK || strings.Contains(revokeResponse.Body.String(), dynamicCredentialNeedle) {
 		t.Fatal("dynamic account revoke failed or disclosed credential content")
 	}
+	postRevokeSwitch := request(
+		t, aliceServer, aliceCookie, csrf, http.MethodPost,
+		"/agents/credentials/templates/"+testDynamicTemplateTwo+"/connect", "", nil,
+	)
+	if postRevokeSwitch.Code != http.StatusConflict || runner.callCount() != 0 {
+		t.Fatal("revocation removed the durable template switch lock")
+	}
 }
 
 func TestDynamicEligibilityAndDependenciesFailClosedWithoutReassignment(t *testing.T) {
@@ -407,7 +451,7 @@ func TestDynamicEligibilityAndDependenciesFailClosedWithoutReassignment(t *testi
 		t, server, cookie, csrf, http.MethodPost,
 		"/agents/credentials/templates/"+testDynamicTemplateOne+"/connect", "", nil,
 	)
-	if connect.Code != http.StatusServiceUnavailable || runner.calls != 0 {
+	if connect.Code != http.StatusServiceUnavailable || runner.callCount() != 0 {
 		t.Fatal("broker unavailability did not fail before runner execution")
 	}
 	broker.accountErr = nil

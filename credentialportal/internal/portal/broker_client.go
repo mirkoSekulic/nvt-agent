@@ -156,12 +156,14 @@ func (c *HTTPPrincipalAccountBroker) Account(
 			Generation int    `json:"generation"`
 			OK         bool   `json:"ok"`
 		}
-		if !strictBrokerJSON(body, &response) || !response.OK || response.State != accountStateReady ||
+		if !strictBrokerJSON(body, &response) || !response.OK ||
+			(response.State != accountStateReady && response.State != accountStateUnready &&
+				response.State != accountStateRevoked) ||
 			response.Template == "" || response.Generation < 1 {
 			return DynamicAccountState{}, ErrBrokerUnavailable
 		}
 		return DynamicAccountState{
-			State: accountStateReady, Template: response.Template, Generation: response.Generation,
+			State: response.State, Template: response.Template, Generation: response.Generation,
 		}, nil
 	}
 	reason, ok := strictBrokerError(body)
@@ -170,9 +172,6 @@ func (c *HTTPPrincipalAccountBroker) Account(
 	}
 	if status == http.StatusNotFound && reason == reasonAccountNotFound {
 		return DynamicAccountState{State: accountStateNotEnrolled}, nil
-	}
-	if status == http.StatusServiceUnavailable && reason == "account-unready" {
-		return DynamicAccountState{State: accountStateUnready}, nil
 	}
 	return DynamicAccountState{}, ErrBrokerUnavailable
 }
@@ -188,7 +187,9 @@ func (c *HTTPPrincipalAccountBroker) CompleteEnrollment(
 		return ErrBrokerRejected
 	}
 	defer clearBytes(body)
-	return c.mutate(ctx, "/v1/principal-accounts/complete-enrollment", body, principal, true)
+	return c.mutate(
+		ctx, "/v1/principal-accounts/complete-enrollment", body, principal, accountStateReady, true,
+	)
 }
 
 func (c *HTTPPrincipalAccountBroker) Reconnect(
@@ -202,7 +203,7 @@ func (c *HTTPPrincipalAccountBroker) Reconnect(
 		return ErrBrokerRejected
 	}
 	defer clearBytes(body)
-	return c.mutate(ctx, "/v1/principal-accounts/reconnect", body, principal, true)
+	return c.mutate(ctx, "/v1/principal-accounts/reconnect", body, principal, accountStateReady, true)
 }
 
 func (c *HTTPPrincipalAccountBroker) Revoke(
@@ -215,7 +216,7 @@ func (c *HTTPPrincipalAccountBroker) Revoke(
 		return ErrBrokerRejected
 	}
 	defer clearBytes(body)
-	return c.mutate(ctx, "/v1/principal-accounts/revoke", body, principal, true)
+	return c.mutate(ctx, "/v1/principal-accounts/revoke", body, principal, accountStateRevoked, true)
 }
 
 func (c *HTTPPrincipalAccountBroker) mutate(
@@ -223,6 +224,7 @@ func (c *HTTPPrincipalAccountBroker) mutate(
 	path string,
 	body []byte,
 	principal Principal,
+	expectedState string,
 	retry bool,
 ) error {
 	status, responseBody, err := c.request(ctx, http.MethodPost, path, body, principal, retry)
@@ -237,9 +239,9 @@ func (c *HTTPPrincipalAccountBroker) mutate(
 			Generation int    `json:"generation,omitempty"`
 			OK         bool   `json:"ok"`
 		}
-		if !strictBrokerJSON(responseBody, &response) || !response.OK ||
-			(response.State != accountStateReady && response.State != accountStateRevoked) ||
-			(response.State == accountStateReady && (response.Template == "" || response.Generation < 1)) {
+		if !strictBrokerJSON(responseBody, &response) || !response.OK || response.State != expectedState ||
+			(expectedState == accountStateReady && (response.Template == "" || response.Generation < 1)) ||
+			(expectedState == accountStateRevoked && (response.Template != "" || response.Generation != 0)) {
 			return ErrBrokerUnavailable
 		}
 		return nil
@@ -432,7 +434,7 @@ func brokerCompletionReason(err error) string {
 		return "broker-update-failed"
 	}
 	switch rejected.reason {
-	case "account-already-enrolled", "operation-conflict":
+	case "account-already-enrolled", "operation-conflict", "template-switch-not-authorized":
 		return "account-conflict"
 	case reasonAccountNotFound:
 		return reasonAccountNotFound

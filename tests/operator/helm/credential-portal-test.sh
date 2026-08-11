@@ -8,6 +8,7 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 RENDER="${WORKDIR}/portal.yaml"
 OAUTH_RENDER="${WORKDIR}/portal-oauth.yaml"
 DYNAMIC_RENDER="${WORKDIR}/portal-dynamic.yaml"
+DYNAMIC_ROTATED_RENDER="${WORKDIR}/portal-dynamic-rotated.yaml"
 
 helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" >"${RENDER}"
 
@@ -60,6 +61,14 @@ deployment = next(
     for document in documents
     if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-credential-portal"
 )
+broker_deployment = next(
+    document
+    for document in documents
+    if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-broker"
+)
+rotation_annotation = "nvt.io/dynamic-account-assertion-rotation-epoch"
+assert rotation_annotation not in deployment["spec"]["template"]["metadata"]["annotations"]
+assert rotation_annotation not in broker_deployment["spec"]["template"]["metadata"]["annotations"]
 pod = deployment["spec"]["template"]["spec"]
 containers = {container["name"]: container for container in pod["containers"]}
 portal = containers["credential-portal"]
@@ -119,6 +128,10 @@ assert config["dynamic"]["templates"] == [
 assert config.get("slots") is None
 
 deployment = next(document for document in portal_documents if document["kind"] == "Deployment")
+broker_deployment = next(
+    document for document in documents
+    if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-broker"
+)
 pod = deployment["spec"]["template"]["spec"]
 containers = {container["name"]: container for container in pod["containers"]}
 portal = containers["credential-portal"]
@@ -138,6 +151,13 @@ assert all(
     for env in portal.get("env", [])
 )
 assert not any("serviceAccountToken" in source for volume in pod["volumes"] for source in volume.get("projected", {}).get("sources", []))
+portal_epoch = deployment["spec"]["template"]["metadata"]["annotations"][
+    "nvt.io/dynamic-account-assertion-rotation-epoch"
+]
+broker_epoch = broker_deployment["spec"]["template"]["metadata"]["annotations"][
+    "nvt.io/dynamic-account-assertion-rotation-epoch"
+]
+assert portal_epoch == broker_epoch == "epoch-1"
 
 serialized = open(sys.argv[1], encoding="utf-8").read()
 for needle in (
@@ -147,6 +167,36 @@ for needle in (
     "provider_instance_id",
 ):
     assert needle not in serialized
+PY
+
+helm template nvt "${CHART}" -n nvt \
+  -f "${ROOT}/tests/operator/helm/credential-portal-dynamic-values.yaml" \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=epoch-2 >"${DYNAMIC_ROTATED_RENDER}"
+python3 - "${DYNAMIC_RENDER}" "${DYNAMIC_ROTATED_RENDER}" <<'PY'
+import sys
+
+import yaml
+
+annotation = "nvt.io/dynamic-account-assertion-rotation-epoch"
+
+def epochs(path):
+    documents = [document for document in yaml.safe_load_all(open(path, encoding="utf-8")) if document]
+    deployments = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document.get("kind") == "Deployment"
+        and document.get("metadata", {}).get("name") in {"nvt-broker", "nvt-credential-portal"}
+    }
+    return {
+        name: deployment["spec"]["template"]["metadata"]["annotations"][annotation]
+        for name, deployment in deployments.items()
+    }
+
+before = epochs(sys.argv[1])
+after = epochs(sys.argv[2])
+assert before == {"nvt-broker": "epoch-1", "nvt-credential-portal": "epoch-1"}
+assert after == {"nvt-broker": "epoch-2", "nvt-credential-portal": "epoch-2"}
+assert all(after[name] != before[name] for name in before)
 PY
 
 helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
@@ -321,6 +371,12 @@ expect_dynamic_failure broker-network-policy \
 expect_dynamic_failure broker-auth-secret \
   'broker authentication must reference the broker dynamic assertion key' \
   --set-string credentialPortal.dynamic.broker.authentication.existingSecret=wrong-secret
+expect_dynamic_failure missing-rotation-epoch \
+  'requires broker.dynamicAccountAssertionRotationEpoch' \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=
+expect_dynamic_failure invalid-rotation-epoch \
+  'bounded non-secret rotation identifier' \
+  --set-string broker.dynamicAccountAssertionRotationEpoch='not valid'
 expect_dynamic_failure broker-assertion-window \
   'assertion TTL must not exceed the broker assertion window' \
   --set broker.config.dynamic-accounts.authentication.max-assertion-seconds=30

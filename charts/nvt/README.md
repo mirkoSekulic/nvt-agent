@@ -918,9 +918,19 @@ exclusive with static slots and absent by default.
 
 The browser cannot choose provider plugins, commands, paths, provider instance
 ids, Secrets, profiles, grants, capabilities, runtime settings, or egress
-policy. A different active template fails closed before runner execution;
-template-switch and AgentRun coordination remain outside this chart flow for
-#211. See [credential portal dynamic mode](../../docs/credential-portal.md#dynamic-principal-owned-mode).
+policy. Authenticated readiness preserves the committed template for ready,
+unready, and revoked accounts. A different template fails closed before runner
+execution, and revocation retains a broker-owned template lock;
+template-switch authorization and AgentRun coordination remain outside this
+chart flow for #211. See [credential portal dynamic mode](../../docs/credential-portal.md#dynamic-principal-owned-mode).
+
+Dynamic mode also requires the non-secret
+`broker.dynamicAccountAssertionRotationEpoch`. When the externally managed
+assertion-key Secret changes, increment this epoch in the same GitOps change.
+The chart places the value on both broker and portal Pod templates so both
+startup-only key consumers roll together; it never renders or hashes the key
+material. Wait for both rollouts before considering rotation complete. A
+temporary version mismatch fails authentication closed.
 
 `gateway.credentialPortal.url` adds only a dashboard link. The gateway does not
 proxy the portal, share authentication state, or depend on its availability.

@@ -410,7 +410,15 @@ func (s *Server) dynamicAction(
 	case accountStateNotEnrolled:
 		return dynamicActionEnroll, nil
 	case accountStateUnready:
+		if account.Template != templateName {
+			return "", errDynamicTemplateConflict
+		}
 		return dynamicActionReconnect, nil
+	case accountStateRevoked:
+		if account.Template != templateName {
+			return "", errDynamicTemplateConflict
+		}
+		return dynamicActionEnroll, nil
 	case accountStateReady:
 		if account.Template != templateName {
 			return "", errDynamicTemplateConflict
@@ -738,7 +746,7 @@ var dynamicPortalTemplate = template.Must(template.New("dynamic-portal").Parse(`
 <label for="template">Credential template</label><select id="template"><option value="">Select a template</option>{{range .Templates}}<option value="{{.Name}}">{{.Label}}</option>{{end}}</select>
 <fieldset><legend>Provider login</legend><button id="connect" type="button">{{.ActionLabel}}</button><div id="action" class="action hidden"><a id="provider" href="#" target="_blank" rel="noopener noreferrer">Continue with provider</a><p id="device"></p><div id="paste" class="hidden"><label for="code">Authorization code</label><br><input id="code" type="password" value="" autocomplete="off"><button id="submit-code" type="button">Submit authorization code</button></div><button id="cancel" type="button">Cancel</button></div><p class="status" id="status" role="status"></p></fieldset>
 {{if .RecoveryUpload}}<fieldset><legend>Recovery upload (optional)</legend><p>This administrator-enabled alternative replaces provider login; it is not a prerequisite. Upload only a valid credential document for the selected template.</p><input id="credential" type="file" accept="application/json,.json"><br><label><input id="confirm" type="checkbox"> I understand this enrolls or replaces my current credential.</label><br><button id="upload" type="button">Upload recovery credential</button><p class="status" id="upload-status" role="status"></p></fieldset>{{end}}
-{{if ne .Account.State "not-enrolled"}}<button id="revoke" type="button">Revoke credential account</button>{{end}} <button id="logout" type="button">Log out</button>
+{{if or (eq .Account.State "ready") (eq .Account.State "unready")}}<button id="revoke" type="button">Revoke credential account</button>{{end}} <button id="logout" type="button">Log out</button>
 <script>
 const csrf={{.CSRF}},base={{.BasePath}},status=document.getElementById('status');
 let enrollment='';

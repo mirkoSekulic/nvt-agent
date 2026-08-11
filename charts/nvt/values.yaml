@@ -69,6 +69,10 @@ broker:
     tag: ""
     pullPolicy: IfNotPresent
   envSecretName: ""
+  # Non-secret GitOps rotation generation for the dynamic principal assertion
+  # key in envSecretName. Dynamic portal deployments require a non-empty value;
+  # change it in the same release update as the external Secret key.
+  dynamicAccountAssertionRotationEpoch: ""
   tls:
     # Serve the broker over TLS. The egressd->broker leg carries real
     # credentials through the agent's network namespace, so mediated
