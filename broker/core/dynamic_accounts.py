@@ -427,6 +427,11 @@ class DynamicAccountManager:
             template = self.config.credential_templates.get(template_name)
             if template is None:
                 raise ProviderError("unknown-template", "unknown-template", 400)
+            if current is not None and current["state"] == "revoked" and current["template"] != template_name:
+                # The tombstone keeps the committed template locked. A future
+                # trusted run-coordination contract may authorize a switch;
+                # an enrollment frontend cannot do so implicitly today.
+                raise ProviderError("template-switch-not-authorized", "template-switch-not-authorized", 409)
             if current is None and len(self._accounts) >= self.config.max_accounts:
                 raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
             provider_id = self._new_provider_id()
@@ -484,14 +489,19 @@ class DynamicAccountManager:
     def readiness(self, principal):
         with self._lock:
             self._require_healthy()
-            current = self._own_active(principal)
+            current = self._own_account(principal)
+            if current["state"] == "revoked":
+                return {
+                    "ok": True,
+                    "state": "revoked",
+                    "template": current["template"],
+                    "generation": current["generation"],
+                }
             provider = self._providers.get(current["provider_instance_id"])
             ready = self._provider_is_ready(provider)
-            if not ready:
-                raise ProviderError("account-unready", "account-unready", 503)
             return {
                 "ok": True,
-                "state": "ready",
+                "state": "ready" if ready else "unready",
                 "template": current["template"],
                 "generation": current["generation"],
             }

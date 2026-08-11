@@ -111,7 +111,7 @@ receives the same `account-not-found` response as a principal with no account.
 | `POST /v1/principal-accounts/complete-enrollment` | `template`, `operation_id`, `credential_base64` | state, template, generation |
 | `POST /v1/principal-accounts/reconnect` | `operation_id`, `credential_base64` | state, template, generation |
 | `POST /v1/principal-accounts/revoke` | `operation_id` | revoked state |
-| `POST /v1/principal-accounts/readiness` | empty object | own state, template, generation |
+| `POST /v1/principal-accounts/readiness` | empty object | own `ready`, `unready`, or `revoked` state plus committed template and generation |
 | `POST /v1/principal-accounts/resolve` | empty object | own template, opaque provider instance id, generation |
 
 Bodies are at most 1,028 KiB, credential documents at most 768 KiB, and JSON is
@@ -125,12 +125,19 @@ provider template through the existing
 provider to accept its local state. A provider error is sanitized to
 `provider-initialization-failed`; no diagnostic may echo input.
 
-Exactly one template may be active for a principal. Reconnect always uses that
-committed template and provider instance id, and is permitted regardless of the
-current credential expiry. Switching is explicit: revoke, then complete a new
-enrollment with the new approved template. The last 32 mutation operation ids
-and their non-secret results are retained for bounded response-loss replay;
-callers must use a new id for a new mutation. Revoke is durable and idempotent.
+Exactly one template may be committed for a principal. Reconnect always uses
+that template and provider instance id, and is permitted regardless of the
+current credential expiry or account-local provider readiness. Authenticated
+readiness returns the committed template and generation even when that account
+is unready or revoked, so an enrollment frontend can reject a mismatched
+adapter before execution. Revoke is an emergency access-removal operation, not
+authorization to switch templates: its durable tombstone retains the committed
+template. The same template may be enrolled again, but a different template is
+rejected as `template-switch-not-authorized` until a future trusted
+run-coordination contract explicitly authorizes the change. The last 32
+mutation operation ids and their non-secret results are retained for bounded
+response-loss replay; callers must use a new id for a new mutation. Revoke is
+durable and idempotent.
 
 Provider instance ids use the reserved `dpa_` shape plus 192 random bits and
 are checked against static and loaded dynamic ids; enabling the feature rejects
@@ -163,17 +170,20 @@ symlinks, invalid modes, malformed metadata, unknown templates, collisions, or
 storage uncertainty latch the dynamic registry unavailable. A missing
 credential generation, invalid credential document, or provider initialization
 failure retains valid ownership metadata but publishes no provider handle for
-that account; its owner can reconnect or revoke while all resolution through
-that account fails closed. Revoke commits the tombstone before closing the
-provider and deleting its credential, so restart completes cleanup without
-restoring access.
+that account; authenticated readiness reports `unready` with its committed
+template and generation, its owner can reconnect or revoke, and all resolution
+through that account fails closed. Revoke commits a template-preserving
+tombstone before closing the provider and deleting its credential, so restart
+completes cleanup without restoring access or enabling an uncoordinated
+template switch.
 
 This broker contract deliberately contains no Kubernetes, portal UI, run,
-profile, grant, or egress coordination. The credential portal can call it in
-the #210 phase after its existing tokenless runner returns a validated document;
-the operator can resolve the opaque provider id in #211. Coordinating an active
-run during template replacement is outside this version; no implicit switch or
-fallback is performed.
+profile, grant, or egress coordination. The optional dynamic credential portal
+calls completion, reconnect, revoke, and readiness after its tokenless runner
+returns a validated document; it never exposes or consumes the resolved opaque
+provider id. Operator resolution remains #211. Coordinating an active run during
+template replacement is outside this version; no implicit switch or fallback is
+performed.
 
 ### Guest enrollment endpoints
 

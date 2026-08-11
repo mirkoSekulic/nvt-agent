@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.59`; otherwise the API server may prune the
+of, upgrading to chart `0.8.60`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.59 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.60 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.59 --namespace nvt --create-namespace
+  --version 0.8.60 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -887,9 +887,9 @@ for trust boundaries and traffic behavior.
 
 The chart can deploy the disabled-by-default standalone
 `nvt-credential-portal`. It provides authenticated, owner-bound Codex and Claude
-Connect/Reconnect flows through the official CLIs and writes their validated
-credential documents into a pre-created broker seed Secret. It never reads
-current values or participates in refresh/injection. A raw file recovery path
+Connect/Reconnect flows through the official CLIs. Static-slot mode writes each
+validated document into an exact pre-created broker seed Secret key. It never
+reads current values or participates in refresh/injection. A raw file recovery path
 is separately administrator-enabled and disabled by default. See
 [`docs/credential-portal.md`](https://github.com/mirkoSekulic/nvt-agent/blob/main/docs/credential-portal.md) for the security
 boundary, slot configuration, migration procedure, and removal behavior.
@@ -903,6 +903,34 @@ Generated results remain retrievable until the portal acknowledges a successful
 exact Secret patch; cancellation and bounded expiry wipe retained bytes and
 reclaim runner capacity. Portal readiness includes an authenticated runner
 dependency check but makes no provider-credential health claim.
+
+An independently enabled `credentialPortal.dynamic` mode replaces configured
+static slots with administrator-approved public credential templates. Eligible
+principals enroll, reconnect, inspect their own non-secret readiness, or revoke
+through the broker's principal-account API. The portal mints only short-lived
+exact issuer+immutable-subject assertions for the fixed broker audience and
+uses verified TLS with a mounted CA. The broker CA and assertion key come from
+existing Secret file mounts visible only to the portal container; the runner
+receives neither, and dynamic mode renders no portal Secret-patch Role or
+ServiceAccount token. Helm requires the public template name/adapter mappings
+to match the enabled broker credential templates. Dynamic mode is mutually
+exclusive with static slots and absent by default.
+
+The browser cannot choose provider plugins, commands, paths, provider instance
+ids, Secrets, profiles, grants, capabilities, runtime settings, or egress
+policy. Authenticated readiness preserves the committed template for ready,
+unready, and revoked accounts. A different template fails closed before runner
+execution, and revocation retains a broker-owned template lock;
+template-switch authorization and AgentRun coordination remain outside this
+chart flow for #211. See [credential portal dynamic mode](../../docs/credential-portal.md#dynamic-principal-owned-mode).
+
+Dynamic mode also requires the non-secret
+`broker.dynamicAccountAssertionRotationEpoch`. When the externally managed
+assertion-key Secret changes, increment this epoch in the same GitOps change.
+The chart places the value on both broker and portal Pod templates so both
+startup-only key consumers roll together; it never renders or hashes the key
+material. Wait for both rollouts before considering rotation complete. A
+temporary version mismatch fails authentication closed.
 
 `gateway.credentialPortal.url` adds only a dashboard link. The gateway does not
 proxy the portal, share authentication state, or depend on its availability.

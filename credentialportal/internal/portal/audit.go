@@ -33,3 +33,23 @@ func (a *AuditLogger) Enrollment(principal Principal, slot Slot, outcome, reason
 		return
 	}
 }
+
+func (a *AuditLogger) DynamicAccount(principal Principal, operation, outcome, reason string) {
+	event := struct {
+		Event     string `json:"event"`
+		Timestamp string `json:"timestamp"`
+		Issuer    string `json:"issuer"`
+		Subject   string `json:"subject"`
+		Operation string `json:"operation"`
+		Outcome   string `json:"outcome"`
+		Reason    string `json:"reason,omitempty"`
+	}{
+		"credential_account", a.now().UTC().Format(time.RFC3339Nano), principal.Issuer,
+		principal.Subject, operation, outcome, reason,
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := json.NewEncoder(a.out).Encode(event); err != nil {
+		return
+	}
+}

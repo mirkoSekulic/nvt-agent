@@ -8,6 +8,13 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 )
 
+const (
+	testDynamicTemplateOne = "approved-one"
+	testDynamicTemplateTwo = "approved-two"
+	testEligibleValue      = "approved"
+	testEligibilityGroups  = "groups"
+)
+
 func TestConfigStrictlyRejectsUnknownDuplicateAndUnsafeSlotPolicy(t *testing.T) {
 	valid, err := json.Marshal(testConfig())
 	if err != nil {
@@ -116,5 +123,112 @@ func TestConfigAppliesAndStrictlyValidatesEnrollmentBounds(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("invalid enrollment limits were accepted")
 		}
+	}
+}
+
+func testDynamicConfig() Config {
+	cfg := testConfig()
+	cfg.Slots = nil
+	cfg.RecoveryUpload.Enabled = false
+	cfg.Auth.Eligibility = &eligibility.Policy{
+		Default: eligibility.DefaultDeny,
+		Rules: []eligibility.Rule{{
+			ID: "dynamic-admission", Effect: eligibility.EffectAllow, Authenticated: true,
+		}},
+	}
+	cfg.Dynamic = DynamicConfig{
+		Enabled: true,
+		Broker: DynamicBrokerConfig{
+			URL: "https://nvt-broker.nvt.svc:7347", CAFile: "/var/run/nvt-broker/ca.crt",
+			AssertionKeyFile: "/var/run/nvt-broker/assertion-key",
+		},
+		Templates: []DynamicCredentialTemplate{
+			{Name: testDynamicTemplateOne, Label: "Approved one", Adapter: AdapterCodexOAuthFile},
+			{Name: testDynamicTemplateTwo, Label: "Approved two", Adapter: AdapterClaudeOAuthFile},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		panic(err)
+	}
+	return cfg
+}
+
+func TestDynamicConfigIsExplicitMutuallyExclusiveAndStrict(t *testing.T) {
+	valid := testDynamicConfig()
+	if valid.Dynamic.Broker.AssertionTTLSeconds != defaultAssertionTTL ||
+		valid.Dynamic.Broker.RequestTimeoutSeconds != defaultBrokerTimeout ||
+		valid.Dynamic.Broker.MaxResponseBytes != defaultBrokerResponse {
+		t.Fatal("dynamic broker defaults were not applied")
+	}
+	invalid := make([]Config, 0, 10)
+
+	withSlot := testDynamicConfig()
+	withSlot.Slots = testConfig().Slots[:1]
+	invalid = append(invalid, withSlot)
+
+	withoutEligibility := testDynamicConfig()
+	withoutEligibility.Auth.Eligibility = nil
+	invalid = append(invalid, withoutEligibility)
+
+	insecureBroker := testDynamicConfig()
+	insecureBroker.Dynamic.Broker.URL = "http://nvt-broker.nvt.svc:7347"
+	invalid = append(invalid, insecureBroker)
+
+	brokerPath := testDynamicConfig()
+	brokerPath.Dynamic.Broker.URL += "/api"
+	invalid = append(invalid, brokerPath)
+
+	duplicateTemplate := testDynamicConfig()
+	duplicateTemplate.Dynamic.Templates[1].Name = duplicateTemplate.Dynamic.Templates[0].Name
+	invalid = append(invalid, duplicateTemplate)
+
+	unsupportedAdapter := testDynamicConfig()
+	unsupportedAdapter.Dynamic.Templates[0].Adapter = "caller-plugin"
+	invalid = append(invalid, unsupportedAdapter)
+
+	controlLabel := testDynamicConfig()
+	controlLabel.Dynamic.Templates[0].Label = "unsafe\tlabel"
+	invalid = append(invalid, controlLabel)
+
+	oversizedCredential := testDynamicConfig()
+	oversizedCredential.Enrollment.MaxOutputBytes = maxBrokerCredential + 1
+	invalid = append(invalid, oversizedCredential)
+
+	oversizedRecovery := testDynamicConfig()
+	oversizedRecovery.RecoveryUpload.Enabled = true
+	oversizedRecovery.MaxUploadBytes = maxBrokerCredential + 1
+	invalid = append(invalid, oversizedRecovery)
+
+	wrongPrefix := testDynamicConfig()
+	wrongPrefix.PublicURL = "https://portal.example/other"
+	invalid = append(invalid, wrongPrefix)
+
+	for index := range invalid {
+		if err := invalid[index].Validate(); err == nil {
+			t.Fatalf("unsafe dynamic config %d was accepted", index)
+		}
+	}
+
+	disabledWithDynamicConfig := testConfig()
+	disabledWithDynamicConfig.Dynamic.Templates = []DynamicCredentialTemplate{{
+		Name: "dormant", Label: "Dormant", Adapter: AdapterClaudeOAuthFile,
+	}}
+	if err := disabledWithDynamicConfig.Validate(); err == nil {
+		t.Fatal("disabled dynamic mode accepted ambiguous dormant templates")
+	}
+}
+
+func TestStaticConfigCompatibilityRemainsSlotOwnedWithoutDynamicMode(t *testing.T) {
+	cfg := testConfig()
+	if cfg.Dynamic.Enabled || len(cfg.Dynamic.Templates) != 0 {
+		t.Fatal("static fixture unexpectedly enabled dynamic mode")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("existing static config was rejected: %v", err)
+	}
+	auth := &Authenticator{cfg: cfg}
+	if !auth.admits(Principal{Issuer: testIdentityIssuer, Subject: testAliceSubject}, nil) ||
+		auth.admits(Principal{Issuer: testIdentityIssuer, Subject: "previously-unknown"}, nil) {
+		t.Fatal("static exact-owner admission behavior changed")
 	}
 }

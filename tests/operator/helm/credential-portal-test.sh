@@ -7,6 +7,8 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 RENDER="${WORKDIR}/portal.yaml"
 OAUTH_RENDER="${WORKDIR}/portal-oauth.yaml"
+DYNAMIC_RENDER="${WORKDIR}/portal-dynamic.yaml"
+DYNAMIC_ROTATED_RENDER="${WORKDIR}/portal-dynamic-rotated.yaml"
 
 helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" >"${RENDER}"
 
@@ -22,7 +24,7 @@ if grep -Eq 'verbs:.*(get|list|create|delete)' "${PORTAL_ROLE}"; then
 fi
 grep -Fq 'resourceNames:' "${RENDER}"
 grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
-grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.59"' "${RENDER}"
+grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.60"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
@@ -41,16 +43,32 @@ grep -Fq '"eligibilityClaimSource": "access_token"' "${RENDER}"
 grep -Fq '"accessTokenAudience": "nvt-eligibility-api"' "${RENDER}"
 
 python3 - "${RENDER}" <<'PY'
+import json
 import sys
 
 import yaml
 
 documents = [document for document in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if document]
+config_map = next(
+    document
+    for document in documents
+    if document.get("kind") == "ConfigMap" and document["metadata"]["name"] == "nvt-credential-portal"
+)
+config = json.loads(config_map["data"]["config.json"])
+assert "dynamic" not in config
 deployment = next(
     document
     for document in documents
     if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-credential-portal"
 )
+broker_deployment = next(
+    document
+    for document in documents
+    if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-broker"
+)
+rotation_annotation = "nvt.io/dynamic-account-assertion-rotation-epoch"
+assert rotation_annotation not in deployment["spec"]["template"]["metadata"]["annotations"]
+assert rotation_annotation not in broker_deployment["spec"]["template"]["metadata"]["annotations"]
 pod = deployment["spec"]["template"]["spec"]
 containers = {container["name"]: container for container in pod["containers"]}
 portal = containers["credential-portal"]
@@ -71,6 +89,114 @@ assert not any(
     mount["name"] == "config" or mount["mountPath"] == "/etc/nvt-credential-portal"
     for mount in runner["volumeMounts"]
 )
+PY
+
+helm template nvt "${CHART}" -n nvt \
+  -f "${ROOT}/tests/operator/helm/credential-portal-dynamic-values.yaml" >"${DYNAMIC_RENDER}"
+
+python3 - "${DYNAMIC_RENDER}" <<'PY'
+import json
+import sys
+
+import yaml
+
+documents = [document for document in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if document]
+portal_documents = [
+    document for document in documents
+    if document.get("metadata", {}).get("name") == "nvt-credential-portal"
+]
+kinds = {document["kind"] for document in portal_documents}
+assert {"ServiceAccount", "ConfigMap", "Deployment", "Service", "NetworkPolicy"} <= kinds
+assert "Role" not in kinds
+assert "RoleBinding" not in kinds
+
+config_map = next(document for document in portal_documents if document["kind"] == "ConfigMap")
+config = json.loads(config_map["data"]["config.json"])
+assert config["dynamic"]["enabled"] is True
+assert config["dynamic"]["broker"] == {
+    "assertionKeyFile": "/var/run/nvt-broker/auth/assertion-key",
+    "assertionTTLSeconds": 60,
+    "caFile": "/var/run/nvt-broker/ca/ca.crt",
+    "maxResponseBytes": 65536,
+    "requestTimeoutSeconds": 10,
+    "url": "https://nvt-broker:7347",
+}
+assert config["dynamic"]["templates"] == [
+    {"adapter": "codex-oauth-file", "label": "Approved one", "name": "approved-one"},
+    {"adapter": "claude-oauth-file", "label": "Approved two", "name": "approved-two"},
+]
+assert config.get("slots") is None
+
+deployment = next(document for document in portal_documents if document["kind"] == "Deployment")
+broker_deployment = next(
+    document for document in documents
+    if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-broker"
+)
+pod = deployment["spec"]["template"]["spec"]
+containers = {container["name"]: container for container in pod["containers"]}
+portal = containers["credential-portal"]
+runner = containers["credential-runner"]
+portal_mounts = {mount["name"] for mount in portal["volumeMounts"]}
+runner_mounts = {mount["name"] for mount in runner["volumeMounts"]}
+volume_names = {volume["name"] for volume in pod["volumes"]}
+
+assert pod["automountServiceAccountToken"] is False
+assert "kube-api-access" not in volume_names
+assert {"broker-ca", "broker-assertion-auth"} <= portal_mounts
+assert not ({"config", "broker-ca", "broker-assertion-auth", "kube-api-access"} & runner_mounts)
+assert not runner.get("env")
+assert not runner.get("envFrom")
+assert all(
+    env.get("name") not in {"NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY", "NVT_BROKER_CA"}
+    for env in portal.get("env", [])
+)
+assert not any("serviceAccountToken" in source for volume in pod["volumes"] for source in volume.get("projected", {}).get("sources", []))
+portal_epoch = deployment["spec"]["template"]["metadata"]["annotations"][
+    "nvt.io/dynamic-account-assertion-rotation-epoch"
+]
+broker_epoch = broker_deployment["spec"]["template"]["metadata"]["annotations"][
+    "nvt.io/dynamic-account-assertion-rotation-epoch"
+]
+assert portal_epoch == broker_epoch == "epoch-1"
+
+serialized = open(sys.argv[1], encoding="utf-8").read()
+for needle in (
+    "DYNAMIC-PORTAL-CREDENTIAL-NEEDLE",
+    "refresh-token-needle",
+    "credential_base64",
+    "provider_instance_id",
+):
+    assert needle not in serialized
+PY
+
+helm template nvt "${CHART}" -n nvt \
+  -f "${ROOT}/tests/operator/helm/credential-portal-dynamic-values.yaml" \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=epoch-2 >"${DYNAMIC_ROTATED_RENDER}"
+python3 - "${DYNAMIC_RENDER}" "${DYNAMIC_ROTATED_RENDER}" <<'PY'
+import sys
+
+import yaml
+
+annotation = "nvt.io/dynamic-account-assertion-rotation-epoch"
+
+def epochs(path):
+    documents = [document for document in yaml.safe_load_all(open(path, encoding="utf-8")) if document]
+    deployments = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document.get("kind") == "Deployment"
+        and document.get("metadata", {}).get("name") in {"nvt-broker", "nvt-credential-portal"}
+    }
+    return {
+        name: deployment["spec"]["template"]["metadata"]["annotations"][annotation]
+        for name, deployment in deployments.items()
+    }
+
+before = epochs(sys.argv[1])
+after = epochs(sys.argv[2])
+assert before == {"nvt-broker": "epoch-1", "nvt-credential-portal": "epoch-1"}
+assert after == {"nvt-broker": "epoch-2", "nvt-credential-portal": "epoch-2"}
+assert all(after[name] != before[name] for name in before)
 PY
 
 helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
@@ -213,6 +339,71 @@ grep -Fq 'eligibilityClaimSource must be id_token, access_token, or userinfo' "$
 helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set-string 'credentialPortal.auth.eligibility.rules[0].id=Approved party legacy rule' \
   --set-string 'credentialPortal.auth.eligibility.rules[0].where.all[0].values[1]=0192:123456789' >/dev/null
+
+expect_dynamic_failure() {
+  local name="$1"
+  local message="$2"
+  shift 2
+  if helm template nvt "${CHART}" -n nvt \
+    -f "${ROOT}/tests/operator/helm/credential-portal-dynamic-values.yaml" \
+    "$@" >/dev/null 2>"${WORKDIR}/${name}.txt"; then
+    echo "expected dynamic credential portal ${name} validation to fail" >&2
+    exit 1
+  fi
+  grep -Fq "${message}" "${WORKDIR}/${name}.txt"
+}
+
+expect_dynamic_failure static-slot \
+  'static slots and dynamic templates are mutually exclusive' \
+  --set-string credentialPortal.slots[0].name=forbidden-static-slot
+expect_dynamic_failure missing-eligibility \
+  'requires an explicit eligibility policy' \
+  --set credentialPortal.auth.eligibility=null
+expect_dynamic_failure path-prefix \
+  'publicURL must use the /agents/credentials path prefix' \
+  --set-string credentialPortal.publicURL=https://agents.example.test/other
+expect_dynamic_failure broker-tls \
+  'broker.url must be an HTTPS origin without a path' \
+  --set-string credentialPortal.dynamic.broker.url=http://nvt-broker:7347
+expect_dynamic_failure broker-network-policy \
+  'broker port must be allowed by networkPolicy.egressTCPPorts' \
+  --set credentialPortal.networkPolicy.egressTCPPorts='{443}'
+expect_dynamic_failure broker-auth-secret \
+  'broker authentication must reference the broker dynamic assertion key' \
+  --set-string credentialPortal.dynamic.broker.authentication.existingSecret=wrong-secret
+expect_dynamic_failure missing-rotation-epoch \
+  'requires broker.dynamicAccountAssertionRotationEpoch' \
+  --set-string broker.dynamicAccountAssertionRotationEpoch=
+expect_dynamic_failure invalid-rotation-epoch \
+  'bounded non-secret rotation identifier' \
+  --set-string broker.dynamicAccountAssertionRotationEpoch='not valid'
+expect_dynamic_failure broker-assertion-window \
+  'assertion TTL must not exceed the broker assertion window' \
+  --set broker.config.dynamic-accounts.authentication.max-assertion-seconds=30
+expect_dynamic_failure unknown-template \
+  'is not an approved broker credential template' \
+  --set-string credentialPortal.dynamic.templates[0].name=not-approved
+expect_dynamic_failure adapter-drift \
+  'adapter does not match the broker credential template' \
+  --set-string credentialPortal.dynamic.templates[0].adapter=claude-oauth-file
+expect_dynamic_failure broker-disabled \
+  'requires broker.config.dynamic-accounts.enabled=true' \
+  --set broker.config.dynamic-accounts.enabled=false
+expect_dynamic_failure output-limit \
+  'must not exceed the broker 768 KiB credential limit' \
+  --set credentialPortal.enrollment.maxOutputBytes=786433
+expect_dynamic_failure recovery-output-limit \
+  'maxUploadBytes must not exceed the broker 768 KiB credential limit' \
+  --set credentialPortal.maxUploadBytes=786433
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.dynamic.broker.url=https://nvt-broker:7347 \
+  >/dev/null 2>"${WORKDIR}/dormant-dynamic.txt"; then
+  echo "expected disabled dynamic credential portal configuration to fail" >&2
+  exit 1
+fi
+grep -Fq 'disabled credentialPortal.dynamic must not carry broker or template configuration' \
+  "${WORKDIR}/dormant-dynamic.txt"
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set credentialPortal.enabled=false >"${WORKDIR}/disabled.yaml"; then :; fi

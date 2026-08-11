@@ -189,9 +189,12 @@ are stored only in generation files with mode `0600`; an atomic `metadata.json`
 manifest selects the committed generation. Broker startup recovers recognized
 interrupted replacements and fails global readiness closed on registry/storage
 corruption or writer uncertainty. Credential or provider initialization failure
-is isolated to that principal: its readiness and resolution fail closed, its
-owner can reconnect or revoke, and static providers plus healthy dynamic
-accounts remain available.
+is isolated to that principal: authenticated readiness reports its non-secret
+`unready` state, committed template, and generation; resolution fails closed;
+its owner can reconnect or revoke; and static providers plus healthy dynamic
+accounts remain available. Revocation retains a durable template tombstone.
+Re-enrollment may use that same template, but switching remains rejected until
+a future trusted run-coordination contract authorizes it.
 
 The complete principal-bound API, storage algorithm, idempotency window, and
 future #210/#211 integration boundary are documented in

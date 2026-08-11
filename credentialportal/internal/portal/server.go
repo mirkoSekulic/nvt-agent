@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"mime"
@@ -20,8 +21,11 @@ type Server struct {
 	audit       *AuditLogger
 	enrollments *EnrollmentManager
 	runner      CredentialRunner
+	broker      PrincipalAccountBroker
 	cfg         Config
 }
+
+var errDynamicTemplateConflict = errors.New("dynamic credential template conflicts with the active account")
 
 func NewServer(
 	cfg Config,
@@ -29,11 +33,16 @@ func NewServer(
 	patcher SecretPatcher,
 	audit *AuditLogger,
 	runner CredentialRunner,
+	brokers ...PrincipalAccountBroker,
 ) *Server {
-	return &Server{
+	server := &Server{
 		cfg: cfg, auth: auth, patcher: patcher, audit: audit, runner: runner,
-		enrollments: NewEnrollmentManager(cfg, patcher, audit, runner),
+		enrollments: NewEnrollmentManager(cfg, patcher, audit, runner, brokers...),
 	}
+	if len(brokers) == 1 {
+		server.broker = brokers[0]
+	}
+	return server
 }
 
 func (s *Server) Close() {
@@ -69,6 +78,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "dependency unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		if s.cfg.Dynamic.Enabled && (s.broker == nil || s.broker.Ready(ctx) != nil) {
+			http.Error(w, "dependency unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case s.cfg.Path("/login"):
@@ -93,7 +106,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		s.dashboard(w, principal, csrf)
+		s.dashboard(r.Context(), w, principal, csrf)
 		return
 	}
 	if r.URL.Path == s.cfg.Path("/logout") {
@@ -106,24 +119,54 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	prefix := s.cfg.Path("/slots/")
-	if strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/connect") {
-		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/connect")
-		if name == "" || strings.Contains(name, "/") {
-			http.NotFound(w, r)
+	if s.cfg.Dynamic.Enabled {
+		if r.URL.Path == s.cfg.Path("/account") {
+			s.dynamicAccount(w, r, principal)
 			return
 		}
-		s.connect(w, r, principal, csrf, authExpiresAt, name)
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/credential") {
-		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/credential")
-		if name == "" || strings.Contains(name, "/") {
-			http.NotFound(w, r)
+		if r.URL.Path == s.cfg.Path("/account/revoke") {
+			s.dynamicRevoke(w, r, principal, csrf)
 			return
 		}
-		s.enroll(w, r, principal, csrf, name)
-		return
+		prefix := s.cfg.Path("/templates/")
+		if strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/connect") {
+			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/connect")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			s.dynamicConnect(w, r, principal, csrf, authExpiresAt, name)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/credential") {
+			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/credential")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			s.dynamicRecovery(w, r, principal, csrf, name)
+			return
+		}
+	} else {
+		prefix := s.cfg.Path("/slots/")
+		if strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/connect") {
+			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/connect")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			s.connect(w, r, principal, csrf, authExpiresAt, name)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/credential") {
+			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/credential")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			s.enroll(w, r, principal, csrf, name)
+			return
+		}
 	}
 	enrollmentPrefix := s.cfg.Path("/enrollments/")
 	if tail, found := strings.CutPrefix(r.URL.Path, enrollmentPrefix); found {
@@ -145,7 +188,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (s *Server) dashboard(w http.ResponseWriter, principal Principal, csrf string) {
+func (s *Server) dashboard(ctx context.Context, w http.ResponseWriter, principal Principal, csrf string) {
+	if s.cfg.Dynamic.Enabled {
+		s.dynamicDashboard(ctx, w, principal, csrf)
+		return
+	}
 	slots := []Slot{}
 	for _, slot := range s.cfg.Slots {
 		if principal.Owns(slot) {
@@ -165,6 +212,259 @@ func (s *Server) dashboard(w http.ResponseWriter, principal Principal, csrf stri
 		Slots: slots, RecoveryUpload: s.cfg.RecoveryUpload.Enabled,
 	}); err != nil {
 		return
+	}
+}
+
+func (s *Server) dynamicDashboard(ctx context.Context, w http.ResponseWriter, principal Principal, csrf string) {
+	account := DynamicAccountState{State: "unavailable"}
+	if s.broker != nil {
+		if current, err := s.broker.Account(ctx, principal); err == nil {
+			account = current
+		}
+	}
+	actionLabel := "Connect"
+	if account.State == accountStateReady || account.State == accountStateUnready {
+		actionLabel = "Reconnect"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := dynamicPortalTemplate.Execute(w, struct {
+		CSRF           string
+		BasePath       string
+		PrincipalName  string
+		ActionLabel    string
+		Account        DynamicAccountState
+		Templates      []DynamicCredentialTemplate
+		RecoveryUpload bool
+	}{
+		CSRF: csrf, BasePath: s.cfg.basePath, PrincipalName: principal.DisplayName,
+		ActionLabel: actionLabel, Account: account, Templates: s.cfg.Dynamic.Templates,
+		RecoveryUpload: s.cfg.RecoveryUpload.Enabled,
+	}); err != nil {
+		return
+	}
+}
+
+func (s *Server) dynamicAccount(w http.ResponseWriter, r *http.Request, principal Principal) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet || r.URL.RawQuery != "" {
+		http.NotFound(w, r)
+		return
+	}
+	account, err := s.broker.Account(r.Context(), principal)
+	if err != nil {
+		http.Error(w, "broker-unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) dynamicConnect(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal Principal,
+	csrf string,
+	authExpiresAt time.Time,
+	templateName string,
+) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" {
+		http.NotFound(w, r)
+		return
+	}
+	templateConfig, ok := s.dynamicTemplate(templateName)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	slot := dynamicAuditSlot(principal, templateConfig)
+	if !validMutation(r, s.cfg.PublicOrigin(), csrf) {
+		s.reject(w, principal, slot, http.StatusForbidden, "csrf")
+		return
+	}
+	if r.Header.Get(confirmHeader) != confirmationReplace {
+		s.reject(w, principal, slot, http.StatusBadRequest, "confirmation-required")
+		return
+	}
+	action, err := s.dynamicAction(r.Context(), principal, templateName)
+	if errors.Is(err, errDynamicTemplateConflict) {
+		s.reject(w, principal, slot, http.StatusConflict, "template-conflict")
+		return
+	}
+	if err != nil {
+		s.reject(w, principal, slot, http.StatusServiceUnavailable, "broker-unavailable")
+		return
+	}
+	status, err := s.enrollments.StartDynamic(
+		r.Context(), principal, templateConfig, action, authExpiresAt,
+	)
+	if errors.Is(err, ErrEnrollmentBusy) {
+		s.reject(w, principal, slot, http.StatusTooManyRequests, "capacity")
+		return
+	}
+	if err != nil {
+		s.reject(w, principal, slot, http.StatusBadGateway, "runner-start-failed")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, status)
+}
+
+func (s *Server) dynamicRecovery(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal Principal,
+	csrf, templateName string,
+) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.cfg.RecoveryUpload.Enabled || r.Method != http.MethodPut || r.URL.RawQuery != "" {
+		http.NotFound(w, r)
+		return
+	}
+	templateConfig, ok := s.dynamicTemplate(templateName)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	slot := dynamicAuditSlot(principal, templateConfig)
+	s.audit.Enrollment(principal, slot, "attempt", "")
+	if !validMutation(r, s.cfg.PublicOrigin(), csrf) {
+		s.reject(w, principal, slot, http.StatusForbidden, "csrf")
+		return
+	}
+	if r.Header.Get(confirmHeader) != confirmationReplace {
+		s.reject(w, principal, slot, http.StatusBadRequest, "confirmation-required")
+		return
+	}
+	action, actionErr := s.dynamicAction(r.Context(), principal, templateName)
+	if errors.Is(actionErr, errDynamicTemplateConflict) {
+		s.reject(w, principal, slot, http.StatusConflict, "template-conflict")
+		return
+	}
+	if actionErr != nil {
+		s.reject(w, principal, slot, http.StatusServiceUnavailable, "broker-unavailable")
+		return
+	}
+	body, ok := s.readRecoveryCredential(w, r, principal, slot)
+	if !ok {
+		return
+	}
+	defer clearBytes(body)
+	if err := ValidateCredential(templateConfig.Adapter, body); err != nil {
+		s.reject(w, principal, slot, http.StatusBadRequest, "invalid-credential")
+		return
+	}
+	operationID, err := randomToken(32)
+	if err != nil {
+		s.reject(w, principal, slot, http.StatusServiceUnavailable, "broker-unavailable")
+		return
+	}
+	if action == dynamicActionEnroll {
+		err = s.broker.CompleteEnrollment(r.Context(), principal, templateName, operationID, body)
+	} else {
+		err = s.broker.Reconnect(r.Context(), principal, operationID, body)
+	}
+	if err != nil {
+		reason := brokerCompletionReason(err)
+		status := http.StatusBadGateway
+		if reason == "account-conflict" {
+			status = http.StatusConflict
+		}
+		s.reject(w, principal, slot, status, reason)
+		return
+	}
+	s.audit.Enrollment(principal, slot, "success", "")
+	writeJSON(w, http.StatusOK, map[string]string{"outcome": "updated", "template": templateName})
+}
+
+func (s *Server) dynamicRevoke(w http.ResponseWriter, r *http.Request, principal Principal, csrf string) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" ||
+		!validMutation(r, s.cfg.PublicOrigin(), csrf) || r.Header.Get(confirmHeader) != "revoke" {
+		http.Error(w, "request rejected", http.StatusForbidden)
+		return
+	}
+	operationID, err := randomToken(32)
+	if err == nil {
+		err = s.broker.Revoke(r.Context(), principal, operationID)
+	}
+	if err != nil {
+		s.audit.DynamicAccount(principal, "revoke", "failure", brokerCompletionReason(err))
+		http.Error(w, "account-update-failed", http.StatusBadGateway)
+		return
+	}
+	s.enrollments.CancelPrincipal(principal)
+	s.audit.DynamicAccount(principal, "revoke", "success", "")
+	writeJSON(w, http.StatusOK, DynamicAccountState{State: accountStateRevoked})
+}
+
+func (s *Server) dynamicAction(
+	ctx context.Context,
+	principal Principal,
+	templateName string,
+) (string, error) {
+	account, err := s.broker.Account(ctx, principal)
+	if err != nil {
+		return "", fmt.Errorf("read own dynamic account state: %w", err)
+	}
+	switch account.State {
+	case accountStateNotEnrolled:
+		return dynamicActionEnroll, nil
+	case accountStateUnready:
+		if account.Template != templateName {
+			return "", errDynamicTemplateConflict
+		}
+		return dynamicActionReconnect, nil
+	case accountStateRevoked:
+		if account.Template != templateName {
+			return "", errDynamicTemplateConflict
+		}
+		return dynamicActionEnroll, nil
+	case accountStateReady:
+		if account.Template != templateName {
+			return "", errDynamicTemplateConflict
+		}
+		return dynamicActionReconnect, nil
+	default:
+		return "", ErrBrokerUnavailable
+	}
+}
+
+func (s *Server) dynamicTemplate(name string) (DynamicCredentialTemplate, bool) {
+	for _, templateConfig := range s.cfg.Dynamic.Templates {
+		if templateConfig.Name == name {
+			return templateConfig, true
+		}
+	}
+	return DynamicCredentialTemplate{}, false
+}
+
+func (s *Server) readRecoveryCredential(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal Principal,
+	slot Slot,
+) ([]byte, bool) {
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != jsonContentType || len(params) != 0 {
+		s.reject(w, principal, slot, http.StatusUnsupportedMediaType, "content-type")
+		return nil, false
+	}
+	if r.ContentLength > s.cfg.MaxUploadBytes {
+		s.reject(w, principal, slot, http.StatusRequestEntityTooLarge, "too-large")
+		return nil, false
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes))
+	if err != nil {
+		clearBytes(body)
+		s.reject(w, principal, slot, http.StatusRequestEntityTooLarge, "too-large")
+		return nil, false
+	}
+	return body, true
+}
+
+func dynamicAuditSlot(principal Principal, templateConfig DynamicCredentialTemplate) Slot {
+	return Slot{
+		Name: templateConfig.Name, Label: templateConfig.Label, Owner: principal, Adapter: templateConfig.Adapter,
 	}
 }
 
@@ -190,7 +490,7 @@ func (s *Server) connect(
 		s.reject(w, principal, slot, http.StatusForbidden, "csrf")
 		return
 	}
-	if r.Header.Get(confirmHeader) != "replace" {
+	if r.Header.Get(confirmHeader) != confirmationReplace {
 		s.reject(w, principal, slot, http.StatusBadRequest, "confirmation-required")
 		return
 	}
@@ -278,7 +578,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request, principal Princi
 		s.reject(w, principal, slot, http.StatusForbidden, "csrf")
 		return
 	}
-	if r.Header.Get(confirmHeader) != "replace" {
+	if r.Header.Get(confirmHeader) != confirmationReplace {
 		s.reject(w, principal, slot, http.StatusBadRequest, "confirmation-required")
 		return
 	}
@@ -435,4 +735,62 @@ document.getElementById('logout').onclick=async()=>{
 await fetch(base+'/logout',{method:'POST',credentials:'same-origin',headers});
 location.href=base+'/'
 };
+</script></body></html>`))
+
+var dynamicPortalTemplate = template.Must(template.New("dynamic-portal").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Credential enrollment</title><style>body{font:16px system-ui;margin:2rem;max-width:48rem;color:#17202a}fieldset{margin:1rem 0;padding:1rem}button,select,input{font:inherit;margin:.4rem 0}.status{min-height:1.5rem}.action{padding:1rem;background:#f4f6f7}.hidden{display:none}</style></head>
+<body><header><h1>Manage credentials</h1>{{if .PrincipalName}}<p>Signed in as {{.PrincipalName}}</p>{{end}}</header>
+<p>Choose one administrator-approved credential template. The portal never displays credential contents or selects broker providers, execution profiles, grants, capabilities, or runtime settings.</p>
+<p id="account-state">Broker-reported account state: {{.Account.State}}{{if .Account.Template}} (template {{.Account.Template}}, generation {{.Account.Generation}}){{end}}.</p>
+<label for="template">Credential template</label><select id="template"><option value="">Select a template</option>{{range .Templates}}<option value="{{.Name}}">{{.Label}}</option>{{end}}</select>
+<fieldset><legend>Provider login</legend><button id="connect" type="button">{{.ActionLabel}}</button><div id="action" class="action hidden"><a id="provider" href="#" target="_blank" rel="noopener noreferrer">Continue with provider</a><p id="device"></p><div id="paste" class="hidden"><label for="code">Authorization code</label><br><input id="code" type="password" value="" autocomplete="off"><button id="submit-code" type="button">Submit authorization code</button></div><button id="cancel" type="button">Cancel</button></div><p class="status" id="status" role="status"></p></fieldset>
+{{if .RecoveryUpload}}<fieldset><legend>Recovery upload (optional)</legend><p>This administrator-enabled alternative replaces provider login; it is not a prerequisite. Upload only a valid credential document for the selected template.</p><input id="credential" type="file" accept="application/json,.json"><br><label><input id="confirm" type="checkbox"> I understand this enrolls or replaces my current credential.</label><br><button id="upload" type="button">Upload recovery credential</button><p class="status" id="upload-status" role="status"></p></fieldset>{{end}}
+{{if or (eq .Account.State "ready") (eq .Account.State "unready")}}<button id="revoke" type="button">Revoke credential account</button>{{end}} <button id="logout" type="button">Log out</button>
+<script>
+const csrf={{.CSRF}},base={{.BasePath}},status=document.getElementById('status');
+let enrollment='';
+const headers={'X-CSRF-Token':csrf};
+function setText(element,value){if(element.textContent!==value)element.textContent=value}
+async function poll(){
+if(!enrollment)return;
+const r=await fetch(base+'/enrollments/'+encodeURIComponent(enrollment),{credentials:'same-origin'});
+if(!r.ok){setText(status,'Enrollment failed.');return}
+const value=await r.json();
+if(value.status==='starting'){setTimeout(poll,500);return}
+if(value.status==='action-required'){
+document.getElementById('action').classList.remove('hidden');
+const link=document.getElementById('provider');
+if(link.getAttribute('href')!==value.authorizationURL)link.setAttribute('href',value.authorizationURL);
+setText(document.getElementById('device'),value.userCode?'One-time device code: '+value.userCode:'');
+document.getElementById('paste').classList.toggle('hidden',!value.needsCode);
+setText(status,value.needsCode?'Complete provider authorization, then enter the authorization code.':'Complete device authorization with the provider.');
+setTimeout(poll,1000);return
+}
+document.getElementById('action').classList.add('hidden');
+setText(status,value.status==='success'?'Credential stored by the broker.':'Enrollment failed.')
+}
+document.getElementById('connect').onclick=async()=>{
+const selected=document.getElementById('template').value;
+if(!selected||!confirm('Continue with this credential template? Active templates are never switched implicitly.'))return;
+setText(status,'Starting provider login…');
+const r=await fetch(base+'/templates/'+encodeURIComponent(selected)+'/connect',{method:'POST',credentials:'same-origin',headers:{...headers,'X-NVT-Confirm':'replace'}});
+if(!r.ok){setText(status,r.status===409?'A different template is already active. Revoke explicitly before any later enrollment.':'Enrollment failed.');return}
+const value=await r.json();enrollment=value.id;poll()
+};
+document.getElementById('submit-code').onclick=async()=>{
+const input=document.getElementById('code'),code=input.value;input.value='';
+if(!enrollment||!code)return;
+const r=await fetch(base+'/enrollments/'+encodeURIComponent(enrollment)+'/code',{method:'POST',credentials:'same-origin',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({code})});
+setText(status,r.ok?'Completing provider login…':'Enrollment failed.')
+};
+document.getElementById('cancel').onclick=async()=>{if(enrollment)await fetch(base+'/enrollments/'+encodeURIComponent(enrollment),{method:'DELETE',credentials:'same-origin',headers});enrollment='';document.getElementById('action').classList.add('hidden');setText(status,'Enrollment cancelled.')};
+{{if .RecoveryUpload}}document.getElementById('upload').onclick=async()=>{
+const uploadStatus=document.getElementById('upload-status'),selected=document.getElementById('template').value,file=document.getElementById('credential').files[0];
+if(!selected||!file||!document.getElementById('confirm').checked){setText(uploadStatus,'Select a template and file, then confirm replacement.');return}
+const r=await fetch(base+'/templates/'+encodeURIComponent(selected)+'/credential',{method:'PUT',credentials:'same-origin',headers:{...headers,'Content-Type':'application/json','X-NVT-Confirm':'replace'},body:file});
+setText(uploadStatus,r.ok?'Credential stored by the broker.':'Recovery enrollment failed.')
+};{{end}}
+const revoke=document.getElementById('revoke');if(revoke)revoke.onclick=async()=>{if(!confirm('Revoke this credential account? Running agents are not coordinated by this portal.'))return;const r=await fetch(base+'/account/revoke',{method:'POST',credentials:'same-origin',headers:{...headers,'X-NVT-Confirm':'revoke'}});if(r.ok)location.reload();else setText(status,'Account update failed.')};
+document.getElementById('logout').onclick=async()=>{await fetch(base+'/logout',{method:'POST',credentials:'same-origin',headers});location.href=base+'/'};
 </script></body></html>`))

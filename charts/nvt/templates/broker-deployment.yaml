@@ -1,6 +1,7 @@
 {{- if .Values.broker.enabled }}
 {{- $dynamicAccountsEnabled := false }}
 {{- $dynamicAccounts := index .Values.broker.config "dynamic-accounts" }}
+{{- $dynamicAssertionRotationEpoch := .Values.broker.dynamicAccountAssertionRotationEpoch | default "" }}
 {{- if $dynamicAccounts }}
 {{- if not (kindIs "map" $dynamicAccounts) }}{{ fail "broker.config.dynamic-accounts must be an object" }}{{ end }}
 {{- if hasKey $dynamicAccounts "enabled" }}
@@ -8,6 +9,7 @@
 {{- $dynamicAccountsEnabled = index $dynamicAccounts "enabled" }}
 {{- end }}
 {{- end }}
+{{- if and $dynamicAssertionRotationEpoch (not (regexMatch `^[A-Za-z0-9._-]{1,128}$` $dynamicAssertionRotationEpoch)) }}{{ fail "broker.dynamicAccountAssertionRotationEpoch must be a bounded non-secret rotation identifier" }}{{ end }}
 {{- if $dynamicAccountsEnabled }}
 {{- if not .Values.broker.persistence.enabled }}{{ fail "broker.config.dynamic-accounts.enabled requires broker.persistence.enabled=true" }}{{ end }}
 {{- if not .Values.broker.tls.enabled }}{{ fail "broker.config.dynamic-accounts.enabled requires broker.tls.enabled=true" }}{{ end }}
@@ -55,6 +57,9 @@ spec:
         # The broker loads its provider config once at startup and does not
         # hot-reload it, so a broker.config change must roll the Deployment.
         checksum/broker-config: {{ include "nvt.brokerConfigChecksum" . | quote }}
+        {{- if $dynamicAssertionRotationEpoch }}
+        nvt.io/dynamic-account-assertion-rotation-epoch: {{ $dynamicAssertionRotationEpoch | quote }}
+        {{- end }}
         {{- if .Values.broker.tls.enabled }}
         # The broker loads its TLS cert/key once at startup; this checksum
         # restarts it when the TLS Secret material (or name) changes.

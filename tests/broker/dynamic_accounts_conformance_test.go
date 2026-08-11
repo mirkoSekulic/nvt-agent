@@ -63,6 +63,10 @@ func newDynamicAccountFixture(t *testing.T, enabled bool) *dynamicAccountFixture
       label: Approved member
       enrollment-adapter: trusted-enrollment-adapter
       provider-template: approved-oauth
+    - name: alternate-member
+      label: Alternate member
+      enrollment-adapter: alternate-enrollment-adapter
+      provider-template: approved-oauth
 `, filepath.Join(home, "dynamic-state"))
 	}
 	if err := os.WriteFile(f.config, []byte(config), 0o600); err != nil {
@@ -283,6 +287,19 @@ func TestDynamicPrincipalAccountHTTPContract(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("revoked resolution must fail closed, got %d", status)
 	}
+	revokedReadiness, status, _ := f.post("/v1/principal-accounts/readiness", alice, map[string]any{})
+	if status != http.StatusOK || revokedReadiness["state"] != "revoked" ||
+		revokedReadiness["template"] != "approved-member" || revokedReadiness["generation"] != float64(2) {
+		t.Fatalf("revoked owner readiness lost its template lock status=%d payload=%v", status, revokedReadiness)
+	}
+	switchDenied, status, switchBody := f.post("/v1/principal-accounts/complete-enrollment", alice, map[string]any{
+		"template": "alternate-member", "operation_id": "unauthorized-switch",
+		"credential_base64": dynamicCodexCredential(t, "switch"),
+	})
+	if status != http.StatusConflict || switchDenied["error"] != "template-switch-not-authorized" ||
+		strings.Contains(switchBody, dynamicAccountNeedle) {
+		t.Fatalf("revoked template switch was not locked status=%d body=%s", status, switchBody)
+	}
 
 	f.stop()
 	audit, err := os.ReadFile(f.audit)
@@ -328,11 +345,14 @@ func TestDynamicPrincipalAccountRestartFailureIsAccountLocalAndReconnectable(t *
 	if status != http.StatusOK || ready["ok"] != true {
 		t.Fatalf("account-local failure changed global readiness status=%d payload=%v", status, ready)
 	}
-	for _, operation := range []string{"readiness", "resolve"} {
-		payload, operationStatus, _ := f.post("/v1/principal-accounts/"+operation, alice, map[string]any{})
-		if operationStatus != http.StatusServiceUnavailable || payload["error"] != "account-unready" {
-			t.Fatalf("degraded Alice %s did not fail closed status=%d payload=%v", operation, operationStatus, payload)
-		}
+	readiness, readinessStatus, _ := f.post("/v1/principal-accounts/readiness", alice, map[string]any{})
+	if readinessStatus != http.StatusOK || readiness["state"] != "unready" ||
+		readiness["template"] != "approved-member" || readiness["generation"] != float64(1) {
+		t.Fatalf("degraded Alice readiness lost its template status=%d payload=%v", readinessStatus, readiness)
+	}
+	resolution, resolutionStatus, _ := f.post("/v1/principal-accounts/resolve", alice, map[string]any{})
+	if resolutionStatus != http.StatusServiceUnavailable || resolution["error"] != "account-unready" {
+		t.Fatalf("degraded Alice resolution did not fail closed status=%d payload=%v", resolutionStatus, resolution)
 	}
 	resolvedBob, status, _ := f.post("/v1/principal-accounts/resolve", bob, map[string]any{})
 	if status != http.StatusOK || resolvedBob["ok"] != true {

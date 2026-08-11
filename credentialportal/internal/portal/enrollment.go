@@ -37,6 +37,8 @@ const (
 	reasonCredentialUnsafe   = "credential-unsafe"
 	reasonTimeout            = "timeout"
 	reasonSecretUpdateFailed = "secret-update-failed"
+	dynamicActionEnroll      = "enroll"
+	dynamicActionReconnect   = "reconnect"
 )
 
 var (
@@ -89,6 +91,8 @@ type enrollmentSession struct {
 	ID               string
 	Status           string
 	CancelReason     string
+	DynamicAction    string
+	OperationID      string
 	NeedsCode        bool
 	CodeUsed         bool
 }
@@ -114,6 +118,7 @@ type CLICredentialRunner struct {
 
 type EnrollmentManager struct {
 	patcher   SecretPatcher
+	broker    PrincipalAccountBroker
 	audit     *AuditLogger
 	runner    CredentialRunner
 	sessions  map[string]*enrollmentSession
@@ -148,8 +153,9 @@ func NewEnrollmentManager(
 	patcher SecretPatcher,
 	audit *AuditLogger,
 	runner CredentialRunner,
+	brokers ...PrincipalAccountBroker,
 ) *EnrollmentManager {
-	return &EnrollmentManager{
+	manager := &EnrollmentManager{
 		patcher:   patcher,
 		audit:     audit,
 		runner:    runner,
@@ -159,6 +165,10 @@ func NewEnrollmentManager(
 		now:       time.Now,
 		config:    cfg.Enrollment,
 	}
+	if len(brokers) == 1 {
+		manager.broker = brokers[0]
+	}
+	return manager
 }
 
 func (m *EnrollmentManager) Start(
@@ -170,6 +180,32 @@ func (m *EnrollmentManager) Start(
 	if !principal.Owns(slot) {
 		return EnrollmentStatus{}, ErrEnrollmentNotFound
 	}
+	return m.start(ctx, principal, slot, "", authExpiresAt)
+}
+
+func (m *EnrollmentManager) StartDynamic(
+	ctx context.Context,
+	principal Principal,
+	template DynamicCredentialTemplate,
+	action string,
+	authExpiresAt time.Time,
+) (EnrollmentStatus, error) {
+	if m.broker == nil || (action != dynamicActionEnroll && action != dynamicActionReconnect) {
+		return EnrollmentStatus{}, ErrEnrollmentState
+	}
+	slot := Slot{
+		Name: template.Name, Label: template.Label, Adapter: template.Adapter, Owner: principal,
+	}
+	return m.start(ctx, principal, slot, action, authExpiresAt)
+}
+
+func (m *EnrollmentManager) start(
+	ctx context.Context,
+	principal Principal,
+	slot Slot,
+	dynamicAction string,
+	authExpiresAt time.Time,
+) (EnrollmentStatus, error) {
 	select {
 	case m.semaphore <- struct{}{}:
 	default:
@@ -179,6 +215,14 @@ func (m *EnrollmentManager) Start(
 	if err != nil {
 		<-m.semaphore
 		return EnrollmentStatus{}, fmt.Errorf("create enrollment identifier: %w", err)
+	}
+	operationID := ""
+	if dynamicAction != "" {
+		operationID, err = randomToken(32)
+		if err != nil {
+			<-m.semaphore
+			return EnrollmentStatus{}, fmt.Errorf("create broker operation identifier: %w", err)
+		}
 	}
 	now := m.now()
 	deadline := now.Add(time.Duration(m.config.TimeoutSeconds) * time.Second)
@@ -192,7 +236,8 @@ func (m *EnrollmentManager) Start(
 	enrollmentContext, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	session := &enrollmentSession{
 		Cancel: cancel, Code: make(chan string, 1), ID: id, Status: enrollmentStarting,
-		Principal: principal, Slot: slot, ExpiresAt: deadline,
+		Principal: principal, Slot: slot, ExpiresAt: deadline, DynamicAction: dynamicAction,
+		OperationID: operationID,
 	}
 	m.mu.Lock()
 	m.pruneLocked(now)
@@ -313,15 +358,29 @@ func (m *EnrollmentManager) run(ctx context.Context, session *enrollmentSession)
 	if status == enrollmentSucceeded {
 		if err := ValidateCredential(session.Slot.Adapter, document); err != nil {
 			status, reason = enrollmentFailed, "invalid-credential"
+		} else if session.DynamicAction != "" {
+			var completionError error
+			switch session.DynamicAction {
+			case dynamicActionEnroll:
+				completionError = m.broker.CompleteEnrollment(
+					ctx, session.Principal, session.Slot.Name, session.OperationID, document,
+				)
+			case dynamicActionReconnect:
+				completionError = m.broker.Reconnect(
+					ctx, session.Principal, session.OperationID, document,
+				)
+			default:
+				completionError = ErrBrokerRejected
+			}
+			if completionError != nil {
+				status, reason = enrollmentFailed, brokerCompletionReason(completionError)
+			}
 		} else if err := m.patcher.Patch(
-			ctx,
-			m.namespace,
-			session.Slot.SecretName,
-			session.Slot.DataKey,
-			document,
+			ctx, m.namespace, session.Slot.SecretName, session.Slot.DataKey, document,
 		); err != nil {
 			status, reason = enrollmentFailed, reasonSecretUpdateFailed
-		} else {
+		}
+		if status == enrollmentSucceeded {
 			ackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			ackErr := m.runner.Acknowledge(ackContext, session.ID)
 			cancel()

@@ -89,7 +89,13 @@ def configuration(root, *, maximum=8, template="member"):
                     "label": "Member account",
                     "enrollment-adapter": "approved-adapter",
                     "provider-template": "provider-template",
-                }
+                },
+                {
+                    "name": "alternate",
+                    "label": "Alternate account",
+                    "enrollment-adapter": "alternate-adapter",
+                    "provider-template": "provider-template",
+                },
             ],
         }
     }
@@ -361,9 +367,12 @@ class DynamicAccountsTest(unittest.TestCase):
         provider_id = manager.resolve(self.alice)["provider_instance_id"]
         self.factory.created[-1].path.unlink()
         self.assertTrue(manager.system_ready())
-        for operation in (manager.readiness, manager.resolve):
-            with self.assertRaisesRegex(ProviderError, "account-unready"):
-                operation(self.alice)
+        self.assertEqual(
+            manager.readiness(self.alice),
+            {"ok": True, "state": "unready", "template": "member", "generation": 1},
+        )
+        with self.assertRaisesRegex(ProviderError, "account-unready"):
+            manager.resolve(self.alice)
         with self.assertRaisesRegex(ProviderError, "account-unready"):
             manager.provider(provider_id)
 
@@ -377,11 +386,11 @@ class DynamicAccountsTest(unittest.TestCase):
             502,
         )
 
-        for operation in (
-            lambda: manager.readiness(self.alice),
-            lambda: manager.resolve(self.alice),
-            lambda: manager.provider(provider_id),
-        ):
+        self.assertEqual(
+            manager.readiness(self.alice),
+            {"ok": True, "state": "unready", "template": "member", "generation": 1},
+        )
+        for operation in (lambda: manager.resolve(self.alice), lambda: manager.provider(provider_id)):
             with self.assertRaises(ProviderError) as denied:
                 operation()
             self.assertEqual(denied.exception.reason, "account-unready")
@@ -454,9 +463,12 @@ class DynamicAccountsTest(unittest.TestCase):
         recovered = self.manager(factory=failing)
         self.assertTrue(recovered.system_ready())
         self.assertEqual(recovered.resolve(self.bob), bob_resolution)
-        for operation in (recovered.readiness, recovered.resolve):
-            with self.assertRaisesRegex(ProviderError, "account-unready"):
-                operation(self.alice)
+        self.assertEqual(
+            recovered.readiness(self.alice),
+            {"ok": True, "state": "unready", "template": "member", "generation": 1},
+        )
+        with self.assertRaisesRegex(ProviderError, "account-unready"):
+            recovered.resolve(self.alice)
         with self.assertRaisesRegex(ProviderError, "account-unready"):
             recovered.provider(alice_resolution["provider_instance_id"])
 
@@ -542,11 +554,15 @@ class DynamicAccountsTest(unittest.TestCase):
         self.assertEqual(recovered.resolve(self.alice)["generation"], 2)
         self.assertEqual(len(list((self.root / "accounts").glob("p_*/credential-*.bin"))), 1)
 
-    def test_revoke_is_idempotent_durable_and_allows_explicit_new_template_selection(self):
+    def test_revoke_is_idempotent_durable_and_keeps_template_locked(self):
         manager = self.manager()
         manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
         first = manager.revoke(self.alice, "revoke-1")
         self.assertEqual(manager.revoke(self.alice, "revoke-1"), first)
+        self.assertEqual(
+            manager.readiness(self.alice),
+            {"ok": True, "state": "revoked", "template": "member", "generation": 1},
+        )
         with self.assertRaisesRegex(ProviderError, "account-not-found"):
             manager.resolve(self.alice)
         self.assertEqual(list((self.root / "accounts").glob("p_*/credential-*.bin")), [])
@@ -554,6 +570,9 @@ class DynamicAccountsTest(unittest.TestCase):
         recovered = self.manager(factory=FakeFactory())
         with self.assertRaisesRegex(ProviderError, "account-not-found"):
             recovered.resolve(self.alice)
+        self.assertEqual(recovered.readiness(self.alice)["template"], "member")
+        with self.assertRaisesRegex(ProviderError, "template-switch-not-authorized"):
+            recovered.enroll(self.alice, "alternate", "switch", bytearray(b"new"))
         self.assertEqual(recovered.enroll(self.alice, "member", "enroll-2", bytearray(b"new"))["generation"], 2)
 
     def test_secret_needle_never_enters_metadata_or_sanitized_errors(self):
