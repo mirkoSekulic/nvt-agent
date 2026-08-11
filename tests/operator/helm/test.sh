@@ -1453,7 +1453,11 @@ expect_dynamic_principal_failure() {
     echo "expected dynamic principal Helm validation failure: ${name}" >&2
     exit 1
   fi
-  grep -Fq "${expected}" "${DYNAMIC_PRINCIPAL_FAILURE}"
+  if ! grep -Fq "${expected}" "${DYNAMIC_PRINCIPAL_FAILURE}"; then
+    echo "unexpected dynamic principal Helm validation for ${name}; wanted: ${expected}" >&2
+    cat "${DYNAMIC_PRINCIPAL_FAILURE}" >&2
+    exit 1
+  fi
 }
 
 expect_dynamic_principal_failure operator-disabled \
@@ -1466,7 +1470,7 @@ expect_dynamic_principal_failure mixed-static-selection \
   'agentSchedule.principalCredentialSelection cannot be combined with profileSelection' \
   --set agentSchedule.profileSelection.onNoMatch=deny
 expect_dynamic_principal_failure unknown-profile \
-  'dynamic principal credential mapping references unknown profile' \
+  'agentSchedule principal credential mapping references unknown profile' \
   --set-string agentSchedule.principalCredentialSelection.templateProfiles[0].profile=missing
 expect_dynamic_principal_failure direct-profile \
   'must use mediated egress and broker grants' \

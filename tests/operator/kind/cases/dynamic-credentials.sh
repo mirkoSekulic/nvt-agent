@@ -206,8 +206,8 @@ request = {
 (directory / "credential-needle").write_text(needle + "\n", encoding="utf-8")
 config = "\n".join([
     'silent', 'show-error',
-    'url = "https://nvt-broker:7347/v1/principal-accounts/complete-enrollment"',
-    'resolve = "nvt-broker:7347:127.0.0.1"',
+    'url = "https://nvt-broker:17347/v1/principal-accounts/complete-enrollment"',
+    'resolve = "nvt-broker:17347:127.0.0.1"',
     f'cacert = "{directory / "broker-ca.crt"}"',
     f'header = "Authorization: NVT-Principal-v1 {token}"',
     'header = "Content-Type: application/json"',
