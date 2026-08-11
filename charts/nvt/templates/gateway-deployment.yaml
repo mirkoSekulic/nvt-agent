@@ -93,33 +93,9 @@
 {{- fail "gateway.auth.session.existingSecret is required when gateway authentication is enabled" }}
 {{- end }}
 {{- if $admissionConfigured }}
-{{- $admission := .Values.gateway.auth.admission }}
-{{- if and $admission.default (ne $admission.default "deny") }}
-{{- fail "gateway.auth.admission.default must be deny" }}
+{{- include "nvt.validateEligibility" (dict "policy" .Values.gateway.auth.admission "prefix" "gateway.auth.admission") }}
 {{- end }}
-{{- range $index, $rule := $admission.rules }}
-{{- if $rule.owner }}
-{{- fail (printf "gateway.auth.admission.rules[%d].owner is invalid because login admission has no AgentRun" $index) }}
-{{- end }}
-{{- end }}
-{{- end }}
-{{- if gt (len .Values.gateway.auth.claimEnrichment.sources) 8 }}
-{{- fail "gateway.auth.claimEnrichment.sources must contain at most 8 entries" }}
-{{- end }}
-{{- if and (gt (len .Values.gateway.auth.claimEnrichment.sources) 0) (eq (len .Values.gateway.auth.claimEnrichment.allowedHosts) 0) }}
-{{- fail "gateway.auth.claimEnrichment.allowedHosts is required when sources are configured" }}
-{{- end }}
-{{- range $index, $source := .Values.gateway.auth.claimEnrichment.sources }}
-{{- if not (regexMatch `^https://[^/@?#]+(?::[0-9]+)?(?:/[^?#]*)?$` $source.endpoint) }}
-{{- fail (printf "gateway.auth.claimEnrichment.sources[%d].endpoint must be an absolute HTTPS URL without credentials, query, or fragment" $index) }}
-{{- end }}
-{{- if not (regexMatch `^[a-z][a-z0-9_]{0,63}$` $source.outputClaim) }}
-{{- fail (printf "gateway.auth.claimEnrichment.sources[%d].outputClaim must be a safe top-level claim name" $index) }}
-{{- end }}
-{{- if not $source.valuePath }}
-{{- fail (printf "gateway.auth.claimEnrichment.sources[%d].valuePath is required" $index) }}
-{{- end }}
-{{- end }}
+{{- include "nvt.validateClaimEnrichment" (dict "config" .Values.gateway.auth.claimEnrichment "prefix" "gateway.auth.claimEnrichment") }}
 {{- end }}
 {{- if eq .Values.gateway.auth.mode "oidc" }}
 {{- if not .Values.gateway.auth.oidc.clientSecret.existingSecret }}

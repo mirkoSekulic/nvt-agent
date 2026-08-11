@@ -18,12 +18,14 @@ import (
 	"time"
 
 	"github.com/gorilla/securecookie"
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 	"golang.org/x/oauth2"
 )
 
 const (
 	testLoginPath = "login"
 	testJWTAlg    = "RS256"
+	testTokenPath = "/token"
 )
 
 type oidcFixture struct {
@@ -54,7 +56,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 				Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "kid": "portal-test", "use": "sig", "alg": testJWTAlg, "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": "AQAB"}}}); err != nil {
 				http.Error(w, "encode failed", http.StatusInternalServerError)
 			}
-		case "/token":
+		case testTokenPath:
 			if err := r.ParseForm(); err != nil || r.Form.Get("code_verifier") == "" {
 				http.Error(w, "invalid", http.StatusBadRequest)
 				return
@@ -188,7 +190,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	identityBody := `{"id":424242,"login":"octocat"}`
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/token":
+		case testTokenPath:
 			if err := r.ParseForm(); err != nil || r.Form.Get("code_verifier") == "" ||
 				r.Form.Get("code") != "one-time-code" {
 				http.Error(w, "invalid exchange", http.StatusBadRequest)
@@ -221,7 +223,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Auth.OAuth2.AuthorizationURL = provider.URL + "/authorize"
-	cfg.Auth.OAuth2.TokenURL = provider.URL + "/token"
+	cfg.Auth.OAuth2.TokenURL = provider.URL + testTokenPath
 	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL + "/identity"
 	cfg.Auth.OAuth2.AllowedHosts = []string{providerURL.Hostname()}
 	cfg.Auth.OAuth2.SubjectPath = "id"
@@ -324,6 +326,102 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // One end-to-end fixture proves the complete configured login boundary.
+func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichment(t *testing.T) {
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case testTokenPath:
+			body := `{"access_token":"transient-eligibility-token","token_type":"Bearer"}`
+			if _, err := io.WriteString(w, body); err != nil {
+				t.Error(err)
+			}
+		case "/identity":
+			if _, err := io.WriteString(w, `{"id":"new-immutable-subject","login":"new-user"}`); err != nil {
+				t.Error(err)
+			}
+		case "/claims":
+			if r.Header.Get("Authorization") != "Bearer transient-eligibility-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if _, err := io.WriteString(
+				w,
+				`[{"organization":{"ID":"0192:123456789"},"resource":"approved-resource"}]`,
+			); err != nil {
+				t.Error(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(provider.Close)
+	providerURL, err := url.Parse(provider.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.Auth.OAuth2.AuthorizationURL = provider.URL + "/authorize"
+	cfg.Auth.OAuth2.TokenURL = provider.URL + testTokenPath
+	cfg.Auth.OAuth2.IdentityEndpoint = provider.URL + "/identity"
+	cfg.Auth.OAuth2.AllowedHosts = []string{providerURL.Hostname()}
+	cfg.Auth.OAuth2.SubjectPath = "id"
+	cfg.Auth.OAuth2.DisplayNamePath = "login"
+	cfg.Auth.ClaimEnrichment = eligibility.EnrichmentConfig{
+		AllowedHosts: []string{providerURL.Hostname()},
+		Sources: []eligibility.ClaimSource{{
+			Endpoint: provider.URL + "/claims", OutputClaim: "memberships", ValuePath: "$",
+		}},
+	}
+	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
+		ID: "eligible", Effect: eligibility.EffectAllow,
+		Where: eligibility.Where{Array: "memberships[]", All: []eligibility.Condition{
+			{ClaimPath: "organization.ID", Values: []string{"0192:123456789"}},
+			{ClaimPath: "resource", Values: []string{"approved-resource"}},
+		}},
+	}}}
+	if validateErr := cfg.Validate(); validateErr != nil {
+		t.Fatal(validateErr)
+	}
+	auth, err := NewAuthenticator(
+		t.Context(), cfg, strings.Repeat("s", 64), "portal-client", "client-secret", provider.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRecorder()
+	auth.Login(login, httptest.NewRequestWithContext(t.Context(), http.MethodGet, cfg.PublicURL+"/login", nil))
+	location, err := url.Parse(login.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		cfg.PublicURL+"/oauth2/callback?state="+url.QueryEscape(location.Query().Get("state"))+"&code=one-time",
+		nil,
+	)
+	callback.AddCookie(login.Result().Cookies()[0])
+	response := httptest.NewRecorder()
+	auth.Callback(response, callback)
+	if response.Code != http.StatusFound {
+		t.Fatalf("eligible unknown principal denied: status=%d body=%q", response.Code, response.Body.String())
+	}
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, cfg.PublicURL+"/", nil)
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == cfg.Auth.Session.CookieName {
+			request.AddCookie(cookie)
+		}
+	}
+	principal, _, _, ok := auth.Session(request)
+	if !ok || principal.Issuer != cfg.Auth.OAuth2.Issuer || principal.Subject != "new-immutable-subject" {
+		t.Fatalf("unexpected eligible principal session: %#v ok=%v", principal, ok)
+	}
+	if auth.hasOwnedSlot(principal) {
+		t.Fatal("eligibility incorrectly granted ownership of a configured slot")
+	}
+}
+
 func TestCallbackRejectsDuplicateAndCraftedState(t *testing.T) {
 	cfg := testConfig()
 	sum := sha512.Sum512([]byte(strings.Repeat("s", 64)))
@@ -380,7 +478,8 @@ func fetchOAuth2TestPrincipal(t *testing.T, identityBody, accessToken string) (P
 	cfg.Auth.OAuth2.SubjectPath = "id"
 	cfg.Auth.OAuth2.DisplayNamePath = testLoginPath
 	auth := &Authenticator{cfg: cfg, client: noRedirectClient(provider.Client())}
-	return auth.principal(context.Background(), &oauth2.Token{AccessToken: accessToken}, "")
+	principal, _, err := auth.principal(context.Background(), &oauth2.Token{AccessToken: accessToken}, "")
+	return principal, err
 }
 
 func TestOAuth2IdentityCanonicalizationAndTokenReflection(t *testing.T) {

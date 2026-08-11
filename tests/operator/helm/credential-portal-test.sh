@@ -22,7 +22,7 @@ if grep -Eq 'verbs:.*(get|list|create|delete)' "${PORTAL_ROLE}"; then
 fi
 grep -Fq 'resourceNames:' "${RENDER}"
 grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
-grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.57"' "${RENDER}"
+grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.58"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
@@ -34,6 +34,9 @@ grep -Fq '"maxConcurrent": 2' "${RENDER}"
 grep -Fq '"maxSessions": 64' "${RENDER}"
 grep -Fq '"experimentalCodexDeviceAuth": true' "${RENDER}"
 grep -Fq '"enabled": false' "${RENDER}"
+grep -Fq '"array": "memberships[]"' "${RENDER}"
+grep -Fq '"valuePath": "$"' "${RENDER}"
+grep -Fq '"timeoutSeconds": 5' "${RENDER}"
 
 python3 - "${RENDER}" <<'PY'
 import sys
@@ -130,6 +133,27 @@ if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credentia
   exit 1
 fi
 grep -Fq 'requires enrollment.experimentalCodexDeviceAuth=true' "${WORKDIR}/codex-device.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string 'credentialPortal.auth.eligibility.rules[0].claimPath=groups[]' >/dev/null 2>"${WORKDIR}/ambiguous-eligibility.txt"; then
+  echo "expected ambiguous portal eligibility predicate to fail" >&2
+  exit 1
+fi
+grep -Fq 'must define exactly one eligibility predicate' "${WORKDIR}/ambiguous-eligibility.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.auth.claimEnrichment.limits.maxArrayItems=257 >/dev/null 2>"${WORKDIR}/unsafe-eligibility-limit.txt"; then
+  echo "expected unsafe portal enrichment limit to fail" >&2
+  exit 1
+fi
+grep -Fq 'limits.maxArrayItems exceeds safe bounds' "${WORKDIR}/unsafe-eligibility-limit.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.claimEnrichment.sources[0].endpoint=https://other.identity.example/v1/memberships >/dev/null 2>"${WORKDIR}/disallowed-eligibility-host.txt"; then
+  echo "expected disallowed portal enrichment host to fail" >&2
+  exit 1
+fi
+grep -Fq 'endpoint host is not allowed' "${WORKDIR}/disallowed-eligibility-host.txt"
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set credentialPortal.enabled=false >"${WORKDIR}/disabled.yaml"; then :; fi

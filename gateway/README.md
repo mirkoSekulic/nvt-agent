@@ -284,6 +284,11 @@ are rejected, and only the selected non-sensitive JSON value is retained under
 a new safe top-level claim. Source failures, missing/ambiguous values, output
 collisions, malformed or oversized responses, and timeouts fail login closed.
 Access tokens and raw responses are never stored in sessions or cookies.
+The gateway policy and enrichment implementation are shared with the credential
+portal. Enrichment may select a bounded top-level array with `valuePath: $`, and
+`where.array/all` requires all conditions on one selected object. The complete
+provider-neutral contract, limits, failure behavior, and compatibility rules are
+documented in [generic OAuth2/OIDC eligibility](../docs/oauth-eligibility.md).
 
 This provider-neutral configuration expresses GitHub organization membership
 entirely as operator configuration:

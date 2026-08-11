@@ -302,6 +302,8 @@ gateway:
     # Provider-neutral bounded OAuth claim lookups performed before admission.
     claimEnrichment:
       allowedHosts: []
+      timeoutSeconds: 0
+      limits: {}
       sources: []
     authorization:
       default: deny
@@ -343,6 +345,16 @@ credentialPortal:
     enabled: false
   auth:
     mode: oidc
+    # Optional shared default-deny eligibility policy. When absent, the portal
+    # preserves static admission and requires an exact configured slot owner.
+    eligibility: null
+    # Optional provider-neutral bounded OAuth claim lookups evaluated only
+    # during login. Selected claims and OAuth tokens are not stored in sessions.
+    claimEnrichment:
+      allowedHosts: []
+      timeoutSeconds: 0
+      limits: {}
+      sources: []
     session:
       existingSecret: ""
       secretKey: session-secret

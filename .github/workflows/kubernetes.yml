@@ -36,6 +36,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  eligibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: protocol/eligibility/go.mod
+          cache: false
+      - name: Run shared eligibility contract and conformance tests
+        working-directory: protocol/eligibility
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
   guest-enrollment:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -79,6 +94,7 @@ jobs:
           cache-dependency-path: |
             gateway/go.sum
             hostbundle/go.mod
+            protocol/eligibility/go.mod
             protocol/guestenrollment/go.mod
       - name: Run gateway tests
         working-directory: gateway
@@ -98,7 +114,9 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
-          cache-dependency-path: credentialportal/go.sum
+          cache-dependency-path: |
+            credentialportal/go.sum
+            protocol/eligibility/go.mod
       - name: Run credential portal security and service tests
         working-directory: credentialportal
         run: |

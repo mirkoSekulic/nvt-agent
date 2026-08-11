@@ -27,9 +27,15 @@ tokens and the generated `auth.json` or `.credentials.json` stay server-side.
 
 Authentication is generic OIDC or OAuth2. The portal uses its own encrypted,
 HTTP-only, Secure session cookie, short-lived signed login state, PKCE, and a
-separate callback path. Admission is default-deny: a successfully authenticated
-issuer/subject pair receives a session only when it owns at least one configured
-slot. Display names are never authorization input. OAuth2 identity subjects may
+separate callback path. By default, a successfully authenticated issuer/subject
+pair receives a session only when it owns at least one configured slot. Optional
+`auth.eligibility` and `auth.claimEnrichment` use the same provider-neutral,
+bounded default-deny contract as gateway login admission. With that policy set,
+an eligible principal may receive a session without a static slot, but exact
+issuer/subject ownership still protects every slot operation. This is admission
+groundwork only and does not dynamically create enrollment slots or broker
+accounts. See [generic OAuth2/OIDC eligibility](oauth-eligibility.md).
+Display names are never authorization input. OAuth2 identity subjects may
 be JSON strings or integers; integer subjects are converted to their exact
 canonical decimal form, so quote that value in slot configuration (for example,
 `subject: "424242"`). Fractional numbers and identity values containing the

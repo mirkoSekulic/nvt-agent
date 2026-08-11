@@ -10,6 +10,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 )
 
 const (
@@ -33,7 +35,6 @@ var (
 	slotPattern    = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 )
 
-//nolint:govet // JSON contract fields stay grouped for reviewability; the eight-byte saving is immaterial.
 type Config struct {
 	Auth           AuthConfig `json:"auth"`
 	PublicURL      string     `json:"publicURL"`
@@ -59,11 +60,14 @@ type RecoveryUploadConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+//nolint:govet // JSON contract fields stay grouped for reviewability.
 type AuthConfig struct {
-	OAuth2  OAuth2Config  `json:"oauth2"`
-	OIDC    OIDCConfig    `json:"oidc"`
-	Mode    string        `json:"mode"`
-	Session SessionConfig `json:"session"`
+	OAuth2          OAuth2Config                 `json:"oauth2"`
+	OIDC            OIDCConfig                   `json:"oidc"`
+	Mode            string                       `json:"mode"`
+	Session         SessionConfig                `json:"session"`
+	Eligibility     *eligibility.Policy          `json:"eligibility"`
+	ClaimEnrichment eligibility.EnrichmentConfig `json:"claimEnrichment"`
 }
 
 type SessionConfig struct {
@@ -168,6 +172,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Auth.Mode != authModeOIDC && c.Auth.Mode != authModeOAuth2 {
 		return fmt.Errorf("%w: auth.mode must be oidc or oauth2", errInvalidConfig)
+	}
+	if c.Auth.Eligibility != nil {
+		if err := c.Auth.Eligibility.Validate("auth.eligibility"); err != nil {
+			return fmt.Errorf("%w: %w", errInvalidConfig, err)
+		}
+	}
+	if err := c.Auth.ClaimEnrichment.Validate("auth.claimEnrichment"); err != nil {
+		return fmt.Errorf("%w: %w", errInvalidConfig, err)
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(c.Auth.Session.CookieName) {
 		return fmt.Errorf("%w: auth.session.cookieName is invalid", errInvalidConfig)

@@ -24,6 +24,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 	"golang.org/x/oauth2"
 )
 
@@ -191,7 +192,7 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, a.oauth.AuthCodeURL(state, opts...), http.StatusFound)
 }
 
-//nolint:gocyclo // Callback validation is intentionally linear and fail-closed before session creation.
+//nolint:funlen,gocyclo // Callback validation is intentionally linear and fail-closed before session creation.
 func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -226,10 +227,21 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		a.authFailure(w)
 		return
 	}
-	principal, err := a.principal(ctx, token, login.Nonce)
+	principal, claims, err := a.principal(ctx, token, login.Nonce)
+	if err == nil {
+		claims, err = eligibility.Enrich(
+			ctx,
+			a.cfg.Auth.ClaimEnrichment,
+			token.AccessToken,
+			claims,
+			eligibility.EnrichOptions{Client: a.client, UserAgent: "nvt-credential-portal"},
+		)
+	}
+	admitted := err == nil && a.admits(principal, claims)
+	clear(claims)
 	token.AccessToken = ""
 	token.RefreshToken = ""
-	if err != nil || !a.hasOwnedSlot(principal) {
+	if !admitted {
 		a.authFailure(w)
 		return
 	}
@@ -287,70 +299,101 @@ func (a *Authenticator) validCallbackIssuer(query url.Values) bool {
 	return values[0] == expected
 }
 
-//nolint:cyclop,gocognit,gocyclo // OIDC and generic OAuth identity checks share one fail-closed boundary.
-func (a *Authenticator) principal(ctx context.Context, token *oauth2.Token, nonce string) (Principal, error) {
+func (a *Authenticator) principal(
+	ctx context.Context,
+	token *oauth2.Token,
+	nonce string,
+) (Principal, map[string]any, error) {
 	if a.cfg.Auth.Mode == authModeOIDC {
-		raw, ok := token.Extra("id_token").(string)
-		if !ok {
-			return Principal{}, errMissingIDToken
-		}
-		idToken, err := a.verifier.Verify(ctx, raw)
-		if err != nil || idToken.Nonce != nonce {
-			return Principal{}, errInvalidIDToken
-		}
-		var claims struct {
-			Issuer  string `json:"iss"`
-			Subject string `json:"sub"`
-			Name    string `json:"name"`
-		}
-		if idToken.Claims(&claims) != nil || !validPrincipalIdentity(claims.Issuer, claims.Subject) {
-			return Principal{}, errInvalidIdentity
-		}
-		return Principal{Issuer: claims.Issuer, Subject: claims.Subject, DisplayName: safeDisplayName(claims.Name)}, nil
+		return a.oidcPrincipal(ctx, token, nonce)
 	}
+	return a.oauth2Principal(ctx, token)
+}
+
+func (a *Authenticator) oidcPrincipal(
+	ctx context.Context,
+	token *oauth2.Token,
+	nonce string,
+) (Principal, map[string]any, error) {
+	raw, ok := token.Extra("id_token").(string)
+	if !ok {
+		return Principal{}, nil, errMissingIDToken
+	}
+	idToken, err := a.verifier.Verify(ctx, raw)
+	if err != nil || idToken.Nonce != nonce {
+		return Principal{}, nil, errInvalidIDToken
+	}
+	var claims map[string]any
+	if idToken.Claims(&claims) != nil || !validPrincipalIdentity(idToken.Issuer, idToken.Subject) {
+		return Principal{}, nil, errInvalidIdentity
+	}
+	name, nameOK := claims["name"].(string)
+	if !nameOK {
+		name = ""
+	}
+	return Principal{
+		Issuer: idToken.Issuer, Subject: idToken.Subject, DisplayName: safeDisplayName(name),
+	}, claims, nil
+}
+
+//nolint:gocyclo // OAuth2 identity validation stays linear and fail-closed.
+func (a *Authenticator) oauth2Principal(
+	ctx context.Context,
+	token *oauth2.Token,
+) (Principal, map[string]any, error) {
 	req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, a.cfg.Auth.OAuth2.IdentityEndpoint, nil)
 	if requestErr != nil {
-		return Principal{}, errIdentityLookup
+		return Principal{}, nil, errIdentityLookup
 	}
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	req.Header.Set("Accept", jsonContentType)
 	response, err := a.client.Do(req)
 	req.Header.Del("Authorization")
 	if err != nil {
-		return Principal{}, errIdentityLookup
+		return Principal{}, nil, errIdentityLookup
 	}
 	body, responseErr := readIdentityResponse(response)
 	if responseErr != nil {
-		return Principal{}, errIdentityLookup
+		return Principal{}, nil, errIdentityLookup
 	}
+	defer clearBytes(body)
 	if !json.Valid(body) || rejectDuplicateJSONKeys(body) != nil {
-		return Principal{}, errIdentityLookup
+		return Principal{}, nil, errIdentityLookup
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	var identity any
 	if decoder.Decode(&identity) != nil {
-		return Principal{}, errIdentityLookup
+		return Principal{}, nil, errIdentityLookup
 	}
 	subjectValue, ok := jsonValuePath(identity, a.cfg.Auth.OAuth2.SubjectPath)
 	if !ok {
-		return Principal{}, errIdentitySubject
+		return Principal{}, nil, errIdentitySubject
 	}
 	subject, ok := canonicalOAuth2Subject(subjectValue)
 	if !ok || !validPrincipalIdentity(a.cfg.Auth.OAuth2.Issuer, subject) ||
 		strings.Contains(subject, token.AccessToken) {
-		return Principal{}, errIdentitySubject
+		return Principal{}, nil, errIdentitySubject
 	}
 	display := ""
 	if a.cfg.Auth.OAuth2.DisplayNamePath != "" {
 		if displayValue, found := jsonValuePath(identity, a.cfg.Auth.OAuth2.DisplayNamePath); found {
 			display, ok = displayValue.(string)
 			if !ok || !validOAuth2IdentityString(display, 256) || strings.Contains(display, token.AccessToken) {
-				return Principal{}, errIdentityDisplay
+				return Principal{}, nil, errIdentityDisplay
 			}
 		}
 	}
-	return Principal{Issuer: a.cfg.Auth.OAuth2.Issuer, Subject: subject, DisplayName: safeDisplayName(display)}, nil
+	claims := map[string]any{"oauth2_subject": subject}
+	if object, isObject := identity.(map[string]any); isObject {
+		claims = object
+	}
+	if display != "" {
+		claims["oauth2_display_name"] = display
+	}
+	return Principal{
+		Issuer: a.cfg.Auth.OAuth2.Issuer, Subject: subject, DisplayName: safeDisplayName(display),
+	}, claims, nil
 }
 
 func readIdentityResponse(response *http.Response) ([]byte, error) {
@@ -489,6 +532,12 @@ func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request, csrf stri
 
 func (a *Authenticator) hasOwnedSlot(p Principal) bool {
 	return slices.ContainsFunc(a.cfg.Slots, p.Owns)
+}
+func (a *Authenticator) admits(p Principal, claims map[string]any) bool {
+	if a.cfg.Auth.Eligibility == nil {
+		return a.hasOwnedSlot(p)
+	}
+	return eligibility.Evaluate(*a.cfg.Auth.Eligibility, claims).Allowed
 }
 func (a *Authenticator) authFailure(w http.ResponseWriter) {
 	http.Error(w, "authentication failed", http.StatusUnauthorized)

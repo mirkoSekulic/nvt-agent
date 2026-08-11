@@ -16,6 +16,7 @@ import (
 	"time"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"github.com/mirkoSekulic/nvt-agent/protocol/eligibility"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -284,7 +285,7 @@ func (c AuthConfig) validateCommonAuthenticated() error {
 		return err
 	}
 	if c.Admission != nil {
-		if err := c.Admission.validate(); err != nil {
+		if err := validateAdmission(*c.Admission); err != nil {
 			return err
 		}
 	}
@@ -345,12 +346,12 @@ func (c AuthConfig) validateOAuth2() error {
 	if len(c.OAuth2.Identity.AllowedHosts) == 0 {
 		return fmt.Errorf("auth.oauth2.identity.allowedHosts is required")
 	}
-	if len(c.OAuth2.Identity.AllowedHosts) > maxClaimSourceHosts {
-		return fmt.Errorf("auth.oauth2.identity.allowedHosts must contain at most %d entries", maxClaimSourceHosts)
+	if len(c.OAuth2.Identity.AllowedHosts) > eligibility.MaxAllowedHosts {
+		return fmt.Errorf("auth.oauth2.identity.allowedHosts must contain at most %d entries", eligibility.MaxAllowedHosts)
 	}
 	allowed := map[string]struct{}{}
 	for index, host := range c.OAuth2.Identity.AllowedHosts {
-		if !validClaimSourceHost(host) {
+		if !eligibility.ValidHost(host) {
 			return fmt.Errorf("auth.oauth2.identity.allowedHosts[%d] must be a normalized lowercase DNS hostname or IP address without a port", index)
 		}
 		if _, exists := allowed[host]; exists {
@@ -395,7 +396,7 @@ func (c AuthConfig) validateOAuth2() error {
 		if field == "displayNamePath" && path == "" {
 			continue
 		}
-		if !claimPathPattern.MatchString(path) || isSensitiveEnrichmentPath(path) {
+		if !eligibility.ValidClaimPath(path) || eligibility.SensitiveEnrichmentPath(path) {
 			return fmt.Errorf("auth.oauth2.identity.%s must be a safe non-sensitive JSON path", field)
 		}
 	}
