@@ -34,6 +34,7 @@ const (
 var (
 	ErrNotEnrolled = errors.New("principal account is not enrolled")
 	ErrNotReady    = errors.New("principal credential is not ready")
+	ErrNotEligible = errors.New("principal is not currently eligible")
 	ErrUnavailable = errors.New("principal credential resolution unavailable")
 	providerIDRE   = regexp.MustCompile(`^dpa_[A-Za-z0-9_-]{32}$`)
 )
@@ -192,6 +193,9 @@ func (c *Client) Resolve(ctx context.Context, principal Principal) (Resolution, 
 	if status == http.StatusNotFound && brokerReason(body) == "account-not-found" {
 		return Resolution{}, ErrNotEnrolled
 	}
+	if status == http.StatusForbidden && brokerReason(body) == "principal-not-eligible" {
+		return Resolution{}, ErrNotEligible
+	}
 	if status != http.StatusOK {
 		return Resolution{}, ErrUnavailable
 	}
@@ -225,6 +229,9 @@ func (c *Client) Resolve(ctx context.Context, principal Principal) (Resolution, 
 	}
 	if status == http.StatusServiceUnavailable && brokerReason(resolvedBody) == "account-unready" {
 		return Resolution{}, ErrNotReady
+	}
+	if status == http.StatusForbidden && brokerReason(resolvedBody) == "principal-not-eligible" {
+		return Resolution{}, ErrNotEligible
 	}
 	if status != http.StatusOK {
 		return Resolution{}, ErrUnavailable

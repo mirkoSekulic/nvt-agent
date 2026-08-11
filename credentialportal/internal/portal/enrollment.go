@@ -79,22 +79,23 @@ type providerAction struct {
 }
 
 type enrollmentSession struct {
-	ExpiresAt        time.Time
-	TerminalAt       time.Time
-	Cancel           context.CancelFunc
-	Code             chan string
-	Slot             Slot
-	Principal        Principal
-	AuthorizationURL string
-	UserCode         string
-	Reason           string
-	ID               string
-	Status           string
-	CancelReason     string
-	DynamicAction    string
-	OperationID      string
-	NeedsCode        bool
-	CodeUsed         bool
+	ExpiresAt            time.Time
+	EligibilityExpiresAt time.Time
+	TerminalAt           time.Time
+	Cancel               context.CancelFunc
+	Code                 chan string
+	Slot                 Slot
+	Principal            Principal
+	AuthorizationURL     string
+	UserCode             string
+	Reason               string
+	ID                   string
+	Status               string
+	CancelReason         string
+	DynamicAction        string
+	OperationID          string
+	NeedsCode            bool
+	CodeUsed             bool
 }
 
 type CredentialRunner interface {
@@ -236,7 +237,8 @@ func (m *EnrollmentManager) start(
 	enrollmentContext, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	session := &enrollmentSession{
 		Cancel: cancel, Code: make(chan string, 1), ID: id, Status: enrollmentStarting,
-		Principal: principal, Slot: slot, ExpiresAt: deadline, DynamicAction: dynamicAction,
+		Principal: principal, Slot: slot, ExpiresAt: deadline,
+		EligibilityExpiresAt: authExpiresAt, DynamicAction: dynamicAction,
 		OperationID: operationID,
 	}
 	m.mu.Lock()
@@ -363,11 +365,12 @@ func (m *EnrollmentManager) run(ctx context.Context, session *enrollmentSession)
 			switch session.DynamicAction {
 			case dynamicActionEnroll:
 				completionError = m.broker.CompleteEnrollment(
-					ctx, session.Principal, session.Slot.Name, session.OperationID, document,
+					ctx, session.Principal, session.Slot.Name, session.OperationID,
+					document, session.EligibilityExpiresAt,
 				)
 			case dynamicActionReconnect:
 				completionError = m.broker.Reconnect(
-					ctx, session.Principal, session.OperationID, document,
+					ctx, session.Principal, session.OperationID, document, session.EligibilityExpiresAt,
 				)
 			default:
 				completionError = ErrBrokerRejected

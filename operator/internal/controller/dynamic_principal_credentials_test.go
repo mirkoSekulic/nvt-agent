@@ -136,6 +136,7 @@ func TestDynamicPrincipalAdmissionStableFailClosedReasons(t *testing.T) {
 		reason string
 	}{
 		{name: "not-enrolled", err: principalaccounts.ErrNotEnrolled, status: http.StatusForbidden, reason: "principal-not-enrolled"},
+		{name: "eligibility-expired", err: principalaccounts.ErrNotEligible, status: http.StatusForbidden, reason: "principal-not-eligible"},
 		{name: "unready", err: principalaccounts.ErrNotReady, status: http.StatusConflict, reason: "credential-not-ready"},
 		{name: "broker-unavailable", err: errors.New("TLS SECRET-NEEDLE internal"), status: http.StatusServiceUnavailable, reason: "credential-resolution-unavailable"},
 		{name: "unknown-template", result: principalaccounts.Resolution{Template: "unmapped-secret-template", ProviderInstanceID: dynamicProvider, Generation: 4}, status: http.StatusServiceUnavailable, reason: "credential-resolution-unavailable"},

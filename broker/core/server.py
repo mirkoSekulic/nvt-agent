@@ -223,7 +223,9 @@ class Broker:
             dynamic_config = load_dynamic_accounts_config(self.config, self.provider_factory.supported_plugins)
             if dynamic_config.enabled:
                 self.dynamic_account_authenticator = PrincipalAuthenticator(
-                    dynamic_config.hmac_key, dynamic_config.max_assertion_seconds
+                    dynamic_config.hmac_key,
+                    dynamic_config.max_assertion_seconds,
+                    dynamic_config.max_eligibility_lease_seconds,
                 )
                 self.dynamic_accounts = DynamicAccountManager(
                     dynamic_config, self.provider_factory, self.providers
@@ -533,6 +535,10 @@ class Broker:
                 result = self.dynamic_accounts.readiness(principal)
             elif operation == "resolve":
                 result = self.dynamic_accounts.resolve(principal)
+            elif operation == "renew-eligibility":
+                result = self.dynamic_accounts.renew_eligibility(principal)
+            elif operation == "revoke-eligibility":
+                result = self.dynamic_accounts.revoke_eligibility(principal)
             else:
                 raise ProviderError("not-found", "not-found", 404)
         finally:

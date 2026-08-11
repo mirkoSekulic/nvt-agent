@@ -272,11 +272,15 @@ complete rollout and verify they carry the same epoch. During a rolling
 mismatch assertions fail closed; do not rotate the Secret or restart only one
 workload without advancing the shared epoch.
 
-Eligibility is evaluated during portal login. If a principal no longer passes
-it, a new session and therefore new enrollment/reconnect is denied; an existing
-broker account is never reassigned or exposed. As with all in-memory portal
-sessions, logout or portal restart requires authentication and eligibility to
-be evaluated again.
+Eligibility is evaluated during portal login. A successful evaluation renews a
+signed broker-held eligibility lease for no longer than
+`credentialPortal.dynamic.broker.eligibilityLeaseSeconds` or the portal session,
+whichever is shorter. Enrollment and reconnect commit that same bounded expiry.
+If the verified identity no longer passes policy, login is denied and the
+portal explicitly revokes its prior lease. Expired or revoked evidence denies
+new operator resolution while preserving the existing account, template lock,
+credential custody, and already admitted AgentRuns. A future eligible login
+renews the same exact issuer+subject account; it never reassigns ownership.
 
 ## Enabling static-slot mode
 

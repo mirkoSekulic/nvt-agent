@@ -66,12 +66,13 @@ type DynamicConfig struct {
 }
 
 type DynamicBrokerConfig struct {
-	URL                   string `json:"url"`
-	CAFile                string `json:"caFile"`
-	AssertionKeyFile      string `json:"assertionKeyFile"`
-	AssertionTTLSeconds   int    `json:"assertionTTLSeconds"`
-	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
-	MaxResponseBytes      int    `json:"maxResponseBytes"`
+	URL                     string `json:"url"`
+	CAFile                  string `json:"caFile"`
+	AssertionKeyFile        string `json:"assertionKeyFile"`
+	AssertionTTLSeconds     int    `json:"assertionTTLSeconds"`
+	EligibilityLeaseSeconds int    `json:"eligibilityLeaseSeconds"`
+	RequestTimeoutSeconds   int    `json:"requestTimeoutSeconds"`
+	MaxResponseBytes        int    `json:"maxResponseBytes"`
 }
 
 type DynamicCredentialTemplate struct {
@@ -247,7 +248,8 @@ func (c *Config) Validate() error {
 				errInvalidConfig,
 			)
 		}
-		if len(c.Auth.OIDC.AccessTokenAudience) > 512 || strings.ContainsAny(c.Auth.OIDC.AccessTokenAudience, "\x00\r\n") {
+		if len(c.Auth.OIDC.AccessTokenAudience) > 512 ||
+			strings.ContainsAny(c.Auth.OIDC.AccessTokenAudience, "\x00\r\n") {
 			return fmt.Errorf("%w: OIDC accessTokenAudience must be a bounded string", errInvalidConfig)
 		}
 	} else {
@@ -383,19 +385,8 @@ func (c *Config) validateDynamic() error {
 			)
 		}
 	}
-	if c.Dynamic.Broker.AssertionTTLSeconds == 0 {
-		c.Dynamic.Broker.AssertionTTLSeconds = defaultAssertionTTL
-	}
-	if c.Dynamic.Broker.RequestTimeoutSeconds == 0 {
-		c.Dynamic.Broker.RequestTimeoutSeconds = defaultBrokerTimeout
-	}
-	if c.Dynamic.Broker.MaxResponseBytes == 0 {
-		c.Dynamic.Broker.MaxResponseBytes = defaultBrokerResponse
-	}
-	if c.Dynamic.Broker.AssertionTTLSeconds < 1 || c.Dynamic.Broker.AssertionTTLSeconds > 300 ||
-		c.Dynamic.Broker.RequestTimeoutSeconds < 1 || c.Dynamic.Broker.RequestTimeoutSeconds > 30 ||
-		c.Dynamic.Broker.MaxResponseBytes < 1024 || c.Dynamic.Broker.MaxResponseBytes > 1024*1024 {
-		return fmt.Errorf("%w: dynamic broker bounds are invalid", errInvalidConfig)
+	if err := c.validateDynamicBrokerBounds(); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for index, template := range c.Dynamic.Templates {
@@ -423,6 +414,29 @@ func (c *Config) validateDynamic() error {
 		}
 	}
 
+	return nil
+}
+
+func (c *Config) validateDynamicBrokerBounds() error {
+	if c.Dynamic.Broker.AssertionTTLSeconds == 0 {
+		c.Dynamic.Broker.AssertionTTLSeconds = defaultAssertionTTL
+	}
+	if c.Dynamic.Broker.EligibilityLeaseSeconds == 0 {
+		c.Dynamic.Broker.EligibilityLeaseSeconds = c.Auth.Session.MaxAgeSeconds
+	}
+	if c.Dynamic.Broker.RequestTimeoutSeconds == 0 {
+		c.Dynamic.Broker.RequestTimeoutSeconds = defaultBrokerTimeout
+	}
+	if c.Dynamic.Broker.MaxResponseBytes == 0 {
+		c.Dynamic.Broker.MaxResponseBytes = defaultBrokerResponse
+	}
+	if c.Dynamic.Broker.AssertionTTLSeconds < 1 || c.Dynamic.Broker.AssertionTTLSeconds > 300 ||
+		c.Dynamic.Broker.EligibilityLeaseSeconds < 300 ||
+		c.Dynamic.Broker.EligibilityLeaseSeconds > c.Auth.Session.MaxAgeSeconds ||
+		c.Dynamic.Broker.RequestTimeoutSeconds < 1 || c.Dynamic.Broker.RequestTimeoutSeconds > 30 ||
+		c.Dynamic.Broker.MaxResponseBytes < 1024 || c.Dynamic.Broker.MaxResponseBytes > 1024*1024 {
+		return fmt.Errorf("%w: dynamic broker bounds are invalid", errInvalidConfig)
+	}
 	return nil
 }
 

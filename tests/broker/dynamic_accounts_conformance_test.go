@@ -112,14 +112,16 @@ func (f *dynamicAccountFixture) stop() {
 
 func (f *dynamicAccountFixture) assertion(issuer, subject string) string {
 	payload := struct {
-		Audience  string `json:"audience"`
-		ExpiresAt int64  `json:"expires_at"`
-		Issuer    string `json:"issuer"`
-		Subject   string `json:"subject"`
-		Version   int    `json:"version"`
+		Audience             string `json:"audience"`
+		EligibilityExpiresAt int64  `json:"eligibility_expires_at"`
+		ExpiresAt            int64  `json:"expires_at"`
+		Issuer               string `json:"issuer"`
+		Subject              string `json:"subject"`
+		Version              int    `json:"version"`
 	}{
 		Audience: "nvt.broker.principal-accounts/v1", ExpiresAt: time.Now().Add(time.Minute).Unix(),
-		Issuer: issuer, Subject: subject, Version: 1,
+		EligibilityExpiresAt: time.Now().Add(30 * time.Minute).Unix(),
+		Issuer:               issuer, Subject: subject, Version: 1,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -252,6 +254,29 @@ func TestDynamicPrincipalAccountHTTPContract(t *testing.T) {
 		if otherStatus != http.StatusNotFound || strings.Contains(otherBody, "alice") {
 			t.Fatalf("cross-principal %s leaked status=%d body=%s", path, otherStatus, otherBody)
 		}
+	}
+
+	eligibilityRevoked, status, _ := f.post(
+		"/v1/principal-accounts/revoke-eligibility", alice, map[string]any{},
+	)
+	if status != http.StatusOK || eligibilityRevoked["ok"] != true {
+		t.Fatalf("eligibility revocation failed status=%d payload=%v", status, eligibilityRevoked)
+	}
+	deniedResolution, status, deniedResolutionBody := f.post(
+		"/v1/principal-accounts/resolve", alice, map[string]any{},
+	)
+	if status != http.StatusForbidden || deniedResolution["error"] != "principal-not-eligible" ||
+		strings.Contains(deniedResolutionBody, dynamicAccountNeedle) {
+		t.Fatalf("revoked eligibility did not deny resolution status=%d body=%s", status, deniedResolutionBody)
+	}
+	eligibilityRenewed, status, _ := f.post(
+		"/v1/principal-accounts/renew-eligibility", alice, map[string]any{},
+	)
+	if status != http.StatusOK || eligibilityRenewed["ok"] != true {
+		t.Fatalf("eligibility renewal failed status=%d payload=%v", status, eligibilityRenewed)
+	}
+	if _, status, _ = f.post("/v1/principal-accounts/resolve", alice, map[string]any{}); status != http.StatusOK {
+		t.Fatalf("renewed eligibility did not restore resolution status=%d", status)
 	}
 
 	reconnected, status, _ := f.post("/v1/principal-accounts/reconnect", alice, map[string]any{

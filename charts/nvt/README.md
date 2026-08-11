@@ -274,6 +274,7 @@ broker:
       state-dir: /state/principal-accounts
       authentication:
         hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+        max-eligibility-lease-seconds: 3600
       provider-templates:
         - name: approved-provider
           plugin: company-oauth
@@ -471,6 +472,14 @@ still send only immutable principal facts, workflow, work metadata, and prompt;
 they cannot choose the template, provider, generation, profile, grants,
 capabilities, runtime, or egress policy.
 
+Issuer policy is only a producer-domain constraint. Current user eligibility is
+a bounded signed lease created by the portal after the shared OAuth policy
+passes and retained as a non-secret expiry by the broker. Operator resolution
+fails closed as `principal-not-eligible` after expiry or explicit policy
+revocation; a fresh eligible portal login renews it. Configure the portal lease
+no longer than its session and the broker's
+`max-eligibility-lease-seconds` bound.
+
 The operator's broker CA and assertion key are projected only into the operator
 manager. They are never mounted into producers or AgentRun Pods. The broker URL
 must be an HTTPS origin, responses and deadlines are bounded, and readiness plus
@@ -493,6 +502,12 @@ remain alongside a separate dynamic schedule. Rollback disables dynamic
 schedule admission and the operator client; it does not delete broker account
 state or mutate already accepted AgentRuns. Do not replace the dynamic schedule
 with a shared static fallback for affected principals.
+
+On upgrade, account metadata written before eligibility leases is preserved
+with an expired lease and therefore cannot admit new dynamic runs. Each owner
+must complete one currently eligible portal login to renew that exact account;
+no credential upload or reconnect is required. Existing AgentRuns continue
+using their frozen provider generation during this adoption step.
 
 Omitted profile execution keeps the existing Kubernetes Pod path. Operators
 may spell that selection explicitly as `execution: {kind: pod, driver:

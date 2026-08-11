@@ -21,11 +21,12 @@ const dynamicCredentialNeedle = "DYNAMIC-PORTAL-CREDENTIAL-NEEDLE"
 
 //nolint:govet // Test record order mirrors the broker mutation interface.
 type brokerMutation struct {
-	Principal   Principal
-	Template    string
-	OperationID string
-	Credential  []byte
-	Action      string
+	Principal            Principal
+	Template             string
+	OperationID          string
+	Credential           []byte
+	EligibilityExpiresAt time.Time
+	Action               string
 }
 
 type memoryPrincipalAccountBroker struct {
@@ -68,6 +69,7 @@ func (b *memoryPrincipalAccountBroker) CompleteEnrollment(
 	principal Principal,
 	template, operationID string,
 	credential []byte,
+	eligibilityExpiresAt time.Time,
 ) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -80,7 +82,8 @@ func (b *memoryPrincipalAccountBroker) CompleteEnrollment(
 	}
 	b.mutations = append(b.mutations, brokerMutation{
 		Principal: principal, Template: template, OperationID: operationID,
-		Credential: bytes.Clone(credential), Action: dynamicActionEnroll,
+		Credential: bytes.Clone(credential), EligibilityExpiresAt: eligibilityExpiresAt,
+		Action: dynamicActionEnroll,
 	})
 	b.accounts[key] = DynamicAccountState{State: accountStateReady, Template: template, Generation: 1}
 	return nil
@@ -91,6 +94,7 @@ func (b *memoryPrincipalAccountBroker) Reconnect(
 	principal Principal,
 	operationID string,
 	credential []byte,
+	eligibilityExpiresAt time.Time,
 ) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -104,7 +108,8 @@ func (b *memoryPrincipalAccountBroker) Reconnect(
 	}
 	b.mutations = append(b.mutations, brokerMutation{
 		Principal: principal, Template: current.Template, OperationID: operationID,
-		Credential: bytes.Clone(credential), Action: dynamicActionReconnect,
+		Credential: bytes.Clone(credential), EligibilityExpiresAt: eligibilityExpiresAt,
+		Action: dynamicActionReconnect,
 	})
 	if current.Generation < 1 {
 		current.Generation = 1
@@ -112,6 +117,13 @@ func (b *memoryPrincipalAccountBroker) Reconnect(
 	current.State = accountStateReady
 	current.Generation++
 	b.accounts[key] = current
+	return nil
+}
+
+func (b *memoryPrincipalAccountBroker) RenewEligibility(_ context.Context, _ Principal) error {
+	return nil
+}
+func (b *memoryPrincipalAccountBroker) RevokeEligibility(_ context.Context, _ Principal) error {
 	return nil
 }
 
@@ -226,7 +238,7 @@ func waitHTTPEnrollment(
 	return waitEnrollmentStatus(t, server.enrollments, principal, started.ID, enrollmentSucceeded, enrollmentFailed)
 }
 
-//nolint:gocyclo // One end-to-end test deliberately verifies all custody and non-disclosure invariants together.
+//nolint:gocyclo,cyclop // One test deliberately verifies the complete custody/non-disclosure lifecycle.
 func TestDynamicEligibleUnknownPrincipalEnrollsAndReconnectsBeforeExpiryWithoutDisclosure(t *testing.T) {
 	principal := Principal{Issuer: testIdentityIssuer, Subject: "new-dynamic-user", DisplayName: "New user"}
 	broker := newMemoryPrincipalAccountBroker()
@@ -272,7 +284,9 @@ func TestDynamicEligibleUnknownPrincipalEnrollsAndReconnectsBeforeExpiryWithoutD
 		broker.mutations[1].Action != dynamicActionReconnect ||
 		broker.mutations[0].Principal != principal || broker.mutations[0].Template != testDynamicTemplateOne ||
 		broker.mutations[0].OperationID == "" || broker.mutations[1].OperationID == "" ||
-		broker.mutations[0].OperationID == broker.mutations[1].OperationID {
+		broker.mutations[0].OperationID == broker.mutations[1].OperationID ||
+		broker.mutations[0].EligibilityExpiresAt.Before(time.Now().Add(50*time.Minute)) ||
+		broker.mutations[1].EligibilityExpiresAt.Before(time.Now().Add(50*time.Minute)) {
 		t.Fatal("dynamic broker custody did not preserve exact principal/template/action/operation binding")
 	}
 	observable := dashboard.Body.String() + started.Body.String() + audit.String()

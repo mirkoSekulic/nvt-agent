@@ -22,6 +22,7 @@ var (
 	errProducerNotAllowed                   = errors.New("producer is not allowed")
 	errWorkflowSelectionDenied              = errors.New("workflow selection denied")
 	errPrincipalNotEnrolled                 = errors.New("principal not enrolled")
+	errPrincipalNotEligible                 = errors.New("principal not currently eligible")
 	errPrincipalCredentialNotReady          = errors.New("principal credential not ready")
 	errPrincipalCredentialResolution        = errors.New("principal credential resolution unavailable")
 )
@@ -268,6 +269,8 @@ func resolvePrincipalCredentialProfile(
 		Issuer: principal.Issuer, Subject: principal.Subject,
 	})
 	switch {
+	case errors.Is(err, principalaccounts.ErrNotEligible):
+		return nil, errPrincipalNotEligible
 	case errors.Is(err, principalaccounts.ErrNotEnrolled):
 		return nil, errPrincipalNotEnrolled
 	case errors.Is(err, principalaccounts.ErrNotReady):

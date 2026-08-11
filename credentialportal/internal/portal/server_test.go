@@ -83,7 +83,7 @@ func testConfig() Config {
 				Issuer:           testIdentityIssuer,
 				AuthorizationURL: testIdentityIssuer + "/auth",
 				TokenURL:         testIdentityIssuer + "/token",
-				CallbackPath:     "/oauth2/callback",
+				CallbackPath:     testOAuthCallbackPath,
 				IdentityEndpoint: testIdentityIssuer + "/me",
 				AllowedHosts:     []string{"identity.example"},
 				SubjectPath:      "id",

@@ -214,11 +214,15 @@ profiles:
 
 The authenticated producer identity comes from TokenReview as before. Each
 dynamic producer policy additionally lists 1–32 exact canonical HTTPS
-principal issuers. This is the operator's current admission eligibility gate;
-the credential portal's shared OAuth eligibility policy remains responsible
-for who may establish the broker account. Display name, login, and email are
-never ownership. A missing/malformed principal or disallowed issuer returns
-`principal-not-eligible` before the broker is contacted.
+principal issuers. This constrains which identity domains that producer may
+assert but is not current user eligibility. The portal's shared OAuth policy
+mints a bounded renewable eligibility lease after each successful login; the
+broker persists only its non-secret expiry and requires it during operator
+readiness/resolution. A later verified policy denial revokes the lease, and
+expiry or revocation denies new AgentRuns as `principal-not-eligible` without
+interrupting already frozen runs. Display name, login, and email are never
+ownership. A missing/malformed principal or disallowed issuer is rejected
+before the broker is contacted.
 
 The operator alone sends a short-lived exact-principal assertion to the broker
 over verified TLS. It requires consistent authenticated readiness and

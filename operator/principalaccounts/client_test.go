@@ -189,6 +189,17 @@ func TestResolveStableAccountStates(t *testing.T) {
 			want:          ErrNotReady,
 		},
 		{
+			name: "eligibility-expired", readinessCode: 403,
+			readinessBody: `{"ok":false,"error":"principal-not-eligible","message":"principal-not-eligible"}`,
+			want:          ErrNotEligible,
+		},
+		{
+			name: "eligibility-revoked-between-checks", readinessCode: 200, readinessBody: readyResponse,
+			resolutionCode: 403,
+			resolutionBody: `{"ok":false,"error":"principal-not-eligible","message":"principal-not-eligible"}`,
+			want:           ErrNotEligible,
+		},
+		{
 			name: "raced-unready", readinessCode: 200, readinessBody: readyResponse, resolutionCode: 503,
 			resolutionBody: `{"ok":false,"error":"account-unready","message":"account-unready"}`,
 			want:           ErrNotReady,

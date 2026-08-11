@@ -376,6 +376,9 @@ credentialPortal:
         existingSecret: ""
         key: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
       assertionTTLSeconds: 60
+      # Signed current-eligibility evidence never outlives the portal session.
+      # Users renew it by completing a fresh eligible portal login.
+      eligibilityLeaseSeconds: 3600
       requestTimeoutSeconds: 10
       maxResponseBytes: 65536
     # Public template name/label -> one compiled trusted enrollment adapter.

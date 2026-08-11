@@ -52,7 +52,6 @@ type loginState struct {
 }
 
 type Authenticator struct {
-	oauth               oauth2.Config
 	provider            *oidc.Provider
 	verifier            *oidc.IDTokenVerifier
 	accessTokenVerifier *oidc.IDTokenVerifier
@@ -60,15 +59,24 @@ type Authenticator struct {
 	client              *http.Client
 	sessions            map[string]session
 	now                 func() time.Time
+	eligibility         EligibilityLeaseBroker
+	oauth               oauth2.Config
 	cfg                 Config
 	mu                  sync.Mutex
 }
 
+type EligibilityLeaseBroker interface {
+	RenewEligibility(ctx context.Context, principal Principal) error
+	RevokeEligibility(ctx context.Context, principal Principal) error
+}
+
+//nolint:nestif // OIDC discovery and OAuth2 endpoint setup are explicit fail-closed branches.
 func NewAuthenticator(
 	ctx context.Context,
 	cfg Config,
 	sessionSecret, clientID, clientSecret string,
 	client *http.Client,
+	leaseBrokers ...EligibilityLeaseBroker,
 ) (*Authenticator, error) {
 	if len(sessionSecret) < 32 || clientSecret == "" {
 		return nil, fmt.Errorf(
@@ -87,6 +95,9 @@ func NewAuthenticator(
 		client:   client,
 		sessions: map[string]session{},
 		now:      time.Now,
+	}
+	if err := configureEligibilityLeaseBroker(a, cfg.Dynamic.Enabled, leaseBrokers); err != nil {
+		return nil, err
 	}
 	a.cookies.MaxAge(cfg.Auth.Session.MaxAgeSeconds)
 	redirect := cfg.PublicURL + callbackPath(cfg)
@@ -128,6 +139,24 @@ func NewAuthenticator(
 		}
 	}
 	return a, nil
+}
+
+func configureEligibilityLeaseBroker(
+	auth *Authenticator,
+	dynamic bool,
+	brokers []EligibilityLeaseBroker,
+) error {
+	if dynamic {
+		if len(brokers) != 1 || brokers[0] == nil {
+			return fmt.Errorf("%w: dynamic mode requires an eligibility lease broker", errAuthConfiguration)
+		}
+		auth.eligibility = brokers[0]
+		return nil
+	}
+	if len(brokers) != 0 {
+		return fmt.Errorf("%w: static mode must not configure an eligibility lease broker", errAuthConfiguration)
+	}
+	return nil
 }
 
 func authStyle(method string) oauth2.AuthStyle {
@@ -200,7 +229,7 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, a.oauth.AuthCodeURL(state, opts...), http.StatusFound)
 }
 
-//nolint:funlen,gocyclo // Callback validation is intentionally linear and fail-closed before session creation.
+//nolint:funlen,gocyclo,cyclop // Callback validation is intentionally linear and fail-closed before session creation.
 func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -236,6 +265,7 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal, claims, err := a.principal(ctx, token, login.Nonce)
+	identityVerified := err == nil
 	if err == nil && a.cfg.Auth.Mode == authModeOIDC {
 		claims, err = a.oidcEligibilityClaims(ctx, token, principal, claims)
 	}
@@ -254,7 +284,7 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	clear(claims)
 	token.AccessToken = ""
 	token.RefreshToken = ""
-	if !admitted {
+	if !a.updateEligibilityLease(ctx, principal, identityVerified, admitted) {
 		a.authFailure(w)
 		return
 	}
@@ -295,6 +325,26 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	http.Redirect(w, r, a.cfg.Path("/"), http.StatusFound)
+}
+
+func (a *Authenticator) updateEligibilityLease(
+	ctx context.Context,
+	principal Principal,
+	identityVerified, admitted bool,
+) bool {
+	if a.eligibility == nil {
+		return admitted
+	}
+	if !admitted {
+		if identityVerified {
+			// Exact verified identity may revoke its prior lease when current
+			// policy evaluation denies it. The login remains denied regardless
+			// of dependency state, so no broker detail is exposed.
+			_ = a.eligibility.RevokeEligibility(ctx, principal) //nolint:errcheck // Already fail-closed.
+		}
+		return false
+	}
+	return a.eligibility.RenewEligibility(ctx, principal) == nil
 }
 
 func (a *Authenticator) validCallbackIssuer(query url.Values) bool {

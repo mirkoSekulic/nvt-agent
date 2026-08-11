@@ -144,7 +144,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.NotFound(w, r)
 				return
 			}
-			s.dynamicRecovery(w, r, principal, csrf, name)
+			s.dynamicRecovery(w, r, principal, csrf, name, authExpiresAt)
 			return
 		}
 	} else {
@@ -314,6 +314,7 @@ func (s *Server) dynamicRecovery(
 	r *http.Request,
 	principal Principal,
 	csrf, templateName string,
+	authExpiresAt time.Time,
 ) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !s.cfg.RecoveryUpload.Enabled || r.Method != http.MethodPut || r.URL.RawQuery != "" {
@@ -359,9 +360,9 @@ func (s *Server) dynamicRecovery(
 		return
 	}
 	if action == dynamicActionEnroll {
-		err = s.broker.CompleteEnrollment(r.Context(), principal, templateName, operationID, body)
+		err = s.broker.CompleteEnrollment(r.Context(), principal, templateName, operationID, body, authExpiresAt)
 	} else {
-		err = s.broker.Reconnect(r.Context(), principal, operationID, body)
+		err = s.broker.Reconnect(r.Context(), principal, operationID, body, authExpiresAt)
 	}
 	if err != nil {
 		reason := brokerCompletionReason(err)

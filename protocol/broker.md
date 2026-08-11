@@ -90,9 +90,13 @@ Each request uses a short-lived assertion from a trusted identity frontend:
 Authorization: NVT-Principal-v1 <base64url(payload)>.<base64url(HMAC-SHA256)>
 ```
 
-The duplicate-free JSON payload has exactly `version: 1`, audience
+The duplicate-free JSON payload has `version: 1`, audience
 `nvt.broker.principal-accounts/v1`, canonical `issuer`, immutable `subject`, and
-an integer `expires_at`. The configured HMAC key never appears in broker config;
+an integer `expires_at`. Assertions minted by the eligibility frontend may also
+carry an integer `eligibility_expires_at`; operator resolution assertions omit
+it. The broker bounds this renewable evidence to
+`authentication.max-eligibility-lease-seconds` (3600 seconds by default) and
+persists only its expiry, never OAuth claims or tokens. The configured HMAC key never appears in broker config;
 `authentication.hmac-key-env` names a Secret-sourced environment variable of at
 least 32 bytes. The frontend remains responsible for authenticating the
 identity before minting this assertion. Assertions are bounded to at most the
@@ -113,6 +117,18 @@ receives the same `account-not-found` response as a principal with no account.
 | `POST /v1/principal-accounts/revoke` | `operation_id` | revoked state |
 | `POST /v1/principal-accounts/readiness` | empty object | own `ready`, `unready`, or `revoked` state plus committed template and generation |
 | `POST /v1/principal-accounts/resolve` | empty object | own template, opaque provider instance id, generation |
+| `POST /v1/principal-accounts/renew-eligibility` | empty object | acknowledgement only |
+| `POST /v1/principal-accounts/revoke-eligibility` | empty object | acknowledgement only |
+
+Enrollment and reconnect require a currently valid signed eligibility expiry.
+The portal renews an existing account after each successful current policy
+evaluation and revokes the lease when a verified identity is denied. Renewal
+for a principal without an account is deliberately indistinguishable from a
+successful no-op; first enrollment commits that same signed lease atomically
+with the account. Expired or revoked evidence makes readiness and resolution
+return only `principal-not-eligible`. Existing provider handles remain usable
+by already admitted AgentRuns; the lease gates new resolution rather than
+rewriting or interrupting frozen runs.
 
 Bodies are at most 1,028 KiB, credential documents at most 768 KiB, and JSON is
 strict UTF-8 with duplicate and unknown fields rejected. The bounded 4 KiB
@@ -152,8 +168,8 @@ exist only in the authenticated request, broker-owned credential file, and
 provider process protocol; they never enter metadata, operation results, HTTP
 responses, audit, errors, events, command arguments, or Kubernetes objects.
 Metadata contains only the exact ownership identity, opaque ids, approved
-template, generation, timestamps, state, active credential filename, and
-bounded idempotency records.
+template, generation, timestamps, non-secret eligibility expiry, state, active
+credential filename, and bounded idempotency records.
 
 Replacement writes and fsyncs a new unique credential generation, initializes
 the provider against it, then atomically replaces and fsyncs the metadata

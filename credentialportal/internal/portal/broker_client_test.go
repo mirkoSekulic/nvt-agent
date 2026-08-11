@@ -53,7 +53,8 @@ func newTestPrincipalAccountBroker(
 	}
 	client, err := NewHTTPPrincipalAccountBroker(DynamicBrokerConfig{
 		URL: server.URL, CAFile: caPath, AssertionKeyFile: keyPath,
-		AssertionTTLSeconds: 60, RequestTimeoutSeconds: 2, MaxResponseBytes: 64 * 1024,
+		AssertionTTLSeconds: 60, EligibilityLeaseSeconds: 3600,
+		RequestTimeoutSeconds: 2, MaxResponseBytes: 64 * 1024,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -90,11 +91,12 @@ func verifyTestPrincipalAssertion(
 		t.Fatal("broker principal assertion signature did not verify")
 	}
 	var assertion struct { //nolint:govet // Signed field order mirrors the production assertion.
-		Audience  string `json:"audience"`
-		ExpiresAt int64  `json:"expires_at"`
-		Issuer    string `json:"issuer"`
-		Subject   string `json:"subject"`
-		Version   int    `json:"version"`
+		Audience             string `json:"audience"`
+		EligibilityExpiresAt int64  `json:"eligibility_expires_at,omitempty"`
+		ExpiresAt            int64  `json:"expires_at"`
+		Issuer               string `json:"issuer"`
+		Subject              string `json:"subject"`
+		Version              int    `json:"version"`
 	}
 	if !strictBrokerJSON(payload, &assertion) || assertion.Version != 1 ||
 		assertion.Audience != principalAssertionAudience || assertion.ExpiresAt <= time.Now().Unix() ||
@@ -179,11 +181,12 @@ func TestPrincipalAccountBrokerRejectsMutationResponseStateConfusion(t *testing.
 	client, _ := newTestPrincipalAccountBroker(t, handler)
 	principal := Principal{Issuer: testBrokerIssuer, Subject: "state-confusion"}
 	credential := []byte("credential")
+	eligibilityExpiresAt := time.Now().Add(10 * time.Minute)
 	for operation, err := range map[string]error{
 		"enroll": client.CompleteEnrollment(
-			t.Context(), principal, testBrokerTemplate, "wrong-enroll-state", credential,
+			t.Context(), principal, testBrokerTemplate, "wrong-enroll-state", credential, eligibilityExpiresAt,
 		),
-		"reconnect":  client.Reconnect(t.Context(), principal, "wrong-reconnect-state", credential),
+		"reconnect":  client.Reconnect(t.Context(), principal, "wrong-reconnect-state", credential, eligibilityExpiresAt),
 		"revocation": client.Revoke(t.Context(), principal, "wrong-revoke-state"),
 	} {
 		if !errors.Is(err, ErrBrokerUnavailable) {
@@ -235,6 +238,7 @@ func TestPrincipalAccountBrokerRetriesResponseLossWithSameOperationAndNoDisclosu
 		testBrokerTemplate,
 		"same-operation-after-response-loss",
 		credential,
+		time.Now().Add(10*time.Minute),
 	)
 	if err != nil {
 		t.Fatalf("response-loss recovery failed: %v", err)
@@ -293,19 +297,19 @@ func TestPrincipalAccountBrokerFailsClosedOnMalformedUnavailableAndAssertionReje
 		t.Fatal("malformed broker response did not fail closed")
 	}
 	if err := client.Reconnect(
-		t.Context(), principal, "malformed-completion", []byte("credential"),
+		t.Context(), principal, "malformed-completion", []byte("credential"), time.Now().Add(10*time.Minute),
 	); !errors.Is(err, ErrBrokerUnavailable) {
 		t.Fatal("malformed broker completion did not fail closed")
 	}
 	mode = "rejected"
-	err := client.Reconnect(t.Context(), principal, "operation", []byte("credential"))
+	err := client.Reconnect(t.Context(), principal, "operation", []byte("credential"), time.Now().Add(10*time.Minute))
 	if !errors.Is(err, ErrBrokerRejected) || brokerCompletionReason(err) != "broker-authorization-failed" ||
 		strings.Contains(err.Error(), brokerClientSecretNeedle) {
 		t.Fatal("broker assertion rejection was not sanitized")
 	}
 	mode = "secret-error"
-	err = client.Reconnect(t.Context(), principal, "secret-error", []byte("credential"))
-	if !errors.Is(err, ErrBrokerRejected) || brokerCompletionReason(err) != "broker-update-failed" ||
+	err = client.Reconnect(t.Context(), principal, "secret-error", []byte("credential"), time.Now().Add(10*time.Minute))
+	if !errors.Is(err, ErrBrokerRejected) || brokerCompletionReason(err) != reasonBrokerUpdateFailed ||
 		strings.Contains(err.Error()+brokerCompletionReason(err), brokerClientSecretNeedle) {
 		t.Fatal("broker diagnostic was not normalized before portal output")
 	}

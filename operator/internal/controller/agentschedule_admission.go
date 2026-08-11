@@ -263,6 +263,12 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 					Scheduled: false, Reason: "principal-not-enrolled",
 				})
 				return
+			case errors.Is(resolveErr, errPrincipalNotEligible):
+				h.recordRejected(ctx, schedule, "principal-not-eligible")
+				writeScheduleAdmissionJSON(response, http.StatusForbidden, scheduleAdmissionResponse{
+					Scheduled: false, Reason: "principal-not-eligible",
+				})
+				return
 			case errors.Is(resolveErr, errPrincipalCredentialNotReady):
 				h.recordRejected(ctx, schedule, "credential-not-ready")
 				writeScheduleAdmissionJSON(response, http.StatusConflict, scheduleAdmissionResponse{
