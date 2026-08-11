@@ -1,0 +1,414 @@
+import base64
+import hmac
+import json
+import os
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from broker.core.config import BrokerConfigError
+from broker.core.dynamic_accounts import (
+    DynamicAccountManager,
+    Principal,
+    PrincipalAuthenticator,
+    decode_api_request,
+    load_dynamic_accounts_config,
+    principal_id,
+    sign_principal_assertion,
+)
+from broker.core.errors import ProviderError
+
+
+class FakeProvider:
+    def __init__(self, entry, fail=False):
+        self.name = entry["name"]
+        self.path = Path(entry["config"]["credential-file"])
+        self.closed = False
+        self.external = False
+        self.validation_entered = None
+        self.validation_release = None
+        if fail or self.path.read_bytes().startswith(b"invalid"):
+            raise RuntimeError("provider rejected credential SECRET-NEEDLE")
+
+    @property
+    def ready(self):
+        return not self.closed
+
+    def validate_state(self):
+        if self.validation_entered is not None:
+            self.validation_entered.set()
+            self.validation_release.wait(timeout=5)
+        return not self.closed and self.path.is_file()
+
+    def close(self):
+        self.closed = True
+
+
+class FakeFactory:
+    supported_plugins = frozenset({"synthetic"})
+
+    def __init__(self):
+        self.fail = False
+        self.created = []
+
+    def create(self, entry):
+        provider = FakeProvider(entry, self.fail)
+        self.created.append(provider)
+        return provider
+
+
+def configuration(root, *, maximum=8, template="member"):
+    return {
+        "dynamic-accounts": {
+            "enabled": True,
+            "state-dir": str(root),
+            "max-accounts": maximum,
+            "authentication": {"hmac-key-env": "TEST_DYNAMIC_ACCOUNT_KEY", "max-assertion-seconds": 60},
+            "provider-templates": [
+                {
+                    "name": "provider-template",
+                    "plugin": "synthetic",
+                    "credential-config-key": "credential-file",
+                    "config": {"safe-setting": "configured-by-admin"},
+                }
+            ],
+            "credential-templates": [
+                {
+                    "name": template,
+                    "label": "Member account",
+                    "enrollment-adapter": "approved-adapter",
+                    "provider-template": "provider-template",
+                }
+            ],
+        }
+    }
+
+
+class DynamicAccountsTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "accounts"
+        self.key = b"k" * 32
+        self.environment = mock.patch.dict(os.environ, {"TEST_DYNAMIC_ACCOUNT_KEY": self.key.decode()})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.factory = FakeFactory()
+        self.config = load_dynamic_accounts_config(configuration(self.root), self.factory.supported_plugins)
+        self.alice = Principal("https://issuer.example", "alice-immutable", principal_id("https://issuer.example", "alice-immutable"))
+        self.bob = Principal("https://issuer.example", "bob-immutable", principal_id("https://issuer.example", "bob-immutable"))
+
+    def manager(self, config=None, factory=None):
+        manager = DynamicAccountManager(config or self.config, factory or self.factory, {"shared-static"})
+        self.addCleanup(manager.close)
+        return manager
+
+    def test_disabled_is_inert_and_preserves_absent_configuration(self):
+        self.assertFalse(load_dynamic_accounts_config({}, set()).enabled)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            value = load_dynamic_accounts_config({"dynamic-accounts": {"enabled": False}}, set())
+        self.assertFalse(value.enabled)
+
+    def test_configuration_is_strict_and_provider_neutral(self):
+        broken = configuration(self.root)
+        broken["dynamic-accounts"]["credential-templates"][0]["provider-template"] = "missing"
+        with self.assertRaisesRegex(BrokerConfigError, "unknown"):
+            load_dynamic_accounts_config(broken, self.factory.supported_plugins)
+        broken = configuration(self.root)
+        broken["dynamic-accounts"]["provider-templates"][0]["config"]["credential-file"] = "/caller"
+        with self.assertRaisesRegex(BrokerConfigError, "must not set"):
+            load_dynamic_accounts_config(broken, self.factory.supported_plugins)
+
+    def test_assertion_binds_exact_issuer_and_subject_and_fails_closed(self):
+        authenticator = PrincipalAuthenticator(self.key, 60)
+        assertion = sign_principal_assertion(self.key, self.alice.issuer, self.alice.subject, int(time.time()) + 30)
+        self.assertEqual(authenticator.authenticate(assertion), self.alice)
+        for invalid in (
+            assertion + "x",
+            sign_principal_assertion(self.key, self.alice.issuer, self.alice.subject, int(time.time()) - 1),
+            sign_principal_assertion(self.key, self.alice.issuer, self.alice.subject, int(time.time()) + 61),
+            None,
+        ):
+            with self.assertRaisesRegex(ProviderError, "unauthorized"):
+                authenticator.authenticate(invalid)
+        self.assertNotEqual(
+            principal_id("https://issuer-a", "same"),
+            principal_id("https://issuer-b", "same"),
+        )
+        raw = json.dumps(
+            {
+                "audience": "nvt.broker.principal-accounts/v1",
+                "expires_at": int(time.time()) + 30,
+                "issuer": self.alice.issuer,
+                "subject": self.alice.subject,
+                "version": True,
+            },
+            separators=(",", ":"),
+        ).encode()
+        encoded = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+        signature = base64.urlsafe_b64encode(hmac.digest(self.key, raw, "sha256")).rstrip(b"=").decode()
+        with self.assertRaisesRegex(ProviderError, "unauthorized"):
+            authenticator.authenticate(f"NVT-Principal-v1 {encoded}.{signature}")
+
+    def test_strict_request_codec_rejects_destinations_and_duplicate_fields(self):
+        with self.assertRaisesRegex(ProviderError, "invalid-request"):
+            decode_api_request(b'{"operation_id":"one","operation_id":"two"}', "revoke")
+        with self.assertRaisesRegex(ProviderError, "invalid-request"):
+            decode_api_request(b'{"operation_id":"one","provider":"shared-static"}', "revoke")
+        payload, credential = decode_api_request(
+            b'{"template":"member","operation_id":"one","credential_base64":"c2FmZQ=="}', "enroll"
+        )
+        self.assertEqual(payload["template"], "member")
+        self.assertEqual(credential, b"safe")
+
+    def test_enroll_resolve_reconnect_and_restart_recovery(self):
+        manager = self.manager()
+        first = manager.enroll(self.alice, "member", "enroll-1", bytearray(b"credential-one"))
+        self.assertEqual(first["generation"], 1)
+        resolved = manager.resolve(self.alice)
+        self.assertTrue(resolved["provider_instance_id"].startswith("dpa_"))
+        self.assertNotEqual(resolved["provider_instance_id"], "shared-static")
+        first_file = self.factory.created[-1].path
+        self.assertEqual(first_file.stat().st_mode & 0o777, 0o600)
+        metadata_file = first_file.parent / "metadata.json"
+        self.assertEqual(metadata_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.root / ".writer.lock").stat().st_mode & 0o777, 0o600)
+        second = manager.reconnect(self.alice, "reconnect-1", bytearray(b"credential-two"))
+        self.assertEqual(second["generation"], 2)
+        self.assertFalse(first_file.exists())
+        current_id = manager.resolve(self.alice)["provider_instance_id"]
+        manager.close()
+
+        recovered = self.manager(factory=FakeFactory())
+        self.assertEqual(recovered.resolve(self.alice)["provider_instance_id"], current_id)
+        self.assertEqual(recovered.readiness(self.alice)["state"], "ready")
+
+    def test_concurrent_idempotent_enrollment_creates_one_account(self):
+        manager = self.manager()
+        results = []
+        failures = []
+        barrier = threading.Barrier(8)
+
+        def enroll():
+            try:
+                barrier.wait()
+                results.append(manager.enroll(self.alice, "member", "same-operation", bytearray(b"same")))
+            except Exception as error:  # pragma: no cover - asserted below
+                failures.append(error)
+
+        threads = [threading.Thread(target=enroll) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(failures, [])
+        self.assertEqual(results, [results[0]] * 8)
+        self.assertEqual(len(list((self.root / "accounts").glob("p_*/credential-*.bin"))), 1)
+
+    def test_reconnect_waits_for_old_provider_leases_before_retirement(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"one"))
+        resolved = manager.resolve(self.alice)
+        handle = manager.provider(resolved["provider_instance_id"])
+        old = self.factory.created[-1]
+        old.validation_entered = threading.Event()
+        old.validation_release = threading.Event()
+        validation_results = []
+        replacement_results = []
+
+        validating = threading.Thread(target=lambda: validation_results.append(handle.validate_state()))
+        validating.start()
+        self.assertTrue(old.validation_entered.wait(timeout=2))
+        replacing = threading.Thread(
+            target=lambda: replacement_results.append(
+                manager.reconnect(self.alice, "reconnect", bytearray(b"two"))
+            )
+        )
+        replacing.start()
+        time.sleep(0.05)
+        self.assertTrue(replacing.is_alive())
+        self.assertFalse(old.closed)
+        old.validation_release.set()
+        validating.join(timeout=2)
+        replacing.join(timeout=2)
+        self.assertFalse(validating.is_alive())
+        self.assertFalse(replacing.is_alive())
+        self.assertEqual(validation_results, [True])
+        self.assertEqual(replacement_results[0]["generation"], 2)
+        self.assertTrue(old.closed)
+        self.assertTrue(handle.validate_state())
+
+    def test_second_writer_is_rejected(self):
+        manager = self.manager()
+        with self.assertRaisesRegex(BrokerConfigError, "storage is unavailable"):
+            DynamicAccountManager(self.config, FakeFactory())
+        self.assertTrue(manager.healthy)
+
+    def test_static_provider_cannot_overlap_dynamic_id_namespace(self):
+        collision = "dpa_" + "A" * 32
+        with self.assertRaisesRegex(BrokerConfigError, "collides"):
+            DynamicAccountManager(self.config, FakeFactory(), {collision})
+
+    def test_cross_principal_denial_does_not_reveal_account(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"alice-only"))
+        for method in (manager.resolve, manager.readiness):
+            with self.assertRaises(ProviderError) as missing:
+                method(self.bob)
+            self.assertEqual((missing.exception.reason, missing.exception.status), ("account-not-found", 404))
+        with self.assertRaises(ProviderError) as reconnect:
+            manager.reconnect(self.bob, "operation", bytearray(b"bob"))
+        self.assertEqual((reconnect.exception.reason, reconnect.exception.status), ("account-not-found", 404))
+
+    def test_unknown_template_and_implicit_switch_fail_closed(self):
+        manager = self.manager()
+        with self.assertRaisesRegex(ProviderError, "unknown-template"):
+            manager.enroll(self.alice, "not-approved", "unknown", bytearray(b"usable"))
+        manager.enroll(self.alice, "member", "approved", bytearray(b"usable"))
+        with self.assertRaisesRegex(ProviderError, "account-already-enrolled"):
+            manager.enroll(self.alice, "not-approved", "switch", bytearray(b"other"))
+
+    def test_provider_failure_preserves_last_usable_generation(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        before = manager.resolve(self.alice)
+        before_files = list((self.root / "accounts" / self.alice.principal_id).glob("credential-*.bin"))
+        with self.assertRaisesRegex(ProviderError, "provider-initialization-failed"):
+            manager.reconnect(self.alice, "bad", bytearray(b"invalid SECRET-NEEDLE"))
+        self.assertEqual(manager.resolve(self.alice), before)
+        self.assertEqual(list((self.root / "accounts" / self.alice.principal_id).glob("credential-*.bin")), before_files)
+
+    def test_missing_committed_credential_fails_account_and_system_readiness(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        self.factory.created[-1].path.unlink()
+        self.assertFalse(manager.system_ready())
+        for operation in (manager.readiness, manager.resolve):
+            with self.assertRaisesRegex(ProviderError, "account-unready"):
+                operation(self.alice)
+
+    def test_interrupted_replacement_orphan_is_removed_on_restart(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        orphan = account_dir / "credential-2-abcdefghijklmnop.bin"
+        orphan.write_bytes(b"SECRET-ORPHAN")
+        orphan.chmod(0o600)
+        manager.close()
+        recovered = self.manager(factory=FakeFactory())
+        self.assertEqual(recovered.resolve(self.alice)["generation"], 1)
+        self.assertFalse(orphan.exists())
+
+    def test_interrupted_first_enrollment_directory_is_recovered(self):
+        account_dir = self.root / "accounts" / self.alice.principal_id
+        account_dir.mkdir(parents=True, mode=0o700)
+        orphan = account_dir / "credential-1-abcdefghijklmnop.bin"
+        orphan.write_bytes(b"SECRET-UNCOMMITTED")
+        orphan.chmod(0o600)
+        manager = self.manager(factory=FakeFactory())
+        self.assertTrue(manager.healthy)
+        self.assertFalse(account_dir.exists())
+        self.assertEqual(manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))["generation"], 1)
+
+    def test_corrupt_and_unknown_template_storage_latch_unready(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        manager.close()
+        metadata = self.root / "accounts" / self.alice.principal_id / "metadata.json"
+        metadata.write_text("{broken", encoding="utf-8")
+        metadata.chmod(0o600)
+        corrupt = self.manager(factory=FakeFactory())
+        self.assertFalse(corrupt.healthy)
+        with self.assertRaisesRegex(ProviderError, "dynamic-accounts-unavailable"):
+            corrupt.resolve(self.alice)
+
+        # A valid manifest that references a no-longer-approved template also
+        # fails closed rather than selecting a static/shared provider.
+        second_root = Path(self.temporary.name) / "unknown-template"
+        second_config = load_dynamic_accounts_config(configuration(second_root), self.factory.supported_plugins)
+        second = self.manager(config=second_config)
+        second.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        second.close()
+        changed = load_dynamic_accounts_config(configuration(second_root, template="replacement"), self.factory.supported_plugins)
+        unknown = self.manager(config=changed, factory=FakeFactory())
+        self.assertFalse(unknown.healthy)
+
+    def test_restart_provider_initialization_failure_latches_unready(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        manager.close()
+        failing = FakeFactory()
+        failing.fail = True
+        recovered = self.manager(factory=failing)
+        self.assertFalse(recovered.healthy)
+        with self.assertRaisesRegex(ProviderError, "dynamic-accounts-unavailable"):
+            recovered.resolve(self.alice)
+
+    def test_account_capacity_counts_durable_revoked_tombstones(self):
+        bounded = load_dynamic_accounts_config(configuration(self.root, maximum=1), self.factory.supported_plugins)
+        manager = self.manager(config=bounded)
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        manager.revoke(self.alice, "revoke")
+        with self.assertRaisesRegex(ProviderError, "capacity-exceeded"):
+            manager.enroll(self.bob, "member", "bob-enroll", bytearray(b"usable"))
+        # The same principal can explicitly re-enroll without creating a
+        # second durable account record.
+        self.assertEqual(manager.enroll(self.alice, "member", "reenroll", bytearray(b"usable"))["generation"], 2)
+        with self.assertRaisesRegex(ProviderError, "operation-conflict"):
+            manager.revoke(self.alice, "revoke")
+
+    def test_storage_failure_does_not_publish_new_provider(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        before = manager.resolve(self.alice)
+        with mock.patch.object(manager, "_write_metadata", side_effect=OSError("disk SECRET-NEEDLE")):
+            with self.assertRaisesRegex(ProviderError, "account-storage-unavailable"):
+                manager.reconnect(self.alice, "replace", bytearray(b"new-secret"))
+        self.assertEqual(manager.resolve(self.alice), before)
+
+    def test_uncertain_metadata_fsync_preserves_recoverable_generation_and_fails_closed(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable-one"))
+        with mock.patch("broker.core.dynamic_accounts._fsync_dir", side_effect=OSError("fsync failed")):
+            with self.assertRaisesRegex(ProviderError, "account-storage-unavailable"):
+                manager.reconnect(self.alice, "replace", bytearray(b"usable-two"))
+        self.assertFalse(manager.healthy)
+        with self.assertRaisesRegex(ProviderError, "dynamic-accounts-unavailable"):
+            manager.resolve(self.alice)
+        manager.close()
+        recovered = self.manager(factory=FakeFactory())
+        self.assertTrue(recovered.healthy)
+        self.assertEqual(recovered.resolve(self.alice)["generation"], 2)
+        self.assertEqual(len(list((self.root / "accounts").glob("p_*/credential-*.bin"))), 1)
+
+    def test_revoke_is_idempotent_durable_and_allows_explicit_new_template_selection(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        first = manager.revoke(self.alice, "revoke-1")
+        self.assertEqual(manager.revoke(self.alice, "revoke-1"), first)
+        with self.assertRaisesRegex(ProviderError, "account-not-found"):
+            manager.resolve(self.alice)
+        self.assertEqual(list((self.root / "accounts").glob("p_*/credential-*.bin")), [])
+        manager.close()
+        recovered = self.manager(factory=FakeFactory())
+        with self.assertRaisesRegex(ProviderError, "account-not-found"):
+            recovered.resolve(self.alice)
+        self.assertEqual(recovered.enroll(self.alice, "member", "enroll-2", bytearray(b"new"))["generation"], 2)
+
+    def test_secret_needle_never_enters_metadata_or_sanitized_errors(self):
+        manager = self.manager()
+        needle = b"SUPER-SECRET-NEEDLE"
+        manager.enroll(self.alice, "member", "enroll", bytearray(needle))
+        metadata = (self.root / "accounts" / self.alice.principal_id / "metadata.json").read_bytes()
+        self.assertNotIn(needle, metadata)
+        self.assertNotIn(b"credential_base64", metadata)
+        with self.assertRaises(ProviderError) as failure:
+            manager.reconnect(self.alice, "bad", bytearray(b"invalid " + needle))
+        self.assertNotIn("SECRET", str(failure.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -92,18 +92,28 @@ class InProcessProviderAdapter(ProviderAdapter):
         return result
 
 
-def load_providers(config) -> dict[str, ProviderAdapter]:
+class ProviderFactory:
+    """Create approved instances through the existing provider boundary."""
+
+    def __init__(self, config):
+        self.external_plugins = provider_plugin_entries(config, BUILTIN_PROVIDERS)
+        self.supported_plugins = frozenset(BUILTIN_PROVIDERS) | frozenset(self.external_plugins)
+
+    def create(self, entry):
+        plugin_name = entry["plugin"]
+        if plugin_name not in self.supported_plugins:
+            raise ProviderError("provider-template-invalid", "provider template is unavailable", 503)
+        if plugin_name in BUILTIN_PROVIDERS:
+            return InProcessProviderAdapter(BUILTIN_PROVIDERS[plugin_name](entry))
+        return ExecutableProviderAdapter(entry, self.external_plugins[plugin_name])
+
+
+def load_providers(config, factory=None) -> dict[str, ProviderAdapter]:
     output: dict[str, ProviderAdapter] = {}
-    external_plugins = provider_plugin_entries(config, BUILTIN_PROVIDERS)
-    supported = set(BUILTIN_PROVIDERS) | set(external_plugins)
+    factory = factory or ProviderFactory(config)
     try:
-        for entry in provider_entries(config, supported):
-            plugin_name = entry["plugin"]
-            if plugin_name in BUILTIN_PROVIDERS:
-                provider = BUILTIN_PROVIDERS[plugin_name](entry)
-                adapter = InProcessProviderAdapter(provider)
-            else:
-                adapter = ExecutableProviderAdapter(entry, external_plugins[plugin_name])
+        for entry in provider_entries(config, factory.supported_plugins):
+            adapter = factory.create(entry)
             output[adapter.name] = adapter
     except Exception:
         for adapter in output.values():
