@@ -454,6 +454,24 @@ spec:
                           minLength: 1
                         displayName:
                           type: string
+                    principalCredential:
+                      type: object
+                      required:
+                        - template
+                        - providerInstanceID
+                        - generation
+                      properties:
+                        template:
+                          type: string
+                          minLength: 1
+                          maxLength: 63
+                        providerInstanceID:
+                          type: string
+                          pattern: '^dpa_[A-Za-z0-9_-]{32}$'
+                        generation:
+                          type: integer
+                          format: int64
+                          minimum: 1
             status:
               type: object
               properties:

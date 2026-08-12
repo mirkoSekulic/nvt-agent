@@ -91,7 +91,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.auth.Callback(w, r)
 		return
 	}
-	principal, csrf, authExpiresAt, authenticated := s.auth.Session(r)
+	principal, csrf, authExpiresAt, eligibilityExpiresAt, authenticated := s.auth.Session(r)
 	if !authenticated {
 		if r.URL.Path == s.cfg.Path("/") && r.Method == http.MethodGet {
 			w.Header().Set("Cache-Control", "no-store")
@@ -135,7 +135,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.NotFound(w, r)
 				return
 			}
-			s.dynamicConnect(w, r, principal, csrf, authExpiresAt, name)
+			s.dynamicConnect(w, r, principal, csrf, eligibilityExpiresAt, name)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/credential") {
@@ -144,7 +144,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.NotFound(w, r)
 				return
 			}
-			s.dynamicRecovery(w, r, principal, csrf, name)
+			s.dynamicRecovery(w, r, principal, csrf, name, eligibilityExpiresAt)
 			return
 		}
 	} else {
@@ -314,6 +314,7 @@ func (s *Server) dynamicRecovery(
 	r *http.Request,
 	principal Principal,
 	csrf, templateName string,
+	authExpiresAt time.Time,
 ) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !s.cfg.RecoveryUpload.Enabled || r.Method != http.MethodPut || r.URL.RawQuery != "" {
@@ -359,9 +360,9 @@ func (s *Server) dynamicRecovery(
 		return
 	}
 	if action == dynamicActionEnroll {
-		err = s.broker.CompleteEnrollment(r.Context(), principal, templateName, operationID, body)
+		err = s.broker.CompleteEnrollment(r.Context(), principal, templateName, operationID, body, authExpiresAt)
 	} else {
-		err = s.broker.Reconnect(r.Context(), principal, operationID, body)
+		err = s.broker.Reconnect(r.Context(), principal, operationID, body, authExpiresAt)
 	}
 	if err != nil {
 		reason := brokerCompletionReason(err)

@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.60`; otherwise the API server may prune the
+of, upgrading to chart `0.8.61`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.60 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.61 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.60 --namespace nvt --create-namespace
+  --version 0.8.61 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -274,6 +274,7 @@ broker:
       state-dir: /state/principal-accounts
       authentication:
         hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+        max-eligibility-lease-seconds: 3600
       provider-templates:
         - name: approved-provider
           plugin: company-oauth
@@ -454,12 +455,61 @@ CRD default, which is direct.
 ## Execution profiles
 
 `agentSchedule.template`, optional `executionClasses`, `profiles`,
-`profileSelection`, and either the legacy
+`profileSelection` (or explicitly enabled `principalCredentialSelection`), and either the legacy
 `allowedProducers` list or typed workflow `producerPolicies` configure profiled
 admission. Empty values
 preserve legacy full-`AgentRun` admission. Profiled admission requires a
 projected ServiceAccount token with audience `nvt-operator`; see the
 [AgentSchedule contract](../../operator/docs/agentschedule.md).
+
+Dynamic principal-owned schedule resolution is disabled by default. Enable
+`operator.principalAccounts` and map public broker credential templates only to
+complete administrator-owned mediated profiles. Each mapped profile uses the
+reserved exact scalar `$principal-account` in at least one zero-secret broker
+grant; the trusted operator replaces it with the broker's opaque instance ID.
+Producer policies must list exact allowed canonical principal issuers. Producers
+still send only immutable principal facts, workflow, work metadata, and prompt;
+they cannot choose the template, provider, generation, profile, grants,
+capabilities, runtime, or egress policy.
+
+Issuer policy is only a producer-domain constraint. Current user eligibility is
+a bounded signed lease created by the portal after the shared OAuth policy
+passes and retained as a non-secret expiry by the broker. Operator resolution
+fails closed as `principal-not-eligible` after expiry or explicit policy
+revocation; a fresh eligible portal login renews it. Configure the portal lease
+no longer than its session and the broker's
+`max-eligibility-lease-seconds` bound. Connect/reconnect retains the exact
+expiry from the successful policy evaluation and cannot extend it; a shorter
+lease therefore requires fresh login before later dynamic actions.
+
+The operator's broker CA and assertion key are projected only into the operator
+manager. They are never mounted into producers or AgentRun Pods. The broker URL
+must be an HTTPS origin, responses and deadlines are bounded, and readiness plus
+resolution must agree exactly. Failures have stable non-sensitive producer
+reasons and never fall back to a static/shared provider. Existing static
+profile selection and legacy admission do not load or contact this client.
+
+The startup-only operator and broker assertion-key consumers share
+`broker.dynamicAccountAssertionRotationEpoch` (the portal uses it too when
+enabled). Rotate by updating the externally managed assertion Secret and
+incrementing this non-secret epoch in one GitOps change, then wait for every
+enabled consumer rollout. The manifest contains neither the key nor a hash of
+it; a transient mixed generation rejects assertions closed.
+
+Adoption does not move credentials through Helm or CRDs: enable the broker and
+portal account flow, let the principal establish a ready broker-owned account,
+add the operator client Secret/CA references and a template-to-profile mapping,
+then enable `principalCredentialSelection`. Existing static schedules can
+remain alongside a separate dynamic schedule. Rollback disables dynamic
+schedule admission and the operator client; it does not delete broker account
+state or mutate already accepted AgentRuns. Do not replace the dynamic schedule
+with a shared static fallback for affected principals.
+
+On upgrade, account metadata written before eligibility leases is preserved
+with an expired lease and therefore cannot admit new dynamic runs. Each owner
+must complete one currently eligible portal login to renew that exact account;
+no credential upload or reconnect is required. Existing AgentRuns continue
+using their frozen provider generation during this adoption step.
 
 Omitted profile execution keeps the existing Kubernetes Pod path. Operators
 may spell that selection explicitly as `execution: {kind: pod, driver:
@@ -921,15 +971,17 @@ ids, Secrets, profiles, grants, capabilities, runtime settings, or egress
 policy. Authenticated readiness preserves the committed template for ready,
 unready, and revoked accounts. A different template fails closed before runner
 execution, and revocation retains a broker-owned template lock;
-template-switch authorization and AgentRun coordination remain outside this
-chart flow for #211. See [credential portal dynamic mode](../../docs/credential-portal.md#dynamic-principal-owned-mode).
+template-switch authorization remains locked until the trusted,
+race-safe no-active-AgentRun coordination contract in
+[#215](https://github.com/mirkoSekulic/nvt-agent/issues/215) is implemented. See
+[credential portal dynamic mode](../../docs/credential-portal.md#dynamic-principal-owned-mode).
 
 Dynamic mode also requires the non-secret
 `broker.dynamicAccountAssertionRotationEpoch`. When the externally managed
 assertion-key Secret changes, increment this epoch in the same GitOps change.
-The chart places the value on both broker and portal Pod templates so both
-startup-only key consumers roll together; it never renders or hashes the key
-material. Wait for both rollouts before considering rotation complete. A
+The chart places the value on broker, portal when enabled, and dynamic operator
+Pod templates so every startup-only key consumer rolls together; it never
+renders or hashes the key material. Wait for all enabled rollouts before considering rotation complete. A
 temporary version mismatch fails authentication closed.
 
 `gateway.credentialPortal.url` adds only a dashboard link. The gateway does not

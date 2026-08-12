@@ -35,6 +35,8 @@ API_OPERATIONS = {
     API_PREFIX + "revoke": "revoke",
     API_PREFIX + "readiness": "readiness",
     API_PREFIX + "resolve": "resolve",
+    API_PREFIX + "renew-eligibility": "renew-eligibility",
+    API_PREFIX + "revoke-eligibility": "revoke-eligibility",
 }
 API_PATHS = frozenset(API_OPERATIONS)
 MAX_CREDENTIAL_BYTES = 768 * 1024
@@ -57,6 +59,7 @@ class Principal:
     issuer: str
     subject: str
     principal_id: str
+    eligibility_expires_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class DynamicAccountsConfig:
     state_dir: Path | None = None
     hmac_key: bytes | None = None
     max_assertion_seconds: int = 300
+    max_eligibility_lease_seconds: int = 3600
     max_accounts: int = 10000
     credential_templates: dict | None = None
     provider_templates: dict | None = None
@@ -124,7 +128,9 @@ def load_dynamic_accounts_config(config, supported_plugins):
     authentication = raw.get("authentication")
     if not isinstance(authentication, dict):
         fail("dynamic-accounts.authentication must be a YAML object")
-    unknown = set(authentication) - {"hmac-key-env", "max-assertion-seconds"}
+    unknown = set(authentication) - {
+        "hmac-key-env", "max-assertion-seconds", "max-eligibility-lease-seconds",
+    }
     if unknown:
         fail(f"dynamic-accounts.authentication has unknown keys: {', '.join(sorted(unknown))}")
     key_env = string_value(
@@ -143,6 +149,16 @@ def load_dynamic_accounts_config(config, supported_plugins):
     max_assertion = authentication.get("max-assertion-seconds", 300)
     if not isinstance(max_assertion, int) or isinstance(max_assertion, bool) or not 1 <= max_assertion <= 900:
         fail("dynamic-accounts.authentication.max-assertion-seconds must be an integer from 1 through 900")
+    max_eligibility_lease = authentication.get("max-eligibility-lease-seconds", 3600)
+    if (
+        not isinstance(max_eligibility_lease, int)
+        or isinstance(max_eligibility_lease, bool)
+        or not 300 <= max_eligibility_lease <= 86400
+    ):
+        fail(
+            "dynamic-accounts.authentication.max-eligibility-lease-seconds "
+            "must be an integer from 300 through 86400"
+        )
 
     provider_templates = {}
     for index, item in enumerate(list_value(raw.get("provider-templates"), "dynamic-accounts.provider-templates")):
@@ -196,6 +212,7 @@ def load_dynamic_accounts_config(config, supported_plugins):
         state_dir=state_dir,
         hmac_key=key,
         max_assertion_seconds=max_assertion,
+        max_eligibility_lease_seconds=max_eligibility_lease,
         max_accounts=max_accounts,
         credential_templates=credential_templates,
         provider_templates=provider_templates,
@@ -224,9 +241,10 @@ def is_dynamic_provider_id(value):
 
 
 class PrincipalAuthenticator:
-    def __init__(self, key, max_assertion_seconds, clock=time.time):
+    def __init__(self, key, max_assertion_seconds, max_eligibility_lease_seconds=3600, clock=time.time):
         self._key = key
         self._maximum = max_assertion_seconds
+        self._maximum_eligibility = max_eligibility_lease_seconds
         self._clock = clock
 
     def authenticate(self, authorization):
@@ -248,11 +266,13 @@ class PrincipalAuthenticator:
             payload = _strict_json(raw)
         except ValueError:
             raise ProviderError("unauthorized", "unauthorized", 401)
-        if not isinstance(payload, dict) or set(payload) != {"version", "audience", "issuer", "subject", "expires_at"}:
+        expected = {"version", "audience", "issuer", "subject", "expires_at"}
+        if not isinstance(payload, dict) or set(payload) not in (expected, expected | {"eligibility_expires_at"}):
             raise ProviderError("unauthorized", "unauthorized", 401)
         issuer = payload.get("issuer")
         subject = payload.get("subject")
         expires = payload.get("expires_at")
+        eligibility_expires = payload.get("eligibility_expires_at")
         if (
             not isinstance(payload.get("version"), int)
             or isinstance(payload.get("version"), bool)
@@ -267,13 +287,26 @@ class PrincipalAuthenticator:
         now = int(self._clock())
         if expires <= now or expires > now + self._maximum:
             raise ProviderError("unauthorized", "unauthorized", 401)
-        return Principal(issuer, subject, principal_id(issuer, subject))
+        if eligibility_expires is not None and (
+            not isinstance(eligibility_expires, int)
+            or isinstance(eligibility_expires, bool)
+            or eligibility_expires <= now
+            or eligibility_expires > now + self._maximum_eligibility
+        ):
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        return Principal(issuer, subject, principal_id(issuer, subject), eligibility_expires)
 
 
-def sign_principal_assertion(key, issuer, subject, expires_at):
+def sign_principal_assertion(key, issuer, subject, expires_at, eligibility_expires_at=None):
     """Test/integrator helper; callers still own authentication to this identity."""
+    claims = {
+        "audience": AUTH_AUDIENCE, "expires_at": expires_at,
+        "issuer": issuer, "subject": subject, "version": 1,
+    }
+    if eligibility_expires_at is not None:
+        claims["eligibility_expires_at"] = eligibility_expires_at
     raw = json.dumps(
-        {"audience": AUTH_AUDIENCE, "expires_at": expires_at, "issuer": issuer, "subject": subject, "version": 1},
+        claims,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
@@ -319,6 +352,8 @@ def decode_api_request(raw, operation):
         "revoke": {"operation_id"},
         "readiness": set(),
         "resolve": set(),
+        "renew-eligibility": set(),
+        "revoke-eligibility": set(),
     }[operation]
     if set(payload) != expected:
         raise ProviderError("invalid-request", "invalid-request", 400)
@@ -416,6 +451,7 @@ class DynamicAccountManager:
     def enroll(self, principal, template_name, operation_id, credential):
         with self._lock:
             self._require_healthy()
+            self._require_asserted_eligibility(principal)
             current = self._accounts.get(principal.principal_id)
             if current and current["state"] == "active":
                 repeated = self._idempotent(current, "enroll", operation_id)
@@ -440,6 +476,7 @@ class DynamicAccountManager:
     def reconnect(self, principal, operation_id, credential):
         with self._lock:
             self._require_healthy()
+            self._require_asserted_eligibility(principal)
             current = self._own_active(principal)
             repeated = self._idempotent(current, "reconnect", operation_id)
             if repeated:
@@ -463,6 +500,7 @@ class DynamicAccountManager:
             metadata.update(
                 state="revoked",
                 credential_file=None,
+                eligibility_expires_at=0,
                 updated_at=int(self._clock()),
                 operations=self._record_operation(
                     current, "revoke", operation_id, result, current["provider_instance_id"]
@@ -497,6 +535,7 @@ class DynamicAccountManager:
                     "template": current["template"],
                     "generation": current["generation"],
                 }
+            self._require_current_eligibility(current)
             provider = self._providers.get(current["provider_instance_id"])
             ready = self._provider_is_ready(provider)
             return {
@@ -510,6 +549,7 @@ class DynamicAccountManager:
         with self._lock:
             self._require_healthy()
             current = self._own_active(principal)
+            self._require_current_eligibility(current)
             provider = self._providers.get(current["provider_instance_id"])
             ready = self._provider_is_ready(provider)
             if not ready:
@@ -520,6 +560,39 @@ class DynamicAccountManager:
                 "provider_instance_id": current["provider_instance_id"],
                 "generation": current["generation"],
             }
+
+    def renew_eligibility(self, principal):
+        with self._lock:
+            self._require_healthy()
+            self._require_asserted_eligibility(principal)
+            current = self._accounts.get(principal.principal_id)
+            if current is None:
+                # A first-time principal renews by committing the same signed
+                # lease with enrollment. Do not reveal whether an account
+                # exists through this policy-maintenance endpoint.
+                return {"ok": True}
+            if current.get("issuer") != principal.issuer or current.get("subject") != principal.subject:
+                return {"ok": True}
+            if current.get("eligibility_expires_at", 0) >= principal.eligibility_expires_at:
+                return {"ok": True}
+            self._commit_eligibility(current, principal.eligibility_expires_at)
+            return {"ok": True}
+
+    def revoke_eligibility(self, principal):
+        with self._lock:
+            self._require_healthy()
+            # Presence of this bounded signed field distinguishes the trusted
+            # eligibility frontend assertion from the operator's resolution
+            # assertion. The request body cannot choose the value.
+            self._require_asserted_eligibility(principal)
+            current = self._accounts.get(principal.principal_id)
+            if current is None:
+                return {"ok": True}
+            if current.get("issuer") != principal.issuer or current.get("subject") != principal.subject:
+                return {"ok": True}
+            if current.get("eligibility_expires_at", 0) != 0:
+                self._commit_eligibility(current, 0)
+            return {"ok": True}
 
     @staticmethod
     def _provider_is_ready(provider):
@@ -568,6 +641,7 @@ class DynamicAccountManager:
             "credential_file": filename,
             "created_at": (current or {}).get("created_at", int(self._clock())),
             "updated_at": int(self._clock()),
+            "eligibility_expires_at": principal.eligibility_expires_at,
             "operations": self._record_operation(current, action, operation_id, result, provider_id),
         }
         try:
@@ -713,6 +787,9 @@ class DynamicAccountManager:
             raise ValueError("metadata size")
         metadata = _strict_json(data)
         _validate_metadata(metadata, account_dir.name)
+        # Accounts created before eligibility leases shipped are retained but
+        # fail closed for new resolution until the trusted portal renews them.
+        metadata.setdefault("eligibility_expires_at", 0)
         return metadata
 
     def _write_metadata(self, account_id, metadata):
@@ -825,6 +902,31 @@ class DynamicAccountManager:
         if not self._healthy:
             raise ProviderError("dynamic-accounts-unavailable", "dynamic-accounts-unavailable", 503)
 
+    def _require_asserted_eligibility(self, principal):
+        if (
+            principal.eligibility_expires_at is None
+            or principal.eligibility_expires_at <= int(self._clock())
+        ):
+            raise ProviderError("principal-not-eligible", "principal-not-eligible", 403)
+
+    def _require_current_eligibility(self, metadata):
+        if metadata.get("eligibility_expires_at", 0) <= int(self._clock()):
+            raise ProviderError("principal-not-eligible", "principal-not-eligible", 403)
+
+    def _commit_eligibility(self, current, expires_at):
+        metadata = dict(current)
+        metadata["eligibility_expires_at"] = expires_at
+        metadata["updated_at"] = int(self._clock())
+        try:
+            self._write_metadata(current["principal_id"], metadata)
+        except _MetadataCommitError as error:
+            if error.committed:
+                self._latch_unhealthy()
+            raise ProviderError("account-storage-unavailable", "account-storage-unavailable", 503) from error
+        except Exception as error:
+            raise ProviderError("account-storage-unavailable", "account-storage-unavailable", 503) from error
+        self._accounts[current["principal_id"]] = metadata
+
     def _latch_unhealthy(self, extra_provider=None):
         providers = list(self._providers.values())
         if extra_provider is not None and all(extra_provider is not provider for provider in providers):
@@ -849,7 +951,7 @@ def _validate_metadata(value, directory_name):
         "version", "principal_id", "issuer", "subject", "state", "template", "provider_instance_id",
         "generation", "credential_file", "created_at", "updated_at", "operations",
     }
-    if not isinstance(value, dict) or set(value) != expected:
+    if not isinstance(value, dict) or set(value) not in (expected, expected | {"eligibility_expires_at"}):
         raise ValueError("invalid metadata")
     if value["version"] != METADATA_VERSION or value["principal_id"] != directory_name:
         raise ValueError("invalid metadata")
@@ -875,6 +977,13 @@ def _validate_metadata(value, directory_name):
     for key in ("created_at", "updated_at"):
         if not isinstance(value[key], int) or isinstance(value[key], bool) or value[key] < 0:
             raise ValueError("invalid timestamp")
+    eligibility_expires_at = value.get("eligibility_expires_at", 0)
+    if (
+        not isinstance(eligibility_expires_at, int)
+        or isinstance(eligibility_expires_at, bool)
+        or eligibility_expires_at < 0
+    ):
+        raise ValueError("invalid eligibility lease")
     if not isinstance(value["operations"], list) or len(value["operations"]) > MAX_OPERATIONS:
         raise ValueError("invalid operations")
     for operation in value["operations"]:

@@ -76,16 +76,9 @@ func runPortal() error {
 	if broker != nil {
 		defer broker.Close()
 	}
-	auth, err := portal.NewAuthenticator(
-		context.Background(),
-		cfg,
-		os.Getenv("NVT_CREDENTIAL_PORTAL_SESSION_SECRET"),
-		os.Getenv("NVT_CREDENTIAL_PORTAL_CLIENT_ID"),
-		os.Getenv("NVT_CREDENTIAL_PORTAL_CLIENT_SECRET"),
-		nil,
-	)
+	auth, err := configureAuthenticator(cfg, broker)
 	if err != nil {
-		return fmt.Errorf("configure authentication: %w", err)
+		return err
 	}
 	runnerKeyPath := os.Getenv("NVT_CREDENTIAL_RUNNER_AUTH_KEY_FILE")
 	runnerURL := os.Getenv("NVT_CREDENTIAL_RUNNER_URL")
@@ -129,6 +122,27 @@ func runPortal() error {
 		}
 	}
 	return nil
+}
+
+func configureAuthenticator(
+	cfg portal.Config,
+	broker *portal.HTTPPrincipalAccountBroker,
+) (*portal.Authenticator, error) {
+	var eligibility []portal.EligibilityLeaseBroker
+	if broker != nil {
+		eligibility = append(eligibility, broker)
+	}
+	auth, err := portal.NewAuthenticator(
+		context.Background(), cfg,
+		os.Getenv("NVT_CREDENTIAL_PORTAL_SESSION_SECRET"),
+		os.Getenv("NVT_CREDENTIAL_PORTAL_CLIENT_ID"),
+		os.Getenv("NVT_CREDENTIAL_PORTAL_CLIENT_SECRET"),
+		nil, eligibility...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("configure authentication: %w", err)
+	}
+	return auth, nil
 }
 
 func configureCustody(

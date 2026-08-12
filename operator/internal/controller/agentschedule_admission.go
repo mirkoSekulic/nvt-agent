@@ -19,17 +19,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"github.com/mirkoSekulic/nvt-agent/operator/principalaccounts"
 )
 
 const scheduleAdmissionPathPrefix = "/v1/schedules/"
 
 type agentScheduleAdmissionHandler struct {
-	client          client.Client
-	scheme          *runtime.Scheme
-	authenticator   ScheduleProducerAuthenticator
-	profileResolver ExecutionProfileResolver
-	now             func() metav1.Time
-	admissionLocks  *scheduleAdmissionLocks
+	client            client.Client
+	scheme            *runtime.Scheme
+	authenticator     ScheduleProducerAuthenticator
+	profileResolver   ExecutionProfileResolver
+	principalAccounts principalaccounts.Resolver
+	now               func() metav1.Time
+	admissionLocks    *scheduleAdmissionLocks
 }
 
 type scheduleAdmissionRequest struct {
@@ -70,13 +72,24 @@ type scheduleAdmissionAgentRun struct {
 
 // NewAgentScheduleAdmissionHandler returns the cluster-internal schedule admission handler.
 func NewAgentScheduleAdmissionHandler(k8sClient client.Client, scheme *runtime.Scheme) http.Handler {
+	return NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(k8sClient, scheme, nil)
+}
+
+// NewAgentScheduleAdmissionHandlerWithPrincipalAccounts adds the optional
+// trusted dynamic principal-account resolver without changing static admission.
+func NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(
+	k8sClient client.Client,
+	scheme *runtime.Scheme,
+	accounts principalaccounts.Resolver,
+) http.Handler {
 	return &agentScheduleAdmissionHandler{
-		client:          k8sClient,
-		scheme:          scheme,
-		authenticator:   NewKubernetesTokenReviewProducerAuthenticator(k8sClient),
-		profileResolver: StaticExecutionProfileResolver{},
-		now:             metav1.Now,
-		admissionLocks:  newScheduleAdmissionLocks(),
+		client:            k8sClient,
+		scheme:            scheme,
+		authenticator:     NewKubernetesTokenReviewProducerAuthenticator(k8sClient),
+		profileResolver:   StaticExecutionProfileResolver{},
+		principalAccounts: accounts,
+		now:               metav1.Now,
+		admissionLocks:    newScheduleAdmissionLocks(),
 	}
 }
 
@@ -130,6 +143,7 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	profiled := ScheduleUsesExecutionProfiles(schedule)
 	producer := ""
 	var resolvedWorkflow *ResolvedWorkflowProfile
+	var principal *nvtv1alpha1.AgentRunPrincipal
 	if profiled {
 		token, ok := bearerToken(request.Header.Get("Authorization"))
 		if !ok || h.authenticator == nil {
@@ -165,6 +179,14 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
 				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+			})
+			return
+		}
+		principal = admissionPrincipal(admission.Work.Principal)
+		if ScheduleUsesPrincipalCredentials(schedule) && !producerAllowsDynamicPrincipal(schedule, producer, principal) {
+			h.recordRejected(ctx, schedule, "principal-not-eligible")
+			writeScheduleAdmissionJSON(response, http.StatusForbidden, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "principal-not-eligible",
 			})
 			return
 		}
@@ -213,17 +235,50 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		if h.profileResolver == nil {
 			h.profileResolver = StaticExecutionProfileResolver{}
 		}
-		principal := admissionPrincipal(admission.Work.Principal)
+		if principal == nil {
+			principal = admissionPrincipal(admission.Work.Principal)
+		}
 		if principal != nil && (strings.TrimSpace(principal.Issuer) == "" || strings.TrimSpace(principal.Subject) == "") {
 			http.Error(response, "principal issuer and subject are required\n", http.StatusBadRequest)
 			return
 		}
-		resolved, resolveErr := h.profileResolver.Resolve(schedule, principal)
+		var resolved *ResolvedExecutionProfile
+		var resolveErr error
+		if ScheduleUsesPrincipalCredentials(schedule) {
+			resolved, resolveErr = resolvePrincipalCredentialProfile(ctx, schedule, principal, h.principalAccounts)
+		} else {
+			resolved, resolveErr = h.profileResolver.Resolve(schedule, principal)
+		}
 		if resolveErr != nil {
-			if errors.Is(resolveErr, errExecutionProfileSelectionDenied) {
+			switch {
+			case errors.Is(resolveErr, errExecutionProfileSelectionDenied):
 				h.recordRejected(ctx, schedule, "profile-selection-denied")
 				writeScheduleAdmissionJSON(response, http.StatusForbidden, scheduleAdmissionResponse{
 					Scheduled: false, Reason: "profile-selection-denied",
+				})
+				return
+			case errors.Is(resolveErr, errPrincipalNotEnrolled):
+				h.recordRejected(ctx, schedule, "principal-not-enrolled")
+				writeScheduleAdmissionJSON(response, http.StatusForbidden, scheduleAdmissionResponse{
+					Scheduled: false, Reason: "principal-not-enrolled",
+				})
+				return
+			case errors.Is(resolveErr, errPrincipalNotEligible):
+				h.recordRejected(ctx, schedule, "principal-not-eligible")
+				writeScheduleAdmissionJSON(response, http.StatusForbidden, scheduleAdmissionResponse{
+					Scheduled: false, Reason: "principal-not-eligible",
+				})
+				return
+			case errors.Is(resolveErr, errPrincipalCredentialNotReady):
+				h.recordRejected(ctx, schedule, "credential-not-ready")
+				writeScheduleAdmissionJSON(response, http.StatusConflict, scheduleAdmissionResponse{
+					Scheduled: false, Reason: "credential-not-ready",
+				})
+				return
+			case errors.Is(resolveErr, errPrincipalCredentialResolution):
+				h.recordRejected(ctx, schedule, "credential-resolution-unavailable")
+				writeScheduleAdmissionJSON(response, http.StatusServiceUnavailable, scheduleAdmissionResponse{
+					Scheduled: false, Reason: "credential-resolution-unavailable",
 				})
 				return
 			}

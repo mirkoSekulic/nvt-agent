@@ -16,6 +16,10 @@
 {{- if not .Values.broker.envSecretName }}{{ fail "broker.config.dynamic-accounts.enabled requires broker.envSecretName for assertion authentication" }}{{ end }}
 {{- $dynamicStateDir := index $dynamicAccounts "state-dir" | default "" }}
 {{- if or (not (kindIs "string" $dynamicStateDir)) (not (regexMatch `^/state/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$` $dynamicStateDir)) (contains ".." $dynamicStateDir) }}{{ fail "broker.config.dynamic-accounts.state-dir must be a normalized path below /state" }}{{ end }}
+{{- $dynamicAuthentication := index $dynamicAccounts "authentication" }}
+{{- if not (kindIs "map" $dynamicAuthentication) }}{{ fail "broker.config.dynamic-accounts.authentication must be an object" }}{{ end }}
+{{- $maxEligibilityLeaseSeconds := int (default 3600 (index $dynamicAuthentication "max-eligibility-lease-seconds")) }}
+{{- if or (lt $maxEligibilityLeaseSeconds 300) (gt $maxEligibilityLeaseSeconds 86400) }}{{ fail "broker dynamic eligibility lease window must be 300..86400 seconds" }}{{ end }}
 {{- end }}
 {{- if and .Values.broker.persistence.seedSecretName (not .Values.broker.persistence.enabled) }}
 {{- fail "broker.persistence.seedSecretName requires broker.persistence.enabled=true" }}

@@ -112,8 +112,15 @@ class DynamicAccountsTest(unittest.TestCase):
         self.addCleanup(self.environment.stop)
         self.factory = FakeFactory()
         self.config = load_dynamic_accounts_config(configuration(self.root), self.factory.supported_plugins)
-        self.alice = Principal("https://issuer.example", "alice-immutable", principal_id("https://issuer.example", "alice-immutable"))
-        self.bob = Principal("https://issuer.example", "bob-immutable", principal_id("https://issuer.example", "bob-immutable"))
+        eligibility_expires_at = int(time.time()) + 1800
+        self.alice = Principal(
+            "https://issuer.example", "alice-immutable",
+            principal_id("https://issuer.example", "alice-immutable"), eligibility_expires_at,
+        )
+        self.bob = Principal(
+            "https://issuer.example", "bob-immutable",
+            principal_id("https://issuer.example", "bob-immutable"), eligibility_expires_at,
+        )
 
     def manager(self, config=None, factory=None):
         manager = DynamicAccountManager(config or self.config, factory or self.factory, {"shared-static"})
@@ -135,11 +142,18 @@ class DynamicAccountsTest(unittest.TestCase):
         broken["dynamic-accounts"]["provider-templates"][0]["config"]["credential-file"] = "/caller"
         with self.assertRaisesRegex(BrokerConfigError, "must not set"):
             load_dynamic_accounts_config(broken, self.factory.supported_plugins)
+        broken = configuration(self.root)
+        broken["dynamic-accounts"]["authentication"]["max-eligibility-lease-seconds"] = 299
+        with self.assertRaisesRegex(BrokerConfigError, "eligibility"):
+            load_dynamic_accounts_config(broken, self.factory.supported_plugins)
 
     def test_assertion_binds_exact_issuer_and_subject_and_fails_closed(self):
         authenticator = PrincipalAuthenticator(self.key, 60)
         assertion = sign_principal_assertion(self.key, self.alice.issuer, self.alice.subject, int(time.time()) + 30)
-        self.assertEqual(authenticator.authenticate(assertion), self.alice)
+        self.assertEqual(
+            authenticator.authenticate(assertion),
+            Principal(self.alice.issuer, self.alice.subject, self.alice.principal_id),
+        )
         for invalid in (
             assertion + "x",
             sign_principal_assertion(self.key, self.alice.issuer, self.alice.subject, int(time.time()) - 1),
@@ -166,6 +180,77 @@ class DynamicAccountsTest(unittest.TestCase):
         signature = base64.urlsafe_b64encode(hmac.digest(self.key, raw, "sha256")).rstrip(b"=").decode()
         with self.assertRaisesRegex(ProviderError, "unauthorized"):
             authenticator.authenticate(f"NVT-Principal-v1 {encoded}.{signature}")
+
+    def test_signed_eligibility_lease_expires_renews_revokes_and_survives_restart(self):
+        now = [1_700_000_000]
+        principal = Principal(
+            self.alice.issuer, self.alice.subject, self.alice.principal_id, now[0] + 60,
+        )
+        manager = DynamicAccountManager(
+            self.config, self.factory, {"shared-static"}, clock=lambda: now[0]
+        )
+        self.addCleanup(manager.close)
+        manager.enroll(principal, "member", "lease-enroll", bytearray(b"usable"))
+        provider_id = manager.resolve(principal)["provider_instance_id"]
+
+        now[0] += 61
+        for operation in (manager.readiness, manager.resolve):
+            with self.assertRaisesRegex(ProviderError, "principal-not-eligible") as denied:
+                operation(principal)
+            self.assertEqual((denied.exception.reason, denied.exception.status), ("principal-not-eligible", 403))
+        # Existing AgentRuns retain their frozen provider handle; lease expiry
+        # gates only new resolution/admission.
+        self.assertTrue(manager.provider(provider_id).ready)
+
+        renewed = Principal(
+            principal.issuer, principal.subject, principal.principal_id, now[0] + 120,
+        )
+        manager.renew_eligibility(renewed)
+        self.assertEqual(manager.readiness(renewed)["state"], "ready")
+        manager.close()
+
+        restarted = DynamicAccountManager(
+            self.config, FakeFactory(), {"shared-static"}, clock=lambda: now[0]
+        )
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.resolve(renewed)["provider_instance_id"], provider_id)
+        restarted.revoke_eligibility(renewed)
+        with self.assertRaisesRegex(ProviderError, "principal-not-eligible"):
+            restarted.resolve(renewed)
+
+        assertion = sign_principal_assertion(
+            self.key, principal.issuer, principal.subject, now[0] + 30, now[0] + 120,
+        )
+        authenticated = PrincipalAuthenticator(
+            self.key, 60, 120, clock=lambda: now[0]
+        ).authenticate(assertion)
+        self.assertEqual(authenticated.eligibility_expires_at, now[0] + 120)
+        with self.assertRaisesRegex(ProviderError, "unauthorized"):
+            PrincipalAuthenticator(self.key, 60, 120, clock=lambda: now[0]).authenticate(
+                sign_principal_assertion(
+                    self.key, principal.issuer, principal.subject, now[0] + 30, now[0] + 121,
+                )
+            )
+
+    def test_prelease_account_is_preserved_but_requires_current_renewal(self):
+        manager = self.manager()
+        manager.enroll(self.alice, "member", "legacy-enroll", bytearray(b"usable"))
+        account_dir = next((self.root / "accounts").iterdir())
+        metadata_path = account_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata.pop("eligibility_expires_at")
+        metadata_path.write_text(
+            json.dumps(metadata, separators=(",", ":"), sort_keys=True), encoding="utf-8"
+        )
+        os.chmod(metadata_path, 0o600)
+        manager.close()
+
+        restarted = self.manager(factory=FakeFactory())
+        self.assertTrue(restarted.system_ready())
+        with self.assertRaisesRegex(ProviderError, "principal-not-eligible"):
+            restarted.resolve(self.alice)
+        restarted.renew_eligibility(self.alice)
+        self.assertEqual(restarted.resolve(self.alice)["generation"], 1)
 
     def test_strict_request_codec_rejects_destinations_and_duplicate_fields(self):
         with self.assertRaisesRegex(ProviderError, "invalid-request"):

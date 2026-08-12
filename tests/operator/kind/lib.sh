@@ -15,6 +15,7 @@ load_config() {
   SMOKE_TMPDIR="$(mktemp -d)"
   SMOKE_TMPDIR_CREATED=1
   PORT_FORWARD_PID="${PORT_FORWARD_PID:-}"
+  CASE_PORT_FORWARD_PID="${CASE_PORT_FORWARD_PID:-}"
 }
 
 log() {
@@ -151,6 +152,10 @@ diagnostics() {
   if [[ -n "${PORT_FORWARD_PID:-}" ]]; then
     cat "${SMOKE_TMPDIR}/operator-port-forward.log" >&2 || true
   fi
+  if [[ -n "${CASE_PORT_FORWARD_PID:-}" ]]; then
+    kill "${CASE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    wait "${CASE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
 }
 
 cleanup() {
@@ -161,6 +166,10 @@ cleanup() {
   if [[ -n "${PORT_FORWARD_PID:-}" ]]; then
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
     wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CASE_PORT_FORWARD_PID:-}" ]]; then
+    kill "${CASE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    wait "${CASE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   fi
   if [[ "${SMOKE_TMPDIR_CREATED:-0}" == "1" && -n "${SMOKE_TMPDIR:-}" ]]; then
     rm -rf "${SMOKE_TMPDIR}"

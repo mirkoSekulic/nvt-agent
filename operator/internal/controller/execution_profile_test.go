@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
+	"github.com/mirkoSekulic/nvt-agent/operator/principalaccounts"
 )
 
 type fakeScheduleProducerAuthenticator struct {
@@ -993,7 +994,9 @@ func TestAgentRunProfileProvenanceCRDSchema(t *testing.T) {
 	).(map[string]any)
 	if crdPath(t, provenance, "authenticatedProducer", "type") != "string" ||
 		crdPath(t, provenance, "principal", "properties", "subject", "type") != "string" ||
-		crdPath(t, provenance, "selectedWorkflow", "type") != "string" {
+		crdPath(t, provenance, "selectedWorkflow", "type") != "string" ||
+		crdPath(t, provenance, "principalCredential", "properties", "providerInstanceID", "pattern") != "^dpa_[A-Za-z0-9_-]{32}$" ||
+		fmt.Sprint(crdPath(t, provenance, "principalCredential", "properties", "generation", "minimum")) != "1" {
 		t.Fatalf("profile provenance schema incomplete: %#v", provenance)
 	}
 	validations := crdPath(t, crd,
@@ -1012,10 +1015,11 @@ func TestAgentRunProfileProvenanceCRDSchema(t *testing.T) {
 }
 
 type profileAdmissionFixture struct {
-	client        client.Client
-	schedule      *nvtv1alpha1.AgentSchedule
-	authenticator ScheduleProducerAuthenticator
-	scheme        *runtime.Scheme
+	client            client.Client
+	schedule          *nvtv1alpha1.AgentSchedule
+	authenticator     ScheduleProducerAuthenticator
+	principalAccounts principalaccounts.Resolver
+	scheme            *runtime.Scheme
 }
 
 func newProfileAdmissionFixture(t *testing.T, schedule *nvtv1alpha1.AgentSchedule) *profileAdmissionFixture {
@@ -1061,7 +1065,7 @@ func (f *profileAdmissionFixture) serve(t *testing.T, body, authorization string
 	t.Helper()
 	handler := &agentScheduleAdmissionHandler{
 		client: f.client, scheme: f.scheme, authenticator: f.authenticator,
-		profileResolver: StaticExecutionProfileResolver{}, now: metav1.Now,
+		profileResolver: StaticExecutionProfileResolver{}, principalAccounts: f.principalAccounts, now: metav1.Now,
 	}
 	request := httptest.NewRequest(http.MethodPost,
 		"/v1/schedules/"+f.schedule.Namespace+"/"+f.schedule.Name+"/admissions",

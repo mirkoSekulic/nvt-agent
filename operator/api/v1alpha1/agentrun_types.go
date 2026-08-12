@@ -144,6 +144,17 @@ type AgentRunProfileProvenance struct {
 	SelectedProfile       string             `json:"selectedProfile"`
 	SelectedWorkflow      string             `json:"selectedWorkflow,omitempty"`
 	Principal             *AgentRunPrincipal `json:"principal,omitempty"`
+	// PrincipalCredential freezes the non-secret broker resolution used for a
+	// dynamic principal-owned credential admission.
+	PrincipalCredential *AgentRunPrincipalCredentialProvenance `json:"principalCredential,omitempty"`
+}
+
+// AgentRunPrincipalCredentialProvenance is a non-secret immutable snapshot of
+// the exact broker account generation selected during schedule admission.
+type AgentRunPrincipalCredentialProvenance struct {
+	Template           string `json:"template"`
+	ProviderInstanceID string `json:"providerInstanceID"`
+	Generation         int64  `json:"generation"`
 }
 
 // AgentRunPrincipal records immutable authorization keys and optional display data.
@@ -537,6 +548,12 @@ func (in *AgentRunProfileProvenance) DeepCopy() *AgentRunProfileProvenance {
 	if in.Principal != nil {
 		out.Principal = &AgentRunPrincipal{
 			Issuer: in.Principal.Issuer, Subject: in.Principal.Subject, DisplayName: in.Principal.DisplayName,
+		}
+	}
+	if in.PrincipalCredential != nil {
+		out.PrincipalCredential = &AgentRunPrincipalCredentialProvenance{
+			Template: in.PrincipalCredential.Template, ProviderInstanceID: in.PrincipalCredential.ProviderInstanceID,
+			Generation: in.PrincipalCredential.Generation,
 		}
 	}
 	return out

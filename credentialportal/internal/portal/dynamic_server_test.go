@@ -21,11 +21,12 @@ const dynamicCredentialNeedle = "DYNAMIC-PORTAL-CREDENTIAL-NEEDLE"
 
 //nolint:govet // Test record order mirrors the broker mutation interface.
 type brokerMutation struct {
-	Principal   Principal
-	Template    string
-	OperationID string
-	Credential  []byte
-	Action      string
+	Principal            Principal
+	Template             string
+	OperationID          string
+	Credential           []byte
+	EligibilityExpiresAt time.Time
+	Action               string
 }
 
 type memoryPrincipalAccountBroker struct {
@@ -68,6 +69,7 @@ func (b *memoryPrincipalAccountBroker) CompleteEnrollment(
 	principal Principal,
 	template, operationID string,
 	credential []byte,
+	eligibilityExpiresAt time.Time,
 ) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -80,7 +82,8 @@ func (b *memoryPrincipalAccountBroker) CompleteEnrollment(
 	}
 	b.mutations = append(b.mutations, brokerMutation{
 		Principal: principal, Template: template, OperationID: operationID,
-		Credential: bytes.Clone(credential), Action: dynamicActionEnroll,
+		Credential: bytes.Clone(credential), EligibilityExpiresAt: eligibilityExpiresAt,
+		Action: dynamicActionEnroll,
 	})
 	b.accounts[key] = DynamicAccountState{State: accountStateReady, Template: template, Generation: 1}
 	return nil
@@ -91,6 +94,7 @@ func (b *memoryPrincipalAccountBroker) Reconnect(
 	principal Principal,
 	operationID string,
 	credential []byte,
+	eligibilityExpiresAt time.Time,
 ) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -104,7 +108,8 @@ func (b *memoryPrincipalAccountBroker) Reconnect(
 	}
 	b.mutations = append(b.mutations, brokerMutation{
 		Principal: principal, Template: current.Template, OperationID: operationID,
-		Credential: bytes.Clone(credential), Action: dynamicActionReconnect,
+		Credential: bytes.Clone(credential), EligibilityExpiresAt: eligibilityExpiresAt,
+		Action: dynamicActionReconnect,
 	})
 	if current.Generation < 1 {
 		current.Generation = 1
@@ -112,6 +117,13 @@ func (b *memoryPrincipalAccountBroker) Reconnect(
 	current.State = accountStateReady
 	current.Generation++
 	b.accounts[key] = current
+	return nil
+}
+
+func (b *memoryPrincipalAccountBroker) RenewEligibility(_ context.Context, _ Principal, _ time.Time) error {
+	return nil
+}
+func (b *memoryPrincipalAccountBroker) RevokeEligibility(_ context.Context, _ Principal) error {
 	return nil
 }
 
@@ -202,7 +214,10 @@ func authenticatedDynamicServer(
 	auth := &Authenticator{cfg: cfg, cookies: cookies, sessions: map[string]session{}, now: time.Now}
 	csrf := testCSRFToken
 	id := "dynamic-opaque-session"
-	auth.sessions[id] = session{Principal: principal, CSRF: csrf, ExpiresAt: time.Now().Add(time.Hour)}
+	expiresAt := time.Now().Add(time.Hour)
+	auth.sessions[id] = session{
+		Principal: principal, CSRF: csrf, ExpiresAt: expiresAt, EligibilityExpiresAt: expiresAt,
+	}
 	encoded, err := cookies.Encode(cfg.Auth.Session.CookieName, id)
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +241,7 @@ func waitHTTPEnrollment(
 	return waitEnrollmentStatus(t, server.enrollments, principal, started.ID, enrollmentSucceeded, enrollmentFailed)
 }
 
-//nolint:gocyclo // One end-to-end test deliberately verifies all custody and non-disclosure invariants together.
+//nolint:gocyclo,cyclop // One test deliberately verifies the complete custody/non-disclosure lifecycle.
 func TestDynamicEligibleUnknownPrincipalEnrollsAndReconnectsBeforeExpiryWithoutDisclosure(t *testing.T) {
 	principal := Principal{Issuer: testIdentityIssuer, Subject: "new-dynamic-user", DisplayName: "New user"}
 	broker := newMemoryPrincipalAccountBroker()
@@ -272,12 +287,77 @@ func TestDynamicEligibleUnknownPrincipalEnrollsAndReconnectsBeforeExpiryWithoutD
 		broker.mutations[1].Action != dynamicActionReconnect ||
 		broker.mutations[0].Principal != principal || broker.mutations[0].Template != testDynamicTemplateOne ||
 		broker.mutations[0].OperationID == "" || broker.mutations[1].OperationID == "" ||
-		broker.mutations[0].OperationID == broker.mutations[1].OperationID {
+		broker.mutations[0].OperationID == broker.mutations[1].OperationID ||
+		broker.mutations[0].EligibilityExpiresAt.Before(time.Now().Add(50*time.Minute)) ||
+		broker.mutations[1].EligibilityExpiresAt.Before(time.Now().Add(50*time.Minute)) {
 		t.Fatal("dynamic broker custody did not preserve exact principal/template/action/operation binding")
 	}
 	observable := dashboard.Body.String() + started.Body.String() + audit.String()
 	if strings.Contains(observable, dynamicCredentialNeedle) || strings.Contains(observable, "refresh-needle") {
 		t.Fatal("dynamic credential appeared in browser or audit output")
+	}
+}
+
+func TestDynamicShortEligibilityLeaseBindsEnrollmentAndRequiresFreshLoginAfterExpiry(t *testing.T) {
+	principal := Principal{Issuer: testIdentityIssuer, Subject: "short-lease-owner"}
+	broker := newMemoryPrincipalAccountBroker()
+	runner := &scriptedDynamicRunner{}
+	cfg := testDynamicConfig()
+	cfg.Auth.Session.MaxAgeSeconds = 3600
+	cfg.Dynamic.Broker.EligibilityLeaseSeconds = 300
+	evaluatedAt := time.Now().Truncate(time.Second)
+	clock := evaluatedAt
+	leaseExpiresAt := evaluatedAt.Add(300 * time.Second)
+	sessionExpiresAt := evaluatedAt.Add(time.Hour)
+
+	sum := sha512.Sum512([]byte(strings.Repeat("l", 64)))
+	cookies := securecookie.New(sum[:32], sum[32:])
+	cookies.MaxAge(cfg.Auth.Session.MaxAgeSeconds)
+	auth := &Authenticator{
+		cfg: cfg, cookies: cookies, sessions: map[string]session{}, now: func() time.Time { return clock },
+	}
+	const sessionID = "short-lease-session"
+	auth.sessions[sessionID] = session{
+		Principal: principal, CSRF: testCSRFToken,
+		ExpiresAt: sessionExpiresAt, EligibilityExpiresAt: leaseExpiresAt,
+	}
+	encoded, err := cookies.Encode(cfg.Auth.Session.CookieName, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: cfg.Auth.Session.CookieName, Value: encoded}
+	server := NewServer(cfg, auth, nil, NewAuditLogger(&bytes.Buffer{}), runner, broker)
+	defer server.Close()
+
+	started := request(
+		t, server, cookie, testCSRFToken, http.MethodPost,
+		"/agents/credentials/templates/"+testDynamicTemplateOne+"/connect", "", nil,
+	)
+	if started.Code != http.StatusAccepted {
+		t.Fatalf("immediate short-lease enrollment failed: %d %s", started.Code, started.Body.String())
+	}
+	completed := waitHTTPEnrollment(t, server, principal, started.Body.Bytes())
+	if completed.Status != enrollmentSucceeded {
+		t.Fatalf("immediate short-lease enrollment did not complete: %#v", completed)
+	}
+	broker.mu.Lock()
+	if len(broker.mutations) != 1 || !broker.mutations[0].EligibilityExpiresAt.Equal(leaseExpiresAt) ||
+		broker.mutations[0].EligibilityExpiresAt.After(sessionExpiresAt) {
+		broker.mu.Unlock()
+		t.Fatal("enrollment did not retain the exact original evaluated eligibility expiry")
+	}
+	broker.mu.Unlock()
+
+	clock = leaseExpiresAt.Add(time.Second)
+	expired := request(
+		t, server, cookie, testCSRFToken, http.MethodPost,
+		"/agents/credentials/templates/"+testDynamicTemplateOne+"/connect", "", nil,
+	)
+	if expired.Code != http.StatusUnauthorized || runner.callCount() != 1 {
+		t.Fatalf(
+			"expired eligibility did not require fresh login: status=%d calls=%d",
+			expired.Code, runner.callCount(),
+		)
 	}
 }
 

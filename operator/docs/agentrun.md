@@ -417,6 +417,13 @@ schedule identity and generation, selected profile, and the immutable
 principal issuer/subject plus optional display name. The fully resolved
 runtime, agent runtime config, egress, and broker grants are stored directly in
 the same `AgentRun`; later schedule edits do not re-resolve existing runs.
+For dynamic principal-owned admission,
+`profileProvenance.principalCredential` additionally freezes the public
+credential template, opaque `dpa_…` provider instance ID, and positive broker
+credential generation. These are non-secret routing provenance, not credential
+material. The immutable AgentRun continues to use the existing mediated broker
+grant and capability paths; no credential bytes enter the CRD, Pod spec,
+runtime config, events, logs, or agent files.
 
 ## Lifecycle
 

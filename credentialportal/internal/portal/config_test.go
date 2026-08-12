@@ -64,7 +64,7 @@ func TestConfigValidatesOIDCEligibilityClaimSource(t *testing.T) {
 	cfg := testConfig()
 	cfg.Auth.Mode = authModeOIDC
 	cfg.Auth.OIDC = OIDCConfig{
-		IssuerURL: "https://identity.example.test", ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+		IssuerURL: "https://identity.example.test", ClientID: testOIDCClientID, CallbackPath: testOAuthCallbackPath,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default ID-token claim source rejected: %v", err)
@@ -156,6 +156,7 @@ func testDynamicConfig() Config {
 func TestDynamicConfigIsExplicitMutuallyExclusiveAndStrict(t *testing.T) {
 	valid := testDynamicConfig()
 	if valid.Dynamic.Broker.AssertionTTLSeconds != defaultAssertionTTL ||
+		valid.Dynamic.Broker.EligibilityLeaseSeconds != valid.Auth.Session.MaxAgeSeconds ||
 		valid.Dynamic.Broker.RequestTimeoutSeconds != defaultBrokerTimeout ||
 		valid.Dynamic.Broker.MaxResponseBytes != defaultBrokerResponse {
 		t.Fatal("dynamic broker defaults were not applied")
@@ -202,6 +203,11 @@ func TestDynamicConfigIsExplicitMutuallyExclusiveAndStrict(t *testing.T) {
 	wrongPrefix := testDynamicConfig()
 	wrongPrefix.PublicURL = "https://portal.example/other"
 	invalid = append(invalid, wrongPrefix)
+
+	overlongEligibilityLease := testDynamicConfig()
+	overlongEligibilityLease.Dynamic.Broker.EligibilityLeaseSeconds =
+		overlongEligibilityLease.Auth.Session.MaxAgeSeconds + 1
+	invalid = append(invalid, overlongEligibilityLease)
 
 	for index := range invalid {
 		if err := invalid[index].Validate(); err == nil {

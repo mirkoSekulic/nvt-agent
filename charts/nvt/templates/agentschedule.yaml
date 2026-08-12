@@ -3,6 +3,47 @@
 {{- if and $workflowMode (or (eq (len .Values.agentSchedule.workflowProfiles) 0) (eq (len .Values.agentSchedule.producerPolicies) 0) (gt (len .Values.agentSchedule.allowedProducers) 0)) }}
 {{- fail "workflow-enabled agentSchedule requires workflowProfiles and producerPolicies and cannot use legacy allowedProducers" }}
 {{- end }}
+{{- $dynamic := .Values.agentSchedule.principalCredentialSelection }}
+{{- $dynamicEnabled := and (kindIs "map" $dynamic) (eq true (default false (index $dynamic "enabled"))) }}
+{{- if and (kindIs "map" $dynamic) (gt (len $dynamic) 0) (not $dynamicEnabled) }}{{ fail "agentSchedule.principalCredentialSelection must set enabled=true when configured" }}{{ end }}
+{{- if $dynamicEnabled }}
+{{- if not .Values.operator.principalAccounts.enabled }}{{ fail "agentSchedule.principalCredentialSelection requires operator.principalAccounts.enabled=true" }}{{ end }}
+{{- if gt (len .Values.agentSchedule.profileSelection) 0 }}{{ fail "agentSchedule.principalCredentialSelection cannot be combined with profileSelection" }}{{ end }}
+{{- if ne "deny" (index $dynamic "onNoMatch") }}{{ fail "agentSchedule.principalCredentialSelection.onNoMatch must be deny" }}{{ end }}
+{{- $mappings := default (list) (index $dynamic "templateProfiles") }}
+{{- if or (lt (len $mappings) 1) (gt (len $mappings) 64) }}{{ fail "agentSchedule.principalCredentialSelection.templateProfiles must contain 1-64 mappings" }}{{ end }}
+{{- $seenTemplates := dict }}
+{{- range $index, $mapping := $mappings }}
+{{- $template := default "" (index $mapping "template") }}
+{{- $profileName := default "" (index $mapping "profile") }}
+{{- if or (not (regexMatch `^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$` $template)) (gt (len $template) 63) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$` $profileName)) (gt (len $profileName) 63) }}{{ fail (printf "agentSchedule.principalCredentialSelection.templateProfiles[%d] is invalid" $index) }}{{ end }}
+{{- if hasKey $seenTemplates $template }}{{ fail "agentSchedule.principalCredentialSelection templates must be unique" }}{{ end }}
+{{- $_ := set $seenTemplates $template true }}
+{{- $matchedProfile := dict }}
+{{- range $.Values.agentSchedule.profiles }}{{ if eq .name $profileName }}{{ $_ := set $matchedProfile "profile" . }}{{ end }}{{ end }}
+{{- if not (hasKey $matchedProfile "profile") }}{{ fail (printf "agentSchedule principal credential mapping references unknown profile %q" $profileName) }}{{ end }}
+{{- $profile := index $matchedProfile "profile" }}
+{{- if or (ne (default "" $profile.egress) "mediated") (not (kindIs "map" $profile.broker)) }}{{ fail (printf "dynamic principal profile %q must use mediated egress and broker grants" $profileName) }}{{ end }}
+{{- $placeholder := false }}
+{{- range $grant := default (list) $profile.broker.grants }}
+{{- if eq (default "" $grant.provider) "$principal-account" }}
+{{- $placeholder = true }}
+{{- if eq (default "" $grant.materialization) "file-bundle" }}{{ fail "dynamic principal-account grants cannot use file-bundle materialization" }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if not $placeholder }}{{ fail (printf "dynamic principal profile %q must contain a $principal-account broker grant" $profileName) }}{{ end }}
+{{- end }}
+{{- range $index, $policy := .Values.agentSchedule.producerPolicies }}
+{{- $issuers := default (list) $policy.allowedPrincipalIssuers }}
+{{- if or (lt (len $issuers) 1) (gt (len $issuers) 32) }}{{ fail (printf "dynamic principal producerPolicies[%d].allowedPrincipalIssuers must contain 1-32 issuers" $index) }}{{ end }}
+{{- $seenIssuers := dict }}
+{{- range $issuer := $issuers }}
+{{- if or (gt (len $issuer) 2048) (not (regexMatch `^https://[^/@?#[:space:]\\]+(?::[0-9]+)?(?:/[^?#[:space:]\\]*)?$` $issuer)) }}{{ fail "dynamic principal allowedPrincipalIssuers must be canonical HTTPS issuers" }}{{ end }}
+{{- if hasKey $seenIssuers $issuer }}{{ fail "dynamic principal allowedPrincipalIssuers must be unique" }}{{ end }}
+{{- $_ := set $seenIssuers $issuer true }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: nvt.dev/v1alpha1
 kind: AgentSchedule
 metadata:
@@ -31,6 +72,10 @@ spec:
   {{- end }}
   {{- with .Values.agentSchedule.profileSelection }}
   profileSelection:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.agentSchedule.principalCredentialSelection }}
+  principalCredentialSelection:
     {{- toYaml . | nindent 4 }}
   {{- end }}
   {{- with .Values.agentSchedule.workflowProfiles }}

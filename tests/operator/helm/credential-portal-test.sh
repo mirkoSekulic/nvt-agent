@@ -24,7 +24,7 @@ if grep -Eq 'verbs:.*(get|list|create|delete)' "${PORTAL_ROLE}"; then
 fi
 grep -Fq 'resourceNames:' "${RENDER}"
 grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
-grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.60"' "${RENDER}"
+grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.61"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
@@ -117,6 +117,7 @@ assert config["dynamic"]["broker"] == {
     "assertionKeyFile": "/var/run/nvt-broker/auth/assertion-key",
     "assertionTTLSeconds": 60,
     "caFile": "/var/run/nvt-broker/ca/ca.crt",
+    "eligibilityLeaseSeconds": 3600,
     "maxResponseBytes": 65536,
     "requestTimeoutSeconds": 10,
     "url": "https://nvt-broker:7347",
@@ -380,6 +381,12 @@ expect_dynamic_failure invalid-rotation-epoch \
 expect_dynamic_failure broker-assertion-window \
   'assertion TTL must not exceed the broker assertion window' \
   --set broker.config.dynamic-accounts.authentication.max-assertion-seconds=30
+expect_dynamic_failure eligibility-session-window \
+  'dynamic broker bounds are invalid' \
+  --set credentialPortal.dynamic.broker.eligibilityLeaseSeconds=3601
+expect_dynamic_failure broker-eligibility-window \
+  'eligibility lease must not exceed the broker eligibility window' \
+  --set broker.config.dynamic-accounts.authentication.max-eligibility-lease-seconds=3599
 expect_dynamic_failure unknown-template \
   'is not an approved broker credential template' \
   --set-string credentialPortal.dynamic.templates[0].name=not-approved

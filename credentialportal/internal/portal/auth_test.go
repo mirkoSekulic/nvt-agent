@@ -9,6 +9,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,18 +24,47 @@ import (
 )
 
 const (
-	testLoginPath = "login"
-	testJWTAlg    = "RS256"
-	testTokenPath = "/token"
+	testLoginPath         = "login"
+	testJWTAlg            = "RS256"
+	testTokenPath         = "/token"
+	testOIDCSubject       = "oidc-owner"
+	testOIDCClientID      = "portal-client"
+	testOAuthCallbackPath = "/oauth2/callback"
+	testEligibilityValue  = "eligible"
+	testSubjectClaim      = "sub"
 )
+
+var errTestBrokerUnavailable = errors.New("broker unavailable")
 
 type oidcFixture struct {
 	*httptest.Server
 
 	key            *rsa.PrivateKey
-	nonce          string
 	accessToken    func(*testing.T, string) string
 	userInfoClaims map[string]any
+	nonce          string
+}
+
+type recordingEligibilityLeaseBroker struct { //nolint:govet // Test recorder favors operation grouping.
+	renewed       []Principal
+	renewedExpiry []time.Time
+	revoked       []Principal
+	renewErr      error
+}
+
+func (b *recordingEligibilityLeaseBroker) RenewEligibility(
+	_ context.Context,
+	principal Principal,
+	expiresAt time.Time,
+) error {
+	b.renewed = append(b.renewed, principal)
+	b.renewedExpiry = append(b.renewedExpiry, expiresAt)
+	return b.renewErr
+}
+
+func (b *recordingEligibilityLeaseBroker) RevokeEligibility(_ context.Context, principal Principal) error {
+	b.revoked = append(b.revoked, principal)
+	return nil
 }
 
 func newOIDCFixture(t *testing.T) *oidcFixture {
@@ -91,7 +121,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 func (f *oidcFixture) idToken(t *testing.T, issuer string) string {
 	t.Helper()
 	return f.signedToken(t, map[string]any{
-		"iss": issuer, "sub": "oidc-owner", "aud": "portal-client", "nonce": f.nonce,
+		"iss": issuer, testSubjectClaim: testOIDCSubject, "aud": testOIDCClientID, "nonce": f.nonce,
 		"iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix(),
 	})
 }
@@ -121,11 +151,11 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 	cfg.Auth.Mode = authModeOIDC
 	cfg.Auth.OIDC = OIDCConfig{
 		IssuerURL:    fixture.URL,
-		ClientID:     "portal-client",
+		ClientID:     testOIDCClientID,
 		Scopes:       []string{"openid", "profile"},
-		CallbackPath: "/oauth2/callback",
+		CallbackPath: testOAuthCallbackPath,
 	}
-	cfg.Slots[0].Owner = Principal{Issuer: fixture.URL, Subject: "oidc-owner"}
+	cfg.Slots[0].Owner = Principal{Issuer: fixture.URL, Subject: testOIDCSubject}
 	cfg.Slots = cfg.Slots[:1]
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -198,12 +228,61 @@ func TestOIDCAuthenticationVerifiesNonceAndAdmitsExactSlotOwner(t *testing.T) {
 	}
 }
 
+func TestEligibleOIDCCallbackRenewsLeaseAndPolicyDenialRevokesIt(t *testing.T) {
+	fixture := newOIDCFixture(t)
+	cfg := testConfig()
+	cfg.Auth.Mode = authModeOIDC
+	cfg.Auth.OIDC = OIDCConfig{
+		IssuerURL: fixture.URL, ClientID: testOIDCClientID, CallbackPath: testOAuthCallbackPath,
+	}
+	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
+		ID: "current-member", Effect: eligibility.EffectAllow, Authenticated: true,
+	}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(
+		t.Context(), cfg, strings.Repeat("s", 64), "", "client-secret", fixture.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth.cfg.Dynamic.Broker.EligibilityLeaseSeconds = 300
+	evaluatedAt := time.Now().Truncate(time.Second)
+	auth.now = func() time.Time { return evaluatedAt }
+	leases := &recordingEligibilityLeaseBroker{}
+	auth.eligibility = leases
+	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusFound {
+		t.Fatalf("eligible callback status=%d body=%q", response.Code, response.Body.String())
+	}
+	want := Principal{Issuer: fixture.URL, Subject: testOIDCSubject}
+	if len(leases.renewed) != 1 || leases.renewed[0] != want || len(leases.revoked) != 0 ||
+		len(leases.renewedExpiry) != 1 ||
+		!leases.renewedExpiry[0].Equal(evaluatedAt.Add(300*time.Second)) {
+		t.Fatalf("eligible identity did not renew its exact lease: %#v", leases)
+	}
+
+	auth.cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny}
+	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusUnauthorized {
+		t.Fatalf("ineligible callback status=%d body=%q", response.Code, response.Body.String())
+	}
+	if len(leases.revoked) != 1 || leases.revoked[0] != want {
+		t.Fatalf("current policy denial did not revoke the exact lease: %#v", leases.revoked)
+	}
+
+	auth.cfg.Auth.Eligibility = cfg.Auth.Eligibility
+	leases.renewErr = errTestBrokerUnavailable
+	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusUnauthorized {
+		t.Fatalf("failed lease renewal did not fail login closed: %d", response.Code)
+	}
+}
+
 func TestOIDCEligibilityUsesOnlyVerifiedConfiguredClaimSource(t *testing.T) {
 	fixture := newOIDCFixture(t)
 	cfg := testConfig()
 	cfg.Auth.Mode = authModeOIDC
 	cfg.Auth.OIDC = OIDCConfig{
-		IssuerURL: fixture.URL, ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+		IssuerURL: fixture.URL, ClientID: testOIDCClientID, CallbackPath: testOAuthCallbackPath,
 		EligibilityClaimSource: eligibility.ClaimSourceAccessToken,
 		AccessTokenAudience:    "portal-eligibility",
 	}
@@ -224,26 +303,29 @@ func TestOIDCEligibilityUsesOnlyVerifiedConfiguredClaimSource(t *testing.T) {
 	}
 	validClaims := func(issuer, audience string) map[string]any {
 		return map[string]any{
-			"iss": issuer, "sub": "oidc-owner", "aud": audience,
+			"iss": issuer, testSubjectClaim: testOIDCSubject, "aud": audience,
 			"iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix(),
 			"authorization_details": []any{map[string]any{"type": "configured-resource"}},
 		}
 	}
-	tests := []struct {
+	tests := []struct { //nolint:govet // Test table follows claim-source flow.
 		name       string
 		access     func(*testing.T, string) string
 		wantStatus int
 	}{
 		{name: "verified access token", wantStatus: http.StatusFound, access: func(t *testing.T, issuer string) string {
+			t.Helper()
 			return fixture.signedToken(t, validClaims(issuer, "portal-eligibility"))
 		}},
 		{name: "malformed access token", wantStatus: http.StatusUnauthorized, access: func(*testing.T, string) string {
 			return "not-a-jwt"
 		}},
 		{name: "wrong issuer", wantStatus: http.StatusUnauthorized, access: func(t *testing.T, _ string) string {
+			t.Helper()
 			return fixture.signedToken(t, validClaims("https://wrong-issuer.example", "portal-eligibility"))
 		}},
 		{name: "wrong audience", wantStatus: http.StatusUnauthorized, access: func(t *testing.T, issuer string) string {
+			t.Helper()
 			return fixture.signedToken(t, validClaims(issuer, "other-audience"))
 		}},
 	}
@@ -260,15 +342,15 @@ func TestOIDCEligibilityUsesOnlyVerifiedConfiguredClaimSource(t *testing.T) {
 
 func TestOIDCEligibilitySupportsExactSubjectUserInfoClaims(t *testing.T) {
 	fixture := newOIDCFixture(t)
-	fixture.userInfoClaims = map[string]any{"sub": "oidc-owner", "groups": []any{"eligible"}}
+	fixture.userInfoClaims = map[string]any{testSubjectClaim: testOIDCSubject, "groups": []any{testEligibilityValue}}
 	cfg := testConfig()
 	cfg.Auth.Mode = authModeOIDC
 	cfg.Auth.OIDC = OIDCConfig{
-		IssuerURL: fixture.URL, ClientID: "portal-client", CallbackPath: "/oauth2/callback",
+		IssuerURL: fixture.URL, ClientID: testOIDCClientID, CallbackPath: testOAuthCallbackPath,
 		EligibilityClaimSource: eligibility.ClaimSourceUserInfo,
 	}
 	cfg.Auth.Eligibility = &eligibility.Policy{Rules: []eligibility.Rule{{
-		ID: "userinfo", Effect: eligibility.EffectAllow, ClaimPath: "groups[]", Values: []string{"eligible"},
+		ID: "userinfo", Effect: eligibility.EffectAllow, ClaimPath: "groups[]", Values: []string{testEligibilityValue},
 	}}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -282,7 +364,7 @@ func TestOIDCEligibilitySupportsExactSubjectUserInfoClaims(t *testing.T) {
 	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusFound {
 		t.Fatalf("userinfo eligibility callback status=%d body=%q", response.Code, response.Body.String())
 	}
-	fixture.userInfoClaims["sub"] = "different-subject"
+	fixture.userInfoClaims[testSubjectClaim] = "different-subject"
 	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusUnauthorized {
 		t.Fatalf("mismatched userinfo subject admitted: status=%d", response.Code)
 	}
@@ -363,7 +445,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 		context.Background(),
 		cfg,
 		strings.Repeat("s", 64),
-		"portal-client",
+		testOIDCClientID,
 		"client-secret",
 		provider.Client(),
 	)
@@ -422,10 +504,10 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 		nil,
 	)
 	principalRequest.AddCookie(sessionCookie)
-	principal, csrf, expiresAt, ok := auth.Session(principalRequest)
+	principal, csrf, expiresAt, eligibilityExpiresAt, ok := auth.Session(principalRequest)
 	if !ok || principal.Issuer != testIdentityIssuer || principal.Subject != "424242" ||
 		principal.DisplayName != "octocat" ||
-		csrf == "" || expiresAt.IsZero() {
+		csrf == "" || expiresAt.IsZero() || eligibilityExpiresAt.IsZero() {
 		t.Fatalf("unexpected principal: %#v ok=%v", principal, ok)
 	}
 
@@ -453,7 +535,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	}
 }
 
-//nolint:gocyclo // One end-to-end fixture proves the complete configured login boundary.
+//nolint:gocyclo,cyclop // One fixture proves the complete configured login boundary.
 func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichment(t *testing.T) {
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -501,7 +583,7 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 		}},
 	}
 	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
-		ID: "eligible", Effect: eligibility.EffectAllow,
+		ID: testEligibilityValue, Effect: eligibility.EffectAllow,
 		Where: eligibility.Where{Array: "memberships[]", All: []eligibility.Condition{
 			{ClaimPath: "organization.ID", Values: []string{"0192:123456789"}},
 			{ClaimPath: "resource", Values: []string{"approved-resource"}},
@@ -511,7 +593,7 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 		t.Fatal(validateErr)
 	}
 	auth, err := NewAuthenticator(
-		t.Context(), cfg, strings.Repeat("s", 64), "portal-client", "client-secret", provider.Client(),
+		t.Context(), cfg, strings.Repeat("s", 64), testOIDCClientID, "client-secret", provider.Client(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -540,8 +622,9 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 			request.AddCookie(cookie)
 		}
 	}
-	principal, _, _, ok := auth.Session(request)
-	if !ok || principal.Issuer != cfg.Auth.OAuth2.Issuer || principal.Subject != "new-immutable-subject" {
+	principal, csrf, sessionExpiry, eligibilityExpiry, ok := auth.Session(request)
+	if !ok || csrf == "" || sessionExpiry.IsZero() || eligibilityExpiry.IsZero() ||
+		principal.Issuer != cfg.Auth.OAuth2.Issuer || principal.Subject != "new-immutable-subject" {
 		t.Fatalf("unexpected eligible principal session: %#v ok=%v", principal, ok)
 	}
 	if auth.hasOwnedSlot(principal) {

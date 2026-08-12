@@ -27,6 +27,7 @@ const (
 	brokerMaxRequestBytes      = 1028 * 1024
 	maxBrokerKeyBytes          = 4096
 	maxBrokerCABytes           = 256 * 1024
+	reasonBrokerUpdateFailed   = "broker-update-failed"
 )
 
 var (
@@ -43,9 +44,23 @@ type DynamicAccountState struct {
 type PrincipalAccountBroker interface {
 	Ready(ctx context.Context) error
 	Account(ctx context.Context, principal Principal) (DynamicAccountState, error)
-	CompleteEnrollment(ctx context.Context, principal Principal, template, operationID string, credential []byte) error
-	Reconnect(ctx context.Context, principal Principal, operationID string, credential []byte) error
+	CompleteEnrollment(
+		ctx context.Context,
+		principal Principal,
+		template, operationID string,
+		credential []byte,
+		eligibilityExpiresAt time.Time,
+	) error
+	Reconnect(
+		ctx context.Context,
+		principal Principal,
+		operationID string,
+		credential []byte,
+		eligibilityExpiresAt time.Time,
+	) error
 	Revoke(ctx context.Context, principal Principal, operationID string) error
+	RenewEligibility(ctx context.Context, principal Principal, expiresAt time.Time) error
+	RevokeEligibility(ctx context.Context, principal Principal) error
 }
 
 type brokerOperationError struct {
@@ -57,13 +72,14 @@ func (e *brokerOperationError) Unwrap() error { return ErrBrokerRejected }
 
 //nolint:govet // Security-sensitive transport fields are grouped by purpose.
 type HTTPPrincipalAccountBroker struct {
-	client         *http.Client
-	baseURL        *url.URL
-	assertionKey   []byte
-	assertionTTL   time.Duration
-	requestTimeout time.Duration
-	maxResponse    int64
-	now            func() time.Time
+	client           *http.Client
+	baseURL          *url.URL
+	assertionKey     []byte
+	assertionTTL     time.Duration
+	eligibilityLease time.Duration
+	requestTimeout   time.Duration
+	maxResponse      int64
+	now              func() time.Time
 }
 
 func NewHTTPPrincipalAccountBroker(cfg DynamicBrokerConfig) (*HTTPPrincipalAccountBroker, error) {
@@ -103,9 +119,10 @@ func NewHTTPPrincipalAccountBroker(cfg DynamicBrokerConfig) (*HTTPPrincipalAccou
 			},
 		},
 		baseURL: parsed, assertionKey: key,
-		assertionTTL:   time.Duration(cfg.AssertionTTLSeconds) * time.Second,
-		requestTimeout: time.Duration(cfg.RequestTimeoutSeconds) * time.Second,
-		maxResponse:    int64(cfg.MaxResponseBytes), now: time.Now,
+		assertionTTL:     time.Duration(cfg.AssertionTTLSeconds) * time.Second,
+		eligibilityLease: time.Duration(cfg.EligibilityLeaseSeconds) * time.Second,
+		requestTimeout:   time.Duration(cfg.RequestTimeoutSeconds) * time.Second,
+		maxResponse:      int64(cfg.MaxResponseBytes), now: time.Now,
 	}, nil
 }
 
@@ -181,6 +198,7 @@ func (c *HTTPPrincipalAccountBroker) CompleteEnrollment(
 	principal Principal,
 	template, operationID string,
 	credential []byte,
+	eligibilityExpiresAt time.Time,
 ) error {
 	body, err := encodeBrokerCredentialRequest(template, operationID, credential)
 	if err != nil {
@@ -189,6 +207,7 @@ func (c *HTTPPrincipalAccountBroker) CompleteEnrollment(
 	defer clearBytes(body)
 	return c.mutate(
 		ctx, "/v1/principal-accounts/complete-enrollment", body, principal, accountStateReady, true,
+		eligibilityExpiresAt,
 	)
 }
 
@@ -197,13 +216,17 @@ func (c *HTTPPrincipalAccountBroker) Reconnect(
 	principal Principal,
 	operationID string,
 	credential []byte,
+	eligibilityExpiresAt time.Time,
 ) error {
 	body, err := encodeBrokerCredentialRequest("", operationID, credential)
 	if err != nil {
 		return ErrBrokerRejected
 	}
 	defer clearBytes(body)
-	return c.mutate(ctx, "/v1/principal-accounts/reconnect", body, principal, accountStateReady, true)
+	return c.mutate(
+		ctx, "/v1/principal-accounts/reconnect", body, principal,
+		accountStateReady, true, eligibilityExpiresAt,
+	)
 }
 
 func (c *HTTPPrincipalAccountBroker) Revoke(
@@ -216,7 +239,41 @@ func (c *HTTPPrincipalAccountBroker) Revoke(
 		return ErrBrokerRejected
 	}
 	defer clearBytes(body)
-	return c.mutate(ctx, "/v1/principal-accounts/revoke", body, principal, accountStateRevoked, true)
+	return c.mutate(ctx, "/v1/principal-accounts/revoke", body, principal, accountStateRevoked, true, time.Time{})
+}
+
+func (c *HTTPPrincipalAccountBroker) RenewEligibility(
+	ctx context.Context,
+	principal Principal,
+	expiresAt time.Time,
+) error {
+	return c.updateEligibility(ctx, "/v1/principal-accounts/renew-eligibility", principal, expiresAt)
+}
+
+func (c *HTTPPrincipalAccountBroker) RevokeEligibility(ctx context.Context, principal Principal) error {
+	return c.updateEligibility(
+		ctx, "/v1/principal-accounts/revoke-eligibility", principal, c.now().Add(c.eligibilityLease),
+	)
+}
+
+func (c *HTTPPrincipalAccountBroker) updateEligibility(
+	ctx context.Context,
+	path string,
+	principal Principal,
+	expiresAt time.Time,
+) error {
+	status, body, err := c.request(ctx, http.MethodPost, path, []byte("{}"), principal, true, expiresAt)
+	defer clearBytes(body)
+	if err != nil || status != http.StatusOK {
+		return ErrBrokerUnavailable
+	}
+	var response struct {
+		OK bool `json:"ok"`
+	}
+	if !strictBrokerJSON(body, &response) || !response.OK {
+		return ErrBrokerUnavailable
+	}
+	return nil
 }
 
 func (c *HTTPPrincipalAccountBroker) mutate(
@@ -226,8 +283,9 @@ func (c *HTTPPrincipalAccountBroker) mutate(
 	principal Principal,
 	expectedState string,
 	retry bool,
+	eligibilityExpiresAt time.Time,
 ) error {
-	status, responseBody, err := c.request(ctx, http.MethodPost, path, body, principal, retry)
+	status, responseBody, err := c.request(ctx, http.MethodPost, path, body, principal, retry, eligibilityExpiresAt)
 	defer clearBytes(responseBody)
 	if err != nil {
 		return ErrBrokerUnavailable
@@ -259,13 +317,14 @@ func (c *HTTPPrincipalAccountBroker) request(
 	body []byte,
 	principal Principal,
 	retry bool,
+	eligibilityExpiresAt ...time.Time,
 ) (int, []byte, error) {
 	attempts := 1
 	if retry {
 		attempts = 2
 	}
 	for range attempts {
-		status, response, err := c.requestOnce(ctx, method, path, body, principal)
+		status, response, err := c.requestOnce(ctx, method, path, body, principal, eligibilityExpiresAt...)
 		if err == nil {
 			return status, response, nil
 		}
@@ -282,6 +341,7 @@ func (c *HTTPPrincipalAccountBroker) requestOnce(
 	method, requestPath string,
 	body []byte,
 	principal Principal,
+	eligibilityExpiresAt ...time.Time,
 ) (int, []byte, error) {
 	requestContext, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
@@ -299,7 +359,7 @@ func (c *HTTPPrincipalAccountBroker) requestOnce(
 		request.Header.Set("Content-Type", jsonContentType)
 	}
 	if principal.Issuer != "" || principal.Subject != "" {
-		assertion, assertionErr := c.assertion(principal)
+		assertion, assertionErr := c.assertion(principal, eligibilityExpiresAt...)
 		if assertionErr != nil {
 			return 0, nil, ErrBrokerUnavailable
 		}
@@ -326,20 +386,29 @@ func (c *HTTPPrincipalAccountBroker) requestOnce(
 	return response.StatusCode, responseBody, nil
 }
 
-func (c *HTTPPrincipalAccountBroker) assertion(principal Principal) (string, error) {
+func (c *HTTPPrincipalAccountBroker) assertion(principal Principal, eligibilityExpiresAt ...time.Time) (string, error) {
 	if !validPrincipalIdentity(principal.Issuer, principal.Subject) {
 		return "", ErrBrokerUnavailable
 	}
-	payload, err := json.Marshal(struct { //nolint:govet // Signed field order is stable and reviewable.
-		Audience  string `json:"audience"`
-		ExpiresAt int64  `json:"expires_at"`
-		Issuer    string `json:"issuer"`
-		Subject   string `json:"subject"`
-		Version   int    `json:"version"`
+	claims := struct { //nolint:govet // Signed field order is stable and reviewable.
+		Audience             string `json:"audience"`
+		EligibilityExpiresAt int64  `json:"eligibility_expires_at,omitempty"`
+		ExpiresAt            int64  `json:"expires_at"`
+		Issuer               string `json:"issuer"`
+		Subject              string `json:"subject"`
+		Version              int    `json:"version"`
 	}{
 		Audience: principalAssertionAudience, ExpiresAt: c.now().Add(c.assertionTTL).Unix(),
 		Issuer: principal.Issuer, Subject: principal.Subject, Version: 1,
-	})
+	}
+	if len(eligibilityExpiresAt) != 0 && !eligibilityExpiresAt[0].IsZero() {
+		maximum := c.now().Add(c.eligibilityLease)
+		if eligibilityExpiresAt[0].Before(c.now()) || eligibilityExpiresAt[0].After(maximum) {
+			return "", ErrBrokerUnavailable
+		}
+		claims.EligibilityExpiresAt = eligibilityExpiresAt[0].Unix()
+	}
+	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", ErrBrokerUnavailable
 	}
@@ -431,7 +500,7 @@ func brokerCompletionReason(err error) string {
 	}
 	var rejected *brokerOperationError
 	if !errors.As(err, &rejected) {
-		return "broker-update-failed"
+		return reasonBrokerUpdateFailed
 	}
 	switch rejected.reason {
 	case "account-already-enrolled", "operation-conflict", "template-switch-not-authorized":
@@ -443,6 +512,6 @@ func brokerCompletionReason(err error) string {
 	case "unauthorized":
 		return "broker-authorization-failed"
 	default:
-		return "broker-update-failed"
+		return reasonBrokerUpdateFailed
 	}
 }
