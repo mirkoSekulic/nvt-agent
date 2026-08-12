@@ -313,7 +313,7 @@ func TestPrincipalAccountBrokerFailsClosedOnMalformedUnavailableAndAssertionReje
 		strings.Contains(err.Error()+brokerCompletionReason(err), brokerClientSecretNeedle) {
 		t.Fatal("broker diagnostic was not normalized before portal output")
 	}
-	mode = "unavailable"
+	mode = accountStateUnavailable
 	if _, err := client.Account(t.Context(), principal); !errors.Is(err, ErrBrokerUnavailable) {
 		t.Fatal("unavailable broker response did not fail closed")
 	}

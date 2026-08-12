@@ -193,6 +193,15 @@ func operatorHTTPHandler(mgr manager.Manager, accounts principalaccounts.Resolve
 		"/v1/schedules/",
 		controller.NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(mgr.GetClient(), mgr.GetScheme(), accounts),
 	)
+	if coordinator, ok := accounts.(interface {
+		principalaccounts.Coordinator
+		CoordinationEnabled() bool
+	}); ok && coordinator.CoordinationEnabled() {
+		mux.Handle(
+			"/v1/principal-accounts/authorize-template-switch",
+			controller.NewPrincipalTemplateSwitchHandler(mgr.GetAPIReader(), coordinator, os.Getenv("POD_NAMESPACE")),
+		)
+	}
 	return mux
 }
 

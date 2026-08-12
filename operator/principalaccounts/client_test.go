@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 )
 
 const testAssertionKey = "0123456789abcdef0123456789abcdef"
+const testCoordinationKey = "abcdef0123456789abcdef0123456789"
 const readyResponse = `{"ok":true,"state":"ready","template":"work","generation":7}`
 
 type brokerFixture struct { //nolint:govet // Test fixture fields follow request/response flow for readability.
@@ -313,6 +315,162 @@ func TestResolveRejectsInvalidPrincipalWithoutBrokerCall(t *testing.T) {
 	}
 	if len(fixture.requestPaths()) != 0 {
 		t.Fatalf("invalid principals reached broker: %v", fixture.requestPaths())
+	}
+}
+
+func TestCoordinationClientBindsBodyAndAcceptsOnlyExactStates(t *testing.T) {
+	principal := Principal{Issuer: "https://issuer.example/tenant", Subject: "immutable-42"}
+	expiresAt := int64(1_700_000_060)
+	var paths []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		verifyCoordinationAssertion(t, request.Header.Get("Authorization"), request.URL.Path, body)
+		paths = append(paths, request.URL.Path)
+		response.Header().Set("Content-Type", jsonContentType)
+		switch request.URL.Path {
+		case "/v1/principal-account-coordination/begin-admission":
+			_, _ = fmt.Fprintf(response, `{"ok":true,"state":"reserved","expires_at":%d}`, expiresAt)
+		case "/v1/principal-account-coordination/end-admission":
+			_, _ = response.Write([]byte(`{"ok":true,"state":"released"}`))
+		case "/v1/principal-account-coordination/begin-template-switch":
+			_, _ = fmt.Fprintf(
+				response,
+				`{"ok":true,"issuer":"https://issuer.example/tenant","subject":"immutable-42","expires_at":%d}`,
+				expiresAt,
+			)
+		case "/v1/principal-account-coordination/commit-template-switch":
+			_, _ = response.Write([]byte(`{"ok":true,"state":"authorized"}`))
+		case "/v1/principal-account-coordination/abort-template-switch":
+			_, _ = response.Write([]byte(`{"ok":true,"state":"released"}`))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	client := newCoordinationTestClient(t, server)
+	reservation, err := client.BeginAdmission(t.Context(), principal, "admission-op")
+	if err != nil || reservation.ExpiresAt.Unix() != expiresAt {
+		t.Fatal(err)
+	}
+	if err := client.EndAdmission(t.Context(), principal, "admission-op"); err != nil {
+		t.Fatal(err)
+	}
+	resolved, switchReservation, err := client.BeginTemplateSwitch(t.Context(), "opaque-request", "switch-op")
+	if err != nil || resolved != principal || switchReservation.ExpiresAt.Unix() != expiresAt {
+		t.Fatalf("begin switch = %#v, %#v, %v", resolved, switchReservation, err)
+	}
+	if err := client.CommitTemplateSwitch(t.Context(), principal, "switch-op"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AbortTemplateSwitch(t.Context(), principal, "switch-op"); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 5 {
+		t.Fatalf("coordination request count=%d paths=%v", len(paths), paths)
+	}
+}
+
+func TestBeginAdmissionPreservesStablePrincipalFailures(t *testing.T) {
+	principal := Principal{Issuer: "https://issuer.example/tenant", Subject: "immutable-42"}
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{name: "not-enrolled", status: http.StatusNotFound, body: `{"ok":false,"error":"account-not-found","message":"account-not-found"}`, want: ErrNotEnrolled},
+		{name: "not-eligible", status: http.StatusForbidden, body: `{"ok":false,"error":"principal-not-eligible","message":"principal-not-eligible"}`, want: ErrNotEligible},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				verifyCoordinationAssertion(t, request.Header.Get("Authorization"), request.URL.Path, body)
+				response.Header().Set("Content-Type", jsonContentType)
+				response.WriteHeader(test.status)
+				_, _ = response.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client := newCoordinationTestClient(t, server)
+			defer client.Close()
+			_, err := client.BeginAdmission(t.Context(), principal, "admission-op")
+			if !errors.Is(err, test.want) {
+				t.Fatalf("BeginAdmission error=%v want=%v", err, test.want)
+			}
+		})
+	}
+}
+
+func newCoordinationTestClient(t *testing.T, server *httptest.Server) *Client {
+	t.Helper()
+	directory := t.TempDir()
+	certificate, err := x509.ParseCertificate(server.Certificate().Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(directory, "ca.pem")
+	keyPath := filepath.Join(directory, "key")
+	coordinationPath := filepath.Join(directory, "coordination-key")
+	for path, body := range map[string][]byte{
+		caPath: pemCertificate(certificate.Raw), keyPath: []byte(testAssertionKey),
+		coordinationPath: []byte(testCoordinationKey),
+	} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client, err := New(Config{
+		Version: 1, BaseURL: server.URL, CAFile: caPath, AssertionKeyFile: keyPath,
+		AssertionTTLSeconds: 30, RequestTimeoutSeconds: 2, MaxResponseBytes: 4096,
+		Coordination: &CoordinationConfig{AssertionKeyFile: coordinationPath, AssertionTTLSeconds: 30},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	t.Cleanup(client.Close)
+	return client
+}
+
+func verifyCoordinationAssertion(t *testing.T, header, path string, body []byte) {
+	t.Helper()
+	parts := strings.Split(strings.TrimPrefix(header, coordinationScheme+" "), ".")
+	if len(parts) != 2 {
+		t.Fatalf("invalid coordination assertion")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, []byte(testCoordinationKey))
+	_, _ = mac.Write(payload)
+	if !hmac.Equal(signature, mac.Sum(nil)) {
+		t.Fatal("invalid coordination signature")
+	}
+	var claims struct {
+		Audience   string `json:"audience"`
+		BodySHA256 string `json:"body_sha256"`
+		ExpiresAt  int64  `json:"expires_at"`
+		Operation  string `json:"operation"`
+		Version    int    `json:"version"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatal(err)
+	}
+	wantOperation := strings.TrimPrefix(path, "/v1/principal-account-coordination/")
+	if claims.Audience != coordinationAudience || claims.Operation != wantOperation ||
+		claims.BodySHA256 != fmt.Sprintf("%x", sha256.Sum256(body)) ||
+		claims.ExpiresAt != 1_700_000_030 || claims.Version != 1 {
+		t.Fatalf("coordination assertion is not body/action bounded: %#v", claims)
 	}
 }
 

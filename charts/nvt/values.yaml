@@ -131,6 +131,14 @@ operator:
     assertionTTLSeconds: 60
     requestTimeoutSeconds: 10
     maxResponseBytes: 65536
+    # Optional operator-only reservation/authorization key. The broker uses
+    # it to serialize dynamic admission with target-free template unlock.
+    templateSwitching:
+      enabled: false
+      authentication:
+        existingSecret: ""
+        key: NVT_DYNAMIC_ACCOUNT_COORDINATION_KEY
+      assertionTTLSeconds: 30
 
 # Opt-in standalone native-VM egress relay. The relay remains unpublished and
 # deny-all until the operator applies a complete exact-binding snapshot. All
@@ -381,6 +389,13 @@ credentialPortal:
       eligibilityLeaseSeconds: 3600
       requestTimeoutSeconds: 10
       maxResponseBytes: 65536
+    templateSwitch:
+      enabled: false
+      # Internal target-free coordinator. No principal, template, provider,
+      # profile, or credential is sent on this hop; only an opaque broker ID.
+      coordinatorURL: ""
+      requestTimeoutSeconds: 10
+      maxResponseBytes: 4096
     # Public template name/label -> one compiled trusted enrollment adapter.
     # Provider plugins, ids, profiles, grants, capabilities, and runtime
     # settings remain broker/operator administrator configuration.

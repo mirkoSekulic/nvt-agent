@@ -28,6 +28,8 @@ const (
 	maxBrokerKeyBytes          = 4096
 	maxBrokerCABytes           = 256 * 1024
 	reasonBrokerUpdateFailed   = "broker-update-failed"
+	reasonBrokerUnavailable    = "broker-unavailable"
+	accountStateUnavailable    = "unavailable"
 )
 
 var (
@@ -61,6 +63,7 @@ type PrincipalAccountBroker interface {
 	Revoke(ctx context.Context, principal Principal, operationID string) error
 	RenewEligibility(ctx context.Context, principal Principal, expiresAt time.Time) error
 	RevokeEligibility(ctx context.Context, principal Principal) error
+	RequestTemplateSwitch(ctx context.Context, principal Principal, operationID string) (string, bool, error)
 }
 
 type brokerOperationError struct {
@@ -240,6 +243,54 @@ func (c *HTTPPrincipalAccountBroker) Revoke(
 	}
 	defer clearBytes(body)
 	return c.mutate(ctx, "/v1/principal-accounts/revoke", body, principal, accountStateRevoked, true, time.Time{})
+}
+
+func (c *HTTPPrincipalAccountBroker) RequestTemplateSwitch(
+	ctx context.Context,
+	principal Principal,
+	operationID string,
+) (string, bool, error) {
+	body, err := json.Marshal(map[string]string{"operation_id": operationID})
+	if err != nil {
+		return "", false, ErrBrokerRejected
+	}
+	defer clearBytes(body)
+	status, response, err := c.request(
+		ctx, http.MethodPost, "/v1/principal-accounts/request-template-switch", body, principal, true,
+	)
+	defer clearBytes(response)
+	if err != nil {
+		return "", false, ErrBrokerUnavailable
+	}
+	if status != http.StatusOK {
+		reason, ok := strictBrokerError(response)
+		if !ok {
+			return "", false, ErrBrokerUnavailable
+		}
+		return "", false, &brokerOperationError{reason: reason}
+	}
+	var result struct {
+		State     string `json:"state"`
+		RequestID string `json:"request_id,omitempty"`
+		OK        bool   `json:"ok"`
+	}
+	if !strictBrokerJSON(response, &result) || !result.OK {
+		return "", false, ErrBrokerUnavailable
+	}
+	switch result.State {
+	case "authorized":
+		if result.RequestID != "" {
+			return "", false, ErrBrokerUnavailable
+		}
+		return "", true, nil
+	case "pending":
+		if result.RequestID == "" || len(result.RequestID) > 128 {
+			return "", false, ErrBrokerUnavailable
+		}
+		return result.RequestID, false, nil
+	default:
+		return "", false, ErrBrokerUnavailable
+	}
 }
 
 func (c *HTTPPrincipalAccountBroker) RenewEligibility(
@@ -496,7 +547,7 @@ func readBoundedFile(path string, maximum int64) ([]byte, error) {
 
 func brokerCompletionReason(err error) string {
 	if errors.Is(err, ErrBrokerUnavailable) {
-		return "broker-unavailable"
+		return reasonBrokerUnavailable
 	}
 	var rejected *brokerOperationError
 	if !errors.As(err, &rejected) {

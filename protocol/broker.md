@@ -119,6 +119,7 @@ receives the same `account-not-found` response as a principal with no account.
 | `POST /v1/principal-accounts/resolve` | empty object | own template, opaque provider instance id, generation |
 | `POST /v1/principal-accounts/renew-eligibility` | empty object | acknowledgement only |
 | `POST /v1/principal-accounts/revoke-eligibility` | empty object | acknowledgement only |
+| `POST /v1/principal-accounts/request-template-switch` | `operation_id` | opaque target-free request id, or already-authorized state |
 
 Enrollment and reconnect require a currently valid signed eligibility expiry.
 The portal renews an existing account after each successful current policy
@@ -148,12 +149,71 @@ readiness returns the committed template and generation even when that account
 is unready or revoked, so an enrollment frontend can reject a mismatched
 adapter before execution. Revoke is an emergency access-removal operation, not
 authorization to switch templates: its durable tombstone retains the committed
-template. The same template may be enrolled again, but a different template is
-rejected as `template-switch-not-authorized` until a future trusted
-run-coordination contract explicitly authorizes the change. The last 32
+template. The same template may be enrolled again. A different template stays
+`template-switch-not-authorized` until the optional operator coordination below
+commits a target-free authorization after proving there are no active owned
+AgentRuns. The last 32
 mutation operation ids and their non-secret results are retained for bounded
 response-loss replay; callers must use a new id for a new mutation. Revoke is
 durable and idempotent.
+
+#### Operator-only template-switch coordination
+
+`dynamic-accounts.template-switching.enabled` is independently opt-in. Its
+`operator-hmac-key-env` must name a key distinct from the principal assertion
+key and is mounted only into the broker and trusted operator. The portal can
+only create a random, bounded, expiring switch request for its exact
+authenticated principal; that request contains no target template, and its id
+never reaches the browser. Possessing the id is not authorization: the trusted
+operator must acquire the broker reservation, inspect its own AgentRun state,
+and explicitly commit or abort.
+
+Operator mutations use verified broker TLS and a separate assertion:
+
+```text
+Authorization: NVT-Principal-Coordination-v1 <base64url(payload)>.<base64url(HMAC-SHA256)>
+```
+
+The strict payload fixes version 1, audience
+`nvt.broker.principal-account-coordination/v1`, operation, expiry, and the
+SHA-256 of the exact duplicate-free JSON body. Assertions expire in 1–300
+seconds. The body can carry only an opaque operation/request id and, where the
+operator already knows it, canonical issuer plus immutable subject. It cannot
+name a template, provider, profile, grant, capability, runtime, or egress
+setting.
+
+| Endpoint | Exact request body | Non-secret result |
+| --- | --- | --- |
+| `POST /v1/principal-account-coordination/begin-admission` | `operation_id`, `issuer`, `subject` | reserved plus broker expiry |
+| `POST /v1/principal-account-coordination/end-admission` | same exact fields | released |
+| `POST /v1/principal-account-coordination/begin-template-switch` | `operation_id`, `request_id` | exact request owner issuer + subject and broker expiry |
+| `POST /v1/principal-account-coordination/commit-template-switch` | `operation_id`, `issuer`, `subject` | authorized |
+| `POST /v1/principal-account-coordination/abort-template-switch` | same exact fields | released |
+
+Admission and switch proof reserve the same exact principal. Dynamic schedule
+admission holds `begin-admission` from before readiness/resolve through
+AgentRun creation. A switch proof cannot begin during that window. Conversely,
+admission cannot begin while the operator lists exact-principal AgentRuns under
+a switch reservation. The operator commits only when every matching run is
+terminal or absent; otherwise it aborts. The Kubernetes read is direct rather
+than cache-backed and bounded to 1,000 AgentRuns; pagination or malformed
+dynamic ownership provenance is uncertainty and fails closed. A committed unlock applies only to the
+existing revoked tombstone and is consumed by the next successful enrollment.
+Since revoked accounts cannot resolve, no new run can enter between commit and
+replacement.
+
+Reservations and target-free requests are bounded and durably stored with the
+private account metadata. Reusing the same operation id is idempotent. A broker
+or operator restart preserves an unexpired reservation; abandoned reservations
+expire before later work proceeds. Expired, mismatched, replayed,
+cross-principal, malformed, or storage-uncertain coordination fails closed.
+The operator bounds its resolve/create or list/commit context to the
+broker-returned reservation expiry, so an old operation cannot continue into a
+later unlock window.
+None of these records contains credential bytes or provider configuration.
+The coordinated chart requires one operator replica; horizontal admission
+replicas need a future distributed run-state reader before this feature can be
+enabled.
 
 Provider instance ids use the reserved `dpa_` shape plus 192 random bits and
 are checked against static and loaded dynamic ids; enabling the feature rejects
@@ -168,8 +228,8 @@ exist only in the authenticated request, broker-owned credential file, and
 provider process protocol; they never enter metadata, operation results, HTTP
 responses, audit, errors, events, command arguments, or Kubernetes objects.
 Metadata contains only the exact ownership identity, opaque ids, approved
-template, generation, timestamps, non-secret eligibility expiry, state, active
-credential filename, and bounded idempotency records.
+template, generation, timestamps, non-secret eligibility/coordination expiry,
+state, active credential filename, and bounded idempotency/coordination records.
 
 Replacement writes and fsyncs a new unique credential generation, initializes
 the provider against it, then atomically replaces and fsyncs the metadata
@@ -193,17 +253,17 @@ tombstone before closing the provider and deleting its credential, so restart
 completes cleanup without restoring access or enabling an uncoordinated
 template switch.
 
-This broker contract deliberately contains no Kubernetes, portal UI, run,
-profile, grant, or egress coordination. The optional dynamic credential portal
+This broker contract deliberately contains no Kubernetes, portal UI, AgentRun,
+profile, grant, or egress knowledge. The optional dynamic credential portal
 calls completion, reconnect, revoke, and readiness after its tokenless runner
 returns a validated document; it never exposes or consumes the resolved opaque
 provider id. The separately enabled operator client calls authenticated
 readiness and resolution for an exact issuer plus immutable subject and freezes
 the consistent template, provider instance, and generation into an AgentRun;
-the broker remains unaware of schedules and profiles. Coordinating an active
-run during template replacement remains outside this version; the durable
-template lock stays fail-closed and no implicit switch or fallback is
-performed.
+the broker remains unaware of schedules and profiles. Its optional coordination
+API supplies only the durable exact-principal reservation and target-free unlock
+decision described above; the operator alone interprets AgentRun state. No
+implicit switch or fallback is performed.
 
 ### Guest enrollment endpoints
 

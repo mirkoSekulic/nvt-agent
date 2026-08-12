@@ -126,6 +126,50 @@ func TestDynamicPrincipalAdmissionFreezesBrokerResolution(t *testing.T) {
 	}
 }
 
+func TestDynamicPrincipalAdmissionReservationWrapsResolveAndCreate(t *testing.T) {
+	setTLSBrokerEnv(t)
+	schedule := testDynamicPrincipalSchedule()
+	resolver := readyFakeResolver()
+	coordinator := &recordingPrincipalCoordinator{}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	fixture.principalAccounts = resolver
+	fixture.principalCoordination = coordinator
+
+	response := fixture.serve(
+		t,
+		profiledAdmissionBody(t, "coordinated", dynamicPrincipal(), nil),
+		"Bearer projected-token",
+	)
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	calls := coordinator.snapshot()
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "begin-admission:") ||
+		!strings.HasPrefix(calls[1], "end-admission:") {
+		t.Fatalf("admission reservation did not wrap create: %#v", calls)
+	}
+	beginParts, endParts := strings.Split(calls[0], ":"), strings.Split(calls[1], ":")
+	if len(beginParts) != 3 || len(endParts) != 3 || beginParts[1] != endParts[1] ||
+		beginParts[2] != dynamicSubject || endParts[2] != dynamicSubject {
+		t.Fatalf("admission reservation was not exact-principal/idempotent: %#v", calls)
+	}
+
+	failedSchedule := testDynamicPrincipalSchedule()
+	failedSchedule.Name = "coordination-failed"
+	failed := newProfileAdmissionFixture(t, failedSchedule)
+	failed.principalAccounts = readyFakeResolver()
+	failed.principalCoordination = &recordingPrincipalCoordinator{beginErr: principalaccounts.ErrCoordination}
+	denied := failed.serve(
+		t,
+		profiledAdmissionBody(t, "coordination-failed", dynamicPrincipal(), nil),
+		"Bearer projected-token",
+	)
+	var deniedResponse scheduleAdmissionResponse
+	decodeAdmissionResponse(t, denied, http.StatusServiceUnavailable, &deniedResponse)
+	if deniedResponse.Reason != "credential-resolution-unavailable" || failed.principalAccounts.(*fakePrincipalAccountResolver).callCount() != 0 {
+		t.Fatalf("failed reservation did not fail before resolution: %q", denied.Body.String())
+	}
+}
+
 func TestDynamicPrincipalAdmissionStableFailClosedReasons(t *testing.T) {
 	setTLSBrokerEnv(t)
 	tests := []struct {

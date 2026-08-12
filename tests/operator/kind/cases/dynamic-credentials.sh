@@ -30,9 +30,12 @@ case_kind_setup() {
 
   kubectl_smoke create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_smoke apply -f -
   openssl rand -base64 48 >"${SMOKE_TMPDIR}/dynamic-assertion-key"
+  openssl rand -base64 48 >"${SMOKE_TMPDIR}/dynamic-coordination-key"
   chmod 0600 "${SMOKE_TMPDIR}/dynamic-assertion-key"
+  chmod 0600 "${SMOKE_TMPDIR}/dynamic-coordination-key"
   kubectl_smoke -n "${NAMESPACE}" create secret generic nvt-dynamic-assertions \
     --from-file=NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY="${SMOKE_TMPDIR}/dynamic-assertion-key" \
+    --from-file=NVT_DYNAMIC_ACCOUNT_COORDINATION_KEY="${SMOKE_TMPDIR}/dynamic-coordination-key" \
     --dry-run=client -o yaml | kubectl_smoke apply -f -
 
   prepare_dynamic_credential_fixture
@@ -111,6 +114,9 @@ broker:
       authentication:
         hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
         max-eligibility-lease-seconds: 3600
+      template-switching:
+        enabled: true
+        operator-hmac-key-env: NVT_DYNAMIC_ACCOUNT_COORDINATION_KEY
       provider-templates:
         - name: dynamic-oauth
           plugin: codex-oauth
@@ -124,6 +130,10 @@ broker:
           label: Dynamic work
           enrollment-adapter: synthetic-kind-adapter
           provider-template: dynamic-oauth
+        - name: alternate-work
+          label: Alternate work
+          enrollment-adapter: synthetic-kind-adapter
+          provider-template: dynamic-oauth
 operator:
   principalAccounts:
     enabled: true
@@ -134,6 +144,11 @@ operator:
     authentication:
       existingSecret: nvt-dynamic-assertions
       key: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+    templateSwitching:
+      enabled: true
+      authentication:
+        existingSecret: nvt-dynamic-assertions
+        key: NVT_DYNAMIC_ACCOUNT_COORDINATION_KEY
 agentSchedule:
   maxParallelism: 4
   template:
@@ -171,6 +186,8 @@ agentSchedule:
     templateProfiles:
       - template: dynamic-work
         profile: dynamic-work
+      - template: alternate-work
+        profile: dynamic-work
   workflowProfiles:
     - name: implement
       workspaceInstructions: Complete the authorized work.
@@ -193,6 +210,7 @@ case_run() {
   assert_dynamic_proxy_injects "${run}"
   assert_dynamic_snapshot "${run}"
   assert_dynamic_secret_absence "${run}"
+  assert_dynamic_template_switch_coordination "${run}"
 }
 
 case_diagnostics() {
@@ -428,4 +446,160 @@ assert_dynamic_secret_absence() {
     die "dynamic credential appeared in an agent file"
   fi
   log "dynamic credential remained broker-owned"
+}
+
+start_dynamic_port_forward() {
+  local resource="$1" mapping="$2" log_file="$3"
+  kubectl_smoke -n "${NAMESPACE}" port-forward "${resource}" "${mapping}" >"${log_file}" 2>&1 &
+  CASE_PORT_FORWARD_PID=$!
+  sleep 1
+  kill -0 "${CASE_PORT_FORWARD_PID}" 2>/dev/null || die "${resource} port-forward failed"
+}
+
+stop_dynamic_port_forward() {
+  kill "${CASE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  wait "${CASE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  CASE_PORT_FORWARD_PID=""
+}
+
+write_dynamic_broker_request() {
+  local path="$1" body_file="$2" response_file="$3" config_file="$4"
+  python3 - "${SMOKE_TMPDIR}" "${path}" "${body_file}" "${response_file}" "${config_file}" <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import pathlib
+import sys
+import time
+
+directory = pathlib.Path(sys.argv[1])
+path, body_file, response_file, config_file = sys.argv[2:]
+key = (directory / "dynamic-assertion-key").read_bytes()
+claims = {
+    "audience": "nvt.broker.principal-accounts/v1",
+    "expires_at": int(time.time()) + 60,
+    "eligibility_expires_at": int(time.time()) + 1800,
+    "issuer": "https://github.com",
+    "subject": "424242",
+    "version": 1,
+}
+raw = json.dumps(claims, separators=(",", ":"), sort_keys=True).encode()
+token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode() + "." + base64.urlsafe_b64encode(
+    hmac.digest(key, raw, "sha256")
+).rstrip(b"=").decode()
+config = "\n".join([
+    "silent", "show-error",
+    f'url = "https://nvt-broker:17347{path}"',
+    'resolve = "nvt-broker:17347:127.0.0.1"',
+    f'cacert = "{directory / "broker-ca.crt"}"',
+    f'header = "Authorization: NVT-Principal-v1 {token}"',
+    'header = "Content-Type: application/json"',
+    f'data-binary = "@{body_file}"',
+    f'output = "{response_file}"',
+    'write-out = "%{http_code}"',
+])
+pathlib.Path(config_file).write_text(config + "\n", encoding="utf-8")
+PY
+}
+
+call_dynamic_broker() {
+  local path="$1" body_file="$2" response_file="$3" config_file="$4"
+  write_dynamic_broker_request "${path}" "${body_file}" "${response_file}" "${config_file}"
+  env \
+    -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY \
+    -u https_proxy -u http_proxy -u all_proxy \
+    NO_PROXY='*' no_proxy='*' \
+    curl --config "${config_file}"
+}
+
+assert_dynamic_template_switch_coordination() {
+  local run="$1" status request_id
+  log "proving active-run template-switch exclusion across broker and operator"
+  printf '%s' '{"operation_id":"kind-switch-revoke"}' >"${SMOKE_TMPDIR}/switch-revoke.json"
+  printf '%s' '{"operation_id":"kind-switch-request"}' >"${SMOKE_TMPDIR}/switch-request.json"
+  start_dynamic_port_forward service/nvt-broker 17347:7347 "${SMOKE_TMPDIR}/broker-switch-forward.log"
+  status="$(call_dynamic_broker \
+    /v1/principal-accounts/revoke "${SMOKE_TMPDIR}/switch-revoke.json" \
+    "${SMOKE_TMPDIR}/switch-revoke-response.json" "${SMOKE_TMPDIR}/switch-revoke.curl")"
+  [[ "${status}" == "200" ]] || die "dynamic revoke before switch failed with HTTP ${status}"
+  status="$(call_dynamic_broker \
+    /v1/principal-accounts/request-template-switch "${SMOKE_TMPDIR}/switch-request.json" \
+    "${SMOKE_TMPDIR}/switch-request-response.json" "${SMOKE_TMPDIR}/switch-request.curl")"
+  [[ "${status}" == "200" ]] || die "dynamic switch request failed with HTTP ${status}"
+  request_id="$(python3 - "${SMOKE_TMPDIR}/switch-request-response.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value.get("ok") is True and value.get("state") == "pending"
+request_id = value.get("request_id")
+assert isinstance(request_id, str) and 16 <= len(request_id) <= 128
+print(request_id)
+PY
+)"
+
+  printf '{"request_id":"%s"}' "${request_id}" >"${SMOKE_TMPDIR}/operator-switch.json"
+  status="$(curl -sS -o "${SMOKE_TMPDIR}/operator-switch-active-response.json" -w '%{http_code}' \
+    -H 'Content-Type: application/json' --data-binary "@${SMOKE_TMPDIR}/operator-switch.json" \
+    "http://127.0.0.1:${PORT_FORWARD_PORT}/v1/principal-accounts/authorize-template-switch")"
+  [[ "${status}" == "409" ]] || die "active AgentRun did not block template switch (HTTP ${status})"
+  python3 - "${SMOKE_TMPDIR}/operator-switch-active-response.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {
+    "authorized": False, "reason": "active-agentruns",
+}
+PY
+
+  kubectl_smoke -n "${NAMESPACE}" delete agentrun "${run}" --wait=true --timeout="${ROLLOUT_TIMEOUT}"
+  status="$(curl -sS -o "${SMOKE_TMPDIR}/operator-switch-response.json" -w '%{http_code}' \
+    -H 'Content-Type: application/json' --data-binary "@${SMOKE_TMPDIR}/operator-switch.json" \
+    "http://127.0.0.1:${PORT_FORWARD_PORT}/v1/principal-accounts/authorize-template-switch")"
+  [[ "${status}" == "200" ]] || die "cleaned-up AgentRun did not permit template switch (HTTP ${status})"
+  python3 - "${SMOKE_TMPDIR}/operator-switch-response.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {"authorized": True}
+PY
+
+  python3 - "${SMOKE_TMPDIR}" <<'PY'
+import base64, json, pathlib, sys
+directory = pathlib.Path(sys.argv[1])
+access_token = (directory / "access-token").read_text(encoding="utf-8")
+refresh = (directory / "refresh-needle").read_text(encoding="utf-8")
+identity = (directory / "id-needle").read_text(encoding="utf-8")
+credential = json.dumps({"tokens": {
+    "access_token": access_token, "refresh_token": refresh, "id_token": identity,
+}}, separators=(",", ":")).encode()
+request = {
+    "template": "alternate-work",
+    "operation_id": "kind-switch-enrollment",
+    "credential_base64": base64.b64encode(credential).decode(),
+}
+(directory / "switch-enrollment.json").write_text(
+    json.dumps(request, separators=(",", ":")), encoding="utf-8",
+)
+PY
+  status="$(call_dynamic_broker \
+    /v1/principal-accounts/complete-enrollment "${SMOKE_TMPDIR}/switch-enrollment.json" \
+    "${SMOKE_TMPDIR}/switch-enrollment-response.json" "${SMOKE_TMPDIR}/switch-enrollment.curl")"
+  [[ "${status}" == "200" ]] || die "authorized alternate enrollment failed with HTTP ${status}"
+  python3 - "${SMOKE_TMPDIR}/switch-enrollment-response.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {
+    "ok": True, "state": "ready", "template": "alternate-work", "generation": 2,
+}
+PY
+  stop_dynamic_port_forward
+  {
+    cat "${SMOKE_TMPDIR}/switch-revoke-response.json"
+    cat "${SMOKE_TMPDIR}/switch-request-response.json"
+    cat "${SMOKE_TMPDIR}/operator-switch-active-response.json"
+    cat "${SMOKE_TMPDIR}/operator-switch-response.json"
+    cat "${SMOKE_TMPDIR}/switch-enrollment-response.json"
+    kubectl_smoke -n "${NAMESPACE}" get agentruns,configmaps,events -o yaml
+    kubectl_smoke -n "${NAMESPACE}" logs deployment/nvt-operator --all-containers
+    kubectl_smoke -n "${NAMESPACE}" logs deployment/nvt-broker --all-containers
+  } >"${SMOKE_TMPDIR}/switch-observable.txt"
+  if grep -Fq -f "${SMOKE_TMPDIR}/credential-needles" "${SMOKE_TMPDIR}/switch-observable.txt"; then
+    die "dynamic credential appeared in a template-switch observable surface"
+  fi
+  log "active run denied the switch; cleanup permitted the target-free authorized replacement"
 }

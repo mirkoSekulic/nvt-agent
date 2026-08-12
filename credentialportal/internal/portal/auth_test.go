@@ -103,7 +103,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 			}
 		case "/userinfo":
 			if fixture.userInfoClaims == nil {
-				http.Error(w, "unavailable", http.StatusNotFound)
+				http.Error(w, accountStateUnavailable, http.StatusNotFound)
 				return
 			}
 			if err := json.NewEncoder(w).Encode(fixture.userInfoClaims); err != nil {

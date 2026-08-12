@@ -1015,11 +1015,12 @@ func TestAgentRunProfileProvenanceCRDSchema(t *testing.T) {
 }
 
 type profileAdmissionFixture struct {
-	client            client.Client
-	schedule          *nvtv1alpha1.AgentSchedule
-	authenticator     ScheduleProducerAuthenticator
-	principalAccounts principalaccounts.Resolver
-	scheme            *runtime.Scheme
+	client                client.Client
+	schedule              *nvtv1alpha1.AgentSchedule
+	authenticator         ScheduleProducerAuthenticator
+	principalAccounts     principalaccounts.Resolver
+	principalCoordination principalaccounts.Coordinator
+	scheme                *runtime.Scheme
 }
 
 func newProfileAdmissionFixture(t *testing.T, schedule *nvtv1alpha1.AgentSchedule) *profileAdmissionFixture {
@@ -1066,6 +1067,7 @@ func (f *profileAdmissionFixture) serve(t *testing.T, body, authorization string
 	handler := &agentScheduleAdmissionHandler{
 		client: f.client, scheme: f.scheme, authenticator: f.authenticator,
 		profileResolver: StaticExecutionProfileResolver{}, principalAccounts: f.principalAccounts, now: metav1.Now,
+		principalCoordination: f.principalCoordination,
 	}
 	request := httptest.NewRequest(http.MethodPost,
 		"/v1/schedules/"+f.schedule.Namespace+"/"+f.schedule.Name+"/admissions",

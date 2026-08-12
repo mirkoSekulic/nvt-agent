@@ -43,6 +43,8 @@ var (
 	slotPattern    = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 )
 
+const httpScheme = "http"
+
 //nolint:govet // JSON contract fields stay grouped for reviewability.
 type Config struct {
 	Auth           AuthConfig `json:"auth"`
@@ -60,9 +62,17 @@ type Config struct {
 
 //nolint:govet // JSON contract fields stay grouped for reviewability.
 type DynamicConfig struct {
-	Enabled   bool                        `json:"enabled"`
-	Broker    DynamicBrokerConfig         `json:"broker"`
-	Templates []DynamicCredentialTemplate `json:"templates"`
+	Enabled        bool                        `json:"enabled"`
+	Broker         DynamicBrokerConfig         `json:"broker"`
+	TemplateSwitch TemplateSwitchConfig        `json:"templateSwitch"`
+	Templates      []DynamicCredentialTemplate `json:"templates"`
+}
+
+type TemplateSwitchConfig struct {
+	CoordinatorURL        string `json:"coordinatorURL"`
+	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
+	MaxResponseBytes      int    `json:"maxResponseBytes"`
+	Enabled               bool   `json:"enabled"`
 }
 
 type DynamicBrokerConfig struct {
@@ -388,6 +398,9 @@ func (c *Config) validateDynamic() error {
 	if err := c.validateDynamicBrokerBounds(); err != nil {
 		return err
 	}
+	if err := c.validateTemplateSwitch(); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for index, template := range c.Dynamic.Templates {
 		if !slotPattern.MatchString(template.Name) || len(template.Name) > 63 || seen[template.Name] {
@@ -414,6 +427,40 @@ func (c *Config) validateDynamic() error {
 		}
 	}
 
+	return nil
+}
+
+func (c *Config) validateTemplateSwitch() error {
+	config := &c.Dynamic.TemplateSwitch
+	if !config.Enabled {
+		if config.CoordinatorURL != "" || config.RequestTimeoutSeconds != 0 || config.MaxResponseBytes != 0 {
+			return fmt.Errorf("%w: disabled template switch coordination must be empty", errInvalidConfig)
+		}
+		return nil
+	}
+	return validateEnabledTemplateSwitch(config)
+}
+
+func validateEnabledTemplateSwitch(config *TemplateSwitchConfig) error {
+	coordinator, err := url.Parse(config.CoordinatorURL)
+	if err != nil || coordinator.Scheme != httpScheme || coordinator.Host == "" ||
+		coordinator.User != nil || coordinator.Path != "" || coordinator.RawQuery != "" ||
+		coordinator.Fragment != "" || config.CoordinatorURL != coordinator.String() {
+		return fmt.Errorf(
+			"%w: template switch coordinator must be one canonical internal HTTP origin",
+			errInvalidConfig,
+		)
+	}
+	if config.RequestTimeoutSeconds == 0 {
+		config.RequestTimeoutSeconds = 10
+	}
+	if config.MaxResponseBytes == 0 {
+		config.MaxResponseBytes = 4096
+	}
+	if config.RequestTimeoutSeconds < 1 || config.RequestTimeoutSeconds > 30 ||
+		config.MaxResponseBytes < 512 || config.MaxResponseBytes > 16*1024 {
+		return fmt.Errorf("%w: template switch coordinator bounds are invalid", errInvalidConfig)
+	}
 	return nil
 }
 

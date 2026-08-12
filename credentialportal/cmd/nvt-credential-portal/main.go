@@ -91,7 +91,16 @@ func runPortal() error {
 	if err != nil {
 		return fmt.Errorf("configure credential runner: %w", err)
 	}
-	handler := portal.NewServer(cfg, auth, patcher, portal.NewAuditLogger(os.Stdout), runner, broker)
+	var switchCoordinator portal.TemplateSwitchCoordinator
+	if cfg.Dynamic.TemplateSwitch.Enabled {
+		switchCoordinator, err = portal.NewHTTPTemplateSwitchCoordinator(cfg.Dynamic.TemplateSwitch)
+		if err != nil {
+			return fmt.Errorf("configure template switch coordinator: %w", err)
+		}
+	}
+	handler := portal.NewServerWithSwitchCoordinator(
+		cfg, auth, patcher, portal.NewAuditLogger(os.Stdout), runner, broker, switchCoordinator,
+	)
 	defer handler.Close()
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,

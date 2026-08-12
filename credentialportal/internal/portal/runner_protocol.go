@@ -123,7 +123,7 @@ func NewRunnerServer(key []byte, config EnrollmentConfig, runner CredentialRunne
 
 func NewHTTPRunnerClient(rawURL string, key []byte, maxOutputBytes int) (*HTTPRunnerClient, error) {
 	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" ||
+	if err != nil || parsed.Scheme != httpScheme || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" ||
 		parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		len(key) < minimumRunnerKeyBytes || maxOutputBytes < 4096 || maxOutputBytes > 1024*1024 {
 		return nil, errInvalidRunnerClient

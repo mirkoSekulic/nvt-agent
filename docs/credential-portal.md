@@ -206,6 +206,10 @@ broker:
       state-dir: /state/principal-accounts
       authentication:
         hmac-key-env: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+      template-switching:
+        enabled: true
+        # A distinct key in the same externally managed broker env Secret.
+        operator-hmac-key-env: NVT_DYNAMIC_ACCOUNT_COORDINATION_KEY
       provider-templates:
         - name: approved-claude-provider
           plugin: claude-oauth
@@ -231,6 +235,9 @@ credentialPortal:
       authentication:
         existingSecret: nvt-broker-dynamic-account-auth
         key: NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+    templateSwitch:
+      enabled: true
+      coordinatorURL: http://nvt-operator:8082
     templates:
       - name: claude-member
         label: Claude member
@@ -243,7 +250,16 @@ credentialPortal:
           effect: allow
           authenticated: true
   networkPolicy:
-    egressTCPPorts: [443, 7347]
+    egressTCPPorts: [443, 7347, 8082]
+
+operator:
+  principalAccounts:
+    enabled: true
+    templateSwitching:
+      enabled: true
+      authentication:
+        existingSecret: nvt-broker-dynamic-account-auth
+        key: NVT_DYNAMIC_ACCOUNT_COORDINATION_KEY
 ```
 
 The generic contract accepts only adapters compiled into the trusted runner;
@@ -253,22 +269,41 @@ presets. Core selection and custody logic has no provider branch.
 First enrollment selects one approved template. The broker's authenticated
 readiness response retains that committed template and generation while the
 account is ready, unready, or revoked. Reconnect is permitted before expiry and
-while the account is unready, but selecting a different template fails before
-runner execution. Revoke remains an emergency access-removal operation; its
-durable broker tombstone keeps the prior template locked, and subsequent
-enrollment may use only that same template. Revoke therefore cannot be used as
-an uncoordinated template-switch path. This portal does not inspect or
-coordinate active AgentRuns, so authorizing a safe switch remains the bounded
-responsibility of #211. Dynamic account resolution to an opaque provider
-instance is likewise not exposed to the browser and remains operator work in
-#211.
+while the account is unready. Revoke remains an emergency access-removal
+operation and its durable broker tombstone keeps the prior template locked.
+With template switching disabled, subsequent enrollment may use only that same
+template, preserving the prior behavior exactly.
 
-The portal and broker load their shared assertion key only at process startup.
+When the separately opt-in switch coordinator is enabled, selecting another
+approved public template creates a random, expiring broker request bound to the
+authenticated principal but containing no target. The portal sends only that
+opaque id to the trusted operator. The browser never sees the id and cannot
+name or authorize a transition. The operator acquires a broker reservation,
+lists AgentRuns for the broker-returned canonical issuer and immutable subject,
+and commits only when none is active. Active runs return a stable denial before
+the credential runner starts. Broker/operator/storage uncertainty also fails
+before runner execution. A successful target-free authorization is consumed
+by the next enrollment, whose template remains limited to the administrator's
+existing portal and broker mappings.
+
+The operator wraps every dynamic schedule resolve-and-create operation in the
+same broker reservation. Therefore a new AgentRun cannot enter between the
+operator's no-active-run proof and unlock, and a proof cannot overtake an
+admission already creating a run. The account remains revoked and unresolvable
+between unlock and replacement. Existing AgentRun provenance is immutable and
+never rewritten. Bounded durable reservations make retries idempotent across a
+broker/operator restart; abandoned reservations expire, while any dependency
+or metadata uncertainty fails closed. No credential or provider configuration
+enters the request, operator, AgentRun, logs, or Kubernetes objects.
+
+The portal and broker load their shared principal assertion key only at process
+startup; the broker and operator separately load the distinct coordination key.
 For a coordinated rotation, update the externally managed Secret and increment
 `broker.dynamicAccountAssertionRotationEpoch` in the same GitOps change. That
-non-secret epoch is placed on both Pod templates, rolling both workloads
-without hashing or rendering key material. Wait for both Deployments to
-complete rollout and verify they carry the same epoch. During a rolling
+non-secret epoch is placed on every enabled portal, broker, and operator Pod
+template, rolling all startup-only consumers without hashing or rendering key
+material. Wait for all Deployments to complete rollout and verify they carry
+the same epoch. During a rolling
 mismatch assertions fail closed; do not rotate the Secret or restart only one
 workload without advancing the shared epoch.
 

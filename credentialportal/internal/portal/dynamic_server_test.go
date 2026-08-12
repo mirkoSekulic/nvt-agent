@@ -30,12 +30,14 @@ type brokerMutation struct {
 }
 
 type memoryPrincipalAccountBroker struct {
-	accounts    map[string]DynamicAccountState
-	readyErr    error
-	accountErr  error
-	mutationErr error
-	mutations   []brokerMutation
-	mu          sync.Mutex
+	accounts         map[string]DynamicAccountState
+	readyErr         error
+	accountErr       error
+	mutationErr      error
+	mutations        []brokerMutation
+	mu               sync.Mutex
+	switchRequests   int
+	switchAuthorized bool
 }
 
 func newMemoryPrincipalAccountBroker() *memoryPrincipalAccountBroker {
@@ -127,6 +129,27 @@ func (b *memoryPrincipalAccountBroker) RevokeEligibility(_ context.Context, _ Pr
 	return nil
 }
 
+func (b *memoryPrincipalAccountBroker) RequestTemplateSwitch(
+	_ context.Context,
+	principal Principal,
+	_ string,
+) (string, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.mutationErr != nil {
+		return "", false, b.mutationErr
+	}
+	current, ok := b.accounts[principalMapKey(principal)]
+	if !ok || current.State != accountStateRevoked {
+		return "", false, &brokerOperationError{reason: "template-switch-not-revoked"}
+	}
+	b.switchRequests++
+	if b.switchAuthorized {
+		return "", true, nil
+	}
+	return "switch-request", false, nil
+}
+
 func (b *memoryPrincipalAccountBroker) Revoke(
 	_ context.Context,
 	principal Principal,
@@ -155,6 +178,19 @@ type scriptedDynamicRunner struct {
 	calls  int
 	acks   int
 	mu     sync.Mutex
+}
+
+type recordingSwitchCoordinator struct {
+	err   error
+	calls []string
+	mu    sync.Mutex
+}
+
+func (c *recordingSwitchCoordinator) Authorize(_ context.Context, requestID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, requestID)
+	return c.err
 }
 
 func (r *scriptedDynamicRunner) Run(
@@ -506,6 +542,101 @@ func TestDynamicPrincipalIsolationTemplateConflictRevokeAndRecoveryFallback(t *t
 	}
 }
 
+func TestDynamicRevokedTemplateSwitchUsesTargetFreeCoordinatorBeforeRunner(t *testing.T) {
+	principal := Principal{Issuer: testIdentityIssuer, Subject: "switch-owner"}
+	broker := newMemoryPrincipalAccountBroker()
+	broker.accounts[principalMapKey(principal)] = DynamicAccountState{
+		State: accountStateRevoked, Template: testDynamicTemplateOne, Generation: 1,
+	}
+	runner := &scriptedDynamicRunner{}
+	coordinator := &recordingSwitchCoordinator{}
+	cfg := testDynamicConfig()
+	cfg.Dynamic.TemplateSwitch = TemplateSwitchConfig{
+		Enabled: true, CoordinatorURL: "http://nvt-operator:8082",
+		RequestTimeoutSeconds: 2, MaxResponseBytes: 4096,
+	}
+	sum := sha512.Sum512([]byte(strings.Repeat("s", 64)))
+	cookies := securecookie.New(sum[:32], sum[32:])
+	cookies.MaxAge(cfg.Auth.Session.MaxAgeSeconds)
+	auth := &Authenticator{cfg: cfg, cookies: cookies, sessions: map[string]session{}, now: time.Now}
+	expiresAt := time.Now().Add(time.Hour)
+	auth.sessions["switch-session"] = session{
+		Principal: principal, CSRF: testCSRFToken, ExpiresAt: expiresAt, EligibilityExpiresAt: expiresAt,
+	}
+	encoded, err := cookies.Encode(cfg.Auth.Session.CookieName, "switch-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServerWithSwitchCoordinator(
+		cfg, auth, nil, NewAuditLogger(&bytes.Buffer{}), runner, broker, coordinator,
+	)
+	defer server.Close()
+	cookie := &http.Cookie{Name: cfg.Auth.Session.CookieName, Value: encoded}
+	response := request(
+		t, server, cookie, testCSRFToken, http.MethodPost,
+		"/agents/credentials/templates/"+testDynamicTemplateTwo+"/connect", "", nil,
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("authorized switch did not start enrollment: %d %q", response.Code, response.Body.String())
+	}
+	var started EnrollmentStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	waitEnrollmentStatus(t, server.enrollments, principal, started.ID, enrollmentActionRequired)
+	if err := server.enrollments.ProvideCode(principal, started.ID, "synthetic-authorization-code"); err != nil {
+		t.Fatal(err)
+	}
+	if result := waitEnrollmentStatus(
+		t, server.enrollments, principal, started.ID, enrollmentSucceeded,
+	); result.Status != enrollmentSucceeded {
+		t.Fatalf("switched enrollment failed: %#v", result)
+	}
+	if broker.switchRequests != 1 || len(coordinator.calls) != 1 || coordinator.calls[0] != "switch-request" ||
+		runner.callCount() != 1 || broker.accounts[principalMapKey(principal)].Template != testDynamicTemplateTwo {
+		t.Fatalf(
+			"switch path was not target-free and ordered: broker=%#v coordinator=%#v runner=%d",
+			broker, coordinator.calls, runner.callCount(),
+		)
+	}
+}
+
+func TestDynamicTemplateSwitchActiveRunAndCoordinatorFailureStopBeforeRunner(t *testing.T) {
+	principal := Principal{Issuer: testIdentityIssuer, Subject: "switch-denied"}
+	for _, test := range []struct { //nolint:govet // Test-case field names favor readable literals.
+		name   string
+		err    error
+		status int
+		reason string
+	}{
+		{name: "active", err: ErrTemplateSwitchDenied, status: http.StatusConflict, reason: "active-agentruns"},
+		{name: accountStateUnavailable, err: ErrTemplateSwitchUnavailable, status: http.StatusServiceUnavailable, reason: reasonBrokerUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			broker := newMemoryPrincipalAccountBroker()
+			broker.accounts[principalMapKey(principal)] = DynamicAccountState{
+				State: accountStateRevoked, Template: testDynamicTemplateOne, Generation: 1,
+			}
+			runner := &scriptedDynamicRunner{}
+			coordinator := &recordingSwitchCoordinator{err: test.err}
+			server, cookie, csrf, _ := authenticatedDynamicServer(t, principal, broker, runner, false)
+			server.switchCoordinator = coordinator
+			response := request(
+				t, server, cookie, csrf, http.MethodPost,
+				"/agents/credentials/templates/"+testDynamicTemplateTwo+"/connect", "", nil,
+			)
+			wrongResponse := response.Code != test.status ||
+				!strings.Contains(response.Body.String(), test.reason)
+			if wrongResponse || runner.callCount() != 0 {
+				t.Fatalf(
+					"switch dependency failure reached runner: %d %q calls=%d",
+					response.Code, response.Body.String(), runner.callCount(),
+				)
+			}
+		})
+	}
+}
+
 func TestDynamicEligibilityAndDependenciesFailClosedWithoutReassignment(t *testing.T) {
 	cfg := testDynamicConfig()
 	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
@@ -544,7 +675,7 @@ func TestDynamicEligibilityAndDependenciesFailClosedWithoutReassignment(t *testi
 		t.Fatal("broker-failure enrollment did not start")
 	}
 	result := waitHTTPEnrollment(t, server, unknown, started.Body.Bytes())
-	if result.Status != enrollmentFailed || result.Reason != "broker-unavailable" {
+	if result.Status != enrollmentFailed || result.Reason != reasonBrokerUnavailable {
 		t.Fatal("broker completion failure was not stable and fail-closed")
 	}
 	broker.mu.Lock()
