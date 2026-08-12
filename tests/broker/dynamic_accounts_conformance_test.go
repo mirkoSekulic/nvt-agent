@@ -20,16 +20,17 @@ import (
 const dynamicAccountNeedle = "DYNAMIC-ACCOUNT-SECRET-NEEDLE"
 
 type dynamicAccountFixture struct {
-	t       *testing.T
-	root    string
-	home    string
-	url     string
-	bind    string
-	config  string
-	audit   string
-	key     []byte
-	command *exec.Cmd
-	output  bytes.Buffer
+	t               *testing.T
+	root            string
+	home            string
+	url             string
+	bind            string
+	config          string
+	audit           string
+	key             []byte
+	coordinationKey []byte
+	command         *exec.Cmd
+	output          bytes.Buffer
 }
 
 func newDynamicAccountFixture(t *testing.T, enabled bool) *dynamicAccountFixture {
@@ -39,11 +40,12 @@ func newDynamicAccountFixture(t *testing.T, enabled bool) *dynamicAccountFixture
 	port := freePort(t)
 	f := &dynamicAccountFixture{
 		t: t, root: root, home: home,
-		bind:   fmt.Sprintf("127.0.0.1:%d", port),
-		url:    fmt.Sprintf("http://127.0.0.1:%d", port),
-		config: filepath.Join(home, "broker.yaml"),
-		audit:  filepath.Join(home, "audit.jsonl"),
-		key:    []byte("0123456789abcdef0123456789abcdef"),
+		bind:            fmt.Sprintf("127.0.0.1:%d", port),
+		url:             fmt.Sprintf("http://127.0.0.1:%d", port),
+		config:          filepath.Join(home, "broker.yaml"),
+		audit:           filepath.Join(home, "audit.jsonl"),
+		key:             []byte("0123456789abcdef0123456789abcdef"),
+		coordinationKey: []byte("abcdef0123456789abcdef0123456789"),
 	}
 	config := "providers: []\n"
 	if enabled {
@@ -53,6 +55,12 @@ func newDynamicAccountFixture(t *testing.T, enabled bool) *dynamicAccountFixture
   authentication:
     hmac-key-env: TEST_DYNAMIC_ACCOUNT_HMAC_KEY
     max-assertion-seconds: 120
+  template-switching:
+    enabled: true
+    operator-hmac-key-env: TEST_DYNAMIC_COORDINATION_HMAC_KEY
+    max-assertion-seconds: 60
+    reservation-seconds: 30
+    request-seconds: 120
   provider-templates:
     - name: approved-oauth
       plugin: codex-oauth
@@ -85,6 +93,7 @@ func (f *dynamicAccountFixture) start() {
 		"NVT_BROKER_BIND="+f.bind,
 		"NVT_BROKER_AUDIT_LOG="+f.audit,
 		"TEST_DYNAMIC_ACCOUNT_HMAC_KEY="+string(f.key),
+		"TEST_DYNAMIC_COORDINATION_HMAC_KEY="+string(f.coordinationKey),
 	)
 	f.command.Stdout = &f.output
 	f.command.Stderr = &f.output
@@ -156,6 +165,48 @@ func (f *dynamicAccountFixture) post(path, authorization string, body any) (map[
 	decoded := map[string]any{}
 	if err := json.Unmarshal(responseBody, &decoded); err != nil {
 		f.t.Fatalf("decode response %q: %v", responseBody, err)
+	}
+	return decoded, response.StatusCode, string(responseBody)
+}
+
+func (f *dynamicAccountFixture) coordinate(path, operation string, body any) (map[string]any, int, string) {
+	f.t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	claims, err := json.Marshal(map[string]any{
+		"audience":    "nvt.broker.principal-account-coordination/v1",
+		"body_sha256": fmt.Sprintf("%x", sha256.Sum256(raw)),
+		"expires_at":  time.Now().Add(30 * time.Second).Unix(),
+		"operation":   operation,
+		"version":     1,
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, f.coordinationKey)
+	_, _ = mac.Write(claims)
+	authorization := "NVT-Principal-Coordination-v1 " + base64.RawURLEncoding.EncodeToString(claims) + "." +
+		base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	request, err := http.NewRequest(http.MethodPost, f.url+path, bytes.NewReader(raw))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request.Header.Set("Authorization", authorization)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	decoded := map[string]any{}
+	if err := json.Unmarshal(responseBody, &decoded); err != nil {
+		f.t.Fatalf("decode coordination response %q: %v", responseBody, err)
 	}
 	return decoded, response.StatusCode, string(responseBody)
 }
@@ -300,6 +351,13 @@ func TestDynamicPrincipalAccountHTTPContract(t *testing.T) {
 		t.Fatalf("provider rejection status=%d body=%s", status, failedBody)
 	}
 
+	reserved, status, _ := f.coordinate(
+		"/v1/principal-account-coordination/begin-admission", "begin-admission",
+		map[string]any{"issuer": "https://issuer.example", "subject": "alice-immutable", "operation_id": "admission-one"},
+	)
+	if status != http.StatusOK || reserved["state"] != "reserved" {
+		t.Fatalf("admission reservation failed status=%d payload=%v", status, reserved)
+	}
 	revoked, status, _ := f.post("/v1/principal-accounts/revoke", alice, map[string]any{"operation_id": "revoke-one"})
 	if status != http.StatusOK || revoked["state"] != "revoked" {
 		t.Fatalf("revoke failed status=%d payload=%v", status, revoked)
@@ -324,6 +382,54 @@ func TestDynamicPrincipalAccountHTTPContract(t *testing.T) {
 	if status != http.StatusConflict || switchDenied["error"] != "template-switch-not-authorized" ||
 		strings.Contains(switchBody, dynamicAccountNeedle) {
 		t.Fatalf("revoked template switch was not locked status=%d body=%s", status, switchBody)
+	}
+	pending, status, _ := f.post(
+		"/v1/principal-accounts/request-template-switch", alice, map[string]any{"operation_id": "switch-request"},
+	)
+	if status != http.StatusOK || pending["state"] != "pending" || pending["request_id"] == "" {
+		t.Fatalf("target-free switch request failed status=%d payload=%v", status, pending)
+	}
+	requestID := pending["request_id"].(string)
+	conflict, status, _ := f.coordinate(
+		"/v1/principal-account-coordination/begin-template-switch", "begin-template-switch",
+		map[string]any{"operation_id": requestID, "request_id": requestID},
+	)
+	if status != http.StatusConflict || conflict["error"] != "coordination-conflict" {
+		t.Fatalf("switch raced an admission reservation status=%d payload=%v", status, conflict)
+	}
+	_, status, _ = f.coordinate(
+		"/v1/principal-account-coordination/end-admission", "end-admission",
+		map[string]any{"issuer": "https://issuer.example", "subject": "alice-immutable", "operation_id": "admission-one"},
+	)
+	if status != http.StatusOK {
+		t.Fatalf("admission release failed status=%d", status)
+	}
+	identity, status, _ := f.coordinate(
+		"/v1/principal-account-coordination/begin-template-switch", "begin-template-switch",
+		map[string]any{"operation_id": requestID, "request_id": requestID},
+	)
+	if status != http.StatusOK || identity["issuer"] != "https://issuer.example" || identity["subject"] != "alice-immutable" {
+		t.Fatalf("switch proof did not recover exact principal status=%d payload=%v", status, identity)
+	}
+	authorized, status, authorizationBody := f.coordinate(
+		"/v1/principal-account-coordination/commit-template-switch", "commit-template-switch",
+		map[string]any{"issuer": "https://issuer.example", "subject": "alice-immutable", "operation_id": requestID},
+	)
+	if status != http.StatusOK || authorized["state"] != "authorized" || strings.Contains(authorizationBody, dynamicAccountNeedle) {
+		t.Fatalf("switch authorization failed status=%d body=%s", status, authorizationBody)
+	}
+	switched, status, switchedBody := f.post("/v1/principal-accounts/complete-enrollment", alice, map[string]any{
+		"template": "alternate-member", "operation_id": "authorized-switch",
+		"credential_base64": dynamicCodexCredential(t, "authorized-switch"),
+	})
+	if status != http.StatusOK || switched["template"] != "alternate-member" || strings.Contains(switchedBody, dynamicAccountNeedle) {
+		t.Fatalf("authorized switch failed status=%d body=%s", status, switchedBody)
+	}
+	reconnectedAfterSwitch, status, _ := f.post("/v1/principal-accounts/reconnect", alice, map[string]any{
+		"operation_id": "same-template-reconnect", "credential_base64": dynamicCodexCredential(t, "same-template"),
+	})
+	if status != http.StatusOK || reconnectedAfterSwitch["template"] != "alternate-member" {
+		t.Fatalf("current-template reconnect changed after switch status=%d payload=%v", status, reconnectedAfterSwitch)
 	}
 
 	f.stop()

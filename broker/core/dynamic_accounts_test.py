@@ -12,6 +12,7 @@ from unittest import mock
 import broker.core.dynamic_accounts as dynamic_accounts_module
 from broker.core.config import BrokerConfigError
 from broker.core.dynamic_accounts import (
+    CoordinationAuthenticator,
     DynamicAccountManager,
     MAX_BODY_BYTES,
     MAX_CREDENTIAL_BYTES,
@@ -21,6 +22,7 @@ from broker.core.dynamic_accounts import (
     load_dynamic_accounts_config,
     principal_id,
     sign_principal_assertion,
+    sign_coordination_assertion,
 )
 from broker.core.errors import ProviderError
 from broker.core.server import Broker
@@ -68,8 +70,8 @@ class FakeFactory:
         return provider
 
 
-def configuration(root, *, maximum=8, template="member"):
-    return {
+def configuration(root, *, maximum=8, template="member", switching=False):
+    value = {
         "dynamic-accounts": {
             "enabled": True,
             "state-dir": str(root),
@@ -99,6 +101,15 @@ def configuration(root, *, maximum=8, template="member"):
             ],
         }
     }
+    if switching:
+        value["dynamic-accounts"]["template-switching"] = {
+            "enabled": True,
+            "operator-hmac-key-env": "TEST_DYNAMIC_COORDINATION_KEY",
+            "max-assertion-seconds": 60,
+            "reservation-seconds": 30,
+            "request-seconds": 120,
+        }
+    return value
 
 
 class DynamicAccountsTest(unittest.TestCase):
@@ -107,11 +118,16 @@ class DynamicAccountsTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "accounts"
         self.key = b"k" * 32
-        self.environment = mock.patch.dict(os.environ, {"TEST_DYNAMIC_ACCOUNT_KEY": self.key.decode()})
+        self.coordination_key = b"c" * 32
+        self.environment = mock.patch.dict(os.environ, {
+            "TEST_DYNAMIC_ACCOUNT_KEY": self.key.decode(),
+            "TEST_DYNAMIC_COORDINATION_KEY": self.coordination_key.decode(),
+        })
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.factory = FakeFactory()
         self.config = load_dynamic_accounts_config(configuration(self.root), self.factory.supported_plugins)
+
         eligibility_expires_at = int(time.time()) + 1800
         self.alice = Principal(
             "https://issuer.example", "alice-immutable",
@@ -231,6 +247,26 @@ class DynamicAccountsTest(unittest.TestCase):
                     self.key, principal.issuer, principal.subject, now[0] + 30, now[0] + 121,
                 )
             )
+
+    def test_coordination_assertion_binds_operation_body_and_expiry(self):
+        now = 1_700_000_000
+        body = b'{"operation_id":"one"}'
+        assertion = sign_coordination_assertion(
+            self.coordination_key, "begin-admission", body, now + 30
+        )
+        authenticator = CoordinationAuthenticator(self.coordination_key, 60, clock=lambda: now)
+        self.assertIsNone(authenticator.authenticate(assertion, "begin-admission", body))
+        for operation, candidate_body, expires in (
+            ("end-admission", body, now + 30),
+            ("begin-admission", b'{"operation_id":"two"}', now + 30),
+            ("begin-admission", body, now - 1),
+            ("begin-admission", body, now + 61),
+        ):
+            candidate = sign_coordination_assertion(
+                self.coordination_key, "begin-admission", body, expires
+            )
+            with self.assertRaisesRegex(ProviderError, "unauthorized"):
+                authenticator.authenticate(candidate, operation, candidate_body)
 
     def test_prelease_account_is_preserved_but_requires_current_renewal(self):
         manager = self.manager()
@@ -659,6 +695,111 @@ class DynamicAccountsTest(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "template-switch-not-authorized"):
             recovered.enroll(self.alice, "alternate", "switch", bytearray(b"new"))
         self.assertEqual(recovered.enroll(self.alice, "member", "enroll-2", bytearray(b"new"))["generation"], 2)
+
+    def test_operator_authorized_switch_is_target_free_durable_and_exact_principal(self):
+        config = load_dynamic_accounts_config(
+            configuration(self.root, switching=True), self.factory.supported_plugins
+        )
+        manager = self.manager(config=config)
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        manager.revoke(self.alice, "revoke")
+        pending = manager.request_template_switch(self.alice, "request")
+        self.assertEqual(pending["state"], "pending")
+        operation_id = "operator-proof"
+        identity = manager.begin_template_switch(pending["request_id"], operation_id)
+        self.assertEqual((identity["issuer"], identity["subject"]), (self.alice.issuer, self.alice.subject))
+        with self.assertRaisesRegex(ProviderError, "account-not-found"):
+            manager.commit_template_switch(self.bob, operation_id)
+        self.assertEqual(manager.commit_template_switch(self.alice, operation_id)["state"], "authorized")
+        # A lost operator response can retry the same target-free capability;
+        # the committed proof remains durable and idempotent until enrollment.
+        self.assertEqual(
+            manager.begin_template_switch(pending["request_id"], operation_id)["subject"],
+            self.alice.subject,
+        )
+        self.assertEqual(manager.commit_template_switch(self.alice, operation_id)["state"], "authorized")
+        manager.close()
+        manager = DynamicAccountManager(config, FakeFactory(), {"shared-static"})
+        self.addCleanup(manager.close)
+        self.assertEqual(
+            manager.begin_template_switch(pending["request_id"], operation_id)["subject"],
+            self.alice.subject,
+        )
+        self.assertEqual(manager.commit_template_switch(self.alice, operation_id)["state"], "authorized")
+        switched = manager.enroll(self.alice, "alternate", "switch-enroll", bytearray(b"usable-new"))
+        self.assertEqual((switched["template"], switched["generation"]), ("alternate", 2))
+        metadata = (self.root / "accounts" / self.alice.principal_id / "metadata.json").read_bytes()
+        self.assertNotIn(b"usable", metadata)
+        self.assertNotIn(b"operator-proof", metadata)
+
+    def test_admission_reservation_serializes_switch_and_reclaims_after_release_or_expiry(self):
+        now = [1_700_000_000]
+        principal = Principal(
+            self.alice.issuer, self.alice.subject, self.alice.principal_id, now[0] + 1800,
+        )
+        config = load_dynamic_accounts_config(
+            configuration(self.root, switching=True), self.factory.supported_plugins
+        )
+        manager = DynamicAccountManager(config, self.factory, {"shared-static"}, clock=lambda: now[0])
+        self.addCleanup(manager.close)
+        manager.enroll(principal, "member", "enroll", bytearray(b"usable"))
+        admission_reserved = threading.Event()
+        release_admission = threading.Event()
+        admission_errors = []
+
+        def admit():
+            try:
+                self.assertEqual(manager.begin_admission(principal, "admit-1")["state"], "reserved")
+                admission_reserved.set()
+                if not release_admission.wait(timeout=5):
+                    raise TimeoutError("test admission release timed out")
+                manager.end_admission(principal, "admit-1")
+            except Exception as error:  # pragma: no cover - asserted on the parent thread
+                admission_errors.append(error)
+
+        admission_thread = threading.Thread(target=admit)
+        admission_thread.start()
+        self.addCleanup(release_admission.set)
+        self.addCleanup(admission_thread.join, 5)
+        self.assertTrue(admission_reserved.wait(timeout=5))
+        # Reconnect is always owner-available, but it must preserve the
+        # reservation protecting an admission already creating a run.
+        manager.reconnect(principal, "reconnect-during-admission", bytearray(b"usable-new"))
+        manager.revoke(principal, "revoke")
+        pending = manager.request_template_switch(principal, "request")
+        with self.assertRaisesRegex(ProviderError, "coordination-conflict"):
+            manager.begin_template_switch(pending["request_id"], "switch-1")
+        release_admission.set()
+        admission_thread.join(timeout=5)
+        self.assertFalse(admission_thread.is_alive())
+        self.assertEqual(admission_errors, [])
+        manager.begin_template_switch(pending["request_id"], "switch-1")
+        manager.abort_template_switch(principal, "switch-1")
+
+        manager.begin_template_switch(pending["request_id"], "switch-expiring")
+        now[0] += config.coordination_reservation_seconds + 1
+        with self.assertRaisesRegex(ProviderError, "coordination-not-held"):
+            manager.commit_template_switch(principal, "switch-expiring")
+        manager.begin_template_switch(pending["request_id"], "switch-retry")
+        manager.commit_template_switch(principal, "switch-retry")
+        self.assertEqual(
+            manager.enroll(principal, "alternate", "replace", bytearray(b"usable-two"))["template"],
+            "alternate",
+        )
+
+    def test_coordination_reservation_survives_restart_and_is_idempotent(self):
+        config = load_dynamic_accounts_config(
+            configuration(self.root, switching=True), self.factory.supported_plugins
+        )
+        manager = DynamicAccountManager(config, self.factory, {"shared-static"})
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        manager.begin_admission(self.alice, "admit-retry")
+        manager.close()
+        recovered = DynamicAccountManager(config, FakeFactory(), {"shared-static"})
+        self.addCleanup(recovered.close)
+        self.assertEqual(recovered.begin_admission(self.alice, "admit-retry")["state"], "reserved")
+        self.assertEqual(recovered.end_admission(self.alice, "admit-retry")["state"], "released")
+        self.assertEqual(recovered.end_admission(self.alice, "admit-retry")["state"], "released")
 
     def test_secret_needle_never_enters_metadata_or_sanitized_errors(self):
         manager = self.manager()

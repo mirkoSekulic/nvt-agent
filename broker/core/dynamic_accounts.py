@@ -28,6 +28,8 @@ from broker.core.errors import ProviderError
 
 AUTH_SCHEME = "NVT-Principal-v1"
 AUTH_AUDIENCE = "nvt.broker.principal-accounts/v1"
+COORDINATION_AUTH_SCHEME = "NVT-Principal-Coordination-v1"
+COORDINATION_AUTH_AUDIENCE = "nvt.broker.principal-account-coordination/v1"
 API_PREFIX = "/v1/principal-accounts/"
 API_OPERATIONS = {
     API_PREFIX + "complete-enrollment": "enroll",
@@ -37,8 +39,18 @@ API_OPERATIONS = {
     API_PREFIX + "resolve": "resolve",
     API_PREFIX + "renew-eligibility": "renew-eligibility",
     API_PREFIX + "revoke-eligibility": "revoke-eligibility",
+    API_PREFIX + "request-template-switch": "request-template-switch",
 }
 API_PATHS = frozenset(API_OPERATIONS)
+COORDINATION_API_PREFIX = "/v1/principal-account-coordination/"
+COORDINATION_API_OPERATIONS = {
+    COORDINATION_API_PREFIX + "begin-admission": "begin-admission",
+    COORDINATION_API_PREFIX + "end-admission": "end-admission",
+    COORDINATION_API_PREFIX + "begin-template-switch": "begin-template-switch",
+    COORDINATION_API_PREFIX + "commit-template-switch": "commit-template-switch",
+    COORDINATION_API_PREFIX + "abort-template-switch": "abort-template-switch",
+}
+COORDINATION_API_PATHS = frozenset(COORDINATION_API_OPERATIONS)
 MAX_CREDENTIAL_BYTES = 768 * 1024
 # A maximum-size credential encodes to exactly 1 MiB of base64. Reserve a
 # bounded 4 KiB for the strict JSON envelope instead of advertising a payload
@@ -89,6 +101,11 @@ class DynamicAccountsConfig:
     max_accounts: int = 10000
     credential_templates: dict | None = None
     provider_templates: dict | None = None
+    template_switching_enabled: bool = False
+    coordination_hmac_key: bytes | None = None
+    max_coordination_assertion_seconds: int = 60
+    coordination_reservation_seconds: int = 60
+    switch_request_seconds: int = 300
 
 
 class _MetadataCommitError(Exception):
@@ -106,7 +123,7 @@ def load_dynamic_accounts_config(config, supported_plugins):
         fail("dynamic-accounts must be a YAML object")
     unknown = set(raw) - {
         "enabled", "state-dir", "authentication", "max-accounts",
-        "credential-templates", "provider-templates",
+        "credential-templates", "provider-templates", "template-switching",
     }
     if unknown:
         fail(f"dynamic-accounts has unknown keys: {', '.join(sorted(unknown))}")
@@ -207,6 +224,52 @@ def load_dynamic_accounts_config(config, supported_plugins):
     if not provider_templates or not credential_templates:
         fail("enabled dynamic-accounts requires provider-templates and credential-templates")
 
+    switching = raw.get("template-switching", {})
+    if not isinstance(switching, dict):
+        fail("dynamic-accounts.template-switching must be a YAML object")
+    unknown = set(switching) - {
+        "enabled", "operator-hmac-key-env", "max-assertion-seconds",
+        "reservation-seconds", "request-seconds",
+    }
+    if unknown:
+        fail(f"dynamic-accounts.template-switching has unknown keys: {', '.join(sorted(unknown))}")
+    switching_enabled = switching.get("enabled", False)
+    if not isinstance(switching_enabled, bool):
+        fail("dynamic-accounts.template-switching.enabled must be a boolean")
+    coordination_key = None
+    coordination_assertion = 60
+    reservation_seconds = 60
+    request_seconds = 300
+    if switching_enabled:
+        coordination_env = string_value(
+            switching.get("operator-hmac-key-env"),
+            "dynamic-accounts.template-switching.operator-hmac-key-env",
+            required=True,
+        )
+        if not ENV_NAME_RE.fullmatch(coordination_env) or coordination_env == key_env:
+            fail("dynamic-accounts.template-switching operator HMAC environment must be valid and distinct")
+        coordination_text = os.environ.get(coordination_env)
+        if coordination_text is None:
+            fail(f"environment variable {coordination_env} is not set")
+        coordination_key = coordination_text.encode("utf-8")
+        if len(coordination_key) < 32 or len(coordination_key) > 4096:
+            fail(f"environment variable {coordination_env} must contain 32 through 4096 bytes")
+        coordination_assertion = switching.get("max-assertion-seconds", 60)
+        reservation_seconds = switching.get("reservation-seconds", 60)
+        request_seconds = switching.get("request-seconds", 300)
+        if (
+            not isinstance(coordination_assertion, int)
+            or isinstance(coordination_assertion, bool)
+            or not 1 <= coordination_assertion <= 300
+            or not isinstance(reservation_seconds, int)
+            or isinstance(reservation_seconds, bool)
+            or not 15 <= reservation_seconds <= 300
+            or not isinstance(request_seconds, int)
+            or isinstance(request_seconds, bool)
+            or not 60 <= request_seconds <= 900
+        ):
+            fail("dynamic-accounts.template-switching bounds are invalid")
+
     return DynamicAccountsConfig(
         enabled=True,
         state_dir=state_dir,
@@ -216,6 +279,11 @@ def load_dynamic_accounts_config(config, supported_plugins):
         max_accounts=max_accounts,
         credential_templates=credential_templates,
         provider_templates=provider_templates,
+        template_switching_enabled=switching_enabled,
+        coordination_hmac_key=coordination_key,
+        max_coordination_assertion_seconds=coordination_assertion,
+        coordination_reservation_seconds=reservation_seconds,
+        switch_request_seconds=request_seconds,
     )
 
 
@@ -313,6 +381,69 @@ def sign_principal_assertion(key, issuer, subject, expires_at, eligibility_expir
     return f"{AUTH_SCHEME} {_b64url(raw)}.{_b64url(hmac.digest(key, raw, 'sha256'))}"
 
 
+class CoordinationAuthenticator:
+    """Authenticates one bounded operator mutation bound to its exact body."""
+
+    def __init__(self, key, max_assertion_seconds, clock=time.time):
+        self._key = key
+        self._maximum = max_assertion_seconds
+        self._clock = clock
+
+    def authenticate(self, authorization, operation, raw_body):
+        if not isinstance(authorization, str) or not authorization.startswith(COORDINATION_AUTH_SCHEME + " "):
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        token = authorization[len(COORDINATION_AUTH_SCHEME) + 1 :]
+        if len(token) > 8192 or token.count(".") != 1:
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        encoded, signature = token.split(".")
+        try:
+            raw = _decode_b64url(encoded)
+            provided = _decode_b64url(signature)
+        except (ValueError, binascii.Error):
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        expected_signature = hmac.digest(self._key, raw, "sha256")
+        if not hmac.compare_digest(provided, expected_signature):
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        try:
+            payload = _strict_json(raw)
+        except ValueError:
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        if not isinstance(payload, dict) or set(payload) != {
+            "version", "audience", "operation", "body_sha256", "expires_at",
+        }:
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        expires = payload.get("expires_at")
+        if (
+            payload.get("version") != 1
+            or isinstance(payload.get("version"), bool)
+            or payload.get("audience") != COORDINATION_AUTH_AUDIENCE
+            or payload.get("operation") != operation
+            or payload.get("body_sha256") != hashlib.sha256(raw_body).hexdigest()
+            or not isinstance(expires, int)
+            or isinstance(expires, bool)
+        ):
+            raise ProviderError("unauthorized", "unauthorized", 401)
+        now = int(self._clock())
+        if expires <= now or expires > now + self._maximum:
+            raise ProviderError("unauthorized", "unauthorized", 401)
+
+
+def sign_coordination_assertion(key, operation, raw_body, expires_at):
+    """Test/integrator helper for the operator-only coordination audience."""
+    raw = json.dumps(
+        {
+            "audience": COORDINATION_AUTH_AUDIENCE,
+            "body_sha256": hashlib.sha256(raw_body).hexdigest(),
+            "expires_at": expires_at,
+            "operation": operation,
+            "version": 1,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"{COORDINATION_AUTH_SCHEME} {_b64url(raw)}.{_b64url(hmac.digest(key, raw, 'sha256'))}"
+
+
 def _identity_value(value):
     return (
         isinstance(value, str)
@@ -354,6 +485,7 @@ def decode_api_request(raw, operation):
         "resolve": set(),
         "renew-eligibility": set(),
         "revoke-eligibility": set(),
+        "request-template-switch": {"operation_id"},
     }[operation]
     if set(payload) != expected:
         raise ProviderError("invalid-request", "invalid-request", 400)
@@ -372,6 +504,31 @@ def decode_api_request(raw, operation):
         if not credential or len(credential) > MAX_CREDENTIAL_BYTES:
             raise ProviderError("invalid-request", "invalid-request", 400)
     return payload, credential
+
+
+def decode_coordination_request(raw, operation):
+    if len(raw) > 16 * 1024:
+        raise ProviderError("invalid-request", "invalid-request", 400)
+    try:
+        payload = _strict_json(raw)
+    except ValueError as error:
+        raise ProviderError("invalid-request", "invalid-request", 400) from error
+    expected = {
+        "begin-admission": {"operation_id", "issuer", "subject"},
+        "end-admission": {"operation_id", "issuer", "subject"},
+        "begin-template-switch": {"operation_id", "request_id"},
+        "commit-template-switch": {"operation_id", "issuer", "subject"},
+        "abort-template-switch": {"operation_id", "issuer", "subject"},
+    }[operation]
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise ProviderError("invalid-request", "invalid-request", 400)
+    _api_string(payload.get("operation_id"), MAX_OPERATION_BYTES)
+    if "request_id" in payload:
+        _api_string(payload["request_id"], MAX_OPERATION_BYTES)
+    if "issuer" in payload:
+        if not _identity_value(payload["issuer"]) or not _identity_value(payload["subject"]):
+            raise ProviderError("invalid-request", "invalid-request", 400)
+    return payload
 
 
 def _api_string(value, maximum):
@@ -395,6 +552,8 @@ class DynamicAccountManager:
         self._lock = threading.RLock()
         self._providers = {}
         self._accounts = {}
+        self._switch_requests = {}
+        self._authorized_switch_requests = {}
         self._healthy = True
         self._root = config.state_dir
         self._accounts_dir = self._root / "accounts"
@@ -421,6 +580,8 @@ class DynamicAccountManager:
             providers = list(self._providers.values())
             self._providers.clear()
             self._accounts.clear()
+            self._switch_requests.clear()
+            self._authorized_switch_requests.clear()
         for provider in providers:
             provider.close()
         descriptor = self._writer_lock_fd
@@ -463,15 +624,134 @@ class DynamicAccountManager:
             template = self.config.credential_templates.get(template_name)
             if template is None:
                 raise ProviderError("unknown-template", "unknown-template", 400)
-            if current is not None and current["state"] == "revoked" and current["template"] != template_name:
-                # The tombstone keeps the committed template locked. A future
-                # trusted run-coordination contract may authorize a switch;
-                # an enrollment frontend cannot do so implicitly today.
+            if (
+                current is not None
+                and current["state"] == "revoked"
+                and current["template"] != template_name
+                and not current.get("template_switch_authorized", False)
+            ):
                 raise ProviderError("template-switch-not-authorized", "template-switch-not-authorized", 409)
             if current is None and len(self._accounts) >= self.config.max_accounts:
                 raise ProviderError("capacity-exceeded", "capacity-exceeded", 429)
             provider_id = self._new_provider_id()
             return self._replace(principal, current, template, operation_id, credential, "enroll", provider_id)
+
+    def request_template_switch(self, principal, operation_id):
+        with self._lock:
+            self._require_switching()
+            self._require_healthy()
+            self._require_asserted_eligibility(principal)
+            current = self._own_account(principal)
+            if current["state"] != "revoked":
+                raise ProviderError("template-switch-not-revoked", "template-switch-not-revoked", 409)
+            if current.get("template_switch_authorized", False):
+                return {"ok": True, "state": "authorized"}
+            now = int(self._clock())
+            pending = current.get("switch_request")
+            if pending is not None and pending["expires_at"] > now:
+                return {"ok": True, "state": "pending", "request_id": pending["id"]}
+            request = {
+                "id": _b64url(secrets.token_bytes(24)),
+                "operation_id": operation_id,
+                "expires_at": now + self.config.switch_request_seconds,
+            }
+            metadata = dict(current)
+            if pending is not None:
+                self._switch_requests.pop(pending["id"], None)
+            metadata["switch_request"] = request
+            metadata["updated_at"] = now
+            self._commit_coordination_metadata(metadata)
+            self._switch_requests[request["id"]] = principal.principal_id
+            return {"ok": True, "state": "pending", "request_id": request["id"]}
+
+    def begin_admission(self, principal, operation_id):
+        with self._lock:
+            self._require_switching()
+            self._require_healthy()
+            current = self._own_active(principal)
+            self._require_current_eligibility(current)
+            return self._begin_coordination(current, "admission", operation_id)
+
+    def end_admission(self, principal, operation_id):
+        with self._lock:
+            self._require_switching()
+            self._require_healthy()
+            current = self._own_account(principal)
+            return self._end_coordination(current, "admission", operation_id)
+
+    def begin_template_switch(self, request_id, operation_id):
+        with self._lock:
+            self._require_switching()
+            self._require_healthy()
+            account_id = self._switch_requests.get(request_id)
+            current = self._accounts.get(account_id) if account_id is not None else None
+            if current is None:
+                account_id = self._authorized_switch_requests.get(request_id)
+                authorized = self._accounts.get(account_id) if account_id is not None else None
+                completed = (authorized or {}).get("last_switch_authorization")
+                if (
+                    authorized is not None
+                    and authorized.get("state") == "revoked"
+                    and authorized.get("template_switch_authorized") is True
+                    and completed is not None
+                    and completed.get("request_id") == request_id
+                    and completed.get("operation_id") == operation_id
+                ):
+                    now = int(self._clock())
+                    return {
+                        "ok": True,
+                        "issuer": authorized["issuer"],
+                        "subject": authorized["subject"],
+                        "expires_at": now + self.config.coordination_reservation_seconds,
+                    }
+            now = int(self._clock())
+            if (
+                current is None
+                or current.get("state") != "revoked"
+                or current.get("switch_request", {}).get("id") != request_id
+                or current["switch_request"]["expires_at"] <= now
+            ):
+                raise ProviderError("switch-request-not-found", "switch-request-not-found", 404)
+            reservation = self._begin_coordination(current, "template-switch", operation_id)
+            return {
+                "ok": True,
+                "issuer": current["issuer"],
+                "subject": current["subject"],
+                "expires_at": reservation["expires_at"],
+            }
+
+    def commit_template_switch(self, principal, operation_id):
+        with self._lock:
+            self._require_switching()
+            self._require_healthy()
+            current = self._own_account(principal)
+            completed = current.get("last_switch_authorization")
+            if completed is not None and completed["operation_id"] == operation_id:
+                return {"ok": True, "state": "authorized"}
+            self._require_coordination(current, "template-switch", operation_id)
+            if current["state"] != "revoked":
+                raise ProviderError("template-switch-not-revoked", "template-switch-not-revoked", 409)
+            metadata = dict(current)
+            request = metadata.pop("switch_request", None)
+            metadata.pop("coordination", None)
+            metadata["template_switch_authorized"] = True
+            metadata["last_switch_authorization"] = {
+                "operation_id": operation_id,
+                "request_id": request["id"],
+            }
+            metadata["updated_at"] = int(self._clock())
+            self._commit_coordination_metadata(metadata)
+            if request is not None:
+                self._switch_requests.pop(request["id"], None)
+                self._authorized_switch_requests[request["id"]] = principal.principal_id
+            return {"ok": True, "state": "authorized"}
+
+    def abort_template_switch(self, principal, operation_id):
+        with self._lock:
+            self._require_switching()
+            self._require_healthy()
+            current = self._own_account(principal)
+            return self._end_coordination(current, "template-switch", operation_id)
 
     def reconnect(self, principal, operation_id, credential):
         with self._lock:
@@ -644,6 +924,10 @@ class DynamicAccountManager:
             "eligibility_expires_at": principal.eligibility_expires_at,
             "operations": self._record_operation(current, action, operation_id, result, provider_id),
         }
+        if current is not None and current.get("coordination") is not None:
+            # Credential replacement remains owner-available at any time, but
+            # must not reopen the schedule-admission versus switch-unlock race.
+            metadata["coordination"] = dict(current["coordination"])
         try:
             self._write_metadata(principal.principal_id, metadata)
         except _MetadataCommitError as error:
@@ -675,6 +959,12 @@ class DynamicAccountManager:
         else:
             self._providers[provider_id] = DynamicProviderAdapter(provider)
         self._accounts[principal.principal_id] = metadata
+        if current is not None and current.get("switch_request") is not None:
+            self._switch_requests.pop(current["switch_request"]["id"], None)
+        if current is not None and current.get("last_switch_authorization") is not None:
+            self._authorized_switch_requests.pop(
+                current["last_switch_authorization"].get("request_id"), None
+            )
         if old_file and old_file != filename:
             self._unlink_credential(principal.principal_id, old_file)
         return result
@@ -736,6 +1026,23 @@ class DynamicAccountManager:
                     raise ValueError("provider collision")
                 seen_provider_ids.add(metadata["provider_instance_id"])
                 self._accounts[entry.name] = metadata
+                pending = metadata.get("switch_request")
+                if pending is not None:
+                    if (
+                        pending["id"] in self._switch_requests
+                        or pending["id"] in self._authorized_switch_requests
+                    ):
+                        raise ValueError("switch request collision")
+                    self._switch_requests[pending["id"]] = entry.name
+                completed = metadata.get("last_switch_authorization")
+                if completed is not None:
+                    request_id = completed["request_id"]
+                    if (
+                        request_id in self._switch_requests
+                        or request_id in self._authorized_switch_requests
+                    ):
+                        raise ValueError("switch request collision")
+                    self._authorized_switch_requests[request_id] = entry.name
                 if metadata["state"] == "active":
                     credential = entry / metadata["credential_file"]
                     template = self.config.credential_templates.get(metadata["template"])
@@ -777,6 +1084,8 @@ class DynamicAccountManager:
                 provider.close()
             self._providers.clear()
             self._accounts.clear()
+            self._switch_requests.clear()
+            self._authorized_switch_requests.clear()
             self._healthy = False
 
     def _read_metadata(self, account_dir):
@@ -927,6 +1236,74 @@ class DynamicAccountManager:
             raise ProviderError("account-storage-unavailable", "account-storage-unavailable", 503) from error
         self._accounts[current["principal_id"]] = metadata
 
+    def _require_switching(self):
+        if not self.config.template_switching_enabled:
+            raise ProviderError("not-found", "not-found", 404)
+
+    def _begin_coordination(self, current, kind, operation_id):
+        now = int(self._clock())
+        coordination = current.get("coordination")
+        if coordination is not None and coordination["expires_at"] <= now:
+            metadata = dict(current)
+            metadata.pop("coordination", None)
+            metadata["updated_at"] = now
+            self._commit_coordination_metadata(metadata)
+            current = metadata
+            coordination = None
+        if coordination is not None:
+            if coordination["kind"] == kind and coordination["operation_id"] == operation_id:
+                return {
+                    "ok": True,
+                    "state": "reserved",
+                    "expires_at": coordination["expires_at"],
+                }
+            raise ProviderError("coordination-conflict", "coordination-conflict", 409)
+        metadata = dict(current)
+        metadata["coordination"] = {
+            "kind": kind,
+            "operation_id": operation_id,
+            "expires_at": now + self.config.coordination_reservation_seconds,
+        }
+        metadata["updated_at"] = now
+        self._commit_coordination_metadata(metadata)
+        return {
+            "ok": True,
+            "state": "reserved",
+            "expires_at": metadata["coordination"]["expires_at"],
+        }
+
+    def _end_coordination(self, current, kind, operation_id):
+        coordination = current.get("coordination")
+        if coordination is None:
+            return {"ok": True, "state": "released"}
+        self._require_coordination(current, kind, operation_id)
+        metadata = dict(current)
+        metadata.pop("coordination", None)
+        metadata["updated_at"] = int(self._clock())
+        self._commit_coordination_metadata(metadata)
+        return {"ok": True, "state": "released"}
+
+    def _require_coordination(self, current, kind, operation_id):
+        coordination = current.get("coordination")
+        if (
+            coordination is None
+            or coordination["kind"] != kind
+            or coordination["operation_id"] != operation_id
+            or coordination["expires_at"] <= int(self._clock())
+        ):
+            raise ProviderError("coordination-not-held", "coordination-not-held", 409)
+
+    def _commit_coordination_metadata(self, metadata):
+        try:
+            self._write_metadata(metadata["principal_id"], metadata)
+        except _MetadataCommitError as error:
+            if error.committed:
+                self._latch_unhealthy()
+            raise ProviderError("account-storage-unavailable", "account-storage-unavailable", 503) from error
+        except Exception as error:
+            raise ProviderError("account-storage-unavailable", "account-storage-unavailable", 503) from error
+        self._accounts[metadata["principal_id"]] = metadata
+
     def _latch_unhealthy(self, extra_provider=None):
         providers = list(self._providers.values())
         if extra_provider is not None and all(extra_provider is not provider for provider in providers):
@@ -951,7 +1328,11 @@ def _validate_metadata(value, directory_name):
         "version", "principal_id", "issuer", "subject", "state", "template", "provider_instance_id",
         "generation", "credential_file", "created_at", "updated_at", "operations",
     }
-    if not isinstance(value, dict) or set(value) not in (expected, expected | {"eligibility_expires_at"}):
+    optional = {
+        "eligibility_expires_at", "switch_request", "coordination",
+        "template_switch_authorized", "last_switch_authorization",
+    }
+    if not isinstance(value, dict) or not expected <= set(value) or set(value) - expected - optional:
         raise ValueError("invalid metadata")
     if value["version"] != METADATA_VERSION or value["principal_id"] != directory_name:
         raise ValueError("invalid metadata")
@@ -1000,6 +1381,62 @@ def _validate_metadata(value, directory_name):
         ):
             raise ValueError("invalid operation")
         _validate_operation_result(operation["action"], operation["result"])
+    switch_request = value.get("switch_request")
+    if switch_request is not None:
+        if (
+            value["state"] != "revoked"
+            or not isinstance(switch_request, dict)
+            or set(switch_request) != {"id", "operation_id", "expires_at"}
+        ):
+            raise ValueError("invalid switch request")
+        _validate_bounded_identifier(switch_request["id"])
+        _validate_bounded_identifier(switch_request["operation_id"])
+        _validate_positive_time(switch_request["expires_at"])
+    coordination = value.get("coordination")
+    if coordination is not None:
+        if (
+            not isinstance(coordination, dict)
+            or set(coordination) != {"kind", "operation_id", "expires_at"}
+            or coordination["kind"] not in ("admission", "template-switch")
+        ):
+            raise ValueError("invalid coordination reservation")
+        _validate_bounded_identifier(coordination["operation_id"])
+        _validate_positive_time(coordination["expires_at"])
+        if coordination["kind"] == "template-switch" and (
+            value["state"] != "revoked" or switch_request is None
+        ):
+            raise ValueError("invalid template switch reservation")
+    switch_authorized = value.get("template_switch_authorized", False)
+    if not isinstance(switch_authorized, bool) or (switch_authorized and value["state"] != "revoked"):
+        raise ValueError("invalid template switch authorization")
+    last_authorization = value.get("last_switch_authorization")
+    if last_authorization is not None:
+        if (
+            not isinstance(last_authorization, dict)
+            or set(last_authorization) != {"operation_id", "request_id"}
+        ):
+            raise ValueError("invalid switch authorization result")
+        _validate_bounded_identifier(last_authorization["operation_id"])
+        _validate_bounded_identifier(last_authorization["request_id"])
+    if switch_authorized != (last_authorization is not None) or (
+        switch_authorized and switch_request is not None
+    ):
+        raise ValueError("invalid template switch authorization state")
+
+
+def _validate_bounded_identifier(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > MAX_OPERATION_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError("invalid bounded identifier")
+
+
+def _validate_positive_time(value):
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("invalid timestamp")
 
 
 def _validate_operation_result(action, result):

@@ -19,7 +19,13 @@ from broker.core.dynamic_accounts import (
     API_PATHS as DYNAMIC_ACCOUNT_API_PATHS,
     MAX_BODY_BYTES as MAX_DYNAMIC_ACCOUNT_BODY_BYTES,
     DynamicAccountManager,
+    COORDINATION_API_OPERATIONS as DYNAMIC_COORDINATION_API_OPERATIONS,
+    COORDINATION_API_PATHS as DYNAMIC_COORDINATION_API_PATHS,
+    CoordinationAuthenticator,
     PrincipalAuthenticator,
+    Principal as DynamicPrincipal,
+    decode_coordination_request,
+    principal_id as dynamic_principal_id,
     decode_api_request as decode_dynamic_account_request,
     is_dynamic_provider_id,
     load_dynamic_accounts_config,
@@ -219,6 +225,7 @@ class Broker:
         self.agents = AgentRegistry()
         self.dynamic_accounts = None
         self.dynamic_account_authenticator = None
+        self.dynamic_coordination_authenticator = None
         try:
             dynamic_config = load_dynamic_accounts_config(self.config, self.provider_factory.supported_plugins)
             if dynamic_config.enabled:
@@ -230,6 +237,11 @@ class Broker:
                 self.dynamic_accounts = DynamicAccountManager(
                     dynamic_config, self.provider_factory, self.providers
                 )
+                if dynamic_config.template_switching_enabled:
+                    self.dynamic_coordination_authenticator = CoordinationAuthenticator(
+                        dynamic_config.coordination_hmac_key,
+                        dynamic_config.max_coordination_assertion_seconds,
+                    )
             self.guest_enrollment, self.guest_enrollment_orchestrator = load_guest_enrollment_from_environment()
         except (EnrollmentConfigError, BrokerConfigError) as error:
             if self.dynamic_accounts is not None:
@@ -539,6 +551,8 @@ class Broker:
                 result = self.dynamic_accounts.renew_eligibility(principal)
             elif operation == "revoke-eligibility":
                 result = self.dynamic_accounts.revoke_eligibility(principal)
+            elif operation == "request-template-switch":
+                result = self.dynamic_accounts.request_template_switch(principal, payload["operation_id"])
             else:
                 raise ProviderError("not-found", "not-found", 404)
         finally:
@@ -549,6 +563,53 @@ class Broker:
             request_id=request_id,
             agent=principal.principal_id,
             operation=f"principal-accounts.{operation}",
+            allowed=True,
+        )
+        return result
+
+    def dynamic_coordination_request(self, request_id, path, raw_payload, authorization):
+        if self.dynamic_accounts is None or self.dynamic_coordination_authenticator is None:
+            raise ProviderError("not-found", "not-found", 404)
+        operation = DYNAMIC_COORDINATION_API_OPERATIONS.get(path)
+        if operation is None:
+            raise ProviderError("not-found", "not-found", 404)
+        self.dynamic_coordination_authenticator.authenticate(authorization, operation, raw_payload)
+        payload = decode_coordination_request(raw_payload, operation)
+        if operation == "begin-admission":
+            principal = DynamicPrincipal(
+                payload["issuer"], payload["subject"],
+                dynamic_principal_id(payload["issuer"], payload["subject"]),
+            )
+            result = self.dynamic_accounts.begin_admission(principal, payload["operation_id"])
+        elif operation == "end-admission":
+            principal = DynamicPrincipal(
+                payload["issuer"], payload["subject"],
+                dynamic_principal_id(payload["issuer"], payload["subject"]),
+            )
+            result = self.dynamic_accounts.end_admission(principal, payload["operation_id"])
+        elif operation == "begin-template-switch":
+            result = self.dynamic_accounts.begin_template_switch(
+                payload["request_id"], payload["operation_id"]
+            )
+            principal = DynamicPrincipal(
+                result["issuer"], result["subject"],
+                dynamic_principal_id(result["issuer"], result["subject"]),
+            )
+        else:
+            principal = DynamicPrincipal(
+                payload["issuer"], payload["subject"],
+                dynamic_principal_id(payload["issuer"], payload["subject"]),
+            )
+            if operation == "commit-template-switch":
+                result = self.dynamic_accounts.commit_template_switch(principal, payload["operation_id"])
+            elif operation == "abort-template-switch":
+                result = self.dynamic_accounts.abort_template_switch(principal, payload["operation_id"])
+            else:
+                raise ProviderError("not-found", "not-found", 404)
+        self.audit.write(
+            request_id=request_id,
+            agent=principal.principal_id,
+            operation=f"principal-account-coordination.{operation}",
             allowed=True,
         )
         return result
@@ -1077,6 +1138,20 @@ def make_handler(broker):
             native_egress_operation = None
             native_egress_operation_deadline = None
             try:
+                if self.path in DYNAMIC_COORDINATION_API_PATHS:
+                    raw_payload = bytearray(self.read_enrollment_body(16 * 1024))
+                    try:
+                        response = broker.dynamic_coordination_request(
+                            request_id,
+                            self.path,
+                            raw_payload,
+                            self.headers.get("authorization"),
+                        )
+                    finally:
+                        for index in range(len(raw_payload)):
+                            raw_payload[index] = 0
+                    self.write_json(200, response)
+                    return
                 if self.path in DYNAMIC_ACCOUNT_API_PATHS:
                     # Authenticate before accepting credential material. The
                     # body is decoded by the stricter duplicate-rejecting
