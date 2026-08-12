@@ -38,12 +38,48 @@ spec:
                   message: dynamic principal credential selection requires producerPolicies
                 - rule: "!has(self.principalCredentialSelection) || !self.principalCredentialSelection.enabled || self.producerPolicies.all(p, has(p.allowedPrincipalIssuers) && size(p.allowedPrincipalIssuers) > 0)"
                   message: dynamic principal credential selection requires issuer eligibility on every producer policy
+                - rule: "!has(self.principalParallelism) || (has(self.profiles) && size(self.profiles) > 0)"
+                  message: principalParallelism requires a profiled schedule
               properties:
                 suspend:
                   type: boolean
                 maxParallelism:
                   type: integer
                   minimum: 0
+                principalParallelism:
+                  description: Per-principal active-run capacity with exact issuer and subject overrides.
+                  type: object
+                  required:
+                    - defaultMaxParallelism
+                  properties:
+                    defaultMaxParallelism:
+                      type: integer
+                      minimum: 1
+                    overrides:
+                      type: array
+                      maxItems: 256
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys:
+                        - issuer
+                        - subject
+                      items:
+                        type: object
+                        required:
+                          - issuer
+                          - subject
+                          - maxParallelism
+                        properties:
+                          issuer:
+                            type: string
+                            minLength: 1
+                            maxLength: 2048
+                          subject:
+                            type: string
+                            minLength: 1
+                            maxLength: 512
+                          maxParallelism:
+                            type: integer
+                            minimum: 1
                 allowedProducers:
                   type: array
                   minItems: 1

@@ -20,9 +20,12 @@ type AgentSchedule struct {
 
 // AgentScheduleSpec defines generic scheduling controls.
 type AgentScheduleSpec struct {
-	Suspend        bool                   `json:"suspend,omitempty"`
-	MaxParallelism int32                  `json:"maxParallelism,omitempty"`
-	Template       *AgentScheduleTemplate `json:"template,omitempty"`
+	Suspend        bool  `json:"suspend,omitempty"`
+	MaxParallelism int32 `json:"maxParallelism,omitempty"`
+	// PrincipalParallelism optionally bounds active runs independently for each
+	// exact immutable issuer+subject identity.
+	PrincipalParallelism *AgentSchedulePrincipalParallelism `json:"principalParallelism,omitempty"`
+	Template             *AgentScheduleTemplate             `json:"template,omitempty"`
 	// ExecutionClasses are administrator-owned, bounded driver configurations.
 	// +listType=map
 	// +listMapKey=name
@@ -135,6 +138,32 @@ type AgentScheduleProducerPolicy struct {
 	AllowedPrincipalIssuers []string `json:"allowedPrincipalIssuers,omitempty"`
 }
 
+// AgentSchedulePrincipalParallelism defines a default per-principal capacity
+// and bounded exact-principal exceptions. Global MaxParallelism remains the
+// absolute schedule ceiling.
+type AgentSchedulePrincipalParallelism struct {
+	// +kubebuilder:validation:Minimum=1
+	DefaultMaxParallelism int32 `json:"defaultMaxParallelism"`
+	// +kubebuilder:validation:MaxItems=256
+	// +listType=map
+	// +listMapKey=issuer
+	// +listMapKey=subject
+	Overrides []AgentSchedulePrincipalParallelismOverride `json:"overrides,omitempty"`
+}
+
+// AgentSchedulePrincipalParallelismOverride replaces the default capacity for
+// one exact immutable principal.
+type AgentSchedulePrincipalParallelismOverride struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	Issuer string `json:"issuer"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Subject string `json:"subject"`
+	// +kubebuilder:validation:Minimum=1
+	MaxParallelism int32 `json:"maxParallelism"`
+}
+
 // AgentSchedulePrincipalCredentialSelection maps broker-owned public
 // credential templates to administrator-owned execution profiles.
 type AgentSchedulePrincipalCredentialSelection struct {
@@ -236,6 +265,9 @@ func (in *AgentScheduleSpec) DeepCopy() *AgentScheduleSpec {
 	if in.Template != nil {
 		out.Template = in.Template.DeepCopy()
 	}
+	if in.PrincipalParallelism != nil {
+		out.PrincipalParallelism = in.PrincipalParallelism.DeepCopy()
+	}
 	if in.ExecutionClasses != nil {
 		out.ExecutionClasses = make([]AgentScheduleExecutionClass, len(in.ExecutionClasses))
 		for i := range in.ExecutionClasses {
@@ -272,6 +304,19 @@ func (in *AgentScheduleSpec) DeepCopy() *AgentScheduleSpec {
 		}
 	}
 	out.AllowedProducers = append([]string(nil), in.AllowedProducers...)
+	return out
+}
+
+// DeepCopy returns a copy of principal parallelism configuration.
+func (in *AgentSchedulePrincipalParallelism) DeepCopy() *AgentSchedulePrincipalParallelism {
+	if in == nil {
+		return nil
+	}
+	out := new(AgentSchedulePrincipalParallelism)
+	*out = *in
+	if in.Overrides != nil {
+		out.Overrides = append([]AgentSchedulePrincipalParallelismOverride{}, in.Overrides...)
+	}
 	return out
 }
 

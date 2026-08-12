@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -241,6 +242,158 @@ func TestProfiledScheduleNoMatchPolicies(t *testing.T) {
 	decodeAdmissionResponse(t, denied, http.StatusForbidden, &decoded)
 	if decoded.Reason != "profile-selection-denied" || strings.Contains(denied.Body.String(), "canary") {
 		t.Fatalf("unsafe or unexpected denial: %q", denied.Body.String())
+	}
+}
+
+func TestProfiledSchedulePrincipalParallelism(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.PrincipalParallelism = &nvtv1alpha1.AgentSchedulePrincipalParallelism{
+		DefaultMaxParallelism: 1,
+		Overrides: []nvtv1alpha1.AgentSchedulePrincipalParallelismOverride{{
+			Issuer: "https://github.com", Subject: "immutable-user-42", MaxParallelism: 2,
+		}},
+	}
+	fixture := newProfileAdmissionFixture(t, schedule)
+
+	principal := &scheduleAdmissionPrincipal{
+		Issuer: "https://github.com", Subject: "immutable-user-42", DisplayName: "original-login",
+	}
+	first := fixture.serve(t, profiledAdmissionBody(t, "principal-first", principal, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, first, http.StatusCreated, &decoded)
+	firstRun := fixture.run(t, decoded.AgentRun.Name)
+
+	renamed := *principal
+	renamed.DisplayName = "renamed-login"
+	second := fixture.serve(t, profiledAdmissionBody(t, "principal-second", &renamed, nil), "Bearer projected-token")
+	decodeAdmissionResponse(t, second, http.StatusCreated, &decoded)
+	denied := fixture.serve(t, profiledAdmissionBody(t, "principal-third", &renamed, nil), "Bearer projected-token")
+	decodeAdmissionResponse(t, denied, http.StatusTooManyRequests, &decoded)
+	if decoded.Scheduled || decoded.Reason != principalMaxParallelismReachedReason {
+		t.Fatalf("unexpected same-principal response: %#v", decoded)
+	}
+
+	otherSubject := *principal
+	otherSubject.Subject = "immutable-user-43"
+	otherSubjectResponse := fixture.serve(t,
+		profiledAdmissionBody(t, "other-subject", &otherSubject, nil), "Bearer projected-token")
+	decodeAdmissionResponse(t, otherSubjectResponse, http.StatusCreated, &decoded)
+	otherSubjectDenied := fixture.serve(t,
+		profiledAdmissionBody(t, "other-subject-second", &otherSubject, nil), "Bearer projected-token")
+	decodeAdmissionResponse(t, otherSubjectDenied, http.StatusTooManyRequests, &decoded)
+	if decoded.Reason != principalMaxParallelismReachedReason {
+		t.Fatalf("unexpected default-limit response: %#v", decoded)
+	}
+
+	otherIssuer := *principal
+	otherIssuer.Issuer = "https://idp.example.test"
+	otherIssuerResponse := fixture.serve(t,
+		profiledAdmissionBody(t, "other-issuer", &otherIssuer, nil), "Bearer projected-token")
+	decodeAdmissionResponse(t, otherIssuerResponse, http.StatusCreated, &decoded)
+
+	firstRun.Status.Phase = nvtv1alpha1.AgentRunPhaseCompleted
+	if err := fixture.client.Status().Update(context.Background(), &firstRun); err != nil {
+		t.Fatalf("mark first principal run terminal: %v", err)
+	}
+	released := fixture.serve(t,
+		profiledAdmissionBody(t, "principal-after-terminal", principal, nil), "Bearer projected-token")
+	decodeAdmissionResponse(t, released, http.StatusCreated, &decoded)
+}
+
+func TestProfiledSchedulePerPrincipalLimitRequiresPrincipal(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.PrincipalParallelism = &nvtv1alpha1.AgentSchedulePrincipalParallelism{DefaultMaxParallelism: 1}
+	fixture := newProfileAdmissionFixture(t, schedule)
+
+	response := fixture.serve(t, profiledAdmissionBody(t, "missing-principal", nil, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+	if decoded.Scheduled || decoded.Reason != "principal-required" {
+		t.Fatalf("unexpected missing-principal response: %#v", decoded)
+	}
+}
+
+func TestProfiledScheduleGlobalParallelismRemainsAbsoluteCeiling(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.MaxParallelism = 1
+	schedule.Spec.PrincipalParallelism = &nvtv1alpha1.AgentSchedulePrincipalParallelism{
+		DefaultMaxParallelism: 5,
+		Overrides: []nvtv1alpha1.AgentSchedulePrincipalParallelismOverride{{
+			Issuer: "https://github.com", Subject: "privileged-user", MaxParallelism: 10,
+		}},
+	}
+	fixture := newProfileAdmissionFixture(t, schedule)
+
+	firstPrincipal := &scheduleAdmissionPrincipal{Issuer: "https://github.com", Subject: "privileged-user"}
+	first := fixture.serve(t, profiledAdmissionBody(t, "global-first", firstPrincipal, nil), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, first, http.StatusCreated, &decoded)
+
+	secondPrincipal := &scheduleAdmissionPrincipal{Issuer: "https://github.com", Subject: "other-user"}
+	second := fixture.serve(t,
+		profiledAdmissionBody(t, "global-second", secondPrincipal, nil), "Bearer projected-token")
+	decodeAdmissionResponse(t, second, http.StatusTooManyRequests, &decoded)
+	if decoded.Reason != maxParallelismReachedReason {
+		t.Fatalf("global ceiling did not win: %#v", decoded)
+	}
+}
+
+func TestProfiledScheduleRejectsInvalidPrincipalParallelism(t *testing.T) {
+	invalidConfigurations := []nvtv1alpha1.AgentSchedulePrincipalParallelism{
+		{},
+		{DefaultMaxParallelism: 1, Overrides: []nvtv1alpha1.AgentSchedulePrincipalParallelismOverride{
+			{Issuer: "https://github.com", Subject: "same", MaxParallelism: 1},
+			{Issuer: "https://github.com", Subject: "same", MaxParallelism: 2},
+		}},
+		{DefaultMaxParallelism: 1, Overrides: []nvtv1alpha1.AgentSchedulePrincipalParallelismOverride{{
+			Issuer: "http://insecure.example", Subject: testPrincipalSubject, MaxParallelism: 1,
+		}}},
+	}
+	principal := &scheduleAdmissionPrincipal{Issuer: "https://github.com", Subject: testPrincipalSubject}
+	for index := range invalidConfigurations {
+		schedule := testProfiledAgentSchedule()
+		schedule.Spec.PrincipalParallelism = invalidConfigurations[index].DeepCopy()
+		fixture := newProfileAdmissionFixture(t, schedule)
+		body := profiledAdmissionBody(t, fmt.Sprintf("invalid-capacity-%d", index), principal, nil)
+		response := fixture.serve(t, body, "Bearer projected-token")
+		var decoded scheduleAdmissionResponse
+		decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+		if decoded.Scheduled || decoded.Reason != invalidExecutionProfileConfigurationReason {
+			t.Fatalf("configuration %d was accepted: %#v", index, decoded)
+		}
+	}
+}
+
+func TestProfiledScheduleConcurrentAdmissionsRespectPrincipalParallelism(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.PrincipalParallelism = &nvtv1alpha1.AgentSchedulePrincipalParallelism{DefaultMaxParallelism: 1}
+	fixture := newProfileAdmissionFixture(t, schedule)
+	principal := &scheduleAdmissionPrincipal{Issuer: "https://github.com", Subject: "concurrent-user"}
+	bodies := make([]string, 8)
+	for index := range bodies {
+		bodies[index] = profiledAdmissionBody(t, fmt.Sprintf("principal-concurrent-%d", index), principal, nil)
+	}
+
+	responses := make([]*httptest.ResponseRecorder, len(bodies))
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for index := range bodies {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			responses[index] = fixture.serve(t, bodies[index], "Bearer projected-token")
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+
+	statusCounts := map[int]int{}
+	for _, response := range responses {
+		statusCounts[response.Code]++
+	}
+	if statusCounts[http.StatusCreated] != 1 || statusCounts[http.StatusTooManyRequests] != len(bodies)-1 {
+		t.Fatalf("principal capacity was oversubscribed: %#v", statusCounts)
 	}
 }
 
@@ -1021,6 +1174,7 @@ type profileAdmissionFixture struct {
 	principalAccounts     principalaccounts.Resolver
 	principalCoordination principalaccounts.Coordinator
 	scheme                *runtime.Scheme
+	admissionLocks        *scheduleAdmissionLocks
 }
 
 func newProfileAdmissionFixture(t *testing.T, schedule *nvtv1alpha1.AgentSchedule) *profileAdmissionFixture {
@@ -1039,7 +1193,8 @@ func newProfileAdmissionFixture(t *testing.T, schedule *nvtv1alpha1.AgentSchedul
 	}
 	return &profileAdmissionFixture{
 		client: k8sClient, schedule: schedule, scheme: scheme,
-		authenticator: fakeScheduleProducerAuthenticator{identity: identity},
+		authenticator:  fakeScheduleProducerAuthenticator{identity: identity},
+		admissionLocks: newScheduleAdmissionLocks(),
 	}
 }
 
@@ -1068,6 +1223,7 @@ func (f *profileAdmissionFixture) serve(t *testing.T, body, authorization string
 		client: f.client, scheme: f.scheme, authenticator: f.authenticator,
 		profileResolver: StaticExecutionProfileResolver{}, principalAccounts: f.principalAccounts, now: metav1.Now,
 		principalCoordination: f.principalCoordination,
+		admissionLocks:        f.admissionLocks,
 	}
 	request := httptest.NewRequest(http.MethodPost,
 		"/v1/schedules/"+f.schedule.Namespace+"/"+f.schedule.Name+"/admissions",

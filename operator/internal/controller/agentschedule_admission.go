@@ -25,10 +25,16 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/operator/principalaccounts"
 )
 
-const scheduleAdmissionPathPrefix = "/v1/schedules/"
+const (
+	scheduleAdmissionPathPrefix                = "/v1/schedules/"
+	invalidExecutionProfileConfigurationReason = "invalid-execution-profile-configuration"
+	maxParallelismReachedReason                = "max-parallelism-reached"
+	principalMaxParallelismReachedReason       = "principal-max-parallelism-reached"
+)
 
 type agentScheduleAdmissionHandler struct {
 	client                client.Client
+	reader                client.Reader
 	scheme                *runtime.Scheme
 	authenticator         ScheduleProducerAuthenticator
 	profileResolver       ExecutionProfileResolver
@@ -76,13 +82,14 @@ type scheduleAdmissionAgentRun struct {
 
 // NewAgentScheduleAdmissionHandler returns the cluster-internal schedule admission handler.
 func NewAgentScheduleAdmissionHandler(k8sClient client.Client, scheme *runtime.Scheme) http.Handler {
-	return NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(k8sClient, scheme, nil)
+	return NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(k8sClient, k8sClient, scheme, nil)
 }
 
 // NewAgentScheduleAdmissionHandlerWithPrincipalAccounts adds the optional
 // trusted dynamic principal-account resolver without changing static admission.
 func NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(
 	k8sClient client.Client,
+	reader client.Reader,
 	scheme *runtime.Scheme,
 	accounts principalaccounts.Resolver,
 ) http.Handler {
@@ -92,6 +99,7 @@ func NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(
 	}
 	return &agentScheduleAdmissionHandler{
 		client:                k8sClient,
+		reader:                reader,
 		scheme:                scheme,
 		authenticator:         NewKubernetesTokenReviewProducerAuthenticator(k8sClient),
 		profileResolver:       StaticExecutionProfileResolver{},
@@ -139,9 +147,13 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	unlock := h.lockScheduleAdmission(namespace, name)
 	defer unlock()
 
+	reader := h.reader
+	if reader == nil {
+		reader = h.client
+	}
 	schedule := &nvtv1alpha1.AgentSchedule{}
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, schedule); err != nil {
-		if apierrors.IsNotFound(err) {
+	if getErr := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, schedule); getErr != nil {
+		if apierrors.IsNotFound(getErr) {
 			http.Error(response, "AgentSchedule not found\n", http.StatusNotFound)
 			return
 		}
@@ -185,9 +197,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 			})
 			return
 		case err != nil:
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -215,18 +227,52 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		})
 		return
 	}
+	principalLimit := int32(0)
+	if schedule.Spec.PrincipalParallelism != nil {
+		if !profiled {
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
+			})
+			return
+		}
+		var limitErr error
+		principalLimit, limitErr = principalParallelismLimit(schedule.Spec.PrincipalParallelism, principal)
+		if errors.Is(limitErr, errPrincipalRequired) {
+			h.recordRejected(ctx, schedule, "principal-required")
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: "principal-required",
+			})
+			return
+		}
+		if limitErr != nil {
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
+			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
+			})
+			return
+		}
+	}
 
-	runs, err := ListScheduledRuns(ctx, h.client, schedule)
+	runs, err := ListScheduledRuns(ctx, reader, schedule)
 	if err != nil {
 		http.Error(response, "list scheduled AgentRuns failed\n", http.StatusInternalServerError)
 		return
 	}
 	activeRuns := countActiveScheduledRuns(runs)
 	if activeRuns >= EffectiveMaxParallelism(schedule) {
-		h.recordRejected(ctx, schedule, "max-parallelism-reached")
+		h.recordRejected(ctx, schedule, maxParallelismReachedReason)
 		writeScheduleAdmissionJSON(response, http.StatusTooManyRequests, scheduleAdmissionResponse{
 			Scheduled: false,
-			Reason:    "max-parallelism-reached",
+			Reason:    maxParallelismReachedReason,
+		})
+		return
+	}
+	if principalLimit > 0 && countActiveScheduledRunsForPrincipal(runs, principal) >= principalLimit {
+		h.recordRejected(ctx, schedule, principalMaxParallelismReachedReason)
+		writeScheduleAdmissionJSON(response, http.StatusTooManyRequests, scheduleAdmissionResponse{
+			Scheduled: false,
+			Reason:    principalMaxParallelismReachedReason,
 		})
 		return
 	}
@@ -323,9 +369,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 				})
 				return
 			}
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -335,9 +381,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		}
 		profiledRun, buildErr := buildProfiledAgentRun(schedule, resolved, producer, principal, resolvedWorkflow, prompt)
 		if buildErr != nil {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -360,9 +406,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	ApplyDefaultEgressMode(&run)
 	if err := ValidateAgentRunExecution(&run); err != nil {
 		if profiled {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -375,9 +421,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 	if err := ValidateAgentRunRuntimeCapabilities(&run); err != nil {
 		if profiled {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -390,9 +436,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 	if err := ValidateAgentRunDockerNetworks(&run); err != nil {
 		if profiled {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -405,9 +451,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 	if err := ValidateAgentRunEgressMode(&run); err != nil {
 		if profiled {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -421,9 +467,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 	if err := ValidateAgentRunWorkspace(&run); err != nil {
 		if profiled {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -437,9 +483,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 	if err := ValidateAgentRunWorkspaceInstructions(&run); err != nil {
 		if profiled {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -462,9 +508,9 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 	if profiled {
 		if err := injectProfiledLifecycleCallback(&run); err != nil {
-			h.recordRejected(ctx, schedule, "invalid-execution-profile-configuration")
+			h.recordRejected(ctx, schedule, invalidExecutionProfileConfigurationReason)
 			writeScheduleAdmissionJSON(response, http.StatusBadRequest, scheduleAdmissionResponse{
-				Scheduled: false, Reason: "invalid-execution-profile-configuration",
+				Scheduled: false, Reason: invalidExecutionProfileConfigurationReason,
 			})
 			return
 		}
@@ -634,6 +680,71 @@ func countActiveScheduledRuns(runs *nvtv1alpha1.AgentRunList) int32 {
 		}
 	}
 	return active
+}
+
+func countActiveScheduledRunsForPrincipal(
+	runs *nvtv1alpha1.AgentRunList,
+	principal *nvtv1alpha1.AgentRunPrincipal,
+) int32 {
+	if !validPrincipalIdentity(principal) {
+		return 0
+	}
+	var active int32
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if !IsActiveScheduledRun(run) || run.Spec.ProfileProvenance == nil ||
+			run.Spec.ProfileProvenance.Principal == nil {
+			continue
+		}
+		owner := run.Spec.ProfileProvenance.Principal
+		if owner.Issuer == principal.Issuer && owner.Subject == principal.Subject {
+			active++
+		}
+	}
+	return active
+}
+
+func validPrincipalIdentity(principal *nvtv1alpha1.AgentRunPrincipal) bool {
+	return principal != nil && canonicalPrincipalIssuer(principal.Issuer) && validPrincipalSubject(principal.Subject)
+}
+
+var errPrincipalRequired = errors.New("principal required")
+
+func principalParallelismLimit(
+	configuration *nvtv1alpha1.AgentSchedulePrincipalParallelism,
+	principal *nvtv1alpha1.AgentRunPrincipal,
+) (int32, error) {
+	if configuration == nil {
+		return 0, nil
+	}
+	if configuration.DefaultMaxParallelism < 1 || len(configuration.Overrides) > 256 {
+		return 0, errInvalidExecutionProfileConfiguration
+	}
+
+	type principalKey struct {
+		issuer  string
+		subject string
+	}
+	overrides := make(map[principalKey]int32, len(configuration.Overrides))
+	for _, override := range configuration.Overrides {
+		if !canonicalPrincipalIssuer(override.Issuer) || !validPrincipalSubject(override.Subject) ||
+			override.MaxParallelism < 1 {
+			return 0, errInvalidExecutionProfileConfiguration
+		}
+		key := principalKey{issuer: override.Issuer, subject: override.Subject}
+		if _, duplicate := overrides[key]; duplicate {
+			return 0, errInvalidExecutionProfileConfiguration
+		}
+		overrides[key] = override.MaxParallelism
+	}
+
+	if !validPrincipalIdentity(principal) {
+		return 0, errPrincipalRequired
+	}
+	if limit, overridden := overrides[principalKey{issuer: principal.Issuer, subject: principal.Subject}]; overridden {
+		return limit, nil
+	}
+	return configuration.DefaultMaxParallelism, nil
 }
 
 type scheduleAdmissionLocks struct {

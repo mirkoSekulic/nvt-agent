@@ -26,6 +26,8 @@ import (
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 )
 
+const testPrincipalSubject = "subject"
+
 func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := nvtv1alpha1.AddToScheme(scheme); err != nil {
@@ -33,6 +35,12 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	}
 
 	schedule := testAgentSchedule()
+	schedule.Spec.PrincipalParallelism = &nvtv1alpha1.AgentSchedulePrincipalParallelism{
+		DefaultMaxParallelism: 1,
+		Overrides: []nvtv1alpha1.AgentSchedulePrincipalParallelismOverride{{
+			Issuer: "https://identity.example", Subject: "principal", MaxParallelism: 2,
+		}},
+	}
 	now := metav1.Now()
 	schedule.Status.LastAcceptedAt = &now
 	copyObject := schedule.DeepCopyObject()
@@ -43,6 +51,10 @@ func TestAgentScheduleAPIDeepCopyAndScheme(t *testing.T) {
 	copied.Status.LastAcceptedAt.Time = copied.Status.LastAcceptedAt.Time.Add(1)
 	if schedule.Status.LastAcceptedAt.Equal(copied.Status.LastAcceptedAt) {
 		t.Fatal("expected status timestamp to be deep-copied")
+	}
+	copied.Spec.PrincipalParallelism.Overrides[0].MaxParallelism = 9
+	if schedule.Spec.PrincipalParallelism.Overrides[0].MaxParallelism != 2 {
+		t.Fatal("expected principal parallelism overrides to be deep-copied")
 	}
 	workspaceSize := resource.MustParse("5Gi")
 	dockerSize := resource.MustParse("20Gi")
@@ -120,6 +132,17 @@ func TestAgentScheduleCRDSchemaIncludesSpecAndStatus(t *testing.T) {
 	).(map[string]any)
 	if crdPath(t, properties, "maxParallelism", "type") != "integer" {
 		t.Fatalf("expected spec.maxParallelism integer schema, got %#v", properties["maxParallelism"])
+	}
+	principalParallelismValue := crdPath(t, properties, "principalParallelism")
+	principalParallelism, ok := principalParallelismValue.(map[string]any)
+	if !ok {
+		t.Fatalf("expected principalParallelism object schema, got %#v", principalParallelismValue)
+	}
+	if fmt.Sprint(crdPath(t, principalParallelism, "properties", "defaultMaxParallelism", "minimum")) != "1" ||
+		fmt.Sprint(crdPath(t, principalParallelism, "properties", "overrides", "maxItems")) != "256" ||
+		!reflect.DeepEqual(crdPath(t, principalParallelism, "properties", "overrides", "x-kubernetes-list-map-keys"),
+			[]any{"issuer", testPrincipalSubject}) {
+		t.Fatalf("expected bounded exact-key principal parallelism schema, got %#v", principalParallelism)
 	}
 	if crdPath(t, properties, "profiles", "items", "properties", "agentRuntimeConfig", "x-kubernetes-preserve-unknown-fields") != true {
 		t.Fatalf("expected profile runtime config preservation schema, got %#v", properties["profiles"])
@@ -351,6 +374,64 @@ func TestScheduleAdmissionMaxParallelismCreatesNoRun(t *testing.T) {
 		t.Fatalf("unexpected response: %#v", decoded)
 	}
 	assertScheduledRunCount(t, k8sClient, schedule, 1)
+}
+
+func TestScheduleAdmissionUsesAuthoritativeReaderForCapacity(t *testing.T) {
+	schedule := testAgentSchedule()
+	schedule.Spec.MaxParallelism = 1
+	scheme := testScheme(t)
+	writerScheduleObject := schedule.DeepCopyObject()
+	writerSchedule, ok := writerScheduleObject.(*nvtv1alpha1.AgentSchedule)
+	if !ok {
+		t.Fatalf("copy schedule for writer: %T", writerScheduleObject)
+	}
+	readerScheduleObject := schedule.DeepCopyObject()
+	readerSchedule, ok := readerScheduleObject.(*nvtv1alpha1.AgentSchedule)
+	if !ok {
+		t.Fatalf("copy schedule for reader: %T", readerScheduleObject)
+	}
+	writer := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentSchedule{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(writerSchedule).
+		Build()
+	reader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&nvtv1alpha1.AgentSchedule{}, &nvtv1alpha1.AgentRun{}).
+		WithObjects(readerSchedule, scheduledRun("authoritative-active", schedule, "existing", nvtv1alpha1.AgentRunPhaseRunning)).
+		Build()
+	handler := &agentScheduleAdmissionHandler{
+		client: writer, reader: reader, scheme: scheme, now: metav1.Now,
+		admissionLocks: newScheduleAdmissionLocks(),
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		"/v1/schedules/"+schedule.Namespace+"/"+schedule.Name+"/admissions",
+		strings.NewReader(scheduleAdmissionBody(t, "new-work", "", nil)),
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusTooManyRequests, &decoded)
+	if decoded.Reason != maxParallelismReachedReason {
+		t.Fatalf("authoritative capacity was ignored: %#v", decoded)
+	}
+	assertScheduledRunCount(t, writer, schedule, 0)
+}
+
+func TestLegacyScheduleRejectsPerPrincipalParallelism(t *testing.T) {
+	schedule := testAgentSchedule()
+	schedule.Spec.PrincipalParallelism = &nvtv1alpha1.AgentSchedulePrincipalParallelism{DefaultMaxParallelism: 1}
+	fixture := scheduleAdmissionFixture(t, schedule)
+
+	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t, "new-work", "", nil))
+
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusBadRequest, &decoded)
+	if decoded.Scheduled || decoded.Reason != invalidExecutionProfileConfigurationReason {
+		t.Fatalf("unexpected response: %#v", decoded)
+	}
+	assertScheduledRunCount(t, k8sClient, schedule, 0)
 }
 
 func TestScheduleAdmissionDuplicateActiveWorkCreatesNoRun(t *testing.T) {
