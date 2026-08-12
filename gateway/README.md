@@ -323,14 +323,16 @@ gateway:
       allowedHosts:
         - api.github.com
       limits:
-        maxArrayItems: 256
+        maxResponseBytes: 262144
+        maxArrayItems: 60
+        maxTotalNodes: 4096
       sources:
         - endpoint: https://api.github.com/user/teams
           outputClaim: teams
           valuePath: $
           pagination:
             mode: link
-            maxPages: 10
+            maxPages: 2
     admission:
       default: deny
       rules:
@@ -351,13 +353,20 @@ gateway:
           owner: true
 ```
 
-For this GitHub example, use a GitHub OAuth App and request `read:org`.
-Organization approval and SSO authorization may still be required by the
-organization's policy. The same-array rule requires both `organization.login`
-and `slug` on one team object. No repository permission is needed. Other
-providers have their own permission/approval requirements. Claim sources
-cannot add arbitrary headers, disable TLS verification, follow redirects, or
-derive their endpoint from a browser request.
+The shown client is a GitHub OAuth App: request `read:org`; it needs no App
+installation, although organization approval and SSO authorization may still
+be required by policy. A GitHub App is an equally supported alternative: set
+`scopes: []`, grant organization **Members: read**, install and approve it once
+in Altinn, and have each user authorize it. Neither choice needs repository
+permission for this check. The same-array rule requires both
+`organization.login` and `slug` on one team object. The 256 KiB, 60-item,
+4,096-node, two-page limits form one coherent bound for at most two default
+30-item pages of full team responses; more pages or any cumulative overflow
+deny login. The application has no GitHub branch. Other providers use the same
+generic contract with their own configured endpoints, permissions, predicates,
+and bounds. Claim sources cannot add arbitrary headers, disable TLS
+verification, follow redirects, or derive their endpoint from a browser
+request.
 
 Enriched admission claims are a login-time snapshot. They are stored in the
 server-side session and are not re-fetched on each dashboard or AgentRun
@@ -376,12 +385,14 @@ identity endpoint used to obtain one immutable subject; unlike OIDC, OAuth2
 alone does not cryptographically establish an issuer/ID-token identity
 contract. Prefer OIDC when the provider supports it.
 
-For GitHub, create a dedicated GitHub App for human login. Configure its
-callback URL as `https://<gateway-host>/oauth2/callback`; it needs no repository
-permissions, repository scopes, or webhook subscriptions for profile identity
-lookup. A membership claim source does require the organization permission and
-installation/approval described above. Store both credentials in a Kubernetes
-Secret:
+For the GitHub App deployment choice, create a dedicated App for human login.
+Configure its callback URL as `https://<gateway-host>/oauth2/callback`, grant
+organization **Members: read**, install and approve it once in Altinn, and have
+each user authorize it. Use `scopes: []`; it needs no repository permissions,
+repository scopes, or webhook subscriptions. The OAuth App alternative uses
+the same callback and client Secret shape, requests `read:org`, and needs no
+installation, but organization approval and SSO authorization can still be
+required. Store the selected client's credentials in a Kubernetes Secret:
 
 ```sh
 kubectl -n nvt create secret generic nvt-gateway-github \

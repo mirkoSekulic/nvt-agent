@@ -113,12 +113,14 @@ oauth2:
 claimEnrichment:
   allowedHosts: [api.github.com]
   limits:
-    maxArrayItems: 256
+    maxResponseBytes: 262144
+    maxArrayItems: 60
+    maxTotalNodes: 4096
   sources:
     - endpoint: https://api.github.com/user/teams
       outputClaim: teams
       valuePath: $
-      pagination: {mode: link, maxPages: 10}
+      pagination: {mode: link, maxPages: 2}
 eligibility: # use admission at the gateway
   default: deny
   rules:
@@ -133,16 +135,25 @@ eligibility: # use admission at the gateway
             values: [allowed-team]
 ```
 
-The application contains no provider branch for this shape. GitHub OAuth App
-organization approval and SSO authorization may still be required by the
-organization's policy. At the gateway, keep AgentRun authorization separate
-with an `owner: true` rule; team eligibility must not broaden resource access.
+The shown client is a GitHub OAuth App: request `read:org`; no App installation
+is needed, although organization approval and SSO authorization may still be
+required by policy. A GitHub App is also supported: set `scopes: []`, grant the
+App organization **Members: read**, install and approve it once in Altinn, and
+have each user authorize it. Neither choice needs repository permission for
+this check. The application contains no GitHub branch; these are provider-side
+client settings for the same generic contract. At the gateway, keep AgentRun
+authorization separate with an `owner: true` rule; team eligibility must not
+broaden resource access.
 
-The limits shown are the defaults. `pagination.maxPages` is explicit and may be
-2 through 10. Administrators may configure smaller values
-or bounded larger values up to the compiled safety ceilings. Hosts, endpoints,
-paths, expected values, predicates, timeout, and response limits are deployment
-configuration; shared code contains no identity-provider-specific decisions.
+The first generic example shows the enrichment defaults. The GitHub example
+intentionally overrides three coupled limits: 256 KiB, 60 combined items, 4,096
+decoded nodes, and two pages support at most two default 30-item pages of the
+documented full team shape. A further `rel=next`, or any byte/item/node overflow,
+denies login rather than returning partial membership. `pagination.maxPages`
+may be 2 through 10, but deployments that change it must choose coherent
+byte/item/node bounds within the compiled ceilings. Hosts, paths, expected
+values, predicates, timeouts, and limits remain configuration; shared code
+contains no identity-provider-specific decisions.
 
 ## Compatibility and consumer boundaries
 

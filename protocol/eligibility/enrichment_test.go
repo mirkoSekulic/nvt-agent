@@ -1,12 +1,15 @@
 package eligibility
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +40,23 @@ func TestEnrichmentPreservesBoundedTopLevelArrayForEligibility(t *testing.T) {
 }
 
 func TestLinkPaginationCombinesArraysBeforeEligibilityEvaluation(t *testing.T) {
+	pageOne := githubTeamsFixturePage(t, 30, false)
+	pageTwo := githubTeamsFixturePage(t, 30, true)
+	if len(pageOne) < 40*1024 {
+		t.Fatalf("full 30-team fixture is not representative: bytes=%d", len(pageOne))
+	}
+	decoder := json.NewDecoder(bytes.NewReader(pageOne))
+	decoder.UseNumber()
+	nodes := 0
+	if _, err := decodeBoundedJSON(decoder, 1, (EnrichmentConfig{}).effectiveLimits(), &nodes); err == nil {
+		t.Fatalf("realistic 30-team page unexpectedly fit the default node limit: nodes=%d", nodes)
+	} else if !strings.Contains(err.Error(), "maximum JSON nodes exceeded") {
+		t.Fatalf("realistic fixture failed for an unexpected reason: %v", err)
+	}
+	const documentedResponseBytes = 256 * 1024
+	if len(pageOne)+len(pageTwo) > documentedResponseBytes {
+		t.Fatalf("fixture exceeds documented cumulative byte bound: bytes=%d", len(pageOne)+len(pageTwo))
+	}
 	requests := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -44,16 +64,21 @@ func TestLinkPaginationCombinesArraysBeforeEligibilityEvaluation(t *testing.T) {
 			t.Error("temporary bearer was not sent")
 		}
 		if r.URL.Query().Get("page") == "2" {
-			_, _ = w.Write([]byte(`[{"organization":{"login":"Altinn"},"slug":"allowed-team"}]`))
+			_, _ = w.Write(pageTwo)
 			return
 		}
 		w.Header().Set("Link", `<?page=2>; rel="next", <?page=2>; rel="last"`)
-		_, _ = w.Write([]byte(`[{"organization":{"login":"Elsewhere"},"slug":"other-team"}]`))
+		_, _ = w.Write(pageOne)
 	}))
 	t.Cleanup(server.Close)
 	config := enrichmentForServer(t, server, "$")
 	config.Sources[0].Endpoint = server.URL + "/user/teams"
-	config.Sources[0].Pagination = &PaginationConfig{Mode: "link", MaxPages: 3}
+	config.Limits = ResponseLimits{
+		MaxResponseBytes: documentedResponseBytes,
+		MaxArrayItems:    60,
+		MaxTotalNodes:    hardMaxTotalNodes,
+	}
+	config.Sources[0].Pagination = &PaginationConfig{Mode: "link", MaxPages: 2}
 	claims, err := Enrich(
 		t.Context(), config, "transient-token", nil,
 		EnrichOptions{Client: noRedirect(server.Client())},
@@ -67,8 +92,10 @@ func TestLinkPaginationCombinesArraysBeforeEligibilityEvaluation(t *testing.T) {
 			{ClaimPath: "slug", Values: []string{"allowed-team"}},
 		},
 	}}}}
-	if requests != 2 || !Evaluate(policy, claims).Allowed {
-		t.Fatalf("page-two team was not admitted: requests=%d claims=%#v", requests, claims)
+	teams, ok := claims["memberships"].([]any)
+	allowed := Evaluate(policy, claims).Allowed
+	if requests != 2 || !ok || len(teams) != 60 || !allowed {
+		t.Fatalf("page-two team was not admitted: requests=%d teams=%d allowed=%t", requests, len(teams), allowed)
 	}
 }
 
@@ -391,6 +418,28 @@ func noRedirect(base *http.Client) *http.Client {
 	return &http.Client{Transport: base.Transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
+}
+
+func githubTeamsFixturePage(t *testing.T, count int, allowLast bool) []byte {
+	t.Helper()
+	team, err := os.ReadFile("../../tests/fixtures/oauth/github-team.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := make([]byte, 0, count*(len(team)+1)+2)
+	page = append(page, '[')
+	for index := range count {
+		if index > 0 {
+			page = append(page, ',')
+		}
+		entry := team
+		if allowLast && index == count-1 {
+			entry = bytes.ReplaceAll(entry, []byte(`"slug": "other-team"`), []byte(`"slug": "allowed-team"`))
+			entry = bytes.ReplaceAll(entry, []byte(`"login": "Elsewhere"`), []byte(`"login": "Altinn"`))
+		}
+		page = append(page, entry...)
+	}
+	return append(page, ']')
 }
 
 type closeOrderedClient struct {

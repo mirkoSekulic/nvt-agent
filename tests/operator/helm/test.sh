@@ -401,12 +401,14 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.oauth2.identity.endpoint=https://api.github.com/user \
   --set gateway.auth.oauth2.identity.allowedHosts[0]=api.github.com \
   --set gateway.auth.claimEnrichment.allowedHosts[0]=api.github.com \
-  --set gateway.auth.claimEnrichment.limits.maxArrayItems=256 \
+  --set gateway.auth.claimEnrichment.limits.maxResponseBytes=262144 \
+  --set gateway.auth.claimEnrichment.limits.maxArrayItems=60 \
+  --set gateway.auth.claimEnrichment.limits.maxTotalNodes=4096 \
   --set gateway.auth.claimEnrichment.sources[0].endpoint=https://api.github.com/user/teams \
   --set gateway.auth.claimEnrichment.sources[0].outputClaim=teams \
   --set-string 'gateway.auth.claimEnrichment.sources[0].valuePath=$' \
   --set gateway.auth.claimEnrichment.sources[0].pagination.mode=link \
-  --set gateway.auth.claimEnrichment.sources[0].pagination.maxPages=10 \
+  --set gateway.auth.claimEnrichment.sources[0].pagination.maxPages=2 \
   --set gateway.auth.admission.default=deny \
   --set gateway.auth.admission.rules[0].id=allowed-organization \
   --set gateway.auth.admission.rules[0].effect=allow \
@@ -1779,7 +1781,10 @@ grep -A1 'name: NVT_GATEWAY_OAUTH2_ISSUER' "${GATEWAY_ADMISSION_RENDER}" | grep 
 grep -A1 'name: NVT_GATEWAY_OAUTH2_IDENTITY_ENDPOINT' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://api.github.com/user"'
 grep -Fq '\"allowedHosts\":[\"api.github.com\"]' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"endpoint\":\"https://api.github.com/user/teams\"' "${GATEWAY_ADMISSION_RENDER}"
-grep -Fq '\"pagination\":{\"maxPages\":10,\"mode\":\"link\"}' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"maxArrayItems\":60' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"maxResponseBytes\":262144' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"maxTotalNodes\":4096' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"pagination\":{\"maxPages\":2,\"mode\":\"link\"}' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_OAUTH2_SCOPES' "${GATEWAY_ADMISSION_RENDER}" | grep -Fq 'value: "read:org"'
 grep -Fq '\"owner\":true' "${GATEWAY_ADMISSION_RENDER}"
 grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_EMPTY_ADMISSION_RENDER}"

@@ -1137,14 +1137,16 @@ gateway:
     claimEnrichment:
       allowedHosts: [api.github.com]
       limits:
-        maxArrayItems: 256
+        maxResponseBytes: 262144
+        maxArrayItems: 60
+        maxTotalNodes: 4096
       sources:
         - endpoint: https://api.github.com/user/teams
           outputClaim: teams
           valuePath: $
           pagination:
             mode: link
-            maxPages: 10
+            maxPages: 2
     admission:
       default: deny
       rules:
@@ -1166,8 +1168,14 @@ gateway:
 ```
 
 This is provider configuration, not GitHub-specific application behavior. The
-GitHub OAuth App requests `read:org`; organization approval and SSO
-authorization may also be required by organization policy. The shared client
+shown GitHub OAuth App requests `read:org` and needs no installation;
+organization approval and SSO authorization may still be required by policy.
+A GitHub App is also supported: use `scopes: []`, grant organization
+**Members: read**, install and approve it once in Altinn, and have each user
+authorize it. Neither choice needs repository permission for this check. The
+256 KiB, 60-item, 4,096-node, two-page settings coherently bound the documented
+full team response to at most two default 30-item pages; further pages or any
+cumulative overflow deny login. The shared client
 follows only a validated RFC 8288 `rel=next` link on the exact original HTTPS
 origin, effective port, and path. Only its query may vary. The complete source
 operation shares one timeout. Page count, bytes, combined array items, and
@@ -1263,11 +1271,12 @@ gateway:
           owner: true
 ```
 
-Register `https://agents.example.com/oauth2/callback` as the GitHub App
-callback. No repository permission or scope is needed for the current-user
-identity lookup. Owner matching uses only exact normalized issuer and immutable
-subject from `AgentRun.spec.profileProvenance.principal`; login/display name and
-requested-by annotations are ignored. See the [gateway
+Register `https://agents.example.com/oauth2/callback` on the selected GitHub
+App or OAuth App. For the identity-only GitHub App values shown, no repository
+permission or OAuth scope is needed; team enrichment uses one of the two
+permission models documented above. Owner matching uses only exact normalized
+issuer and immutable subject from `AgentRun.spec.profileProvenance.principal`;
+login/display name and requested-by annotations are ignored. See the [gateway
 README](../../gateway/README.md) for the OAuth2 trust boundary and the exact
 0.3 `github.*` to 0.4 `oauth2.*` migration.
 
