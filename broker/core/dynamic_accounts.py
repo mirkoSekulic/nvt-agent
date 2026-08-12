@@ -628,7 +628,10 @@ class DynamicAccountManager:
                 current is not None
                 and current["state"] == "revoked"
                 and current["template"] != template_name
-                and not current.get("template_switch_authorized", False)
+                and not (
+                    self.config.template_switching_enabled
+                    and current.get("template_switch_authorized", False)
+                )
             ):
                 raise ProviderError("template-switch-not-authorized", "template-switch-not-authorized", 409)
             if current is None and len(self._accounts) >= self.config.max_accounts:

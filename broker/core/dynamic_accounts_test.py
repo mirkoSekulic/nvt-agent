@@ -732,6 +732,32 @@ class DynamicAccountsTest(unittest.TestCase):
         self.assertNotIn(b"usable", metadata)
         self.assertNotIn(b"operator-proof", metadata)
 
+    def test_disabling_switching_ignores_persisted_unlock_after_restart(self):
+        enabled_config = load_dynamic_accounts_config(
+            configuration(self.root, switching=True), self.factory.supported_plugins
+        )
+        manager = self.manager(config=enabled_config)
+        manager.enroll(self.alice, "member", "enroll", bytearray(b"usable"))
+        manager.revoke(self.alice, "revoke")
+        pending = manager.request_template_switch(self.alice, "request")
+        manager.begin_template_switch(pending["request_id"], "operator-proof")
+        manager.commit_template_switch(self.alice, "operator-proof")
+        manager.close()
+
+        disabled_config = load_dynamic_accounts_config(
+            configuration(self.root, switching=False), self.factory.supported_plugins
+        )
+        recovered = self.manager(config=disabled_config, factory=FakeFactory())
+        with self.assertRaisesRegex(ProviderError, "template-switch-not-authorized"):
+            recovered.enroll(self.alice, "alternate", "alternate-enroll", bytearray(b"alternate"))
+        same_template = recovered.enroll(
+            self.alice, "member", "same-template-enroll", bytearray(b"replacement")
+        )
+        self.assertEqual(
+            (same_template["template"], same_template["generation"]),
+            ("member", 2),
+        )
+
     def test_admission_reservation_serializes_switch_and_reclaims_after_release_or_expiry(self):
         now = [1_700_000_000]
         principal = Principal(
