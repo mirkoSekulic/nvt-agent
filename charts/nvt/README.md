@@ -467,6 +467,9 @@ projected ServiceAccount token with audience `nvt-operator`; see the
 `issuer` + `subject` and up to 256 exact-principal overrides. Omit the object to
 preserve global-only admission. Overrides never bypass the global ceiling and
 do not use mutable display names or provider-specific usernames.
+The chart fixes the operator at one replica and uses `Recreate` unconditionally
+because schedule admission locking is process-local. An upgrade can briefly
+pause admission, but old and new operator binaries never admit concurrently.
 
 Dynamic principal-owned schedule resolution is disabled by default. Enable
 `operator.principalAccounts` and map public broker credential templates only to

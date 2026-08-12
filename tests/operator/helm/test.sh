@@ -824,6 +824,7 @@ require_resource_namespace "${DEFAULT_RENDER}" ServiceAccount nvt-operator custo
 require_resource_namespace "${DEFAULT_RENDER}" Role nvt-operator custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" RoleBinding nvt-operator custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" Service nvt-operator custom-ns
+require_deployment_strategy "${DEFAULT_RENDER}" nvt-operator Recreate
 grep -q 'resources: \["persistentvolumeclaims"\]' "${DEFAULT_RENDER}"
 require_resource_namespace "${DEFAULT_RENDER}" AgentSchedule default custom-ns
 missing_resource "${DEFAULT_RENDER}" Namespace nvt

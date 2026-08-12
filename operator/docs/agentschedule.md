@@ -395,6 +395,9 @@ providers, and producer identities do not affect the capacity key. Duplicate
 override keys are invalid, and terminal runs release both limits.
 
 Admissions are serialized per schedule within the active operator process.
+The chart therefore requires one operator replica and an unconditional
+`Recreate` Deployment strategy. Upgrades may briefly pause admission, but an
+old and new binary cannot overlap and make independent capacity decisions.
 The operator forces namespace and ownership and records work/gateway metadata;
 `work.repository` is stored in `nvt.dev/work-repository` when present.
 
