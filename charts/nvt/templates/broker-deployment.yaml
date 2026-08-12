@@ -20,6 +20,16 @@
 {{- if not (kindIs "map" $dynamicAuthentication) }}{{ fail "broker.config.dynamic-accounts.authentication must be an object" }}{{ end }}
 {{- $maxEligibilityLeaseSeconds := int (default 3600 (index $dynamicAuthentication "max-eligibility-lease-seconds")) }}
 {{- if or (lt $maxEligibilityLeaseSeconds 300) (gt $maxEligibilityLeaseSeconds 86400) }}{{ fail "broker dynamic eligibility lease window must be 300..86400 seconds" }}{{ end }}
+{{- $switching := index $dynamicAccounts "template-switching" | default dict }}
+{{- if not (kindIs "map" $switching) }}{{ fail "broker.config.dynamic-accounts.template-switching must be an object" }}{{ end }}
+{{- $switchingEnabled := false }}{{- if hasKey $switching "enabled" }}{{- if not (kindIs "bool" (index $switching "enabled")) }}{{ fail "broker dynamic template-switching.enabled must be a boolean" }}{{ end }}{{- $switchingEnabled = index $switching "enabled" }}{{- end }}
+{{- if $switchingEnabled }}
+{{- if ne (int .Values.operator.replicas) 1 }}{{ fail "dynamic template switching requires operator.replicas=1" }}{{ end }}
+{{- $principalKeyEnv := index $dynamicAuthentication "hmac-key-env" | default "" }}
+{{- $operatorKeyEnv := index $switching "operator-hmac-key-env" | default "" }}
+{{- if or (not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` $operatorKeyEnv)) (eq $operatorKeyEnv $principalKeyEnv) }}{{ fail "broker dynamic template switching requires a distinct operator HMAC environment" }}{{ end }}
+{{- if or (lt (int (default 60 (index $switching "max-assertion-seconds"))) 1) (gt (int (default 60 (index $switching "max-assertion-seconds"))) 300) (lt (int (default 60 (index $switching "reservation-seconds"))) 15) (gt (int (default 60 (index $switching "reservation-seconds"))) 300) (lt (int (default 300 (index $switching "request-seconds"))) 60) (gt (int (default 300 (index $switching "request-seconds"))) 900) }}{{ fail "broker dynamic template switching bounds are invalid" }}{{ end }}
+{{- end }}
 {{- end }}
 {{- if and .Values.broker.persistence.seedSecretName (not .Values.broker.persistence.enabled) }}
 {{- fail "broker.persistence.seedSecretName requires broker.persistence.enabled=true" }}

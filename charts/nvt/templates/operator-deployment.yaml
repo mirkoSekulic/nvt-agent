@@ -1,6 +1,9 @@
 {{- $brandingConfigMap := include "nvt.brandingConfigMap" . -}}
 {{- $principalAccounts := .Values.operator.principalAccounts -}}
 {{- $principalAccountsEnabled := default false $principalAccounts.enabled -}}
+{{- $templateSwitching := $principalAccounts.templateSwitching -}}
+{{- $templateSwitchingEnabled := and $principalAccountsEnabled (default false $templateSwitching.enabled) -}}
+{{- if and (not $principalAccountsEnabled) (default false $templateSwitching.enabled) }}{{ fail "operator template switching requires principalAccounts.enabled=true" }}{{ end -}}
 {{- if $principalAccountsEnabled -}}
 {{- if or (not .Values.broker.enabled) (not .Values.broker.persistence.enabled) (not .Values.broker.tls.enabled) }}{{ fail "operator.principalAccounts requires the persistent TLS broker" }}{{ end -}}
 {{- if or (not (regexMatch `^https://[^/@?#[:space:]\\]+(?::[0-9]+)?$` $principalAccounts.brokerURL)) (hasSuffix "/" $principalAccounts.brokerURL) }}{{ fail "operator.principalAccounts.brokerURL must be an HTTPS origin without a path" }}{{ end -}}
@@ -14,6 +17,14 @@
 {{- if or (not (kindIs "map" $brokerAuth)) (ne $principalAccounts.authentication.existingSecret .Values.broker.envSecretName) (ne $principalAccounts.authentication.key (index $brokerAuth "hmac-key-env")) }}{{ fail "operator.principalAccounts authentication must reference the broker dynamic assertion key" }}{{ end -}}
 {{- if or (ne $principalAccounts.ca.existingSecret (include "nvt.brokerTLSSecretName" .)) (ne $principalAccounts.ca.key "ca.crt") }}{{ fail "operator.principalAccounts CA must reference the broker TLS CA" }}{{ end -}}
 {{- if gt (int $principalAccounts.assertionTTLSeconds) (int (default 300 (index $brokerAuth "max-assertion-seconds"))) }}{{ fail "operator.principalAccounts assertion TTL must not exceed the broker assertion window" }}{{ end -}}
+{{- if $templateSwitchingEnabled -}}
+{{- range $name := list $templateSwitching.authentication.existingSecret }}{{ if or (not $name) (gt (len $name) 253) (not (regexMatch `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$` $name)) }}{{ fail "operator template-switching Secret reference must be a valid Kubernetes name" }}{{ end }}{{ end -}}
+{{- if or (not $templateSwitching.authentication.key) (not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` $templateSwitching.authentication.key)) (eq $templateSwitching.authentication.key $principalAccounts.authentication.key) }}{{ fail "operator template-switching key must be a distinct environment-style Secret key" }}{{ end -}}
+{{- $brokerSwitching := index $dynamicAccounts "template-switching" | default dict -}}
+{{- if or (not (kindIs "map" $brokerSwitching)) (not (eq true (index $brokerSwitching "enabled"))) }}{{ fail "operator template switching requires broker dynamic template-switching.enabled=true" }}{{ end -}}
+{{- if or (ne $templateSwitching.authentication.existingSecret .Values.broker.envSecretName) (ne $templateSwitching.authentication.key (index $brokerSwitching "operator-hmac-key-env")) }}{{ fail "operator template-switching authentication must reference the broker operator HMAC key" }}{{ end -}}
+{{- if or (lt (int $templateSwitching.assertionTTLSeconds) 1) (gt (int $templateSwitching.assertionTTLSeconds) (int (default 60 (index $brokerSwitching "max-assertion-seconds")))) }}{{ fail "operator template-switching assertion TTL is outside the broker window" }}{{ end -}}
+{{- end -}}
 {{- end -}}
 {{- if .Values.executionDrivers.guestEnrollment.enabled }}
 apiVersion: v1
@@ -55,7 +66,11 @@ data:
       "assertionKeyFile": "/var/run/nvt-principal-accounts/assertion-key",
       "assertionTTLSeconds": {{ $principalAccounts.assertionTTLSeconds }},
       "requestTimeoutSeconds": {{ $principalAccounts.requestTimeoutSeconds }},
-      "maxResponseBytes": {{ $principalAccounts.maxResponseBytes }}
+      "maxResponseBytes": {{ $principalAccounts.maxResponseBytes }}{{ if $templateSwitchingEnabled }},
+      "coordination": {
+        "assertionKeyFile": "/var/run/nvt-principal-accounts/coordination-key",
+        "assertionTTLSeconds": {{ $templateSwitching.assertionTTLSeconds }}
+      }{{ end }}
     }
 ---
 {{- end }}
@@ -303,5 +318,12 @@ spec:
                   items:
                     - key: {{ $principalAccounts.authentication.key | quote }}
                       path: assertion-key
+              {{- if $templateSwitchingEnabled }}
+              - secret:
+                  name: {{ $templateSwitching.authentication.existingSecret | quote }}
+                  items:
+                    - key: {{ $templateSwitching.authentication.key | quote }}
+                      path: coordination-key
+              {{- end }}
         {{- end }}
       {{- end }}

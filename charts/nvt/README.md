@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.61`; otherwise the API server may prune the
+of, upgrading to chart `0.8.62`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.61 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.62 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.61 --namespace nvt --create-namespace
+  --version 0.8.62 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -511,6 +511,27 @@ must complete one currently eligible portal login to renew that exact account;
 no credential upload or reconnect is required. Existing AgentRuns continue
 using their frozen provider generation during this adoption step.
 
+Safe credential-template switching is a separate opt-in layered on dynamic
+accounts. Configure broker `dynamic-accounts.template-switching`,
+`operator.principalAccounts.templateSwitching`, and
+`credentialPortal.dynamic.templateSwitch` together. The broker/operator use a
+dedicated HMAC key distinct from the portal principal assertion key. The portal
+sends the operator only an opaque, target-free broker request id. The operator
+serializes its no-active-AgentRun proof with every dynamic schedule admission
+through the broker, commits only when the exact issuer+subject owns no
+non-terminal run, and otherwise denies before the credential runner starts.
+Neither browser nor producer supplies a transition, template, provider,
+profile, grant, capability, runtime, or egress setting. Disabling this layer
+restores the locked-tombstone behavior without changing static schedules.
+The chart requires exactly one operator replica while this process-local
+admission server owns the Kubernetes-side proof boundary.
+
+The coordination key is another startup-only external Secret value. Rotate it
+in the same GitOps change as the principal assertion key when practical and
+always increment `broker.dynamicAccountAssertionRotationEpoch`; the epoch rolls
+the broker, portal, and operator together without exposing or hashing key
+material. During a mixed rollout coordination and admission fail closed.
+
 Omitted profile execution keeps the existing Kubernetes Pod path. Operators
 may spell that selection explicitly as `execution: {kind: pod, driver:
 kubernetes}`. External drivers select one exact entry from
@@ -970,10 +991,10 @@ The browser cannot choose provider plugins, commands, paths, provider instance
 ids, Secrets, profiles, grants, capabilities, runtime settings, or egress
 policy. Authenticated readiness preserves the committed template for ready,
 unready, and revoked accounts. A different template fails closed before runner
-execution, and revocation retains a broker-owned template lock;
-template-switch authorization remains locked until the trusted,
-race-safe no-active-AgentRun coordination contract in
-[#215](https://github.com/mirkoSekulic/nvt-agent/issues/215) is implemented. See
+execution unless the optional trusted operator coordination proves the exact
+principal owns no active AgentRun and commits a target-free broker unlock.
+Admission and proof use the same durable bounded reservation, so neither can
+overtake the other. See
 [credential portal dynamic mode](../../docs/credential-portal.md#dynamic-principal-owned-mode).
 
 Dynamic mode also requires the non-secret

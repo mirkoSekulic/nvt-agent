@@ -24,7 +24,7 @@ if grep -Eq 'verbs:.*(get|list|create|delete)' "${PORTAL_ROLE}"; then
 fi
 grep -Fq 'resourceNames:' "${RENDER}"
 grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
-grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.61"' "${RENDER}"
+grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.62"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
@@ -122,6 +122,12 @@ assert config["dynamic"]["broker"] == {
     "requestTimeoutSeconds": 10,
     "url": "https://nvt-broker:7347",
 }
+assert config["dynamic"]["templateSwitch"] == {
+    "coordinatorURL": "http://nvt-operator:8082",
+    "enabled": True,
+    "maxResponseBytes": 4096,
+    "requestTimeoutSeconds": 10,
+}
 assert config["dynamic"]["templates"] == [
     {"adapter": "codex-oauth-file", "label": "Approved one", "name": "approved-one"},
     {"adapter": "claude-oauth-file", "label": "Approved two", "name": "approved-two"},
@@ -132,6 +138,10 @@ deployment = next(document for document in portal_documents if document["kind"] 
 broker_deployment = next(
     document for document in documents
     if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-broker"
+)
+operator_deployment = next(
+    document for document in documents
+    if document.get("kind") == "Deployment" and document["metadata"]["name"] == "nvt-operator"
 )
 pod = deployment["spec"]["template"]["spec"]
 containers = {container["name"]: container for container in pod["containers"]}
@@ -159,6 +169,18 @@ broker_epoch = broker_deployment["spec"]["template"]["metadata"]["annotations"][
     "nvt.io/dynamic-account-assertion-rotation-epoch"
 ]
 assert portal_epoch == broker_epoch == "epoch-1"
+assert operator_deployment["spec"]["template"]["metadata"]["annotations"][
+    "nvt.io/dynamic-account-assertion-rotation-epoch"
+] == "epoch-1"
+operator_pod = operator_deployment["spec"]["template"]["spec"]
+operator_volume = next(volume for volume in operator_pod["volumes"] if volume["name"] == "principal-account-client")
+operator_items = [
+    item["path"]
+    for source in operator_volume["projected"]["sources"]
+    for item in source.get("secret", {}).get("items", [])
+]
+assert "coordination-key" in operator_items
+assert "coordination-key" not in str(pod)
 
 serialized = open(sys.argv[1], encoding="utf-8").read()
 for needle in (
@@ -186,7 +208,7 @@ def epochs(path):
         document["metadata"]["name"]: document
         for document in documents
         if document.get("kind") == "Deployment"
-        and document.get("metadata", {}).get("name") in {"nvt-broker", "nvt-credential-portal"}
+        and document.get("metadata", {}).get("name") in {"nvt-broker", "nvt-credential-portal", "nvt-operator"}
     }
     return {
         name: deployment["spec"]["template"]["metadata"]["annotations"][annotation]
@@ -195,8 +217,8 @@ def epochs(path):
 
 before = epochs(sys.argv[1])
 after = epochs(sys.argv[2])
-assert before == {"nvt-broker": "epoch-1", "nvt-credential-portal": "epoch-1"}
-assert after == {"nvt-broker": "epoch-2", "nvt-credential-portal": "epoch-2"}
+assert before == {"nvt-broker": "epoch-1", "nvt-credential-portal": "epoch-1", "nvt-operator": "epoch-1"}
+assert after == {"nvt-broker": "epoch-2", "nvt-credential-portal": "epoch-2", "nvt-operator": "epoch-2"}
 assert all(after[name] != before[name] for name in before)
 PY
 
@@ -402,6 +424,25 @@ expect_dynamic_failure output-limit \
 expect_dynamic_failure recovery-output-limit \
   'maxUploadBytes must not exceed the broker 768 KiB credential limit' \
   --set credentialPortal.maxUploadBytes=786433
+expect_dynamic_failure switch-coordinator-url \
+  'template switch coordinator must be a canonical internal HTTP origin' \
+  --set-string credentialPortal.dynamic.templateSwitch.coordinatorURL=https://nvt-operator:8082
+expect_dynamic_failure switch-coordinator-network-policy \
+  'template switch coordinator port must be allowed by networkPolicy.egressTCPPorts' \
+  --set credentialPortal.networkPolicy.egressTCPPorts='{443,7347}'
+expect_dynamic_failure switch-operator-disabled \
+  'requires broker and operator coordination' \
+  --set operator.principalAccounts.templateSwitching.enabled=false
+expect_dynamic_failure switch-broker-disabled \
+  'requires broker dynamic template-switching.enabled=true' \
+  --set broker.config.dynamic-accounts.template-switching.enabled=false
+expect_dynamic_failure switch-shared-auth-key \
+  'distinct' \
+  --set-string broker.config.dynamic-accounts.template-switching.operator-hmac-key-env=NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY \
+  --set-string operator.principalAccounts.templateSwitching.authentication.key=NVT_DYNAMIC_ACCOUNT_ASSERTION_KEY
+expect_dynamic_failure switch-operator-replicas \
+  'operator.replicas must be 1' \
+  --set operator.replicas=2
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set-string credentialPortal.dynamic.broker.url=https://nvt-broker:7347 \
