@@ -39,9 +39,10 @@ var (
 )
 
 type session struct {
-	ExpiresAt time.Time
-	Principal Principal
-	CSRF      string
+	ExpiresAt            time.Time
+	EligibilityExpiresAt time.Time
+	Principal            Principal
+	CSRF                 string
 }
 
 type loginState struct {
@@ -66,7 +67,7 @@ type Authenticator struct {
 }
 
 type EligibilityLeaseBroker interface {
-	RenewEligibility(ctx context.Context, principal Principal) error
+	RenewEligibility(ctx context.Context, principal Principal, expiresAt time.Time) error
 	RevokeEligibility(ctx context.Context, principal Principal) error
 }
 
@@ -284,7 +285,16 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	clear(claims)
 	token.AccessToken = ""
 	token.RefreshToken = ""
-	if !a.updateEligibilityLease(ctx, principal, identityVerified, admitted) {
+	now := a.now()
+	sessionExpiresAt := now.Add(time.Duration(a.cfg.Auth.Session.MaxAgeSeconds) * time.Second)
+	eligibilityExpiresAt := sessionExpiresAt
+	if a.eligibility != nil {
+		leaseExpiry := now.Add(time.Duration(a.cfg.Dynamic.Broker.EligibilityLeaseSeconds) * time.Second)
+		if leaseExpiry.Before(eligibilityExpiresAt) {
+			eligibilityExpiresAt = leaseExpiry
+		}
+	}
+	if !a.updateEligibilityLease(ctx, principal, identityVerified, admitted, eligibilityExpiresAt) {
 		a.authFailure(w)
 		return
 	}
@@ -302,9 +312,8 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.sessions[sessionID] = session{
-		Principal: principal,
-		CSRF:      csrf,
-		ExpiresAt: a.now().Add(time.Duration(a.cfg.Auth.Session.MaxAgeSeconds) * time.Second),
+		Principal: principal, CSRF: csrf,
+		ExpiresAt: sessionExpiresAt, EligibilityExpiresAt: eligibilityExpiresAt,
 	}
 	a.mu.Unlock()
 	encoded, err := a.cookies.Encode(a.cfg.Auth.Session.CookieName, sessionID)
@@ -331,12 +340,14 @@ func (a *Authenticator) updateEligibilityLease(
 	ctx context.Context,
 	principal Principal,
 	identityVerified, admitted bool,
+	expiresAt time.Time,
 ) bool {
 	if a.eligibility == nil {
 		return admitted
 	}
 	if !admitted {
 		if identityVerified {
+			a.invalidatePrincipalSessions(principal)
 			// Exact verified identity may revoke its prior lease when current
 			// policy evaluation denies it. The login remains denied regardless
 			// of dependency state, so no broker detail is exposed.
@@ -344,7 +355,17 @@ func (a *Authenticator) updateEligibilityLease(
 		}
 		return false
 	}
-	return a.eligibility.RenewEligibility(ctx, principal) == nil
+	return a.eligibility.RenewEligibility(ctx, principal, expiresAt) == nil
+}
+
+func (a *Authenticator) invalidatePrincipalSessions(principal Principal) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id, existing := range a.sessions {
+		if existing.Principal.Issuer == principal.Issuer && existing.Principal.Subject == principal.Subject {
+			delete(a.sessions, id)
+		}
+	}
 }
 
 func (a *Authenticator) validCallbackIssuer(query url.Values) bool {
@@ -581,23 +602,24 @@ func jsonValuePath(value any, rawPath string) (any, bool) {
 	return current, true
 }
 
-func (a *Authenticator) Session(r *http.Request) (Principal, string, time.Time, bool) {
+func (a *Authenticator) Session(r *http.Request) (Principal, string, time.Time, time.Time, bool) {
 	cookie, err := r.Cookie(a.cfg.Auth.Session.CookieName)
 	if err != nil {
-		return Principal{}, "", time.Time{}, false
+		return Principal{}, "", time.Time{}, time.Time{}, false
 	}
 	var id string
 	if a.cookies.Decode(a.cfg.Auth.Session.CookieName, cookie.Value, &id) != nil {
-		return Principal{}, "", time.Time{}, false
+		return Principal{}, "", time.Time{}, time.Time{}, false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s, ok := a.sessions[id]
-	if !ok || !s.ExpiresAt.After(a.now()) {
+	now := a.now()
+	if !ok || !s.ExpiresAt.After(now) || (a.cfg.Dynamic.Enabled && !s.EligibilityExpiresAt.After(now)) {
 		delete(a.sessions, id)
-		return Principal{}, "", time.Time{}, false
+		return Principal{}, "", time.Time{}, time.Time{}, false
 	}
-	return s.Principal, s.CSRF, s.ExpiresAt, true
+	return s.Principal, s.CSRF, s.ExpiresAt, s.EligibilityExpiresAt, true
 }
 
 func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request, csrf string) bool {

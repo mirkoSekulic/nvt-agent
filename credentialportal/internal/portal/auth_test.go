@@ -46,13 +46,19 @@ type oidcFixture struct {
 }
 
 type recordingEligibilityLeaseBroker struct { //nolint:govet // Test recorder favors operation grouping.
-	renewed  []Principal
-	revoked  []Principal
-	renewErr error
+	renewed       []Principal
+	renewedExpiry []time.Time
+	revoked       []Principal
+	renewErr      error
 }
 
-func (b *recordingEligibilityLeaseBroker) RenewEligibility(_ context.Context, principal Principal) error {
+func (b *recordingEligibilityLeaseBroker) RenewEligibility(
+	_ context.Context,
+	principal Principal,
+	expiresAt time.Time,
+) error {
 	b.renewed = append(b.renewed, principal)
+	b.renewedExpiry = append(b.renewedExpiry, expiresAt)
 	return b.renewErr
 }
 
@@ -241,13 +247,18 @@ func TestEligibleOIDCCallbackRenewsLeaseAndPolicyDenialRevokesIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	auth.cfg.Dynamic.Broker.EligibilityLeaseSeconds = 300
+	evaluatedAt := time.Now().Truncate(time.Second)
+	auth.now = func() time.Time { return evaluatedAt }
 	leases := &recordingEligibilityLeaseBroker{}
 	auth.eligibility = leases
 	if response := performOIDCCallback(t, auth, fixture, cfg.PublicURL); response.Code != http.StatusFound {
 		t.Fatalf("eligible callback status=%d body=%q", response.Code, response.Body.String())
 	}
 	want := Principal{Issuer: fixture.URL, Subject: testOIDCSubject}
-	if len(leases.renewed) != 1 || leases.renewed[0] != want || len(leases.revoked) != 0 {
+	if len(leases.renewed) != 1 || leases.renewed[0] != want || len(leases.revoked) != 0 ||
+		len(leases.renewedExpiry) != 1 ||
+		!leases.renewedExpiry[0].Equal(evaluatedAt.Add(300*time.Second)) {
 		t.Fatalf("eligible identity did not renew its exact lease: %#v", leases)
 	}
 
@@ -493,10 +504,10 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 		nil,
 	)
 	principalRequest.AddCookie(sessionCookie)
-	principal, csrf, expiresAt, ok := auth.Session(principalRequest)
+	principal, csrf, expiresAt, eligibilityExpiresAt, ok := auth.Session(principalRequest)
 	if !ok || principal.Issuer != testIdentityIssuer || principal.Subject != "424242" ||
 		principal.DisplayName != "octocat" ||
-		csrf == "" || expiresAt.IsZero() {
+		csrf == "" || expiresAt.IsZero() || eligibilityExpiresAt.IsZero() {
 		t.Fatalf("unexpected principal: %#v ok=%v", principal, ok)
 	}
 
@@ -524,7 +535,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 	}
 }
 
-//nolint:gocyclo // One end-to-end fixture proves the complete configured login boundary.
+//nolint:gocyclo,cyclop // One fixture proves the complete configured login boundary.
 func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichment(t *testing.T) {
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -611,8 +622,9 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 			request.AddCookie(cookie)
 		}
 	}
-	principal, _, _, ok := auth.Session(request)
-	if !ok || principal.Issuer != cfg.Auth.OAuth2.Issuer || principal.Subject != "new-immutable-subject" {
+	principal, csrf, sessionExpiry, eligibilityExpiry, ok := auth.Session(request)
+	if !ok || csrf == "" || sessionExpiry.IsZero() || eligibilityExpiry.IsZero() ||
+		principal.Issuer != cfg.Auth.OAuth2.Issuer || principal.Subject != "new-immutable-subject" {
 		t.Fatalf("unexpected eligible principal session: %#v ok=%v", principal, ok)
 	}
 	if auth.hasOwnedSlot(principal) {

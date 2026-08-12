@@ -478,7 +478,9 @@ passes and retained as a non-secret expiry by the broker. Operator resolution
 fails closed as `principal-not-eligible` after expiry or explicit policy
 revocation; a fresh eligible portal login renews it. Configure the portal lease
 no longer than its session and the broker's
-`max-eligibility-lease-seconds` bound.
+`max-eligibility-lease-seconds` bound. Connect/reconnect retains the exact
+expiry from the successful policy evaluation and cannot extend it; a shorter
+lease therefore requires fresh login before later dynamic actions.
 
 The operator's broker CA and assertion key are projected only into the operator
 manager. They are never mounted into producers or AgentRun Pods. The broker URL

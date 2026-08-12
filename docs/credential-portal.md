@@ -275,7 +275,10 @@ workload without advancing the shared epoch.
 Eligibility is evaluated during portal login. A successful evaluation renews a
 signed broker-held eligibility lease for no longer than
 `credentialPortal.dynamic.broker.eligibilityLeaseSeconds` or the portal session,
-whichever is shorter. Enrollment and reconnect commit that same bounded expiry.
+whichever is shorter. The server-side portal session retains that exact
+evaluation expiry; enrollment and reconnect commit it without extending it.
+Once it expires, dynamic actions require a fresh eligible login even if the
+authentication session would otherwise remain valid.
 If the verified identity no longer passes policy, login is denied and the
 portal explicitly revokes its prior lease. Expired or revoked evidence denies
 new operator resolution while preserving the existing account, template lock,

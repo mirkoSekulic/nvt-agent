@@ -130,7 +130,10 @@ func authenticatedServer(
 	auth := &Authenticator{cfg: cfg, cookies: cookies, sessions: map[string]session{}, now: time.Now}
 	csrf := testCSRFToken
 	id := "opaque-session"
-	auth.sessions[id] = session{Principal: principal, CSRF: csrf, ExpiresAt: time.Now().Add(time.Hour)}
+	expiresAt := time.Now().Add(time.Hour)
+	auth.sessions[id] = session{
+		Principal: principal, CSRF: csrf, ExpiresAt: expiresAt, EligibilityExpiresAt: expiresAt,
+	}
 	encoded, err := cookies.Encode(cfg.Auth.Session.CookieName, id)
 	if err != nil {
 		t.Fatal(err)

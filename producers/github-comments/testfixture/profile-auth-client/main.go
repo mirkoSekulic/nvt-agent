@@ -21,22 +21,31 @@ func main() {
 	url := mustEnv("ADMISSION_URL")
 	switch mustEnv("MODE") {
 	case "allowed":
-		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 11, 424242, http.StatusCreated)
-		expectProducerAdmission(url, "/var/run/nvt-tokens/wrong-audience", 12, 424242, http.StatusUnauthorized)
+		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 11, 424242, http.StatusCreated, "")
+		expectProducerAdmission(url, "/var/run/nvt-tokens/wrong-audience", 12, 424242, http.StatusUnauthorized, "")
 		expectInjectedRequestRejected(url, "/var/run/nvt-tokens/correct")
 	case "unlisted":
-		expectProducerAdmission(url, "/var/run/nvt-token/token", 13, 424242, http.StatusForbidden)
+		expectProducerAdmission(url, "/var/run/nvt-token/token", 13, 424242, http.StatusForbidden, "")
 	case "dynamic-isolation":
 		// The producer is authenticated and issuer-authorized, but this exact
 		// second immutable subject owns no broker account. Admission must not
 		// resolve or reuse the first principal's dynamic provider.
-		expectProducerAdmission(url, "/var/run/nvt-tokens/correct", 14, 424243, http.StatusForbidden)
+		expectProducerAdmission(
+			url, "/var/run/nvt-tokens/correct", 14, 424243,
+			http.StatusForbidden, "principal-not-enrolled",
+		)
 	default:
 		fatalf("unsupported MODE")
 	}
 }
 
-func expectProducerAdmission(url, tokenFile string, issueNumber int, userID int64, wantStatus int) {
+func expectProducerAdmission(
+	url, tokenFile string,
+	issueNumber int,
+	userID int64,
+	wantStatus int,
+	wantReason string,
+) {
 	baseURL, namespace, schedule := splitAdmissionURL(url)
 	cfg := producer.Config{
 		Submission: producer.SubmissionConfig{
@@ -71,6 +80,18 @@ func expectProducerAdmission(url, tokenFile string, issueNumber int, userID int6
 	if recorder.status != wantStatus {
 		fatalf("profiled producer admission status=%d want=%d", recorder.status, wantStatus)
 	}
+	if wantReason != "" {
+		var denial struct {
+			Scheduled bool   `json:"scheduled"`
+			Reason    string `json:"reason"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(recorder.body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&denial); err != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+			denial.Scheduled || denial.Reason != wantReason {
+			fatalf("profiled producer denial did not prove exact account isolation")
+		}
+	}
 	if wantStatus == http.StatusCreated && (err != nil || !created) {
 		fatalf("profiled producer admission failed: created=%v err=%v", created, err)
 	}
@@ -82,12 +103,20 @@ func expectProducerAdmission(url, tokenFile string, issueNumber int, userID int6
 type statusRecordingTransport struct {
 	next   http.RoundTripper
 	status int
+	body   []byte
 }
 
 func (t *statusRecordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	response, err := t.next.RoundTrip(request)
 	if response != nil {
 		t.status = response.StatusCode
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
+		_ = response.Body.Close()
+		if readErr != nil || len(body) > 4096 {
+			return nil, fmt.Errorf("bounded admission response unavailable")
+		}
+		t.body = bytes.Clone(body)
+		response.Body = io.NopCloser(bytes.NewReader(body))
 	}
 	return response, err
 }

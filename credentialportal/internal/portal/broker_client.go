@@ -59,7 +59,7 @@ type PrincipalAccountBroker interface {
 		eligibilityExpiresAt time.Time,
 	) error
 	Revoke(ctx context.Context, principal Principal, operationID string) error
-	RenewEligibility(ctx context.Context, principal Principal) error
+	RenewEligibility(ctx context.Context, principal Principal, expiresAt time.Time) error
 	RevokeEligibility(ctx context.Context, principal Principal) error
 }
 
@@ -242,16 +242,26 @@ func (c *HTTPPrincipalAccountBroker) Revoke(
 	return c.mutate(ctx, "/v1/principal-accounts/revoke", body, principal, accountStateRevoked, true, time.Time{})
 }
 
-func (c *HTTPPrincipalAccountBroker) RenewEligibility(ctx context.Context, principal Principal) error {
-	return c.updateEligibility(ctx, "/v1/principal-accounts/renew-eligibility", principal)
+func (c *HTTPPrincipalAccountBroker) RenewEligibility(
+	ctx context.Context,
+	principal Principal,
+	expiresAt time.Time,
+) error {
+	return c.updateEligibility(ctx, "/v1/principal-accounts/renew-eligibility", principal, expiresAt)
 }
 
 func (c *HTTPPrincipalAccountBroker) RevokeEligibility(ctx context.Context, principal Principal) error {
-	return c.updateEligibility(ctx, "/v1/principal-accounts/revoke-eligibility", principal)
+	return c.updateEligibility(
+		ctx, "/v1/principal-accounts/revoke-eligibility", principal, c.now().Add(c.eligibilityLease),
+	)
 }
 
-func (c *HTTPPrincipalAccountBroker) updateEligibility(ctx context.Context, path string, principal Principal) error {
-	expiresAt := c.now().Add(c.eligibilityLease)
+func (c *HTTPPrincipalAccountBroker) updateEligibility(
+	ctx context.Context,
+	path string,
+	principal Principal,
+	expiresAt time.Time,
+) error {
 	status, body, err := c.request(ctx, http.MethodPost, path, []byte("{}"), principal, true, expiresAt)
 	defer clearBytes(body)
 	if err != nil || status != http.StatusOK {
