@@ -947,7 +947,7 @@ accounts = resources("ServiceAccount")
 configmaps = resources("ConfigMap")
 default_operator = next(item for item in default_documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-operator")
 assert "securityContext" not in default_operator["spec"]["template"]["spec"]
-assert "strategy" not in default_operator["spec"]
+assert default_operator["spec"]["strategy"] == {"type": "Recreate"}
 assert "nvt.dev/native-egress-rollout-revision" not in default_operator["spec"]["template"].get("metadata", {}).get("annotations", {})
 expected = {"fake-east", "fake-west"}
 driver_names = {f"nvt-execution-driver-{name}" for name in expected}
