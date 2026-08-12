@@ -16,13 +16,14 @@ import (
 )
 
 type Server struct {
-	patcher     SecretPatcher
-	auth        *Authenticator
-	audit       *AuditLogger
-	enrollments *EnrollmentManager
-	runner      CredentialRunner
-	broker      PrincipalAccountBroker
-	cfg         Config
+	patcher           SecretPatcher
+	auth              *Authenticator
+	audit             *AuditLogger
+	enrollments       *EnrollmentManager
+	runner            CredentialRunner
+	broker            PrincipalAccountBroker
+	switchCoordinator TemplateSwitchCoordinator
+	cfg               Config
 }
 
 var errDynamicTemplateConflict = errors.New("dynamic credential template conflicts with the active account")
@@ -35,12 +36,44 @@ func NewServer(
 	runner CredentialRunner,
 	brokers ...PrincipalAccountBroker,
 ) *Server {
+	var broker PrincipalAccountBroker
+	if len(brokers) != 0 {
+		broker = brokers[0]
+	}
+	return newServer(cfg, auth, patcher, audit, runner, broker, nil)
+}
+
+// NewServerWithSwitchCoordinator wires the optional target-free operator
+// coordination dependency without broadening the static server constructor.
+func NewServerWithSwitchCoordinator(
+	cfg Config,
+	auth *Authenticator,
+	patcher SecretPatcher,
+	audit *AuditLogger,
+	runner CredentialRunner,
+	broker PrincipalAccountBroker,
+	coordinator TemplateSwitchCoordinator,
+) *Server {
+	return newServer(cfg, auth, patcher, audit, runner, broker, coordinator)
+}
+
+func newServer(
+	cfg Config,
+	auth *Authenticator,
+	patcher SecretPatcher,
+	audit *AuditLogger,
+	runner CredentialRunner,
+	broker PrincipalAccountBroker,
+	coordinator TemplateSwitchCoordinator,
+) *Server {
 	server := &Server{
 		cfg: cfg, auth: auth, patcher: patcher, audit: audit, runner: runner,
-		enrollments: NewEnrollmentManager(cfg, patcher, audit, runner, brokers...),
+		broker: broker, switchCoordinator: coordinator,
 	}
-	if len(brokers) == 1 {
-		server.broker = brokers[0]
+	if server.broker != nil {
+		server.enrollments = NewEnrollmentManager(cfg, patcher, audit, runner, server.broker)
+	} else {
+		server.enrollments = NewEnrollmentManager(cfg, patcher, audit, runner)
 	}
 	return server
 }
@@ -216,7 +249,7 @@ func (s *Server) dashboard(ctx context.Context, w http.ResponseWriter, principal
 }
 
 func (s *Server) dynamicDashboard(ctx context.Context, w http.ResponseWriter, principal Principal, csrf string) {
-	account := DynamicAccountState{State: "unavailable"}
+	account := DynamicAccountState{State: accountStateUnavailable}
 	if s.broker != nil {
 		if current, err := s.broker.Account(ctx, principal); err == nil {
 			account = current
@@ -253,7 +286,7 @@ func (s *Server) dynamicAccount(w http.ResponseWriter, r *http.Request, principa
 	}
 	account, err := s.broker.Account(r.Context(), principal)
 	if err != nil {
-		http.Error(w, "broker-unavailable", http.StatusServiceUnavailable)
+		http.Error(w, reasonBrokerUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	writeJSON(w, http.StatusOK, account)
@@ -287,12 +320,16 @@ func (s *Server) dynamicConnect(
 		return
 	}
 	action, err := s.dynamicAction(r.Context(), principal, templateName)
+	if errors.Is(err, ErrTemplateSwitchDenied) {
+		s.reject(w, principal, slot, http.StatusConflict, "active-agentruns")
+		return
+	}
 	if errors.Is(err, errDynamicTemplateConflict) {
 		s.reject(w, principal, slot, http.StatusConflict, "template-conflict")
 		return
 	}
 	if err != nil {
-		s.reject(w, principal, slot, http.StatusServiceUnavailable, "broker-unavailable")
+		s.reject(w, principal, slot, http.StatusServiceUnavailable, reasonBrokerUnavailable)
 		return
 	}
 	status, err := s.enrollments.StartDynamic(
@@ -337,12 +374,16 @@ func (s *Server) dynamicRecovery(
 		return
 	}
 	action, actionErr := s.dynamicAction(r.Context(), principal, templateName)
+	if errors.Is(actionErr, ErrTemplateSwitchDenied) {
+		s.reject(w, principal, slot, http.StatusConflict, "active-agentruns")
+		return
+	}
 	if errors.Is(actionErr, errDynamicTemplateConflict) {
 		s.reject(w, principal, slot, http.StatusConflict, "template-conflict")
 		return
 	}
 	if actionErr != nil {
-		s.reject(w, principal, slot, http.StatusServiceUnavailable, "broker-unavailable")
+		s.reject(w, principal, slot, http.StatusServiceUnavailable, reasonBrokerUnavailable)
 		return
 	}
 	body, ok := s.readRecoveryCredential(w, r, principal, slot)
@@ -356,7 +397,7 @@ func (s *Server) dynamicRecovery(
 	}
 	operationID, err := randomToken(32)
 	if err != nil {
-		s.reject(w, principal, slot, http.StatusServiceUnavailable, "broker-unavailable")
+		s.reject(w, principal, slot, http.StatusServiceUnavailable, reasonBrokerUnavailable)
 		return
 	}
 	if action == dynamicActionEnroll {
@@ -416,8 +457,11 @@ func (s *Server) dynamicAction(
 		}
 		return dynamicActionReconnect, nil
 	case accountStateRevoked:
-		if account.Template != templateName {
-			return "", errDynamicTemplateConflict
+		if account.Template == templateName {
+			return dynamicActionEnroll, nil
+		}
+		if err := s.authorizeTemplateSwitch(ctx, principal); err != nil {
+			return "", err
 		}
 		return dynamicActionEnroll, nil
 	case accountStateReady:
@@ -428,6 +472,27 @@ func (s *Server) dynamicAction(
 	default:
 		return "", ErrBrokerUnavailable
 	}
+}
+
+func (s *Server) authorizeTemplateSwitch(ctx context.Context, principal Principal) error {
+	if s.switchCoordinator == nil {
+		return errDynamicTemplateConflict
+	}
+	operationID, err := randomToken(32)
+	if err != nil {
+		return ErrTemplateSwitchUnavailable
+	}
+	requestID, authorized, err := s.broker.RequestTemplateSwitch(ctx, principal, operationID)
+	if err != nil {
+		return fmt.Errorf("request target-free template switch: %w", err)
+	}
+	if authorized {
+		return nil
+	}
+	if err := s.switchCoordinator.Authorize(ctx, requestID); err != nil {
+		return fmt.Errorf("authorize target-free template switch: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) dynamicTemplate(name string) (DynamicCredentialTemplate, bool) {

@@ -248,11 +248,15 @@ work retries are answered from existing Kubernetes state without re-resolving;
 reconnect, revoke, schedule changes, operator restart, or broker outage cannot
 rewrite an accepted run. Revoked/unready accounts cannot admit new runs.
 
-Template switching remains fail-closed. Broker revocation retains its durable
-template lock; this release does not add an operator API that unlocks it.
-Authoritative, race-safe no-active-AgentRun coordination is tracked in
-[#215](https://github.com/mirkoSekulic/nvt-agent/issues/215),
-and browser or producer input can never authorize a switch.
+Template switching remains fail-closed unless the separate operator-only
+coordination contract is enabled. Broker revocation retains its durable
+template lock; an opaque target-free portal request lets the trusted operator
+reserve the exact account, prove there are no non-terminal exact-principal
+AgentRuns, and commit the unlock. Dynamic admission uses that same broker
+reservation around resolution and creation, closing the race. Browser and
+producer input never supplies a transition, target, provider, or profile. The
+proof uses a bounded uncached API read; pagination or ambiguous dynamic
+provenance fails closed.
 
 Profiled requests contain only an optional workflow name, work metadata, and
 prompt input:
@@ -383,3 +387,15 @@ When dynamic principal selection is absent there is no external resolver and
 the existing static and legacy behavior is unchanged. No mode permits a
 producer-selectable profile choice, repository templating, or gateway
 creator-only authorization.
+
+When optional dynamic template switching is enabled, every dynamic admission
+first obtains an exact-principal reservation from the broker and releases it
+only after AgentRun creation has succeeded or failed. The trusted switch
+handler uses the same reservation while listing AgentRuns for the
+broker-returned canonical issuer and immutable subject. It commits the
+target-free unlock only when every matching run is terminal (`Completed`,
+`Failed`, or `DeadlineExceeded`) or absent. An active run returns
+`active-agentruns`; list, broker, storage, timeout, malformed-response, or
+authentication uncertainty fails closed. Producers cannot invoke this handler
+or supply a switch request/template/provider/profile. The portal supplies only
+an opaque broker request id, and neither hop contains credential material.

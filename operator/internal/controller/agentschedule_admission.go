@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,13 +28,14 @@ import (
 const scheduleAdmissionPathPrefix = "/v1/schedules/"
 
 type agentScheduleAdmissionHandler struct {
-	client            client.Client
-	scheme            *runtime.Scheme
-	authenticator     ScheduleProducerAuthenticator
-	profileResolver   ExecutionProfileResolver
-	principalAccounts principalaccounts.Resolver
-	now               func() metav1.Time
-	admissionLocks    *scheduleAdmissionLocks
+	client                client.Client
+	scheme                *runtime.Scheme
+	authenticator         ScheduleProducerAuthenticator
+	profileResolver       ExecutionProfileResolver
+	principalAccounts     principalaccounts.Resolver
+	principalCoordination principalaccounts.Coordinator
+	now                   func() metav1.Time
+	admissionLocks        *scheduleAdmissionLocks
 }
 
 type scheduleAdmissionRequest struct {
@@ -82,14 +86,19 @@ func NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(
 	scheme *runtime.Scheme,
 	accounts principalaccounts.Resolver,
 ) http.Handler {
+	coordination, _ := accounts.(principalaccounts.Coordinator)
+	if enabled, ok := accounts.(interface{ CoordinationEnabled() bool }); !ok || !enabled.CoordinationEnabled() {
+		coordination = nil
+	}
 	return &agentScheduleAdmissionHandler{
-		client:            k8sClient,
-		scheme:            scheme,
-		authenticator:     NewKubernetesTokenReviewProducerAuthenticator(k8sClient),
-		profileResolver:   StaticExecutionProfileResolver{},
-		principalAccounts: accounts,
-		now:               metav1.Now,
-		admissionLocks:    newScheduleAdmissionLocks(),
+		client:                k8sClient,
+		scheme:                scheme,
+		authenticator:         NewKubernetesTokenReviewProducerAuthenticator(k8sClient),
+		profileResolver:       StaticExecutionProfileResolver{},
+		principalAccounts:     accounts,
+		principalCoordination: coordination,
+		now:                   metav1.Now,
+		admissionLocks:        newScheduleAdmissionLocks(),
 	}
 }
 
@@ -245,7 +254,39 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 		var resolved *ResolvedExecutionProfile
 		var resolveErr error
 		if ScheduleUsesPrincipalCredentials(schedule) {
-			resolved, resolveErr = resolvePrincipalCredentialProfile(ctx, schedule, principal, h.principalAccounts)
+			var coordinationOperation string
+			if h.principalCoordination != nil {
+				coordinationOperation, resolveErr = newPrincipalCoordinationOperationID()
+				if resolveErr == nil {
+					var reservation principalaccounts.Reservation
+					reservation, resolveErr = h.principalCoordination.BeginAdmission(
+						ctx,
+						principalaccounts.Principal{Issuer: principal.Issuer, Subject: principal.Subject},
+						coordinationOperation,
+					)
+					if resolveErr == nil {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithDeadline(ctx, reservation.ExpiresAt.Add(-time.Second))
+						defer cancel()
+					}
+				}
+				if resolveErr != nil {
+					switch {
+					case errors.Is(resolveErr, principalaccounts.ErrNotEnrolled):
+						resolveErr = errPrincipalNotEnrolled
+					case errors.Is(resolveErr, principalaccounts.ErrNotEligible):
+						resolveErr = errPrincipalNotEligible
+					default:
+						resolveErr = errPrincipalCredentialResolution
+					}
+				}
+				if resolveErr == nil {
+					defer h.releasePrincipalAdmission(principal, coordinationOperation)
+				}
+			}
+			if resolveErr == nil {
+				resolved, resolveErr = resolvePrincipalCredentialProfile(ctx, schedule, principal, h.principalAccounts)
+			}
 		} else {
 			resolved, resolveErr = h.profileResolver.Resolve(schedule, principal)
 		}
@@ -441,6 +482,27 @@ func (h *agentScheduleAdmissionHandler) ServeHTTP(response http.ResponseWriter, 
 			Name:      run.Name,
 		},
 	})
+}
+
+func newPrincipalCoordinationOperationID() (string, error) {
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func (h *agentScheduleAdmissionHandler) releasePrincipalAdmission(
+	principal *nvtv1alpha1.AgentRunPrincipal,
+	operationID string,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = h.principalCoordination.EndAdmission(
+		ctx,
+		principalaccounts.Principal{Issuer: principal.Issuer, Subject: principal.Subject},
+		operationID,
+	)
 }
 
 func admissionPrincipal(input *scheduleAdmissionPrincipal) *nvtv1alpha1.AgentRunPrincipal {

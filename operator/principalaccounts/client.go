@@ -22,32 +22,43 @@ import (
 )
 
 const (
-	ConfigFileEnv     = "NVT_PRINCIPAL_ACCOUNT_BROKER_CONFIG_FILE"
-	assertionAudience = "nvt.broker.principal-accounts/v1"
-	assertionScheme   = "NVT-Principal-v1"
-	maxConfigBytes    = 64 * 1024
-	maxCABytes        = 1024 * 1024
-	maxKeyBytes       = 4096
-	jsonContentType   = "application/json"
+	ConfigFileEnv        = "NVT_PRINCIPAL_ACCOUNT_BROKER_CONFIG_FILE"
+	assertionAudience    = "nvt.broker.principal-accounts/v1"
+	assertionScheme      = "NVT-Principal-v1"
+	coordinationAudience = "nvt.broker.principal-account-coordination/v1"
+	coordinationScheme   = "NVT-Principal-Coordination-v1"
+	maxConfigBytes       = 64 * 1024
+	maxCABytes           = 1024 * 1024
+	maxKeyBytes          = 4096
+	jsonContentType      = "application/json"
 )
 
 var (
-	ErrNotEnrolled = errors.New("principal account is not enrolled")
-	ErrNotReady    = errors.New("principal credential is not ready")
-	ErrNotEligible = errors.New("principal is not currently eligible")
-	ErrUnavailable = errors.New("principal credential resolution unavailable")
-	providerIDRE   = regexp.MustCompile(`^dpa_[A-Za-z0-9_-]{32}$`)
+	ErrNotEnrolled           = errors.New("principal account is not enrolled")
+	ErrNotReady              = errors.New("principal credential is not ready")
+	ErrNotEligible           = errors.New("principal is not currently eligible")
+	ErrUnavailable           = errors.New("principal credential resolution unavailable")
+	ErrCoordination          = errors.New("principal account coordination unavailable")
+	ErrCoordinationConflict  = errors.New("principal account coordination conflict")
+	ErrSwitchRequestNotFound = errors.New("template switch request not found")
+	providerIDRE             = regexp.MustCompile(`^dpa_[A-Za-z0-9_-]{32}$`)
 )
 
 // Config is the bounded startup-only broker resolution configuration.
 type Config struct {
-	BaseURL               string `json:"baseURL"`
-	CAFile                string `json:"caFile"`
-	AssertionKeyFile      string `json:"assertionKeyFile"`
-	AssertionTTLSeconds   int    `json:"assertionTTLSeconds"`
-	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
-	MaxResponseBytes      int64  `json:"maxResponseBytes"`
-	Version               int    `json:"version"`
+	BaseURL               string              `json:"baseURL"`
+	CAFile                string              `json:"caFile"`
+	AssertionKeyFile      string              `json:"assertionKeyFile"`
+	AssertionTTLSeconds   int                 `json:"assertionTTLSeconds"`
+	RequestTimeoutSeconds int                 `json:"requestTimeoutSeconds"`
+	MaxResponseBytes      int64               `json:"maxResponseBytes"`
+	Version               int                 `json:"version"`
+	Coordination          *CoordinationConfig `json:"coordination,omitempty"`
+}
+
+type CoordinationConfig struct {
+	AssertionKeyFile    string `json:"assertionKeyFile"`
+	AssertionTTLSeconds int    `json:"assertionTTLSeconds"`
 }
 
 // Principal is the canonical issuer plus immutable subject authorization key.
@@ -63,20 +74,41 @@ type Resolution struct {
 	Generation         int64
 }
 
+// Reservation is the broker-owned deadline for one serialized operator action.
+type Reservation struct {
+	ExpiresAt time.Time
+}
+
 // Resolver resolves a ready exact-principal broker account.
 type Resolver interface {
 	Resolve(ctx context.Context, principal Principal) (Resolution, error)
 }
 
+// Coordinator serializes dynamic admission with an operator-controlled template switch proof.
+type Coordinator interface {
+	BeginAdmission(ctx context.Context, principal Principal, operationID string) (Reservation, error)
+	EndAdmission(ctx context.Context, principal Principal, operationID string) error
+	BeginTemplateSwitch(ctx context.Context, requestID, operationID string) (Principal, Reservation, error)
+	CommitTemplateSwitch(ctx context.Context, principal Principal, operationID string) error
+	AbortTemplateSwitch(ctx context.Context, principal Principal, operationID string) error
+}
+
 // Client is a verified-TLS principal-account broker client.
 type Client struct {
-	httpClient     *http.Client
-	baseURL        *url.URL
-	now            func() time.Time
-	assertionKey   []byte
-	assertionTTL   time.Duration
-	requestTimeout time.Duration
-	maxResponse    int64
+	httpClient      *http.Client
+	baseURL         *url.URL
+	now             func() time.Time
+	assertionKey    []byte
+	coordinationKey []byte
+	assertionTTL    time.Duration
+	coordinationTTL time.Duration
+	requestTimeout  time.Duration
+	maxResponse     int64
+}
+
+// CoordinationEnabled reports whether the optional template-switch contract is configured.
+func (c *Client) CoordinationEnabled() bool {
+	return c != nil && len(c.coordinationKey) >= 32 && c.coordinationTTL > 0
 }
 
 // LoadConfigured loads the optional client. An absent environment variable is disabled.
@@ -123,6 +155,15 @@ func New(cfg Config) (*Client, error) {
 		clearBytes(key)
 		return nil, fmt.Errorf("read principal account assertion key: %w", ErrUnavailable)
 	}
+	var coordinationKey []byte
+	if cfg.Coordination != nil {
+		coordinationKey, err = readBoundedFile(cfg.Coordination.AssertionKeyFile, maxKeyBytes)
+		if err != nil || len(coordinationKey) < 32 || hmac.Equal(key, coordinationKey) {
+			clearBytes(key)
+			clearBytes(coordinationKey)
+			return nil, fmt.Errorf("read distinct coordination assertion key: %w", ErrUnavailable)
+		}
+	}
 	transport := &http.Transport{
 		Proxy:             http.ProxyFromEnvironment,
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
@@ -136,8 +177,14 @@ func New(cfg Config) (*Client, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		baseURL: parsed, assertionKey: key,
-		assertionTTL:   time.Duration(cfg.AssertionTTLSeconds) * time.Second,
+		baseURL: parsed, assertionKey: key, coordinationKey: coordinationKey,
+		assertionTTL: time.Duration(cfg.AssertionTTLSeconds) * time.Second,
+		coordinationTTL: func() time.Duration {
+			if cfg.Coordination == nil {
+				return 0
+			}
+			return time.Duration(cfg.Coordination.AssertionTTLSeconds) * time.Second
+		}(),
 		requestTimeout: time.Duration(cfg.RequestTimeoutSeconds) * time.Second,
 		maxResponse:    cfg.MaxResponseBytes, now: time.Now,
 	}, nil
@@ -156,6 +203,10 @@ func (c Config) validate() error {
 		c.MaxResponseBytes < 1024 || c.MaxResponseBytes > 64*1024 {
 		return fmt.Errorf("principal account broker config is outside safe bounds: %w", ErrUnavailable)
 	}
+	if c.Coordination != nil && (c.Coordination.AssertionKeyFile == "" ||
+		c.Coordination.AssertionTTLSeconds < 1 || c.Coordination.AssertionTTLSeconds > 300) {
+		return fmt.Errorf("principal account coordination config is outside safe bounds: %w", ErrUnavailable)
+	}
 	return nil
 }
 
@@ -173,6 +224,8 @@ func (c *Client) Close() {
 	}
 	clearBytes(c.assertionKey)
 	c.assertionKey = nil
+	clearBytes(c.coordinationKey)
+	c.coordinationKey = nil
 	if transport, ok := c.httpClient.Transport.(*http.Transport); ok {
 		transport.CloseIdleConnections()
 	}
@@ -251,6 +304,234 @@ func (c *Client) Resolve(ctx context.Context, principal Principal) (Resolution, 
 		Template: resolved.Template, ProviderInstanceID: resolved.ProviderInstanceID,
 		Generation: resolved.Generation,
 	}, nil
+}
+
+func (c *Client) BeginAdmission(
+	ctx context.Context,
+	principal Principal,
+	operationID string,
+) (Reservation, error) {
+	body, err := json.Marshal(map[string]string{
+		"issuer": principal.Issuer, "subject": principal.Subject, "operation_id": operationID,
+	})
+	if err != nil || !validPrincipal(principal) || !validOperationID(operationID) {
+		return Reservation{}, ErrCoordination
+	}
+	defer clearBytes(body)
+	status, response, err := c.coordinationRequest(
+		ctx, "/v1/principal-account-coordination/begin-admission", "begin-admission", body,
+	)
+	defer clearBytes(response)
+	if err != nil {
+		return Reservation{}, ErrCoordination
+	}
+	switch {
+	case status == http.StatusNotFound && brokerReason(response) == "account-not-found":
+		return Reservation{}, ErrNotEnrolled
+	case status == http.StatusForbidden && brokerReason(response) == "principal-not-eligible":
+		return Reservation{}, ErrNotEligible
+	case status == http.StatusConflict && brokerReason(response) == "coordination-conflict":
+		return Reservation{}, ErrCoordinationConflict
+	}
+	var result struct {
+		ExpiresAt int64  `json:"expires_at"`
+		State     string `json:"state"`
+		OK        bool   `json:"ok"`
+	}
+	if status != http.StatusOK || decodeStrictJSON(response, &result) != nil || !result.OK || result.State != "reserved" {
+		return Reservation{}, ErrCoordination
+	}
+	return c.reservation(result.ExpiresAt)
+}
+
+func (c *Client) EndAdmission(ctx context.Context, principal Principal, operationID string) error {
+	body, err := json.Marshal(map[string]string{
+		"issuer": principal.Issuer, "subject": principal.Subject, "operation_id": operationID,
+	})
+	if err != nil || !validPrincipal(principal) || !validOperationID(operationID) {
+		return ErrCoordination
+	}
+	defer clearBytes(body)
+	return c.coordinationMutation(ctx, "/v1/principal-account-coordination/end-admission", "end-admission", body, "released")
+}
+
+func (c *Client) BeginTemplateSwitch(
+	ctx context.Context,
+	requestID, operationID string,
+) (Principal, Reservation, error) {
+	body, err := json.Marshal(map[string]string{"request_id": requestID, "operation_id": operationID})
+	if err != nil || !validOperationID(requestID) || !validOperationID(operationID) {
+		return Principal{}, Reservation{}, ErrCoordination
+	}
+	defer clearBytes(body)
+	status, response, err := c.coordinationRequest(
+		ctx, "/v1/principal-account-coordination/begin-template-switch", "begin-template-switch", body,
+	)
+	defer clearBytes(response)
+	if err != nil {
+		return Principal{}, Reservation{}, ErrCoordination
+	}
+	if status == http.StatusNotFound && brokerReason(response) == "switch-request-not-found" {
+		return Principal{}, Reservation{}, ErrSwitchRequestNotFound
+	}
+	if status == http.StatusConflict && brokerReason(response) == "coordination-conflict" {
+		return Principal{}, Reservation{}, ErrCoordinationConflict
+	}
+	var result struct {
+		Issuer    string `json:"issuer"`
+		Subject   string `json:"subject"`
+		ExpiresAt int64  `json:"expires_at"`
+		OK        bool   `json:"ok"`
+	}
+	principal := Principal{}
+	if status == http.StatusOK && decodeStrictJSON(response, &result) == nil && result.OK {
+		principal = Principal{Issuer: result.Issuer, Subject: result.Subject}
+	}
+	if !validPrincipal(principal) {
+		return Principal{}, Reservation{}, ErrCoordination
+	}
+	reservation, err := c.reservation(result.ExpiresAt)
+	if err != nil {
+		return Principal{}, Reservation{}, err
+	}
+	return principal, reservation, nil
+}
+
+func (c *Client) reservation(expiresAt int64) (Reservation, error) {
+	deadline := time.Unix(expiresAt, 0)
+	now := c.now()
+	if !deadline.After(now.Add(time.Second)) || deadline.After(now.Add(5*time.Minute)) {
+		return Reservation{}, ErrCoordination
+	}
+	return Reservation{ExpiresAt: deadline}, nil
+}
+
+func (c *Client) CommitTemplateSwitch(ctx context.Context, principal Principal, operationID string) error {
+	return c.finishTemplateSwitch(ctx, principal, operationID, true)
+}
+
+func (c *Client) AbortTemplateSwitch(ctx context.Context, principal Principal, operationID string) error {
+	return c.finishTemplateSwitch(ctx, principal, operationID, false)
+}
+
+func (c *Client) finishTemplateSwitch(
+	ctx context.Context,
+	principal Principal,
+	operationID string,
+	commit bool,
+) error {
+	body, err := json.Marshal(map[string]string{
+		"issuer": principal.Issuer, "subject": principal.Subject, "operation_id": operationID,
+	})
+	if err != nil || !validPrincipal(principal) || !validOperationID(operationID) {
+		return ErrCoordination
+	}
+	defer clearBytes(body)
+	action, path, expected := "abort-template-switch", "/v1/principal-account-coordination/abort-template-switch", "released"
+	if commit {
+		action, path, expected = "commit-template-switch", "/v1/principal-account-coordination/commit-template-switch", "authorized"
+	}
+	return c.coordinationMutation(ctx, path, action, body, expected)
+}
+
+func (c *Client) coordinationMutation(
+	ctx context.Context,
+	path, action string,
+	body []byte,
+	expectedState string,
+) error {
+	status, response, err := c.coordinationRequest(ctx, path, action, body)
+	defer clearBytes(response)
+	if err != nil {
+		return ErrCoordination
+	}
+	if status == http.StatusConflict && brokerReason(response) == "coordination-conflict" {
+		return ErrCoordinationConflict
+	}
+	var result struct {
+		State string `json:"state"`
+		OK    bool   `json:"ok"`
+	}
+	if status != http.StatusOK || decodeStrictJSON(response, &result) != nil || !result.OK || result.State != expectedState {
+		return ErrCoordination
+	}
+	return nil
+}
+
+func (c *Client) coordinationRequest(
+	ctx context.Context,
+	path, action string,
+	body []byte,
+) (int, []byte, error) {
+	if len(c.coordinationKey) < 32 || c.coordinationTTL <= 0 {
+		return 0, nil, ErrCoordination
+	}
+	var lastErr error
+	for range 2 {
+		requestContext, cancel := context.WithTimeout(ctx, c.requestTimeout)
+		assertion, err := c.coordinationAssertion(action, body)
+		if err != nil {
+			cancel()
+			return 0, nil, err
+		}
+		endpoint := *c.baseURL
+		endpoint.Path = path
+		request, err := http.NewRequestWithContext(requestContext, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+		if err == nil {
+			request.Header.Set("Authorization", assertion)
+			request.Header.Set("Content-Type", jsonContentType)
+			request.Header.Set("Accept", jsonContentType)
+			var response *http.Response
+			response, err = c.httpClient.Do(request)
+			request.Header.Del("Authorization")
+			if err == nil {
+				mediaType, parameters, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+				responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, c.maxResponse+1))
+				closeErr := response.Body.Close()
+				cancel()
+				if mediaErr == nil && mediaType == jsonContentType && len(parameters) == 0 &&
+					readErr == nil && closeErr == nil && int64(len(responseBody)) <= c.maxResponse {
+					return response.StatusCode, responseBody, nil
+				}
+				clearBytes(responseBody)
+				err = ErrCoordination
+			}
+		}
+		cancel()
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return 0, nil, lastErr
+}
+
+func (c *Client) coordinationAssertion(action string, body []byte) (string, error) {
+	payload, err := json.Marshal(struct {
+		Audience   string `json:"audience"`
+		BodySHA256 string `json:"body_sha256"`
+		ExpiresAt  int64  `json:"expires_at"`
+		Operation  string `json:"operation"`
+		Version    int    `json:"version"`
+	}{
+		Audience:   coordinationAudience,
+		BodySHA256: fmt.Sprintf("%x", sha256.Sum256(body)),
+		ExpiresAt:  c.now().Add(c.coordinationTTL).Unix(), Operation: action, Version: 1,
+	})
+	if err != nil {
+		return "", ErrCoordination
+	}
+	defer clearBytes(payload)
+	mac := hmac.New(sha256.New, c.coordinationKey)
+	_, _ = mac.Write(payload)
+	signature := mac.Sum(nil)
+	defer clearBytes(signature)
+	return coordinationScheme + " " + base64.RawURLEncoding.EncodeToString(payload) + "." +
+		base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+func validOperationID(value string) bool {
+	return value != "" && len(value) <= 128 && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\x00\r\n")
 }
 
 func (c *Client) request(ctx context.Context, path string, principal Principal) (int, []byte, error) {
