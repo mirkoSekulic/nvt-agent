@@ -536,7 +536,7 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 }
 
 //nolint:gocyclo,cyclop // One fixture proves the complete configured login boundary.
-func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichment(t *testing.T) {
+func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughPaginatedArrayEnrichment(t *testing.T) {
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -554,10 +554,15 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			if _, err := io.WriteString(
-				w,
-				`[{"organization":{"ID":"0192:123456789"},"resource":"approved-resource"}]`,
-			); err != nil {
+			if r.URL.Query().Get("page") == "2" {
+				page := `[{"organization":{"login":"Altinn"},"slug":"allowed-team"}]`
+				if _, err := io.WriteString(w, page); err != nil {
+					t.Error(err)
+				}
+				return
+			}
+			w.Header().Set("Link", `<?page=2>; rel="next"`)
+			if _, err := io.WriteString(w, `[{"organization":{"login":"Elsewhere"},"slug":"other-team"}]`); err != nil {
 				t.Error(err)
 			}
 		default:
@@ -580,13 +585,14 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 		AllowedHosts: []string{providerURL.Hostname()},
 		Sources: []eligibility.ClaimSource{{
 			Endpoint: provider.URL + "/claims", OutputClaim: "memberships", ValuePath: "$",
+			Pagination: &eligibility.PaginationConfig{Mode: "link", MaxPages: 3},
 		}},
 	}
 	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
 		ID: testEligibilityValue, Effect: eligibility.EffectAllow,
 		Where: eligibility.Where{Array: "memberships[]", All: []eligibility.Condition{
-			{ClaimPath: "organization.ID", Values: []string{"0192:123456789"}},
-			{ClaimPath: "resource", Values: []string{"approved-resource"}},
+			{ClaimPath: "organization.login", Values: []string{"Altinn"}},
+			{ClaimPath: "slug", Values: []string{"allowed-team"}},
 		}},
 	}}}
 	if validateErr := cfg.Validate(); validateErr != nil {

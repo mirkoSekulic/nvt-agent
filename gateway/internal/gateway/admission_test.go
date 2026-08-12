@@ -248,6 +248,42 @@ func TestGatewayUsesSharedArrayEligibilityForTopLevelEnrichment(t *testing.T) {
 	}
 }
 
+func TestGatewayAdmissionUsesSharedPaginatedTeamEligibility(t *testing.T) {
+	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[{"organization":{"login":"Altinn"},"slug":"allowed-team"}]`))
+			return
+		}
+		w.Header().Set("Link", `<?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"organization":{"login":"Elsewhere"},"slug":"other-team"}]`))
+	}))
+	t.Cleanup(claimServer.Close)
+	fixture := newOAuth2Fixture(t, "temporary-access-token", `{"id":42,"login":"member"}`)
+	config := oauth2TestConfig(fixture.URL)
+	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
+	config.Auth.ClaimEnrichment.Sources[0].OutputClaim = "teams"
+	config.Auth.ClaimEnrichment.Sources[0].ValuePath = "$"
+	config.Auth.ClaimEnrichment.Sources[0].Pagination = &eligibility.PaginationConfig{Mode: "link", MaxPages: 3}
+	config.Auth.Admission = &AdmissionConfig{Default: authorizationDefaultDeny, Rules: []AdmissionRule{{
+		ID: "team", Effect: authorizationEffectAllow,
+		Where: eligibility.Where{Array: "teams[]", All: []eligibility.Condition{
+			{ClaimPath: "organization.login", Values: []string{"Altinn"}},
+			{ClaimPath: "slug", Values: []string{"allowed-team"}},
+		}},
+	}}}
+	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}
+	server := mustNewServer(t, config, fakeClient(t))
+	server.auth.httpClient = noRedirectClient(claimServer.Client())
+	response := completeOAuth2Login(t, server)
+	if response.Code != http.StatusFound || len(server.auth.sessions) != 1 {
+		t.Fatalf("page-two team admission status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
+	}
+	stored := server.auth.sessions[mustReadSessionID(t, server, cookieNamed(t, response, defaultSessionCookie))]
+	if teams, ok := stored.Principal.Claims["teams"].([]any); !ok || len(teams) != 2 {
+		t.Fatalf("paginated team claims were not combined: %#v", stored.Principal.Claims)
+	}
+}
+
 func TestGatewayDoesNotPersistSensitiveNestedWholeDocumentEnrichment(t *testing.T) {
 	const sensitiveCanary = "other-secret-canary"
 	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

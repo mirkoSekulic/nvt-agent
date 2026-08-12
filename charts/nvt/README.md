@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.62`; otherwise the API server may prune the
+of, upgrading to chart `0.8.63`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.62 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.63 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.62 --namespace nvt --create-namespace
+  --version 0.8.63 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -1127,7 +1127,7 @@ gateway:
       issuer: https://github.com
       authorizationURL: https://github.com/login/oauth/authorize
       tokenURL: https://github.com/login/oauth/access_token
-      scopes: []
+      scopes: [read:org]
       clientAuthMethod: client_secret_post
       identity:
         endpoint: https://api.github.com/user
@@ -1136,17 +1136,27 @@ gateway:
         displayNamePath: login
     claimEnrichment:
       allowedHosts: [api.github.com]
+      limits:
+        maxArrayItems: 256
       sources:
-        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
-          outputClaim: organization_membership
-          valuePath: state
+        - endpoint: https://api.github.com/user/teams
+          outputClaim: teams
+          valuePath: $
+          pagination:
+            mode: link
+            maxPages: 10
     admission:
       default: deny
       rules:
-        - id: allowed-organization
+        - id: allowed-team
           effect: allow
-          claimPath: organization_membership
-          values: [active]
+          where:
+            array: teams[]
+            all:
+              - claimPath: organization.login
+                values: [Altinn]
+              - claimPath: slug
+                values: [allowed-team]
     authorization:
       default: deny
       rules:
@@ -1155,16 +1165,16 @@ gateway:
           owner: true
 ```
 
-This is a generic claim-source example, not GitHub-specific gateway policy.
-Each configured endpoint receives the temporary OAuth bearer token, must use
-HTTPS, and must be on `allowedHosts`; redirects and failures deny login. Only
-the selected non-sensitive value is retained. Required OAuth permissions and
-organization approval belong to provider/client configuration. For the GitHub
-example, the GitHub App needs organization **Members: read**, must be installed
-and approved for the Altinn organization by an organization owner, and must be
-authorized by each user. It needs no repository permissions. Active membership
-returns `state: active`; pending, unaffiliated, blocked, or unapproved access
-fails admission closed.
+This is provider configuration, not GitHub-specific application behavior. The
+GitHub OAuth App requests `read:org`; organization approval and SSO
+authorization may also be required by organization policy. The shared client
+follows only a validated RFC 8288 `rel=next` link on the exact original HTTPS
+origin, effective port, and path. Only its query may vary. The complete source
+operation shares one timeout. Page count, bytes, combined array items, and
+decoded nodes are cumulative; depth, object, and string limits apply to every
+page. Redirects, unsafe or ambiguous links, loops,
+partial results, and limit overflow deny login. Gateway AgentRun authorization
+remains the separate `owner: true` rule shown above.
 
 Claim enrichment runs only during OAuth login. The selected claims are kept in
 the server-side session and are not refreshed on every request; OAuth tokens

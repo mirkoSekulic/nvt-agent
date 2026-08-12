@@ -24,7 +24,7 @@ if grep -Eq 'verbs:.*(get|list|create|delete)' "${PORTAL_ROLE}"; then
 fi
 grep -Fq 'resourceNames:' "${RENDER}"
 grep -Fq -- '- "nvt-portal-seed"' "${RENDER}"
-grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.62"' "${RENDER}"
+grep -Fq 'image: "ghcr.io/mirkosekulic/nvt-credential-portal:0.8.63"' "${RENDER}"
 grep -Fq -- '--credential-portal-url=/agents/credentials' "${RENDER}"
 grep -Fq 'readOnlyRootFilesystem: true' "${RENDER}"
 grep -Fq 'automountServiceAccountToken: false' "${RENDER}"
@@ -38,6 +38,8 @@ grep -Fq '"experimentalCodexDeviceAuth": true' "${RENDER}"
 grep -Fq '"enabled": false' "${RENDER}"
 grep -Fq '"array": "memberships[]"' "${RENDER}"
 grep -Fq '"valuePath": "$"' "${RENDER}"
+grep -Fq '"maxPages": 5' "${RENDER}"
+grep -Fq '"mode": "link"' "${RENDER}"
 grep -Fq '"timeoutSeconds": 5' "${RENDER}"
 grep -Fq '"eligibilityClaimSource": "access_token"' "${RENDER}"
 grep -Fq '"accessTokenAudience": "nvt-eligibility-api"' "${RENDER}"
@@ -305,6 +307,27 @@ if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credentia
   exit 1
 fi
 grep -Fq 'limits.maxArrayItems exceeds safe bounds' "${WORKDIR}/unsafe-eligibility-limit.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.claimEnrichment.sources[0].pagination.mode=cursor >/dev/null 2>"${WORKDIR}/invalid-pagination-mode.txt"; then
+  echo "credential portal rendered unsupported claim pagination" >&2
+  exit 1
+fi
+grep -Fq 'pagination must use link mode with maxPages between 2 and 10' "${WORKDIR}/invalid-pagination-mode.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set credentialPortal.auth.claimEnrichment.sources[0].pagination.maxPages=11 >/dev/null 2>"${WORKDIR}/invalid-pagination-pages.txt"; then
+  echo "credential portal rendered excessive claim pages" >&2
+  exit 1
+fi
+grep -Fq 'pagination must use link mode with maxPages between 2 and 10' "${WORKDIR}/invalid-pagination-pages.txt"
+
+if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
+  --set-string credentialPortal.auth.claimEnrichment.sources[0].valuePath=state >/dev/null 2>"${WORKDIR}/invalid-pagination-path.txt"; then
+  echo "credential portal rendered paginated non-root valuePath" >&2
+  exit 1
+fi
+grep -Fq 'valuePath must be $ when pagination is configured' "${WORKDIR}/invalid-pagination-path.txt"
 
 if helm template nvt "${CHART}" -n nvt -f "${ROOT}/tests/operator/helm/credential-portal-values.yaml" \
   --set-string credentialPortal.auth.claimEnrichment.sources[0].endpoint=https://other.identity.example/v1/memberships >/dev/null 2>"${WORKDIR}/disallowed-eligibility-host.txt"; then

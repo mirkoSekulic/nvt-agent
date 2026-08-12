@@ -80,7 +80,66 @@ claimEnrichment:
       valuePath: $
 ```
 
-The limits shown are the defaults. Administrators may configure smaller values
+A source may opt into bounded RFC 8288 Link pagination:
+
+```yaml
+    - endpoint: https://claims.identity.example/v1/teams
+      outputClaim: teams
+      valuePath: $
+      pagination:
+        mode: link
+        maxPages: 5
+```
+
+Pagination is disabled when the object is absent. Paginated pages must each be
+a top-level JSON array and `valuePath` must be `$`; arrays are combined before
+policy evaluation. Only one unambiguous `rel=next` is accepted. Before the
+bearer is sent, the next URL must retain HTTPS, exact original origin/effective
+port, and exact original path, with no userinfo or fragment; only its query may
+change. Redirects remain rejected. One timeout covers the complete source
+operation. Page count, response bytes, combined array items, and decoded nodes
+are cumulative; the existing depth, object-property, and string bounds apply to
+every page. Loops,
+malformed links, non-array pages, partial results, and all limit overflow fail
+closed. Each response body is closed before the next request; raw pages and the
+OAuth bearer are never logged or retained.
+
+For example, a GitHub OAuth App can use the same contract in either gateway
+admission or credential-portal eligibility:
+
+```yaml
+oauth2:
+  scopes: [read:org]
+claimEnrichment:
+  allowedHosts: [api.github.com]
+  limits:
+    maxArrayItems: 256
+  sources:
+    - endpoint: https://api.github.com/user/teams
+      outputClaim: teams
+      valuePath: $
+      pagination: {mode: link, maxPages: 10}
+eligibility: # use admission at the gateway
+  default: deny
+  rules:
+    - id: allowed-team
+      effect: allow
+      where:
+        array: teams[]
+        all:
+          - claimPath: organization.login
+            values: [Altinn]
+          - claimPath: slug
+            values: [allowed-team]
+```
+
+The application contains no provider branch for this shape. GitHub OAuth App
+organization approval and SSO authorization may still be required by the
+organization's policy. At the gateway, keep AgentRun authorization separate
+with an `owner: true` rule; team eligibility must not broaden resource access.
+
+The limits shown are the defaults. `pagination.maxPages` is explicit and may be
+2 through 10. Administrators may configure smaller values
 or bounded larger values up to the compiled safety ceilings. Hosts, endpoints,
 paths, expected values, predicates, timeout, and response limits are deployment
 configuration; shared code contains no identity-provider-specific decisions.
