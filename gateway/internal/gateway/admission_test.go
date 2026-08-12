@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -248,6 +249,49 @@ func TestGatewayUsesSharedArrayEligibilityForTopLevelEnrichment(t *testing.T) {
 	}
 }
 
+func TestGatewayAdmissionUsesSharedPaginatedTeamEligibility(t *testing.T) {
+	pageOne := githubTeamsFixturePage(t, 30, false)
+	pageTwo := githubTeamsFixturePage(t, 30, true)
+	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write(pageTwo)
+			return
+		}
+		w.Header().Set("Link", `<?page=2>; rel="next"`)
+		_, _ = w.Write(pageOne)
+	}))
+	t.Cleanup(claimServer.Close)
+	fixture := newOAuth2Fixture(t, "temporary-access-token", `{"id":42,"login":"member"}`)
+	config := oauth2TestConfig(fixture.URL)
+	config.Auth.ClaimEnrichment = claimEnrichmentForURL(claimServer.URL)
+	config.Auth.ClaimEnrichment.Sources[0].OutputClaim = "teams"
+	config.Auth.ClaimEnrichment.Sources[0].ValuePath = "$"
+	config.Auth.ClaimEnrichment.Limits = eligibility.ResponseLimits{
+		MaxResponseBytes: 256 * 1024,
+		MaxArrayItems:    60,
+		MaxTotalNodes:    4096,
+	}
+	config.Auth.ClaimEnrichment.Sources[0].Pagination = &eligibility.PaginationConfig{Mode: "link", MaxPages: 2}
+	config.Auth.Admission = &AdmissionConfig{Default: authorizationDefaultDeny, Rules: []AdmissionRule{{
+		ID: "team", Effect: authorizationEffectAllow,
+		Where: eligibility.Where{Array: "teams[]", All: []eligibility.Condition{
+			{ClaimPath: "organization.login", Values: []string{"Altinn"}},
+			{ClaimPath: "slug", Values: []string{"allowed-team"}},
+		}},
+	}}}
+	config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}
+	server := mustNewServer(t, config, fakeClient(t))
+	server.auth.httpClient = noRedirectClient(claimServer.Client())
+	response := completeOAuth2Login(t, server)
+	if response.Code != http.StatusFound || len(server.auth.sessions) != 1 {
+		t.Fatalf("page-two team admission status=%d sessions=%d body=%q", response.Code, len(server.auth.sessions), response.Body.String())
+	}
+	stored := server.auth.sessions[mustReadSessionID(t, server, cookieNamed(t, response, defaultSessionCookie))]
+	if teams, ok := stored.Principal.Claims["teams"].([]any); !ok || len(teams) != 60 {
+		t.Fatalf("paginated team claims were not combined: type=%T count=%d", stored.Principal.Claims["teams"], len(teams))
+	}
+}
+
 func TestGatewayDoesNotPersistSensitiveNestedWholeDocumentEnrichment(t *testing.T) {
 	const sensitiveCanary = "other-secret-canary"
 	claimServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -341,6 +385,28 @@ func claimEnrichmentForURL(endpoint string) ClaimEnrichmentConfig {
 		AllowedHosts: []string{parsed.Hostname()},
 		Sources:      []OAuthClaimSource{{Endpoint: endpoint, OutputClaim: "organization_membership", ValuePath: "state"}},
 	}
+}
+
+func githubTeamsFixturePage(t *testing.T, count int, allowLast bool) []byte {
+	t.Helper()
+	team, err := os.ReadFile("../../../tests/fixtures/oauth/github-team.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := make([]byte, 0, count*(len(team)+1)+2)
+	page = append(page, '[')
+	for index := range count {
+		if index > 0 {
+			page = append(page, ',')
+		}
+		entry := team
+		if allowLast && index == count-1 {
+			entry = bytes.ReplaceAll(entry, []byte(`"slug": "other-team"`), []byte(`"slug": "allowed-team"`))
+			entry = bytes.ReplaceAll(entry, []byte(`"login": "Elsewhere"`), []byte(`"login": "Altinn"`))
+		}
+		page = append(page, entry...)
+	}
+	return append(page, ']')
 }
 
 func noRedirectClient(base *http.Client) *http.Client {

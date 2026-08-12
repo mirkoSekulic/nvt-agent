@@ -286,11 +286,17 @@ collisions, malformed or oversized responses, and timeouts fail login closed.
 Access tokens and raw responses are never stored in sessions or cookies.
 The gateway policy and enrichment implementation are shared with the credential
 portal. Enrichment may select a bounded top-level array with `valuePath: $`, and
+an explicitly paginated source can combine bounded array pages before policy
+evaluation. Pagination is disabled when omitted. It follows only a validated
+RFC 8288 `rel=next` on the exact original HTTPS origin, effective port, and
+path; only the query may vary. One timeout and cumulative response limits cover
+the complete operation. Unsafe links, redirects, loops, partial results, and
+overflow fail closed. The bearer and raw pages are never retained. The
 `where.array/all` requires all conditions on one selected object. The complete
 provider-neutral contract, limits, failure behavior, and compatibility rules are
 documented in [generic OAuth2/OIDC eligibility](../docs/oauth-eligibility.md).
 
-This provider-neutral configuration expresses GitHub organization membership
+This provider-neutral configuration expresses GitHub team membership
 entirely as operator configuration:
 
 ```yaml
@@ -306,7 +312,7 @@ gateway:
       issuer: https://github.com
       authorizationURL: https://github.com/login/oauth/authorize
       tokenURL: https://github.com/login/oauth/access_token
-      scopes: []
+      scopes: [read:org]
       clientAuthMethod: client_secret_post
       identity:
         endpoint: https://api.github.com/user
@@ -316,17 +322,29 @@ gateway:
     claimEnrichment:
       allowedHosts:
         - api.github.com
+      limits:
+        maxResponseBytes: 262144
+        maxArrayItems: 60
+        maxTotalNodes: 4096
       sources:
-        - endpoint: https://api.github.com/user/memberships/orgs/Altinn
-          outputClaim: organization_membership
-          valuePath: state
+        - endpoint: https://api.github.com/user/teams
+          outputClaim: teams
+          valuePath: $
+          pagination:
+            mode: link
+            maxPages: 2
     admission:
       default: deny
       rules:
-        - id: allowed-organization
+        - id: allowed-team
           effect: allow
-          claimPath: organization_membership
-          values: [active]
+          where:
+            array: teams[]
+            all:
+              - claimPath: organization.login
+                values: [Altinn]
+              - claimPath: slug
+                values: [allowed-team]
     authorization:
       default: deny
       rules:
@@ -335,15 +353,21 @@ gateway:
           owner: true
 ```
 
-For this GitHub example, configure the GitHub App with organization
-**Members: read** permission and have an Altinn organization owner install and
-approve the app for that organization. Each user must also authorize the app.
-GitHub then returns `state: active` only for an active member; pending membership
-does not match, while an unaffiliated user or blocked/unapproved app produces a
-failed source request and login is denied. No repository permission is needed.
-Other providers have their own permission/approval requirements. Claim sources
-cannot add arbitrary headers, disable TLS verification, follow redirects, or
-derive their endpoint from a browser request.
+The shown client is a GitHub OAuth App: request `read:org`; it needs no App
+installation, although organization policy and SAML SSO may still affect
+authorization or visibility. A GitHub App is an equally supported alternative:
+set `scopes: []` and have each user authorize it. Its user access token needs no
+repository or organization permission for this endpoint, and authorization
+does not require App installation. Applicable organization policy and SAML SSO
+can still affect authorization or visible teams. The same-array rule requires
+both `organization.login` and `slug` on one team object. The 256 KiB, 60-item,
+4,096-node, two-page limits form one coherent bound for at most two default
+30-item pages of full team responses; more pages or any cumulative overflow
+deny login. The application has no GitHub branch. Other providers use the same
+generic contract with their own configured endpoints, permissions, predicates,
+and bounds. Claim sources cannot add arbitrary headers, disable TLS
+verification, follow redirects, or derive their endpoint from a browser
+request.
 
 Enriched admission claims are a login-time snapshot. They are stored in the
 server-side session and are not re-fetched on each dashboard or AgentRun
@@ -362,12 +386,15 @@ identity endpoint used to obtain one immutable subject; unlike OIDC, OAuth2
 alone does not cryptographically establish an issuer/ID-token identity
 contract. Prefer OIDC when the provider supports it.
 
-For GitHub, create a dedicated GitHub App for human login. Configure its
-callback URL as `https://<gateway-host>/oauth2/callback`; it needs no repository
-permissions, repository scopes, or webhook subscriptions for profile identity
-lookup. A membership claim source does require the organization permission and
-installation/approval described above. Store both credentials in a Kubernetes
-Secret:
+For the GitHub App deployment choice, create a dedicated App for human login.
+Configure its callback URL as `https://<gateway-host>/oauth2/callback`, use
+`scopes: []`, and have each user authorize it. `GET /user/teams` needs no
+repository or organization permission on its user access token, and user
+authorization does not require App installation. No repository scopes or
+webhook subscriptions are needed. The OAuth App alternative uses the same
+callback and client Secret shape and requests `read:org`. Applicable
+organization policy and SAML SSO can still affect either choice's authorization
+or visibility. Store the selected client's credentials in a Kubernetes Secret:
 
 ```sh
 kubectl -n nvt create secret generic nvt-gateway-github \

@@ -80,10 +80,81 @@ claimEnrichment:
       valuePath: $
 ```
 
-The limits shown are the defaults. Administrators may configure smaller values
-or bounded larger values up to the compiled safety ceilings. Hosts, endpoints,
-paths, expected values, predicates, timeout, and response limits are deployment
-configuration; shared code contains no identity-provider-specific decisions.
+A source may opt into bounded RFC 8288 Link pagination:
+
+```yaml
+    - endpoint: https://claims.identity.example/v1/teams
+      outputClaim: teams
+      valuePath: $
+      pagination:
+        mode: link
+        maxPages: 5
+```
+
+Pagination is disabled when the object is absent. Paginated pages must each be
+a top-level JSON array and `valuePath` must be `$`; arrays are combined before
+policy evaluation. Only one unambiguous `rel=next` is accepted. Before the
+bearer is sent, the next URL must retain HTTPS, exact original origin/effective
+port, and exact original path, with no userinfo or fragment; only its query may
+change. Redirects remain rejected. One timeout covers the complete source
+operation. Page count, response bytes, combined array items, and decoded nodes
+are cumulative; the existing depth, object-property, and string bounds apply to
+every page. Loops,
+malformed links, non-array pages, partial results, and all limit overflow fail
+closed. Each response body is closed before the next request; raw pages and the
+OAuth bearer are never logged or retained.
+
+For example, a GitHub OAuth App can use the same contract in either gateway
+admission or credential-portal eligibility:
+
+```yaml
+oauth2:
+  scopes: [read:org]
+claimEnrichment:
+  allowedHosts: [api.github.com]
+  limits:
+    maxResponseBytes: 262144
+    maxArrayItems: 60
+    maxTotalNodes: 4096
+  sources:
+    - endpoint: https://api.github.com/user/teams
+      outputClaim: teams
+      valuePath: $
+      pagination: {mode: link, maxPages: 2}
+eligibility: # use admission at the gateway
+  default: deny
+  rules:
+    - id: allowed-team
+      effect: allow
+      where:
+        array: teams[]
+        all:
+          - claimPath: organization.login
+            values: [Altinn]
+          - claimPath: slug
+            values: [allowed-team]
+```
+
+The shown client is a GitHub OAuth App: request `read:org`; no App installation
+is needed, although organization policy and SAML SSO may still affect
+authorization or visibility. A GitHub App is also supported: set `scopes: []`
+and have each user authorize it. Its user access token needs no repository or
+organization permission for this endpoint, and authorization does not require
+the user or an administrator to install the App. Applicable organization policy
+and SAML SSO can still affect authorization or visible teams. The application
+contains no GitHub branch; these are provider-side client settings for the same
+generic contract. At the gateway, keep AgentRun authorization separate with an
+`owner: true` rule; team eligibility must not broaden resource access.
+
+The first generic example shows the enrichment defaults. The GitHub example
+intentionally overrides three coupled limits: 256 KiB, 60 combined items, 4,096
+decoded nodes, and two pages support at most two default 30-item pages of the
+documented full team shape. A further `rel=next`, or any byte/item/node overflow,
+denies login rather than returning partial membership. `pagination.maxPages`
+may be 2 through 10, but deployments that change it must choose coherent
+byte/item/node bounds within the compiled ceilings. Hosts, paths, expected
+values, predicates, timeouts, and limits remain configuration; shared code
+contains no identity-provider-specific decisions.
 
 ## Compatibility and consumer boundaries
 

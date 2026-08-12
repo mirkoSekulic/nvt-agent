@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -536,7 +538,9 @@ func TestGenericOAuth2UsesPKCEStateAndDefaultDenySlotAdmission(t *testing.T) {
 }
 
 //nolint:gocyclo,cyclop // One fixture proves the complete configured login boundary.
-func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichment(t *testing.T) {
+func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughPaginatedArrayEnrichment(t *testing.T) {
+	pageOne := githubTeamsFixturePage(t, 30, false)
+	pageTwo := githubTeamsFixturePage(t, 30, true)
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -554,10 +558,14 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			if _, err := io.WriteString(
-				w,
-				`[{"organization":{"ID":"0192:123456789"},"resource":"approved-resource"}]`,
-			); err != nil {
+			if r.URL.Query().Get("page") == "2" {
+				if _, err := w.Write(pageTwo); err != nil {
+					t.Error(err)
+				}
+				return
+			}
+			w.Header().Set("Link", `<?page=2>; rel="next"`)
+			if _, err := w.Write(pageOne); err != nil {
 				t.Error(err)
 			}
 		default:
@@ -578,15 +586,21 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 	cfg.Auth.OAuth2.DisplayNamePath = "login"
 	cfg.Auth.ClaimEnrichment = eligibility.EnrichmentConfig{
 		AllowedHosts: []string{providerURL.Hostname()},
+		Limits: eligibility.ResponseLimits{
+			MaxResponseBytes: 256 * 1024,
+			MaxArrayItems:    60,
+			MaxTotalNodes:    4096,
+		},
 		Sources: []eligibility.ClaimSource{{
 			Endpoint: provider.URL + "/claims", OutputClaim: "memberships", ValuePath: "$",
+			Pagination: &eligibility.PaginationConfig{Mode: "link", MaxPages: 2},
 		}},
 	}
 	cfg.Auth.Eligibility = &eligibility.Policy{Default: eligibility.DefaultDeny, Rules: []eligibility.Rule{{
 		ID: testEligibilityValue, Effect: eligibility.EffectAllow,
 		Where: eligibility.Where{Array: "memberships[]", All: []eligibility.Condition{
-			{ClaimPath: "organization.ID", Values: []string{"0192:123456789"}},
-			{ClaimPath: "resource", Values: []string{"approved-resource"}},
+			{ClaimPath: "organization.login", Values: []string{"Altinn"}},
+			{ClaimPath: "slug", Values: []string{"allowed-team"}},
 		}},
 	}}}
 	if validateErr := cfg.Validate(); validateErr != nil {
@@ -630,6 +644,28 @@ func TestConfiguredEligibilityAdmitsUnknownPrincipalThroughBoundedArrayEnrichmen
 	if auth.hasOwnedSlot(principal) {
 		t.Fatal("eligibility incorrectly granted ownership of a configured slot")
 	}
+}
+
+func githubTeamsFixturePage(t *testing.T, count int, allowLast bool) []byte {
+	t.Helper()
+	team, err := os.ReadFile("../../../tests/fixtures/oauth/github-team.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := make([]byte, 0, count*(len(team)+1)+2)
+	page = append(page, '[')
+	for index := range count {
+		if index > 0 {
+			page = append(page, ',')
+		}
+		entry := team
+		if allowLast && index == count-1 {
+			entry = bytes.ReplaceAll(entry, []byte(`"slug": "other-team"`), []byte(`"slug": "allowed-team"`))
+			entry = bytes.ReplaceAll(entry, []byte(`"login": "Elsewhere"`), []byte(`"login": "Altinn"`))
+		}
+		page = append(page, entry...)
+	}
+	return append(page, ']')
 }
 
 func TestCallbackRejectsDuplicateAndCraftedState(t *testing.T) {

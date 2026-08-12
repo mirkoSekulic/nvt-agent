@@ -1,10 +1,15 @@
 package eligibility
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +36,201 @@ func TestEnrichmentPreservesBoundedTopLevelArrayForEligibility(t *testing.T) {
 	}}}}
 	if !Evaluate(policy, claims).Allowed {
 		t.Fatalf("enriched top-level array did not satisfy shared policy: %#v", claims)
+	}
+}
+
+func TestLinkPaginationCombinesArraysBeforeEligibilityEvaluation(t *testing.T) {
+	pageOne := githubTeamsFixturePage(t, 30, false)
+	pageTwo := githubTeamsFixturePage(t, 30, true)
+	if len(pageOne) < 40*1024 {
+		t.Fatalf("full 30-team fixture is not representative: bytes=%d", len(pageOne))
+	}
+	decoder := json.NewDecoder(bytes.NewReader(pageOne))
+	decoder.UseNumber()
+	nodes := 0
+	if _, err := decodeBoundedJSON(decoder, 1, (EnrichmentConfig{}).effectiveLimits(), &nodes); err == nil {
+		t.Fatalf("realistic 30-team page unexpectedly fit the default node limit: nodes=%d", nodes)
+	} else if !strings.Contains(err.Error(), "maximum JSON nodes exceeded") {
+		t.Fatalf("realistic fixture failed for an unexpected reason: %v", err)
+	}
+	const documentedResponseBytes = 256 * 1024
+	if len(pageOne)+len(pageTwo) > documentedResponseBytes {
+		t.Fatalf("fixture exceeds documented cumulative byte bound: bytes=%d", len(pageOne)+len(pageTwo))
+	}
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer transient-token" {
+			t.Error("temporary bearer was not sent")
+		}
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write(pageTwo)
+			return
+		}
+		w.Header().Set("Link", `<?page=2>; rel="next", <?page=2>; rel="last"`)
+		_, _ = w.Write(pageOne)
+	}))
+	t.Cleanup(server.Close)
+	config := enrichmentForServer(t, server, "$")
+	config.Sources[0].Endpoint = server.URL + "/user/teams"
+	config.Limits = ResponseLimits{
+		MaxResponseBytes: documentedResponseBytes,
+		MaxArrayItems:    60,
+		MaxTotalNodes:    hardMaxTotalNodes,
+	}
+	config.Sources[0].Pagination = &PaginationConfig{Mode: "link", MaxPages: 2}
+	claims, err := Enrich(
+		t.Context(), config, "transient-token", nil,
+		EnrichOptions{Client: noRedirect(server.Client())},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := Policy{Rules: []Rule{{ID: "team", Effect: EffectAllow, Where: Where{
+		Array: "memberships[]", All: []Condition{
+			{ClaimPath: "organization.login", Values: []string{"Altinn"}},
+			{ClaimPath: "slug", Values: []string{"allowed-team"}},
+		},
+	}}}}
+	teams, ok := claims["memberships"].([]any)
+	allowed := Evaluate(policy, claims).Allowed
+	if requests != 2 || !ok || len(teams) != 60 || !allowed {
+		t.Fatalf("page-two team was not admitted: requests=%d teams=%d allowed=%t", requests, len(teams), allowed)
+	}
+}
+
+func TestPaginationOmittedPreservesSingleRequestCompatibility(t *testing.T) {
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Link", `<?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`{"state":"active"}`))
+	}))
+	t.Cleanup(server.Close)
+	config := enrichmentForServer(t, server, "state")
+	claims, err := Enrich(t.Context(), config, "token", nil, EnrichOptions{Client: noRedirect(server.Client())})
+	if err != nil || claims["memberships"] != "active" || requests != 1 {
+		t.Fatalf("unpaginated compatibility changed: requests=%d claims=%#v err=%v", requests, claims, err)
+	}
+}
+
+func TestLinkPaginationRejectsUnsafeOrPartialResults(t *testing.T) {
+	otherRequests := 0
+	other := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { otherRequests++ }))
+	t.Cleanup(other.Close)
+	tests := []struct {
+		name      string
+		first     string
+		second    string
+		linkOne   string
+		linkTwo   string
+		statusTwo int
+		pages     int
+		limits    ResponseLimits
+	}{
+		{name: "cross origin", first: `[]`, linkOne: `<` + other.URL + `/user/teams?page=2>; rel="next"`, pages: 3},
+		{name: "http", first: `[]`, linkOne: `<http://example.test/user/teams?page=2>; rel="next"`, pages: 3},
+		{name: "fragment", first: `[]`, linkOne: `<?page=2#section>; rel="next"`, pages: 3},
+		{name: "empty fragment", first: `[]`, linkOne: `<?page=2#>; rel="next"`, pages: 3},
+		{name: "changed path", first: `[]`, linkOne: `</other?page=2>; rel="next"`, pages: 3},
+		{name: "redirect", first: `[]`, second: `[]`, linkOne: `<?page=2>; rel="next"`, statusTwo: http.StatusFound, pages: 3},
+		{name: "loop", first: `[]`, second: `[]`, linkOne: `<?page=2>; rel="next"`, linkTwo: `<?page=2>; rel="next"`, pages: 3},
+		{name: "excess pages", first: `[]`, second: `[]`, linkOne: `<?page=2>; rel="next"`, linkTwo: `<?page=3>; rel="next"`, pages: 2},
+		{name: "excess items", first: `[1]`, second: `[2]`, linkOne: `<?page=2>; rel="next"`, pages: 3, limits: ResponseLimits{MaxArrayItems: 1}},
+		{name: "excess bytes", first: `[1]`, second: `[2]`, linkOne: `<?page=2>; rel="next"`, pages: 3, limits: ResponseLimits{MaxResponseBytes: 5}},
+		{name: "excess nodes", first: `[1]`, second: `[2]`, linkOne: `<?page=2>; rel="next"`, pages: 3, limits: ResponseLimits{MaxTotalNodes: 3}},
+		{name: "malformed link", first: `[]`, linkOne: `</user/teams?page=2; rel="next"`, pages: 3},
+		{name: "ambiguous next", first: `[]`, linkOne: `<?page=2>; rel="next", <?page=3>; rel="next"`, pages: 3},
+		{name: "duplicate next relation", first: `[]`, linkOne: `<?page=2>; rel="next next"`, pages: 3},
+		{name: "oversized link", first: `[]`, linkOne: `<` + strings.Repeat("x", maxPaginationLinkBytes) + `>; rel="next"`, pages: 3},
+		{name: "non-array", first: `[]`, second: `{"items":[]}`, linkOne: `<?page=2>; rel="next"`, pages: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("page") == "2" {
+					if test.linkTwo != "" {
+						w.Header().Set("Link", test.linkTwo)
+					}
+					if test.statusTwo != 0 {
+						w.Header().Set("Location", "/user/teams?redirected=1")
+						w.WriteHeader(test.statusTwo)
+					}
+					_, _ = w.Write([]byte(test.second))
+					return
+				}
+				if test.linkOne != "" {
+					w.Header().Set("Link", test.linkOne)
+				}
+				_, _ = w.Write([]byte(test.first))
+			}))
+			defer server.Close()
+			config := enrichmentForServer(t, server, "$")
+			config.Sources[0].Endpoint = server.URL + "/user/teams"
+			config.Sources[0].Pagination = &PaginationConfig{Mode: "link", MaxPages: test.pages}
+			config.Limits = test.limits
+			if _, err := Enrich(
+				t.Context(), config, "token", nil, EnrichOptions{Client: noRedirect(server.Client())},
+			); err == nil {
+				t.Fatal("unsafe or partial pagination succeeded")
+			}
+		})
+	}
+	if otherRequests != 0 {
+		t.Fatalf("bearer was sent to a cross-origin next link: requests=%d", otherRequests)
+	}
+}
+
+func TestNextLinkRejectsUserinfoOnOtherwiseMatchingOrigin(t *testing.T) {
+	original, err := url.Parse("https://api.example.test/user/teams")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nextLink(
+		[]string{`<https://user:password@api.example.test/user/teams?page=2>; rel="next"`},
+		original,
+		original,
+	); err == nil {
+		t.Fatal("userinfo-bearing next link was accepted")
+	}
+}
+
+func TestLinkPaginationClosesEachBodyBeforeRequestingNextPage(t *testing.T) {
+	client := &closeOrderedClient{}
+	config := EnrichmentConfig{
+		AllowedHosts: []string{"api.example.test"},
+		Sources: []ClaimSource{{
+			Endpoint: "https://api.example.test/user/teams", OutputClaim: "teams", ValuePath: "$",
+			Pagination: &PaginationConfig{Mode: "link", MaxPages: 2},
+		}},
+	}
+	claims, err := Enrich(t.Context(), config, "token", nil, EnrichOptions{Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.requests != 2 || !client.firstClosed || len(claims["teams"].([]any)) != 0 {
+		t.Fatalf("page bodies were not closed in order: requests=%d firstClosed=%t", client.requests, client.firstClosed)
+	}
+}
+
+func TestLinkPaginationUsesOneTimeoutForAllPages(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(40 * time.Millisecond)
+		if r.URL.Query().Get("page") == "" {
+			w.Header().Set("Link", `<?page=2>; rel="next"`)
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(server.Close)
+	config := enrichmentForServer(t, server, "$")
+	config.Sources[0].Endpoint = server.URL + "/user/teams"
+	config.Sources[0].Pagination = &PaginationConfig{Mode: "link", MaxPages: 3}
+	_, err := Enrich(
+		context.Background(), config, "token", nil,
+		EnrichOptions{Client: noRedirect(server.Client()), TimeoutOverride: 60 * time.Millisecond},
+	)
+	if err == nil {
+		t.Fatal("per-page timeout reset accepted a source exceeding its total deadline")
 	}
 }
 
@@ -183,6 +383,24 @@ func TestEnrichmentValidationRejectsDisallowedHostAndUnsafeLimits(t *testing.T) 
 	if err := invalid.Validate("auth.claimEnrichment"); err == nil {
 		t.Fatal("value path with too many segments accepted")
 	}
+	for _, pagination := range []*PaginationConfig{
+		{Mode: "", MaxPages: 2}, {Mode: "link", MaxPages: 1},
+		{Mode: "link", MaxPages: hardMaxPaginationPages + 1}, {Mode: "cursor", MaxPages: 2},
+	} {
+		invalid = valid
+		invalid.Sources = append([]ClaimSource(nil), valid.Sources...)
+		invalid.Sources[0].Pagination = pagination
+		if err := invalid.Validate("auth.claimEnrichment"); err == nil {
+			t.Fatalf("invalid pagination accepted: %#v", pagination)
+		}
+	}
+	invalid = valid
+	invalid.Sources = append([]ClaimSource(nil), valid.Sources...)
+	invalid.Sources[0].Pagination = &PaginationConfig{Mode: "link", MaxPages: 2}
+	invalid.Sources[0].ValuePath = "state"
+	if err := invalid.Validate("auth.claimEnrichment"); err == nil {
+		t.Fatal("paginated non-root valuePath accepted")
+	}
 }
 
 func enrichmentForServer(t *testing.T, server *httptest.Server, valuePath string) EnrichmentConfig {
@@ -200,4 +418,57 @@ func noRedirect(base *http.Client) *http.Client {
 	return &http.Client{Transport: base.Transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
+}
+
+func githubTeamsFixturePage(t *testing.T, count int, allowLast bool) []byte {
+	t.Helper()
+	team, err := os.ReadFile("../../tests/fixtures/oauth/github-team.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := make([]byte, 0, count*(len(team)+1)+2)
+	page = append(page, '[')
+	for index := range count {
+		if index > 0 {
+			page = append(page, ',')
+		}
+		entry := team
+		if allowLast && index == count-1 {
+			entry = bytes.ReplaceAll(entry, []byte(`"slug": "other-team"`), []byte(`"slug": "allowed-team"`))
+			entry = bytes.ReplaceAll(entry, []byte(`"login": "Elsewhere"`), []byte(`"login": "Altinn"`))
+		}
+		page = append(page, entry...)
+	}
+	return append(page, ']')
+}
+
+type closeOrderedClient struct {
+	requests    int
+	firstClosed bool
+}
+
+func (c *closeOrderedClient) Do(request *http.Request) (*http.Response, error) {
+	c.requests++
+	if c.requests == 2 && !c.firstClosed {
+		return nil, errors.New("second request began before first body closed")
+	}
+	header := make(http.Header)
+	if c.requests == 1 {
+		header.Set("Link", `<?page=2>; rel="next"`)
+	}
+	body := io.NopCloser(strings.NewReader(`[]`))
+	if c.requests == 1 {
+		body = &trackingReadCloser{Reader: strings.NewReader(`[]`), onClose: func() { c.firstClosed = true }}
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: header, Body: body, Request: request}, nil
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	onClose func()
+}
+
+func (c *trackingReadCloser) Close() error {
+	c.onClose()
+	return nil
 }

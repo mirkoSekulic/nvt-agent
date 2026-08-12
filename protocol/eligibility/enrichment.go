@@ -31,6 +31,9 @@ const (
 	hardMaxObjectProperties = 256
 	hardMaxTotalNodes       = 4096
 	hardMaxStringBytes      = 8192
+	hardMaxPaginationPages  = 10
+	maxPaginationLinkBytes  = 16 * 1024
+	maxPaginationURLBytes   = 8 * 1024
 	maxSources              = 8
 	maxAllowedHosts         = 32
 )
@@ -50,9 +53,15 @@ type EnrichmentConfig struct {
 }
 
 type ClaimSource struct {
-	Endpoint    string `json:"endpoint"`
-	OutputClaim string `json:"outputClaim"`
-	ValuePath   string `json:"valuePath"`
+	Endpoint    string            `json:"endpoint"`
+	OutputClaim string            `json:"outputClaim"`
+	ValuePath   string            `json:"valuePath"`
+	Pagination  *PaginationConfig `json:"pagination,omitempty"`
+}
+
+type PaginationConfig struct {
+	Mode     string `json:"mode"`
+	MaxPages int    `json:"maxPages"`
 }
 
 type ResponseLimits struct {
@@ -158,6 +167,15 @@ func (c EnrichmentConfig) Validate(prefix string) error {
 		if source.ValuePath != "$" && !validClaimPath(source.ValuePath) || sensitiveEnrichmentPath(source.ValuePath) {
 			return fmt.Errorf("%s.sources[%d].valuePath must be $ or a safe non-sensitive JSON path", prefix, index)
 		}
+		if source.Pagination != nil {
+			if source.Pagination.Mode != "link" || source.Pagination.MaxPages < 2 ||
+				source.Pagination.MaxPages > hardMaxPaginationPages {
+				return fmt.Errorf("%s.sources[%d].pagination must use link mode with maxPages between 2 and %d", prefix, index, hardMaxPaginationPages)
+			}
+			if source.ValuePath != "$" {
+				return fmt.Errorf("%s.sources[%d].valuePath must be $ when pagination is configured", prefix, index)
+			}
+		}
 	}
 	if len(c.Sources) > 0 && len(allowed) == 0 {
 		return fmt.Errorf("%s.allowedHosts is required when sources are configured", prefix)
@@ -230,6 +248,13 @@ func Enrich(ctx context.Context, config EnrichmentConfig, accessToken string, cl
 }
 
 func fetchClaim(ctx context.Context, config EnrichmentConfig, source ClaimSource, accessToken string, options EnrichOptions) (any, error) {
+	if source.Pagination != nil {
+		if source.Pagination.Mode != "link" || source.Pagination.MaxPages < 2 ||
+			source.Pagination.MaxPages > hardMaxPaginationPages || source.ValuePath != "$" {
+			return nil, errors.New("OAuth claim source pagination configuration is invalid")
+		}
+		return fetchPaginatedClaim(ctx, config, source, accessToken, options)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.Endpoint, nil)
 	if err != nil {
 		return nil, errors.New("build OAuth claim source request")
@@ -276,6 +301,339 @@ func fetchClaim(ctx context.Context, config EnrichmentConfig, source ClaimSource
 		return nil, errors.New("OAuth claim source value is invalid")
 	}
 	return selected[0], nil
+}
+
+func fetchPaginatedClaim(
+	ctx context.Context,
+	config EnrichmentConfig,
+	source ClaimSource,
+	accessToken string,
+	options EnrichOptions,
+) (any, error) {
+	original, err := url.Parse(source.Endpoint)
+	if err != nil {
+		return nil, errors.New("build OAuth claim source request")
+	}
+	current := original
+	visited := map[string]struct{}{current.String(): {}}
+	combined := make([]any, 0)
+	limits := config.effectiveLimits()
+	remainingBytes := limits.MaxResponseBytes
+	nodes := 0
+
+	for page := 1; page <= source.Pagination.MaxPages; page++ {
+		document, links, bytesRead, fetchErr := fetchPaginatedPage(
+			ctx, current, accessToken, options, limits, remainingBytes, &nodes,
+		)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		remainingBytes -= bytesRead
+		items, ok := document.([]any)
+		if !ok {
+			return nil, errors.New("OAuth claim source paginated response must be an array")
+		}
+		if containsSensitiveData(items) || containsToken(items, accessToken) {
+			return nil, errors.New("OAuth claim source value is invalid")
+		}
+		if len(items) > limits.MaxArrayItems-len(combined) {
+			return nil, errors.New("OAuth claim source paginated response exceeds array limit")
+		}
+		combined = append(combined, items...)
+
+		next, nextErr := nextLink(links, current, original)
+		if nextErr != nil {
+			return nil, errors.New("OAuth claim source pagination link is invalid")
+		}
+		if ctx.Err() != nil {
+			return nil, errors.New("request OAuth claim source")
+		}
+		if next == nil {
+			return combined, nil
+		}
+		if page == source.Pagination.MaxPages {
+			return nil, errors.New("OAuth claim source pagination exceeds page limit")
+		}
+		canonical := next.String()
+		if _, exists := visited[canonical]; exists {
+			return nil, errors.New("OAuth claim source pagination loop")
+		}
+		visited[canonical] = struct{}{}
+		current = next
+	}
+	return nil, errors.New("OAuth claim source pagination exceeds page limit")
+}
+
+func fetchPaginatedPage(
+	ctx context.Context,
+	endpoint *url.URL,
+	accessToken string,
+	options EnrichOptions,
+	limits ResponseLimits,
+	remainingBytes int64,
+	nodes *int,
+) (any, []string, int64, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, nil, 0, errors.New("build OAuth claim source request")
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	if options.UserAgent != "" {
+		request.Header.Set("User-Agent", options.UserAgent)
+	}
+	response, err := options.Client.Do(request)
+	request.Header.Del("Authorization")
+	if err != nil {
+		return nil, nil, 0, errors.New("request OAuth claim source")
+	}
+	if response == nil || response.Body == nil {
+		return nil, nil, 0, errors.New("read OAuth claim source response")
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, remainingBytes+1))
+	closeErr := response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		clear(body)
+		return nil, nil, 0, errors.New("OAuth claim source rejected request")
+	}
+	if response.Request != nil && response.Request.URL.String() != endpoint.String() {
+		clear(body)
+		return nil, nil, 0, errors.New("OAuth claim source redirected request")
+	}
+	if readErr != nil || closeErr != nil || int64(len(body)) > remainingBytes {
+		clear(body)
+		return nil, nil, 0, errors.New("read OAuth claim source response")
+	}
+	bytesRead := int64(len(body))
+	defer clear(body)
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	document, err := decodeBoundedJSON(decoder, 1, limits, nodes)
+	if err != nil {
+		return nil, nil, 0, errors.New("decode OAuth claim source response")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, nil, 0, errors.New("decode OAuth claim source response")
+	}
+	if ctx.Err() != nil {
+		return nil, nil, 0, errors.New("request OAuth claim source")
+	}
+	return document, response.Header.Values("Link"), bytesRead, nil
+}
+
+func nextLink(headers []string, current, original *url.URL) (*url.URL, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	var next *url.URL
+	headerBytes := 0
+	for _, header := range headers {
+		if len(header) > maxPaginationLinkBytes-headerBytes {
+			return nil, errors.New("link header exceeds limit")
+		}
+		headerBytes += len(header)
+		values, err := splitLinkHeader(header)
+		if err != nil {
+			return nil, err
+		}
+		for _, value := range values {
+			target, relations, parseErr := parseLinkValue(value)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			nextRelations := 0
+			for _, relation := range relations {
+				if strings.EqualFold(relation, "next") {
+					nextRelations++
+				}
+			}
+			if nextRelations == 0 {
+				continue
+			}
+			if nextRelations != 1 || next != nil {
+				return nil, errors.New("ambiguous next link")
+			}
+			if strings.Contains(target, "#") {
+				return nil, errors.New("unsafe next link")
+			}
+			reference, err := url.Parse(target)
+			if err != nil {
+				return nil, err
+			}
+			candidate := current.ResolveReference(reference)
+			if len(candidate.String()) > maxPaginationURLBytes || !safePaginationURL(candidate, original) {
+				return nil, errors.New("unsafe next link")
+			}
+			next = candidate
+		}
+	}
+	return next, nil
+}
+
+func safePaginationURL(candidate, original *url.URL) bool {
+	return candidate != nil && candidate.Scheme == "https" && candidate.Opaque == "" &&
+		candidate.User == nil && candidate.Fragment == "" &&
+		strings.EqualFold(candidate.Hostname(), original.Hostname()) &&
+		effectiveHTTPSPort(candidate) == effectiveHTTPSPort(original) &&
+		candidate.EscapedPath() == original.EscapedPath()
+}
+
+func effectiveHTTPSPort(value *url.URL) string {
+	if value.Port() != "" {
+		return value.Port()
+	}
+	return "443"
+}
+
+func splitLinkHeader(header string) ([]string, error) {
+	var values []string
+	start, angleDepth := 0, 0
+	quoted, escaped := false, false
+	for index, character := range header {
+		switch {
+		case escaped:
+			escaped = false
+		case quoted && character == '\\':
+			escaped = true
+		case character == '"':
+			quoted = !quoted
+		case !quoted && character == '<':
+			if angleDepth != 0 {
+				return nil, errors.New("nested link target")
+			}
+			angleDepth = 1
+		case !quoted && character == '>':
+			if angleDepth != 1 {
+				return nil, errors.New("unexpected link target end")
+			}
+			angleDepth = 0
+		case !quoted && angleDepth == 0 && character == ',':
+			value := strings.TrimSpace(header[start:index])
+			if value == "" {
+				return nil, errors.New("empty link value")
+			}
+			values = append(values, value)
+			start = index + 1
+		}
+	}
+	if quoted || escaped || angleDepth != 0 {
+		return nil, errors.New("unterminated link value")
+	}
+	value := strings.TrimSpace(header[start:])
+	if value == "" {
+		return nil, errors.New("empty link value")
+	}
+	return append(values, value), nil
+}
+
+func parseLinkValue(value string) (string, []string, error) {
+	if !strings.HasPrefix(value, "<") {
+		return "", nil, errors.New("missing link target")
+	}
+	end := strings.IndexByte(value, '>')
+	if end < 1 {
+		return "", nil, errors.New("invalid link target")
+	}
+	target := value[1:end]
+	remainder := strings.TrimSpace(value[end+1:])
+	var relations []string
+	relSeen := false
+	for remainder != "" {
+		if remainder[0] != ';' {
+			return "", nil, errors.New("invalid link parameter")
+		}
+		remainder = strings.TrimSpace(remainder[1:])
+		nameEnd := strings.IndexByte(remainder, '=')
+		if nameEnd <= 0 {
+			return "", nil, errors.New("invalid link parameter")
+		}
+		name := strings.TrimSpace(remainder[:nameEnd])
+		if !validLinkToken(name) {
+			return "", nil, errors.New("invalid link parameter name")
+		}
+		remainder = strings.TrimSpace(remainder[nameEnd+1:])
+		parameter, rest, err := consumeLinkParameter(remainder)
+		if err != nil {
+			return "", nil, err
+		}
+		remainder = strings.TrimSpace(rest)
+		if strings.EqualFold(name, "rel") {
+			if relSeen {
+				return "", nil, errors.New("duplicate rel parameter")
+			}
+			relSeen = true
+			relations = strings.Fields(parameter)
+			if len(relations) == 0 {
+				return "", nil, errors.New("empty rel parameter")
+			}
+		}
+	}
+	return target, relations, nil
+}
+
+func consumeLinkParameter(value string) (string, string, error) {
+	if value == "" {
+		return "", "", errors.New("missing link parameter value")
+	}
+	if value[0] != '"' {
+		end := strings.IndexByte(value, ';')
+		if end < 0 {
+			end = len(value)
+		}
+		parameter := strings.TrimSpace(value[:end])
+		if !validLinkParameterToken(parameter) {
+			return "", "", errors.New("invalid link parameter value")
+		}
+		return parameter, value[end:], nil
+	}
+	var result strings.Builder
+	escaped := false
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if escaped {
+			result.WriteByte(character)
+			escaped = false
+			continue
+		}
+		if character == '\\' {
+			escaped = true
+			continue
+		}
+		if character == '"' {
+			return result.String(), value[index+1:], nil
+		}
+		if character < 0x20 || character == 0x7f {
+			return "", "", errors.New("invalid quoted link parameter")
+		}
+		result.WriteByte(character)
+	}
+	return "", "", errors.New("unterminated quoted link parameter")
+}
+
+func validLinkToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", character)) {
+			return false
+		}
+	}
+	return true
+}
+
+func validLinkParameterToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character <= 0x20 || character == 0x7f || strings.ContainsRune("\",;\\", character) {
+			return false
+		}
+	}
+	return true
 }
 
 // sensitiveDataKey rejects secret-bearing or stable personal identifiers at

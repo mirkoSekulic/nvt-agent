@@ -330,6 +330,8 @@ gateway:
       allowedHosts: []
       timeoutSeconds: 0
       limits: {}
+      # Each source may opt into bounded RFC 8288 pagination with:
+      # pagination: {mode: link, maxPages: 5}. Paginated valuePath must be $.
       sources: []
     authorization:
       default: deny
@@ -411,6 +413,8 @@ credentialPortal:
       allowedHosts: []
       timeoutSeconds: 0
       limits: {}
+      # Each source may opt into bounded RFC 8288 pagination with:
+      # pagination: {mode: link, maxPages: 5}. Paginated valuePath must be $.
       sources: []
     session:
       existingSecret: ""

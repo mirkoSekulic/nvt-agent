@@ -98,5 +98,12 @@
 {{- if or (not (kindIs "string" $source.valuePath)) (not (regexMatch `^[A-Za-z_][A-Za-z0-9_-]*(?:\[\])?(?:\.[A-Za-z_][A-Za-z0-9_-]*(?:\[\])?)*$` $source.valuePath)) (gt (len (splitList "." $source.valuePath)) 16) }}{{ fail (printf "%s.sources[%d].valuePath must be $ or a bounded JSON path" $prefix $index) }}{{ end -}}
 {{- include "nvt.rejectSensitiveEnrichmentPath" (dict "path" $source.valuePath "field" (printf "%s.sources[%d].valuePath" $prefix $index)) -}}
 {{- end -}}
+{{- if hasKey $source "pagination" -}}
+{{- if not (kindIs "map" $source.pagination) }}{{ fail (printf "%s.sources[%d].pagination must be an object" $prefix $index) }}{{ end -}}
+{{- range $key, $_ := $source.pagination }}{{ if not (has $key (list "mode" "maxPages")) }}{{ fail (printf "%s.sources[%d].pagination has unknown key %s" $prefix $index $key) }}{{ end }}{{ end -}}
+{{- $pagesNumeric := or (kindIs "float64" $source.pagination.maxPages) (kindIs "int64" $source.pagination.maxPages) -}}
+{{- if or (ne $source.pagination.mode "link") (not $pagesNumeric) (not (regexMatch `^[0-9]+$` (toString $source.pagination.maxPages))) (lt (int $source.pagination.maxPages) 2) (gt (int $source.pagination.maxPages) 10) }}{{ fail (printf "%s.sources[%d].pagination must use link mode with maxPages between 2 and 10" $prefix $index) }}{{ end -}}
+{{- if ne $source.valuePath "$" }}{{ fail (printf "%s.sources[%d].valuePath must be $ when pagination is configured" $prefix $index) }}{{ end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

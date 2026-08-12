@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.62" || "${CHART_APP_VERSION}" != "0.8.62" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.62, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.63" || "${CHART_APP_VERSION}" != "0.8.63" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.63, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.62' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.63' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -397,17 +397,26 @@ helm template nvt "${CHART}" -n custom-ns \
   --set gateway.auth.oauth2.issuer=https://github.com \
   --set gateway.auth.oauth2.authorizationURL=https://github.com/login/oauth/authorize \
   --set gateway.auth.oauth2.tokenURL=https://github.com/login/oauth/access_token \
+  --set-string 'gateway.auth.oauth2.scopes[0]=read:org' \
   --set gateway.auth.oauth2.identity.endpoint=https://api.github.com/user \
   --set gateway.auth.oauth2.identity.allowedHosts[0]=api.github.com \
   --set gateway.auth.claimEnrichment.allowedHosts[0]=api.github.com \
-  --set gateway.auth.claimEnrichment.sources[0].endpoint=https://api.github.com/user/memberships/orgs/Altinn \
-  --set gateway.auth.claimEnrichment.sources[0].outputClaim=organization_membership \
-  --set gateway.auth.claimEnrichment.sources[0].valuePath=state \
+  --set gateway.auth.claimEnrichment.limits.maxResponseBytes=262144 \
+  --set gateway.auth.claimEnrichment.limits.maxArrayItems=60 \
+  --set gateway.auth.claimEnrichment.limits.maxTotalNodes=4096 \
+  --set gateway.auth.claimEnrichment.sources[0].endpoint=https://api.github.com/user/teams \
+  --set gateway.auth.claimEnrichment.sources[0].outputClaim=teams \
+  --set-string 'gateway.auth.claimEnrichment.sources[0].valuePath=$' \
+  --set gateway.auth.claimEnrichment.sources[0].pagination.mode=link \
+  --set gateway.auth.claimEnrichment.sources[0].pagination.maxPages=2 \
   --set gateway.auth.admission.default=deny \
   --set gateway.auth.admission.rules[0].id=allowed-organization \
   --set gateway.auth.admission.rules[0].effect=allow \
-  --set gateway.auth.admission.rules[0].claimPath=organization_membership \
-  --set gateway.auth.admission.rules[0].values[0]=active \
+  --set-string 'gateway.auth.admission.rules[0].where.array=teams[]' \
+  --set gateway.auth.admission.rules[0].where.all[0].claimPath=organization.login \
+  --set gateway.auth.admission.rules[0].where.all[0].values[0]=Altinn \
+  --set gateway.auth.admission.rules[0].where.all[1].claimPath=slug \
+  --set gateway.auth.admission.rules[0].where.all[1].values[0]=allowed-team \
   --set gateway.auth.admission.rules[0].owner=false \
   --set gateway.auth.authorization.rules[0].id=agent-owner \
   --set gateway.auth.authorization.rules[0].effect=allow \
@@ -1763,20 +1772,28 @@ done
 
 grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_SESSION_MAX_AGE_SECONDS' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "3600"'
-grep -Fq '\"claimPath\":\"organization_membership\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"array\":\"teams[]\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"claimPath\":\"organization.login\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"claimPath\":\"slug\"' "${GATEWAY_ADMISSION_RENDER}"
 grep -Fq '\"owner\":false' "${GATEWAY_ADMISSION_RENDER}"
 grep -q 'name: NVT_GATEWAY_CLAIM_ENRICHMENT' "${GATEWAY_ADMISSION_RENDER}"
 grep -A1 'name: NVT_GATEWAY_OAUTH2_ISSUER' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://github.com"'
 grep -A1 'name: NVT_GATEWAY_OAUTH2_IDENTITY_ENDPOINT' "${GATEWAY_ADMISSION_RENDER}" | grep -q 'value: "https://api.github.com/user"'
 grep -Fq '\"allowedHosts\":[\"api.github.com\"]' "${GATEWAY_ADMISSION_RENDER}"
-grep -Fq '\"endpoint\":\"https://api.github.com/user/memberships/orgs/Altinn\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"endpoint\":\"https://api.github.com/user/teams\"' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"maxArrayItems\":60' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"maxResponseBytes\":262144' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"maxTotalNodes\":4096' "${GATEWAY_ADMISSION_RENDER}"
+grep -Fq '\"pagination\":{\"maxPages\":2,\"mode\":\"link\"}' "${GATEWAY_ADMISSION_RENDER}"
+grep -A1 'name: NVT_GATEWAY_OAUTH2_SCOPES' "${GATEWAY_ADMISSION_RENDER}" | grep -Fq 'value: "read:org"'
 grep -Fq '\"owner\":true' "${GATEWAY_ADMISSION_RENDER}"
 grep -q 'name: NVT_GATEWAY_ADMISSION' "${GATEWAY_EMPTY_ADMISSION_RENDER}"
 grep -q 'value: "{}"' "${GATEWAY_EMPTY_ADMISSION_RENDER}"
 
 for invalid_args in \
   '--set gateway.auth.admission.rules[0].id=owner --set gateway.auth.admission.rules[0].effect=allow --set gateway.auth.admission.rules[0].owner=true' \
-  '--set gateway.auth.claimEnrichment.allowedHosts[0]=api.example.com --set gateway.auth.claimEnrichment.sources[0].endpoint=http://api.example.com/member --set gateway.auth.claimEnrichment.sources[0].outputClaim=membership --set gateway.auth.claimEnrichment.sources[0].valuePath=state'; do
+  '--set gateway.auth.claimEnrichment.allowedHosts[0]=api.example.com --set gateway.auth.claimEnrichment.sources[0].endpoint=http://api.example.com/member --set gateway.auth.claimEnrichment.sources[0].outputClaim=membership --set gateway.auth.claimEnrichment.sources[0].valuePath=state' \
+  '--set gateway.auth.claimEnrichment.allowedHosts[0]=api.example.com --set gateway.auth.claimEnrichment.sources[0].endpoint=https://api.example.com/member --set gateway.auth.claimEnrichment.sources[0].outputClaim=membership --set-string gateway.auth.claimEnrichment.sources[0].valuePath=$ --set gateway.auth.claimEnrichment.sources[0].pagination.mode=cursor --set gateway.auth.claimEnrichment.sources[0].pagination.maxPages=2'; do
   if helm template nvt "${CHART}" -n custom-ns \
     --set gateway.enabled=true \
     --set gateway.auth.mode=oauth2 \
