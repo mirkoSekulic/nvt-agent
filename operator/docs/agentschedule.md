@@ -372,11 +372,34 @@ Kubernetes producer workload identity, not an end-user identity.
 
 ## Generic admission controls
 
-Both modes enforce suspend, max parallelism, and retained work-ID
-deduplication. The parallelism default is `1`. Admissions are serialized per
-schedule within the active operator process. The operator forces namespace and
-ownership and records work/gateway metadata; `work.repository` is stored in
-`nvt.dev/work-repository` when present.
+Both modes enforce suspend, global max parallelism, and retained work-ID
+deduplication. The global parallelism default is `1`. Profiled schedules may
+also set `principalParallelism.defaultMaxParallelism` to limit active runs
+independently for every exact immutable `issuer` + `subject` pair. Up to 256
+administrator-owned `overrides` may replace that default for exact principals:
+
+```yaml
+maxParallelism: 20
+principalParallelism:
+  defaultMaxParallelism: 2
+  overrides:
+    - issuer: https://identity.example/tenant
+      subject: immutable-user-42
+      maxParallelism: 5
+```
+
+The global value remains the absolute ceiling. Omitting `principalParallelism`
+preserves global-only behavior. Requests must carry a canonical principal when
+the object is configured. Display names, selected profiles, credential
+providers, and producer identities do not affect the capacity key. Duplicate
+override keys are invalid, and terminal runs release both limits.
+
+Admissions are serialized per schedule within the active operator process.
+The chart therefore requires one operator replica and an unconditional
+`Recreate` Deployment strategy. Upgrades may briefly pause admission, but an
+old and new binary cannot overlap and make independent capacity decisions.
+The operator forces namespace and ownership and records work/gateway metadata;
+`work.repository` is stored in `nvt.dev/work-repository` when present.
 
 Responses use `201` for creation, `202` for suspended/duplicate work, `429` for
 capacity, `401` for failed profiled authentication, `403` for unauthorized

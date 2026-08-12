@@ -1,4 +1,10 @@
 agentSchedule:
+  principalParallelism:
+    defaultMaxParallelism: 2
+    overrides:
+      - issuer: https://github.com
+        subject: "23359247"
+        maxParallelism: 4
   executionClasses:
     - name: vm-standard
       kind: vm

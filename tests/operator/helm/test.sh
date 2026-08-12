@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.63" || "${CHART_APP_VERSION}" != "0.8.63" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.63, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.64" || "${CHART_APP_VERSION}" != "0.8.64" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.64, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.63' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.64' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -824,6 +824,7 @@ require_resource_namespace "${DEFAULT_RENDER}" ServiceAccount nvt-operator custo
 require_resource_namespace "${DEFAULT_RENDER}" Role nvt-operator custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" RoleBinding nvt-operator custom-ns
 require_resource_namespace "${DEFAULT_RENDER}" Service nvt-operator custom-ns
+require_deployment_strategy "${DEFAULT_RENDER}" nvt-operator Recreate
 grep -q 'resources: \["persistentvolumeclaims"\]' "${DEFAULT_RENDER}"
 require_resource_namespace "${DEFAULT_RENDER}" AgentSchedule default custom-ns
 missing_resource "${DEFAULT_RENDER}" Namespace nvt
@@ -946,7 +947,7 @@ accounts = resources("ServiceAccount")
 configmaps = resources("ConfigMap")
 default_operator = next(item for item in default_documents if item.get("kind") == "Deployment" and item["metadata"]["name"] == "nvt-operator")
 assert "securityContext" not in default_operator["spec"]["template"]["spec"]
-assert "strategy" not in default_operator["spec"]
+assert default_operator["spec"]["strategy"] == {"type": "Recreate"}
 assert "nvt.dev/native-egress-rollout-revision" not in default_operator["spec"]["template"].get("metadata", {}).get("annotations", {})
 expected = {"fake-east", "fake-west"}
 driver_names = {f"nvt-execution-driver-{name}" for name in expected}
@@ -1356,6 +1357,13 @@ fi
 grep -q 'operator.image must use the 0.2 repository/tag/pullPolicy map; migrate 0.1 scalar image values before upgrading' "${LEGACY_IMAGE_FAILURE}"
 
 grep -q 'name: default-codex' "${PROFILE_RENDER}"
+grep -q 'principalParallelism:' "${PROFILE_RENDER}"
+grep -q 'defaultMaxParallelism: 2' "${PROFILE_RENDER}"
+grep -A8 'principalParallelism:' "${PROFILE_RENDER}" | grep -q 'maxParallelism: 4'
+if grep -q 'principalParallelism:' "${SCHEDULE_LEGACY_RENDER}"; then
+  echo "default schedule unexpectedly enabled per-principal capacity" >&2
+  exit 1
+fi
 grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'name: vm-standard'
 grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'driver: example-vm'
 grep -A10 'executionClasses:' "${PROFILE_RENDER}" | grep -q 'isolation: required'

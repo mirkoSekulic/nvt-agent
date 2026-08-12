@@ -83,10 +83,10 @@ metadata:
     {{- include "nvt.operatorLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.operator.replicas }}
-  {{- if .Values.nativeEgressRelay.enabled }}
+  # Schedule admission locking is process-local. Recreate prevents old and
+  # new operator binaries from admitting concurrently during an upgrade.
   strategy:
     type: Recreate
-  {{- end }}
   selector:
     matchLabels:
       {{- include "nvt.operatorSelectorLabels" . | nindent 6 }}

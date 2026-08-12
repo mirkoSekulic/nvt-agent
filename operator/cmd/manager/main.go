@@ -191,7 +191,9 @@ func operatorHTTPHandler(mgr manager.Manager, accounts principalaccounts.Resolve
 	mux.Handle("/v1/agentruns/", controller.NewAgentRunCallbackHandler(mgr.GetClient()))
 	mux.Handle(
 		"/v1/schedules/",
-		controller.NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(mgr.GetClient(), mgr.GetScheme(), accounts),
+		controller.NewAgentScheduleAdmissionHandlerWithPrincipalAccounts(
+			mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme(), accounts,
+		),
 	)
 	if coordinator, ok := accounts.(interface {
 		principalaccounts.Coordinator

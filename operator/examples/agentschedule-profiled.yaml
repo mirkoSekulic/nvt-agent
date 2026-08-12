@@ -5,6 +5,12 @@ metadata:
   namespace: nvt
 spec:
   maxParallelism: 5
+  principalParallelism:
+    defaultMaxParallelism: 2
+    overrides:
+      - issuer: https://github.com
+        subject: "23359247"
+        maxParallelism: 4
   template:
     image: nvt-agent-runtime:latest
     runtimeClassName: kata-vm-isolation

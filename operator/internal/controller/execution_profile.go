@@ -443,8 +443,7 @@ func producerAllowsDynamicPrincipal(
 	principal *nvtv1alpha1.AgentRunPrincipal,
 ) bool {
 	if !ScheduleUsesPrincipalCredentials(schedule) || principal == nil ||
-		!canonicalPrincipalIssuer(principal.Issuer) || principal.Subject == "" || len(principal.Subject) > 512 ||
-		strings.TrimSpace(principal.Subject) != principal.Subject || strings.ContainsAny(principal.Subject, "\x00\r\n") {
+		!canonicalPrincipalIssuer(principal.Issuer) || !validPrincipalSubject(principal.Subject) {
 		return false
 	}
 	for _, policy := range schedule.Spec.ProducerPolicies {
@@ -459,6 +458,11 @@ func producerAllowsDynamicPrincipal(
 		return false
 	}
 	return false
+}
+
+func validPrincipalSubject(value string) bool {
+	return value != "" && len(value) <= 512 && strings.TrimSpace(value) == value &&
+		!strings.ContainsAny(value, "\x00\r\n")
 }
 
 func canonicalPrincipalIssuer(value string) bool {

@@ -476,6 +476,9 @@ agentSchedule:
   enabled: true
   name: default
   maxParallelism: 1
+  # Optional active-run limit applied independently to every exact principal
+  # issuer+subject pair, with bounded administrator-owned exceptions.
+  principalParallelism: {}
   suspend: false
   # Empty profile fields preserve the legacy full-AgentRun admission contract.
   # See operator/docs/agentschedule.md for a complete profiled example.

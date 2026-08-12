@@ -53,6 +53,10 @@ metadata:
     {{- include "nvt.labels" . | nindent 4 }}
 spec:
   maxParallelism: {{ .Values.agentSchedule.maxParallelism }}
+  {{- with .Values.agentSchedule.principalParallelism }}
+  principalParallelism:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   suspend: {{ .Values.agentSchedule.suspend }}
   {{- with .Values.agentSchedule.template }}
   {{- $template := deepCopy . }}
