@@ -136,14 +136,15 @@ eligibility: # use admission at the gateway
 ```
 
 The shown client is a GitHub OAuth App: request `read:org`; no App installation
-is needed, although organization approval and SSO authorization may still be
-required by policy. A GitHub App is also supported: set `scopes: []`, grant the
-App organization **Members: read**, install and approve it once in Altinn, and
-have each user authorize it. Neither choice needs repository permission for
-this check. The application contains no GitHub branch; these are provider-side
-client settings for the same generic contract. At the gateway, keep AgentRun
-authorization separate with an `owner: true` rule; team eligibility must not
-broaden resource access.
+is needed, although organization policy and SAML SSO may still affect
+authorization or visibility. A GitHub App is also supported: set `scopes: []`
+and have each user authorize it. Its user access token needs no repository or
+organization permission for this endpoint, and authorization does not require
+the user or an administrator to install the App. Applicable organization policy
+and SAML SSO can still affect authorization or visible teams. The application
+contains no GitHub branch; these are provider-side client settings for the same
+generic contract. At the gateway, keep AgentRun authorization separate with an
+`owner: true` rule; team eligibility must not broaden resource access.
 
 The first generic example shows the enrichment defaults. The GitHub example
 intentionally overrides three coupled limits: 256 KiB, 60 combined items, 4,096

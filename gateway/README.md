@@ -354,12 +354,13 @@ gateway:
 ```
 
 The shown client is a GitHub OAuth App: request `read:org`; it needs no App
-installation, although organization approval and SSO authorization may still
-be required by policy. A GitHub App is an equally supported alternative: set
-`scopes: []`, grant organization **Members: read**, install and approve it once
-in Altinn, and have each user authorize it. Neither choice needs repository
-permission for this check. The same-array rule requires both
-`organization.login` and `slug` on one team object. The 256 KiB, 60-item,
+installation, although organization policy and SAML SSO may still affect
+authorization or visibility. A GitHub App is an equally supported alternative:
+set `scopes: []` and have each user authorize it. Its user access token needs no
+repository or organization permission for this endpoint, and authorization
+does not require App installation. Applicable organization policy and SAML SSO
+can still affect authorization or visible teams. The same-array rule requires
+both `organization.login` and `slug` on one team object. The 256 KiB, 60-item,
 4,096-node, two-page limits form one coherent bound for at most two default
 30-item pages of full team responses; more pages or any cumulative overflow
 deny login. The application has no GitHub branch. Other providers use the same
@@ -386,13 +387,14 @@ alone does not cryptographically establish an issuer/ID-token identity
 contract. Prefer OIDC when the provider supports it.
 
 For the GitHub App deployment choice, create a dedicated App for human login.
-Configure its callback URL as `https://<gateway-host>/oauth2/callback`, grant
-organization **Members: read**, install and approve it once in Altinn, and have
-each user authorize it. Use `scopes: []`; it needs no repository permissions,
-repository scopes, or webhook subscriptions. The OAuth App alternative uses
-the same callback and client Secret shape, requests `read:org`, and needs no
-installation, but organization approval and SSO authorization can still be
-required. Store the selected client's credentials in a Kubernetes Secret:
+Configure its callback URL as `https://<gateway-host>/oauth2/callback`, use
+`scopes: []`, and have each user authorize it. `GET /user/teams` needs no
+repository or organization permission on its user access token, and user
+authorization does not require App installation. No repository scopes or
+webhook subscriptions are needed. The OAuth App alternative uses the same
+callback and client Secret shape and requests `read:org`. Applicable
+organization policy and SAML SSO can still affect either choice's authorization
+or visibility. Store the selected client's credentials in a Kubernetes Secret:
 
 ```sh
 kubectl -n nvt create secret generic nvt-gateway-github \

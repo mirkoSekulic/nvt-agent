@@ -1169,13 +1169,14 @@ gateway:
 
 This is provider configuration, not GitHub-specific application behavior. The
 shown GitHub OAuth App requests `read:org` and needs no installation;
-organization approval and SSO authorization may still be required by policy.
-A GitHub App is also supported: use `scopes: []`, grant organization
-**Members: read**, install and approve it once in Altinn, and have each user
-authorize it. Neither choice needs repository permission for this check. The
-256 KiB, 60-item, 4,096-node, two-page settings coherently bound the documented
-full team response to at most two default 30-item pages; further pages or any
-cumulative overflow deny login. The shared client
+organization policy and SAML SSO may still affect authorization or visibility.
+A GitHub App is also supported: use `scopes: []` and have each user authorize
+it. Its user access token needs no repository or organization permission for
+this endpoint, and authorization does not require App installation. Applicable
+organization policy and SAML SSO can still affect authorization or visible
+teams. The 256 KiB, 60-item, 4,096-node, two-page settings coherently bound the
+documented full team response to at most two default 30-item pages; further
+pages or any cumulative overflow deny login. The shared client
 follows only a validated RFC 8288 `rel=next` link on the exact original HTTPS
 origin, effective port, and path. Only its query may vary. The complete source
 operation shares one timeout. Page count, bytes, combined array items, and
@@ -1273,8 +1274,8 @@ gateway:
 
 Register `https://agents.example.com/oauth2/callback` on the selected GitHub
 App or OAuth App. For the identity-only GitHub App values shown, no repository
-permission or OAuth scope is needed; team enrichment uses one of the two
-permission models documented above. Owner matching uses only exact normalized
+permission or OAuth scope is needed; team enrichment uses the client/token
+settings documented above. Owner matching uses only exact normalized
 issuer and immutable subject from `AgentRun.spec.profileProvenance.principal`;
 login/display name and requested-by annotations are ignored. See the [gateway
 README](../../gateway/README.md) for the OAuth2 trust boundary and the exact
