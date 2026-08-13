@@ -16,6 +16,11 @@ import (
 	"time"
 )
 
+const (
+	reactionTestRepoOwner = "acme"
+	reactionTestRepoName  = "widget"
+)
+
 func TestInstallationTokenSourceUsesGitHubAppJWT(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -103,6 +108,83 @@ func TestGitHubAPIClientRejectsUnrepresentableAuthorID(t *testing.T) {
 	client := NewGitHubAPIClient(server.URL, "test-agent", staticTokenSource("token"), server.Client())
 	if _, err := client.ListUpdatedIssueComments(context.Background(), Repository{Owner: "o", Name: "r"}, nil); err == nil {
 		t.Fatal("expected an unrepresentable numeric author ID to fail decoding")
+	}
+}
+
+func TestGitHubAPIClientCreatesIdempotentIssueCommentReaction(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodPost ||
+					request.URL.Path != "/repos/acme/widget/issues/comments/4242/reactions" {
+					t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+				}
+				if request.Header.Get("Authorization") != "Bearer installation-token" ||
+					request.Header.Get("Accept") != "application/vnd.github+json" {
+					t.Fatalf("unexpected headers: %#v", request.Header)
+				}
+				var body struct {
+					Content string `json:"content"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body.Content != "+1" {
+					t.Fatalf("unexpected reaction body %#v: %v", body, err)
+				}
+				response.WriteHeader(status)
+				_, _ = response.Write([]byte(`{"id":7,"content":"+1"}`))
+			}))
+			defer server.Close()
+
+			client := NewGitHubAPIClient(
+				server.URL, "test-agent", staticTokenSource("installation-token"), server.Client(),
+			)
+			if err := client.CreateIssueCommentReaction(
+				context.Background(),
+				Repository{Owner: reactionTestRepoOwner, Name: reactionTestRepoName},
+				4242,
+				"+1",
+			); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestGitHubAPIClientReactionFailuresAreBoundedAndSanitized(t *testing.T) {
+	const responseCanary = "REACTION-RESPONSE-SECRET-NEEDLE"
+	for _, test := range []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{name: "forbidden", status: http.StatusForbidden, body: responseCanary},
+		{name: "not found", status: http.StatusNotFound, body: responseCanary},
+		{name: "unprocessable", status: http.StatusUnprocessableEntity, body: responseCanary},
+		{name: "malformed success", status: http.StatusCreated, body: responseCanary},
+		{name: "wrong reaction", status: http.StatusCreated, body: `{"id":7,"content":"-1"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.WriteHeader(test.status)
+				_, _ = response.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			client := NewGitHubAPIClient(
+				server.URL, "test-agent", staticTokenSource("installation-token"), server.Client(),
+			)
+			err := client.CreateIssueCommentReaction(
+				context.Background(),
+				Repository{Owner: reactionTestRepoOwner, Name: reactionTestRepoName},
+				4242,
+				"+1",
+			)
+			if err == nil {
+				t.Fatal("expected reaction failure")
+			}
+			if strings.Contains(err.Error(), responseCanary) || len(err.Error()) > 80 {
+				t.Fatalf("reaction error was not bounded and sanitized: %q", err)
+			}
+		})
 	}
 }
 

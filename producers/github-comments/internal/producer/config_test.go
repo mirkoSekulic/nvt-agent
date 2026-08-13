@@ -7,6 +7,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+const testAcceptedReactionField = "accepted"
+
 func TestConfigDefaultOperatorCallbackBaseURL(t *testing.T) {
 	cfg := Config{
 		Repositories: []Repository{{Owner: "acme", Name: "widget"}},
@@ -49,6 +51,52 @@ func TestConfigDefaultSubmissionScheduleAdmission(t *testing.T) {
 		cfg.Submission.ScheduleNamespace != "nvt" ||
 		cfg.Submission.ScheduleName != defaultScheduleName || cfg.Submission.Workflow != "" {
 		t.Fatalf("unexpected submission defaults: %#v", cfg.Submission)
+	}
+}
+
+func TestConfigDefaultsSchedulingReactionsEnabled(t *testing.T) {
+	cfg := validTestConfig()
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SchedulingReactions.IsEnabled() || cfg.SchedulingReactions.Accepted != "+1" ||
+		cfg.SchedulingReactions.Rejected != "-1" {
+		t.Fatalf("unexpected scheduling reaction defaults: %#v", cfg.SchedulingReactions)
+	}
+}
+
+func TestConfigAllowsSchedulingReactionsOptOutAndSupportedNames(t *testing.T) {
+	disabled := false
+	for _, reaction := range []string{"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"} {
+		cfg := validTestConfig()
+		cfg.SchedulingReactions = SchedulingReactionsConfig{
+			Enabled:  &disabled,
+			Accepted: reaction,
+			Rejected: reaction,
+		}
+		if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+			t.Fatalf("reaction %q: %v", reaction, err)
+		}
+		if cfg.SchedulingReactions.IsEnabled() {
+			t.Fatalf("reaction %q unexpectedly enabled", reaction)
+		}
+	}
+}
+
+func TestConfigRejectsUnsupportedSchedulingReaction(t *testing.T) {
+	for _, field := range []string{testAcceptedReactionField, "rejected"} {
+		cfg := validTestConfig()
+		cfg.SchedulingReactions.Accepted = "+1"
+		cfg.SchedulingReactions.Rejected = "-1"
+		if field == testAcceptedReactionField {
+			cfg.SchedulingReactions.Accepted = "thumbsup"
+		} else {
+			cfg.SchedulingReactions.Rejected = "thumbsdown"
+		}
+		err := cfg.ApplyDefaultsAndValidate()
+		if err == nil || !strings.Contains(err.Error(), "schedulingReactions."+field) {
+			t.Fatalf("field %s error = %v", field, err)
+		}
 	}
 }
 

@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.64" || "${CHART_APP_VERSION}" != "0.8.64" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.64, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.65" || "${CHART_APP_VERSION}" != "0.8.65" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.65, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.64' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.65' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -65,6 +65,8 @@ NAMESPACE_OVERRIDE_RENDER="${WORKDIR}/namespace-override.yaml"
 NAMESPACE_CREATE_RENDER="${WORKDIR}/namespace-create.yaml"
 REPLICA_FAILURE="${WORKDIR}/replica-failure.txt"
 PRODUCER_RENDER="${WORKDIR}/producer.yaml"
+PRODUCER_REACTIONS_DISABLED_RENDER="${WORKDIR}/producer-reactions-disabled.yaml"
+PRODUCER_REACTIONS_FAILURE="${WORKDIR}/producer-reactions-failure.txt"
 PRODUCER_DIRECT_RENDER="${WORKDIR}/producer-direct.yaml"
 PRODUCER_PROFILED_RENDER="${WORKDIR}/producer-profiled.yaml"
 PRODUCER_PROFILED_EXPIRATION_FAILURE="${WORKDIR}/producer-profiled-expiration-failure.txt"
@@ -464,6 +466,11 @@ helm template nvt "${CHART}" -n custom-ns \
 helm template nvt "${CHART}" --set namespace.name=nvt > "${NAMESPACE_OVERRIDE_RENDER}"
 helm template nvt "${CHART}" --set namespace.create=true --set namespace.name=nvt > "${NAMESPACE_CREATE_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true > "${PRODUCER_RENDER}"
+helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set producer.schedulingReactions.enabled=false \
+  --set-string producer.schedulingReactions.accepted=rocket \
+  --set-string producer.schedulingReactions.rejected=confused \
+  > "${PRODUCER_REACTIONS_DISABLED_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true --set producer.submission.mode=direct > "${PRODUCER_DIRECT_RENDER}"
 helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
   --set producer.submission.admissionMode=profiled \
@@ -2157,6 +2164,28 @@ require_resource_namespace "${PRODUCER_RENDER}" ServiceAccount nvt-github-commen
 require_resource_namespace "${PRODUCER_RENDER}" PersistentVolumeClaim nvt-github-comments-producer-state custom-ns
 grep -q -- '--config=/etc/nvt-github-comments/config.yaml' "${PRODUCER_RENDER}"
 grep -q 'operatorCallbackBaseURL: "http://nvt-operator:8082"' "${PRODUCER_RENDER}"
+grep -q 'enabled: true' "${PRODUCER_RENDER}"
+grep -q 'accepted: "+1"' "${PRODUCER_RENDER}"
+grep -q 'rejected: "-1"' "${PRODUCER_RENDER}"
+grep -q 'enabled: false' "${PRODUCER_REACTIONS_DISABLED_RENDER}"
+grep -q 'accepted: "rocket"' "${PRODUCER_REACTIONS_DISABLED_RENDER}"
+grep -q 'rejected: "confused"' "${PRODUCER_REACTIONS_DISABLED_RENDER}"
+for reaction_field in accepted rejected; do
+  if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+    --set-string "producer.schedulingReactions.${reaction_field}=thumbsup" \
+    > /dev/null 2> "${PRODUCER_REACTIONS_FAILURE}"; then
+    echo "expected unsupported producer scheduling reaction to fail: ${reaction_field}" >&2
+    exit 1
+  fi
+  grep -q "producer.schedulingReactions.${reaction_field} must be a supported GitHub reaction" "${PRODUCER_REACTIONS_FAILURE}"
+done
+if helm template nvt "${CHART}" -n custom-ns --set producer.enabled=true \
+  --set-string producer.schedulingReactions.enabled=true \
+  > /dev/null 2> "${PRODUCER_REACTIONS_FAILURE}"; then
+  echo "expected non-boolean producer scheduling reaction enablement to fail" >&2
+  exit 1
+fi
+grep -q 'producer.schedulingReactions.enabled must be a boolean' "${PRODUCER_REACTIONS_FAILURE}"
 grep -q 'mode: "scheduleAdmission"' "${PRODUCER_RENDER}"
 grep -q 'admissionMode: "legacy"' "${PRODUCER_RENDER}"
 grep -q 'admissionBaseURL: "http://nvt-operator:8082"' "${PRODUCER_RENDER}"

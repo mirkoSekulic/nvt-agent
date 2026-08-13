@@ -460,6 +460,45 @@ func TestSubmitScheduleAdmissionSuspendedIsDeferred(t *testing.T) {
 	}
 }
 
+func TestScheduleAdmissionOutcomeClassification(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		body        string
+		status      int
+		wantOutcome schedulingOutcome
+		wantError   bool
+	}{
+		{name: "created", status: http.StatusCreated, body: `{"scheduled":true}`, wantOutcome: schedulingOutcomeAccepted},
+		{name: "accepted", status: http.StatusAccepted, body: `{"scheduled":true}`, wantOutcome: schedulingOutcomeAccepted},
+		{name: "duplicate", status: http.StatusAccepted, body: `{"scheduled":false,"reason":"duplicate-work"}`, wantOutcome: schedulingOutcomeAccepted},
+		{name: "suspended", status: http.StatusAccepted, body: `{"scheduled":false,"reason":"schedule-suspended"}`, wantOutcome: schedulingOutcomeDeferred, wantError: true},
+		{name: "global capacity", status: http.StatusTooManyRequests, body: `{"scheduled":false,"reason":"max-parallelism-reached"}`, wantOutcome: schedulingOutcomeDeferred, wantError: true},
+		{name: "principal capacity", status: http.StatusTooManyRequests, body: `{"scheduled":false,"reason":"principal-max-parallelism-reached"}`, wantOutcome: schedulingOutcomeDeferred, wantError: true},
+		{name: "definitive rejection", status: http.StatusForbidden, body: `{"scheduled":false,"reason":"principal-not-eligible"}`, wantOutcome: schedulingOutcomeRejected, wantError: true},
+		{name: "rejection with run is uncertain", status: http.StatusForbidden, body: `{"scheduled":false,"reason":"principal-not-eligible","agentRun":{"namespace":"nvt","name":"unexpected"}}`, wantOutcome: schedulingOutcomeUncertain, wantError: true},
+		{name: "malformed", status: http.StatusCreated, body: `{`, wantOutcome: schedulingOutcomeUncertain, wantError: true},
+		{name: "server failure", status: http.StatusInternalServerError, body: `{"scheduled":false,"reason":"response-encode-failed"}`, wantOutcome: schedulingOutcomeUncertain, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			submitter := scheduleAdmissionSubmitterForStatus(t, test.status, test.body)
+			result, err := submitter.submitWithOutcome(
+				context.Background(),
+				Repository{Owner: "acme", Name: "widget"},
+				GitHubIssue{Number: 7, Title: "Broken widget"},
+				nil,
+				GitHubIssueComment{ID: 101, Body: "/nvtagent pr create", User: GitHubUser{Login: "alice"}},
+				Command{Prefix: "/nvtagent"},
+			)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError %v", err, test.wantError)
+			}
+			if result.Outcome != test.wantOutcome {
+				t.Fatalf("outcome = %v, want %v", result.Outcome, test.wantOutcome)
+			}
+		})
+	}
+}
+
 func TestSubmitDefaultIssueScopeBlocksSecondCommandOnSameIssue(t *testing.T) {
 	s := runtime.NewScheme()
 	if err := scheme.AddToScheme(s); err != nil {

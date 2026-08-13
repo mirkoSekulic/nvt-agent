@@ -9,6 +9,13 @@ import (
 	"time"
 )
 
+const schedulingReactionTimeout = 5 * time.Second
+
+type pendingSchedulingReaction struct {
+	commentID int64
+	reaction  string
+}
+
 type Poller struct {
 	Config    Config
 	GitHub    GitHubClient
@@ -72,6 +79,10 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 
 func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	key := repo.Owner + "/" + repo.Name
+	pendingReactions := make([]pendingSchedulingReaction, 0)
+	defer func() {
+		p.postSchedulingReactions(ctx, repo, pendingReactions)
+	}()
 	var since *time.Time
 	storedCursor, foundCursor, err := p.State.GetRepoCursor(ctx, key)
 	if err != nil {
@@ -141,7 +152,10 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		if err != nil {
 			return fmt.Errorf("list issue comments %s#%d: %w", key, issueNumber, err)
 		}
-		created, idempotencyKey, err := p.Submitter.Submit(ctx, repo, issue, issueComments, comment, command)
+		result, err := p.Submitter.submitWithOutcome(ctx, repo, issue, issueComments, comment, command)
+		created := result.Created
+		idempotencyKey := result.IdempotencyKey
+		pendingReactions = p.appendSchedulingReaction(pendingReactions, comment.ID, result.Outcome)
 		if errors.Is(err, ErrSubmissionDeferred) {
 			p.Logger.Info(
 				"deferred pr create comment submission",
@@ -182,4 +196,63 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		return fmt.Errorf("set poll cursor for %s: %w", key, err)
 	}
 	return nil
+}
+
+func (p *Poller) reactionForOutcome(outcome schedulingOutcome) string {
+	if !p.Config.SchedulingReactions.IsEnabled() {
+		return ""
+	}
+	switch outcome {
+	case schedulingOutcomeAccepted:
+		if p.Config.SchedulingReactions.Accepted != "" {
+			return p.Config.SchedulingReactions.Accepted
+		}
+		return defaultAcceptedReaction
+	case schedulingOutcomeRejected:
+		if p.Config.SchedulingReactions.Rejected != "" {
+			return p.Config.SchedulingReactions.Rejected
+		}
+		return defaultRejectedReaction
+	case schedulingOutcomeNone, schedulingOutcomeDeferred, schedulingOutcomeUncertain:
+		return ""
+	}
+	return ""
+}
+
+func (p *Poller) appendSchedulingReaction(
+	pending []pendingSchedulingReaction,
+	commentID int64,
+	outcome schedulingOutcome,
+) []pendingSchedulingReaction {
+	reaction := p.reactionForOutcome(outcome)
+	if reaction == "" {
+		return pending
+	}
+	return append(pending, pendingSchedulingReaction{commentID: commentID, reaction: reaction})
+}
+
+func (p *Poller) postSchedulingReactions(
+	parent context.Context,
+	repo Repository,
+	pending []pendingSchedulingReaction,
+) {
+	if len(pending) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), schedulingReactionTimeout)
+	defer cancel()
+	for _, item := range pending {
+		err := p.GitHub.CreateIssueCommentReaction(ctx, repo, item.commentID, item.reaction)
+		if err != nil {
+			p.Logger.Warn(
+				"failed to add best-effort scheduling reaction",
+				"repo",
+				repo.Owner+"/"+repo.Name,
+				"commentID",
+				item.commentID,
+				"reason",
+				"github-reaction-unavailable",
+			)
+		}
+	}
 }

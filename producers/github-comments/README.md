@@ -27,6 +27,10 @@ allowedAuthors:
   - "*"
 pollInterval: 30s
 operatorCallbackBaseURL: http://nvt-operator:8082
+schedulingReactions:
+  enabled: true
+  accepted: "+1"
+  rejected: "-1"
 submission:
   mode: scheduleAdmission
   admissionMode: legacy
@@ -126,6 +130,25 @@ In `scheduleAdmission` mode, the operator is the final authority for duplicate
 work, suspension, and `maxParallelism`. A duplicate work response is treated as
 an accepted no-op. `max-parallelism-reached` and `schedule-suspended` responses
 are retried on a later poll by leaving the repository cursor unchanged.
+
+By default, the producer adds an accepted reaction (`+1`) to the triggering
+issue comment after the operator confirms `scheduled: true`, or reports the
+idempotent `duplicate-work` result. It adds the configured rejected reaction
+(`-1` by default) only for a bounded, recognized non-retryable operator denial
+that proves no AgentRun was created. Deferred capacity/suspension responses,
+transport failures, timeouts, malformed responses, 5xx responses, invalid
+commands, and unauthorized authors receive no reaction. Set
+`schedulingReactions.enabled: false` to opt out. `accepted` and `rejected` may
+be any GitHub-supported reaction: `+1`, `-1`, `laugh`, `confused`, `heart`,
+`hooray`, `rocket`, or `eyes`.
+
+Reaction posting uses GitHub's create-reaction-on-issue-comment endpoint and
+requires the GitHub App to have **Issues: write** permission. HTTP 200 (the
+reaction already exists) and 201 (created) are both successes. Reaction calls
+are bounded and strictly best-effort: permission, API, timeout, network, or
+response errors produce only a sanitized warning after scheduling and cursor
+behavior have already been decided. Direct submission does not produce an
+operator scheduling outcome and therefore does not add these reactions.
 
 `submission.admissionMode` is an explicit migration boundary:
 
