@@ -1,0 +1,26 @@
+{
+  "name": "nvt-agent-terminal",
+  "displayName": "NVT Agent Terminal",
+  "description": "Opens the NVT-managed agent session in one dedicated terminal.",
+  "publisher": "nvt",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "The extension reads only an NVT-owned state marker and starts the fixed nvt-session-attach executable."
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js"
+}

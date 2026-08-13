@@ -54,6 +54,10 @@ COPY assets/branding/nvt-agent-mark-512.png /usr/local/share/nvt-agent/branding/
 RUN /bin/sh /tmp/install-code-server-branding /usr/local/share/nvt-agent/branding \
   && rm -f /tmp/install-code-server-branding
 
+COPY runtime/code-server-agent-terminal /tmp/nvt-code-server-agent-terminal
+RUN /bin/sh /tmp/nvt-code-server-agent-terminal/install.sh /tmp/nvt-code-server-agent-terminal \
+  && rm -rf /tmp/nvt-code-server-agent-terminal
+
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
 COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint

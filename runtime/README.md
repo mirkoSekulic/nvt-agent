@@ -12,28 +12,32 @@ code-server:
 ```
 
 The feature is disabled when `agentTerminal` is omitted or when
-`openOnStartup` is `false`. When enabled, bootstrap merges an NVT-owned user
-task into code-server's user `tasks.json` and enables automatic folder-open
-tasks in user `settings.json`. Existing settings, tasks, and task-file fields
-are preserved. The task runs only `nvt-session-attach`, uses a focused
-dedicated panel, and has an instance limit of one. It does not configure a
-default terminal profile, so manually created terminals remain ordinary
-shells.
+`openOnStartup` is `false`. When enabled, bootstrap atomically writes one
+non-secret, mode `0600` NVT-owned enable marker under `NVT_STATE_DIR`. The
+bundled workspace-side extension activates after code-server startup, reads
+only that exact marker, creates one focused integrated terminal whose
+executable is exactly `nvt-session-attach`, and reuses a surviving terminal
+with the same stable NVT identity across extension activation or browser
+reload. It does not configure a default terminal profile, so manually created
+terminals remain ordinary shells.
+
+This mechanism does not create, parse, authorize, or execute user/workspace
+tasks. In particular, bootstrap never sets `task.allowAutomaticTasks`, so a
+repository-controlled `.vscode/tasks.json` entry with `runOn: folderOpen` does
+not become authorized by this feature. Existing user `tasks.json` content,
+including any task with the display label `NVT: Agent Session`, is untouched.
 
 `nvt-session-attach` is the generic session attachment boundary. Its current
 implementation waits up to 60 seconds for the managed session and then
 attaches to it. It never creates or replaces a session. The implementation can
 be replaced if the session backend changes without changing code-server
-bootstrap or the task contract. `AGENT_SESSION` selects the managed session
+bootstrap or extension activation. `AGENT_SESSION` selects the managed session
 name; the default is `agent`.
 
-Bootstrap records only enough local ownership state to restore a pre-existing
-`task.allowAutomaticTasks` value. Disabling the feature removes the NVT-owned
-task and restores that setting when it is still managed, without removing
-unrelated settings or tasks. If the setting was independently changed after
-bootstrap, cleanup preserves that newer value. Re-running bootstrap is
-idempotent. `agentTerminal` must be an object and `openOnStartup` must be a
-boolean.
+Disabling or omitting the feature removes only the NVT-owned enable marker.
+Bootstrap and the extension do not read or modify any code-server setting or
+task for this feature. Re-running bootstrap is idempotent. `agentTerminal` must
+be an object and `openOnStartup` must be a boolean.
 
 Runtime bootstrap accepts a provider-neutral command contract:
 

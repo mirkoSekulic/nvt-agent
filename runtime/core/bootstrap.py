@@ -57,9 +57,8 @@ DEFAULT_EGRESS_CA_FILE = "/nvt-egress-ca/ca.crt"
 DEFAULT_EGRESS_CA_WAIT_SECONDS = 60
 DEFAULT_FORWARD_PROXY_URL = "http://127.0.0.1:8470"
 DEFAULT_BROKER_WAIT_SECONDS = 180
-CODE_SERVER_AGENT_TASK_LABEL = "NVT: Agent Session"
-CODE_SERVER_AUTOMATIC_TASK_SETTING = "task.allowAutomaticTasks"
-CODE_SERVER_AUTOMATIC_TASK_VALUE = "on"
+CODE_SERVER_AGENT_TERMINAL_MARKER = "code-server-agent-terminal-enabled"
+CODE_SERVER_AGENT_TERMINAL_MARKER_CONTENT = b"enabled\n"
 
 
 def load_bootstrap_config(path):
@@ -817,133 +816,9 @@ def code_server_settings_target():
     return Path.home() / ".local" / "share" / "code-server" / "User" / "settings.json"
 
 
-def code_server_tasks_target():
-    return code_server_settings_target().with_name("tasks.json")
-
-
 def code_server_agent_terminal_state_target():
     state_dir = Path(os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
-    return state_dir / "code-server-agent-terminal.json"
-
-
-def strip_json_comments(value):
-    output = []
-    index = 0
-    in_string = False
-    escaped = False
-    while index < len(value):
-        character = value[index]
-        if in_string:
-            output.append(character)
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-            index += 1
-            continue
-        if character == '"':
-            in_string = True
-            output.append(character)
-            index += 1
-            continue
-        if character == "/" and index + 1 < len(value) and value[index + 1] == "/":
-            index += 2
-            while index < len(value) and value[index] not in "\r\n":
-                index += 1
-            continue
-        if character == "/" and index + 1 < len(value) and value[index + 1] == "*":
-            end = value.find("*/", index + 2)
-            if end < 0:
-                raise ValueError("unterminated block comment")
-            output.append(" ")
-            index = end + 2
-            continue
-        output.append(character)
-        index += 1
-
-    # JSON-with-comments also permits trailing commas. Remove them outside
-    # strings without interpreting or interpolating any setting value.
-    value = "".join(output)
-    output = []
-    index = 0
-    in_string = False
-    escaped = False
-    while index < len(value):
-        character = value[index]
-        if in_string:
-            output.append(character)
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-            index += 1
-            continue
-        if character == '"':
-            in_string = True
-            output.append(character)
-            index += 1
-            continue
-        if character == ",":
-            next_index = index + 1
-            while next_index < len(value) and value[next_index].isspace():
-                next_index += 1
-            if next_index < len(value) and value[next_index] in "}]":
-                index += 1
-                continue
-        output.append(character)
-        index += 1
-    return "".join(output)
-
-
-def read_json_object(path, field, allow_comments=True):
-    if not path.exists():
-        return None
-    try:
-        raw = path.read_text(encoding="utf-8-sig")
-        value = json.loads(strip_json_comments(raw) if allow_comments else raw)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
-        raise SystemExit(f"bootstrap: {field} is invalid JSON: {error}") from None
-    if not isinstance(value, dict):
-        raise SystemExit(f"bootstrap: {field} must contain a JSON object")
-    return value
-
-
-def write_json_atomic(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-            json.dump(value, file, indent=2, sort_keys=True)
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def remove_file_atomic(path):
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-    directory = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    return state_dir / CODE_SERVER_AGENT_TERMINAL_MARKER
 
 
 def code_server_agent_terminal_enabled(config):
@@ -959,95 +834,39 @@ def code_server_agent_terminal_enabled(config):
     )
 
 
-def code_server_agent_task():
-    return {
-        "label": CODE_SERVER_AGENT_TASK_LABEL,
-        "type": "process",
-        "command": "nvt-session-attach",
-        "presentation": {
-            "reveal": "always",
-            "focus": True,
-            "panel": "dedicated",
-        },
-        "runOptions": {
-            "runOn": "folderOpen",
-            "instanceLimit": 1,
-        },
-    }
-
-
 def apply_code_server_agent_terminal(enabled):
-    settings_path = code_server_settings_target()
-    tasks_path = code_server_tasks_target()
-    state_path = code_server_agent_terminal_state_target()
-    state = read_json_object(state_path, "managed code-server agent-terminal state", allow_comments=False)
-
-    if state is not None:
-        if set(state) != {"previous_setting_present", "previous_setting", "tasks_file_existed", "version"}:
-            raise SystemExit("bootstrap: managed code-server agent-terminal state has unknown fields")
-        if (
-            state.get("version") != 1
-            or not isinstance(state.get("previous_setting_present"), bool)
-            or not isinstance(state.get("tasks_file_existed"), bool)
-        ):
-            raise SystemExit("bootstrap: managed code-server agent-terminal state is invalid")
-
-    # Omission/explicit disable is byte-for-byte compatible unless bootstrap
-    # previously recorded ownership of the managed setting/task.
-    if not enabled and state is None:
-        return
-
-    settings = (
-        read_json_object(settings_path, "code-server settings.json")
-        if (enabled or state is not None)
-        else None
-    )
-    tasks = read_json_object(tasks_path, "code-server tasks.json")
-    tasks_existed = tasks is not None
-    if tasks is None:
-        tasks = {"version": "2.0.0", "tasks": []}
-    task_entries = tasks.get("tasks", [])
-    if not isinstance(task_entries, list):
-        raise SystemExit("bootstrap: code-server tasks.json tasks must be an array")
-
-    unrelated_tasks = [
-        task for task in task_entries
-        if not (isinstance(task, dict) and task.get("label") == CODE_SERVER_AGENT_TASK_LABEL)
-    ]
-
+    marker = code_server_agent_terminal_state_target()
     if enabled:
-        if settings is None:
-            settings = {}
-        if state is None:
-            state = {
-                "version": 1,
-                "previous_setting_present": CODE_SERVER_AUTOMATIC_TASK_SETTING in settings,
-                "previous_setting": settings.get(CODE_SERVER_AUTOMATIC_TASK_SETTING),
-                "tasks_file_existed": tasks_existed,
-            }
-            write_json_atomic(state_path, state)
-        settings[CODE_SERVER_AUTOMATIC_TASK_SETTING] = CODE_SERVER_AUTOMATIC_TASK_VALUE
-        tasks["tasks"] = [*unrelated_tasks, code_server_agent_task()]
-        write_json_atomic(settings_path, settings)
-        write_json_atomic(tasks_path, tasks)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{marker.name}.", dir=marker.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as file:
+                file.write(CODE_SERVER_AGENT_TERMINAL_MARKER_CONTENT)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, marker)
+            directory = os.open(marker.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
         print("bootstrap: configured code-server agent terminal", flush=True)
         return
 
-    tasks["tasks"] = unrelated_tasks
-    if len(unrelated_tasks) != len(task_entries):
-        if not state.get("tasks_file_existed") and set(tasks) == {"version", "tasks"} and not unrelated_tasks:
-            remove_file_atomic(tasks_path)
-        else:
-            write_json_atomic(tasks_path, tasks)
-
-    if settings is not None and settings.get(CODE_SERVER_AUTOMATIC_TASK_SETTING) == CODE_SERVER_AUTOMATIC_TASK_VALUE:
-        if state.get("previous_setting_present"):
-            settings[CODE_SERVER_AUTOMATIC_TASK_SETTING] = state.get("previous_setting")
-        else:
-            settings.pop(CODE_SERVER_AUTOMATIC_TASK_SETTING, None)
-        write_json_atomic(settings_path, settings)
-    remove_file_atomic(state_path)
-    print("bootstrap: removed managed code-server agent terminal", flush=True)
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return
+    directory = os.open(marker.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    print("bootstrap: removed code-server agent terminal marker", flush=True)
 
 
 def copy_code_server_settings(settings_file):

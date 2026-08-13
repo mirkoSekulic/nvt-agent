@@ -1,7 +1,6 @@
 package runtime_test
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,13 +9,6 @@ import (
 
 func codeServerTasksPath(f *fixture) string {
 	return filepath.Join(f.home, ".local", "share", "code-server", "User", "tasks.json")
-}
-
-func readCodeServerTasks(t *testing.T, f *fixture) map[string]any {
-	t.Helper()
-	var tasks map[string]any
-	decodeJSONFile(t, codeServerTasksPath(f), &tasks)
-	return tasks
 }
 
 func TestCodeServerAgentTerminalConfigValidation(t *testing.T) {
@@ -50,8 +42,8 @@ func TestCodeServerAgentTerminalConfigValidation(t *testing.T) {
 			if !strings.Contains(output, tt.want) {
 				t.Fatalf("expected %q, got:\n%s", tt.want, output)
 			}
-			if _, err := os.Stat(codeServerTasksPath(f)); !os.IsNotExist(err) {
-				t.Fatalf("invalid config mutated tasks, stat err=%v", err)
+			if _, err := os.Stat(codeServerSettingsPath(f)); !os.IsNotExist(err) {
+				t.Fatalf("invalid config mutated settings, stat err=%v", err)
 			}
 		})
 	}
@@ -68,7 +60,7 @@ func TestCodeServerAgentTerminalOmittedAndDisabledAreNoOps(t *testing.T) {
 			t.Fatal(err)
 		}
 		settingsBefore := []byte("{\n  // user-owned JSONC\n  \"editor.fontSize\": 15,\n}\n")
-		tasksBefore := []byte("{\n  \"version\": \"2.0.0\",\n  \"tasks\": [not valid JSON on purpose]\n}\n")
+		tasksBefore := []byte("{\n  \"tasks\": [not valid JSON on purpose]\n}\n")
 		if err := os.WriteFile(codeServerSettingsPath(f), settingsBefore, 0o640); err != nil {
 			t.Fatal(err)
 		}
@@ -93,7 +85,7 @@ func TestCodeServerAgentTerminalOmittedAndDisabledAreNoOps(t *testing.T) {
 	}
 }
 
-func TestCodeServerAgentTerminalMergesIdempotentlyAndCleansUp(t *testing.T) {
+func TestCodeServerAgentTerminalUsesOwnedMarkerAndNeverMutatesSettingsOrTasks(t *testing.T) {
 	f := newFixture(t)
 	userDir := filepath.Dir(codeServerSettingsPath(f))
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
@@ -103,19 +95,34 @@ func TestCodeServerAgentTerminalMergesIdempotentlyAndCleansUp(t *testing.T) {
   // Existing user settings are JSON-with-comments.
   "editor.fontSize": 15,
   "task.allowAutomaticTasks": "off",
+  "nvtAgent.agentTerminal.openOnStartup": "unrelated-user-value",
 }
 `), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(codeServerTasksPath(f), []byte(`{
+	// A repository or user task with the old display label is entirely
+	// unrelated to the bundled extension and must survive byte-for-byte.
+	tasksBefore := []byte(`{
   "version": "2.0.0",
-  "windows": {"options": {"shell": {"executable": "pwsh"}}},
   "tasks": [
     {"label": "User task", "type": "shell", "command": "true"},
-    {"label": "NVT: Agent Session", "type": "shell", "command": "obsolete-command"}
+    {"label": "NVT: Agent Session", "type": "shell", "command": "user-command"},
+    {"label": "Repository folder-open task", "runOptions": {"runOn": "folderOpen"}, "command": "never-authorize-me"}
   ]
 }
-`), 0o640); err != nil {
+`)
+	if err := os.WriteFile(codeServerTasksPath(f), tasksBefore, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	settingsBefore, err := os.ReadFile(codeServerSettingsPath(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceSettings := filepath.Join(f.workspace, ".vscode", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(workspaceSettings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workspaceSettings, []byte(`{"nvtAgent.agentTerminal.openOnStartup":true}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	enabled := f.writeAgentConfig(`
@@ -125,77 +132,78 @@ code-server:
 `)
 
 	f.runWithEnv(bootstrapBin(f.root), true, nil, enabled)
-	settings := readCodeServerSettings(t, f)
-	if settings["editor.fontSize"] != float64(15) || settings["task.allowAutomaticTasks"] != "on" {
-		t.Fatalf("managed settings did not preserve user values: %#v", settings)
+	settingsAfterEnable, err := os.ReadFile(codeServerSettingsPath(f))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for key := range settings {
-		if strings.Contains(key, "terminal.integrated.defaultProfile") {
-			t.Fatalf("agent terminal became a manual-terminal default: %#v", settings)
-		}
+	if string(settingsAfterEnable) != string(settingsBefore) {
+		t.Fatalf("enable changed user settings:\n%s", settingsAfterEnable)
 	}
-	tasks := readCodeServerTasks(t, f)
-	if _, ok := tasks["windows"]; !ok {
-		t.Fatalf("unrelated top-level task configuration was removed: %#v", tasks)
+	tasksAfterEnable, err := os.ReadFile(codeServerTasksPath(f))
+	if err != nil {
+		t.Fatal(err)
 	}
-	entries, ok := tasks["tasks"].([]any)
-	if !ok || len(entries) != 2 {
-		t.Fatalf("expected user and managed tasks: %#v", tasks)
+	if string(tasksAfterEnable) != string(tasksBefore) {
+		t.Fatalf("enable changed user/repository tasks:\n%s", tasksAfterEnable)
 	}
-	managed, ok := entries[1].(map[string]any)
-	if !ok {
-		t.Fatalf("managed task is not an object: %#v", entries[1])
+	workspaceSettingsAfter, err := os.ReadFile(workspaceSettings)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if managed["label"] != "NVT: Agent Session" || managed["type"] != "process" || managed["command"] != "nvt-session-attach" {
-		t.Fatalf("unexpected managed task identity: %#v", managed)
+	if string(workspaceSettingsAfter) != `{"nvtAgent.agentTerminal.openOnStartup":true}`+"\n" {
+		t.Fatalf("enable changed repository workspace settings: %s", workspaceSettingsAfter)
 	}
-	runOptions, _ := managed["runOptions"].(map[string]any)
-	if runOptions["runOn"] != "folderOpen" || runOptions["instanceLimit"] != float64(1) {
-		t.Fatalf("managed task is not bounded to one folder-open instance: %#v", managed)
+	marker := filepath.Join(f.state, "code-server-agent-terminal-enabled")
+	markerContent, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
 	}
-	presentation, _ := managed["presentation"].(map[string]any)
-	if presentation["panel"] != "dedicated" || presentation["focus"] != true || presentation["reveal"] != "always" {
-		t.Fatalf("managed task does not use a focused dedicated terminal: %#v", managed)
+	if string(markerContent) != "enabled\n" {
+		t.Fatalf("unexpected enable marker: %q", markerContent)
+	}
+	markerInfo, err := os.Stat(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markerInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("enable marker mode is %o, want 0600", markerInfo.Mode().Perm())
 	}
 
-	firstSettings, _ := os.ReadFile(codeServerSettingsPath(f))
-	firstTasks, _ := os.ReadFile(codeServerTasksPath(f))
 	f.runWithEnv(bootstrapBin(f.root), true, nil, enabled)
-	secondSettings, _ := os.ReadFile(codeServerSettingsPath(f))
-	secondTasks, _ := os.ReadFile(codeServerTasksPath(f))
-	if string(firstSettings) != string(secondSettings) || string(firstTasks) != string(secondTasks) {
-		t.Fatalf("re-running bootstrap did not update managed state idempotently")
+	markerContent, err = os.ReadFile(marker)
+	if err != nil || string(markerContent) != "enabled\n" {
+		t.Fatalf("re-running bootstrap did not update the marker idempotently: %q, %v", markerContent, err)
 	}
 
 	disabled := f.writeAgentConfig("code-server:\n  agentTerminal:\n    openOnStartup: false\n")
 	f.runWithEnv(bootstrapBin(f.root), true, nil, disabled)
-	settings = readCodeServerSettings(t, f)
-	if settings["editor.fontSize"] != float64(15) || settings["task.allowAutomaticTasks"] != "off" {
-		t.Fatalf("disable did not restore the prior user setting: %#v", settings)
+	settingsAfterDisable, err := os.ReadFile(codeServerSettingsPath(f))
+	if err != nil {
+		t.Fatal(err)
 	}
-	tasks = readCodeServerTasks(t, f)
-	entries, _ = tasks["tasks"].([]any)
-	if len(entries) != 1 || entries[0].(map[string]any)["label"] != "User task" {
-		t.Fatalf("disable did not remove only the managed task: %#v", tasks)
+	if string(settingsAfterDisable) != string(settingsBefore) {
+		t.Fatalf("disable changed user settings:\n%s", settingsAfterDisable)
 	}
-	if _, err := os.Stat(filepath.Join(f.state, "code-server-agent-terminal.json")); !os.IsNotExist(err) {
-		t.Fatalf("managed ownership state remained after disable, stat err=%v", err)
+	tasksAfterDisable, err := os.ReadFile(codeServerTasksPath(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tasksAfterDisable) != string(tasksBefore) {
+		t.Fatalf("disable changed user/repository tasks:\n%s", tasksAfterDisable)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("managed enable marker remained after disable, stat err=%v", err)
 	}
 }
 
-func TestCodeServerAgentTerminalDisableRemovesFilesItOwnsOnly(t *testing.T) {
+func TestCodeServerAgentTerminalOmissionCleansPreviousOwnedMarkerOnly(t *testing.T) {
 	f := newFixture(t)
 	enabled := f.writeAgentConfig("code-server:\n  agentTerminal:\n    openOnStartup: true\n")
 	f.runWithEnv(bootstrapBin(f.root), true, nil, enabled)
-
 	disabled := f.writeAgentConfig("code-server: {}\n")
 	f.runWithEnv(bootstrapBin(f.root), true, nil, disabled)
-	if _, err := os.Stat(codeServerTasksPath(f)); !os.IsNotExist(err) {
-		t.Fatalf("bootstrap-created tasks.json survived disable, stat err=%v", err)
-	}
-	settings := readCodeServerSettings(t, f)
-	if len(settings) != 0 {
-		t.Fatalf("managed automatic-task setting survived disable: %#v", settings)
+	if _, err := os.Stat(filepath.Join(f.state, "code-server-agent-terminal-enabled")); !os.IsNotExist(err) {
+		t.Fatalf("omission did not remove the owned marker, stat err=%v", err)
 	}
 }
 
@@ -284,13 +292,15 @@ exit 1
 	}
 }
 
-func TestRuntimeImageInstallsSessionAttachHelper(t *testing.T) {
+func TestRuntimeImageInstallsSessionAttachBoundaryAndExtension(t *testing.T) {
 	root := repoRoot(t)
 	dockerfile, err := os.ReadFile(filepath.Join(root, "runtime", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, fragment := range []string{
+		"COPY runtime/code-server-agent-terminal /tmp/nvt-code-server-agent-terminal",
+		"/tmp/nvt-code-server-agent-terminal/install.sh",
 		"COPY runtime/core/nvt-session-attach.sh /usr/local/bin/nvt-session-attach",
 		"/usr/local/bin/nvt-session-attach",
 	} {
@@ -299,28 +309,13 @@ func TestRuntimeImageInstallsSessionAttachHelper(t *testing.T) {
 		}
 	}
 
-	// The task contract is pure JSON and contains no tmux implementation detail.
 	bootstrap, err := os.ReadFile(filepath.Join(root, "runtime", "core", "bootstrap.py"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(bootstrap), "tmux attach") || strings.Contains(string(bootstrap), "attach-session") {
-		t.Fatalf("code-server bootstrap contains a tmux-specific attach implementation")
-	}
-}
-
-func TestManagedTaskJSONRoundTripsStrictly(t *testing.T) {
-	// Keep encoding/json imported here so malformed managed task output cannot
-	// accidentally be hidden by the more permissive code-server JSONC reader.
-	f := newFixture(t)
-	config := f.writeAgentConfig("code-server:\n  agentTerminal:\n    openOnStartup: true\n")
-	f.runWithEnv(bootstrapBin(f.root), true, nil, config)
-	data, err := os.ReadFile(codeServerTasksPath(f))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var value map[string]any
-	if err := json.Unmarshal(data, &value); err != nil {
-		t.Fatalf("managed tasks.json is not strict JSON: %v", err)
+	for _, forbidden := range []string{"task.allowAutomaticTasks", "tasks.json", "attach-session"} {
+		if strings.Contains(string(bootstrap), forbidden) {
+			t.Fatalf("code-server bootstrap contains forbidden task/backend behavior %q", forbidden)
+		}
 	}
 }
