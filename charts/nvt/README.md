@@ -24,7 +24,7 @@ chart values.
 Helm installs files from a chart's `crds/` directory on first install but does
 not upgrade them during a normal `helm upgrade`. Existing installations must
 therefore update both the AgentRun and AgentSchedule CRDs before, or as part
-of, upgrading to chart `0.8.64`; otherwise the API server may prune the
+of, upgrading to chart `0.8.65`; otherwise the API server may prune the
 operator-owned native guest routing status or reject new AgentRun and schedule
 fields such as container capabilities, required Docker networks, the Docker
 kernel-log device control, dedicated Docker storage size, broker grant
@@ -45,11 +45,11 @@ For the Helm CLI, apply the CRDs from the same immutable chart version before
 upgrading the release:
 
 ```sh
-helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.64 \
+helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.65 \
   | kubectl apply --server-side -f -
 
 helm upgrade --install nvt oci://ghcr.io/mirkosekulic/helm/nvt \
-  --version 0.8.64 --namespace nvt --create-namespace
+  --version 0.8.65 --namespace nvt --create-namespace
 ```
 
 Do not apply CRDs from a different chart version than the release being
@@ -161,6 +161,10 @@ producer:
     appID: 123456
     installationID: 12345678
     existingSecret: nvt-github-app
+  schedulingReactions:
+    enabled: true
+    accepted: "+1"
+    rejected: "-1"
   submission:
     mode: scheduleAdmission
     admissionMode: profiled
@@ -179,6 +183,16 @@ use the typed `agentSchedule.producerPolicies` field shown below.
 The chart projects only a rotating `nvt-operator` audience token. The default
 producer AgentRun runtime image is the coordinated `runtime.image`; set
 `producer.agentRun.runtimeImage` only for an intentional override.
+
+Scheduling reactions default to enabled. They are derived only from the
+operator's schedule-admission response: confirmed scheduling and
+`duplicate-work` receive the accepted reaction, while only recognized
+definitive denials receive the rejected reaction. Deferred or uncertain
+outcomes receive no reaction. Posting is bounded and best-effort after
+scheduling/cursor behavior is decided; failures never change that behavior.
+The GitHub App needs **Issues: write** permission. Set `enabled: false` to opt
+out, or choose any GitHub-supported reaction name for `accepted` and
+`rejected`.
 
 Legacy/direct producer payloads can opt into AgentRun-scoped persistence:
 

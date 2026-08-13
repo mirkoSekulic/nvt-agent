@@ -1,4 +1,18 @@
 {{- if .Values.producer.enabled }}
+{{- $schedulingReactions := .Values.producer.schedulingReactions }}
+{{- if not (kindIs "map" $schedulingReactions) }}
+{{- fail "producer.schedulingReactions must be an object" }}
+{{- end }}
+{{- if not (kindIs "bool" (get $schedulingReactions "enabled")) }}
+{{- fail "producer.schedulingReactions.enabled must be a boolean" }}
+{{- end }}
+{{- $supportedReactions := list "+1" "-1" "laugh" "confused" "heart" "hooray" "rocket" "eyes" }}
+{{- range $field := list "accepted" "rejected" }}
+{{- $reaction := get $schedulingReactions $field }}
+{{- if or (not (kindIs "string" $reaction)) (not (has $reaction $supportedReactions)) }}
+{{- fail (printf "producer.schedulingReactions.%s must be a supported GitHub reaction" $field) }}
+{{- end }}
+{{- end }}
 {{- $workspaceMode := .Values.producer.agentRun.workspaceMode | default "Ephemeral" }}
 {{- if not (has $workspaceMode (list "Ephemeral" "Persistent")) }}
 {{- fail "producer.agentRun.workspaceMode must be Ephemeral or Persistent" }}
@@ -36,6 +50,10 @@ data:
       {{- toYaml .Values.producer.allowedAuthors | nindent 6 }}
     pollInterval: {{ .Values.producer.pollInterval | quote }}
     operatorCallbackBaseURL: {{ .Values.producer.operatorCallbackBaseURL | quote }}
+    schedulingReactions:
+      enabled: {{ get $schedulingReactions "enabled" }}
+      accepted: {{ get $schedulingReactions "accepted" | quote }}
+      rejected: {{ get $schedulingReactions "rejected" | quote }}
     submission:
       mode: {{ .Values.producer.submission.mode | quote }}
       admissionMode: {{ .Values.producer.submission.admissionMode | quote }}

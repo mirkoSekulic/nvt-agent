@@ -89,14 +89,43 @@ func (s AgentRunSubmitter) Submit(
 	commandComment GitHubIssueComment,
 	command Command,
 ) (bool, string, error) {
+	result, err := s.submitWithOutcome(ctx, repo, issue, comments, commandComment, command)
+	return result.Created, result.IdempotencyKey, err
+}
+
+func (s AgentRunSubmitter) submitWithOutcome(
+	ctx context.Context,
+	repo Repository,
+	issue GitHubIssue,
+	comments []GitHubIssueComment,
+	commandComment GitHubIssueComment,
+	command Command,
+) (submissionResult, error) {
 	identity := s.agentRunIdentity(repo, issue, commandComment)
 	if s.submissionMode() == SubmissionModeScheduleAdmission {
 		return s.submitScheduleAdmission(ctx, repo, issue, comments, commandComment, command, identity)
 	}
-	return s.submitDirect(ctx, repo, issue, comments, commandComment, command, identity)
+	created, key, err := s.submitDirect(ctx, repo, issue, comments, commandComment, command, identity)
+	return submissionResult{Created: created, IdempotencyKey: key}, err
 }
 
 var ErrSubmissionDeferred = errors.New("submission deferred")
+
+type schedulingOutcome uint8
+
+const (
+	schedulingOutcomeNone schedulingOutcome = iota
+	schedulingOutcomeAccepted
+	schedulingOutcomeDeferred
+	schedulingOutcomeRejected
+	schedulingOutcomeUncertain
+)
+
+type submissionResult struct {
+	IdempotencyKey string
+	Created        bool
+	Outcome        schedulingOutcome
+}
 
 func (s AgentRunSubmitter) submitDirect(
 	ctx context.Context,
@@ -179,6 +208,7 @@ type scheduleAdmissionAgentRun struct {
 	Name      string `json:"name"`
 }
 
+//nolint:err113 // Preserve the existing stable admission errors while adding a typed, producer-local outcome.
 func (s AgentRunSubmitter) submitScheduleAdmission(
 	ctx context.Context,
 	repo Repository,
@@ -187,18 +217,18 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 	commandComment GitHubIssueComment,
 	command Command,
 	identity agentRunIdentity,
-) (bool, string, error) {
+) (submissionResult, error) {
 	payload, token, err := s.scheduleAdmissionPayload(repo, issue, comments, commandComment, command, identity)
 	if err != nil {
-		return false, "", err
+		return submissionResult{}, err
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return false, "", fmt.Errorf("marshal schedule admission: %w", err)
+		return submissionResult{}, fmt.Errorf("marshal schedule admission: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.scheduleAdmissionURL(), bytes.NewReader(body))
 	if err != nil {
-		return false, "", fmt.Errorf("build schedule admission request: %w", err)
+		return submissionResult{}, fmt.Errorf("build schedule admission request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	if token != "" {
@@ -207,56 +237,115 @@ func (s AgentRunSubmitter) submitScheduleAdmission(
 
 	response, err := s.httpClient.Do(request)
 	if err != nil {
-		return false, "", fmt.Errorf("post schedule admission: %w", err)
+		return submissionResult{Outcome: schedulingOutcomeUncertain}, fmt.Errorf("post schedule admission: %w", err)
 	}
 	defer response.Body.Close()
 
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxScheduleAdmissionResponseBytes+1))
 	if err != nil {
-		return false, "", errors.New("read schedule admission response")
+		return submissionResult{Outcome: schedulingOutcomeUncertain}, errors.New("read schedule admission response")
 	}
 	switch response.StatusCode {
 	case http.StatusCreated:
 		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
 		if decodeErr != nil {
-			return false, "", decodeErr
+			return submissionResult{Outcome: schedulingOutcomeUncertain}, decodeErr
 		}
 		if !decoded.Scheduled {
-			return false, "", fmt.Errorf("schedule admission returned 201 without scheduled=true")
+			return submissionResult{Outcome: schedulingOutcomeUncertain}, errors.New(
+				"schedule admission returned 201 without scheduled=true",
+			)
 		}
-		return true, identity.Key, nil
+		return submissionResult{
+			IdempotencyKey: identity.Key,
+			Created:        true,
+			Outcome:        schedulingOutcomeAccepted,
+		}, nil
 	case http.StatusAccepted:
 		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
 		if decodeErr != nil {
-			return false, "", decodeErr
+			return submissionResult{Outcome: schedulingOutcomeUncertain}, decodeErr
 		}
 		if decoded.Scheduled {
-			return true, identity.Key, nil
+			return submissionResult{
+				IdempotencyKey: identity.Key,
+				Created:        true,
+				Outcome:        schedulingOutcomeAccepted,
+			}, nil
 		}
 		switch decoded.Reason {
 		case "duplicate-work":
-			return false, identity.Key, nil
+			return submissionResult{IdempotencyKey: identity.Key, Outcome: schedulingOutcomeAccepted}, nil
 		case "schedule-suspended":
-			return false, identity.Key, ErrSubmissionDeferred
+			return submissionResult{
+				IdempotencyKey: identity.Key,
+				Outcome:        schedulingOutcomeDeferred,
+			}, ErrSubmissionDeferred
 		default:
-			return false, "", fmt.Errorf("schedule admission returned 202 with unsupported reason %q", decoded.Reason)
+			return submissionResult{Outcome: schedulingOutcomeUncertain}, fmt.Errorf(
+				"schedule admission returned 202 with unsupported reason %q",
+				decoded.Reason,
+			)
 		}
 	case http.StatusTooManyRequests:
 		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
 		if decodeErr != nil {
-			return false, "", decodeErr
+			return submissionResult{Outcome: schedulingOutcomeUncertain}, decodeErr
 		}
-		if decoded.Reason == "max-parallelism-reached" {
-			return false, identity.Key, ErrSubmissionDeferred
+		if !decoded.Scheduled && isDeferredCapacityReason(decoded.Reason) {
+			return submissionResult{
+				IdempotencyKey: identity.Key,
+				Outcome:        schedulingOutcomeDeferred,
+			}, ErrSubmissionDeferred
 		}
-		return false, "", fmt.Errorf("schedule admission rejected with 429 reason %q", decoded.Reason)
+		return submissionResult{Outcome: schedulingOutcomeUncertain}, fmt.Errorf(
+			"schedule admission rejected with 429 reason %q",
+			decoded.Reason,
+		)
 	default:
+		outcome := schedulingOutcomeUncertain
+		decoded, decodeErr := decodeScheduleAdmissionContract(responseBody)
+		if decodeErr == nil && definitiveScheduleAdmissionRejection(response.StatusCode, decoded) {
+			outcome = schedulingOutcomeRejected
+		}
 		reason := safeScheduleAdmissionReason(responseBody)
 		if reason != "" {
-			return false, "", fmt.Errorf("schedule admission failed with HTTP %d reason %q", response.StatusCode, reason)
+			return submissionResult{Outcome: outcome}, fmt.Errorf(
+				"schedule admission failed with HTTP %d reason %q",
+				response.StatusCode,
+				reason,
+			)
 		}
-		return false, "", fmt.Errorf("schedule admission failed with HTTP %d", response.StatusCode)
+		return submissionResult{Outcome: outcome}, fmt.Errorf(
+			"schedule admission failed with HTTP %d",
+			response.StatusCode,
+		)
 	}
+}
+
+func isDeferredCapacityReason(reason string) bool {
+	return reason == "max-parallelism-reached" || reason == "principal-max-parallelism-reached"
+}
+
+func definitiveScheduleAdmissionRejection(status int, response scheduleAdmissionResponse) bool {
+	if response.Scheduled || response.AgentRun != nil {
+		return false
+	}
+	switch status {
+	case http.StatusBadRequest:
+		return response.Reason == "invalid-execution-profile-configuration" || response.Reason == "principal-required"
+	case http.StatusForbidden:
+		switch response.Reason {
+		case "workflow-selection-denied",
+			"profile-selection-denied",
+			"principal-not-eligible",
+			"principal-not-enrolled":
+			return true
+		}
+	case http.StatusConflict:
+		return response.Reason == "credential-not-ready"
+	}
+	return false
 }
 
 func decodeScheduleAdmissionContract(body []byte) (scheduleAdmissionResponse, error) {
@@ -282,8 +371,14 @@ func safeScheduleAdmissionReason(body []byte) string {
 	case "duplicate-work",
 		"schedule-suspended",
 		"max-parallelism-reached",
+		"principal-max-parallelism-reached",
 		"profile-selection-denied",
 		"workflow-selection-denied",
+		"principal-required",
+		"principal-not-eligible",
+		"principal-not-enrolled",
+		"credential-not-ready",
+		"credential-resolution-unavailable",
 		"invalid-execution-profile-configuration",
 		"response-encode-failed":
 		return decoded.Reason

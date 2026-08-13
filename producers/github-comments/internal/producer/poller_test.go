@@ -2,12 +2,15 @@
 package producer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,8 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+var errReactionFailureNeedle = errors.New("REACTION-FAILURE-SECRET-NEEDLE")
 
 func TestPollerDefaultsFirstRunSinceToStartupTime(t *testing.T) {
 	startedAt := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
@@ -273,6 +278,258 @@ func TestPollerReplaysAcceptedWorkAsDuplicateThenAdvancesAfterDeferredWorkSuccee
 	}
 }
 
+func TestPollerReactsOnlyToAuthoritativeTerminalAdmissionOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		body         string
+		wantReaction string
+		status       int
+		wantError    bool
+		wantDeferred bool
+	}{
+		{name: "created", status: http.StatusCreated, body: `{"scheduled":true}`, wantReaction: "+1"},
+		{name: "accepted", status: http.StatusAccepted, body: `{"scheduled":true}`, wantReaction: "+1"},
+		{name: "duplicate", status: http.StatusAccepted, body: `{"scheduled":false,"reason":"duplicate-work"}`, wantReaction: "+1"},
+		{name: "definitive rejection", status: http.StatusForbidden, body: `{"scheduled":false,"reason":"principal-not-enrolled"}`, wantReaction: "-1"},
+		{name: "suspended", status: http.StatusAccepted, body: `{"scheduled":false,"reason":"schedule-suspended"}`, wantDeferred: true},
+		{name: "capacity", status: http.StatusTooManyRequests, body: `{"scheduled":false,"reason":"max-parallelism-reached"}`, wantDeferred: true},
+		{name: "malformed", status: http.StatusCreated, body: `{`, wantError: true},
+		{name: "server failure", status: http.StatusInternalServerError, body: `{"scheduled":false,"reason":"response-encode-failed"}`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.WriteHeader(test.status)
+				if _, err := response.Write([]byte(test.body)); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer server.Close()
+
+			cfg, github, state := schedulingReactionPollerFixture(t, server.URL)
+			poller := NewPoller(
+				cfg, github, NewAgentRunSubmitterWithHTTP(nil, server.Client(), cfg), state, slog.Default(),
+			)
+			err := poller.PollOnce(context.Background())
+			if test.wantDeferred {
+				if err != nil {
+					t.Fatalf("deferred poll failed: %v", err)
+				}
+			} else if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError %v", err, test.wantError)
+			}
+			if test.wantReaction == "" {
+				if len(github.reactions) != 0 {
+					t.Fatalf("unexpected reactions: %#v", github.reactions)
+				}
+			} else if len(github.reactions) != 1 || github.reactions[0].commentID != 123 ||
+				github.reactions[0].reaction != test.wantReaction {
+				t.Fatalf("reactions = %#v, want %q on comment 123", github.reactions, test.wantReaction)
+			}
+		})
+	}
+}
+
+//nolint:gocyclo // The integration-style regression checks two ordered admissions, reactions, cursor, and replay.
+func TestPollerConsumesRejectedCommentAndContinuesToAcceptedComment(t *testing.T) {
+	const rejectionNeedle = "DEFINITIVE-REJECTION-SECRET-NEEDLE"
+	ctx := context.Background()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			response.WriteHeader(http.StatusForbidden)
+			if _, err := response.Write([]byte(
+				`{"scheduled":false,"reason":"principal-not-enrolled","detail":"` + rejectionNeedle + `"}`,
+			)); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		response.WriteHeader(http.StatusCreated)
+		if _, err := response.Write([]byte(`{"scheduled":true}`)); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+
+	state := newMemoryStateStore()
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	cfg.Idempotency.Scope = IdempotencyScopeComment
+	cfg.Submission = SubmissionConfig{
+		Mode: SubmissionModeScheduleAdmission, AdmissionBaseURL: server.URL, ScheduleName: "default",
+	}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	firstUpdated := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	secondUpdated := firstUpdated.Add(time.Minute)
+	github := &fakeGitHubClient{
+		filterUpdatedBySince: true,
+		updatedComments: []GitHubIssueComment{
+			{
+				ID: 101, Body: "/nvtagent pr create",
+				IssueURL: "https://api.github.com/repos/acme/widget/issues/41", UpdatedAt: firstUpdated,
+				User: GitHubUser{Login: "octo", ID: 424242},
+			},
+			{
+				ID: 202, Body: "/nvtagent pr create",
+				IssueURL: "https://api.github.com/repos/acme/widget/issues/42", UpdatedAt: secondUpdated,
+				User: GitHubUser{Login: "octo", ID: 424242},
+			},
+		},
+		issues: map[int]GitHubIssue{
+			41: {Number: 41, Title: "Rejected"},
+			42: {Number: 42, Title: "Accepted"},
+		},
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	poller := NewPoller(cfg, github, NewAgentRunSubmitterWithHTTP(nil, server.Client(), cfg), state, logger)
+	poller.startedAt = firstUpdated.Add(-time.Minute)
+	pollStartedAt := secondUpdated.Add(time.Minute)
+	poller.now = func() time.Time { return pollStartedAt }
+
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("admission requests = %d, want 2", requestCount)
+	}
+	if !strings.Contains(logs.String(), "processed definitive schedule admission rejection") ||
+		strings.Contains(logs.String(), rejectionNeedle) {
+		t.Fatalf("definitive rejection log was missing or unsafe: %q", logs.String())
+	}
+	if len(github.reactions) != 2 || github.reactions[0].commentID != 101 || github.reactions[0].reaction != "-1" ||
+		github.reactions[1].commentID != 202 || github.reactions[1].reaction != "+1" {
+		t.Fatalf("reactions = %#v, want -1 then +1", github.reactions)
+	}
+	cursor, found, err := state.GetRepoCursor(ctx, "acme/widget")
+	if err != nil || !found || !cursor.Equal(pollStartedAt) {
+		t.Fatalf("cursor = %v found=%v err=%v, want %v", cursor, found, err, pollStartedAt)
+	}
+
+	poller.now = func() time.Time { return pollStartedAt.Add(time.Minute) }
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 2 || len(github.reactions) != 2 {
+		t.Fatalf("commands were resubmitted: requests=%d reactions=%#v", requestCount, github.reactions)
+	}
+}
+
+func TestPollerSchedulingReactionOptOut(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusCreated)
+		if _, err := response.Write([]byte(`{"scheduled":true}`)); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+
+	cfg, github, state := schedulingReactionPollerFixture(t, server.URL)
+	disabled := false
+	cfg.SchedulingReactions.Enabled = &disabled
+	poller := NewPoller(cfg, github, NewAgentRunSubmitterWithHTTP(nil, server.Client(), cfg), state, slog.Default())
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.reactions) != 0 {
+		t.Fatalf("disabled reactions were posted: %#v", github.reactions)
+	}
+}
+
+func TestPollerReactionFailureNeverChangesAcceptedSchedulingOrCursor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusCreated)
+		if _, err := response.Write([]byte(`{"scheduled":true}`)); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+
+	cfg, github, state := schedulingReactionPollerFixture(t, server.URL)
+	const secretNeedle = "REACTION-FAILURE-SECRET-NEEDLE"
+	github.reactionErr = errReactionFailureNeedle
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	poller := NewPoller(cfg, github, NewAgentRunSubmitterWithHTTP(nil, server.Client(), cfg), state, logger)
+	pollStartedAt := time.Date(2026, 6, 23, 13, 0, 0, 0, time.UTC)
+	poller.now = func() time.Time { return pollStartedAt }
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatalf("reaction failure changed accepted scheduling: %v", err)
+	}
+	cursor, found, err := state.GetRepoCursor(context.Background(), "acme/widget")
+	if err != nil || !found || !cursor.Equal(pollStartedAt) {
+		t.Fatalf("cursor = %v found=%v err=%v, want %v", cursor, found, err, pollStartedAt)
+	}
+	if len(github.reactions) != 1 || strings.Contains(logs.String(), secretNeedle) {
+		t.Fatalf("reaction warning/calls were not sanitized: calls=%#v logs=%q", github.reactions, logs.String())
+	}
+}
+
+func TestPollerAdmissionNetworkFailureDoesNotReact(t *testing.T) {
+	cfg, github, state := schedulingReactionPollerFixture(t, "https://operator.invalid")
+	httpClient := &http.Client{Transport: testRoundTripper(func(*http.Request) (*http.Response, error) {
+		return nil, context.DeadlineExceeded
+	})}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitterWithHTTP(nil, httpClient, cfg), state, slog.Default())
+	if err := poller.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected uncertain admission failure")
+	}
+	if len(github.reactions) != 0 {
+		t.Fatalf("uncertain admission posted reactions: %#v", github.reactions)
+	}
+}
+
+func TestPollerInvalidAndUnauthorizedCommandsDoNotReact(t *testing.T) {
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"maintainer"}
+	github := &fakeGitHubClient{updatedComments: []GitHubIssueComment{
+		{ID: 1, Body: "not a command", User: GitHubUser{Login: "maintainer"}},
+		{ID: 2, Body: "/nvtagent pr create", User: GitHubUser{Login: "outsider"}},
+	}}
+	poller := NewPoller(cfg, github, AgentRunSubmitter{}, newMemoryStateStore(), slog.Default())
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.reactions) != 0 {
+		t.Fatalf("invalid or unauthorized commands posted reactions: %#v", github.reactions)
+	}
+}
+
+func schedulingReactionPollerFixture(t *testing.T, admissionURL string) (Config, *fakeGitHubClient, StateStore) {
+	t.Helper()
+	state := newMemoryStateStore()
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	cfg.Submission = SubmissionConfig{
+		Mode:             SubmissionModeScheduleAdmission,
+		AdmissionBaseURL: admissionURL,
+		ScheduleName:     "default",
+	}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID:        123,
+			Body:      "/nvtagent pr create",
+			IssueURL:  "https://api.github.com/repos/acme/widget/issues/42",
+			UpdatedAt: time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC),
+			User:      GitHubUser{Login: "octo", ID: 424242},
+		}},
+		issue: GitHubIssue{Number: 42, Title: "Broken widget", HTMLURL: "https://github.com/acme/widget/issues/42"},
+	}
+	return cfg, github, state
+}
+
+type testRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 func TestPollerReopenedStoreUsesEmptyPollCursorInsteadOfStartupTime(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")
@@ -468,6 +725,15 @@ type fakeGitHubClient struct {
 	issueComments          []GitHubIssueComment
 	listUpdatedSince       []*time.Time
 	listIssueCommentsCalls int
+	filterUpdatedBySince   bool
+	reactions              []fakeSchedulingReaction
+	reactionErr            error
+}
+
+type fakeSchedulingReaction struct {
+	repo      Repository
+	reaction  string
+	commentID int64
 }
 
 func (f *fakeGitHubClient) ListUpdatedIssueComments(
@@ -476,6 +742,15 @@ func (f *fakeGitHubClient) ListUpdatedIssueComments(
 	since *time.Time,
 ) ([]GitHubIssueComment, error) {
 	f.listUpdatedSince = append(f.listUpdatedSince, since)
+	if f.filterUpdatedBySince && since != nil {
+		filtered := make([]GitHubIssueComment, 0, len(f.updatedComments))
+		for _, comment := range f.updatedComments {
+			if comment.UpdatedAt.After(*since) {
+				filtered = append(filtered, comment)
+			}
+		}
+		return filtered, nil
+	}
 	return f.updatedComments, nil
 }
 
@@ -493,4 +768,14 @@ func (f *fakeGitHubClient) ListIssueComments(
 ) ([]GitHubIssueComment, error) {
 	f.listIssueCommentsCalls++
 	return f.issueComments, nil
+}
+
+func (f *fakeGitHubClient) CreateIssueCommentReaction(
+	_ context.Context,
+	repo Repository,
+	commentID int64,
+	reaction string,
+) error {
+	f.reactions = append(f.reactions, fakeSchedulingReaction{repo: repo, commentID: commentID, reaction: reaction})
+	return f.reactionErr
 }

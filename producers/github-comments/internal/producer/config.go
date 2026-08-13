@@ -26,6 +26,8 @@ const (
 	defaultSubmissionMode          = SubmissionModeScheduleAdmission
 	defaultAdmissionMode           = AdmissionModeLegacy
 	defaultScheduleName            = "default"
+	defaultAcceptedReaction        = "+1"
+	defaultRejectedReaction        = "-1"
 )
 
 type IdempotencyScope string
@@ -44,20 +46,21 @@ const (
 )
 
 type Config struct {
-	CommandPrefixes         []string          `json:"commandPrefixes,omitempty"`
-	AllowedAuthors          []string          `json:"allowedAuthors,omitempty"`
-	PollInterval            Duration          `json:"pollInterval,omitempty"`
-	Repositories            []Repository      `json:"repositories"`
-	GitHubApp               GitHubAppConfig   `json:"githubApp"`
-	State                   StateConfig       `json:"state,omitempty"`
-	AgentRun                AgentRunConfig    `json:"agentRun"`
-	AgentConfig             map[string]any    `json:"agentConfig,omitempty"`
-	Idempotency             IdempotencyConfig `json:"idempotency,omitempty"`
-	Submission              SubmissionConfig  `json:"submission,omitempty"`
-	OperatorCallbackBaseURL string            `json:"operatorCallbackBaseURL,omitempty"`
-	InitialSince            string            `json:"initialSince,omitempty"`
-	GitHubAPIBaseURL        string            `json:"githubAPIBaseURL,omitempty"`
-	UserAgent               string            `json:"userAgent,omitempty"`
+	CommandPrefixes         []string                  `json:"commandPrefixes,omitempty"`
+	AllowedAuthors          []string                  `json:"allowedAuthors,omitempty"`
+	PollInterval            Duration                  `json:"pollInterval,omitempty"`
+	Repositories            []Repository              `json:"repositories"`
+	GitHubApp               GitHubAppConfig           `json:"githubApp"`
+	State                   StateConfig               `json:"state,omitempty"`
+	AgentRun                AgentRunConfig            `json:"agentRun"`
+	AgentConfig             map[string]any            `json:"agentConfig,omitempty"`
+	Idempotency             IdempotencyConfig         `json:"idempotency,omitempty"`
+	Submission              SubmissionConfig          `json:"submission,omitempty"`
+	SchedulingReactions     SchedulingReactionsConfig `json:"schedulingReactions,omitempty"`
+	OperatorCallbackBaseURL string                    `json:"operatorCallbackBaseURL,omitempty"`
+	InitialSince            string                    `json:"initialSince,omitempty"`
+	GitHubAPIBaseURL        string                    `json:"githubAPIBaseURL,omitempty"`
+	UserAgent               string                    `json:"userAgent,omitempty"`
 }
 
 type Repository struct {
@@ -93,6 +96,12 @@ type SubmissionConfig struct {
 	// Workflow is an optional static, non-secret workflow profile name for
 	// profiled schedule admission.
 	Workflow string `json:"workflow,omitempty"`
+}
+
+type SchedulingReactionsConfig struct {
+	Enabled  *bool  `json:"enabled,omitempty"`
+	Accepted string `json:"accepted,omitempty"`
+	Rejected string `json:"rejected,omitempty"`
 }
 
 type AgentRunConfig struct {
@@ -194,6 +203,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.Submission.ScheduleName == "" {
 		c.Submission.ScheduleName = defaultScheduleName
 	}
+	if err := c.SchedulingReactions.applyDefaultsAndValidate(); err != nil {
+		return err
+	}
 	if c.Idempotency.Scope == "" {
 		c.Idempotency.Scope = IdempotencyScopeIssue
 	}
@@ -293,6 +305,39 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		return err
 	}
 	return nil
+}
+
+func (c *SchedulingReactionsConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+func (c *SchedulingReactionsConfig) applyDefaultsAndValidate() error {
+	if c.Enabled == nil {
+		enabled := true
+		c.Enabled = &enabled
+	}
+	if c.Accepted == "" {
+		c.Accepted = defaultAcceptedReaction
+	}
+	if c.Rejected == "" {
+		c.Rejected = defaultRejectedReaction
+	}
+	if !isSupportedGitHubReaction(c.Accepted) {
+		return errors.New("schedulingReactions.accepted must be a supported GitHub reaction")
+	}
+	if !isSupportedGitHubReaction(c.Rejected) {
+		return errors.New("schedulingReactions.rejected must be a supported GitHub reaction")
+	}
+	return nil
+}
+
+func isSupportedGitHubReaction(value string) bool {
+	switch value {
+	case "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes":
+		return true
+	default:
+		return false
+	}
 }
 
 func configuredAgentRunWorkspace(config AgentRunConfig) (nvtv1alpha1.AgentRunWorkspace, error) {
