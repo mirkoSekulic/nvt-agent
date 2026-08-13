@@ -1,5 +1,40 @@
 # Runtime session launch and continuation
 
+## Optional code-server agent terminal
+
+Code-server can open one dedicated integrated terminal and attach it to the
+managed agent session when the workspace folder opens:
+
+```yaml
+code-server:
+  agentTerminal:
+    openOnStartup: true
+```
+
+The feature is disabled when `agentTerminal` is omitted or when
+`openOnStartup` is `false`. When enabled, bootstrap merges an NVT-owned user
+task into code-server's user `tasks.json` and enables automatic folder-open
+tasks in user `settings.json`. Existing settings, tasks, and task-file fields
+are preserved. The task runs only `nvt-session-attach`, uses a focused
+dedicated panel, and has an instance limit of one. It does not configure a
+default terminal profile, so manually created terminals remain ordinary
+shells.
+
+`nvt-session-attach` is the generic session attachment boundary. Its current
+implementation waits up to 60 seconds for the managed session and then
+attaches to it. It never creates or replaces a session. The implementation can
+be replaced if the session backend changes without changing code-server
+bootstrap or the task contract. `AGENT_SESSION` selects the managed session
+name; the default is `agent`.
+
+Bootstrap records only enough local ownership state to restore a pre-existing
+`task.allowAutomaticTasks` value. Disabling the feature removes the NVT-owned
+task and restores that setting when it is still managed, without removing
+unrelated settings or tasks. If the setting was independently changed after
+bootstrap, cleanup preserves that newer value. Re-running bootstrap is
+idempotent. `agentTerminal` must be an object and `openOnStartup` must be a
+boolean.
+
 Runtime bootstrap accepts a provider-neutral command contract:
 
 ```yaml

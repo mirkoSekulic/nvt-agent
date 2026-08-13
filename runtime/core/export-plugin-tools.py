@@ -27,6 +27,7 @@ PROTECTED_NAMES = {
     "entrypoint",
     "export-plugin-tools",
     "health",
+    "nvt-session-attach",
     "plugin-egress-exec",
     "prompt-agent",
     "run-plugins",
