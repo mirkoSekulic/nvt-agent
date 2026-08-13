@@ -54,6 +54,10 @@ COPY assets/branding/nvt-agent-mark-512.png /usr/local/share/nvt-agent/branding/
 RUN /bin/sh /tmp/install-code-server-branding /usr/local/share/nvt-agent/branding \
   && rm -f /tmp/install-code-server-branding
 
+COPY runtime/code-server-agent-terminal /tmp/nvt-code-server-agent-terminal
+RUN /bin/sh /tmp/nvt-code-server-agent-terminal/install.sh /tmp/nvt-code-server-agent-terminal \
+  && rm -rf /tmp/nvt-code-server-agent-terminal
+
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
 COPY runtime/core/entrypoint.sh /usr/local/bin/entrypoint
@@ -70,6 +74,7 @@ COPY runtime/core/prompt-agent.sh /usr/local/bin/prompt-agent
 COPY runtime/core/brokerctl.py /usr/local/bin/brokerctl
 COPY runtime/core/write-agent-instructions.sh /usr/local/bin/write-agent-instructions
 COPY runtime/core/start-code-server.sh /usr/local/bin/start-code-server
+COPY runtime/core/nvt-session-attach.sh /usr/local/bin/nvt-session-attach
 COPY runtime/core/start-agent-session.sh /usr/local/bin/start-agent-session
 COPY runtime/core/start-agent-session.py /usr/local/bin/start-agent-session-exec
 COPY runtime/core/session-resume-state.py /usr/local/bin/session-resume-state
@@ -94,6 +99,7 @@ RUN chmod +x \
   /usr/local/bin/brokerctl \
   /usr/local/bin/write-agent-instructions \
   /usr/local/bin/start-code-server \
+  /usr/local/bin/nvt-session-attach \
   /usr/local/bin/start-agent-session \
   /usr/local/bin/start-agent-session-exec \
   /usr/local/bin/session-resume-state \

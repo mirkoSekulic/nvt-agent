@@ -1,5 +1,44 @@
 # Runtime session launch and continuation
 
+## Optional code-server agent terminal
+
+Code-server can open one dedicated integrated terminal and attach it to the
+managed agent session when the workspace folder opens:
+
+```yaml
+code-server:
+  agentTerminal:
+    openOnStartup: true
+```
+
+The feature is disabled when `agentTerminal` is omitted or when
+`openOnStartup` is `false`. When enabled, bootstrap atomically writes one
+non-secret, mode `0600` NVT-owned enable marker under `NVT_STATE_DIR`. The
+bundled workspace-side extension activates after code-server startup, reads
+only that exact marker, creates one focused integrated terminal whose
+executable is exactly `nvt-session-attach`, and reuses a surviving terminal
+with the same stable NVT identity across extension activation or browser
+reload. It does not configure a default terminal profile, so manually created
+terminals remain ordinary shells.
+
+This mechanism does not create, parse, authorize, or execute user/workspace
+tasks. In particular, bootstrap never sets `task.allowAutomaticTasks`, so a
+repository-controlled `.vscode/tasks.json` entry with `runOn: folderOpen` does
+not become authorized by this feature. Existing user `tasks.json` content,
+including any task with the display label `NVT: Agent Session`, is untouched.
+
+`nvt-session-attach` is the generic session attachment boundary. Its current
+implementation waits up to 60 seconds for the managed session and then
+attaches to it. It never creates or replaces a session. The implementation can
+be replaced if the session backend changes without changing code-server
+bootstrap or extension activation. `AGENT_SESSION` selects the managed session
+name; the default is `agent`.
+
+Disabling or omitting the feature removes only the NVT-owned enable marker.
+Bootstrap and the extension do not read or modify any code-server setting or
+task for this feature. Re-running bootstrap is idempotent. `agentTerminal` must
+be an object and `openOnStartup` must be a boolean.
+
 Runtime bootstrap accepts a provider-neutral command contract:
 
 ```yaml

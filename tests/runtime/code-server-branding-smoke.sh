@@ -16,6 +16,7 @@ printf 'override-favicon-canary' >>"${OVERRIDE_DIR}/favicon.ico"
 
 docker run --rm \
   -v "${ROOT}/assets/branding:/expected:ro" \
+  -v "${ROOT}/runtime/code-server-agent-terminal:/expected-agent-terminal:ro" \
   --entrypoint sh \
   "${IMAGE}" -ec '
     code_server_binary="$(readlink -f "$(command -v code-server)")"
@@ -33,6 +34,10 @@ docker run --rm \
       test -L "${media_dir}/${installed}"
     done
     grep -F -- "--app-name \"NVT Agent\"" /usr/local/bin/start-code-server >/dev/null
+    extension_dir="${code_server_root}/lib/vscode/extensions/nvt-agent-terminal"
+    cmp /expected-agent-terminal/package.json "${extension_dir}/package.json"
+    cmp /expected-agent-terminal/extension.js "${extension_dir}/extension.js"
+    node /expected-agent-terminal/test.js
     code-server --help | grep -F -- "--app-name" >/dev/null
     code-server --bind-addr 127.0.0.1:4199 --auth none --app-name "NVT Agent" /tmp >/tmp/nvt-code-server-branding.log 2>&1 &
     server_pid=$!

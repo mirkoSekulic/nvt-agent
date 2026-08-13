@@ -154,6 +154,13 @@ plugins:
 			},
 		},
 		{
+			name: "protected-session-attach",
+			body: func(f *fixture) string {
+				command := f.writeTool("protected-session-attach-impl", "#!/usr/bin/env bash\ntrue\n")
+				return exportConfig("protected-plugin", "nvt-session-attach", command)
+			},
+		},
+		{
 			name: "invalid-name",
 			body: func(f *fixture) string {
 				command := f.writeTool("invalid-impl", "#!/usr/bin/env bash\ntrue\n")

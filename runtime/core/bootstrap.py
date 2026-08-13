@@ -57,6 +57,8 @@ DEFAULT_EGRESS_CA_FILE = "/nvt-egress-ca/ca.crt"
 DEFAULT_EGRESS_CA_WAIT_SECONDS = 60
 DEFAULT_FORWARD_PROXY_URL = "http://127.0.0.1:8470"
 DEFAULT_BROKER_WAIT_SECONDS = 180
+CODE_SERVER_AGENT_TERMINAL_MARKER = "code-server-agent-terminal-enabled"
+CODE_SERVER_AGENT_TERMINAL_MARKER_CONTENT = b"enabled\n"
 
 
 def load_bootstrap_config(path):
@@ -814,6 +816,59 @@ def code_server_settings_target():
     return Path.home() / ".local" / "share" / "code-server" / "User" / "settings.json"
 
 
+def code_server_agent_terminal_state_target():
+    state_dir = Path(os.environ.get("NVT_STATE_DIR", str(Path.home() / ".nvt-agent")))
+    return state_dir / CODE_SERVER_AGENT_TERMINAL_MARKER
+
+
+def code_server_agent_terminal_enabled(config):
+    if "agentTerminal" not in config:
+        return False
+    agent_terminal = config.get("agentTerminal")
+    if not isinstance(agent_terminal, dict):
+        raise SystemExit("code-server.agentTerminal must be a YAML object")
+    return optional_bool(
+        agent_terminal.get("openOnStartup"),
+        "code-server.agentTerminal.openOnStartup",
+        False,
+    )
+
+
+def apply_code_server_agent_terminal(enabled):
+    marker = code_server_agent_terminal_state_target()
+    if enabled:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{marker.name}.", dir=marker.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as file:
+                file.write(CODE_SERVER_AGENT_TERMINAL_MARKER_CONTENT)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, marker)
+            directory = os.open(marker.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print("bootstrap: configured code-server agent terminal", flush=True)
+        return
+
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return
+    directory = os.open(marker.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    print("bootstrap: removed code-server agent terminal marker", flush=True)
+
+
 def copy_code_server_settings(settings_file):
     source = resolve_workspace_path(settings_file)
     if not source.is_file():
@@ -877,14 +932,18 @@ def apply_code_server_settings(config):
     write_code_server_settings(values, overwrite)
 
 
-def setup_code_server(config):
+def setup_code_server(config, agent_terminal_enabled):
     install_code_server_extensions(as_string_list(config.get("extensions"), "code-server.extensions"))
     apply_code_server_settings(config)
+    apply_code_server_agent_terminal(agent_terminal_enabled)
 
 
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/nvt-agent/agent.yaml")
     runtime, tools, code_server, egress, preseed = load_bootstrap_config(config_path)
+    # Validate the optional managed terminal contract before bootstrap mutates
+    # runtime state or installs anything.
+    agent_terminal_enabled = code_server_agent_terminal_enabled(code_server)
     command = optional_string(runtime.get("command"), "runtime.command")
     initial_prompt = runtime_initial_prompt(runtime)
     resume = runtime_resume(runtime)
@@ -915,7 +974,7 @@ def main():
         persist_env_var("AGENT_COMMAND", command)
         args = optional_string_list(runtime.get("args"), "runtime.args")
         persist_agent_command(command, args, initial_prompt, resume, environment)
-    setup_code_server(code_server)
+    setup_code_server(code_server, agent_terminal_enabled)
     apply_additional_paths(as_string_list(tools.get("additional-paths"), "additional-paths"))
     install_packages(configured_packages(tools))
     install_mise(as_string_list(tools.get("mise"), "mise"))
