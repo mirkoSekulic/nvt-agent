@@ -171,6 +171,18 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			deferredSubmission = true
 			continue
 		}
+		if result.Outcome == schedulingOutcomeRejected {
+			p.Logger.Info(
+				"processed definitive schedule admission rejection",
+				"repo",
+				key,
+				"issue",
+				issueNumber,
+				"commentID",
+				comment.ID,
+			)
+			continue
+		}
 		if err != nil {
 			return err
 		}
