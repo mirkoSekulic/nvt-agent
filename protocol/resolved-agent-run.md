@@ -77,18 +77,23 @@ document. Typed fields are authoritative, so the base block must not contain:
 - `runtime.initial-prompt` (owned by `Prompt`);
 - `runtime.proxy` or top-level `egress` (owned by `Egress` and `Broker`); or
 - the `git-host-credentials`, `git-credentials`, or `checkout-repos` plugins
-  (owned by `CredentialProviders` and `Workflow.Repositories`); or
-- the `lifecycle-termination` plugin (owned by `Lifecycle`).
+  (owned by `CredentialProviders` and `Workflow.Repositories`).
 
 Any presence is a configuration conflict and fails before resolution. The
 renderer clones the base, injects the typed initial prompt, injects the selected
 runtime proxy for tunnel transports, renders broker/egress metadata, emits the
 three managed repository plugins in stable dependency order before other
-plugins, and appends the managed lifecycle plugin. Enforced egress, including
-redirect transport, is marked `operator-prepared: true`; bootstrap therefore
-uses the already bounded route hosts/Git flags and never attempts an in-agent
-broker lookup. Backends must execute the rendered result, never the base block,
-and must not independently repeat these transformations.
+plugins. Enforced egress, including redirect transport, is marked
+`operator-prepared: true`; bootstrap therefore uses the already bounded route
+hosts/Git flags and never attempts an in-agent broker lookup. Backends must
+execute the rendered result, never the base block, and must not independently
+repeat these transformations.
+
+`Lifecycle` remains portable desired intent, not runtime plugin configuration.
+Each backend/controller observes the named agentd events and applies its own
+completion, failure, process, and retention behavior. The portable renderer
+does not inject the Kubernetes `lifecycle-termination` plugin or its
+`/dev/termination-log` path.
 
 Backend provisioning supplies only non-secret `AgentConfigBindings`: one
 forward-proxy URL for forward-proxy/transparent, or an exact provider-to-base-
@@ -245,7 +250,9 @@ controls, resources, instructions, and a real mediated provider with provider
 identity, optional upstream, host-qualified checkout, and provider-native broker
 repository. It removes only the fields that become the typed local overlay,
 renders them through `RenderAgentConfig`, and compares the result with the
-existing operator's final runtime rendering. It also verifies that local
-resolution does not mutate the Kubernetes object. The full operator and
-execution-driver image suites remain regression gates for existing Pod/VM
-behavior.
+existing operator's final runtime rendering after removing only the asserted
+Kubernetes lifecycle adapter from the comparison. The test separately pins
+that the Kubernetes renderer still emits that adapter and that the portable
+renderer does not. It also verifies that local resolution does not mutate the
+Kubernetes object. The full operator and execution-driver image suites remain
+regression gates for existing Pod/VM behavior.

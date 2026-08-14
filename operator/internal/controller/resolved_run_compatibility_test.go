@@ -168,6 +168,8 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 	if err := json.Unmarshal(kubernetesRendered, &kubernetesRenderedObject); err != nil {
 		t.Fatal(err)
 	}
+	assertNoPortableLifecycleAdapter(t, localRenderedObject)
+	removeKubernetesLifecycleAdapter(t, kubernetesRenderedObject)
 
 	if localRun.Image != kubernetesRun.Spec.Image || localRun.Runtime.Type != kubernetesRun.Spec.Runtime.Type ||
 		!reflect.DeepEqual(localRun.Runtime, runtime) ||
@@ -203,7 +205,7 @@ func portableBaseAgentConfig(t *testing.T, raw []byte) json.RawMessage {
 	if err := json.Unmarshal(raw, &root); err != nil {
 		t.Fatal(err)
 	}
-	managed := map[string]struct{}{"git-host-credentials": {}, "git-credentials": {}, "checkout-repos": {}, "lifecycle-termination": {}}
+	managed := map[string]struct{}{"git-host-credentials": {}, "git-credentials": {}, "checkout-repos": {}}
 	plugins, _ := root["plugins"].([]any)
 	basePlugins := make([]any, 0, len(plugins))
 	for _, rawPlugin := range plugins {
@@ -223,6 +225,39 @@ func portableBaseAgentConfig(t *testing.T, raw []byte) json.RawMessage {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func assertNoPortableLifecycleAdapter(t *testing.T, root map[string]any) {
+	t.Helper()
+	for _, rawPlugin := range root["plugins"].([]any) {
+		plugin := rawPlugin.(map[string]any)
+		if plugin["name"] == "lifecycle-termination" {
+			t.Fatalf("portable rendering injected the Kubernetes lifecycle adapter: %#v", plugin)
+		}
+	}
+}
+
+func removeKubernetesLifecycleAdapter(t *testing.T, root map[string]any) {
+	t.Helper()
+	plugins := root["plugins"].([]any)
+	remaining := make([]any, 0, len(plugins)-1)
+	found := 0
+	for _, rawPlugin := range plugins {
+		plugin := rawPlugin.(map[string]any)
+		if plugin["name"] != "lifecycle-termination" {
+			remaining = append(remaining, rawPlugin)
+			continue
+		}
+		found++
+		config, ok := plugin["config"].(map[string]any)
+		if !ok || config["terminationMessagePath"] != "/dev/termination-log" {
+			t.Fatalf("Kubernetes lifecycle adapter changed unexpectedly: %#v", plugin)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("Kubernetes rendering contained %d lifecycle adapters, want 1", found)
+	}
+	root["plugins"] = remaining
 }
 
 func portableRuntime(value nvtv1alpha1.AgentRunRuntime) resolvedrun.Runtime {

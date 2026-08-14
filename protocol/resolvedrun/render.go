@@ -10,10 +10,9 @@ import (
 const runtimePlaceholder = "NVT-PLACEHOLDER-NOT-A-KEY"
 
 var managedControllerPlugins = map[string]struct{}{
-	"git-host-credentials":  {},
-	"git-credentials":       {},
-	"checkout-repos":        {},
-	"lifecycle-termination": {},
+	"git-host-credentials": {},
+	"git-credentials":      {},
+	"checkout-repos":       {},
 }
 
 // RenderAgentConfig applies the controller-owned fields of a resolved run to
@@ -42,18 +41,7 @@ func RenderAgentConfig(run ResolvedAgentRun, bindings AgentConfigBindings) (json
 	root["runtime"] = runtime
 
 	plugins, _ := root["plugins"].([]any)
-	plugins = append(renderRepositoryPlugins(run), plugins...)
-	if len(run.Lifecycle.CompleteOn) != 0 || len(run.Lifecycle.FailOn) != 0 {
-		plugins = append(plugins, map[string]any{
-			"name": "lifecycle-termination", "source": "builtin", "when": "after-agent", "restart": "always",
-			"config": map[string]any{
-				"completeOn":             append([]string(nil), run.Lifecycle.CompleteOn...),
-				"failOn":                 append([]string(nil), run.Lifecycle.FailOn...),
-				"terminationMessagePath": "/dev/termination-log",
-			},
-		})
-	}
-	root["plugins"] = plugins
+	root["plugins"] = append(renderRepositoryPlugins(run), plugins...)
 	if run.Egress.Mode == "mediated" {
 		root["egress"] = renderEgress(run, bindings)
 	}

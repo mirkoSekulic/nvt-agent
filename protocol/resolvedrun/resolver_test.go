@@ -85,6 +85,9 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	if !reflect.DeepEqual(pluginNames[:3], []string{"git-host-credentials", "git-credentials", "checkout-repos"}) {
 		t.Fatalf("typed repositories were not rendered before base plugins: %#v", pluginNames)
 	}
+	if bytes.Contains(rendered, []byte("lifecycle-termination")) || bytes.Contains(rendered, []byte("/dev/termination-log")) {
+		t.Fatalf("portable rendering injected a backend-specific lifecycle adapter: %s", rendered)
+	}
 	plugins := renderedConfig["plugins"].([]any)
 	provider := plugins[0].(map[string]any)["config"].(map[string]any)["providers"].([]any)[0].(map[string]any)
 	credential := plugins[1].(map[string]any)["config"].(map[string]any)["credentials"].([]any)[0].(map[string]any)
@@ -288,9 +291,6 @@ func TestAgentConfigRejectsControllerOwnedFieldConflicts(t *testing.T) {
 		},
 		"credential mapping plugin": func(root map[string]any) {
 			root["plugins"] = append(root["plugins"].([]any), map[string]any{"name": "git-host-credentials", "source": "builtin"})
-		},
-		"lifecycle plugin": func(root map[string]any) {
-			root["plugins"] = append(root["plugins"].([]any), map[string]any{"name": "lifecycle-termination", "source": "builtin"})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
