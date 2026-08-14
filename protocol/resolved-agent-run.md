@@ -1,192 +1,200 @@
 # Resolved agent-run contract
 
 `nvt.resolved-agent-run/v1` is the provider-neutral, non-secret desired value
-consumed by trusted local execution backends. It is deliberately independent of
-Kubernetes CRDs, Docker Compose YAML, process supervision, route publication,
-and lifecycle storage. Those responsibilities belong to later local-controller
+consumed by trusted local execution backends. It is independent of Kubernetes
+CRDs, Compose YAML, process supervision, route publication, and durable
+lifecycle storage. Those responsibilities belong to later local-controller
 layers and backend adapters.
 
 The Go contract and deterministic resolver live in `protocol/resolvedrun`.
-This first version defines data and resolution only; it does not introduce a
-controller process or change Kubernetes `AgentSchedule`/`AgentRun` behavior.
+This first child issue defines data and resolution only; it does not introduce
+a controller process or change Kubernetes `AgentSchedule`/`AgentRun` behavior.
 
-## Ownership and precedence
+## Authority and precedence
 
-Resolution has four explicit layers:
+Resolution receives two different inputs:
 
-1. trusted platform defaults provide the runtime image, runtime process,
-   tools, code-server settings, and resource defaults;
-2. the selected trusted profile may replace each of those complete blocks and
-   exclusively owns credential-provider mappings, broker grants, egress policy,
-   profile instructions, and the allowed backend/retention selections;
-3. the selected trusted workflow exclusively owns repositories and workflow
-   instructions;
-4. the local-run request supplies only a run ID, the authenticated immutable
-   principal, profile name, workflow name, retention-policy name, and an
-   optional backend name.
+1. a trusted authorization context containing the authenticated canonical
+   issuer plus immutable subject and the exact profile/workflow pairs that the
+   caller may select; and
+2. a strictly decoded caller request containing only run ID, one authorized
+   profile/workflow selection, retention name, optional backend name, and an
+   optional initial prompt.
 
-Profile overrides replace complete blocks. The resolver does not merge partial
-security policy. A request can select only a backend and retention policy
-explicitly allowed by the selected profile. Their effective configuration is
-looked up from the administrator-owned catalogs.
+Identity is deliberately absent from the caller request. The resolver freezes
+the principal from the trusted context and rejects a profile/workflow pair not
+listed in that context before looking it up in the global catalogs. A display
+name is presentation data and never participates in authorization.
 
-The request decoder is strict and bounded. Unknown and duplicate fields are
-rejected. In particular, a producer cannot submit repositories, checkout
-paths, credential-provider aliases, broker providers or grants, capabilities,
-runtime commands, preseed, tools, code-server settings, resources, egress
-policy, execution configuration, persistence, or TTL values.
+Trusted platform defaults own image, runtime controls, the complete agent
+configuration, resources, and lifecycle events. A trusted profile may replace
+those complete blocks and exclusively owns credential-provider mappings,
+broker grants, egress policy, profile instructions, and the allowed
+backend/retention selections. The selected trusted workflow exclusively owns
+repositories and workflow instructions. Partial security-policy merging is not
+performed.
 
-## Principal identity
+Unknown and duplicate JSON fields are rejected. In particular, the caller
+cannot submit a principal, repository, checkout path, credential alias, broker
+provider/grant, capability, runtime configuration, plugin, exposure, resource,
+egress policy, execution configuration, persistence policy, or TTL.
 
-The owner is the exact canonical HTTPS issuer plus immutable subject. The
-optional display name is presentation data and never participates in profile,
-workflow, repository, provider, retention, or backend selection.
-
-## Contract shape
+## Complete desired behavior
 
 A resolved value contains:
 
-- the contract version, run ID, exact principal, and selected profile/workflow;
-- image, direct runtime command/arguments, optional direct resume command,
-  autonomy, user, process-scoped non-secret environment, and non-secret
-  preseed;
-- administrator-owned repository checkouts and their approved public
-  credential-provider aliases;
-- tools and code-server configuration;
-- broker provider names, repository bounds, capability names, preparation
-  names, materialization mode, egress hosts, permission ceilings, and bounded
-  request quotas;
-- direct or mediated egress policy, the approved proxy provider, and whether a
-  distinct paired-egress identity is required;
-- profile and workflow workspace instructions in separate ordered fields;
-- portable CPU/memory quantities, persistence intent, retention name, TTLs,
-  and the selected trusted execution-backend name/kind.
+- contract version, run ID, trusted principal, and authorized profile/workflow;
+- image plus typed runtime identity, autonomy, user, container capabilities,
+  Docker kernel-log-device policy, and required Docker networks;
+- a bounded immutable `agent_config` JSON object carrying the existing
+  provider-neutral agent configuration, including fresh/resume commands,
+  process environment, preseed, tools, code-server, plugins and their config,
+  and HTTP exposures;
+- the caller's bounded UTF-8 initial prompt;
+- lifecycle completion and failure event names;
+- administrator-owned repository checkouts and approved public credential
+  aliases;
+- broker provider names and non-secret grant/capability metadata;
+- direct or mediated egress policy;
+- separately ordered profile/workflow instructions;
+- portable resources, persistence intent, retention, TTLs, and trusted
+  execution-backend name/kind.
+
+`agent_config` is limited to 256 KiB, must be a duplicate-free JSON object, and
+must contain a valid direct runtime command. The prompt is limited to 64 KiB,
+must be valid UTF-8, and cannot contain NUL. Agent configuration is trusted
+administrator input: it must not contain real credentials. Existing runtime
+configuration that declares plugins, exposures, tools, preseed, or code-server
+behavior is carried unchanged instead of being re-expressed through a lossy
+second schema.
 
 The execution backend has only a stable name and provider-neutral kind in this
-portable value. Backend implementation/configuration remains trusted controller
-configuration. A backend must reject resources or policy it cannot honor; it
-must not silently weaken the resolved value.
+portable value. Backend implementation/configuration remains trusted
+controller configuration. A backend must reject resources or policy it cannot
+honor rather than silently weakening the resolved value.
 
 ## Repository and credential boundary
 
-Workflows own exact repository IDs, HTTPS checkout URLs, and destinations. The
-repository ID must equal the canonical URL host and path (with an optional
-terminal `.git` removed), so policy for one repository cannot be applied to a
-different checkout host. URLs cannot contain userinfo, query parameters,
-fragments, encoded paths, or traversal. A workflow can reference only a
-credential alias declared by the selected profile. Both that mapping and its
-matching broker grant must allow the exact repository ID. Repository bounds
-support exact identifiers and one bounded trailing `/*` form.
+Repository checkout and broker authorization use two explicit namespaces:
 
-The contract has no credential-value field. It can carry provider names,
+- `checkout_target` is the host-qualified match key derived exactly from the
+  canonical HTTPS checkout URL, such as
+  `github.com/Altinn/altinn-studio`; and
+- `broker_repository` is the administrator-declared provider-native repository
+  identifier passed unchanged to broker grant matching, such as
+  `Altinn/altinn-studio`.
+
+Generic code does not strip hosts or otherwise translate between these
+namespaces. The selected credential mapping must allow the checkout target and
+its referenced broker grant must independently allow the broker repository.
+Both support exact values and one bounded trailing `/*` form. Checkout URLs
+cannot contain userinfo, query parameters, fragments, encoded paths, or
+traversal.
+
+The contract has no credential-value field. It may carry provider names,
 capability/grant metadata, and routing policy only. It never carries an access
-token, refresh token, password, private key, authorization code, provider
-configuration, credential file, injected header, broker agent token, or paired
-egress token. Runtime environment rejects credential-bearing variable-name
-forms such as token, secret, password, credential, private-key, API-key, and
-authorization variables. Runtime environment and preseed remain trusted
-deployment configuration and must not be used for real credentials; broker
-custody and the trusted egress path remain the sensitive-data boundary.
+token, refresh token, password, private key, authorization code, credential
+file, injected header, broker agent token, or paired-egress token. Runtime
+environment names that indicate credential values are rejected. Broker custody
+and the trusted egress path remain the sensitive-data boundary.
 
 Mediated resolution requires a paired-egress identity, an approved proxy
 provider present in the broker grants, and a known transport. It rejects
 file-bundle grants. Direct resolution rejects mediated materializations and
-paired/proxy policy. The resolver contains no provider-name, provider-host, or
-provider-specific branches.
+paired/proxy policy. The resolver contains no provider-specific branches.
 
-## Input example
+## Configuration and request example
 
-The following abbreviated JSON illustrates administrator-owned configuration.
-Names and values are examples, not built-in providers or policies:
+This abbreviated trusted configuration uses example names only:
 
 ```json
 {
   "defaults": {
     "image": "registry.example/agent-runtime@sha256:...",
-    "runtime": {
-      "command": "agent-cli",
-      "args": ["run"],
-      "resume": {"command": "agent-cli", "args": ["resume"]},
-      "autonomy": "trusted-local",
-      "user": "root"
+    "runtime": {"type":"generic-agent","autonomy":"trusted-local","user":"root"},
+    "agent_config": {
+      "runtime": {
+        "command":"agent-cli",
+        "args":["run"],
+        "resume":{"command":"agent-cli","args":["resume"]}
+      },
+      "plugins":[],
+      "expose":{"http":[]}
     },
-    "tools": {},
-    "code_server": {},
-    "resources": {"cpu_limit": "2", "memory_limit": "8Gi"}
+    "resources":{"cpu_limit":"2","memory_limit":"8Gi"},
+    "lifecycle":{"complete_on":["plugin.work.completed"],"fail_on":["plugin.work.failed"]}
   },
-  "profiles": [{
-    "name": "engineering",
-    "credential_providers": [{
-      "name": "source",
-      "broker_provider": "source-app",
-      "repositories": ["git.example/approved/*"]
+  "profiles":[{
+    "name":"engineering",
+    "credential_providers":[{
+      "name":"source",
+      "broker_provider":"source-app",
+      "match_targets":["git.example/approved/*"]
     }],
-    "broker": {"grants": [{
-      "provider": "source-app",
-      "repositories": ["git.example/approved/*"],
-      "capabilities": ["injection.headers"],
-      "materialization": "header-inject",
-      "egress_hosts": ["git.example:443"]
-    }, {
-      "provider": "runtime-main",
-      "capabilities": ["injection.headers"],
-      "materialization": "header-inject",
-      "egress_hosts": ["runtime.example:443"]
+    "broker":{"grants":[{
+      "provider":"source-app",
+      "repositories":["approved/*"],
+      "capabilities":["injection.headers"],
+      "materialization":"header-inject",
+      "egress_hosts":["git.example:443"]
+    },{
+      "provider":"runtime-main",
+      "capabilities":["injection.headers"],
+      "materialization":"header-inject",
+      "egress_hosts":["runtime.example:443"]
     }]},
-    "egress": {
-      "mode": "mediated",
-      "transport": "forward-proxy",
-      "proxy_provider": "runtime-main",
-      "paired_egress_required": true
-    },
-    "allowed_backends": ["container"],
-    "default_backend": "container",
-    "allowed_retentions": ["persistent"]
+    "egress":{"mode":"mediated","transport":"forward-proxy","proxy_provider":"runtime-main","paired_egress_required":true},
+    "allowed_backends":["container"],
+    "default_backend":"container",
+    "allowed_retentions":["persistent"]
   }],
-  "workflows": [{
-    "name": "development",
-    "repositories": [{
-      "id": "git.example/approved/project",
-      "url": "https://git.example/approved/project.git",
-      "path": "project",
-      "credential_provider": "source"
+  "workflows":[{
+    "name":"development",
+    "repositories":[{
+      "checkout_target":"git.example/approved/project",
+      "broker_repository":"approved/project",
+      "url":"https://git.example/approved/project.git",
+      "path":"project",
+      "credential_provider":"source"
     }]
   }],
-  "execution_backends": [{"name": "container", "kind": "container"}],
-  "retention_policies": [{
-    "name": "persistent",
-    "persistence": {"workspace": true, "runtime_state": true}
-  }]
+  "execution_backends":[{"name":"container","kind":"container"}],
+  "retention_policies":[{"name":"persistent","persistence":{"workspace":true,"runtime_state":true}}]
 }
 ```
 
-The corresponding caller-owned request is only:
+The authentication/policy layer supplies the trusted principal and an exact
+authorization such as `engineering` plus `development`. The caller-owned JSON
+request is only:
 
 ```json
 {
-  "run_id": "infra",
-  "principal": {
-    "issuer": "https://issuer.example",
-    "subject": "immutable-subject",
-    "display_name": "Display only"
-  },
-  "profile": "engineering",
-  "workflow": "development",
-  "retention": "persistent",
-  "backend": "container"
+  "run_id":"infra",
+  "profile":"engineering",
+  "workflow":"development",
+  "retention":"persistent",
+  "backend":"container",
+  "prompt":"Implement the requested change."
 }
 ```
 
-Omitting `backend` selects the profile's trusted default. Unknown profiles,
-workflows, backends, retention policies, malformed principals, conflicts,
-repository-policy mismatches, and unsupported extra request fields fail closed.
+Omitting `backend` selects the authorized profile's trusted default. A
+caller-supplied `principal` field, an unauthorized profile/workflow pair,
+unknown selections, malformed trusted identity, repository-policy mismatch,
+or unsupported field fails closed.
 
 ## Kubernetes compatibility boundary
 
 Kubernetes continues to resolve `AgentSchedule` directly into immutable
 `AgentRun` resources through the existing operator implementation. It does not
-serialize a CRD into this contract and does not route reconciliation through
-the local resolver. Operator compatibility coverage compares the shared fields
-produced by existing profile/workflow resolution with an equivalent local
-resolution and asserts that the Kubernetes `AgentRun` is unchanged. The full
-operator suite remains the regression gate for existing Pod/VM behavior.
+serialize CRD YAML into this contract and does not route reconciliation through
+the local resolver.
+
+The operator compatibility gate constructs an existing profiled `AgentRun`
+through the real schedule/profile/workflow builders, including its prompt,
+full runtime configuration, plugins, exposure, lifecycle, container and Docker
+controls, resources, instructions, and real-shaped host-qualified checkout plus
+provider-native broker repository. It compares that desired behavior with the
+portable resolution and verifies that local resolution does not mutate the
+Kubernetes object. The full operator and execution-driver image suites remain
+regression gates for existing Pod/VM behavior.

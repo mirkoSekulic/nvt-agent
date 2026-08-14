@@ -16,34 +16,31 @@ import (
 )
 
 const (
-	maxNameBytes               = 63
-	maxIssuerBytes             = 2048
-	maxSubjectBytes            = 512
-	maxDisplayNameBytes        = 512
-	maxCommandBytes            = 4096
-	maxArgumentBytes           = 16 << 10
-	maxArguments               = 256
-	maxEnvironmentVariables    = 128
-	maxEnvironmentValueBytes   = 16 << 10
-	maxPreseedFiles            = 32
-	maxPreseedFileBytes        = 64 << 10
-	maxToolEntries             = 256
-	maxCodeServerExtensions    = 128
-	maxCodeServerSettings      = 256
-	maxCodeServerSettingsBytes = 64 << 10
-	maxPatternsPerProvider     = 256
-	maxGrantValues             = 256
-	maxTTLSeconds              = 365 * 24 * 60 * 60
+	maxNameBytes             = 63
+	maxIssuerBytes           = 2048
+	maxSubjectBytes          = 512
+	maxDisplayNameBytes      = 512
+	maxCommandBytes          = 4096
+	maxArgumentBytes         = 16 << 10
+	maxArguments             = 256
+	maxEnvironmentVariables  = 128
+	maxEnvironmentValueBytes = 16 << 10
+	maxRuntimeCapabilities   = 64
+	maxDockerNetworks        = 16
+	maxLifecycleEvents       = 128
+	maxPatternsPerProvider   = 256
+	maxGrantValues           = 256
+	maxTTLSeconds            = 365 * 24 * 60 * 60
 )
 
 var (
-	namePattern           = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
-	providerPattern       = regexp.MustCompile(`^[A-Za-z0-9](?:[-._A-Za-z0-9]*[A-Za-z0-9])?$`)
-	environmentPattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	capabilityPattern     = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
-	packagePattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@+._/-]*$`)
-	cpuQuantityPattern    = regexp.MustCompile(`^(?:0|[1-9][0-9]*)(?:m)?$`)
-	memoryQuantityPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]*)(?:Ki|Mi|Gi|Ti|Pi)?$`)
+	namePattern            = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
+	providerPattern        = regexp.MustCompile(`^[A-Za-z0-9](?:[-._A-Za-z0-9]*[A-Za-z0-9])?$`)
+	environmentPattern     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	capabilityPattern      = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
+	linuxCapabilityPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+	cpuQuantityPattern     = regexp.MustCompile(`^(?:0|[1-9][0-9]*)(?:m)?$`)
+	memoryQuantityPattern  = regexp.MustCompile(`^(?:0|[1-9][0-9]*)(?:Ki|Mi|Gi|Ti|Pi)?$`)
 )
 
 var sensitiveEnvironmentSegments = []string{
@@ -53,9 +50,6 @@ var sensitiveEnvironmentSegments = []string{
 func ValidateLocalRunRequest(value LocalRunRequest) error {
 	if !validName(value.RunID) {
 		return errors.New("run_id is invalid")
-	}
-	if err := validatePrincipal(value.Principal); err != nil {
-		return err
 	}
 	if !validName(value.Profile) {
 		return errors.New("profile is invalid")
@@ -69,6 +63,32 @@ func ValidateLocalRunRequest(value LocalRunRequest) error {
 	if value.Backend != "" && !validName(value.Backend) {
 		return errors.New("backend is invalid")
 	}
+	if len(value.Prompt) > MaxPromptBytes || strings.ContainsRune(value.Prompt, 0) || !utf8.ValidString(value.Prompt) {
+		return errors.New("prompt is invalid")
+	}
+	return nil
+}
+
+func ValidateAuthorizationContext(value AuthorizationContext) error {
+	if err := validatePrincipal(value.Principal); err != nil {
+		return errors.New("authorization context is invalid")
+	}
+	if len(value.Selections) == 0 || len(value.Selections) > MaxProfiles {
+		return errors.New("authorization context is invalid")
+	}
+	profiles := make(map[string]struct{}, len(value.Selections))
+	for _, selection := range value.Selections {
+		if !validName(selection.Profile) || len(selection.Workflows) == 0 || len(selection.Workflows) > MaxWorkflows {
+			return errors.New("authorization context is invalid")
+		}
+		if _, duplicate := profiles[selection.Profile]; duplicate {
+			return errors.New("authorization context is invalid")
+		}
+		profiles[selection.Profile] = struct{}{}
+		if err := validateUniqueStrings(selection.Workflows, validName); err != nil {
+			return errors.New("authorization context is invalid")
+		}
+	}
 	return nil
 }
 
@@ -77,15 +97,18 @@ func ValidateResolvedAgentRun(value ResolvedAgentRun) error {
 		return errors.New("contract_version is unsupported")
 	}
 	if err := ValidateLocalRunRequest(LocalRunRequest{
-		RunID: value.RunID, Principal: value.Principal, Profile: value.Profile,
-		Workflow: value.Workflow, Retention: value.Retention, Backend: value.Execution.Name,
+		RunID: value.RunID, Profile: value.Profile, Workflow: value.Workflow,
+		Retention: value.Retention, Backend: value.Execution.Name, Prompt: value.Prompt,
 	}); err != nil {
+		return err
+	}
+	if err := validatePrincipal(value.Principal); err != nil {
 		return err
 	}
 	if !validName(value.Execution.Kind) {
 		return errors.New("execution kind is invalid")
 	}
-	if err := validateEffective(value.Image, value.Runtime, value.Tools, value.CodeServer, value.Resources); err != nil {
+	if err := validateEffective(value.Image, value.Runtime, value.AgentConfig, value.Resources, value.Lifecycle); err != nil {
 		return err
 	}
 	if len(value.Repositories) > MaxRepositories || len(value.CredentialProviders) > MaxCredentialProviderMappings {
@@ -129,134 +152,134 @@ func validatePrincipal(value Principal) error {
 	return nil
 }
 
-func validateEffective(image string, runtime Runtime, tools Tools, codeServer CodeServer, resources Resources) error {
+func validateEffective(image string, runtime Runtime, agentConfig json.RawMessage, resources Resources, lifecycle Lifecycle) error {
 	if image == "" || len(image) > 4096 || image != strings.TrimSpace(image) || containsControl(image) {
 		return errors.New("image is invalid")
 	}
 	if err := validateRuntime(runtime); err != nil {
 		return err
 	}
-	if err := validateTools(tools); err != nil {
+	if err := validateAgentConfig(agentConfig); err != nil {
 		return err
 	}
-	if err := validateCodeServer(codeServer); err != nil {
+	if err := validateLifecycle(lifecycle); err != nil {
 		return err
 	}
 	return validateResources(resources)
 }
 
 func validateRuntime(value Runtime) error {
-	if err := validateCommand(value.RuntimeCommand); err != nil {
-		return errors.New("runtime command is invalid")
-	}
-	if value.Resume != nil {
-		if err := validateCommand(*value.Resume); err != nil {
-			return errors.New("runtime resume command is invalid")
-		}
+	if !validProvider(value.Type) {
+		return errors.New("runtime type is invalid")
 	}
 	if (value.Autonomy != "trusted-local" && value.Autonomy != "interactive") ||
 		(value.User != "root" && value.User != "non-root") {
 		return errors.New("runtime autonomy or user is invalid")
 	}
-	if len(value.Env) > maxEnvironmentVariables {
-		return errors.New("runtime environment exceeds its limit")
-	}
-	for name, environmentValue := range value.Env {
-		if len(name) > 128 || !environmentPattern.MatchString(name) ||
-			len(environmentValue) > maxEnvironmentValueBytes || strings.ContainsRune(environmentValue, 0) ||
-			sensitiveEnvironmentName(name) {
-			return errors.New("runtime environment is invalid")
+	if value.Container != nil {
+		if len(value.Container.Capabilities) > maxRuntimeCapabilities ||
+			validateUniqueStrings(value.Container.Capabilities, func(item string) bool {
+				return len(item) <= 64 && linuxCapabilityPattern.MatchString(item)
+			}) != nil {
+			return errors.New("runtime container capabilities are invalid")
 		}
 	}
-	if len(value.Preseed) > maxPreseedFiles {
-		return errors.New("runtime preseed exceeds its limit")
-	}
-	seen := make(map[string]struct{}, len(value.Preseed))
-	for _, file := range value.Preseed {
-		if !strings.HasPrefix(file.Path, "$HOME/") || len(file.Path) > 4096 || containsControl(file.Path) ||
-			strings.Contains(file.Path, "//") || hasDotPathSegment(strings.TrimPrefix(file.Path, "$HOME/")) {
-			return errors.New("runtime preseed path is invalid")
+	if value.Docker != nil {
+		if len(value.Docker.RequiredNetworks) > maxDockerNetworks {
+			return errors.New("runtime Docker networks exceed their limit")
 		}
-		if _, duplicate := seen[file.Path]; duplicate {
-			return errors.New("runtime preseed path is duplicated")
-		}
-		seen[file.Path] = struct{}{}
-		if file.Mode != "0600" && file.Mode != "0644" {
-			return errors.New("runtime preseed mode is invalid")
-		}
-		hasContent := file.Content != nil
-		hasJSON := len(file.JSON) != 0
-		if hasContent == hasJSON {
-			return errors.New("runtime preseed must contain exactly one content form")
-		}
-		if hasContent && len(*file.Content) > maxPreseedFileBytes {
-			return errors.New("runtime preseed content exceeds its limit")
-		}
-		if hasJSON {
-			if len(file.JSON) > maxPreseedFileBytes || validateRawJSON(file.JSON) != nil {
-				return errors.New("runtime preseed JSON is invalid")
+		seen := map[string]struct{}{}
+		for _, network := range value.Docker.RequiredNetworks {
+			if !validName(network.Name) || !validDockerSubnet(network.Subnet) {
+				return errors.New("runtime Docker network is invalid")
 			}
+			if _, duplicate := seen[network.Name]; duplicate {
+				return errors.New("runtime Docker network is duplicated")
+			}
+			seen[network.Name] = struct{}{}
 		}
 	}
 	return nil
 }
 
-func validateCommand(value RuntimeCommand) error {
-	if !validBoundedText(value.Command, maxCommandBytes, false) ||
-		strings.ContainsAny(value.Command, " \t") || len(value.Args) > maxArguments {
+func validateCommand(command string, args []any) error {
+	if !validBoundedText(command, maxCommandBytes, false) || strings.ContainsAny(command, " \t") || len(args) > maxArguments {
 		return errors.New("invalid command")
 	}
-	for _, argument := range value.Args {
-		if len(argument) > maxArgumentBytes || strings.ContainsRune(argument, 0) || !utf8.ValidString(argument) {
+	for _, raw := range args {
+		argument, ok := raw.(string)
+		if !ok || len(argument) > maxArgumentBytes || strings.ContainsRune(argument, 0) || !utf8.ValidString(argument) {
 			return errors.New("invalid command argument")
 		}
 	}
 	return nil
 }
 
-func validateTools(value Tools) error {
-	if len(value.Packages) > maxToolEntries || len(value.Mise) > maxToolEntries ||
-		len(value.AdditionalPaths) > maxToolEntries || len(value.Shell) > maxToolEntries {
-		return errors.New("tools configuration exceeds its limit")
+func validateAgentConfig(value json.RawMessage) error {
+	if len(value) == 0 || len(value) > MaxAgentConfigBytes || rejectDuplicateKeys(value) != nil {
+		return errors.New("agent_config is invalid")
 	}
-	for _, values := range [][]string{value.Packages, value.Mise} {
-		if err := validateUniqueStrings(values, func(item string) bool {
-			return len(item) <= 512 && packagePattern.MatchString(item)
-		}); err != nil {
-			return errors.New("tools package configuration is invalid")
+	var root map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.UseNumber()
+	if decoder.Decode(&root) != nil || root == nil || ensureDecoderEOF(decoder) != nil {
+		return errors.New("agent_config is invalid")
+	}
+	runtime, ok := root["runtime"].(map[string]any)
+	if !ok {
+		return errors.New("agent_config runtime is invalid")
+	}
+	command, ok := runtime["command"].(string)
+	args, argsOK := optionalAnySlice(runtime, "args")
+	if !ok || !argsOK || validateCommand(command, args) != nil {
+		return errors.New("agent_config runtime command is invalid")
+	}
+	if rawResume, present := runtime["resume"]; present {
+		resume, ok := rawResume.(map[string]any)
+		resumeCommand, commandOK := resume["command"].(string)
+		resumeArgs, argsOK := optionalAnySlice(resume, "args")
+		if !ok || !commandOK || !argsOK || validateCommand(resumeCommand, resumeArgs) != nil {
+			return errors.New("agent_config runtime resume is invalid")
 		}
 	}
-	if err := validateUniqueStrings(value.AdditionalPaths, func(item string) bool {
-		return len(item) <= 4096 && strings.HasPrefix(item, "/") && !containsControl(item)
-	}); err != nil {
-		return errors.New("tools additional paths are invalid")
-	}
-	if err := validateUniqueStrings(value.Shell, func(item string) bool {
-		return validBoundedText(item, 16<<10, false)
-	}); err != nil {
-		return errors.New("tools shell configuration is invalid")
+	if rawEnvironment, present := runtime["env"]; present {
+		environment, ok := rawEnvironment.(map[string]any)
+		if !ok || len(environment) > maxEnvironmentVariables {
+			return errors.New("agent_config runtime environment is invalid")
+		}
+		for name, raw := range environment {
+			text, ok := raw.(string)
+			if !ok || len(name) > 128 || !environmentPattern.MatchString(name) || len(text) > maxEnvironmentValueBytes ||
+				strings.ContainsRune(text, 0) || sensitiveEnvironmentName(name) {
+				return errors.New("agent_config runtime environment is invalid")
+			}
+		}
 	}
 	return nil
 }
 
-func validateCodeServer(value CodeServer) error {
-	if len(value.Extensions) > maxCodeServerExtensions || len(value.Settings) > maxCodeServerSettings {
-		return errors.New("code-server configuration exceeds its limit")
+func optionalAnySlice(object map[string]any, key string) ([]any, bool) {
+	value, present := object[key]
+	if !present {
+		return nil, true
 	}
-	if err := validateUniqueStrings(value.Extensions, func(item string) bool {
-		return len(item) <= 256 && providerPattern.MatchString(item)
-	}); err != nil {
-		return errors.New("code-server extensions are invalid")
+	result, ok := value.([]any)
+	return result, ok
+}
+
+func validateLifecycle(value Lifecycle) error {
+	if len(value.CompleteOn) > maxLifecycleEvents || len(value.FailOn) > maxLifecycleEvents ||
+		validateUniqueStrings(value.CompleteOn, validEventName) != nil || validateUniqueStrings(value.FailOn, validEventName) != nil {
+		return errors.New("lifecycle is invalid")
 	}
-	total := 0
-	for name, setting := range value.Settings {
-		if !validBoundedText(name, 256, false) || len(setting) > 4096 || validateRawJSON(setting) != nil {
-			return errors.New("code-server settings are invalid")
+	seen := map[string]struct{}{}
+	for _, event := range value.CompleteOn {
+		seen[event] = struct{}{}
+	}
+	for _, event := range value.FailOn {
+		if _, conflict := seen[event]; conflict {
+			return errors.New("lifecycle event has conflicting outcomes")
 		}
-		total += len(name) + len(setting)
-	}
-	if total > maxCodeServerSettingsBytes {
-		return errors.New("code-server settings exceed their byte limit")
 	}
 	return nil
 }
@@ -373,7 +396,7 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 	}
 	aliases := make(map[string]CredentialProviderMapping, len(mappings))
 	for _, mapping := range mappings {
-		if !validProvider(mapping.Name) || !validProvider(mapping.BrokerProvider) || len(mapping.Repositories) > maxPatternsPerProvider {
+		if !validProvider(mapping.Name) || !validProvider(mapping.BrokerProvider) || len(mapping.MatchTargets) > maxPatternsPerProvider {
 			return errors.New("credential provider mapping is invalid")
 		}
 		if _, duplicate := aliases[mapping.Name]; duplicate {
@@ -382,25 +405,26 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 		if _, granted := providers[mapping.BrokerProvider]; !granted {
 			return errors.New("credential provider mapping references an ungranted provider")
 		}
-		if err := validateUniqueStrings(mapping.Repositories, validRepositoryPattern); err != nil {
-			return errors.New("credential provider repository patterns are invalid")
+		if err := validateUniqueStrings(mapping.MatchTargets, validRepositoryPattern); err != nil {
+			return errors.New("credential provider match targets are invalid")
 		}
 		aliases[mapping.Name] = mapping
 	}
 	identifiers := make(map[string]struct{}, len(repositories))
 	paths := make(map[string]struct{}, len(repositories))
 	for _, repository := range repositories {
-		if !validRepositoryID(repository.ID) || repositoryIDFromURL(repository.URL) != repository.ID ||
+		if !validRepositoryID(repository.CheckoutTarget) || repositoryTargetFromURL(repository.URL) != repository.CheckoutTarget ||
+			!validRepositoryID(repository.BrokerRepository) ||
 			!validCheckoutPath(repository.Path) {
 			return errors.New("workflow repository is invalid")
 		}
-		if _, duplicate := identifiers[repository.ID]; duplicate {
+		if _, duplicate := identifiers[repository.CheckoutTarget]; duplicate {
 			return errors.New("workflow repository is duplicated")
 		}
-		identifiers[repository.ID] = struct{}{}
+		identifiers[repository.CheckoutTarget] = struct{}{}
 		effectivePath := repository.Path
 		if effectivePath == "" {
-			effectivePath = path.Base(strings.TrimSuffix(repository.ID, ".git"))
+			effectivePath = path.Base(strings.TrimSuffix(repository.CheckoutTarget, ".git"))
 		}
 		if _, duplicate := paths[effectivePath]; duplicate {
 			return errors.New("workflow checkout path is duplicated")
@@ -410,11 +434,11 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 			continue
 		}
 		mapping, exists := aliases[repository.CredentialProvider]
-		if !exists || !patternsContain(mapping.Repositories, repository.ID) {
+		if !exists || !patternsContain(mapping.MatchTargets, repository.CheckoutTarget) {
 			return errors.New("workflow repository is not authorized by its credential mapping")
 		}
 		grant := providers[mapping.BrokerProvider]
-		if !patternsContain(grant.Repositories, repository.ID) {
+		if !patternsContain(grant.Repositories, repository.BrokerRepository) {
 			return errors.New("workflow repository is not authorized by its broker grant")
 		}
 	}
@@ -505,7 +529,7 @@ func patternsContain(patterns []string, repository string) bool {
 	return false
 }
 
-func repositoryIDFromURL(value string) string {
+func repositoryTargetFromURL(value string) string {
 	if len(value) == 0 || len(value) > 4096 || containsControl(value) {
 		return ""
 	}
@@ -578,20 +602,17 @@ func sensitiveEnvironmentName(name string) bool {
 	return false
 }
 
-func validateRawJSON(value json.RawMessage) error {
-	if err := rejectDuplicateKeys(value); err != nil {
-		return err
+func validDockerSubnet(value string) bool {
+	ip, network, err := net.ParseCIDR(value)
+	if err != nil || ip.To4() == nil || !ip.Equal(network.IP) {
+		return false
 	}
-	decoder := json.NewDecoder(bytes.NewReader(value))
-	decoder.UseNumber()
-	var decoded any
-	if err := decoder.Decode(&decoded); err != nil {
-		return err
-	}
-	if err := ensureDecoderEOF(decoder); err != nil {
-		return err
-	}
-	return nil
+	ones, bits := network.Mask.Size()
+	return bits == 32 && ones >= 16 && ones <= 30
+}
+
+func validEventName(value string) bool {
+	return len(value) <= 256 && capabilityPattern.MatchString(value)
 }
 
 func ensureDecoderEOF(decoder *json.Decoder) error {

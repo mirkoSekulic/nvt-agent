@@ -30,7 +30,7 @@ func NewResolver(configuration TrustedConfiguration) (*Resolver, error) {
 		return nil, ErrInvalidConfiguration
 	}
 	if err := validateEffective(configuration.Defaults.Image, configuration.Defaults.Runtime,
-		configuration.Defaults.Tools, configuration.Defaults.CodeServer, configuration.Defaults.Resources); err != nil {
+		configuration.Defaults.AgentConfig, configuration.Defaults.Resources, configuration.Defaults.Lifecycle); err != nil {
 		return nil, ErrInvalidConfiguration
 	}
 
@@ -82,8 +82,8 @@ func NewResolver(configuration TrustedConfiguration) (*Resolver, error) {
 		if profile.Image != "" && (profile.Image != stringTrimSpace(profile.Image) || containsControl(profile.Image)) {
 			return nil, ErrInvalidConfiguration
 		}
-		image, runtime, tools, codeServer, resources := resolver.effective(profile)
-		if validateEffective(image, runtime, tools, codeServer, resources) != nil ||
+		image, runtime, agentConfig, resources, lifecycle := resolver.effective(profile)
+		if validateEffective(image, runtime, agentConfig, resources, lifecycle) != nil ||
 			validateBrokerAndEgress(profile.Broker, profile.Egress) != nil {
 			return nil, ErrInvalidConfiguration
 		}
@@ -104,17 +104,18 @@ func validateWorkflowRepositories(repositories []Repository) error {
 	identifiers := make(map[string]struct{}, len(repositories))
 	paths := make(map[string]struct{}, len(repositories))
 	for _, repository := range repositories {
-		if !validRepositoryID(repository.ID) || repositoryIDFromURL(repository.URL) != repository.ID || !validCheckoutPath(repository.Path) ||
+		if !validRepositoryID(repository.CheckoutTarget) || repositoryTargetFromURL(repository.URL) != repository.CheckoutTarget ||
+			!validRepositoryID(repository.BrokerRepository) || !validCheckoutPath(repository.Path) ||
 			(repository.CredentialProvider != "" && !validProvider(repository.CredentialProvider)) {
 			return ErrInvalidConfiguration
 		}
-		if _, duplicate := identifiers[repository.ID]; duplicate {
+		if _, duplicate := identifiers[repository.CheckoutTarget]; duplicate {
 			return ErrInvalidConfiguration
 		}
-		identifiers[repository.ID] = struct{}{}
+		identifiers[repository.CheckoutTarget] = struct{}{}
 		effectivePath := repository.Path
 		if effectivePath == "" {
-			effectivePath = pathBase(repository.ID)
+			effectivePath = pathBase(repository.CheckoutTarget)
 		}
 		if _, duplicate := paths[effectivePath]; duplicate {
 			return ErrInvalidConfiguration
@@ -139,9 +140,12 @@ func pathBase(value string) string {
 	return base
 }
 
-func (resolver *Resolver) Resolve(request LocalRunRequest) (ResolvedAgentRun, error) {
-	if resolver == nil || ValidateLocalRunRequest(request) != nil {
+func (resolver *Resolver) Resolve(authorization AuthorizationContext, request LocalRunRequest) (ResolvedAgentRun, error) {
+	if resolver == nil || ValidateLocalRunRequest(request) != nil || ValidateAuthorizationContext(authorization) != nil {
 		return ResolvedAgentRun{}, ErrInvalidRequest
+	}
+	if !selectionAuthorized(authorization.Selections, request.Profile, request.Workflow) {
+		return ResolvedAgentRun{}, ErrSelectionDenied
 	}
 	profile, exists := resolver.profiles[request.Profile]
 	if !exists {
@@ -166,15 +170,16 @@ func (resolver *Resolver) Resolve(request LocalRunRequest) (ResolvedAgentRun, er
 	if err := validateMappingsAndRepositories(profile.CredentialProviders, workflow.Repositories, profile.Broker); err != nil {
 		return ResolvedAgentRun{}, ErrInvalidConfiguration
 	}
-	image, runtime, tools, codeServer, resources := resolver.effective(profile)
+	image, runtime, agentConfig, resources, lifecycle := resolver.effective(profile)
 	resolved := ResolvedAgentRun{
-		ContractVersion: ContractVersion, RunID: request.RunID, Principal: request.Principal,
+		ContractVersion: ContractVersion, RunID: request.RunID, Principal: authorization.Principal,
 		Profile: profile.Name, Workflow: workflow.Name, Image: image, Runtime: runtime,
+		AgentConfig: clone(agentConfig), Prompt: request.Prompt,
 		Repositories: clone(workflow.Repositories), CredentialProviders: clone(profile.CredentialProviders),
-		Tools: tools, CodeServer: codeServer, Broker: clone(profile.Broker), Egress: profile.Egress,
+		Broker: clone(profile.Broker), Egress: profile.Egress,
 		WorkspaceInstructions: WorkspaceInstructions{Profile: profile.WorkspaceInstructions, Workflow: workflow.WorkspaceInstructions},
 		Resources:             resources, Persistence: retention.Persistence, Retention: retention.Name,
-		TTL: retention.TTL, Execution: backend,
+		TTL: retention.TTL, Lifecycle: lifecycle, Execution: backend,
 	}
 	if err := ValidateResolvedAgentRun(resolved); err != nil {
 		return ResolvedAgentRun{}, ErrInvalidConfiguration
@@ -182,7 +187,7 @@ func (resolver *Resolver) Resolve(request LocalRunRequest) (ResolvedAgentRun, er
 	return clone(resolved), nil
 }
 
-func (resolver *Resolver) effective(profile Profile) (string, Runtime, Tools, CodeServer, Resources) {
+func (resolver *Resolver) effective(profile Profile) (string, Runtime, json.RawMessage, Resources, Lifecycle) {
 	image := resolver.defaults.Image
 	if profile.Image != "" {
 		image = profile.Image
@@ -191,19 +196,28 @@ func (resolver *Resolver) effective(profile Profile) (string, Runtime, Tools, Co
 	if profile.Runtime != nil {
 		runtime = clone(*profile.Runtime)
 	}
-	tools := clone(resolver.defaults.Tools)
-	if profile.Tools != nil {
-		tools = clone(*profile.Tools)
-	}
-	codeServer := clone(resolver.defaults.CodeServer)
-	if profile.CodeServer != nil {
-		codeServer = clone(*profile.CodeServer)
+	agentConfig := clone(resolver.defaults.AgentConfig)
+	if len(profile.AgentConfig) != 0 {
+		agentConfig = clone(profile.AgentConfig)
 	}
 	resources := resolver.defaults.Resources
 	if profile.Resources != nil {
 		resources = *profile.Resources
 	}
-	return image, runtime, tools, codeServer, resources
+	lifecycle := clone(resolver.defaults.Lifecycle)
+	if profile.Lifecycle != nil {
+		lifecycle = clone(*profile.Lifecycle)
+	}
+	return image, runtime, agentConfig, resources, lifecycle
+}
+
+func selectionAuthorized(selections []AuthorizedSelection, profile, workflow string) bool {
+	for _, selection := range selections {
+		if selection.Profile == profile && containsString(selection.Workflows, workflow) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateAllowedSelections(profile Profile, backends map[string]ExecutionBackend, retentions map[string]RetentionPolicy) error {

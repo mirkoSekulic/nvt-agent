@@ -17,6 +17,8 @@ const (
 	MaxCredentialProviderMappings = 64
 	MaxBrokerGrants               = 64
 	MaxWorkspaceInstructionsBytes = 64 << 10
+	MaxAgentConfigBytes           = 256 << 10
+	MaxPromptBytes                = 64 << 10
 )
 
 // Principal is the immutable authenticated owner. DisplayName is presentation
@@ -27,52 +29,36 @@ type Principal struct {
 	DisplayName string `json:"display_name,omitempty"`
 }
 
-// RuntimeCommand is executed directly. It is never parsed by a shell.
-type RuntimeCommand struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args,omitempty"`
-}
-
-// Runtime contains only non-secret process and bootstrap configuration.
+// Runtime contains the runtime identity and trusted execution controls. The
+// direct process command, resume command, preseed, tools, code-server, plugins,
+// and exposure configuration live in the bounded AgentConfig object.
 type Runtime struct {
-	RuntimeCommand
-	Resume   *RuntimeCommand   `json:"resume,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
-	Autonomy string            `json:"autonomy"`
-	User     string            `json:"user"`
-	Preseed  []PreseedFile     `json:"preseed,omitempty"`
+	Type      string            `json:"type"`
+	Autonomy  string            `json:"autonomy"`
+	User      string            `json:"user"`
+	Container *RuntimeContainer `json:"container,omitempty"`
+	Docker    *RuntimeDocker    `json:"docker,omitempty"`
 }
 
-// PreseedFile is administrator-authored, non-secret content placed under the
-// agent home. Exactly one of Content and JSON must be set.
-type PreseedFile struct {
-	Path      string          `json:"path"`
-	Mode      string          `json:"mode"`
-	Overwrite bool            `json:"overwrite"`
-	Content   *string         `json:"content,omitempty"`
-	JSON      json.RawMessage `json:"json,omitempty"`
+type RuntimeContainer struct {
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
-// Tools is the bounded administrator-owned runtime tool configuration.
-type Tools struct {
-	Packages        []string `json:"packages,omitempty"`
-	Mise            []string `json:"mise,omitempty"`
-	AdditionalPaths []string `json:"additional_paths,omitempty"`
-	Shell           []string `json:"shell,omitempty"`
+type RuntimeDocker struct {
+	KernelLogDevice  bool            `json:"kernel_log_device,omitempty"`
+	RequiredNetworks []DockerNetwork `json:"required_networks,omitempty"`
 }
 
-// CodeServer is the non-secret code-server configuration. Settings values are
-// JSON so booleans and numbers are retained without Kubernetes types.
-type CodeServer struct {
-	Extensions                 []string                   `json:"extensions,omitempty"`
-	Settings                   map[string]json.RawMessage `json:"settings,omitempty"`
-	AgentTerminalOpenOnStartup bool                       `json:"agent_terminal_open_on_startup,omitempty"`
+type DockerNetwork struct {
+	Name   string `json:"name"`
+	Subnet string `json:"subnet"`
 }
 
 // Repository is an exact administrator-owned checkout. CredentialProvider is
 // an alias into the selected profile's approved mappings.
 type Repository struct {
-	ID                 string `json:"id"`
+	CheckoutTarget     string `json:"checkout_target"`
+	BrokerRepository   string `json:"broker_repository"`
 	URL                string `json:"url"`
 	Path               string `json:"path,omitempty"`
 	CredentialProvider string `json:"credential_provider,omitempty"`
@@ -83,7 +69,7 @@ type Repository struct {
 type CredentialProviderMapping struct {
 	Name           string   `json:"name"`
 	BrokerProvider string   `json:"broker_provider"`
-	Repositories   []string `json:"repositories,omitempty"`
+	MatchTargets   []string `json:"match_targets,omitempty"`
 }
 
 // Broker is a set of non-secret capability grants. It never carries provider
@@ -149,6 +135,11 @@ type TTL struct {
 	RunRetentionSeconds int64 `json:"run_retention_seconds,omitempty"`
 }
 
+type Lifecycle struct {
+	CompleteOn []string `json:"complete_on,omitempty"`
+	FailOn     []string `json:"fail_on,omitempty"`
+}
+
 // ExecutionBackend selects one trusted backend implementation by stable name
 // and provider-neutral kind. Backend configuration remains outside this
 // portable resolved value.
@@ -173,10 +164,10 @@ type ResolvedAgentRun struct {
 	Workflow              string                      `json:"workflow"`
 	Image                 string                      `json:"image"`
 	Runtime               Runtime                     `json:"runtime"`
+	AgentConfig           json.RawMessage             `json:"agent_config"`
+	Prompt                string                      `json:"prompt,omitempty"`
 	Repositories          []Repository                `json:"repositories,omitempty"`
 	CredentialProviders   []CredentialProviderMapping `json:"credential_providers,omitempty"`
-	Tools                 Tools                       `json:"tools"`
-	CodeServer            CodeServer                  `json:"code_server"`
 	Broker                Broker                      `json:"broker"`
 	Egress                Egress                      `json:"egress"`
 	WorkspaceInstructions WorkspaceInstructions       `json:"workspace_instructions"`
@@ -184,6 +175,7 @@ type ResolvedAgentRun struct {
 	Persistence           Persistence                 `json:"persistence"`
 	Retention             string                      `json:"retention"`
 	TTL                   TTL                         `json:"ttl"`
+	Lifecycle             Lifecycle                   `json:"lifecycle"`
 	Execution             ExecutionBackend            `json:"execution"`
 }
 
@@ -191,11 +183,11 @@ type ResolvedAgentRun struct {
 // replace complete blocks; partial security-policy merging is intentionally not
 // supported.
 type PlatformDefaults struct {
-	Image      string     `json:"image"`
-	Runtime    Runtime    `json:"runtime"`
-	Tools      Tools      `json:"tools"`
-	CodeServer CodeServer `json:"code_server"`
-	Resources  Resources  `json:"resources"`
+	Image       string          `json:"image"`
+	Runtime     Runtime         `json:"runtime"`
+	AgentConfig json.RawMessage `json:"agent_config"`
+	Resources   Resources       `json:"resources"`
+	Lifecycle   Lifecycle       `json:"lifecycle"`
 }
 
 // Profile is trusted administrator configuration. Protected provider, broker,
@@ -205,9 +197,9 @@ type Profile struct {
 	Name                  string                      `json:"name"`
 	Image                 string                      `json:"image,omitempty"`
 	Runtime               *Runtime                    `json:"runtime,omitempty"`
-	Tools                 *Tools                      `json:"tools,omitempty"`
-	CodeServer            *CodeServer                 `json:"code_server,omitempty"`
+	AgentConfig           json.RawMessage             `json:"agent_config,omitempty"`
 	Resources             *Resources                  `json:"resources,omitempty"`
+	Lifecycle             *Lifecycle                  `json:"lifecycle,omitempty"`
 	CredentialProviders   []CredentialProviderMapping `json:"credential_providers,omitempty"`
 	Broker                Broker                      `json:"broker"`
 	Egress                Egress                      `json:"egress"`
@@ -233,13 +225,27 @@ type TrustedConfiguration struct {
 	RetentionPolicies []RetentionPolicy  `json:"retention_policies"`
 }
 
-// LocalRunRequest is the complete caller-controlled selection surface. Its
-// strict decoder rejects every additional field.
+// AuthorizedSelection and AuthorizationContext are trusted authentication and
+// policy outputs. They are never decoded from the local-run request.
+type AuthorizedSelection struct {
+	Profile   string
+	Workflows []string
+}
+
+type AuthorizationContext struct {
+	Principal  Principal
+	Selections []AuthorizedSelection
+}
+
+// LocalRunRequest is the complete caller-controlled surface. Identity is
+// deliberately absent and every profile/workflow pair is checked against a
+// separate trusted AuthorizationContext. Its strict decoder rejects every
+// additional field.
 type LocalRunRequest struct {
-	RunID     string    `json:"run_id"`
-	Principal Principal `json:"principal"`
-	Profile   string    `json:"profile"`
-	Workflow  string    `json:"workflow"`
-	Retention string    `json:"retention"`
-	Backend   string    `json:"backend,omitempty"`
+	RunID     string `json:"run_id"`
+	Profile   string `json:"profile"`
+	Workflow  string `json:"workflow"`
+	Retention string `json:"retention"`
+	Backend   string `json:"backend,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
 }
