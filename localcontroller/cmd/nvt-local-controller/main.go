@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/controller"
+	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/dockerbackend"
 )
 
 func main() {
@@ -32,13 +33,27 @@ func main() {
 			logger.Print("shutdown warning reason=state-close-failed")
 		}
 	}()
+	backend, err := dockerbackend.New(dockerbackend.Config{
+		DockerHost: config.DockerHost, RunsDir: config.RunsDir, BrokerURL: config.BrokerURL, BrokerCAFile: config.BrokerCAFile,
+		BrokerAgentsPath: config.BrokerAgentsPath, IdentityKeyPath: config.IdentityKeyPath, Owner: config.ControllerOwner,
+		ExternalNetwork: config.ExternalNetwork, ProxyPort: config.ProxyPort, ProtectedCIDRs: config.ProtectedCIDRs, DindImage: config.DindImage, EgressdImage: config.EgressdImage,
+		CapturedImage: config.CapturedImage, SeedImage: config.SeedImage, OperationTimeout: config.BackendOperationTimeout,
+	})
+	if err != nil {
+		logger.Fatal("startup failed reason=backend-unavailable")
+	}
+	reconciler, err := controller.NewReconciler(store, backend, config.ControllerOwner, config.MaxClaimLease, logger)
+	if err != nil {
+		logger.Fatal("startup failed reason=invalid-configuration")
+	}
 
 	server := &http.Server{
-		Addr: config.Bind, Handler: controller.NewHTTPHandler(store, logger),
+		Addr: config.Bind, Handler: controller.NewHTTPHandlerWithBackend(store, logger, backend.Ready),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second,
 	}
 	go sweep(ctx, logger, store, config.SweepInterval)
+	go reconciler.Run(ctx, config.ReconcileInterval)
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.ListenAndServe() }()
 	logger.Print("started")

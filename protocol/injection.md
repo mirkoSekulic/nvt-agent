@@ -395,6 +395,13 @@ deployments it must use TLS or a transport unreachable from the agent. Serving
 conformance failure. The agent-to-egress path carries only inert placeholders
 and non-secret routing metadata; the agent has no real credential to send.
 
+`egressd` accepts its paired broker bearer from the existing
+`NVT_BROKER_TOKEN` environment variable or from an exact private regular file
+named by `NVT_BROKER_TOKEN_FILE`. The sources are mutually exclusive. The file
+form is used by the local Docker controller so container arguments,
+environment, Compose state, and inspect output carry only the non-secret file
+path; the volume containing the bearer is mounted only into trusted egressd.
+
 ## Audit
 
 Every injection request appends one JSONL audit entry: request id,

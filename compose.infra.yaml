@@ -12,6 +12,7 @@ services:
       - ./.broker:/state
     networks:
       - agents-proxy
+      - local-control-plane
     restart: unless-stopped
 
   proxy:
@@ -36,11 +37,28 @@ services:
       NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS: ${NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS:-32}
       NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS: ${NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS:-30}
       NVT_LOCAL_CONTROLLER_SWEEP_SECONDS: ${NVT_LOCAL_CONTROLLER_SWEEP_SECONDS:-1}
+      NVT_LOCAL_CONTROLLER_RECONCILE_SECONDS: ${NVT_LOCAL_CONTROLLER_RECONCILE_SECONDS:-1}
+      NVT_LOCAL_CONTROLLER_DOCKER_HOST: unix:///var/run/docker.sock
+      NVT_LOCAL_CONTROLLER_RUNS_DIR: /state/controller/runs
+      NVT_LOCAL_CONTROLLER_BROKER_URL: http://broker:7347
+      NVT_LOCAL_CONTROLLER_BROKER_AGENTS: /broker-state/agents.yaml
+      NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE: /broker-state/local-controller.key
+      NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK: agents-proxy
+      NVT_LOCAL_CONTROLLER_PROXY_PORT: ${NVT_PROXY_PORT:-4090}
+      NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS: ${NVT_DIND_PROTECTED_CIDRS:-127.0.0.0/8 169.254.0.0/16}
+      NVT_LOCAL_CONTROLLER_DIND_IMAGE: ${DIND_IMAGE:-nvt-dind:latest}
+      NVT_LOCAL_CONTROLLER_EGRESSD_IMAGE: ${EGRESSD_IMAGE:-nvt-egressd:latest}
+      NVT_LOCAL_CONTROLLER_CAPTURED_IMAGE: ${CAPTURED_IMAGE:-nvt-captured:latest}
+      NVT_LOCAL_CONTROLLER_SEED_IMAGE: ${RUNTIME_IMAGE:-nvt-agent-runtime:latest}
     volumes:
       - local-controller-state:/state
+      - ./.broker:/broker-state
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - local-control-plane
     read_only: true
+    tmpfs:
+      - /tmp
     restart: unless-stopped
 
 networks:

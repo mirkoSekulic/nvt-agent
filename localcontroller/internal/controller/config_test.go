@@ -6,7 +6,16 @@ import (
 )
 
 func TestValidateConfigBounds(t *testing.T) {
-	valid := Config{Bind: "0.0.0.0:7480", StatePath: "/state/controller/local-controller.sqlite3", MaxActiveRuns: 32, MaxClaimLease: 30 * time.Second, SweepInterval: time.Second}
+	valid := Config{
+		Bind: "0.0.0.0:7480", StatePath: "/state/controller/local-controller.sqlite3", MaxActiveRuns: 32,
+		MaxClaimLease: 30 * time.Second, SweepInterval: time.Second, ReconcileInterval: time.Second,
+		DockerHost: "unix:///var/run/docker.sock", RunsDir: "/state/controller/runs", BrokerURL: "http://broker:7347",
+		BrokerAgentsPath: "/broker-state/agents.yaml", IdentityKeyPath: "/broker-state/local-controller.key",
+		ControllerOwner: "nvt-local-controller", ExternalNetwork: "agents-proxy", ProxyPort: 4090, DindImage: "nvt-dind:latest",
+		ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16",
+		EgressdImage:   "nvt-egressd:latest", CapturedImage: "nvt-captured:latest", SeedImage: "nvt-agent-runtime:latest",
+		BackendOperationTimeout: 2 * time.Minute,
+	}
 	if err := ValidateConfig(valid); err != nil {
 		t.Fatal(err)
 	}
@@ -16,10 +25,14 @@ func TestValidateConfigBounds(t *testing.T) {
 		"relative state": func(value *Config) {
 			value.StatePath = "state/local-controller.sqlite3"
 		},
-		"root state":  func(value *Config) { value.StatePath = "/local-controller.sqlite3" },
-		"capacity":    func(value *Config) { value.MaxActiveRuns = 0 },
-		"claim lease": func(value *Config) { value.MaxClaimLease = 0 },
-		"sweep":       func(value *Config) { value.SweepInterval = 0 },
+		"root state":    func(value *Config) { value.StatePath = "/local-controller.sqlite3" },
+		"capacity":      func(value *Config) { value.MaxActiveRuns = 0 },
+		"claim lease":   func(value *Config) { value.MaxClaimLease = 0 },
+		"sweep":         func(value *Config) { value.SweepInterval = 0 },
+		"reconcile":     func(value *Config) { value.ReconcileInterval = 0 },
+		"docker host":   func(value *Config) { value.DockerHost = "" },
+		"runs dir":      func(value *Config) { value.RunsDir = "relative" },
+		"broker agents": func(value *Config) { value.BrokerAgentsPath = "relative" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
@@ -38,6 +51,9 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 		"NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS",
 		"NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS",
 		"NVT_LOCAL_CONTROLLER_SWEEP_SECONDS",
+		"NVT_LOCAL_CONTROLLER_RECONCILE_SECONDS",
+		"NVT_LOCAL_CONTROLLER_BACKEND_TIMEOUT_SECONDS",
+		"NVT_LOCAL_CONTROLLER_PROXY_PORT",
 	} {
 		t.Setenv(name, "")
 		if _, err := ConfigFromEnvironment(); err == nil {
@@ -51,6 +67,24 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestDockerBackendEnvironmentRejectsMalformedPathsAndEndpoints(t *testing.T) {
+	for name, value := range map[string]string{
+		"NVT_LOCAL_CONTROLLER_DOCKER_HOST":       "",
+		"NVT_LOCAL_CONTROLLER_RUNS_DIR":          "relative/runs",
+		"NVT_LOCAL_CONTROLLER_BROKER_AGENTS":     "relative/agents.yaml",
+		"NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE": "relative/key",
+		"NVT_LOCAL_CONTROLLER_BROKER_CA_FILE":    "relative/ca.crt",
+		"NVT_LOCAL_CONTROLLER_BROKER_URL":        "http://user@example.test",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, value)
+			if _, err := ConfigFromEnvironment(); err == nil {
+				t.Fatal("malformed backend configuration was accepted")
+			}
+		})
+	}
+}
+
 func defaultEnvironmentValue(name string) string {
 	switch name {
 	case "NVT_LOCAL_CONTROLLER_BIND":
@@ -61,6 +95,8 @@ func defaultEnvironmentValue(name string) string {
 		return "32"
 	case "NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS":
 		return "30"
+	case "NVT_LOCAL_CONTROLLER_PROXY_PORT":
+		return "4090"
 	default:
 		return "1"
 	}

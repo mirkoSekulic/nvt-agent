@@ -20,5 +20,9 @@ fi
 if [ ! -f "$broker_dir/env" ]; then
   cp "$templates_dir/broker-env" "$broker_dir/env"
 fi
+if [ ! -f "$broker_dir/local-controller.key" ]; then
+  (umask 077; openssl rand 32 >"$broker_dir/local-controller.key")
+fi
+chmod 600 "$broker_dir/local-controller.key"
 
 docker compose -f "$repo_root/compose.infra.yaml" up -d
