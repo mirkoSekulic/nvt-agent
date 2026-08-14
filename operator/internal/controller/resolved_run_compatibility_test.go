@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -38,9 +39,9 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
   "tools":{"packages":["git","jq"],"mise":["go@1.26"]},
   "code-server":{"extensions":["redhat.vscode-yaml"],"agentTerminal":{"openOnStartup":true}},
   "plugins":[
-    {"name":"git-host-credentials","source":"builtin","config":{"providers":[{"name":"source","type":"broker","broker-provider":"source-app","match":["github.com/Altinn/*"]}]}},
-    {"name":"git-credentials","source":"builtin","when":"before-agent","config":{"credentials":[{"match":"https://github.com/Altinn/altinn-studio.git","provider":"source"}]}},
-    {"name":"checkout-repos","source":"builtin","when":"before-agent","restart":"never","config":{"repos":[{"url":"https://github.com/Altinn/altinn-studio.git","path":"altinn-studio"}]}},
+    {"name":"git-host-credentials","source":"builtin","config":{"providers":[{"name":"source","type":"broker","broker-provider":"source-app","credential-kind":"mediated","match":["github.com/Altinn/*"]}]}},
+    {"name":"git-credentials","source":"builtin","when":"before-agent","config":{"credentials":[{"match":"https://github.com/Altinn/altinn-studio.git","provider":"source","identity":{"mode":"provider"}}]}},
+    {"name":"checkout-repos","source":"builtin","when":"before-agent","restart":"never","config":{"repos":[{"url":"https://github.com/Altinn/altinn-studio.git","path":"altinn-studio","upstream":"https://github.com/Altinn/altinn-studio-upstream.git"}]}},
     {"name":"github-watcher","source":"builtin","when":"after-agent","config":{"repositories":["Altinn/altinn-studio"]}}
   ],
   "expose":{"http":[{"name":"app","targetPort":3000}]}
@@ -56,9 +57,14 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 	}
 	profileSpec.AgentRuntimeConfig = rawJSON(`{"command":"agent-cli","args":["run","--profiled"],"resume":{"command":"agent-cli","args":["resume","--last"]},"env":{"NO_PROXY":"localhost,127.0.0.1"}}`)
 	profileSpec.WorkspaceInstructions = "Profile-owned guidance.\n"
-	profileSpec.Egress = nvtv1alpha1.AgentRunEgressDirect
+	profileSpec.Egress = nvtv1alpha1.AgentRunEgressMediated
+	profileSpec.EgressAllowInsecureBroker = true
+	profileSpec.EgressEnforcement = true
+	profileSpec.EgressTransport = nvtv1alpha1.AgentRunEgressTransportRedirect
 	profileSpec.Broker = &nvtv1alpha1.AgentRunBroker{Grants: []nvtv1alpha1.AgentRunBrokerGrant{{
-		Provider: "source-app", Repositories: []string{"Altinn/*"}, Materialization: nvtv1alpha1.AgentRunGrantFileBundle,
+		Provider: "source-app", Repositories: []string{"Altinn/*"},
+		Preparations:    []nvtv1alpha1.AgentRunBrokerPreparation{{Operation: nvtv1alpha1.AgentRunBrokerPreparationIdentity}},
+		Materialization: nvtv1alpha1.AgentRunGrantHeaderInject, EgressHosts: []string{"github.com:443"}, Git: true,
 	}}}
 
 	workflow, err := resolveWorkflowForProducer(
@@ -100,13 +106,17 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 		Profiles: []resolvedrun.Profile{{
 			Name: profile.Profile.Name,
 			CredentialProviders: []resolvedrun.CredentialProviderMapping{{
-				Name: "source", BrokerProvider: "source-app", MatchTargets: []string{"github.com/Altinn/*"},
+				Name: "source", BrokerProvider: "source-app", CredentialKind: "mediated", MatchTargets: []string{"github.com/Altinn/*"},
 			}},
 			Broker: resolvedrun.Broker{Grants: []resolvedrun.BrokerGrant{{
 				Provider: "source-app", Repositories: append([]string(nil), kubernetesRun.Spec.Broker.Grants[0].Repositories...),
-				Materialization: string(kubernetesRun.Spec.Broker.Grants[0].Materialization),
+				Preparations: []string{"identity"}, Materialization: string(kubernetesRun.Spec.Broker.Grants[0].Materialization),
+				EgressHosts: append([]string(nil), kubernetesRun.Spec.Broker.Grants[0].EgressHosts...), Git: true,
 			}}},
-			Egress:                resolvedrun.Egress{Mode: string(kubernetesRun.Spec.Egress)},
+			Egress: resolvedrun.Egress{
+				Mode: string(kubernetesRun.Spec.Egress), Transport: string(kubernetesRun.Spec.EgressTransport),
+				Enforced: kubernetesRun.Spec.EgressEnforcement, PairedEgressRequired: true,
+			},
 			WorkspaceInstructions: kubernetesRun.Spec.Agent.WorkspaceInstructions,
 			AllowedBackends:       []string{"container"}, DefaultBackend: "container", AllowedRetentions: []string{"ephemeral"},
 		}},
@@ -114,7 +124,9 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 			Name: workflow.Name, WorkspaceInstructions: kubernetesRun.Spec.Agent.WorkflowInstructions,
 			Repositories: []resolvedrun.Repository{{
 				CheckoutTarget: checkoutTarget, BrokerRepository: brokerRepository,
-				URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio", CredentialProvider: "source",
+				URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio",
+				Upstream: "https://github.com/Altinn/altinn-studio-upstream.git", CredentialProvider: "source",
+				Identity: &resolvedrun.RepositoryIdentity{Mode: "provider"},
 			}},
 		}},
 		ExecutionBackends: []resolvedrun.ExecutionBackend{{Name: "container", Kind: "container"}},
@@ -135,7 +147,9 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	localRendered, err := resolvedrun.RenderAgentConfig(localRun, resolvedrun.AgentConfigBindings{})
+	localRendered, err := resolvedrun.RenderAgentConfig(localRun, resolvedrun.AgentConfigBindings{RedirectBaseURLs: map[string]string{
+		"source-app": fmt.Sprintf("https://%s:%d", EgressdServiceName(kubernetesRun.Name), egressRouteBasePort),
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +184,9 @@ func TestLocalResolvedRunContractMatchesExistingKubernetesProfileResolution(t *t
 		localRun.Egress.Mode != string(kubernetesRun.Spec.Egress) ||
 		localRun.WorkspaceInstructions.Profile != kubernetesRun.Spec.Agent.WorkspaceInstructions ||
 		localRun.WorkspaceInstructions.Workflow != kubernetesRun.Spec.Agent.WorkflowInstructions {
-		t.Fatalf("local and Kubernetes desired behavior diverged:\nlocal=%#v\nkubernetes=%#v", localRun, kubernetesRun.Spec)
+		localJSON, _ := json.MarshalIndent(localRenderedObject, "", "  ")
+		kubernetesJSON, _ := json.MarshalIndent(kubernetesRenderedObject, "", "  ")
+		t.Fatalf("local and Kubernetes desired behavior diverged:\nlocal run=%#v\nkubernetes=%#v\nlocal config=%s\nkubernetes config=%s", localRun, kubernetesRun.Spec, localJSON, kubernetesJSON)
 	}
 	kubernetesAfter, err := json.Marshal(kubernetesRun)
 	if err != nil {
@@ -187,7 +203,7 @@ func portableBaseAgentConfig(t *testing.T, raw []byte) json.RawMessage {
 	if err := json.Unmarshal(raw, &root); err != nil {
 		t.Fatal(err)
 	}
-	managed := map[string]struct{}{"git-host-credentials": {}, "git-credentials": {}, "checkout-repos": {}}
+	managed := map[string]struct{}{"git-host-credentials": {}, "git-credentials": {}, "checkout-repos": {}, "lifecycle-termination": {}}
 	plugins, _ := root["plugins"].([]any)
 	basePlugins := make([]any, 0, len(plugins))
 	for _, rawPlugin := range plugins {

@@ -85,6 +85,14 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	if !reflect.DeepEqual(pluginNames[:3], []string{"git-host-credentials", "git-credentials", "checkout-repos"}) {
 		t.Fatalf("typed repositories were not rendered before base plugins: %#v", pluginNames)
 	}
+	plugins := renderedConfig["plugins"].([]any)
+	provider := plugins[0].(map[string]any)["config"].(map[string]any)["providers"].([]any)[0].(map[string]any)
+	credential := plugins[1].(map[string]any)["config"].(map[string]any)["credentials"].([]any)[0].(map[string]any)
+	checkout := plugins[2].(map[string]any)["config"].(map[string]any)["repos"].([]any)[0].(map[string]any)
+	if provider["credential-kind"] != "mediated" || credential["identity"].(map[string]any)["mode"] != "provider" ||
+		checkout["upstream"] != "https://github.com/Altinn/altinn-studio-upstream.git" {
+		t.Fatalf("managed repository behavior was rendered incompletely: provider=%#v credential=%#v checkout=%#v", provider, credential, checkout)
+	}
 	encoded, err := json.Marshal(resolved)
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +220,22 @@ func TestConfigurationAndRepositoryFailuresFailClosed(t *testing.T) {
 		"invalid egress port": func(value *TrustedConfiguration) {
 			value.Profiles[0].Broker.Grants[0].EgressHosts[0] = "github.com:not-a-port"
 		},
+		"invalid credential kind": func(value *TrustedConfiguration) {
+			value.Profiles[0].CredentialProviders[0].CredentialKind = "executable"
+		},
+		"mediated git defaults to token": func(value *TrustedConfiguration) {
+			value.Profiles[0].CredentialProviders[0].CredentialKind = ""
+		},
+		"provider identity contains explicit fields": func(value *TrustedConfiguration) {
+			value.Workflows[0].Repositories[0].Identity.Name = "unexpected"
+		},
+		"credential-less identity": func(value *TrustedConfiguration) {
+			value.Workflows[0].Repositories[0].CredentialProvider = ""
+			value.Workflows[0].Repositories[0].BrokerRepository = ""
+		},
+		"credential-bearing upstream URL": func(value *TrustedConfiguration) {
+			value.Workflows[0].Repositories[0].Upstream = "https://user:password@github.com/Altinn/upstream.git"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			configuration := validConfiguration()
@@ -231,6 +255,9 @@ func TestConfigurationAndRepositoryFailuresFailClosed(t *testing.T) {
 			value.Workflows[0].Repositories[0].BrokerRepository = "Other/project"
 		},
 		"unknown provider alias": func(value *TrustedConfiguration) { value.Workflows[0].Repositories[0].CredentialProvider = "untrusted" },
+		"provider identity lacks preparation": func(value *TrustedConfiguration) {
+			value.Profiles[0].Broker.Grants[0].Preparations = nil
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			configuration := validConfiguration()
@@ -262,6 +289,9 @@ func TestAgentConfigRejectsControllerOwnedFieldConflicts(t *testing.T) {
 		"credential mapping plugin": func(root map[string]any) {
 			root["plugins"] = append(root["plugins"].([]any), map[string]any{"name": "git-host-credentials", "source": "builtin"})
 		},
+		"lifecycle plugin": func(root map[string]any) {
+			root["plugins"] = append(root["plugins"].([]any), map[string]any{"name": "lifecycle-termination", "source": "builtin"})
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			configuration := validConfiguration()
@@ -278,12 +308,44 @@ func TestAgentConfigRejectsControllerOwnedFieldConflicts(t *testing.T) {
 	}
 }
 
+func TestRepositoryExplicitIdentityRendersWithoutProviderPreparation(t *testing.T) {
+	t.Parallel()
+	configuration := validConfiguration()
+	repository := &configuration.Workflows[0].Repositories[0]
+	repository.Identity = &RepositoryIdentity{Mode: "explicit", Name: "Automation Bot", Email: "automation@example.test"}
+	configuration.Profiles[0].Broker.Grants[0].Preparations = nil
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := RenderAgentConfig(run, AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(rendered, &root); err != nil {
+		t.Fatal(err)
+	}
+	plugins := root["plugins"].([]any)
+	identity := plugins[1].(map[string]any)["config"].(map[string]any)["credentials"].([]any)[0].(map[string]any)["identity"].(map[string]any)
+	if identity["mode"] != "explicit" || identity["name"] != "Automation Bot" || identity["email"] != "automation@example.test" {
+		t.Fatalf("explicit repository identity was not preserved: %#v", identity)
+	}
+}
+
 func TestEgressTransportContractMatchesRuntime(t *testing.T) {
 	t.Parallel()
 	for _, transport := range []string{"redirect", "forward-proxy", "transparent"} {
 		t.Run(transport+" valid", func(t *testing.T) {
 			configuration := validConfiguration()
 			configureTransport(&configuration, transport)
+			if transport == "redirect" {
+				configuration.Profiles[0].Egress.Enforced = true
+			}
 			configuration.Profiles[0].Broker.Grants = append(configuration.Profiles[0].Broker.Grants, BrokerGrant{
 				Provider: "placeholder-main", Capabilities: []string{"injection.files"}, Materialization: "placeholder-file",
 			})
@@ -316,8 +378,9 @@ func TestEgressTransportContractMatchesRuntime(t *testing.T) {
 					t.Fatalf("redirect rendered tunnel selector: runtime=%#v egress=%#v", runtime, egress)
 				}
 				firstGrant := egress["grants"].([]any)[0].(map[string]any)
-				if firstGrant["base-url"] != "https://egress-source.internal:14431" {
-					t.Fatalf("redirect binding was not rendered: %#v", firstGrant)
+				if firstGrant["base-url"] != "https://egress-source.internal:14431" ||
+					egress["operator-prepared"] != true || len(firstGrant["hosts"].([]any)) == 0 {
+					t.Fatalf("enforced redirect is not bootstrap-consumable without broker lookup: egress=%#v grant=%#v", egress, firstGrant)
 				}
 			} else if runtime["proxy"].(map[string]any)["provider"] != "runtime-main" || egress["enforcement"] != true {
 				t.Fatalf("tunnel transport lacks enforced proxy rendering: runtime=%#v egress=%#v", runtime, egress)
@@ -521,9 +584,9 @@ func validConfiguration() TrustedConfiguration {
 		Profiles: []Profile{{
 			Name: "engineering", Image: "registry.example/nvt-profile:sha256-deadbeef", Runtime: &profileRuntime,
 			AgentConfig: profileAgentConfig, Resources: &profileResources, Lifecycle: &profileLifecycle,
-			CredentialProviders: []CredentialProviderMapping{{Name: "source", BrokerProvider: "source-app", MatchTargets: []string{"github.com/Altinn/*"}}},
+			CredentialProviders: []CredentialProviderMapping{{Name: "source", BrokerProvider: "source-app", CredentialKind: "mediated", MatchTargets: []string{"github.com/Altinn/*"}}},
 			Broker: Broker{Grants: []BrokerGrant{
-				{Provider: "source-app", Repositories: []string{"Altinn/*"}, Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{"github.com:443"}, Git: true, Permissions: map[string]string{"contents": "write"}},
+				{Provider: "source-app", Repositories: []string{"Altinn/*"}, Capabilities: []string{"injection.headers"}, Preparations: []string{"identity"}, Materialization: "header-inject", EgressHosts: []string{"github.com:443"}, Git: true, Permissions: map[string]string{"contents": "write"}},
 				{Provider: "runtime-main", Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{"runtime.example:443"}},
 			}},
 			Egress:                Egress{Mode: "mediated", Transport: "forward-proxy", Enforced: true, ProxyProvider: "runtime-main", PairedEgressRequired: true, MaxConcurrentTunnels: 128},
@@ -536,7 +599,7 @@ func validConfiguration() TrustedConfiguration {
 		}},
 		Workflows: []Workflow{{
 			Name: "development", WorkspaceInstructions: "Workflow-owned guidance.\n",
-			Repositories: []Repository{{CheckoutTarget: "github.com/Altinn/altinn-studio", BrokerRepository: "Altinn/altinn-studio", URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio", CredentialProvider: "source"}},
+			Repositories: []Repository{{CheckoutTarget: "github.com/Altinn/altinn-studio", BrokerRepository: "Altinn/altinn-studio", URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio", Upstream: "https://github.com/Altinn/altinn-studio-upstream.git", CredentialProvider: "source", Identity: &RepositoryIdentity{Mode: "provider"}}},
 		}, {Name: "restricted"}},
 		ExecutionBackends: []ExecutionBackend{{Name: "container", Kind: "container"}},
 		RetentionPolicies: []RetentionPolicy{{Name: "persistent", Persistence: Persistence{Workspace: true, RuntimeState: true, DockerData: true}, TTL: TTL{ActiveSeconds: 14400, FailedSeconds: 3600}}, {Name: "disposable", TTL: TTL{ActiveSeconds: 3600}}},

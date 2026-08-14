@@ -117,7 +117,7 @@ func ValidateResolvedAgentRun(value ResolvedAgentRun) error {
 	if err := validateBrokerAndEgress(value.Broker, value.Egress); err != nil {
 		return err
 	}
-	if err := validateMappingsAndRepositories(value.CredentialProviders, value.Repositories, value.Broker); err != nil {
+	if err := validateMappingsAndRepositories(value.CredentialProviders, value.Repositories, value.Broker, value.Egress); err != nil {
 		return err
 	}
 	if err := validateInstructions(value.WorkspaceInstructions.Profile); err != nil {
@@ -275,8 +275,8 @@ func validateAgentConfig(value json.RawMessage) error {
 			if !ok || !nameOK || name == "" {
 				return errors.New("agent_config plugins are invalid")
 			}
-			if _, controlled := managedRepositoryPlugins[name]; controlled {
-				return errors.New("agent_config contains a controller-owned repository plugin")
+			if _, controlled := managedControllerPlugins[name]; controlled {
+				return errors.New("agent_config contains a controller-owned plugin")
 			}
 		}
 	}
@@ -437,21 +437,27 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 	return nil
 }
 
-func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repositories []Repository, broker Broker) error {
+func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repositories []Repository, broker Broker, egress Egress) error {
 	providers := make(map[string]BrokerGrant, len(broker.Grants))
 	for _, grant := range broker.Grants {
 		providers[grant.Provider] = grant
 	}
 	aliases := make(map[string]CredentialProviderMapping, len(mappings))
 	for _, mapping := range mappings {
-		if !validProvider(mapping.Name) || !validProvider(mapping.BrokerProvider) || len(mapping.MatchTargets) > maxPatternsPerProvider {
+		if !validProvider(mapping.Name) || !validProvider(mapping.BrokerProvider) || len(mapping.MatchTargets) > maxPatternsPerProvider ||
+			(mapping.CredentialKind != "" && mapping.CredentialKind != "token" && mapping.CredentialKind != "headers" && mapping.CredentialKind != "mediated") {
 			return errors.New("credential provider mapping is invalid")
 		}
 		if _, duplicate := aliases[mapping.Name]; duplicate {
 			return errors.New("credential provider mapping is duplicated")
 		}
-		if _, granted := providers[mapping.BrokerProvider]; !granted {
+		grant, granted := providers[mapping.BrokerProvider]
+		if !granted {
 			return errors.New("credential provider mapping references an ungranted provider")
+		}
+		mediatedGit := egress.Mode == "mediated" && grant.Materialization == "header-inject" && grant.Git
+		if (mapping.CredentialKind == "mediated") != mediatedGit {
+			return errors.New("credential provider kind does not match its git transport")
 		}
 		if err := validateUniqueStrings(mapping.MatchTargets, validRepositoryPattern); err != nil {
 			return errors.New("credential provider match targets are invalid")
@@ -462,9 +468,12 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 	paths := make(map[string]struct{}, len(repositories))
 	for _, repository := range repositories {
 		if !validRepositoryID(repository.CheckoutTarget) || repositoryTargetFromURL(repository.URL) != repository.CheckoutTarget ||
+			(repository.Upstream != "" && repositoryTargetFromURL(repository.Upstream) == "") ||
 			!validCheckoutPath(repository.Path) ||
 			(repository.CredentialProvider == "" && repository.BrokerRepository != "") ||
-			(repository.CredentialProvider != "" && !validRepositoryID(repository.BrokerRepository)) {
+			(repository.CredentialProvider == "" && repository.Identity != nil) ||
+			(repository.CredentialProvider != "" && !validRepositoryID(repository.BrokerRepository)) ||
+			validateRepositoryIdentity(repository.Identity) != nil {
 			return errors.New("workflow repository is invalid")
 		}
 		if _, duplicate := identifiers[repository.CheckoutTarget]; duplicate {
@@ -490,6 +499,33 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 		if !patternsContain(grant.Repositories, repository.BrokerRepository) {
 			return errors.New("workflow repository is not authorized by its broker grant")
 		}
+		if egress.Mode == "mediated" &&
+			(grant.Materialization != "header-inject" || !grant.Git || mapping.CredentialKind != "mediated") {
+			return errors.New("mediated repository lacks a mediated git credential path")
+		}
+		if repository.Identity != nil && repository.Identity.Mode == "provider" && egress.Enforced &&
+			!containsString(grant.Preparations, "identity") {
+			return errors.New("enforced provider identity lacks trusted preparation")
+		}
+	}
+	return nil
+}
+
+func validateRepositoryIdentity(identity *RepositoryIdentity) error {
+	if identity == nil {
+		return nil
+	}
+	switch identity.Mode {
+	case "provider":
+		if identity.Name != "" || identity.Email != "" {
+			return errors.New("provider repository identity contains explicit fields")
+		}
+	case "explicit":
+		if !validBoundedText(identity.Name, 512, false) || !validBoundedText(identity.Email, 512, false) {
+			return errors.New("explicit repository identity is invalid")
+		}
+	default:
+		return errors.New("repository identity mode is invalid")
 	}
 	return nil
 }

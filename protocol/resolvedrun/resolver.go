@@ -93,7 +93,7 @@ func NewResolver(configuration TrustedConfiguration) (*Resolver, error) {
 		}
 		// Repository authorization is checked per workflow at Resolve. Validate
 		// the mapping itself here with an empty repository set.
-		if validateMappingsAndRepositories(profile.CredentialProviders, nil, profile.Broker) != nil {
+		if validateMappingsAndRepositories(profile.CredentialProviders, nil, profile.Broker, profile.Egress) != nil {
 			return nil, ErrInvalidConfiguration
 		}
 		resolver.profiles[profile.Name] = clone(profile)
@@ -106,10 +106,13 @@ func validateWorkflowRepositories(repositories []Repository) error {
 	paths := make(map[string]struct{}, len(repositories))
 	for _, repository := range repositories {
 		if !validRepositoryID(repository.CheckoutTarget) || repositoryTargetFromURL(repository.URL) != repository.CheckoutTarget ||
+			(repository.Upstream != "" && repositoryTargetFromURL(repository.Upstream) == "") ||
 			!validCheckoutPath(repository.Path) ||
 			(repository.CredentialProvider == "" && repository.BrokerRepository != "") ||
+			(repository.CredentialProvider == "" && repository.Identity != nil) ||
 			(repository.CredentialProvider != "" && !validRepositoryID(repository.BrokerRepository)) ||
-			(repository.CredentialProvider != "" && !validProvider(repository.CredentialProvider)) {
+			(repository.CredentialProvider != "" && !validProvider(repository.CredentialProvider)) ||
+			validateRepositoryIdentity(repository.Identity) != nil {
 			return ErrInvalidConfiguration
 		}
 		if _, duplicate := identifiers[repository.CheckoutTarget]; duplicate {
@@ -170,7 +173,7 @@ func (resolver *Resolver) Resolve(authorization AuthorizationContext, request Lo
 	if !backendExists || !retentionExists {
 		return ResolvedAgentRun{}, ErrSelectionDenied
 	}
-	if err := validateMappingsAndRepositories(profile.CredentialProviders, workflow.Repositories, profile.Broker); err != nil {
+	if err := validateMappingsAndRepositories(profile.CredentialProviders, workflow.Repositories, profile.Broker, profile.Egress); err != nil {
 		return ResolvedAgentRun{}, ErrInvalidConfiguration
 	}
 	image, runtime, agentConfig, resources, lifecycle := resolver.effective(profile)

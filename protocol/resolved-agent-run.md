@@ -77,14 +77,18 @@ document. Typed fields are authoritative, so the base block must not contain:
 - `runtime.initial-prompt` (owned by `Prompt`);
 - `runtime.proxy` or top-level `egress` (owned by `Egress` and `Broker`); or
 - the `git-host-credentials`, `git-credentials`, or `checkout-repos` plugins
-  (owned by `CredentialProviders` and `Workflow.Repositories`).
+  (owned by `CredentialProviders` and `Workflow.Repositories`); or
+- the `lifecycle-termination` plugin (owned by `Lifecycle`).
 
 Any presence is a configuration conflict and fails before resolution. The
 renderer clones the base, injects the typed initial prompt, injects the selected
-runtime proxy for tunnel transports, renders broker/egress metadata, and emits
-the three managed repository plugins in stable dependency order before other
-plugins. Backends must execute the rendered result, never the base block, and
-must not independently repeat these transformations.
+runtime proxy for tunnel transports, renders broker/egress metadata, emits the
+three managed repository plugins in stable dependency order before other
+plugins, and appends the managed lifecycle plugin. Enforced egress, including
+redirect transport, is marked `operator-prepared: true`; bootstrap therefore
+uses the already bounded route hosts/Git flags and never attempts an in-agent
+broker lookup. Backends must execute the rendered result, never the base block,
+and must not independently repeat these transformations.
 
 Backend provisioning supplies only non-secret `AgentConfigBindings`: one
 forward-proxy URL for forward-proxy/transparent, or an exact provider-to-base-
@@ -115,6 +119,16 @@ Both support exact values and one bounded trailing `/*` form. Checkout URLs
 cannot contain userinfo, query parameters, fragments, encoded paths, or
 traversal. A public checkout has no credential provider and therefore must omit
 `broker_repository`; it is rendered only into the checkout plugin.
+
+Credential mappings retain the bounded generic broker credential kind
+(`token`, `headers`, or `mediated`). A mediated Git grant must use
+`credential_kind: mediated`, so runtime plugins cannot silently fall back to
+asking the agent-side broker client for a token. Repository entries also retain
+an optional HTTPS `upstream` remote and optional commit identity policy.
+Identity mode is either `provider`, with no inline fields, or `explicit`, with
+bounded administrator-authored name and email. Enforced provider identity
+requires the corresponding grant's non-secret `identity` preparation. None of
+these fields contains credential material.
 
 The contract has no credential-value field. It may carry provider names,
 capability/grant metadata, and routing policy only. It never carries an access
@@ -158,14 +172,17 @@ This abbreviated trusted configuration uses example names only:
     "credential_providers":[{
       "name":"source",
       "broker_provider":"source-app",
+      "credential_kind":"mediated",
       "match_targets":["git.example/approved/*"]
     }],
     "broker":{"grants":[{
       "provider":"source-app",
       "repositories":["approved/*"],
       "capabilities":["injection.headers"],
+      "preparations":["identity"],
       "materialization":"header-inject",
-      "egress_hosts":["git.example:443"]
+      "egress_hosts":["git.example:443"],
+      "git":true
     },{
       "provider":"runtime-main",
       "capabilities":["injection.headers"],
@@ -184,7 +201,9 @@ This abbreviated trusted configuration uses example names only:
       "broker_repository":"approved/project",
       "url":"https://git.example/approved/project.git",
       "path":"project",
-      "credential_provider":"source"
+      "upstream":"https://git.example/upstream/project.git",
+      "credential_provider":"source",
+      "identity":{"mode":"provider"}
     }]
   }],
   "execution_backends":[{"name":"container","kind":"container"}],
@@ -222,10 +241,11 @@ the local resolver.
 The operator compatibility gate constructs an existing profiled `AgentRun`
 through the real schedule/profile/workflow builders, including its prompt,
 full runtime configuration, plugins, exposure, lifecycle, container and Docker
-controls, resources, instructions, and real-shaped host-qualified checkout plus
-provider-native broker repository. It removes only the fields that become the
-typed local overlay, renders them through `RenderAgentConfig`, and compares the
-result with the existing operator's final runtime rendering. It also verifies
-that local resolution does not mutate the Kubernetes object. The full operator
-and execution-driver image suites remain regression gates for existing Pod/VM
+controls, resources, instructions, and a real mediated provider with provider
+identity, optional upstream, host-qualified checkout, and provider-native broker
+repository. It removes only the fields that become the typed local overlay,
+renders them through `RenderAgentConfig`, and compares the result with the
+existing operator's final runtime rendering. It also verifies that local
+resolution does not mutate the Kubernetes object. The full operator and
+execution-driver image suites remain regression gates for existing Pod/VM
 behavior.

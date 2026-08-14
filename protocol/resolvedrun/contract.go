@@ -57,18 +57,31 @@ type DockerNetwork struct {
 // Repository is an exact administrator-owned checkout. CredentialProvider is
 // an alias into the selected profile's approved mappings.
 type Repository struct {
-	CheckoutTarget     string `json:"checkout_target"`
-	BrokerRepository   string `json:"broker_repository"`
-	URL                string `json:"url"`
-	Path               string `json:"path,omitempty"`
-	CredentialProvider string `json:"credential_provider,omitempty"`
+	CheckoutTarget     string              `json:"checkout_target"`
+	BrokerRepository   string              `json:"broker_repository"`
+	URL                string              `json:"url"`
+	Path               string              `json:"path,omitempty"`
+	Upstream           string              `json:"upstream,omitempty"`
+	CredentialProvider string              `json:"credential_provider,omitempty"`
+	Identity           *RepositoryIdentity `json:"identity,omitempty"`
+}
+
+// RepositoryIdentity is non-secret repository-local Git commit identity
+// policy. Provider mode delegates to the approved credential mapping;
+// explicit mode carries only administrator-authored display metadata.
+type RepositoryIdentity struct {
+	Mode  string `json:"mode"`
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
 }
 
 // CredentialProviderMapping binds a public runtime alias to one broker
-// provider and an exact bounded set of repository patterns.
+// provider, its generic runtime credential behavior, and an exact bounded set
+// of repository patterns. CredentialKind is token, headers, or mediated.
 type CredentialProviderMapping struct {
 	Name           string   `json:"name"`
 	BrokerProvider string   `json:"broker_provider"`
+	CredentialKind string   `json:"credential_kind,omitempty"`
 	MatchTargets   []string `json:"match_targets,omitempty"`
 }
 

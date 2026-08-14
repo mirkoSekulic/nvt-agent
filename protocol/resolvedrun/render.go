@@ -9,10 +9,11 @@ import (
 
 const runtimePlaceholder = "NVT-PLACEHOLDER-NOT-A-KEY"
 
-var managedRepositoryPlugins = map[string]struct{}{
-	"git-host-credentials": {},
-	"git-credentials":      {},
-	"checkout-repos":       {},
+var managedControllerPlugins = map[string]struct{}{
+	"git-host-credentials":  {},
+	"git-credentials":       {},
+	"checkout-repos":        {},
+	"lifecycle-termination": {},
 }
 
 // RenderAgentConfig applies the controller-owned fields of a resolved run to
@@ -41,7 +42,18 @@ func RenderAgentConfig(run ResolvedAgentRun, bindings AgentConfigBindings) (json
 	root["runtime"] = runtime
 
 	plugins, _ := root["plugins"].([]any)
-	root["plugins"] = append(renderRepositoryPlugins(run), plugins...)
+	plugins = append(renderRepositoryPlugins(run), plugins...)
+	if len(run.Lifecycle.CompleteOn) != 0 || len(run.Lifecycle.FailOn) != 0 {
+		plugins = append(plugins, map[string]any{
+			"name": "lifecycle-termination", "source": "builtin", "when": "after-agent", "restart": "always",
+			"config": map[string]any{
+				"completeOn":             append([]string(nil), run.Lifecycle.CompleteOn...),
+				"failOn":                 append([]string(nil), run.Lifecycle.FailOn...),
+				"terminationMessagePath": "/dev/termination-log",
+			},
+		})
+	}
+	root["plugins"] = plugins
 	if run.Egress.Mode == "mediated" {
 		root["egress"] = renderEgress(run, bindings)
 	}
@@ -79,10 +91,14 @@ func renderRepositoryPlugins(run ResolvedAgentRun) []any {
 	if len(run.CredentialProviders) != 0 {
 		providers := make([]any, 0, len(run.CredentialProviders))
 		for _, mapping := range run.CredentialProviders {
-			providers = append(providers, map[string]any{
+			provider := map[string]any{
 				"name": mapping.Name, "type": "broker", "broker-provider": mapping.BrokerProvider,
 				"match": append([]string(nil), mapping.MatchTargets...),
-			})
+			}
+			if mapping.CredentialKind != "" {
+				provider["credential-kind"] = mapping.CredentialKind
+			}
+			providers = append(providers, provider)
 		}
 		plugins = append(plugins, map[string]any{
 			"name": "git-host-credentials", "source": "builtin", "config": map[string]any{"providers": providers},
@@ -95,11 +111,23 @@ func renderRepositoryPlugins(run ResolvedAgentRun) []any {
 		if repository.Path != "" {
 			checkout["path"] = repository.Path
 		}
+		if repository.Upstream != "" {
+			checkout["upstream"] = repository.Upstream
+		}
 		checkouts = append(checkouts, checkout)
 		if repository.CredentialProvider != "" {
-			credentials = append(credentials, map[string]any{
+			credential := map[string]any{
 				"match": repository.URL, "provider": repository.CredentialProvider,
-			})
+			}
+			if repository.Identity != nil {
+				identity := map[string]any{"mode": repository.Identity.Mode}
+				if repository.Identity.Mode == "explicit" {
+					identity["name"] = repository.Identity.Name
+					identity["email"] = repository.Identity.Email
+				}
+				credential["identity"] = identity
+			}
+			credentials = append(credentials, credential)
 		}
 	}
 	if len(credentials) != 0 {
@@ -134,6 +162,7 @@ func renderEgress(run ResolvedAgentRun, bindings AgentConfigBindings) map[string
 	}
 	if run.Egress.Enforced {
 		egress["enforcement"] = true
+		egress["operator-prepared"] = true
 	}
 	if isTunnelTransport(run.Egress.Transport) {
 		egress["forward-proxy-url"] = bindings.ForwardProxyURL
