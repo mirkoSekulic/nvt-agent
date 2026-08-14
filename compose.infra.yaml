@@ -28,6 +28,26 @@ services:
     networks:
       - agents-proxy
 
+  local-controller:
+    image: nvt-local-controller:latest
+    environment:
+      NVT_LOCAL_CONTROLLER_BIND: 0.0.0.0:7480
+      NVT_LOCAL_CONTROLLER_STATE: /state/controller/local-controller.sqlite3
+      NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS: ${NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS:-32}
+      NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS: ${NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS:-30}
+      NVT_LOCAL_CONTROLLER_SWEEP_SECONDS: ${NVT_LOCAL_CONTROLLER_SWEEP_SECONDS:-1}
+    volumes:
+      - local-controller-state:/state
+    networks:
+      - local-control-plane
+    read_only: true
+    restart: unless-stopped
+
 networks:
   agents-proxy:
     external: true
+  local-control-plane:
+    internal: true
+
+volumes:
+  local-controller-state:
