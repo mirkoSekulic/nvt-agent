@@ -58,11 +58,11 @@ func (state State) active() bool {
 func transitionAllowed(from, to State) bool {
 	switch from {
 	case StatePending:
-		return to == StatePreparing || to == StateStopping || to == StateFailed || to == StateExpired
+		return to == StatePreparing || to == StateStopping
 	case StatePreparing:
-		return to == StateRunning || to == StateStopping || to == StateFailed || to == StateExpired
+		return to == StateRunning || to == StateStopping
 	case StateRunning:
-		return to == StateStopping || to == StateCompleted || to == StateFailed || to == StateExpired
+		return to == StateStopping
 	case StateStopping:
 		return to == StateCompleted || to == StateFailed || to == StateExpired
 	default:
@@ -87,6 +87,7 @@ type StatusInput struct {
 	Owner            string
 	ExpectedRevision int64
 	State            State
+	TerminalTarget   State
 	Reason           string
 }
 
@@ -107,6 +108,7 @@ type Run struct {
 	DeadlineAt        *time.Time `json:"deadline_at,omitempty"`
 	TerminalExpiresAt *time.Time `json:"terminal_expires_at,omitempty"`
 	DeleteRequested   bool       `json:"delete_requested,omitempty"`
+	TerminalTarget    State      `json:"terminal_target,omitempty"`
 	LastReason        string     `json:"last_reason,omitempty"`
 	ReconcileOwner    string     `json:"reconcile_owner,omitempty"`
 	ReconcileUntil    *time.Time `json:"reconcile_until,omitempty"`

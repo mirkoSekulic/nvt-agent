@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 type StoreOptions struct {
 	MaxActiveRuns int
@@ -158,6 +158,14 @@ PRAGMA user_version = 1;`); err != nil {
 PRAGMA user_version = 2;`); err != nil {
 			return ErrStoreUnavailable
 		}
+		version = 2
+	}
+	if version == 2 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE local_runs ADD COLUMN terminal_target TEXT NOT NULL DEFAULT '';
+UPDATE local_runs SET terminal_target=CASE WHEN delete_requested=1 THEN 'completed' ELSE 'failed' END WHERE state='stopping';
+PRAGMA user_version = 3;`); err != nil {
+			return ErrStoreUnavailable
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrStoreUnavailable
@@ -198,7 +206,7 @@ func (store *Store) validate(ctx context.Context) error {
 
 const selectRuns = `SELECT run_id, idempotency_key, request_digest, snapshot, snapshot_digest,
 state, revision, created_at, updated_at, deadline_at, terminal_expires_at,
-reconcile_owner, reconcile_until, delete_requested, deleted_at, last_reason FROM local_runs`
+reconcile_owner, reconcile_until, delete_requested, deleted_at, last_reason, terminal_target FROM local_runs`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -212,7 +220,7 @@ func scanStoredRun(row scanner) (storedRun, error) {
 	err := row.Scan(
 		&record.view.RunID, &record.idempotencyKey, &record.requestDigest, &record.snapshot, &record.view.SnapshotDigest,
 		&state, &record.view.Revision, &createdAt, &updatedAt, &deadlineAt, &terminalExpiresAt,
-		&reconcileOwner, &reconcileUntil, &deleteRequested, &deletedAt, &record.view.LastReason,
+		&reconcileOwner, &reconcileUntil, &deleteRequested, &deletedAt, &record.view.LastReason, &record.view.TerminalTarget,
 	)
 	if err != nil {
 		return storedRun{}, err
@@ -272,6 +280,13 @@ func validateStoredRun(record *storedRun) error {
 	}
 	if record.view.ReconcileOwner == "" && record.view.ReconcileUntil != nil ||
 		record.view.ReconcileOwner != "" && record.view.ReconcileUntil == nil || record.view.State.terminal() && record.view.ReconcileOwner != "" {
+		return ErrStoreUnavailable
+	}
+	if record.view.State == StateStopping {
+		if !record.view.TerminalTarget.terminal() {
+			return ErrStoreUnavailable
+		}
+	} else if record.view.TerminalTarget != "" {
 		return ErrStoreUnavailable
 	}
 	return nil
@@ -487,7 +502,8 @@ func (store *Store) Claim(ctx context.Context, input ClaimInput) (Run, error) {
 
 func (store *Store) UpdateStatus(ctx context.Context, input StatusInput) (Run, error) {
 	if !validRunID(input.RunID) || !validOwner(input.Owner) || input.ExpectedRevision < 1 || !input.State.valid() ||
-		!validReason(input.Reason) {
+		!validReason(input.Reason) || input.State == StateStopping && !input.TerminalTarget.terminal() ||
+		input.State != StateStopping && input.TerminalTarget != "" {
 		return Run{}, ErrInvalidRequest
 	}
 	if _, err := store.Sweep(ctx); err != nil {
@@ -513,6 +529,9 @@ func (store *Store) UpdateStatus(ctx context.Context, input StatusInput) (Run, e
 	if !transitionAllowed(record.view.State, input.State) {
 		return Run{}, ErrInvalidTransition
 	}
+	if record.view.State == StateStopping && input.State != record.view.TerminalTarget {
+		return Run{}, ErrInvalidTransition
+	}
 	resolved, err := resolvedrun.DecodeResolvedAgentRun(record.snapshot)
 	if err != nil {
 		return Run{}, ErrStoreUnavailable
@@ -523,10 +542,14 @@ func (store *Store) UpdateStatus(ctx context.Context, input StatusInput) (Run, e
 		deletedAt = &now
 	}
 	newRevision := record.view.Revision + 1
+	target := State("")
+	if input.State == StateStopping {
+		target = input.TerminalTarget
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state=?,revision=?,updated_at=?,terminal_expires_at=?,
-reconcile_owner=NULL,reconcile_until=NULL,deleted_at=?,last_reason=? WHERE run_id=? AND revision=?`,
+reconcile_owner=NULL,reconcile_until=NULL,deleted_at=?,last_reason=?,terminal_target=? WHERE run_id=? AND revision=?`,
 		string(input.State), newRevision, formatTimestamp(now), formatOptionalTimestamp(terminalExpiry),
-		formatOptionalTimestamp(deletedAt), input.Reason, input.RunID, input.ExpectedRevision)
+		formatOptionalTimestamp(deletedAt), input.Reason, string(target), input.RunID, input.ExpectedRevision)
 	if err != nil || rowsAffected(result) != 1 {
 		return Run{}, ErrOwnershipConflict
 	}
@@ -540,6 +563,7 @@ reconcile_owner=NULL,reconcile_until=NULL,deleted_at=?,last_reason=? WHERE run_i
 	record.view.ReconcileOwner = ""
 	record.view.ReconcileUntil = nil
 	record.view.LastReason = input.Reason
+	record.view.TerminalTarget = target
 	if deletedAt != nil {
 		return Run{}, ErrGone
 	}
@@ -588,27 +612,42 @@ func (store *Store) requestStop(ctx context.Context, runID string, deleteRequest
 		if !deleteRequested {
 			return record.view, nil
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE local_runs SET deleted_at=?,delete_requested=1,revision=revision+1,updated_at=?,last_reason='delete-requested' WHERE run_id=? AND revision=?`,
-			formatTimestamp(now), formatTimestamp(now), runID, record.view.Revision)
+		result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state='stopping',terminal_target=?,terminal_expires_at=NULL,
+delete_requested=1,revision=revision+1,updated_at=?,last_reason='delete-requested' WHERE run_id=? AND revision=?`,
+			string(record.view.State), formatTimestamp(now), runID, record.view.Revision)
 		if err != nil || rowsAffected(result) != 1 {
 			return Run{}, ErrConflict
 		}
 		if err := tx.Commit(); err != nil {
 			return Run{}, ErrStoreUnavailable
 		}
-		return Run{}, ErrGone
+		record.view.TerminalTarget = record.view.State
+		record.view.State = StateStopping
+		record.view.TerminalExpiresAt = nil
+		record.view.DeleteRequested = true
+		record.view.Revision++
+		record.view.UpdatedAt = now
+		record.view.LastReason = "delete-requested"
+		return record.view, nil
 	}
 	if record.view.State == StateStopping && (!deleteRequested || record.view.DeleteRequested) {
 		return record.view, nil
 	}
 	reason := "cancel-requested"
-	if deleteRequested {
+	target := StateFailed
+	if record.view.State == StateStopping {
+		target = record.view.TerminalTarget
+		if deleteRequested {
+			reason = "delete-requested"
+		}
+	} else if deleteRequested {
 		reason = "delete-requested"
+		target = StateCompleted
 	}
 	newRevision := record.view.Revision + 1
 	result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state='stopping',delete_requested=?,revision=?,updated_at=?,
-reconcile_owner=NULL,reconcile_until=NULL,last_reason=? WHERE run_id=? AND revision=?`,
-		boolInt(deleteRequested || record.view.DeleteRequested), newRevision, formatTimestamp(now), reason, runID, record.view.Revision)
+reconcile_owner=NULL,reconcile_until=NULL,last_reason=?,terminal_target=? WHERE run_id=? AND revision=?`,
+		boolInt(deleteRequested || record.view.DeleteRequested), newRevision, formatTimestamp(now), reason, string(target), runID, record.view.Revision)
 	if err != nil || rowsAffected(result) != 1 {
 		return Run{}, ErrConflict
 	}
@@ -622,6 +661,7 @@ reconcile_owner=NULL,reconcile_until=NULL,last_reason=? WHERE run_id=? AND revis
 	record.view.ReconcileOwner = ""
 	record.view.ReconcileUntil = nil
 	record.view.LastReason = reason
+	record.view.TerminalTarget = target
 	return record.view, nil
 }
 
@@ -650,19 +690,10 @@ func (store *Store) Sweep(ctx context.Context) (int, error) {
 	}
 	changed := 0
 	for _, record := range records {
-		if record.view.State.active() && record.view.DeadlineAt != nil && !record.view.DeadlineAt.After(now) {
-			resolved, err := resolvedrun.DecodeResolvedAgentRun(record.snapshot)
-			if err != nil {
-				return 0, ErrStoreUnavailable
-			}
-			expires := terminalExpiry(now, StateExpired, resolved)
-			deletedAt := (*time.Time)(nil)
-			if record.view.DeleteRequested {
-				deletedAt = &now
-			}
-			result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state='expired',revision=revision+1,updated_at=?,terminal_expires_at=?,deleted_at=?,
-reconcile_owner=NULL,reconcile_until=NULL,last_reason='active-deadline-exceeded' WHERE run_id=? AND revision=?`,
-				formatTimestamp(now), formatOptionalTimestamp(expires), formatOptionalTimestamp(deletedAt), record.view.RunID, record.view.Revision)
+		if record.view.State.active() && record.view.State != StateStopping && record.view.DeadlineAt != nil && !record.view.DeadlineAt.After(now) {
+			result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state='stopping',revision=revision+1,updated_at=?,
+reconcile_owner=NULL,reconcile_until=NULL,last_reason='active-deadline-exceeded',terminal_target='expired' WHERE run_id=? AND revision=?`,
+				formatTimestamp(now), record.view.RunID, record.view.Revision)
 			if err != nil || rowsAffected(result) != 1 {
 				return 0, ErrStoreUnavailable
 			}
@@ -670,8 +701,9 @@ reconcile_owner=NULL,reconcile_until=NULL,last_reason='active-deadline-exceeded'
 			continue
 		}
 		if record.view.State.terminal() && record.view.TerminalExpiresAt != nil && !record.view.TerminalExpiresAt.After(now) {
-			result, err := tx.ExecContext(ctx, `UPDATE local_runs SET deleted_at=?,delete_requested=1,revision=revision+1,updated_at=?,last_reason='retention-expired' WHERE run_id=? AND revision=?`,
-				formatTimestamp(now), formatTimestamp(now), record.view.RunID, record.view.Revision)
+			result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state='stopping',terminal_target=state,terminal_expires_at=NULL,
+delete_requested=1,revision=revision+1,updated_at=?,last_reason='retention-expired' WHERE run_id=? AND revision=?`,
+				formatTimestamp(now), record.view.RunID, record.view.Revision)
 			if err != nil || rowsAffected(result) != 1 {
 				return 0, ErrStoreUnavailable
 			}

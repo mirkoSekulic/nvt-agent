@@ -212,6 +212,18 @@ func TestReadinessFailsClosedOnIncompatibleLiveSchema(t *testing.T) {
 	}
 }
 
+func TestReadinessIncludesBackendDependencyWithoutChangingLiveness(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	handler := NewHTTPHandlerWithBackend(store, nil, func(context.Context) bool { return false })
+	if response := serveRequest(t, handler, http.MethodGet, "/readyz", nil, ""); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("backend-unready readiness = %d %s", response.Code, response.Body.String())
+	}
+	if response := serveRequest(t, handler, http.MethodGet, "/healthz", nil, ""); response.Code != http.StatusOK {
+		t.Fatalf("backend-unready liveness = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestRequestDuplicateScannerIsDepthBounded(t *testing.T) {
 	deep := strings.Repeat("[", 68) + "null" + strings.Repeat("]", 68)
 	if err := rejectDuplicateJSONKeys([]byte(deep)); !errors.Is(err, ErrInvalidRequest) {

@@ -185,12 +185,12 @@ func TestOptimisticOwnershipTransitionsAndCancellation(t *testing.T) {
 		t.Fatalf("stale worker updated cancelled run: %v", err)
 	}
 	claimed = claimRun(t, store, cancelled, "controller-b")
-	completed := transitionRun(t, store, claimed, "controller-b", StateCompleted)
-	if completed.State != StateCompleted || completed.TerminalExpiresAt == nil {
-		t.Fatalf("completed run = %#v", completed)
+	failed := transitionRun(t, store, claimed, "controller-b", StateFailed)
+	if failed.State != StateFailed || failed.TerminalExpiresAt == nil {
+		t.Fatalf("failed run = %#v", failed)
 	}
 	repeated, err := store.Cancel(context.Background(), run.RunID)
-	if err != nil || repeated.Revision != completed.Revision {
+	if err != nil || repeated.Revision != failed.Revision {
 		t.Fatalf("terminal cancel was not idempotent: %#v, %v", repeated, err)
 	}
 }
@@ -232,24 +232,45 @@ func TestTTLExpiryAndRetentionAreDeterministic(t *testing.T) {
 	if changed, err := store.Sweep(context.Background()); err != nil || changed != 1 {
 		t.Fatalf("active expiry changed=%d err=%v", changed, err)
 	}
-	expired, err := store.Get(context.Background(), disposable.RunID)
-	if err != nil || expired.State != StateExpired || expired.LastReason != "active-deadline-exceeded" || expired.TerminalExpiresAt == nil {
-		t.Fatalf("expired run = %#v, %v", expired, err)
+	stopping, err := store.Get(context.Background(), disposable.RunID)
+	if err != nil || stopping.State != StateStopping || stopping.TerminalTarget != StateExpired || stopping.TerminalExpiresAt != nil {
+		t.Fatalf("expiring run = %#v, %v", stopping, err)
+	}
+	claimed := claimRun(t, store, stopping, "cleanup")
+	expired := transitionRun(t, store, claimed, "cleanup", StateExpired)
+	if expired.TerminalExpiresAt == nil || expired.LastReason != "backend-observed" {
+		t.Fatalf("expired terminal state = %#v", expired)
 	}
 	clock.Advance(5 * time.Second)
 	if changed, err := store.Sweep(context.Background()); err != nil || changed != 1 {
 		t.Fatalf("disposable retention changed=%d err=%v", changed, err)
+	}
+	retiring, err := store.Get(context.Background(), disposable.RunID)
+	if err != nil || retiring.State != StateStopping || !retiring.DeleteRequested || retiring.TerminalTarget != StateExpired {
+		t.Fatalf("retention cleanup state = %#v %v", retiring, err)
+	}
+	claimed = claimRun(t, store, retiring, "retention-cleanup")
+	if _, err := store.UpdateStatus(context.Background(), StatusInput{RunID: retiring.RunID, Owner: "retention-cleanup", ExpectedRevision: claimed.Revision, State: StateExpired}); !errors.Is(err, ErrGone) {
+		t.Fatalf("retention cleanup terminal result = %v", err)
 	}
 	if _, err := store.Get(context.Background(), disposable.RunID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired disposable run remained: %v", err)
 	}
 
 	persistent := createRun(t, store, "persistent-run", true)
-	claimed := claimRun(t, store, persistent, "controller")
+	claimed = claimRun(t, store, persistent, "controller")
 	preparing := transitionRun(t, store, claimed, "controller", StatePreparing)
 	claimed = claimRun(t, store, preparing, "controller")
 	running := transitionRun(t, store, claimed, "controller", StateRunning)
 	claimed = claimRun(t, store, running, "controller")
+	stoppingCompleted, err := store.UpdateStatus(context.Background(), StatusInput{
+		RunID: persistent.RunID, Owner: "controller", ExpectedRevision: claimed.Revision,
+		State: StateStopping, TerminalTarget: StateCompleted, Reason: "backend-completed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed = claimRun(t, store, stoppingCompleted, "controller")
 	completed := transitionRun(t, store, claimed, "controller", StateCompleted)
 	if completed.TerminalExpiresAt == nil || completed.TerminalExpiresAt.Sub(clock.value) != 20*time.Second {
 		t.Fatalf("persistent retention expiry = %#v", completed.TerminalExpiresAt)
@@ -264,7 +285,7 @@ func TestTTLExpiryAndRetentionAreDeterministic(t *testing.T) {
 	}
 }
 
-func TestDeleteRequestedRunIsHiddenWhenItsDeadlineExpires(t *testing.T) {
+func TestDeleteRequestedRunRemainsClaimableUntilCleanup(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
 	run := createRun(t, store, "delete-expiry", false)
@@ -272,14 +293,33 @@ func TestDeleteRequestedRunIsHiddenWhenItsDeadlineExpires(t *testing.T) {
 		t.Fatalf("delete request: deleted=%v err=%v", deleted, err)
 	}
 	clock.Advance(10 * time.Second)
-	if changed, err := store.Sweep(context.Background()); err != nil || changed != 1 {
+	if changed, err := store.Sweep(context.Background()); err != nil || changed != 0 {
 		t.Fatalf("delete expiry changed=%d err=%v", changed, err)
 	}
-	if _, err := store.Get(context.Background(), run.RunID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("deadline-terminal delete remained visible: %v", err)
+	stopping, err := store.Get(context.Background(), run.RunID)
+	if err != nil || stopping.State != StateStopping || !stopping.DeleteRequested {
+		t.Fatalf("deadline stranded cleanup: %#v %v", stopping, err)
+	}
+	claimed := claimRun(t, store, stopping, "cleanup")
+	if _, err := store.UpdateStatus(context.Background(), StatusInput{RunID: run.RunID, Owner: "cleanup", ExpectedRevision: claimed.Revision, State: StateCompleted}); !errors.Is(err, ErrGone) {
+		t.Fatalf("cleanup completion: %v", err)
 	}
 	if _, deleted, err := store.Delete(context.Background(), run.RunID); err != nil || !deleted {
 		t.Fatalf("deadline-terminal repeated delete: deleted=%v err=%v", deleted, err)
+	}
+}
+
+func TestDeleteDuringExistingStopDoesNotRewriteCleanupOutcome(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	run := createRun(t, store, "cancel-then-delete", false)
+	cancelled, err := store.Cancel(context.Background(), run.RunID)
+	if err != nil || cancelled.TerminalTarget != StateFailed {
+		t.Fatalf("cancel = %#v %v", cancelled, err)
+	}
+	deleting, deleted, err := store.Delete(context.Background(), run.RunID)
+	if err != nil || deleted || !deleting.DeleteRequested || deleting.TerminalTarget != StateFailed {
+		t.Fatalf("delete rewrote the cleanup target = %#v deleted=%v err=%v", deleting, deleted, err)
 	}
 }
 
@@ -338,6 +378,53 @@ VALUES(?,?,?,?,?,'pending',1,?,?)`, "migrated", "idempotency-key-migrated", dige
 	_ = db.Close()
 	if _, err := OpenStore(context.Background(), future, StoreOptions{MaxActiveRuns: 4, MaxClaimLease: time.Minute, Now: clock.Now}); !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("future schema error = %v", err)
+	}
+}
+
+func TestVersionTwoStoppingRowsGainDeterministicCleanupTargets(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "local-controller.sqlite3")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE local_runs (
+run_id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,request_digest TEXT NOT NULL,snapshot BLOB NOT NULL,
+snapshot_digest TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+deadline_at TEXT,terminal_expires_at TEXT,reconcile_owner TEXT,reconcile_until TEXT,delete_requested INTEGER NOT NULL DEFAULT 0,
+deleted_at TEXT,last_reason TEXT NOT NULL DEFAULT ''); PRAGMA user_version=2;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		id       string
+		deleting int
+	}{{"cancel-migrated", 0}, {"delete-migrated", 1}} {
+		snapshot, _, digest, snapshotErr := canonicalSnapshot(testResolvedRun(t, item.id, false))
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		_, err = db.Exec(`INSERT INTO local_runs(run_id,idempotency_key,request_digest,snapshot,snapshot_digest,state,revision,created_at,updated_at,delete_requested,last_reason)
+VALUES(?,?,?,?,?,'stopping',2,?,?,?,'migrated-stop')`, item.id, "idempotency-key-"+item.id, digest, snapshot, digest,
+			formatTimestamp(clock.value), formatTimestamp(clock.value), item.deleting)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	store, err := OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 4, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cancelled, _ := store.Get(context.Background(), "cancel-migrated")
+	deleting, _ := store.Get(context.Background(), "delete-migrated")
+	if cancelled.TerminalTarget != StateFailed || deleting.TerminalTarget != StateCompleted {
+		t.Fatalf("migration targets = cancel:%q delete:%q", cancelled.TerminalTarget, deleting.TerminalTarget)
 	}
 }
 

@@ -17,8 +17,9 @@ import (
 )
 
 type HTTPServer struct {
-	store  *Store
-	logger *log.Logger
+	store        *Store
+	logger       *log.Logger
+	backendReady func(context.Context) bool
 }
 
 type createRequest struct {
@@ -39,6 +40,7 @@ type statusRequest struct {
 	Owner            string `json:"owner"`
 	ExpectedRevision int64  `json:"expected_revision"`
 	State            State  `json:"state"`
+	TerminalTarget   State  `json:"terminal_target,omitempty"`
 	Reason           string `json:"reason,omitempty"`
 }
 
@@ -52,10 +54,14 @@ type apiError struct {
 }
 
 func NewHTTPHandler(store *Store, logger *log.Logger) http.Handler {
+	return NewHTTPHandlerWithBackend(store, logger, nil)
+}
+
+func NewHTTPHandlerWithBackend(store *Store, logger *log.Logger, backendReady func(context.Context) bool) http.Handler {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	server := &HTTPServer{store: store, logger: logger}
+	server := &HTTPServer{store: store, logger: logger, backendReady: backendReady}
 	return http.HandlerFunc(server.serveHTTP)
 }
 
@@ -83,7 +89,7 @@ func (server *HTTPServer) route(response http.ResponseWriter, request *http.Requ
 		}
 		ctx, cancel := context.WithTimeout(request.Context(), time.Second)
 		defer cancel()
-		if !server.store.Ready(ctx) {
+		if !server.store.Ready(ctx) || server.backendReady != nil && !server.backendReady(ctx) {
 			return server.writeError(response, ErrStoreUnavailable, "")
 		}
 		response.WriteHeader(http.StatusOK)
@@ -237,7 +243,8 @@ func (server *HTTPServer) status(response http.ResponseWriter, request *http.Req
 		return server.writeError(response, ErrInvalidRequest, runID)
 	}
 	run, err := server.store.UpdateStatus(request.Context(), StatusInput{
-		RunID: runID, Owner: input.Owner, ExpectedRevision: input.ExpectedRevision, State: input.State, Reason: input.Reason,
+		RunID: runID, Owner: input.Owner, ExpectedRevision: input.ExpectedRevision, State: input.State,
+		TerminalTarget: input.TerminalTarget, Reason: input.Reason,
 	})
 	if err != nil {
 		return server.writeError(response, err, runID)
