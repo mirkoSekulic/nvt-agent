@@ -11,6 +11,7 @@ var (
 	ErrUnknownProfile       = errors.New("unknown profile")
 	ErrUnknownWorkflow      = errors.New("unknown workflow")
 	ErrSelectionDenied      = errors.New("local-run selection denied")
+	ErrInvalidRenderBinding = errors.New("invalid agent-config render binding")
 )
 
 // Resolver holds an immutable validated snapshot of trusted configuration.
@@ -105,7 +106,9 @@ func validateWorkflowRepositories(repositories []Repository) error {
 	paths := make(map[string]struct{}, len(repositories))
 	for _, repository := range repositories {
 		if !validRepositoryID(repository.CheckoutTarget) || repositoryTargetFromURL(repository.URL) != repository.CheckoutTarget ||
-			!validRepositoryID(repository.BrokerRepository) || !validCheckoutPath(repository.Path) ||
+			!validCheckoutPath(repository.Path) ||
+			(repository.CredentialProvider == "" && repository.BrokerRepository != "") ||
+			(repository.CredentialProvider != "" && !validRepositoryID(repository.BrokerRepository)) ||
 			(repository.CredentialProvider != "" && !validProvider(repository.CredentialProvider)) {
 			return ErrInvalidConfiguration
 		}

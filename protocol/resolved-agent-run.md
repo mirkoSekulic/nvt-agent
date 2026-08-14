@@ -46,10 +46,10 @@ A resolved value contains:
 - contract version, run ID, trusted principal, and authorized profile/workflow;
 - image plus typed runtime identity, autonomy, user, container capabilities,
   Docker kernel-log-device policy, and required Docker networks;
-- a bounded immutable `agent_config` JSON object carrying the existing
-  provider-neutral agent configuration, including fresh/resume commands,
-  process environment, preseed, tools, code-server, plugins and their config,
-  and HTTP exposures;
+- a bounded immutable base `agent_config` JSON object carrying the existing
+  provider-neutral profile configuration, including fresh/resume commands,
+  process environment, preseed, tools, code-server, non-managed plugins and
+  their config, and HTTP exposures;
 - the caller's bounded UTF-8 initial prompt;
 - lifecycle completion and failure event names;
 - administrator-owned repository checkouts and approved public credential
@@ -64,9 +64,33 @@ A resolved value contains:
 must contain a valid direct runtime command. The prompt is limited to 64 KiB,
 must be valid UTF-8, and cannot contain NUL. Agent configuration is trusted
 administrator input: it must not contain real credentials. Existing runtime
-configuration that declares plugins, exposures, tools, preseed, or code-server
-behavior is carried unchanged instead of being re-expressed through a lossy
-second schema.
+configuration that declares non-managed plugins, exposures, tools, preseed, or
+code-server behavior is carried unchanged instead of being re-expressed
+through a lossy second schema.
+
+### One runtime-rendering rule
+
+The base block is not itself executable. `RenderAgentConfig` is the single
+adapter transformation from a resolved value to the generic runtime bootstrap
+document. Typed fields are authoritative, so the base block must not contain:
+
+- `runtime.initial-prompt` (owned by `Prompt`);
+- `runtime.proxy` or top-level `egress` (owned by `Egress` and `Broker`); or
+- the `git-host-credentials`, `git-credentials`, or `checkout-repos` plugins
+  (owned by `CredentialProviders` and `Workflow.Repositories`).
+
+Any presence is a configuration conflict and fails before resolution. The
+renderer clones the base, injects the typed initial prompt, injects the selected
+runtime proxy for tunnel transports, renders broker/egress metadata, and emits
+the three managed repository plugins in stable dependency order before other
+plugins. Backends must execute the rendered result, never the base block, and
+must not independently repeat these transformations.
+
+Backend provisioning supplies only non-secret `AgentConfigBindings`: one
+forward-proxy URL for forward-proxy/transparent, or an exact provider-to-base-
+URL map for redirect header-injection grants. Missing, extra, malformed, or
+wrong-transport bindings fail closed. Endpoint allocation remains outside the
+portable desired value.
 
 The execution backend has only a stable name and provider-neutral kind in this
 portable value. Backend implementation/configuration remains trusted
@@ -89,7 +113,8 @@ namespaces. The selected credential mapping must allow the checkout target and
 its referenced broker grant must independently allow the broker repository.
 Both support exact values and one bounded trailing `/*` form. Checkout URLs
 cannot contain userinfo, query parameters, fragments, encoded paths, or
-traversal.
+traversal. A public checkout has no credential provider and therefore must omit
+`broker_repository`; it is rendered only into the checkout plugin.
 
 The contract has no credential-value field. It may carry provider names,
 capability/grant metadata, and routing policy only. It never carries an access
@@ -98,10 +123,14 @@ file, injected header, broker agent token, or paired-egress token. Runtime
 environment names that indicate credential values are rejected. Broker custody
 and the trusted egress path remain the sensitive-data boundary.
 
-Mediated resolution requires a paired-egress identity, an approved proxy
-provider present in the broker grants, and a known transport. It rejects
-file-bundle grants. Direct resolution rejects mediated materializations and
-paired/proxy policy. The resolver contains no provider-specific branches.
+Mediated resolution requires a paired-egress identity and a known transport.
+Redirect does not use a runtime proxy selector and may use the established
+unenforced compatibility mode. Forward-proxy and transparent require mediated
+egress, enforcement, and an approved proxy provider present in the broker
+grants; the renderer places that provider under `runtime.proxy.provider` for
+the runtime command. Mediated policy rejects file-bundle grants. Direct policy
+rejects mediated materializations and paired/proxy policy. The resolver
+contains no provider-specific branches.
 
 ## Configuration and request example
 
@@ -143,7 +172,7 @@ This abbreviated trusted configuration uses example names only:
       "materialization":"header-inject",
       "egress_hosts":["runtime.example:443"]
     }]},
-    "egress":{"mode":"mediated","transport":"forward-proxy","proxy_provider":"runtime-main","paired_egress_required":true},
+    "egress":{"mode":"mediated","transport":"forward-proxy","enforced":true,"proxy_provider":"runtime-main","paired_egress_required":true},
     "allowed_backends":["container"],
     "default_backend":"container",
     "allowed_retentions":["persistent"]
@@ -194,7 +223,9 @@ The operator compatibility gate constructs an existing profiled `AgentRun`
 through the real schedule/profile/workflow builders, including its prompt,
 full runtime configuration, plugins, exposure, lifecycle, container and Docker
 controls, resources, instructions, and real-shaped host-qualified checkout plus
-provider-native broker repository. It compares that desired behavior with the
-portable resolution and verifies that local resolution does not mutate the
-Kubernetes object. The full operator and execution-driver image suites remain
-regression gates for existing Pod/VM behavior.
+provider-native broker repository. It removes only the fields that become the
+typed local overlay, renders them through `RenderAgentConfig`, and compares the
+result with the existing operator's final runtime rendering. It also verifies
+that local resolution does not mutate the Kubernetes object. The full operator
+and execution-driver image suites remain regression gates for existing Pod/VM
+behavior.

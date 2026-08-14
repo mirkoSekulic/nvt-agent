@@ -140,6 +140,15 @@ type Lifecycle struct {
 	FailOn     []string `json:"fail_on,omitempty"`
 }
 
+// AgentConfigBindings are non-secret, backend-provisioned endpoints needed to
+// render the authoritative egress policy into the generic runtime config. They
+// are deliberately outside ResolvedAgentRun because endpoint allocation is an
+// execution-backend concern.
+type AgentConfigBindings struct {
+	ForwardProxyURL  string            `json:"forward_proxy_url,omitempty"`
+	RedirectBaseURLs map[string]string `json:"redirect_base_urls,omitempty"`
+}
+
 // ExecutionBackend selects one trusted backend implementation by stable name
 // and provider-neutral kind. Backend configuration remains outside this
 // portable resolved value.
@@ -157,13 +166,15 @@ type RetentionPolicy struct {
 // ResolvedAgentRun is the complete immutable, non-secret desired value handed
 // to a trusted local execution backend.
 type ResolvedAgentRun struct {
-	ContractVersion       string                      `json:"contract_version"`
-	RunID                 string                      `json:"run_id"`
-	Principal             Principal                   `json:"principal"`
-	Profile               string                      `json:"profile"`
-	Workflow              string                      `json:"workflow"`
-	Image                 string                      `json:"image"`
-	Runtime               Runtime                     `json:"runtime"`
+	ContractVersion string    `json:"contract_version"`
+	RunID           string    `json:"run_id"`
+	Principal       Principal `json:"principal"`
+	Profile         string    `json:"profile"`
+	Workflow        string    `json:"workflow"`
+	Image           string    `json:"image"`
+	Runtime         Runtime   `json:"runtime"`
+	// AgentConfig is the immutable non-controller-owned base. Backends must
+	// execute RenderAgentConfig's result, not this base document directly.
 	AgentConfig           json.RawMessage             `json:"agent_config"`
 	Prompt                string                      `json:"prompt,omitempty"`
 	Repositories          []Repository                `json:"repositories,omitempty"`

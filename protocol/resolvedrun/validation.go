@@ -225,9 +225,18 @@ func validateAgentConfig(value json.RawMessage) error {
 	if decoder.Decode(&root) != nil || root == nil || ensureDecoderEOF(decoder) != nil {
 		return errors.New("agent_config is invalid")
 	}
+	if _, controlled := root["egress"]; controlled {
+		return errors.New("agent_config contains controller-owned egress")
+	}
 	runtime, ok := root["runtime"].(map[string]any)
 	if !ok {
 		return errors.New("agent_config runtime is invalid")
+	}
+	if _, controlled := runtime["initial-prompt"]; controlled {
+		return errors.New("agent_config contains controller-owned initial prompt")
+	}
+	if _, controlled := runtime["proxy"]; controlled {
+		return errors.New("agent_config contains controller-owned runtime proxy")
 	}
 	command, ok := runtime["command"].(string)
 	args, argsOK := optionalAnySlice(runtime, "args")
@@ -252,6 +261,22 @@ func validateAgentConfig(value json.RawMessage) error {
 			if !ok || len(name) > 128 || !environmentPattern.MatchString(name) || len(text) > maxEnvironmentValueBytes ||
 				strings.ContainsRune(text, 0) || sensitiveEnvironmentName(name) {
 				return errors.New("agent_config runtime environment is invalid")
+			}
+		}
+	}
+	if rawPlugins, present := root["plugins"]; present && rawPlugins != nil {
+		plugins, ok := rawPlugins.([]any)
+		if !ok {
+			return errors.New("agent_config plugins are invalid")
+		}
+		for _, rawPlugin := range plugins {
+			plugin, ok := rawPlugin.(map[string]any)
+			name, nameOK := plugin["name"].(string)
+			if !ok || !nameOK || name == "" {
+				return errors.New("agent_config plugins are invalid")
+			}
+			if _, controlled := managedRepositoryPlugins[name]; controlled {
+				return errors.New("agent_config contains a controller-owned repository plugin")
 			}
 		}
 	}
@@ -361,27 +386,50 @@ func validateBrokerAndEgress(broker Broker, egress Egress) error {
 			}
 		}
 	case "mediated":
-		if !egress.PairedEgressRequired || egress.ProxyProvider == "" {
-			return errors.New("mediated egress lacks its paired identity or proxy provider")
+		if !egress.PairedEgressRequired {
+			return errors.New("mediated egress lacks its paired identity")
 		}
 		switch egress.Transport {
-		case "redirect", "forward-proxy", "transparent":
+		case "redirect":
+			if egress.ProxyProvider != "" || egress.MaxConcurrentTunnels != 0 {
+				return errors.New("mediated redirect contains tunnel policy")
+			}
+		case "forward-proxy", "transparent":
+			if !egress.Enforced || egress.ProxyProvider == "" {
+				return errors.New("mediated tunnel transport lacks enforcement or proxy provider")
+			}
 		default:
 			return errors.New("mediated egress transport is invalid")
 		}
-		if _, exists := providers[egress.ProxyProvider]; !exists {
-			return errors.New("mediated egress proxy provider is not granted")
+		if egress.ProxyProvider != "" {
+			if _, exists := providers[egress.ProxyProvider]; !exists {
+				return errors.New("mediated egress proxy provider is not granted")
+			}
 		}
 		if egress.MaxConcurrentTunnels != 0 && egress.Transport != "forward-proxy" && egress.Transport != "transparent" {
 			return errors.New("mediated egress tunnel limit requires a tunnel transport")
 		}
+		headerInjectGrants := 0
+		tunnelRoutes := 0
 		for _, grant := range broker.Grants {
 			if grant.Materialization != "header-inject" && grant.Materialization != "placeholder-file" {
 				return errors.New("mediated egress contains a non-mediated broker grant")
 			}
-			if len(grant.EgressHosts) == 0 {
+			if grant.Materialization == "header-inject" {
+				headerInjectGrants++
+			}
+			if grant.Materialization == "header-inject" && len(grant.EgressHosts) == 0 {
 				return errors.New("mediated egress grant has no bounded host")
 			}
+			if isTunnelTransport(egress.Transport) {
+				tunnelRoutes += len(grant.EgressHosts)
+			}
+		}
+		if egress.Transport == "redirect" && headerInjectGrants == 0 {
+			return errors.New("mediated redirect has no header-injection route")
+		}
+		if isTunnelTransport(egress.Transport) && tunnelRoutes == 0 {
+			return errors.New("mediated tunnel transport has no injection route")
 		}
 	default:
 		return errors.New("egress mode is invalid")
@@ -414,8 +462,9 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 	paths := make(map[string]struct{}, len(repositories))
 	for _, repository := range repositories {
 		if !validRepositoryID(repository.CheckoutTarget) || repositoryTargetFromURL(repository.URL) != repository.CheckoutTarget ||
-			!validRepositoryID(repository.BrokerRepository) ||
-			!validCheckoutPath(repository.Path) {
+			!validCheckoutPath(repository.Path) ||
+			(repository.CredentialProvider == "" && repository.BrokerRepository != "") ||
+			(repository.CredentialProvider != "" && !validRepositoryID(repository.BrokerRepository)) {
 			return errors.New("workflow repository is invalid")
 		}
 		if _, duplicate := identifiers[repository.CheckoutTarget]; duplicate {

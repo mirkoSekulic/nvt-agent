@@ -42,6 +42,9 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 		agentConfig["plugins"] == nil || agentConfig["expose"] == nil {
 		t.Fatalf("complete provider-neutral agent configuration was not retained: %#v", agentConfig)
 	}
+	if runtime["initial-prompt"] != nil || runtime["proxy"] != nil || agentConfig["egress"] != nil {
+		t.Fatalf("base agent configuration contains controller-owned fields: %#v", agentConfig)
+	}
 	if resolved.Prompt != request.Prompt || !reflect.DeepEqual(resolved.Lifecycle.CompleteOn, []string{"plugin.work.completed"}) ||
 		!reflect.DeepEqual(resolved.Lifecycle.FailOn, []string{"plugin.work.failed"}) {
 		t.Fatalf("prompt/lifecycle behavior was not retained: %#v", resolved)
@@ -59,6 +62,28 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 		resolved.WorkspaceInstructions.Workflow != "Workflow-owned guidance.\n" ||
 		resolved.Retention != "persistent" || !resolved.Persistence.Workspace || resolved.Execution.Name != "container" {
 		t.Fatalf("resolved policy is incomplete: %#v", resolved)
+	}
+	rendered, err := RenderAgentConfig(resolved, AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"})
+	if err != nil {
+		t.Fatalf("RenderAgentConfig: %v", err)
+	}
+	var renderedConfig map[string]any
+	if err := json.Unmarshal(rendered, &renderedConfig); err != nil {
+		t.Fatal(err)
+	}
+	renderedRuntime := renderedConfig["runtime"].(map[string]any)
+	if renderedRuntime["initial-prompt"].(map[string]any)["text"] != request.Prompt ||
+		renderedRuntime["proxy"].(map[string]any)["provider"] != "runtime-main" {
+		t.Fatalf("typed prompt/proxy were not rendered authoritatively: %#v", renderedRuntime)
+	}
+	renderedEgress := renderedConfig["egress"].(map[string]any)
+	if renderedEgress["mode"] != "mediated" || renderedEgress["transport"] != "forward-proxy" ||
+		renderedEgress["forward-proxy-url"] != "http://127.0.0.1:15002" {
+		t.Fatalf("typed egress was not rendered authoritatively: %#v", renderedEgress)
+	}
+	pluginNames := renderedPluginNames(t, renderedConfig)
+	if !reflect.DeepEqual(pluginNames[:3], []string{"git-host-credentials", "git-credentials", "checkout-repos"}) {
+		t.Fatalf("typed repositories were not rendered before base plugins: %#v", pluginNames)
 	}
 	encoded, err := json.Marshal(resolved)
 	if err != nil {
@@ -181,6 +206,9 @@ func TestConfigurationAndRepositoryFailuresFailClosed(t *testing.T) {
 		"checkout URL mismatch": func(value *TrustedConfiguration) {
 			value.Workflows[0].Repositories[0].URL = "https://attacker.example/Altinn/altinn-studio.git"
 		},
+		"credentialed checkout missing broker repository": func(value *TrustedConfiguration) {
+			value.Workflows[0].Repositories[0].BrokerRepository = ""
+		},
 		"invalid egress port": func(value *TrustedConfiguration) {
 			value.Profiles[0].Broker.Grants[0].EgressHosts[0] = "github.com:not-a-port"
 		},
@@ -215,6 +243,213 @@ func TestConfigurationAndRepositoryFailuresFailClosed(t *testing.T) {
 				t.Fatalf("Resolve error = %v", err)
 			}
 		})
+	}
+}
+
+func TestAgentConfigRejectsControllerOwnedFieldConflicts(t *testing.T) {
+	t.Parallel()
+	for name, mutate := range map[string]func(map[string]any){
+		"initial prompt": func(root map[string]any) {
+			root["runtime"].(map[string]any)["initial-prompt"] = map[string]any{"delivery": "argument", "text": "other"}
+		},
+		"runtime proxy": func(root map[string]any) {
+			root["runtime"].(map[string]any)["proxy"] = map[string]any{"provider": "other"}
+		},
+		"egress": func(root map[string]any) { root["egress"] = map[string]any{"mode": "direct"} },
+		"checkout plugin": func(root map[string]any) {
+			root["plugins"] = append(root["plugins"].([]any), map[string]any{"name": "checkout-repos", "source": "builtin"})
+		},
+		"credential mapping plugin": func(root map[string]any) {
+			root["plugins"] = append(root["plugins"].([]any), map[string]any{"name": "git-host-credentials", "source": "builtin"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configuration := validConfiguration()
+			var root map[string]any
+			if err := json.Unmarshal(configuration.Profiles[0].AgentConfig, &root); err != nil {
+				t.Fatal(err)
+			}
+			mutate(root)
+			configuration.Profiles[0].AgentConfig = mustJSON(t, root)
+			if _, err := NewResolver(configuration); !errors.Is(err, ErrInvalidConfiguration) {
+				t.Fatalf("conflicting base config error = %v", err)
+			}
+		})
+	}
+}
+
+func TestEgressTransportContractMatchesRuntime(t *testing.T) {
+	t.Parallel()
+	for _, transport := range []string{"redirect", "forward-proxy", "transparent"} {
+		t.Run(transport+" valid", func(t *testing.T) {
+			configuration := validConfiguration()
+			configureTransport(&configuration, transport)
+			configuration.Profiles[0].Broker.Grants = append(configuration.Profiles[0].Broker.Grants, BrokerGrant{
+				Provider: "placeholder-main", Capabilities: []string{"injection.files"}, Materialization: "placeholder-file",
+			})
+			resolver, err := NewResolver(configuration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := resolver.Resolve(validAuthorization(), validRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bindings := AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"}
+			if transport == "redirect" {
+				bindings = AgentConfigBindings{RedirectBaseURLs: map[string]string{
+					"source-app": "https://egress-source.internal:14431", "runtime-main": "https://egress-runtime.internal:14432",
+				}}
+			}
+			rendered, err := RenderAgentConfig(run, bindings)
+			if err != nil {
+				t.Fatalf("render %s: %v", transport, err)
+			}
+			var root map[string]any
+			if err := json.Unmarshal(rendered, &root); err != nil {
+				t.Fatal(err)
+			}
+			runtime := root["runtime"].(map[string]any)
+			egress := root["egress"].(map[string]any)
+			if transport == "redirect" {
+				if runtime["proxy"] != nil || egress["forward-proxy-url"] != nil {
+					t.Fatalf("redirect rendered tunnel selector: runtime=%#v egress=%#v", runtime, egress)
+				}
+				firstGrant := egress["grants"].([]any)[0].(map[string]any)
+				if firstGrant["base-url"] != "https://egress-source.internal:14431" {
+					t.Fatalf("redirect binding was not rendered: %#v", firstGrant)
+				}
+			} else if runtime["proxy"].(map[string]any)["provider"] != "runtime-main" || egress["enforcement"] != true {
+				t.Fatalf("tunnel transport lacks enforced proxy rendering: runtime=%#v egress=%#v", runtime, egress)
+			}
+		})
+	}
+
+	resolver, err := NewResolver(validConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwardRun, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, bindings := range map[string]AgentConfigBindings{
+		"missing forward endpoint":    {},
+		"redirect endpoint on tunnel": {ForwardProxyURL: "http://127.0.0.1:15002", RedirectBaseURLs: map[string]string{"runtime-main": "https://egress.internal:14431"}},
+		"credential in endpoint":      {ForwardProxyURL: "http://user:password@127.0.0.1:15002"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := RenderAgentConfig(forwardRun, bindings); !errors.Is(err, ErrInvalidRenderBinding) {
+				t.Fatalf("render binding error = %v", err)
+			}
+		})
+	}
+
+	for name, mutate := range map[string]func(*TrustedConfiguration){
+		"redirect proxy selector": func(value *TrustedConfiguration) {
+			configureTransport(value, "redirect")
+			value.Profiles[0].Egress.ProxyProvider = "runtime-main"
+		},
+		"forward proxy without enforcement": func(value *TrustedConfiguration) {
+			configureTransport(value, "forward-proxy")
+			value.Profiles[0].Egress.Enforced = false
+		},
+		"transparent without enforcement": func(value *TrustedConfiguration) {
+			configureTransport(value, "transparent")
+			value.Profiles[0].Egress.Enforced = false
+		},
+		"tunnel without proxy": func(value *TrustedConfiguration) {
+			configureTransport(value, "forward-proxy")
+			value.Profiles[0].Egress.ProxyProvider = ""
+		},
+		"ungranted proxy": func(value *TrustedConfiguration) {
+			configureTransport(value, "transparent")
+			value.Profiles[0].Egress.ProxyProvider = "not-granted"
+		},
+		"redirect without header route": func(value *TrustedConfiguration) {
+			configureTransport(value, "redirect")
+			for index := range value.Profiles[0].Broker.Grants {
+				value.Profiles[0].Broker.Grants[index].Materialization = "placeholder-file"
+				value.Profiles[0].Broker.Grants[index].Git = false
+			}
+		},
+		"tunnel without injection route": func(value *TrustedConfiguration) {
+			configureTransport(value, "forward-proxy")
+			for index := range value.Profiles[0].Broker.Grants {
+				value.Profiles[0].Broker.Grants[index].Materialization = "placeholder-file"
+				value.Profiles[0].Broker.Grants[index].EgressHosts = nil
+				value.Profiles[0].Broker.Grants[index].Git = false
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configuration := validConfiguration()
+			mutate(&configuration)
+			if _, err := NewResolver(configuration); !errors.Is(err, ErrInvalidConfiguration) {
+				t.Fatalf("invalid transport error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPublicRepositoryNeedsNoBrokerNamespace(t *testing.T) {
+	t.Parallel()
+	configuration := validConfiguration()
+	configuration.Workflows[0].Repositories = append(configuration.Workflows[0].Repositories, Repository{
+		CheckoutTarget: "github.com/Altinn/public-repository", URL: "https://github.com/Altinn/public-repository.git", Path: "public-repository",
+	})
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := resolver.Resolve(validAuthorization(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Repositories[1].BrokerRepository != "" || run.Repositories[1].CredentialProvider != "" {
+		t.Fatalf("public repository gained broker authorization: %#v", run.Repositories[1])
+	}
+	rendered, err := RenderAgentConfig(run, AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rendered, []byte(`"url":"https://github.com/Altinn/public-repository.git"`)) {
+		t.Fatalf("public checkout was not rendered: %s", rendered)
+	}
+	configuration.Workflows[0].Repositories[1].BrokerRepository = "Altinn/public-repository"
+	if _, err := NewResolver(configuration); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("uncredentialed broker repository error = %v", err)
+	}
+}
+
+func TestWorkflowSwitchRendersOnlyTheAuthorizedRepositories(t *testing.T) {
+	t.Parallel()
+	configuration := validConfiguration()
+	configuration.Workflows[1] = Workflow{
+		Name: "restricted", Repositories: []Repository{{
+			CheckoutTarget: "git.example/public/project", URL: "https://git.example/public/project.git", Path: "public-project",
+		}},
+	}
+	resolver, err := NewResolver(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization := validAuthorization()
+	authorization.Selections[0].Workflows = append(authorization.Selections[0].Workflows, "restricted")
+	request := validRequest()
+	request.Workflow = "restricted"
+	run, err := resolver.Resolve(authorization, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := RenderAgentConfig(run, AgentConfigBindings{ForwardProxyURL: "http://127.0.0.1:15002"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rendered, []byte("https://git.example/public/project.git")) ||
+		bytes.Contains(rendered, []byte("https://github.com/Altinn/altinn-studio.git")) ||
+		bytes.Count(rendered, []byte(`"name":"checkout-repos"`)) != 1 {
+		t.Fatalf("workflow repository rendering was not authoritative: %s", rendered)
 	}
 }
 
@@ -267,7 +502,7 @@ func validConfiguration() TrustedConfiguration {
   "preseed":{"files":[{"path":"$HOME/.agent/config","mode":"0600","overwrite":false,"content":"check_for_update_on_startup = false\n"}]},
   "tools":{"packages":["git","jq"],"mise":["go@1.26"],"additional-paths":["/opt/tools/bin"],"shell":[]},
   "code-server":{"extensions":["redhat.vscode-yaml"],"settings":{"overwrite":false,"values":{"workbench.startupEditor":"none"}},"agentTerminal":{"openOnStartup":true}},
-  "plugins":[{"name":"checkout-repos","source":"builtin","when":"before-agent","restart":"never","config":{"repos":[{"url":"https://github.com/Altinn/altinn-studio.git","path":"altinn-studio"}]}}],
+  "plugins":[{"name":"smoke-complete","source":"builtin","when":"after-agent","config":{}}],
   "expose":{"http":[{"name":"app","targetPort":3000}]}
 }`)
 	profileRuntime := Runtime{
@@ -296,7 +531,7 @@ func validConfiguration() TrustedConfiguration {
 		}, {
 			Name: "restricted", Runtime: &profileRuntime, AgentConfig: profileAgentConfig,
 			Broker:          Broker{Grants: []BrokerGrant{{Provider: "runtime-main", Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{"runtime.example:443"}}}},
-			Egress:          Egress{Mode: "mediated", Transport: "forward-proxy", ProxyProvider: "runtime-main", PairedEgressRequired: true},
+			Egress:          Egress{Mode: "mediated", Transport: "forward-proxy", Enforced: true, ProxyProvider: "runtime-main", PairedEgressRequired: true},
 			AllowedBackends: []string{"container"}, DefaultBackend: "container", AllowedRetentions: []string{"persistent"},
 		}},
 		Workflows: []Workflow{{
@@ -306,6 +541,44 @@ func validConfiguration() TrustedConfiguration {
 		ExecutionBackends: []ExecutionBackend{{Name: "container", Kind: "container"}},
 		RetentionPolicies: []RetentionPolicy{{Name: "persistent", Persistence: Persistence{Workspace: true, RuntimeState: true, DockerData: true}, TTL: TTL{ActiveSeconds: 14400, FailedSeconds: 3600}}, {Name: "disposable", TTL: TTL{ActiveSeconds: 3600}}},
 	}
+}
+
+func configureTransport(configuration *TrustedConfiguration, transport string) {
+	profile := &configuration.Profiles[0]
+	profile.Egress.Transport = transport
+	profile.Egress.Enforced = transport != "redirect"
+	profile.Egress.ProxyProvider = "runtime-main"
+	profile.Egress.MaxConcurrentTunnels = 0
+	if transport == "redirect" {
+		profile.Egress.ProxyProvider = ""
+	}
+}
+
+func renderedPluginNames(t *testing.T, config map[string]any) []string {
+	t.Helper()
+	raw, ok := config["plugins"].([]any)
+	if !ok {
+		t.Fatalf("rendered plugins are invalid: %#v", config["plugins"])
+	}
+	result := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		plugin, ok := entry.(map[string]any)
+		name, nameOK := plugin["name"].(string)
+		if !ok || !nameOK {
+			t.Fatalf("rendered plugin is invalid: %#v", entry)
+		}
+		result = append(result, name)
+	}
+	return result
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func replaceAgentConfigRuntimeEnv(t *testing.T, raw json.RawMessage, environment map[string]any) json.RawMessage {
