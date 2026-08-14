@@ -7,8 +7,10 @@ lifecycle storage. Those responsibilities belong to later local-controller
 layers and backend adapters.
 
 The Go contract and deterministic resolver live in `protocol/resolvedrun`.
-This first child issue defines data and resolution only; it does not introduce
-a controller process or change Kubernetes `AgentSchedule`/`AgentRun` behavior.
+The separate [local-controller protocol](local-controller.md) durably stores a
+complete resolved snapshot and owns local lifecycle metadata; resolution itself
+remains independent of that process. Neither contract changes Kubernetes
+`AgentSchedule`/`AgentRun` behavior.
 
 ## Authority and precedence
 

@@ -32,6 +32,10 @@ local quick start. The documents below are the maintained sources of truth.
 Files under [`protocol/`](../protocol/) are normative contracts:
 
 - [`agentd`](../protocol/agentd.md): session I/O and prompt queueing.
+- [Resolved agent runs](../protocol/resolved-agent-run.md): trusted,
+  provider-neutral local desired-run value.
+- [Local controller](../protocol/local-controller.md): trusted local run API,
+  durable lifecycle state, deadlines, retention, and reconciliation leases.
 - [Runtime session continuation](../runtime/README.md): optional generic fresh/resume commands, durable startup state, and pending-prompt recovery.
 - [Events](../protocol/events.md): JSONL event format.
 - [Broker](../protocol/broker.md): identities, grants, and provider material.

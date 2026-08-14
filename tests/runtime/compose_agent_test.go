@@ -1670,13 +1670,13 @@ code-server: {extensions: []}
 	}
 }
 
-func TestLocalBuildDocumentationIncludesDindImage(t *testing.T) {
+func TestLocalBuildDocumentationIncludesInfrastructureImages(t *testing.T) {
 	root := repoRoot(t)
-	const command = "make runtime-build dind-build broker-build egressd-build captured-build"
+	const command = "make runtime-build dind-build broker-build local-controller-build egressd-build captured-build"
 	for _, path := range []string{"README.md", filepath.Join("docs", "local-development-agent.md")} {
 		contents := mustReadFile(t, filepath.Join(root, path))
 		if !strings.Contains(contents, command) {
-			t.Fatalf("%s does not build the required local DinD image", path)
+			t.Fatalf("%s does not build the required local infrastructure images", path)
 		}
 	}
 }
