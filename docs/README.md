@@ -35,7 +35,7 @@ Files under [`protocol/`](../protocol/) are normative contracts:
 - [Resolved agent runs](../protocol/resolved-agent-run.md): trusted,
   provider-neutral local desired-run value.
 - [Local controller](../protocol/local-controller.md): trusted local run API,
-  durable lifecycle state, deadlines, retention, and reconciliation leases.
+  durable cleanup-gated lifecycle state, and swappable Docker execution backend.
 - [Runtime session continuation](../runtime/README.md): optional generic fresh/resume commands, durable startup state, and pending-prompt recovery.
 - [Events](../protocol/events.md): JSONL event format.
 - [Broker](../protocol/broker.md): identities, grants, and provider material.

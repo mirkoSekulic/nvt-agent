@@ -177,7 +177,7 @@ func (s *server) handle(req request) {
 	case "files":
 		s.success(req.ID, map[string]any{"files": []map[string]string{{"name": "fixture.txt", "content": s.secret, "mode": "0600"}}, "expires_at": nil})
 	case "placeholder-files":
-		s.success(req.ID, map[string]any{"files": []map[string]string{{"path": ".fixture/auth.json", "content": "placeholder", "mode": "0600"}}, "hosts": []string{"api.example.test"}, "expires_at": nil})
+		s.success(req.ID, map[string]any{"files": []map[string]string{{"path": ".fixture/auth.json", "content": `{"access_token":"NVT-PLACEHOLDER-NOT-A-KEY"}` + "\n", "mode": "0600"}}, "hosts": []string{"api.example.test"}, "expires_at": nil})
 	case "injection.headers":
 		appendHeaders := map[string]string{"x-fixture-feature": "required"}
 		if path, _ := req.Params["path"].(string); path == "/overlap" {

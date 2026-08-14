@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/egressd/internal/egress"
@@ -36,9 +37,9 @@ func run() error {
 	forwardProxyInjects := config.ForwardProxy != nil && len(config.ForwardProxy.InjectRoutes) > 0
 	var broker *egress.BrokerClient
 	if len(config.Routes) > 0 || forwardProxyInjects {
-		token := os.Getenv("NVT_BROKER_TOKEN")
-		if token == "" {
-			return fmt.Errorf("NVT_BROKER_TOKEN is required when injection routes are configured")
+		token, err := brokerToken()
+		if err != nil {
+			return err
 		}
 		brokerHTTP, err := brokerHTTPClient(config)
 		if err != nil {
@@ -135,6 +136,34 @@ func run() error {
 		}()
 	}
 	return <-errors
+}
+
+func brokerToken() (string, error) {
+	inline := os.Getenv("NVT_BROKER_TOKEN")
+	path := os.Getenv("NVT_BROKER_TOKEN_FILE")
+	if inline != "" && path != "" {
+		return "", fmt.Errorf("configure only one broker token source")
+	}
+	if path == "" {
+		if inline == "" {
+			return "", fmt.Errorf("NVT_BROKER_TOKEN or NVT_BROKER_TOKEN_FILE is required when injection routes are configured")
+		}
+		return inline, nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 4096 || info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("broker token file is unavailable")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("broker token file is unavailable")
+	}
+	defer clear(raw)
+	token := strings.TrimSpace(string(raw))
+	if token == "" || strings.ContainsAny(token, "\x00\r\n") {
+		return "", fmt.Errorf("broker token file is unavailable")
+	}
+	return token, nil
 }
 
 func brokerHTTPClient(config *egress.Config) (*http.Client, error) {
