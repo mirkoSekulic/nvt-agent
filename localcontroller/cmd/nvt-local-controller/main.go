@@ -36,13 +36,17 @@ func main() {
 	backend, err := dockerbackend.New(dockerbackend.Config{
 		DockerHost: config.DockerHost, RunsDir: config.RunsDir, BrokerURL: config.BrokerURL, BrokerCAFile: config.BrokerCAFile,
 		BrokerAgentsPath: config.BrokerAgentsPath, IdentityKeyPath: config.IdentityKeyPath, Owner: config.ControllerOwner,
-		ExternalNetwork: config.ExternalNetwork, ProxyPort: config.ProxyPort, ProtectedCIDRs: config.ProtectedCIDRs, DindImage: config.DindImage, EgressdImage: config.EgressdImage,
+		ExternalNetwork: config.ExternalNetwork, RunNetworkPool: config.RunNetworkPool, ProxyPort: config.ProxyPort, ProtectedCIDRs: config.ProtectedCIDRs, DindImage: config.DindImage, EgressdImage: config.EgressdImage,
 		CapturedImage: config.CapturedImage, SeedImage: config.SeedImage, OperationTimeout: config.BackendOperationTimeout,
 	})
 	if err != nil {
 		logger.Fatal("startup failed reason=backend-unavailable")
 	}
-	reconciler, err := controller.NewReconciler(store, backend, config.ControllerOwner, config.MaxClaimLease, logger)
+	reconcileOwner, err := controller.NewProcessReconcileOwner(config.ControllerOwner)
+	if err != nil {
+		logger.Fatal("startup failed reason=identity-unavailable")
+	}
+	reconciler, err := controller.NewReconciler(store, backend, reconcileOwner, config.MaxClaimLease, logger)
 	if err != nil {
 		logger.Fatal("startup failed reason=invalid-configuration")
 	}

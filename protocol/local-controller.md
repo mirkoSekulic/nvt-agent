@@ -96,7 +96,11 @@ Reconciliation is optimistic and lease-based. A backend first calls:
 }
 ```
 
-The owner is an opaque, bounded controller-instance name. The claim succeeds
+The owner is an opaque, bounded controller-instance name generated from fresh
+randomness at each process start. It is deliberately distinct from the stable
+administrator-configured Docker resource-label owner, so two live controller
+processes with identical deployment configuration cannot share or immediately
+reclaim one lease. The claim succeeds
 only for the exact current revision and when no different unexpired owner holds
 the run. Claiming increments the revision. An expired lease can be replaced by
 another owner. A stale owner cannot update status after takeover, cancellation,
@@ -189,9 +193,22 @@ restriction is local-backend-specific and does not change the portable resolved
 run or Kubernetes transport contracts.
 
 Compose is used only to converge declared services; the controller never uses
-Compose orphan or project-wide teardown. Cleanup enumerates resources using all
-three NVT ownership labels and re-verifies them immediately before deletion, so
-an unmanaged same-project container remains untouched.
+Compose orphan or project-wide teardown. Before `up --no-recreate`, the
+controller enumerates every existing container for the project and refuses to
+invoke Compose if a declared service lacks the exact three NVT ownership
+labels. It repeats the ownership check after convergence. Cleanup enumerates
+resources using all three labels and re-verifies them immediately before
+deletion, so unmanaged same-project orphan and declared-service containers
+remain untouched.
+
+The backend creates both per-run networks itself from deterministic `/28`
+candidates within the administrator-owned run-network pool. Bounded probing
+handles occupied subnets, while an existing named network must retain exact
+ownership labels and a subnet inside the configured pool. The pool must not
+overlap the reserved `172.30.0.0/15` DinD range and must contain at least two
+subnets per configured active run. Compose's default network is explicitly
+mapped to the owned internal network, so Compose cannot create an unmanaged
+project network.
 
 The controller derives stable per-run broker identities from a private
 startup-only key. Only SHA-256 token hashes and the resolved grants are written
@@ -208,7 +225,9 @@ because this backend has no zero-secret direct materialization path.
 Registry replacement preserves the existing `agents.yaml` owner and group.
 Controller-created lock files use the bind directory owner and group, with
 mode 0600, so a root controller does not take ownership away from native Linux
-Compose users.
+Compose users. Registry flock acquisition is nonblocking with bounded retry and
+the backend operation context; a held static-agent lock therefore yields a
+retryable operation before the claim lease can expire.
 
 ## Durable state and recovery
 
@@ -274,8 +293,9 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_BROKER_CA_FILE` | omitted | optional absolute CA file |
 | `NVT_LOCAL_CONTROLLER_BROKER_AGENTS` | `/broker-state/agents.yaml` | existing broker registry file |
 | `NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE` | `/broker-state/local-controller.key` | private regular file, 32-4096 bytes, no group/other permissions |
-| `NVT_LOCAL_CONTROLLER_OWNER` | `nvt-local-controller` | stable bounded ownership label |
+| `NVT_LOCAL_CONTROLLER_OWNER` | `nvt-local-controller` | stable bounded Docker ownership label; not the per-process lease identity |
 | `NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK` | `agents-proxy` | pre-created proxy/broker network |
+| `NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL` | `100.64.0.0/10` | canonical IPv4 pool, at least two `/28`s per active run, disjoint from `172.30.0.0/15` |
 | `NVT_LOCAL_CONTROLLER_PROXY_PORT` | `4090` | public local proxy port recorded in generated workspace guidance |
 | `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded administrator-owned protected CIDR list, validated by DinD before transparent capture |
 | `NVT_LOCAL_CONTROLLER_DIND_IMAGE` | `nvt-dind:latest` | administrator image |

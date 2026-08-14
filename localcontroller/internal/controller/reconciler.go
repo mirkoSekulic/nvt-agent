@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -9,6 +11,24 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
+
+// NewProcessReconcileOwner derives an opaque per-process lease identity from
+// the stable resource owner. Resource labels remain stable across restarts,
+// while two live controller processes can never intentionally share a claim.
+func NewProcessReconcileOwner(resourceOwner string) (string, error) {
+	if !validOwner(resourceOwner) || len(resourceOwner) > 63 {
+		return "", ErrInvalidRequest
+	}
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return "", ErrStoreUnavailable
+	}
+	owner := resourceOwner + "-" + hex.EncodeToString(random)
+	if !validOwner(owner) {
+		return "", ErrInvalidRequest
+	}
+	return owner, nil
+}
 
 // BackendRun is the immutable desired value handed to one trusted local
 // execution backend. SnapshotDigest binds every owned backend resource to the

@@ -21,6 +21,7 @@ type Config struct {
 	IdentityKeyPath  string
 	Owner            string
 	ExternalNetwork  string
+	RunNetworkPool   string
 	ProxyPort        int
 	ProtectedCIDRs   string
 	DindImage        string

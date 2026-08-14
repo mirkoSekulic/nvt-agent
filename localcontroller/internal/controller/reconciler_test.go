@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,27 +50,42 @@ func (backend *fakeBackend) Ensure(_ context.Context, run BackendRun) (BackendOb
 	return BackendObservation{Ready: true}, nil
 }
 
-func TestReconcilerClaimCannotBeTakenDuringBoundedBackendOperation(t *testing.T) {
+func TestTwoControllerProcessesWithSameStableResourceOwnerCannotEnterBackendTogether(t *testing.T) {
 	store, _ := openTestStore(t, &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}, 4)
-	backend := newFakeBackend()
-	backend.ensureStarted = make(chan struct{}, 1)
-	backend.ensureRelease = make(chan struct{})
-	reconciler, _ := NewReconciler(store, backend, "controller-a", 30*time.Second, log.New(io.Discard, "", 0))
+	firstBackend, secondBackend := newFakeBackend(), newFakeBackend()
+	firstBackend.ensureStarted = make(chan struct{}, 1)
+	firstBackend.ensureRelease = make(chan struct{})
+	firstOwner, err := NewProcessReconcileOwner("nvt-local-controller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondOwner, err := NewProcessReconcileOwner("nvt-local-controller")
+	if err != nil || firstOwner == secondOwner || !strings.HasPrefix(firstOwner, "nvt-local-controller-") || !strings.HasPrefix(secondOwner, "nvt-local-controller-") {
+		t.Fatalf("process owners are not distinct: %q %q %v", firstOwner, secondOwner, err)
+	}
+	firstReconciler, _ := NewReconciler(store, firstBackend, firstOwner, 30*time.Second, log.New(io.Discard, "", 0))
+	secondReconciler, _ := NewReconciler(store, secondBackend, secondOwner, 30*time.Second, log.New(io.Discard, "", 0))
 	run := createRun(t, store, "delayed-operation", false)
-	if err := reconciler.Reconcile(context.Background()); err != nil {
+	if err := firstReconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- reconciler.Reconcile(context.Background()) }()
-	<-backend.ensureStarted
+	go func() { done <- firstReconciler.Reconcile(context.Background()) }()
+	<-firstBackend.ensureStarted
 	owned, err := store.Get(context.Background(), run.RunID)
-	if err != nil || owned.ReconcileOwner != "controller-a" || owned.ReconcileUntil == nil {
+	if err != nil || owned.ReconcileOwner != firstOwner || owned.ReconcileUntil == nil {
 		t.Fatalf("operation not claimed: %#v %v", owned, err)
 	}
-	if _, err := store.Claim(context.Background(), ClaimInput{RunID: run.RunID, Owner: "controller-b", ExpectedRevision: owned.Revision, Lease: 30 * time.Second}); !errors.Is(err, ErrOwnershipConflict) {
-		t.Fatalf("concurrent reconciler took over an in-flight backend call: %v", err)
+	if err := secondReconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	close(backend.ensureRelease)
+	secondBackend.mu.Lock()
+	secondCalls := secondBackend.ensureCalls
+	secondBackend.mu.Unlock()
+	if secondCalls != 0 {
+		t.Fatalf("second controller entered backend %d times", secondCalls)
+	}
+	close(firstBackend.ensureRelease)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}

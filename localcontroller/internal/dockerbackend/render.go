@@ -120,6 +120,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 		"agent-home":   {External: true, Name: names.home},
 	}
 	networks := map[string]externalObject{
+		"default":        {External: true, Name: names.internalNet},
 		"agents-proxy":   {External: true, Name: config.ExternalNetwork},
 		"run-internal":   {External: true, Name: names.internalNet},
 		"egress-private": {External: true, Name: names.privateNet},
@@ -191,7 +192,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 	agentDepends := map[string]composeDependency{namespaceService: {Condition: namespaceCondition}}
 	if run.Runtime.User == "non-root" {
 		services["workspace-init"] = composeService{
-			Image: config.SeedImage, User: "0:0", Entrypoint: []string{"sh", "-ec"}, Command: []string{"chown 1000:1000 /workspace"},
+			Image: config.SeedImage, User: "0:0", NetworkMode: "none", Entrypoint: []string{"sh", "-ec"}, Command: []string{"chown 1000:1000 /workspace"},
 			Volumes: []string{"workspace:/workspace"}, Labels: labels,
 		}
 		agentDepends["workspace-init"] = composeDependency{Condition: "service_completed_successfully"}
@@ -229,7 +230,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 			}
 		}
 		services["ca-init"] = composeService{
-			Image: config.EgressdImage, User: "0:0", Entrypoint: []string{"/usr/local/bin/egress-ca-init"}, Command: caCommand,
+			Image: config.EgressdImage, User: "0:0", NetworkMode: "none", Entrypoint: []string{"/usr/local/bin/egress-ca-init"}, Command: caCommand,
 			Volumes: []string{"egress-private:/private", "egress-public:/public"}, Labels: labels,
 		}
 		if run.Egress.Transport == "forward-proxy" || run.Egress.Transport == "transparent" {

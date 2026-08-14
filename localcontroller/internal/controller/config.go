@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ type Config struct {
 	IdentityKeyPath         string
 	ControllerOwner         string
 	ExternalNetwork         string
+	RunNetworkPool          string
 	ProxyPort               int
 	ProtectedCIDRs          string
 	DindImage               string
@@ -50,6 +52,7 @@ func ConfigFromEnvironment() (Config, error) {
 		IdentityKeyPath:         environmentOrDefault("NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE", "/broker-state/local-controller.key"),
 		ControllerOwner:         environmentOrDefault("NVT_LOCAL_CONTROLLER_OWNER", "nvt-local-controller"),
 		ExternalNetwork:         environmentOrDefault("NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK", "agents-proxy"),
+		RunNetworkPool:          environmentOrDefault("NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL", "100.64.0.0/10"),
 		ProxyPort:               4090,
 		ProtectedCIDRs:          environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS", "127.0.0.0/8 169.254.0.0/16"),
 		DindImage:               environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_IMAGE", "nvt-dind:latest"),
@@ -107,9 +110,16 @@ func ValidateConfig(config Config) error {
 		return ErrInvalidRequest
 	}
 	brokerURL, brokerURLErr := url.Parse(config.BrokerURL)
+	runNetworkPool, runNetworkPoolErr := netip.ParsePrefix(config.RunNetworkPool)
+	runNetworkCapacity := 0
+	if runNetworkPoolErr == nil && runNetworkPool.Addr().Is4() && runNetworkPool == runNetworkPool.Masked() && runNetworkPool.Bits() >= 8 && runNetworkPool.Bits() <= 27 {
+		runNetworkCapacity = 1 << (28 - runNetworkPool.Bits())
+	}
+	managedPool := netip.MustParsePrefix("172.30.0.0/15")
 	if config.StatePath == "" || !strings.HasSuffix(config.StatePath, ".sqlite3") || strings.ContainsAny(config.StatePath, "\x00\r\n") ||
 		!filepath.IsAbs(config.StatePath) || filepath.Clean(config.StatePath) != config.StatePath || filepath.Dir(config.StatePath) == string(filepath.Separator) ||
 		config.MaxActiveRuns < 1 || config.MaxActiveRuns > 10_000 ||
+		runNetworkCapacity < config.MaxActiveRuns*2 || runNetworkPool.Overlaps(managedPool) ||
 		config.MaxClaimLease < time.Second || config.MaxClaimLease > time.Hour ||
 		config.SweepInterval < time.Second || config.SweepInterval > time.Minute ||
 		config.ReconcileInterval < time.Second || config.ReconcileInterval > time.Minute ||
@@ -121,7 +131,7 @@ func ValidateConfig(config Config) error {
 		(brokerURL.Scheme != "http" && brokerURL.Scheme != "https") || config.BrokerAgentsPath == "" || !filepath.IsAbs(config.BrokerAgentsPath) ||
 		config.IdentityKeyPath == "" || !filepath.IsAbs(config.IdentityKeyPath) ||
 		config.BrokerCAFile != "" && !filepath.IsAbs(config.BrokerCAFile) ||
-		config.ControllerOwner == "" || len(config.ControllerOwner) > 63 || config.ExternalNetwork == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 ||
+		config.ControllerOwner == "" || len(config.ControllerOwner) > 63 || config.ExternalNetwork == "" || config.RunNetworkPool == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 ||
 		config.DindImage == "" || config.EgressdImage == "" || config.CapturedImage == "" || config.SeedImage == "" ||
 		strings.ContainsAny(config.ControllerOwner+config.ExternalNetwork+config.ProtectedCIDRs+config.DindImage+config.EgressdImage+config.CapturedImage+config.SeedImage, "\x00\r\n") {
 		return ErrInvalidRequest

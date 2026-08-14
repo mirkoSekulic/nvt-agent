@@ -11,7 +11,7 @@ func TestValidateConfigBounds(t *testing.T) {
 		MaxClaimLease: 180 * time.Second, SweepInterval: time.Second, ReconcileInterval: time.Second,
 		DockerHost: "unix:///var/run/docker.sock", RunsDir: "/state/controller/runs", BrokerURL: "http://broker:7347",
 		BrokerAgentsPath: "/broker-state/agents.yaml", IdentityKeyPath: "/broker-state/local-controller.key",
-		ControllerOwner: "nvt-local-controller", ExternalNetwork: "agents-proxy", ProxyPort: 4090, DindImage: "nvt-dind:latest",
+		ControllerOwner: "nvt-local-controller", ExternalNetwork: "agents-proxy", RunNetworkPool: "100.64.0.0/10", ProxyPort: 4090, DindImage: "nvt-dind:latest",
 		ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16",
 		EgressdImage:   "nvt-egressd:latest", CapturedImage: "nvt-captured:latest", SeedImage: "nvt-agent-runtime:latest",
 		BackendOperationTimeout: 2 * time.Minute,
@@ -29,6 +29,8 @@ func TestValidateConfigBounds(t *testing.T) {
 		"capacity":                             func(value *Config) { value.MaxActiveRuns = 0 },
 		"claim lease":                          func(value *Config) { value.MaxClaimLease = 0 },
 		"claim shorter than backend operation": func(value *Config) { value.MaxClaimLease = value.BackendOperationTimeout + 29*time.Second },
+		"managed network overlap":              func(value *Config) { value.RunNetworkPool = "172.30.0.0/15" },
+		"network capacity":                     func(value *Config) { value.RunNetworkPool = "100.64.0.0/27" },
 		"sweep":                                func(value *Config) { value.SweepInterval = 0 },
 		"reconcile":                            func(value *Config) { value.ReconcileInterval = 0 },
 		"docker host":                          func(value *Config) { value.DockerHost = "" },
@@ -55,6 +57,7 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 		"NVT_LOCAL_CONTROLLER_RECONCILE_SECONDS",
 		"NVT_LOCAL_CONTROLLER_BACKEND_TIMEOUT_SECONDS",
 		"NVT_LOCAL_CONTROLLER_PROXY_PORT",
+		"NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL",
 	} {
 		t.Setenv(name, "")
 		if _, err := ConfigFromEnvironment(); err == nil {
@@ -100,6 +103,8 @@ func defaultEnvironmentValue(name string) string {
 		return "120"
 	case "NVT_LOCAL_CONTROLLER_PROXY_PORT":
 		return "4090"
+	case "NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL":
+		return "100.64.0.0/10"
 	default:
 		return "1"
 	}

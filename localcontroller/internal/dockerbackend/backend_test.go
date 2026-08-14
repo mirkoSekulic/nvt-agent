@@ -8,12 +8,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 type fakeDocker struct {
 	mu            sync.Mutex
 	objects       map[string]map[string]string
+	objectSubnets map[string]string
 	containers    map[string]map[string]string
 	commands      [][]string
 	inputs        [][]byte
@@ -34,7 +38,7 @@ type fakeDocker struct {
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{objects: map[string]map[string]string{"network:agents-proxy": {}}, containers: map[string]map[string]string{}}
+	return &fakeDocker{objects: map[string]map[string]string{"network:agents-proxy": {}}, objectSubnets: map[string]string{}, containers: map[string]map[string]string{}}
 }
 
 func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -127,7 +131,10 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 				break
 			}
 		}
-		docker.containers["fake-agent-id"] = cloneLabels(labels)
+		labels = cloneLabels(labels)
+		labels[composeProjectLabel] = argumentAfter(arguments, "-p")
+		labels[composeServiceLabel] = "agent"
+		docker.containers["fake-agent-id"] = labels
 		return nil, nil
 	}
 	if contains(arguments, "ps") {
@@ -154,6 +161,10 @@ func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
 		if !exists {
 			return nil, errors.New("missing")
 		}
+		if contains(arguments, "{{json .IPAM.Config}}") {
+			encoded, _ := json.Marshal([]map[string]string{{"Subnet": docker.objectSubnets[key]}})
+			return append(encoded, '\n'), nil
+		}
 		encoded, _ := json.Marshal(labels)
 		return append(encoded, '\n'), nil
 	case "create":
@@ -161,12 +172,16 @@ func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
 			return nil, errors.New("exists")
 		}
 		docker.objects[key] = parsedLabels(arguments)
+		if kind == "network" {
+			docker.objectSubnets[key] = argumentAfter(arguments, "--subnet")
+		}
 		return []byte(name + "\n"), nil
 	case "rm":
 		if _, exists := docker.objects[key]; !exists {
 			return nil, errors.New("missing")
 		}
 		delete(docker.objects, key)
+		delete(docker.objectSubnets, key)
 		return nil, nil
 	default:
 		return nil, errors.New("unsupported object command")
@@ -192,6 +207,16 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 	}
 	if !secretSafePlan(plan, tokens.agent, tokens.egress, "REAL-ACCESS-TOKEN-NEEDLE") {
 		t.Fatalf("plan contains a credential:\n%s", plan)
+	}
+	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+	managedPool := netip.MustParsePrefix("172.30.0.0/15")
+	seenSubnets := map[string]bool{}
+	for _, name := range []string{names.internalNet, names.privateNet} {
+		subnet, err := netip.ParsePrefix(docker.objectSubnets["network:"+name])
+		if err != nil || subnet.Bits() != runNetworkPrefixBits || subnet.Overlaps(managedPool) || seenSubnets[subnet.String()] {
+			t.Fatalf("backend network subnet = %q, %v", subnet, err)
+		}
+		seenSubnets[subnet.String()] = true
 	}
 	policy, err := os.ReadFile(backend.config.BrokerAgentsPath)
 	if err != nil {
@@ -277,6 +302,26 @@ func TestDockerBackendOwnershipAndCleanupFailClosed(t *testing.T) {
 	for key, labels := range docker.objects {
 		if labels[runLabel] == run.RunID {
 			t.Fatalf("owned resource remained after explicit delete: %s", key)
+		}
+	}
+}
+
+func TestDockerBackendPreflightPreservesUnmanagedDeclaredService(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("3", 64)}
+	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+	const collisionID = "unmanaged-current-agent"
+	original := map[string]string{composeProjectLabel: names.project, composeServiceLabel: "agent", "unmanaged": "true"}
+	docker.containers[collisionID] = cloneLabels(original)
+	if _, err := backend.Ensure(context.Background(), desired); !errors.Is(err, controller.ErrBackendDesiredRunInvalid) {
+		t.Fatalf("declared-service collision = %v", err)
+	}
+	if labels, exists := docker.containers[collisionID]; !exists || !reflect.DeepEqual(labels, original) {
+		t.Fatalf("unmanaged declared service changed: %#v", labels)
+	}
+	for _, command := range docker.commands {
+		if len(command) > 0 && command[0] == "compose" && contains(command, "up") {
+			t.Fatalf("Compose convergence ran after ownership collision: %v", command)
 		}
 	}
 }
@@ -400,7 +445,7 @@ func TestBrokerRegistryPreservesNativeLinuxOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := brokerRegistry{path: agents}
-	if err := registry.mutate(func(policy *brokerPolicy) error { return nil }); err != nil {
+	if err := registry.mutate(context.Background(), func(policy *brokerPolicy) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	uid, gid, err := fileOwnership(agents)
@@ -410,6 +455,35 @@ func TestBrokerRegistryPreservesNativeLinuxOwnership(t *testing.T) {
 	uid, gid, err = fileOwnership(filepath.Join(directory, "agents.lock"))
 	if err != nil || uid != directoryUID || gid != directoryGID {
 		t.Fatalf("lock ownership = %d:%d, %v", uid, gid, err)
+	}
+}
+
+func TestBrokerRegistryLockRespectsBackendOperationDeadline(t *testing.T) {
+	backend, _, run, _ := testBackend(t)
+	backend.config.OperationTimeout = 120 * time.Millisecond
+	lockPath := strings.TrimSuffix(backend.config.BrokerAgentsPath, filepath.Ext(backend.config.BrokerAgentsPath)) + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("4", 64), DeleteRequested: true}
+	for name, operation := range map[string]func() error{
+		"ensure": func() error { _, err := backend.Ensure(context.Background(), desired); return err },
+		"delete": func() error { return backend.Delete(context.Background(), desired) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			started := time.Now()
+			err := operation()
+			elapsed := time.Since(started)
+			if !errors.Is(err, controller.ErrBackendRetryable) || elapsed > 500*time.Millisecond {
+				t.Fatalf("held registry lock result = %v after %s", err, elapsed)
+			}
+		})
 	}
 }
 
@@ -588,7 +662,7 @@ func testBackend(t *testing.T) (*Backend, *fakeDocker, resolvedrun.ResolvedAgent
 	t.Cleanup(server.Close)
 	config := Config{
 		DockerHost: "unix:///var/run/docker.sock", RunsDir: filepath.Join(directory, "runs"), BrokerURL: server.URL,
-		BrokerAgentsPath: agents, IdentityKeyPath: filepath.Join(directory, "key"), Owner: "test-controller", ExternalNetwork: "agents-proxy",
+		BrokerAgentsPath: agents, IdentityKeyPath: filepath.Join(directory, "key"), Owner: "test-controller", ExternalNetwork: "agents-proxy", RunNetworkPool: "100.64.0.0/10",
 		ProxyPort:      4090,
 		ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16",
 		DindImage:      "nvt-dind:test", EgressdImage: "nvt-egressd:test", CapturedImage: "nvt-captured:test", SeedImage: "nvt-runtime:test",

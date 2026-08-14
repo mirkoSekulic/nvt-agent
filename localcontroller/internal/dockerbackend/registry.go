@@ -1,6 +1,7 @@
 package dockerbackend
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 	"gopkg.in/yaml.v3"
@@ -78,7 +80,7 @@ type brokerRegistry struct {
 	path string
 }
 
-func (registry brokerRegistry) upsert(run resolvedrun.ResolvedAgentRun, digest string, tokens identityTokens) error {
+func (registry brokerRegistry) upsert(ctx context.Context, run resolvedrun.ResolvedAgentRun, digest string, tokens identityTokens) error {
 	agentID, egressID := brokerIDs(run.RunID)
 	agent := brokerAgent{ID: agentID, TokenSHA256: tokenHash(tokens.agent), Grants: make([]brokerGrant, 0, len(run.Broker.Grants))}
 	for _, grant := range run.Broker.Grants {
@@ -103,7 +105,7 @@ func (registry brokerRegistry) upsert(run resolvedrun.ResolvedAgentRun, digest s
 	if run.Egress.PairedEgressRequired {
 		entries = append(entries, brokerAgent{ID: egressID, TokenSHA256: tokenHash(tokens.egress), Role: "egress", PairedAgent: agentID})
 	}
-	return registry.mutate(func(policy *brokerPolicy) error {
+	return registry.mutate(ctx, func(policy *brokerPolicy) error {
 		remove := map[string]bool{agentID: true, egressID: true}
 		retained := policy.Agents[:0]
 		for _, existing := range policy.Agents {
@@ -124,9 +126,9 @@ func (registry brokerRegistry) upsert(run resolvedrun.ResolvedAgentRun, digest s
 	})
 }
 
-func (registry brokerRegistry) remove(runID string, tokens identityTokens) error {
+func (registry brokerRegistry) remove(ctx context.Context, runID string, tokens identityTokens) error {
 	agentID, egressID := brokerIDs(runID)
-	return registry.mutate(func(policy *brokerPolicy) error {
+	return registry.mutate(ctx, func(policy *brokerPolicy) error {
 		retained := policy.Agents[:0]
 		for _, entry := range policy.Agents {
 			if entry.ID == agentID || entry.ID == egressID {
@@ -146,7 +148,7 @@ func (registry brokerRegistry) remove(runID string, tokens identityTokens) error
 	})
 }
 
-func (registry brokerRegistry) mutate(change func(*brokerPolicy) error) error {
+func (registry brokerRegistry) mutate(ctx context.Context, change func(*brokerPolicy) error) error {
 	lockPath := strings.TrimSuffix(registry.path, filepath.Ext(registry.path)) + ".lock"
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -157,7 +159,7 @@ func (registry brokerRegistry) mutate(change func(*brokerPolicy) error) error {
 	if err != nil || lock.Chown(directoryUID, directoryGID) != nil || lock.Chmod(0o600) != nil {
 		return errors.New("broker registry unavailable")
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := acquireRegistryLock(ctx, int(lock.Fd())); err != nil {
 		return errors.New("broker registry unavailable")
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
@@ -186,6 +188,25 @@ func (registry brokerRegistry) mutate(change func(*brokerPolicy) error) error {
 		return errors.New("broker registry unavailable")
 	}
 	return atomicWrite(registry.path, encoded, 0o600)
+}
+
+func acquireRegistryLock(ctx context.Context, descriptor int) error {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err := syscall.Flock(descriptor, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func validateBrokerPolicy(policy brokerPolicy) error {

@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,7 +107,7 @@ providers:
 	backendConfig := Config{
 		DockerHost: boundary.host, RunsDir: filepath.Join(directory, "runs"), BrokerURL: brokerURL,
 		BrokerAgentsPath: agents, IdentityKeyPath: filepath.Join(directory, "unused-key"), Owner: "smoke-controller",
-		ExternalNetwork: network, ProxyPort: 4090, ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16", DindImage: environmentOr("NVT_DIND_IMAGE", "nvt-dind:latest"),
+		ExternalNetwork: network, RunNetworkPool: "100.64.0.0/10", ProxyPort: 4090, ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16", DindImage: environmentOr("NVT_DIND_IMAGE", "nvt-dind:latest"),
 		EgressdImage: environmentOr("NVT_EGRESSD_IMAGE", "nvt-egressd:latest"), CapturedImage: environmentOr("NVT_CAPTURED_IMAGE", "nvt-captured:latest"),
 		SeedImage: environmentOr("NVT_RUNTIME_IMAGE", "nvt-agent-runtime:latest"), OperationTimeout: 3 * time.Minute,
 	}
@@ -112,6 +115,7 @@ providers:
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertRealEngineDeclaredServiceCollisionPreserved(t, ctx, boundary, backend, backendConfig)
 	run := testMediatedRun(t)
 	run.RunID = "mediated-engine-smoke"
 	run.Image = backendConfig.SeedImage
@@ -129,14 +133,6 @@ providers:
 	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64), DeleteRequested: true}
 	ownedNames := namesFor(backendConfig, run.RunID, desired.SnapshotDigest)
 	ownedLabels := ownedLabels{Owner: backendConfig.Owner, RunID: run.RunID, Digest: desired.SnapshotDigest}
-	for index, item := range []string{ownedNames.internalNet, ownedNames.privateNet} {
-		arguments := []string{"network", "create", "--subnet", fmt.Sprintf("10.%d.%d.0/24", 234+index, 20+os.Getpid()%200)}
-		arguments = append(arguments, labelArguments(ownedLabels)...)
-		arguments = append(arguments, item)
-		if _, err := boundary.Run(ctx, nil, arguments...); err != nil {
-			t.Fatal(err)
-		}
-	}
 	defer func() {
 		if err := backend.Delete(context.Background(), desired); err != nil {
 			t.Errorf("cleanup: %v", err)
@@ -161,6 +157,7 @@ providers:
 		policy, _ := os.ReadFile(agents)
 		t.Fatalf("real mediated ensure = %#v %v\nbroker=%s\nregistry=%s", observation, err, diagnostics, policy)
 	}
+	assertBackendCreatedNonOverlappingNetworks(t, ctx, boundary, backendConfig, ownedNames)
 	agentID := ownedAgentContainer(t, ctx, boundary, ownedLabels)
 	response, err := boundary.Run(ctx, nil, "exec", agentID, "curl", "-fsS", "https://api.example.test/credential-proof")
 	if err != nil || !bytes.Contains(response, []byte(`"credential_match":true`)) || bytes.Contains(response, []byte(`"placeholder_seen":true`)) {
@@ -177,6 +174,64 @@ providers:
 		t.Fatalf("mediated injection proof = %v %s\ncurl=%s\n%s", err, response, curlDiagnostics, diagnostics)
 	}
 	assertRealEngineSecretAbsent(t, ctx, boundary, backendConfig, desired, agentID, credential)
+}
+
+func assertRealEngineDeclaredServiceCollisionPreserved(t *testing.T, ctx context.Context, boundary CommandBoundary, backend *Backend, config Config) {
+	t.Helper()
+	run := testMediatedRun(t)
+	run.RunID = "declared-collision-smoke"
+	run.Image = config.SeedImage
+	run.Runtime.Docker = nil
+	run.AgentConfig = []byte(`{"runtime":{"command":"bash","args":["-lc","sleep 300"]},"plugins":[]}`)
+	run.Repositories = nil
+	run.CredentialProviders = nil
+	run.Broker = resolvedrun.Broker{}
+	run.Egress = resolvedrun.Egress{Mode: "direct"}
+	if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
+		t.Fatal(err)
+	}
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("6", 64)}
+	names := namesFor(config, run.RunID, desired.SnapshotDigest)
+	containerName := "nvt-lc-unmanaged-agent-" + strconv.Itoa(os.Getpid())
+	created, err := boundary.Run(ctx, nil, "run", "-d", "--name", containerName, "--entrypoint", "bash",
+		"--label", composeProjectLabel+"="+names.project, "--label", composeServiceLabel+"=agent", config.SeedImage, "-lc", "sleep 300")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalID := strings.TrimSpace(string(created))
+	defer func() { _, _ = boundary.Run(context.Background(), nil, "rm", "-f", containerName) }()
+	if _, err := backend.Ensure(ctx, desired); !errors.Is(err, controller.ErrBackendDesiredRunInvalid) {
+		t.Fatalf("real declared-service collision = %v", err)
+	}
+	current, err := boundary.Run(ctx, nil, "inspect", "--format", "{{.Id}} {{json .Config.Labels}}", containerName)
+	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(current)), originalID+" ") || !bytes.Contains(current, []byte(`"com.docker.compose.service":"agent"`)) || bytes.Contains(current, []byte(ownerLabel)) {
+		t.Fatalf("Compose changed unmanaged declared service: %v %s", err, current)
+	}
+}
+
+func assertBackendCreatedNonOverlappingNetworks(t *testing.T, ctx context.Context, boundary CommandBoundary, config Config, names resourceNames) {
+	t.Helper()
+	pool := netip.MustParsePrefix(config.RunNetworkPool)
+	managed := netip.MustParsePrefix("172.30.0.0/15")
+	seen := map[string]bool{}
+	for _, name := range []string{names.internalNet, names.privateNet} {
+		raw, err := boundary.Run(ctx, nil, "network", "inspect", "--format", "{{json .IPAM.Config}}", name)
+		if err != nil {
+			t.Fatalf("backend-owned network missing: %s: %v", name, err)
+		}
+		var values []dockerIPAMConfig
+		if json.Unmarshal(raw, &values) != nil || len(values) != 1 {
+			t.Fatalf("backend-owned network IPAM malformed: %s: %s", name, raw)
+		}
+		subnet, err := netip.ParsePrefix(values[0].Subnet)
+		if err != nil || subnet.Bits() != runNetworkPrefixBits || !pool.Contains(subnet.Addr()) || subnet.Overlaps(managed) || seen[subnet.String()] {
+			t.Fatalf("backend-owned subnet invalid: %s: %v", values[0].Subnet, err)
+		}
+		seen[subnet.String()] = true
+	}
+	if _, err := boundary.Run(ctx, nil, "network", "inspect", names.project+"_default"); err == nil {
+		t.Fatal("Compose created an unmanaged implicit project network")
+	}
 }
 
 func smokeRepositoryRoot(t *testing.T) string {

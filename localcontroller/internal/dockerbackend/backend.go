@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +16,12 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/controller"
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	composeProjectLabel = "com.docker.compose.project"
+	composeServiceLabel = "com.docker.compose.service"
 )
 
 type Backend struct {
@@ -82,11 +89,14 @@ func prepareRunsDir(path string) error {
 }
 
 func validateConfig(config Config) error {
+	runNetworkPool, runNetworkPoolErr := netip.ParsePrefix(config.RunNetworkPool)
+	managedPool := netip.MustParsePrefix("172.30.0.0/15")
 	if config.DockerHost == "" || config.RunsDir == "" || !filepath.IsAbs(config.RunsDir) || filepath.Clean(config.RunsDir) != config.RunsDir ||
 		config.BrokerAgentsPath == "" || !filepath.IsAbs(config.BrokerAgentsPath) || config.IdentityKeyPath == "" || !filepath.IsAbs(config.IdentityKeyPath) ||
 		config.BrokerCAFile != "" && !filepath.IsAbs(config.BrokerCAFile) ||
 		config.Owner == "" || len(config.Owner) > 63 || config.ExternalNetwork == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 || config.DindImage == "" || config.EgressdImage == "" ||
 		config.CapturedImage == "" || config.SeedImage == "" || config.OperationTimeout < time.Second || config.OperationTimeout > 5*time.Minute ||
+		runNetworkPoolErr != nil || !runNetworkPool.Addr().Is4() || runNetworkPool != runNetworkPool.Masked() || runNetworkPool.Bits() < 8 || runNetworkPool.Bits() > 27 || runNetworkPool.Overlaps(managedPool) ||
 		!validDockerName(config.ExternalNetwork) || !validImage(config.DindImage) || !validImage(config.EgressdImage) || !validImage(config.CapturedImage) || !validImage(config.SeedImage) ||
 		strings.ContainsAny(config.Owner+config.ProtectedCIDRs, "\x00\r\n") {
 		return errors.New("docker backend configuration invalid")
@@ -145,11 +155,17 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 	defer cancel()
 	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
 	labels := ownedLabels{Owner: backend.config.Owner, RunID: run.RunID, Digest: desired.SnapshotDigest}
+	if err := backend.preflightComposeMutation(operationContext, names.project, plan, labels); err != nil {
+		if errors.Is(err, errOwnershipConflict) {
+			return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+		}
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
+	}
 	if err := backend.ensureDirectory(run.RunID); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	tokens := deriveTokens(backend.key, run.RunID, desired.SnapshotDigest)
-	if err := backend.registry.upsert(run, desired.SnapshotDigest, tokens); err != nil {
+	if err := backend.registry.upsert(operationContext, run, desired.SnapshotDigest, tokens); err != nil {
 		if errors.Is(err, errRegistryIdentityCollision) {
 			return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 		}
@@ -167,7 +183,7 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		}
 	}
 	for _, network := range []string{names.internalNet, names.privateNet} {
-		if err := backend.ensureOwnedObject(operationContext, "network", network, labels); err != nil {
+		if err := backend.ensureOwnedNetwork(operationContext, network, labels); err != nil {
 			if errors.Is(err, errOwnershipConflict) {
 				return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 			}
@@ -212,7 +228,10 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 	if err := atomicWrite(names.composeFile, plan, 0o600); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
-	if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d"); err != nil {
+	if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--no-recreate"); err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
+	}
+	if err := backend.preflightComposeMutation(operationContext, names.project, plan, labels); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -261,15 +280,15 @@ func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRu
 	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
 	labels := ownedLabels{Owner: backend.config.Owner, RunID: run.RunID, Digest: desired.SnapshotDigest}
 	tokens := deriveTokens(backend.key, run.RunID, desired.SnapshotDigest)
-	if err := backend.registry.remove(run.RunID, tokens); err != nil {
-		return err
+	if err := backend.registry.remove(operationContext, run.RunID, tokens); err != nil {
+		return controller.ErrBackendRetryable
 	}
 	if err := backend.removeOwnedContainers(operationContext, labels); err != nil {
 		return controller.ErrBackendRetryable
 	}
 	for _, network := range []string{names.internalNet, names.privateNet} {
 		if err := backend.removeOwnedObject(operationContext, "network", network, labels); err != nil {
-			return err
+			return controller.ErrBackendRetryable
 		}
 	}
 	volumes := []string{names.agentConfig, names.egressPrivate, names.egressPublic}
@@ -284,12 +303,12 @@ func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRu
 	}
 	for _, volume := range volumes {
 		if err := backend.removeOwnedObject(operationContext, "volume", volume, labels); err != nil {
-			return err
+			return controller.ErrBackendRetryable
 		}
 	}
 	if desired.DeleteRequested {
 		if err := os.RemoveAll(filepath.Dir(names.composeFile)); err != nil {
-			return errors.New("backend state unavailable")
+			return controller.ErrBackendRetryable
 		}
 	}
 	return nil
@@ -300,6 +319,33 @@ func (backend *Backend) ensureDirectory(runID string) error {
 		return err
 	}
 	return os.Chmod(filepath.Join(backend.config.RunsDir, runID), 0o700)
+}
+
+func (backend *Backend) preflightComposeMutation(ctx context.Context, project string, plan []byte, expected ownedLabels) error {
+	var document struct {
+		Services map[string]any `yaml:"services"`
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(plan))
+	if err := decoder.Decode(&document); err != nil || len(document.Services) == 0 {
+		return errors.New("compose plan unavailable")
+	}
+	output, err := backend.docker.Run(ctx, nil, "ps", "-aq", "--filter", "label="+composeProjectLabel+"="+project)
+	if err != nil {
+		return err
+	}
+	for _, container := range strings.Fields(string(output)) {
+		labels, err := backend.containerLabels(ctx, container)
+		if err != nil {
+			return err
+		}
+		if _, declared := document.Services[labels[composeServiceLabel]]; !declared {
+			continue
+		}
+		if err := verifyLabelMap(labels, expected); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (backend *Backend) requiredVolumes(run resolvedrun.ResolvedAgentRun, names resourceNames) []string {
@@ -345,11 +391,23 @@ func (backend *Backend) verifyObject(ctx context.Context, kind, name string, lab
 }
 
 func (backend *Backend) verifyContainer(ctx context.Context, name string, labels ownedLabels) error {
-	output, err := backend.docker.Run(ctx, nil, "inspect", "--format", "{{json .Config.Labels}}", name)
+	values, err := backend.containerLabels(ctx, name)
 	if err != nil {
 		return err
 	}
-	return verifyLabels(output, labels)
+	return verifyLabelMap(values, labels)
+}
+
+func (backend *Backend) containerLabels(ctx context.Context, name string) (map[string]string, error) {
+	output, err := backend.docker.Run(ctx, nil, "inspect", "--format", "{{json .Config.Labels}}", name)
+	if err != nil {
+		return nil, err
+	}
+	var labels map[string]string
+	if err := json.Unmarshal(bytes.TrimSpace(output), &labels); err != nil {
+		return nil, errors.New("backend ownership unavailable")
+	}
+	return labels, nil
 }
 
 func verifyLabels(raw []byte, expected ownedLabels) error {
@@ -357,6 +415,10 @@ func verifyLabels(raw []byte, expected ownedLabels) error {
 	if err := json.Unmarshal(bytes.TrimSpace(raw), &labels); err != nil {
 		return errors.New("backend ownership unavailable")
 	}
+	return verifyLabelMap(labels, expected)
+}
+
+func verifyLabelMap(labels map[string]string, expected ownedLabels) error {
 	for key, value := range labelMap(expected) {
 		if labels[key] != value {
 			return errOwnershipConflict
