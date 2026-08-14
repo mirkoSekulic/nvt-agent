@@ -34,7 +34,10 @@ type fakeDocker struct {
 	seedCount     int
 	agentAbsent   bool
 	agentStatus   string
+	agentExitCode int
+	agentOOM      bool
 	failComposeUp int
+	failRemove    string
 }
 
 func newFakeDocker() *fakeDocker {
@@ -87,12 +90,17 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	if arguments[0] == "inspect" {
 		id := arguments[len(arguments)-1]
 		if labels, exists := docker.containers[id]; exists {
-			if contains(arguments, "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{if .State.Running}}running{{else}}stopped{{end}}{{end}}") {
+			if contains(arguments, "{{json .State}}") {
 				status := docker.agentStatus
 				if status == "" {
 					status = "running"
 				}
-				return []byte(status + "\n"), nil
+				state := map[string]any{"Running": status != "stopped", "OOMKilled": docker.agentOOM, "ExitCode": docker.agentExitCode}
+				if status == "healthy" || status == "starting" || status == "unhealthy" {
+					state["Health"] = map[string]any{"Status": status}
+				}
+				encoded, _ := json.Marshal(state)
+				return append(encoded, '\n'), nil
 			}
 			encoded, _ := json.Marshal(labels)
 			return append(encoded, '\n'), nil
@@ -125,14 +133,15 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 			return nil, errors.New("temporary Docker unavailable")
 		}
 		var labels map[string]string
+		project := argumentAfter(arguments, "-p")
 		for key, value := range docker.objects {
-			if strings.HasPrefix(key, "volume:") && value[runLabel] != "" {
+			if strings.HasPrefix(key, "volume:"+project+"-") && value[runLabel] != "" {
 				labels = value
 				break
 			}
 		}
 		labels = cloneLabels(labels)
-		labels[composeProjectLabel] = argumentAfter(arguments, "-p")
+		labels[composeProjectLabel] = project
 		labels[composeServiceLabel] = "agent"
 		docker.containers["fake-agent-id"] = labels
 		return nil, nil
@@ -153,6 +162,16 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
 	kind := arguments[0]
 	action := arguments[1]
+	if action == "ls" {
+		values := []string{}
+		for key, labels := range docker.objects {
+			prefix := kind + ":"
+			if strings.HasPrefix(key, prefix) && labelsMatchFilters(labels, arguments) {
+				values = append(values, strings.TrimPrefix(key, prefix))
+			}
+		}
+		return []byte(strings.Join(values, "\n")), nil
+	}
 	name := arguments[len(arguments)-1]
 	key := kind + ":" + name
 	switch action {
@@ -179,6 +198,10 @@ func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
 	case "rm":
 		if _, exists := docker.objects[key]; !exists {
 			return nil, errors.New("missing")
+		}
+		if docker.failRemove == kind {
+			docker.failRemove = ""
+			return nil, errors.New("temporary remove failure")
 		}
 		delete(docker.objects, key)
 		delete(docker.objectSubnets, key)
@@ -234,7 +257,7 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 	if len(docker.inputs) != 2 || bytes.Contains(docker.inputs[0], []byte(tokens.egress)) || !bytes.Contains(docker.inputs[1], []byte(tokens.egress)) || bytes.Contains(docker.inputs[1], []byte("REAL-ACCESS-TOKEN-NEEDLE")) {
 		t.Fatalf("broker bearer was not confined to the paired-egress private seed stream")
 	}
-	for _, expected := range []string{"git-host-credentials", "checkout-repos", "github.example/org/repo", "NVT-PLACEHOLDER-NOT-A-KEY", "prepared-provider-metadata.json", "Example Bot"} {
+	for _, expected := range []string{"git-host-credentials", "checkout-repos", "github.example/org/repo", "NVT-PLACEHOLDER-NOT-A-KEY", "prepared-provider-metadata.json", "Example Bot", `"resume":{"args":["resume","--last"],"command":"agent-cli"}`} {
 		if !bytes.Contains(docker.inputs[0], []byte(expected)) {
 			t.Fatalf("agent seed omitted %q", expected)
 		}
@@ -306,6 +329,75 @@ func TestDockerBackendOwnershipAndCleanupFailClosed(t *testing.T) {
 	}
 }
 
+func TestRestartReconcilePrunesExactStaleResourcesAndRetainsOnlyPersistentData(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	run.Persistence = resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}
+	run.Retention = "persistent"
+	if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
+		t.Fatal(err)
+	}
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("9", 64)}
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("initial ensure = %#v, %v", observation, err)
+	}
+	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+	labels := ownedLabels{Owner: backend.config.Owner, RunID: run.RunID, Digest: desired.SnapshotDigest}
+	docker.containers["stale-owned-service"] = map[string]string{
+		ownerLabel: labels.Owner, runLabel: labels.RunID, digestLabel: labels.Digest,
+		composeProjectLabel: names.project, composeServiceLabel: "obsolete",
+	}
+	docker.containers["unmanaged-same-project"] = map[string]string{composeProjectLabel: names.project, composeServiceLabel: "obsolete"}
+	docker.objects["volume:"+names.project+"-obsolete"] = labelMap(labels)
+	docker.objects["network:"+names.project+"-obsolete"] = labelMap(labels)
+	docker.objectSubnets["network:"+names.project+"-obsolete"] = "100.127.255.240/28"
+	otherLabels := ownedLabels{Owner: backend.config.Owner, RunID: "other-run", Digest: strings.Repeat("8", 64)}
+	docker.objects["volume:other-run-workspace"] = labelMap(otherLabels)
+
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("restart ensure = %#v, %v", observation, err)
+	}
+	for _, key := range []string{"stale-owned-service", "volume:" + names.project + "-obsolete", "network:" + names.project + "-obsolete"} {
+		_, containerExists := docker.containers[key]
+		_, objectExists := docker.objects[key]
+		if containerExists || objectExists {
+			t.Fatalf("exact-owned stale resource survived: %s", key)
+		}
+	}
+	if _, exists := docker.containers["unmanaged-same-project"]; !exists {
+		t.Fatal("restart reconciliation removed unmanaged same-project resource")
+	}
+	if _, exists := docker.objects["volume:other-run-workspace"]; !exists {
+		t.Fatal("restart reconciliation removed another run resource")
+	}
+
+	if err := backend.Delete(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	for _, retained := range []string{names.workspace, names.home, names.dockerData} {
+		if _, exists := docker.objects["volume:"+retained]; !exists {
+			t.Fatalf("persistent volume was removed: %s", retained)
+		}
+	}
+	for _, removed := range []string{names.agentConfig, names.egressPrivate, names.egressPublic} {
+		if _, exists := docker.objects["volume:"+removed]; exists {
+			t.Fatalf("ephemeral volume survived cleanup: %s", removed)
+		}
+	}
+	if _, err := os.Stat(filepath.Dir(names.composeFile)); !os.IsNotExist(err) {
+		t.Fatalf("generated Compose state survived cleanup: %v", err)
+	}
+
+	desired.DeleteRequested = true
+	if err := backend.Delete(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	for _, retained := range []string{names.workspace, names.home, names.dockerData} {
+		if _, exists := docker.objects["volume:"+retained]; exists {
+			t.Fatalf("explicit deletion retained volume: %s", retained)
+		}
+	}
+}
+
 func TestDockerBackendPreflightPreservesUnmanagedDeclaredService(t *testing.T) {
 	backend, docker, run, _ := testBackend(t)
 	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("3", 64)}
@@ -344,6 +436,63 @@ func TestDockerBackendRetriesTransientDockerAndRecognizesMissingOrExitedAgent(t 
 	docker.agentStatus = "stopped"
 	if observation, err := backend.Inspect(context.Background(), desired); err != nil || observation.Ready {
 		t.Fatalf("exited agent = %#v %v", observation, err)
+	}
+}
+
+func TestDockerBackendInspectionClassifiesLifecycleWithoutDiagnostics(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]struct {
+		apply    func()
+		ready    bool
+		terminal controller.State
+	}{
+		"healthy":   {apply: func() { docker.agentStatus = "healthy" }, ready: true},
+		"starting":  {apply: func() { docker.agentStatus = "starting" }},
+		"missing":   {apply: func() { docker.agentAbsent = true }, terminal: controller.StateFailed},
+		"completed": {apply: func() { docker.agentStatus = "stopped" }, terminal: controller.StateCompleted},
+		"failed":    {apply: func() { docker.agentStatus = "stopped"; docker.agentExitCode = 19 }, terminal: controller.StateFailed},
+		"oom":       {apply: func() { docker.agentStatus = "stopped"; docker.agentOOM = true }, terminal: controller.StateFailed},
+		"unhealthy": {apply: func() { docker.agentStatus = "unhealthy" }, terminal: controller.StateFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			docker.agentAbsent, docker.agentStatus, docker.agentExitCode, docker.agentOOM = false, "", 0, false
+			mutate.apply()
+			observation, err := backend.Inspect(context.Background(), desired)
+			if err != nil || observation.Ready != mutate.ready || observation.TerminalTarget != mutate.terminal {
+				t.Fatalf("lifecycle observation = %#v, %v", observation, err)
+			}
+		})
+	}
+}
+
+func TestDockerBackendInterruptedDeleteRetriesToCompleteCleanup(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("6", 64), DeleteRequested: true}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+	docker.failRemove = "network"
+	if err := backend.Delete(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("interrupted delete = %v", err)
+	}
+	if _, err := os.Stat(names.composeFile); err != nil {
+		t.Fatalf("interrupted cleanup lost its deterministic retry state: %v", err)
+	}
+	if err := backend.Delete(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	for key, labels := range docker.objects {
+		if labels[runLabel] == run.RunID {
+			t.Fatalf("retry left owned object %s", key)
+		}
+	}
+	if _, err := os.Stat(filepath.Dir(names.composeFile)); !os.IsNotExist(err) {
+		t.Fatalf("retry left generated state: %v", err)
 	}
 }
 
@@ -714,7 +863,7 @@ func testMediatedRun(t *testing.T) resolvedrun.ResolvedAgentRun {
 		ContractVersion: resolvedrun.ContractVersion, RunID: "docker-run",
 		Principal: resolvedrun.Principal{Issuer: "https://identity.example", Subject: "subject-1"}, Profile: "dynamic", Workflow: "work",
 		Image: "nvt-agent-runtime:test", Runtime: resolvedrun.Runtime{Type: "generic-agent", Autonomy: "interactive", User: "root", Docker: &resolvedrun.RuntimeDocker{}},
-		AgentConfig: json.RawMessage(`{"runtime":{"command":"agent-cli","args":[]},"plugins":[]}`),
+		AgentConfig: json.RawMessage(`{"runtime":{"command":"agent-cli","args":[],"resume":{"command":"agent-cli","args":["resume","--last"]}},"plugins":[]}`),
 		Repositories: []resolvedrun.Repository{{
 			CheckoutTarget: "github.example/org/repo", BrokerRepository: "org/repo", URL: "https://github.example/org/repo.git",
 			CredentialProvider: "git-provider", Identity: &resolvedrun.RepositoryIdentity{Mode: "provider"},

@@ -17,6 +17,7 @@ type fakeBackend struct {
 	resources     map[string]bool
 	ensureErr     error
 	inspectErr    error
+	inspectTarget State
 	deleteErr     error
 	ensureCalls   int
 	deleteCalls   int
@@ -101,7 +102,119 @@ func (backend *fakeBackend) Inspect(_ context.Context, run BackendRun) (BackendO
 	if backend.inspectErr != nil {
 		return BackendObservation{}, backend.inspectErr
 	}
-	return BackendObservation{Ready: backend.resources[run.Resolved.RunID]}, nil
+	if backend.inspectTarget != "" {
+		return BackendObservation{TerminalTarget: backend.inspectTarget}, nil
+	}
+	if !backend.resources[run.Resolved.RunID] {
+		return BackendObservation{TerminalTarget: StateFailed}, nil
+	}
+	return BackendObservation{Ready: true}, nil
+}
+
+func TestControllerRestartReconcilesRunningSnapshotAndRecreatesMissingRuntime(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, path := openTestStore(t, clock, 4)
+	backend := newFakeBackend()
+	before, _ := NewReconciler(store, backend, "controller-before-restart", 30*time.Second, log.New(io.Discard, "", 0))
+	run := createRun(t, store, "persistent-recovery", true)
+	reconcileToRunning(t, before, store, run.RunID)
+	backend.mu.Lock()
+	delete(backend.resources, run.RunID)
+	ensureCallsBefore := backend.ensureCalls
+	backend.mu.Unlock()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 4, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	after, _ := NewReconciler(restarted, backend, "controller-after-restart", 30*time.Second, log.New(io.Discard, "", 0))
+	if err := after.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	preparing, err := restarted.Get(context.Background(), run.RunID)
+	if err != nil || preparing.State != StatePreparing || preparing.LastReason != "backend-recovery-requested" || preparing.RunID != run.RunID {
+		t.Fatalf("restart recovery request = %#v, %v", preparing, err)
+	}
+	if err := after.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := restarted.Get(context.Background(), run.RunID)
+	backend.mu.Lock()
+	resourceRestored := backend.resources[run.RunID]
+	ensureCallsAfter := backend.ensureCalls
+	backend.mu.Unlock()
+	if err != nil || recovered.State != StateRunning || recovered.LastReason != "backend-recovered" ||
+		!resourceRestored || ensureCallsAfter != ensureCallsBefore+1 {
+		t.Fatalf("restarted run = %#v resource=%v ensure=%d->%d err=%v", recovered, resourceRestored, ensureCallsBefore, ensureCallsAfter, err)
+	}
+	snapshot, _, err := restarted.ResolvedSnapshot(context.Background(), run.RunID)
+	if err != nil || !bytes.Contains(snapshot, []byte(`"resume":{"command":"agent-cli"`)) {
+		t.Fatalf("generic resume contract was not retained: %v %s", err, snapshot)
+	}
+}
+
+func TestControllerRecoveryWaitsForCrashedProcessLease(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	backend := newFakeBackend()
+	before, _ := NewReconciler(store, backend, "controller-before-restart", 30*time.Second, log.New(io.Discard, "", 0))
+	run := createRun(t, store, "leased-recovery", true)
+	reconcileToRunning(t, before, store, run.RunID)
+	running, _ := store.Get(context.Background(), run.RunID)
+	if _, err := store.Claim(context.Background(), ClaimInput{
+		RunID: run.RunID, Owner: "crashed-controller", ExpectedRevision: running.Revision, Lease: 5 * time.Second,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := NewReconciler(store, backend, "controller-after-restart", 30*time.Second, log.New(io.Discard, "", 0))
+	if err := after.Recover(context.Background()); !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("unexpired recovery lease = %v", err)
+	}
+	retained, _ := store.Get(context.Background(), run.RunID)
+	if retained.State != StateRunning || retained.ReconcileOwner != "crashed-controller" {
+		t.Fatalf("recovery stole live lease: %#v", retained)
+	}
+	clock.Advance(6 * time.Second)
+	if err := after.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	preparing, _ := store.Get(context.Background(), run.RunID)
+	if preparing.State != StatePreparing || preparing.LastReason != "backend-recovery-requested" {
+		t.Fatalf("expired recovery lease was not reclaimed: %#v", preparing)
+	}
+}
+
+func TestReconcilerMapsBoundedRuntimeCompletionAndFailureReasons(t *testing.T) {
+	for _, target := range []State{StateCompleted, StateFailed} {
+		t.Run(string(target), func(t *testing.T) {
+			clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+			store, _ := openTestStore(t, clock, 4)
+			backend := newFakeBackend()
+			reconciler, _ := NewReconciler(store, backend, "controller", 30*time.Second, log.New(io.Discard, "", 0))
+			run := createRun(t, store, "runtime-"+string(target), false)
+			reconcileToRunning(t, reconciler, store, run.RunID)
+			backend.inspectTarget = target
+			if err := reconciler.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			stopping, err := store.Get(context.Background(), run.RunID)
+			if err != nil || stopping.State != StateStopping || stopping.TerminalTarget != target || stopping.LastReason != terminalReason(target) {
+				t.Fatalf("terminal observation = %#v, %v", stopping, err)
+			}
+			backend.inspectTarget = ""
+			if err := reconciler.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			terminal, err := store.Get(context.Background(), run.RunID)
+			if err != nil || terminal.State != target || terminal.LastReason != "backend-cleanup-complete" {
+				t.Fatalf("terminal cleanup = %#v, %v", terminal, err)
+			}
+		})
+	}
 }
 
 func (backend *fakeBackend) Delete(_ context.Context, run BackendRun) error {

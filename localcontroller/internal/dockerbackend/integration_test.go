@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -111,7 +112,8 @@ providers:
 		EgressdImage: environmentOr("NVT_EGRESSD_IMAGE", "nvt-egressd:latest"), CapturedImage: environmentOr("NVT_CAPTURED_IMAGE", "nvt-captured:latest"),
 		SeedImage: environmentOr("NVT_RUNTIME_IMAGE", "nvt-agent-runtime:latest"), OperationTimeout: 3 * time.Minute,
 	}
-	backend, err := NewWithBoundary(backendConfig, boundary, bytes.Repeat([]byte{0x73}, 32), preparer)
+	recordedBoundary := &recordingBoundary{delegate: boundary}
+	backend, err := NewWithBoundary(backendConfig, recordedBoundary, bytes.Repeat([]byte{0x73}, 32), preparer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,13 +122,15 @@ providers:
 	run.RunID = "mediated-engine-smoke"
 	run.Image = backendConfig.SeedImage
 	run.Runtime.Docker = nil
-	run.AgentConfig = []byte(`{"runtime":{"command":"bash","args":["-lc","sleep 300"]},"plugins":[]}`)
+	run.AgentConfig = []byte(`{"runtime":{"command":"bash","args":["-lc","echo fresh >> $HOME/session-modes; exec sleep 300"],"resume":{"command":"bash","args":["-lc","echo resume >> $HOME/session-modes; exec sleep 300"]}},"plugins":[]}`)
 	run.Repositories = nil
 	run.CredentialProviders = nil
 	run.Broker.Grants = []resolvedrun.BrokerGrant{{
 		Provider: "provider-a", Materialization: "placeholder-file", EgressHosts: []string{"api.example.test:443"}, AllowInsecureUpstream: true,
 	}}
 	run.Egress = resolvedrun.Egress{Mode: "mediated", Transport: "transparent", Enforced: true, ProxyProvider: "provider-a", PairedEgressRequired: true, AllowInsecureBroker: true}
+	run.Persistence = resolvedrun.Persistence{Workspace: true, RuntimeState: true}
+	run.Retention = "persistent"
 	if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +177,103 @@ providers:
 		}
 		t.Fatalf("mediated injection proof = %v %s\ncurl=%s\n%s", err, response, curlDiagnostics, diagnostics)
 	}
-	assertRealEngineSecretAbsent(t, ctx, boundary, backendConfig, desired, agentID, credential)
+	waitContainerFile(t, ctx, boundary, agentID, "/root/session-modes", "fresh\n", 20*time.Second)
+	waitContainerFileContains(t, ctx, boundary, agentID, "/root/.nvt-agent/runtime-session.json", `"state":"resumable"`, 20*time.Second)
+	if _, err := boundary.Run(ctx, nil, "rm", "-f", agentID); err != nil {
+		t.Fatal(err)
+	}
+	observation, recoveryErr := ensureEventually(ctx, backend, desired, 20*time.Second)
+	if recoveryErr != nil || !observation.Ready {
+		composeState, _ := boundary.Run(ctx, nil, "compose", "-p", ownedNames.project, "-f", ownedNames.composeFile, "ps", "--all")
+		ownedState, _ := boundary.Run(ctx, nil, "ps", "-a", "--filter", "label="+ownerLabel+"="+backendConfig.Owner, "--format", "{{.ID}} {{.Names}} {{.Status}}")
+		diagnostics := append(append([]byte("compose:\n"), composeState...), append([]byte("\nowned:\n"), ownedState...)...)
+		diagnostics = append(diagnostics, append([]byte("\nbackend commands:\n"), []byte(recordedBoundary.tail(30))...)...)
+		if bytes.Contains(diagnostics, []byte(credential)) {
+			diagnostics = []byte("recovery diagnostics contained credential and were suppressed")
+		}
+		t.Fatalf("agent recreation = %#v, %v\n%s", observation, recoveryErr, diagnostics)
+	}
+	recoveredAgentID := ownedAgentContainer(t, ctx, boundary, ownedLabels)
+	if recoveredAgentID == agentID {
+		t.Fatal("removed agent container was not recreated")
+	}
+	waitContainerFile(t, ctx, boundary, recoveredAgentID, "/root/session-modes", "fresh\nresume\n", 20*time.Second)
+	for _, retained := range []string{ownedNames.workspace, ownedNames.home} {
+		if _, err := boundary.Run(ctx, nil, "volume", "inspect", retained); err != nil {
+			t.Fatalf("persistent recovery volume missing: %s: %v", retained, err)
+		}
+	}
+	assertRealEngineSecretAbsent(t, ctx, boundary, backendConfig, desired, recoveredAgentID, credential)
+	if strings.Contains(strings.Join(recordedBoundary.commands, "\n"), credential) {
+		t.Fatal("credential entered Docker command arguments during recovery")
+	}
+}
+
+type recordingBoundary struct {
+	delegate CommandBoundary
+	commands []string
+}
+
+func (boundary *recordingBoundary) Run(ctx context.Context, input io.Reader, arguments ...string) ([]byte, error) {
+	output, err := boundary.delegate.Run(ctx, input, arguments...)
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	boundary.commands = append(boundary.commands, result+" "+strings.Join(arguments, " "))
+	return output, err
+}
+
+func (boundary *recordingBoundary) tail(limit int) string {
+	start := len(boundary.commands) - limit
+	if start < 0 {
+		start = 0
+	}
+	return strings.Join(boundary.commands[start:], "\n")
+}
+
+func ensureEventually(ctx context.Context, backend *Backend, desired controller.BackendRun, timeout time.Duration) (controller.BackendObservation, error) {
+	deadline := time.Now().Add(timeout)
+	var observation controller.BackendObservation
+	var err error
+	for time.Now().Before(deadline) {
+		observation, err = backend.Ensure(ctx, desired)
+		if err == nil && observation.Ready {
+			return observation, nil
+		}
+		select {
+		case <-ctx.Done():
+			return observation, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return observation, err
+}
+
+func waitContainerFile(t *testing.T, ctx context.Context, boundary CommandBoundary, container, path, expected string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		output, err := boundary.Run(ctx, nil, "exec", container, "cat", path)
+		if err == nil && string(output) == expected {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("container recovery state did not reach the expected value: %s", path)
+}
+
+func waitContainerFileContains(t *testing.T, ctx context.Context, boundary CommandBoundary, container, path, expected string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		output, err := boundary.Run(ctx, nil, "exec", container, "cat", path)
+		if err == nil && strings.Contains(string(output), expected) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("container recovery marker did not reach the expected value: %s", path)
 }
 
 func assertRealEngineDeclaredServiceCollisionPreserved(t *testing.T, ctx context.Context, boundary CommandBoundary, backend *Backend, config Config) {

@@ -62,7 +62,7 @@ func transitionAllowed(from, to State) bool {
 	case StatePreparing:
 		return to == StateRunning || to == StateStopping
 	case StateRunning:
-		return to == StateStopping
+		return to == StatePreparing || to == StateStopping
 	case StateStopping:
 		return to == StateCompleted || to == StateFailed || to == StateExpired
 	default:

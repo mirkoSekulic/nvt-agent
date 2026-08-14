@@ -43,7 +43,8 @@ type BackendRun struct {
 // reconciler. Backend object IDs, credentials and raw diagnostics never cross
 // this boundary.
 type BackendObservation struct {
-	Ready bool
+	Ready          bool
+	TerminalTarget State
 }
 
 // These sentinels classify a backend operation without exposing backend or
@@ -84,15 +85,81 @@ func NewReconciler(store *Store, backend LocalBackend, owner string, lease time.
 func (reconciler *Reconciler) Run(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	recovered := false
 	for {
-		if err := reconciler.Reconcile(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			reconciler.logger.Print("reconcile warning reason=backend-unavailable")
+		var err error
+		if recovered {
+			err = reconciler.Reconcile(ctx)
+		} else {
+			recoveryErr := reconciler.Recover(ctx)
+			recovered = recoveryErr == nil
+			err = errors.Join(recoveryErr, reconciler.Reconcile(ctx))
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			reason := "backend-unavailable"
+			if !recovered {
+				reason = "recovery-unavailable"
+			}
+			reconciler.logger.Printf("reconcile warning reason=%s", reason)
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// Recover moves every previously running record back through idempotent
+// preparation exactly once per controller process. The backend then reconciles
+// the durable snapshot against exact-owned resources, recreating missing
+// containers while retaining named data volumes. Other lifecycle states are
+// already restart-safe and remain untouched.
+func (reconciler *Reconciler) Recover(ctx context.Context) error {
+	after := ""
+	pendingLease := false
+	for {
+		page, err := reconciler.store.List(ctx, MaxListLimit, after)
+		if err != nil {
+			return err
+		}
+		for _, run := range page.Runs {
+			if run.State != StateRunning {
+				continue
+			}
+			claimed, err := reconciler.claim(ctx, run)
+			if errors.Is(err, ErrOwnershipConflict) {
+				pendingLease = true
+				continue
+			}
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if _, err := reconciler.store.UpdateStatus(ctx, StatusInput{
+				RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
+				State: StatePreparing, Reason: "backend-recovery-requested",
+			}); err != nil {
+				if errors.Is(err, ErrOwnershipConflict) {
+					pendingLease = true
+					continue
+				}
+				if !errors.Is(err, ErrNotFound) {
+					return err
+				}
+			} else {
+				reconciler.logger.Printf("reconcile event=recovery-requested run_id=%s", run.RunID)
+			}
+		}
+		if page.NextAfter == "" {
+			if pendingLease {
+				return ErrOwnershipConflict
+			}
+			return nil
+		}
+		after = page.NextAfter
 	}
 }
 
@@ -143,6 +210,19 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		if ensureErr != nil && !errors.Is(ensureErr, ErrBackendDesiredRunInvalid) {
 			return ensureErr
 		}
+		if ensureErr == nil && observation.TerminalTarget != "" {
+			if observation.TerminalTarget != StateCompleted && observation.TerminalTarget != StateFailed {
+				return ErrBackendRetryable
+			}
+			_, updateErr := reconciler.store.UpdateStatus(ctx, StatusInput{
+				RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
+				State: StateStopping, TerminalTarget: observation.TerminalTarget, Reason: terminalReason(observation.TerminalTarget),
+			})
+			if updateErr == nil {
+				reconciler.logger.Printf("reconcile event=%s run_id=%s", terminalReason(observation.TerminalTarget), run.RunID)
+			}
+			return updateErr
+		}
 		if ensureErr == nil && !observation.Ready {
 			return ErrBackendRetryable
 		}
@@ -153,10 +233,17 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 			})
 			return updateErr
 		}
+		reason := "backend-ready"
+		if run.LastReason == "backend-recovery-requested" {
+			reason = "backend-recovered"
+		}
 		_, err = reconciler.store.UpdateStatus(ctx, StatusInput{
 			RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
-			State: StateRunning, Reason: "backend-ready",
+			State: StateRunning, Reason: reason,
 		})
+		if err == nil && reason == "backend-recovered" {
+			reconciler.logger.Printf("reconcile event=backend-recovered run_id=%s", run.RunID)
+		}
 		return err
 	case StateRunning:
 		observation, inspectErr := reconciler.backend.Inspect(ctx, backendRun)
@@ -166,14 +253,20 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		if observation.Ready {
 			return nil
 		}
+		if observation.TerminalTarget != StateCompleted && observation.TerminalTarget != StateFailed {
+			return ErrBackendRetryable
+		}
 		claimed, err := reconciler.claim(ctx, run)
 		if err != nil {
 			return err
 		}
 		_, err = reconciler.store.UpdateStatus(ctx, StatusInput{
 			RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
-			State: StateStopping, TerminalTarget: StateFailed, Reason: "backend-runtime-failed",
+			State: StateStopping, TerminalTarget: observation.TerminalTarget, Reason: terminalReason(observation.TerminalTarget),
 		})
+		if err == nil {
+			reconciler.logger.Printf("reconcile event=%s run_id=%s", terminalReason(observation.TerminalTarget), run.RunID)
+		}
 		return err
 	case StateStopping:
 		claimed, err := reconciler.claim(ctx, run)
@@ -187,10 +280,20 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 			RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
 			State: run.TerminalTarget, Reason: "backend-cleanup-complete",
 		})
+		if err == nil || errors.Is(err, ErrGone) {
+			reconciler.logger.Printf("reconcile event=backend-cleanup-complete run_id=%s", run.RunID)
+		}
 		return err
 	default:
 		return nil
 	}
+}
+
+func terminalReason(target State) string {
+	if target == StateCompleted {
+		return "backend-completed"
+	}
+	return "backend-runtime-failed"
 }
 
 func (reconciler *Reconciler) claim(ctx context.Context, run Run) (Run, error) {
