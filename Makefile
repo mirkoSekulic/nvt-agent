@@ -90,6 +90,9 @@ host-bundle-test:
 eligibility-test:
 	cd protocol/eligibility && go vet ./... && go test -race -count=1 ./...
 
+resolved-run-test:
+	cd protocol/resolvedrun && go vet ./... && go test -race -count=1 ./...
+
 guest-enrollment-test:
 	cd protocol/guestenrollment && go vet ./... && go test -race -count=1 ./...
 

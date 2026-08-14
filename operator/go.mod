@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment v0.0.0
+	github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun v0.0.0
 	k8s.io/api v0.34.2
 	k8s.io/apiextensions-apiserver v0.34.1
 	k8s.io/apimachinery v0.34.2
@@ -13,6 +14,8 @@ require (
 )
 
 replace github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment => ../protocol/guestenrollment
+
+replace github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun => ../protocol/resolvedrun
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

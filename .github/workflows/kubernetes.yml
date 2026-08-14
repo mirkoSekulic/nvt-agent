@@ -51,6 +51,21 @@ jobs:
           go vet ./...
           go test -race -count=1 ./...
 
+  resolved-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: protocol/resolvedrun/go.mod
+          cache: false
+      - name: Run resolved agent-run contract and resolution tests
+        working-directory: protocol/resolvedrun
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
   guest-enrollment:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -75,7 +90,9 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
-          cache-dependency-path: operator/go.sum
+          cache-dependency-path: |
+            operator/go.sum
+            protocol/resolvedrun/go.mod
       - name: Run operator tests
         working-directory: operator
         run: |

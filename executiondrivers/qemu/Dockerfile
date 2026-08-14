@@ -8,11 +8,13 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
 COPY protocol/guestenrollment/go.mod protocol/guestenrollment/go.mod
+COPY protocol/resolvedrun/go.mod protocol/resolvedrun/go.mod
 COPY operator/go.mod operator/go.sum operator/
 COPY executiondrivers/qemu/go.mod executiondrivers/qemu/go.sum executiondrivers/qemu/
 COPY hostbundle/go.mod hostbundle/go.mod
 RUN cd /src/executiondrivers/qemu && go mod download
 COPY protocol/guestenrollment/ protocol/guestenrollment/
+COPY protocol/resolvedrun/ protocol/resolvedrun/
 COPY operator/executiondriver/ operator/executiondriver/
 COPY executiondrivers/qemu/ executiondrivers/qemu/
 COPY hostbundle/ hostbundle/
