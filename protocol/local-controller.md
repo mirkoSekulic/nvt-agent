@@ -242,7 +242,19 @@ returns at most 1,024 bounded event names plus an opaque file-generation/byte
 cursor per pass. The trusted backend compares only those names with the
 resolved `lifecycle.complete_on` and `lifecycle.fail_on` sets. A match produces
 the same bounded completed/failed observation and cleanup path as a confirmed
-runtime exit; unrelated events only advance the cursor.
+runtime exit; unrelated events only advance the cursor. A configured matching
+event is authoritative over a later process exit or OOM result: `fail_on`
+followed by exit 0 remains failed, and `complete_on` followed by a nonzero exit
+remains completed.
+
+For an exact-owned stopped agent, the backend does not restart or execute the
+mutable agent container. It first verifies the deterministic runtime-home
+volume's exact owner/run/digest labels, then mounts that volume read-only into
+the administrator-configured trusted seed image. The short-lived reader runs
+as root with no network, capabilities, writable root, Docker socket, broker
+identity, portal/config secrets, or credential-bearing environment. A missing
+or ownership-conflicting volume and any helper uncertainty fail closed before
+process-exit classification.
 
 The cursor is private non-secret SQLite state (maximum 256 ASCII token bytes),
 not part of the local-run API, logs, or resolved snapshot. Cursor advancement

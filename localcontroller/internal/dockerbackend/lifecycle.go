@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 
@@ -32,43 +33,44 @@ MAX_LINE = 1 << 20
 EVENT = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 CURSOR = re.compile(r"^v1:([0-9]+):([0-9]+):([0-9]+)$")
 
-def stop():
-    raise SystemExit(2)
+def stop(reason):
+    print(json.dumps({"version": 1, "cursor": "", "events": [], "error": reason}, separators=(",", ":")))
+    raise SystemExit(0)
 
 raw = sys.stdin.buffer.read(MAX_INPUT + 1)
 if not raw or len(raw) > MAX_INPUT:
-    stop()
+    stop("input")
 try:
     request = json.loads(raw)
 except Exception:
-    stop()
+    stop("input")
 if not isinstance(request, dict) or set(request) != {"cursor"} or not isinstance(request["cursor"], str):
-    stop()
+    stop("input")
 cursor = request["cursor"]
 state_dir = os.environ.get("NVT_STATE_DIR", "")
 if not state_dir or not os.path.isabs(state_dir):
-    stop()
+    stop("state-dir")
 path = os.path.join(state_dir, "agentd", "events.jsonl")
 try:
     metadata = os.stat(path, follow_symlinks=False)
 except FileNotFoundError:
     if cursor:
-        stop()
+        stop("event-missing")
     print(json.dumps({"version": 1, "cursor": "", "events": []}, separators=(",", ":")))
     raise SystemExit(0)
 except OSError:
-    stop()
+    stop("event-stat")
 if not stat.S_ISREG(metadata.st_mode):
-    stop()
+    stop("event-type")
 
 offset = 0
 if cursor:
     match = CURSOR.fullmatch(cursor)
     if match is None:
-        stop()
+        stop("cursor")
     device, inode, offset = (int(value) for value in match.groups())
     if device != metadata.st_dev or inode != metadata.st_ino or offset > metadata.st_size:
-        stop()
+        stop("generation")
 
 events = []
 try:
@@ -76,7 +78,7 @@ try:
         handle.seek(offset)
         chunk = handle.read(MAX_BYTES + 1)
 except OSError:
-    stop()
+    stop("event-read")
 
 consumed = 0
 lines = 0
@@ -84,22 +86,22 @@ while consumed < len(chunk) and lines < MAX_LINES:
     newline = chunk.find(b"\n", consumed)
     if newline < 0:
         if len(chunk) > MAX_BYTES and consumed == 0:
-            stop()
+            stop("line-size")
         break
     end = newline + 1
     if end > MAX_BYTES or end - consumed > MAX_LINE:
-        stop()
+        stop("line-size")
     line = chunk[consumed:newline]
     try:
         record = json.loads(line.decode("utf-8"))
     except Exception:
-        stop()
+        stop("event-json")
     if not isinstance(record, dict):
-        stop()
+        stop("event-json")
     if record.get("event") == "plugin.event":
         name = record.get("plugin_event")
         if not isinstance(name, str) or len(name.encode("utf-8")) > 256 or EVENT.fullmatch(name) is None:
-            stop()
+            stop("event-name")
         events.append(name)
     consumed = end
     lines += 1
@@ -112,17 +114,43 @@ type lifecycleReaderResponse struct {
 	Version int      `json:"version"`
 	Cursor  string   `json:"cursor"`
 	Events  []string `json:"events"`
+	Error   string   `json:"error,omitempty"`
 }
 
 func (backend *Backend) observeLifecycle(ctx context.Context, containerID string, desired controller.BackendRun) (string, controller.State, error) {
+	return backend.readLifecycle(ctx, desired, "exec", "-i", containerID, "python3", "-c", lifecycleEventReader)
+}
+
+// observeStoppedLifecycle reads the retained state volume with the
+// administrator-configured trusted seed image. It never starts or executes the
+// mutable stopped agent. The helper has no network, capabilities, writable
+// root, Docker socket, broker identity, or credential-bearing environment.
+func (backend *Backend) observeStoppedLifecycle(ctx context.Context, desired controller.BackendRun, names resourceNames, labels ownedLabels) (string, controller.State, error) {
+	if len(desired.Resolved.Lifecycle.CompleteOn) == 0 && len(desired.Resolved.Lifecycle.FailOn) == 0 {
+		return desired.LifecycleCursor, "", nil
+	}
+	if err := backend.verifyObject(ctx, "volume", names.home, labels); err != nil {
+		return "", "", fmt.Errorf("%w: lifecycle state unavailable", controller.ErrBackendRetryable)
+	}
+	arguments := []string{
+		"run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges", "--user", "0:0",
+		"--env", "NVT_STATE_DIR=/state/.nvt-agent", "--volume", names.home + ":/state:ro",
+	}
+	arguments = append(arguments, labelArguments(labels)...)
+	arguments = append(arguments, "--entrypoint", "python3", backend.config.SeedImage, "-c", lifecycleEventReader)
+	return backend.readLifecycle(ctx, desired, arguments...)
+}
+
+func (backend *Backend) readLifecycle(ctx context.Context, desired controller.BackendRun, arguments ...string) (string, controller.State, error) {
 	if len(desired.Resolved.Lifecycle.CompleteOn) == 0 && len(desired.Resolved.Lifecycle.FailOn) == 0 {
 		return desired.LifecycleCursor, "", nil
 	}
 	request, _ := json.Marshal(map[string]string{"cursor": desired.LifecycleCursor})
-	output, err := backend.docker.Run(ctx, bytes.NewReader(request), "exec", "-i", containerID, "python3", "-c", lifecycleEventReader)
+	output, err := backend.docker.Run(ctx, bytes.NewReader(request), arguments...)
 	clear(request)
 	if err != nil {
-		return "", "", controller.ErrBackendRetryable
+		return "", "", fmt.Errorf("%w: lifecycle reader unavailable", controller.ErrBackendRetryable)
 	}
 	defer clear(output)
 	decoder := json.NewDecoder(bytes.NewReader(output))
@@ -130,7 +158,8 @@ func (backend *Backend) observeLifecycle(ctx context.Context, containerID string
 	var response lifecycleReaderResponse
 	if err := decoder.Decode(&response); err != nil || response.Version != 1 ||
 		(response.Cursor != "" && !lifecycleCursorPattern.MatchString(response.Cursor)) ||
-		len(response.Cursor) > controller.MaxLifecycleCursorBytes || response.Events == nil || len(response.Events) > maxLifecycleEventsPerObservation {
+		len(response.Cursor) > controller.MaxLifecycleCursorBytes || response.Events == nil || len(response.Events) > maxLifecycleEventsPerObservation ||
+		response.Error != "" {
 		return "", "", controller.ErrBackendRetryable
 	}
 	var trailing any

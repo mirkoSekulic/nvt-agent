@@ -300,10 +300,17 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 		}
 		return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
 	}
-	if state.ExitCode == 0 && !state.OOMKilled {
-		return controller.BackendObservation{TerminalTarget: controller.StateCompleted, LifecycleCursor: desired.LifecycleCursor}, nil
+	cursor, target, lifecycleErr := backend.observeStoppedLifecycle(operationContext, desired, names, labels)
+	if lifecycleErr != nil {
+		return controller.BackendObservation{}, lifecycleErr
 	}
-	return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: desired.LifecycleCursor}, nil
+	if target != "" {
+		return controller.BackendObservation{TerminalTarget: target, LifecycleCursor: cursor}, nil
+	}
+	if state.ExitCode == 0 && !state.OOMKilled {
+		return controller.BackendObservation{TerminalTarget: controller.StateCompleted, LifecycleCursor: cursor}, nil
+	}
+	return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
 }
 
 func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRun) error {

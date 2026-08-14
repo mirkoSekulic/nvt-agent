@@ -62,7 +62,7 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	if arguments[0] == "compose" {
 		return docker.compose(arguments)
 	}
-	if arguments[0] == "exec" {
+	if arguments[0] == "exec" || arguments[0] == "run" && contains(arguments, lifecycleEventReader) {
 		if docker.lifecycleErr != nil {
 			return nil, docker.lifecycleErr
 		}
@@ -525,6 +525,93 @@ func TestDockerBackendMatchesOnlyConfiguredLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestStoppedAgentLifecycleEventPrecedesProcessExit(t *testing.T) {
+	for _, item := range []struct {
+		name     string
+		events   []string
+		exitCode int
+		oom      bool
+		expected controller.State
+	}{
+		{name: "fail-event-before-zero-exit", events: []string{"plugin.work.failed"}, expected: controller.StateFailed},
+		{name: "complete-event-before-nonzero-exit", events: []string{"plugin.work.done"}, exitCode: 17, expected: controller.StateCompleted},
+		{name: "unrelated-event-keeps-zero-exit", events: []string{"plugin.unrelated.ready"}, expected: controller.StateCompleted},
+		{name: "unrelated-event-keeps-nonzero-exit", events: []string{"plugin.unrelated.ready"}, exitCode: 17, expected: controller.StateFailed},
+		{name: "unrelated-event-keeps-oom-failure", events: []string{"plugin.unrelated.ready"}, oom: true, expected: controller.StateFailed},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			backend, docker, run, tokens := testBackend(t)
+			desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+			if _, err := backend.Ensure(context.Background(), desired); err != nil {
+				t.Fatal(err)
+			}
+			commandStart := len(docker.commands)
+			docker.agentStatus = "stopped"
+			docker.agentExitCode = item.exitCode
+			docker.agentOOM = item.oom
+			docker.lifecycleEvents = item.events
+			docker.lifecycleCursor = "v1:7:8:90"
+			observation, err := backend.Inspect(context.Background(), desired)
+			if err != nil || observation.TerminalTarget != item.expected || observation.LifecycleCursor != docker.lifecycleCursor {
+				t.Fatalf("stopped lifecycle precedence = %#v, %v", observation, err)
+			}
+			commands := docker.commands[commandStart:]
+			helperSeen := false
+			expectedLabels := ownedLabels{Owner: backend.config.Owner, RunID: run.RunID, Digest: desired.SnapshotDigest}
+			expectedHomeMount := namesFor(backend.config, run.RunID, desired.SnapshotDigest).home + ":/state:ro"
+			for _, command := range commands {
+				if len(command) > 0 && command[0] == "exec" {
+					t.Fatalf("stopped mutable agent was executed: %v", command)
+				}
+				if len(command) > 0 && command[0] == "run" {
+					helperSeen = contains(command, "-i") && contains(command, "--network") && contains(command, "none") &&
+						contains(command, "--read-only") && contains(command, "--cap-drop") && contains(command, "ALL") &&
+						contains(command, "NVT_STATE_DIR=/state/.nvt-agent") && contains(command, expectedHomeMount) &&
+						contains(command, backend.config.SeedImage)
+					for _, pair := range labelPairs(expectedLabels) {
+						helperSeen = helperSeen && contains(command, pair)
+					}
+					joined := strings.Join(command, " ")
+					if strings.Contains(joined, tokens.agent) || strings.Contains(joined, tokens.egress) {
+						t.Fatal("credential entered lifecycle helper arguments")
+					}
+				}
+			}
+			if !helperSeen {
+				t.Fatalf("constrained lifecycle helper was not used: %v", commands)
+			}
+		})
+	}
+}
+
+func TestStoppedAgentLifecycleUncertaintyFailsClosed(t *testing.T) {
+	for _, item := range []struct {
+		name   string
+		mutate func(*fakeDocker)
+	}{
+		{name: "malformed-reader", mutate: func(docker *fakeDocker) {
+			docker.lifecycleErr = errors.New("LIFECYCLE-RAW-PAYLOAD-SECRET-NEEDLE")
+		}},
+		{name: "replaced-event-file", mutate: func(docker *fakeDocker) {
+			docker.lifecycleCursor = "v1:invalid-generation"
+		}},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			backend, docker, run, _ := testBackend(t)
+			desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+			if _, err := backend.Ensure(context.Background(), desired); err != nil {
+				t.Fatal(err)
+			}
+			docker.agentStatus = "stopped"
+			item.mutate(docker)
+			observation, err := backend.Inspect(context.Background(), desired)
+			if !errors.Is(err, controller.ErrBackendRetryable) || observation.TerminalTarget != "" || strings.Contains(err.Error(), "SECRET") {
+				t.Fatalf("stopped lifecycle uncertainty = %#v, %v", observation, err)
+			}
+		})
+	}
+}
+
 func TestLifecycleReaderAdvancesOpaqueCursorWithoutReturningPayloads(t *testing.T) {
 	stateDir := t.TempDir()
 	eventDir := filepath.Join(stateDir, "agentd")
@@ -555,8 +642,22 @@ func TestLifecycleReaderAdvancesOpaqueCursorWithoutReturningPayloads(t *testing.
 	command := exec.Command("python3", "-c", lifecycleEventReader)
 	command.Env = append(os.Environ(), "NVT_STATE_DIR="+stateDir)
 	command.Stdin = strings.NewReader(`{"cursor":""}`)
-	if output, err := command.CombinedOutput(); err == nil || bytes.Contains(output, []byte("not-json")) {
+	output, err := command.Output()
+	if err != nil || bytes.Contains(output, []byte("not-json")) || !bytes.Contains(output, []byte(`"error":"event-json"`)) {
 		t.Fatalf("malformed lifecycle log did not fail closed: %v %s", err, output)
+	}
+	if err := os.Rename(eventPath, eventPath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command("python3", "-c", lifecycleEventReader)
+	command.Env = append(os.Environ(), "NVT_STATE_DIR="+stateDir)
+	command.Stdin = strings.NewReader(`{"cursor":"` + response.Cursor + `"}`)
+	output, err = command.Output()
+	if err != nil || bytes.Contains(output, []byte(secretNeedle)) || !bytes.Contains(output, []byte(`"error":"generation"`)) {
+		t.Fatalf("replaced lifecycle log did not fail closed: %v %s", err, output)
 	}
 }
 

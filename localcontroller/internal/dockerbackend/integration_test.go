@@ -210,9 +210,16 @@ providers:
 	if _, err := boundary.Run(ctx, nil, "exec", recoveredAgentID, "agentdctl", "publish", "plugin.work.done", "--source", "plugin:local-controller-smoke"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := boundary.Run(ctx, nil, "stop", recoveredAgentID); err != nil {
+		t.Fatal(err)
+	}
 	lifecycle, err := backend.Inspect(ctx, desired)
 	if err != nil || lifecycle.TerminalTarget != controller.StateCompleted || lifecycle.LifecycleCursor == "" {
-		t.Fatalf("real lifecycle completion = %#v, %v", lifecycle, err)
+		diagnostics := recordedBoundary.lifecycleDiagnostics(ctx, boundary.host, desired.LifecycleCursor)
+		if bytes.Contains(diagnostics, []byte(credential)) {
+			diagnostics = []byte("lifecycle diagnostics contained credential and were suppressed")
+		}
+		t.Fatalf("real lifecycle completion = %#v, %v\nhelper=%s", lifecycle, err, diagnostics)
 	}
 	desired.LifecycleCursor = lifecycle.LifecycleCursor
 	if err := backend.Delete(ctx, desired); err != nil {
@@ -224,8 +231,9 @@ providers:
 }
 
 type recordingBoundary struct {
-	delegate CommandBoundary
-	commands []string
+	delegate  CommandBoundary
+	commands  []string
+	arguments [][]string
 }
 
 func (boundary *recordingBoundary) Run(ctx context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -235,7 +243,27 @@ func (boundary *recordingBoundary) Run(ctx context.Context, input io.Reader, arg
 		result = "error"
 	}
 	boundary.commands = append(boundary.commands, result+" "+strings.Join(arguments, " "))
+	boundary.arguments = append(boundary.arguments, append([]string(nil), arguments...))
 	return output, err
+}
+
+func (boundary *recordingBoundary) lifecycleDiagnostics(ctx context.Context, dockerHost, cursor string) []byte {
+	for index := len(boundary.arguments) - 1; index >= 0; index-- {
+		arguments := boundary.arguments[index]
+		if len(arguments) == 0 || arguments[0] != "run" || !contains(arguments, lifecycleEventReader) {
+			continue
+		}
+		request, _ := json.Marshal(map[string]string{"cursor": cursor})
+		command := exec.CommandContext(ctx, "docker", arguments...)
+		command.Env = []string{"DOCKER_HOST=" + dockerHost, "HOME=/tmp", "PATH=" + os.Getenv("PATH")}
+		command.Stdin = bytes.NewReader(request)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			return append([]byte("error: "), output...)
+		}
+		return output
+	}
+	return []byte("lifecycle helper was not invoked")
 }
 
 func (boundary *recordingBoundary) tail(limit int) string {
