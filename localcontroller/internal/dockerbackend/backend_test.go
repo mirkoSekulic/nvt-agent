@@ -22,12 +22,15 @@ import (
 )
 
 type fakeDocker struct {
-	mu         sync.Mutex
-	objects    map[string]map[string]string
-	containers map[string]map[string]string
-	commands   [][]string
-	inputs     [][]byte
-	seedCount  int
+	mu            sync.Mutex
+	objects       map[string]map[string]string
+	containers    map[string]map[string]string
+	commands      [][]string
+	inputs        [][]byte
+	seedCount     int
+	agentAbsent   bool
+	agentStatus   string
+	failComposeUp int
 }
 
 func newFakeDocker() *fakeDocker {
@@ -81,7 +84,11 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		id := arguments[len(arguments)-1]
 		if labels, exists := docker.containers[id]; exists {
 			if contains(arguments, "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{if .State.Running}}running{{else}}stopped{{end}}{{end}}") {
-				return []byte("running\n"), nil
+				status := docker.agentStatus
+				if status == "" {
+					status = "running"
+				}
+				return []byte(status + "\n"), nil
 			}
 			encoded, _ := json.Marshal(labels)
 			return append(encoded, '\n'), nil
@@ -109,6 +116,10 @@ func labelsMatchFilters(labels map[string]string, arguments []string) bool {
 
 func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 	if contains(arguments, "up") {
+		if docker.failComposeUp > 0 {
+			docker.failComposeUp--
+			return nil, errors.New("temporary Docker unavailable")
+		}
 		var labels map[string]string
 		for key, value := range docker.objects {
 			if strings.HasPrefix(key, "volume:") && value[runLabel] != "" {
@@ -120,6 +131,9 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 		return nil, nil
 	}
 	if contains(arguments, "ps") {
+		if docker.agentAbsent {
+			return nil, nil
+		}
 		return []byte("fake-agent-id\n"), nil
 	}
 	if contains(arguments, "down") {
@@ -234,6 +248,14 @@ func TestDockerBackendOwnershipAndCleanupFailClosed(t *testing.T) {
 	if _, err := backend.Ensure(context.Background(), desired); err != nil {
 		t.Fatal(err)
 	}
+	orphanID := "unmanaged-project-orphan"
+	docker.containers[orphanID] = map[string]string{"com.docker.compose.project": names.project, "com.docker.compose.service": "old-service"}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := docker.containers[orphanID]; !exists {
+		t.Fatal("compose ensure removed an unmanaged same-project orphan")
+	}
 	docker.objects["volume:unmanaged-other-run"] = map[string]string{ownerLabel: backend.config.Owner, runLabel: "other", digestLabel: strings.Repeat("c", 64)}
 	if err := backend.Delete(context.Background(), desired); err != nil {
 		t.Fatal(err)
@@ -244,10 +266,100 @@ func TestDockerBackendOwnershipAndCleanupFailClosed(t *testing.T) {
 	if _, exists := docker.containers[legacySeedName]; !exists {
 		t.Fatal("cleanup touched an unmanaged helper-name collision")
 	}
+	if _, exists := docker.containers[orphanID]; !exists {
+		t.Fatal("cleanup touched an unmanaged same-project orphan")
+	}
+	for _, command := range docker.commands {
+		if contains(command, "--remove-orphans") || contains(command, "down") {
+			t.Fatalf("broad Compose cleanup bypassed ownership checks: %v", command)
+		}
+	}
 	for key, labels := range docker.objects {
 		if labels[runLabel] == run.RunID {
 			t.Fatalf("owned resource remained after explicit delete: %s", key)
 		}
+	}
+}
+
+func TestDockerBackendRetriesTransientDockerAndRecognizesMissingOrExitedAgent(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("8", 64)}
+	docker.failComposeUp = 1
+	if _, err := backend.Ensure(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("transient Docker failure = %v", err)
+	}
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("Docker recovery = %#v %v", observation, err)
+	}
+	docker.agentAbsent = true
+	if observation, err := backend.Inspect(context.Background(), desired); err != nil || observation.Ready {
+		t.Fatalf("missing agent = %#v %v", observation, err)
+	}
+	docker.agentAbsent = false
+	docker.agentStatus = "stopped"
+	if observation, err := backend.Inspect(context.Background(), desired); err != nil || observation.Ready {
+		t.Fatalf("exited agent = %#v %v", observation, err)
+	}
+}
+
+func TestDockerBackendRetriesBrokerStartupFailureAndRecovers(t *testing.T) {
+	backend, _, run, _ := testBackend(t)
+	available := false
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if !available {
+			http.Error(response, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/v1/placeholder-files":
+			_, _ = io.WriteString(response, `{"ok":true,"files":[{"path":".agent/auth.json","content":"{\"access_token\":\"NVT-PLACEHOLDER-NOT-A-KEY\"}\n","mode":"0600"}],"hosts":["api.example.test"],"expires_at":null}`)
+		case "/v1/identity":
+			_, _ = io.WriteString(response, `{"ok":true,"name":"Example Bot","email":"bot@example.test"}`)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	preparer, err := newBrokerPreparer(server.URL, "", 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.preparer = preparer
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("2", 64)}
+	if _, err := backend.Ensure(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("starting broker = %v", err)
+	}
+	available = true
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("recovered broker = %#v %v", observation, err)
+	}
+}
+
+func TestLocalBackendAcceptsOnlyNetworkConfinedEnforcedMediatedTransport(t *testing.T) {
+	config := Config{Owner: "test-controller", ExternalNetwork: "agents-proxy", ProxyPort: 4090, ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16", DindImage: "nvt-dind:test", EgressdImage: "nvt-egressd:test", CapturedImage: "nvt-captured:test", SeedImage: "nvt-runtime:test"}
+	for _, transport := range []string{"redirect", "forward-proxy", "transparent"} {
+		t.Run(transport, func(t *testing.T) {
+			run := testMediatedRun(t)
+			run.Egress.Transport = transport
+			if transport == "redirect" {
+				run.Egress.ProxyProvider = ""
+			}
+			if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := renderCompose(config, run, strings.Repeat("1", 64), namesFor(Config{RunsDir: t.TempDir()}, run.RunID, strings.Repeat("1", 64)))
+			if transport != "transparent" {
+				if err == nil {
+					t.Fatalf("enforced %s was accepted without network capture", transport)
+				}
+				return
+			}
+			if err != nil || !bytes.Contains(plan, []byte("net-init:")) || !bytes.Contains(plan, []byte("NET_ADMIN")) ||
+				!bytes.Contains(plan, []byte("-p tcp -j REDIRECT --to-ports 15001")) {
+				t.Fatalf("transparent confinement = %v\n%s", err, plan)
+			}
+		})
 	}
 }
 
@@ -268,6 +380,36 @@ func TestBrokerRegistryNeverAdoptsOrDeletesCollidingIdentity(t *testing.T) {
 	retained, _ := os.ReadFile(backend.config.BrokerAgentsPath)
 	if !bytes.Contains(retained, []byte(strings.Repeat("f", 64))) {
 		t.Fatal("colliding registry entry changed")
+	}
+}
+
+func TestBrokerRegistryPreservesNativeLinuxOwnership(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("ownership transition requires root")
+	}
+	directory := t.TempDir()
+	agents := filepath.Join(directory, "agents.yaml")
+	if err := os.WriteFile(agents, []byte("agents: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const directoryUID, directoryGID, fileUID, fileGID = 23001, 23002, 23003, 23004
+	if err := os.Chown(directory, directoryUID, directoryGID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(agents, fileUID, fileGID); err != nil {
+		t.Fatal(err)
+	}
+	registry := brokerRegistry{path: agents}
+	if err := registry.mutate(func(policy *brokerPolicy) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, err := fileOwnership(agents)
+	if err != nil || uid != fileUID || gid != fileGID {
+		t.Fatalf("registry ownership = %d:%d, %v", uid, gid, err)
+	}
+	uid, gid, err = fileOwnership(filepath.Join(directory, "agents.lock"))
+	if err != nil || uid != directoryUID || gid != directoryGID {
+		t.Fatalf("lock ownership = %d:%d, %v", uid, gid, err)
 	}
 }
 
@@ -415,6 +557,9 @@ func TestStackOmitsDinDWhenRuntimeDoesNotRequestDocker(t *testing.T) {
 		if bytes.Contains(plan, []byte(forbidden)) {
 			t.Fatalf("Docker-free stack retained %q:\n%s", forbidden, plan)
 		}
+	}
+	if bytes.Contains(plan, []byte("nvt-disable-bridge-netfilter")) {
+		t.Fatal("fixed namespace attempted to mutate an unavailable bridge sysctl")
 	}
 }
 

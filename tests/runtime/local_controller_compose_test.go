@@ -33,6 +33,8 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"image: nvt-local-controller:latest",
 		"NVT_LOCAL_CONTROLLER_BIND: 0.0.0.0:7480",
 		"NVT_LOCAL_CONTROLLER_STATE: /state/controller/local-controller.sqlite3",
+		"NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS: ${NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS:-180}",
+		"NVT_LOCAL_CONTROLLER_BACKEND_TIMEOUT_SECONDS: ${NVT_LOCAL_CONTROLLER_BACKEND_TIMEOUT_SECONDS:-120}",
 		"NVT_LOCAL_CONTROLLER_DOCKER_HOST: unix:///var/run/docker.sock",
 		"NVT_LOCAL_CONTROLLER_BROKER_AGENTS: /broker-state/agents.yaml",
 		"NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS:",

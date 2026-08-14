@@ -26,6 +26,14 @@ type BackendObservation struct {
 	Ready bool
 }
 
+// These sentinels classify a backend operation without exposing backend or
+// provider diagnostics. Unknown errors are treated as dependency uncertainty;
+// only ErrBackendDesiredRunInvalid may permanently fail a preparing run.
+var (
+	ErrBackendRetryable         = errors.New("local backend temporarily unavailable")
+	ErrBackendDesiredRunInvalid = errors.New("local backend rejected desired run")
+)
+
 // LocalBackend is deliberately smaller than Docker. Later QEMU or sandbox
 // implementations need only idempotent ensure, inspect and cleanup behavior.
 type LocalBackend interface {
@@ -112,7 +120,13 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 			return err
 		}
 		observation, ensureErr := reconciler.backend.Ensure(ctx, backendRun)
-		if ensureErr != nil || !observation.Ready {
+		if ensureErr != nil && !errors.Is(ensureErr, ErrBackendDesiredRunInvalid) {
+			return ensureErr
+		}
+		if ensureErr == nil && !observation.Ready {
+			return ErrBackendRetryable
+		}
+		if ensureErr != nil {
 			_, updateErr := reconciler.store.UpdateStatus(ctx, StatusInput{
 				RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
 				State: StateStopping, TerminalTarget: StateFailed, Reason: "backend-prepare-failed",

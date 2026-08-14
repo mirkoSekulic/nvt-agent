@@ -122,45 +122,61 @@ func asciiAlphaNumeric(value byte) bool {
 func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRun) (controller.BackendObservation, error) {
 	run := desired.Resolved
 	if run.Execution.Kind != "container" {
-		return controller.BackendObservation{}, errors.New("backend kind unsupported")
+		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 	}
 	if run.Egress.Mode == "direct" && len(run.Broker.Grants) != 0 {
-		return controller.BackendObservation{}, errors.New("zero-secret backend requires mediated credentials")
+		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+	}
+	if run.Egress.Mode == "mediated" && run.Egress.Enforced && run.Egress.Transport != "transparent" {
+		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 	}
 	if strings.HasPrefix(backend.config.BrokerURL, "http://") && run.Egress.Mode == "mediated" && !run.Egress.AllowInsecureBroker {
-		return controller.BackendObservation{}, errors.New("broker transport unavailable")
+		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+	}
+	rendered, err := resolvedrun.RenderAgentConfig(run, renderBindings(run))
+	if err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+	}
+	plan, err := renderCompose(backend.config, run, desired.SnapshotDigest, namesFor(backend.config, run.RunID, desired.SnapshotDigest))
+	if err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 	}
 	operationContext, cancel := context.WithTimeout(ctx, backend.config.OperationTimeout)
 	defer cancel()
 	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
 	labels := ownedLabels{Owner: backend.config.Owner, RunID: run.RunID, Digest: desired.SnapshotDigest}
 	if err := backend.ensureDirectory(run.RunID); err != nil {
-		return controller.BackendObservation{}, errors.New("backend state unavailable")
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	tokens := deriveTokens(backend.key, run.RunID, desired.SnapshotDigest)
 	if err := backend.registry.upsert(run, desired.SnapshotDigest, tokens); err != nil {
-		return controller.BackendObservation{}, err
+		if errors.Is(err, errRegistryIdentityCollision) {
+			return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+		}
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	if err := backend.ensureExternalNetwork(operationContext); err != nil {
-		return controller.BackendObservation{}, err
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	for _, volume := range backend.requiredVolumes(run, names) {
 		if err := backend.ensureOwnedObject(operationContext, "volume", volume, labels); err != nil {
-			return controller.BackendObservation{}, err
+			if errors.Is(err, errOwnershipConflict) {
+				return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+			}
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		}
 	}
 	for _, network := range []string{names.internalNet, names.privateNet} {
 		if err := backend.ensureOwnedObject(operationContext, "network", network, labels); err != nil {
-			return controller.BackendObservation{}, err
+			if errors.Is(err, errOwnershipConflict) {
+				return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+			}
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		}
-	}
-	rendered, err := resolvedrun.RenderAgentConfig(run, renderBindings(run))
-	if err != nil {
-		return controller.BackendObservation{}, errors.New("agent configuration unavailable")
 	}
 	rendered, preparedMetadata, err := backend.preparer.prepare(operationContext, run, tokens.agent, rendered)
 	if err != nil {
-		return controller.BackendObservation{}, err
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	agentUID := 0
 	if run.Runtime.User == "non-root" {
@@ -177,7 +193,7 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		agentFiles["workflow-instructions.md"] = seedFile{content: []byte(run.WorkspaceInstructions.Workflow), mode: 0o644, uid: agentUID, gid: agentUID}
 	}
 	if err := backend.seedVolume(operationContext, names.agentConfig, agentFiles, labels); err != nil {
-		return controller.BackendObservation{}, err
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	if run.Egress.Mode == "mediated" {
 		egressConfig, err := renderEgressdConfig(backend.config, run)
@@ -187,21 +203,17 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		if err := backend.seedVolume(operationContext, names.egressPrivate, map[string]seedFile{
 			"egressd.json": {content: egressConfig, mode: 0o600}, "broker-token": {content: []byte(tokens.egress), mode: 0o400},
 		}, labels); err != nil {
-			return controller.BackendObservation{}, err
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		}
 	}
-	plan, err := renderCompose(backend.config, run, desired.SnapshotDigest, names)
-	if err != nil {
-		return controller.BackendObservation{}, err
-	}
 	if bytes.Contains(plan, []byte(tokens.agent)) || bytes.Contains(plan, []byte(tokens.egress)) {
-		return controller.BackendObservation{}, errors.New("compose plan unavailable")
+		return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
 	}
 	if err := atomicWrite(names.composeFile, plan, 0o600); err != nil {
-		return controller.BackendObservation{}, errors.New("backend state unavailable")
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
-	if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--remove-orphans"); err != nil {
-		return controller.BackendObservation{}, err
+	if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d"); err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -212,7 +224,7 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		}
 		select {
 		case <-operationContext.Done():
-			return controller.BackendObservation{}, errors.New("backend readiness unavailable")
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		case <-ticker.C:
 		}
 	}
@@ -222,9 +234,12 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 	names := namesFor(backend.config, desired.Resolved.RunID, desired.SnapshotDigest)
 	operationContext, cancel := context.WithTimeout(ctx, backend.config.OperationTimeout)
 	defer cancel()
-	output, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "ps", "-q", "agent")
-	if err != nil || strings.TrimSpace(string(output)) == "" {
-		return controller.BackendObservation{}, errors.New("backend instance unavailable")
+	output, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "ps", "--all", "-q", "agent")
+	if err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
+	}
+	if strings.TrimSpace(string(output)) == "" {
+		return controller.BackendObservation{Ready: false}, nil
 	}
 	containerID := strings.TrimSpace(string(output))
 	labels := ownedLabels{Owner: backend.config.Owner, RunID: desired.Resolved.RunID, Digest: desired.SnapshotDigest}
@@ -249,13 +264,8 @@ func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRu
 	if err := backend.registry.remove(run.RunID, tokens); err != nil {
 		return err
 	}
-	if _, err := os.Stat(names.composeFile); err == nil {
-		if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "down", "--remove-orphans", "--timeout", "15"); err != nil {
-			return err
-		}
-	}
 	if err := backend.removeOwnedContainers(operationContext, labels); err != nil {
-		return err
+		return controller.ErrBackendRetryable
 	}
 	for _, network := range []string{names.internalNet, names.privateNet} {
 		if err := backend.removeOwnedObject(operationContext, "network", network, labels); err != nil {
@@ -311,13 +321,15 @@ func (backend *Backend) ensureExternalNetwork(ctx context.Context) error {
 func (backend *Backend) ensureOwnedObject(ctx context.Context, kind, name string, labels ownedLabels) error {
 	if err := backend.verifyObject(ctx, kind, name, labels); err == nil {
 		return nil
+	} else if errors.Is(err, errOwnershipConflict) {
+		return err
 	}
 	arguments := []string{kind, "create"}
 	arguments = append(arguments, labelArguments(labels)...)
 	arguments = append(arguments, name)
 	if _, err := backend.docker.Run(ctx, nil, arguments...); err != nil {
 		if verifyErr := backend.verifyObject(ctx, kind, name, labels); verifyErr != nil {
-			return err
+			return verifyErr
 		}
 		return nil
 	}
@@ -347,7 +359,7 @@ func verifyLabels(raw []byte, expected ownedLabels) error {
 	}
 	for key, value := range labelMap(expected) {
 		if labels[key] != value {
-			return errors.New("backend ownership unavailable")
+			return errOwnershipConflict
 		}
 	}
 	return nil
@@ -493,3 +505,5 @@ func labelArguments(labels ownedLabels) []string {
 }
 
 var _ controller.LocalBackend = (*Backend)(nil)
+
+var errOwnershipConflict = errors.New("backend ownership conflict")

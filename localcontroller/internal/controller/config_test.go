@@ -8,7 +8,7 @@ import (
 func TestValidateConfigBounds(t *testing.T) {
 	valid := Config{
 		Bind: "0.0.0.0:7480", StatePath: "/state/controller/local-controller.sqlite3", MaxActiveRuns: 32,
-		MaxClaimLease: 30 * time.Second, SweepInterval: time.Second, ReconcileInterval: time.Second,
+		MaxClaimLease: 180 * time.Second, SweepInterval: time.Second, ReconcileInterval: time.Second,
 		DockerHost: "unix:///var/run/docker.sock", RunsDir: "/state/controller/runs", BrokerURL: "http://broker:7347",
 		BrokerAgentsPath: "/broker-state/agents.yaml", IdentityKeyPath: "/broker-state/local-controller.key",
 		ControllerOwner: "nvt-local-controller", ExternalNetwork: "agents-proxy", ProxyPort: 4090, DindImage: "nvt-dind:latest",
@@ -25,14 +25,15 @@ func TestValidateConfigBounds(t *testing.T) {
 		"relative state": func(value *Config) {
 			value.StatePath = "state/local-controller.sqlite3"
 		},
-		"root state":    func(value *Config) { value.StatePath = "/local-controller.sqlite3" },
-		"capacity":      func(value *Config) { value.MaxActiveRuns = 0 },
-		"claim lease":   func(value *Config) { value.MaxClaimLease = 0 },
-		"sweep":         func(value *Config) { value.SweepInterval = 0 },
-		"reconcile":     func(value *Config) { value.ReconcileInterval = 0 },
-		"docker host":   func(value *Config) { value.DockerHost = "" },
-		"runs dir":      func(value *Config) { value.RunsDir = "relative" },
-		"broker agents": func(value *Config) { value.BrokerAgentsPath = "relative" },
+		"root state":                           func(value *Config) { value.StatePath = "/local-controller.sqlite3" },
+		"capacity":                             func(value *Config) { value.MaxActiveRuns = 0 },
+		"claim lease":                          func(value *Config) { value.MaxClaimLease = 0 },
+		"claim shorter than backend operation": func(value *Config) { value.MaxClaimLease = value.BackendOperationTimeout + 29*time.Second },
+		"sweep":                                func(value *Config) { value.SweepInterval = 0 },
+		"reconcile":                            func(value *Config) { value.ReconcileInterval = 0 },
+		"docker host":                          func(value *Config) { value.DockerHost = "" },
+		"runs dir":                             func(value *Config) { value.RunsDir = "relative" },
+		"broker agents":                        func(value *Config) { value.BrokerAgentsPath = "relative" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
@@ -62,7 +63,7 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 		t.Setenv(name, defaultEnvironmentValue(name))
 	}
 	config, err := ConfigFromEnvironment()
-	if err != nil || config.MaxActiveRuns != 32 || config.MaxClaimLease != 30*time.Second || config.SweepInterval != time.Second {
+	if err != nil || config.MaxActiveRuns != 32 || config.MaxClaimLease != 180*time.Second || config.SweepInterval != time.Second {
 		t.Fatalf("explicit valid environment = %#v, %v", config, err)
 	}
 }
@@ -94,7 +95,9 @@ func defaultEnvironmentValue(name string) string {
 	case "NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS":
 		return "32"
 	case "NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS":
-		return "30"
+		return "180"
+	case "NVT_LOCAL_CONTROLLER_BACKEND_TIMEOUT_SECONDS":
+		return "120"
 	case "NVT_LOCAL_CONTROLLER_PROXY_PORT":
 		return "4090"
 	default:

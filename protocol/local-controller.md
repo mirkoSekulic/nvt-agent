@@ -100,7 +100,10 @@ The owner is an opaque, bounded controller-instance name. The claim succeeds
 only for the exact current revision and when no different unexpired owner holds
 the run. Claiming increments the revision. An expired lease can be replaced by
 another owner. A stale owner cannot update status after takeover, cancellation,
-or deletion.
+or deletion. Controller configuration requires the claim lease to exceed the
+complete backend-operation timeout by at least 30 seconds; the default is 180
+seconds for a 120-second operation. Thus an idempotent `Ensure` or `Delete`
+cannot outlive its ownership claim.
 
 The owner then calls `PUT /v1/runs/{run_id}/status` with the claimed revision:
 
@@ -117,6 +120,15 @@ The owner then calls `PUT /v1/runs/{run_id}/status` with the claimed revision:
 Reasons are optional, bounded machine-readable values. They are never raw
 backend errors. A successful transition increments the revision and releases
 the claim, so the next reconciliation step must claim again.
+
+The backend boundary distinguishes only deterministic desired-state rejection
+from dependency uncertainty. Unsupported local transport/kind or an ownership
+collision may move `preparing` into cleanup with terminal target `failed`.
+Broker startup/HTTP uncertainty, Docker/image availability, storage I/O, and
+operation timeouts leave the run in `preparing` for an idempotent retry. During
+`running`, a successful inspection that confirms the managed agent is absent or
+stopped enters cleanup; an inspection error leaves `running` unchanged. Cleanup
+errors always retain the claimable `stopping` state and retry.
 
 A transition into cleanup also supplies the exact terminal target:
 
@@ -169,6 +181,18 @@ step to make the named workspace writable without a host bind.
 Controller-owned config volumes are populated with `docker cp` tar streams, so
 the Docker daemon never needs a controller-container path as a host bind.
 
+The local backend accepts `egress.enforced: true` only with the transparent
+transport, whose `NET_ADMIN` initialization captures the complete shared agent
+network namespace. Enforced redirect and forward-proxy runs fail as unsupported:
+proxy variables or selected URLs are not treated as network confinement. This
+restriction is local-backend-specific and does not change the portable resolved
+run or Kubernetes transport contracts.
+
+Compose is used only to converge declared services; the controller never uses
+Compose orphan or project-wide teardown. Cleanup enumerates resources using all
+three NVT ownership labels and re-verifies them immediately before deletion, so
+an unmanaged same-project container remains untouched.
+
 The controller derives stable per-run broker identities from a private
 startup-only key. Only SHA-256 token hashes and the resolved grants are written
 atomically into the existing live-reloaded broker agent registry. The agent
@@ -180,6 +204,11 @@ environment, inspect output, or controller logs. Real provider credentials stay
 inside the broker/provider and are injected only by egressd. Direct runs with
 no broker grants remain valid; a credential-bearing direct run is rejected
 because this backend has no zero-secret direct materialization path.
+
+Registry replacement preserves the existing `agents.yaml` owner and group.
+Controller-created lock files use the bind directory owner and group, with
+mode 0600, so a root controller does not take ownership away from native Linux
+Compose users.
 
 ## Durable state and recovery
 
@@ -235,7 +264,7 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_BIND` | `0.0.0.0:7480` | valid host and TCP port |
 | `NVT_LOCAL_CONTROLLER_STATE` | `/state/controller/local-controller.sqlite3` | clean absolute `.sqlite3` path under a dedicated private directory |
 | `NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS` | `32` | 1 through 10,000 |
-| `NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS` | `30` | 1 through 3,600 |
+| `NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS` | `180` | backend timeout plus at least 30 seconds, through 3,600 |
 | `NVT_LOCAL_CONTROLLER_SWEEP_SECONDS` | `1` | 1 through 60 |
 | `NVT_LOCAL_CONTROLLER_RECONCILE_SECONDS` | `1` | 1 through 60 |
 | `NVT_LOCAL_CONTROLLER_BACKEND_TIMEOUT_SECONDS` | `120` | 1 through 300 |

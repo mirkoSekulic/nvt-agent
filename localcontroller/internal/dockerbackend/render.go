@@ -59,7 +59,6 @@ for host in broker egressd; do
     case "$$ip" in *:*) exclude_v6="$$exclude_v6 $$ip" ;; *) exclude_v4="$$exclude_v4 $$ip" ;; esac
   done
 done
-/usr/local/bin/nvt-disable-bridge-netfilter
 iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
 iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
 for ip in $$exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$$ip/32" -j RETURN; done
@@ -107,6 +106,9 @@ type exposeRoute struct {
 }
 
 func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest string, names resourceNames) ([]byte, error) {
+	if run.Egress.Mode == "mediated" && run.Egress.Enforced && run.Egress.Transport != "transparent" {
+		return nil, errors.New("enforced local transport unsupported")
+	}
 	routes, err := parseExposeRoutes(run.AgentConfig)
 	if err != nil {
 		return nil, errors.New("HTTP exposure configuration unavailable")

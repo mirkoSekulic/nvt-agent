@@ -17,6 +17,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var errRegistryIdentityCollision = errors.New("broker registry identity collision")
+
 type brokerPolicy struct {
 	Agents []brokerAgent `yaml:"agents"`
 }
@@ -111,7 +113,7 @@ func (registry brokerRegistry) upsert(run resolvedrun.ResolvedAgentRun, digest s
 					expectedHash = tokenHash(tokens.egress)
 				}
 				if existing.TokenSHA256 != expectedHash {
-					return errors.New("broker registry identity collision")
+					return errRegistryIdentityCollision
 				}
 				continue
 			}
@@ -133,7 +135,7 @@ func (registry brokerRegistry) remove(runID string, tokens identityTokens) error
 					expectedHash = tokenHash(tokens.egress)
 				}
 				if entry.TokenSHA256 != expectedHash {
-					return errors.New("broker registry identity collision")
+					return errRegistryIdentityCollision
 				}
 				continue
 			}
@@ -151,6 +153,10 @@ func (registry brokerRegistry) mutate(change func(*brokerPolicy) error) error {
 		return errors.New("broker registry unavailable")
 	}
 	defer lock.Close()
+	directoryUID, directoryGID, err := fileOwnership(filepath.Dir(registry.path))
+	if err != nil || lock.Chown(directoryUID, directoryGID) != nil || lock.Chmod(0o600) != nil {
+		return errors.New("broker registry unavailable")
+	}
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return errors.New("broker registry unavailable")
 	}
@@ -203,12 +209,26 @@ func validateBrokerPolicy(policy brokerPolicy) error {
 
 func atomicWrite(path string, content []byte, mode os.FileMode) error {
 	directory := filepath.Dir(path)
+	ownerPath := path
+	if _, err := os.Lstat(ownerPath); errors.Is(err, os.ErrNotExist) {
+		ownerPath = directory
+	} else if err != nil {
+		return err
+	}
+	uid, gid, err := fileOwnership(ownerPath)
+	if err != nil {
+		return err
+	}
 	temporary, err := os.CreateTemp(directory, ".nvt-local-controller-*")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
+	if err := temporary.Chown(uid, gid); err != nil {
+		_ = temporary.Close()
+		return err
+	}
 	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
 		return err
@@ -233,6 +253,18 @@ func atomicWrite(path string, content []byte, mode os.FileMode) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+func fileOwnership(path string) (int, int, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, errors.New("file ownership unavailable")
+	}
+	return int(stat.Uid), int(stat.Gid), nil
 }
 
 func brokerIDs(runID string) (string, string) {

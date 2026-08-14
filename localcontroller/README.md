@@ -25,3 +25,16 @@ cd localcontroller
 go vet ./...
 go test -race -count=1 ./...
 ```
+
+After building the runtime, DinD, broker, egressd, captured, and synthetic echo
+images, the opt-in real-engine proof exercises transparent capture, the paired
+egress identity, exact synthetic credential injection, and scans generated
+Compose, container inspect/environment, logs, and agent files:
+
+```sh
+NVT_LOCAL_CONTROLLER_DOCKER_SMOKE=1 \
+  go test -count=1 -run '^TestDockerBackendRealEngineSmoke$' ./internal/dockerbackend
+```
+
+This proof uses the repository's executable synthetic provider. Real
+Codex/Claude account proofs are deliberately separate and non-hermetic.

@@ -39,7 +39,7 @@ func ConfigFromEnvironment() (Config, error) {
 		Bind:                    environmentOrDefault("NVT_LOCAL_CONTROLLER_BIND", "0.0.0.0:7480"),
 		StatePath:               environmentOrDefault("NVT_LOCAL_CONTROLLER_STATE", "/state/controller/local-controller.sqlite3"),
 		MaxActiveRuns:           32,
-		MaxClaimLease:           30 * time.Second,
+		MaxClaimLease:           180 * time.Second,
 		SweepInterval:           time.Second,
 		ReconcileInterval:       time.Second,
 		DockerHost:              environmentOrDefault("NVT_LOCAL_CONTROLLER_DOCKER_HOST", "unix:///var/run/docker.sock"),
@@ -114,6 +114,7 @@ func ValidateConfig(config Config) error {
 		config.SweepInterval < time.Second || config.SweepInterval > time.Minute ||
 		config.ReconcileInterval < time.Second || config.ReconcileInterval > time.Minute ||
 		config.BackendOperationTimeout < time.Second || config.BackendOperationTimeout > 5*time.Minute ||
+		config.MaxClaimLease < config.BackendOperationTimeout+30*time.Second ||
 		config.DockerHost == "" || strings.ContainsAny(config.DockerHost, "\x00\r\n") ||
 		config.RunsDir == "" || !filepath.IsAbs(config.RunsDir) || filepath.Clean(config.RunsDir) != config.RunsDir ||
 		brokerURLErr != nil || brokerURL.Host == "" || brokerURL.User != nil || brokerURL.RawQuery != "" || brokerURL.Fragment != "" ||
