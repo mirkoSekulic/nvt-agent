@@ -18,6 +18,7 @@ type fakeBackend struct {
 	ensureErr     error
 	inspectErr    error
 	inspectTarget State
+	inspectCursor string
 	deleteErr     error
 	ensureCalls   int
 	deleteCalls   int
@@ -48,7 +49,7 @@ func (backend *fakeBackend) Ensure(_ context.Context, run BackendRun) (BackendOb
 	if err != nil {
 		return BackendObservation{}, err
 	}
-	return BackendObservation{Ready: true}, nil
+	return BackendObservation{Ready: true, LifecycleCursor: run.LifecycleCursor}, nil
 }
 
 func TestTwoControllerProcessesWithSameStableResourceOwnerCannotEnterBackendTogether(t *testing.T) {
@@ -103,12 +104,20 @@ func (backend *fakeBackend) Inspect(_ context.Context, run BackendRun) (BackendO
 		return BackendObservation{}, backend.inspectErr
 	}
 	if backend.inspectTarget != "" {
-		return BackendObservation{TerminalTarget: backend.inspectTarget}, nil
+		cursor := backend.inspectCursor
+		if cursor == "" {
+			cursor = run.LifecycleCursor
+		}
+		return BackendObservation{TerminalTarget: backend.inspectTarget, LifecycleCursor: cursor}, nil
 	}
 	if !backend.resources[run.Resolved.RunID] {
-		return BackendObservation{TerminalTarget: StateFailed}, nil
+		return BackendObservation{TerminalTarget: StateFailed, LifecycleCursor: run.LifecycleCursor}, nil
 	}
-	return BackendObservation{Ready: true}, nil
+	cursor := backend.inspectCursor
+	if cursor == "" {
+		cursor = run.LifecycleCursor
+	}
+	return BackendObservation{Ready: true, LifecycleCursor: cursor}, nil
 }
 
 func TestControllerRestartReconcilesRunningSnapshotAndRecreatesMissingRuntime(t *testing.T) {
@@ -198,12 +207,16 @@ func TestReconcilerMapsBoundedRuntimeCompletionAndFailureReasons(t *testing.T) {
 			run := createRun(t, store, "runtime-"+string(target), false)
 			reconcileToRunning(t, reconciler, store, run.RunID)
 			backend.inspectTarget = target
+			backend.inspectCursor = "v1:11:22:33"
 			if err := reconciler.Reconcile(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			stopping, err := store.Get(context.Background(), run.RunID)
 			if err != nil || stopping.State != StateStopping || stopping.TerminalTarget != target || stopping.LastReason != terminalReason(target) {
 				t.Fatalf("terminal observation = %#v, %v", stopping, err)
+			}
+			if _, _, cursor, snapshotErr := store.backendSnapshot(context.Background(), run.RunID); snapshotErr != nil || cursor != backend.inspectCursor {
+				t.Fatalf("terminal observation cursor = %q, %v", cursor, snapshotErr)
 			}
 			backend.inspectTarget = ""
 			if err := reconciler.Reconcile(context.Background()); err != nil {
@@ -214,6 +227,60 @@ func TestReconcilerMapsBoundedRuntimeCompletionAndFailureReasons(t *testing.T) {
 				t.Fatalf("terminal cleanup = %#v, %v", terminal, err)
 			}
 		})
+	}
+}
+
+func TestLifecycleCursorSurvivesRestartAndMatchingEventCleansUp(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, path := openTestStore(t, clock, 4)
+	backend := newFakeBackend()
+	before, _ := NewReconciler(store, backend, "controller-before", 30*time.Second, log.New(io.Discard, "", 0))
+	run := createRun(t, store, "lifecycle-restart", false)
+	reconcileToRunning(t, before, store, run.RunID)
+	backend.inspectCursor = "v1:10:20:30"
+	if err := before.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, _, cursor, err := store.backendSnapshot(context.Background(), run.RunID)
+	if err != nil || cursor != backend.inspectCursor {
+		t.Fatalf("unrelated-event cursor = %q, %v", cursor, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 4, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	after, _ := NewReconciler(restarted, backend, "controller-after", 30*time.Second, log.New(io.Discard, "", 0))
+	if err := after.Recover(context.Background()); err != nil {
+		t.Fatalf("startup recovery request failed: %v", err)
+	}
+	if err := after.Reconcile(context.Background()); err != nil {
+		t.Fatalf("startup recovery reconcile failed: %v", err)
+	}
+	backend.inspectCursor = "v1:10:20:60"
+	backend.inspectTarget = StateCompleted
+	if err := after.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stopping, err := restarted.Get(context.Background(), run.RunID)
+	if err != nil || stopping.State != StateStopping || stopping.TerminalTarget != StateCompleted || stopping.LastReason != "backend-completed" {
+		t.Fatalf("matching completion = %#v, %v", stopping, err)
+	}
+	_, _, cursor, err = restarted.backendSnapshot(context.Background(), run.RunID)
+	if err != nil || cursor != backend.inspectCursor {
+		t.Fatalf("terminal cursor = %q, %v", cursor, err)
+	}
+	backend.inspectTarget = ""
+	if err := after.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := restarted.Get(context.Background(), run.RunID)
+	if err != nil || terminal.State != StateCompleted || backend.resources[run.RunID] {
+		t.Fatalf("lifecycle cleanup = %#v resource=%v err=%v", terminal, backend.resources[run.RunID], err)
 	}
 }
 

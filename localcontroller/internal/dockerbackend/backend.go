@@ -260,7 +260,7 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	if strings.TrimSpace(string(output)) == "" {
-		return controller.BackendObservation{TerminalTarget: controller.StateFailed}, nil
+		return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: desired.LifecycleCursor}, nil
 	}
 	containerID := strings.TrimSpace(string(output))
 	labels := ownedLabels{Owner: backend.config.Owner, RunID: desired.Resolved.RunID, Digest: desired.SnapshotDigest}
@@ -285,18 +285,25 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 	}
 	clear(rawState)
 	if state.Running {
+		cursor, target, lifecycleErr := backend.observeLifecycle(operationContext, containerID, desired)
+		if lifecycleErr != nil {
+			return controller.BackendObservation{}, lifecycleErr
+		}
+		if target != "" {
+			return controller.BackendObservation{TerminalTarget: target, LifecycleCursor: cursor}, nil
+		}
 		if state.Health == nil || state.Health.Status == "healthy" {
-			return controller.BackendObservation{Ready: true}, nil
+			return controller.BackendObservation{Ready: true, LifecycleCursor: cursor}, nil
 		}
 		if state.Health.Status == "starting" {
-			return controller.BackendObservation{}, nil
+			return controller.BackendObservation{LifecycleCursor: cursor}, nil
 		}
-		return controller.BackendObservation{TerminalTarget: controller.StateFailed}, nil
+		return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: cursor}, nil
 	}
 	if state.ExitCode == 0 && !state.OOMKilled {
-		return controller.BackendObservation{TerminalTarget: controller.StateCompleted}, nil
+		return controller.BackendObservation{TerminalTarget: controller.StateCompleted, LifecycleCursor: desired.LifecycleCursor}, nil
 	}
-	return controller.BackendObservation{TerminalTarget: controller.StateFailed}, nil
+	return controller.BackendObservation{TerminalTarget: controller.StateFailed, LifecycleCursor: desired.LifecycleCursor}, nil
 }
 
 func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRun) error {
@@ -312,6 +319,9 @@ func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRu
 	if err := backend.removeOwnedContainers(operationContext, labels); err != nil {
 		return controller.ErrBackendRetryable
 	}
+	if err := backend.removeExpectedOwnedObjects(operationContext, "network", []string{names.internalNet, names.privateNet}, labels); err != nil {
+		return controller.ErrBackendRetryable
+	}
 	if err := backend.removeOwnedObjectsExcept(operationContext, "network", labels, nil); err != nil {
 		return controller.ErrBackendRetryable
 	}
@@ -324,6 +334,15 @@ func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRu
 	}
 	if !desired.DeleteRequested && run.Runtime.Docker != nil && run.Persistence.DockerData {
 		preserveVolumes[names.dockerData] = true
+	}
+	removeVolumes := []string{}
+	for _, name := range backend.requiredVolumes(run, names) {
+		if !preserveVolumes[name] {
+			removeVolumes = append(removeVolumes, name)
+		}
+	}
+	if err := backend.removeExpectedOwnedObjects(operationContext, "volume", removeVolumes, labels); err != nil {
+		return controller.ErrBackendRetryable
 	}
 	if err := backend.removeOwnedObjectsExcept(operationContext, "volume", labels, preserveVolumes); err != nil {
 		return controller.ErrBackendRetryable
@@ -629,6 +648,47 @@ func (backend *Backend) removeOwnedObjectsExcept(ctx context.Context, kind strin
 		}
 	}
 	return nil
+}
+
+// removeExpectedOwnedObjects handles deterministic names independently of the
+// exact-label inventory. A missing object is already clean; a present object
+// with partial or conflicting labels is never touched and keeps cleanup
+// retryable instead of allowing the durable run to become terminal.
+func (backend *Backend) removeExpectedOwnedObjects(ctx context.Context, kind string, names []string, labels ownedLabels) error {
+	for _, name := range names {
+		output, err := backend.docker.Run(ctx, nil, kind, "inspect", "--format", "{{json .Labels}}", name)
+		if err != nil {
+			missing, missingErr := backend.objectConfirmedMissing(ctx, kind, name)
+			if missingErr != nil || !missing {
+				return errors.New("backend ownership unavailable")
+			}
+			continue
+		}
+		if err := verifyLabels(output, labels); err != nil {
+			return err
+		}
+		if _, err := backend.docker.Run(ctx, nil, kind, "rm", name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (backend *Backend) objectConfirmedMissing(ctx context.Context, kind, expected string) (bool, error) {
+	output, err := backend.docker.Run(ctx, nil, kind, "ls", "--format", "{{.Name}}")
+	if err != nil {
+		return false, err
+	}
+	names := strings.Fields(string(output))
+	if len(names) > 10_000 {
+		return false, errors.New("backend inventory exceeded its bound")
+	}
+	for _, name := range names {
+		if name == expected {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func secretSafePlan(plan []byte, needles ...string) bool {

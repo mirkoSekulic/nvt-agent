@@ -30,8 +30,8 @@ After building the runtime, DinD, broker, egressd, captured, and synthetic echo
 images, the opt-in real-engine proof exercises transparent capture, the paired
 egress identity, exact synthetic credential injection, removal/recreation of
 the agent container through the generic resume command, retained named state,
-and scans generated Compose, container inspect/environment, logs, and agent
-files:
+an agentd completion event with lifecycle cleanup, and scans generated Compose,
+container inspect/environment, logs, and agent files:
 
 ```sh
 NVT_LOCAL_CONTROLLER_DOCKER_SMOKE=1 \

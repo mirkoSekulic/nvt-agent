@@ -7,12 +7,13 @@ import (
 )
 
 const (
-	APIVersion             = "nvt.local-runs/v1"
-	MaxRequestBytes        = 1088 << 10
-	MaxIdempotencyKeyBytes = 256
-	MaxOwnerBytes          = 128
-	MaxReasonBytes         = 128
-	MaxListLimit           = 500
+	APIVersion              = "nvt.local-runs/v1"
+	MaxRequestBytes         = 1088 << 10
+	MaxIdempotencyKeyBytes  = 256
+	MaxOwnerBytes           = 128
+	MaxReasonBytes          = 128
+	MaxLifecycleCursorBytes = 256
+	MaxListLimit            = 500
 )
 
 type State string
@@ -89,6 +90,9 @@ type StatusInput struct {
 	State            State
 	TerminalTarget   State
 	Reason           string
+	// LifecycleCursor is private backend progress. It never enters the
+	// local-run API and contains no event names or payloads.
+	LifecycleCursor *string
 }
 
 type Run struct {

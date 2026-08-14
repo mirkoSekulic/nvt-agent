@@ -207,6 +207,20 @@ providers:
 	if strings.Contains(strings.Join(recordedBoundary.commands, "\n"), credential) {
 		t.Fatal("credential entered Docker command arguments during recovery")
 	}
+	if _, err := boundary.Run(ctx, nil, "exec", recoveredAgentID, "agentdctl", "publish", "plugin.work.done", "--source", "plugin:local-controller-smoke"); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := backend.Inspect(ctx, desired)
+	if err != nil || lifecycle.TerminalTarget != controller.StateCompleted || lifecycle.LifecycleCursor == "" {
+		t.Fatalf("real lifecycle completion = %#v, %v", lifecycle, err)
+	}
+	desired.LifecycleCursor = lifecycle.LifecycleCursor
+	if err := backend.Delete(ctx, desired); err != nil {
+		t.Fatalf("real lifecycle cleanup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(ownedNames.composeFile)); !os.IsNotExist(err) {
+		t.Fatalf("real lifecycle cleanup retained generated state: %v", err)
+	}
 }
 
 type recordingBoundary struct {

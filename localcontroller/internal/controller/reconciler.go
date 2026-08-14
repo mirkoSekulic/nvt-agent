@@ -37,14 +37,16 @@ type BackendRun struct {
 	Resolved        resolvedrun.ResolvedAgentRun
 	SnapshotDigest  string
 	DeleteRequested bool
+	LifecycleCursor string
 }
 
 // BackendObservation contains only the portable state needed by the lifecycle
 // reconciler. Backend object IDs, credentials and raw diagnostics never cross
 // this boundary.
 type BackendObservation struct {
-	Ready          bool
-	TerminalTarget State
+	Ready           bool
+	TerminalTarget  State
+	LifecycleCursor string
 }
 
 // These sentinels classify a backend operation without exposing backend or
@@ -217,6 +219,7 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 			_, updateErr := reconciler.store.UpdateStatus(ctx, StatusInput{
 				RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
 				State: StateStopping, TerminalTarget: observation.TerminalTarget, Reason: terminalReason(observation.TerminalTarget),
+				LifecycleCursor: &observation.LifecycleCursor,
 			})
 			if updateErr == nil {
 				reconciler.logger.Printf("reconcile event=%s run_id=%s", terminalReason(observation.TerminalTarget), run.RunID)
@@ -239,7 +242,7 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		}
 		_, err = reconciler.store.UpdateStatus(ctx, StatusInput{
 			RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
-			State: StateRunning, Reason: reason,
+			State: StateRunning, Reason: reason, LifecycleCursor: &observation.LifecycleCursor,
 		})
 		if err == nil && reason == "backend-recovered" {
 			reconciler.logger.Printf("reconcile event=backend-recovered run_id=%s", run.RunID)
@@ -250,10 +253,21 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		if inspectErr != nil {
 			return inspectErr
 		}
-		if observation.Ready {
+		if observation.Ready && observation.LifecycleCursor == backendRun.LifecycleCursor {
 			return nil
 		}
 		if observation.TerminalTarget != StateCompleted && observation.TerminalTarget != StateFailed {
+			if observation.LifecycleCursor != backendRun.LifecycleCursor {
+				claimed, err := reconciler.claim(ctx, run)
+				if err != nil {
+					return err
+				}
+				_, err = reconciler.store.UpdateStatus(ctx, StatusInput{
+					RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
+					State: StateRunning, LifecycleCursor: &observation.LifecycleCursor,
+				})
+				return err
+			}
 			return ErrBackendRetryable
 		}
 		claimed, err := reconciler.claim(ctx, run)
@@ -263,6 +277,7 @@ func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {
 		_, err = reconciler.store.UpdateStatus(ctx, StatusInput{
 			RunID: run.RunID, Owner: reconciler.owner, ExpectedRevision: claimed.Revision,
 			State: StateStopping, TerminalTarget: observation.TerminalTarget, Reason: terminalReason(observation.TerminalTarget),
+			LifecycleCursor: &observation.LifecycleCursor,
 		})
 		if err == nil {
 			reconciler.logger.Printf("reconcile event=%s run_id=%s", terminalReason(observation.TerminalTarget), run.RunID)
@@ -303,7 +318,7 @@ func (reconciler *Reconciler) claim(ctx context.Context, run Run) (Run, error) {
 }
 
 func (reconciler *Reconciler) backendRun(ctx context.Context, run Run) (BackendRun, error) {
-	snapshot, digest, err := reconciler.store.ResolvedSnapshot(ctx, run.RunID)
+	snapshot, digest, cursor, err := reconciler.store.backendSnapshot(ctx, run.RunID)
 	if err != nil {
 		return BackendRun{}, err
 	}
@@ -311,5 +326,5 @@ func (reconciler *Reconciler) backendRun(ctx context.Context, run Run) (BackendR
 	if err != nil || digest != run.SnapshotDigest {
 		return BackendRun{}, ErrStoreUnavailable
 	}
-	return BackendRun{Resolved: resolved, SnapshotDigest: digest, DeleteRequested: run.DeleteRequested}, nil
+	return BackendRun{Resolved: resolved, SnapshotDigest: digest, DeleteRequested: run.DeleteRequested, LifecycleCursor: cursor}, nil
 }

@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -192,6 +194,50 @@ func TestOptimisticOwnershipTransitionsAndCancellation(t *testing.T) {
 	repeated, err := store.Cancel(context.Background(), run.RunID)
 	if err != nil || repeated.Revision != failed.Revision {
 		t.Fatalf("terminal cancel was not idempotent: %#v, %v", repeated, err)
+	}
+}
+
+func TestLifecycleCursorIsBoundedDurableAndAbsentFromAPIState(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, path := openTestStore(t, clock, 4)
+	run := createRun(t, store, "cursor-state", false)
+	claimed := claimRun(t, store, run, "controller")
+	preparing := transitionRun(t, store, claimed, "controller", StatePreparing)
+	claimed = claimRun(t, store, preparing, "controller")
+	running := transitionRun(t, store, claimed, "controller", StateRunning)
+	claimed = claimRun(t, store, running, "controller")
+	cursor := "v1:123:456:789"
+	updated, err := store.UpdateStatus(context.Background(), StatusInput{
+		RunID: run.RunID, Owner: "controller", ExpectedRevision: claimed.Revision,
+		State: StateRunning, LifecycleCursor: &cursor,
+	})
+	if err != nil || updated.State != StateRunning || updated.ReconcileOwner != "" {
+		t.Fatalf("cursor update = %#v, %v", updated, err)
+	}
+	public, _ := json.Marshal(updated)
+	if bytes.Contains(public, []byte("lifecycle_cursor")) || bytes.Contains(public, []byte(cursor)) {
+		t.Fatalf("private cursor entered API state: %s", public)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 4, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	_, _, durable, err := restarted.backendSnapshot(context.Background(), run.RunID)
+	if err != nil || durable != cursor {
+		t.Fatalf("durable cursor = %q, %v", durable, err)
+	}
+	current, _ := restarted.Get(context.Background(), run.RunID)
+	claimed = claimRun(t, restarted, current, "controller")
+	invalid := strings.Repeat("x", MaxLifecycleCursorBytes+1)
+	if _, err := restarted.UpdateStatus(context.Background(), StatusInput{
+		RunID: run.RunID, Owner: "controller", ExpectedRevision: claimed.Revision,
+		State: StateRunning, LifecycleCursor: &invalid,
+	}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("oversized cursor error = %v", err)
 	}
 }
 
@@ -425,6 +471,9 @@ VALUES(?,?,?,?,?,'stopping',2,?,?,?,'migrated-stop')`, item.id, "idempotency-key
 	deleting, _ := store.Get(context.Background(), "delete-migrated")
 	if cancelled.TerminalTarget != StateFailed || deleting.TerminalTarget != StateCompleted {
 		t.Fatalf("migration targets = cancel:%q delete:%q", cancelled.TerminalTarget, deleting.TerminalTarget)
+	}
+	if _, _, cursor, err := store.backendSnapshot(context.Background(), "cancel-migrated"); err != nil || cursor != "" {
+		t.Fatalf("migrated lifecycle cursor = %q, %v", cursor, err)
 	}
 }
 

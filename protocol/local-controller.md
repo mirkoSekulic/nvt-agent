@@ -236,6 +236,24 @@ failed exits enter the ordinary claimable cleanup path with reasons
 `backend-completed` and `backend-runtime-failed`; raw container diagnostics are
 never persisted or logged.
 
+The Docker backend also observes the append-only agentd event log through the
+already-owned agent container. The in-container reader discards payloads and
+returns at most 1,024 bounded event names plus an opaque file-generation/byte
+cursor per pass. The trusted backend compares only those names with the
+resolved `lifecycle.complete_on` and `lifecycle.fail_on` sets. A match produces
+the same bounded completed/failed observation and cleanup path as a confirmed
+runtime exit; unrelated events only advance the cursor.
+
+The cursor is private non-secret SQLite state (maximum 256 ASCII token bytes),
+not part of the local-run API, logs, or resolved snapshot. Cursor advancement
+and a terminal transition are committed under the reconciliation lease. A
+controller crash before commit may replay bounded event names, while a commit
+prevents old events from becoming newly terminal after restart. Missing,
+replaced, truncated, malformed, oversized, or ambiguous event logs fail closed
+as backend uncertainty. Event payloads and raw records never cross the Docker
+boundary or enter controller persistence/diagnostics. This observation belongs
+to the local backend; `agentd` remains unchanged and owns only append/event I/O.
+
 The controller derives stable per-run broker identities from a private
 startup-only key. Only SHA-256 token hashes and the resolved grants are written
 atomically into the existing live-reloaded broker agent registry. The agent
@@ -265,6 +283,11 @@ and DinD data volumes survive terminal cleanup only when the resolved
 persistence policy explicitly retains them; explicit deletion removes those
 retained volumes too. Every step is bounded and idempotent, so a crash during
 create or delete resumes from the durable `preparing` or `stopping` record.
+Before deleting each deterministic expected network or removable volume, the
+backend inspects that exact name. Missing is already clean, exact owner/run/
+digest labels permit deletion, and any partial or mismatched label set remains
+untouched while cleanup stays retryable. Exact-label inventory is used only to
+remove additional stale owned objects.
 
 ## Durable state and recovery
 

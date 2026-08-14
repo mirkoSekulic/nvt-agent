@@ -25,19 +25,22 @@ import (
 )
 
 type fakeDocker struct {
-	mu            sync.Mutex
-	objects       map[string]map[string]string
-	objectSubnets map[string]string
-	containers    map[string]map[string]string
-	commands      [][]string
-	inputs        [][]byte
-	seedCount     int
-	agentAbsent   bool
-	agentStatus   string
-	agentExitCode int
-	agentOOM      bool
-	failComposeUp int
-	failRemove    string
+	mu              sync.Mutex
+	objects         map[string]map[string]string
+	objectSubnets   map[string]string
+	containers      map[string]map[string]string
+	commands        [][]string
+	inputs          [][]byte
+	seedCount       int
+	agentAbsent     bool
+	agentStatus     string
+	agentExitCode   int
+	agentOOM        bool
+	failComposeUp   int
+	failRemove      string
+	lifecycleEvents []string
+	lifecycleCursor string
+	lifecycleErr    error
 }
 
 func newFakeDocker() *fakeDocker {
@@ -48,15 +51,33 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	docker.mu.Lock()
 	defer docker.mu.Unlock()
 	docker.commands = append(docker.commands, append([]string(nil), arguments...))
+	var rawInput []byte
 	if input != nil {
-		raw, _ := io.ReadAll(input)
-		docker.inputs = append(docker.inputs, raw)
+		rawInput, _ = io.ReadAll(input)
+		docker.inputs = append(docker.inputs, rawInput)
 	}
 	if len(arguments) == 0 {
 		return nil, errors.New("missing command")
 	}
 	if arguments[0] == "compose" {
 		return docker.compose(arguments)
+	}
+	if arguments[0] == "exec" {
+		if docker.lifecycleErr != nil {
+			return nil, docker.lifecycleErr
+		}
+		var request struct {
+			Cursor string `json:"cursor"`
+		}
+		if json.Unmarshal(rawInput, &request) != nil {
+			return nil, errors.New("invalid lifecycle request")
+		}
+		cursor := docker.lifecycleCursor
+		if cursor == "" {
+			cursor = request.Cursor
+		}
+		response, _ := json.Marshal(lifecycleReaderResponse{Version: 1, Cursor: cursor, Events: append([]string{}, docker.lifecycleEvents...)})
+		return append(response, '\n'), nil
 	}
 	if arguments[0] == "create" {
 		name := argumentAfter(arguments, "--name")
@@ -254,8 +275,13 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 			t.Fatalf("credential entered command arguments: %q", joined)
 		}
 	}
-	if len(docker.inputs) != 2 || bytes.Contains(docker.inputs[0], []byte(tokens.egress)) || !bytes.Contains(docker.inputs[1], []byte(tokens.egress)) || bytes.Contains(docker.inputs[1], []byte("REAL-ACCESS-TOKEN-NEEDLE")) {
+	if len(docker.inputs) < 3 || bytes.Contains(docker.inputs[0], []byte(tokens.egress)) || !bytes.Contains(docker.inputs[1], []byte(tokens.egress)) || bytes.Contains(docker.inputs[1], []byte("REAL-ACCESS-TOKEN-NEEDLE")) {
 		t.Fatalf("broker bearer was not confined to the paired-egress private seed stream")
+	}
+	for _, input := range docker.inputs[2:] {
+		if bytes.Contains(input, []byte(tokens.agent)) || bytes.Contains(input, []byte(tokens.egress)) || bytes.Contains(input, []byte("REAL-ACCESS-TOKEN-NEEDLE")) {
+			t.Fatal("credential entered lifecycle observation input")
+		}
 	}
 	for _, expected := range []string{"git-host-credentials", "checkout-repos", "github.example/org/repo", "NVT-PLACEHOLDER-NOT-A-KEY", "prepared-provider-metadata.json", "Example Bot", `"resume":{"args":["resume","--last"],"command":"agent-cli"}`} {
 		if !bytes.Contains(docker.inputs[0], []byte(expected)) {
@@ -469,6 +495,88 @@ func TestDockerBackendInspectionClassifiesLifecycleWithoutDiagnostics(t *testing
 	}
 }
 
+func TestDockerBackendMatchesOnlyConfiguredLifecycleEvents(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+	if _, err := backend.Ensure(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	docker.lifecycleCursor = "v1:1:2:40"
+	docker.lifecycleEvents = []string{"plugin.unrelated.ready"}
+	observation, err := backend.Inspect(context.Background(), desired)
+	if err != nil || !observation.Ready || observation.TerminalTarget != "" || observation.LifecycleCursor != docker.lifecycleCursor {
+		t.Fatalf("unrelated event = %#v, %v", observation, err)
+	}
+	desired.LifecycleCursor = observation.LifecycleCursor
+
+	for _, item := range []struct {
+		name   string
+		event  string
+		target controller.State
+	}{{"complete", "plugin.work.done", controller.StateCompleted}, {"fail", "plugin.work.failed", controller.StateFailed}} {
+		t.Run(item.name, func(t *testing.T) {
+			docker.lifecycleCursor = "v1:1:2:80"
+			docker.lifecycleEvents = []string{"plugin.unrelated.ready", item.event}
+			result, observeErr := backend.Inspect(context.Background(), desired)
+			if observeErr != nil || result.Ready || result.TerminalTarget != item.target || result.LifecycleCursor != docker.lifecycleCursor {
+				t.Fatalf("matched event = %#v, %v", result, observeErr)
+			}
+		})
+	}
+}
+
+func TestLifecycleReaderAdvancesOpaqueCursorWithoutReturningPayloads(t *testing.T) {
+	stateDir := t.TempDir()
+	eventDir := filepath.Join(stateDir, "agentd")
+	if err := os.Mkdir(eventDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join(eventDir, "events.jsonl")
+	const secretNeedle = "LIFECYCLE-PAYLOAD-SECRET-NEEDLE"
+	first := `{"event":"plugin.event","plugin_event":"plugin.unrelated.ready","payload":{"value":"` + secretNeedle + `"}}` + "\n" +
+		`{"event":"plugin.event","plugin_event":"plugin.work.done","payload":{"ignored":true}}` + "\n"
+	if err := os.WriteFile(eventPath, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response, raw := runLifecycleReader(t, stateDir, "")
+	if strings.Contains(string(raw), secretNeedle) || !reflect.DeepEqual(response.Events, []string{"plugin.unrelated.ready", "plugin.work.done"}) || response.Cursor == "" {
+		t.Fatalf("first lifecycle read = %#v raw=%s", response, raw)
+	}
+	if err := os.WriteFile(eventPath, append([]byte(first), []byte(`{"event":"plugin.event","plugin_event":"plugin.work.failed","payload":{}}`+"\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := runLifecycleReader(t, stateDir, response.Cursor)
+	if !reflect.DeepEqual(next.Events, []string{"plugin.work.failed"}) || next.Cursor == response.Cursor {
+		t.Fatalf("incremental lifecycle read = %#v", next)
+	}
+	if err := os.WriteFile(eventPath, []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("python3", "-c", lifecycleEventReader)
+	command.Env = append(os.Environ(), "NVT_STATE_DIR="+stateDir)
+	command.Stdin = strings.NewReader(`{"cursor":""}`)
+	if output, err := command.CombinedOutput(); err == nil || bytes.Contains(output, []byte("not-json")) {
+		t.Fatalf("malformed lifecycle log did not fail closed: %v %s", err, output)
+	}
+}
+
+func runLifecycleReader(t *testing.T, stateDir, cursor string) (lifecycleReaderResponse, []byte) {
+	t.Helper()
+	request, _ := json.Marshal(map[string]string{"cursor": cursor})
+	command := exec.Command("python3", "-c", lifecycleEventReader)
+	command.Env = append(os.Environ(), "NVT_STATE_DIR="+stateDir)
+	command.Stdin = bytes.NewReader(request)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("lifecycle reader: %v", err)
+	}
+	var response lifecycleReaderResponse
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatal(err)
+	}
+	return response, output
+}
+
 func TestDockerBackendInterruptedDeleteRetriesToCompleteCleanup(t *testing.T) {
 	backend, docker, run, _ := testBackend(t)
 	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("6", 64), DeleteRequested: true}
@@ -493,6 +601,52 @@ func TestDockerBackendInterruptedDeleteRetriesToCompleteCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(names.composeFile)); !os.IsNotExist(err) {
 		t.Fatalf("retry left generated state: %v", err)
+	}
+}
+
+func TestDockerBackendExpectedOwnershipConflictKeepsCleanupRetryable(t *testing.T) {
+	for _, item := range []struct {
+		name       string
+		objectKind string
+		selectName func(resourceNames) string
+		persistent bool
+		explicit   bool
+	}{
+		{name: "network-partial-labels", objectKind: "network", selectName: func(names resourceNames) string { return names.internalNet }, explicit: true},
+		{name: "disposable-volume-mismatched-label", objectKind: "volume", selectName: func(names resourceNames) string { return names.agentConfig }},
+		{name: "explicit-persistent-volume-partial-labels", objectKind: "volume", selectName: func(names resourceNames) string { return names.workspace }, persistent: true, explicit: true},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			backend, docker, run, _ := testBackend(t)
+			if item.persistent {
+				run.Persistence.Workspace = true
+				run.Retention = "persistent"
+				if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
+					t.Fatal(err)
+				}
+			}
+			desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("6", 64), DeleteRequested: item.explicit}
+			if _, err := backend.Ensure(context.Background(), desired); err != nil {
+				t.Fatal(err)
+			}
+			names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+			objectName := item.selectName(names)
+			key := item.objectKind + ":" + objectName
+			conflicting := cloneLabels(docker.objects[key])
+			delete(conflicting, digestLabel)
+			conflicting[ownerLabel] = "different-owner"
+			docker.objects[key] = conflicting
+
+			if err := backend.Delete(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+				t.Fatalf("ownership conflict cleanup = %v", err)
+			}
+			if retained, exists := docker.objects[key]; !exists || !reflect.DeepEqual(retained, conflicting) {
+				t.Fatalf("conflicting expected object changed: %#v", retained)
+			}
+			if _, err := os.Stat(names.composeFile); err != nil {
+				t.Fatalf("retryable cleanup removed deterministic state: %v", err)
+			}
+		})
 	}
 }
 
@@ -877,7 +1031,7 @@ func testMediatedRun(t *testing.T) resolvedrun.ResolvedAgentRun {
 		}},
 		Egress:      resolvedrun.Egress{Mode: "mediated", Transport: "transparent", Enforced: true, ProxyProvider: "provider-a", PairedEgressRequired: true, AllowInsecureBroker: true},
 		Persistence: resolvedrun.Persistence{}, Retention: "disposable", TTL: resolvedrun.TTL{ActiveSeconds: 300, FailedSeconds: 60},
-		Lifecycle: resolvedrun.Lifecycle{CompleteOn: []string{"work.done"}, FailOn: []string{"work.failed"}},
+		Lifecycle: resolvedrun.Lifecycle{CompleteOn: []string{"plugin.work.done"}, FailOn: []string{"plugin.work.failed"}},
 		Execution: resolvedrun.ExecutionBackend{Name: "docker", Kind: "container"},
 	}
 	if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
