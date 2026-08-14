@@ -205,8 +205,10 @@ The backend creates both per-run networks itself from deterministic `/28`
 candidates within the administrator-owned run-network pool. Bounded probing
 handles occupied subnets, while an existing named network must retain exact
 ownership labels and a subnet inside the configured pool. The pool must not
-overlap the reserved `172.30.0.0/15` DinD range and must contain at least two
-subnets per configured active run. Compose's default network is explicitly
+overlap the reserved `172.30.0.0/15` DinD range or any administrator-declared
+IPv4 protected CIDR, and must contain at least two subnets per configured
+active run. Mixed IPv4/IPv6 protected lists remain supported; IPv6 ranges do
+not conflict with the IPv4 run pool. Compose's default network is explicitly
 mapped to the owned internal network, so Compose cannot create an unmanaged
 project network.
 
@@ -295,9 +297,9 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE` | `/broker-state/local-controller.key` | private regular file, 32-4096 bytes, no group/other permissions |
 | `NVT_LOCAL_CONTROLLER_OWNER` | `nvt-local-controller` | stable bounded Docker ownership label; not the per-process lease identity |
 | `NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK` | `agents-proxy` | pre-created proxy/broker network |
-| `NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL` | `100.64.0.0/10` | canonical IPv4 pool, at least two `/28`s per active run, disjoint from `172.30.0.0/15` |
+| `NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL` | `100.64.0.0/10` | canonical IPv4 pool, at least two `/28`s per active run, disjoint from `172.30.0.0/15` and every protected IPv4 CIDR |
 | `NVT_LOCAL_CONTROLLER_PROXY_PORT` | `4090` | public local proxy port recorded in generated workspace guidance |
-| `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded administrator-owned protected CIDR list, validated by DinD before transparent capture |
+| `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded canonical mixed-family prefixes, validated at startup and by DinD; IPv4 ranges must be disjoint from the run-network pool |
 | `NVT_LOCAL_CONTROLLER_DIND_IMAGE` | `nvt-dind:latest` | administrator image |
 | `NVT_LOCAL_CONTROLLER_EGRESSD_IMAGE` | `nvt-egressd:latest` | administrator image |
 | `NVT_LOCAL_CONTROLLER_CAPTURED_IMAGE` | `nvt-captured:latest` | administrator image |

@@ -2,13 +2,14 @@ package controller
 
 import (
 	"net"
-	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/networkpolicy"
 )
 
 type Config struct {
@@ -110,16 +111,11 @@ func ValidateConfig(config Config) error {
 		return ErrInvalidRequest
 	}
 	brokerURL, brokerURLErr := url.Parse(config.BrokerURL)
-	runNetworkPool, runNetworkPoolErr := netip.ParsePrefix(config.RunNetworkPool)
-	runNetworkCapacity := 0
-	if runNetworkPoolErr == nil && runNetworkPool.Addr().Is4() && runNetworkPool == runNetworkPool.Masked() && runNetworkPool.Bits() >= 8 && runNetworkPool.Bits() <= 27 {
-		runNetworkCapacity = 1 << (28 - runNetworkPool.Bits())
-	}
-	managedPool := netip.MustParsePrefix("172.30.0.0/15")
+	runNetworkPolicy, runNetworkPolicyErr := networkpolicy.ValidateRunNetworkPolicy(config.RunNetworkPool, config.ProtectedCIDRs)
 	if config.StatePath == "" || !strings.HasSuffix(config.StatePath, ".sqlite3") || strings.ContainsAny(config.StatePath, "\x00\r\n") ||
 		!filepath.IsAbs(config.StatePath) || filepath.Clean(config.StatePath) != config.StatePath || filepath.Dir(config.StatePath) == string(filepath.Separator) ||
 		config.MaxActiveRuns < 1 || config.MaxActiveRuns > 10_000 ||
-		runNetworkCapacity < config.MaxActiveRuns*2 || runNetworkPool.Overlaps(managedPool) ||
+		runNetworkPolicyErr != nil || runNetworkPolicy.SubnetCapacity < config.MaxActiveRuns*2 ||
 		config.MaxClaimLease < time.Second || config.MaxClaimLease > time.Hour ||
 		config.SweepInterval < time.Second || config.SweepInterval > time.Minute ||
 		config.ReconcileInterval < time.Second || config.ReconcileInterval > time.Minute ||

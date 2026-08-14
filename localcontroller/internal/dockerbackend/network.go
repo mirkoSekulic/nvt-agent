@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+
+	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/networkpolicy"
 )
 
 const (
-	runNetworkPrefixBits = 28
+	runNetworkPrefixBits = networkpolicy.RunNetworkPrefixBits
 	maxNetworkProbes     = 128
 )
 

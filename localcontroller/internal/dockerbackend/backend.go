@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/controller"
+	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/networkpolicy"
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 	"gopkg.in/yaml.v3"
 )
@@ -89,14 +89,13 @@ func prepareRunsDir(path string) error {
 }
 
 func validateConfig(config Config) error {
-	runNetworkPool, runNetworkPoolErr := netip.ParsePrefix(config.RunNetworkPool)
-	managedPool := netip.MustParsePrefix("172.30.0.0/15")
+	_, runNetworkPolicyErr := networkpolicy.ValidateRunNetworkPolicy(config.RunNetworkPool, config.ProtectedCIDRs)
 	if config.DockerHost == "" || config.RunsDir == "" || !filepath.IsAbs(config.RunsDir) || filepath.Clean(config.RunsDir) != config.RunsDir ||
 		config.BrokerAgentsPath == "" || !filepath.IsAbs(config.BrokerAgentsPath) || config.IdentityKeyPath == "" || !filepath.IsAbs(config.IdentityKeyPath) ||
 		config.BrokerCAFile != "" && !filepath.IsAbs(config.BrokerCAFile) ||
 		config.Owner == "" || len(config.Owner) > 63 || config.ExternalNetwork == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 || config.DindImage == "" || config.EgressdImage == "" ||
 		config.CapturedImage == "" || config.SeedImage == "" || config.OperationTimeout < time.Second || config.OperationTimeout > 5*time.Minute ||
-		runNetworkPoolErr != nil || !runNetworkPool.Addr().Is4() || runNetworkPool != runNetworkPool.Masked() || runNetworkPool.Bits() < 8 || runNetworkPool.Bits() > 27 || runNetworkPool.Overlaps(managedPool) ||
+		runNetworkPolicyErr != nil ||
 		!validDockerName(config.ExternalNetwork) || !validImage(config.DindImage) || !validImage(config.EgressdImage) || !validImage(config.CapturedImage) || !validImage(config.SeedImage) ||
 		strings.ContainsAny(config.Owner+config.ProtectedCIDRs, "\x00\r\n") {
 		return errors.New("docker backend configuration invalid")

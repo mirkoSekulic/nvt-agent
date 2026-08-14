@@ -19,6 +19,11 @@ func TestValidateConfigBounds(t *testing.T) {
 	if err := ValidateConfig(valid); err != nil {
 		t.Fatal(err)
 	}
+	mixedFamily := valid
+	mixedFamily.ProtectedCIDRs = "10.0.0.0/8 fd00:1234::/48"
+	if err := ValidateConfig(mixedFamily); err != nil {
+		t.Fatalf("mixed-family protected CIDRs rejected: %v", err)
+	}
 	for name, mutate := range map[string]func(*Config){
 		"bind":  func(value *Config) { value.Bind = "7480" },
 		"state": func(value *Config) { value.StatePath = "/state/data.db" },
@@ -30,6 +35,8 @@ func TestValidateConfigBounds(t *testing.T) {
 		"claim lease":                          func(value *Config) { value.MaxClaimLease = 0 },
 		"claim shorter than backend operation": func(value *Config) { value.MaxClaimLease = value.BackendOperationTimeout + 29*time.Second },
 		"managed network overlap":              func(value *Config) { value.RunNetworkPool = "172.30.0.0/15" },
+		"protected network overlap":            func(value *Config) { value.ProtectedCIDRs = "100.64.0.0/10" },
+		"malformed protected network":          func(value *Config) { value.ProtectedCIDRs = "not-a-prefix" },
 		"network capacity":                     func(value *Config) { value.RunNetworkPool = "100.64.0.0/27" },
 		"sweep":                                func(value *Config) { value.SweepInterval = 0 },
 		"reconcile":                            func(value *Config) { value.ReconcileInterval = 0 },

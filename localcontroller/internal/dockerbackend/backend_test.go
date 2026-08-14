@@ -408,6 +408,32 @@ func TestLocalBackendAcceptsOnlyNetworkConfinedEnforcedMediatedTransport(t *test
 	}
 }
 
+func TestDockerBackendConfigValidatesRunPoolAgainstProtectedCIDRs(t *testing.T) {
+	directory := t.TempDir()
+	valid := Config{
+		DockerHost: "unix:///var/run/docker.sock", RunsDir: filepath.Join(directory, "runs"), BrokerURL: "http://broker:7347",
+		BrokerAgentsPath: filepath.Join(directory, "agents.yaml"), IdentityKeyPath: filepath.Join(directory, "identity.key"),
+		Owner: "test-controller", ExternalNetwork: "agents-proxy", RunNetworkPool: "100.64.0.0/10", ProxyPort: 4090,
+		ProtectedCIDRs: "10.0.0.0/8 fd00:1234::/48", DindImage: "nvt-dind:test", EgressdImage: "nvt-egressd:test",
+		CapturedImage: "nvt-captured:test", SeedImage: "nvt-runtime:test", OperationTimeout: 2 * time.Minute,
+	}
+	if err := validateConfig(valid); err != nil {
+		t.Fatalf("non-overlapping mixed-family config rejected: %v", err)
+	}
+	for name, protected := range map[string]string{
+		"malformed": "not-a-prefix",
+		"overlap":   "100.96.0.0/11 fd00:1234::/48",
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			candidate.ProtectedCIDRs = protected
+			if err := validateConfig(candidate); err == nil {
+				t.Fatal("invalid protected CIDR policy accepted")
+			}
+		})
+	}
+}
+
 func TestBrokerRegistryNeverAdoptsOrDeletesCollidingIdentity(t *testing.T) {
 	backend, _, run, _ := testBackend(t)
 	agentID, _ := brokerIDs(run.RunID)
