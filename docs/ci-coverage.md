@@ -8,6 +8,8 @@ precise and every hermetic suite has a clear home.
 - `captured/go.mod` → `network.yml / captured`
 - `egressd/go.mod` → `network.yml / egressd`
 - `gateway/go.mod` → `kubernetes.yml / gateway`
+- `localcontroller/go.mod` → `local-controller.yml / controller`
+- `protocol/localroutes/go.mod` → `local-controller.yml / contract`
 - `hostbundle/go.mod` → `host-bundle.yml / host-bundle`
 - `protocol/guestenrollment/go.mod` → `kubernetes.yml / guest-enrollment`,
   including the real-yamux native workspace contract/conformance package
@@ -128,6 +130,19 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 - `gateway/internal/gateway/server_test.go`
 
+### local controller
+
+- `protocol/localroutes` strict route/readiness metadata contract and bounds →
+  `local-controller.yml / contract`
+- `localcontroller/internal/controller` API-audience separation, scheduling,
+  durable SQLite state, idempotency, concurrency, cancellation, TTL, restart,
+  lifecycle cursor, and secret-safe response tests →
+  `local-controller.yml / controller`
+- `localcontroller/internal/dockerbackend` deterministic rendering, exact
+  ownership, retry/cleanup, gateway availability and identity separation,
+  network isolation, restart/resume, lifecycle observation, and secret-scan
+  tests → `local-controller.yml / controller`
+
 ### producer
 
 - `producers/github-comments/internal/producer/agentrun_test.go`
@@ -172,6 +187,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `nativeegressrelay/image-test.sh` → `images.yml / build` (the coordinated
   non-root relay image contains the static command and no shell, package
   manager, Git, or Go toolchain)
+- `localcontroller/Dockerfile` → `images.yml / build (local-controller)`; the
+  trusted controller binary and its local protocol replacement modules are
+  compiled in the shipped Docker context.
 
 ### native host bundle
 
@@ -267,6 +285,9 @@ The harness and helper scripts are not standalone cases:
 - `kubernetes.yml`: operator, gateway, producer, and Helm/shell coverage
   plus the provider-neutral guest-enrollment and native-workspace yamux
   contract/conformance packages
+- `local-controller.yml`: shared local-route contract plus local-controller
+  API, persistence, reconciliation, Docker ownership, isolation, and cleanup
+  coverage
 - `images.yml`: shipped images, including the coordinated native-egress relay,
   plus local test/reference and fixture images,
   the runtime git-credentials smoke, and the execution-driver host's private

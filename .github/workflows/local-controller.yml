@@ -1,0 +1,68 @@
+name: local-controller
+
+on:
+  push:
+    branches:
+      - main
+      - feat/local-controller
+    paths:
+      - "localcontroller/**"
+      - "protocol/localroutes/**"
+      - "protocol/resolvedrun/**"
+      - "compose.infra.yaml"
+      - "scripts/infra-up.sh"
+      - "tests/runtime/local_controller_compose_test.go"
+      - "docs/ci-coverage.md"
+      - ".github/workflows/local-controller.yml"
+  pull_request:
+    paths:
+      - "localcontroller/**"
+      - "protocol/localroutes/**"
+      - "protocol/resolvedrun/**"
+      - "compose.infra.yaml"
+      - "scripts/infra-up.sh"
+      - "tests/runtime/local_controller_compose_test.go"
+      - "docs/ci-coverage.md"
+      - ".github/workflows/local-controller.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-controller-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: protocol/localroutes/go.mod
+          cache: false
+      - name: Run local route contract tests
+        working-directory: protocol/localroutes
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+  controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: localcontroller/go.mod
+          cache: true
+          cache-dependency-path: |
+            localcontroller/go.sum
+            protocol/localroutes/go.mod
+            protocol/resolvedrun/go.mod
+      - name: Run local controller security and reconciliation tests
+        working-directory: localcontroller
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...

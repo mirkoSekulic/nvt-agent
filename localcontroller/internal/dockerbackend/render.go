@@ -27,23 +27,24 @@ type externalObject struct {
 }
 
 type composeService struct {
-	Image       string                       `yaml:"image"`
-	User        string                       `yaml:"user,omitempty"`
-	Entrypoint  []string                     `yaml:"entrypoint,omitempty"`
-	Command     []string                     `yaml:"command,omitempty"`
-	Environment map[string]string            `yaml:"environment,omitempty"`
-	WorkingDir  string                       `yaml:"working_dir,omitempty"`
-	NetworkMode string                       `yaml:"network_mode,omitempty"`
-	Networks    []string                     `yaml:"networks,omitempty"`
-	Volumes     []string                     `yaml:"volumes,omitempty"`
-	DependsOn   map[string]composeDependency `yaml:"depends_on,omitempty"`
-	Privileged  bool                         `yaml:"privileged,omitempty"`
-	CapAdd      []string                     `yaml:"cap_add,omitempty"`
-	Restart     string                       `yaml:"restart,omitempty"`
-	Labels      map[string]string            `yaml:"labels"`
-	Healthcheck *composeHealthcheck          `yaml:"healthcheck,omitempty"`
-	CPUs        string                       `yaml:"cpus,omitempty"`
-	MemLimit    string                       `yaml:"mem_limit,omitempty"`
+	Image         string                       `yaml:"image"`
+	ContainerName string                       `yaml:"container_name,omitempty"`
+	User          string                       `yaml:"user,omitempty"`
+	Entrypoint    []string                     `yaml:"entrypoint,omitempty"`
+	Command       []string                     `yaml:"command,omitempty"`
+	Environment   map[string]string            `yaml:"environment,omitempty"`
+	WorkingDir    string                       `yaml:"working_dir,omitempty"`
+	NetworkMode   string                       `yaml:"network_mode,omitempty"`
+	Networks      []string                     `yaml:"networks,omitempty"`
+	Volumes       []string                     `yaml:"volumes,omitempty"`
+	DependsOn     map[string]composeDependency `yaml:"depends_on,omitempty"`
+	Privileged    bool                         `yaml:"privileged,omitempty"`
+	CapAdd        []string                     `yaml:"cap_add,omitempty"`
+	Restart       string                       `yaml:"restart,omitempty"`
+	Labels        map[string]string            `yaml:"labels"`
+	Healthcheck   *composeHealthcheck          `yaml:"healthcheck,omitempty"`
+	CPUs          string                       `yaml:"cpus,omitempty"`
+	MemLimit      string                       `yaml:"mem_limit,omitempty"`
 }
 
 const transparentInitScript = `exclude_v4=""
@@ -106,6 +107,7 @@ type exposeRoute struct {
 }
 
 func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest string, names resourceNames) ([]byte, error) {
+	config = withRouteDefaults(config)
 	if run.Egress.Mode == "mediated" && run.Egress.Enforced && run.Egress.Transport != "transparent" {
 		return nil, errors.New("enforced local transport unsupported")
 	}
@@ -141,23 +143,22 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 			dockerEnvironment["NVT_DIND_KERNEL_LOG_DEVICE"] = "true"
 		}
 		services["docker"] = composeService{
-			Image: config.DindImage, Privileged: true, Restart: "unless-stopped", Labels: dockerRouteLabels(labels, names.project, run.RunID, routes),
+			Image: config.DindImage, ContainerName: names.namespace, Privileged: true, Restart: "unless-stopped", Labels: labels,
 			Environment: dockerEnvironment,
 			Command:     []string{"--host=unix:///var/run/docker.sock", "--host=tcp://127.0.0.1:2375", "--tls=false"},
 			Volumes:     []string{"workspace:/workspace", "docker-data:/var/lib/nvt-dind"},
-			Networks:    []string{"agents-proxy", "run-internal", "egress-private"},
+			Networks:    []string{"run-internal", "egress-private"},
 			Healthcheck: &composeHealthcheck{Test: []string{"CMD-SHELL", "docker info >/dev/null 2>&1"}, Interval: "2s", Timeout: "2s", Retries: 30},
 		}
 	} else {
 		services["network"] = composeService{
-			Image: config.SeedImage, Entrypoint: []string{"sh", "-ec"}, Command: []string{"trap 'exit 0' TERM INT; while sleep 3600; do :; done"},
-			Networks: []string{"agents-proxy", "run-internal", "egress-private"}, Restart: "unless-stopped",
-			Labels: dockerRouteLabels(labels, names.project, run.RunID, routes),
+			Image: config.SeedImage, ContainerName: names.namespace, Entrypoint: []string{"sh", "-ec"}, Command: []string{"trap 'exit 0' TERM INT; while sleep 3600; do :; done"},
+			Networks: []string{"run-internal", "egress-private"}, Restart: "unless-stopped", Labels: labels,
 		}
 	}
 	agentEnvironment := map[string]string{
 		"NVT_WORKSPACE": "/workspace", "NVT_AGENT_CONFIG_FILE": "/nvt-config/agent.json",
-		"AGENT_HOST": run.RunID + ".agent.localhost", "NVT_PROXY_PORT": strconv.Itoa(config.ProxyPort),
+		"AGENT_HOST": run.RunID + "." + config.RouteBaseDomain, "NVT_PROXY_PORT": strconv.Itoa(config.ProxyPort),
 	}
 	if run.Runtime.Docker != nil {
 		agentEnvironment["DOCKER_HOST"] = "tcp://127.0.0.1:2375"
@@ -441,7 +442,7 @@ func namesFor(config Config, runID, digest string) resourceNames {
 		project: project, composeFile: filepath.Join(config.RunsDir, runID, "compose.yaml"),
 		agentConfig: project + "-agent-config", egressPrivate: project + "-egress-private", egressPublic: project + "-egress-public",
 		workspace: project + "-workspace", home: project + "-home", dockerData: project + "-docker-data",
-		internalNet: project + "-internal", privateNet: project + "-private",
+		internalNet: project + "-internal", privateNet: project + "-private", namespace: project + "-namespace",
 	}
 }
 
@@ -453,24 +454,3 @@ func shortDigest(value string) string {
 }
 
 func sha256Bytes(value []byte) [32]byte { return sha256.Sum256(value) }
-
-func dockerRouteLabels(base map[string]string, project, runID string, routes []exposeRoute) map[string]string {
-	labels := make(map[string]string, len(base)+6+len(routes)*4)
-	for key, value := range base {
-		labels[key] = value
-	}
-	labels["traefik.enable"] = "true"
-	labels["traefik.docker.network"] = "agents-proxy"
-	labels["traefik.http.routers."+project+".rule"] = "Host(`" + runID + ".agent.localhost`)"
-	labels["traefik.http.routers."+project+".entrypoints"] = "web"
-	labels["traefik.http.routers."+project+".service"] = project
-	labels["traefik.http.services."+project+".loadbalancer.server.port"] = "4090"
-	for _, route := range routes {
-		router := project + "-" + route.Name
-		labels["traefik.http.routers."+router+".rule"] = "Host(`" + route.Name + "." + runID + ".agent.localhost`)"
-		labels["traefik.http.routers."+router+".entrypoints"] = "web"
-		labels["traefik.http.routers."+router+".service"] = router
-		labels["traefik.http.services."+router+".loadbalancer.server.port"] = strconv.Itoa(route.TargetPort)
-	}
-	return labels
-}

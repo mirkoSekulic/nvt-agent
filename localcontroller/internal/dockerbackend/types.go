@@ -23,6 +23,9 @@ type Config struct {
 	ExternalNetwork  string
 	RunNetworkPool   string
 	ProxyPort        int
+	RouteBaseDomain  string
+	RoutePathPrefix  string
+	GatewayContainer string
 	ProtectedCIDRs   string
 	DindImage        string
 	EgressdImage     string
@@ -54,6 +57,7 @@ type resourceNames struct {
 	dockerData    string
 	internalNet   string
 	privateNet    string
+	namespace     string
 }
 
 type ownedLabels struct {

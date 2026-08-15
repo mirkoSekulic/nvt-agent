@@ -9,6 +9,38 @@ defaults to deny whenever authentication is enabled.
 `auth.mode=none` remains the default and preserves unrestricted access to all
 routable AgentRuns, including legacy runs.
 
+## Optional local runs
+
+The local Compose control plane enables the gateway as the only public route
+for controller-owned local runs. The gateway consumes bounded
+[`nvt.local-routes/v1`](../protocol/local-routes.md) metadata over the private
+control-plane network. The trusted local controller exact-label verifies the
+fixed gateway container and attaches it to each exact-owned run network. Route
+metadata supplies only a bounded internal DNS target and port; it never accepts
+an upstream URL, credential, provider, or browser-selected proxy target.
+
+Stable session routes are available at `/agents/<run-id>/` and
+`<run-id>.agent.localhost`; named application exposures use
+`<name>.<run-id>.agent.localhost` without base-path rewriting. Session paths
+preserve WebSocket upgrades and strip only the stable run prefix. Public host
+and path routes terminate at the gateway. Run agents do not join the shared
+proxy bridge or sibling run networks, and no private Traefik entrypoint is
+reachable from them; the gateway owner check therefore remains the only route
+to another run. When authentication is enabled, listing and routing use the
+same exact issuer+immutable-subject owner policy as Kubernetes AgentRuns.
+The local Compose router also forwards the gateway-owned `/oauth2` endpoints;
+repository and run traffic cannot register or override those routes.
+
+Local route support is opt-in through `NVT_GATEWAY_LOCAL_RUNS_ENABLED`; the
+controller origin, base domain, path prefix, and complete request timeout are
+startup-validated. `NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE` names the private,
+read-only route-audience bearer; the gateway sends it only to the configured
+controller origin and cannot use it for scheduling or raw run management.
+`NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES`
+is valid only with local runs and is used by the Compose-local gateway. With
+local support omitted, Kubernetes discovery, dashboards, authorization, and
+proxying are unchanged.
+
 ## Optional credential portal link
 
 `NVT_GATEWAY_CREDENTIAL_PORTAL_URL` (or `--credential-portal-url`) adds one

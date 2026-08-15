@@ -28,6 +28,7 @@ type fakeDocker struct {
 	mu              sync.Mutex
 	objects         map[string]map[string]string
 	objectSubnets   map[string]string
+	networkMembers  map[string]map[string]bool
 	containers      map[string]map[string]string
 	commands        [][]string
 	inputs          [][]byte
@@ -36,6 +37,8 @@ type fakeDocker struct {
 	agentStatus     string
 	agentExitCode   int
 	agentOOM        bool
+	gatewayStatus   string
+	gatewayHealth   string
 	failComposeUp   int
 	failRemove      string
 	lifecycleEvents []string
@@ -44,7 +47,10 @@ type fakeDocker struct {
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{objects: map[string]map[string]string{"network:agents-proxy": {}}, objectSubnets: map[string]string{}, containers: map[string]map[string]string{}}
+	return &fakeDocker{
+		objects: map[string]map[string]string{"network:agents-proxy": {}}, objectSubnets: map[string]string{}, networkMembers: map[string]map[string]bool{},
+		containers: map[string]map[string]string{"nvt-local-gateway": {localGatewayLabel: "true"}},
+	}
 }
 
 func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -58,6 +64,9 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	}
 	if len(arguments) == 0 {
 		return nil, errors.New("missing command")
+	}
+	if arguments[0] == "info" {
+		return []byte("27.0.0\n"), nil
 	}
 	if arguments[0] == "compose" {
 		return docker.compose(arguments)
@@ -113,11 +122,18 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		if labels, exists := docker.containers[id]; exists {
 			if contains(arguments, "{{json .State}}") {
 				status := docker.agentStatus
+				health := ""
+				if id == "nvt-local-gateway" {
+					status = docker.gatewayStatus
+					health = docker.gatewayHealth
+				}
 				if status == "" {
 					status = "running"
 				}
 				state := map[string]any{"Running": status != "stopped", "OOMKilled": docker.agentOOM, "ExitCode": docker.agentExitCode}
-				if status == "healthy" || status == "starting" || status == "unhealthy" {
+				if health != "" {
+					state["Health"] = map[string]any{"Status": health}
+				} else if id != "nvt-local-gateway" && (status == "healthy" || status == "starting" || status == "unhealthy") {
 					state["Health"] = map[string]any{"Status": status}
 				}
 				encoded, _ := json.Marshal(state)
@@ -183,6 +199,22 @@ func (docker *fakeDocker) compose(arguments []string) ([]byte, error) {
 func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
 	kind := arguments[0]
 	action := arguments[1]
+	if kind == "network" && (action == "connect" || action == "disconnect") {
+		network := arguments[len(arguments)-2]
+		container := arguments[len(arguments)-1]
+		if _, exists := docker.objects["network:"+network]; !exists {
+			return nil, errors.New("missing")
+		}
+		if action == "connect" {
+			if docker.networkMembers[network] == nil {
+				docker.networkMembers[network] = map[string]bool{}
+			}
+			docker.networkMembers[network][container] = true
+		} else if docker.networkMembers[network] != nil {
+			delete(docker.networkMembers[network], container)
+		}
+		return nil, nil
+	}
 	if action == "ls" {
 		values := []string{}
 		for key, labels := range docker.objects {
@@ -200,6 +232,14 @@ func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
 		labels, exists := docker.objects[key]
 		if !exists {
 			return nil, errors.New("missing")
+		}
+		if contains(arguments, "{{json .Containers}}") {
+			members := map[string]dockerNetworkEndpoint{}
+			for container := range docker.networkMembers[name] {
+				members[container] = dockerNetworkEndpoint{Name: container}
+			}
+			encoded, _ := json.Marshal(members)
+			return append(encoded, '\n'), nil
 		}
 		if contains(arguments, "{{json .IPAM.Config}}") {
 			encoded, _ := json.Marshal([]map[string]string{{"Subnet": docker.objectSubnets[key]}})
@@ -226,6 +266,7 @@ func (docker *fakeDocker) object(arguments []string) ([]byte, error) {
 		}
 		delete(docker.objects, key)
 		delete(docker.objectSubnets, key)
+		delete(docker.networkMembers, name)
 		return nil, nil
 	default:
 		return nil, errors.New("unsupported object command")
@@ -744,6 +785,9 @@ func TestDockerBackendExpectedOwnershipConflictKeepsCleanupRetryable(t *testing.
 			if retained, exists := docker.objects[key]; !exists || !reflect.DeepEqual(retained, conflicting) {
 				t.Fatalf("conflicting expected object changed: %#v", retained)
 			}
+			if item.objectKind == "network" && !docker.networkMembers[objectName][backend.config.GatewayContainer] {
+				t.Fatal("cleanup detached the gateway from an ownership-conflicting network")
+			}
 			if _, err := os.Stat(names.composeFile); err != nil {
 				t.Fatalf("retryable cleanup removed deterministic state: %v", err)
 			}
@@ -1025,11 +1069,13 @@ func TestDockerStackPreservesBoundedAgentHTTPExposures(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"NVT_EXPOSED_HTTP_ROUTES_JSON", `[{"name":"app","targetPort":3000,"source":"agent"}`,
-		"app.docker-run.agent.localhost", `loadbalancer.server.port: "3000"`, "api.docker-run.agent.localhost", `loadbalancer.server.port: "8080"`,
 	} {
 		if !bytes.Contains(plan, []byte(expected)) {
 			t.Fatalf("exposure stack omitted %q:\n%s", expected, plan)
 		}
+	}
+	if bytes.Contains(plan, []byte("traefik.http.")) || bytes.Contains(plan, []byte("traefik.enable")) {
+		t.Fatalf("agent namespace retained a directly addressable proxy route:\n%s", plan)
 	}
 	for _, invalid := range []json.RawMessage{
 		json.RawMessage(`{"runtime":{"command":"agent-cli"},"plugins":[],"expose":{"http":[{"name":"Bad","targetPort":3000}]}}`),

@@ -1,6 +1,7 @@
 FROM golang:1.25 AS build
 
 WORKDIR /src
+COPY protocol/localroutes ./protocol/localroutes
 COPY protocol/resolvedrun ./protocol/resolvedrun
 COPY localcontroller ./localcontroller
 WORKDIR /src/localcontroller

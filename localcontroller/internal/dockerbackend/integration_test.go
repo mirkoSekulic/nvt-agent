@@ -41,6 +41,12 @@ func TestDockerBackendRealEngineSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = boundary.Run(context.Background(), nil, "network", "rm", network) }()
+	gatewayName := "nvt-lc-gateway-" + suffix
+	if _, err := boundary.Run(ctx, nil, "run", "-d", "--name", gatewayName, "--network", network,
+		"--label", localGatewayLabel+"=true", "--entrypoint", "sh", environmentOr("NVT_RUNTIME_IMAGE", "nvt-agent-runtime:latest"), "-c", "sleep 300"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = boundary.Run(context.Background(), nil, "rm", "-f", gatewayName) }()
 
 	repositoryRoot := smokeRepositoryRoot(t)
 	directory, err := os.MkdirTemp(repositoryRoot, ".nvt-local-controller-smoke-")
@@ -109,7 +115,8 @@ providers:
 		DockerHost: boundary.host, RunsDir: filepath.Join(directory, "runs"), BrokerURL: brokerURL,
 		BrokerAgentsPath: agents, IdentityKeyPath: filepath.Join(directory, "unused-key"), Owner: "smoke-controller",
 		ExternalNetwork: network, RunNetworkPool: "100.64.0.0/10", ProxyPort: 4090, ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16", DindImage: environmentOr("NVT_DIND_IMAGE", "nvt-dind:latest"),
-		EgressdImage: environmentOr("NVT_EGRESSD_IMAGE", "nvt-egressd:latest"), CapturedImage: environmentOr("NVT_CAPTURED_IMAGE", "nvt-captured:latest"),
+		GatewayContainer: gatewayName,
+		EgressdImage:     environmentOr("NVT_EGRESSD_IMAGE", "nvt-egressd:latest"), CapturedImage: environmentOr("NVT_CAPTURED_IMAGE", "nvt-captured:latest"),
 		SeedImage: environmentOr("NVT_RUNTIME_IMAGE", "nvt-agent-runtime:latest"), OperationTimeout: 3 * time.Minute,
 	}
 	recordedBoundary := &recordingBoundary{delegate: boundary}
@@ -118,6 +125,7 @@ providers:
 		t.Fatal(err)
 	}
 	assertRealEngineDeclaredServiceCollisionPreserved(t, ctx, boundary, backend, backendConfig)
+	assertRealEngineLocalRouteIsolation(t, ctx, boundary, backend, backendConfig, network, gatewayName)
 	run := testMediatedRun(t)
 	run.RunID = "mediated-engine-smoke"
 	run.Image = backendConfig.SeedImage
@@ -163,9 +171,13 @@ providers:
 	}
 	assertBackendCreatedNonOverlappingNetworks(t, ctx, boundary, backendConfig, ownedNames)
 	agentID := ownedAgentContainer(t, ctx, boundary, ownedLabels)
-	response, err := boundary.Run(ctx, nil, "exec", agentID, "curl", "-fsS", "https://api.example.test/credential-proof")
+	// The synthetic upstream's Docker DNS alias is intentionally reachable only
+	// by egressd on agents-proxy. Give the isolated agent an inert public-shaped
+	// destination so transparent capture, rather than a shared Docker network,
+	// remains the only path to the provider.
+	response, err := boundary.Run(ctx, nil, "exec", agentID, "curl", "-fsS", "--resolve", "api.example.test:443:198.51.100.1", "https://api.example.test/credential-proof")
 	if err != nil || !bytes.Contains(response, []byte(`"credential_match":true`)) || bytes.Contains(response, []byte(`"placeholder_seen":true`)) {
-		curlDiagnostics, _ := boundary.Run(ctx, nil, "exec", agentID, "sh", "-c", "curl -v https://api.example.test/credential-proof 2>&1 || true")
+		curlDiagnostics, _ := boundary.Run(ctx, nil, "exec", agentID, "sh", "-c", "curl -v --resolve api.example.test:443:198.51.100.1 https://api.example.test/credential-proof 2>&1 || true")
 		ownedIDs, _ := boundary.Run(ctx, nil, "ps", "-aq", "--filter", "label="+ownerLabel+"="+backendConfig.Owner)
 		diagnostics := []byte{}
 		for _, id := range strings.Fields(string(ownedIDs)) {
@@ -227,6 +239,78 @@ providers:
 	}
 	if _, err := os.Stat(filepath.Dir(ownedNames.composeFile)); !os.IsNotExist(err) {
 		t.Fatalf("real lifecycle cleanup retained generated state: %v", err)
+	}
+}
+
+func assertRealEngineLocalRouteIsolation(t *testing.T, ctx context.Context, boundary CommandBoundary, backend *Backend, config Config, externalNetwork, gatewayName string) {
+	t.Helper()
+	proxyName := "nvt-lc-private-proxy-" + strconv.Itoa(os.Getpid())
+	if _, err := boundary.Run(ctx, nil, "run", "-d", "--name", proxyName, "--network", externalNetwork, "--network-alias", "proxy",
+		"-e", "ECHO_LISTEN=:8081", environmentOr("NVT_ECHO_IMAGE", "nvt-smoke-echo:test")); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = boundary.Run(context.Background(), nil, "rm", "-f", proxyName) }()
+
+	desiredRuns := make([]controller.BackendRun, 0, 2)
+	for index, runID := range []string{"direct-isolation-a", "direct-isolation-b"} {
+		run := testMediatedRun(t)
+		run.RunID, run.Image, run.Runtime.Docker = runID, config.SeedImage, nil
+		run.AgentConfig = []byte(`{"runtime":{"command":"bash","args":["-lc","exec sleep 300"]},"plugins":[]}`)
+		run.Repositories, run.CredentialProviders, run.Broker.Grants = nil, nil, nil
+		run.Egress = resolvedrun.Egress{Mode: "direct"}
+		run.Persistence = resolvedrun.Persistence{}
+		run.Retention = "disposable"
+		if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
+			t.Fatal(err)
+		}
+		desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat(strconv.Itoa(index+1), 64), DeleteRequested: true}
+		if observation, err := backend.Ensure(ctx, desired); err != nil || !observation.Ready {
+			t.Fatalf("direct isolation run %s = %#v, %v", runID, observation, err)
+		}
+		desiredRuns = append(desiredRuns, desired)
+	}
+	defer func() {
+		for _, desired := range desiredRuns {
+			if err := backend.Delete(context.Background(), desired); err != nil {
+				t.Errorf("direct isolation cleanup %s: %v", desired.Resolved.RunID, err)
+			}
+		}
+	}()
+
+	first := desiredRuns[0]
+	second := desiredRuns[1]
+	firstAgent := ownedAgentContainer(t, ctx, boundary, ownedLabels{Owner: config.Owner, RunID: first.Resolved.RunID, Digest: first.SnapshotDigest})
+	secondNames := namesFor(config, second.Resolved.RunID, second.SnapshotDigest)
+	secondTarget := secondNames.namespace
+	secondAddress := containerIPAddress(t, ctx, boundary, secondTarget, secondNames.internalNet)
+	proxyAddress := containerIPAddress(t, ctx, boundary, proxyName, externalNetwork)
+	attempts := []struct {
+		name       string
+		target     string
+		hostHeader string
+	}{
+		{name: "sibling", target: "http://" + secondAddress + ":4090/"},
+		{name: "private-entrypoint", target: "http://" + proxyAddress + ":8081/", hostHeader: second.Resolved.RunID + ".agent.localhost"},
+	}
+	for _, attempt := range attempts {
+		arguments := []string{"exec", firstAgent, "curl", "-fsS", "--connect-timeout", "1", "--max-time", "2"}
+		if attempt.hostHeader != "" {
+			arguments = append(arguments, "-H", "Host: "+attempt.hostHeader)
+		}
+		arguments = append(arguments, attempt.target)
+		if _, err := boundary.Run(ctx, nil, arguments...); err == nil {
+			t.Fatalf("run A reached %s target %s", attempt.name, attempt.target)
+		}
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := boundary.Run(ctx, nil, "exec", gatewayName, "curl", "-fsS", "--connect-timeout", "1", "--max-time", "2", "http://"+secondTarget+":4090/"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("trusted gateway could not reach the sibling session endpoint")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

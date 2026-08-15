@@ -14,9 +14,23 @@ make local-controller-build
 `compose.infra.yaml` runs the image with a durable named state volume on the
 internal `local-control-plane` network. The trusted controller alone receives
 the host Docker socket and broker registry/key mount; it has no host port and is
-not reachable from agent containers. Generated agent stacks use named resources
-and never receive the host socket. See [the protocol](../protocol/local-controller.md)
-for the complete API, state, recovery, cleanup, and zero-secret contracts.
+not reachable from agent containers. The network is defense in depth, not the
+API authorization boundary: schedule producers, the gateway route reader, and
+raw administration use distinct startup-loaded private bearers with disjoint
+endpoint audiences. The gateway mounts only its route-reader file; the optional
+administrator bearer is retained by the controller and omission disables raw
+run management. Generated agent stacks use named resources
+and never receive the host socket. The optional local scheduling config maps an
+authenticated producer and allowed principal issuers to exact administrator
+profile/workflow selections; omission disables scheduling. The gateway consumes
+only bounded [local route metadata](../protocol/local-routes.md) and remains the
+browser authorization/proxy boundary. Each run's untrusted network namespace is
+isolated from the shared proxy bridge and sibling runs; the controller attaches
+only the fixed label-verified, running (and, when configured, healthy) gateway
+to each run-internal network. Cleanup uses only that fixed identity proof, so a
+gateway outage cannot strand exact-owned run resources. See
+[the protocol](../protocol/local-controller.md) for the complete API, state,
+recovery, cleanup, and zero-secret contracts.
 
 Run focused checks with:
 

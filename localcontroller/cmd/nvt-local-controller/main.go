@@ -37,6 +37,7 @@ func main() {
 		DockerHost: config.DockerHost, RunsDir: config.RunsDir, BrokerURL: config.BrokerURL, BrokerCAFile: config.BrokerCAFile,
 		BrokerAgentsPath: config.BrokerAgentsPath, IdentityKeyPath: config.IdentityKeyPath, Owner: config.ControllerOwner,
 		ExternalNetwork: config.ExternalNetwork, RunNetworkPool: config.RunNetworkPool, ProxyPort: config.ProxyPort, ProtectedCIDRs: config.ProtectedCIDRs, DindImage: config.DindImage, EgressdImage: config.EgressdImage,
+		RouteBaseDomain: config.RouteBaseDomain, RoutePathPrefix: config.RoutePathPrefix, GatewayContainer: config.GatewayContainer,
 		CapturedImage: config.CapturedImage, SeedImage: config.SeedImage, OperationTimeout: config.BackendOperationTimeout,
 	})
 	if err != nil {
@@ -50,9 +51,21 @@ func main() {
 	if err != nil {
 		logger.Fatal("startup failed reason=invalid-configuration")
 	}
+	scheduler, err := controller.LoadScheduler(config.SchedulingConfigPath, store)
+	if err != nil {
+		logger.Fatal("startup failed reason=scheduling-configuration-unavailable")
+	}
+	authorization, err := controller.LoadAPIAuthorization(config.AdminTokenFile, config.RouteTokenFile, scheduler)
+	if err != nil {
+		logger.Fatal("startup failed reason=api-authorization-unavailable")
+	}
+	handler, err := controller.NewAuthorizedHTTPHandlerWithServices(store, logger, backend.Ready, backend, scheduler, authorization)
+	if err != nil {
+		logger.Fatal("startup failed reason=api-authorization-unavailable")
+	}
 
 	server := &http.Server{
-		Addr: config.Bind, Handler: controller.NewHTTPHandlerWithBackend(store, logger, backend.Ready),
+		Addr: config.Bind, Handler: handler,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second,
 	}

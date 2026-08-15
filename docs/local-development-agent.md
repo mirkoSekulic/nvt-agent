@@ -68,7 +68,7 @@ Provider `allow` is the maximum ceiling. Each agent grant narrows it further.
 ## Build And Start
 
 ```sh
-make runtime-build dind-build broker-build local-controller-build egressd-build captured-build
+make runtime-build dind-build broker-build local-controller-build gateway-build egressd-build captured-build
 make infra-up
 make agent-init NAME=$AGENT
 make agent-grant NAME=$AGENT PROVIDER=$PROVIDER REPO=$REPO
@@ -218,7 +218,7 @@ Ports 4090 and 2375 are reserved.
 ## Troubleshooting
 
 - **Infrastructure image missing:** run
-  `make broker-build local-controller-build && make infra-up`.
+  `make broker-build local-controller-build gateway-build && make infra-up`.
 - **Unauthorized:** verify the grant in `.broker/agents.yaml` and provider
   ceiling in `.broker/broker.yaml`.
 - **GitHub mint failure:** verify App installation, permissions, IDs, and the

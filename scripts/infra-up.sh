@@ -24,5 +24,16 @@ if [ ! -f "$broker_dir/local-controller.key" ]; then
   (umask 077; openssl rand 32 >"$broker_dir/local-controller.key")
 fi
 chmod 600 "$broker_dir/local-controller.key"
+for token_name in local-controller-admin-token local-controller-route-token; do
+  if [ ! -f "$broker_dir/$token_name" ]; then
+    (umask 077; openssl rand -hex 32 >"$broker_dir/$token_name")
+  fi
+  chmod 600 "$broker_dir/$token_name"
+done
+
+# The gateway remains non-root while reading its mode-0600 bind-mounted route
+# credential on native Linux. Docker Desktop also accepts the numeric host UID.
+export NVT_LOCAL_GATEWAY_UID="$(id -u)"
+export NVT_LOCAL_GATEWAY_GID="$(id -g)"
 
 docker compose -f "$repo_root/compose.infra.yaml" up -d

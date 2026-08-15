@@ -14,12 +14,17 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mirkoSekulic/nvt-agent/protocol/localroutes"
 )
 
 type HTTPServer struct {
-	store        *Store
-	logger       *log.Logger
-	backendReady func(context.Context) bool
+	store         *Store
+	logger        *log.Logger
+	backendReady  func(context.Context) bool
+	routeProvider RouteProvider
+	scheduler     *Scheduler
+	authorization *APIAuthorization
 }
 
 type createRequest struct {
@@ -58,11 +63,31 @@ func NewHTTPHandler(store *Store, logger *log.Logger) http.Handler {
 }
 
 func NewHTTPHandlerWithBackend(store *Store, logger *log.Logger, backendReady func(context.Context) bool) http.Handler {
+	return NewHTTPHandlerWithServices(store, logger, backendReady, nil, nil)
+}
+
+func NewHTTPHandlerWithServices(store *Store, logger *log.Logger, backendReady func(context.Context) bool, routeProvider RouteProvider, scheduler *Scheduler) http.Handler {
+	handler, err := NewAuthorizedHTTPHandlerWithServices(store, logger, backendReady, routeProvider, scheduler, nil)
+	if err != nil {
+		return http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			response.Header().Set("Cache-Control", "no-store")
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = response.Write([]byte(`{"error":{"reason":"service-unavailable","message":"request denied"}}` + "\n"))
+		})
+	}
+	return handler
+}
+
+func NewAuthorizedHTTPHandlerWithServices(store *Store, logger *log.Logger, backendReady func(context.Context) bool, routeProvider RouteProvider, scheduler *Scheduler, authorization *APIAuthorization) (http.Handler, error) {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	server := &HTTPServer{store: store, logger: logger, backendReady: backendReady}
-	return http.HandlerFunc(server.serveHTTP)
+	if err := authorization.validate(routeProvider); err != nil {
+		return nil, err
+	}
+	server := &HTTPServer{store: store, logger: logger, backendReady: backendReady, routeProvider: routeProvider, scheduler: scheduler, authorization: authorization}
+	return http.HandlerFunc(server.serveHTTP), nil
 }
 
 func (server *HTTPServer) serveHTTP(response http.ResponseWriter, request *http.Request) {
@@ -73,7 +98,13 @@ func (server *HTTPServer) serveHTTP(response http.ResponseWriter, request *http.
 func (server *HTTPServer) route(response http.ResponseWriter, request *http.Request) (int, string, string) {
 	response.Header().Set("Cache-Control", "no-store")
 	response.Header().Set("X-Content-Type-Options", "nosniff")
-	if request.URL.RawQuery != "" && request.URL.Path != "/v1/runs" {
+	if request.URL.EscapedPath() != request.URL.Path {
+		return server.writeError(response, ErrNotFound, "")
+	}
+	if audience := apiAudienceForPath(request.URL.Path); !server.authorization.permits(request, audience) {
+		return server.writeUnauthorized(response)
+	}
+	if request.URL.RawQuery != "" && request.URL.Path != "/v1/runs" && request.URL.Path != "/v1/routes" && !strings.HasPrefix(request.URL.Path, "/v1/schedules/") {
 		return server.writeError(response, ErrInvalidRequest, "")
 	}
 	switch request.URL.Path {
@@ -102,8 +133,26 @@ func (server *HTTPServer) route(response http.ResponseWriter, request *http.Requ
 			return server.list(response, request)
 		}
 		return server.writeMethod(response, "")
+	case "/v1/routes":
+		if request.Method != http.MethodGet {
+			return server.writeMethod(response, "")
+		}
+		return server.listRoutes(response, request)
 	}
-	if request.URL.EscapedPath() != request.URL.Path || !strings.HasPrefix(request.URL.Path, "/v1/runs/") {
+	if strings.HasPrefix(request.URL.Path, "/v1/routes/") {
+		if request.Method != http.MethodGet || request.URL.RawQuery != "" {
+			return server.writeMethod(response, "")
+		}
+		runID := strings.TrimPrefix(request.URL.Path, "/v1/routes/")
+		if !validRunID(runID) || strings.Contains(runID, "/") {
+			return server.writeError(response, ErrNotFound, "")
+		}
+		return server.getRoute(response, request, runID)
+	}
+	if strings.HasPrefix(request.URL.Path, "/v1/schedules/") && server.scheduler != nil {
+		return server.scheduler.serveHTTP(server, response, request)
+	}
+	if !strings.HasPrefix(request.URL.Path, "/v1/runs/") {
 		return server.writeError(response, ErrNotFound, "")
 	}
 	parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/v1/runs/"), "/")
@@ -140,6 +189,45 @@ func (server *HTTPServer) route(response http.ResponseWriter, request *http.Requ
 	default:
 		return server.writeError(response, ErrNotFound, runID)
 	}
+}
+
+func (server *HTTPServer) listRoutes(response http.ResponseWriter, request *http.Request) (int, string, string) {
+	query, parseErr := url.ParseQuery(request.URL.RawQuery)
+	if parseErr != nil {
+		return server.writeError(response, ErrInvalidRequest, "")
+	}
+	for key, values := range query {
+		if (key != "limit" && key != "after") || len(values) != 1 {
+			return server.writeError(response, ErrInvalidRequest, "")
+		}
+	}
+	limit := localroutes.MaxRunsPerPage
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return server.writeError(response, ErrInvalidRequest, "")
+		}
+		limit = parsed
+	}
+	result, err := server.routeList(request.Context(), limit, query.Get("after"))
+	if err != nil {
+		return server.writeError(response, err, "")
+	}
+	server.writeJSON(response, http.StatusOK, result)
+	return http.StatusOK, "ok", ""
+}
+
+func (server *HTTPServer) getRoute(response http.ResponseWriter, request *http.Request, runID string) (int, string, string) {
+	run, err := server.store.Get(request.Context(), runID)
+	if err != nil {
+		return server.writeError(response, err, runID)
+	}
+	route, err := server.routeForRun(request.Context(), run)
+	if err != nil {
+		return server.writeError(response, err, runID)
+	}
+	server.writeJSON(response, http.StatusOK, route)
+	return http.StatusOK, "ok", runID
 }
 
 func (server *HTTPServer) create(response http.ResponseWriter, request *http.Request) (int, string, string) {
@@ -382,6 +470,12 @@ func routeClass(path string) string {
 		return "ready"
 	case path == "/v1/runs":
 		return "runs"
+	case path == "/v1/routes":
+		return "routes"
+	case strings.HasPrefix(path, "/v1/routes/"):
+		return "route"
+	case strings.HasPrefix(path, "/v1/schedules/"):
+		return "schedule"
 	case strings.HasSuffix(path, "/cancel"):
 		return "run-cancel"
 	case strings.HasSuffix(path, "/claim"):

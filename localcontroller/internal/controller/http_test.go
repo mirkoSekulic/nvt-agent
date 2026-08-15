@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"log"
@@ -19,7 +20,7 @@ func TestHTTPRunLifecycleHealthAndGenericResponses(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
 	var logs bytes.Buffer
-	handler := NewHTTPHandler(store, log.New(&logs, "", 0))
+	handler := newAuthorizedTestHandler(t, store, log.New(&logs, "", 0), nil, nil)
 
 	for _, path := range []string{"/healthz", "/readyz"} {
 		response := serveRequest(t, handler, http.MethodGet, path, nil, "")
@@ -95,7 +96,7 @@ func TestHTTPRunLifecycleHealthAndGenericResponses(t *testing.T) {
 func TestHTTPDeleteWaitsForTerminalCleanupAndIsIdempotent(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
-	handler := NewHTTPHandler(store, nil)
+	handler := newAuthorizedTestHandler(t, store, nil, nil, nil)
 	run := createRun(t, store, "http-delete", false)
 
 	deleting := serveRequest(t, handler, http.MethodDelete, "/v1/runs/http-delete", nil, "")
@@ -127,7 +128,7 @@ func TestHTTPFailsClosedAndNeverLogsRejectedBodies(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 	store, path := openTestStore(t, clock, 4)
 	var logs bytes.Buffer
-	handler := NewHTTPHandler(store, log.New(&logs, "", 0))
+	handler := newAuthorizedTestHandler(t, store, log.New(&logs, "", 0), nil, nil)
 
 	valid := testResolvedRun(t, "invalid-run", false)
 	var object map[string]any
@@ -185,7 +186,7 @@ func TestHTTPFailsClosedAndNeverLogsRejectedBodies(t *testing.T) {
 func TestReadinessFailsWhenStoreIsUnavailableButHealthRemainsLive(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
-	handler := NewHTTPHandler(store, nil)
+	handler := newAuthorizedTestHandler(t, store, nil, nil, nil)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,7 @@ func TestReadinessFailsWhenStoreIsUnavailableButHealthRemainsLive(t *testing.T) 
 func TestReadinessFailsClosedOnIncompatibleLiveSchema(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
-	handler := NewHTTPHandler(store, nil)
+	handler := newAuthorizedTestHandler(t, store, nil, nil, nil)
 	if _, err := store.db.Exec(`PRAGMA user_version=99`); err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +241,30 @@ func serveRequest(t *testing.T, handler http.Handler, method, path string, body 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+const (
+	testAdminBearer = "admin-bearer-00000000000000000000000000000000"
+	testRouteBearer = "route-bearer-00000000000000000000000000000000"
+)
+
+func newAuthorizedTestHandler(t *testing.T, store *Store, logger *log.Logger, routeProvider RouteProvider, scheduler *Scheduler) http.Handler {
+	t.Helper()
+	adminDigest := sha256.Sum256([]byte(testAdminBearer))
+	routeDigest := sha256.Sum256([]byte(testRouteBearer))
+	handler, err := NewAuthorizedHTTPHandlerWithServices(store, logger, nil, routeProvider, scheduler, &APIAuthorization{admin: &adminDigest, routes: &routeDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch apiAudienceForPath(request.URL.Path) {
+		case apiAudienceAdmin:
+			request.Header.Set("Authorization", "Bearer "+testAdminBearer)
+		case apiAudienceRoutes:
+			request.Header.Set("Authorization", "Bearer "+testRouteBearer)
+		}
+		handler.ServeHTTP(response, request)
+	})
 }
 
 func mustJSON(t *testing.T, value any) []byte {

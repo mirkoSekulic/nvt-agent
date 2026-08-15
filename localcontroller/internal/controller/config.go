@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/networkpolicy"
+	"github.com/mirkoSekulic/nvt-agent/protocol/localroutes"
 )
 
 type Config struct {
@@ -29,6 +30,12 @@ type Config struct {
 	ExternalNetwork         string
 	RunNetworkPool          string
 	ProxyPort               int
+	RouteBaseDomain         string
+	RoutePathPrefix         string
+	GatewayContainer        string
+	SchedulingConfigPath    string
+	AdminTokenFile          string
+	RouteTokenFile          string
 	ProtectedCIDRs          string
 	DindImage               string
 	EgressdImage            string
@@ -38,6 +45,11 @@ type Config struct {
 }
 
 func ConfigFromEnvironment() (Config, error) {
+	for _, name := range []string{"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER"} {
+		if value, exists := os.LookupEnv(name); exists && strings.TrimSpace(value) == "" {
+			return Config{}, ErrInvalidRequest
+		}
+	}
 	config := Config{
 		Bind:                    environmentOrDefault("NVT_LOCAL_CONTROLLER_BIND", "0.0.0.0:7480"),
 		StatePath:               environmentOrDefault("NVT_LOCAL_CONTROLLER_STATE", "/state/controller/local-controller.sqlite3"),
@@ -55,6 +67,12 @@ func ConfigFromEnvironment() (Config, error) {
 		ExternalNetwork:         environmentOrDefault("NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK", "agents-proxy"),
 		RunNetworkPool:          environmentOrDefault("NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL", "100.64.0.0/10"),
 		ProxyPort:               4090,
+		RouteBaseDomain:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "agent.localhost"),
+		RoutePathPrefix:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "/agents"),
+		GatewayContainer:        environmentOrDefault("NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER", "nvt-local-gateway"),
+		SchedulingConfigPath:    environmentOrDefault("NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG", ""),
+		AdminTokenFile:          environmentOrDefault("NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE", ""),
+		RouteTokenFile:          environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE", ""),
 		ProtectedCIDRs:          environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS", "127.0.0.0/8 169.254.0.0/16"),
 		DindImage:               environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_IMAGE", "nvt-dind:latest"),
 		EgressdImage:            environmentOrDefault("NVT_LOCAL_CONTROLLER_EGRESSD_IMAGE", "nvt-egressd:latest"),
@@ -99,6 +117,15 @@ func ConfigFromEnvironment() (Config, error) {
 }
 
 func ValidateConfig(config Config) error {
+	if config.RouteBaseDomain == "" {
+		config.RouteBaseDomain = "agent.localhost"
+	}
+	if config.RoutePathPrefix == "" {
+		config.RoutePathPrefix = "/agents"
+	}
+	if config.GatewayContainer == "" {
+		config.GatewayContainer = "nvt-local-gateway"
+	}
 	if config.Bind == "" || len(config.Bind) > 512 || strings.ContainsAny(config.Bind, "\x00\r\n") {
 		return ErrInvalidRequest
 	}
@@ -114,7 +141,7 @@ func ValidateConfig(config Config) error {
 	runNetworkPolicy, runNetworkPolicyErr := networkpolicy.ValidateRunNetworkPolicy(config.RunNetworkPool, config.ProtectedCIDRs)
 	if config.StatePath == "" || !strings.HasSuffix(config.StatePath, ".sqlite3") || strings.ContainsAny(config.StatePath, "\x00\r\n") ||
 		!filepath.IsAbs(config.StatePath) || filepath.Clean(config.StatePath) != config.StatePath || filepath.Dir(config.StatePath) == string(filepath.Separator) ||
-		config.MaxActiveRuns < 1 || config.MaxActiveRuns > 10_000 ||
+		config.MaxActiveRuns < 1 || config.MaxActiveRuns > localroutes.MaxRuns ||
 		runNetworkPolicyErr != nil || runNetworkPolicy.SubnetCapacity < config.MaxActiveRuns*2 ||
 		config.MaxClaimLease < time.Second || config.MaxClaimLease > time.Hour ||
 		config.SweepInterval < time.Second || config.SweepInterval > time.Minute ||
@@ -128,11 +155,39 @@ func ValidateConfig(config Config) error {
 		config.IdentityKeyPath == "" || !filepath.IsAbs(config.IdentityKeyPath) ||
 		config.BrokerCAFile != "" && !filepath.IsAbs(config.BrokerCAFile) ||
 		config.ControllerOwner == "" || len(config.ControllerOwner) > 63 || config.ExternalNetwork == "" || config.RunNetworkPool == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 ||
+		!validRouteDomain(config.RouteBaseDomain) || !validRoutePrefix(config.RoutePathPrefix) || !validRunID(config.GatewayContainer) ||
+		config.SchedulingConfigPath != "" && (!filepath.IsAbs(config.SchedulingConfigPath) || filepath.Clean(config.SchedulingConfigPath) != config.SchedulingConfigPath) ||
+		config.RouteTokenFile == "" || !filepath.IsAbs(config.RouteTokenFile) || filepath.Clean(config.RouteTokenFile) != config.RouteTokenFile || strings.ContainsAny(config.RouteTokenFile, "\x00\r\n") ||
+		config.AdminTokenFile != "" && (!filepath.IsAbs(config.AdminTokenFile) || filepath.Clean(config.AdminTokenFile) != config.AdminTokenFile || strings.ContainsAny(config.AdminTokenFile, "\x00\r\n")) ||
 		config.DindImage == "" || config.EgressdImage == "" || config.CapturedImage == "" || config.SeedImage == "" ||
 		strings.ContainsAny(config.ControllerOwner+config.ExternalNetwork+config.ProtectedCIDRs+config.DindImage+config.EgressdImage+config.CapturedImage+config.SeedImage, "\x00\r\n") {
 		return ErrInvalidRequest
 	}
 	return nil
+}
+
+func validRouteDomain(value string) bool {
+	if len(value) == 0 || len(value) > 190 || value != strings.ToLower(value) || strings.HasSuffix(value, ".") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !validRunID(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validRoutePrefix(value string) bool {
+	if len(value) < 2 || len(value) > 256 || value[0] != '/' || strings.HasSuffix(value, "/") || strings.Contains(value, "//") || strings.ContainsAny(value, "%\\?#\x00\r\n") {
+		return false
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(value, "/"), "/") {
+		if !validRunID(segment) {
+			return false
+		}
+	}
+	return true
 }
 
 func environmentOrDefault(name, fallback string) string {

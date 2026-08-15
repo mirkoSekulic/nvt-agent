@@ -32,6 +32,7 @@ func main() {
 	var claimEnrichmentRaw string
 	var nativeSessionAuthenticationTimeoutSeconds int
 	var nativeSessionRevalidationIntervalSeconds int
+	var localRunTimeoutSeconds int
 	flag.StringVar(&cfg.BaseDomain, "base-domain", envString("NVT_GATEWAY_BASE_DOMAIN", "agents.localhost"), "base DNS domain for AgentRun access")
 	flag.StringVar(&cfg.PublicURL, "public-url", envString("NVT_GATEWAY_PUBLIC_URL", ""), "externally visible base URL for dashboard and OAuth callbacks")
 	flag.StringVar(&cfg.Routing.Mode, "routing-mode", envString("NVT_GATEWAY_ROUTING_MODE", "subdomain"), "routing mode: subdomain or path")
@@ -40,6 +41,13 @@ func main() {
 	flag.StringVar(&cfg.CredentialPortal.URL, "credential-portal-url", envString("NVT_GATEWAY_CREDENTIAL_PORTAL_URL", ""), "optional credential portal dashboard link")
 	flag.StringVar(&cfg.CredentialPortal.Label, "credential-portal-label", envString("NVT_GATEWAY_CREDENTIAL_PORTAL_LABEL", "Manage credentials"), "credential portal dashboard link label")
 	flag.StringVar(&cfg.BrandingDir, "branding-dir", envString("NVT_GATEWAY_BRANDING_DIR", ""), "optional directory containing the fixed NVT branding asset set")
+	flag.BoolVar(&cfg.LocalRuns.Enabled, "local-runs-enabled", strictEnvBool("NVT_GATEWAY_LOCAL_RUNS_ENABLED", false), "enable the bounded local-controller route source")
+	flag.StringVar(&cfg.LocalRuns.ControllerURL, "local-runs-controller-url", envString("NVT_GATEWAY_LOCAL_RUNS_CONTROLLER_URL", ""), "canonical local-controller origin")
+	flag.StringVar(&cfg.LocalRuns.TokenFile, "local-runs-token-file", envString("NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE", ""), "private local-controller route bearer file")
+	flag.StringVar(&cfg.LocalRuns.BaseDomain, "local-runs-base-domain", envString("NVT_GATEWAY_LOCAL_RUNS_BASE_DOMAIN", ""), "local run host-route base domain")
+	flag.StringVar(&cfg.LocalRuns.PathPrefix, "local-runs-path-prefix", envString("NVT_GATEWAY_LOCAL_RUNS_PATH_PREFIX", ""), "local run path-route prefix")
+	flag.BoolVar(&cfg.LocalRuns.DisableKubernetes, "local-runs-disable-kubernetes", strictEnvBool("NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES", false), "disable Kubernetes AgentRun discovery for a local-only gateway")
+	flag.IntVar(&localRunTimeoutSeconds, "local-runs-timeout-seconds", strictEnvInt("NVT_GATEWAY_LOCAL_RUNS_TIMEOUT_SECONDS", 2), "complete local route lookup timeout")
 	flag.StringVar(&cfg.Auth.Mode, "auth-mode", envString("NVT_GATEWAY_AUTH_MODE", "none"), "auth mode: none, oidc, or oauth2")
 	flag.StringVar(&cfg.Auth.Session.Secret, "session-secret", envString("NVT_GATEWAY_SESSION_SECRET", ""), "session cookie secret")
 	flag.StringVar(&cfg.Auth.Session.CookieName, "session-cookie-name", envString("NVT_GATEWAY_SESSION_COOKIE_NAME", ""), "session cookie name")
@@ -82,6 +90,7 @@ func main() {
 	flag.Parse()
 	cfg.NativeSession.AuthenticationTimeout = time.Duration(nativeSessionAuthenticationTimeoutSeconds) * time.Second
 	cfg.NativeSession.RevalidationInterval = time.Duration(nativeSessionRevalidationIntervalSeconds) * time.Second
+	cfg.LocalRuns.Timeout = time.Duration(localRunTimeoutSeconds) * time.Second
 
 	cfg.Auth.OIDC.Scopes = gateway.SplitScopes(envString("NVT_GATEWAY_OIDC_SCOPES", ""))
 	cfg.Auth.OAuth2.Scopes = gateway.SplitScopes(envString("NVT_GATEWAY_OAUTH2_SCOPES", ""))
@@ -110,9 +119,13 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
-	client, namespace, err := kubernetesClient(kubeconfig)
-	if err != nil {
-		log.Fatalf("create kubernetes client: %v", err)
+	var client ctrlclient.Client
+	namespace := corev1.NamespaceDefault
+	if !cfg.LocalRuns.DisableKubernetes {
+		client, namespace, err = kubernetesClient(kubeconfig)
+		if err != nil {
+			log.Fatalf("create kubernetes client: %v", err)
+		}
 	}
 	nativeSessionServer, err := gateway.NewNativeSessionServer(cfg.NativeSession)
 	if err != nil {

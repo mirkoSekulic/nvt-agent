@@ -18,6 +18,9 @@ on:
       - "protocol/guestenrollment/**"
       - "protocol/eligibility/**"
       - "gateway/**"
+      - "localcontroller/**"
+      - "protocol/localroutes/**"
+      - "protocol/resolvedrun/**"
       - "credentialportal/**"
       - "nativeegressrelay/**"
       - "producers/github-comments/**"
@@ -25,6 +28,8 @@ on:
       - "tests/fixtures/execution-driver/**"
       - "tests/operator/execution-driver-host-image-smoke.sh"
       - "scripts/**"
+      - "compose.infra.yaml"
+      - "tests/runtime/local_controller_compose_test.go"
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
       - "tests/runtime/dind-kmsg-device-smoke.sh"
@@ -45,6 +50,9 @@ on:
       - "protocol/guestenrollment/**"
       - "protocol/eligibility/**"
       - "gateway/**"
+      - "localcontroller/**"
+      - "protocol/localroutes/**"
+      - "protocol/resolvedrun/**"
       - "credentialportal/**"
       - "nativeegressrelay/**"
       - "producers/github-comments/**"
@@ -52,6 +60,8 @@ on:
       - "tests/fixtures/execution-driver/**"
       - "tests/operator/execution-driver-host-image-smoke.sh"
       - "scripts/**"
+      - "compose.infra.yaml"
+      - "tests/runtime/local_controller_compose_test.go"
       - "Makefile"
       - "tests/runtime/git_credentials_smoke.sh"
       - "tests/runtime/dind-kmsg-device-smoke.sh"
@@ -110,6 +120,9 @@ jobs:
           - name: gateway
             dockerfile: gateway/Dockerfile
             image: nvt-agent-gateway:test
+          - name: local-controller
+            dockerfile: localcontroller/Dockerfile
+            image: nvt-local-controller:test
           - name: credential-portal
             dockerfile: credentialportal/Dockerfile
             image: nvt-credential-portal:test

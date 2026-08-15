@@ -458,13 +458,25 @@ func (store *Store) backendSnapshot(ctx context.Context, runID string) (json.Raw
 }
 
 func (store *Store) List(ctx context.Context, limit int, after string) (ListResult, error) {
+	return store.list(ctx, limit, after, false)
+}
+
+func (store *Store) listActive(ctx context.Context, limit int, after string) (ListResult, error) {
+	return store.list(ctx, limit, after, true)
+}
+
+func (store *Store) list(ctx context.Context, limit int, after string, activeOnly bool) (ListResult, error) {
 	if limit < 1 || limit > MaxListLimit || after != "" && !validRunID(after) {
 		return ListResult{}, ErrInvalidRequest
 	}
 	if _, err := store.Sweep(ctx); err != nil {
 		return ListResult{}, err
 	}
-	rows, err := store.db.QueryContext(ctx, selectRuns+` WHERE deleted_at IS NULL AND run_id > ? ORDER BY run_id LIMIT ?`, after, limit+1)
+	where := ` WHERE deleted_at IS NULL AND run_id > ?`
+	if activeOnly {
+		where += ` AND state IN ('pending','preparing','running','stopping')`
+	}
+	rows, err := store.db.QueryContext(ctx, selectRuns+where+` ORDER BY run_id LIMIT ?`, after, limit+1)
 	if err != nil {
 		return ListResult{}, ErrStoreUnavailable
 	}
