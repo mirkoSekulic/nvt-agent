@@ -163,10 +163,11 @@ type composeDependency struct {
 }
 
 type composeHealthcheck struct {
-	Test     []string `yaml:"test"`
-	Interval string   `yaml:"interval"`
-	Timeout  string   `yaml:"timeout"`
-	Retries  int      `yaml:"retries"`
+	Test        []string `yaml:"test"`
+	Interval    string   `yaml:"interval"`
+	Timeout     string   `yaml:"timeout"`
+	StartPeriod string   `yaml:"start_period,omitempty"`
+	Retries     int      `yaml:"retries"`
 }
 
 type exposeRoute struct {
@@ -288,8 +289,9 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 	services["agent"] = composeService{
 		Image: run.Image, User: user, WorkingDir: "/workspace", NetworkMode: "service:" + namespaceService, Restart: "unless-stopped", Labels: agentLabels,
 		Environment: agentEnvironment, DependsOn: agentDepends, CapAdd: append([]string(nil), runtimeCapabilities(run)...),
-		Volumes: []string{"workspace:/workspace", "agent-home:" + home, "agent-config:/nvt-config:ro"},
-		CPUs:    dockerCPU(run.Resources.CPULimit), MemLimit: dockerMemory(run.Resources.MemoryLimit),
+		Volumes:     []string{"workspace:/workspace", "agent-home:" + home, "agent-config:/nvt-config:ro"},
+		Healthcheck: &composeHealthcheck{Test: []string{"CMD-SHELL", "health"}, Interval: "10s", Timeout: "2s", StartPeriod: "15m", Retries: 3},
+		CPUs:        dockerCPU(run.Resources.CPULimit), MemLimit: dockerMemory(run.Resources.MemoryLimit),
 	}
 	if requiresConfinementProof(run) {
 		agent := services["agent"]

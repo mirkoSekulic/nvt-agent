@@ -60,16 +60,18 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL: ${NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL:-100.64.0.0/10}",
 		"NVT_LOCAL_CONTROLLER_DOCKER_HOST: unix:///var/run/docker.sock",
 		"NVT_LOCAL_CONTROLLER_BROKER_AGENTS: /broker-state/agents.yaml",
+		"NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE: /controller-private/local-controller.key",
 		"NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS:",
 		"NVT_LOCAL_CONTROLLER_PROXY_PORT:",
 		"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN: agent.localhost",
 		"NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX: /agents",
 		"NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER: nvt-local-gateway",
 		"NVT_LOCAL_CONTROLLER_CONFIG:",
-		"NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE: /broker-state/local-controller-admin-token",
-		"NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE: /broker-state/local-controller-route-token",
+		"NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE: /controller-private/local-controller-admin-token",
+		"NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE: /controller-private/local-controller-route-token",
 		"local-controller-state:/state",
 		"./.broker:/broker-state",
+		"local-controller-private:/controller-private:ro",
 		"/var/run/docker.sock:/var/run/docker.sock",
 		"- local-control-plane",
 		"read_only: true",
@@ -99,7 +101,7 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		`NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES: "true"`,
 		"NVT_GATEWAY_LOCAL_RUNS_CONTROLLER_URL: http://local-controller:7480",
 		"NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE: /run/secrets/local-controller-route-token",
-		"./.broker/local-controller-route-token:/run/secrets/local-controller-route-token:ro",
+		"local-gateway-private:/run/secrets:ro",
 		"nvt.dev/local-gateway=true",
 		"traefik.http.routers.nvt-local-gateway.rule=Host(`localhost`) && (PathPrefix(`/agents`) || PathPrefix(`/oauth2`))",
 		"traefik.http.routers.nvt-local-gateway-host.rule=HostRegexp(",
@@ -134,6 +136,32 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	if !strings.Contains(compose, "\n  local-controller-state:\n") {
 		t.Fatalf("compose infrastructure has no durable controller state volume:\n%s", compose)
 	}
+	if !strings.Contains(compose, "\n  local-controller-private:\n") {
+		t.Fatalf("compose infrastructure has no private controller credential volume:\n%s", compose)
+	}
+	if !strings.Contains(compose, "\n  local-gateway-private:\n") {
+		t.Fatalf("compose infrastructure has no private gateway credential volume:\n%s", compose)
+	}
+	privateInitStart := strings.Index(compose, "\n  local-controller-private-init:\n")
+	if privateInitStart == -1 || privateInitStart >= gatewayStart {
+		t.Fatalf("compose infrastructure has no controller credential initializer:\n%s", compose)
+	}
+	privateInit := compose[privateInitStart:gatewayStart]
+	for _, required := range []string{
+		"image: nvt-local-controller:latest",
+		"network_mode: none",
+		"./.broker:/source:ro",
+		"local-controller-private:/private",
+		"local-gateway-private:/gateway-private",
+		"chmod 0600 /private/local-controller.key.next",
+		"chmod 0600 /private/local-controller-admin-token.next",
+		"chmod 0600 /private/local-controller-route-token.next",
+		"chmod 0400 /gateway-private/local-controller-route-token.next",
+	} {
+		if !strings.Contains(privateInit, required) {
+			t.Fatalf("controller credential initializer missing %q:\n%s", required, privateInit)
+		}
+	}
 
 	dockerfileBytes, err := os.ReadFile(filepath.Join(root, "localcontroller", "Dockerfile"))
 	if err != nil {
@@ -164,7 +192,7 @@ func TestNativeLocalConfigurationReplacesMigrationAuthoring(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(config)
-	for _, required := range []string{"api_version: nvt.local-platform/v1", "profiles:", "workflows:", "execution_backends:", "retention_policies:", "workstations:", "name: nvt", "name: studio", "name: infra"} {
+	for _, required := range []string{"api_version: nvt.local-platform/v1", "profiles:", "workflows:", "execution_backends:", "name: local-docker", "kind: container", "retention_policies:", "workstations:", "name: nvt", "name: studio", "name: infra"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("native local config missing %q", required)
 		}
@@ -173,7 +201,7 @@ func TestNativeLocalConfigurationReplacesMigrationAuthoring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"local_runs", "source_agent", ".agents/", "local-agent-migrate", "local-controller-migration"} {
+	for _, forbidden := range []string{"local_runs", "source_agent", ".agents/", "local-agent-migrate", "local-controller-migration", "kind: docker"} {
 		if strings.Contains(text, forbidden) || strings.Contains(string(makefile), forbidden) {
 			t.Fatalf("legacy local authoring surface remains: %q", forbidden)
 		}

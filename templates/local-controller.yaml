@@ -22,7 +22,7 @@ defaults:
 
 execution_backends:
   - name: local-docker
-    kind: docker
+    kind: container
 
 retention_policies:
   - name: persistent
