@@ -33,6 +33,16 @@ gateway outage cannot strand exact-owned run resources. See
 [the protocol](../protocol/local-controller.md) for the complete API, state,
 recovery, cleanup, and zero-secret contracts.
 
+The shared proxy, gateway, broker, and controller restart automatically after
+an ordinary Docker daemon or Docker Desktop restart. Enforced transparent
+agents cannot race that recovery: their trusted startup gate accepts only a
+capture proof for the current network namespace, and controller reconciliation
+forces `net-init` to reapply and verify capture for each new namespace
+generation before the runtime entrypoint can run or resume. The nested-daemon
+smoke covers Linux dockerd semantics; native Docker Desktop restart remains a
+platform smoke. Docker data reset or volume pruning is intentionally outside
+restart recovery.
+
 For installation, deterministic translation of existing `nvt-dev`, `studio`,
 and `infra` configurations, verification, troubleshooting, and the unchanged
 static Compose rollback path, see the
@@ -57,6 +67,16 @@ logs, and agent files:
 ```sh
 NVT_LOCAL_CONTROLLER_DOCKER_SMOKE=1 \
   go test -count=1 -run '^TestDockerBackendRealEngineSmoke$' ./internal/dockerbackend
+```
+
+The stronger restart proof uses a disposable nested daemon, restarts dockerd,
+checks that the stale proof blocks an adversarial immediate direct request,
+then verifies capture reinstallation, generic resume, mediated injection,
+stable routes/volumes, proxy recovery, and secret absence:
+
+```sh
+NVT_LOCAL_CONTROLLER_DAEMON_RESTART_SMOKE=1 \
+  go test -count=1 -run '^TestDockerBackendDaemonRestartSmoke$' ./internal/dockerbackend
 ```
 
 This proof uses the repository's executable synthetic provider. Real

@@ -357,6 +357,27 @@ named volumes. A successful pass returns to `running` with reason
 `backend-recovered`. `pending`, already `preparing`, `stopping`, and terminal
 records retain their existing restart-safe semantics.
 
+Docker daemon restart does not replay Compose dependency ordering. For an
+enforced transparent run, automatic agent-container restart therefore begins
+in a fixed trusted gate rather than the runtime entrypoint. `net-init` removes
+an old-generation proof, installs and verifies the IPv4 and IPv6 capture hooks
+in the exact shared network namespace, and writes the host boot ID plus that
+namespace's kernel identity to an exact-owned proof volume. A same-generation
+proof is reused only after every required capture hook is reverified, without
+flushing a live ruleset. The agent mounts the proof read-only and executes the
+runtime entrypoint only when it equals its current boot/namespace identity. A
+proof from a previous boot, daemon, or container namespace generation cannot
+unlock startup. The wait is bounded and fails loudly; a missing controller or
+failed capture leaves only the gate running, never the agent runtime.
+
+Every controller recovery removes and recreates only the exact-owned
+`net-init` service before Compose convergence, so a completed one-shot from a
+prior namespace is never treated as current evidence. Agent-only restart in an
+unchanged namespace may reuse the matching proof because the verified capture
+rules live in that same namespace. The proof contains no credential and is
+removed with the other ephemeral run volumes during cleanup. Direct and
+non-enforced runs do not receive this gate.
+
 The runtime home volume contains `NVT_STATE_DIR`. When the administrator's
 generic agent configuration includes `runtime.resume.command` and optional
 `runtime.resume.args`, the existing runtime startup contract writes its durable
@@ -459,6 +480,12 @@ every bounded record, snapshot digest, state, timestamp, and ownership tuple.
 Unknown future schema versions, corrupt databases, invalid snapshots, and
 inconsistent records fail startup as `state-unavailable`; the controller never
 silently recreates or partially recovers uncertain state.
+
+The shared local proxy, gateway, broker, and controller use Docker restart
+policies so an ordinary daemon or Docker Desktop restart restores the public
+route without rerunning `infra-up`. This guarantee assumes Docker retains its
+data root and named volumes. Engine reset, volume pruning, namespace deletion,
+or Docker Desktop data loss is destructive and requires an independent backup.
 
 ## TTL and retention
 

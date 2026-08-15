@@ -55,6 +55,7 @@ type resourceNames struct {
 	workspace     string
 	home          string
 	dockerData    string
+	confinement   string
 	internalNet   string
 	privateNet    string
 	namespace     string

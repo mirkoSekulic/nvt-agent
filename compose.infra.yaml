@@ -28,6 +28,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - agents-proxy
+    restart: unless-stopped
 
   gateway:
     image: nvt-agent-gateway:latest

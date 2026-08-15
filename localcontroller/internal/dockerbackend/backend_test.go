@@ -285,10 +285,19 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"agent:", "docker:", "egressd:", "captured:", "net-init:", "ca-init:", "network_mode: service:docker", "NVT_BROKER_TOKEN_FILE"} {
+	for _, required := range []string{
+		"agent:", "docker:", "egressd:", "captured:", "net-init:", "ca-init:", "network_mode: service:docker", "NVT_BROKER_TOKEN_FILE",
+		"confinement:/run/nvt-confinement:ro", "confinement:/confinement", "current network confinement was not established",
+		"/proc/sys/kernel/random/boot_id", "readlink /proc/self/ns/net", "iptables -t nat -C OUTPUT -j NVT_CAPTURE", "ip6tables -t nat -C OUTPUT -j NVT_CAPTURE",
+	} {
 		if !bytes.Contains(plan, []byte(required)) {
 			t.Fatalf("plan missing %q:\n%s", required, plan)
 		}
+	}
+	reuseCheck := bytes.Index(plan, []byte(`proof="$$(cat "$$proof_file"`))
+	proofInvalidation := bytes.Index(plan, []byte(`rm -f "$$proof_file"`))
+	if reuseCheck < 0 || proofInvalidation < 0 || reuseCheck > proofInvalidation || bytes.Count(plan, []byte("iptables -t nat -C OUTPUT -j NVT_CAPTURE")) < 2 {
+		t.Fatalf("net-init does not verify a current proof before mutating capture:\n%s", plan)
 	}
 	if !secretSafePlan(plan, tokens.agent, tokens.egress, "REAL-ACCESS-TOKEN-NEEDLE") {
 		t.Fatalf("plan contains a credential:\n%s", plan)
@@ -329,8 +338,28 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 			t.Fatalf("agent seed omitted %q", expected)
 		}
 	}
+	netInitID := "exact-owned-net-init"
+	docker.containers[netInitID] = map[string]string{
+		ownerLabel: backend.config.Owner, runLabel: run.RunID, digestLabel: desired.SnapshotDigest,
+		composeProjectLabel: names.project, composeServiceLabel: "net-init",
+	}
 	if _, err := backend.Ensure(context.Background(), desired); err != nil {
 		t.Fatalf("restart ensure: %v", err)
+	}
+	if _, exists := docker.containers[netInitID]; exists {
+		t.Fatal("restart reconciliation did not recreate the exact-owned net-init proof writer")
+	}
+	removeIndex, composeIndex := -1, -1
+	for index, command := range docker.commands {
+		if len(command) >= 3 && command[0] == "rm" && command[len(command)-1] == netInitID {
+			removeIndex = index
+		}
+		if command[0] == "compose" && contains(command, "up") {
+			composeIndex = index
+		}
+	}
+	if removeIndex < 0 || composeIndex < 0 || removeIndex > composeIndex {
+		t.Fatalf("net-init was not removed before Compose convergence: %v", docker.commands)
 	}
 	second, _ := os.ReadFile(planPath)
 	if !bytes.Equal(plan, second) {
@@ -339,6 +368,35 @@ func TestDockerBackendRendersCompleteIdempotentZeroSecretStack(t *testing.T) {
 	observation, err := backend.Inspect(context.Background(), desired)
 	if err != nil || !observation.Ready {
 		t.Fatalf("inspect = %#v %v", observation, err)
+	}
+}
+
+func TestConfinementGateIsLimitedToEnforcedTransparentRuns(t *testing.T) {
+	run := testMediatedRun(t)
+	config := Config{Owner: "test-controller", ExternalNetwork: "agents-proxy", ProxyPort: 4090, ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16", DindImage: "nvt-dind:test", EgressdImage: "nvt-egressd:test", CapturedImage: "nvt-captured:test", SeedImage: "nvt-runtime:test"}
+	names := namesFor(Config{RunsDir: t.TempDir()}, run.RunID, strings.Repeat("3", 64))
+	plan, err := renderCompose(config, run, strings.Repeat("3", 64), names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"entrypoint:\n", "- sh", "network-namespace", names.confinement, "restart: unless-stopped"} {
+		if !bytes.Contains(plan, []byte(expected)) {
+			t.Fatalf("enforced transparent plan omitted %q:\n%s", expected, plan)
+		}
+	}
+
+	run.Egress = resolvedrun.Egress{Mode: "direct"}
+	run.Broker.Grants = nil
+	run.Repositories = nil
+	run.CredentialProviders = nil
+	direct, err := renderCompose(config, run, strings.Repeat("3", 64), names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"network-namespace", "nvt-confinement", names.confinement} {
+		if bytes.Contains(direct, []byte(forbidden)) {
+			t.Fatalf("direct run received confinement gate %q:\n%s", forbidden, direct)
+		}
 	}
 }
 
@@ -445,7 +503,7 @@ func TestRestartReconcilePrunesExactStaleResourcesAndRetainsOnlyPersistentData(t
 			t.Fatalf("persistent volume was removed: %s", retained)
 		}
 	}
-	for _, removed := range []string{names.agentConfig, names.egressPrivate, names.egressPublic} {
+	for _, removed := range []string{names.agentConfig, names.egressPrivate, names.egressPublic, names.confinement} {
 		if _, exists := docker.objects["volume:"+removed]; exists {
 			t.Fatalf("ephemeral volume survived cleanup: %s", removed)
 		}

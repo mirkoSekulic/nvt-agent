@@ -47,7 +47,24 @@ type composeService struct {
 	MemLimit      string                       `yaml:"mem_limit,omitempty"`
 }
 
-const transparentInitScript = `exclude_v4=""
+const transparentInitScript = `proof_file=/confinement/network-namespace
+boot_id="$$(cat /proc/sys/kernel/random/boot_id)"
+netns="$$(readlink /proc/self/ns/net)"
+case "$$boot_id" in ""|*[!0-9a-f-]*) echo "net-init: host boot identity unavailable" >&2; exit 1 ;; esac
+case "$$netns" in net:\[*\]) ;; *) echo "net-init: network namespace identity unavailable" >&2; exit 1 ;; esac
+namespace="$$boot_id:$$netns"
+proof="$$(cat "$$proof_file" 2>/dev/null || true)"
+if [ "$$proof" = "$$namespace" ] &&
+   iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null &&
+   iptables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001 2>/dev/null &&
+   iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null &&
+   ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null &&
+   ip6tables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001 2>/dev/null &&
+   ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null; then
+  exit 0
+fi
+rm -f "$$proof_file"
+exclude_v4=""
 exclude_v6=""
 reject_managed_overlap() {
   case "$$1" in 172.30.*|172.31.*) echo "managed Docker pool overlaps protected address $$1" >&2; exit 1 ;; esac
@@ -87,6 +104,35 @@ for ip in $$exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$$ip/128" -j RETURN;
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND
+iptables -t nat -C OUTPUT -j NVT_CAPTURE
+iptables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -C PREROUTING -j NVT_DIND
+ip6tables -t nat -C OUTPUT -j NVT_CAPTURE
+ip6tables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -C PREROUTING -j NVT_DIND
+umask 077
+printf '%s\n' "$$namespace" > "$$proof_file.tmp"
+chmod 0444 "$$proof_file.tmp"
+mv -f "$$proof_file.tmp" "$$proof_file"
+`
+
+const agentConfinementGateScript = `proof_file=/run/nvt-confinement/network-namespace
+attempt=0
+while [ "$$attempt" -lt 600 ]; do
+  boot_id="$$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  netns="$$(readlink /proc/self/ns/net 2>/dev/null || true)"
+  namespace="$$boot_id:$$netns"
+  proof="$$(cat "$$proof_file" 2>/dev/null || true)"
+  case "$$boot_id" in ""|*[!0-9a-f-]*) valid_boot=false ;; *) valid_boot=true ;; esac
+  case "$$netns" in net:\[*\]) valid_netns=true ;; *) valid_netns=false ;; esac
+  if [ "$$valid_boot" = true ] && [ "$$valid_netns" = true ] && [ "$$proof" = "$$namespace" ]; then
+    exec /usr/local/bin/entrypoint
+  fi
+  attempt=$$((attempt + 1))
+  sleep 0.25
+done
+echo "nvt-local-agent: current network confinement was not established" >&2
+exit 1
 `
 
 type composeDependency struct {
@@ -205,11 +251,21 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 		volumes["egress-private"] = externalObject{External: true, Name: names.egressPrivate}
 		volumes["egress-public"] = externalObject{External: true, Name: names.egressPublic}
 	}
+	if requiresConfinementProof(run) {
+		volumes["confinement"] = externalObject{External: true, Name: names.confinement}
+	}
 	services["agent"] = composeService{
 		Image: run.Image, User: user, WorkingDir: "/workspace", NetworkMode: "service:" + namespaceService, Restart: "unless-stopped", Labels: labels,
 		Environment: agentEnvironment, DependsOn: agentDepends, CapAdd: append([]string(nil), runtimeCapabilities(run)...),
 		Volumes: []string{"workspace:/workspace", "agent-home:" + home, "agent-config:/nvt-config:ro"},
 		CPUs:    dockerCPU(run.Resources.CPULimit), MemLimit: dockerMemory(run.Resources.MemoryLimit),
+	}
+	if requiresConfinementProof(run) {
+		agent := services["agent"]
+		agent.Entrypoint = []string{"sh", "-ec"}
+		agent.Command = []string{agentConfinementGateScript}
+		agent.Volumes = append(agent.Volumes, "confinement:/run/nvt-confinement:ro")
+		services["agent"] = agent
 	}
 	if run.Egress.Mode == "mediated" {
 		agent := services["agent"]
@@ -246,6 +302,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 			services["net-init"] = composeService{
 				Image: config.DindImage, User: "0:0", NetworkMode: "service:" + namespaceService, Entrypoint: []string{"sh", "-ec"},
 				Command: []string{transparentInitScript}, CapAdd: []string{"NET_ADMIN"}, Labels: labels,
+				Volumes:     []string{"confinement:/confinement"},
 				Environment: map[string]string{"NVT_DIND_PROTECTED_CIDRS": config.ProtectedCIDRs},
 				DependsOn: map[string]composeDependency{
 					namespaceService: {Condition: namespaceCondition}, "captured": {Condition: "service_started"},
@@ -441,9 +498,13 @@ func namesFor(config Config, runID, digest string) resourceNames {
 	return resourceNames{
 		project: project, composeFile: filepath.Join(config.RunsDir, runID, "compose.yaml"),
 		agentConfig: project + "-agent-config", egressPrivate: project + "-egress-private", egressPublic: project + "-egress-public",
-		workspace: project + "-workspace", home: project + "-home", dockerData: project + "-docker-data",
+		workspace: project + "-workspace", home: project + "-home", dockerData: project + "-docker-data", confinement: project + "-confinement",
 		internalNet: project + "-internal", privateNet: project + "-private", namespace: project + "-namespace",
 	}
+}
+
+func requiresConfinementProof(run resolvedrun.ResolvedAgentRun) bool {
+	return run.Egress.Mode == "mediated" && run.Egress.Enforced && run.Egress.Transport == "transparent"
 }
 
 func shortDigest(value string) string {

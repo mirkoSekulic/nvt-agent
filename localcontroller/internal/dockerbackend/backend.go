@@ -277,6 +277,14 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 	if err := atomicWrite(names.composeFile, plan, 0o600); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
+	if requiresConfinementProof(run) {
+		if err := backend.removeOwnedComposeService(operationContext, names.project, "net-init", labels); err != nil {
+			if errors.Is(err, errOwnershipConflict) {
+				return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+			}
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
+	}
 	if _, err := backend.docker.Run(operationContext, nil, "compose", "-p", names.project, "-f", names.composeFile, "up", "-d", "--no-recreate"); err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
@@ -495,6 +503,9 @@ func (backend *Backend) pruneStaleOwnedResources(ctx context.Context, run resolv
 
 func (backend *Backend) requiredVolumes(run resolvedrun.ResolvedAgentRun, names resourceNames) []string {
 	values := []string{names.agentConfig, names.workspace, names.home}
+	if requiresConfinementProof(run) {
+		values = append(values, names.confinement)
+	}
 	if run.Runtime.Docker != nil {
 		values = append(values, names.dockerData)
 	}
@@ -502,6 +513,26 @@ func (backend *Backend) requiredVolumes(run resolvedrun.ResolvedAgentRun, names 
 		values = append(values, names.egressPrivate, names.egressPublic)
 	}
 	return values
+}
+
+func (backend *Backend) removeOwnedComposeService(ctx context.Context, project, service string, labels ownedLabels) error {
+	output, err := backend.docker.Run(ctx, nil, "ps", "-aq", "--filter", "label="+composeProjectLabel+"="+project, "--filter", "label="+composeServiceLabel+"="+service)
+	if err != nil {
+		return err
+	}
+	containers := strings.Fields(string(output))
+	if len(containers) > 1 {
+		return errors.New("backend service inventory unavailable")
+	}
+	for _, container := range containers {
+		if err := backend.verifyContainer(ctx, container, labels); err != nil {
+			return err
+		}
+		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (backend *Backend) ensureExternalNetwork(ctx context.Context) error {
