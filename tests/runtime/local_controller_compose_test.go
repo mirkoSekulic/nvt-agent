@@ -35,6 +35,14 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		t.Fatal(err)
 	}
 	compose := string(data)
+	protocolDocument, err := os.ReadFile(filepath.Join(root, "protocol", "local-controller.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(protocolDocument), "token_file: /broker-state/github-comments-producer-token") ||
+		strings.Contains(string(protocolDocument), "token_file: /run/secrets/nvt-local-controller/producer-token") {
+		t.Fatal("documented producer token path is not reachable through the shipped broker-state mount")
+	}
 	start := strings.Index(compose, "\n  local-controller:\n")
 	if start == -1 {
 		t.Fatalf("compose infrastructure has no local controller:\n%s", compose)

@@ -109,7 +109,7 @@ schedules:
   - name: github
     producers:
       - identity: github-comments
-        token_file: /run/secrets/nvt-local-controller/producer-token
+        token_file: /broker-state/github-comments-producer-token
         allowed_principal_issuers: [https://github.com]
         selections:
           - {profile: engineering, workflow: review-pr}
@@ -122,10 +122,15 @@ The empty reusable-policy arrays above are illustrative; startup rejects an
 incomplete configuration. Workstations and schedules resolve through the same
 immutable resolver, so protected profile/workflow/provider/grant policy is
 authored once. A workstation must select an explicitly persistent policy that
-retains workspace, runtime state, and Docker data and has no active deadline.
-Producer bearers stay in
-private regular files (no group/other permissions), are 32-4096 bytes, are
-hashed at startup, and are never logged, returned, or stored in SQLite.
+retains workspace, runtime state, and Docker data and has an entirely zero
+`ttl` block. Workstations never expire automatically; completion, failure,
+retention, and explicit authenticated deletion continue through the durable
+controller lifecycle without an implicit volume-deletion deadline. Producer
+bearers stay in private regular files (no group/other permissions), are
+32-4096 bytes, are hashed at startup, and are never logged, returned, or stored
+in SQLite. In the shipped Compose deployment, place them beneath the host
+`.broker/` directory and reference the corresponding `/broker-state/<name>`
+path mounted into the controller, as shown above.
 
 The complete workstation set is installed in one SQLite transaction. Deadline
 convergence, snapshot/replay, capacity, durable tombstone, and

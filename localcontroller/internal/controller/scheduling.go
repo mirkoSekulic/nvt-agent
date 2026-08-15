@@ -166,7 +166,7 @@ func LoadScheduler(path string, store *Store) (*Scheduler, error) {
 			RunID: configured.Name, Profile: configured.Profile, Workflow: configured.Workflow,
 			Retention: configured.Retention, Backend: configured.Backend,
 		})
-		if resolveErr != nil || !resolved.Persistence.Workspace || !resolved.Persistence.RuntimeState || !resolved.Persistence.DockerData || resolved.TTL.ActiveSeconds != 0 {
+		if resolveErr != nil || !resolved.Persistence.Workspace || !resolved.Persistence.RuntimeState || !resolved.Persistence.DockerData || resolved.TTL != (resolvedrun.TTL{}) {
 			return nil, ErrInvalidRequest
 		}
 		encoded, encodeErr := encodeCanonicalResolved(resolved)

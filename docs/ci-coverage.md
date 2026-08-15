@@ -123,6 +123,16 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 - `tests/operator/kind/producer-kind-targets-test.sh`
 - `tests/operator/kind/smoke-scheduler-job-test.sh`
 
+### runtime
+
+- `tests/runtime/runtime_core_conformance_test.go` → provider-neutral runtime
+  image wiring, generated workspace guidance, capture/session startup,
+  bootstrap preseed confinement and overwrite behavior, code-server settings,
+  runtime user/command persistence, package installation through
+  `nvt-as-root`, and the privilege wrapper contract.
+- The remaining `tests/runtime` files cover plugin, mediation, session resume,
+  lifecycle, Docker-network, and credential non-possession behavior.
+
 ### gateway
 
 - `gateway/internal/gateway/server_test.go`

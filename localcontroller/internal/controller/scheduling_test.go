@@ -413,18 +413,30 @@ func TestNativeConfigurationRejectsLegacyMixedAndAmbiguousShapes(t *testing.T) {
 	deadline := testNativeConfiguration()
 	deadline.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
 	deadline.RetentionPolicies[1].TTL.ActiveSeconds = 3600
+	runRetention := testNativeConfiguration()
+	runRetention.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	runRetention.RetentionPolicies[1].TTL.RunRetentionSeconds = 3600
+	completedRetention := testNativeConfiguration()
+	completedRetention.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	completedRetention.RetentionPolicies[1].TTL.CompletedSeconds = 3600
+	failedRetention := testNativeConfiguration()
+	failedRetention.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	failedRetention.RetentionPolicies[1].TTL.FailedSeconds = 3600
 	for name, document := range map[string]string{
-		"local_runs":        strings.TrimSuffix(validJSON, "}") + `,"local_runs":[]}`,
-		"source_agent":      strings.Replace(validJSON, `"name":"nvt"`, `"name":"nvt","source_agent":"nvt-dev"`, 1),
-		"duplicate name":    strings.Replace(validJSON, `"workstations":[`, `"workstations":[`+string(mustJSON(t, testWorkstation("nvt", "duplicate")))+`,`, 1),
-		"duplicate profile": strings.Replace(validJSON, `"profiles":[`, `"profiles":[`+string(mustJSON(t, valid.Profiles[0]))+`,`, 1),
-		"unknown profile":   strings.Replace(validJSON, `"profile":"engineering"`, `"profile":"missing"`, 1),
-		"unknown workflow":  strings.Replace(validJSON, `"workflow":"development"`, `"workflow":"missing"`, 1),
-		"invalid name":      strings.Replace(validJSON, `"name":"nvt"`, `"name":"../nvt"`, 1),
-		"nonpersistent":     strings.Replace(validJSON, `"retention":"persistent"`, `"retention":"disposable"`, 1),
-		"active deadline":   string(mustJSON(t, deadline)),
-		"duplicate yaml":    "api_version: nvt.local-platform/v1\napi_version: nvt.local-platform/v1\n",
-		"yaml alias":        "api_version: nvt.local-platform/v1\ndefaults: &defaults {}\nprofiles: []\nworkflows: []\nexecution_backends: []\nretention_policies: []\nworkstations: []\nschedules: []\n",
+		"local_runs":          strings.TrimSuffix(validJSON, "}") + `,"local_runs":[]}`,
+		"source_agent":        strings.Replace(validJSON, `"name":"nvt"`, `"name":"nvt","source_agent":"nvt-dev"`, 1),
+		"duplicate name":      strings.Replace(validJSON, `"workstations":[`, `"workstations":[`+string(mustJSON(t, testWorkstation("nvt", "duplicate")))+`,`, 1),
+		"duplicate profile":   strings.Replace(validJSON, `"profiles":[`, `"profiles":[`+string(mustJSON(t, valid.Profiles[0]))+`,`, 1),
+		"unknown profile":     strings.Replace(validJSON, `"profile":"engineering"`, `"profile":"missing"`, 1),
+		"unknown workflow":    strings.Replace(validJSON, `"workflow":"development"`, `"workflow":"missing"`, 1),
+		"invalid name":        strings.Replace(validJSON, `"name":"nvt"`, `"name":"../nvt"`, 1),
+		"nonpersistent":       strings.Replace(validJSON, `"retention":"persistent"`, `"retention":"disposable"`, 1),
+		"active deadline":     string(mustJSON(t, deadline)),
+		"run retention":       string(mustJSON(t, runRetention)),
+		"completed retention": string(mustJSON(t, completedRetention)),
+		"failed retention":    string(mustJSON(t, failedRetention)),
+		"duplicate yaml":      "api_version: nvt.local-platform/v1\napi_version: nvt.local-platform/v1\n",
+		"yaml alias":          "api_version: nvt.local-platform/v1\ndefaults: &defaults {}\nprofiles: []\nworkflows: []\nexecution_backends: []\nretention_policies: []\nworkstations: []\nschedules: []\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "local-controller.yaml")
