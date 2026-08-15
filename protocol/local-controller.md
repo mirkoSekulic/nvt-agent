@@ -165,6 +165,11 @@ capability, or egress setting. The authenticated policy maps the workflow to an
 exact authorized profile before the shared resolver runs, so denial happens
 before durable state or Docker resources exist.
 
+The optional work source URL is bounded HTTPS provenance and is never fetched
+by the controller. Query strings and validated fragments are accepted unchanged
+so producers can retain an exact comment anchor; userinfo, malformed escapes,
+and percent-decoded fragment control characters are rejected.
+
 The idempotency key and local run ID are deterministic hashes of the schedule,
 administrator producer identity, and producer work ID. An identical retry
 returns HTTP 202 with `duplicate-work`; serialized active-run capacity returns

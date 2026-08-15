@@ -542,6 +542,38 @@ func TestLocalSchedulingDeniesUntrustedSelectionBeforeBackendAndBoundsCapacity(t
 	}
 }
 
+func TestLocalSchedulingAcceptsValidatedSourceURLFragment(t *testing.T) {
+	store, _ := openTestStore(t, &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}, 1)
+	handler := NewHTTPHandlerWithServices(store, nil, nil, nil, testScheduler(t, store, schedulingTestToken))
+	body := testAdmissionBody(t, "https://identity.example.test", "subject-1", "development", "work")
+	var admission map[string]any
+	if err := json.Unmarshal(body, &admission); err != nil {
+		t.Fatal(err)
+	}
+	const sourceURL = "https://github.com/acme/widget/issues/7#issuecomment-5304285434"
+	admission["work"].(map[string]any)["url"] = sourceURL
+	response := scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions", mustJSON(t, admission), schedulingTestToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("fragment source URL admission = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestScheduleSourceURLRejectsUnsafeFragments(t *testing.T) {
+	for name, sourceURL := range map[string]string{
+		"encoded newline": "https://github.example/acme/widget/issues/7#issuecomment%0a7",
+		"encoded null":    "https://github.example/acme/widget/issues/7#issuecomment%007",
+		"invalid escape":  "https://github.example/acme/widget/issues/7#issuecomment%zz7",
+		"userinfo":        "https://user@github.example/acme/widget/issues/7#issuecomment-7",
+		"insecure scheme": "http://github.example/acme/widget/issues/7#issuecomment-7",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if validScheduleURL(sourceURL) {
+				t.Fatalf("unsafe source URL was accepted: %q", sourceURL)
+			}
+		})
+	}
+}
+
 func testScheduler(t *testing.T, store *Store, token string) *Scheduler {
 	t.Helper()
 	directory := t.TempDir()

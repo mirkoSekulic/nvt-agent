@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
@@ -605,5 +606,7 @@ func validScheduleText(value string, maximum int, allowEmpty bool) bool {
 
 func validScheduleURL(raw string) bool {
 	parsed, err := url.Parse(raw)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.Fragment == "" && len(raw) <= 2048 && !strings.ContainsAny(raw, "\x00\r\n")
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && len(raw) <= 2048 &&
+		!strings.ContainsAny(raw, "\x00\r\n") && utf8.ValidString(parsed.Fragment) &&
+		strings.IndexFunc(parsed.Fragment, unicode.IsControl) == -1
 }
