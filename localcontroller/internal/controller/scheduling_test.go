@@ -172,6 +172,43 @@ func TestConfiguredLocalRunsBootstrapIsAtomic(t *testing.T) {
 	})
 }
 
+func TestConfiguredLocalRunsBootstrapReclaimsExpiredCapacityAfterRestart(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, path := openTestStore(t, clock, 2)
+	for _, runID := range []string{"expired-a", "expired-b"} {
+		if _, err := store.Create(context.Background(), CreateInput{IdempotencyKey: "expired-key-" + runID, ResolvedRun: testResolvedRun(t, runID, false)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clock.value = clock.value.Add(24 * time.Hour)
+	restarted, err := OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 2, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	scheduler, err := LoadScheduler(writeLocalRunsDocument(t, []localRunConfig{testNamedRun("first", ""), testNamedRun("second", "")}), restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.BootstrapLocalRuns(context.Background()); err != nil {
+		t.Fatalf("expired downtime capacity blocked named bootstrap: %v", err)
+	}
+	listed, err := restarted.List(context.Background(), 10, "")
+	if err != nil || len(listed.Runs) != 4 {
+		t.Fatalf("restart rows = %#v err=%v", listed, err)
+	}
+	states := map[string]State{}
+	for _, run := range listed.Runs {
+		states[run.RunID] = run.State
+	}
+	if states["expired-a"] != StateStopping || states["expired-b"] != StateStopping || states["first"] != StatePending || states["second"] != StatePending {
+		t.Fatalf("atomic deadline/bootstrap states = %#v", states)
+	}
+}
+
 func testNamedRun(runID, prompt string) localRunConfig {
 	return localRunConfig{
 		RunID: runID, Principal: resolvedrun.Principal{Issuer: "https://local.nvt.test", Subject: "workstation-" + runID},

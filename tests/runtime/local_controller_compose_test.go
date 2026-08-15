@@ -161,3 +161,29 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		t.Fatal("agent stack received the host Docker socket")
 	}
 }
+
+func TestLocalMigrationProofIsReadOnlyAndRedacted(t *testing.T) {
+	root := repoRoot(t)
+	proofPath := filepath.Join(root, "scripts", "local-agent-migrate-proof.sh")
+	proof, err := os.ReadFile(proofPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(proofPath)
+	if err != nil || info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("migration proof is not executable: %#v %v", info, err)
+	}
+	text := string(proof)
+	for _, required := range []string{"--check", "local-agent-migration-real-config-proof: PASS", ">/dev/null 2>&1"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("migration proof lacks redacted read-only behavior: missing %q", required)
+		}
+	}
+	if strings.Contains(text, "--output") || strings.Contains(text, "cat ") {
+		t.Fatal("migration proof can write or print generated/source configuration")
+	}
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil || !strings.Contains(string(makefile), "local-agent-migrate-proof:") {
+		t.Fatalf("migration proof Make target missing: %v", err)
+	}
+}

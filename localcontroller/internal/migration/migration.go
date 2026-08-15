@@ -36,11 +36,11 @@ type Manifest struct {
 }
 
 type runtimeAllowlist struct {
-	Commands        []string          `yaml:"commands"`
-	Arguments       []string          `yaml:"arguments,omitempty"`
-	ResumeCommands  []string          `yaml:"resume_commands,omitempty"`
-	ResumeArguments []string          `yaml:"resume_arguments,omitempty"`
-	Environment     map[string]string `yaml:"environment,omitempty"`
+	Commands        []string            `yaml:"commands"`
+	Arguments       []string            `yaml:"arguments,omitempty"`
+	ResumeCommands  []string            `yaml:"resume_commands,omitempty"`
+	ResumeArguments []string            `yaml:"resume_arguments,omitempty"`
+	Environment     map[string][]string `yaml:"environment,omitempty"`
 }
 
 type ManifestAgent struct {
@@ -52,6 +52,7 @@ type ManifestAgent struct {
 	RuntimeType        string            `yaml:"runtime_type"`
 	Autonomy           string            `yaml:"autonomy"`
 	User               string            `yaml:"user"`
+	ToolShell          []string          `yaml:"tools_shell"`
 	ContainerCaps      []string          `yaml:"container_capabilities,omitempty"`
 	Docker             *manifestDocker   `yaml:"docker,omitempty"`
 	BrokerRepositories map[string]string `yaml:"broker_repositories,omitempty"`
@@ -237,7 +238,7 @@ func convertAgent(manifest Manifest, configured ManifestAgent, root string, brok
 	}
 	agentPath := filepath.Join(root, configured.Name, "agent.yaml")
 	base, mappings, defaultProvider, repositories, egress, err := convertAgentConfig(
-		agentPath, staticAgent.Grants, configured.BrokerRepositories, manifest.RuntimeAllowlist, manifest.CredentialUsernames, configured.User,
+		agentPath, staticAgent.Grants, configured.BrokerRepositories, manifest.RuntimeAllowlist, manifest.CredentialUsernames, configured.User, configured.ToolShell,
 	)
 	if err != nil {
 		return resolvedrun.Profile{}, resolvedrun.Workflow{}, outputLocalRun{}, err
@@ -274,7 +275,7 @@ func convertAgent(manifest Manifest, configured ManifestAgent, root string, brok
 	return profile, workflow, localRun, nil
 }
 
-func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]string, runtimeAllowlist runtimeAllowlist, credentialUsernames []string, runtimeUser string) (json.RawMessage, []resolvedrun.CredentialProviderMapping, string, []resolvedrun.Repository, resolvedrun.Egress, error) {
+func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]string, runtimeAllowlist runtimeAllowlist, credentialUsernames []string, runtimeUser string, configuredToolShell []string) (json.RawMessage, []resolvedrun.CredentialProviderMapping, string, []resolvedrun.Repository, resolvedrun.Egress, error) {
 	root, err := loadYAMLObject(path, resolvedrun.MaxAgentConfigBytes)
 	if err != nil {
 		return nil, nil, "", nil, resolvedrun.Egress{}, err
@@ -433,7 +434,11 @@ func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]
 			return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
 		}
 	}
-	if !sanitizePortableAgentConfig(root, runtimeAllowlist, runtimeUser, grantByProvider) {
+	credentialProviders := make(map[string]struct{}, len(mappings))
+	for _, mapping := range mappings {
+		credentialProviders[mapping.Name] = struct{}{}
+	}
+	if !projectPortableAgentConfig(root, runtimeAllowlist, runtimeUser, configuredToolShell, grantByProvider, credentialProviders) {
 		return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
 	}
 	base, err := json.Marshal(root)
@@ -487,29 +492,28 @@ func exactBrokerRepository(checkoutTarget string, repositories []string) string 
 	return result
 }
 
-// sanitizePortableAgentConfig accepts only source fields whose runtime meaning
-// is explicitly non-secret and bounded. Runtime arguments/environment must be
-// enumerated by the administrator-owned migration manifest. Arbitrary plugin
-// configuration, shell hooks, editor settings, and other value-bearing escape
-// hatches stay on the static Compose rollback path.
-func sanitizePortableAgentConfig(root map[string]any, allow runtimeAllowlist, runtimeUser string, grants map[string]brokerGrant) bool {
+// projectPortableAgentConfig builds a bounded portable base from typed source
+// semantics. Values that can execute or carry arbitrary data are either
+// enumerated by the administrator manifest or replaced by a fixed generated
+// shape; the source document is never copied wholesale.
+func projectPortableAgentConfig(root map[string]any, allow runtimeAllowlist, runtimeUser string, configuredToolShell []string, grants map[string]brokerGrant, credentialProviders map[string]struct{}) bool {
 	if !onlyKeys(root, "runtime", "tools", "code-server", "expose", "preseed", "plugins") {
 		return false
 	}
 	runtime, ok := root["runtime"].(map[string]any)
-	if !ok || !validPortableRuntime(runtime, allow, runtimeUser) {
+	if !ok || !projectPortableRuntime(runtime, allow, runtimeUser) {
 		return false
 	}
-	if tools, present := root["tools"]; present && !validPortableTools(tools) {
+	if tools, present := root["tools"]; present && !projectPortableTools(tools, configuredToolShell) {
 		return false
 	}
-	if codeServer, present := root["code-server"]; present && !validPortableCodeServer(codeServer) {
+	if codeServer, present := root["code-server"]; present && !projectPortableCodeServer(codeServer) {
 		return false
 	}
 	if expose, present := root["expose"]; present && !validPortableExpose(expose) {
 		return false
 	}
-	if preseed, present := root["preseed"]; present && !validGeneratedPreseed(preseed) {
+	if preseed, present := root["preseed"]; present && !projectGeneratedPreseed(preseed) {
 		return false
 	}
 	plugins, ok := root["plugins"].([]any)
@@ -518,7 +522,7 @@ func sanitizePortableAgentConfig(root map[string]any, allow runtimeAllowlist, ru
 	}
 	for _, raw := range plugins {
 		plugin, ok := raw.(map[string]any)
-		if !ok || !validReferenceOnlyPlugin(plugin, grants) {
+		if !ok || !projectReferenceOnlyPlugin(plugin, grants, credentialProviders) {
 			return false
 		}
 	}
@@ -550,17 +554,19 @@ func validAllowlistStrings(values []string, minimum, maximum int, valid func(str
 	return true
 }
 
-func validPortableRuntime(value map[string]any, allow runtimeAllowlist, runtimeUser string) bool {
+func projectPortableRuntime(value map[string]any, allow runtimeAllowlist, runtimeUser string) bool {
 	if !onlyKeys(value, "command", "args", "user", "env", "resume") {
 		return false
 	}
-	command, commandOK := value["command"].(string)
-	user, userOK := value["user"].(string)
-	if !commandOK || !containsString(allow.Commands, command) || !userOK || user != runtimeUser ||
-		!allowedStringArray(value["args"], allow.Arguments) {
+	if user, present := value["user"]; present && user != runtimeUser {
 		return false
 	}
-	if environment, present := value["env"]; present && !allowedEnvironment(environment, allow.Environment) {
+	value["user"] = runtimeUser
+	environment := map[string]string{}
+	if rawEnvironment, present := value["env"]; present && !projectEnvironment(rawEnvironment, allow.Environment, environment) {
+		return false
+	}
+	if !projectRuntimeCommand(value, allow.Commands, allow.Arguments, allow.Environment, environment) {
 		return false
 	}
 	if resumeValue, present := value["resume"]; present {
@@ -568,15 +574,62 @@ func validPortableRuntime(value map[string]any, allow runtimeAllowlist, runtimeU
 		if !ok || !onlyKeys(resume, "command", "args") {
 			return false
 		}
-		resumeCommand, ok := resume["command"].(string)
-		if !ok || !containsString(allow.ResumeCommands, resumeCommand) || !allowedOptionalStringArray(resume, "args", allow.ResumeArguments) {
+		if !projectRuntimeCommand(resume, allow.ResumeCommands, allow.ResumeArguments, allow.Environment, environment) {
 			return false
 		}
+	}
+	if len(environment) == 0 {
+		delete(value, "env")
+	} else {
+		projected := make(map[string]any, len(environment))
+		for name, entry := range environment {
+			projected[name] = entry
+		}
+		value["env"] = projected
 	}
 	return true
 }
 
-func validPortableTools(raw any) bool {
+func projectRuntimeCommand(value map[string]any, allowedCommands, allowedArguments []string, allowedEnvironment map[string][]string, environment map[string]string) bool {
+	command, ok := value["command"].(string)
+	if !ok {
+		return false
+	}
+	arguments, ok := stringsFromArray(value["args"], 64)
+	if !ok {
+		return false
+	}
+	if command == "env" {
+		index := 0
+		for index < len(arguments) {
+			name, entry, assignment := strings.Cut(arguments[index], "=")
+			if !assignment {
+				break
+			}
+			if !projectEnvironmentEntry(name, entry, allowedEnvironment, environment) {
+				return false
+			}
+			index++
+		}
+		if index == len(arguments) {
+			return false
+		}
+		command, arguments = arguments[index], arguments[index+1:]
+	}
+	if !containsString(allowedCommands, command) {
+		return false
+	}
+	for _, argument := range arguments {
+		if !containsString(allowedArguments, argument) {
+			return false
+		}
+	}
+	value["command"] = command
+	value["args"] = stringsToAny(arguments)
+	return true
+}
+
+func projectPortableTools(raw any, configuredShell []string) bool {
 	value, ok := raw.(map[string]any)
 	if !ok || !onlyKeys(value, "packages", "mise", "additional-paths", "shell") {
 		return false
@@ -591,13 +644,25 @@ func validPortableTools(raw any) bool {
 	if item, present := value["additional-paths"]; present && !stringArray(item, 64, validPortablePath) {
 		return false
 	}
-	if item, present := value["shell"]; present && !emptyArray(item) {
-		return false
+	if item, present := value["shell"]; present {
+		if _, ok := stringsFromArray(item, 64); !ok || configuredShell == nil {
+			return false
+		}
+	}
+	if configuredShell == nil {
+		delete(value, "shell")
+	} else {
+		for _, command := range configuredShell {
+			if len(command) == 0 || len(command) > 2048 || !utf8.ValidString(command) || strings.ContainsAny(command, "\x00\r\n") {
+				return false
+			}
+		}
+		value["shell"] = stringsToAny(configuredShell)
 	}
 	return true
 }
 
-func validPortableCodeServer(raw any) bool {
+func projectPortableCodeServer(raw any) bool {
 	value, ok := raw.(map[string]any)
 	if !ok || !onlyKeys(value, "extensions", "settings", "agentTerminal") {
 		return false
@@ -619,7 +684,7 @@ func validPortableCodeServer(raw any) bool {
 		}
 		if values, exists := settings["values"]; exists {
 			object, ok := values.(map[string]any)
-			if !ok || len(object) != 0 {
+			if !ok || !validGeneratedCodeServerSettings(object) {
 				return false
 			}
 		}
@@ -634,6 +699,29 @@ func validPortableCodeServer(raw any) bool {
 				return false
 			}
 		}
+	}
+	return true
+}
+
+func validGeneratedCodeServerSettings(values map[string]any) bool {
+	if !onlyKeys(values, "workbench.colorTheme", "workbench.startupEditor", "security.workspace.trust.enabled", "extensions.ignoreRecommendations", "editor.minimap.enabled", "keyboard.dispatch") {
+		return false
+	}
+	for _, key := range []string{"security.workspace.trust.enabled", "extensions.ignoreRecommendations", "editor.minimap.enabled"} {
+		if value, present := values[key]; present {
+			if _, ok := value.(bool); !ok {
+				return false
+			}
+		}
+	}
+	if value, present := values["workbench.colorTheme"]; present && value != "Default Dark Modern" {
+		return false
+	}
+	if value, present := values["workbench.startupEditor"]; present && value != "none" {
+		return false
+	}
+	if value, present := values["keyboard.dispatch"]; present && value != "keyCode" && value != "code" {
+		return false
 	}
 	return true
 }
@@ -670,7 +758,7 @@ func validPortableExpose(raw any) bool {
 	return true
 }
 
-func validGeneratedPreseed(raw any) bool {
+func projectGeneratedPreseed(raw any) bool {
 	value, ok := raw.(map[string]any)
 	if !ok || !onlyKeys(value, "files") {
 		return false
@@ -679,6 +767,8 @@ func validGeneratedPreseed(raw any) bool {
 	if !ok || len(files) > 8 {
 		return false
 	}
+	seen := map[string]struct{}{}
+	projected := make([]any, 0, len(files))
 	for _, rawFile := range files {
 		file, ok := rawFile.(map[string]any)
 		if !ok || !onlyKeys(file, "path", "mode", "overwrite", "content", "json") {
@@ -690,28 +780,41 @@ func validGeneratedPreseed(raw any) bool {
 		if !pathOK || !modeOK || mode != "0600" || !overwriteOK || overwrite {
 			return false
 		}
-		content, hasContent := file["content"]
-		jsonValue, hasJSON := file["json"]
+		_, hasContent := file["content"]
+		_, hasJSON := file["json"]
 		if hasContent == hasJSON {
 			return false
 		}
-		if hasContent {
-			text, ok := content.(string)
-			if !ok || path != "$HOME/.codex/config.toml" || strings.TrimSuffix(text, "\n") != "check_for_update_on_startup = false" {
-				return false
-			}
+		if _, duplicate := seen[path]; duplicate {
+			return false
 		}
-		if hasJSON {
-			object, ok := jsonValue.(map[string]any)
-			if !ok || path != "$HOME/.claude/settings.json" || !onlyKeys(object, "theme", "skipDangerousModePermissionPrompt") || object["theme"] != "dark-daltonized" || object["skipDangerousModePermissionPrompt"] != true {
+		seen[path] = struct{}{}
+		switch path {
+		case "$HOME/.codex/config.toml":
+			if _, ok := file["content"].(string); !ok || hasJSON {
 				return false
 			}
+			projected = append(projected, map[string]any{
+				"path": path, "mode": "0600", "overwrite": false,
+				"content": "check_for_update_on_startup = false\n",
+			})
+		case "$HOME/.claude/settings.json":
+			if _, ok := file["json"].(map[string]any); !ok || hasContent {
+				return false
+			}
+			projected = append(projected, map[string]any{
+				"path": path, "mode": "0600", "overwrite": false,
+				"json": map[string]any{"theme": "dark-daltonized", "skipDangerousModePermissionPrompt": true},
+			})
+		default:
+			return false
 		}
 	}
+	value["files"] = projected
 	return true
 }
 
-func validReferenceOnlyPlugin(plugin map[string]any, grants map[string]brokerGrant) bool {
+func projectReferenceOnlyPlugin(plugin map[string]any, grants map[string]brokerGrant, credentialProviders map[string]struct{}) bool {
 	if !onlyKeys(plugin, "name", "source", "when", "restart", "health", "egress", "config") {
 		return false
 	}
@@ -752,78 +855,300 @@ func validReferenceOnlyPlugin(plugin map[string]any, grants map[string]brokerGra
 	}
 	if configValue, present := plugin["config"]; present {
 		config, ok := configValue.(map[string]any)
-		if !ok || !validReferenceOnlyPluginConfig(name, config) {
+		if !ok || !projectReferenceOnlyPluginConfig(name, config, grants, credentialProviders) {
 			return false
 		}
 	}
 	return true
 }
 
-func validReferenceOnlyPluginConfig(name string, config map[string]any) bool {
+func projectReferenceOnlyPluginConfig(name string, config map[string]any, grants map[string]brokerGrant, credentialProviders map[string]struct{}) bool {
 	if len(config) == 0 {
 		return true
 	}
-	// The watcher registry and credential transport remain outside this static
-	// config. Only its bounded cadence is portable reference-free policy.
-	if name != "github-watcher" || !onlyKeys(config, "poll-seconds") {
+	if name != "github-watcher" || !onlyKeys(config, "default-provider", "broker", "prs", "poll-seconds", "poll-interval-seconds") {
 		return false
 	}
-	seconds, ok := config["poll-seconds"].(int)
-	return ok && seconds >= 5 && seconds <= 3600
+	if provider, present := config["default-provider"]; present && !validConfiguredReference(provider, credentialProviders) {
+		return false
+	}
+	if broker, present := config["broker"]; present && !validWatcherBroker(broker, grants) {
+		return false
+	}
+	poll, hasPoll := config["poll-seconds"]
+	legacyPoll, hasLegacyPoll := config["poll-interval-seconds"]
+	if hasPoll && hasLegacyPoll {
+		return false
+	}
+	if hasLegacyPoll {
+		poll = legacyPoll
+		delete(config, "poll-interval-seconds")
+		config["poll-seconds"] = poll
+	}
+	if hasPoll || hasLegacyPoll {
+		seconds, ok := poll.(int)
+		if !ok || seconds < 5 || seconds > 3600 {
+			return false
+		}
+	}
+	if rawPRs, present := config["prs"]; present {
+		prs, ok := rawPRs.([]any)
+		if !ok || len(prs) > 64 {
+			return false
+		}
+		for _, rawPR := range prs {
+			pr, ok := rawPR.(map[string]any)
+			if !ok || !validWatcherPR(pr, grants, credentialProviders) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
-func validAllowedEnvironment(value map[string]string) bool {
-	if len(value) > 32 {
+func validWatcherPR(value map[string]any, grants map[string]brokerGrant, credentialProviders map[string]struct{}) bool {
+	if !onlyKeys(value, "repo", "number", "pr", "provider", "labels", "publish", "comments", "reviews", "checks", "closed", "broker") {
 		return false
 	}
-	for name, entry := range value {
-		if !validEnvironmentName(name) || len(entry) > 4096 || strings.ContainsAny(entry, "\x00\r\n") {
+	repository, ok := value["repo"].(string)
+	if !ok || !validRepositoryReference(repository) {
+		return false
+	}
+	rawNumber, hasNumber := value["number"]
+	rawLegacyNumber, hasLegacyNumber := value["pr"]
+	if hasNumber == hasLegacyNumber {
+		return false
+	}
+	if hasNumber {
+		number, ok := rawNumber.(int)
+		if !ok || number < 1 {
+			return false
+		}
+	}
+	if hasLegacyNumber {
+		number, ok := rawLegacyNumber.(int)
+		if !ok || number < 1 {
+			return false
+		}
+	}
+	if provider, present := value["provider"]; present && !validConfiguredReference(provider, credentialProviders) {
+		return false
+	}
+	if labels, present := value["labels"]; present && !stringArray(labels, 64, validWatcherLabel) {
+		return false
+	}
+	if broker, present := value["broker"]; present && !validWatcherBroker(broker, grants) {
+		return false
+	}
+	if publish, present := value["publish"]; present && !validBooleanPolicy(publish, "enabled") {
+		return false
+	}
+	for _, key := range []string{"comments", "reviews"} {
+		if policy, present := value[key]; present && !validWatcherDiscussion(policy) {
+			return false
+		}
+	}
+	if policy, present := value["checks"]; present && !validWatcherChecks(policy) {
+		return false
+	}
+	if policy, present := value["closed"]; present && !validWatcherClosed(policy) {
+		return false
+	}
+	return true
+}
+
+func validWatcherBroker(raw any, grants map[string]brokerGrant) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "enabled", "provider") {
+		return false
+	}
+	if enabled, present := value["enabled"]; present {
+		if _, ok := enabled.(bool); !ok {
+			return false
+		}
+	}
+	if provider, present := value["provider"]; present {
+		name, ok := provider.(string)
+		if !ok {
+			return false
+		}
+		if _, granted := grants[name]; !granted {
 			return false
 		}
 	}
 	return true
 }
 
-func allowedEnvironment(raw any, allowed map[string]string) bool {
+func validWatcherDiscussion(raw any) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "enabled", "author-associations", "prompt") {
+		return false
+	}
+	if enabled, present := value["enabled"]; present {
+		if _, ok := enabled.(bool); !ok {
+			return false
+		}
+	}
+	if associations, present := value["author-associations"]; present && !stringArray(associations, 16, validAuthorAssociation) {
+		return false
+	}
+	return validWatcherPrompt(value["prompt"])
+}
+
+func validWatcherChecks(raw any) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "enabled", "mode", "publish-failed-transition", "publish-passed-transition", "prompt") {
+		return false
+	}
+	for _, key := range []string{"enabled", "publish-failed-transition", "publish-passed-transition"} {
+		if entry, present := value[key]; present {
+			if _, ok := entry.(bool); !ok {
+				return false
+			}
+		}
+	}
+	if mode, present := value["mode"]; present && mode != "aggregate" {
+		return false
+	}
+	if prompt, present := value["prompt"]; present {
+		policy, ok := prompt.(map[string]any)
+		if !ok || !onlyKeys(policy, "failed", "passed", "template") {
+			return false
+		}
+		for _, key := range []string{"failed", "passed"} {
+			if entry, exists := policy[key]; exists {
+				if _, ok := entry.(bool); !ok {
+					return false
+				}
+			}
+		}
+		if _, hasTemplate := policy["template"]; hasTemplate {
+			return false
+		}
+	}
+	return true
+}
+
+func validWatcherClosed(raw any) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "enabled", "remove", "publish", "prompt", "template") {
+		return false
+	}
+	for _, key := range []string{"enabled", "remove", "publish", "prompt"} {
+		if entry, present := value[key]; present {
+			if _, ok := entry.(bool); !ok {
+				return false
+			}
+		}
+	}
+	_, hasTemplate := value["template"]
+	return !hasTemplate
+}
+
+func validWatcherPrompt(raw any) bool {
+	if raw == nil {
+		return true
+	}
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "enabled", "template") {
+		return false
+	}
+	if enabled, present := value["enabled"]; present {
+		if _, ok := enabled.(bool); !ok {
+			return false
+		}
+	}
+	_, hasTemplate := value["template"]
+	return !hasTemplate
+}
+
+func validBooleanPolicy(raw any, keys ...string) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, keys...) {
+		return false
+	}
+	for _, key := range keys {
+		if entry, present := value[key]; present {
+			if _, ok := entry.(bool); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validAllowedEnvironment(value map[string][]string) bool {
+	if len(value) > 32 {
+		return false
+	}
+	for name, entries := range value {
+		if !validEnvironmentName(name) || !validAllowlistStrings(entries, 1, 8, func(entry string) bool {
+			return len(entry) <= 4096 && !strings.ContainsAny(entry, "\x00\r\n")
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+func projectEnvironment(raw any, allowed map[string][]string, projected map[string]string) bool {
 	value, ok := raw.(map[string]any)
 	if !ok || len(value) > len(allowed) {
 		return false
 	}
 	for name, rawEntry := range value {
 		entry, ok := rawEntry.(string)
-		if !ok || allowed[name] != entry {
+		if !ok || !projectEnvironmentEntry(name, entry, allowed, projected) {
 			return false
 		}
 	}
 	return true
 }
 
-func allowedStringArray(raw any, allowed []string) bool {
-	return stringArray(raw, 64, func(value string) bool { return containsString(allowed, value) })
-}
-
-func allowedOptionalStringArray(value map[string]any, key string, allowed []string) bool {
-	raw, present := value[key]
-	return !present || allowedStringArray(raw, allowed)
+func projectEnvironmentEntry(name, entry string, allowed map[string][]string, projected map[string]string) bool {
+	entries, configured := allowed[name]
+	if !configured || !containsString(entries, entry) {
+		return false
+	}
+	projected[name] = entries[0]
+	return true
 }
 
 func stringArray(raw any, maximum int, valid func(string) bool) bool {
-	values, ok := raw.([]any)
-	if !ok || len(values) > maximum {
+	values, ok := stringsFromArray(raw, maximum)
+	if !ok {
 		return false
 	}
-	for _, rawValue := range values {
-		value, ok := rawValue.(string)
-		if !ok || !valid(value) {
+	for _, value := range values {
+		if !valid(value) {
 			return false
 		}
 	}
 	return true
 }
 
-func emptyArray(raw any) bool {
+func stringsFromArray(raw any, maximum int) ([]string, bool) {
 	values, ok := raw.([]any)
-	return ok && len(values) == 0
+	if !ok || len(values) > maximum {
+		return nil, false
+	}
+	result := make([]string, 0, len(values))
+	for _, rawValue := range values {
+		value, ok := rawValue.(string)
+		if !ok {
+			return nil, false
+		}
+		result = append(result, value)
+	}
+	return result, true
+}
+
+func stringsToAny(values []string) []any {
+	result := make([]any, len(values))
+	for index, value := range values {
+		result[index] = value
+	}
+	return result
 }
 
 func onlyKeys(value map[string]any, allowed ...string) bool {
@@ -846,6 +1171,40 @@ func containsString(values []string, candidate string) bool {
 		}
 	}
 	return false
+}
+
+func validConfiguredReference(raw any, configured map[string]struct{}) bool {
+	value, ok := raw.(string)
+	if !ok {
+		return false
+	}
+	_, exists := configured[value]
+	return exists
+}
+
+func validRepositoryReference(value string) bool {
+	if len(value) < 3 || len(value) > 256 || strings.Count(value, "/") != 1 || strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || !safeToken(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+func validWatcherLabel(value string) bool {
+	return len(value) > 0 && len(value) <= 128 && value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validAuthorAssociation(value string) bool {
+	switch value {
+	case "COLLABORATOR", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", "MEMBER", "NONE", "OWNER":
+		return true
+	default:
+		return false
+	}
 }
 
 func validPortableCommand(value string) bool {

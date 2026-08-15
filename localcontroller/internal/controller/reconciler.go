@@ -166,25 +166,42 @@ func (reconciler *Reconciler) Recover(ctx context.Context) error {
 }
 
 func (reconciler *Reconciler) Reconcile(ctx context.Context) error {
-	after := ""
-	for {
-		page, err := reconciler.store.List(ctx, MaxListLimit, after)
-		if err != nil {
-			return err
-		}
-		for _, run := range page.Runs {
-			if run.State.terminal() {
-				continue
+	// Cleanup-bound runs go first across the complete durable set. Named-run
+	// bootstrap may reserve replacement capacity for rows whose deadlines were
+	// atomically converged to stopping; no pending backend is created before
+	// those exact-owned resources receive a cleanup attempt.
+	for pass := 0; pass < 2; pass++ {
+		after := ""
+		for {
+			page, err := reconciler.store.List(ctx, MaxListLimit, after)
+			if err != nil {
+				return err
 			}
-			if err := reconciler.reconcileRun(ctx, run); err != nil && !errors.Is(err, ErrOwnershipConflict) && !errors.Is(err, ErrNotFound) {
-				reconciler.logger.Printf("reconcile warning reason=run-unavailable run_id=%s", run.RunID)
+			for _, run := range page.Runs {
+				cleanup := run.State == StateStopping
+				if run.State.terminal() || cleanup != (pass == 0) {
+					continue
+				}
+				if err := reconciler.reconcileRun(ctx, run); err != nil && !errors.Is(err, ErrOwnershipConflict) && !errors.Is(err, ErrNotFound) {
+					reconciler.logger.Printf("reconcile warning reason=run-unavailable run_id=%s", run.RunID)
+				}
+			}
+			if page.NextAfter == "" {
+				break
+			}
+			after = page.NextAfter
+		}
+		if pass == 0 {
+			blocked, err := reconciler.store.replacementCleanupPending(ctx)
+			if err != nil {
+				return err
+			}
+			if blocked {
+				return nil
 			}
 		}
-		if page.NextAfter == "" {
-			return nil
-		}
-		after = page.NextAfter
 	}
+	return nil
 }
 
 func (reconciler *Reconciler) reconcileRun(ctx context.Context, run Run) error {

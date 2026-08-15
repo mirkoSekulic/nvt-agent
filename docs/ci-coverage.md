@@ -132,8 +132,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 ### local controller
 
-- deterministic local-agent migration, canonical repository/username mapping,
-  structural secret rejection, atomic named-run bootstrap/restart, composed
+- deterministic typed local-agent projection, env-wrapper/preseed/watcher/editor
+  normalization, canonical repository/username mapping, structural secret
+  rejection, atomic deadline/bootstrap restart, composed
   disposable scheduling, and representative nvt-dev/studio/infra fixtures →
   `local-controller.yml / controller`
 - `protocol/localroutes` strict route/readiness metadata contract and bounds →

@@ -329,7 +329,7 @@ func (store *Store) Create(ctx context.Context, input CreateInput) (CreateResult
 	if _, err := store.Sweep(ctx); err != nil {
 		return CreateResult{}, err
 	}
-	results, err := store.CreateBatch(ctx, []CreateInput{input})
+	results, err := store.createBatch(ctx, []CreateInput{input}, false)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -348,6 +348,10 @@ type preparedCreate struct {
 // boundary for administrator-owned named runs; a rejected document cannot
 // leave a partially installed set behind.
 func (store *Store) CreateBatch(ctx context.Context, inputs []CreateInput) ([]CreateResult, error) {
+	return store.createBatch(ctx, inputs, true)
+}
+
+func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, reclaimCleanupCapacity bool) ([]CreateResult, error) {
 	if len(inputs) == 0 || len(inputs) > store.maxActiveRuns {
 		return nil, ErrInvalidRequest
 	}
@@ -378,6 +382,9 @@ func (store *Store) CreateBatch(ctx context.Context, inputs []CreateInput) ([]Cr
 		return nil, ErrStoreUnavailable
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := sweepTx(ctx, tx, now); err != nil {
+		return nil, err
+	}
 	results := make([]CreateResult, len(prepared))
 	newIndexes := make([]int, 0, len(prepared))
 	for index, candidate := range prepared {
@@ -401,7 +408,14 @@ func (store *Store) CreateBatch(ctx context.Context, inputs []CreateInput) ([]Cr
 		results[index] = CreateResult{Run: existing.view, Created: false}
 	}
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_runs WHERE deleted_at IS NULL AND state IN ('pending','preparing','running','stopping')`).Scan(&active); err != nil {
+	activeStates := "('pending','preparing','running','stopping')"
+	if reclaimCleanupCapacity {
+		// Named runs are durable startup intent. Cleanup-bound rows are already
+		// denied execution and reconciled before pending work; excluding them
+		// prevents expired downtime state from permanently blocking bootstrap.
+		activeStates = "('pending','preparing','running')"
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_runs WHERE deleted_at IS NULL AND state IN `+activeStates).Scan(&active); err != nil {
 		return nil, ErrStoreUnavailable
 	}
 	if active+len(newIndexes) > store.maxActiveRuns {
@@ -787,6 +801,17 @@ func (store *Store) Sweep(ctx context.Context) (int, error) {
 		return 0, ErrStoreUnavailable
 	}
 	defer func() { _ = tx.Rollback() }()
+	changed, err := sweepTx(ctx, tx, now)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, ErrStoreUnavailable
+	}
+	return changed, nil
+}
+
+func sweepTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	rows, err := tx.QueryContext(ctx, selectRuns+` WHERE deleted_at IS NULL ORDER BY run_id`)
 	if err != nil {
 		return 0, ErrStoreUnavailable
@@ -825,10 +850,20 @@ delete_requested=1,revision=revision+1,updated_at=?,last_reason='retention-expir
 			changed++
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, ErrStoreUnavailable
-	}
 	return changed, nil
+}
+
+func (store *Store) replacementCleanupPending(ctx context.Context) (bool, error) {
+	var active, stopping int
+	err := store.db.QueryRowContext(ctx, `SELECT
+COUNT(*),
+COALESCE(SUM(CASE WHEN state = 'stopping' THEN 1 ELSE 0 END), 0)
+FROM local_runs
+WHERE deleted_at IS NULL AND state IN ('pending','preparing','running','stopping')`).Scan(&active, &stopping)
+	if err != nil {
+		return false, ErrStoreUnavailable
+	}
+	return stopping > 0 && active > store.maxActiveRuns, nil
 }
 
 func (store *Store) Ready(ctx context.Context) bool {

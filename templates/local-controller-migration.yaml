@@ -13,11 +13,20 @@ runtime_allowlist:
     - never
     - --dangerously-skip-permissions
   resume_commands: [codex, claude]
-  resume_arguments: [exec, resume, --last, --continue]
+  resume_arguments: [exec, resume, --last, --continue, --sandbox, danger-full-access, --ask-for-approval, never, --dangerously-skip-permissions]
   environment:
-    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt
-    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd
-credential_usernames: [x-access-token, oauth2, oauth-user]
+    NODE_EXTRA_CA_CERTS: [/nvt-egress-ca/ca.crt]
+    SSL_CERT_FILE: [/nvt-egress-ca/ca.crt]
+    REQUESTS_CA_BUNDLE: [/nvt-egress-ca/ca.crt]
+    GIT_SSL_CAINFO: [/nvt-egress-ca/ca.crt]
+    NO_PROXY:
+      - localhost,127.0.0.1,::1,broker,egressd
+      - localhost,127.0.0.1,::1,broker,egressd,docker,proxy.golang.org,sum.golang.org,golang.org,.golang.org,registry.npmjs.org,.npmjs.org,http-intake.logs.us5.datadoghq.com,browser-intake-us5-datadoghq.com,.datadoghq.com
+      - localhost,127.0.0.1,::1,broker,egressd,docker,proxy.golang.org,sum.golang.org,golang.org,.golang.org,registry.npmjs.org,.npmjs.org,http-intake.logs.us5.datadoghq.com,browser-intake-us5.datadoghq.com,.datadoghq.com
+    no_proxy:
+      - localhost,127.0.0.1,::1,broker,egressd,docker,proxy.golang.org,sum.golang.org,golang.org,.golang.org,registry.npmjs.org,.npmjs.org,http-intake.logs.us5.datadoghq.com,browser-intake-us5-datadoghq.com,.datadoghq.com
+      - localhost,127.0.0.1,::1,broker,egressd,docker,proxy.golang.org,sum.golang.org,golang.org,.golang.org,registry.npmjs.org,.npmjs.org,http-intake.logs.us5.datadoghq.com,browser-intake-us5.datadoghq.com,.datadoghq.com
+credential_usernames: [x-access-token, oauth2, oauth-user, pat]
 agents:
   - name: nvt-dev
     subject: workstation-nvt-dev
@@ -25,6 +34,9 @@ agents:
     runtime_type: local-agent
     autonomy: trusted-local
     user: root
+    # Source tools.shell is never copied. Keep [] only when those host-local
+    # commands are intentionally unnecessary in the coordinated runtime image.
+    tools_shell: []
     # broker_repositories is needed only when the checkout owner/repository is
     # not an exact unique entry in its selected broker grant.
   - name: studio
@@ -33,9 +45,11 @@ agents:
     runtime_type: local-agent
     autonomy: trusted-local
     user: root
+    tools_shell: []
   - name: infra
     subject: workstation-infra
     display_name: Infrastructure development
     runtime_type: local-agent
     autonomy: trusted-local
     user: root
+    tools_shell: []

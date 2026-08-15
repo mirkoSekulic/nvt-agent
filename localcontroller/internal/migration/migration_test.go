@@ -65,8 +65,29 @@ func TestGenerateMigratesRepresentativeAgentsDeterministicallyWithoutSecrets(t *
 		if err != nil || bytes.Contains(rendered, []byte(secretNeedle)) || !bytes.Contains(rendered, []byte(`"credential-kind":"mediated"`)) || !bytes.Contains(rendered, []byte(`"default-provider":"source"`)) {
 			t.Fatalf("render %s = %s err=%v", localRun.RunID, rendered, err)
 		}
-		if (localRun.RunID == "studio" || localRun.RunID == "infra") && !bytes.Contains(rendered, []byte(`"username":"oauth-user"`)) {
+		expectedUsername := ""
+		if localRun.RunID == "studio" {
+			expectedUsername = "oauth-user"
+		} else if localRun.RunID == "infra" {
+			expectedUsername = "pat"
+		}
+		if expectedUsername != "" && !bytes.Contains(rendered, []byte(`"username":"`+expectedUsername+`"`)) {
 			t.Fatalf("render %s lost the non-secret credential username: %s", localRun.RunID, rendered)
+		}
+		if localRun.RunID == "nvt-dev" && (bytes.Contains(rendered, []byte(`"command":"env"`)) || !bytes.Contains(rendered, []byte(`"command":"codex"`))) {
+			t.Fatalf("env wrapper was not normalized to the direct runtime command: %s", rendered)
+		}
+		if localRun.RunID == "infra" && (bytes.Contains(rendered, []byte("poll-interval-seconds")) || !bytes.Contains(rendered, []byte(`"poll-seconds":60`))) {
+			t.Fatalf("legacy watcher cadence was not normalized: %s", rendered)
+		}
+		if !bytes.Contains(rendered, []byte(`"workbench.startupEditor":"none"`)) || !bytes.Contains(rendered, []byte(`"default-provider":"source"`)) {
+			t.Fatalf("generated editor/watcher policy was not preserved: %s", rendered)
+		}
+		if localRun.RunID == "studio" && (!bytes.Contains(rendered, []byte(`"failed":true`)) || !bytes.Contains(rendered, []byte(`"check_for_update_on_startup = false\n"`))) {
+			t.Fatalf("typed watcher/preseed projection was not preserved: %s", rendered)
+		}
+		if !bytes.Contains(rendered, []byte(`"shell":[]`)) {
+			t.Fatalf("administrator-owned tools shell projection missing: %s", rendered)
 		}
 	}
 	for _, name := range []string{"nvt-dev", "studio", "infra"} {
@@ -342,7 +363,7 @@ func TestGenerateFailsClosedForAmbiguousAndUnsupportedInput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		data = bytes.Replace(data, []byte("config: {}"), []byte("config:\n      access-token: "+secretNeedle), 1)
+		data = bytes.Replace(data, []byte("      poll-seconds: 60"), []byte("      poll-seconds: 60\n      access-token: "+secretNeedle), 1)
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -352,7 +373,7 @@ func TestGenerateFailsClosedForAmbiguousAndUnsupportedInput(t *testing.T) {
 	})
 	for name, mutate := range map[string]func([]byte) []byte{
 		"innocuous plugin value": func(data []byte) []byte {
-			return bytes.Replace(data, []byte("config: {}"), []byte("config:\n      value: "+secretNeedle), 1)
+			return bytes.Replace(data, []byte("      prs: []"), []byte("      prs: []\n      value: "+secretNeedle), 1)
 		},
 		"runtime argument": func(data []byte) []byte {
 			return bytes.Replace(data, []byte("    - --sandbox"), []byte("    - "+secretNeedle), 1)
@@ -367,14 +388,19 @@ func TestGenerateFailsClosedForAmbiguousAndUnsupportedInput(t *testing.T) {
 			return bytes.Replace(data, []byte("  shell: []"), []byte("  shell:\n    - [echo, "+secretNeedle+"]"), 1)
 		},
 		"camel case credential field": func(data []byte) []byte {
-			return bytes.Replace(data, []byte("config: {}"), []byte("config:\n      accessToken: "+secretNeedle), 1)
+			return bytes.Replace(data, []byte("      prs: []"), []byte("      prs: []\n      accessToken: "+secretNeedle), 1)
+		},
+		"watcher prompt template": func(data []byte) []byte {
+			return bytes.Replace(data, []byte("      prs: []"), []byte("      prs:\n        - repo: Altinn/nvt-dev\n          number: 1\n          comments:\n            prompt: {enabled: true, template: "+secretNeedle+"}"), 1)
+		},
+		"editor value": func(data []byte) []byte {
+			return bytes.Replace(data, []byte("keyboard.dispatch: keyCode"), []byte("keyboard.dispatch: keyCode\n      terminal.integrated.env.linux: {TOKEN: "+secretNeedle+"}"), 1)
 		},
 		"innocuous preseed path": func(data []byte) []byte {
 			return bytes.Replace(data, []byte("$HOME/.codex/config.toml"), []byte("$HOME/"+secretNeedle), 1)
 		},
 		"custom plugin config": func(data []byte) []byte {
-			data = bytes.Replace(data, []byte("name: github-watcher\n    source: builtin"), []byte("name: github-watcher\n    source: custom"), 1)
-			return bytes.Replace(data, []byte("config: {}"), []byte("config:\n      value: "+secretNeedle), 1)
+			return bytes.Replace(data, []byte("name: github-watcher\n    source: builtin"), []byte("name: github-watcher\n    source: custom"), 1)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -402,40 +428,12 @@ func migrationFixture(t *testing.T) (string, Options) {
 	if err := os.MkdirAll(brokerRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `api_version: nvt.local-agent-migration/v1
-image: nvt-agent-runtime:test
-principal_issuer: https://local.nvt.test
-backend: local-docker
-retention: persistent
-runtime_allowlist:
-  commands: [codex, claude]
-  arguments: [--sandbox, danger-full-access, --ask-for-approval, never, --dangerously-skip-permissions]
-  resume_commands: [codex, claude]
-  resume_arguments: [exec, resume, --last, --continue]
-  environment:
-    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt
-    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd
-credential_usernames: [x-access-token, oauth2, oauth-user]
-agents:
-  - name: nvt-dev
-    subject: workstation-nvt-dev
-    display_name: NVT development
-    runtime_type: codex
-    autonomy: trusted-local
-    user: root
-  - name: studio
-    subject: workstation-studio
-    runtime_type: claude
-    autonomy: trusted-local
-    user: root
-  - name: infra
-    subject: workstation-infra
-    runtime_type: codex
-    autonomy: interactive
-    user: root
-`
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "templates", "local-controller-migration.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	manifestPath := filepath.Join(root, "migration.yaml")
-	writeTestFile(t, manifestPath, manifest)
+	writeTestFile(t, manifestPath, string(manifest))
 	agentTemplates := map[string][3]string{
 		"nvt-dev": {"codex", "github-app-main", "Altinn/nvt-dev"},
 		"studio":  {"claude", "github-pat-main", "Altinn/studio"},
@@ -447,18 +445,24 @@ agents:
 			t.Fatal(err)
 		}
 		args := "[]"
+		command := values[0]
 		if name == "nvt-dev" {
-			args = "\n    - --sandbox\n    - danger-full-access\n    - --ask-for-approval\n    - never"
+			command = "env"
+			noProxy := "localhost,127.0.0.1,::1,broker,egressd,docker,proxy.golang.org,sum.golang.org,golang.org,.golang.org,registry.npmjs.org,.npmjs.org,http-intake.logs.us5.datadoghq.com,browser-intake-us5-datadoghq.com,.datadoghq.com"
+			args = "\n    - NO_PROXY=" + noProxy + "\n    - no_proxy=" + noProxy + "\n    - NODE_EXTRA_CA_CERTS=/nvt-egress-ca/ca.crt\n    - SSL_CERT_FILE=/nvt-egress-ca/ca.crt\n    - REQUESTS_CA_BUNDLE=/nvt-egress-ca/ca.crt\n    - GIT_SSL_CAINFO=/nvt-egress-ca/ca.crt\n    - codex\n    - --sandbox\n    - danger-full-access\n    - --ask-for-approval\n    - never"
 		} else if name == "studio" {
 			args = "\n    - --dangerously-skip-permissions"
 		}
 		resume := ""
 		if name == "nvt-dev" {
-			resume = "  resume:\n    command: codex\n    args: [resume, --last]\n"
+			resume = "  resume:\n    command: env\n    args: [NODE_EXTRA_CA_CERTS=/nvt-egress-ca/ca.crt, codex, resume, --last]\n"
 		}
 		username := ""
 		if name != "nvt-dev" {
 			username = "          username: oauth-user\n"
+		}
+		if name == "infra" {
+			username = "          username: pat\n"
 		}
 		extraProvider, extraCredential, extraCheckout := "", "", ""
 		if name == "nvt-dev" {
@@ -468,17 +472,29 @@ agents:
 		}
 		preseed := "preseed:\n  files:\n    - path: $HOME/.codex/config.toml\n      mode: \"0600\"\n      overwrite: false\n      content: |\n        check_for_update_on_startup = false\n"
 		if values[0] == "claude" {
-			preseed = "preseed:\n  files:\n    - path: $HOME/.claude/settings.json\n      mode: \"0600\"\n      overwrite: false\n      json:\n        theme: dark-daltonized\n        skipDangerousModePermissionPrompt: true\n"
+			preseed = "preseed:\n  files:\n    - path: $HOME/.claude/settings.json\n      mode: \"0600\"\n      overwrite: false\n      json:\n        theme: dark-daltonized\n        skipDangerousModePermissionPrompt: true\n    - path: $HOME/.codex/config.toml\n      mode: \"0600\"\n      overwrite: false\n      content: |\n        check_for_update_on_startup = false\n        project_trust = \"" + secretNeedle + "\"\n"
 		}
-		config := "runtime:\n  command: " + values[0] + "\n  args: " + args + "\n  user: root\n" + resume + "  env:\n    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt\n    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd\n  proxy:\n    provider: " + values[0] + "-main\n" +
-			"tools:\n  packages: []\n  mise: []\n  additional-paths: []\n  shell: []\ncode-server:\n  extensions: []\n  settings:\n    overwrite: false\n    values: {}\nexpose:\n  http:\n    - name: app\n      targetPort: 3000\n" +
+		shell := "[]"
+		if name != "nvt-dev" {
+			shell = "\n    - echo " + secretNeedle
+		}
+		watchPoll := "poll-seconds: 60"
+		if name == "infra" {
+			watchPoll = "poll-interval-seconds: 60"
+		}
+		watchPRs := "prs: []"
+		if name == "studio" {
+			watchPRs = "prs:\n        - repo: Altinn/studio\n          number: 42\n          provider: source\n          labels: [work]\n          broker: {enabled: true, provider: github-pat-main}\n          comments:\n            enabled: true\n            author-associations: [MEMBER]\n            prompt: {enabled: false}\n          checks:\n            enabled: true\n            mode: aggregate\n            prompt: {failed: true, passed: false}\n          closed: {enabled: true, remove: false, publish: true, prompt: false}"
+		}
+		config := "runtime:\n  command: " + command + "\n  args: " + args + "\n" + resume + "  env:\n    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt\n    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd\n  proxy:\n    provider: " + values[0] + "-main\n" +
+			"tools:\n  packages: []\n  mise: []\n  additional-paths: []\n  shell: " + shell + "\ncode-server:\n  extensions: []\n  settings:\n    overwrite: true\n    values:\n      workbench.colorTheme: Default Dark Modern\n      workbench.startupEditor: none\n      security.workspace.trust.enabled: false\n      extensions.ignoreRecommendations: true\n      editor.minimap.enabled: false\n      keyboard.dispatch: keyCode\nexpose:\n  http:\n    - name: app\n      targetPort: 3000\n" +
 			preseed +
 			"plugins:\n  - name: git-host-credentials\n    source: builtin\n    config:\n      default-provider: source\n      providers:\n        - name: source\n          type: broker\n          broker-provider: " + values[1] + "\n          match: [github.com/Altinn/" + name + "]\n" + extraProvider +
 			"  - name: git-credentials\n    source: builtin\n    when: before-agent\n    config:\n      credentials:\n        - match: https://github.com/Altinn/" + name + "\n          provider: source\n" + username + "          identity:\n            mode: provider\n" +
 			extraCredential +
 			"  - name: checkout-repos\n    source: builtin\n    when: before-agent\n    restart: never\n    config:\n      repos:\n        - url: https://github.com/Altinn/" + name + ".git\n" +
 			extraCheckout +
-			"  - name: github-watcher\n    source: builtin\n    config: {}\n" +
+			"  - name: github-watcher\n    source: builtin\n    config:\n      default-provider: source\n      " + watchPoll + "\n      broker:\n        enabled: true\n        provider: " + values[1] + "\n      " + watchPRs + "\n" +
 			"egress:\n  mode: mediated\n  transport: transparent\n  placeholder: NVT-PLACEHOLDER-NOT-A-KEY\n  forward-proxy-url: http://127.0.0.1:15002\n  grants: []\n"
 		writeTestFile(t, filepath.Join(directory, "agent.yaml"), config)
 	}

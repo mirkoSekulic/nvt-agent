@@ -18,8 +18,12 @@ make infra-up
 The manifest supplies only trusted metadata that cannot be inferred safely:
 the immutable local principal, runtime type/autonomy/user, image, backend,
 retention, and an explicit allowlist of reviewed non-secret runtime commands,
-arguments, resume arguments, environment entries, and credential usernames. A source value is copied
-only when it exactly matches that administrator-owned allowlist. Each named run selects a generated profile and workflow. Profile and
+arguments, resume arguments, environment entries, credential usernames, and
+the replacement `tools_shell` list. Source shell commands are never copied;
+an explicit empty list discards them, while required commands must be reviewed
+and written into the manifest. Treat those commands as deployment policy: they
+must be non-secret and must not embed credential values. A source runtime value is retained only when it
+matches the administrator-owned allowlist. Each named run selects a generated profile and workflow. Profile and
 workflow names may be shared only when their complete generated values are
 identical; conflicting reuse fails closed.
 
@@ -51,14 +55,21 @@ broker_repositories:
   github.example/organization/repository: organization/repository
 ```
 
-The immutable base is deliberately narrower than arbitrary local `agent.yaml`.
-It accepts the validated runtime allowlist, non-executing tool declarations,
-empty editor settings, bounded HTTP exposures, the two exact `agent-init`
-preseed shapes, and reference-only built-in plugins with empty configuration
-(apart from the bounded GitHub watcher polling cadence).
-Shell hooks, arbitrary editor values, custom/Git plugin configuration,
-unapproved runtime arguments or environment values, and any other value-bearing
-escape hatch are rejected and remain on static Compose. Unsupported transports,
+The immutable base is a typed projection rather than a copy of arbitrary local
+`agent.yaml`. A missing source `runtime.user` is filled from the trusted
+manifest. The reviewed `env VAR=value ... command` form is normalized to a
+direct command plus `runtime.env`, with every assignment checked against the
+manifest allowlist. Generated code-server settings are limited to the known
+theme/startup/trust/recommendation/minimap/keyboard policy fields. The GitHub
+watcher retains bounded provider/broker/PR references and boolean policy, and
+normalizes `poll-interval-seconds` to `poll-seconds`; free-form prompt templates
+remain unsupported. Known Codex/Claude preseed paths are regenerated with fixed
+safe content, so additional source trust text is not copied.
+
+Shell hooks, unknown editor values, custom/Git plugin configuration,
+unapproved runtime arguments or environment values, free-form watcher text,
+and any other value-bearing escape hatch are rejected or replaced only through
+the explicit manifest projection. Unsupported transports,
 duplicate managed plugins, unknown providers, unmatched checkout rules,
 aliases, duplicate YAML keys, and ambiguous grants are also rejected.
 
@@ -95,7 +106,14 @@ path/host/application routes, WebSocket proxying, audience separation, and
 secret-needle absence across generated Compose, Docker inspect/environment,
 logs, controller state, and agent files. They do not claim that this container
 ran the developer's current private configuration or completed a live
-third-party login. A real local credential check, when needed, must be run manually against
+third-party login. To validate the real three source documents without writing
+output or printing generated configuration/credentials, run:
+
+```sh
+make local-agent-migrate-proof
+```
+
+The command prints only `PASS` or `FAIL`. A real local credential check, when needed, must be run manually against
 the operator's existing broker state, must not modify or print credential
 files, and must record only pass/fail and redacted diagnostics.
 

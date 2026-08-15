@@ -123,10 +123,16 @@ trusted profile/workflow/retention/backend selection:
 }
 ```
 
-The complete named-run set is installed in one SQLite transaction. Every
-snapshot/replay, capacity check, durable tombstone, and configuration-drift
-check succeeds before any new row is committed. A rejected startup document
-therefore cannot leave a partially installed named-run set.
+The complete named-run set is installed in one SQLite transaction. Deadline
+convergence, snapshot/replay, capacity, durable tombstone, and
+configuration-drift checks happen in that transaction. Rejection rolls back
+both deadline transitions and inserts. Cleanup-bound rows do not consume
+replacement named-run admission capacity; reconciliation processes stopping
+rows first and does not create replacement backends while the retained cleanup
+backlog leaves the durable set over capacity. Expired downtime state therefore
+cannot permanently prevent controller startup or temporarily exceed backend
+resource concurrency. A rejected startup document cannot
+leave a partially installed named-run set or partially converged state.
 
 At startup the controller resolves and creates these selections through the
 same immutable contract. Replay after restart is idempotent. Changing the
