@@ -184,6 +184,42 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	}
 }
 
+func TestLocalCredentialPortalComposeIsOptionalAndPrivate(t *testing.T) {
+	root := repoRoot(t)
+	composeBytes, err := os.ReadFile(filepath.Join(root, "compose.infra.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(composeBytes)
+	for _, required := range []string{
+		"profiles: [credentials]", "credential-portal:", "credential-runner:",
+		"local-credential-seeds:/seed", "local-credential-seeds:/portal-seed:ro",
+		"local-broker-private:/private", "NVT_BROKER_SEED_TARGET_DIR: portal",
+		"PathPrefix(`/agents/credentials`)", "NVT_GATEWAY_CREDENTIAL_PORTAL_URL:",
+		"NVT_BROKER_SEED_DIR: ${NVT_BROKER_CREDENTIAL_SEED_DIR:-}",
+		`if [ -n "$${NVT_BROKER_SEED_DIR:-}" ]; then`,
+	} {
+		if !strings.Contains(compose, required) {
+			t.Fatalf("local credential compose missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"CODEX_TOKEN=", "CLAUDE_TOKEN=", "credentials.json:"} {
+		if strings.Contains(compose, forbidden) {
+			t.Fatalf("compose exposes credential material via %q", forbidden)
+		}
+	}
+	infraBytes, err := os.ReadFile(filepath.Join(root, "scripts", "infra-up.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	infra := string(infraBytes)
+	if !strings.Contains(infra, `NVT_CREDENTIAL_PORTAL_ENABLED:-false`) ||
+		!strings.Contains(infra, `--profile credentials`) ||
+		!strings.Contains(infra, `export NVT_BROKER_CREDENTIAL_SEED_DIR=/portal-seed`) {
+		t.Fatalf("infra-up does not gate local credentials explicitly:\n%s", infra)
+	}
+}
+
 func TestNativeLocalConfigurationReplacesMigrationAuthoring(t *testing.T) {
 	root := repoRoot(t)
 	templatePath := filepath.Join(root, "templates", "local-controller.yaml")

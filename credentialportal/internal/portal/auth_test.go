@@ -120,6 +120,44 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 	return fixture
 }
 
+func TestLocalAuthenticatorCreatesExplicitLocalSession(t *testing.T) {
+	cfg := testConfig()
+	principal := Principal{Issuer: "local://workstation", Subject: "developer", DisplayName: "Local developer"}
+	cfg.PublicURL = "http://localhost:4090/agents/credentials"
+	cfg.Auth = AuthConfig{Mode: authModeLocal, Session: SessionConfig{CookieName: "nvt_local_credentials", MaxAgeSeconds: 3600}, Local: LocalAuthConfig{Principal: principal}}
+	cfg.Persistence = PersistenceConfig{Mode: "local", Local: LocalPersistenceConfig{Directory: t.TempDir()}}
+	for index := range cfg.Slots {
+		cfg.Slots[index].Owner = principal
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(context.Background(), cfg, strings.Repeat("s", 64), "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	auth.Login(response, httptest.NewRequest(http.MethodGet, cfg.PublicURL+"/login", nil))
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/agents/credentials/" {
+		t.Fatalf("login = %d %q", response.Code, response.Header().Get("Location"))
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Secure {
+		t.Fatalf("unexpected local cookie: %#v", cookies)
+	}
+	request := httptest.NewRequest(http.MethodGet, cfg.PublicURL+"/", nil)
+	request.AddCookie(cookies[0])
+	got, csrf, _, _, ok := auth.Session(request)
+	if !ok || got != principal || csrf == "" {
+		t.Fatalf("local session = %#v csrf=%q ok=%v", got, csrf, ok)
+	}
+
+	cfg.PublicURL = "http://not-local.example/agents/credentials"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("non-local local-auth URL accepted")
+	}
+}
+
 func (f *oidcFixture) idToken(t *testing.T, issuer string) string {
 	t.Helper()
 	return f.signedToken(t, map[string]any{

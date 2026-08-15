@@ -262,6 +262,51 @@ func TestCodexConnectBindsSlotPatchesValidatedFileAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestCodexConnectAndReconnectReplaceConfiguredLocalSlot(t *testing.T) {
+	cfg := testConfig()
+	root := t.TempDir()
+	patcher, err := NewLocalFilePatcher(root, cfg.Namespace, cfg.Slots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := NewCLICredentialRunner(cfg.Enrollment)
+	runner.tempRoot = t.TempDir()
+	adapter := runner.adapters[AdapterCodexOAuthFile]
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.Command = executable
+	adapter.Args = []string{"-test.run=^TestEnrollmentCLIHelper$"}
+	adapter.Environment = []string{
+		"NVT_FAKE_CLI_SCENARIO=codex-success",
+		"NVT_FAKE_CREDENTIAL_KIND=" + codexCommand,
+	}
+	runner.adapters[AdapterCodexOAuthFile] = adapter
+	manager := NewEnrollmentManager(cfg, patcher, NewAuditLogger(&bytes.Buffer{}), runner)
+	defer manager.Close()
+
+	principal := Principal{Issuer: testIdentityIssuer, Subject: testAliceSubject}
+	for attempt := 0; attempt < 2; attempt++ {
+		status, startErr := manager.Start(t.Context(), principal, cfg.Slots[0], time.Now().Add(time.Hour))
+		if startErr != nil {
+			t.Fatal(startErr)
+		}
+		waitEnrollmentStatus(t, manager, principal, status.ID, enrollmentSucceeded)
+		deadline := time.Now().Add(time.Second)
+		for len(manager.semaphore) != 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	credential, err := os.ReadFile(filepath.Join(root, testAliceSubject))
+	if err != nil || ValidateCredential(AdapterCodexOAuthFile, credential) != nil {
+		t.Fatal("connect/reconnect did not persist the validated local slot")
+	}
+	if _, err := os.Stat(filepath.Join(root, testBobSubject)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("connect/reconnect changed another local slot")
+	}
+}
+
 func TestClaudeConnectAcceptsOneCodeAndRejectsReplay(t *testing.T) {
 	manager, patcher, _, root := fakeEnrollmentManager(t, AdapterClaudeOAuthFile, "claude-success")
 	defer manager.Close()

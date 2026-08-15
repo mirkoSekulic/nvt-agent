@@ -221,6 +221,42 @@ func TestEnrollmentBindsPrincipalSlotAndDestinationAndDoesNotLeak(t *testing.T) 
 	}
 }
 
+func TestRecoveryUploadReplacesOnlyConfiguredLocalSlot(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig()
+	patcher, err := NewLocalFilePatcher(root, cfg.Namespace, cfg.Slots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(root, testBobSubject)
+	if err := os.WriteFile(other, validClaude("other-access", "other-refresh"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, cookie, csrf := authenticatedServer(
+		t,
+		Principal{Issuer: testIdentityIssuer, Subject: testAliceSubject},
+		patcher,
+		&bytes.Buffer{},
+	)
+	wanted := validCodex("replacement-access", "replacement-refresh")
+	response := request(t, server, cookie, csrf, http.MethodPut, testUploadPath, jsonContentType, wanted)
+	if response.Code != http.StatusOK {
+		t.Fatalf("recovery upload failed with status %d", response.Code)
+	}
+	got, err := os.ReadFile(filepath.Join(root, testAliceSubject))
+	if err != nil || !bytes.Equal(got, wanted) {
+		t.Fatal("recovery upload did not atomically replace the configured local slot")
+	}
+	after, err := os.ReadFile(other)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatal("recovery upload changed another local slot")
+	}
+}
+
 func TestDashboardListsOnlyOwnedSlotsAndNeverExistingValueOrHealth(t *testing.T) {
 	server, cookie, csrf := authenticatedServer(
 		t,

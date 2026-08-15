@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,49 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 )
+
+func TestLocalFilePatcherAtomicSlotIsolationAndValidation(t *testing.T) {
+	directory := t.TempDir()
+	patcher, err := NewLocalFilePatcher(directory, "nvt", []Slot{
+		{Name: "codex", SecretName: "local-seed", DataKey: "codex.json"},
+		{Name: "claude", SecretName: "local-seed", DataKey: "claude.json"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := []byte(`{"tokens":{"access_token":"synthetic"}}`)
+	if err := patcher.Patch(context.Background(), "nvt", "local-seed", "codex.json", credential); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "codex")
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(credential) {
+		t.Fatalf("credential = %q, %v", got, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, %v", info.Mode().Perm(), err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "claude")); !os.IsNotExist(err) {
+		t.Fatal("unselected slot changed")
+	}
+	if err := patcher.Patch(context.Background(), "other", "local-seed", "codex.json", credential); err == nil {
+		t.Fatal("cross-namespace destination accepted")
+	}
+	if err := patcher.Patch(context.Background(), "nvt", "local-seed", "../codex.json", credential); err == nil {
+		t.Fatal("cross-slot destination accepted")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("claude", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := patcher.Patch(context.Background(), "nvt", "local-seed", "codex.json", credential); err == nil {
+		t.Fatal("symlink target accepted")
+	}
+}
 
 func patchRESTClient(t *testing.T, handler http.Handler) rest.Interface {
 	t.Helper()
