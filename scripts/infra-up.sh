@@ -31,8 +31,8 @@ for token_name in local-controller-admin-token local-controller-route-token; do
   chmod 600 "$broker_dir/$token_name"
 done
 
-# The gateway remains non-root while reading its mode-0600 bind-mounted route
-# credential on native Linux. Docker Desktop also accepts the numeric host UID.
+# The gateway remains non-root while reading the route credential copied into
+# the private controller volume. Numeric IDs keep ownership portable.
 export NVT_LOCAL_GATEWAY_UID="$(id -u)"
 export NVT_LOCAL_GATEWAY_GID="$(id -g)"
 

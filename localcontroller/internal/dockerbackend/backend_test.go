@@ -22,6 +22,7 @@ import (
 
 	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/controller"
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
+	"gopkg.in/yaml.v3"
 )
 
 type fakeDocker struct {
@@ -442,6 +443,24 @@ func TestConfinementGateIsLimitedToEnforcedTransparentRuns(t *testing.T) {
 		if bytes.Contains(direct, []byte(forbidden)) {
 			t.Fatalf("direct run received confinement gate %q:\n%s", forbidden, direct)
 		}
+	}
+}
+
+func TestAgentHealthcheckAllowsBoundedColdBootstrap(t *testing.T) {
+	run := testMediatedRun(t)
+	config := Config{Owner: "test-controller", ExternalNetwork: "agents-proxy", ProxyPort: 4090, ProtectedCIDRs: "127.0.0.0/8 169.254.0.0/16", DindImage: "nvt-dind:test", EgressdImage: "nvt-egressd:test", CapturedImage: "nvt-captured:test", SeedImage: "nvt-runtime:test"}
+	names := namesFor(Config{RunsDir: t.TempDir()}, run.RunID, strings.Repeat("3", 64))
+	plan, err := renderCompose(config, run, strings.Repeat("3", 64), names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document composeDocument
+	if err := yaml.Unmarshal(plan, &document); err != nil {
+		t.Fatal(err)
+	}
+	healthcheck := document.Services["agent"].Healthcheck
+	if healthcheck == nil || !reflect.DeepEqual(healthcheck.Test, []string{"CMD-SHELL", "health"}) || healthcheck.Interval != "10s" || healthcheck.Timeout != "2s" || healthcheck.StartPeriod != "15m" || healthcheck.Retries != 3 {
+		t.Fatalf("agent healthcheck does not preserve the bounded bootstrap grace: %#v", healthcheck)
 	}
 }
 

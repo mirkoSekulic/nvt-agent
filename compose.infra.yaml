@@ -30,6 +30,44 @@ services:
       - agents-proxy
     restart: unless-stopped
 
+  local-controller-private-init:
+    image: nvt-local-controller:latest
+    user: "0:0"
+    network_mode: none
+    environment:
+      NVT_LOCAL_GATEWAY_UID: ${NVT_LOCAL_GATEWAY_UID:-65532}
+      NVT_LOCAL_GATEWAY_GID: ${NVT_LOCAL_GATEWAY_GID:-65532}
+    entrypoint:
+      - /bin/sh
+      - -euc
+    command:
+      - |
+        umask 077
+        test -s /source/local-controller.key
+        test -s /source/local-controller-admin-token
+        test -s /source/local-controller-route-token
+        cp /source/local-controller.key /private/local-controller.key.next
+        chown 0:0 /private/local-controller.key.next
+        chmod 0600 /private/local-controller.key.next
+        mv -f /private/local-controller.key.next /private/local-controller.key
+        cp /source/local-controller-admin-token /private/local-controller-admin-token.next
+        chown 0:0 /private/local-controller-admin-token.next
+        chmod 0600 /private/local-controller-admin-token.next
+        mv -f /private/local-controller-admin-token.next /private/local-controller-admin-token
+        cp /source/local-controller-route-token /private/local-controller-route-token.next
+        chown 0:0 /private/local-controller-route-token.next
+        chmod 0600 /private/local-controller-route-token.next
+        mv -f /private/local-controller-route-token.next /private/local-controller-route-token
+        cp /source/local-controller-route-token /gateway-private/local-controller-route-token.next
+        chown "$${NVT_LOCAL_GATEWAY_UID}:$${NVT_LOCAL_GATEWAY_GID}" /gateway-private/local-controller-route-token.next
+        chmod 0400 /gateway-private/local-controller-route-token.next
+        mv -f /gateway-private/local-controller-route-token.next /gateway-private/local-controller-route-token
+    volumes:
+      - ./.broker:/source:ro
+      - local-controller-private:/private
+      - local-gateway-private:/gateway-private
+    restart: "no"
+
   gateway:
     image: nvt-agent-gateway:latest
     container_name: nvt-local-gateway
@@ -48,8 +86,11 @@ services:
     networks:
       - agents-proxy
       - local-control-plane
+    depends_on:
+      local-controller-private-init:
+        condition: service_completed_successfully
     volumes:
-      - ./.broker/local-controller-route-token:/run/secrets/local-controller-route-token:ro
+      - local-gateway-private:/run/secrets:ro
     labels:
       - traefik.enable=true
       - traefik.docker.network=agents-proxy
@@ -85,14 +126,14 @@ services:
       NVT_LOCAL_CONTROLLER_RUNS_DIR: /state/controller/runs
       NVT_LOCAL_CONTROLLER_BROKER_URL: http://broker:7347
       NVT_LOCAL_CONTROLLER_BROKER_AGENTS: /broker-state/agents.yaml
-      NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE: /broker-state/local-controller.key
+      NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE: /controller-private/local-controller.key
       NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK: agents-proxy
       NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN: agent.localhost
       NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX: /agents
       NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER: nvt-local-gateway
       NVT_LOCAL_CONTROLLER_CONFIG: ${NVT_LOCAL_CONTROLLER_CONFIG:-}
-      NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE: /broker-state/local-controller-admin-token
-      NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE: /broker-state/local-controller-route-token
+      NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE: /controller-private/local-controller-admin-token
+      NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE: /controller-private/local-controller-route-token
       NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL: ${NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL:-100.64.0.0/10}
       NVT_LOCAL_CONTROLLER_PROXY_PORT: ${NVT_PROXY_PORT:-4090}
       NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS: ${NVT_DIND_PROTECTED_CIDRS:-127.0.0.0/8 169.254.0.0/16}
@@ -103,9 +144,13 @@ services:
     volumes:
       - local-controller-state:/state
       - ./.broker:/broker-state
+      - local-controller-private:/controller-private:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - local-control-plane
+    depends_on:
+      local-controller-private-init:
+        condition: service_completed_successfully
     read_only: true
     tmpfs:
       - /tmp
@@ -119,3 +164,5 @@ networks:
 
 volumes:
   local-controller-state:
+  local-controller-private:
+  local-gateway-private:

@@ -62,6 +62,9 @@ http://localhost:4090/agents/nvt/
 http://nvt.agent.localhost:4090/
 ```
 
+Every workstation uses `/workspace` inside the agent, matching the Kubernetes
+runtime contract; host-specific `.agents/...` paths are not exposed.
+
 Adding a workstation and restarting the controller creates it atomically.
 Unchanged entries replay idempotently. Workspace, runtime/session state, Docker
 data, and route identity survive controller, agent-container, and ordinary
