@@ -33,6 +33,7 @@ const (
 type IdempotencyScope string
 type SubmissionMode string
 type AdmissionMode string
+type SubmissionBackend string
 
 const (
 	IdempotencyScopeIssue   IdempotencyScope = "issue"
@@ -43,6 +44,9 @@ const (
 
 	AdmissionModeLegacy   AdmissionMode = "legacy"
 	AdmissionModeProfiled AdmissionMode = "profiled"
+
+	SubmissionBackendKubernetes SubmissionBackend = "kubernetes"
+	SubmissionBackendLocal      SubmissionBackend = "local"
 )
 
 type Config struct {
@@ -87,12 +91,13 @@ type IdempotencyConfig struct {
 }
 
 type SubmissionConfig struct {
-	Mode               SubmissionMode `json:"mode,omitempty"`
-	AdmissionMode      AdmissionMode  `json:"admissionMode,omitempty"`
-	AdmissionBaseURL   string         `json:"admissionBaseURL,omitempty"`
-	AdmissionTokenFile string         `json:"admissionTokenFile,omitempty"`
-	ScheduleNamespace  string         `json:"scheduleNamespace,omitempty"`
-	ScheduleName       string         `json:"scheduleName,omitempty"`
+	Mode               SubmissionMode    `json:"mode,omitempty"`
+	Backend            SubmissionBackend `json:"backend,omitempty"`
+	AdmissionMode      AdmissionMode     `json:"admissionMode,omitempty"`
+	AdmissionBaseURL   string            `json:"admissionBaseURL,omitempty"`
+	AdmissionTokenFile string            `json:"admissionTokenFile,omitempty"`
+	ScheduleNamespace  string            `json:"scheduleNamespace,omitempty"`
+	ScheduleName       string            `json:"scheduleName,omitempty"`
 	// Workflow is an optional static, non-secret workflow profile name for
 	// profiled schedule admission.
 	Workflow string `json:"workflow,omitempty"`
@@ -194,6 +199,9 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.Submission.AdmissionMode == "" {
 		c.Submission.AdmissionMode = defaultAdmissionMode
 	}
+	if c.Submission.Backend == "" {
+		c.Submission.Backend = SubmissionBackendKubernetes
+	}
 	if c.Submission.AdmissionBaseURL == "" {
 		c.Submission.AdmissionBaseURL = defaultOperatorCallbackBaseURL
 	}
@@ -250,6 +258,17 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	}
 	if c.Submission.AdmissionMode != AdmissionModeLegacy && c.Submission.AdmissionMode != AdmissionModeProfiled {
 		return fmt.Errorf("submission.admissionMode must be one of %q or %q", AdmissionModeLegacy, AdmissionModeProfiled)
+	}
+	if c.Submission.Backend != SubmissionBackendKubernetes &&
+		c.Submission.Backend != SubmissionBackendLocal {
+		return fmt.Errorf("submission.backend must be one of %q or %q",
+			SubmissionBackendKubernetes, SubmissionBackendLocal)
+	}
+	if c.Submission.Backend == SubmissionBackendLocal {
+		if c.Submission.Mode != SubmissionModeScheduleAdmission ||
+			c.Submission.AdmissionMode != AdmissionModeProfiled {
+			return errors.New("submission.backend local requires profiled scheduleAdmission mode")
+		}
 	}
 	if c.Submission.AdmissionMode == AdmissionModeProfiled && c.Submission.Mode != SubmissionModeScheduleAdmission {
 		return errors.New("submission.admissionMode profiled requires submission.mode scheduleAdmission")

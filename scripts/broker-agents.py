@@ -59,7 +59,7 @@ def copy_register_agent(data, from_name, to_name, token, copy_grants):
     wanted_hash = token_hash(token)
     source = next((agent for agent in data["agents"] if isinstance(agent, dict) and agent.get("id") == from_name), None)
     if source is None:
-        raise SystemExit(f"agent {from_name} is not registered; run agent-init first")
+        raise SystemExit(f"agent {from_name} is not registered")
     if copy_grants:
         grants = source.get("grants", [])
     else:
@@ -116,7 +116,7 @@ def add_grant(data, name, provider, repo, materialization, egress_hosts, git=Fal
             grants.append(entry)
             grants.sort(key=lambda grant: grant["provider"])
             return
-    raise SystemExit(f"agent {name} is not registered; run agent-init first")
+    raise SystemExit(f"agent {name} is not registered")
 
 
 def unregister_agent(data, name):

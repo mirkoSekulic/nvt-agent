@@ -85,39 +85,22 @@ Containers.
 Requirements: Docker with Compose, Make, and a browser.
 
 ```sh
-make runtime-build dind-build broker-build egressd-build captured-build
+make runtime-build dind-build broker-build local-controller-build gateway-build egressd-build captured-build
+mkdir -p .broker
+cp templates/local-controller.yaml .broker/local-controller.yaml
 make infra-up
-
-make agent-init NAME=demo
-make agent-up NAME=demo
 ```
 
 Open:
 
 ```text
-http://demo.agent.localhost:4090
+http://nvt.agent.localhost:4090
 ```
 
-Common commands:
-
-```sh
-make agent-ps
-make agent-logs NAME=demo
-make agent-shell NAME=demo
-make agent-doctor NAME=demo
-make agent-down NAME=demo
-make agent-rm NAME=demo FORCE=1
-```
-
-Create a Claude Code agent instead of the default Codex agent:
-
-```sh
-make agent-init NAME=demo-claude TYPE=claude
-```
-
-Generated agent definitions live under `.agents/<name>/`. Start with
-[Local development agent](docs/local-development-agent.md) when configuring
-repositories, broker grants, mediated credentials, or custom plugins.
+Edit the one native platform file to define reusable profiles/workflows,
+persistent workstations, and producer schedules. Provider implementations and
+credentials stay in broker configuration. Start with
+[Native local workstations](docs/local-development-agent.md).
 
 ## Kubernetes
 
@@ -169,6 +152,8 @@ See [Runtime plugins](runtime/plugins/README.md) and the contracts under
 - [`agentd` protocol](protocol/agentd.md)
 - [Broker protocol](protocol/broker.md)
 - [Execution driver protocol](protocol/execution-driver.md)
+- [Local controller protocol](protocol/local-controller.md)
+- [Local route metadata](protocol/local-routes.md)
 
 ## Project Status
 

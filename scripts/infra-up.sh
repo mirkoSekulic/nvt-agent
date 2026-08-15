@@ -20,5 +20,24 @@ fi
 if [ ! -f "$broker_dir/env" ]; then
   cp "$templates_dir/broker-env" "$broker_dir/env"
 fi
+if [ ! -f "$broker_dir/local-controller.key" ]; then
+  (umask 077; openssl rand 32 >"$broker_dir/local-controller.key")
+fi
+chmod 600 "$broker_dir/local-controller.key"
+for token_name in local-controller-admin-token local-controller-route-token; do
+  if [ ! -f "$broker_dir/$token_name" ]; then
+    (umask 077; openssl rand -hex 32 >"$broker_dir/$token_name")
+  fi
+  chmod 600 "$broker_dir/$token_name"
+done
+
+# The gateway remains non-root while reading the route credential copied into
+# the private controller volume. Numeric IDs keep ownership portable.
+export NVT_LOCAL_GATEWAY_UID="$(id -u)"
+export NVT_LOCAL_GATEWAY_GID="$(id -g)"
+
+if [ -f "$broker_dir/local-controller.yaml" ] && [ -z "${NVT_LOCAL_CONTROLLER_CONFIG+x}" ]; then
+  export NVT_LOCAL_CONTROLLER_CONFIG=/broker-state/local-controller.yaml
+fi
 
 docker compose -f "$repo_root/compose.infra.yaml" up -d

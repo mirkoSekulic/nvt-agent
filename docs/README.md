@@ -5,8 +5,8 @@ local quick start. The documents below are the maintained sources of truth.
 
 ## Guides
 
-- [Local development agent](local-development-agent.md): configure a local
-  Compose agent, broker grants, repositories, and plugins.
+- [Native local workstations](local-development-agent.md): configure reusable
+  local profiles/workflows, persistent workstations, and producer schedules.
 - [Local Kubernetes GitHub producer](local-kind-github-producer.md): run
   the operator, broker, producer, and real AgentRun Pods in kind.
 - [Claude authentication](claude-auth.md): direct and mediated Claude Code
@@ -32,6 +32,12 @@ local quick start. The documents below are the maintained sources of truth.
 Files under [`protocol/`](../protocol/) are normative contracts:
 
 - [`agentd`](../protocol/agentd.md): session I/O and prompt queueing.
+- [Resolved agent runs](../protocol/resolved-agent-run.md): trusted,
+  provider-neutral local desired-run value.
+- [Local controller](../protocol/local-controller.md): trusted local run API,
+  durable cleanup-gated lifecycle state, and swappable Docker execution backend.
+- [Local route metadata](../protocol/local-routes.md): bounded controller-to-gateway
+  session/readiness and host exposure contract.
 - [Runtime session continuation](../runtime/README.md): optional generic fresh/resume commands, durable startup state, and pending-prompt recovery.
 - [Events](../protocol/events.md): JSONL event format.
 - [Broker](../protocol/broker.md): identities, grants, and provider material.

@@ -6,11 +6,13 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
 COPY protocol/guestenrollment/go.mod protocol/guestenrollment/go.mod
+COPY protocol/resolvedrun/go.mod protocol/resolvedrun/go.mod
 COPY operator/go.mod operator/go.sum operator/
 COPY executiondrivers/azure/go.mod executiondrivers/azure/go.sum executiondrivers/azure/
 COPY hostbundle/go.mod hostbundle/go.mod
 RUN cd /src/executiondrivers/azure && go mod download
 COPY protocol/guestenrollment/ protocol/guestenrollment/
+COPY protocol/resolvedrun/ protocol/resolvedrun/
 COPY operator/executiondriver/ operator/executiondriver/
 COPY executiondrivers/azure/ executiondrivers/azure/
 COPY hostbundle/ hostbundle/

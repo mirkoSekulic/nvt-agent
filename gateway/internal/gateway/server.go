@@ -45,6 +45,7 @@ type Config struct {
 	NativeSession     NativeSessionConfig
 	NativeWorkspace   NativeWorkspaceConfig
 	CredentialPortal  CredentialPortalLinkConfig
+	LocalRuns         LocalRunsConfig
 	basePathValue     string
 	publicOriginValue string
 	publicURLParsed   bool
@@ -110,6 +111,9 @@ type OAuth2IdentityConfig struct {
 }
 
 func (c Config) Validate() error {
+	if err := c.LocalRuns.validate(); err != nil {
+		return err
+	}
 	if c.CredentialPortal.URL != "" {
 		parsed, err := url.Parse(c.CredentialPortal.URL)
 		rootRelative := strings.HasPrefix(c.CredentialPortal.URL, "/") && !strings.HasPrefix(c.CredentialPortal.URL, "//") && parsed != nil && parsed.IsAbs() == false
@@ -418,6 +422,8 @@ type Server struct {
 	auth                    *Authenticator
 	branding                brandAssets
 	nativeWorkspaceResolver NativeWorkspaceResolver
+	localRuns               LocalRunSource
+	localProxyTransport     http.RoundTripper
 }
 
 type routeKind int
@@ -425,12 +431,16 @@ type routeKind int
 const (
 	routeDashboard routeKind = iota
 	routeAgentRun
+	routeLocalSession
+	routeLocalExposure
 	routeNotFound
 )
 
 type route struct {
 	kind      routeKind
 	accessKey string
+	exposure  string
+	localPath bool
 }
 
 func NewServer(config Config, client ctrlclient.Client, namespace string) (*Server, error) {
@@ -441,6 +451,10 @@ func NewServer(config Config, client ctrlclient.Client, namespace string) (*Serv
 // optional exact native-VM routing seam. A nil resolver preserves the existing
 // Pod-only server and makes external VM routes unavailable without fallback.
 func NewServerWithNativeWorkspaceResolver(config Config, client ctrlclient.Client, namespace string, resolver NativeWorkspaceResolver) (*Server, error) {
+	return NewServerWithSources(config, client, namespace, resolver, nil)
+}
+
+func NewServerWithSources(config Config, client ctrlclient.Client, namespace string, resolver NativeWorkspaceResolver, localSource LocalRunSource) (*Server, error) {
 	if config.Routing.Mode == "" {
 		config.Routing.Mode = routingModeSubdomain
 	}
@@ -451,6 +465,7 @@ func NewServerWithNativeWorkspaceResolver(config Config, client ctrlclient.Clien
 		return nil, err
 	}
 	config = config.withParsedPublicURL()
+	config.LocalRuns.applyDefaults()
 	branding, err := loadBrandAssets(config.BrandingDir)
 	if err != nil {
 		return nil, fmt.Errorf("load branding assets: %w", err)
@@ -459,9 +474,22 @@ func NewServerWithNativeWorkspaceResolver(config Config, client ctrlclient.Clien
 	if err != nil {
 		return nil, err
 	}
+	var localProxyTransport http.RoundTripper
+	if config.LocalRuns.Enabled {
+		if localSource == nil {
+			localSource, err = newHTTPLocalRunSource(config.LocalRuns)
+			if err != nil {
+				return nil, err
+			}
+		}
+		localProxyTransport = &http.Transport{
+			Proxy: nil, DialContext: (&net.Dialer{Timeout: config.LocalRuns.Timeout, KeepAlive: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2: true, ResponseHeaderTimeout: config.LocalRuns.Timeout, DisableCompression: true,
+		}
+	}
 	return &Server{
 		config: config, client: client, namespace: namespace, auth: auth, branding: branding,
-		nativeWorkspaceResolver: resolver,
+		nativeWorkspaceResolver: resolver, localRuns: localSource, localProxyTransport: localProxyTransport,
 	}, nil
 }
 
@@ -475,6 +503,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+	if s.redirectLocalDashboardRoot(w, r) {
 		return
 	}
 	if s.config.routingMode() == routingModePath {
@@ -509,12 +540,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.serveAuthorizedAgentRun(w, r, route.accessKey)
 		}
+	case routeLocalSession, routeLocalExposure:
+		s.serveAuthorizedLocalRun(w, r, route)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
 func (s *Server) parseRoute(r *http.Request) route {
+	if s.config.LocalRuns.Enabled {
+		if local := ParseLocalRoute(r.URL, r.Host, s.config.LocalRuns); local.kind != routeNotFound {
+			return local
+		}
+	}
 	if s.config.routingMode() == routingModePath {
 		return ParsePathAtBase(r.URL, s.config.basePath())
 	}
@@ -740,56 +778,80 @@ func targetPort(run nvtv1alpha1.AgentRun, fallback int) int {
 }
 
 func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principal *Principal) {
-	var runs nvtv1alpha1.AgentRunList
-	if err := s.client.List(r.Context(), &runs, ctrlclient.InNamespace(s.namespace)); err != nil {
-		http.Error(w, "list AgentRuns", http.StatusInternalServerError)
-		return
-	}
-	routableRuns, err := s.routableAgentRuns(r.Context())
-	if err != nil {
-		http.Error(w, "list AgentRun pods", http.StatusInternalServerError)
-		return
-	}
 	view := dashboardViewActive
 	if r.URL.Query().Get("view") == dashboardViewAll {
 		view = dashboardViewAll
 	}
-	items := make([]dashboardItem, 0, len(runs.Items))
-	for _, run := range runs.Items {
-		key := run.Annotations[AccessKeyAnnotation]
-		if key == "" {
-			continue
+	items := make([]dashboardItem, 0)
+	if !s.config.LocalRuns.DisableKubernetes {
+		if s.client == nil {
+			http.Error(w, "list AgentRuns", http.StatusInternalServerError)
+			return
 		}
-		if s.config.routingMode() == routingModePath && (!validAccessKey(key) || reservedGatewayPath(key)) {
-			continue
+		var runs nvtv1alpha1.AgentRunList
+		if err := s.client.List(r.Context(), &runs, ctrlclient.InNamespace(s.namespace)); err != nil {
+			http.Error(w, "list AgentRuns", http.StatusInternalServerError)
+			return
 		}
-		if principal != nil && !EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run).Allowed {
-			continue
+		routableRuns, err := s.routableAgentRuns(r.Context())
+		if err != nil {
+			http.Error(w, "list AgentRun pods", http.StatusInternalServerError)
+			return
 		}
-		routable := routableRuns[run.Name]
-		if isExternalVMRun(run) {
-			routable = false
-			if s.nativeWorkspaceResolver != nil {
-				_, resolveErr := s.nativeWorkspaceResolver.Resolve(&run)
-				routable = resolveErr == nil
+		for _, run := range runs.Items {
+			key := run.Annotations[AccessKeyAnnotation]
+			if key == "" {
+				continue
 			}
+			if s.config.routingMode() == routingModePath && (!validAccessKey(key) || reservedGatewayPath(key)) {
+				continue
+			}
+			if principal != nil && !EvaluateAuthorization(s.config.Auth.Authorization, *principal, &run).Allowed {
+				continue
+			}
+			routable := routableRuns[run.Name]
+			if isExternalVMRun(run) {
+				routable = false
+				if s.nativeWorkspaceResolver != nil {
+					_, resolveErr := s.nativeWorkspaceResolver.Resolve(&run)
+					routable = resolveErr == nil
+				}
+			}
+			if view == dashboardViewActive && !routable {
+				continue
+			}
+			openURL := s.openURL(r, key, routable)
+			if routable && openURL == "" {
+				continue
+			}
+			items = append(items, dashboardItem{
+				DisplayName: displayName(run), Phase: string(run.Status.Phase), RequestedBy: requestedBy(run),
+				CreatedAt: run.CreationTimestamp.Time, SourceURL: run.Annotations[SourceURLAnnotation], OpenURL: openURL, Routable: routable,
+			})
 		}
-		if view == dashboardViewActive && !routable {
-			continue
+	}
+	if s.config.LocalRuns.Enabled {
+		localRuns, err := s.localRuns.List(r.Context())
+		if err != nil {
+			http.Error(w, "list local runs", http.StatusServiceUnavailable)
+			return
 		}
-		openURL := s.openURL(r, key, routable)
-		if routable && openURL == "" {
-			continue
+		for _, run := range localRuns {
+			if !localRunMatchesConfig(run, s.config.LocalRuns) {
+				http.Error(w, "list local runs", http.StatusServiceUnavailable)
+				return
+			}
+			if principal != nil && !EvaluateAuthorizationForOwner(s.config.Auth.Authorization, *principal, run.Principal.Issuer, run.Principal.Subject).Allowed {
+				continue
+			}
+			if view == dashboardViewActive && !run.Ready {
+				continue
+			}
+			items = append(items, dashboardItem{
+				DisplayName: run.RunID, Phase: run.State, RequestedBy: run.Principal.DisplayName, CreatedAt: run.CreatedAt,
+				OpenURL: localRunOpenURL(r, run.Session.Path, run.Ready), Routable: run.Ready,
+			})
 		}
-		items = append(items, dashboardItem{
-			DisplayName: displayName(run),
-			Phase:       string(run.Status.Phase),
-			RequestedBy: requestedBy(run),
-			CreatedAt:   run.CreationTimestamp.Time,
-			SourceURL:   run.Annotations[SourceURLAnnotation],
-			OpenURL:     openURL,
-			Routable:    routable,
-		})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].CreatedAt.After(items[j].CreatedAt)
@@ -799,8 +861,8 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 	if err := dashboardTemplate.Execute(w, dashboardData{
 		Items:                 items,
 		View:                  view,
-		ActiveURL:             s.dashboardViewURL(dashboardViewActive),
-		AllURL:                s.dashboardViewURL(dashboardViewAll),
+		ActiveURL:             s.dashboardViewURLForRequest(r, dashboardViewActive),
+		AllURL:                s.dashboardViewURLForRequest(r, dashboardViewAll),
 		ShowLogout:            s.auth != nil,
 		LogoutPath:            s.config.mountedPath("/oauth2/logout"),
 		BrandMarkPath:         s.config.mountedPath(brandMarkPath),
@@ -817,6 +879,13 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 	}); err != nil {
 		http.Error(w, "render dashboard", http.StatusInternalServerError)
 	}
+}
+
+func localRunOpenURL(request *http.Request, routePath string, ready bool) string {
+	if !ready {
+		return ""
+	}
+	return requestScheme(request) + "://" + request.Host + routePath
 }
 
 const (
@@ -868,6 +937,33 @@ func (s *Server) routableAgentRuns(ctx context.Context) (map[string]bool, error)
 
 func (s *Server) dashboardViewURL(view string) string {
 	return s.config.mountedPath("/") + "?view=" + url.QueryEscape(view)
+}
+
+func (s *Server) redirectLocalDashboardRoot(response http.ResponseWriter, request *http.Request) bool {
+	if !s.config.LocalRuns.Enabled || request.URL.Path != s.config.LocalRuns.PathPrefix || request.URL.EscapedPath() != s.config.LocalRuns.PathPrefix {
+		return false
+	}
+	canonical := *request.URL
+	canonical.Path = s.config.LocalRuns.PathPrefix + "/"
+	canonical.RawPath = ""
+	if ParseLocalRoute(&canonical, request.Host, s.config.LocalRuns).kind != routeDashboard {
+		return false
+	}
+	if s.config.routingMode() == routingModePath && !requestMatchesPublicOrigin(request, s.config.PublicURL) {
+		return false
+	}
+	target := (&url.URL{Path: canonical.Path, RawQuery: request.URL.RawQuery}).String()
+	http.Redirect(response, request, target, http.StatusPermanentRedirect)
+	return true
+}
+
+func (s *Server) dashboardViewURLForRequest(request *http.Request, view string) string {
+	if s.config.LocalRuns.Enabled {
+		if local := ParseLocalRoute(request.URL, request.Host, s.config.LocalRuns); local.kind == routeDashboard {
+			return strings.TrimSuffix(s.config.LocalRuns.PathPrefix, "/") + "/?view=" + url.QueryEscape(view)
+		}
+	}
+	return s.dashboardViewURL(view)
 }
 
 func displayName(run nvtv1alpha1.AgentRun) string {

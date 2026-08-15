@@ -1,246 +1,94 @@
-# Local Development Agent
+# Native local workstations
 
-This guide creates one Docker Compose agent with a broker-backed GitHub App.
-The App private key stays in the broker; the agent receives only a scoped
-broker identity.
+`nvt-local-controller` creates persistent local workstations and disposable
+producer runs from one administrator-owned YAML file.
 
-## Prerequisites
+## Configure
 
-- Docker with Compose
-- Make
-- A GitHub App installed on the target repository
-- The App ID, installation ID, and private key
-- Codex or Claude credentials when using that runtime
-
-`.broker/` and `.agents/` are ignored local state. Never commit provider
-credentials from either directory.
-
-## Configure The Broker
-
-From the repository root:
+Build the trusted images, copy the example, and edit only non-secret policy:
 
 ```sh
-export AGENT=nvt-dev
-export REPO=mirkosekulic/nvt-agent
-export PROVIDER=github-main-app
-
+make runtime-build dind-build broker-build local-controller-build gateway-build egressd-build captured-build
 mkdir -p .broker
-cp -n templates/broker-agents.yaml .broker/agents.yaml
+cp templates/local-controller.yaml .broker/local-controller.yaml
 ```
 
-Create `.broker/env` with mode `0600`:
-
-```text
-GITHUB_APP_ID=<app-id>
-GITHUB_APP_INSTALLATION_ID=<installation-id>
-GITHUB_APP_PRIVATE_KEY_BASE64=<base64-private-key>
-```
-
-Generate the final value portably with:
-
-```sh
-base64 < /absolute/path/to/private-key.pem | tr -d '\n'
-```
-
-Create `.broker/broker.yaml`:
+The top-level profiles, workflows, execution backends, and retention policies
+are reusable. A persistent workstation selects them by name:
 
 ```yaml
-providers:
-  - name: github-main-app
-    plugin: github-app
-    config:
-      app-id-env: GITHUB_APP_ID
-      installation-id-env: GITHUB_APP_INSTALLATION_ID
-      private-key-base64-env: GITHUB_APP_PRIVATE_KEY_BASE64
-      api-url: https://api.github.com
-      injection-hosts: [github.com, api.github.com]
-    allow:
-      repositories: [mirkoSekulic/nvt-agent]
-      permissions:
-        contents: write
-        pull_requests: write
-        checks: read
-      methods: [GET, POST, PATCH]
+workstations:
+  - name: nvt
+    principal:
+      issuer: https://local.nvt.invalid
+      subject: workstation-nvt
+      display_name: NVT development
+    profile: engineering
+    workflow: nvt-development
+    retention: persistent
+    backend: local-docker
 ```
 
-Provider `allow` is the maximum ceiling. Each agent grant narrows it further.
+The `name` is the durable run and route identity. Principal authorization uses
+exact issuer plus immutable subject; display name is presentation only.
+Producer schedules in the same document select the same profiles/workflows and
+use private bearer files by reference. Producers cannot submit profiles,
+providers, grants, repositories, runtime controls, retention, or backend
+settings.
 
-## Build And Start
+Provider implementations and credential values stay in `.broker/broker.yaml`
+and broker-owned credential state. The local platform file contains only
+provider references, broker grants/capabilities, repository identifiers, and
+non-secret runtime/egress policy. Never place tokens, passwords, private keys,
+credential documents, or credential-bearing command arguments in it.
+
+The checked-in template is an intentionally credential-free direct example.
+Replace its illustrative shell profile with reviewed broker-backed mediated
+profiles for real Codex, Claude, GitHub App, or PAT use. The shared resolved-run
+contract is provider-neutral; the local controller has no provider branches.
+
+## Start and operate
 
 ```sh
-make runtime-build dind-build broker-build egressd-build captured-build
 make infra-up
-make agent-init NAME=$AGENT
-make agent-grant NAME=$AGENT PROVIDER=$PROVIDER REPO=$REPO
-make agent-up NAME=$AGENT
 ```
 
-Mediated startup requires the local DinD image used by net-init. Override its
-name with `DIND_IMAGE`; `agent-up` fails with build guidance instead of trying
-to pull a missing local image.
-
-`agent-init` creates `.agents/$AGENT/agent.yaml`, environment, workspace,
-state, and a unique broker identity. The broker stores only its token hash.
-
-Open code-server:
+`infra-up` detects `.broker/local-controller.yaml` and supplies its read-only
+in-container path. Open stable routes such as:
 
 ```text
-http://nvt-dev.agent.localhost:4090
+http://localhost:4090/agents/nvt/
+http://nvt.agent.localhost:4090/
 ```
 
-Useful commands:
+Every workstation uses `/workspace` inside the agent, matching the Kubernetes
+runtime contract.
 
-```sh
-make agent-logs NAME=$AGENT
-make agent-shell NAME=$AGENT
-make agent-doctor NAME=$AGENT
-make agent-ps
-```
+Adding a workstation and restarting the controller creates it atomically.
+Unchanged entries replay idempotently. Workspace, runtime/session state, Docker
+data, and route identity survive controller, agent-container, and ordinary
+Docker daemon/Desktop restarts; the runtime uses its generic `resume` command.
 
-## Configure Repositories And Tools
+Removing an entry from YAML never stops or deletes the existing run. Destructive
+cleanup requires the separately authenticated controller delete API. This
+prevents an accidental configuration edit from deleting retained volumes.
+Changing the resolved profile/workflow/policy for an existing name is immutable
+drift and fails startup; explicitly delete and recreate when that is intended.
 
-Edit `.agents/$AGENT/agent.yaml`. Generated defaults already contain the
-runtime, tools, code-server, and plugin sections.
-
-For mediated Compose agents, `agent-init` keeps the runtime command direct and
-places the public CA path and local bypass settings in `runtime.env`. The map is
-applied only to the runtime child, including its resume command. Separately,
-bootstrap installs the required public CA trust and persists
-`NODE_EXTRA_CA_CERTS` in the generated container environment for components
-that source it, including code-server. That independently installed CA trust
-is intentionally visible outside the runtime child; the certificate is public,
-non-secret trust material. `runtime.env` remains deployment configuration and
-must not contain real, long-lived secrets.
-
-Re-running `agent-init` upgrades an existing mediated config that has no
-`runtime.env` map by adding these managed defaults. If `runtime.env` already
-exists, it is treated as user-authored and left unchanged.
-
-Broker-backed repository access uses the public provider alias exported by
-`git-host-credentials`, then references that alias from checkout and watcher
-plugins:
-
-```yaml
-plugins:
-  - name: git-host-credentials
-    source: builtin
-    config:
-      default-provider: github-main
-      providers:
-        - name: github-main
-          type: broker
-          broker-provider: github-main-app
-          match:
-            - github.com/mirkosekulic/nvt-agent
-
-  - name: git-credentials
-    source: builtin
-    when: before-agent
-    config:
-      credentials:
-        - match: https://github.com/mirkosekulic/nvt-agent
-          provider: github-main
-          identity:
-            mode: provider
-
-  - name: checkout-repos
-    source: builtin
-    when: before-agent
-    restart: never
-    config:
-      repos:
-        - url: https://github.com/mirkosekulic/nvt-agent.git
-```
-
-Keep `broker-provider` aligned with `.broker/broker.yaml`. Plugin `provider`
-values refer to the local exported alias, not directly to the broker provider.
-
-For custom tools, exposed ports, runtime arguments, and watcher configuration,
-see [Runtime plugins](../runtime/plugins/README.md) and the generated comments
-in `agent.yaml`.
-
-## Verify
-
-Inside `make agent-shell NAME=$AGENT`:
-
-```sh
-brokerctl health
-docker info
-docker compose version
-cd "$NVT_WORKSPACE/nvt-agent"
-git fetch
-agentdctl status
-doctor
-```
-
-Do not print broker tokens or provider credentials during verification.
-
-Register a pull-request watcher dynamically:
-
-```sh
-github-watch register \
-  --repo mirkoSekulic/nvt-agent \
-  --number <pr-number> \
-  --label nvt-dev
-
-github-watch list
-```
-
-Registrations live in the persistent agent state directory and survive
-container restart.
-
-## HTTP Services
-
-Declare named routes in `agent.yaml`:
-
-```yaml
-expose:
-  http:
-    - name: app
-      targetPort: 3000
-```
-
-Then open:
-
-```text
-http://app.nvt-dev.agent.localhost:4090
-```
-
-For temporary forwarding:
-
-```sh
-make forward NAME=$AGENT PORT=5173
-make forward NAME=$AGENT PORT=5173 LOCAL=9000
-```
-
-Ports 4090 and 2375 are reserved.
+The raw management, exact-schedule producer, and gateway route-reader APIs use
+separate credentials and cannot be substituted for one another. Agent
+containers receive neither the Docker socket nor controller credentials.
 
 ## Troubleshooting
 
-- **Broker image missing:** run `make broker-build && make infra-up`.
-- **Unauthorized:** verify the grant in `.broker/agents.yaml` and provider
-  ceiling in `.broker/broker.yaml`.
-- **GitHub mint failure:** verify App installation, permissions, IDs, and the
-  base64 private key in `.broker/env`.
-- **Docker unavailable:** recreate the agent and verify
-  `DOCKER_HOST=tcp://127.0.0.1:2375`.
-- **Runtime credentials stale:** update the broker-owned credential source;
-  mediated agents should not receive copied provider credentials.
+- `workstation-configuration-unavailable`: validate the YAML API version,
+  references, duplicate names, persistent retention, and immutable drift.
+- `backend-unavailable`: verify Docker, broker, gateway, images, and configured
+  network ranges.
+- A run in `preparing` is retried after dependency recovery. A confirmed
+  ownership conflict remains fail closed and is never adopted or deleted.
+- Do not delete or prune the controller state and named Docker volumes when
+  testing restart recovery.
 
-## Cleanup
-
-If the configured tmux agent session disappears, the main agent container exits
-non-zero. Docker Compose does not automatically stop the agent's support
-containers; use `agent-down` to remove the complete local stack.
-
-```sh
-make agent-down NAME=$AGENT
-make agent-rm NAME=$AGENT FORCE=1
-make infra-down
-```
-
-To clone an initialized agent definition with a fresh broker identity:
-
-```sh
-make agent-copy FROM=$AGENT TO=nvt-dev-copy
-```
+The normative configuration, API, recovery, and cleanup rules are in
+[`protocol/local-controller.md`](../protocol/local-controller.md).
