@@ -9,7 +9,7 @@ import (
 )
 
 func CommentIntentIdempotencyKey(owner, repo string, issue int, commentID int64, intent CommandIntent) string {
-	return CommentIdempotencyKey(owner, repo, issue, commentID) + ":" + string(intent)
+	return fmt.Sprintf("github:%s/%s:issue:%d:comment:%d:intent:%s", owner, repo, issue, commentID, intent)
 }
 
 func CommentIntentAgentRunName(owner, repo string, issue int, commentID int64, intent CommandIntent) string {

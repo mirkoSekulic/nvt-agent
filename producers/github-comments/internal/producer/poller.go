@@ -174,6 +174,10 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			continue
 		}
 		if result.Outcome == schedulingOutcomeRejected {
+			reason := "schedule-admission-rejected"
+			if errors.Is(err, errCommandDisabled) {
+				reason = "command-disabled"
+			}
 			p.Logger.Info(
 				"processed definitive schedule admission rejection",
 				"repo",
@@ -182,6 +186,8 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 				issueNumber,
 				"commentID",
 				comment.ID,
+				"reason",
+				reason,
 			)
 			continue
 		}

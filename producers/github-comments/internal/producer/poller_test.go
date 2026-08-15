@@ -635,6 +635,62 @@ func TestCommandPlacementByIntent(t *testing.T) {
 	}
 }
 
+func TestPollerConsumesUnmappedCommandAndProcessesFollowingWork(t *testing.T) {
+	ctx := context.Background()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requestCount++
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true,"agentRun":{"namespace":"nvt","name":"valid-work"}}`))
+	}))
+	defer server.Close()
+
+	firstUpdated := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	secondUpdated := firstUpdated.Add(time.Minute)
+	thirdUpdated := secondUpdated.Add(time.Minute)
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	cfg.Submission = SubmissionConfig{
+		Mode:               SubmissionModeScheduleAdmission,
+		AdmissionMode:      AdmissionModeProfiled,
+		AdmissionBaseURL:   server.URL,
+		AdmissionTokenFile: writeTestAdmissionToken(t, testAdmissionToken("c2lnMQ")),
+		ScheduleName:       "default",
+		Workflow:           "implement-pr",
+	}
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{
+			{ID: 300, Body: "/nvtagent run\ninspect it", IssueURL: "https://api.github.com/repos/acme/widget/issues/40", UpdatedAt: firstUpdated, User: GitHubUser{Login: "octo", ID: 7}},
+			{ID: 301, Body: "/nvtagent review", IssueURL: "https://api.github.com/repos/acme/widget/issues/41", UpdatedAt: secondUpdated, User: GitHubUser{Login: "octo", ID: 7}},
+			{ID: 302, Body: "/nvtagent pr create", IssueURL: "https://api.github.com/repos/acme/widget/issues/42", UpdatedAt: thirdUpdated, User: GitHubUser{Login: "octo", ID: 7}},
+		},
+		issues: map[int]GitHubIssue{
+			40: {Number: 40, Title: "Run task"},
+			41: {Number: 41, Title: "Review me", PullRequest: &GitHubPullRequest{HTMLURL: "https://github.com/acme/widget/pull/41"}},
+			42: {Number: 42, Title: "Implement me", HTMLURL: "https://github.com/acme/widget/issues/42"},
+		},
+	}
+	state := newMemoryStateStore()
+	poller := NewPoller(cfg, github, NewAgentRunSubmitterWithHTTP(nil, server.Client(), cfg), state, slog.Default())
+	poller.now = func() time.Time { return firstUpdated.Add(-time.Minute) }
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if github.listIssueCommentsCalls != 3 {
+		t.Fatalf("comment fetches = %d, want both commands processed", github.listIssueCommentsCalls)
+	}
+	if requestCount != 1 {
+		t.Fatalf("admission requests = %d, want only following valid work", requestCount)
+	}
+	cursor, found, err := state.GetRepoCursor(ctx, "acme/widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || !cursor.Equal(thirdUpdated) {
+		t.Fatalf("cursor = %v found=%v, want %v", cursor, found, thirdUpdated)
+	}
+}
+
 func TestPollerDefaultAllowedAuthorsAcceptsAnyCommandAuthor(t *testing.T) {
 	cfg := testPollerConfig("")
 	cfg.AllowedAuthors = nil

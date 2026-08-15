@@ -37,6 +37,7 @@ type AgentRunSubmitter struct {
 var (
 	errReadLocalAdmissionToken    = errors.New("read local admission token")
 	errInvalidLocalAdmissionToken = errors.New("invalid local admission token")
+	errCommandDisabled            = errors.New("command disabled by producer configuration")
 )
 
 type agentRunIdentity struct {
@@ -109,10 +110,12 @@ func (s AgentRunSubmitter) submitWithOutcome(
 ) (submissionResult, error) {
 	if command.Intent == CommandIntentReview || command.Intent == CommandIntentRun {
 		if s.submissionMode() != SubmissionModeScheduleAdmission || s.admissionMode() != AdmissionModeProfiled {
-			return submissionResult{}, fmt.Errorf("command %q requires profiled schedule admission", command.Intent)
+			return submissionResult{Outcome: schedulingOutcomeRejected}, fmt.Errorf(
+				"%w: command %q requires profiled schedule admission", errCommandDisabled, command.Intent,
+			)
 		}
 		if _, err := s.workflowForCommand(command.Intent); err != nil {
-			return submissionResult{}, err
+			return submissionResult{Outcome: schedulingOutcomeRejected}, fmt.Errorf("%w: %v", errCommandDisabled, err)
 		}
 	}
 	identity := s.agentRunIdentityForCommand(repo, issue, commandComment, command)

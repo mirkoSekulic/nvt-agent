@@ -1387,9 +1387,19 @@ grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
 grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
 grep -q 'name: implement-pr' "${PROFILE_RENDER}"
 grep -q 'name: review-pr' "${PROFILE_RENDER}"
+grep -q 'name: generic-run' "${PROFILE_RENDER}"
 grep -q 'defaultWorkflow: implement-pr' "${PROFILE_RENDER}"
 grep -A3 'workflows:' "${PROFILE_RENDER}" | grep -q 'implement-pr'
 grep -A3 'workflows:' "${PROFILE_RENDER}" | grep -q 'review-pr'
+grep -A4 'workflows:' "${PROFILE_RENDER}" | grep -q 'generic-run'
+grep -A4 'plugins:' "${PROFILE_RENDER}" | grep -q 'name: work-control'
+grep -A6 'completeOn:' "${PROFILE_RENDER}" | grep -q 'plugin.work.completed'
+grep -A6 'completeOn:' "${PROFILE_RENDER}" | grep -q 'plugin.github.pr.merged'
+grep -A6 'completeOn:' "${PROFILE_RENDER}" | grep -q 'plugin.github.pr.closed'
+grep -A3 'failOn:' "${PROFILE_RENDER}" | grep -q 'plugin.work.failed'
+grep -A5 'commandWorkflows:' "${PROFILE_RENDER}" | grep -q 'pr-create: implement-pr'
+grep -A5 'commandWorkflows:' "${PROFILE_RENDER}" | grep -q 'review: review-pr'
+grep -A5 'commandWorkflows:' "${PROFILE_RENDER}" | grep -q 'run: generic-run'
 grep -q 'runtimeClassName: kata-vm-isolation' "${PROFILE_RENDER}"
 grep -A6 'resources:' "${PROFILE_RENDER}" | grep -q 'cpu: "2"'
 grep -A6 'resources:' "${PROFILE_RENDER}" | grep -q 'memory: 8Gi'

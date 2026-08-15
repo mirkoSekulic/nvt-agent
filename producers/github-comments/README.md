@@ -228,11 +228,13 @@ Producer-created AgentRuns complete on either `plugin.github.pr.merged` or
 `plugin.github.pr.closed`. Closed/unmerged PRs are treated as valid terminal
 outcomes for this workflow, not AgentRun failures.
 
-Cooperative `review` and `run` workflows enable the builtin `work-control`
-plugin and complete or fail on `plugin.work.completed` / `plugin.work.failed`.
-For PR-backed work, lifecycle completion may be configured as the union of
-those events and `plugin.github.pr.merged` / `plugin.github.pr.closed`. An
-omitted signal remains bounded by `agentRun.ttl.activeDeadlineSeconds`.
+Workflow selection only chooses administrator-authored workflow instructions;
+it does not enable plugins or lifecycle events. Cooperative `review` and `run`
+deployments must explicitly enable the builtin `work-control` plugin and add
+`plugin.work.completed` / `plugin.work.failed` to the shared `AgentSchedule`
+template. For PR-backed work, configure completion as the union of the work
+event and `plugin.github.pr.merged` / `plugin.github.pr.closed`. An omitted
+signal remains bounded by the configured active deadline.
 
 `agentRun.ttl.completedTTLSeconds` and `agentRun.ttl.failedTTLSeconds` are
 forwarded to `AgentRun.spec.ttl` so terminal Pods can be cleaned up by the
@@ -376,3 +378,47 @@ submission:
 
 Existing `submission.workflow` remains the fallback for `pr create` only.
 `review` and `run` fail closed when their exact mapping is absent.
+
+A complete profiled configuration routes commands and independently installs
+the provider-neutral completion tool and lifecycle contract:
+
+```yaml
+agentSchedule:
+  template:
+    agent:
+      config:
+        plugins:
+          - name: work-control
+            source: builtin
+    lifecycle:
+      completeOn:
+        - plugin.work.completed
+        - plugin.github.pr.merged
+        - plugin.github.pr.closed
+      failOn:
+        - plugin.work.failed
+  workflowProfiles:
+    - name: implement-pr
+      workspaceInstructions: Implement the issue and open a pull request.
+    - name: review-pr
+      workspaceInstructions: Review the pull request and report findings.
+    - name: generic-run
+      workspaceInstructions: Perform the requested task and report the result.
+  producerPolicies:
+    - identity: system:serviceaccount:nvt:nvt-github-comments-producer
+      workflows: [implement-pr, review-pr, generic-run]
+      defaultWorkflow: implement-pr
+
+producer:
+  submission:
+    mode: scheduleAdmission
+    admissionMode: profiled
+    commandWorkflows:
+      pr-create: implement-pr
+      review: review-pr
+      run: generic-run
+```
+
+The operator injects the per-run lifecycle event webhook for a profiled
+schedule template. `work-control` itself only exports `nvt-work` and publishes
+the fixed work events; it remains provider-neutral and holds no credentials.

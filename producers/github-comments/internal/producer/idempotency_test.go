@@ -24,8 +24,11 @@ func TestCommentIdempotencyKey(t *testing.T) {
 func TestCommentIntentIdentitySeparatesCommands(t *testing.T) {
 	reviewKey := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentReview)
 	runKey := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentRun)
-	if reviewKey == runKey || !strings.Contains(reviewKey, "review") || !strings.Contains(runKey, "run") {
-		t.Fatalf("intent keys did not separate commands: %q %q", reviewKey, runKey)
+	if reviewKey != "github:owner/repo:issue:42:comment:9001:intent:review" {
+		t.Fatalf("review key = %q", reviewKey)
+	}
+	if runKey != "github:owner/repo:issue:42:comment:9001:intent:run" {
+		t.Fatalf("run key = %q", runKey)
 	}
 	if CommentIntentAgentRunName("owner", "repo", 42, 9001, CommandIntentReview) == CommentIntentAgentRunName("owner", "repo", 42, 9001, CommandIntentRun) {
 		t.Fatal("intent-scoped AgentRun names collided")
