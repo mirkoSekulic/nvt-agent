@@ -94,7 +94,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=agents-proxy
-      - traefik.http.routers.nvt-local-gateway.rule=Host(`localhost`) && (PathPrefix(`/agents`) || PathPrefix(`/oauth2`))
+      - traefik.http.routers.nvt-local-gateway.rule=Host(`localhost`) && (PathPrefix(`/agents`) || PathPrefix(`/oauth2`) || PathPrefix(`/healthz/branding/`))
       - traefik.http.routers.nvt-local-gateway.entrypoints=web
       - traefik.http.routers.nvt-local-gateway.service=nvt-local-gateway
       - traefik.http.routers.nvt-local-gateway-host.rule=HostRegexp(`[a-z0-9-]+\.agent\.localhost`)

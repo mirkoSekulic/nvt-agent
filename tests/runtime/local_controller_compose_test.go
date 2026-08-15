@@ -103,7 +103,7 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE: /run/secrets/local-controller-route-token",
 		"local-gateway-private:/run/secrets:ro",
 		"nvt.dev/local-gateway=true",
-		"traefik.http.routers.nvt-local-gateway.rule=Host(`localhost`) && (PathPrefix(`/agents`) || PathPrefix(`/oauth2`))",
+		"traefik.http.routers.nvt-local-gateway.rule=Host(`localhost`) && (PathPrefix(`/agents`) || PathPrefix(`/oauth2`) || PathPrefix(`/healthz/branding/`))",
 		"traefik.http.routers.nvt-local-gateway-host.rule=HostRegexp(",
 		"traefik.http.routers.nvt-local-gateway-exposure.rule=HostRegexp(",
 		"- agents-proxy",
