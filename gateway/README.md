@@ -9,6 +9,33 @@ defaults to deny whenever authentication is enabled.
 `auth.mode=none` remains the default and preserves unrestricted access to all
 routable AgentRuns, including legacy runs.
 
+## Optional local runs
+
+The local Compose control plane enables the gateway as the only public route
+for controller-owned local runs. The gateway consumes bounded
+[`nvt.local-routes/v1`](../protocol/local-routes.md) metadata over the private
+control-plane network and proxies through one fixed configured Traefik origin.
+It never accepts an upstream URL, port, container, provider, or proxy target
+from the browser or route document.
+
+Stable session routes are available at `/agents/<run-id>/` and
+`<run-id>.agent.localhost`; named application exposures use
+`<name>.<run-id>.agent.localhost` without base-path rewriting. Session paths
+preserve WebSocket upgrades and strip only the stable run prefix. Public host
+and path routes terminate at the gateway. Dynamic per-run Traefik routers use
+a separate private entrypoint so Host headers cannot bypass gateway
+authorization. When authentication is enabled, listing and routing use the
+same exact issuer+immutable-subject owner policy as Kubernetes AgentRuns.
+The local Compose router also forwards the gateway-owned `/oauth2` endpoints;
+repository and run traffic cannot register or override those routes.
+
+Local route support is opt-in through `NVT_GATEWAY_LOCAL_RUNS_ENABLED`; the
+controller origin, fixed proxy origin, base domain, path prefix, and complete
+request timeout are startup-validated. `NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES`
+is valid only with local runs and is used by the Compose-local gateway. With
+local support omitted, Kubernetes discovery, dashboards, authorization, and
+proxying are unchanged.
+
 ## Optional credential portal link
 
 `NVT_GATEWAY_CREDENTIAL_PORTAL_URL` (or `--credential-portal-url`) adds one

@@ -1672,7 +1672,7 @@ code-server: {extensions: []}
 
 func TestLocalBuildDocumentationIncludesInfrastructureImages(t *testing.T) {
 	root := repoRoot(t)
-	const command = "make runtime-build dind-build broker-build local-controller-build egressd-build captured-build"
+	const command = "make runtime-build dind-build broker-build local-controller-build gateway-build egressd-build captured-build"
 	for _, path := range []string{"README.md", filepath.Join("docs", "local-development-agent.md")} {
 		contents := mustReadFile(t, filepath.Join(root, path))
 		if !strings.Contains(contents, command) {

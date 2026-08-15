@@ -9,6 +9,7 @@ require (
 	github.com/mirkoSekulic/nvt-agent/operator v0.0.0
 	github.com/mirkoSekulic/nvt-agent/protocol/eligibility v0.0.0
 	github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment v0.0.0
+	github.com/mirkoSekulic/nvt-agent/protocol/localroutes v0.0.0
 	golang.org/x/oauth2 v0.36.0
 	k8s.io/api v0.34.2
 	k8s.io/apimachinery v0.34.2
@@ -67,3 +68,5 @@ replace github.com/mirkoSekulic/nvt-agent/hostbundle => ../hostbundle
 replace github.com/mirkoSekulic/nvt-agent/protocol/guestenrollment => ../protocol/guestenrollment
 
 replace github.com/mirkoSekulic/nvt-agent/protocol/eligibility => ../protocol/eligibility
+
+replace github.com/mirkoSekulic/nvt-agent/protocol/localroutes => ../protocol/localroutes

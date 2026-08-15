@@ -106,6 +106,7 @@ type exposeRoute struct {
 }
 
 func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest string, names resourceNames) ([]byte, error) {
+	config = withRouteDefaults(config)
 	if run.Egress.Mode == "mediated" && run.Egress.Enforced && run.Egress.Transport != "transparent" {
 		return nil, errors.New("enforced local transport unsupported")
 	}
@@ -141,7 +142,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 			dockerEnvironment["NVT_DIND_KERNEL_LOG_DEVICE"] = "true"
 		}
 		services["docker"] = composeService{
-			Image: config.DindImage, Privileged: true, Restart: "unless-stopped", Labels: dockerRouteLabels(labels, names.project, run.RunID, routes),
+			Image: config.DindImage, Privileged: true, Restart: "unless-stopped", Labels: dockerRouteLabels(config, labels, names.project, run.RunID, routes),
 			Environment: dockerEnvironment,
 			Command:     []string{"--host=unix:///var/run/docker.sock", "--host=tcp://127.0.0.1:2375", "--tls=false"},
 			Volumes:     []string{"workspace:/workspace", "docker-data:/var/lib/nvt-dind"},
@@ -152,12 +153,12 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 		services["network"] = composeService{
 			Image: config.SeedImage, Entrypoint: []string{"sh", "-ec"}, Command: []string{"trap 'exit 0' TERM INT; while sleep 3600; do :; done"},
 			Networks: []string{"agents-proxy", "run-internal", "egress-private"}, Restart: "unless-stopped",
-			Labels: dockerRouteLabels(labels, names.project, run.RunID, routes),
+			Labels: dockerRouteLabels(config, labels, names.project, run.RunID, routes),
 		}
 	}
 	agentEnvironment := map[string]string{
 		"NVT_WORKSPACE": "/workspace", "NVT_AGENT_CONFIG_FILE": "/nvt-config/agent.json",
-		"AGENT_HOST": run.RunID + ".agent.localhost", "NVT_PROXY_PORT": strconv.Itoa(config.ProxyPort),
+		"AGENT_HOST": run.RunID + "." + config.RouteBaseDomain, "NVT_PROXY_PORT": strconv.Itoa(config.ProxyPort),
 	}
 	if run.Runtime.Docker != nil {
 		agentEnvironment["DOCKER_HOST"] = "tcp://127.0.0.1:2375"
@@ -454,21 +455,21 @@ func shortDigest(value string) string {
 
 func sha256Bytes(value []byte) [32]byte { return sha256.Sum256(value) }
 
-func dockerRouteLabels(base map[string]string, project, runID string, routes []exposeRoute) map[string]string {
+func dockerRouteLabels(config Config, base map[string]string, project, runID string, routes []exposeRoute) map[string]string {
 	labels := make(map[string]string, len(base)+6+len(routes)*4)
 	for key, value := range base {
 		labels[key] = value
 	}
 	labels["traefik.enable"] = "true"
 	labels["traefik.docker.network"] = "agents-proxy"
-	labels["traefik.http.routers."+project+".rule"] = "Host(`" + runID + ".agent.localhost`)"
-	labels["traefik.http.routers."+project+".entrypoints"] = "web"
+	labels["traefik.http.routers."+project+".rule"] = "Host(`" + runID + "." + config.RouteBaseDomain + "`)"
+	labels["traefik.http.routers."+project+".entrypoints"] = config.ProxyEntrypoint
 	labels["traefik.http.routers."+project+".service"] = project
 	labels["traefik.http.services."+project+".loadbalancer.server.port"] = "4090"
 	for _, route := range routes {
 		router := project + "-" + route.Name
-		labels["traefik.http.routers."+router+".rule"] = "Host(`" + route.Name + "." + runID + ".agent.localhost`)"
-		labels["traefik.http.routers."+router+".entrypoints"] = "web"
+		labels["traefik.http.routers."+router+".rule"] = "Host(`" + route.Name + "." + runID + "." + config.RouteBaseDomain + "`)"
+		labels["traefik.http.routers."+router+".entrypoints"] = config.ProxyEntrypoint
 		labels["traefik.http.routers."+router+".service"] = router
 		labels["traefik.http.services."+router+".loadbalancer.server.port"] = strconv.Itoa(route.TargetPort)
 	}

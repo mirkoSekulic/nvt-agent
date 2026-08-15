@@ -627,6 +627,9 @@ func (s AgentRunSubmitter) scheduleAdmissionURL() string {
 	if scheduleName == "" {
 		scheduleName = defaultScheduleName
 	}
+	if s.config.Submission.Backend == SubmissionBackendLocal {
+		return strings.TrimRight(baseURL, "/") + "/v1/schedules/" + url.PathEscape(scheduleName) + "/admissions"
+	}
 	return strings.TrimRight(baseURL, "/") +
 		"/v1/schedules/" + url.PathEscape(namespace) + "/" + url.PathEscape(scheduleName) + "/admissions"
 }

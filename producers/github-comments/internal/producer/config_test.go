@@ -115,6 +115,37 @@ func TestConfigAcceptsProfiledAdmissionWithoutAgentRunSecurityConfig(t *testing.
 	}
 }
 
+func TestSubmissionBackendDefaultsToKubernetesAndLocalRequiresProfiledAdmission(t *testing.T) {
+	defaultConfig := validTestConfig()
+	if err := defaultConfig.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	if defaultConfig.Submission.Backend != SubmissionBackendKubernetes {
+		t.Fatalf("default backend = %q", defaultConfig.Submission.Backend)
+	}
+
+	local := validTestConfig()
+	local.AgentRun = AgentRunConfig{}
+	local.Submission = SubmissionConfig{
+		Mode: SubmissionModeScheduleAdmission, Backend: SubmissionBackendLocal, AdmissionMode: AdmissionModeProfiled,
+		AdmissionBaseURL: "http://local-controller:7480", AdmissionTokenFile: "/run/secrets/local-controller/token",
+		ScheduleNamespace: "unused", ScheduleName: "github", Workflow: "development",
+	}
+	if err := local.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*Config){
+		func(value *Config) { value.Submission.Mode = SubmissionModeDirect },
+		func(value *Config) { value.Submission.AdmissionMode = AdmissionModeLegacy },
+	} {
+		invalid := local
+		mutate(&invalid)
+		if err := invalid.ApplyDefaultsAndValidate(); err == nil {
+			t.Fatal("unsafe local submission mode accepted")
+		}
+	}
+}
+
 func TestConfigAcceptsStaticProfiledWorkflow(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.AgentRun = AgentRunConfig{}

@@ -40,6 +40,10 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"NVT_LOCAL_CONTROLLER_BROKER_AGENTS: /broker-state/agents.yaml",
 		"NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS:",
 		"NVT_LOCAL_CONTROLLER_PROXY_PORT:",
+		"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN: agent.localhost",
+		"NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX: /agents",
+		"NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT: local-agents",
+		"NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG:",
 		"local-controller-state:/state",
 		"./.broker:/broker-state",
 		"/var/run/docker.sock:/var/run/docker.sock",
@@ -54,6 +58,41 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		if strings.Contains(service, forbidden) {
 			t.Fatalf("local controller received forbidden Docker authority %q:\n%s", forbidden, service)
 		}
+	}
+	gatewayStart := strings.Index(compose, "\n  gateway:\n")
+	if gatewayStart == -1 {
+		t.Fatalf("compose infrastructure has no local gateway:\n%s", compose)
+	}
+	gateway := compose[gatewayStart:]
+	if end := strings.Index(gateway, "\n  local-controller:\n"); end >= 0 {
+		gateway = gateway[:end]
+	}
+	for _, required := range []string{
+		"image: nvt-agent-gateway:latest",
+		`NVT_GATEWAY_LOCAL_RUNS_ENABLED: "true"`,
+		`NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES: "true"`,
+		"NVT_GATEWAY_LOCAL_RUNS_CONTROLLER_URL: http://local-controller:7480",
+		"NVT_GATEWAY_LOCAL_RUNS_PROXY_URL: http://proxy:8081",
+		"traefik.http.routers.nvt-local-gateway.rule=Host(`localhost`) && (PathPrefix(`/agents`) || PathPrefix(`/oauth2`))",
+		"traefik.http.routers.nvt-local-gateway-host.rule=HostRegexp(",
+		"traefik.http.routers.nvt-local-gateway-exposure.rule=HostRegexp(",
+		"- agents-proxy",
+		"- local-control-plane",
+		"read_only: true",
+	} {
+		if !strings.Contains(gateway, required) {
+			t.Fatalf("local gateway missing %q:\n%s", required, gateway)
+		}
+	}
+	for _, forbidden := range []string{"/var/run/docker.sock", "/broker-state", "privileged:", "cap_add:"} {
+		if strings.Contains(gateway, forbidden) {
+			t.Fatalf("local gateway received forbidden authority %q:\n%s", forbidden, gateway)
+		}
+	}
+	proxyStart := strings.Index(compose, "\n  proxy:\n")
+	proxyEnd := strings.Index(compose, "\n  gateway:\n")
+	if proxyStart == -1 || proxyEnd <= proxyStart || !strings.Contains(compose[proxyStart:proxyEnd], "--entrypoints.local-agents.address=:8081") {
+		t.Fatalf("shared proxy lacks private local-agent entrypoint:\n%s", compose)
 	}
 	if strings.Contains(service, "networks:\n      - agents-proxy") || strings.Contains(service, "ports:") {
 		t.Fatalf("local controller is exposed outside its trusted control-plane network:\n%s", service)
@@ -71,6 +110,7 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	}
 	dockerfile := string(dockerfileBytes)
 	for _, required := range []string{
+		"COPY protocol/localroutes ./protocol/localroutes",
 		"COPY protocol/resolvedrun ./protocol/resolvedrun",
 		"COPY localcontroller ./localcontroller",
 		"CGO_ENABLED=0 GOOS=linux go build",

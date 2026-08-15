@@ -85,7 +85,7 @@ Containers.
 Requirements: Docker with Compose, Make, and a browser.
 
 ```sh
-make runtime-build dind-build broker-build local-controller-build egressd-build captured-build
+make runtime-build dind-build broker-build local-controller-build gateway-build egressd-build captured-build
 make infra-up
 
 make agent-init NAME=demo
@@ -170,6 +170,7 @@ See [Runtime plugins](runtime/plugins/README.md) and the contracts under
 - [Broker protocol](protocol/broker.md)
 - [Execution driver protocol](protocol/execution-driver.md)
 - [Local controller protocol](protocol/local-controller.md)
+- [Local route metadata](protocol/local-routes.md)
 
 ## Project Status
 

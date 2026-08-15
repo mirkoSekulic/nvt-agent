@@ -43,6 +43,10 @@ func TestValidateConfigBounds(t *testing.T) {
 		"docker host":                          func(value *Config) { value.DockerHost = "" },
 		"runs dir":                             func(value *Config) { value.RunsDir = "relative" },
 		"broker agents":                        func(value *Config) { value.BrokerAgentsPath = "relative" },
+		"route domain":                         func(value *Config) { value.RouteBaseDomain = "Bad.Domain" },
+		"route prefix":                         func(value *Config) { value.RoutePathPrefix = "/agents/../other" },
+		"proxy entrypoint":                     func(value *Config) { value.ProxyEntrypoint = "local agents" },
+		"scheduling path":                      func(value *Config) { value.SchedulingConfigPath = "relative.json" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
@@ -65,6 +69,9 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 		"NVT_LOCAL_CONTROLLER_BACKEND_TIMEOUT_SECONDS",
 		"NVT_LOCAL_CONTROLLER_PROXY_PORT",
 		"NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL",
+		"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN",
+		"NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX",
+		"NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT",
 	} {
 		t.Setenv(name, "")
 		if _, err := ConfigFromEnvironment(); err == nil {
@@ -112,6 +119,12 @@ func defaultEnvironmentValue(name string) string {
 		return "4090"
 	case "NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL":
 		return "100.64.0.0/10"
+	case "NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN":
+		return "agent.localhost"
+	case "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX":
+		return "/agents"
+	case "NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT":
+		return "local-agents"
 	default:
 		return "1"
 	}

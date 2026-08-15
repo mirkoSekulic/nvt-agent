@@ -2,6 +2,7 @@
 package producer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -141,6 +142,57 @@ func TestSubmitScheduleAdmissionPostsAdmissionRequest(t *testing.T) {
 	}
 	if _, ok := gotRequest.AgentRun.Annotations[AccessKeyAnnotation]; ok {
 		t.Fatalf("producer should not send access key annotation: %#v", gotRequest.AgentRun.Annotations)
+	}
+}
+
+func TestSubmitLocalScheduleAdmissionUsesProfiledBoundaryWithoutProtectedOverrides(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "local-admission-token")
+	token := testAdmissionToken("bG9jYWwtc2NoZWR1bGluZw")
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/schedules/github/admissions" || request.Header.Get("Authorization") != "Bearer "+token {
+			t.Fatalf("local admission request %s %s auth=%q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
+		}
+		decoder := json.NewDecoder(request.Body)
+		if err := decoder.Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true,"agentRun":{"namespace":"local","name":"local-run"}}`))
+	}))
+	defer server.Close()
+
+	config := Config{
+		Submission: SubmissionConfig{
+			Mode: SubmissionModeScheduleAdmission, Backend: SubmissionBackendLocal, AdmissionMode: AdmissionModeProfiled,
+			AdmissionBaseURL: server.URL, AdmissionTokenFile: tokenPath, ScheduleName: "github", Workflow: "development",
+		},
+		Idempotency: IdempotencyConfig{Scope: IdempotencyScopeIssue},
+	}
+	submitter := NewAgentRunSubmitterWithHTTP(nil, server.Client(), config)
+	created, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "Issue", HTMLURL: "https://github.test/acme/widget/issues/7"}, nil,
+		GitHubIssueComment{ID: 101, HTMLURL: "https://github.test/acme/widget/issues/7#issuecomment-101", User: GitHubUser{ID: 424242, Login: "alice"}},
+		Command{Prefix: "/nvtagent"})
+	if err != nil || !created {
+		t.Fatalf("local submission created=%v err=%v", created, err)
+	}
+	if payload["workflow"] != "development" || payload["agentRun"] != nil {
+		t.Fatalf("local payload = %#v", payload)
+	}
+	encoded, _ := json.Marshal(payload)
+	for _, forbidden := range []string{"profile", "provider", "generation", "grants", "capabilities", "egress", "runtime", "agentRun"} {
+		if bytes.Contains(encoded, []byte(`"`+forbidden+`"`)) {
+			t.Fatalf("producer supplied protected field %q: %s", forbidden, encoded)
+		}
+	}
+	work := payload["work"].(map[string]any)
+	principal := work["principal"].(map[string]any)
+	if principal["issuer"] != githubPrincipalIssuer || principal["subject"] != "424242" {
+		t.Fatalf("immutable principal = %#v", principal)
 	}
 }
 

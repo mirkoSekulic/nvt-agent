@@ -23,6 +23,9 @@ type Config struct {
 	ExternalNetwork  string
 	RunNetworkPool   string
 	ProxyPort        int
+	RouteBaseDomain  string
+	RoutePathPrefix  string
+	ProxyEntrypoint  string
 	ProtectedCIDRs   string
 	DindImage        string
 	EgressdImage     string

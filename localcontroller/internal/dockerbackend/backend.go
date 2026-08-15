@@ -43,6 +43,7 @@ func (backend *Backend) Ready(ctx context.Context) bool {
 }
 
 func New(config Config) (*Backend, error) {
+	config = withRouteDefaults(config)
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
@@ -65,6 +66,7 @@ func New(config Config) (*Backend, error) {
 }
 
 func NewWithBoundary(config Config, boundary CommandBoundary, key []byte, preparer *brokerPreparer) (*Backend, error) {
+	config = withRouteDefaults(config)
 	if err := validateConfig(config); err != nil || boundary == nil || len(key) < 32 || preparer == nil {
 		return nil, errors.New("docker backend configuration invalid")
 	}
@@ -72,6 +74,19 @@ func NewWithBoundary(config Config, boundary CommandBoundary, key []byte, prepar
 		return nil, err
 	}
 	return &Backend{config: config, docker: boundary, registry: brokerRegistry{path: config.BrokerAgentsPath}, key: append([]byte(nil), key...), preparer: preparer}, nil
+}
+
+func withRouteDefaults(config Config) Config {
+	if config.RouteBaseDomain == "" {
+		config.RouteBaseDomain = "agent.localhost"
+	}
+	if config.RoutePathPrefix == "" {
+		config.RoutePathPrefix = "/agents"
+	}
+	if config.ProxyEntrypoint == "" {
+		config.ProxyEntrypoint = "local-agents"
+	}
+	return config
 }
 
 func prepareRunsDir(path string) error {
@@ -89,6 +104,7 @@ func prepareRunsDir(path string) error {
 }
 
 func validateConfig(config Config) error {
+	config = withRouteDefaults(config)
 	_, runNetworkPolicyErr := networkpolicy.ValidateRunNetworkPolicy(config.RunNetworkPool, config.ProtectedCIDRs)
 	if config.DockerHost == "" || config.RunsDir == "" || !filepath.IsAbs(config.RunsDir) || filepath.Clean(config.RunsDir) != config.RunsDir ||
 		config.BrokerAgentsPath == "" || !filepath.IsAbs(config.BrokerAgentsPath) || config.IdentityKeyPath == "" || !filepath.IsAbs(config.IdentityKeyPath) ||
@@ -96,7 +112,8 @@ func validateConfig(config Config) error {
 		config.Owner == "" || len(config.Owner) > 63 || config.ExternalNetwork == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 || config.DindImage == "" || config.EgressdImage == "" ||
 		config.CapturedImage == "" || config.SeedImage == "" || config.OperationTimeout < time.Second || config.OperationTimeout > 5*time.Minute ||
 		runNetworkPolicyErr != nil ||
-		!validDockerName(config.ExternalNetwork) || !validImage(config.DindImage) || !validImage(config.EgressdImage) || !validImage(config.CapturedImage) || !validImage(config.SeedImage) ||
+		!validDockerName(config.ExternalNetwork) || !validRouteBaseDomain(config.RouteBaseDomain) || !validRoutePathPrefix(config.RoutePathPrefix) || !validDockerName(config.ProxyEntrypoint) ||
+		!validImage(config.DindImage) || !validImage(config.EgressdImage) || !validImage(config.CapturedImage) || !validImage(config.SeedImage) ||
 		strings.ContainsAny(config.Owner+config.ProtectedCIDRs, "\x00\r\n") {
 		return errors.New("docker backend configuration invalid")
 	}
@@ -105,6 +122,30 @@ func validateConfig(config Config) error {
 		return errors.New("docker backend configuration invalid")
 	}
 	return nil
+}
+
+func validRouteBaseDomain(value string) bool {
+	if len(value) == 0 || len(value) > 190 || value != strings.ToLower(value) || strings.HasSuffix(value, ".") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !validDNSLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validRoutePathPrefix(value string) bool {
+	if len(value) < 2 || len(value) > 256 || value[0] != '/' || strings.HasSuffix(value, "/") || strings.Contains(value, "//") || strings.ContainsAny(value, "%\\?#\x00\r\n") {
+		return false
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(value, "/"), "/") {
+		if !validDNSLabel(segment) {
+			return false
+		}
+	}
+	return true
 }
 
 func validDockerName(value string) bool {

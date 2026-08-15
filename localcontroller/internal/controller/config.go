@@ -29,6 +29,10 @@ type Config struct {
 	ExternalNetwork         string
 	RunNetworkPool          string
 	ProxyPort               int
+	RouteBaseDomain         string
+	RoutePathPrefix         string
+	ProxyEntrypoint         string
+	SchedulingConfigPath    string
 	ProtectedCIDRs          string
 	DindImage               string
 	EgressdImage            string
@@ -38,6 +42,11 @@ type Config struct {
 }
 
 func ConfigFromEnvironment() (Config, error) {
+	for _, name := range []string{"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT"} {
+		if value, exists := os.LookupEnv(name); exists && strings.TrimSpace(value) == "" {
+			return Config{}, ErrInvalidRequest
+		}
+	}
 	config := Config{
 		Bind:                    environmentOrDefault("NVT_LOCAL_CONTROLLER_BIND", "0.0.0.0:7480"),
 		StatePath:               environmentOrDefault("NVT_LOCAL_CONTROLLER_STATE", "/state/controller/local-controller.sqlite3"),
@@ -55,6 +64,10 @@ func ConfigFromEnvironment() (Config, error) {
 		ExternalNetwork:         environmentOrDefault("NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK", "agents-proxy"),
 		RunNetworkPool:          environmentOrDefault("NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL", "100.64.0.0/10"),
 		ProxyPort:               4090,
+		RouteBaseDomain:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "agent.localhost"),
+		RoutePathPrefix:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "/agents"),
+		ProxyEntrypoint:         environmentOrDefault("NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT", "local-agents"),
+		SchedulingConfigPath:    environmentOrDefault("NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG", ""),
 		ProtectedCIDRs:          environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS", "127.0.0.0/8 169.254.0.0/16"),
 		DindImage:               environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_IMAGE", "nvt-dind:latest"),
 		EgressdImage:            environmentOrDefault("NVT_LOCAL_CONTROLLER_EGRESSD_IMAGE", "nvt-egressd:latest"),
@@ -99,6 +112,15 @@ func ConfigFromEnvironment() (Config, error) {
 }
 
 func ValidateConfig(config Config) error {
+	if config.RouteBaseDomain == "" {
+		config.RouteBaseDomain = "agent.localhost"
+	}
+	if config.RoutePathPrefix == "" {
+		config.RoutePathPrefix = "/agents"
+	}
+	if config.ProxyEntrypoint == "" {
+		config.ProxyEntrypoint = "local-agents"
+	}
 	if config.Bind == "" || len(config.Bind) > 512 || strings.ContainsAny(config.Bind, "\x00\r\n") {
 		return ErrInvalidRequest
 	}
@@ -128,11 +150,37 @@ func ValidateConfig(config Config) error {
 		config.IdentityKeyPath == "" || !filepath.IsAbs(config.IdentityKeyPath) ||
 		config.BrokerCAFile != "" && !filepath.IsAbs(config.BrokerCAFile) ||
 		config.ControllerOwner == "" || len(config.ControllerOwner) > 63 || config.ExternalNetwork == "" || config.RunNetworkPool == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 ||
+		!validRouteDomain(config.RouteBaseDomain) || !validRoutePrefix(config.RoutePathPrefix) || !validRunID(config.ProxyEntrypoint) ||
+		config.SchedulingConfigPath != "" && (!filepath.IsAbs(config.SchedulingConfigPath) || filepath.Clean(config.SchedulingConfigPath) != config.SchedulingConfigPath) ||
 		config.DindImage == "" || config.EgressdImage == "" || config.CapturedImage == "" || config.SeedImage == "" ||
 		strings.ContainsAny(config.ControllerOwner+config.ExternalNetwork+config.ProtectedCIDRs+config.DindImage+config.EgressdImage+config.CapturedImage+config.SeedImage, "\x00\r\n") {
 		return ErrInvalidRequest
 	}
 	return nil
+}
+
+func validRouteDomain(value string) bool {
+	if len(value) == 0 || len(value) > 190 || value != strings.ToLower(value) || strings.HasSuffix(value, ".") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !validRunID(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validRoutePrefix(value string) bool {
+	if len(value) < 2 || len(value) > 256 || value[0] != '/' || strings.HasSuffix(value, "/") || strings.Contains(value, "//") || strings.ContainsAny(value, "%\\?#\x00\r\n") {
+		return false
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(value, "/"), "/") {
+		if !validRunID(segment) {
+			return false
+		}
+	}
+	return true
 }
 
 func environmentOrDefault(name, fallback string) string {

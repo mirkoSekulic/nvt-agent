@@ -33,6 +33,7 @@ schedulingReactions:
   rejected: "-1"
 submission:
   mode: scheduleAdmission
+  backend: kubernetes
   admissionMode: legacy
   admissionBaseURL: http://nvt-operator:8082
   scheduleName: default
@@ -161,6 +162,16 @@ operator scheduling outcome and therefore does not add these reactions.
   broker grant, egress policy, tool, or plugin setting. The operator-owned
   `AgentSchedule` resolves all of those fields.
 
+`submission.backend` defaults to `kubernetes`, preserving the exact existing
+URL and payload behavior. Setting it to `local` is valid only with profiled
+schedule admission and changes only the trusted admission URL to
+`/v1/schedules/<schedule>/admissions`. The local controller authenticates the
+same private token file and maps the producer/principal to exact
+administrator-owned profile/workflow policy. The producer still cannot send a
+profile, provider, broker grant, credential generation, runtime, capability,
+retention, or egress choice. Scheduling reactions and cursor behavior continue
+to use only the authoritative admission result.
+
 Profiled mode identifies the command author with issuer `https://github.com`,
 the immutable numeric GitHub user ID as the decimal subject, and the login as
 display-only metadata. A missing or invalid numeric ID fails before admission.
@@ -170,6 +181,7 @@ authorization. The operator authorizes exact issuer/subject rules.
 ```yaml
 submission:
   mode: scheduleAdmission
+  backend: kubernetes
   admissionMode: profiled
   admissionBaseURL: http://nvt-operator:8082
   admissionTokenFile: /var/run/secrets/nvt-operator/token
@@ -178,13 +190,31 @@ submission:
   workflow: review-pr # optional; must be allowed for this ServiceAccount
 ```
 
+The equivalent local-controller selection keeps the same payload and outcome
+contract:
+
+```yaml
+submission:
+  mode: scheduleAdmission
+  backend: local
+  admissionMode: profiled
+  admissionBaseURL: http://local-controller:7480
+  admissionTokenFile: /run/secrets/nvt-local-controller/producer-token
+  scheduleNamespace: unused # retained for config compatibility; not sent locally
+  scheduleName: github
+  workflow: review-pr
+```
+
 When `workflow` is empty or omitted, the producer preserves the previous
 payload exactly and the schedule may apply that producer policy's default. The
 workflow name is a non-secret routing choice only; all instruction text and
 workflow authorization remain administrator-owned in AgentSchedule.
 
-The projected ServiceAccount token must have audience `nvt-operator`. It is
-read for every request so Kubernetes rotation works without a restart.
+For Kubernetes, the projected ServiceAccount token must have audience
+`nvt-operator`. It is read for every request so Kubernetes rotation works
+without a producer restart. The local backend instead uses the private opaque
+token file bound in the controller's scheduling policy; coordinate a
+controller restart when rotating that startup-loaded value.
 Authentication, principal, or admission failures never fall back to legacy.
 
 `idempotency.scope` defaults to `issue`, which preserves the production-safe

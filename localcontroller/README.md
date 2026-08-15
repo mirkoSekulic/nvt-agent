@@ -15,7 +15,11 @@ make local-controller-build
 internal `local-control-plane` network. The trusted controller alone receives
 the host Docker socket and broker registry/key mount; it has no host port and is
 not reachable from agent containers. Generated agent stacks use named resources
-and never receive the host socket. See [the protocol](../protocol/local-controller.md)
+and never receive the host socket. The optional local scheduling config maps an
+authenticated producer and allowed principal issuers to exact administrator
+profile/workflow selections; omission disables scheduling. The gateway consumes
+only bounded [local route metadata](../protocol/local-routes.md) and remains the
+browser authorization/proxy boundary. See [the protocol](../protocol/local-controller.md)
 for the complete API, state, recovery, cleanup, and zero-secret contracts.
 
 Run focused checks with:

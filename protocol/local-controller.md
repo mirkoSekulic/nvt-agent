@@ -11,9 +11,10 @@ The local Docker backend does not change the Kubernetes `AgentRun` contract or
 existing hand-written Compose agents. It is additive to the shared local
 control plane.
 
-The controller consumes only a complete, already-authorized
-`nvt.resolved-agent-run/v1` value. Resolution and caller authorization happen
-before this boundary. Real credentials are invalid in the resolved-run contract
+The raw run API consumes only a complete, already-authorized
+`nvt.resolved-agent-run/v1` value. The optional scheduling API instead resolves
+an administrator-authorized selection itself from the same shared contract.
+Real credentials are invalid in the resolved-run contract
 and must remain in the broker and trusted egress path.
 
 ## Trust boundary
@@ -23,9 +24,9 @@ interfaces. The Compose
 service has no published host port and is attached only to the internal
 `local-control-plane` network. Agent containers, the public proxy network, and
 repository code are not attached to that network and never receive the host
-Docker socket. A later producer or gateway
-integration must authenticate and authorize requests before supplying a
-resolved value; this service must not be exposed directly to untrusted clients.
+Docker socket. The gateway and producer integrations remain on this private
+network; this service must not be exposed directly to browser or repository
+traffic.
 
 Requests and responses use `application/json`. JSON decoding rejects duplicate
 or unknown fields, trailing data, malformed content types, and bodies larger
@@ -36,6 +37,75 @@ resolved-run diagnostics are never returned.
 ## Run API
 
 The version for request envelopes and responses is `nvt.local-runs/v1`.
+
+The bounded controller-to-gateway route API is documented separately in
+[`local-routes.md`](local-routes.md). It exposes active non-secret route and
+readiness metadata only; gateway authorization never moves into the controller.
+
+### Trusted producer scheduling
+
+Dynamic scheduling is disabled when `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG`
+is omitted. When enabled, the referenced canonical absolute JSON file uses
+`nvt.local-scheduling/v1` and contains one shared `resolved_run_config` plus
+bounded schedules. Each producer policy binds an administrator identity and
+private bearer-token file to exact allowed principal issuers,
+workflow-to-profile selections, one default workflow, retention policy, and
+execution backend. The token file must be a private regular file (no
+group/other permissions), 32-4096 bytes. Its contents are hashed at startup and
+never logged, returned, or stored in SQLite.
+
+The policy shape is intentionally small (the `resolved_run_config` value is the
+complete contract documented in `resolved-agent-run.md`):
+
+```json
+{
+  "api_version": "nvt.local-scheduling/v1",
+  "resolved_run_config": {},
+  "schedules": [{
+    "name": "github",
+    "producers": [{
+      "identity": "github-comments",
+      "token_file": "/run/secrets/nvt-local-controller/producer-token",
+      "allowed_principal_issuers": ["https://github.com"],
+      "selections": [{"profile": "engineering", "workflow": "review-pr"}],
+      "default_workflow": "review-pr",
+      "retention": "disposable",
+      "backend": "container"
+    }]
+  }]
+}
+```
+
+The empty object above is only a placeholder; startup rejects an incomplete
+resolved-run configuration. Mount the policy and token directory read-only
+into the controller and set the scheduling-config environment variable to the
+in-container policy path.
+
+The existing GitHub comments profiled-admission payload is accepted at
+`POST /v1/schedules/{schedule}/admissions`. It contains only work metadata,
+prompt, immutable principal issuer+subject, display-only name, and an optional
+workflow. Strict decoding rejects attempts to supply a profile, resolved run,
+provider, grant, repository checkout, image, plugin, runtime, retention,
+capability, or egress setting. The authenticated policy maps the workflow to an
+exact authorized profile before the shared resolver runs, so denial happens
+before durable state or Docker resources exist.
+
+The idempotency key and local run ID are deterministic hashes of the schedule,
+administrator producer identity, and producer work ID. An identical retry
+returns HTTP 202 with `duplicate-work`; serialized active-run capacity returns
+HTTP 429 with `max-parallelism-reached`. Stable policy denials use bounded 403
+reasons. Malformed input, resolution failure, state uncertainty, and dependency
+failure fail closed without backend fallback. Existing reaction/comment
+handling remains advisory because these are the same authoritative scheduling
+outcomes used by Kubernetes admission.
+
+Authenticated status and cancellation avoid placing work IDs in path segments:
+
+- `GET /v1/schedules/{schedule}/work?work_id={exact-work-id}`;
+- `POST /v1/schedules/{schedule}/work/cancel?work_id={exact-work-id}`.
+
+Cancellation and deadlines enter the existing durable `stopping` cleanup path.
+TTL and retention come only from the selected administrator policy.
 
 ### Create
 
@@ -369,6 +439,10 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK` | `agents-proxy` | pre-created proxy/broker network |
 | `NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL` | `100.64.0.0/10` | canonical IPv4 pool, at least two `/28`s per active run, disjoint from `172.30.0.0/15` and every protected IPv4 CIDR |
 | `NVT_LOCAL_CONTROLLER_PROXY_PORT` | `4090` | public local proxy port recorded in generated workspace guidance |
+| `NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN` | `agent.localhost` | canonical lower-case DNS suffix for local run hosts |
+| `NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX` | `/agents` | canonical stable gateway path prefix |
+| `NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT` | `local-agents` | private Traefik entrypoint used only for gateway-to-run proxying |
+| `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG` | omitted | optional canonical absolute `nvt.local-scheduling/v1` policy file; omission disables scheduling |
 | `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded canonical mixed-family prefixes, validated at startup and by DinD; IPv4 ranges must be disjoint from the run-network pool |
 | `NVT_LOCAL_CONTROLLER_DIND_IMAGE` | `nvt-dind:latest` | administrator image |
 | `NVT_LOCAL_CONTROLLER_EGRESSD_IMAGE` | `nvt-egressd:latest` | administrator image |

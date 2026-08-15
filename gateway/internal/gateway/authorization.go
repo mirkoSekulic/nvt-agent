@@ -149,6 +149,16 @@ func isSensitiveClaimPath(path string) bool {
 }
 
 func EvaluateAuthorization(policy AuthorizationConfig, principal Principal, run *nvtv1alpha1.AgentRun) AuthorizationDecision {
+	return evaluateAuthorization(policy, principal, principalOwnsAgentRun(principal, run))
+}
+
+func EvaluateAuthorizationForOwner(policy AuthorizationConfig, principal Principal, issuer, subject string) AuthorizationDecision {
+	owned := principal.Issuer != "" && principal.Subject != "" && issuer != "" && subject != "" &&
+		principal.Issuer == issuer && principal.Subject == subject
+	return evaluateAuthorization(policy, principal, owned)
+}
+
+func evaluateAuthorization(policy AuthorizationConfig, principal Principal, owned bool) AuthorizationDecision {
 	for _, rule := range policy.Rules {
 		if rule.Effect != authorizationEffectAllow {
 			continue
@@ -156,7 +166,7 @@ func EvaluateAuthorization(policy AuthorizationConfig, principal Principal, run 
 		if rule.Authenticated {
 			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
 		}
-		if rule.Owner && principalOwnsAgentRun(principal, run) {
+		if rule.Owner && owned {
 			return AuthorizationDecision{Allowed: true, RuleID: rule.ID}
 		}
 		if rule.ClaimPath != "" && claimPathMatches(principal.Claims, rule.ClaimPath, rule.Values) {
