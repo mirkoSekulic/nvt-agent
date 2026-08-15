@@ -30,6 +30,17 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 			t.Fatalf("infra-up retained legacy local authoring %q", forbidden)
 		}
 	}
+	infraDown, err := os.ReadFile(filepath.Join(root, "scripts", "infra-down.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, script := range map[string]string{"infra-up": string(infraUp), "infra-down": string(infraDown)} {
+		for _, required := range []string{"compose.producers.yaml", `compose_args+=(-f "$broker_dir/compose.producers.yaml")`} {
+			if !strings.Contains(script, required) {
+				t.Fatalf("%s does not include the optional local producer overlay: missing %q", name, required)
+			}
+		}
+	}
 	data, err := os.ReadFile(filepath.Join(root, "compose.infra.yaml"))
 	if err != nil {
 		t.Fatal(err)

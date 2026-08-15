@@ -40,4 +40,9 @@ if [ -f "$broker_dir/local-controller.yaml" ] && [ -z "${NVT_LOCAL_CONTROLLER_CO
   export NVT_LOCAL_CONTROLLER_CONFIG=/broker-state/local-controller.yaml
 fi
 
-docker compose -f "$repo_root/compose.infra.yaml" up -d
+compose_args=(-f "$repo_root/compose.infra.yaml")
+if [ -f "$broker_dir/compose.producers.yaml" ]; then
+  compose_args+=(-f "$broker_dir/compose.producers.yaml")
+fi
+
+docker compose "${compose_args[@]}" up -d
