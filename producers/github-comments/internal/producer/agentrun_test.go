@@ -352,6 +352,27 @@ func TestSubmitProfiledScheduleAdmissionEmitsOnlyConfiguredWorkflowName(t *testi
 	}
 }
 
+func TestWorkflowRoutingIsExactAndFailClosed(t *testing.T) {
+	submitter := AgentRunSubmitter{config: Config{Submission: SubmissionConfig{
+		Workflow:         "legacy-pr",
+		CommandWorkflows: map[CommandIntent]string{CommandIntentPRCreate: "implement-pr", CommandIntentReview: "review-pr", CommandIntentRun: "generic-run"},
+	}}}
+	for intent, want := range map[CommandIntent]string{CommandIntentPRCreate: "implement-pr", CommandIntentReview: "review-pr", CommandIntentRun: "generic-run"} {
+		got, err := submitter.workflowForCommand(intent)
+		if err != nil || got != want {
+			t.Fatalf("%q workflow = %q, %v; want %q", intent, got, err, want)
+		}
+	}
+	delete(submitter.config.Submission.CommandWorkflows, CommandIntentReview)
+	if _, err := submitter.workflowForCommand(CommandIntentReview); err == nil {
+		t.Fatal("unmapped review selected a workflow")
+	}
+	delete(submitter.config.Submission.CommandWorkflows, CommandIntentPRCreate)
+	if got, err := submitter.workflowForCommand(CommandIntentPRCreate); err != nil || got != "legacy-pr" {
+		t.Fatalf("pr-create fallback = %q, %v", got, err)
+	}
+}
+
 func TestProfiledAdmissionSubjectDoesNotDependOnLoginAndTokenRotates(t *testing.T) {
 	firstToken := testAdmissionToken("c2lnMQ")
 	secondToken := testAdmissionToken("c2lnMg")

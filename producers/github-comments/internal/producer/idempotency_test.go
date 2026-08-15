@@ -21,6 +21,17 @@ func TestCommentIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestCommentIntentIdentitySeparatesCommands(t *testing.T) {
+	reviewKey := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentReview)
+	runKey := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentRun)
+	if reviewKey == runKey || !strings.Contains(reviewKey, "review") || !strings.Contains(runKey, "run") {
+		t.Fatalf("intent keys did not separate commands: %q %q", reviewKey, runKey)
+	}
+	if CommentIntentAgentRunName("owner", "repo", 42, 9001, CommandIntentReview) == CommentIntentAgentRunName("owner", "repo", 42, 9001, CommandIntentRun) {
+		t.Fatal("intent-scoped AgentRun names collided")
+	}
+}
+
 func TestIssueScopeAgentRunNameCompatibility(t *testing.T) {
 	got := AgentRunName("owner", "repo", 42)
 	want := "gh-owner-repo-42-pr-create-7354cbc76a"

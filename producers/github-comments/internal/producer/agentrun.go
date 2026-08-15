@@ -107,7 +107,15 @@ func (s AgentRunSubmitter) submitWithOutcome(
 	commandComment GitHubIssueComment,
 	command Command,
 ) (submissionResult, error) {
-	identity := s.agentRunIdentity(repo, issue, commandComment)
+	if command.Intent == CommandIntentReview || command.Intent == CommandIntentRun {
+		if s.submissionMode() != SubmissionModeScheduleAdmission || s.admissionMode() != AdmissionModeProfiled {
+			return submissionResult{}, fmt.Errorf("command %q requires profiled schedule admission", command.Intent)
+		}
+		if _, err := s.workflowForCommand(command.Intent); err != nil {
+			return submissionResult{}, err
+		}
+	}
+	identity := s.agentRunIdentityForCommand(repo, issue, commandComment, command)
 	if s.submissionMode() == SubmissionModeScheduleAdmission {
 		return s.submitScheduleAdmission(ctx, repo, issue, comments, commandComment, command, identity)
 	}
@@ -415,8 +423,12 @@ func (s AgentRunSubmitter) scheduleAdmissionPayload(
 		if err != nil {
 			return nil, "", err
 		}
+		workflow, workflowErr := s.workflowForCommand(command.Intent)
+		if workflowErr != nil {
+			return nil, "", workflowErr
+		}
 		return profiledScheduleAdmissionRequest{
-			Workflow: s.config.Submission.Workflow,
+			Workflow: workflow,
 			Work: profiledScheduleAdmissionWork{
 				ID:         identity.Key,
 				Title:      issue.Title,
@@ -560,13 +572,7 @@ func (s AgentRunSubmitter) buildAgentRun(
 			Workspace: workspace,
 			Prompt:    &nvtv1alpha1.AgentRunPrompt{Text: prompt},
 			Agent:     nvtv1alpha1.AgentRunAgent{Config: agentConfig},
-			Lifecycle: &nvtv1alpha1.AgentRunLifecycle{
-				CompleteOn: []string{
-					"plugin.github.pr.merged",
-					"plugin.github.pr.closed",
-				},
-				FailOn: []string{},
-			},
+			Lifecycle: lifecycleForCommand(command.Intent, issue.PullRequest != nil),
 		},
 	}
 	if ttl := agentRunTTL(s.config.AgentRun.TTL); ttl != nil {
@@ -612,8 +618,9 @@ func buildPrompt(
 		})
 	}
 	return BuildPrompt(PromptInput{
-		Owner: repo.Owner,
-		Repo:  repo.Name,
+		Intent: command.Intent,
+		Owner:  repo.Owner,
+		Repo:   repo.Name,
 		Issue: Issue{
 			Number:  issue.Number,
 			URL:     issue.URL,
@@ -699,7 +706,13 @@ func cloneInt64(value *int64) *int64 {
 	return &cloned
 }
 
-func (s AgentRunSubmitter) agentRunIdentity(repo Repository, issue GitHubIssue, commandComment GitHubIssueComment) agentRunIdentity {
+func (s AgentRunSubmitter) agentRunIdentityForCommand(repo Repository, issue GitHubIssue, commandComment GitHubIssueComment, command Command) agentRunIdentity {
+	if command.Intent == CommandIntentReview || command.Intent == CommandIntentRun {
+		return agentRunIdentity{
+			Key:  CommentIntentIdempotencyKey(repo.Owner, repo.Name, issue.Number, commandComment.ID, command.Intent),
+			Name: CommentIntentAgentRunName(repo.Owner, repo.Name, issue.Number, commandComment.ID, command.Intent),
+		}
+	}
 	switch s.idempotencyScope() {
 	case IdempotencyScopeComment:
 		return agentRunIdentity{
@@ -712,6 +725,37 @@ func (s AgentRunSubmitter) agentRunIdentity(repo Repository, issue GitHubIssue, 
 			Name: AgentRunName(repo.Owner, repo.Name, issue.Number),
 		}
 	}
+}
+
+func (s AgentRunSubmitter) agentRunIdentity(repo Repository, issue GitHubIssue, commandComment GitHubIssueComment) agentRunIdentity {
+	return s.agentRunIdentityForCommand(repo, issue, commandComment, Command{Intent: CommandIntentPRCreate})
+}
+
+func (s AgentRunSubmitter) workflowForCommand(intent CommandIntent) (string, error) {
+	if intent == "" {
+		intent = CommandIntentPRCreate
+	}
+	if workflow, ok := s.config.Submission.CommandWorkflows[intent]; ok && workflow != "" {
+		return workflow, nil
+	}
+	if intent == CommandIntentPRCreate {
+		return s.config.Submission.Workflow, nil
+	}
+	return "", fmt.Errorf("no authorized workflow configured for command %q", intent)
+}
+
+func lifecycleForCommand(intent CommandIntent, isPullRequest bool) *nvtv1alpha1.AgentRunLifecycle {
+	completeOn := []string{"plugin.work.completed"}
+	if intent == "" || intent == CommandIntentPRCreate {
+		completeOn = []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}
+	} else if isPullRequest {
+		completeOn = append(completeOn, "plugin.github.pr.merged", "plugin.github.pr.closed")
+	}
+	failOn := []string{"plugin.work.failed"}
+	if intent == "" || intent == CommandIntentPRCreate {
+		failOn = []string{}
+	}
+	return &nvtv1alpha1.AgentRunLifecycle{CompleteOn: completeOn, FailOn: failOn}
 }
 
 func (s AgentRunSubmitter) idempotencyScope() IdempotencyScope {

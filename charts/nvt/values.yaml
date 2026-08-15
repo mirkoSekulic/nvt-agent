@@ -529,6 +529,9 @@ producer:
     scheduleName: default
     # Optional static workflow profile name for profiled schedule admission.
     workflow: ""
+    # Trusted exact routing for producer command intents. New review/run
+    # commands are disabled unless explicitly mapped.
+    commandWorkflows: {}
   idempotency:
     scope: issue
   repositories: []

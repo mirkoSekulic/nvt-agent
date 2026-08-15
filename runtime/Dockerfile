@@ -116,6 +116,7 @@ RUN chmod +x \
   /usr/local/lib/nvt-agent/plugins/event-webhook/run.py \
   /usr/local/lib/nvt-agent/plugins/lifecycle-termination/run.py \
   /usr/local/lib/nvt-agent/plugins/smoke-complete/run.py \
+  /usr/local/lib/nvt-agent/plugins/work-control/nvt-work.py \
   /usr/local/lib/nvt-agent/plugins/github-watcher/run.py \
   /usr/local/lib/nvt-agent/plugins/github-watcher/github-watch.py \
   && mkdir -p /workspace /root/.nvt-agent

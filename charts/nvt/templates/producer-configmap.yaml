@@ -66,6 +66,10 @@ data:
       {{- with .Values.producer.submission.workflow }}
       workflow: {{ . | quote }}
       {{- end }}
+      {{- with .Values.producer.submission.commandWorkflows }}
+      commandWorkflows:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     idempotency:
       scope: {{ .Values.producer.idempotency.scope | quote }}
     state:

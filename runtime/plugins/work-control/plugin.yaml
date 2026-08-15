@@ -1,0 +1,5 @@
+exports:
+  tools:
+    - name: nvt-work
+      command: /usr/local/lib/nvt-agent/plugins/work-control/nvt-work.py
+      description: Signal cooperative work completion or failure

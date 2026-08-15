@@ -9,6 +9,22 @@ import (
 
 const testDevelopmentWorkflow = "development"
 
+func TestConfigValidatesCommandWorkflowMapping(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Submission = SubmissionConfig{Mode: SubmissionModeScheduleAdmission, AdmissionMode: AdmissionModeProfiled, AdmissionTokenFile: "/token", CommandWorkflows: map[CommandIntent]string{CommandIntentReview: "review-pr", CommandIntentRun: "generic-run"}}
+	if err := cfg.ApplyDefaultsAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	for command, workflow := range map[CommandIntent]string{"help": "review-pr", CommandIntentReview: "Bad_Name"} {
+		invalid := validTestConfig()
+		invalid.Submission = cfg.Submission
+		invalid.Submission.CommandWorkflows = map[CommandIntent]string{command: workflow}
+		if err := invalid.ApplyDefaultsAndValidate(); err == nil {
+			t.Fatalf("accepted mapping %q: %q", command, workflow)
+		}
+	}
+}
+
 const testAcceptedReactionField = "accepted"
 
 func TestConfigDefaultOperatorCallbackBaseURL(t *testing.T) {
