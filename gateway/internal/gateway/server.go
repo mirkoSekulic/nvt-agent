@@ -505,6 +505,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 		return
 	}
+	if s.redirectLocalDashboardRoot(w, r) {
+		return
+	}
 	if s.config.routingMode() == routingModePath {
 		mountedPath, mountedEscapedPath, ok := pathBelowBase(r.URL, s.config.basePath())
 		if !ok || (strings.HasPrefix(mountedPath, "/oauth2/") && mountedEscapedPath != mountedPath) {
@@ -934,6 +937,24 @@ func (s *Server) routableAgentRuns(ctx context.Context) (map[string]bool, error)
 
 func (s *Server) dashboardViewURL(view string) string {
 	return s.config.mountedPath("/") + "?view=" + url.QueryEscape(view)
+}
+
+func (s *Server) redirectLocalDashboardRoot(response http.ResponseWriter, request *http.Request) bool {
+	if !s.config.LocalRuns.Enabled || request.URL.Path != s.config.LocalRuns.PathPrefix || request.URL.EscapedPath() != s.config.LocalRuns.PathPrefix {
+		return false
+	}
+	canonical := *request.URL
+	canonical.Path = s.config.LocalRuns.PathPrefix + "/"
+	canonical.RawPath = ""
+	if ParseLocalRoute(&canonical, request.Host, s.config.LocalRuns).kind != routeDashboard {
+		return false
+	}
+	if s.config.routingMode() == routingModePath && !requestMatchesPublicOrigin(request, s.config.PublicURL) {
+		return false
+	}
+	target := (&url.URL{Path: canonical.Path, RawQuery: request.URL.RawQuery}).String()
+	http.Redirect(response, request, target, http.StatusPermanentRedirect)
+	return true
 }
 
 func (s *Server) dashboardViewURLForRequest(request *http.Request, view string) string {

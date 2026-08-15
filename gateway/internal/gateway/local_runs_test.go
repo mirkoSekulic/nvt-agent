@@ -176,6 +176,26 @@ func TestLocalRouteConfigurationDriftFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLocalDashboardRedirectsMountWithoutTrailingSlash(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	server := testLocalGateway(t, upstream.URL, fakeLocalRunSource{}, false)
+
+	redirect := httptest.NewRecorder()
+	server.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "http://localhost/agents?view=all", nil))
+	if redirect.Code != http.StatusPermanentRedirect || redirect.Header().Get("Location") != "/agents/?view=all" {
+		t.Fatalf("dashboard redirect=%d location=%q body=%s", redirect.Code, redirect.Header().Get("Location"), redirect.Body.String())
+	}
+
+	dashboard := httptest.NewRecorder()
+	server.ServeHTTP(dashboard, httptest.NewRequest(http.MethodGet, "http://localhost/agents/?view=all", nil))
+	if dashboard.Code != http.StatusOK || !strings.Contains(dashboard.Body.String(), `/agents/?view=active`) || !strings.Contains(dashboard.Body.String(), `/agents/?view=all`) {
+		t.Fatalf("canonical dashboard=%d body=%s", dashboard.Code, dashboard.Body.String())
+	}
+}
+
 func TestLocalDashboardAndRoutesEnforceExactOwnerAndReadiness(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
