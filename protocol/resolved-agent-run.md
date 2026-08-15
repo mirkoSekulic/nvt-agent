@@ -55,7 +55,7 @@ A resolved value contains:
 - the caller's bounded UTF-8 initial prompt;
 - lifecycle completion and failure event names;
 - administrator-owned repository checkouts and approved public credential
-  aliases;
+  aliases, including an optional non-secret credential username;
 - broker provider names and non-secret grant/capability metadata;
 - direct or mediated egress policy;
 - separately ordered profile/workflow instructions;

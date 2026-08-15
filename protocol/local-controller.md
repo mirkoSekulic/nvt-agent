@@ -69,9 +69,15 @@ readiness metadata only; gateway authorization never moves into the controller.
 ### Trusted producer scheduling
 
 Dynamic scheduling is disabled when `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG`
-is omitted. When enabled, the referenced canonical absolute JSON file uses
-`nvt.local-scheduling/v1` and contains one shared `resolved_run_config` plus
-bounded `schedules`, administrator-owned `local_runs`, or both. Each producer policy binds an administrator identity and
+is omitted. Administrator-owned named workstations are independently disabled
+when `NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG` is omitted. Each referenced
+canonical absolute JSON file uses `nvt.local-scheduling/v1` and contains one
+`resolved_run_config` plus bounded `schedules`, administrator-owned
+`local_runs`, or both. Documents are composed at startup, but each schedule is
+resolved only against the trusted configuration in its own document. This
+lets a credential-free generated named-run artifact coexist with a separately
+managed producer policy and private bearer references. Duplicate schedule
+names, named run IDs, source paths, or bearer values fail closed. Each producer policy binds an administrator identity and
 private bearer-token file to exact allowed principal issuers,
 workflow-to-profile selections, one default workflow, retention policy, and
 execution backend. The token file must be a private regular file (no
@@ -116,6 +122,11 @@ trusted profile/workflow/retention/backend selection:
   }]
 }
 ```
+
+The complete named-run set is installed in one SQLite transaction. Every
+snapshot/replay, capacity check, durable tombstone, and configuration-drift
+check succeeds before any new row is committed. A rejected startup document
+therefore cannot leave a partially installed named-run set.
 
 At startup the controller resolves and creates these selections through the
 same immutable contract. Replay after restart is idempotent. Changing the
@@ -491,7 +502,8 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN` | `agent.localhost` | canonical lower-case DNS suffix for local run hosts |
 | `NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX` | `/agents` | canonical stable gateway path prefix |
 | `NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER` | `nvt-local-gateway` | fixed trusted gateway container; it must carry `nvt.dev/local-gateway=true` and is attached to exact-owned run networks |
-| `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG` | omitted | optional canonical absolute `nvt.local-scheduling/v1` schedules/named-runs file; omission disables both |
+| `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG` | omitted | optional canonical absolute `nvt.local-scheduling/v1` producer-schedule file; omission disables producer scheduling |
+| `NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG` | omitted | optional distinct canonical absolute `nvt.local-scheduling/v1` named-runs file; omission disables named-run bootstrap |
 | `NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE` | omitted | optional private regular 32-4096 byte bearer file; omission disables all raw `/v1/runs` management operations |
 | `NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE` | none | required private regular 32-4096 byte gateway route-reader bearer file |
 | `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded canonical mixed-family prefixes, validated at startup and by DinD; IPv4 ranges must be disjoint from the run-network pool |

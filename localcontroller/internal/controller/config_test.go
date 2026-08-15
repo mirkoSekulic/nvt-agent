@@ -57,10 +57,15 @@ func testInvalidConfigMutations(t *testing.T, valid Config) {
 		"route prefix":                         func(value *Config) { value.RoutePathPrefix = "/agents/../other" },
 		"gateway container":                    func(value *Config) { value.GatewayContainer = "local gateway" },
 		"scheduling path":                      func(value *Config) { value.SchedulingConfigPath = "relative.json" },
-		"missing route token":                  func(value *Config) { value.RouteTokenFile = "" },
-		"relative route token":                 func(value *Config) { value.RouteTokenFile = "relative-token" },
-		"relative admin token":                 func(value *Config) { value.AdminTokenFile = "relative-token" },
-		"malformed route token":                func(value *Config) { value.RouteTokenFile = "/run/secrets/route\ntoken" },
+		"named runs path":                      func(value *Config) { value.NamedRunsConfigPath = "relative.json" },
+		"duplicate scheduling paths": func(value *Config) {
+			value.SchedulingConfigPath = "/broker-state/controller.json"
+			value.NamedRunsConfigPath = value.SchedulingConfigPath
+		},
+		"missing route token":   func(value *Config) { value.RouteTokenFile = "" },
+		"relative route token":  func(value *Config) { value.RouteTokenFile = "relative-token" },
+		"relative admin token":  func(value *Config) { value.AdminTokenFile = "relative-token" },
+		"malformed route token": func(value *Config) { value.RouteTokenFile = "/run/secrets/route\ntoken" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid

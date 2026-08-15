@@ -489,8 +489,10 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 			(repository.Upstream != "" && repositoryTargetFromURL(repository.Upstream) == "") ||
 			!validCheckoutPath(repository.Path) ||
 			(repository.CredentialProvider == "" && repository.BrokerRepository != "") ||
+			(repository.CredentialProvider == "" && repository.CredentialUsername != "") ||
 			(repository.CredentialProvider == "" && repository.Identity != nil) ||
 			(repository.CredentialProvider != "" && !validRepositoryID(repository.BrokerRepository)) ||
+			(repository.CredentialUsername != "" && !validCredentialUsername(repository.CredentialUsername)) ||
 			validateRepositoryIdentity(repository.Identity) != nil {
 			return errors.New("workflow repository is invalid")
 		}
@@ -527,6 +529,10 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 		}
 	}
 	return nil
+}
+
+func validCredentialUsername(value string) bool {
+	return len(value) <= 256 && value == strings.TrimSpace(value) && !containsControl(value)
 }
 
 func validateRepositoryIdentity(identity *RepositoryIdentity) error {

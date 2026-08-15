@@ -51,7 +51,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("startup failed reason=invalid-configuration")
 	}
-	scheduler, err := controller.LoadScheduler(config.SchedulingConfigPath, store)
+	scheduler, err := controller.LoadSchedulers([]string{config.SchedulingConfigPath, config.NamedRunsConfigPath}, store)
 	if err != nil {
 		logger.Fatal("startup failed reason=scheduling-configuration-unavailable")
 	}

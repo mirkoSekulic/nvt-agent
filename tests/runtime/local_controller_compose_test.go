@@ -20,10 +20,13 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"local-controller-admin-token", "local-controller-route-token", "local-controller.json", "NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG=/broker-state/local-controller.json", `export NVT_LOCAL_GATEWAY_UID="$(id -u)"`, `openssl rand -hex 32`} {
+	for _, required := range []string{"local-controller-admin-token", "local-controller-route-token", "local-controller.json", "NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG=/broker-state/local-controller.json", `export NVT_LOCAL_GATEWAY_UID="$(id -u)"`, `openssl rand -hex 32`} {
 		if !strings.Contains(string(infraUp), required) {
 			t.Fatalf("infra-up does not provision private local API credentials: missing %q", required)
 		}
+	}
+	if strings.Contains(string(infraUp), "export NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG=/broker-state/local-controller.json") {
+		t.Fatal("generated named runs replaced the independent producer scheduling document")
 	}
 	data, err := os.ReadFile(filepath.Join(root, "compose.infra.yaml"))
 	if err != nil {
@@ -53,6 +56,7 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX: /agents",
 		"NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER: nvt-local-gateway",
 		"NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG:",
+		"NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG:",
 		"NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE: /broker-state/local-controller-admin-token",
 		"NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE: /broker-state/local-controller-route-token",
 		"local-controller-state:/state",

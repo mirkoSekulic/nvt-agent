@@ -20,7 +20,8 @@ raw administration use distinct startup-loaded private bearers with disjoint
 endpoint audiences. The gateway mounts only its route-reader file; the optional
 administrator bearer is retained by the controller and omission disables raw
 run management. Generated agent stacks use named resources
-and never receive the host socket. The optional local scheduling config maps an
+and never receive the host socket. Independent named-run and producer-schedule
+documents compose without sharing producer bearer material. The optional producer scheduling config maps an
 authenticated producer and allowed principal issuers to exact administrator
 profile/workflow selections; omission disables scheduling. The gateway consumes
 only bounded [local route metadata](../protocol/local-routes.md) and remains the

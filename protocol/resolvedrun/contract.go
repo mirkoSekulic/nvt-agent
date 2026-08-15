@@ -63,6 +63,7 @@ type Repository struct {
 	Path               string              `json:"path,omitempty"`
 	Upstream           string              `json:"upstream,omitempty"`
 	CredentialProvider string              `json:"credential_provider,omitempty"`
+	CredentialUsername string              `json:"credential_username,omitempty"`
 	Identity           *RepositoryIdentity `json:"identity,omitempty"`
 }
 

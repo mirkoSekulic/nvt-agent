@@ -3,6 +3,21 @@ image: nvt-agent-runtime:latest
 principal_issuer: https://local.nvt.invalid
 backend: local-docker
 retention: persistent
+runtime_allowlist:
+  # These are reviewed deployment values, never discovered credential data.
+  commands: [codex, claude]
+  arguments:
+    - --sandbox
+    - danger-full-access
+    - --ask-for-approval
+    - never
+    - --dangerously-skip-permissions
+  resume_commands: [codex, claude]
+  resume_arguments: [exec, resume, --last, --continue]
+  environment:
+    NODE_EXTRA_CA_CERTS: /nvt-egress-ca/ca.crt
+    NO_PROXY: localhost,127.0.0.1,::1,broker,egressd
+credential_usernames: [x-access-token, oauth2, oauth-user]
 agents:
   - name: nvt-dev
     subject: workstation-nvt-dev
@@ -10,6 +25,8 @@ agents:
     runtime_type: local-agent
     autonomy: trusted-local
     user: root
+    # broker_repositories is needed only when the checkout owner/repository is
+    # not an exact unique entry in its selected broker grant.
   - name: studio
     subject: workstation-studio
     display_name: Studio development

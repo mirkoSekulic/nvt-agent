@@ -109,6 +109,9 @@ func renderRepositoryPlugins(run ResolvedAgentRun) []any {
 			credential := map[string]any{
 				"match": repository.URL, "provider": repository.CredentialProvider,
 			}
+			if repository.CredentialUsername != "" {
+				credential["username"] = repository.CredentialUsername
+			}
 			if repository.Identity != nil {
 				identity := map[string]any{"mode": repository.Identity.Mode}
 				if repository.Identity.Mode == "explicit" {

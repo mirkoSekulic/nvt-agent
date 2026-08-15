@@ -25,12 +25,22 @@ const ManifestVersion = "nvt.local-agent-migration/v1"
 var ErrInvalidInput = errors.New("invalid local-agent migration input")
 
 type Manifest struct {
-	APIVersion      string          `yaml:"api_version"`
-	Image           string          `yaml:"image"`
-	PrincipalIssuer string          `yaml:"principal_issuer"`
-	Backend         string          `yaml:"backend"`
-	Retention       string          `yaml:"retention"`
-	Agents          []ManifestAgent `yaml:"agents"`
+	APIVersion          string           `yaml:"api_version"`
+	Image               string           `yaml:"image"`
+	PrincipalIssuer     string           `yaml:"principal_issuer"`
+	Backend             string           `yaml:"backend"`
+	Retention           string           `yaml:"retention"`
+	RuntimeAllowlist    runtimeAllowlist `yaml:"runtime_allowlist"`
+	CredentialUsernames []string         `yaml:"credential_usernames,omitempty"`
+	Agents              []ManifestAgent  `yaml:"agents"`
+}
+
+type runtimeAllowlist struct {
+	Commands        []string          `yaml:"commands"`
+	Arguments       []string          `yaml:"arguments,omitempty"`
+	ResumeCommands  []string          `yaml:"resume_commands,omitempty"`
+	ResumeArguments []string          `yaml:"resume_arguments,omitempty"`
+	Environment     map[string]string `yaml:"environment,omitempty"`
 }
 
 type ManifestAgent struct {
@@ -114,6 +124,7 @@ type credentialConfig struct {
 type credentialRule struct {
 	Match    string                          `json:"match"`
 	Provider string                          `json:"provider"`
+	Username string                          `json:"username,omitempty"`
 	Identity *resolvedrun.RepositoryIdentity `json:"identity,omitempty"`
 }
 type checkoutConfig struct {
@@ -133,6 +144,10 @@ func Generate(options Options) ([]byte, error) {
 	var manifest Manifest
 	if err := decodeStrictYAMLFile(options.ManifestPath, 256<<10, &manifest); err != nil ||
 		manifest.APIVersion != ManifestVersion || len(manifest.Agents) == 0 || len(manifest.Agents) > resolvedrun.MaxProfiles {
+		return nil, ErrInvalidInput
+	}
+	if !validRuntimeAllowlist(manifest.RuntimeAllowlist) ||
+		!validAllowlistStrings(manifest.CredentialUsernames, 0, 32, func(value string) bool { return len(value) <= 256 && safeToken(value) }) {
 		return nil, ErrInvalidInput
 	}
 	var agents brokerAgentDocument
@@ -221,7 +236,9 @@ func convertAgent(manifest Manifest, configured ManifestAgent, root string, brok
 		}
 	}
 	agentPath := filepath.Join(root, configured.Name, "agent.yaml")
-	base, mappings, defaultProvider, repositories, egress, err := convertAgentConfig(agentPath, staticAgent.Grants, configured.BrokerRepositories)
+	base, mappings, defaultProvider, repositories, egress, err := convertAgentConfig(
+		agentPath, staticAgent.Grants, configured.BrokerRepositories, manifest.RuntimeAllowlist, manifest.CredentialUsernames, configured.User,
+	)
 	if err != nil {
 		return resolvedrun.Profile{}, resolvedrun.Workflow{}, outputLocalRun{}, err
 	}
@@ -257,7 +274,7 @@ func convertAgent(manifest Manifest, configured ManifestAgent, root string, brok
 	return profile, workflow, localRun, nil
 }
 
-func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]string) (json.RawMessage, []resolvedrun.CredentialProviderMapping, string, []resolvedrun.Repository, resolvedrun.Egress, error) {
+func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]string, runtimeAllowlist runtimeAllowlist, credentialUsernames []string, runtimeUser string) (json.RawMessage, []resolvedrun.CredentialProviderMapping, string, []resolvedrun.Repository, resolvedrun.Egress, error) {
 	root, err := loadYAMLObject(path, resolvedrun.MaxAgentConfigBytes)
 	if err != nil {
 		return nil, nil, "", nil, resolvedrun.Egress{}, err
@@ -362,10 +379,14 @@ func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]
 	}
 	rules := map[string]credentialRule{}
 	for _, rule := range credentials.Credentials {
-		if _, duplicate := rules[rule.Match]; duplicate {
+		target := repositoryTarget(rule.Match)
+		if target == "" || rule.Username != "" && !containsString(credentialUsernames, rule.Username) {
 			return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
 		}
-		rules[rule.Match] = rule
+		if _, duplicate := rules[target]; duplicate {
+			return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
+		}
+		rules[target] = rule
 	}
 	repositories := make([]resolvedrun.Repository, 0, len(checkouts.Repos))
 	usedOverrides := map[string]struct{}{}
@@ -375,8 +396,8 @@ func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]
 			return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
 		}
 		repository := resolvedrun.Repository{CheckoutTarget: target, URL: item.URL, Path: item.Path, Upstream: item.Upstream}
-		if rule, exists := rules[item.URL]; exists {
-			repository.CredentialProvider, repository.Identity = rule.Provider, rule.Identity
+		if rule, exists := rules[target]; exists {
+			repository.CredentialProvider, repository.CredentialUsername, repository.Identity = rule.Provider, rule.Username, rule.Identity
 			mapping, found := findMapping(mappings, rule.Provider)
 			if !found {
 				return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
@@ -387,10 +408,13 @@ func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]
 				usedOverrides[target] = struct{}{}
 			}
 			if repository.BrokerRepository == "" {
-				if len(grant.Repositories) != 1 {
+				repository.BrokerRepository = exactBrokerRepository(target, grant.Repositories)
+				if repository.BrokerRepository == "" && len(grant.Repositories) == 1 {
+					repository.BrokerRepository = grant.Repositories[0]
+				}
+				if repository.BrokerRepository == "" {
 					return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
 				}
-				repository.BrokerRepository = grant.Repositories[0]
 			}
 		}
 		repositories = append(repositories, repository)
@@ -401,7 +425,7 @@ func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]
 	for match := range rules {
 		found := false
 		for _, item := range checkouts.Repos {
-			if item.URL == match {
+			if repositoryTarget(item.URL) == match {
 				found = true
 			}
 		}
@@ -409,7 +433,7 @@ func convertAgentConfig(path string, grants []brokerGrant, overrides map[string]
 			return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
 		}
 	}
-	if containsSensitiveConfig(root) {
+	if !sanitizePortableAgentConfig(root, runtimeAllowlist, runtimeUser, grantByProvider) {
 		return nil, nil, "", nil, resolvedrun.Egress{}, ErrInvalidInput
 	}
 	base, err := json.Marshal(root)
@@ -445,29 +469,440 @@ func validManagedEgressSource(value map[string]any) bool {
 	return len(grants) <= resolvedrun.MaxBrokerGrants
 }
 
-func containsSensitiveConfig(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			normalized := strings.ToLower(strings.NewReplacer("_", "-", ".", "-").Replace(key))
-			for _, segment := range strings.Split(normalized, "-") {
-				switch segment {
-				case "token", "secret", "password", "credential", "credentials", "authorization":
-					return true
-				}
+func exactBrokerRepository(checkoutTarget string, repositories []string) string {
+	separator := strings.IndexByte(checkoutTarget, '/')
+	if separator < 1 || separator == len(checkoutTarget)-1 {
+		return ""
+	}
+	providerNative := checkoutTarget[separator+1:]
+	result := ""
+	for _, repository := range repositories {
+		if repository == providerNative {
+			if result != "" {
+				return ""
 			}
-			if strings.Contains(normalized, "private-key") || strings.Contains(normalized, "api-key") || containsSensitiveConfig(child) {
-				return true
+			result = repository
+		}
+	}
+	return result
+}
+
+// sanitizePortableAgentConfig accepts only source fields whose runtime meaning
+// is explicitly non-secret and bounded. Runtime arguments/environment must be
+// enumerated by the administrator-owned migration manifest. Arbitrary plugin
+// configuration, shell hooks, editor settings, and other value-bearing escape
+// hatches stay on the static Compose rollback path.
+func sanitizePortableAgentConfig(root map[string]any, allow runtimeAllowlist, runtimeUser string, grants map[string]brokerGrant) bool {
+	if !onlyKeys(root, "runtime", "tools", "code-server", "expose", "preseed", "plugins") {
+		return false
+	}
+	runtime, ok := root["runtime"].(map[string]any)
+	if !ok || !validPortableRuntime(runtime, allow, runtimeUser) {
+		return false
+	}
+	if tools, present := root["tools"]; present && !validPortableTools(tools) {
+		return false
+	}
+	if codeServer, present := root["code-server"]; present && !validPortableCodeServer(codeServer) {
+		return false
+	}
+	if expose, present := root["expose"]; present && !validPortableExpose(expose) {
+		return false
+	}
+	if preseed, present := root["preseed"]; present && !validGeneratedPreseed(preseed) {
+		return false
+	}
+	plugins, ok := root["plugins"].([]any)
+	if !ok || len(plugins) > 64 {
+		return false
+	}
+	for _, raw := range plugins {
+		plugin, ok := raw.(map[string]any)
+		if !ok || !validReferenceOnlyPlugin(plugin, grants) {
+			return false
+		}
+	}
+	return true
+}
+
+func validRuntimeAllowlist(value runtimeAllowlist) bool {
+	return validAllowlistStrings(value.Commands, 1, 32, validPortableCommand) &&
+		validAllowlistStrings(value.Arguments, 0, 64, validPortableArgument) &&
+		validAllowlistStrings(value.ResumeCommands, 0, 32, validPortableCommand) &&
+		validAllowlistStrings(value.ResumeArguments, 0, 64, validPortableArgument) &&
+		validAllowedEnvironment(value.Environment)
+}
+
+func validAllowlistStrings(values []string, minimum, maximum int, valid func(string) bool) bool {
+	if len(values) < minimum || len(values) > maximum {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		if !valid(value) {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func validPortableRuntime(value map[string]any, allow runtimeAllowlist, runtimeUser string) bool {
+	if !onlyKeys(value, "command", "args", "user", "env", "resume") {
+		return false
+	}
+	command, commandOK := value["command"].(string)
+	user, userOK := value["user"].(string)
+	if !commandOK || !containsString(allow.Commands, command) || !userOK || user != runtimeUser ||
+		!allowedStringArray(value["args"], allow.Arguments) {
+		return false
+	}
+	if environment, present := value["env"]; present && !allowedEnvironment(environment, allow.Environment) {
+		return false
+	}
+	if resumeValue, present := value["resume"]; present {
+		resume, ok := resumeValue.(map[string]any)
+		if !ok || !onlyKeys(resume, "command", "args") {
+			return false
+		}
+		resumeCommand, ok := resume["command"].(string)
+		if !ok || !containsString(allow.ResumeCommands, resumeCommand) || !allowedOptionalStringArray(resume, "args", allow.ResumeArguments) {
+			return false
+		}
+	}
+	return true
+}
+
+func validPortableTools(raw any) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "packages", "mise", "additional-paths", "shell") {
+		return false
+	}
+	for _, key := range []string{"packages", "mise"} {
+		if item, present := value[key]; present && !stringArray(item, 128, func(entry string) bool {
+			return len(entry) <= 128 && safeToken(entry)
+		}) {
+			return false
+		}
+	}
+	if item, present := value["additional-paths"]; present && !stringArray(item, 64, validPortablePath) {
+		return false
+	}
+	if item, present := value["shell"]; present && !emptyArray(item) {
+		return false
+	}
+	return true
+}
+
+func validPortableCodeServer(raw any) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "extensions", "settings", "agentTerminal") {
+		return false
+	}
+	if extensions, present := value["extensions"]; present && !stringArray(extensions, 128, func(entry string) bool {
+		return len(entry) <= 256 && safeToken(entry)
+	}) {
+		return false
+	}
+	if settingsValue, present := value["settings"]; present {
+		settings, ok := settingsValue.(map[string]any)
+		if !ok || !onlyKeys(settings, "overwrite", "values") {
+			return false
+		}
+		if overwrite, exists := settings["overwrite"]; exists {
+			if _, ok := overwrite.(bool); !ok {
+				return false
 			}
 		}
-	case []any:
-		for _, child := range typed {
-			if containsSensitiveConfig(child) {
-				return true
+		if values, exists := settings["values"]; exists {
+			object, ok := values.(map[string]any)
+			if !ok || len(object) != 0 {
+				return false
 			}
 		}
 	}
+	if terminalValue, present := value["agentTerminal"]; present {
+		terminal, ok := terminalValue.(map[string]any)
+		if !ok || !onlyKeys(terminal, "openOnStartup") {
+			return false
+		}
+		if enabled, exists := terminal["openOnStartup"]; exists {
+			if _, ok := enabled.(bool); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validPortableExpose(raw any) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "http") {
+		return false
+	}
+	routes, ok := value["http"].([]any)
+	if !ok || len(routes) > 64 {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, rawRoute := range routes {
+		route, ok := rawRoute.(map[string]any)
+		if !ok || !onlyKeys(route, "name", "targetPort", "source") {
+			return false
+		}
+		name, nameOK := route["name"].(string)
+		port, portOK := route["targetPort"].(int)
+		source, sourceOK := route["source"].(string)
+		if !sourceOK {
+			source = "agent"
+		}
+		if !nameOK || !safeDNSLabel(name) || !portOK || port < 1 || port > 65535 || source != "agent" {
+			return false
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return false
+		}
+		seen[name] = struct{}{}
+	}
+	return true
+}
+
+func validGeneratedPreseed(raw any) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || !onlyKeys(value, "files") {
+		return false
+	}
+	files, ok := value["files"].([]any)
+	if !ok || len(files) > 8 {
+		return false
+	}
+	for _, rawFile := range files {
+		file, ok := rawFile.(map[string]any)
+		if !ok || !onlyKeys(file, "path", "mode", "overwrite", "content", "json") {
+			return false
+		}
+		path, pathOK := file["path"].(string)
+		mode, modeOK := file["mode"].(string)
+		overwrite, overwriteOK := file["overwrite"].(bool)
+		if !pathOK || !modeOK || mode != "0600" || !overwriteOK || overwrite {
+			return false
+		}
+		content, hasContent := file["content"]
+		jsonValue, hasJSON := file["json"]
+		if hasContent == hasJSON {
+			return false
+		}
+		if hasContent {
+			text, ok := content.(string)
+			if !ok || path != "$HOME/.codex/config.toml" || strings.TrimSuffix(text, "\n") != "check_for_update_on_startup = false" {
+				return false
+			}
+		}
+		if hasJSON {
+			object, ok := jsonValue.(map[string]any)
+			if !ok || path != "$HOME/.claude/settings.json" || !onlyKeys(object, "theme", "skipDangerousModePermissionPrompt") || object["theme"] != "dark-daltonized" || object["skipDangerousModePermissionPrompt"] != true {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validReferenceOnlyPlugin(plugin map[string]any, grants map[string]brokerGrant) bool {
+	if !onlyKeys(plugin, "name", "source", "when", "restart", "health", "egress", "config") {
+		return false
+	}
+	name, nameOK := plugin["name"].(string)
+	source, sourceOK := plugin["source"].(string)
+	if !nameOK || !safeDNSLabel(name) || !sourceOK || source != "builtin" {
+		return false
+	}
+	if when, present := plugin["when"]; present && when != "before-agent" && when != "after-agent" {
+		return false
+	}
+	if restart, present := plugin["restart"]; present && restart != "never" && restart != "always" && restart != "on-failure" {
+		return false
+	}
+	if healthValue, present := plugin["health"]; present {
+		health, ok := healthValue.(map[string]any)
+		if !ok || !onlyKeys(health, "readiness") {
+			return false
+		}
+		if readiness, exists := health["readiness"]; exists {
+			if _, ok := readiness.(bool); !ok {
+				return false
+			}
+		}
+	}
+	if egressValue, present := plugin["egress"]; present {
+		egress, ok := egressValue.(map[string]any)
+		if !ok || !onlyKeys(egress, "provider") {
+			return false
+		}
+		provider, ok := egress["provider"].(string)
+		if !ok {
+			return false
+		}
+		if _, granted := grants[provider]; !granted {
+			return false
+		}
+	}
+	if configValue, present := plugin["config"]; present {
+		config, ok := configValue.(map[string]any)
+		if !ok || !validReferenceOnlyPluginConfig(name, config) {
+			return false
+		}
+	}
+	return true
+}
+
+func validReferenceOnlyPluginConfig(name string, config map[string]any) bool {
+	if len(config) == 0 {
+		return true
+	}
+	// The watcher registry and credential transport remain outside this static
+	// config. Only its bounded cadence is portable reference-free policy.
+	if name != "github-watcher" || !onlyKeys(config, "poll-seconds") {
+		return false
+	}
+	seconds, ok := config["poll-seconds"].(int)
+	return ok && seconds >= 5 && seconds <= 3600
+}
+
+func validAllowedEnvironment(value map[string]string) bool {
+	if len(value) > 32 {
+		return false
+	}
+	for name, entry := range value {
+		if !validEnvironmentName(name) || len(entry) > 4096 || strings.ContainsAny(entry, "\x00\r\n") {
+			return false
+		}
+	}
+	return true
+}
+
+func allowedEnvironment(raw any, allowed map[string]string) bool {
+	value, ok := raw.(map[string]any)
+	if !ok || len(value) > len(allowed) {
+		return false
+	}
+	for name, rawEntry := range value {
+		entry, ok := rawEntry.(string)
+		if !ok || allowed[name] != entry {
+			return false
+		}
+	}
+	return true
+}
+
+func allowedStringArray(raw any, allowed []string) bool {
+	return stringArray(raw, 64, func(value string) bool { return containsString(allowed, value) })
+}
+
+func allowedOptionalStringArray(value map[string]any, key string, allowed []string) bool {
+	raw, present := value[key]
+	return !present || allowedStringArray(raw, allowed)
+}
+
+func stringArray(raw any, maximum int, valid func(string) bool) bool {
+	values, ok := raw.([]any)
+	if !ok || len(values) > maximum {
+		return false
+	}
+	for _, rawValue := range values {
+		value, ok := rawValue.(string)
+		if !ok || !valid(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func emptyArray(raw any) bool {
+	values, ok := raw.([]any)
+	return ok && len(values) == 0
+}
+
+func onlyKeys(value map[string]any, allowed ...string) bool {
+	set := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		set[key] = struct{}{}
+	}
+	for key := range value {
+		if _, ok := set[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(values []string, candidate string) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
 	return false
+}
+
+func validPortableCommand(value string) bool {
+	return len(value) > 0 && len(value) <= 128 && safeToken(value) && !strings.Contains(value, "/")
+}
+
+func validPortableArgument(value string) bool {
+	return len(value) > 0 && len(value) <= 256 && value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func safeToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("._@:+/-$", character) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validPortablePath(value string) bool {
+	if len(value) == 0 || len(value) > 512 || strings.ContainsAny(value, "\x00\r\n") || strings.Contains(value, "..") {
+		return false
+	}
+	if !strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "$HOME/") {
+		return false
+	}
+	return safeToken(value)
+}
+
+func validEnvironmentName(value string) bool {
+	if value == "" || len(value) > 128 || value[0] != '_' && (value[0] < 'A' || value[0] > 'Z') && (value[0] < 'a' || value[0] > 'z') {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if character != '_' && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func safeDNSLabel(value string) bool {
+	if len(value) == 0 || len(value) > 63 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if character != '-' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return value[len(value)-1] != '-'
 }
 
 func exactBrokerAgent(agents []brokerAgent, name string) (brokerAgent, bool) {

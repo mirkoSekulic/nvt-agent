@@ -97,6 +97,11 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	if hostConfig["default-provider"] != "source" {
 		t.Fatalf("default credential provider was not preserved: %#v", hostConfig)
 	}
+	credentialConfig := renderedConfig["plugins"].([]any)[1].(map[string]any)["config"].(map[string]any)
+	credentialRule := credentialConfig["credentials"].([]any)[0].(map[string]any)
+	if credentialRule["username"] != "git-user" {
+		t.Fatalf("credential username was not preserved: %#v", credentialRule)
+	}
 	if bytes.Contains(rendered, []byte("lifecycle-termination")) || bytes.Contains(rendered, []byte("/dev/termination-log")) {
 		t.Fatalf("portable rendering injected a backend-specific lifecycle adapter: %s", rendered)
 	}
@@ -611,7 +616,7 @@ func validConfiguration() TrustedConfiguration {
 		}},
 		Workflows: []Workflow{{
 			Name: "development", WorkspaceInstructions: "Workflow-owned guidance.\n",
-			Repositories: []Repository{{CheckoutTarget: "github.com/Altinn/altinn-studio", BrokerRepository: "Altinn/altinn-studio", URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio", Upstream: "https://github.com/Altinn/altinn-studio-upstream.git", CredentialProvider: "source", Identity: &RepositoryIdentity{Mode: "provider"}}},
+			Repositories: []Repository{{CheckoutTarget: "github.com/Altinn/altinn-studio", BrokerRepository: "Altinn/altinn-studio", URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio", Upstream: "https://github.com/Altinn/altinn-studio-upstream.git", CredentialProvider: "source", CredentialUsername: "git-user", Identity: &RepositoryIdentity{Mode: "provider"}}},
 		}, {Name: "restricted"}},
 		ExecutionBackends: []ExecutionBackend{{Name: "container", Kind: "container"}},
 		RetentionPolicies: []RetentionPolicy{{Name: "persistent", Persistence: Persistence{Workspace: true, RuntimeState: true, DockerData: true}, TTL: TTL{ActiveSeconds: 14400, FailedSeconds: 3600}}, {Name: "disposable", TTL: TTL{ActiveSeconds: 3600}}},
