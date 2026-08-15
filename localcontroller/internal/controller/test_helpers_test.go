@@ -29,7 +29,7 @@ func testResolvedRun(t *testing.T, runID string, persistent bool) json.RawMessag
 		Principal:       resolvedrun.Principal{Issuer: "https://identity.example.test", Subject: "subject-1", DisplayName: "User"},
 		Profile:         "engineering", Workflow: "development", Image: "registry.example/runtime:stable",
 		Runtime:     resolvedrun.Runtime{Type: "generic-agent", Autonomy: "interactive", User: "root"},
-		AgentConfig: json.RawMessage(`{"runtime":{"command":"agent-cli","args":[]},"plugins":[]}`),
+		AgentConfig: json.RawMessage(`{"runtime":{"command":"agent-cli","args":[],"resume":{"command":"agent-cli","args":["resume","--last"]}},"plugins":[]}`),
 		Broker:      resolvedrun.Broker{}, Egress: resolvedrun.Egress{Mode: "direct"},
 		WorkspaceInstructions: resolvedrun.WorkspaceInstructions{Profile: "Trusted profile guidance.\n", Workflow: "Trusted workflow guidance.\n"},
 		Persistence:           persistence, Retention: retention,

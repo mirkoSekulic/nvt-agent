@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 type StoreOptions struct {
 	MaxActiveRuns int
@@ -32,11 +32,12 @@ type Store struct {
 }
 
 type storedRun struct {
-	view           Run
-	snapshot       []byte
-	requestDigest  string
-	idempotencyKey string
-	deletedAt      *time.Time
+	view            Run
+	snapshot        []byte
+	requestDigest   string
+	idempotencyKey  string
+	deletedAt       *time.Time
+	lifecycleCursor string
 }
 
 func OpenStore(ctx context.Context, path string, options StoreOptions) (*Store, error) {
@@ -166,6 +167,13 @@ UPDATE local_runs SET terminal_target=CASE WHEN delete_requested=1 THEN 'complet
 PRAGMA user_version = 3;`); err != nil {
 			return ErrStoreUnavailable
 		}
+		version = 3
+	}
+	if version == 3 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE local_runs ADD COLUMN lifecycle_cursor TEXT NOT NULL DEFAULT '';
+PRAGMA user_version = 4;`); err != nil {
+			return ErrStoreUnavailable
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrStoreUnavailable
@@ -206,7 +214,7 @@ func (store *Store) validate(ctx context.Context) error {
 
 const selectRuns = `SELECT run_id, idempotency_key, request_digest, snapshot, snapshot_digest,
 state, revision, created_at, updated_at, deadline_at, terminal_expires_at,
-reconcile_owner, reconcile_until, delete_requested, deleted_at, last_reason, terminal_target FROM local_runs`
+reconcile_owner, reconcile_until, delete_requested, deleted_at, last_reason, terminal_target, lifecycle_cursor FROM local_runs`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -220,7 +228,7 @@ func scanStoredRun(row scanner) (storedRun, error) {
 	err := row.Scan(
 		&record.view.RunID, &record.idempotencyKey, &record.requestDigest, &record.snapshot, &record.view.SnapshotDigest,
 		&state, &record.view.Revision, &createdAt, &updatedAt, &deadlineAt, &terminalExpiresAt,
-		&reconcileOwner, &reconcileUntil, &deleteRequested, &deletedAt, &record.view.LastReason, &record.view.TerminalTarget,
+		&reconcileOwner, &reconcileUntil, &deleteRequested, &deletedAt, &record.view.LastReason, &record.view.TerminalTarget, &record.lifecycleCursor,
 	)
 	if err != nil {
 		return storedRun{}, err
@@ -255,7 +263,7 @@ func scanStoredRun(row scanner) (storedRun, error) {
 
 func validateStoredRun(record *storedRun) error {
 	if !validRunID(record.view.RunID) || !record.view.State.valid() || record.view.Revision < 1 ||
-		!validIdempotencyKey(record.idempotencyKey) || !validReason(record.view.LastReason) ||
+		!validIdempotencyKey(record.idempotencyKey) || !validReason(record.view.LastReason) || !validLifecycleCursor(record.lifecycleCursor) ||
 		len(record.snapshot) == 0 || len(record.snapshot) > resolvedrun.MaxDocumentBytes ||
 		len(record.requestDigest) != 64 || len(record.view.SnapshotDigest) != 64 ||
 		record.view.CreatedAt.After(record.view.UpdatedAt) ||
@@ -429,6 +437,26 @@ func (store *Store) ResolvedSnapshot(ctx context.Context, runID string) (json.Ra
 	return append(json.RawMessage(nil), record.snapshot...), record.view.SnapshotDigest, nil
 }
 
+// backendSnapshot returns the immutable desired value and opaque lifecycle
+// progress in one read. Lifecycle progress is private to the trusted
+// reconciler/backend boundary and never enters API responses.
+func (store *Store) backendSnapshot(ctx context.Context, runID string) (json.RawMessage, string, string, error) {
+	if !validRunID(runID) {
+		return nil, "", "", ErrInvalidRequest
+	}
+	record, err := scanStoredRun(store.db.QueryRowContext(ctx, selectRuns+` WHERE run_id = ?`, runID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", "", ErrNotFound
+	}
+	if err != nil || validateStoredRun(&record) != nil {
+		return nil, "", "", ErrStoreUnavailable
+	}
+	if record.deletedAt != nil {
+		return nil, "", "", ErrNotFound
+	}
+	return append(json.RawMessage(nil), record.snapshot...), record.view.SnapshotDigest, record.lifecycleCursor, nil
+}
+
 func (store *Store) List(ctx context.Context, limit int, after string) (ListResult, error) {
 	if limit < 1 || limit > MaxListLimit || after != "" && !validRunID(after) {
 		return ListResult{}, ErrInvalidRequest
@@ -503,7 +531,8 @@ func (store *Store) Claim(ctx context.Context, input ClaimInput) (Run, error) {
 func (store *Store) UpdateStatus(ctx context.Context, input StatusInput) (Run, error) {
 	if !validRunID(input.RunID) || !validOwner(input.Owner) || input.ExpectedRevision < 1 || !input.State.valid() ||
 		!validReason(input.Reason) || input.State == StateStopping && !input.TerminalTarget.terminal() ||
-		input.State != StateStopping && input.TerminalTarget != "" {
+		input.State != StateStopping && input.TerminalTarget != "" ||
+		input.LifecycleCursor != nil && !validLifecycleCursor(*input.LifecycleCursor) {
 		return Run{}, ErrInvalidRequest
 	}
 	if _, err := store.Sweep(ctx); err != nil {
@@ -524,6 +553,26 @@ func (store *Store) UpdateStatus(ctx context.Context, input StatusInput) (Run, e
 		return Run{}, ErrOwnershipConflict
 	}
 	if input.State == record.view.State {
+		if input.LifecycleCursor == nil || *input.LifecycleCursor == record.lifecycleCursor {
+			return record.view, nil
+		}
+		if input.Reason != "" || input.TerminalTarget != "" {
+			return Run{}, ErrInvalidTransition
+		}
+		newRevision := record.view.Revision + 1
+		result, updateErr := tx.ExecContext(ctx, `UPDATE local_runs SET lifecycle_cursor=?,revision=?,updated_at=?,
+reconcile_owner=NULL,reconcile_until=NULL WHERE run_id=? AND revision=?`,
+			*input.LifecycleCursor, newRevision, formatTimestamp(now), input.RunID, input.ExpectedRevision)
+		if updateErr != nil || rowsAffected(result) != 1 {
+			return Run{}, ErrOwnershipConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return Run{}, ErrStoreUnavailable
+		}
+		record.view.Revision = newRevision
+		record.view.UpdatedAt = now
+		record.view.ReconcileOwner = ""
+		record.view.ReconcileUntil = nil
 		return record.view, nil
 	}
 	if !transitionAllowed(record.view.State, input.State) {
@@ -546,10 +595,14 @@ func (store *Store) UpdateStatus(ctx context.Context, input StatusInput) (Run, e
 	if input.State == StateStopping {
 		target = input.TerminalTarget
 	}
+	cursor := record.lifecycleCursor
+	if input.LifecycleCursor != nil {
+		cursor = *input.LifecycleCursor
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE local_runs SET state=?,revision=?,updated_at=?,terminal_expires_at=?,
-reconcile_owner=NULL,reconcile_until=NULL,deleted_at=?,last_reason=?,terminal_target=? WHERE run_id=? AND revision=?`,
+	reconcile_owner=NULL,reconcile_until=NULL,deleted_at=?,last_reason=?,terminal_target=?,lifecycle_cursor=? WHERE run_id=? AND revision=?`,
 		string(input.State), newRevision, formatTimestamp(now), formatOptionalTimestamp(terminalExpiry),
-		formatOptionalTimestamp(deletedAt), input.Reason, string(target), input.RunID, input.ExpectedRevision)
+		formatOptionalTimestamp(deletedAt), input.Reason, string(target), cursor, input.RunID, input.ExpectedRevision)
 	if err != nil || rowsAffected(result) != 1 {
 		return Run{}, ErrOwnershipConflict
 	}
@@ -856,6 +909,21 @@ func validReason(value string) bool {
 				}
 			}
 		}
+	}
+	return true
+}
+
+func validLifecycleCursor(value string) bool {
+	if len(value) > MaxLifecycleCursorBytes {
+		return false
+	}
+	for index := range value {
+		character := value[index]
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '.' || character == ':' || character == '_' || character == '-' {
+			continue
+		}
+		return false
 	}
 	return true
 }

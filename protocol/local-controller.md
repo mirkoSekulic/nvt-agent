@@ -153,7 +153,7 @@ Allowed transitions are:
 | --- | --- |
 | `pending` | `preparing`, `stopping` |
 | `preparing` | `running`, `stopping` |
-| `running` | `stopping` |
+| `running` | `preparing` during controller startup recovery, `stopping` |
 | `stopping` | `completed`, `failed`, `expired` |
 
 `completed`, `failed`, and `expired` are terminal. Entering `stopping` records
@@ -212,6 +212,60 @@ not conflict with the IPv4 run pool. Compose's default network is explicitly
 mapped to the owned internal network, so Compose cannot create an unmanaged
 project network.
 
+At each controller process start, every durable `running` record is moved back
+to `preparing` with reason `backend-recovery-requested`. Its immutable snapshot
+is then rendered again and reconciled with `up --no-recreate`. Existing exact-
+owned containers are retained, stopped services are started, and missing
+ephemeral containers are recreated under the same run ID, project, routes, and
+named volumes. A successful pass returns to `running` with reason
+`backend-recovered`. `pending`, already `preparing`, `stopping`, and terminal
+records retain their existing restart-safe semantics.
+
+The runtime home volume contains `NVT_STATE_DIR`. When the administrator's
+generic agent configuration includes `runtime.resume.command` and optional
+`runtime.resume.args`, the existing runtime startup contract writes its durable
+non-secret session marker only after the first session is established. A
+recreated agent container therefore selects the generic resume command when the
+marker exists and the normal command when it does not. The local controller,
+Docker backend, runtime core, and `agentd` contain no provider-specific resume
+branches.
+
+Runtime inspection distinguishes an active/healthy process, bounded startup
+uncertainty, successful exit, and failed/OOM exit. Confirmed successful and
+failed exits enter the ordinary claimable cleanup path with reasons
+`backend-completed` and `backend-runtime-failed`; raw container diagnostics are
+never persisted or logged.
+
+The Docker backend also observes the append-only agentd event log through the
+already-owned agent container. The in-container reader discards payloads and
+returns at most 1,024 bounded event names plus an opaque file-generation/byte
+cursor per pass. The trusted backend compares only those names with the
+resolved `lifecycle.complete_on` and `lifecycle.fail_on` sets. A match produces
+the same bounded completed/failed observation and cleanup path as a confirmed
+runtime exit; unrelated events only advance the cursor. A configured matching
+event is authoritative over a later process exit or OOM result: `fail_on`
+followed by exit 0 remains failed, and `complete_on` followed by a nonzero exit
+remains completed.
+
+For an exact-owned stopped agent, the backend does not restart or execute the
+mutable agent container. It first verifies the deterministic runtime-home
+volume's exact owner/run/digest labels, then mounts that volume read-only into
+the administrator-configured trusted seed image. The short-lived reader runs
+as root with no network, capabilities, writable root, Docker socket, broker
+identity, portal/config secrets, or credential-bearing environment. A missing
+or ownership-conflicting volume and any helper uncertainty fail closed before
+process-exit classification.
+
+The cursor is private non-secret SQLite state (maximum 256 ASCII token bytes),
+not part of the local-run API, logs, or resolved snapshot. Cursor advancement
+and a terminal transition are committed under the reconciliation lease. A
+controller crash before commit may replay bounded event names, while a commit
+prevents old events from becoming newly terminal after restart. Missing,
+replaced, truncated, malformed, oversized, or ambiguous event logs fail closed
+as backend uncertainty. Event payloads and raw records never cross the Docker
+boundary or enter controller persistence/diagnostics. This observation belongs
+to the local backend; `agentd` remains unchanged and owns only append/event I/O.
+
 The controller derives stable per-run broker identities from a private
 startup-only key. Only SHA-256 token hashes and the resolved grants are written
 atomically into the existing live-reloaded broker agent registry. The agent
@@ -230,6 +284,22 @@ mode 0600, so a root controller does not take ownership away from native Linux
 Compose users. Registry flock acquisition is nonblocking with bounded retry and
 the backend operation context; a held static-agent lock therefore yields a
 retryable operation before the claim lease can expire.
+
+Every ensure pass prunes only obsolete containers, networks, and volumes that
+carry the exact owner/run/digest labels for that same durable snapshot.
+Unmanaged, partial-label, ownership-conflicting, and other-run objects are not
+adopted or removed. Cleanup removes all exact-owned containers and routes,
+broker and paired-egress identities, per-run networks, generated config/egress
+volumes, and the private generated Compose directory. Workspace, runtime-home,
+and DinD data volumes survive terminal cleanup only when the resolved
+persistence policy explicitly retains them; explicit deletion removes those
+retained volumes too. Every step is bounded and idempotent, so a crash during
+create or delete resumes from the durable `preparing` or `stopping` record.
+Before deleting each deterministic expected network or removable volume, the
+backend inspects that exact name. Missing is already clean, exact owner/run/
+digest labels permit deletion, and any partial or mismatched label set remains
+untouched while cleanup stays retryable. Exact-label inventory is used only to
+remove additional stale owned objects.
 
 ## Durable state and recovery
 
