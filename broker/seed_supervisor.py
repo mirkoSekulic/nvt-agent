@@ -22,6 +22,7 @@ import time
 MAX_SEED_BYTES = 1024 * 1024
 MAX_CANONICAL_RECOVERY_BYTES = 16 * 1024 * 1024
 MARKER_VERSION = 1
+LOCAL_PORTAL_STAGING_DIRECTORY = ".nvt-portal-staging"
 PROJECTED_VERSION_RE = re.compile(r"^\.\.[0-9]{4}_[0-9]{2}_[0-9]{2}_[0-9_]+(?:\.[0-9]+)?$")
 
 
@@ -306,6 +307,11 @@ class SeedReconciler:
 
         files = {}
         for entry in entries:
+            if entry.name == LOCAL_PORTAL_STAGING_DIRECTORY:
+                staging_status = os.lstat(self.seed_dir / entry.name)
+                if not stat.S_ISDIR(staging_status.st_mode) or stat.S_ISLNK(staging_status.st_mode):
+                    raise SeedError("seed-staging-invalid")
+                continue
             if entry.name.startswith(".."):
                 if entry.name == "..data_tmp":
                     raise SeedTransientError("seed-projection-changing")

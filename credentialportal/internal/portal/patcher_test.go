@@ -41,6 +41,10 @@ func TestLocalFilePatcherAtomicSlotIsolationAndValidation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(directory, "claude")); !os.IsNotExist(err) {
 		t.Fatal("unselected slot changed")
 	}
+	staging, err := os.ReadDir(filepath.Join(directory, localStagingDirectory))
+	if err != nil || len(staging) != 0 {
+		t.Fatalf("local staging was not cleaned: %v %#v", err, staging)
+	}
 	if err := patcher.Patch(context.Background(), "other", "local-seed", "codex.json", credential); err == nil {
 		t.Fatal("cross-namespace destination accepted")
 	}
@@ -56,6 +60,17 @@ func TestLocalFilePatcherAtomicSlotIsolationAndValidation(t *testing.T) {
 	}
 	if err := patcher.Patch(context.Background(), "nvt", "local-seed", "codex.json", credential); err == nil {
 		t.Fatal("symlink target accepted")
+	}
+}
+
+func TestLocalFilePatcherRejectsUnsafeStagingDirectory(t *testing.T) {
+	directory := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(directory, localStagingDirectory)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLocalFilePatcher(directory, "nvt", []Slot{{Name: "codex", SecretName: "seed", DataKey: "auth"}}); err == nil {
+		t.Fatal("symlink staging directory accepted")
 	}
 }
 

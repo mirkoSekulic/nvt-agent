@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -215,8 +216,64 @@ func TestLocalCredentialPortalComposeIsOptionalAndPrivate(t *testing.T) {
 	infra := string(infraBytes)
 	if !strings.Contains(infra, `NVT_CREDENTIAL_PORTAL_ENABLED:-false`) ||
 		!strings.Contains(infra, `--profile credentials`) ||
-		!strings.Contains(infra, `export NVT_BROKER_CREDENTIAL_SEED_DIR=/portal-seed`) {
+		!strings.Contains(infra, `export NVT_BROKER_CREDENTIAL_SEED_DIR=/portal-seed`) ||
+		!strings.Contains(infra, `--profile credentials rm -sf`) ||
+		!strings.Contains(infra, `credential-portal credential-runner credential-private-init`) ||
+		strings.Contains(infra, `rm -sfv`) || strings.Contains(infra, `down -v`) {
 		t.Fatalf("infra-up does not gate local credentials explicitly:\n%s", infra)
+	}
+}
+
+func TestInfraUpDisabledRemovesCredentialContainersAndPreservesVolumes(t *testing.T) {
+	root := repoRoot(t)
+	fixture := t.TempDir()
+	for _, directory := range []string{"scripts", "templates"} {
+		if err := os.Mkdir(filepath.Join(fixture, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, relative := range []string{
+		"scripts/infra-up.sh", "templates/broker.yaml", "templates/broker-agents.yaml",
+		"templates/broker-env", "templates/credential-portal-local.json",
+	} {
+		content, err := os.ReadFile(filepath.Join(root, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture, relative), content, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(fixture, "compose.infra.yaml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(fixture, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(fixture, "docker.log")
+	dockerStub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$DOCKER_LOG\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(dockerStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", filepath.Join(fixture, "scripts", "infra-up.sh"))
+	command.Env = []string{
+		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"DOCKER_LOG=" + logPath,
+		"NVT_CREDENTIAL_PORTAL_ENABLED=false",
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("disabled infra-up failed: %v\n%s", err, output)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	remove := "--profile credentials rm -sf credential-portal credential-runner credential-private-init"
+	if !strings.Contains(log, remove) || strings.Index(log, remove) > strings.LastIndex(log, " up -d") ||
+		strings.Contains(log, "--profile credentials up -d") || strings.Contains(log, " down ") || strings.Contains(log, " -v") {
+		t.Fatalf("disabled infra-up did not converge safely:\n%s", log)
 	}
 }
 

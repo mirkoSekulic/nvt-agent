@@ -21,8 +21,10 @@ The first enabled start copies the non-secret template to
 there; provider-specific commands remain portal configuration. Do not add
 credentials to this file.
 
-Portal replacements are atomically written with mode `0600` to the private
-`local-credential-seeds` named volume. The broker mounts that volume read-only.
+Portal replacements are staged with mode `0600` in the fixed private
+`.nvt-portal-staging` directory and atomically renamed into the
+`local-credential-seeds` named volume. The broker explicitly validates and
+ignores that staging directory, and mounts the seed volume read-only.
 Its existing seed supervisor stops the broker, imports the new generation into
 the broker-owned `local-broker-private` volume, starts and checks the broker,
 then commits the import marker. This prevents a portal write from racing a

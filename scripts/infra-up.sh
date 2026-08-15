@@ -49,6 +49,11 @@ if [ "${NVT_CREDENTIAL_PORTAL_ENABLED:-false}" = "true" ]; then
   export NVT_GATEWAY_CREDENTIAL_PORTAL_URL=/agents/credentials
   export NVT_BROKER_CREDENTIAL_SEED_DIR=/portal-seed
   compose_profiles=(--profile credentials)
+else
+  # Compose does not stop services from an omitted profile during `up`.
+  # Remove only the optional containers; named credential volumes remain.
+  docker compose -f "$repo_root/compose.infra.yaml" --profile credentials rm -sf \
+    credential-portal credential-runner credential-private-init
 fi
 
 docker compose -f "$repo_root/compose.infra.yaml" "${compose_profiles[@]}" up -d
