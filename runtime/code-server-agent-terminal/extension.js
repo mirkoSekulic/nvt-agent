@@ -3,6 +3,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const childProcess = require("child_process");
 
 const TERMINAL_NAME = "NVT Agent Session";
 const SESSION_ATTACH_COMMAND = "nvt-session-attach";
@@ -31,23 +32,40 @@ function enabledByMarker(markerPath) {
 }
 
 function isManagedTerminal(candidate) {
-  return (
-    candidate.name === TERMINAL_NAME &&
-    candidate.creationOptions &&
-    candidate.creationOptions.shellPath === SESSION_ATTACH_COMMAND
-  );
+  // Restored terminals do not reliably retain creationOptions. The name is
+  // reserved by this extension and is the stable identity within a window.
+  return candidate.name === TERMINAL_NAME;
 }
 
-function openAgentTerminal(vscode, markerPath = enableMarkerPath()) {
+function claimAttachment(execFileSync = childProcess.execFileSync) {
+  try {
+    return execFileSync(SESSION_ATTACH_COMMAND, ["--claim"], {
+      encoding: "utf8",
+      timeout: 5000,
+    }).trim();
+  } catch (error) {
+    if (error && error.status === 3) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function openAgentTerminal(vscode, markerPath = enableMarkerPath(), execFileSync) {
   if (!enabledByMarker(markerPath)) {
     return undefined;
   }
 
   let terminal = vscode.window.terminals.find(isManagedTerminal);
   if (terminal === undefined) {
+    const claim = claimAttachment(execFileSync);
+    if (claim === undefined) {
+      return undefined;
+    }
     terminal = vscode.window.createTerminal({
       name: TERMINAL_NAME,
       shellPath: SESSION_ATTACH_COMMAND,
+      shellArgs: ["--attach", claim],
     });
   }
 
@@ -57,9 +75,9 @@ function openAgentTerminal(vscode, markerPath = enableMarkerPath()) {
   return terminal;
 }
 
-function activate(_context, vscodeOverride, markerPathOverride) {
+function activate(_context, vscodeOverride, markerPathOverride, execFileSyncOverride) {
   const vscode = vscodeOverride || require("vscode");
-  return openAgentTerminal(vscode, markerPathOverride || enableMarkerPath());
+  return openAgentTerminal(vscode, markerPathOverride || enableMarkerPath(), execFileSyncOverride);
 }
 
 function deactivate() {}
@@ -69,6 +87,7 @@ module.exports = {
   deactivate,
   enabledByMarker,
   enableMarkerPath,
+  claimAttachment,
   isManagedTerminal,
   openAgentTerminal,
 };

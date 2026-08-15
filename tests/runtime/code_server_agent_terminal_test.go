@@ -2,10 +2,25 @@ package runtime_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func sessionAttachCommand(f *fixture, args ...string) *exec.Cmd {
+	commandArgs := append([]string{filepath.Join(f.root, "runtime", "core", "nvt-session-attach.sh")}, args...)
+	cmd := exec.Command("bash", commandArgs...)
+	cmd.Env = append(os.Environ(),
+		"HOME="+f.home,
+		"NVT_STATE_DIR="+f.state,
+		"PATH="+f.bin+":"+os.Getenv("PATH"),
+		"NVT_SESSION_ATTACH_WAIT_SECONDS=2",
+		"NVT_TEST_ATTACH_RELEASE="+filepath.Join(f.state, "attach-release"),
+	)
+	return cmd
+}
 
 func codeServerTasksPath(f *fixture) string {
 	return filepath.Join(f.home, ".local", "share", "code-server", "User", "tasks.json")
@@ -289,6 +304,121 @@ exit 1
 	}
 	if strings.Contains(string(calls), "new-session") || strings.Contains(string(calls), "attach-session") {
 		t.Fatalf("missing-session path created or attached a session:\n%s", calls)
+	}
+}
+
+func TestSessionAttachLeaseSerializesHostsAndRecoversAfterExit(t *testing.T) {
+	f := newFixture(t)
+	f.writeBin("tmux", `#!/usr/bin/env bash
+case "$1" in
+  has-session) exit 0 ;;
+  attach-session) while [ ! -f "$NVT_TEST_ATTACH_RELEASE" ]; do sleep 0.05; done ;;
+  *) exit 90 ;;
+esac
+`)
+
+	claim, err := sessionAttachCommand(f, "--claim").Output()
+	if err != nil {
+		t.Fatalf("first host could not claim attachment: %v", err)
+	}
+	token := strings.TrimSpace(string(claim))
+	attachment := sessionAttachCommand(f, "--attach", token)
+	if err := attachment.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if attachment.Process != nil {
+			_ = attachment.Process.Kill()
+			_, _ = attachment.Process.Wait()
+		}
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state, _ := os.ReadFile(filepath.Join(f.state, "session-attachment-lease", "state"))
+		if string(state) == "attached\n" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("attachment did not adopt its claim")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	second := sessionAttachCommand(f, "--claim")
+	if err := second.Run(); err == nil {
+		t.Fatal("independent extension host acquired a duplicate attachment claim")
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 3 {
+		t.Fatalf("duplicate claim returned %v, want exit status 3", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(f.state, "attach-release"), []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := attachment.Wait(); err != nil {
+		t.Fatalf("attachment did not exit cleanly: %v", err)
+	}
+	attachment.Process = nil
+
+	if replacement, err := sessionAttachCommand(f, "--claim").Output(); err != nil || strings.TrimSpace(string(replacement)) == "" {
+		t.Fatalf("next host could not claim after terminal exit: output=%q err=%v", replacement, err)
+	}
+}
+
+func TestSessionAttachLeaseRecoversStaleProcessAndRuntimeState(t *testing.T) {
+	f := newFixture(t)
+	lease := filepath.Join(f.state, "session-attachment-lease")
+	if err := os.MkdirAll(lease, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"state": "attached\n",
+		"token": "old-runtime\n",
+		"pid":   "99999999\n",
+		"start": "1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(lease, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claim, err := sessionAttachCommand(f, "--claim").Output()
+	if err != nil || strings.TrimSpace(string(claim)) == "" || strings.TrimSpace(string(claim)) == "old-runtime" {
+		t.Fatalf("runtime restart state was not recovered: output=%q err=%v", claim, err)
+	}
+}
+
+func TestSessionAttachConcurrentClaimsHaveSingleWinner(t *testing.T) {
+	f := newFixture(t)
+	type result struct {
+		output []byte
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 8)
+	for i := 0; i < cap(results); i++ {
+		go func() {
+			<-start
+			output, err := sessionAttachCommand(f, "--claim").Output()
+			results <- result{output: output, err: err}
+		}()
+	}
+	close(start)
+	winners := 0
+	for i := 0; i < cap(results); i++ {
+		result := <-results
+		if result.err == nil {
+			winners++
+			if strings.TrimSpace(string(result.output)) == "" {
+				t.Fatal("winning claim returned an empty token")
+			}
+			continue
+		}
+		if exit, ok := result.err.(*exec.ExitError); !ok || exit.ExitCode() != 3 {
+			t.Fatalf("losing claim returned %v, want exit status 3", result.err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("concurrent extension hosts produced %d winning claims, want 1", winners)
 	}
 }
 
