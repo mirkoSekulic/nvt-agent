@@ -56,16 +56,12 @@ func testInvalidConfigMutations(t *testing.T, valid Config) {
 		"route domain":                         func(value *Config) { value.RouteBaseDomain = "Bad.Domain" },
 		"route prefix":                         func(value *Config) { value.RoutePathPrefix = "/agents/../other" },
 		"gateway container":                    func(value *Config) { value.GatewayContainer = "local gateway" },
-		"scheduling path":                      func(value *Config) { value.SchedulingConfigPath = "relative.json" },
-		"named runs path":                      func(value *Config) { value.NamedRunsConfigPath = "relative.json" },
-		"duplicate scheduling paths": func(value *Config) {
-			value.SchedulingConfigPath = "/broker-state/controller.json"
-			value.NamedRunsConfigPath = value.SchedulingConfigPath
-		},
-		"missing route token":   func(value *Config) { value.RouteTokenFile = "" },
-		"relative route token":  func(value *Config) { value.RouteTokenFile = "relative-token" },
-		"relative admin token":  func(value *Config) { value.AdminTokenFile = "relative-token" },
-		"malformed route token": func(value *Config) { value.RouteTokenFile = "/run/secrets/route\ntoken" },
+		"platform path":                        func(value *Config) { value.PlatformConfigPath = "relative.yaml" },
+		"malformed platform":                   func(value *Config) { value.PlatformConfigPath = "/broker-state/local\ncontroller.yaml" },
+		"missing route token":                  func(value *Config) { value.RouteTokenFile = "" },
+		"relative route token":                 func(value *Config) { value.RouteTokenFile = "relative-token" },
+		"relative admin token":                 func(value *Config) { value.AdminTokenFile = "relative-token" },
+		"malformed route token":                func(value *Config) { value.RouteTokenFile = "/run/secrets/route\ntoken" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
@@ -102,6 +98,17 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 	config, err := ConfigFromEnvironment()
 	if err != nil || config.MaxActiveRuns != 32 || config.MaxClaimLease != 180*time.Second || config.SweepInterval != time.Second {
 		t.Fatalf("explicit valid environment = %#v, %v", config, err)
+	}
+}
+
+func TestLegacyLocalConfigurationEnvironmentFailsClosed(t *testing.T) {
+	for _, name := range []string{"NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG", "NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "/broker-state/legacy.json")
+			if _, err := ConfigFromEnvironment(); err == nil {
+				t.Fatal("legacy local authoring environment was accepted")
+			}
+		})
 	}
 }
 

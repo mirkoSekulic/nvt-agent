@@ -31,15 +31,12 @@ func TestLocalSchedulingIsOptionalAndRejectsNonPrivateToken(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte(schedulingTestToken), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	document := schedulingDocument{
-		APIVersion:        SchedulingAPIVersion,
-		ResolvedRunConfig: mustJSON(t, testSchedulingTrustedConfiguration()),
-		Schedules: []scheduleConfig{{Name: "github", Producers: []scheduleProducerConfig{{
-			Identity: "producer", TokenFile: tokenPath, AllowedPrincipalIssuers: []string{"https://identity.example.test"},
-			Selections: []scheduleSelection{{Profile: "engineering", Workflow: "development"}}, DefaultWorkflow: "development", Retention: "disposable",
-		}}}},
-	}
-	path := filepath.Join(directory, "scheduling.json")
+	document := testNativeConfiguration()
+	document.Schedules = []scheduleConfig{{Name: "github", Producers: []scheduleProducerConfig{{
+		Identity: "producer", TokenFile: tokenPath, AllowedPrincipalIssuers: []string{"https://identity.example.test"},
+		Selections: []scheduleSelection{{Profile: "engineering", Workflow: "development"}}, DefaultWorkflow: "development", Retention: "disposable",
+	}}}}
+	path := filepath.Join(directory, "local-controller.yaml")
 	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -48,18 +45,16 @@ func TestLocalSchedulingIsOptionalAndRejectsNonPrivateToken(t *testing.T) {
 	}
 }
 
-func TestConfiguredLocalRunsBootstrapIdempotentlyAndRejectDrift(t *testing.T) {
+func TestConfiguredWorkstationsBootstrapIdempotentlyAndRejectDrift(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)
 	directory := t.TempDir()
-	document := schedulingDocument{
-		APIVersion: SchedulingAPIVersion, ResolvedRunConfig: mustJSON(t, testSchedulingTrustedConfiguration()),
-		LocalRuns: []localRunConfig{{
-			RunID: "nvt-dev", Principal: resolvedrun.Principal{Issuer: "https://local.nvt.test", Subject: "workstation-nvt-dev"},
-			Profile: "engineering", Workflow: "development", Retention: "disposable", Backend: "container",
-		}},
-	}
-	path := filepath.Join(directory, "local-runs.json")
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{{
+		Name: "nvt", Principal: resolvedrun.Principal{Issuer: "https://local.nvt.test", Subject: "workstation-nvt"},
+		Profile: "engineering", Workflow: "development", Retention: "persistent", Backend: "container",
+	}}
+	path := filepath.Join(directory, "local-controller.yaml")
 	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -67,18 +62,18 @@ func TestConfiguredLocalRunsBootstrapIdempotentlyAndRejectDrift(t *testing.T) {
 	if err != nil || scheduler == nil {
 		t.Fatalf("load local runs = %#v %v", scheduler, err)
 	}
-	if err := scheduler.BootstrapLocalRuns(context.Background()); err != nil {
+	if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	restarted, err := LoadScheduler(path, store)
-	if err != nil || restarted.BootstrapLocalRuns(context.Background()) != nil {
+	if err != nil || restarted.BootstrapWorkstations(context.Background()) != nil {
 		t.Fatalf("idempotent bootstrap failed: %v", err)
 	}
 	listed, err := store.List(context.Background(), 10, "")
-	if err != nil || len(listed.Runs) != 1 || listed.Runs[0].RunID != "nvt-dev" || listed.Runs[0].Subject != "workstation-nvt-dev" {
+	if err != nil || len(listed.Runs) != 1 || listed.Runs[0].RunID != "nvt" || listed.Runs[0].Subject != "workstation-nvt" {
 		t.Fatalf("bootstrapped runs = %#v err=%v", listed, err)
 	}
-	document.LocalRuns[0].Prompt = "changed immutable selection"
+	document.Workstations[0].Principal.DisplayName = "changed immutable selection"
 	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -86,18 +81,18 @@ func TestConfiguredLocalRunsBootstrapIdempotentlyAndRejectDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := drifted.BootstrapLocalRuns(context.Background()); !errors.Is(err, ErrConflict) {
+	if err := drifted.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("configuration drift = %v, want conflict", err)
 	}
 }
 
-func TestConfiguredLocalRunsBootstrapIsAtomic(t *testing.T) {
+func TestConfiguredWorkstationsBootstrapIsAtomic(t *testing.T) {
 	t.Run("later drift", func(t *testing.T) {
 		clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 		store, _ := openTestStore(t, clock, 4)
-		original := writeLocalRunsDocument(t, []localRunConfig{testNamedRun("second", "")})
+		original := writeWorkstationDocument(t, []workstationConfig{testWorkstation("second", "")})
 		scheduler, err := LoadScheduler(original, store)
-		if err != nil || scheduler.BootstrapLocalRuns(context.Background()) != nil {
+		if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
 			t.Fatalf("initial bootstrap: %v", err)
 		}
 		before, err := store.Get(context.Background(), "second")
@@ -105,12 +100,12 @@ func TestConfiguredLocalRunsBootstrapIsAtomic(t *testing.T) {
 			t.Fatal(err)
 		}
 		clock.value = clock.value.Add(24 * time.Hour)
-		attempt := writeLocalRunsDocument(t, []localRunConfig{testNamedRun("first", ""), testNamedRun("second", "changed")})
+		attempt := writeWorkstationDocument(t, []workstationConfig{testWorkstation("first", ""), testWorkstation("second", "changed")})
 		scheduler, err = LoadScheduler(attempt, store)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := scheduler.BootstrapLocalRuns(context.Background()); !errors.Is(err, ErrConflict) {
+		if err := scheduler.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrConflict) {
 			t.Fatalf("drift error = %v", err)
 		}
 		clock.value = before.UpdatedAt
@@ -127,12 +122,12 @@ func TestConfiguredLocalRunsBootstrapIsAtomic(t *testing.T) {
 		if _, err := store.Create(context.Background(), CreateInput{IdempotencyKey: "existing-work-key", ResolvedRun: testResolvedRun(t, "existing", false)}); err != nil {
 			t.Fatal(err)
 		}
-		attempt := writeLocalRunsDocument(t, []localRunConfig{testNamedRun("first", ""), testNamedRun("second", "")})
+		attempt := writeWorkstationDocument(t, []workstationConfig{testWorkstation("first", ""), testWorkstation("second", "")})
 		scheduler, err := LoadScheduler(attempt, store)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := scheduler.BootstrapLocalRuns(context.Background()); !errors.Is(err, ErrCapacityExceeded) {
+		if err := scheduler.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrCapacityExceeded) {
 			t.Fatalf("capacity error = %v", err)
 		}
 		assertRunIDs(t, store, "existing")
@@ -141,9 +136,9 @@ func TestConfiguredLocalRunsBootstrapIsAtomic(t *testing.T) {
 	t.Run("tombstone", func(t *testing.T) {
 		clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 		store, _ := openTestStore(t, clock, 4)
-		original := writeLocalRunsDocument(t, []localRunConfig{testNamedRun("second", "")})
+		original := writeWorkstationDocument(t, []workstationConfig{testWorkstation("second", "")})
 		scheduler, err := LoadScheduler(original, store)
-		if err != nil || scheduler.BootstrapLocalRuns(context.Background()) != nil {
+		if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
 			t.Fatalf("initial bootstrap: %v", err)
 		}
 		stopping, _, err := store.Delete(context.Background(), "second")
@@ -154,12 +149,12 @@ func TestConfiguredLocalRunsBootstrapIsAtomic(t *testing.T) {
 		if _, err := store.UpdateStatus(context.Background(), StatusInput{RunID: "second", Owner: "cleanup", ExpectedRevision: claimed.Revision, State: StateCompleted, Reason: "cleanup-complete"}); !errors.Is(err, ErrGone) {
 			t.Fatalf("tombstone completion = %v", err)
 		}
-		attempt := writeLocalRunsDocument(t, []localRunConfig{testNamedRun("first", ""), testNamedRun("second", "")})
+		attempt := writeWorkstationDocument(t, []workstationConfig{testWorkstation("first", ""), testWorkstation("second", "")})
 		scheduler, err = LoadScheduler(attempt, store)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := scheduler.BootstrapLocalRuns(context.Background()); !errors.Is(err, ErrGone) {
+		if err := scheduler.BootstrapWorkstations(context.Background()); !errors.Is(err, ErrGone) {
 			t.Fatalf("tombstone error = %v", err)
 		}
 		listed, listErr := store.List(context.Background(), 10, "")
@@ -172,7 +167,7 @@ func TestConfiguredLocalRunsBootstrapIsAtomic(t *testing.T) {
 	})
 }
 
-func TestConfiguredLocalRunsBootstrapReclaimsExpiredCapacityAfterRestart(t *testing.T) {
+func TestConfiguredWorkstationsBootstrapReclaimsExpiredCapacityAfterRestart(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, path := openTestStore(t, clock, 2)
 	for _, runID := range []string{"expired-a", "expired-b"} {
@@ -189,11 +184,11 @@ func TestConfiguredLocalRunsBootstrapReclaimsExpiredCapacityAfterRestart(t *test
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	scheduler, err := LoadScheduler(writeLocalRunsDocument(t, []localRunConfig{testNamedRun("first", ""), testNamedRun("second", "")}), restarted)
+	scheduler, err := LoadScheduler(writeWorkstationDocument(t, []workstationConfig{testWorkstation("first", ""), testWorkstation("second", "")}), restarted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := scheduler.BootstrapLocalRuns(context.Background()); err != nil {
+	if err := scheduler.BootstrapWorkstations(context.Background()); err != nil {
 		t.Fatalf("expired downtime capacity blocked named bootstrap: %v", err)
 	}
 	listed, err := restarted.List(context.Background(), 10, "")
@@ -209,18 +204,19 @@ func TestConfiguredLocalRunsBootstrapReclaimsExpiredCapacityAfterRestart(t *test
 	}
 }
 
-func testNamedRun(runID, prompt string) localRunConfig {
-	return localRunConfig{
-		RunID: runID, Principal: resolvedrun.Principal{Issuer: "https://local.nvt.test", Subject: "workstation-" + runID},
-		Profile: "engineering", Workflow: "development", Retention: "disposable", Backend: "container", Prompt: prompt,
+func testWorkstation(runID, displayName string) workstationConfig {
+	return workstationConfig{
+		Name: runID, Principal: resolvedrun.Principal{Issuer: "https://local.nvt.test", Subject: "workstation-" + runID, DisplayName: displayName},
+		Profile: "engineering", Workflow: "development", Retention: "persistent", Backend: "container",
 	}
 }
 
-func writeLocalRunsDocument(t *testing.T, runs []localRunConfig) string {
+func writeWorkstationDocument(t *testing.T, workstations []workstationConfig) string {
 	t.Helper()
 	directory := t.TempDir()
-	path := filepath.Join(directory, "local-runs.json")
-	document := schedulingDocument{APIVersion: SchedulingAPIVersion, ResolvedRunConfig: mustJSON(t, testSchedulingTrustedConfiguration()), LocalRuns: runs}
+	path := filepath.Join(directory, "local-controller.yaml")
+	document := testNativeConfiguration()
+	document.Workstations = workstations
 	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +282,7 @@ func TestLocalSchedulingAuthorizesSelectionIsIdempotentAndSupportsStatusCancel(t
 	}
 }
 
-func TestNamedRunsAndDisposableSchedulesComposeAcrossRestart(t *testing.T) {
+func TestWorkstationsAndDisposableSchedulesSharePolicyAcrossRestart(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, path := openTestStore(t, clock, 8)
 	directory := t.TempDir()
@@ -294,33 +290,19 @@ func TestNamedRunsAndDisposableSchedulesComposeAcrossRestart(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte(schedulingTestToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	schedulePath := filepath.Join(directory, "schedules.json")
-	scheduleDocument := schedulingDocument{
-		APIVersion: SchedulingAPIVersion, ResolvedRunConfig: mustJSON(t, testSchedulingTrustedConfiguration()),
-		Schedules: []scheduleConfig{{Name: "github", Producers: []scheduleProducerConfig{{
-			Identity: "github-comments", TokenFile: tokenPath, AllowedPrincipalIssuers: []string{"https://identity.example.test"},
-			Selections: []scheduleSelection{{Profile: "engineering", Workflow: "development"}}, DefaultWorkflow: "development",
-			Retention: "disposable", Backend: "container",
-		}}}},
-	}
-	if err := os.WriteFile(schedulePath, mustJSON(t, scheduleDocument), 0o600); err != nil {
+	configPath := filepath.Join(directory, "local-controller.yaml")
+	document := testNativeConfiguration()
+	document.Schedules = []scheduleConfig{{Name: "github", Producers: []scheduleProducerConfig{{
+		Identity: "github-comments", TokenFile: tokenPath, AllowedPrincipalIssuers: []string{"https://identity.example.test"},
+		Selections: []scheduleSelection{{Profile: "engineering", Workflow: "development"}}, DefaultWorkflow: "development",
+		Retention: "disposable", Backend: "container",
+	}}}}
+	document.Workstations = []workstationConfig{testWorkstation("nvt", "NVT development")}
+	if err := os.WriteFile(configPath, mustJSON(t, document), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	namedConfiguration := testSchedulingTrustedConfiguration()
-	namedConfiguration.Profiles[0].AllowedRetentions = append(namedConfiguration.Profiles[0].AllowedRetentions, "persistent")
-	namedConfiguration.RetentionPolicies = append(namedConfiguration.RetentionPolicies, resolvedrun.RetentionPolicy{
-		Name: "persistent", Persistence: resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true},
-	})
-	namedRun := testNamedRun("nvt-dev", "")
-	namedRun.Retention = "persistent"
-	namedPath := filepath.Join(directory, "named-runs.json")
-	if err := os.WriteFile(namedPath, mustJSON(t, schedulingDocument{
-		APIVersion: SchedulingAPIVersion, ResolvedRunConfig: mustJSON(t, namedConfiguration), LocalRuns: []localRunConfig{namedRun},
-	}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	scheduler, err := LoadSchedulers([]string{schedulePath, namedPath}, store)
-	if err != nil || scheduler.BootstrapLocalRuns(context.Background()) != nil {
+	scheduler, err := LoadScheduler(configPath, store)
+	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
 		t.Fatalf("composed startup = %#v %v", scheduler, err)
 	}
 	handler := NewHTTPHandlerWithServices(store, nil, nil, nil, scheduler)
@@ -337,8 +319,8 @@ func TestNamedRunsAndDisposableSchedulesComposeAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	restartedScheduler, err := LoadSchedulers([]string{schedulePath, namedPath}, restarted)
-	if err != nil || restartedScheduler.BootstrapLocalRuns(context.Background()) != nil {
+	restartedScheduler, err := LoadScheduler(configPath, restarted)
+	if err != nil || restartedScheduler.BootstrapWorkstations(context.Background()) != nil {
 		t.Fatalf("composed restart = %#v %v", restartedScheduler, err)
 	}
 	listed, err := restarted.List(context.Background(), 10, "")
@@ -347,11 +329,151 @@ func TestNamedRunsAndDisposableSchedulesComposeAcrossRestart(t *testing.T) {
 	}
 	var namedPersistent, disposable bool
 	for _, run := range listed.Runs {
-		namedPersistent = namedPersistent || run.RunID == "nvt-dev" && run.Persistent
+		namedPersistent = namedPersistent || run.RunID == "nvt" && run.Persistent
 		disposable = disposable || strings.HasPrefix(run.RunID, "local-") && !run.Persistent && run.DeadlineAt != nil
 	}
 	if !namedPersistent || !disposable {
 		t.Fatalf("composed retention semantics = %#v", listed.Runs)
+	}
+}
+
+func TestNativeTemplateCreatesNVTStudioAndInfraWithoutLegacyInputs(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 8)
+	templatePath, err := filepath.Abs(filepath.Join("..", "..", "..", "templates", "local-controller.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"local_runs", "source_agent", ".agents/", "token_sha256", "access_token", "refresh_token", "private_key"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("native template contains legacy or secret-bearing field %q", forbidden)
+		}
+	}
+	scheduler, err := LoadScheduler(templatePath, store)
+	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("fresh native template = %#v err=%v", scheduler, err)
+	}
+	assertRunIDs(t, store, "infra", "nvt", "studio")
+	for _, runID := range []string{"infra", "nvt", "studio"} {
+		snapshot, _, snapshotErr := store.ResolvedSnapshot(context.Background(), runID)
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		resolved, decodeErr := resolvedrun.DecodeResolvedAgentRun(snapshot)
+		clear(snapshot)
+		if decodeErr != nil || !resolved.Persistence.Workspace || !resolved.Persistence.RuntimeState || !resolved.Persistence.DockerData ||
+			resolved.Execution.Name != "local-docker" || resolved.Retention != "persistent" {
+			t.Fatalf("workstation %s = %#v err=%v", runID, resolved, decodeErr)
+		}
+	}
+}
+
+func TestNativeWorkstationAddAndRemovalAreAtomicAndNonDestructive(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 8)
+	firstPath := writeWorkstationDocument(t, []workstationConfig{testWorkstation("nvt", "NVT"), testWorkstation("studio", "Studio")})
+	first, err := LoadScheduler(firstPath, store)
+	if err != nil || first.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("initial workstations: %v", err)
+	}
+	nvtBefore, err := store.Get(context.Background(), "nvt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removedPath := writeWorkstationDocument(t, []workstationConfig{testWorkstation("nvt", "NVT")})
+	removed, err := LoadScheduler(removedPath, store)
+	if err != nil || removed.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("non-destructive removal replay: %v", err)
+	}
+	assertRunIDs(t, store, "nvt", "studio")
+	addedPath := writeWorkstationDocument(t, []workstationConfig{
+		testWorkstation("infra", "Infra"), testWorkstation("nvt", "NVT"),
+	})
+	added, err := LoadScheduler(addedPath, store)
+	if err != nil || added.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("workstation addition: %v", err)
+	}
+	assertRunIDs(t, store, "infra", "nvt", "studio")
+	nvtAfter, err := store.Get(context.Background(), "nvt")
+	if err != nil || nvtAfter.Revision != nvtBefore.Revision || nvtAfter.SnapshotDigest != nvtBefore.SnapshotDigest {
+		t.Fatalf("existing workstation mutated: before=%#v after=%#v err=%v", nvtBefore, nvtAfter, err)
+	}
+}
+
+func TestNativeConfigurationRejectsLegacyMixedAndAmbiguousShapes(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 8)
+	valid := testNativeConfiguration()
+	valid.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	validJSON := string(mustJSON(t, valid))
+	deadline := testNativeConfiguration()
+	deadline.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	deadline.RetentionPolicies[1].TTL.ActiveSeconds = 3600
+	for name, document := range map[string]string{
+		"local_runs":        strings.TrimSuffix(validJSON, "}") + `,"local_runs":[]}`,
+		"source_agent":      strings.Replace(validJSON, `"name":"nvt"`, `"name":"nvt","source_agent":"nvt-dev"`, 1),
+		"duplicate name":    strings.Replace(validJSON, `"workstations":[`, `"workstations":[`+string(mustJSON(t, testWorkstation("nvt", "duplicate")))+`,`, 1),
+		"duplicate profile": strings.Replace(validJSON, `"profiles":[`, `"profiles":[`+string(mustJSON(t, valid.Profiles[0]))+`,`, 1),
+		"unknown profile":   strings.Replace(validJSON, `"profile":"engineering"`, `"profile":"missing"`, 1),
+		"unknown workflow":  strings.Replace(validJSON, `"workflow":"development"`, `"workflow":"missing"`, 1),
+		"invalid name":      strings.Replace(validJSON, `"name":"nvt"`, `"name":"../nvt"`, 1),
+		"nonpersistent":     strings.Replace(validJSON, `"retention":"persistent"`, `"retention":"disposable"`, 1),
+		"active deadline":   string(mustJSON(t, deadline)),
+		"duplicate yaml":    "api_version: nvt.local-platform/v1\napi_version: nvt.local-platform/v1\n",
+		"yaml alias":        "api_version: nvt.local-platform/v1\ndefaults: &defaults {}\nprofiles: []\nworkflows: []\nexecution_backends: []\nretention_policies: []\nworkstations: []\nschedules: []\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "local-controller.yaml")
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if loaded, err := LoadScheduler(path, store); err == nil || loaded != nil {
+				t.Fatal("invalid or legacy native configuration was accepted")
+			}
+		})
+	}
+}
+
+func TestNativeConfigurationNeverPersistsProducerBearer(t *testing.T) {
+	const secretNeedle = "NATIVE-CONFIG-PRODUCER-SECRET-NEEDLE-0123456789"
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, statePath := openTestStore(t, clock, 8)
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "producer-token")
+	if err := os.WriteFile(tokenPath, []byte(secretNeedle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document := testNativeConfiguration()
+	document.Workstations = []workstationConfig{testWorkstation("nvt", "NVT")}
+	document.Schedules = []scheduleConfig{{Name: "github", Producers: []scheduleProducerConfig{{
+		Identity: "github-comments", TokenFile: tokenPath, AllowedPrincipalIssuers: []string{"https://identity.example.test"},
+		Selections: []scheduleSelection{{Profile: "engineering", Workflow: "development"}}, DefaultWorkflow: "development",
+		Retention: "disposable", Backend: "container",
+	}}}}
+	configPath := filepath.Join(directory, "local-controller.yaml")
+	if err := os.WriteFile(configPath, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := LoadScheduler(configPath, store)
+	if err != nil || scheduler.BootstrapWorkstations(context.Background()) != nil {
+		t.Fatalf("native config = %#v err=%v", scheduler, err)
+	}
+	handler := NewHTTPHandlerWithServices(store, nil, nil, nil, scheduler)
+	response := scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions",
+		testAdmissionBody(t, "https://identity.example.test", "subject", "development", "work"), secretNeedle)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("schedule = %d %s", response.Code, response.Body.String())
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(state), secretNeedle) || strings.Contains(response.Body.String(), secretNeedle) {
+		t.Fatal("producer bearer crossed into durable or API state")
 	}
 }
 
@@ -416,14 +538,12 @@ func testScheduler(t *testing.T, store *Store, token string) *Scheduler {
 		t.Fatal(err)
 	}
 	configuration := testSchedulingTrustedConfiguration()
-	document := schedulingDocument{
-		APIVersion: SchedulingAPIVersion, ResolvedRunConfig: mustJSON(t, configuration),
-		Schedules: []scheduleConfig{{Name: "github", Producers: []scheduleProducerConfig{{
-			Identity: "github-comments", TokenFile: tokenPath, AllowedPrincipalIssuers: []string{"https://identity.example.test"},
-			Selections: []scheduleSelection{{Profile: "engineering", Workflow: "development"}}, DefaultWorkflow: "development", Retention: "disposable", Backend: "container",
-		}}}},
-	}
-	configPath := filepath.Join(directory, "scheduling.json")
+	document := nativeConfigurationFromTrusted(configuration)
+	document.Schedules = []scheduleConfig{{Name: "github", Producers: []scheduleProducerConfig{{
+		Identity: "github-comments", TokenFile: tokenPath, AllowedPrincipalIssuers: []string{"https://identity.example.test"},
+		Selections: []scheduleSelection{{Profile: "engineering", Workflow: "development"}}, DefaultWorkflow: "development", Retention: "disposable", Backend: "container",
+	}}}}
+	configPath := filepath.Join(directory, "local-controller.yaml")
 	if err := os.WriteFile(configPath, mustJSON(t, document), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -442,11 +562,25 @@ func testSchedulingTrustedConfiguration() resolvedrun.TrustedConfiguration {
 		},
 		Profiles: []resolvedrun.Profile{{
 			Name: "engineering", Broker: resolvedrun.Broker{}, Egress: resolvedrun.Egress{Mode: "direct"},
-			AllowedBackends: []string{"container"}, DefaultBackend: "container", AllowedRetentions: []string{"disposable"},
+			AllowedBackends: []string{"container"}, DefaultBackend: "container", AllowedRetentions: []string{"disposable", "persistent"},
 		}},
 		Workflows:         []resolvedrun.Workflow{{Name: "development"}},
 		ExecutionBackends: []resolvedrun.ExecutionBackend{{Name: "container", Kind: "container"}},
-		RetentionPolicies: []resolvedrun.RetentionPolicy{{Name: "disposable", TTL: resolvedrun.TTL{ActiveSeconds: 3600, CompletedSeconds: 60, FailedSeconds: 60}}},
+		RetentionPolicies: []resolvedrun.RetentionPolicy{
+			{Name: "disposable", TTL: resolvedrun.TTL{ActiveSeconds: 3600, CompletedSeconds: 60, FailedSeconds: 60}},
+			{Name: "persistent", Persistence: resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}},
+		},
+	}
+}
+
+func testNativeConfiguration() nativeConfiguration {
+	return nativeConfigurationFromTrusted(testSchedulingTrustedConfiguration())
+}
+
+func nativeConfigurationFromTrusted(trusted resolvedrun.TrustedConfiguration) nativeConfiguration {
+	return nativeConfiguration{
+		APIVersion: NativeConfigAPIVersion, Defaults: trusted.Defaults, Profiles: trusted.Profiles,
+		Workflows: trusted.Workflows, ExecutionBackends: trusted.ExecutionBackends, RetentionPolicies: trusted.RetentionPolicies,
 	}
 }
 

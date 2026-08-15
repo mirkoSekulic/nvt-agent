@@ -13,32 +13,43 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
+	"gopkg.in/yaml.v3"
 )
 
 const (
-	SchedulingAPIVersion = "nvt.local-scheduling/v1"
-	maxSchedulingConfig  = 1 << 20
+	NativeConfigAPIVersion = "nvt.local-platform/v1"
+	maxNativeConfigBytes   = 1 << 20
+	maxNativeConfigNodes   = 32768
+	maxNativeConfigDepth   = 64
 )
 
-type schedulingDocument struct {
-	APIVersion        string           `json:"api_version"`
-	ResolvedRunConfig json.RawMessage  `json:"resolved_run_config"`
-	Schedules         []scheduleConfig `json:"schedules,omitempty"`
-	LocalRuns         []localRunConfig `json:"local_runs,omitempty"`
+// nativeConfiguration is the single administrator-authored local platform
+// document. Resolved runs remain an internal immutable lifecycle value; the
+// public configuration contains only reusable policy and workstation/schedule
+// selections.
+type nativeConfiguration struct {
+	APIVersion        string                         `json:"api_version"`
+	Defaults          resolvedrun.PlatformDefaults   `json:"defaults"`
+	Profiles          []resolvedrun.Profile          `json:"profiles"`
+	Workflows         []resolvedrun.Workflow         `json:"workflows"`
+	ExecutionBackends []resolvedrun.ExecutionBackend `json:"execution_backends"`
+	RetentionPolicies []resolvedrun.RetentionPolicy  `json:"retention_policies"`
+	Workstations      []workstationConfig            `json:"workstations,omitempty"`
+	Schedules         []scheduleConfig               `json:"schedules,omitempty"`
 }
 
-type localRunConfig struct {
-	RunID     string                `json:"run_id"`
+type workstationConfig struct {
+	Name      string                `json:"name"`
 	Principal resolvedrun.Principal `json:"principal"`
 	Profile   string                `json:"profile"`
 	Workflow  string                `json:"workflow"`
 	Retention string                `json:"retention"`
-	Backend   string                `json:"backend,omitempty"`
-	Prompt    string                `json:"prompt,omitempty"`
+	Backend   string                `json:"backend"`
 }
 
 type scheduleConfig struct {
@@ -79,9 +90,9 @@ type schedule struct {
 }
 
 type Scheduler struct {
-	store     *Store
-	schedules map[string]schedule
-	localRuns []CreateInput
+	store        *Store
+	schedules    map[string]schedule
+	workstations []CreateInput
 }
 
 type scheduleAdmissionRequest struct {
@@ -121,145 +132,203 @@ type scheduleAdmissionRunName struct {
 }
 
 func LoadScheduler(path string, store *Store) (*Scheduler, error) {
-	return LoadSchedulers([]string{path}, store)
-}
-
-// LoadSchedulers composes independent administrator-owned schedule and named-
-// run documents. Each schedule retains its own trusted resolver; bearer files
-// and resolved policy never move into the generated named-run document.
-func LoadSchedulers(paths []string, store *Store) (*Scheduler, error) {
-	configuredPaths := make([]string, 0, len(paths))
-	seenPaths := map[string]struct{}{}
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		if _, duplicate := seenPaths[path]; duplicate {
-			return nil, ErrInvalidRequest
-		}
-		seenPaths[path] = struct{}{}
-		configuredPaths = append(configuredPaths, path)
-	}
-	if len(configuredPaths) == 0 {
+	if path == "" {
 		return nil, nil
 	}
-	if store == nil || len(configuredPaths) > 8 {
+	if store == nil {
+		return nil, ErrInvalidRequest
+	}
+	document, resolver, err := loadNativeConfiguration(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(document.Workstations) > 128 || len(document.Workstations) > store.maxActiveRuns || len(document.Schedules) > 64 {
 		return nil, ErrInvalidRequest
 	}
 	result := &Scheduler{store: store, schedules: map[string]schedule{}}
 	seenRunIDs := map[string]struct{}{}
 	seenTokens := map[[32]byte]struct{}{}
-	for _, path := range configuredPaths {
-		document, resolver, err := loadSchedulingDocument(path)
-		if err != nil {
-			return nil, err
-		}
-		if len(result.localRuns)+len(document.LocalRuns) > 128 || len(result.localRuns)+len(document.LocalRuns) > store.maxActiveRuns ||
-			len(result.schedules)+len(document.Schedules) > 64 {
+	workstations := append([]workstationConfig(nil), document.Workstations...)
+	sort.Slice(workstations, func(i, j int) bool { return workstations[i].Name < workstations[j].Name })
+	for _, configured := range workstations {
+		if !validRunID(configured.Name) || configured.Backend == "" || configured.Retention == "" {
 			return nil, ErrInvalidRequest
 		}
-		for _, configured := range document.LocalRuns {
-			if _, duplicate := seenRunIDs[configured.RunID]; duplicate {
-				return nil, ErrInvalidRequest
-			}
-			seenRunIDs[configured.RunID] = struct{}{}
-			authorization := resolvedrun.AuthorizationContext{
-				Principal:  configured.Principal,
-				Selections: []resolvedrun.AuthorizedSelection{{Profile: configured.Profile, Workflows: []string{configured.Workflow}}},
-			}
-			resolved, resolveErr := resolver.Resolve(authorization, resolvedrun.LocalRunRequest{
-				RunID: configured.RunID, Profile: configured.Profile, Workflow: configured.Workflow,
-				Retention: configured.Retention, Backend: configured.Backend, Prompt: configured.Prompt,
-			})
-			if resolveErr != nil {
-				return nil, ErrInvalidRequest
-			}
-			encoded, encodeErr := encodeCanonicalResolved(resolved)
-			if encodeErr != nil {
-				return nil, ErrInvalidRequest
-			}
-			digest := sha256.Sum256([]byte("nvt.local-config/v1\x00" + configured.RunID))
-			result.localRuns = append(result.localRuns, CreateInput{
-				IdempotencyKey: "local-config-" + hex.EncodeToString(digest[:]), ResolvedRun: encoded,
-			})
+		if _, duplicate := seenRunIDs[configured.Name]; duplicate {
+			return nil, ErrInvalidRequest
 		}
-		for _, configured := range document.Schedules {
-			if !validRunID(configured.Name) || len(configured.Producers) == 0 || len(configured.Producers) > 32 {
-				return nil, ErrInvalidRequest
-			}
-			if _, duplicate := result.schedules[configured.Name]; duplicate {
-				return nil, ErrInvalidRequest
-			}
-			compiled := schedule{name: configured.Name, resolver: resolver, policies: make([]schedulePolicy, 0, len(configured.Producers))}
-			seenIdentities := map[string]struct{}{}
-			for _, producer := range configured.Producers {
-				policy, policyErr := compileSchedulePolicy(producer)
-				if policyErr != nil {
-					return nil, policyErr
-				}
-				if _, duplicate := seenIdentities[policy.identity]; duplicate {
-					return nil, ErrInvalidRequest
-				}
-				seenIdentities[policy.identity] = struct{}{}
-				if _, duplicate := seenTokens[policy.tokenDigest]; duplicate {
-					return nil, ErrInvalidRequest
-				}
-				seenTokens[policy.tokenDigest] = struct{}{}
-				compiled.policies = append(compiled.policies, policy)
-			}
-			result.schedules[configured.Name] = compiled
+		seenRunIDs[configured.Name] = struct{}{}
+		authorization := resolvedrun.AuthorizationContext{
+			Principal:  configured.Principal,
+			Selections: []resolvedrun.AuthorizedSelection{{Profile: configured.Profile, Workflows: []string{configured.Workflow}}},
 		}
+		resolved, resolveErr := resolver.Resolve(authorization, resolvedrun.LocalRunRequest{
+			RunID: configured.Name, Profile: configured.Profile, Workflow: configured.Workflow,
+			Retention: configured.Retention, Backend: configured.Backend,
+		})
+		if resolveErr != nil || !resolved.Persistence.Workspace || !resolved.Persistence.RuntimeState || !resolved.Persistence.DockerData || resolved.TTL.ActiveSeconds != 0 {
+			return nil, ErrInvalidRequest
+		}
+		encoded, encodeErr := encodeCanonicalResolved(resolved)
+		if encodeErr != nil {
+			return nil, ErrInvalidRequest
+		}
+		digest := sha256.Sum256([]byte("nvt.workstation/v1\x00" + configured.Name))
+		result.workstations = append(result.workstations, CreateInput{
+			IdempotencyKey: "workstation-" + hex.EncodeToString(digest[:]), ResolvedRun: encoded,
+		})
+	}
+	for _, configured := range document.Schedules {
+		if !validRunID(configured.Name) || len(configured.Producers) == 0 || len(configured.Producers) > 32 {
+			return nil, ErrInvalidRequest
+		}
+		if _, duplicate := result.schedules[configured.Name]; duplicate {
+			return nil, ErrInvalidRequest
+		}
+		compiled := schedule{name: configured.Name, resolver: resolver, policies: make([]schedulePolicy, 0, len(configured.Producers))}
+		seenIdentities := map[string]struct{}{}
+		for _, producer := range configured.Producers {
+			policy, policyErr := compileSchedulePolicy(producer)
+			if policyErr != nil {
+				return nil, policyErr
+			}
+			if _, duplicate := seenIdentities[policy.identity]; duplicate {
+				return nil, ErrInvalidRequest
+			}
+			seenIdentities[policy.identity] = struct{}{}
+			if _, duplicate := seenTokens[policy.tokenDigest]; duplicate {
+				return nil, ErrInvalidRequest
+			}
+			seenTokens[policy.tokenDigest] = struct{}{}
+			compiled.policies = append(compiled.policies, policy)
+		}
+		result.schedules[configured.Name] = compiled
 	}
 	return result, nil
 }
 
-func loadSchedulingDocument(path string) (schedulingDocument, *resolvedrun.Resolver, error) {
+func loadNativeConfiguration(path string) (nativeConfiguration, *resolvedrun.Resolver, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return schedulingDocument{}, nil, ErrInvalidRequest
+		return nativeConfiguration{}, nil, ErrInvalidRequest
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > maxSchedulingConfig {
-		return schedulingDocument{}, nil, ErrInvalidRequest
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > maxNativeConfigBytes {
+		return nativeConfiguration{}, nil, ErrInvalidRequest
 	}
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 || len(data) > maxSchedulingConfig || rejectDuplicateJSONKeys(data) != nil {
-		return schedulingDocument{}, nil, ErrInvalidRequest
+	if err != nil || len(data) == 0 || len(data) > maxNativeConfigBytes {
+		return nativeConfiguration{}, nil, ErrInvalidRequest
 	}
 	defer clear(data)
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	canonical, err := strictYAMLToJSON(data)
+	if err != nil {
+		return nativeConfiguration{}, nil, ErrInvalidRequest
+	}
+	defer clear(canonical)
+	decoder := json.NewDecoder(bytes.NewReader(canonical))
 	decoder.DisallowUnknownFields()
-	var document schedulingDocument
-	if decoder.Decode(&document) != nil || document.APIVersion != SchedulingAPIVersion ||
-		(len(document.Schedules) == 0 && len(document.LocalRuns) == 0) || len(document.Schedules) > 64 ||
-		len(document.LocalRuns) > 128 {
-		return schedulingDocument{}, nil, ErrInvalidRequest
+	var document nativeConfiguration
+	if decoder.Decode(&document) != nil || document.APIVersion != NativeConfigAPIVersion ||
+		(len(document.Schedules) == 0 && len(document.Workstations) == 0) || len(document.Schedules) > 64 || len(document.Workstations) > 128 {
+		return nativeConfiguration{}, nil, ErrInvalidRequest
 	}
 	var trailing any
 	if !errors.Is(decoder.Decode(&trailing), io.EOF) {
-		return schedulingDocument{}, nil, ErrInvalidRequest
+		return nativeConfiguration{}, nil, ErrInvalidRequest
 	}
-	trusted, err := resolvedrun.DecodeTrustedConfiguration(document.ResolvedRunConfig)
-	if err != nil {
-		return schedulingDocument{}, nil, ErrInvalidRequest
+	trusted := resolvedrun.TrustedConfiguration{
+		Defaults: document.Defaults, Profiles: document.Profiles, Workflows: document.Workflows,
+		ExecutionBackends: document.ExecutionBackends, RetentionPolicies: document.RetentionPolicies,
 	}
 	resolver, err := resolvedrun.NewResolver(trusted)
 	if err != nil {
-		return schedulingDocument{}, nil, ErrInvalidRequest
+		return nativeConfiguration{}, nil, ErrInvalidRequest
 	}
 	return document, resolver, nil
 }
 
-// BootstrapLocalRuns installs the administrator-owned named run selections.
-// Store.Create makes restart replay idempotent and rejects configuration drift
-// for an existing run instead of silently rewriting its immutable snapshot.
-func (scheduler *Scheduler) BootstrapLocalRuns(ctx context.Context) error {
+func strictYAMLToJSON(data []byte) ([]byte, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil || len(document.Content) != 1 {
+		return nil, ErrInvalidRequest
+	}
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, ErrInvalidRequest
+	}
+	nodes := 0
+	if validateYAMLNode(document.Content[0], 0, &nodes) != nil {
+		return nil, ErrInvalidRequest
+	}
+	var value any
+	if err := document.Content[0].Decode(&value); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) > maxNativeConfigBytes {
+		return nil, ErrInvalidRequest
+	}
+	return encoded, nil
+}
+
+func validateYAMLNode(node *yaml.Node, depth int, nodes *int) error {
+	if node == nil || depth > maxNativeConfigDepth {
+		return ErrInvalidRequest
+	}
+	(*nodes)++
+	if *nodes > maxNativeConfigNodes || node.Alias != nil || node.Anchor != "" {
+		return ErrInvalidRequest
+	}
+	switch node.Kind {
+	case yaml.MappingNode:
+		if len(node.Content)%2 != 0 {
+			return ErrInvalidRequest
+		}
+		seen := map[string]struct{}{}
+		for index := 0; index < len(node.Content); index += 2 {
+			key := node.Content[index]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || key.Value == "" {
+				return ErrInvalidRequest
+			}
+			if _, duplicate := seen[key.Value]; duplicate {
+				return ErrInvalidRequest
+			}
+			seen[key.Value] = struct{}{}
+			if validateYAMLNode(node.Content[index+1], depth+1, nodes) != nil {
+				return ErrInvalidRequest
+			}
+		}
+	case yaml.SequenceNode:
+		for _, child := range node.Content {
+			if validateYAMLNode(child, depth+1, nodes) != nil {
+				return ErrInvalidRequest
+			}
+		}
+	case yaml.ScalarNode:
+		switch node.Tag {
+		case "!!str", "!!bool", "!!int", "!!null":
+		default:
+			return ErrInvalidRequest
+		}
+	default:
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
+// BootstrapWorkstations atomically installs the administrator-owned persistent
+// inventory. Replay is idempotent; immutable drift and tombstones fail closed.
+// Removing an entry is deliberately non-destructive because only the explicit
+// authenticated delete API owns destructive lifecycle intent.
+func (scheduler *Scheduler) BootstrapWorkstations(ctx context.Context) error {
 	if scheduler == nil {
 		return nil
 	}
-	if len(scheduler.localRuns) == 0 {
+	if len(scheduler.workstations) == 0 {
 		return nil
 	}
-	_, err := scheduler.store.CreateBatch(ctx, scheduler.localRuns)
+	_, err := scheduler.store.CreateBatch(ctx, scheduler.workstations)
 	return err
 }
 

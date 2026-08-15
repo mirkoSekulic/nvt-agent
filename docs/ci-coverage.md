@@ -27,16 +27,13 @@ precise and every hermetic suite has a clear home.
 
 ### runtime
 
-- `tests/runtime/agent_copy_test.go`
 - `tests/runtime/broker_agents_test.go`
 - `tests/runtime/broker_auth_files_test.go`
-- `tests/runtime/compose_agent_test.go`
 - `tests/runtime/event_webhook_test.go`
 - `tests/runtime/git_host_credentials_test.go`
 - `tests/runtime/github_watcher_test.go`
 - `tests/runtime/initial_prompt_test.go`
 - `tests/runtime/lifecycle_termination_test.go`
-- `tests/runtime/mediated_admission_test.go`
 - `tests/runtime/mediated_smoke_test.go`
 - `tests/runtime/placeholder_file_test.go`
 - `tests/runtime/plugin_exports_test.go`
@@ -132,11 +129,10 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 ### local controller
 
-- deterministic typed local-agent projection, env-wrapper/preseed/watcher/editor
-  normalization, canonical repository/username mapping, structural secret
-  rejection, atomic deadline/bootstrap restart, composed
-  disposable scheduling, and representative nvt-dev/studio/infra fixtures →
-  `local-controller.yml / controller`
+- strict native YAML decoding, reusable profile/workflow resolution, atomic
+  workstation bootstrap/replay/add/remove semantics, composed disposable
+  scheduling, legacy/mixed-format rejection, and representative
+  nvt/studio/infra definitions → `local-controller.yml / controller`
 - `protocol/localroutes` strict route/readiness metadata contract and bounds →
   `local-controller.yml / contract`
 - `localcontroller/internal/controller` API-audience separation, scheduling,

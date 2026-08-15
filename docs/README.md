@@ -5,8 +5,8 @@ local quick start. The documents below are the maintained sources of truth.
 
 ## Guides
 
-- [Local development agent](local-development-agent.md): configure a local
-  Compose agent, broker grants, repositories, and plugins.
+- [Native local workstations](local-development-agent.md): configure reusable
+  local profiles/workflows, persistent workstations, and producer schedules.
 - [Local Kubernetes GitHub producer](local-kind-github-producer.md): run
   the operator, broker, producer, and real AgentRun Pods in kind.
 - [Claude authentication](claude-auth.md): direct and mediated Claude Code

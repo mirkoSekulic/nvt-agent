@@ -358,46 +358,14 @@ For provider `headers`, each `header-env` contains one full HTTP header line:
 COMPANY_GIT_API_KEY_HEADER=X-API-Key: xyz789
 ```
 
-## Custom Example
+## Custom plugins
 
-Custom plugins are provided per agent from:
-
-```text
-.agents/<name>/custom-plugins/
-```
-
-That directory is mounted inside the container at:
-
-```text
-/custom-plugins
-```
-
-`agent-init` writes the host path to the agent env file:
-
-```env
-CUSTOM_PLUGINS_DIR=/path/to/.agents/<name>/custom-plugins
-```
-
-`compose.agent.yaml` mounts that host path into the container:
-
-```yaml
-${CUSTOM_PLUGINS_DIR}:/custom-plugins
-```
-
-Edit `CUSTOM_PLUGINS_DIR` in `.agents/<name>/env` if custom plugins should live
-somewhere else on the host.
-
-For example, this host file:
-
-```text
-.agents/frontend/custom-plugins/custom-plugin
-```
-
-is available inside the `frontend` agent container as:
-
-```text
-/custom-plugins/custom-plugin
-```
+Local-controller profiles use the same immutable runtime plugin contract as
+other resolved runs. Bundle trusted local executables in the selected runtime
+image, or use an explicitly configured immutable Git source. The native local
+platform does not bind arbitrary host plugin directories into agent containers.
+Real secret-bearing plugin configuration is not a supported local platform
+value; use broker-backed providers and mediated egress.
 
 Example `agent.yaml`:
 
@@ -530,9 +498,9 @@ AgentRun Pods use `restartPolicy: Never`, so the existing operator status and
 TTL path records the run as failed; the runtime does not create a replacement
 session. An intentional lifecycle-reporting `TERM` exits cleanly instead.
 
-In local Compose, this stops only the main agent container. Its Docker,
-egress, capture, and other support containers may continue running until
-`make agent-down NAME=<name>`.
+For local-controller runs, this is a backend runtime-loss observation. The
+trusted controller converges the run through its configured lifecycle and
+retention policy; cleanup remains ownership-fenced and explicit.
 
 By default, plugins do not affect readiness. Add `health.readiness: true` when a
 plugin should block agent readiness:
