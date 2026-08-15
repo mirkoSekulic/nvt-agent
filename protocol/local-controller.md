@@ -66,64 +66,73 @@ controller-to-gateway route API is documented separately in
 [`local-routes.md`](local-routes.md). It exposes active non-secret route and
 readiness metadata only; gateway authorization never moves into the controller.
 
-### Trusted producer scheduling
+### Native platform configuration
 
-Dynamic scheduling is disabled when `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG`
-is omitted. Administrator-owned named workstations are independently disabled
-when `NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG` is omitted. Each referenced
-canonical absolute JSON file uses `nvt.local-scheduling/v1` and contains one
-`resolved_run_config` plus bounded `schedules`, administrator-owned
-`local_runs`, or both. Documents are composed at startup, but each schedule is
-resolved only against the trusted configuration in its own document. This
-lets a credential-free generated named-run artifact coexist with a separately
-managed producer policy and private bearer references. Duplicate schedule
-names, named run IDs, source paths, or bearer values fail closed. Each producer policy binds an administrator identity and
-private bearer-token file to exact allowed principal issuers,
-workflow-to-profile selections, one default workflow, retention policy, and
-execution backend. The token file must be a private regular file (no
-group/other permissions), 32-4096 bytes. Its contents are hashed at startup and
-never logged, returned, or stored in SQLite.
+`NVT_LOCAL_CONTROLLER_CONFIG` optionally names one canonical absolute YAML
+document with API version `nvt.local-platform/v1`. It is the only public local
+authoring contract. The document owns reusable `defaults`, `profiles`,
+`workflows`, `execution_backends`, and `retention_policies`, plus a persistent
+`workstations` inventory and optional producer `schedules`. `LocalRun` and
+`ResolvedAgentRun` remain internal lifecycle/resolution values; `local_runs`,
+`source_agent`, legacy `.agents` inputs, aliases, and multiple composed policy
+documents are rejected.
 
-The policy shape is intentionally small (the `resolved_run_config` value is the
-complete contract documented in `resolved-agent-run.md`):
+YAML decoding is bounded and rejects duplicate mapping keys, aliases, anchors,
+multiple documents, unsupported scalar tags, unknown fields, malformed values,
+and excess depth/nodes/bytes. The shared resolved-run validator then enforces
+provider-neutral runtime, broker, repository, egress, backend, and retention
+policy. Broker implementations and real credential values remain in broker
+configuration; the platform document carries only non-secret provider names,
+grants, capabilities, repository identifiers, and runtime policy.
 
-```json
-{
-  "api_version": "nvt.local-scheduling/v1",
-  "resolved_run_config": {},
-  "schedules": [{
-    "name": "github",
-    "producers": [{
-      "identity": "github-comments",
-      "token_file": "/run/secrets/nvt-local-controller/producer-token",
-      "allowed_principal_issuers": ["https://github.com"],
-      "selections": [{"profile": "engineering", "workflow": "review-pr"}],
-      "default_workflow": "review-pr",
-      "retention": "disposable",
-      "backend": "container"
-    }]
-  }]
-}
+The complete schema uses the typed values in `resolved-agent-run.md`. A compact
+selection example is:
+
+```yaml
+api_version: nvt.local-platform/v1
+defaults: {}
+profiles: []
+workflows: []
+execution_backends: []
+retention_policies: []
+workstations:
+  - name: nvt
+    principal:
+      issuer: https://local.nvt.invalid
+      subject: workstation-nvt
+      display_name: NVT development
+    profile: engineering
+    workflow: nvt-development
+    retention: persistent
+    backend: local-docker
+schedules:
+  - name: github
+    producers:
+      - identity: github-comments
+        token_file: /broker-state/github-comments-producer-token
+        allowed_principal_issuers: [https://github.com]
+        selections:
+          - {profile: engineering, workflow: review-pr}
+        default_workflow: review-pr
+        retention: disposable
+        backend: local-docker
 ```
 
-Named local workstations use the same resolver without exposing the raw-run
-administrator API. Each entry contains only an immutable principal and the
-trusted profile/workflow/retention/backend selection:
+The empty reusable-policy arrays above are illustrative; startup rejects an
+incomplete configuration. Workstations and schedules resolve through the same
+immutable resolver, so protected profile/workflow/provider/grant policy is
+authored once. A workstation must select an explicitly persistent policy that
+retains workspace, runtime state, and Docker data and has an entirely zero
+`ttl` block. Workstations never expire automatically; completion, failure,
+retention, and explicit authenticated deletion continue through the durable
+controller lifecycle without an implicit volume-deletion deadline. Producer
+bearers stay in private regular files (no group/other permissions), are
+32-4096 bytes, are hashed at startup, and are never logged, returned, or stored
+in SQLite. In the shipped Compose deployment, place them beneath the host
+`.broker/` directory and reference the corresponding `/broker-state/<name>`
+path mounted into the controller, as shown above.
 
-```json
-{
-  "local_runs": [{
-    "run_id": "nvt-dev",
-    "principal": {"issuer": "https://local.nvt.invalid", "subject": "workstation-nvt-dev"},
-    "profile": "nvt-dev",
-    "workflow": "nvt-dev",
-    "retention": "persistent",
-    "backend": "local-docker"
-  }]
-}
-```
-
-The complete named-run set is installed in one SQLite transaction. Deadline
+The complete workstation set is installed in one SQLite transaction. Deadline
 convergence, snapshot/replay, capacity, durable tombstone, and
 configuration-drift checks happen in that transaction. Rejection rolls back
 both deadline transitions and inserts. Cleanup-bound rows do not consume
@@ -134,18 +143,19 @@ cannot permanently prevent controller startup or temporarily exceed backend
 resource concurrency. A rejected startup document cannot
 leave a partially installed named-run set or partially converged state.
 
-At startup the controller resolves and creates these selections through the
-same immutable contract. Replay after restart is idempotent. Changing the
-resolved value for an existing run ID fails startup as configuration drift;
-the controller never silently rewrites an existing run or its provenance.
-The migration tool described in [local controller migration](../docs/local-controller-migration.md)
-generates this document without copying provider configuration or credential
-values.
+At startup the controller resolves and creates workstation selections through
+the same immutable contract. Replay after controller or Docker restart is
+idempotent and generic `runtime.resume` retains session state. Changing the
+resolved value for an existing name fails startup as configuration drift; the
+controller never silently rewrites provenance. Adding a workstation creates
+only the new run. Removing one from desired configuration is non-destructive:
+its durable state, route, and volumes remain until an explicit authenticated
+delete request completes cleanup.
 
-The empty object above is only a placeholder; startup rejects an incomplete
-resolved-run configuration. Mount the policy and token directory read-only
-into the controller and set the scheduling-config environment variable to the
-in-container policy path.
+Each producer policy binds an administrator identity and private bearer file
+to exact allowed principal issuers, workflow-to-profile selections, one default
+workflow, retention, and backend. Omission of `schedules` disables scheduling;
+omission of `workstations` disables startup bootstrap.
 
 The existing GitHub comments profiled-admission payload is accepted at
 `POST /v1/schedules/{schedule}/admissions`. It contains only work metadata,
@@ -542,8 +552,7 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN` | `agent.localhost` | canonical lower-case DNS suffix for local run hosts |
 | `NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX` | `/agents` | canonical stable gateway path prefix |
 | `NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER` | `nvt-local-gateway` | fixed trusted gateway container; it must carry `nvt.dev/local-gateway=true` and is attached to exact-owned run networks |
-| `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG` | omitted | optional canonical absolute `nvt.local-scheduling/v1` producer-schedule file; omission disables producer scheduling |
-| `NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG` | omitted | optional distinct canonical absolute `nvt.local-scheduling/v1` named-runs file; omission disables named-run bootstrap |
+| `NVT_LOCAL_CONTROLLER_CONFIG` | omitted | optional canonical absolute `nvt.local-platform/v1` YAML file containing reusable trusted policy, workstations, and schedules |
 | `NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE` | omitted | optional private regular 32-4096 byte bearer file; omission disables all raw `/v1/runs` management operations |
 | `NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE` | none | required private regular 32-4096 byte gateway route-reader bearer file |
 | `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded canonical mixed-family prefixes, validated at startup and by DinD; IPv4 ranges must be disjoint from the run-network pool |

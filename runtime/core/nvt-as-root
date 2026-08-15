@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Portable "run this as root" wrapper for the runtime image. It lets the same
 # command work whether the agent runs as root (the default) or as the non-root
-# `agent` user (spec.runtime.user: non-root / agent-init --user non-root):
+# `agent` user (for example a resolved runtime.user set to a non-root user):
 #
 #   nvt-as-root apt-get install -y jq
 #

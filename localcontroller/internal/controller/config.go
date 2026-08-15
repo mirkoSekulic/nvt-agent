@@ -33,8 +33,7 @@ type Config struct {
 	RouteBaseDomain         string
 	RoutePathPrefix         string
 	GatewayContainer        string
-	SchedulingConfigPath    string
-	NamedRunsConfigPath     string
+	PlatformConfigPath      string
 	AdminTokenFile          string
 	RouteTokenFile          string
 	ProtectedCIDRs          string
@@ -46,6 +45,11 @@ type Config struct {
 }
 
 func ConfigFromEnvironment() (Config, error) {
+	for _, legacy := range []string{"NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG", "NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG"} {
+		if _, exists := os.LookupEnv(legacy); exists {
+			return Config{}, ErrInvalidRequest
+		}
+	}
 	for _, name := range []string{"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER"} {
 		if value, exists := os.LookupEnv(name); exists && strings.TrimSpace(value) == "" {
 			return Config{}, ErrInvalidRequest
@@ -71,8 +75,7 @@ func ConfigFromEnvironment() (Config, error) {
 		RouteBaseDomain:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "agent.localhost"),
 		RoutePathPrefix:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "/agents"),
 		GatewayContainer:        environmentOrDefault("NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER", "nvt-local-gateway"),
-		SchedulingConfigPath:    environmentOrDefault("NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG", ""),
-		NamedRunsConfigPath:     environmentOrDefault("NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG", ""),
+		PlatformConfigPath:      environmentOrDefault("NVT_LOCAL_CONTROLLER_CONFIG", ""),
 		AdminTokenFile:          environmentOrDefault("NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE", ""),
 		RouteTokenFile:          environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE", ""),
 		ProtectedCIDRs:          environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS", "127.0.0.0/8 169.254.0.0/16"),
@@ -158,9 +161,7 @@ func ValidateConfig(config Config) error {
 		config.BrokerCAFile != "" && !filepath.IsAbs(config.BrokerCAFile) ||
 		config.ControllerOwner == "" || len(config.ControllerOwner) > 63 || config.ExternalNetwork == "" || config.RunNetworkPool == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 ||
 		!validRouteDomain(config.RouteBaseDomain) || !validRoutePrefix(config.RoutePathPrefix) || !validRunID(config.GatewayContainer) ||
-		config.SchedulingConfigPath != "" && (!filepath.IsAbs(config.SchedulingConfigPath) || filepath.Clean(config.SchedulingConfigPath) != config.SchedulingConfigPath) ||
-		config.NamedRunsConfigPath != "" && (!filepath.IsAbs(config.NamedRunsConfigPath) || filepath.Clean(config.NamedRunsConfigPath) != config.NamedRunsConfigPath) ||
-		config.NamedRunsConfigPath != "" && config.NamedRunsConfigPath == config.SchedulingConfigPath ||
+		config.PlatformConfigPath != "" && (!filepath.IsAbs(config.PlatformConfigPath) || filepath.Clean(config.PlatformConfigPath) != config.PlatformConfigPath || strings.ContainsAny(config.PlatformConfigPath, "\x00\r\n")) ||
 		config.RouteTokenFile == "" || !filepath.IsAbs(config.RouteTokenFile) || filepath.Clean(config.RouteTokenFile) != config.RouteTokenFile || strings.ContainsAny(config.RouteTokenFile, "\x00\r\n") ||
 		config.AdminTokenFile != "" && (!filepath.IsAbs(config.AdminTokenFile) || filepath.Clean(config.AdminTokenFile) != config.AdminTokenFile || strings.ContainsAny(config.AdminTokenFile, "\x00\r\n")) ||
 		config.DindImage == "" || config.EgressdImage == "" || config.CapturedImage == "" || config.SeedImage == "" ||

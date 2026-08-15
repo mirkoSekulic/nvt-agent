@@ -19,11 +19,11 @@ API authorization boundary: schedule producers, the gateway route reader, and
 raw administration use distinct startup-loaded private bearers with disjoint
 endpoint audiences. The gateway mounts only its route-reader file; the optional
 administrator bearer is retained by the controller and omission disables raw
-run management. Generated agent stacks use named resources
-and never receive the host socket. Independent named-run and producer-schedule
-documents compose without sharing producer bearer material. The optional producer scheduling config maps an
-authenticated producer and allowed principal issuers to exact administrator
-profile/workflow selections; omission disables scheduling. The gateway consumes
+run management. Generated agent stacks use named resources and never receive
+the host socket. One strict native YAML document owns reusable profiles,
+workflows, backends, retentions, persistent workstations, and optional producer
+schedule policy. Both kinds of selection use the same resolver without exposing
+internal LocalRun or ResolvedAgentRun values. The gateway consumes
 only bounded [local route metadata](../protocol/local-routes.md) and remains the
 browser authorization/proxy boundary. Each run's untrusted network namespace is
 isolated from the shared proxy bridge and sibling runs; the controller attaches
@@ -44,10 +44,8 @@ retaining their named data volumes. The nested-daemon smoke covers Linux
 dockerd semantics; native Docker Desktop restart remains a platform smoke.
 Docker data reset or volume pruning is intentionally outside restart recovery.
 
-For installation, deterministic translation of existing `nvt-dev`, `studio`,
-and `infra` configurations, verification, troubleshooting, and the unchanged
-static Compose rollback path, see the
-[local controller migration guide](../docs/local-controller-migration.md).
+For installation, native workstation configuration, operation, and
+troubleshooting, see [Native local workstations](../docs/local-development-agent.md).
 
 Run focused checks with:
 
