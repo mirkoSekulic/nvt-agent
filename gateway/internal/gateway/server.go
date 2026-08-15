@@ -423,7 +423,6 @@ type Server struct {
 	branding                brandAssets
 	nativeWorkspaceResolver NativeWorkspaceResolver
 	localRuns               LocalRunSource
-	localProxyURL           *url.URL
 	localProxyTransport     http.RoundTripper
 }
 
@@ -475,16 +474,10 @@ func NewServerWithSources(config Config, client ctrlclient.Client, namespace str
 	if err != nil {
 		return nil, err
 	}
-	var localProxy *url.URL
 	var localProxyTransport http.RoundTripper
 	if config.LocalRuns.Enabled {
 		if localSource == nil {
-			localSource, localProxy, err = newHTTPLocalRunSource(config.LocalRuns)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			localProxy, err = canonicalLocalOrigin(config.LocalRuns.ProxyURL)
+			localSource, err = newHTTPLocalRunSource(config.LocalRuns)
 			if err != nil {
 				return nil, err
 			}
@@ -496,7 +489,7 @@ func NewServerWithSources(config Config, client ctrlclient.Client, namespace str
 	}
 	return &Server{
 		config: config, client: client, namespace: namespace, auth: auth, branding: branding,
-		nativeWorkspaceResolver: resolver, localRuns: localSource, localProxyURL: localProxy, localProxyTransport: localProxyTransport,
+		nativeWorkspaceResolver: resolver, localRuns: localSource, localProxyTransport: localProxyTransport,
 	}, nil
 }
 

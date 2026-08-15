@@ -26,13 +26,17 @@ type Principal struct {
 }
 
 type Endpoint struct {
-	Host string `json:"host"`
-	Path string `json:"path,omitempty"`
+	Host         string `json:"host"`
+	Path         string `json:"path,omitempty"`
+	UpstreamHost string `json:"upstream_host"`
+	UpstreamPort int    `json:"upstream_port"`
 }
 
 type Exposure struct {
-	Name string `json:"name"`
-	Host string `json:"host"`
+	Name         string `json:"name"`
+	Host         string `json:"host"`
+	UpstreamHost string `json:"upstream_host"`
+	UpstreamPort int    `json:"upstream_port"`
 }
 
 type Run struct {
@@ -64,7 +68,8 @@ func ValidateRun(value Run) error {
 	}
 	seen := map[string]struct{}{}
 	for _, exposure := range value.Exposures {
-		if !validName(exposure.Name) || !validHost(exposure.Host) || exposure.Host == value.Session.Host {
+		if !validName(exposure.Name) || !validHost(exposure.Host) || !validHost(exposure.UpstreamHost) ||
+			exposure.UpstreamPort < 1 || exposure.UpstreamPort > 65535 || exposure.Host == value.Session.Host {
 			return errors.New("invalid local route")
 		}
 		if _, duplicate := seen[exposure.Name]; duplicate {
@@ -107,7 +112,7 @@ func validHTTPSIssuer(value string) bool {
 }
 
 func validEndpoint(value Endpoint, requirePath bool) bool {
-	if !validHost(value.Host) {
+	if !validHost(value.Host) || !validHost(value.UpstreamHost) || value.UpstreamPort < 1 || value.UpstreamPort > 65535 {
 		return false
 	}
 	if requirePath {

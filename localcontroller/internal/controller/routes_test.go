@@ -16,8 +16,8 @@ type fixedRouteProvider struct{}
 
 func (fixedRouteProvider) Routes(_ context.Context, run BackendRun) (BackendRoutes, error) {
 	return BackendRoutes{
-		Session:   localroutes.Endpoint{Host: run.Resolved.RunID + ".agent.localhost", Path: "/agents/" + run.Resolved.RunID + "/"},
-		Exposures: []localroutes.Exposure{{Name: "app", Host: "app." + run.Resolved.RunID + ".agent.localhost"}},
+		Session:   localroutes.Endpoint{Host: run.Resolved.RunID + ".agent.localhost", Path: "/agents/" + run.Resolved.RunID + "/", UpstreamHost: "nvt-local-test-namespace", UpstreamPort: 4090},
+		Exposures: []localroutes.Exposure{{Name: "app", Host: "app." + run.Resolved.RunID + ".agent.localhost", UpstreamHost: "nvt-local-test-namespace", UpstreamPort: 3000}},
 	}, nil
 }
 

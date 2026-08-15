@@ -25,7 +25,7 @@ type Config struct {
 	ProxyPort        int
 	RouteBaseDomain  string
 	RoutePathPrefix  string
-	ProxyEntrypoint  string
+	GatewayContainer string
 	ProtectedCIDRs   string
 	DindImage        string
 	EgressdImage     string
@@ -57,6 +57,7 @@ type resourceNames struct {
 	dockerData    string
 	internalNet   string
 	privateNet    string
+	namespace     string
 }
 
 type ownedLabels struct {

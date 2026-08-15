@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +30,7 @@ func TestLocalRunsConfigIsOptInAndStrict(t *testing.T) {
 	}
 	valid := base
 	valid.LocalRuns = LocalRunsConfig{
-		Enabled: true, ControllerURL: "http://local-controller:7480", ProxyURL: "http://proxy:8081",
+		Enabled: true, ControllerURL: "http://local-controller:7480",
 		BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true,
 	}
 	if err := valid.Validate(); err != nil {
@@ -37,7 +38,7 @@ func TestLocalRunsConfigIsOptInAndStrict(t *testing.T) {
 	}
 	for _, mutate := range []func(*LocalRunsConfig){
 		func(value *LocalRunsConfig) { value.ControllerURL = "http://user@local-controller:7480" },
-		func(value *LocalRunsConfig) { value.ProxyURL = value.ControllerURL },
+		func(value *LocalRunsConfig) { value.ControllerURL = "ftp://local-controller:7480" },
 		func(value *LocalRunsConfig) { value.BaseDomain = "Bad.Domain" },
 		func(value *LocalRunsConfig) { value.PathPrefix = "/agents/../other" },
 		func(value *LocalRunsConfig) { value.Timeout = 11 * time.Second },
@@ -173,7 +174,11 @@ func TestLocalRouteConfigurationDriftFailsClosed(t *testing.T) {
 }
 
 func TestLocalDashboardAndRoutesEnforceExactOwnerAndReadiness(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }))
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		response.WriteHeader(http.StatusNoContent)
+	}))
 	defer upstream.Close()
 	owned := testLocalRoute("owned-run", "https://identity.example", "42", true)
 	other := testLocalRoute("other-run", "https://identity.example", "99", true)
@@ -189,6 +194,13 @@ func TestLocalDashboardAndRoutesEnforceExactOwnerAndReadiness(t *testing.T) {
 		!strings.Contains(dashboardResponse.Body.String(), `/agents/?view=active`) || strings.Contains(dashboardResponse.Body.String(), "other-run") {
 		t.Fatalf("owner dashboard=%d %s", dashboardResponse.Code, dashboardResponse.Body.String())
 	}
+	ownedRequest := httptest.NewRequest(http.MethodGet, "http://owned-run.agent.localhost/", nil)
+	setTestPrincipalSession(t, server, ownedRequest, Principal{Issuer: "https://identity.example", Subject: "42"})
+	ownedResponse := httptest.NewRecorder()
+	server.ServeHTTP(ownedResponse, ownedRequest)
+	if ownedResponse.Code != http.StatusNoContent || upstreamCalls != 1 {
+		t.Fatalf("authorized owner route=%d calls=%d body=%s", ownedResponse.Code, upstreamCalls, ownedResponse.Body.String())
+	}
 
 	denied := httptest.NewRequest(http.MethodGet, "http://other-run.agent.localhost/", nil)
 	setTestPrincipalSession(t, server, denied, Principal{Issuer: "https://identity.example", Subject: "42"})
@@ -198,7 +210,7 @@ func TestLocalDashboardAndRoutesEnforceExactOwnerAndReadiness(t *testing.T) {
 	setTestPrincipalSession(t, server, missing, Principal{Issuer: "https://identity.example", Subject: "42"})
 	missingResponse := httptest.NewRecorder()
 	server.ServeHTTP(missingResponse, missing)
-	if deniedResponse.Code != http.StatusNotFound || missingResponse.Code != http.StatusNotFound || deniedResponse.Body.String() != missingResponse.Body.String() {
+	if deniedResponse.Code != http.StatusNotFound || missingResponse.Code != http.StatusNotFound || deniedResponse.Body.String() != missingResponse.Body.String() || upstreamCalls != 1 {
 		t.Fatalf("cross-owner disclosed existence: denied=%d %q missing=%d %q", deniedResponse.Code, deniedResponse.Body.String(), missingResponse.Code, missingResponse.Body.String())
 	}
 	unreadyRequest := httptest.NewRequest(http.MethodGet, "http://unready-run.agent.localhost/", nil)
@@ -229,8 +241,8 @@ func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
 		_, _ = response.Write([]byte(`{"api_version":"nvt.local-routes/v1","runs":[` + strings.Join(runs, ",") + `],"next_after":"run-08"}`))
 	}))
 	defer controller.Close()
-	config := LocalRunsConfig{Enabled: true, ControllerURL: controller.URL, ProxyURL: "http://proxy.example:8081", Timeout: time.Second}
-	source, _, err := newHTTPLocalRunSource(config)
+	config := LocalRunsConfig{Enabled: true, ControllerURL: controller.URL, Timeout: time.Second}
+	source, err := newHTTPLocalRunSource(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +259,7 @@ func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
 	}))
 	defer malformed.Close()
 	config.ControllerURL = malformed.URL
-	source, _, _ = newHTTPLocalRunSource(config)
+	source, _ = newHTTPLocalRunSource(config)
 	if _, err := source.List(context.Background()); err == nil {
 		t.Fatal("malformed controller response accepted")
 	}
@@ -255,14 +267,35 @@ func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
 
 func testLocalGateway(t *testing.T, proxyURL string, source LocalRunSource, authenticated bool) *Server {
 	t.Helper()
+	proxy, err := url.Parse(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(proxy.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake, ok := source.(fakeLocalRunSource); ok {
+		for index := range fake.runs {
+			fake.runs[index].Session.UpstreamHost, fake.runs[index].Session.UpstreamPort = host, port
+			for exposure := range fake.runs[index].Exposures {
+				fake.runs[index].Exposures[exposure].UpstreamHost, fake.runs[index].Exposures[exposure].UpstreamPort = host, port
+			}
+		}
+		source = fake
+	}
 	config := Config{
 		BaseDomain: "localhost", ListenAddr: ":8080", DefaultTargetPort: 4090,
-		LocalRuns: LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", ProxyURL: proxyURL, BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true},
+		LocalRuns: LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true},
 	}
 	if authenticated {
 		config = authenticatedTestConfig()
 		config.BaseDomain = "localhost"
-		config.LocalRuns = LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", ProxyURL: proxyURL, BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true}
+		config.LocalRuns = LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true}
 		config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}
 	}
 	server, err := NewServerWithSources(config, nil, "", nil, source)
@@ -280,8 +313,8 @@ func testLocalRoute(runID, issuer, subject string, ready bool) localroutes.Run {
 	return localroutes.Run{
 		APIVersion: localroutes.APIVersion, RunID: runID, State: state, Ready: ready,
 		Principal: localroutes.Principal{Issuer: issuer, Subject: subject, DisplayName: "Alice"}, Profile: "engineering", Workflow: "development",
-		CreatedAt: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC), Session: localroutes.Endpoint{Host: runID + ".agent.localhost", Path: "/agents/" + runID + "/"},
-		Exposures: []localroutes.Exposure{{Name: "app", Host: "app." + runID + ".agent.localhost"}},
+		CreatedAt: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC), Session: localroutes.Endpoint{Host: runID + ".agent.localhost", Path: "/agents/" + runID + "/", UpstreamHost: "upstream.internal", UpstreamPort: 4090},
+		Exposures: []localroutes.Exposure{{Name: "app", Host: "app." + runID + ".agent.localhost", UpstreamHost: "upstream.internal", UpstreamPort: 3000}},
 	}
 }
 

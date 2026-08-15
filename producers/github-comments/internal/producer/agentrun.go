@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	nvtv1alpha1 "github.com/mirkoSekulic/nvt-agent/operator/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -32,6 +33,11 @@ type AgentRunSubmitter struct {
 	httpClient *http.Client
 	config     Config
 }
+
+var (
+	errReadLocalAdmissionToken    = errors.New("read local admission token")
+	errInvalidLocalAdmissionToken = errors.New("invalid local admission token")
+)
 
 type agentRunIdentity struct {
 	Key  string
@@ -399,7 +405,13 @@ func (s AgentRunSubmitter) scheduleAdmissionPayload(
 		if commandComment.User.ID <= 0 {
 			return nil, "", errors.New("profiled admission requires a valid GitHub author identity")
 		}
-		token, err := readAdmissionToken(s.config.Submission.AdmissionTokenFile)
+		var token string
+		var err error
+		if s.config.Submission.Backend == SubmissionBackendLocal {
+			token, err = readLocalAdmissionToken(s.config.Submission.AdmissionTokenFile)
+		} else {
+			token, err = readAdmissionToken(s.config.Submission.AdmissionTokenFile)
+		}
 		if err != nil {
 			return nil, "", err
 		}
@@ -464,6 +476,29 @@ func readAdmissionToken(path string) (string, error) {
 		}
 	}
 	return token, nil
+}
+
+func readLocalAdmissionToken(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 ||
+		info.Size() < 32 || info.Size() > 4096 {
+		return "", errReadLocalAdmissionToken
+	}
+	// #nosec G304 -- the private token path is trusted producer configuration
+	// and is constrained by Lstat, type, mode, and size before this read.
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) < 32 || len(data) > 4096 {
+		clear(data)
+		return "", errReadLocalAdmissionToken
+	}
+	defer clear(data)
+	token := bytes.TrimSpace(data)
+	if len(token) < 32 || len(token) > 4096 || !utf8.Valid(token) || bytes.IndexFunc(token, func(character rune) bool {
+		return character <= 0x20 || character == 0x7f
+	}) >= 0 {
+		return "", errInvalidLocalAdmissionToken
+	}
+	return string(token), nil
 }
 
 func (s AgentRunSubmitter) hasExistingIdempotencyKey(ctx context.Context, key string) (bool, error) {

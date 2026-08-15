@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mirkoSekulic/nvt-agent/localcontroller/internal/networkpolicy"
+	"github.com/mirkoSekulic/nvt-agent/protocol/localroutes"
 )
 
 type Config struct {
@@ -31,7 +32,7 @@ type Config struct {
 	ProxyPort               int
 	RouteBaseDomain         string
 	RoutePathPrefix         string
-	ProxyEntrypoint         string
+	GatewayContainer        string
 	SchedulingConfigPath    string
 	ProtectedCIDRs          string
 	DindImage               string
@@ -42,7 +43,7 @@ type Config struct {
 }
 
 func ConfigFromEnvironment() (Config, error) {
-	for _, name := range []string{"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT"} {
+	for _, name := range []string{"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER"} {
 		if value, exists := os.LookupEnv(name); exists && strings.TrimSpace(value) == "" {
 			return Config{}, ErrInvalidRequest
 		}
@@ -66,7 +67,7 @@ func ConfigFromEnvironment() (Config, error) {
 		ProxyPort:               4090,
 		RouteBaseDomain:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN", "agent.localhost"),
 		RoutePathPrefix:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "/agents"),
-		ProxyEntrypoint:         environmentOrDefault("NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT", "local-agents"),
+		GatewayContainer:        environmentOrDefault("NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER", "nvt-local-gateway"),
 		SchedulingConfigPath:    environmentOrDefault("NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG", ""),
 		ProtectedCIDRs:          environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS", "127.0.0.0/8 169.254.0.0/16"),
 		DindImage:               environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_IMAGE", "nvt-dind:latest"),
@@ -118,8 +119,8 @@ func ValidateConfig(config Config) error {
 	if config.RoutePathPrefix == "" {
 		config.RoutePathPrefix = "/agents"
 	}
-	if config.ProxyEntrypoint == "" {
-		config.ProxyEntrypoint = "local-agents"
+	if config.GatewayContainer == "" {
+		config.GatewayContainer = "nvt-local-gateway"
 	}
 	if config.Bind == "" || len(config.Bind) > 512 || strings.ContainsAny(config.Bind, "\x00\r\n") {
 		return ErrInvalidRequest
@@ -136,7 +137,7 @@ func ValidateConfig(config Config) error {
 	runNetworkPolicy, runNetworkPolicyErr := networkpolicy.ValidateRunNetworkPolicy(config.RunNetworkPool, config.ProtectedCIDRs)
 	if config.StatePath == "" || !strings.HasSuffix(config.StatePath, ".sqlite3") || strings.ContainsAny(config.StatePath, "\x00\r\n") ||
 		!filepath.IsAbs(config.StatePath) || filepath.Clean(config.StatePath) != config.StatePath || filepath.Dir(config.StatePath) == string(filepath.Separator) ||
-		config.MaxActiveRuns < 1 || config.MaxActiveRuns > 10_000 ||
+		config.MaxActiveRuns < 1 || config.MaxActiveRuns > localroutes.MaxRuns ||
 		runNetworkPolicyErr != nil || runNetworkPolicy.SubnetCapacity < config.MaxActiveRuns*2 ||
 		config.MaxClaimLease < time.Second || config.MaxClaimLease > time.Hour ||
 		config.SweepInterval < time.Second || config.SweepInterval > time.Minute ||
@@ -150,7 +151,7 @@ func ValidateConfig(config Config) error {
 		config.IdentityKeyPath == "" || !filepath.IsAbs(config.IdentityKeyPath) ||
 		config.BrokerCAFile != "" && !filepath.IsAbs(config.BrokerCAFile) ||
 		config.ControllerOwner == "" || len(config.ControllerOwner) > 63 || config.ExternalNetwork == "" || config.RunNetworkPool == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 ||
-		!validRouteDomain(config.RouteBaseDomain) || !validRoutePrefix(config.RoutePathPrefix) || !validRunID(config.ProxyEntrypoint) ||
+		!validRouteDomain(config.RouteBaseDomain) || !validRoutePrefix(config.RoutePathPrefix) || !validRunID(config.GatewayContainer) ||
 		config.SchedulingConfigPath != "" && (!filepath.IsAbs(config.SchedulingConfigPath) || filepath.Clean(config.SchedulingConfigPath) != config.SchedulingConfigPath) ||
 		config.DindImage == "" || config.EgressdImage == "" || config.CapturedImage == "" || config.SeedImage == "" ||
 		strings.ContainsAny(config.ControllerOwner+config.ExternalNetwork+config.ProtectedCIDRs+config.DindImage+config.EgressdImage+config.CapturedImage+config.SeedImage, "\x00\r\n") {

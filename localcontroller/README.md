@@ -19,8 +19,11 @@ and never receive the host socket. The optional local scheduling config maps an
 authenticated producer and allowed principal issuers to exact administrator
 profile/workflow selections; omission disables scheduling. The gateway consumes
 only bounded [local route metadata](../protocol/local-routes.md) and remains the
-browser authorization/proxy boundary. See [the protocol](../protocol/local-controller.md)
-for the complete API, state, recovery, cleanup, and zero-secret contracts.
+browser authorization/proxy boundary. Each run's untrusted network namespace is
+isolated from the shared proxy bridge and sibling runs; the controller attaches
+only the fixed label-verified gateway to each run-internal network. See
+[the protocol](../protocol/local-controller.md) for the complete API, state,
+recovery, cleanup, and zero-secret contracts.
 
 Run focused checks with:
 

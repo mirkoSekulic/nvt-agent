@@ -28,6 +28,14 @@ Docker socket. The gateway and producer integrations remain on this private
 network; this service must not be exposed directly to browser or repository
 traffic.
 
+Each local run receives unique exact-owned internal/private Docker networks.
+The untrusted agent network namespace never joins `agents-proxy` or another
+run's network. The controller verifies the configured gateway container's
+fixed trust label before attaching that container to the run-internal network;
+failure or an ownership mismatch leaves the run unavailable. Cleanup detaches
+the gateway before exact-owned network removal. No per-run Traefik router or
+agent-reachable private proxy entrypoint participates in authorization.
+
 Requests and responses use `application/json`. JSON decoding rejects duplicate
 or unknown fields, trailing data, malformed content types, and bodies larger
 than 1,088 KiB. All timestamps are UTC RFC 3339 values. Error responses contain
@@ -424,7 +432,7 @@ All settings are startup-only and fail closed when malformed:
 | --- | --- | --- |
 | `NVT_LOCAL_CONTROLLER_BIND` | `0.0.0.0:7480` | valid host and TCP port |
 | `NVT_LOCAL_CONTROLLER_STATE` | `/state/controller/local-controller.sqlite3` | clean absolute `.sqlite3` path under a dedicated private directory |
-| `NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS` | `32` | 1 through 10,000 |
+| `NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS` | `32` | 1 through 500, matching the bounded complete route-consumer contract |
 | `NVT_LOCAL_CONTROLLER_MAX_CLAIM_LEASE_SECONDS` | `180` | backend timeout plus at least 30 seconds, through 3,600 |
 | `NVT_LOCAL_CONTROLLER_SWEEP_SECONDS` | `1` | 1 through 60 |
 | `NVT_LOCAL_CONTROLLER_RECONCILE_SECONDS` | `1` | 1 through 60 |
@@ -441,7 +449,7 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_PROXY_PORT` | `4090` | public local proxy port recorded in generated workspace guidance |
 | `NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN` | `agent.localhost` | canonical lower-case DNS suffix for local run hosts |
 | `NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX` | `/agents` | canonical stable gateway path prefix |
-| `NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT` | `local-agents` | private Traefik entrypoint used only for gateway-to-run proxying |
+| `NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER` | `nvt-local-gateway` | fixed trusted gateway container; it must carry `nvt.dev/local-gateway=true` and is attached to exact-owned run networks |
 | `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG` | omitted | optional canonical absolute `nvt.local-scheduling/v1` policy file; omission disables scheduling |
 | `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded canonical mixed-family prefixes, validated at startup and by DinD; IPv4 ranges must be disjoint from the run-network pool |
 | `NVT_LOCAL_CONTROLLER_DIND_IMAGE` | `nvt-dind:latest` | administrator image |

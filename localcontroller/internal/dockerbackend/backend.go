@@ -38,6 +38,9 @@ func (backend *Backend) Ready(ctx context.Context) bool {
 	if _, err := backend.docker.Run(operationContext, nil, "info", "--format", "{{.ServerVersion}}"); err != nil {
 		return false
 	}
+	if err := backend.verifyGateway(operationContext); err != nil {
+		return false
+	}
 	info, err := os.Lstat(backend.config.BrokerAgentsPath)
 	return err == nil && info.Mode().IsRegular()
 }
@@ -83,8 +86,8 @@ func withRouteDefaults(config Config) Config {
 	if config.RoutePathPrefix == "" {
 		config.RoutePathPrefix = "/agents"
 	}
-	if config.ProxyEntrypoint == "" {
-		config.ProxyEntrypoint = "local-agents"
+	if config.GatewayContainer == "" {
+		config.GatewayContainer = "nvt-local-gateway"
 	}
 	return config
 }
@@ -112,7 +115,7 @@ func validateConfig(config Config) error {
 		config.Owner == "" || len(config.Owner) > 63 || config.ExternalNetwork == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 || config.DindImage == "" || config.EgressdImage == "" ||
 		config.CapturedImage == "" || config.SeedImage == "" || config.OperationTimeout < time.Second || config.OperationTimeout > 5*time.Minute ||
 		runNetworkPolicyErr != nil ||
-		!validDockerName(config.ExternalNetwork) || !validRouteBaseDomain(config.RouteBaseDomain) || !validRoutePathPrefix(config.RoutePathPrefix) || !validDockerName(config.ProxyEntrypoint) ||
+		!validDockerName(config.ExternalNetwork) || !validRouteBaseDomain(config.RouteBaseDomain) || !validRoutePathPrefix(config.RoutePathPrefix) || !validDockerName(config.GatewayContainer) ||
 		!validImage(config.DindImage) || !validImage(config.EgressdImage) || !validImage(config.CapturedImage) || !validImage(config.SeedImage) ||
 		strings.ContainsAny(config.Owner+config.ProtectedCIDRs, "\x00\r\n") {
 		return errors.New("docker backend configuration invalid")
@@ -233,6 +236,9 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 			return controller.BackendObservation{}, controller.ErrBackendRetryable
 		}
 	}
+	if err := backend.ensureGatewayAttachment(operationContext, names.internalNet, labels); err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
+	}
 	rendered, preparedMetadata, err := backend.preparer.prepare(operationContext, run, tokens.agent, rendered)
 	if err != nil {
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
@@ -305,6 +311,9 @@ func (backend *Backend) Inspect(ctx context.Context, desired controller.BackendR
 	}
 	containerID := strings.TrimSpace(string(output))
 	labels := ownedLabels{Owner: backend.config.Owner, RunID: desired.Resolved.RunID, Digest: desired.SnapshotDigest}
+	if err := backend.ensureGatewayAttachment(operationContext, names.internalNet, labels); err != nil {
+		return controller.BackendObservation{}, controller.ErrBackendRetryable
+	}
 	if err := backend.verifyContainer(operationContext, containerID, labels); err != nil {
 		return controller.BackendObservation{}, err
 	}
@@ -365,6 +374,9 @@ func (backend *Backend) Delete(ctx context.Context, desired controller.BackendRu
 		return controller.ErrBackendRetryable
 	}
 	if err := backend.removeOwnedContainers(operationContext, labels); err != nil {
+		return controller.ErrBackendRetryable
+	}
+	if err := backend.removeGatewayAttachment(operationContext, names.internalNet, labels); err != nil {
 		return controller.ErrBackendRetryable
 	}
 	if err := backend.removeExpectedOwnedObjects(operationContext, "network", []string{names.internalNet, names.privateNet}, labels); err != nil {

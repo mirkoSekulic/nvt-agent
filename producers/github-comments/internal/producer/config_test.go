@@ -7,6 +7,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+const testDevelopmentWorkflow = "development"
+
 const testAcceptedReactionField = "accepted"
 
 func TestConfigDefaultOperatorCallbackBaseURL(t *testing.T) {
@@ -129,7 +131,7 @@ func TestSubmissionBackendDefaultsToKubernetesAndLocalRequiresProfiledAdmission(
 	local.Submission = SubmissionConfig{
 		Mode: SubmissionModeScheduleAdmission, Backend: SubmissionBackendLocal, AdmissionMode: AdmissionModeProfiled,
 		AdmissionBaseURL: "http://local-controller:7480", AdmissionTokenFile: "/run/secrets/local-controller/token",
-		ScheduleNamespace: "unused", ScheduleName: "github", Workflow: "development",
+		ScheduleNamespace: "unused", ScheduleName: "github", Workflow: testDevelopmentWorkflow,
 	}
 	if err := local.ApplyDefaultsAndValidate(); err != nil {
 		t.Fatal(err)

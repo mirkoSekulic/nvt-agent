@@ -6,7 +6,20 @@ import (
 )
 
 func TestValidateConfigBounds(t *testing.T) {
-	valid := Config{
+	valid := validControllerConfigForTest()
+	if err := ValidateConfig(valid); err != nil {
+		t.Fatal(err)
+	}
+	mixedFamily := valid
+	mixedFamily.ProtectedCIDRs = "10.0.0.0/8 fd00:1234::/48"
+	if err := ValidateConfig(mixedFamily); err != nil {
+		t.Fatalf("mixed-family protected CIDRs rejected: %v", err)
+	}
+	testInvalidConfigMutations(t, valid)
+}
+
+func validControllerConfigForTest() Config {
+	return Config{
 		Bind: "0.0.0.0:7480", StatePath: "/state/controller/local-controller.sqlite3", MaxActiveRuns: 32,
 		MaxClaimLease: 180 * time.Second, SweepInterval: time.Second, ReconcileInterval: time.Second,
 		DockerHost: "unix:///var/run/docker.sock", RunsDir: "/state/controller/runs", BrokerURL: "http://broker:7347",
@@ -16,14 +29,10 @@ func TestValidateConfigBounds(t *testing.T) {
 		EgressdImage:   "nvt-egressd:latest", CapturedImage: "nvt-captured:latest", SeedImage: "nvt-agent-runtime:latest",
 		BackendOperationTimeout: 2 * time.Minute,
 	}
-	if err := ValidateConfig(valid); err != nil {
-		t.Fatal(err)
-	}
-	mixedFamily := valid
-	mixedFamily.ProtectedCIDRs = "10.0.0.0/8 fd00:1234::/48"
-	if err := ValidateConfig(mixedFamily); err != nil {
-		t.Fatalf("mixed-family protected CIDRs rejected: %v", err)
-	}
+}
+
+func testInvalidConfigMutations(t *testing.T, valid Config) {
+	t.Helper()
 	for name, mutate := range map[string]func(*Config){
 		"bind":  func(value *Config) { value.Bind = "7480" },
 		"state": func(value *Config) { value.StatePath = "/state/data.db" },
@@ -45,7 +54,7 @@ func TestValidateConfigBounds(t *testing.T) {
 		"broker agents":                        func(value *Config) { value.BrokerAgentsPath = "relative" },
 		"route domain":                         func(value *Config) { value.RouteBaseDomain = "Bad.Domain" },
 		"route prefix":                         func(value *Config) { value.RoutePathPrefix = "/agents/../other" },
-		"proxy entrypoint":                     func(value *Config) { value.ProxyEntrypoint = "local agents" },
+		"gateway container":                    func(value *Config) { value.GatewayContainer = "local gateway" },
 		"scheduling path":                      func(value *Config) { value.SchedulingConfigPath = "relative.json" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -71,7 +80,7 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 		"NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL",
 		"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN",
 		"NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX",
-		"NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT",
+		"NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER",
 	} {
 		t.Setenv(name, "")
 		if _, err := ConfigFromEnvironment(); err == nil {
@@ -82,6 +91,18 @@ func TestConfigEnvironmentIsStrictAndUsesDefaultsOnlyWhenOmitted(t *testing.T) {
 	config, err := ConfigFromEnvironment()
 	if err != nil || config.MaxActiveRuns != 32 || config.MaxClaimLease != 180*time.Second || config.SweepInterval != time.Second {
 		t.Fatalf("explicit valid environment = %#v, %v", config, err)
+	}
+}
+
+func TestLocalControllerActiveRunLimitMatchesRouteContract(t *testing.T) {
+	valid := validControllerConfigForTest()
+	valid.MaxActiveRuns = 500
+	if err := ValidateConfig(valid); err != nil {
+		t.Fatalf("route maximum rejected: %v", err)
+	}
+	valid.MaxActiveRuns = 501
+	if err := ValidateConfig(valid); err == nil {
+		t.Fatal("active-run count above route contract accepted")
 	}
 }
 
@@ -123,8 +144,8 @@ func defaultEnvironmentValue(name string) string {
 		return "agent.localhost"
 	case "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX":
 		return "/agents"
-	case "NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT":
-		return "local-agents"
+	case "NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER":
+		return "nvt-local-gateway"
 	default:
 		return "1"
 	}

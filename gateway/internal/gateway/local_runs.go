@@ -21,7 +21,6 @@ const localRouteRequestLimit = localroutes.MaxDocumentBytes
 type LocalRunsConfig struct {
 	Enabled           bool
 	ControllerURL     string
-	ProxyURL          string
 	BaseDomain        string
 	PathPrefix        string
 	Timeout           time.Duration
@@ -59,9 +58,8 @@ func (config LocalRunsConfig) validate() error {
 		return nil
 	}
 	config.applyDefaults()
-	controller, controllerErr := canonicalLocalOrigin(config.ControllerURL)
-	proxy, proxyErr := canonicalLocalOrigin(config.ProxyURL)
-	if controllerErr != nil || proxyErr != nil || controller.String() == proxy.String() ||
+	_, controllerErr := canonicalLocalOrigin(config.ControllerURL)
+	if controllerErr != nil ||
 		!validLocalBaseDomain(config.BaseDomain) || !validLocalPathPrefix(config.PathPrefix) ||
 		config.Timeout < 100*time.Millisecond || config.Timeout > 10*time.Second {
 		return fmt.Errorf("localRuns requires bounded controller/proxy origins, route names, and timeout")
@@ -119,13 +117,12 @@ func localAlphaNumeric(value byte) bool {
 	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 }
 
-func newHTTPLocalRunSource(config LocalRunsConfig) (LocalRunSource, *url.URL, error) {
+func newHTTPLocalRunSource(config LocalRunsConfig) (LocalRunSource, error) {
 	config.applyDefaults()
 	if err := config.validate(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	base, _ := canonicalLocalOrigin(config.ControllerURL)
-	proxy, _ := canonicalLocalOrigin(config.ProxyURL)
 	transport := &http.Transport{
 		Proxy: nil, DialContext: (&net.Dialer{Timeout: config.Timeout, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2: true, ResponseHeaderTimeout: config.Timeout, DisableCompression: true,
@@ -134,7 +131,7 @@ func newHTTPLocalRunSource(config LocalRunsConfig) (LocalRunSource, *url.URL, er
 		Transport: transport, Timeout: config.Timeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("local controller redirect denied") },
 	}
-	return &httpLocalRunSource{base: base, client: client, timeout: config.Timeout}, proxy, nil
+	return &httpLocalRunSource{base: base, client: client, timeout: config.Timeout}, nil
 }
 
 func (source *httpLocalRunSource) Get(ctx context.Context, runID string) (localroutes.Run, error) {
@@ -272,12 +269,13 @@ func (s *Server) serveAuthorizedLocalRun(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "local session unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	upstreamHost := localRun.Session.Host
+	publicHost := localRun.Session.Host
+	upstreamHost, upstreamPort := localRun.Session.UpstreamHost, localRun.Session.UpstreamPort
 	if parsed.kind == routeLocalExposure {
-		upstreamHost = ""
+		publicHost, upstreamHost, upstreamPort = "", "", 0
 		for _, exposure := range localRun.Exposures {
 			if exposure.Name == parsed.exposure {
-				upstreamHost = exposure.Host
+				publicHost, upstreamHost, upstreamPort = exposure.Host, exposure.UpstreamHost, exposure.UpstreamPort
 				break
 			}
 		}
@@ -286,7 +284,7 @@ func (s *Server) serveAuthorizedLocalRun(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	s.proxyLocalRun(w, r, localRun, parsed, upstreamHost)
+	s.proxyLocalRun(w, r, localRun, parsed, publicHost, upstreamHost, upstreamPort)
 }
 
 func localRunMatchesConfig(run localroutes.Run, config LocalRunsConfig) bool {
@@ -303,8 +301,9 @@ func localRunMatchesConfig(run localroutes.Run, config LocalRunsConfig) bool {
 	return true
 }
 
-func (s *Server) proxyLocalRun(w http.ResponseWriter, r *http.Request, localRun localroutes.Run, parsed route, upstreamHost string) {
-	proxy := httputil.NewSingleHostReverseProxy(s.localProxyURL)
+func (s *Server) proxyLocalRun(w http.ResponseWriter, r *http.Request, localRun localroutes.Run, parsed route, publicHost, upstreamHost string, upstreamPort int) {
+	target := &url.URL{Scheme: "http", Host: net.JoinHostPort(upstreamHost, strconv.Itoa(upstreamPort))}
+	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = s.localProxyTransport
 	ownedCookies := gatewayCookieNames(s.config.Auth.Session.CookieName)
 	responseCookiePath := ""
@@ -330,9 +329,9 @@ func (s *Server) proxyLocalRun(w http.ResponseWriter, r *http.Request, localRun 
 		request.Header.Set("X-Forwarded-Host", r.Host)
 		request.Header.Set("X-Forwarded-Proto", requestScheme(r))
 		request.Header.Set("X-Forwarded-Port", requestForwardedPort(r))
-		request.Host = upstreamHost
-		request.URL.Scheme = s.localProxyURL.Scheme
-		request.URL.Host = s.localProxyURL.Host
+		request.Host = publicHost
+		request.URL.Scheme = target.Scheme
+		request.URL.Host = target.Host
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
 		filterUpstreamResponseCookies(response, ownedCookies, responseCookiePath)

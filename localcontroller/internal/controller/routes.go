@@ -9,8 +9,8 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
-// BackendRoutes contains only backend-owned public route names. Upstream
-// locations and authorization policy remain gateway configuration.
+// BackendRoutes contains only backend-owned public names and bounded internal
+// targets. Authorization policy remains exclusively gateway configuration.
 type BackendRoutes struct {
 	Session   localroutes.Endpoint
 	Exposures []localroutes.Exposure

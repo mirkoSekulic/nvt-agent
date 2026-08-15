@@ -259,11 +259,16 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 	if c.Submission.AdmissionMode != AdmissionModeLegacy && c.Submission.AdmissionMode != AdmissionModeProfiled {
 		return fmt.Errorf("submission.admissionMode must be one of %q or %q", AdmissionModeLegacy, AdmissionModeProfiled)
 	}
-	if c.Submission.Backend != SubmissionBackendKubernetes && c.Submission.Backend != SubmissionBackendLocal {
-		return fmt.Errorf("submission.backend must be one of %q or %q", SubmissionBackendKubernetes, SubmissionBackendLocal)
+	if c.Submission.Backend != SubmissionBackendKubernetes &&
+		c.Submission.Backend != SubmissionBackendLocal {
+		return fmt.Errorf("submission.backend must be one of %q or %q",
+			SubmissionBackendKubernetes, SubmissionBackendLocal)
 	}
-	if c.Submission.Backend == SubmissionBackendLocal && (c.Submission.Mode != SubmissionModeScheduleAdmission || c.Submission.AdmissionMode != AdmissionModeProfiled) {
-		return errors.New("submission.backend local requires profiled scheduleAdmission mode")
+	if c.Submission.Backend == SubmissionBackendLocal {
+		if c.Submission.Mode != SubmissionModeScheduleAdmission ||
+			c.Submission.AdmissionMode != AdmissionModeProfiled {
+			return errors.New("submission.backend local requires profiled scheduleAdmission mode")
+		}
 	}
 	if c.Submission.AdmissionMode == AdmissionModeProfiled && c.Submission.Mode != SubmissionModeScheduleAdmission {
 		return errors.New("submission.admissionMode profiled requires submission.mode scheduleAdmission")

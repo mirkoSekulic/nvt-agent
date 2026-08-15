@@ -147,52 +147,116 @@ func TestSubmitScheduleAdmissionPostsAdmissionRequest(t *testing.T) {
 
 func TestSubmitLocalScheduleAdmissionUsesProfiledBoundaryWithoutProtectedOverrides(t *testing.T) {
 	tokenPath := filepath.Join(t.TempDir(), "local-admission-token")
-	token := testAdmissionToken("bG9jYWwtc2NoZWR1bGluZw")
+	token := "opaque-local-admission-token-0123456789abcdef"
 	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var payload map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPost || request.URL.Path != "/v1/schedules/github/admissions" || request.Header.Get("Authorization") != "Bearer "+token {
-			t.Fatalf("local admission request %s %s auth=%q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/schedules/github/admissions" ||
+			request.Header.Get("Authorization") != "Bearer "+token {
+			t.Fatalf("local admission request %s %s auth=%q",
+				request.Method, request.URL.Path, request.Header.Get("Authorization"))
 		}
 		decoder := json.NewDecoder(request.Body)
 		if err := decoder.Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
 		response.WriteHeader(http.StatusCreated)
-		_, _ = response.Write([]byte(`{"scheduled":true,"agentRun":{"namespace":"local","name":"local-run"}}`))
+		body := []byte(`{"scheduled":true,"agentRun":{"namespace":"local","name":"local-run"}}`)
+		if _, err := response.Write(body); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 
 	config := Config{
 		Submission: SubmissionConfig{
-			Mode: SubmissionModeScheduleAdmission, Backend: SubmissionBackendLocal, AdmissionMode: AdmissionModeProfiled,
-			AdmissionBaseURL: server.URL, AdmissionTokenFile: tokenPath, ScheduleName: "github", Workflow: "development",
+			Mode:               SubmissionModeScheduleAdmission,
+			Backend:            SubmissionBackendLocal,
+			AdmissionMode:      AdmissionModeProfiled,
+			AdmissionBaseURL:   server.URL,
+			AdmissionTokenFile: tokenPath,
+			ScheduleName:       "github",
+			Workflow:           "development",
 		},
 		Idempotency: IdempotencyConfig{Scope: IdempotencyScopeIssue},
 	}
 	submitter := NewAgentRunSubmitterWithHTTP(nil, server.Client(), config)
-	created, _, err := submitter.Submit(context.Background(), Repository{Owner: "acme", Name: "widget"},
-		GitHubIssue{Number: 7, Title: "Issue", HTMLURL: "https://github.test/acme/widget/issues/7"}, nil,
-		GitHubIssueComment{ID: 101, HTMLURL: "https://github.test/acme/widget/issues/7#issuecomment-101", User: GitHubUser{ID: 424242, Login: "alice"}},
+	issue := GitHubIssue{Number: 7, Title: "Issue", HTMLURL: "https://github.test/acme/widget/issues/7"}
+	comment := GitHubIssueComment{
+		ID: 101, HTMLURL: "https://github.test/acme/widget/issues/7#issuecomment-101",
+		User: GitHubUser{ID: 424242, Login: "alice"},
+	}
+	created, _, err := submitter.Submit(
+		context.Background(), Repository{Owner: "acme", Name: "widget"}, issue, nil, comment,
 		Command{Prefix: "/nvtagent"})
 	if err != nil || !created {
 		t.Fatalf("local submission created=%v err=%v", created, err)
 	}
+	assertLocalSchedulePayload(t, payload)
+}
+
+func assertLocalSchedulePayload(t *testing.T, payload map[string]any) {
+	t.Helper()
 	if payload["workflow"] != "development" || payload["agentRun"] != nil {
 		t.Fatalf("local payload = %#v", payload)
 	}
-	encoded, _ := json.Marshal(payload)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, forbidden := range []string{"profile", "provider", "generation", "grants", "capabilities", "egress", "runtime", "agentRun"} {
 		if bytes.Contains(encoded, []byte(`"`+forbidden+`"`)) {
 			t.Fatalf("producer supplied protected field %q: %s", forbidden, encoded)
 		}
 	}
-	work := payload["work"].(map[string]any)
-	principal := work["principal"].(map[string]any)
+	work, ok := payload["work"].(map[string]any)
+	if !ok {
+		t.Fatalf("local work payload = %#v", payload["work"])
+	}
+	principal, ok := work["principal"].(map[string]any)
+	if !ok {
+		t.Fatalf("local principal payload = %#v", work["principal"])
+	}
 	if principal["issuer"] != githubPrincipalIssuer || principal["subject"] != "424242" {
 		t.Fatalf("immutable principal = %#v", principal)
+	}
+}
+
+func TestLocalAdmissionOpaqueTokenReaderMatchesControllerContract(t *testing.T) {
+	directory := t.TempDir()
+	validPath := filepath.Join(directory, "valid")
+	valid := "opaque-local-admission-token-0123456789abcdef"
+	if err := os.WriteFile(validPath, []byte(valid+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := readLocalAdmissionToken(validPath); err != nil || token != valid {
+		t.Fatalf("valid opaque token = %q, %v", token, err)
+	}
+	for name, value := range map[string][]byte{
+		"short":        []byte("too-short"),
+		"whitespace":   []byte("opaque-local-admission token-0123456789abcdef"),
+		"invalid utf8": append([]byte("opaque-local-admission-token-0123456789abcde"), 0xff),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(directory, strings.ReplaceAll(name, " ", "-"))
+			if err := os.WriteFile(path, value, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			token, err := readLocalAdmissionToken(path)
+			if err == nil || token != "" || strings.Contains(err.Error(), path) ||
+				strings.Contains(err.Error(), string(value)) {
+				t.Fatalf("invalid opaque token = %q, %v", token, err)
+			}
+		})
+	}
+	publicPath := filepath.Join(directory, "public")
+	if err := os.WriteFile(publicPath, []byte(valid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLocalAdmissionToken(publicPath); err == nil {
+		t.Fatal("non-private local token accepted")
 	}
 }
 
@@ -352,6 +416,10 @@ func TestProfiledAdmissionInvalidIdentityAndTokenFailBeforeHTTP(t *testing.T) {
 		{name: "unreadable token", authorID: 1, tokenPath: t.TempDir()},
 		{name: "empty token", authorID: 1, tokenPath: writeTestAdmissionToken(t, "")},
 		{name: "malformed token", authorID: 1, tokenPath: writeTestAdmissionToken(t, secret+" extra")},
+		{
+			name: "opaque token remains invalid for Kubernetes", authorID: 1,
+			tokenPath: writeTestAdmissionToken(t, "opaque-kubernetes-token-0123456789abcdef"),
+		},
 		{name: "invalid base64url punctuation", authorID: 1, tokenPath: writeTestAdmissionToken(t, "eyJhbGciOiJSUzI1NiJ9.e30.c2ln!")},
 		{name: "padded base64url", authorID: 1, tokenPath: writeTestAdmissionToken(t, "eyJhbGciOiJSUzI1NiJ9.e30=.c2ln")},
 		{name: "non-JSON claims", authorID: 1, tokenPath: writeTestAdmissionToken(t, "aGVhZA.e30.c2ln")},

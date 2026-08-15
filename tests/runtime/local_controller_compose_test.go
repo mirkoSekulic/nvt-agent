@@ -42,7 +42,7 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"NVT_LOCAL_CONTROLLER_PROXY_PORT:",
 		"NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN: agent.localhost",
 		"NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX: /agents",
-		"NVT_LOCAL_CONTROLLER_PROXY_ENTRYPOINT: local-agents",
+		"NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER: nvt-local-gateway",
 		"NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG:",
 		"local-controller-state:/state",
 		"./.broker:/broker-state",
@@ -69,10 +69,11 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	}
 	for _, required := range []string{
 		"image: nvt-agent-gateway:latest",
+		"container_name: nvt-local-gateway",
 		`NVT_GATEWAY_LOCAL_RUNS_ENABLED: "true"`,
 		`NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES: "true"`,
 		"NVT_GATEWAY_LOCAL_RUNS_CONTROLLER_URL: http://local-controller:7480",
-		"NVT_GATEWAY_LOCAL_RUNS_PROXY_URL: http://proxy:8081",
+		"nvt.dev/local-gateway=true",
 		"traefik.http.routers.nvt-local-gateway.rule=Host(`localhost`) && (PathPrefix(`/agents`) || PathPrefix(`/oauth2`))",
 		"traefik.http.routers.nvt-local-gateway-host.rule=HostRegexp(",
 		"traefik.http.routers.nvt-local-gateway-exposure.rule=HostRegexp(",
@@ -91,8 +92,8 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	}
 	proxyStart := strings.Index(compose, "\n  proxy:\n")
 	proxyEnd := strings.Index(compose, "\n  gateway:\n")
-	if proxyStart == -1 || proxyEnd <= proxyStart || !strings.Contains(compose[proxyStart:proxyEnd], "--entrypoints.local-agents.address=:8081") {
-		t.Fatalf("shared proxy lacks private local-agent entrypoint:\n%s", compose)
+	if proxyStart == -1 || proxyEnd <= proxyStart || strings.Contains(compose[proxyStart:proxyEnd], "local-agents") || strings.Contains(compose[proxyStart:proxyEnd], ":8081") {
+		t.Fatalf("shared proxy retained an agent-reachable private entrypoint:\n%s", compose)
 	}
 	if strings.Contains(service, "networks:\n      - agents-proxy") || strings.Contains(service, "ports:") {
 		t.Fatalf("local controller is exposed outside its trusted control-plane network:\n%s", service)

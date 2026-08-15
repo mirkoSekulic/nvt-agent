@@ -37,7 +37,7 @@ func main() {
 		DockerHost: config.DockerHost, RunsDir: config.RunsDir, BrokerURL: config.BrokerURL, BrokerCAFile: config.BrokerCAFile,
 		BrokerAgentsPath: config.BrokerAgentsPath, IdentityKeyPath: config.IdentityKeyPath, Owner: config.ControllerOwner,
 		ExternalNetwork: config.ExternalNetwork, RunNetworkPool: config.RunNetworkPool, ProxyPort: config.ProxyPort, ProtectedCIDRs: config.ProtectedCIDRs, DindImage: config.DindImage, EgressdImage: config.EgressdImage,
-		RouteBaseDomain: config.RouteBaseDomain, RoutePathPrefix: config.RoutePathPrefix, ProxyEntrypoint: config.ProxyEntrypoint,
+		RouteBaseDomain: config.RouteBaseDomain, RoutePathPrefix: config.RoutePathPrefix, GatewayContainer: config.GatewayContainer,
 		CapturedImage: config.CapturedImage, SeedImage: config.SeedImage, OperationTimeout: config.BackendOperationTimeout,
 	})
 	if err != nil {
