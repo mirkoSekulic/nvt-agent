@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHART="${ROOT}/charts/nvt"
 CHART_VERSION="$(awk -F ': *' '/^version:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
 CHART_APP_VERSION="$(awk -F ': *' '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' "${CHART}/Chart.yaml")"
-if [[ "${CHART_VERSION}" != "0.8.66" || "${CHART_APP_VERSION}" != "0.8.66" ]]; then
-  echo "expected coordinated chart version and appVersion 0.8.66, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
+if [[ "${CHART_VERSION}" != "0.8.67" || "${CHART_APP_VERSION}" != "0.8.67" ]]; then
+  echo "expected coordinated chart version and appVersion 0.8.67, got ${CHART_VERSION}/${CHART_APP_VERSION}" >&2
   exit 1
 fi
 if [[ "$(grep -Fc 'crds: CreateReplace' "${CHART}/README.md")" -lt 2 ]]; then
   echo "expected Flux install and upgrade CRD CreateReplace guidance" >&2
   exit 1
 fi
-grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.66' "${CHART}/README.md"
+grep -Fq 'helm show crds oci://ghcr.io/mirkosekulic/helm/nvt --version 0.8.67' "${CHART}/README.md"
 grep -Fq 'ghcr.io/mirkosekulic/nvt-host-bundle:<appVersion>' "${CHART}/README.md"
 grep -Fq 'repository: https://ghcr.io/mirkosekulic/nvt-host-bundle' "${CHART}/README.md"
 grep -Fq 'digest: sha256:<64-hex>' "${CHART}/README.md"
@@ -1387,9 +1387,19 @@ grep -q 'onNoMatch: useDefault' "${PROFILE_RENDER}"
 grep -q 'system:serviceaccount:custom-ns:producer' "${PROFILE_RENDER}"
 grep -q 'name: implement-pr' "${PROFILE_RENDER}"
 grep -q 'name: review-pr' "${PROFILE_RENDER}"
+grep -q 'name: generic-run' "${PROFILE_RENDER}"
 grep -q 'defaultWorkflow: implement-pr' "${PROFILE_RENDER}"
 grep -A3 'workflows:' "${PROFILE_RENDER}" | grep -q 'implement-pr'
 grep -A3 'workflows:' "${PROFILE_RENDER}" | grep -q 'review-pr'
+grep -A4 'workflows:' "${PROFILE_RENDER}" | grep -q 'generic-run'
+grep -A4 'plugins:' "${PROFILE_RENDER}" | grep -q 'name: work-control'
+grep -A6 'completeOn:' "${PROFILE_RENDER}" | grep -q 'plugin.work.completed'
+grep -A6 'completeOn:' "${PROFILE_RENDER}" | grep -q 'plugin.github.pr.merged'
+grep -A6 'completeOn:' "${PROFILE_RENDER}" | grep -q 'plugin.github.pr.closed'
+grep -A3 'failOn:' "${PROFILE_RENDER}" | grep -q 'plugin.work.failed'
+grep -A5 'commandWorkflows:' "${PROFILE_RENDER}" | grep -q 'pr-create: implement-pr'
+grep -A5 'commandWorkflows:' "${PROFILE_RENDER}" | grep -q 'review: review-pr'
+grep -A5 'commandWorkflows:' "${PROFILE_RENDER}" | grep -q 'run: generic-run'
 grep -q 'runtimeClassName: kata-vm-isolation' "${PROFILE_RENDER}"
 grep -A6 'resources:' "${PROFILE_RENDER}" | grep -q 'cpu: "2"'
 grep -A6 'resources:' "${PROFILE_RENDER}" | grep -q 'memory: 8Gi'

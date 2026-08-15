@@ -24,6 +24,7 @@ type IssueComment struct {
 }
 
 type PromptInput struct {
+	Intent                 CommandIntent
 	Owner                  string
 	Repo                   string
 	Issue                  Issue
@@ -35,38 +36,66 @@ type PromptInput struct {
 
 func BuildPrompt(input PromptInput) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# GitHub issue PR creation request\n\n")
-	fmt.Fprintf(&b, "Repository: %s/%s\n", input.Owner, input.Repo)
-	fmt.Fprintf(&b, "Issue number: %d\n", input.Issue.Number)
-	fmt.Fprintf(&b, "Issue URL: %s\n", firstNonEmpty(input.Issue.HTMLURL, input.Issue.URL))
-	fmt.Fprintf(&b, "Issue title: %s\n\n", input.Issue.Title)
-	fmt.Fprintf(&b, "Issue body:\n%s\n\n", fenced(input.Issue.Body))
-	fmt.Fprintf(&b, "Command comment:\n")
-	fmt.Fprintf(&b, "- Sender: %s\n", firstNonEmpty(input.Sender, input.CommandComment.UserLogin))
-	fmt.Fprintf(&b, "- URL: %s\n", input.CommandComment.HTMLURL)
-	fmt.Fprintf(&b, "- Body:\n%s\n\n", fenced(input.CommandComment.Body))
-	fmt.Fprintf(&b, "Additional instructions:\n%s\n\n", fenced(input.AdditionalInstructions))
-	fmt.Fprintf(&b, "All issue comments, oldest to newest:\n")
+	writePromptContext(&b, input)
+	fmt.Fprint(&b, "\nTask:\n")
+	switch input.Intent {
+	case CommandIntentReview:
+		fmt.Fprint(&b, strings.Join([]string{
+			"Inspect the current pull request and report findings first, ordered by severity and with file and line references where possible.",
+			"Make no product-code changes. Do not approve the pull request or request changes.",
+			"Post the review findings as a comment on this pull request using the existing mediated GitHub tooling.",
+			"Only after that comment succeeds, invoke `nvt-work complete`.",
+		}, " "))
+	case CommandIntentRun:
+		fmt.Fprint(&b, strings.Join([]string{
+			"Perform the exact user instructions above in the context of this source issue or pull request.",
+			"Post a final result to the same source thread using the existing mediated GitHub tooling.",
+			"Only after that final comment succeeds, invoke `nvt-work complete`.",
+		}, " "))
+	default:
+		fmt.Fprint(&b, strings.Join([]string{
+			"Read the issue and comments, create a new branch from the repository default branch,",
+			"implement the requested fix, run relevant tests, commit the change, push the branch,",
+			fmt.Sprintf("open a pull request whose body includes `Refs #%d`,", input.Issue.Number),
+			"do not create, edit, close, or comment on the source issue,",
+			"put any follow-up status or completion comments on the pull request only,",
+			"and register the PR with `github-watch register --repo OWNER/REPO --number PR_NUMBER` if that command is available.\n",
+		}, " "))
+	}
+	return b.String()
+}
+
+func writePromptContext(b *strings.Builder, input PromptInput) {
+	title, sourceKind := "GitHub issue PR creation request", "Issue"
+	if input.Intent == CommandIntentReview {
+		title, sourceKind = "GitHub pull request review request", "Pull request"
+	} else if input.Intent == CommandIntentRun {
+		title, sourceKind = "GitHub cooperative work request", "Source"
+	}
+	fmt.Fprintf(b, "# %s\n\n", title)
+	fmt.Fprintf(b, "Repository: %s/%s\n", input.Owner, input.Repo)
+	fmt.Fprintf(b, "%s number: %d\n", sourceKind, input.Issue.Number)
+	fmt.Fprint(b, "BEGIN UNTRUSTED GITHUB CONTENT\n")
+	fmt.Fprintf(b, "%s URL: %s\n", sourceKind, firstNonEmpty(input.Issue.HTMLURL, input.Issue.URL))
+	fmt.Fprintf(b, "%s title: %s\n\n", sourceKind, input.Issue.Title)
+	fmt.Fprintf(b, "%s body:\n%s\n\n", sourceKind, fenced(input.Issue.Body))
+	fmt.Fprint(b, "Command comment:\n")
+	fmt.Fprintf(b, "- Sender: %s\n", firstNonEmpty(input.Sender, input.CommandComment.UserLogin))
+	fmt.Fprintf(b, "- URL: %s\n", input.CommandComment.HTMLURL)
+	fmt.Fprintf(b, "- Body:\n%s\n\n", fenced(input.CommandComment.Body))
+	fmt.Fprintf(b, "Additional instructions:\n%s\n\n", fenced(input.AdditionalInstructions))
+	fmt.Fprintf(b, "All %s comments, oldest to newest:\n", strings.ToLower(sourceKind))
 	for _, comment := range input.Comments {
-		fmt.Fprintf(&b, "\n## Comment %d by %s\n", comment.ID, comment.UserLogin)
+		fmt.Fprintf(b, "\n## Comment %d by %s\n", comment.ID, comment.UserLogin)
 		if comment.HTMLURL != "" {
-			fmt.Fprintf(&b, "URL: %s\n", comment.HTMLURL)
+			fmt.Fprintf(b, "URL: %s\n", comment.HTMLURL)
 		}
 		if comment.CreatedAt != "" || comment.UpdatedAt != "" {
-			fmt.Fprintf(&b, "Created: %s\nUpdated: %s\n", comment.CreatedAt, comment.UpdatedAt)
+			fmt.Fprintf(b, "Created: %s\nUpdated: %s\n", comment.CreatedAt, comment.UpdatedAt)
 		}
-		fmt.Fprintf(&b, "%s\n", fenced(comment.Body))
+		fmt.Fprintf(b, "%s\n", fenced(comment.Body))
 	}
-	fmt.Fprintf(&b, "\nTask:\n")
-	fmt.Fprint(&b, strings.Join([]string{
-		"Read the issue and comments, create a new branch from the repository default branch,",
-		"implement the requested fix, run relevant tests, commit the change, push the branch,",
-		fmt.Sprintf("open a pull request whose body includes `Refs #%d`,", input.Issue.Number),
-		"do not create, edit, close, or comment on the source issue,",
-		"put any follow-up status or completion comments on the pull request only,",
-		"and register the PR with `github-watch register --repo OWNER/REPO --number PR_NUMBER` if that command is available.\n",
-	}, " "))
-	return b.String()
+	fmt.Fprint(b, "END UNTRUSTED GITHUB CONTENT\n")
 }
 
 func fenced(value string) string {

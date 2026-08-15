@@ -1,9 +1,10 @@
 # GitHub comments producer
 
-This producer polls GitHub issue comments with GitHub App installation authentication and submits `AgentRun` work to the nvt operator schedule admission endpoint for the first supported command:
+This producer polls GitHub issue comments with GitHub App installation authentication and submits `AgentRun` work to the nvt operator schedule admission endpoint for supported commands:
 
 ```text
-<configured-prefix> pr create
+<configured-prefix> <pr create|review|run> [-- inline prompt]
+[multiline prompt]
 ```
 
 The default prefix is `/nvtagent`, but it is configuration only. GitHub-specific trigger logic lives in this producer, not in the operator or runtime image.
@@ -227,6 +228,14 @@ Producer-created AgentRuns complete on either `plugin.github.pr.merged` or
 `plugin.github.pr.closed`. Closed/unmerged PRs are treated as valid terminal
 outcomes for this workflow, not AgentRun failures.
 
+Workflow selection only chooses administrator-authored workflow instructions;
+it does not enable plugins or lifecycle events. Cooperative `review` and `run`
+deployments must explicitly enable the builtin `work-control` plugin and add
+`plugin.work.completed` / `plugin.work.failed` to the shared `AgentSchedule`
+template. For PR-backed work, configure completion as the union of the work
+event and `plugin.github.pr.merged` / `plugin.github.pr.closed`. An omitted
+signal remains bounded by the configured active deadline.
+
 `agentRun.ttl.completedTTLSeconds` and `agentRun.ttl.failedTTLSeconds` are
 forwarded to `AgentRun.spec.ttl` so terminal Pods can be cleaned up by the
 operator. Chart defaults keep successful Pods for 5 minutes, failed Pods for 1
@@ -337,3 +346,79 @@ to match the runtime image and credential broker installed in that namespace.
 The Helm chart disables the default ServiceAccount token in schedule admission
 mode and mounts only the audience-scoped projection when `admissionMode` is
 `profiled`.
+
+Commands use the first non-empty line of a comment. Prompt text is preferably
+placed on following lines; a same-line prompt must follow a standalone `--`:
+
+```text
+/nvtagent pr create
+Implement the issue and open a PR.
+
+/nvtagent review -- focus on authorization boundaries
+
+/nvtagent run
+Investigate the failing deployment and report the result here.
+```
+
+`pr create` is valid only on ordinary issues, `review` only on pull requests,
+and `run` on either. `run` requires instructions. Bare trailing text, unknown
+options, and malformed separators are rejected. Command prefixes remain
+configuration-driven. Help-command behavior is intentionally not defined yet.
+
+Profiled admission routes commands only through administrator-authored workflow
+names:
+
+```yaml
+submission:
+  commandWorkflows:
+    pr-create: implement-pr
+    review: review-pr
+    run: generic-run
+```
+
+Existing `submission.workflow` remains the fallback for `pr create` only.
+`review` and `run` fail closed when their exact mapping is absent.
+
+A complete profiled configuration routes commands and independently installs
+the provider-neutral completion tool and lifecycle contract:
+
+```yaml
+agentSchedule:
+  template:
+    agent:
+      config:
+        plugins:
+          - name: work-control
+            source: builtin
+    lifecycle:
+      completeOn:
+        - plugin.work.completed
+        - plugin.github.pr.merged
+        - plugin.github.pr.closed
+      failOn:
+        - plugin.work.failed
+  workflowProfiles:
+    - name: implement-pr
+      workspaceInstructions: Implement the issue and open a pull request.
+    - name: review-pr
+      workspaceInstructions: Review the pull request and report findings.
+    - name: generic-run
+      workspaceInstructions: Perform the requested task and report the result.
+  producerPolicies:
+    - identity: system:serviceaccount:nvt:nvt-github-comments-producer
+      workflows: [implement-pr, review-pr, generic-run]
+      defaultWorkflow: implement-pr
+
+producer:
+  submission:
+    mode: scheduleAdmission
+    admissionMode: profiled
+    commandWorkflows:
+      pr-create: implement-pr
+      review: review-pr
+      run: generic-run
+```
+
+The operator injects the per-run lifecycle event webhook for a profiled
+schedule template. `work-control` itself only exports `nvt-work` and publishes
+the fixed work events; it remains provider-neutral and holds no credentials.

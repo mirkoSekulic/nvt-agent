@@ -101,6 +101,9 @@ type SubmissionConfig struct {
 	// Workflow is an optional static, non-secret workflow profile name for
 	// profiled schedule admission.
 	Workflow string `json:"workflow,omitempty"`
+	// CommandWorkflows is an administrator-authored allowlist and exact routing
+	// map for producer command intents.
+	CommandWorkflows map[CommandIntent]string `json:"commandWorkflows,omitempty"`
 }
 
 type SchedulingReactionsConfig struct {
@@ -280,6 +283,20 @@ func (c *Config) ApplyDefaultsAndValidate() error {
 		if len(utilvalidation.IsDNS1123Label(c.Submission.Workflow)) != 0 {
 			return errors.New("submission.workflow must be a normalized DNS label")
 		}
+	}
+	for command, workflow := range c.Submission.CommandWorkflows {
+		switch command {
+		case CommandIntentPRCreate, CommandIntentReview, CommandIntentRun:
+		default:
+			return fmt.Errorf("submission.commandWorkflows contains unsupported command %q", command)
+		}
+		if workflow == "" || len(utilvalidation.IsDNS1123Label(workflow)) != 0 {
+			return fmt.Errorf("submission.commandWorkflows[%q] must be a normalized DNS label", command)
+		}
+	}
+	if len(c.Submission.CommandWorkflows) != 0 &&
+		(c.Submission.Mode != SubmissionModeScheduleAdmission || c.Submission.AdmissionMode != AdmissionModeProfiled) {
+		return errors.New("submission.commandWorkflows requires profiled scheduleAdmission mode")
 	}
 	if c.GitHubApp.AppID == 0 {
 		return errors.New("githubApp.appID is required")

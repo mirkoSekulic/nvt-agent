@@ -108,6 +108,12 @@ Tool wrappers are regenerated at container startup from the enabled plugins.
 Stale generated wrappers are removed. Tool names must not collide with other
 plugin exports or existing commands on `PATH`.
 
+The builtin provider-neutral `work-control` plugin exports `nvt-work complete`
+and `nvt-work fail`. These publish only `plugin.work.completed` and
+`plugin.work.failed`, respectively, with source `plugin:work-control`; they do
+not accept payloads or arbitrary event names. Workflows should post their final
+result through existing mediated provider tooling before signaling completion.
+
 ## Builtin Example
 
 ```yaml

@@ -21,6 +21,20 @@ func TestCommentIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestCommentIntentIdentitySeparatesCommands(t *testing.T) {
+	reviewKey := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentReview)
+	runKey := CommentIntentIdempotencyKey("owner", "repo", 42, 9001, CommandIntentRun)
+	if reviewKey != "github:owner/repo:issue:42:comment:9001:intent:review" {
+		t.Fatalf("review key = %q", reviewKey)
+	}
+	if runKey != "github:owner/repo:issue:42:comment:9001:intent:run" {
+		t.Fatalf("run key = %q", runKey)
+	}
+	if CommentIntentAgentRunName("owner", "repo", 42, 9001, CommandIntentReview) == CommentIntentAgentRunName("owner", "repo", 42, 9001, CommandIntentRun) {
+		t.Fatal("intent-scoped AgentRun names collided")
+	}
+}
+
 func TestIssueScopeAgentRunNameCompatibility(t *testing.T) {
 	got := AgentRunName("owner", "repo", 42)
 	want := "gh-owner-repo-42-pr-create-7354cbc76a"

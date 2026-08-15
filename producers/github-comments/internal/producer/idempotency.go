@@ -8,6 +8,16 @@ import (
 	"strings"
 )
 
+func CommentIntentIdempotencyKey(owner, repo string, issue int, commentID int64, intent CommandIntent) string {
+	return fmt.Sprintf("github:%s/%s:issue:%d:comment:%d:intent:%s", owner, repo, issue, commentID, intent)
+}
+
+func CommentIntentAgentRunName(owner, repo string, issue int, commentID int64, intent CommandIntent) string {
+	base := strings.ToLower(fmt.Sprintf("gh-%d-comment-%d-%s-%s-%s", issue, commentID, owner, repo, intent))
+	base = strings.Trim(dnsLabelInvalid.ReplaceAllString(base, "-"), "-")
+	return agentRunNameFromBaseAndKey(base, CommentIntentIdempotencyKey(owner, repo, issue, commentID, intent))
+}
+
 const (
 	IdempotencyAnnotation = "nvt.dev/idempotency-key"
 	AccessKeyAnnotation   = "nvt.dev/access-key"

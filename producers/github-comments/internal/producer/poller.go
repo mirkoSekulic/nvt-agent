@@ -136,15 +136,17 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		if err != nil {
 			return fmt.Errorf("get issue %s#%d: %w", key, issueNumber, err)
 		}
-		if issue.PullRequest != nil {
+		if !validCommandPlacement(command.Intent, issue.PullRequest != nil) {
 			p.Logger.Info(
-				"skipping pr-backed issue comment",
+				"skipping command with invalid placement",
 				"repo",
 				key,
 				"issue",
 				issueNumber,
 				"commentID",
 				comment.ID,
+				"intent",
+				command.Intent,
 			)
 			continue
 		}
@@ -158,7 +160,7 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		pendingReactions = p.appendSchedulingReaction(pendingReactions, comment.ID, result.Outcome)
 		if errors.Is(err, ErrSubmissionDeferred) {
 			p.Logger.Info(
-				"deferred pr create comment submission",
+				"deferred command submission",
 				"repo",
 				key,
 				"issue",
@@ -172,6 +174,10 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			continue
 		}
 		if result.Outcome == schedulingOutcomeRejected {
+			reason := "schedule-admission-rejected"
+			if errors.Is(err, errCommandDisabled) {
+				reason = "command-disabled"
+			}
 			p.Logger.Info(
 				"processed definitive schedule admission rejection",
 				"repo",
@@ -180,6 +186,8 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 				issueNumber,
 				"commentID",
 				comment.ID,
+				"reason",
+				reason,
 			)
 			continue
 		}
@@ -187,7 +195,7 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			return err
 		}
 		p.Logger.Info(
-			"processed pr create comment",
+			"processed command comment",
 			"repo",
 			key,
 			"issue",
@@ -208,6 +216,19 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 		return fmt.Errorf("set poll cursor for %s: %w", key, err)
 	}
 	return nil
+}
+
+func validCommandPlacement(intent CommandIntent, isPullRequest bool) bool {
+	switch intent {
+	case CommandIntentPRCreate:
+		return !isPullRequest
+	case CommandIntentReview:
+		return isPullRequest
+	case CommandIntentRun:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Poller) reactionForOutcome(outcome schedulingOutcome) string {

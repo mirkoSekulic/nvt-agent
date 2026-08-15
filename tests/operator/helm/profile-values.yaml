@@ -35,7 +35,16 @@ agentSchedule:
       storageClassName: managed-csi
     agent:
       config:
-        plugins: []
+        plugins:
+          - name: work-control
+            source: builtin
+    lifecycle:
+      completeOn:
+        - plugin.work.completed
+        - plugin.github.pr.merged
+        - plugin.github.pr.closed
+      failOn:
+        - plugin.work.failed
   profiles:
     - name: default-codex
       execution:
@@ -88,7 +97,25 @@ agentSchedule:
     - name: review-pr
       workspaceInstructions: |
         Review the pull request and report findings first.
+    - name: generic-run
+      workspaceInstructions: |
+        Perform the requested task and report the result to the source thread.
   producerPolicies:
     - identity: system:serviceaccount:custom-ns:producer
-      workflows: [implement-pr, review-pr]
+      workflows: [implement-pr, review-pr, generic-run]
       defaultWorkflow: implement-pr
+
+producer:
+  enabled: true
+  repositories:
+    - owner: example
+      name: project
+  githubApp:
+    appID: 123
+    installationID: 456
+  submission:
+    admissionMode: profiled
+    commandWorkflows:
+      pr-create: implement-pr
+      review: review-pr
+      run: generic-run
