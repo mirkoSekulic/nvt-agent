@@ -25,7 +25,7 @@ func TestLocalRoutesAreDurableReadyAndDisappearOnlyAfterCleanup(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	store, path := openTestStore(t, clock, 4)
 	run := createRun(t, store, "persistent-route", true)
-	handler := NewHTTPHandlerWithServices(store, nil, nil, fixedRouteProvider{}, nil)
+	handler := newAuthorizedTestHandler(t, store, nil, fixedRouteProvider{}, nil)
 
 	pending := serveRequest(t, handler, http.MethodGet, "/v1/routes/persistent-route", nil, "")
 	if pending.Code != http.StatusOK || !containsAll(pending.Body.String(), `"ready":false`, `"path":"/agents/persistent-route/"`, `"host":"persistent-route.agent.localhost"`) {
@@ -48,7 +48,7 @@ func TestLocalRoutesAreDurableReadyAndDisappearOnlyAfterCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = restarted.Close() })
-	restartedHandler := NewHTTPHandlerWithServices(restarted, nil, nil, fixedRouteProvider{}, nil)
+	restartedHandler := newAuthorizedTestHandler(t, restarted, nil, fixedRouteProvider{}, nil)
 	afterRestart := serveRequest(t, restartedHandler, http.MethodGet, "/v1/routes/persistent-route", nil, "")
 	if afterRestart.Code != http.StatusOK || afterRestart.Body.String() != ready.Body.String() {
 		t.Fatalf("route changed across restart: before=%s after=%s", ready.Body.String(), afterRestart.Body.String())
@@ -107,7 +107,7 @@ func TestLocalRoutePaginationSkipsTerminalRecordsBeforeActiveRuns(t *testing.T) 
 	}
 	_ = createRun(t, store, "zzz-active", true)
 
-	handler := NewHTTPHandlerWithServices(store, nil, nil, fixedRouteProvider{}, nil)
+	handler := newAuthorizedTestHandler(t, store, nil, fixedRouteProvider{}, nil)
 	listed := serveRequest(t, handler, http.MethodGet, "/v1/routes?limit=1", nil, "")
 	var result localroutes.List
 	if listed.Code != http.StatusOK || json.Unmarshal(listed.Body.Bytes(), &result) != nil || len(result.Runs) != 1 || result.Runs[0].RunID != "zzz-active" || result.NextAfter != "" {

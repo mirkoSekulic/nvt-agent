@@ -33,7 +33,10 @@ repository and run traffic cannot register or override those routes.
 
 Local route support is opt-in through `NVT_GATEWAY_LOCAL_RUNS_ENABLED`; the
 controller origin, base domain, path prefix, and complete request timeout are
-startup-validated. `NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES`
+startup-validated. `NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE` names the private,
+read-only route-audience bearer; the gateway sends it only to the configured
+controller origin and cannot use it for scheduling or raw run management.
+`NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES`
 is valid only with local runs and is used by the Compose-local gateway. With
 local support omitted, Kubernetes discovery, dashboards, authorization, and
 proxying are unchanged.

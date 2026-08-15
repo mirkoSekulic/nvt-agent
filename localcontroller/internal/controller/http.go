@@ -24,6 +24,7 @@ type HTTPServer struct {
 	backendReady  func(context.Context) bool
 	routeProvider RouteProvider
 	scheduler     *Scheduler
+	authorization *APIAuthorization
 }
 
 type createRequest struct {
@@ -66,11 +67,27 @@ func NewHTTPHandlerWithBackend(store *Store, logger *log.Logger, backendReady fu
 }
 
 func NewHTTPHandlerWithServices(store *Store, logger *log.Logger, backendReady func(context.Context) bool, routeProvider RouteProvider, scheduler *Scheduler) http.Handler {
+	handler, err := NewAuthorizedHTTPHandlerWithServices(store, logger, backendReady, routeProvider, scheduler, nil)
+	if err != nil {
+		return http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			response.Header().Set("Cache-Control", "no-store")
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = response.Write([]byte(`{"error":{"reason":"service-unavailable","message":"request denied"}}` + "\n"))
+		})
+	}
+	return handler
+}
+
+func NewAuthorizedHTTPHandlerWithServices(store *Store, logger *log.Logger, backendReady func(context.Context) bool, routeProvider RouteProvider, scheduler *Scheduler, authorization *APIAuthorization) (http.Handler, error) {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	server := &HTTPServer{store: store, logger: logger, backendReady: backendReady, routeProvider: routeProvider, scheduler: scheduler}
-	return http.HandlerFunc(server.serveHTTP)
+	if err := authorization.validate(routeProvider); err != nil {
+		return nil, err
+	}
+	server := &HTTPServer{store: store, logger: logger, backendReady: backendReady, routeProvider: routeProvider, scheduler: scheduler, authorization: authorization}
+	return http.HandlerFunc(server.serveHTTP), nil
 }
 
 func (server *HTTPServer) serveHTTP(response http.ResponseWriter, request *http.Request) {
@@ -83,6 +100,9 @@ func (server *HTTPServer) route(response http.ResponseWriter, request *http.Requ
 	response.Header().Set("X-Content-Type-Options", "nosniff")
 	if request.URL.EscapedPath() != request.URL.Path {
 		return server.writeError(response, ErrNotFound, "")
+	}
+	if audience := apiAudienceForPath(request.URL.Path); !server.authorization.permits(request, audience) {
+		return server.writeUnauthorized(response)
 	}
 	if request.URL.RawQuery != "" && request.URL.Path != "/v1/runs" && request.URL.Path != "/v1/routes" && !strings.HasPrefix(request.URL.Path, "/v1/schedules/") {
 		return server.writeError(response, ErrInvalidRequest, "")

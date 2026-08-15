@@ -37,6 +37,8 @@ type fakeDocker struct {
 	agentStatus     string
 	agentExitCode   int
 	agentOOM        bool
+	gatewayStatus   string
+	gatewayHealth   string
 	failComposeUp   int
 	failRemove      string
 	lifecycleEvents []string
@@ -62,6 +64,9 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 	}
 	if len(arguments) == 0 {
 		return nil, errors.New("missing command")
+	}
+	if arguments[0] == "info" {
+		return []byte("27.0.0\n"), nil
 	}
 	if arguments[0] == "compose" {
 		return docker.compose(arguments)
@@ -117,11 +122,18 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 		if labels, exists := docker.containers[id]; exists {
 			if contains(arguments, "{{json .State}}") {
 				status := docker.agentStatus
+				health := ""
+				if id == "nvt-local-gateway" {
+					status = docker.gatewayStatus
+					health = docker.gatewayHealth
+				}
 				if status == "" {
 					status = "running"
 				}
 				state := map[string]any{"Running": status != "stopped", "OOMKilled": docker.agentOOM, "ExitCode": docker.agentExitCode}
-				if status == "healthy" || status == "starting" || status == "unhealthy" {
+				if health != "" {
+					state["Health"] = map[string]any{"Status": health}
+				} else if id != "nvt-local-gateway" && (status == "healthy" || status == "starting" || status == "unhealthy") {
 					state["Health"] = map[string]any{"Status": status}
 				}
 				encoded, _ := json.Marshal(state)

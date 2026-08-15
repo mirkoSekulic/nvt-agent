@@ -32,6 +32,7 @@ services:
   gateway:
     image: nvt-agent-gateway:latest
     container_name: nvt-local-gateway
+    user: "${NVT_LOCAL_GATEWAY_UID:-65532}:${NVT_LOCAL_GATEWAY_GID:-65532}"
     environment:
       NVT_GATEWAY_LISTEN_ADDR: 0.0.0.0:8080
       NVT_GATEWAY_BASE_DOMAIN: localhost
@@ -40,11 +41,14 @@ services:
       NVT_GATEWAY_LOCAL_RUNS_ENABLED: "true"
       NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES: "true"
       NVT_GATEWAY_LOCAL_RUNS_CONTROLLER_URL: http://local-controller:7480
+      NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE: /run/secrets/local-controller-route-token
       NVT_GATEWAY_LOCAL_RUNS_BASE_DOMAIN: agent.localhost
       NVT_GATEWAY_LOCAL_RUNS_PATH_PREFIX: /agents
     networks:
       - agents-proxy
       - local-control-plane
+    volumes:
+      - ./.broker/local-controller-route-token:/run/secrets/local-controller-route-token:ro
     labels:
       - traefik.enable=true
       - traefik.docker.network=agents-proxy
@@ -86,6 +90,8 @@ services:
       NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX: /agents
       NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER: nvt-local-gateway
       NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG: ${NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG:-}
+      NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE: /broker-state/local-controller-admin-token
+      NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE: /broker-state/local-controller-route-token
       NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL: ${NVT_LOCAL_CONTROLLER_RUN_NETWORK_POOL:-100.64.0.0/10}
       NVT_LOCAL_CONTROLLER_PROXY_PORT: ${NVT_PROXY_PORT:-4090}
       NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS: ${NVT_DIND_PROTECTED_CIDRS:-127.0.0.0/8 169.254.0.0/16}

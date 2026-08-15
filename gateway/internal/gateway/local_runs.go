@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/localroutes"
 )
@@ -21,6 +24,7 @@ const localRouteRequestLimit = localroutes.MaxDocumentBytes
 type LocalRunsConfig struct {
 	Enabled           bool
 	ControllerURL     string
+	TokenFile         string
 	BaseDomain        string
 	PathPrefix        string
 	Timeout           time.Duration
@@ -36,6 +40,7 @@ type httpLocalRunSource struct {
 	base    *url.URL
 	client  *http.Client
 	timeout time.Duration
+	token   string
 }
 
 func (config *LocalRunsConfig) applyDefaults() {
@@ -61,6 +66,7 @@ func (config LocalRunsConfig) validate() error {
 	_, controllerErr := canonicalLocalOrigin(config.ControllerURL)
 	if controllerErr != nil ||
 		!validLocalBaseDomain(config.BaseDomain) || !validLocalPathPrefix(config.PathPrefix) ||
+		config.TokenFile == "" || !filepath.IsAbs(config.TokenFile) || filepath.Clean(config.TokenFile) != config.TokenFile || strings.ContainsAny(config.TokenFile, "\x00\r\n") ||
 		config.Timeout < 100*time.Millisecond || config.Timeout > 10*time.Second {
 		return fmt.Errorf("localRuns requires bounded controller/proxy origins, route names, and timeout")
 	}
@@ -123,6 +129,10 @@ func newHTTPLocalRunSource(config LocalRunsConfig) (LocalRunSource, error) {
 		return nil, err
 	}
 	base, _ := canonicalLocalOrigin(config.ControllerURL)
+	token, err := readLocalRouteToken(config.TokenFile)
+	if err != nil {
+		return nil, errors.New("local route authorization unavailable")
+	}
 	transport := &http.Transport{
 		Proxy: nil, DialContext: (&net.Dialer{Timeout: config.Timeout, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2: true, ResponseHeaderTimeout: config.Timeout, DisableCompression: true,
@@ -131,7 +141,7 @@ func newHTTPLocalRunSource(config LocalRunsConfig) (LocalRunSource, error) {
 		Transport: transport, Timeout: config.Timeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("local controller redirect denied") },
 	}
-	return &httpLocalRunSource{base: base, client: client, timeout: config.Timeout}, nil
+	return &httpLocalRunSource{base: base, client: client, timeout: config.Timeout, token: token}, nil
 }
 
 func (source *httpLocalRunSource) Get(ctx context.Context, runID string) (localroutes.Run, error) {
@@ -195,6 +205,7 @@ func (source *httpLocalRunSource) get(ctx context.Context, path string) ([]byte,
 		return nil, 0, err
 	}
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+source.token)
 	response, err := source.client.Do(request)
 	if err != nil {
 		return nil, 0, err
@@ -206,6 +217,24 @@ func (source *httpLocalRunSource) get(ctx context.Context, path string) ([]byte,
 		return nil, response.StatusCode, errors.New("local route response unavailable")
 	}
 	return data, response.StatusCode, nil
+}
+
+func readLocalRouteToken(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() < 32 || info.Size() > 4096 {
+		return "", errors.New("invalid local route authorization")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) > 4096 {
+		clear(data)
+		return "", errors.New("invalid local route authorization")
+	}
+	token := strings.TrimSpace(string(data))
+	clear(data)
+	if len(token) < 32 || len(token) > 4096 || !utf8.ValidString(token) || strings.IndexFunc(token, func(character rune) bool { return character <= 0x20 || character == 0x7f }) >= 0 {
+		return "", errors.New("invalid local route authorization")
+	}
+	return token, nil
 }
 
 func ParseLocalRoute(requestURL *url.URL, host string, config LocalRunsConfig) route {

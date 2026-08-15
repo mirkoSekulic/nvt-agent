@@ -34,6 +34,8 @@ type Config struct {
 	RoutePathPrefix         string
 	GatewayContainer        string
 	SchedulingConfigPath    string
+	AdminTokenFile          string
+	RouteTokenFile          string
 	ProtectedCIDRs          string
 	DindImage               string
 	EgressdImage            string
@@ -69,6 +71,8 @@ func ConfigFromEnvironment() (Config, error) {
 		RoutePathPrefix:         environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX", "/agents"),
 		GatewayContainer:        environmentOrDefault("NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER", "nvt-local-gateway"),
 		SchedulingConfigPath:    environmentOrDefault("NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG", ""),
+		AdminTokenFile:          environmentOrDefault("NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE", ""),
+		RouteTokenFile:          environmentOrDefault("NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE", ""),
 		ProtectedCIDRs:          environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS", "127.0.0.0/8 169.254.0.0/16"),
 		DindImage:               environmentOrDefault("NVT_LOCAL_CONTROLLER_DIND_IMAGE", "nvt-dind:latest"),
 		EgressdImage:            environmentOrDefault("NVT_LOCAL_CONTROLLER_EGRESSD_IMAGE", "nvt-egressd:latest"),
@@ -153,6 +157,8 @@ func ValidateConfig(config Config) error {
 		config.ControllerOwner == "" || len(config.ControllerOwner) > 63 || config.ExternalNetwork == "" || config.RunNetworkPool == "" || config.ProxyPort < 1 || config.ProxyPort > 65535 || config.ProtectedCIDRs == "" || len(config.ProtectedCIDRs) > 4096 ||
 		!validRouteDomain(config.RouteBaseDomain) || !validRoutePrefix(config.RoutePathPrefix) || !validRunID(config.GatewayContainer) ||
 		config.SchedulingConfigPath != "" && (!filepath.IsAbs(config.SchedulingConfigPath) || filepath.Clean(config.SchedulingConfigPath) != config.SchedulingConfigPath) ||
+		config.RouteTokenFile == "" || !filepath.IsAbs(config.RouteTokenFile) || filepath.Clean(config.RouteTokenFile) != config.RouteTokenFile || strings.ContainsAny(config.RouteTokenFile, "\x00\r\n") ||
+		config.AdminTokenFile != "" && (!filepath.IsAbs(config.AdminTokenFile) || filepath.Clean(config.AdminTokenFile) != config.AdminTokenFile || strings.ContainsAny(config.AdminTokenFile, "\x00\r\n")) ||
 		config.DindImage == "" || config.EgressdImage == "" || config.CapturedImage == "" || config.SeedImage == "" ||
 		strings.ContainsAny(config.ControllerOwner+config.ExternalNetwork+config.ProtectedCIDRs+config.DindImage+config.EgressdImage+config.CapturedImage+config.SeedImage, "\x00\r\n") {
 		return ErrInvalidRequest

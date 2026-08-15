@@ -179,7 +179,7 @@ func compileSchedulePolicy(config scheduleProducerConfig) (schedulePolicy, error
 		!validRunID(config.Retention) || config.Backend != "" && !validRunID(config.Backend) {
 		return schedulePolicy{}, ErrInvalidRequest
 	}
-	token, err := readSchedulingToken(config.TokenFile)
+	token, err := readPrivateBearer(config.TokenFile)
 	if err != nil {
 		return schedulePolicy{}, err
 	}
@@ -218,24 +218,38 @@ func compileSchedulePolicy(config scheduleProducerConfig) (schedulePolicy, error
 	return policy, nil
 }
 
-func readSchedulingToken(path string) ([]byte, error) {
+func readPrivateBearer(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() < 32 || info.Size() > 4096 {
-		return nil, ErrInvalidRequest
+		return nil, errInvalidPrivateBearer
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) > 4096 {
 		clear(data)
-		return nil, ErrInvalidRequest
+		return nil, errInvalidPrivateBearer
 	}
 	token := bytes.TrimSpace(data)
 	if len(token) < 32 || len(token) > 4096 || !utf8.Valid(token) || bytes.IndexFunc(token, func(character rune) bool { return character <= 0x20 || character == 0x7f }) >= 0 {
 		clear(data)
-		return nil, ErrInvalidRequest
+		return nil, errInvalidPrivateBearer
 	}
 	result := append([]byte(nil), token...)
 	clear(data)
 	return result, nil
+}
+
+func (scheduler *Scheduler) usesTokenDigest(candidate *[sha256.Size]byte) bool {
+	if scheduler == nil || candidate == nil {
+		return false
+	}
+	for _, configured := range scheduler.schedules {
+		for _, policy := range configured.policies {
+			if subtle.ConstantTimeCompare(candidate[:], policy.tokenDigest[:]) == 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validIssuer(raw string) bool {

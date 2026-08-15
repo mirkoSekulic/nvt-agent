@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +33,7 @@ func TestLocalRunsConfigIsOptInAndStrict(t *testing.T) {
 	valid := base
 	valid.LocalRuns = LocalRunsConfig{
 		Enabled: true, ControllerURL: "http://local-controller:7480",
-		BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true,
+		TokenFile: "/run/secrets/local-controller-route-token", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
@@ -42,6 +44,7 @@ func TestLocalRunsConfigIsOptInAndStrict(t *testing.T) {
 		func(value *LocalRunsConfig) { value.BaseDomain = "Bad.Domain" },
 		func(value *LocalRunsConfig) { value.PathPrefix = "/agents/../other" },
 		func(value *LocalRunsConfig) { value.Timeout = 11 * time.Second },
+		func(value *LocalRunsConfig) { value.TokenFile = "relative-token" },
 	} {
 		candidate := valid
 		mutate(&candidate.LocalRuns)
@@ -223,9 +226,14 @@ func TestLocalDashboardAndRoutesEnforceExactOwnerAndReadiness(t *testing.T) {
 }
 
 func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
+	tokenFile := writeLocalRouteToken(t, "route-token-00000000000000000000000000000000")
 	var mu sync.Mutex
 	requests := 0
 	controller := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer route-token-00000000000000000000000000000000" {
+			http.Error(response, "denied", http.StatusUnauthorized)
+			return
+		}
 		mu.Lock()
 		requests++
 		mu.Unlock()
@@ -241,7 +249,7 @@ func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
 		_, _ = response.Write([]byte(`{"api_version":"nvt.local-routes/v1","runs":[` + strings.Join(runs, ",") + `],"next_after":"run-08"}`))
 	}))
 	defer controller.Close()
-	config := LocalRunsConfig{Enabled: true, ControllerURL: controller.URL, Timeout: time.Second}
+	config := LocalRunsConfig{Enabled: true, ControllerURL: controller.URL, TokenFile: tokenFile, Timeout: time.Second}
 	source, err := newHTTPLocalRunSource(config)
 	if err != nil {
 		t.Fatal(err)
@@ -262,6 +270,31 @@ func TestHTTPLocalRouteSourcePaginatesStrictlyAndFailsClosed(t *testing.T) {
 	source, _ = newHTTPLocalRunSource(config)
 	if _, err := source.List(context.Background()); err == nil {
 		t.Fatal("malformed controller response accepted")
+	}
+}
+
+func TestLocalRouteTokenIsPrivateBoundedAndNeverReturned(t *testing.T) {
+	for name, prepare := range map[string]func(*testing.T) string{
+		"missing":  func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") },
+		"relative": func(_ *testing.T) string { return "relative-token" },
+		"public": func(t *testing.T) string {
+			path := writeLocalRouteToken(t, "route-token-00000000000000000000000000000000")
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"short": func(t *testing.T) string { return writeLocalRouteToken(t, "short") },
+		"whitespace": func(t *testing.T) string {
+			return writeLocalRouteToken(t, "route token 00000000000000000000000000000000")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", TokenFile: prepare(t), Timeout: time.Second}
+			if _, err := newHTTPLocalRunSource(config); err == nil || strings.Contains(err.Error(), "route-token-") {
+				t.Fatalf("invalid token source error = %v", err)
+			}
+		})
 	}
 }
 
@@ -290,12 +323,12 @@ func testLocalGateway(t *testing.T, proxyURL string, source LocalRunSource, auth
 	}
 	config := Config{
 		BaseDomain: "localhost", ListenAddr: ":8080", DefaultTargetPort: 4090,
-		LocalRuns: LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true},
+		LocalRuns: LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", TokenFile: "/run/secrets/local-controller-route-token", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true},
 	}
 	if authenticated {
 		config = authenticatedTestConfig()
 		config.BaseDomain = "localhost"
-		config.LocalRuns = LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true}
+		config.LocalRuns = LocalRunsConfig{Enabled: true, ControllerURL: "http://controller.test:7480", TokenFile: "/run/secrets/local-controller-route-token", BaseDomain: "agent.localhost", PathPrefix: "/agents", Timeout: time.Second, DisableKubernetes: true}
 		config.Auth.Authorization.Rules = []AuthorizationRule{{ID: "owner", Effect: authorizationEffectAllow, Owner: true}}
 	}
 	server, err := NewServerWithSources(config, nil, "", nil, source)
@@ -303,6 +336,15 @@ func testLocalGateway(t *testing.T, proxyURL string, source LocalRunSource, auth
 		t.Fatal(err)
 	}
 	return server
+}
+
+func writeLocalRouteToken(t *testing.T, value string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "route-token")
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func testLocalRoute(runID, issuer, subject string, ready bool) localroutes.Run {

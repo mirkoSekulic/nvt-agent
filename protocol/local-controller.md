@@ -19,20 +19,33 @@ and must remain in the broker and trusted egress path.
 
 ## Trust boundary
 
-The HTTP API and Docker socket are trusted control-plane interfaces, not agent
-interfaces. The Compose
+The Docker socket and raw management API are trusted control-plane interfaces,
+not agent interfaces. The Compose
 service has no published host port and is attached only to the internal
 `local-control-plane` network. Agent containers, the public proxy network, and
 repository code are not attached to that network and never receive the host
 Docker socket. The gateway and producer integrations remain on this private
 network; this service must not be exposed directly to browser or repository
-traffic.
+traffic. Network privacy is not an authorization boundary: every supported
+non-health API request is authenticated for exactly one audience.
+
+Three credentials are deliberately non-interchangeable. A producer token is
+bound to one configured schedule and authorizes only that schedule's
+admission/status/cancel endpoints. The gateway route token authorizes only
+bounded `GET /v1/routes` metadata. A separately mounted administrator token
+authorizes only `/v1/runs` create/list/get/cancel/delete/claim/status. Missing,
+wrong, duplicated, or cross-audience bearer values are rejected before request
+body decoding or state access. Startup rejects reuse of a token across any two
+audiences. Omitting the administrator token disables the raw management API;
+the gateway never receives that token or the producer tokens.
 
 Each local run receives unique exact-owned internal/private Docker networks.
 The untrusted agent network namespace never joins `agents-proxy` or another
 run's network. The controller verifies the configured gateway container's
-fixed trust label before attaching that container to the run-internal network;
-failure or an ownership mismatch leaves the run unavailable. Cleanup detaches
+fixed trust label, running state, and configured healthy state before attaching
+that container to the run-internal network; failure, non-running state,
+unhealthy state, or an ownership mismatch leaves the run unavailable. Cleanup
+detaches
 the gateway before exact-owned network removal. No per-run Traefik router or
 agent-reachable private proxy entrypoint participates in authorization.
 
@@ -46,7 +59,10 @@ resolved-run diagnostics are never returned.
 
 The version for request envelopes and responses is `nvt.local-runs/v1`.
 
-The bounded controller-to-gateway route API is documented separately in
+The administrator-authenticated raw run API consumes only a complete,
+already-authorized value. It is disabled when
+`NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE` is omitted. The bounded
+controller-to-gateway route API is documented separately in
 [`local-routes.md`](local-routes.md). It exposes active non-secret route and
 readiness metadata only; gateway authorization never moves into the controller.
 
@@ -451,6 +467,8 @@ All settings are startup-only and fail closed when malformed:
 | `NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX` | `/agents` | canonical stable gateway path prefix |
 | `NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER` | `nvt-local-gateway` | fixed trusted gateway container; it must carry `nvt.dev/local-gateway=true` and is attached to exact-owned run networks |
 | `NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG` | omitted | optional canonical absolute `nvt.local-scheduling/v1` policy file; omission disables scheduling |
+| `NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE` | omitted | optional private regular 32-4096 byte bearer file; omission disables all raw `/v1/runs` management operations |
+| `NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE` | none | required private regular 32-4096 byte gateway route-reader bearer file |
 | `NVT_LOCAL_CONTROLLER_DIND_PROTECTED_CIDRS` | `127.0.0.0/8 169.254.0.0/16` | bounded canonical mixed-family prefixes, validated at startup and by DinD; IPv4 ranges must be disjoint from the run-network pool |
 | `NVT_LOCAL_CONTROLLER_DIND_IMAGE` | `nvt-dind:latest` | administrator image |
 | `NVT_LOCAL_CONTROLLER_EGRESSD_IMAGE` | `nvt-egressd:latest` | administrator image |

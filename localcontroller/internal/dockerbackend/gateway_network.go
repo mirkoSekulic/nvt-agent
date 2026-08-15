@@ -13,6 +13,13 @@ type dockerNetworkEndpoint struct {
 	Name string `json:"Name"`
 }
 
+type gatewayContainerState struct {
+	Running bool `json:"Running"`
+	Health  *struct {
+		Status string `json:"Status"`
+	} `json:"Health,omitempty"`
+}
+
 func (backend *Backend) ensureGatewayAttachment(ctx context.Context, network string, labels ownedLabels) error {
 	if err := backend.verifyObject(ctx, "network", network, labels); err != nil {
 		return err
@@ -69,6 +76,15 @@ func (backend *Backend) removeGatewayAttachment(ctx context.Context, network str
 func (backend *Backend) verifyGateway(ctx context.Context) error {
 	labels, err := backend.containerLabels(ctx, backend.config.GatewayContainer)
 	if err != nil || len(labels) == 0 || labels[localGatewayLabel] != "true" {
+		return errors.New("local gateway unavailable")
+	}
+	output, err := backend.docker.Run(ctx, nil, "inspect", "--format", "{{json .State}}", backend.config.GatewayContainer)
+	if err != nil {
+		return errors.New("local gateway unavailable")
+	}
+	defer clear(output)
+	var state gatewayContainerState
+	if json.Unmarshal(bytes.TrimSpace(output), &state) != nil || !state.Running || state.Health != nil && state.Health.Status != "healthy" {
 		return errors.New("local gateway unavailable")
 	}
 	return nil

@@ -43,6 +43,7 @@ func main() {
 	flag.StringVar(&cfg.BrandingDir, "branding-dir", envString("NVT_GATEWAY_BRANDING_DIR", ""), "optional directory containing the fixed NVT branding asset set")
 	flag.BoolVar(&cfg.LocalRuns.Enabled, "local-runs-enabled", strictEnvBool("NVT_GATEWAY_LOCAL_RUNS_ENABLED", false), "enable the bounded local-controller route source")
 	flag.StringVar(&cfg.LocalRuns.ControllerURL, "local-runs-controller-url", envString("NVT_GATEWAY_LOCAL_RUNS_CONTROLLER_URL", ""), "canonical local-controller origin")
+	flag.StringVar(&cfg.LocalRuns.TokenFile, "local-runs-token-file", envString("NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE", ""), "private local-controller route bearer file")
 	flag.StringVar(&cfg.LocalRuns.BaseDomain, "local-runs-base-domain", envString("NVT_GATEWAY_LOCAL_RUNS_BASE_DOMAIN", ""), "local run host-route base domain")
 	flag.StringVar(&cfg.LocalRuns.PathPrefix, "local-runs-path-prefix", envString("NVT_GATEWAY_LOCAL_RUNS_PATH_PREFIX", ""), "local run path-route prefix")
 	flag.BoolVar(&cfg.LocalRuns.DisableKubernetes, "local-runs-disable-kubernetes", strictEnvBool("NVT_GATEWAY_LOCAL_RUNS_DISABLE_KUBERNETES", false), "disable Kubernetes AgentRun discovery for a local-only gateway")

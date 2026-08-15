@@ -59,6 +59,38 @@ func TestUntrustedGatewayIsNeverAttachedToRunNetwork(t *testing.T) {
 	}
 }
 
+func TestStoppedOrUnhealthyGatewayIsNotReadyAndRecreatedGatewayIsReattached(t *testing.T) {
+	backend, docker, run, _ := testBackend(t)
+	desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("7", 64)}
+	docker.gatewayStatus = "stopped"
+	if backend.Ready(context.Background()) {
+		t.Fatal("stopped gateway reported ready")
+	}
+	if _, err := backend.Ensure(context.Background(), desired); !errors.Is(err, controller.ErrBackendRetryable) {
+		t.Fatalf("stopped gateway ensure = %v", err)
+	}
+	docker.gatewayStatus = "running"
+	docker.gatewayHealth = "starting"
+	if backend.Ready(context.Background()) {
+		t.Fatal("starting gateway reported ready")
+	}
+	docker.gatewayHealth = "healthy"
+	if !backend.Ready(context.Background()) {
+		t.Fatal("healthy running gateway not ready")
+	}
+	if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("healthy gateway ensure = %#v %v", observation, err)
+	}
+	names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+	delete(docker.networkMembers[names.internalNet], backend.config.GatewayContainer)
+	if observation, err := backend.Inspect(context.Background(), desired); err != nil || !observation.Ready {
+		t.Fatalf("recreated gateway repair = %#v %v", observation, err)
+	}
+	if !docker.networkMembers[names.internalNet][backend.config.GatewayContainer] {
+		t.Fatal("recreated gateway was not reattached")
+	}
+}
+
 func TestSiblingRunAndPrivateProxyAreUnreachableWhileGatewayIsAttached(t *testing.T) {
 	backend, docker, first, _ := testBackend(t)
 	first.RunID = "isolation-first"

@@ -55,9 +55,17 @@ func main() {
 	if err != nil {
 		logger.Fatal("startup failed reason=scheduling-configuration-unavailable")
 	}
+	authorization, err := controller.LoadAPIAuthorization(config.AdminTokenFile, config.RouteTokenFile, scheduler)
+	if err != nil {
+		logger.Fatal("startup failed reason=api-authorization-unavailable")
+	}
+	handler, err := controller.NewAuthorizedHTTPHandlerWithServices(store, logger, backend.Ready, backend, scheduler, authorization)
+	if err != nil {
+		logger.Fatal("startup failed reason=api-authorization-unavailable")
+	}
 
 	server := &http.Server{
-		Addr: config.Bind, Handler: controller.NewHTTPHandlerWithServices(store, logger, backend.Ready, backend, scheduler),
+		Addr: config.Bind, Handler: handler,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second,
 	}
