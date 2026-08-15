@@ -55,10 +55,14 @@ adopt() {
   token="$1"
   exec 9>"${lease_lock}"
   flock 9
-  [ "$(cat "${lease_dir}/token" 2>/dev/null || true)" = "${token}" ] || {
+  lease_state="$(cat "${lease_dir}/state" 2>/dev/null || true)"
+  expires="$(cat "${lease_dir}/expires" 2>/dev/null || true)"
+  if [ "$(cat "${lease_dir}/token" 2>/dev/null || true)" != "${token}" ] || \
+    [ "${lease_state}" != claimed ] || \
+    ! [ "${expires}" -gt "$(date +%s)" ] 2>/dev/null; then
     echo "nvt-session-attach: attachment claim is missing or stale" >&2
     exit 3
-  }
+  fi
   printf '%s\n' "$$" > "${lease_dir}/pid"
   process_start "$$" > "${lease_dir}/start"
   printf '%s\n' "${boot_id}" > "${lease_dir}/boot"

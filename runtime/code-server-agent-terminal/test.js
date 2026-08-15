@@ -89,7 +89,7 @@ assert.throws(
 
 {
   const sameNameUserTerminal = {
-    name: "Different terminal",
+    name: "NVT Agent Session",
     creationOptions: { shellPath: "/bin/bash" },
     show() {
       throw new Error("activation reused a same-name user terminal");

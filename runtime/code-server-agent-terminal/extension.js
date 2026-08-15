@@ -33,8 +33,13 @@ function enabledByMarker(markerPath) {
 
 function isManagedTerminal(candidate) {
   // Restored terminals do not reliably retain creationOptions. The name is
-  // reserved by this extension and is the stable identity within a window.
-  return candidate.name === TERMINAL_NAME;
+  // the stable identity when metadata is absent. When VS Code does retain a
+  // shell path, do not mistake a same-name ordinary shell for ours.
+  if (candidate.name !== TERMINAL_NAME) {
+    return false;
+  }
+  const shellPath = candidate.creationOptions && candidate.creationOptions.shellPath;
+  return shellPath === undefined || shellPath === SESSION_ATTACH_COMMAND;
 }
 
 function claimAttachment(execFileSync = childProcess.execFileSync) {

@@ -344,6 +344,12 @@ esac
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	duplicateAdoption := sessionAttachCommand(f, "--attach", token)
+	if err := duplicateAdoption.Run(); err == nil {
+		t.Fatal("the same claim token was adopted more than once")
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 3 {
+		t.Fatalf("duplicate adoption returned %v, want exit status 3", err)
+	}
 
 	second := sessionAttachCommand(f, "--claim")
 	if err := second.Run(); err == nil {
