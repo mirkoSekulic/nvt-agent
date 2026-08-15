@@ -73,9 +73,8 @@ document with API version `nvt.local-platform/v1`. It is the only public local
 authoring contract. The document owns reusable `defaults`, `profiles`,
 `workflows`, `execution_backends`, and `retention_policies`, plus a persistent
 `workstations` inventory and optional producer `schedules`. `LocalRun` and
-`ResolvedAgentRun` remain internal lifecycle/resolution values; `local_runs`,
-`source_agent`, legacy `.agents` inputs, aliases, and multiple composed policy
-documents are rejected.
+`ResolvedAgentRun` remain internal lifecycle/resolution values. Unknown fields,
+aliases, and multiple composed policy documents are rejected.
 
 YAML decoding is bounded and rejects duplicate mapping keys, aliases, anchors,
 multiple documents, unsupported scalar tags, unknown fields, malformed values,

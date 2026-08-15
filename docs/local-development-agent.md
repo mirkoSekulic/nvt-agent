@@ -1,8 +1,7 @@
 # Native local workstations
 
 `nvt-local-controller` creates persistent local workstations and disposable
-producer runs from one administrator-owned YAML file. There is no per-agent
-Compose or `.agents/<name>/agent.yaml` authoring mode.
+producer runs from one administrator-owned YAML file.
 
 ## Configure
 
@@ -63,7 +62,7 @@ http://nvt.agent.localhost:4090/
 ```
 
 Every workstation uses `/workspace` inside the agent, matching the Kubernetes
-runtime contract; host-specific `.agents/...` paths are not exposed.
+runtime contract.
 
 Adding a workstation and restarting the controller creates it atomically.
 Unchanged entries replay idempotently. Workspace, runtime/session state, Docker

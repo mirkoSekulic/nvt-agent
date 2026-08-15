@@ -39,8 +39,8 @@ agents cannot race that recovery: their trusted startup gate accepts only a
 fresh per-process acknowledgment for the current boot and network namespace.
 The controller-owned confinement guard replaces and verifies both ordinary and
 nested-Docker capture rules before the runtime entrypoint can run or resume.
-On upgrade, a revision label replaces legacy ungated agent containers while
-retaining their named data volumes. The nested-daemon smoke covers Linux
+On upgrade, a revision label replaces pre-gate agent containers while retaining
+their named data volumes. The nested-daemon smoke covers Linux
 dockerd semantics; native Docker Desktop restart remains a platform smoke.
 Docker data reset or volume pruning is intentionally outside restart recovery.
 

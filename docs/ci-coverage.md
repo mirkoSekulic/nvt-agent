@@ -141,7 +141,7 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 - strict native YAML decoding, reusable profile/workflow resolution, atomic
   workstation bootstrap/replay/add/remove semantics, composed disposable
-  scheduling, legacy/mixed-format rejection, and representative
+  scheduling, invalid/mixed-format rejection, and representative
   nvt/studio/infra definitions → `local-controller.yml / controller`
 - `protocol/localroutes` strict route/readiness metadata contract and bounds →
   `local-controller.yml / contract`
