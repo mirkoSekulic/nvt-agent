@@ -91,6 +91,42 @@ func TestStoppedOrUnhealthyGatewayIsNotReadyAndRecreatedGatewayIsReattached(t *t
 	}
 }
 
+func TestCleanupRequiresGatewayIdentityButNotAvailability(t *testing.T) {
+	for name, makeUnavailable := range map[string]func(*fakeDocker){
+		"stopped": func(docker *fakeDocker) { docker.gatewayStatus = "stopped" },
+		"unhealthy": func(docker *fakeDocker) {
+			docker.gatewayStatus = "running"
+			docker.gatewayHealth = "unhealthy"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend, docker, run, _ := testBackend(t)
+			desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat("6", 64), DeleteRequested: true}
+			if observation, err := backend.Ensure(context.Background(), desired); err != nil || !observation.Ready {
+				t.Fatalf("ensure = %#v %v", observation, err)
+			}
+			names := namesFor(backend.config, run.RunID, desired.SnapshotDigest)
+			makeUnavailable(docker)
+			if backend.Ready(context.Background()) {
+				t.Fatal("unavailable gateway reported ready")
+			}
+			if err := backend.Delete(context.Background(), desired); err != nil {
+				t.Fatalf("cleanup was coupled to gateway availability: %v", err)
+			}
+			for _, object := range []string{"network:" + names.internalNet, "network:" + names.privateNet} {
+				if _, exists := docker.objects[object]; exists {
+					t.Fatalf("exact-owned object remained: %s", object)
+				}
+			}
+			for _, volume := range backend.requiredVolumes(run, names) {
+				if _, exists := docker.objects["volume:"+volume]; exists {
+					t.Fatalf("disposable volume remained: %s", volume)
+				}
+			}
+		})
+	}
+}
+
 func TestSiblingRunAndPrivateProxyAreUnreachableWhileGatewayIsAttached(t *testing.T) {
 	backend, docker, first, _ := testBackend(t)
 	first.RunID = "isolation-first"

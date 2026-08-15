@@ -61,7 +61,7 @@ func (backend *Backend) removeGatewayAttachment(ctx context.Context, network str
 	if !attached {
 		return nil
 	}
-	if err := backend.verifyGateway(ctx); err != nil {
+	if err := backend.verifyGatewayIdentity(ctx); err != nil {
 		return err
 	}
 	if _, err := backend.docker.Run(ctx, nil, "network", "disconnect", "-f", network, backend.config.GatewayContainer); err != nil {
@@ -74,9 +74,8 @@ func (backend *Backend) removeGatewayAttachment(ctx context.Context, network str
 }
 
 func (backend *Backend) verifyGateway(ctx context.Context) error {
-	labels, err := backend.containerLabels(ctx, backend.config.GatewayContainer)
-	if err != nil || len(labels) == 0 || labels[localGatewayLabel] != "true" {
-		return errors.New("local gateway unavailable")
+	if err := backend.verifyGatewayIdentity(ctx); err != nil {
+		return err
 	}
 	output, err := backend.docker.Run(ctx, nil, "inspect", "--format", "{{json .State}}", backend.config.GatewayContainer)
 	if err != nil {
@@ -85,6 +84,14 @@ func (backend *Backend) verifyGateway(ctx context.Context) error {
 	defer clear(output)
 	var state gatewayContainerState
 	if json.Unmarshal(bytes.TrimSpace(output), &state) != nil || !state.Running || state.Health != nil && state.Health.Status != "healthy" {
+		return errors.New("local gateway unavailable")
+	}
+	return nil
+}
+
+func (backend *Backend) verifyGatewayIdentity(ctx context.Context) error {
+	labels, err := backend.containerLabels(ctx, backend.config.GatewayContainer)
+	if err != nil || len(labels) == 0 || labels[localGatewayLabel] != "true" {
 		return errors.New("local gateway unavailable")
 	}
 	return nil

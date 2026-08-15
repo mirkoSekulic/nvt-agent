@@ -27,7 +27,8 @@ only bounded [local route metadata](../protocol/local-routes.md) and remains the
 browser authorization/proxy boundary. Each run's untrusted network namespace is
 isolated from the shared proxy bridge and sibling runs; the controller attaches
 only the fixed label-verified, running (and, when configured, healthy) gateway
-to each run-internal network. See
+to each run-internal network. Cleanup uses only that fixed identity proof, so a
+gateway outage cannot strand exact-owned run resources. See
 [the protocol](../protocol/local-controller.md) for the complete API, state,
 recovery, cleanup, and zero-secret contracts.
 

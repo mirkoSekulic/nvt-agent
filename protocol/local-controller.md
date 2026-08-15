@@ -45,8 +45,8 @@ run's network. The controller verifies the configured gateway container's
 fixed trust label, running state, and configured healthy state before attaching
 that container to the run-internal network; failure, non-running state,
 unhealthy state, or an ownership mismatch leaves the run unavailable. Cleanup
-detaches
-the gateway before exact-owned network removal. No per-run Traefik router or
+requires only the fixed identity label, so it can safely detach a stopped or
+unhealthy gateway before exact-owned network removal. No per-run Traefik router or
 agent-reachable private proxy entrypoint participates in authorization.
 
 Requests and responses use `application/json`. JSON decoding rejects duplicate
