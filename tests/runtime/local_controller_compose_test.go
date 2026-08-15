@@ -113,6 +113,9 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	if proxyStart == -1 || proxyEnd <= proxyStart || strings.Contains(compose[proxyStart:proxyEnd], "local-agents") || strings.Contains(compose[proxyStart:proxyEnd], ":8081") {
 		t.Fatalf("shared proxy retained an agent-reachable private entrypoint:\n%s", compose)
 	}
+	if !strings.Contains(compose[proxyStart:proxyEnd], "restart: unless-stopped") {
+		t.Fatalf("shared proxy will not recover after a Docker daemon restart:\n%s", compose[proxyStart:proxyEnd])
+	}
 	if strings.Contains(service, "networks:\n      - agents-proxy") || strings.Contains(service, "ports:") {
 		t.Fatalf("local controller is exposed outside its trusted control-plane network:\n%s", service)
 	}

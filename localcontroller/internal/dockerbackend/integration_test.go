@@ -150,6 +150,14 @@ providers:
 			t.Errorf("cleanup: %v", err)
 		}
 	}()
+	legacyName := "nvt-lc-legacy-agent-" + suffix
+	legacy, err := boundary.Run(ctx, nil, "run", "-d", "--name", legacyName, "--entrypoint", "sh",
+		"--label", ownerLabel+"="+backendConfig.Owner, "--label", runLabel+"="+run.RunID, "--label", digestLabel+"="+desired.SnapshotDigest,
+		"--label", composeProjectLabel+"="+ownedNames.project, "--label", composeServiceLabel+"=agent", backendConfig.SeedImage, "-ec", "sleep 300")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyID := strings.TrimSpace(string(legacy))
 	observation, err := backend.Ensure(ctx, desired)
 	if err != nil || !observation.Ready {
 		diagnostics, _ := boundary.Run(ctx, nil, "logs", brokerName)
@@ -169,8 +177,15 @@ providers:
 		policy, _ := os.ReadFile(agents)
 		t.Fatalf("real mediated ensure = %#v %v\nbroker=%s\nregistry=%s", observation, err, diagnostics, policy)
 	}
+	if _, err := boundary.Run(ctx, nil, "inspect", legacyID); err == nil {
+		t.Fatal("legacy exact-owned ungated agent survived renderer upgrade")
+	}
 	assertBackendCreatedNonOverlappingNetworks(t, ctx, boundary, backendConfig, ownedNames)
 	agentID := ownedAgentContainer(t, ctx, boundary, ownedLabels)
+	agentLabels, err := boundary.Run(ctx, nil, "inspect", "--format", "{{json .Config.Labels}}", agentID)
+	if err != nil || !bytes.Contains(agentLabels, []byte(`"`+agentConfinementRevisionLabel+`":"`+agentConfinementRevision+`"`)) {
+		t.Fatalf("replacement agent lacks confinement revision: %v %s", err, agentLabels)
+	}
 	// The synthetic upstream's Docker DNS alias is intentionally reachable only
 	// by egressd on agents-proxy. Give the isolated agent an inert public-shaped
 	// destination so transparent capture, rather than a shared Docker network,
