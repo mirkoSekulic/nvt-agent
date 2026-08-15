@@ -185,6 +185,7 @@ func TestNativeLocalConfigurationReplacesMigrationAuthoring(t *testing.T) {
 		filepath.Join(root, "templates", "env"),
 		filepath.Join(root, "scripts", "local-agent-migrate.sh"),
 		filepath.Join(root, "scripts", "local-agent-migrate-proof.sh"),
+		filepath.Join(root, "scripts", "render-agent-expose.py"),
 		filepath.Join(root, "templates", "local-controller-migration.yaml"),
 		filepath.Join(root, "docs", "local-controller-migration.md"),
 	} {
