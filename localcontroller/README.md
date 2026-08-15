@@ -20,7 +20,8 @@ raw administration use distinct startup-loaded private bearers with disjoint
 endpoint audiences. The gateway mounts only its route-reader file; the optional
 administrator bearer is retained by the controller and omission disables raw
 run management. Generated agent stacks use named resources
-and never receive the host socket. The optional local scheduling config maps an
+and never receive the host socket. Independent named-run and producer-schedule
+documents compose without sharing producer bearer material. The optional producer scheduling config maps an
 authenticated producer and allowed principal issuers to exact administrator
 profile/workflow selections; omission disables scheduling. The gateway consumes
 only bounded [local route metadata](../protocol/local-routes.md) and remains the
@@ -31,6 +32,11 @@ to each run-internal network. Cleanup uses only that fixed identity proof, so a
 gateway outage cannot strand exact-owned run resources. See
 [the protocol](../protocol/local-controller.md) for the complete API, state,
 recovery, cleanup, and zero-secret contracts.
+
+For installation, deterministic translation of existing `nvt-dev`, `studio`,
+and `infra` configurations, verification, troubleshooting, and the unchanged
+static Compose rollback path, see the
+[local controller migration guide](../docs/local-controller-migration.md).
 
 Run focused checks with:
 

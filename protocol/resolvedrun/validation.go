@@ -120,6 +120,9 @@ func ValidateResolvedAgentRun(value ResolvedAgentRun) error {
 	if err := validateMappingsAndRepositories(value.CredentialProviders, value.Repositories, value.Broker, value.Egress); err != nil {
 		return err
 	}
+	if !validDefaultCredentialProvider(value.DefaultCredentialProvider, value.CredentialProviders) {
+		return errors.New("default credential provider is invalid")
+	}
 	if err := validateInstructions(value.WorkspaceInstructions.Profile); err != nil {
 		return errors.New("profile workspace instructions are invalid")
 	}
@@ -130,6 +133,21 @@ func ValidateResolvedAgentRun(value ResolvedAgentRun) error {
 		return err
 	}
 	return nil
+}
+
+func validDefaultCredentialProvider(name string, mappings []CredentialProviderMapping) bool {
+	if name == "" {
+		return true
+	}
+	if !validProvider(name) {
+		return false
+	}
+	for _, mapping := range mappings {
+		if mapping.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePrincipal(value Principal) error {
@@ -471,8 +489,10 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 			(repository.Upstream != "" && repositoryTargetFromURL(repository.Upstream) == "") ||
 			!validCheckoutPath(repository.Path) ||
 			(repository.CredentialProvider == "" && repository.BrokerRepository != "") ||
+			(repository.CredentialProvider == "" && repository.CredentialUsername != "") ||
 			(repository.CredentialProvider == "" && repository.Identity != nil) ||
 			(repository.CredentialProvider != "" && !validRepositoryID(repository.BrokerRepository)) ||
+			(repository.CredentialUsername != "" && !validCredentialUsername(repository.CredentialUsername)) ||
 			validateRepositoryIdentity(repository.Identity) != nil {
 			return errors.New("workflow repository is invalid")
 		}
@@ -509,6 +529,10 @@ func validateMappingsAndRepositories(mappings []CredentialProviderMapping, repos
 		}
 	}
 	return nil
+}
+
+func validCredentialUsername(value string) bool {
+	return len(value) <= 256 && value == strings.TrimSpace(value) && !containsControl(value)
 }
 
 func validateRepositoryIdentity(identity *RepositoryIdentity) error {

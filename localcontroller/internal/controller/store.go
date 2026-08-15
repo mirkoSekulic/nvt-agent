@@ -323,66 +323,130 @@ func canonicalSnapshot(raw json.RawMessage) ([]byte, resolvedrun.ResolvedAgentRu
 }
 
 func (store *Store) Create(ctx context.Context, input CreateInput) (CreateResult, error) {
-	if !validIdempotencyKey(input.IdempotencyKey) {
-		return CreateResult{}, ErrInvalidRequest
+	// Preserve the single-run API's existing eager deadline convergence. The
+	// named-run bootstrap calls CreateBatch directly so a rejected batch cannot
+	// mutate unrelated durable state before all entries validate.
+	if _, err := store.Sweep(ctx); err != nil {
+		return CreateResult{}, err
 	}
-	snapshot, resolved, digest, err := canonicalSnapshot(input.ResolvedRun)
+	results, err := store.createBatch(ctx, []CreateInput{input}, false)
 	if err != nil {
 		return CreateResult{}, err
 	}
-	if _, err := store.Sweep(ctx); err != nil {
-		return CreateResult{}, err
+	return results[0], nil
+}
+
+type preparedCreate struct {
+	input    CreateInput
+	snapshot []byte
+	resolved resolvedrun.ResolvedAgentRun
+	digest   string
+}
+
+// CreateBatch validates all immutable snapshots, replays, tombstones, run-ID
+// collisions, and capacity before committing any row. It is the startup
+// boundary for administrator-owned named runs; a rejected document cannot
+// leave a partially installed set behind.
+func (store *Store) CreateBatch(ctx context.Context, inputs []CreateInput) ([]CreateResult, error) {
+	return store.createBatch(ctx, inputs, true)
+}
+
+func (store *Store) createBatch(ctx context.Context, inputs []CreateInput, reclaimCleanupCapacity bool) ([]CreateResult, error) {
+	if len(inputs) == 0 || len(inputs) > store.maxActiveRuns {
+		return nil, ErrInvalidRequest
+	}
+	prepared := make([]preparedCreate, 0, len(inputs))
+	seenKeys := make(map[string]struct{}, len(inputs))
+	seenRunIDs := make(map[string]struct{}, len(inputs))
+	for _, input := range inputs {
+		if !validIdempotencyKey(input.IdempotencyKey) {
+			return nil, ErrInvalidRequest
+		}
+		snapshot, resolved, digest, err := canonicalSnapshot(input.ResolvedRun)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := seenKeys[input.IdempotencyKey]; duplicate {
+			return nil, ErrConflict
+		}
+		if _, duplicate := seenRunIDs[resolved.RunID]; duplicate {
+			return nil, ErrConflict
+		}
+		seenKeys[input.IdempotencyKey] = struct{}{}
+		seenRunIDs[resolved.RunID] = struct{}{}
+		prepared = append(prepared, preparedCreate{input: input, snapshot: snapshot, resolved: resolved, digest: digest})
 	}
 	now := store.now().UTC()
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
-		return CreateResult{}, ErrStoreUnavailable
+		return nil, ErrStoreUnavailable
 	}
 	defer func() { _ = tx.Rollback() }()
-	existing, found, err := queryByIdempotency(ctx, tx, input.IdempotencyKey)
-	if err != nil {
-		return CreateResult{}, err
+	if _, err := sweepTx(ctx, tx, now); err != nil {
+		return nil, err
 	}
-	if found {
-		if validateStoredRun(&existing) != nil {
-			return CreateResult{}, ErrStoreUnavailable
+	results := make([]CreateResult, len(prepared))
+	newIndexes := make([]int, 0, len(prepared))
+	for index, candidate := range prepared {
+		existing, found, queryErr := queryByIdempotency(ctx, tx, candidate.input.IdempotencyKey)
+		if queryErr != nil {
+			return nil, queryErr
 		}
-		if existing.requestDigest != digest || existing.view.RunID != resolved.RunID {
-			return CreateResult{}, ErrConflict
+		if !found {
+			newIndexes = append(newIndexes, index)
+			continue
+		}
+		if validateStoredRun(&existing) != nil {
+			return nil, ErrStoreUnavailable
+		}
+		if existing.requestDigest != candidate.digest || existing.view.RunID != candidate.resolved.RunID {
+			return nil, ErrConflict
 		}
 		if existing.deletedAt != nil {
-			return CreateResult{}, ErrGone
+			return nil, ErrGone
 		}
-		return CreateResult{Run: existing.view, Created: false}, nil
+		results[index] = CreateResult{Run: existing.view, Created: false}
 	}
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_runs WHERE deleted_at IS NULL AND state IN ('pending','preparing','running','stopping')`).Scan(&active); err != nil {
-		return CreateResult{}, ErrStoreUnavailable
+	activeStates := "('pending','preparing','running','stopping')"
+	if reclaimCleanupCapacity {
+		// Named runs are durable startup intent. Cleanup-bound rows are already
+		// denied execution and reconciled before pending work; excluding them
+		// prevents expired downtime state from permanently blocking bootstrap.
+		activeStates = "('pending','preparing','running')"
 	}
-	if active >= store.maxActiveRuns {
-		return CreateResult{}, ErrCapacityExceeded
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_runs WHERE deleted_at IS NULL AND state IN `+activeStates).Scan(&active); err != nil {
+		return nil, ErrStoreUnavailable
 	}
-	deadline := optionalDeadline(now, resolved.TTL.ActiveSeconds)
-	_, err = tx.ExecContext(ctx, `INSERT INTO local_runs (
+	if active+len(newIndexes) > store.maxActiveRuns {
+		return nil, ErrCapacityExceeded
+	}
+	for _, index := range newIndexes {
+		candidate := prepared[index]
+		deadline := optionalDeadline(now, candidate.resolved.TTL.ActiveSeconds)
+		_, err = tx.ExecContext(ctx, `INSERT INTO local_runs (
 run_id,idempotency_key,request_digest,snapshot,snapshot_digest,state,revision,created_at,updated_at,deadline_at,last_reason
 ) VALUES (?,?,?,?,?,'pending',1,?,?,?,'')`,
-		resolved.RunID, input.IdempotencyKey, digest, snapshot, digest, formatTimestamp(now), formatTimestamp(now), formatOptionalTimestamp(deadline),
-	)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return CreateResult{}, ErrConflict
+			candidate.resolved.RunID, candidate.input.IdempotencyKey, candidate.digest, candidate.snapshot, candidate.digest,
+			formatTimestamp(now), formatTimestamp(now), formatOptionalTimestamp(deadline),
+		)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "unique") {
+				return nil, ErrConflict
+			}
+			return nil, ErrStoreUnavailable
 		}
-		return CreateResult{}, ErrStoreUnavailable
+		view := Run{
+			APIVersion: APIVersion, RunID: candidate.resolved.RunID, State: StatePending, Revision: 1,
+			SnapshotDigest: candidate.digest, CreatedAt: now, UpdatedAt: now, DeadlineAt: deadline,
+		}
+		populateRunMetadata(&view, candidate.resolved)
+		results[index] = CreateResult{Run: view, Created: true}
 	}
 	if err := tx.Commit(); err != nil {
-		return CreateResult{}, ErrStoreUnavailable
+		return nil, ErrStoreUnavailable
 	}
-	view := Run{
-		APIVersion: APIVersion, RunID: resolved.RunID, State: StatePending, Revision: 1,
-		SnapshotDigest: digest, CreatedAt: now, UpdatedAt: now, DeadlineAt: deadline,
-	}
-	populateRunMetadata(&view, resolved)
-	return CreateResult{Run: view, Created: true}, nil
+	return results, nil
 }
 
 func queryByIdempotency(ctx context.Context, query interface {
@@ -737,6 +801,17 @@ func (store *Store) Sweep(ctx context.Context) (int, error) {
 		return 0, ErrStoreUnavailable
 	}
 	defer func() { _ = tx.Rollback() }()
+	changed, err := sweepTx(ctx, tx, now)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, ErrStoreUnavailable
+	}
+	return changed, nil
+}
+
+func sweepTx(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	rows, err := tx.QueryContext(ctx, selectRuns+` WHERE deleted_at IS NULL ORDER BY run_id`)
 	if err != nil {
 		return 0, ErrStoreUnavailable
@@ -775,10 +850,20 @@ delete_requested=1,revision=revision+1,updated_at=?,last_reason='retention-expir
 			changed++
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, ErrStoreUnavailable
-	}
 	return changed, nil
+}
+
+func (store *Store) replacementCleanupPending(ctx context.Context) (bool, error) {
+	var active, stopping int
+	err := store.db.QueryRowContext(ctx, `SELECT
+COUNT(*),
+COALESCE(SUM(CASE WHEN state = 'stopping' THEN 1 ELSE 0 END), 0)
+FROM local_runs
+WHERE deleted_at IS NULL AND state IN ('pending','preparing','running','stopping')`).Scan(&active, &stopping)
+	if err != nil {
+		return false, ErrStoreUnavailable
+	}
+	return stopping > 0 && active > store.maxActiveRuns, nil
 }
 
 func (store *Store) Ready(ctx context.Context) bool {

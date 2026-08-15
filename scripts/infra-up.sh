@@ -36,4 +36,8 @@ done
 export NVT_LOCAL_GATEWAY_UID="$(id -u)"
 export NVT_LOCAL_GATEWAY_GID="$(id -g)"
 
+if [ -f "$broker_dir/local-controller.json" ] && [ -z "${NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG+x}" ]; then
+  export NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG=/broker-state/local-controller.json
+fi
+
 docker compose -f "$repo_root/compose.infra.yaml" up -d

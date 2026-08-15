@@ -11,6 +11,14 @@ import (
 
 const secretNeedle = "RESOLVED-RUN-SECRET-NEEDLE"
 
+func TestDefaultCredentialProviderMustReferenceApprovedMapping(t *testing.T) {
+	configuration := validConfiguration()
+	configuration.Profiles[0].DefaultCredentialProvider = "unapproved"
+	if _, err := NewResolver(configuration); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("unknown default provider = %v", err)
+	}
+}
+
 func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	t.Parallel()
 	resolver, err := NewResolver(validConfiguration())
@@ -84,6 +92,15 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	pluginNames := renderedPluginNames(t, renderedConfig)
 	if !reflect.DeepEqual(pluginNames[:3], []string{"git-host-credentials", "git-credentials", "checkout-repos"}) {
 		t.Fatalf("typed repositories were not rendered before base plugins: %#v", pluginNames)
+	}
+	hostConfig := renderedConfig["plugins"].([]any)[0].(map[string]any)["config"].(map[string]any)
+	if hostConfig["default-provider"] != "source" {
+		t.Fatalf("default credential provider was not preserved: %#v", hostConfig)
+	}
+	credentialConfig := renderedConfig["plugins"].([]any)[1].(map[string]any)["config"].(map[string]any)
+	credentialRule := credentialConfig["credentials"].([]any)[0].(map[string]any)
+	if credentialRule["username"] != "git-user" {
+		t.Fatalf("credential username was not preserved: %#v", credentialRule)
 	}
 	if bytes.Contains(rendered, []byte("lifecycle-termination")) || bytes.Contains(rendered, []byte("/dev/termination-log")) {
 		t.Fatalf("portable rendering injected a backend-specific lifecycle adapter: %s", rendered)
@@ -584,7 +601,7 @@ func validConfiguration() TrustedConfiguration {
 		Profiles: []Profile{{
 			Name: "engineering", Image: "registry.example/nvt-profile:sha256-deadbeef", Runtime: &profileRuntime,
 			AgentConfig: profileAgentConfig, Resources: &profileResources, Lifecycle: &profileLifecycle,
-			CredentialProviders: []CredentialProviderMapping{{Name: "source", BrokerProvider: "source-app", CredentialKind: "mediated", MatchTargets: []string{"github.com/Altinn/*"}}},
+			CredentialProviders: []CredentialProviderMapping{{Name: "source", BrokerProvider: "source-app", CredentialKind: "mediated", MatchTargets: []string{"github.com/Altinn/*"}}}, DefaultCredentialProvider: "source",
 			Broker: Broker{Grants: []BrokerGrant{
 				{Provider: "source-app", Repositories: []string{"Altinn/*"}, Capabilities: []string{"injection.headers"}, Preparations: []string{"identity"}, Materialization: "header-inject", EgressHosts: []string{"github.com:443"}, Git: true, Permissions: map[string]string{"contents": "write"}},
 				{Provider: "runtime-main", Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{"runtime.example:443"}},
@@ -599,7 +616,7 @@ func validConfiguration() TrustedConfiguration {
 		}},
 		Workflows: []Workflow{{
 			Name: "development", WorkspaceInstructions: "Workflow-owned guidance.\n",
-			Repositories: []Repository{{CheckoutTarget: "github.com/Altinn/altinn-studio", BrokerRepository: "Altinn/altinn-studio", URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio", Upstream: "https://github.com/Altinn/altinn-studio-upstream.git", CredentialProvider: "source", Identity: &RepositoryIdentity{Mode: "provider"}}},
+			Repositories: []Repository{{CheckoutTarget: "github.com/Altinn/altinn-studio", BrokerRepository: "Altinn/altinn-studio", URL: "https://github.com/Altinn/altinn-studio.git", Path: "altinn-studio", Upstream: "https://github.com/Altinn/altinn-studio-upstream.git", CredentialProvider: "source", CredentialUsername: "git-user", Identity: &RepositoryIdentity{Mode: "provider"}}},
 		}, {Name: "restricted"}},
 		ExecutionBackends: []ExecutionBackend{{Name: "container", Kind: "container"}},
 		RetentionPolicies: []RetentionPolicy{{Name: "persistent", Persistence: Persistence{Workspace: true, RuntimeState: true, DockerData: true}, TTL: TTL{ActiveSeconds: 14400, FailedSeconds: 3600}}, {Name: "disposable", TTL: TTL{ActiveSeconds: 3600}}},

@@ -55,7 +55,7 @@ A resolved value contains:
 - the caller's bounded UTF-8 initial prompt;
 - lifecycle completion and failure event names;
 - administrator-owned repository checkouts and approved public credential
-  aliases;
+  aliases, including an optional non-secret credential username;
 - broker provider names and non-secret grant/capability metadata;
 - direct or mediated egress policy;
 - separately ordered profile/workflow instructions;
@@ -130,7 +130,10 @@ traversal. A public checkout has no credential provider and therefore must omit
 Credential mappings retain the bounded generic broker credential kind
 (`token`, `headers`, or `mediated`). A mediated Git grant must use
 `credential_kind: mediated`, so runtime plugins cannot silently fall back to
-asking the agent-side broker client for a token. Repository entries also retain
+asking the agent-side broker client for a token. The profile may retain an
+optional `default_credential_provider`, which must name one approved mapping
+and is rendered as the generic host-credential default for tools that do not
+select an alias explicitly. Repository entries also retain
 an optional HTTPS `upstream` remote and optional commit identity policy.
 Identity mode is either `provider`, with no inline fields, or `explicit`, with
 bounded administrator-authored name and email. Enforced provider identity

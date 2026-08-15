@@ -345,6 +345,76 @@ func TestReconcilerDeadlineAndDeleteRemainClaimableUntilBackendCleanup(t *testin
 	}
 }
 
+func TestReconcilerCleansExpiredReplacementCapacityBeforePreparingNamedRuns(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 2)
+	backend := newFakeBackend()
+	for _, runID := range []string{"expired-a", "expired-b"} {
+		createRun(t, store, runID, false)
+		backend.resources[runID] = true
+	}
+	clock.Advance(24 * time.Hour)
+	inputs := []CreateInput{
+		{IdempotencyKey: "named-idempotency-key-first", ResolvedRun: testResolvedRun(t, "first", true)},
+		{IdempotencyKey: "named-idempotency-key-second", ResolvedRun: testResolvedRun(t, "second", true)},
+	}
+	if _, err := store.CreateBatch(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+	reconciler, err := NewReconciler(store, backend, "controller-capacity-recovery", 30*time.Second, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	deleteCalls, ensureCalls := backend.deleteCalls, backend.ensureCalls
+	backend.mu.Unlock()
+	if deleteCalls != 2 || ensureCalls != 0 {
+		t.Fatalf("cleanup was not ordered before new backend work: deletes=%d ensures=%d", deleteCalls, ensureCalls)
+	}
+	for _, runID := range []string{"first", "second"} {
+		run, err := store.Get(context.Background(), runID)
+		if err != nil || run.State != StatePreparing {
+			t.Fatalf("named run %s was not reserved for the next pass: %#v %v", runID, run, err)
+		}
+	}
+}
+
+func TestReconcilerDoesNotPrepareNamedRunsWhileExpiredCleanupIsUncertain(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 1)
+	backend := newFakeBackend()
+	createRun(t, store, "expired", false)
+	backend.resources["expired"] = true
+	clock.Advance(24 * time.Hour)
+	if _, err := store.CreateBatch(context.Background(), []CreateInput{{
+		IdempotencyKey: "named-idempotency-key",
+		ResolvedRun:    testResolvedRun(t, "named", true),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	backend.deleteErr = errors.New("synthetic cleanup uncertainty")
+	reconciler, err := NewReconciler(store, backend, "controller-capacity-recovery", 30*time.Second, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	ensureCalls := backend.ensureCalls
+	backend.mu.Unlock()
+	if ensureCalls != 0 {
+		t.Fatalf("named backend work started before cleanup completed: %d", ensureCalls)
+	}
+	named, err := store.Get(context.Background(), "named")
+	if err != nil || named.State != StatePending {
+		t.Fatalf("named run left pending safety gate: %#v %v", named, err)
+	}
+}
+
 func TestReconcilerRecoversPartialCreationAndRuntimeFailure(t *testing.T) {
 	clock := &fakeClock{value: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 	store, _ := openTestStore(t, clock, 4)

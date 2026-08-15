@@ -63,6 +63,7 @@ type Repository struct {
 	Path               string              `json:"path,omitempty"`
 	Upstream           string              `json:"upstream,omitempty"`
 	CredentialProvider string              `json:"credential_provider,omitempty"`
+	CredentialUsername string              `json:"credential_username,omitempty"`
 	Identity           *RepositoryIdentity `json:"identity,omitempty"`
 }
 
@@ -188,19 +189,20 @@ type ResolvedAgentRun struct {
 	Runtime         Runtime   `json:"runtime"`
 	// AgentConfig is the immutable non-controller-owned base. Backends must
 	// execute RenderAgentConfig's result, not this base document directly.
-	AgentConfig           json.RawMessage             `json:"agent_config"`
-	Prompt                string                      `json:"prompt,omitempty"`
-	Repositories          []Repository                `json:"repositories,omitempty"`
-	CredentialProviders   []CredentialProviderMapping `json:"credential_providers,omitempty"`
-	Broker                Broker                      `json:"broker"`
-	Egress                Egress                      `json:"egress"`
-	WorkspaceInstructions WorkspaceInstructions       `json:"workspace_instructions"`
-	Resources             Resources                   `json:"resources"`
-	Persistence           Persistence                 `json:"persistence"`
-	Retention             string                      `json:"retention"`
-	TTL                   TTL                         `json:"ttl"`
-	Lifecycle             Lifecycle                   `json:"lifecycle"`
-	Execution             ExecutionBackend            `json:"execution"`
+	AgentConfig               json.RawMessage             `json:"agent_config"`
+	Prompt                    string                      `json:"prompt,omitempty"`
+	Repositories              []Repository                `json:"repositories,omitempty"`
+	CredentialProviders       []CredentialProviderMapping `json:"credential_providers,omitempty"`
+	DefaultCredentialProvider string                      `json:"default_credential_provider,omitempty"`
+	Broker                    Broker                      `json:"broker"`
+	Egress                    Egress                      `json:"egress"`
+	WorkspaceInstructions     WorkspaceInstructions       `json:"workspace_instructions"`
+	Resources                 Resources                   `json:"resources"`
+	Persistence               Persistence                 `json:"persistence"`
+	Retention                 string                      `json:"retention"`
+	TTL                       TTL                         `json:"ttl"`
+	Lifecycle                 Lifecycle                   `json:"lifecycle"`
+	Execution                 ExecutionBackend            `json:"execution"`
 }
 
 // PlatformDefaults are trusted lowest-precedence defaults. Profile pointers
@@ -218,19 +220,20 @@ type PlatformDefaults struct {
 // egress, retention, and backend policy can be selected but never supplied by
 // a LocalRunRequest.
 type Profile struct {
-	Name                  string                      `json:"name"`
-	Image                 string                      `json:"image,omitempty"`
-	Runtime               *Runtime                    `json:"runtime,omitempty"`
-	AgentConfig           json.RawMessage             `json:"agent_config,omitempty"`
-	Resources             *Resources                  `json:"resources,omitempty"`
-	Lifecycle             *Lifecycle                  `json:"lifecycle,omitempty"`
-	CredentialProviders   []CredentialProviderMapping `json:"credential_providers,omitempty"`
-	Broker                Broker                      `json:"broker"`
-	Egress                Egress                      `json:"egress"`
-	WorkspaceInstructions string                      `json:"workspace_instructions,omitempty"`
-	AllowedBackends       []string                    `json:"allowed_backends"`
-	DefaultBackend        string                      `json:"default_backend"`
-	AllowedRetentions     []string                    `json:"allowed_retentions"`
+	Name                      string                      `json:"name"`
+	Image                     string                      `json:"image,omitempty"`
+	Runtime                   *Runtime                    `json:"runtime,omitempty"`
+	AgentConfig               json.RawMessage             `json:"agent_config,omitempty"`
+	Resources                 *Resources                  `json:"resources,omitempty"`
+	Lifecycle                 *Lifecycle                  `json:"lifecycle,omitempty"`
+	CredentialProviders       []CredentialProviderMapping `json:"credential_providers,omitempty"`
+	DefaultCredentialProvider string                      `json:"default_credential_provider,omitempty"`
+	Broker                    Broker                      `json:"broker"`
+	Egress                    Egress                      `json:"egress"`
+	WorkspaceInstructions     string                      `json:"workspace_instructions,omitempty"`
+	AllowedBackends           []string                    `json:"allowed_backends"`
+	DefaultBackend            string                      `json:"default_backend"`
+	AllowedRetentions         []string                    `json:"allowed_retentions"`
 }
 
 // Workflow is trusted administrator configuration and is the sole owner of

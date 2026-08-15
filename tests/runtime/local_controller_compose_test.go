@@ -20,10 +20,13 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"local-controller-admin-token", "local-controller-route-token", `export NVT_LOCAL_GATEWAY_UID="$(id -u)"`, `openssl rand -hex 32`} {
+	for _, required := range []string{"local-controller-admin-token", "local-controller-route-token", "local-controller.json", "NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG=/broker-state/local-controller.json", `export NVT_LOCAL_GATEWAY_UID="$(id -u)"`, `openssl rand -hex 32`} {
 		if !strings.Contains(string(infraUp), required) {
 			t.Fatalf("infra-up does not provision private local API credentials: missing %q", required)
 		}
+	}
+	if strings.Contains(string(infraUp), "export NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG=/broker-state/local-controller.json") {
+		t.Fatal("generated named runs replaced the independent producer scheduling document")
 	}
 	data, err := os.ReadFile(filepath.Join(root, "compose.infra.yaml"))
 	if err != nil {
@@ -53,6 +56,7 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX: /agents",
 		"NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER: nvt-local-gateway",
 		"NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG:",
+		"NVT_LOCAL_CONTROLLER_NAMED_RUNS_CONFIG:",
 		"NVT_LOCAL_CONTROLLER_ADMIN_TOKEN_FILE: /broker-state/local-controller-admin-token",
 		"NVT_LOCAL_CONTROLLER_ROUTE_TOKEN_FILE: /broker-state/local-controller-route-token",
 		"local-controller-state:/state",
@@ -133,9 +137,19 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"RUN install -d -m 0700 /state",
 		"USER root",
 		`ENTRYPOINT ["/nvt-local-controller"]`,
+		`/usr/local/bin/nvt-local-migrate`,
 	} {
 		if !strings.Contains(dockerfile, required) {
 			t.Fatalf("local controller Dockerfile missing %q:\n%s", required, dockerfile)
+		}
+	}
+	migrationScript, err := os.ReadFile(filepath.Join(root, "scripts", "local-agent-migrate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"go run ./cmd/nvt-local-migrate", "--agents-root", "--broker-agents", "--broker-config", ".broker/local-controller.json"} {
+		if !strings.Contains(string(migrationScript), required) {
+			t.Fatalf("migration wrapper missing %q:\n%s", required, migrationScript)
 		}
 	}
 	agentCompose, err := os.ReadFile(filepath.Join(root, "compose.agent.yaml"))
@@ -145,5 +159,31 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	agentText := string(agentCompose)
 	if strings.Contains(agentText, "- /var/run/docker.sock:/var/run/docker.sock") {
 		t.Fatal("agent stack received the host Docker socket")
+	}
+}
+
+func TestLocalMigrationProofIsReadOnlyAndRedacted(t *testing.T) {
+	root := repoRoot(t)
+	proofPath := filepath.Join(root, "scripts", "local-agent-migrate-proof.sh")
+	proof, err := os.ReadFile(proofPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(proofPath)
+	if err != nil || info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("migration proof is not executable: %#v %v", info, err)
+	}
+	text := string(proof)
+	for _, required := range []string{"--check", "local-agent-migration-real-config-proof: PASS", ">/dev/null 2>&1"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("migration proof lacks redacted read-only behavior: missing %q", required)
+		}
+	}
+	if strings.Contains(text, "--output") || strings.Contains(text, "cat ") {
+		t.Fatal("migration proof can write or print generated/source configuration")
+	}
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil || !strings.Contains(string(makefile), "local-agent-migrate-proof:") {
+		t.Fatalf("migration proof Make target missing: %v", err)
 	}
 }

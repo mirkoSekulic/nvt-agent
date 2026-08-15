@@ -88,9 +88,11 @@ func renderRepositoryPlugins(run ResolvedAgentRun) []any {
 			}
 			providers = append(providers, provider)
 		}
-		plugins = append(plugins, map[string]any{
-			"name": "git-host-credentials", "source": "builtin", "config": map[string]any{"providers": providers},
-		})
+		config := map[string]any{"providers": providers}
+		if run.DefaultCredentialProvider != "" {
+			config["default-provider"] = run.DefaultCredentialProvider
+		}
+		plugins = append(plugins, map[string]any{"name": "git-host-credentials", "source": "builtin", "config": config})
 	}
 	credentials := make([]any, 0, len(run.Repositories))
 	checkouts := make([]any, 0, len(run.Repositories))
@@ -106,6 +108,9 @@ func renderRepositoryPlugins(run ResolvedAgentRun) []any {
 		if repository.CredentialProvider != "" {
 			credential := map[string]any{
 				"match": repository.URL, "provider": repository.CredentialProvider,
+			}
+			if repository.CredentialUsername != "" {
+				credential["username"] = repository.CredentialUsername
 			}
 			if repository.Identity != nil {
 				identity := map[string]any{"mode": repository.Identity.Mode}

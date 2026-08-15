@@ -51,7 +51,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("startup failed reason=invalid-configuration")
 	}
-	scheduler, err := controller.LoadScheduler(config.SchedulingConfigPath, store)
+	scheduler, err := controller.LoadSchedulers([]string{config.SchedulingConfigPath, config.NamedRunsConfigPath}, store)
 	if err != nil {
 		logger.Fatal("startup failed reason=scheduling-configuration-unavailable")
 	}
@@ -62,6 +62,9 @@ func main() {
 	handler, err := controller.NewAuthorizedHTTPHandlerWithServices(store, logger, backend.Ready, backend, scheduler, authorization)
 	if err != nil {
 		logger.Fatal("startup failed reason=api-authorization-unavailable")
+	}
+	if err := scheduler.BootstrapLocalRuns(ctx); err != nil {
+		logger.Fatal("startup failed reason=local-run-configuration-unavailable")
 	}
 
 	server := &http.Server{

@@ -42,7 +42,7 @@ func TestDockerBackendRealEngineSmoke(t *testing.T) {
 	}
 	defer func() { _, _ = boundary.Run(context.Background(), nil, "network", "rm", network) }()
 	gatewayName := "nvt-lc-gateway-" + suffix
-	if _, err := boundary.Run(ctx, nil, "run", "-d", "--name", gatewayName, "--network", network,
+	if _, err := boundary.Run(ctx, nil, "run", "-d", "--no-healthcheck", "--name", gatewayName, "--network", network,
 		"--label", localGatewayLabel+"=true", "--entrypoint", "sh", environmentOr("NVT_RUNTIME_IMAGE", "nvt-agent-runtime:latest"), "-c", "sleep 300"); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func assertRealEngineLocalRouteIsolation(t *testing.T, ctx context.Context, boun
 		}
 		desired := controller.BackendRun{Resolved: run, SnapshotDigest: strings.Repeat(strconv.Itoa(index+1), 64), DeleteRequested: true}
 		if observation, err := backend.Ensure(ctx, desired); err != nil || !observation.Ready {
-			t.Fatalf("direct isolation run %s = %#v, %v", runID, observation, err)
+			t.Fatalf("direct isolation run %s = %#v, %v\nbackend commands:\n%s", runID, observation, err, backend.docker.(*recordingBoundary).tail(40))
 		}
 		desiredRuns = append(desiredRuns, desired)
 	}
