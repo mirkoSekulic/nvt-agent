@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	composeProjectLabel = "com.docker.compose.project"
-	composeServiceLabel = "com.docker.compose.service"
+	composeProjectLabel           = "com.docker.compose.project"
+	composeServiceLabel           = "com.docker.compose.service"
+	agentConfinementRevisionLabel = "io.nvt.local-controller.agent-confinement-revision"
+	agentConfinementRevision      = "1"
 )
 
 type Backend struct {
@@ -278,6 +280,12 @@ func (backend *Backend) Ensure(ctx context.Context, desired controller.BackendRu
 		return controller.BackendObservation{}, controller.ErrBackendRetryable
 	}
 	if requiresConfinementProof(run) {
+		if err := backend.removeOutdatedConfinementAgent(operationContext, names.project, labels); err != nil {
+			if errors.Is(err, errOwnershipConflict) {
+				return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
+			}
+			return controller.BackendObservation{}, controller.ErrBackendRetryable
+		}
 		if err := backend.removeOwnedComposeService(operationContext, names.project, "net-init", labels); err != nil {
 			if errors.Is(err, errOwnershipConflict) {
 				return controller.BackendObservation{}, controller.ErrBackendDesiredRunInvalid
@@ -504,7 +512,7 @@ func (backend *Backend) pruneStaleOwnedResources(ctx context.Context, run resolv
 func (backend *Backend) requiredVolumes(run resolvedrun.ResolvedAgentRun, names resourceNames) []string {
 	values := []string{names.agentConfig, names.workspace, names.home}
 	if requiresConfinementProof(run) {
-		values = append(values, names.confinement)
+		values = append(values, names.confinement, names.confinementRequest)
 	}
 	if run.Runtime.Docker != nil {
 		values = append(values, names.dockerData)
@@ -513,6 +521,33 @@ func (backend *Backend) requiredVolumes(run resolvedrun.ResolvedAgentRun, names 
 		values = append(values, names.egressPrivate, names.egressPublic)
 	}
 	return values
+}
+
+func (backend *Backend) removeOutdatedConfinementAgent(ctx context.Context, project string, labels ownedLabels) error {
+	output, err := backend.docker.Run(ctx, nil, "ps", "-aq", "--filter", "label="+composeProjectLabel+"="+project, "--filter", "label="+composeServiceLabel+"=agent")
+	if err != nil {
+		return err
+	}
+	containers := strings.Fields(string(output))
+	if len(containers) > 1 {
+		return errors.New("backend service inventory unavailable")
+	}
+	for _, container := range containers {
+		values, err := backend.containerLabels(ctx, container)
+		if err != nil {
+			return err
+		}
+		if err := verifyLabelMap(values, labels); err != nil {
+			return err
+		}
+		if values[agentConfinementRevisionLabel] == agentConfinementRevision {
+			continue
+		}
+		if _, err := backend.docker.Run(ctx, nil, "rm", "-f", container); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (backend *Backend) removeOwnedComposeService(ctx context.Context, project, service string, labels ownedLabels) error {

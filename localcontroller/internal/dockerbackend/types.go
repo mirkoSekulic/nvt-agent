@@ -47,18 +47,19 @@ type identityTokens struct {
 }
 
 type resourceNames struct {
-	project       string
-	composeFile   string
-	agentConfig   string
-	egressPrivate string
-	egressPublic  string
-	workspace     string
-	home          string
-	dockerData    string
-	confinement   string
-	internalNet   string
-	privateNet    string
-	namespace     string
+	project            string
+	composeFile        string
+	agentConfig        string
+	egressPrivate      string
+	egressPublic       string
+	workspace          string
+	home               string
+	dockerData         string
+	confinement        string
+	confinementRequest string
+	internalNet        string
+	privateNet         string
+	namespace          string
 }
 
 type ownedLabels struct {

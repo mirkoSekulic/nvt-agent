@@ -359,24 +359,31 @@ records retain their existing restart-safe semantics.
 
 Docker daemon restart does not replay Compose dependency ordering. For an
 enforced transparent run, automatic agent-container restart therefore begins
-in a fixed trusted gate rather than the runtime entrypoint. `net-init` removes
-an old-generation proof, installs and verifies the IPv4 and IPv6 capture hooks
-in the exact shared network namespace, and writes the host boot ID plus that
-namespace's kernel identity to an exact-owned proof volume. A same-generation
-proof is reused only after every required capture hook is reverified, without
-flushing a live ruleset. The agent mounts the proof read-only and executes the
-runtime entrypoint only when it equals its current boot/namespace identity. A
-proof from a previous boot, daemon, or container namespace generation cannot
-unlock startup. The wait is bounded and fails loudly; a missing controller or
-failed capture leaves only the gate running, never the agent runtime.
+in a fixed trusted gate rather than the runtime entrypoint. Each gate process
+writes a fresh random nonce to a separate request volume. The controller-owned
+`net-init` guard removes every prior managed base-chain jump, flushes and
+rebuilds the managed IPv4 and IPv6 capture chains in exact order, installs the
+new jumps at rule one, and verifies both ordinary and nested-Docker redirects.
+Temporary catch-all redirects remain ahead of traffic throughout replacement,
+so an untrusted request can cause only fail-closed disruption, never a direct
+egress interval.
+Only then does it acknowledge that exact host boot ID, network-namespace
+identity, and nonce in the proof volume. The agent mounts the proof read-only
+and executes the runtime entrypoint only when the complete acknowledgment
+matches. A proof from a previous agent process, boot, daemon, or container
+namespace cannot unlock startup. The wait is bounded and fails loudly; a
+missing guard or failed capture leaves only the gate running, never the agent
+runtime.
 
 Every controller recovery removes and recreates only the exact-owned
-`net-init` service before Compose convergence, so a completed one-shot from a
-prior namespace is never treated as current evidence. Agent-only restart in an
-unchanged namespace may reuse the matching proof because the verified capture
-rules live in that same namespace. The proof contains no credential and is
-removed with the other ephemeral run volumes during cleanup. Direct and
-non-enforced runs do not receive this gate.
+`net-init` guard before Compose convergence. Agent-only restart in an unchanged
+namespace still requires a new nonce acknowledgment and therefore forces
+trusted rule replacement before resume. An agent-renderer revision label also
+causes a pre-gate exact-owned agent to be recreated once during controller
+upgrade; its persistent workspace, runtime home, and Docker-data volumes are
+retained, so the generic resume command remains authoritative. The proof and
+request contain no credential and are removed with the other ephemeral run
+volumes during cleanup. Direct and non-enforced runs do not receive this gate.
 
 The runtime home volume contains `NVT_STATE_DIR`. When the administrator's
 generic agent configuration includes `runtime.resume.command` and optional

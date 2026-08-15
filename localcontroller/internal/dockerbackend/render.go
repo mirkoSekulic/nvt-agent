@@ -48,22 +48,12 @@ type composeService struct {
 }
 
 const transparentInitScript = `proof_file=/confinement/network-namespace
+request_file=/confinement-request/request
 boot_id="$$(cat /proc/sys/kernel/random/boot_id)"
 netns="$$(readlink /proc/self/ns/net)"
 case "$$boot_id" in ""|*[!0-9a-f-]*) echo "net-init: host boot identity unavailable" >&2; exit 1 ;; esac
 case "$$netns" in net:\[*\]) ;; *) echo "net-init: network namespace identity unavailable" >&2; exit 1 ;; esac
 namespace="$$boot_id:$$netns"
-proof="$$(cat "$$proof_file" 2>/dev/null || true)"
-if [ "$$proof" = "$$namespace" ] &&
-   iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null &&
-   iptables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001 2>/dev/null &&
-   iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null &&
-   ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null &&
-   ip6tables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001 2>/dev/null &&
-   ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null; then
-  exit 0
-fi
-rm -f "$$proof_file"
 exclude_v4=""
 exclude_v6=""
 reject_managed_overlap() {
@@ -77,6 +67,17 @@ for host in broker egressd; do
     case "$$ip" in *:*) exclude_v6="$$exclude_v6 $$ip" ;; *) exclude_v4="$$exclude_v4 $$ip" ;; esac
   done
 done
+while true; do
+request="$$(cat "$$request_file" 2>/dev/null || true)"
+case "$$request" in ""|*[!0-9a-f-]*) request="" ;; esac
+if [ "$${#request}" -eq 36 ] && [ "$$(cat "$$proof_file" 2>/dev/null || true)" != "$$namespace:$$request" ]; then
+rm -f "$$proof_file"
+iptables -t nat -I OUTPUT 1 -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -I PREROUTING 1 -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -I OUTPUT 1 -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -I PREROUTING 1 -p tcp -j REDIRECT --to-ports 15001
+while iptables -t nat -D OUTPUT -j NVT_CAPTURE 2>/dev/null; do :; done
+while iptables -t nat -D PREROUTING -j NVT_DIND 2>/dev/null; do :; done
 iptables -t nat -N NVT_CAPTURE 2>/dev/null || iptables -t nat -F NVT_CAPTURE
 iptables -t nat -A NVT_CAPTURE -d 127.0.0.0/8 -j RETURN
 for ip in $$exclude_v4; do iptables -t nat -A NVT_CAPTURE -d "$$ip/32" -j RETURN; done
@@ -84,13 +85,15 @@ iptables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
 iptables -t nat -A NVT_CAPTURE -o docker0 -j RETURN
 iptables -t nat -A NVT_CAPTURE -o br-+ -j RETURN
 iptables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
-iptables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+iptables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 iptables -t nat -N NVT_DIND 2>/dev/null || iptables -t nat -F NVT_DIND
 iptables -t nat -A NVT_DIND -d 172.30.0.0/15 -j RETURN
 for ip in $$exclude_v4; do iptables -t nat -A NVT_DIND -d "$$ip/32" -j RETURN; done
 iptables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 iptables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
-iptables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || iptables -t nat -I PREROUTING 1 -j NVT_DIND
+iptables -t nat -I PREROUTING 1 -j NVT_DIND
+while ip6tables -t nat -D OUTPUT -j NVT_CAPTURE 2>/dev/null; do :; done
+while ip6tables -t nat -D PREROUTING -j NVT_DIND 2>/dev/null; do :; done
 ip6tables -t nat -N NVT_CAPTURE 2>/dev/null || ip6tables -t nat -F NVT_CAPTURE
 ip6tables -t nat -A NVT_CAPTURE -d ::1/128 -j RETURN
 for ip in $$exclude_v6; do ip6tables -t nat -A NVT_CAPTURE -d "$$ip/128" -j RETURN; done
@@ -98,30 +101,50 @@ ip6tables -t nat -A NVT_CAPTURE -m owner --uid-owner 65532 -j RETURN
 ip6tables -t nat -A NVT_CAPTURE -o docker0 -j RETURN
 ip6tables -t nat -A NVT_CAPTURE -o br-+ -j RETURN
 ip6tables -t nat -A NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
-ip6tables -t nat -C OUTPUT -j NVT_CAPTURE 2>/dev/null || ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
+ip6tables -t nat -I OUTPUT 1 -j NVT_CAPTURE
 ip6tables -t nat -N NVT_DIND 2>/dev/null || ip6tables -t nat -F NVT_DIND
 for ip in $$exclude_v6; do ip6tables -t nat -A NVT_DIND -d "$$ip/128" -j RETURN; done
 ip6tables -t nat -A NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
 ip6tables -t nat -A NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
-ip6tables -t nat -C PREROUTING -j NVT_DIND 2>/dev/null || ip6tables -t nat -I PREROUTING 1 -j NVT_DIND
-iptables -t nat -C OUTPUT -j NVT_CAPTURE
+ip6tables -t nat -I PREROUTING 1 -j NVT_DIND
+while iptables -t nat -D OUTPUT -p tcp -j REDIRECT --to-ports 15001 2>/dev/null; do :; done
+while iptables -t nat -D PREROUTING -p tcp -j REDIRECT --to-ports 15001 2>/dev/null; do :; done
+while ip6tables -t nat -D OUTPUT -p tcp -j REDIRECT --to-ports 15001 2>/dev/null; do :; done
+while ip6tables -t nat -D PREROUTING -p tcp -j REDIRECT --to-ports 15001 2>/dev/null; do :; done
+[ "$$(iptables -t nat -S OUTPUT 1)" = "-A OUTPUT -j NVT_CAPTURE" ]
 iptables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
-iptables -t nat -C PREROUTING -j NVT_DIND
-ip6tables -t nat -C OUTPUT -j NVT_CAPTURE
+iptables -t nat -C NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -C NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
+[ "$$(iptables -t nat -S PREROUTING 1)" = "-A PREROUTING -j NVT_DIND" ]
+[ "$$(ip6tables -t nat -S OUTPUT 1)" = "-A OUTPUT -j NVT_CAPTURE" ]
 ip6tables -t nat -C NVT_CAPTURE -p tcp -j REDIRECT --to-ports 15001
-ip6tables -t nat -C PREROUTING -j NVT_DIND
+ip6tables -t nat -C NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+ip6tables -t nat -C NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
+[ "$$(ip6tables -t nat -S PREROUTING 1)" = "-A PREROUTING -j NVT_DIND" ]
 umask 077
-printf '%s\n' "$$namespace" > "$$proof_file.tmp"
+printf '%s\n' "$$namespace:$$request" > "$$proof_file.tmp"
 chmod 0444 "$$proof_file.tmp"
 mv -f "$$proof_file.tmp" "$$proof_file"
+fi
+sleep 0.1
+done
 `
 
 const agentConfinementGateScript = `proof_file=/run/nvt-confinement/network-namespace
+request_file=/run/nvt-confinement-request/request
+nonce="$$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+case "$$nonce" in ""|*[!0-9a-f-]*) echo "nvt-local-agent: confinement nonce unavailable" >&2; exit 1 ;; esac
+[ "$${#nonce}" -eq 36 ] || { echo "nvt-local-agent: confinement nonce unavailable" >&2; exit 1; }
+umask 077
+rm -f "$$request_file" "$$request_file.tmp"
+printf '%s\n' "$$nonce" > "$$request_file.tmp"
+chmod 0600 "$$request_file.tmp"
+mv -f "$$request_file.tmp" "$$request_file"
 attempt=0
 while [ "$$attempt" -lt 600 ]; do
   boot_id="$$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
   netns="$$(readlink /proc/self/ns/net 2>/dev/null || true)"
-  namespace="$$boot_id:$$netns"
+  namespace="$$boot_id:$$netns:$$nonce"
   proof="$$(cat "$$proof_file" 2>/dev/null || true)"
   case "$$boot_id" in ""|*[!0-9a-f-]*) valid_boot=false ;; *) valid_boot=true ;; esac
   case "$$netns" in net:\[*\]) valid_netns=true ;; *) valid_netns=false ;; esac
@@ -253,9 +276,17 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 	}
 	if requiresConfinementProof(run) {
 		volumes["confinement"] = externalObject{External: true, Name: names.confinement}
+		volumes["confinement-request"] = externalObject{External: true, Name: names.confinementRequest}
+	}
+	agentLabels := make(map[string]string, len(labels)+1)
+	for key, value := range labels {
+		agentLabels[key] = value
+	}
+	if requiresConfinementProof(run) {
+		agentLabels[agentConfinementRevisionLabel] = agentConfinementRevision
 	}
 	services["agent"] = composeService{
-		Image: run.Image, User: user, WorkingDir: "/workspace", NetworkMode: "service:" + namespaceService, Restart: "unless-stopped", Labels: labels,
+		Image: run.Image, User: user, WorkingDir: "/workspace", NetworkMode: "service:" + namespaceService, Restart: "unless-stopped", Labels: agentLabels,
 		Environment: agentEnvironment, DependsOn: agentDepends, CapAdd: append([]string(nil), runtimeCapabilities(run)...),
 		Volumes: []string{"workspace:/workspace", "agent-home:" + home, "agent-config:/nvt-config:ro"},
 		CPUs:    dockerCPU(run.Resources.CPULimit), MemLimit: dockerMemory(run.Resources.MemoryLimit),
@@ -264,7 +295,7 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 		agent := services["agent"]
 		agent.Entrypoint = []string{"sh", "-ec"}
 		agent.Command = []string{agentConfinementGateScript}
-		agent.Volumes = append(agent.Volumes, "confinement:/run/nvt-confinement:ro")
+		agent.Volumes = append(agent.Volumes, "confinement:/run/nvt-confinement:ro", "confinement-request:/run/nvt-confinement-request")
 		services["agent"] = agent
 	}
 	if run.Egress.Mode == "mediated" {
@@ -299,17 +330,25 @@ func renderCompose(config Config, run resolvedrun.ResolvedAgentRun, digest strin
 			}
 		}
 		if run.Egress.Transport == "transparent" {
+			requestOwner := "0:0"
+			if run.Runtime.User == "non-root" {
+				requestOwner = "1000:1000"
+			}
+			services["confinement-init"] = composeService{
+				Image: config.SeedImage, User: "0:0", NetworkMode: "none", Entrypoint: []string{"sh", "-ec"},
+				Command: []string{"chown " + requestOwner + " /request && chmod 0700 /request"}, Volumes: []string{"confinement-request:/request"}, Labels: labels,
+			}
 			services["net-init"] = composeService{
 				Image: config.DindImage, User: "0:0", NetworkMode: "service:" + namespaceService, Entrypoint: []string{"sh", "-ec"},
-				Command: []string{transparentInitScript}, CapAdd: []string{"NET_ADMIN"}, Labels: labels,
-				Volumes:     []string{"confinement:/confinement"},
+				Command: []string{transparentInitScript}, CapAdd: []string{"NET_ADMIN"}, Restart: "unless-stopped", Labels: labels,
+				Volumes:     []string{"confinement:/confinement", "confinement-request:/confinement-request:ro"},
 				Environment: map[string]string{"NVT_DIND_PROTECTED_CIDRS": config.ProtectedCIDRs},
 				DependsOn: map[string]composeDependency{
-					namespaceService: {Condition: namespaceCondition}, "captured": {Condition: "service_started"},
+					namespaceService: {Condition: namespaceCondition}, "captured": {Condition: "service_started"}, "confinement-init": {Condition: "service_completed_successfully"},
 				},
 			}
 			agent := services["agent"]
-			agent.DependsOn["net-init"] = composeDependency{Condition: "service_completed_successfully"}
+			agent.DependsOn["net-init"] = composeDependency{Condition: "service_started"}
 			services["agent"] = agent
 		}
 	}
@@ -499,7 +538,8 @@ func namesFor(config Config, runID, digest string) resourceNames {
 		project: project, composeFile: filepath.Join(config.RunsDir, runID, "compose.yaml"),
 		agentConfig: project + "-agent-config", egressPrivate: project + "-egress-private", egressPublic: project + "-egress-public",
 		workspace: project + "-workspace", home: project + "-home", dockerData: project + "-docker-data", confinement: project + "-confinement",
-		internalNet: project + "-internal", privateNet: project + "-private", namespace: project + "-namespace",
+		confinementRequest: project + "-confinement-request",
+		internalNet:        project + "-internal", privateNet: project + "-private", namespace: project + "-namespace",
 	}
 }
 

@@ -133,6 +133,44 @@ func TestDockerBackendDaemonRestartSmoke(t *testing.T) {
 	assertNestedMediated(t, ctx, nested, agent, credential)
 	beforeRoutes, _ := backend.Routes(ctx, desired)
 	oldProof := execInContainer(t, ctx, nested, agent, "cat", "/run/nvt-confinement/network-namespace")
+	names := namesFor(config, run.RunID, desired.SnapshotDigest)
+	guard := ownedComposeServiceContainer(t, ctx, nested, labels, "net-init")
+	if _, err := nested.Run(ctx, nil, "pause", guard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nested.Run(ctx, nil, "exec", names.namespace, "iptables", "-t", "nat", "-I", "NVT_DIND", "1", "-j", "RETURN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nested.Run(ctx, nil, "exec", names.namespace, "iptables", "-t", "nat", "-I", "NVT_CAPTURE", "1", "-j", "RETURN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nested.Run(ctx, nil, "restart", "--time", "15", agent); err != nil {
+		t.Fatal(err)
+	}
+	staleProof := execInContainer(t, ctx, nested, agent, "cat", "/run/nvt-confinement/network-namespace")
+	currentNamespace := currentNamespaceProof(t, ctx, nested, agent)
+	if staleProof == currentNamespace {
+		t.Fatalf("tampered capture reused a stale proof: %q", staleProof)
+	}
+	time.Sleep(2 * time.Second)
+	if got := execInContainer(t, ctx, nested, agent, "cat", "/root/restart-proof"); got != "confined\nfresh" {
+		t.Fatalf("agent runtime started before tamper repair: %q", got)
+	}
+	if _, err := nested.Run(ctx, nil, "unpause", guard); err != nil {
+		t.Fatal(err)
+	}
+	waitContainerFile(t, ctx, nested, agent, "/root/restart-proof", "confined\nfresh\nconfined\nresume\n", 30*time.Second)
+	if output := execInContainer(t, ctx, nested, names.namespace, "sh", "-ec", `
+[ "$(iptables -t nat -S OUTPUT 1)" = "-A OUTPUT -j NVT_CAPTURE" ]
+[ "$(iptables -t nat -S PREROUTING 1)" = "-A PREROUTING -j NVT_DIND" ]
+! iptables -t nat -S NVT_CAPTURE | grep -qx -- '-A NVT_CAPTURE -j RETURN'
+! iptables -t nat -S NVT_DIND | grep -qx -- '-A NVT_DIND -j RETURN'
+iptables -t nat -C NVT_DIND -i docker0 -p tcp -j REDIRECT --to-ports 15001
+iptables -t nat -C NVT_DIND -i br-+ -p tcp -j REDIRECT --to-ports 15001
+printf repaired
+`); output != "repaired" {
+		t.Fatalf("managed capture rules were not repaired exactly: %s", output)
+	}
 
 	// Give the nested daemon enough time to persist its layer and container
 	// metadata. The default ten-second restart grace can SIGKILL dockerd under
@@ -144,14 +182,12 @@ func TestDockerBackendDaemonRestartSmoke(t *testing.T) {
 	nested = dockerCLI{host: nestedHost}
 	waitProxy(t, nestedHost, 30*time.Second)
 	agent = ownedAgentContainer(t, ctx, nested, labels)
-	staleProof := execInContainer(t, ctx, nested, agent, "cat", "/run/nvt-confinement/network-namespace")
-	currentNamespace := currentNamespaceProof(t, ctx, nested, agent)
-	if staleProof == currentNamespace {
-		t.Fatalf("stale proof unlocked the restarted namespace: %q", staleProof)
-	}
+	restartProof := waitExecInContainer(t, ctx, nested, agent, 30*time.Second, "cat", "/run/nvt-confinement/network-namespace")
+	currentNamespace = waitExecInContainer(t, ctx, nested, agent, 30*time.Second, "sh", "-ec", "printf '%s:%s:%s\\n' \"$(cat /proc/sys/kernel/random/boot_id)\" \"$(readlink /proc/self/ns/net)\" \"$(cat /run/nvt-confinement-request/request)\"")
 	time.Sleep(2 * time.Second)
-	if got := execInContainer(t, ctx, nested, agent, "cat", "/root/restart-proof"); got != "confined\nfresh" {
-		t.Fatalf("agent runtime started before confinement: %q", got)
+	beforeControllerRecovery := execInContainer(t, ctx, nested, agent, "cat", "/root/restart-proof")
+	if strings.Contains(beforeControllerRecovery, "bypass") || (beforeControllerRecovery != "confined\nfresh\nconfined\nresume" && beforeControllerRecovery != "confined\nfresh\nconfined\nresume\nconfined\nresume") {
+		t.Fatalf("daemon restart escaped confinement or produced ambiguous state: proof=%q current=%q runtime=%q", restartProof, currentNamespace, beforeControllerRecovery)
 	}
 
 	config.DockerHost = nestedHost
@@ -164,7 +200,7 @@ func TestDockerBackendDaemonRestartSmoke(t *testing.T) {
 		t.Fatalf("daemon recovery = %#v %v", observation, err)
 	}
 	agent = ownedAgentContainer(t, ctx, nested, labels)
-	waitContainerFile(t, ctx, nested, agent, "/root/restart-proof", "confined\nfresh\nconfined\nresume\n", 30*time.Second)
+	waitContainerFile(t, ctx, nested, agent, "/root/restart-proof", "confined\nfresh\nconfined\nresume\nconfined\nresume\n", 30*time.Second)
 	newProof := execInContainer(t, ctx, nested, agent, "cat", "/run/nvt-confinement/network-namespace")
 	currentNamespace = currentNamespaceProof(t, ctx, nested, agent)
 	if newProof == oldProof || newProof != currentNamespace {
@@ -175,8 +211,7 @@ func TestDockerBackendDaemonRestartSmoke(t *testing.T) {
 	if routeErr != nil || fmt.Sprintf("%#v", beforeRoutes) != fmt.Sprintf("%#v", afterRoutes) {
 		t.Fatalf("routes changed: before=%#v after=%#v err=%v", beforeRoutes, afterRoutes, routeErr)
 	}
-	names := namesFor(config, run.RunID, desired.SnapshotDigest)
-	for _, volume := range []string{names.workspace, names.home} {
+	for _, volume := range []string{names.workspace, names.home, names.dockerData} {
 		if _, err := nested.Run(ctx, nil, "volume", "inspect", volume); err != nil {
 			t.Fatalf("persistent volume missing: %s", volume)
 		}
@@ -221,7 +256,7 @@ func persistControllerSnapshotWithoutSecret(t *testing.T, ctx context.Context, d
 func daemonRestartRun(t *testing.T, config Config, bypassHost string, bypassPort int) resolvedrun.ResolvedAgentRun {
 	t.Helper()
 	run := testMediatedRun(t)
-	run.RunID, run.Image, run.Runtime.Docker = "daemon-restart-run", config.SeedImage, nil
+	run.RunID, run.Image = "daemon-restart-run", config.SeedImage
 	probe := fmt.Sprintf("http://%s:%d/direct", bypassHost, bypassPort)
 	command := func(mode string) string {
 		return "if curl -fsS --connect-timeout 1 --max-time 2 " + probe + "; then echo bypass >> $HOME/restart-proof; else echo confined >> $HOME/restart-proof; fi; echo " + mode + " >> $HOME/restart-proof; exec sleep 600"
@@ -230,7 +265,7 @@ func daemonRestartRun(t *testing.T, config Config, bypassHost string, bypassPort
 	run.Repositories, run.CredentialProviders = nil, nil
 	run.Broker.Grants = []resolvedrun.BrokerGrant{{Provider: "provider-a", Materialization: "placeholder-file", EgressHosts: []string{"api.example.test:443"}, AllowInsecureUpstream: true}}
 	run.Egress = resolvedrun.Egress{Mode: "mediated", Transport: "transparent", Enforced: true, ProxyProvider: "provider-a", PairedEgressRequired: true, AllowInsecureBroker: true}
-	run.Persistence, run.Retention = resolvedrun.Persistence{Workspace: true, RuntimeState: true}, "persistent"
+	run.Persistence, run.Retention = resolvedrun.Persistence{Workspace: true, RuntimeState: true, DockerData: true}, "persistent"
 	if err := resolvedrun.ValidateResolvedAgentRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -368,9 +403,38 @@ func execInContainer(t *testing.T, ctx context.Context, boundary CommandBoundary
 	return strings.TrimSpace(string(output))
 }
 
+func waitExecInContainer(t *testing.T, ctx context.Context, boundary CommandBoundary, container string, timeout time.Duration, command ...string) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		output, err := boundary.Run(ctx, nil, append([]string{"exec", container}, command...)...)
+		if err == nil {
+			return strings.TrimSpace(string(output))
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatal("restarted agent did not become inspectable")
+	return ""
+}
+
 func currentNamespaceProof(t *testing.T, ctx context.Context, boundary CommandBoundary, container string) string {
 	t.Helper()
-	return execInContainer(t, ctx, boundary, container, "sh", "-ec", "printf '%s:%s\\n' \"$(cat /proc/sys/kernel/random/boot_id)\" \"$(readlink /proc/self/ns/net)\"")
+	return execInContainer(t, ctx, boundary, container, "sh", "-ec", "printf '%s:%s:%s\\n' \"$(cat /proc/sys/kernel/random/boot_id)\" \"$(readlink /proc/self/ns/net)\" \"$(cat /run/nvt-confinement-request/request)\"")
+}
+
+func ownedComposeServiceContainer(t *testing.T, ctx context.Context, boundary CommandBoundary, labels ownedLabels, service string) string {
+	t.Helper()
+	arguments := []string{"ps", "-aq"}
+	for _, pair := range labelPairs(labels) {
+		arguments = append(arguments, "--filter", "label="+pair)
+	}
+	arguments = append(arguments, "--filter", "label="+composeServiceLabel+"="+service)
+	output, err := boundary.Run(ctx, nil, arguments...)
+	values := strings.Fields(string(output))
+	if err != nil || len(values) != 1 {
+		t.Fatalf("exact-owned %s container unavailable", service)
+	}
+	return values[0]
 }
 
 func assertNestedMediated(t *testing.T, ctx context.Context, boundary CommandBoundary, agent, needle string) {

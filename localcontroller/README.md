@@ -36,12 +36,13 @@ recovery, cleanup, and zero-secret contracts.
 The shared proxy, gateway, broker, and controller restart automatically after
 an ordinary Docker daemon or Docker Desktop restart. Enforced transparent
 agents cannot race that recovery: their trusted startup gate accepts only a
-capture proof for the current network namespace, and controller reconciliation
-forces `net-init` to reapply and verify capture for each new namespace
-generation before the runtime entrypoint can run or resume. The nested-daemon
-smoke covers Linux dockerd semantics; native Docker Desktop restart remains a
-platform smoke. Docker data reset or volume pruning is intentionally outside
-restart recovery.
+fresh per-process acknowledgment for the current boot and network namespace.
+The controller-owned confinement guard replaces and verifies both ordinary and
+nested-Docker capture rules before the runtime entrypoint can run or resume.
+On upgrade, a revision label replaces legacy ungated agent containers while
+retaining their named data volumes. The nested-daemon smoke covers Linux
+dockerd semantics; native Docker Desktop restart remains a platform smoke.
+Docker data reset or volume pruning is intentionally outside restart recovery.
 
 For installation, deterministic translation of existing `nvt-dev`, `studio`,
 and `infra` configurations, verification, troubleshooting, and the unchanged
