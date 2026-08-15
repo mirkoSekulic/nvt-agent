@@ -63,6 +63,9 @@ func main() {
 	if err != nil {
 		logger.Fatal("startup failed reason=api-authorization-unavailable")
 	}
+	if err := scheduler.BootstrapLocalRuns(ctx); err != nil {
+		logger.Fatal("startup failed reason=local-run-configuration-unavailable")
+	}
 
 	server := &http.Server{
 		Addr: config.Bind, Handler: handler,

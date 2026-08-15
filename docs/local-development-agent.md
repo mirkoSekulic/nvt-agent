@@ -4,6 +4,10 @@ This guide creates one Docker Compose agent with a broker-backed GitHub App.
 The App private key stays in the broker; the agent receives only a scoped
 broker identity.
 
+For controller-managed persistent workstations and producer-created disposable
+runs, see [Migrating local agents to nvt-local-controller](local-controller-migration.md).
+The static Compose commands below remain the compatibility and rollback path.
+
 ## Prerequisites
 
 - Docker with Compose

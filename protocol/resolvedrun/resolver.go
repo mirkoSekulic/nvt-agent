@@ -96,6 +96,9 @@ func NewResolver(configuration TrustedConfiguration) (*Resolver, error) {
 		if validateMappingsAndRepositories(profile.CredentialProviders, nil, profile.Broker, profile.Egress) != nil {
 			return nil, ErrInvalidConfiguration
 		}
+		if !validDefaultCredentialProvider(profile.DefaultCredentialProvider, profile.CredentialProviders) {
+			return nil, ErrInvalidConfiguration
+		}
 		resolver.profiles[profile.Name] = clone(profile)
 	}
 	return resolver, nil
@@ -182,7 +185,8 @@ func (resolver *Resolver) Resolve(authorization AuthorizationContext, request Lo
 		Profile: profile.Name, Workflow: workflow.Name, Image: image, Runtime: runtime,
 		AgentConfig: clone(agentConfig), Prompt: request.Prompt,
 		Repositories: clone(workflow.Repositories), CredentialProviders: clone(profile.CredentialProviders),
-		Broker: clone(profile.Broker), Egress: profile.Egress,
+		DefaultCredentialProvider: profile.DefaultCredentialProvider,
+		Broker:                    clone(profile.Broker), Egress: profile.Egress,
 		WorkspaceInstructions: WorkspaceInstructions{Profile: profile.WorkspaceInstructions, Workflow: workflow.WorkspaceInstructions},
 		Resources:             resources, Persistence: retention.Persistence, Retention: retention.Name,
 		TTL: retention.TTL, Lifecycle: lifecycle, Execution: backend,

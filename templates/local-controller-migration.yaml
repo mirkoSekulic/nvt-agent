@@ -1,0 +1,24 @@
+api_version: nvt.local-agent-migration/v1
+image: nvt-agent-runtime:latest
+principal_issuer: https://local.nvt.invalid
+backend: local-docker
+retention: persistent
+agents:
+  - name: nvt-dev
+    subject: workstation-nvt-dev
+    display_name: NVT development
+    runtime_type: local-agent
+    autonomy: trusted-local
+    user: root
+  - name: studio
+    subject: workstation-studio
+    display_name: Studio development
+    runtime_type: local-agent
+    autonomy: trusted-local
+    user: root
+  - name: infra
+    subject: workstation-infra
+    display_name: Infrastructure development
+    runtime_type: local-agent
+    autonomy: trusted-local
+    user: root

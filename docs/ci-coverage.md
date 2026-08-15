@@ -132,6 +132,9 @@ helper coverage aggregated by `tests/operator/helm/test.sh`:
 
 ### local controller
 
+- deterministic local-agent migration, named-run bootstrap/restart, and
+  representative nvt-dev/studio/infra reference-only fixtures →
+  `local-controller.yml / controller`
 - `protocol/localroutes` strict route/readiness metadata contract and bounds →
   `local-controller.yml / contract`
 - `localcontroller/internal/controller` API-audience separation, scheduling,

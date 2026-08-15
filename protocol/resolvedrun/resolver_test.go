@@ -11,6 +11,14 @@ import (
 
 const secretNeedle = "RESOLVED-RUN-SECRET-NEEDLE"
 
+func TestDefaultCredentialProviderMustReferenceApprovedMapping(t *testing.T) {
+	configuration := validConfiguration()
+	configuration.Profiles[0].DefaultCredentialProvider = "unapproved"
+	if _, err := NewResolver(configuration); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("unknown default provider = %v", err)
+	}
+}
+
 func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	t.Parallel()
 	resolver, err := NewResolver(validConfiguration())
@@ -84,6 +92,10 @@ func TestResolveProducesCompleteTrustedNonSecretContract(t *testing.T) {
 	pluginNames := renderedPluginNames(t, renderedConfig)
 	if !reflect.DeepEqual(pluginNames[:3], []string{"git-host-credentials", "git-credentials", "checkout-repos"}) {
 		t.Fatalf("typed repositories were not rendered before base plugins: %#v", pluginNames)
+	}
+	hostConfig := renderedConfig["plugins"].([]any)[0].(map[string]any)["config"].(map[string]any)
+	if hostConfig["default-provider"] != "source" {
+		t.Fatalf("default credential provider was not preserved: %#v", hostConfig)
 	}
 	if bytes.Contains(rendered, []byte("lifecycle-termination")) || bytes.Contains(rendered, []byte("/dev/termination-log")) {
 		t.Fatalf("portable rendering injected a backend-specific lifecycle adapter: %s", rendered)
@@ -584,7 +596,7 @@ func validConfiguration() TrustedConfiguration {
 		Profiles: []Profile{{
 			Name: "engineering", Image: "registry.example/nvt-profile:sha256-deadbeef", Runtime: &profileRuntime,
 			AgentConfig: profileAgentConfig, Resources: &profileResources, Lifecycle: &profileLifecycle,
-			CredentialProviders: []CredentialProviderMapping{{Name: "source", BrokerProvider: "source-app", CredentialKind: "mediated", MatchTargets: []string{"github.com/Altinn/*"}}},
+			CredentialProviders: []CredentialProviderMapping{{Name: "source", BrokerProvider: "source-app", CredentialKind: "mediated", MatchTargets: []string{"github.com/Altinn/*"}}}, DefaultCredentialProvider: "source",
 			Broker: Broker{Grants: []BrokerGrant{
 				{Provider: "source-app", Repositories: []string{"Altinn/*"}, Capabilities: []string{"injection.headers"}, Preparations: []string{"identity"}, Materialization: "header-inject", EgressHosts: []string{"github.com:443"}, Git: true, Permissions: map[string]string{"contents": "write"}},
 				{Provider: "runtime-main", Capabilities: []string{"injection.headers"}, Materialization: "header-inject", EgressHosts: []string{"runtime.example:443"}},

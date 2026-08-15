@@ -20,7 +20,7 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"local-controller-admin-token", "local-controller-route-token", `export NVT_LOCAL_GATEWAY_UID="$(id -u)"`, `openssl rand -hex 32`} {
+	for _, required := range []string{"local-controller-admin-token", "local-controller-route-token", "local-controller.json", "NVT_LOCAL_CONTROLLER_SCHEDULING_CONFIG=/broker-state/local-controller.json", `export NVT_LOCAL_GATEWAY_UID="$(id -u)"`, `openssl rand -hex 32`} {
 		if !strings.Contains(string(infraUp), required) {
 			t.Fatalf("infra-up does not provision private local API credentials: missing %q", required)
 		}
@@ -133,9 +133,19 @@ func TestLocalControllerIsTheOnlyLocalRunComponentWithDockerAuthority(t *testing
 		"RUN install -d -m 0700 /state",
 		"USER root",
 		`ENTRYPOINT ["/nvt-local-controller"]`,
+		`/usr/local/bin/nvt-local-migrate`,
 	} {
 		if !strings.Contains(dockerfile, required) {
 			t.Fatalf("local controller Dockerfile missing %q:\n%s", required, dockerfile)
+		}
+	}
+	migrationScript, err := os.ReadFile(filepath.Join(root, "scripts", "local-agent-migrate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"go run ./cmd/nvt-local-migrate", "--agents-root", "--broker-agents", "--broker-config", ".broker/local-controller.json"} {
+		if !strings.Contains(string(migrationScript), required) {
+			t.Fatalf("migration wrapper missing %q:\n%s", required, migrationScript)
 		}
 	}
 	agentCompose, err := os.ReadFile(filepath.Join(root, "compose.agent.yaml"))

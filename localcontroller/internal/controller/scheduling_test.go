@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -44,6 +45,49 @@ func TestLocalSchedulingIsOptionalAndRejectsNonPrivateToken(t *testing.T) {
 	}
 	if scheduler, err := LoadScheduler(path, store); err == nil || scheduler != nil {
 		t.Fatal("non-private scheduling bearer was accepted")
+	}
+}
+
+func TestConfiguredLocalRunsBootstrapIdempotentlyAndRejectDrift(t *testing.T) {
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, _ := openTestStore(t, clock, 4)
+	directory := t.TempDir()
+	document := schedulingDocument{
+		APIVersion: SchedulingAPIVersion, ResolvedRunConfig: mustJSON(t, testSchedulingTrustedConfiguration()),
+		LocalRuns: []localRunConfig{{
+			RunID: "nvt-dev", Principal: resolvedrun.Principal{Issuer: "https://local.nvt.test", Subject: "workstation-nvt-dev"},
+			Profile: "engineering", Workflow: "development", Retention: "disposable", Backend: "container",
+		}},
+	}
+	path := filepath.Join(directory, "local-runs.json")
+	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := LoadScheduler(path, store)
+	if err != nil || scheduler == nil {
+		t.Fatalf("load local runs = %#v %v", scheduler, err)
+	}
+	if err := scheduler.BootstrapLocalRuns(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := LoadScheduler(path, store)
+	if err != nil || restarted.BootstrapLocalRuns(context.Background()) != nil {
+		t.Fatalf("idempotent bootstrap failed: %v", err)
+	}
+	listed, err := store.List(context.Background(), 10, "")
+	if err != nil || len(listed.Runs) != 1 || listed.Runs[0].RunID != "nvt-dev" || listed.Runs[0].Subject != "workstation-nvt-dev" {
+		t.Fatalf("bootstrapped runs = %#v err=%v", listed, err)
+	}
+	document.LocalRuns[0].Prompt = "changed immutable selection"
+	if err := os.WriteFile(path, mustJSON(t, document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	drifted, err := LoadScheduler(path, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drifted.BootstrapLocalRuns(context.Background()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("configuration drift = %v, want conflict", err)
 	}
 }
 

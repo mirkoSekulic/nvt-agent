@@ -32,6 +32,11 @@ gateway outage cannot strand exact-owned run resources. See
 [the protocol](../protocol/local-controller.md) for the complete API, state,
 recovery, cleanup, and zero-secret contracts.
 
+For installation, deterministic translation of existing `nvt-dev`, `studio`,
+and `infra` configurations, verification, troubleshooting, and the unchanged
+static Compose rollback path, see the
+[local controller migration guide](../docs/local-controller-migration.md).
+
 Run focused checks with:
 
 ```sh

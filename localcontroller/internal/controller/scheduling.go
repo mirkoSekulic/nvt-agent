@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -26,7 +27,18 @@ const (
 type schedulingDocument struct {
 	APIVersion        string           `json:"api_version"`
 	ResolvedRunConfig json.RawMessage  `json:"resolved_run_config"`
-	Schedules         []scheduleConfig `json:"schedules"`
+	Schedules         []scheduleConfig `json:"schedules,omitempty"`
+	LocalRuns         []localRunConfig `json:"local_runs,omitempty"`
+}
+
+type localRunConfig struct {
+	RunID     string                `json:"run_id"`
+	Principal resolvedrun.Principal `json:"principal"`
+	Profile   string                `json:"profile"`
+	Workflow  string                `json:"workflow"`
+	Retention string                `json:"retention"`
+	Backend   string                `json:"backend,omitempty"`
+	Prompt    string                `json:"prompt,omitempty"`
 }
 
 type scheduleConfig struct {
@@ -69,6 +81,7 @@ type Scheduler struct {
 	store     *Store
 	resolver  *resolvedrun.Resolver
 	schedules map[string]schedule
+	localRuns []CreateInput
 }
 
 type scheduleAdmissionRequest struct {
@@ -126,7 +139,9 @@ func LoadScheduler(path string, store *Store) (*Scheduler, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var document schedulingDocument
-	if decoder.Decode(&document) != nil || document.APIVersion != SchedulingAPIVersion || len(document.Schedules) == 0 || len(document.Schedules) > 64 {
+	if decoder.Decode(&document) != nil || document.APIVersion != SchedulingAPIVersion ||
+		(len(document.Schedules) == 0 && len(document.LocalRuns) == 0) || len(document.Schedules) > 64 ||
+		len(document.LocalRuns) > 128 || len(document.LocalRuns) > store.maxActiveRuns {
 		return nil, ErrInvalidRequest
 	}
 	var trailing any
@@ -142,6 +157,32 @@ func LoadScheduler(path string, store *Store) (*Scheduler, error) {
 		return nil, ErrInvalidRequest
 	}
 	result := &Scheduler{store: store, resolver: resolver, schedules: make(map[string]schedule, len(document.Schedules))}
+	seenRunIDs := map[string]struct{}{}
+	for _, configured := range document.LocalRuns {
+		if _, duplicate := seenRunIDs[configured.RunID]; duplicate {
+			return nil, ErrInvalidRequest
+		}
+		seenRunIDs[configured.RunID] = struct{}{}
+		authorization := resolvedrun.AuthorizationContext{
+			Principal:  configured.Principal,
+			Selections: []resolvedrun.AuthorizedSelection{{Profile: configured.Profile, Workflows: []string{configured.Workflow}}},
+		}
+		resolved, resolveErr := resolver.Resolve(authorization, resolvedrun.LocalRunRequest{
+			RunID: configured.RunID, Profile: configured.Profile, Workflow: configured.Workflow,
+			Retention: configured.Retention, Backend: configured.Backend, Prompt: configured.Prompt,
+		})
+		if resolveErr != nil {
+			return nil, ErrInvalidRequest
+		}
+		encoded, encodeErr := encodeCanonicalResolved(resolved)
+		if encodeErr != nil {
+			return nil, ErrInvalidRequest
+		}
+		digest := sha256.Sum256([]byte("nvt.local-config/v1\x00" + configured.RunID))
+		result.localRuns = append(result.localRuns, CreateInput{
+			IdempotencyKey: "local-config-" + hex.EncodeToString(digest[:]), ResolvedRun: encoded,
+		})
+	}
 	seenTokens := map[[32]byte]struct{}{}
 	for _, configured := range document.Schedules {
 		if !validRunID(configured.Name) || len(configured.Producers) == 0 || len(configured.Producers) > 32 {
@@ -170,6 +211,21 @@ func LoadScheduler(path string, store *Store) (*Scheduler, error) {
 		result.schedules[configured.Name] = compiled
 	}
 	return result, nil
+}
+
+// BootstrapLocalRuns installs the administrator-owned named run selections.
+// Store.Create makes restart replay idempotent and rejects configuration drift
+// for an existing run instead of silently rewriting its immutable snapshot.
+func (scheduler *Scheduler) BootstrapLocalRuns(ctx context.Context) error {
+	if scheduler == nil {
+		return nil
+	}
+	for _, input := range scheduler.localRuns {
+		if _, err := scheduler.store.Create(ctx, input); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func compileSchedulePolicy(config scheduleProducerConfig) (schedulePolicy, error) {
