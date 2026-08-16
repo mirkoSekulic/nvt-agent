@@ -45,6 +45,8 @@ func TestParseCommandGrammar(t *testing.T) {
 		wantAccepted bool
 	}{
 		{"pr multiline", "/nvtagent pr create\nkeep\nnewlines", CommandIntentPRCreate, "keep\nnewlines", true},
+		{"pr inline", "/nvtagent pr create -- include labels", CommandIntentPRCreate, "include labels", true},
+		{"pr inline + multiline", "/nvtagent pr create -- include labels\nnewlines", CommandIntentPRCreate, "include labels\nnewlines", true},
 		{"help", "/nvtagent --help", CommandIntentHelp, "", true},
 		{"review empty", "/nvtagent review", CommandIntentReview, "", true},
 		{"review inline", "/nvtagent review -- focus on tests", CommandIntentReview, "focus on tests", true},

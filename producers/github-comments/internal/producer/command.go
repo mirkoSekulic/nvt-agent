@@ -56,7 +56,7 @@ func parseCommandLine(line, prefix string) (Command, bool) {
 		allowInline bool
 	}
 	commands := []candidate{
-		{text: "pr create", intent: CommandIntentPRCreate},
+		{text: "pr create", intent: CommandIntentPRCreate, allowInline: true},
 		{text: "pr continue", intent: CommandIntentPRContinue, allowInline: true},
 		{text: "review", intent: CommandIntentReview, allowInline: true},
 		{text: "run", intent: CommandIntentRun, allowInline: true},

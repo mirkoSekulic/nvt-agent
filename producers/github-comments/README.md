@@ -14,11 +14,14 @@ Available producer commands:
 
 ```text
 /nvtagent --help
-/nvtagent pr create
+/nvtagent pr create -- <instructions>
 /nvtagent review
 /nvtagent pr continue [-- <optional instructions>]
 /nvtagent run -- <instructions>
 ```
+
+`pr create` keeps multiline instructions and also supports inline syntax via
+`/nvtagent pr create -- <instructions>`.
 
 ## Build
 

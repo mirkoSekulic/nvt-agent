@@ -252,7 +252,7 @@ func helpResponse(prefix string) string {
 		fmt.Sprintf("%s --help", prefix),
 		"",
 		"Commands:",
-		fmt.Sprintf("%s pr create", prefix),
+		fmt.Sprintf("%s pr create -- <instructions>", prefix),
 		"  Create and ship a pull request from an ordinary issue thread.",
 		fmt.Sprintf("%s review", prefix),
 		"  Open a review workflow on the current PR and post findings as a PR comment.",
