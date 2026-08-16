@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -127,6 +128,17 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 			)
 			continue
 		}
+		if command.Intent == CommandIntentHelp {
+			issueNumber, ok := IssueNumberFromIssueURL(comment.IssueURL)
+			if !ok {
+				p.Logger.Warn("help request missing parseable issue URL", "repo", key, "commentID", comment.ID)
+				continue
+			}
+			if err := p.GitHub.CreateIssueComment(ctx, repo, issueNumber, helpResponse(command.Prefix)); err != nil {
+				return err
+			}
+			continue
+		}
 		issueNumber, ok := IssueNumberFromIssueURL(comment.IssueURL)
 		if !ok {
 			p.Logger.Warn("matching command comment missing parseable issue URL", "repo", key, "commentID", comment.ID)
@@ -224,11 +236,36 @@ func validCommandPlacement(intent CommandIntent, isPullRequest bool) bool {
 		return !isPullRequest
 	case CommandIntentReview:
 		return isPullRequest
+	case CommandIntentPRContinue:
+		return isPullRequest
 	case CommandIntentRun:
 		return true
 	default:
 		return false
 	}
+}
+
+func helpResponse(prefix string) string {
+	return "Available commands:\n\n" + strings.Join([]string{
+		"Syntax:",
+		"",
+		fmt.Sprintf("%s --help", prefix),
+		"",
+		"Commands:",
+		fmt.Sprintf("%s pr create", prefix),
+		"  Create and ship a pull request from an ordinary issue thread.",
+		fmt.Sprintf("%s review", prefix),
+		"  Open a review workflow on the current PR and post findings as a PR comment.",
+		fmt.Sprintf("%s run -- <instructions>", prefix),
+		"  Execute one bounded cooperative task on issues and pull requests.",
+		fmt.Sprintf("%s pr continue -- <optional instructions>", prefix),
+		"  Enter PR maintenance mode, inspect prior reviews/comments/checks,",
+		"  address actionable items, register github-watch, and keep running.",
+		"- pr create is valid on ordinary issues.",
+		"- review and pr continue are valid only on pull requests.",
+		"- run is valid on issues and pull requests.",
+		"- pr continue runs a long-lived PR maintenance workflow.",
+	}, "\n")
 }
 
 func (p *Poller) reactionForOutcome(outcome schedulingOutcome) string {

@@ -52,6 +52,15 @@ func BuildPrompt(input PromptInput) string {
 			"Post a final result to the same source thread using the existing mediated GitHub tooling.",
 			"Only after that final comment succeeds, invoke `nvt-work complete`.",
 		}, " "))
+	case CommandIntentPRContinue:
+		fmt.Fprint(&b, strings.Join([]string{
+			"Check out the PR branch and inspect the PR body, all existing PR comments, review threads, and checks.",
+			"Address current actionable issues and continue iterating until the issue is fully resolved.",
+			"Register `github-watch` for ongoing PR activity using:",
+			"  github-watch register --repo OWNER/REPO --number PR_NUMBER --label work",
+			"Keep the workflow alive until the pull request is merged or closed.",
+			"Ignoring control comments in this PR-thread (commands like `/nvtagent ...`) is required.",
+		}, " "))
 	default:
 		fmt.Fprint(&b, strings.Join([]string{
 			"Read the issue and comments, create a new branch from the repository default branch,",
@@ -69,6 +78,8 @@ func writePromptContext(b *strings.Builder, input PromptInput) {
 	title, sourceKind := "GitHub issue PR creation request", "Issue"
 	if input.Intent == CommandIntentReview {
 		title, sourceKind = "GitHub pull request review request", "Pull request"
+	} else if input.Intent == CommandIntentPRContinue {
+		title, sourceKind = "GitHub pull request maintenance request", "Pull request"
 	} else if input.Intent == CommandIntentRun {
 		title, sourceKind = "GitHub cooperative work request", "Source"
 	}

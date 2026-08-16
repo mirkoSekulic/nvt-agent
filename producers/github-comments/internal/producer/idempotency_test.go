@@ -35,6 +35,16 @@ func TestCommentIntentIdentitySeparatesCommands(t *testing.T) {
 	}
 }
 
+func TestIssueIntentIdentityPreventsDuplicateActivePRContinueWork(t *testing.T) {
+	got := IssueIntentIdempotencyKey("owner", "repo", 42, CommandIntentPRContinue)
+	if got != "github:owner/repo:issue:42:intent:pr-continue" {
+		t.Fatalf("issue intent key = %q", got)
+	}
+	if got := IssueIntentAgentRunName("owner", "repo", 42, CommandIntentPRContinue); got == "" {
+		t.Fatalf("issue intent name must be non-empty")
+	}
+}
+
 func TestIssueScopeAgentRunNameCompatibility(t *testing.T) {
 	got := AgentRunName("owner", "repo", 42)
 	want := "gh-owner-repo-42-pr-create-7354cbc76a"

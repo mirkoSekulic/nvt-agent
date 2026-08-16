@@ -255,6 +255,9 @@ func TestLocalAdmissionOpaqueTokenReaderMatchesControllerContract(t *testing.T) 
 	if err := os.WriteFile(publicPath, []byte(valid), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(publicPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := readLocalAdmissionToken(publicPath); err == nil {
 		t.Fatal("non-private local token accepted")
 	}
@@ -354,10 +357,20 @@ func TestSubmitProfiledScheduleAdmissionEmitsOnlyConfiguredWorkflowName(t *testi
 
 func TestWorkflowRoutingIsExactAndFailClosed(t *testing.T) {
 	submitter := AgentRunSubmitter{config: Config{Submission: SubmissionConfig{
-		Workflow:         "legacy-pr",
-		CommandWorkflows: map[CommandIntent]string{CommandIntentPRCreate: "implement-pr", CommandIntentReview: "review-pr", CommandIntentRun: "generic-run"},
+		Workflow: "legacy-pr",
+		CommandWorkflows: map[CommandIntent]string{
+			CommandIntentPRCreate:   "implement-pr",
+			CommandIntentReview:     "review-pr",
+			CommandIntentRun:        "generic-run",
+			CommandIntentPRContinue: "continue-pr",
+		},
 	}}}
-	for intent, want := range map[CommandIntent]string{CommandIntentPRCreate: "implement-pr", CommandIntentReview: "review-pr", CommandIntentRun: "generic-run"} {
+	for intent, want := range map[CommandIntent]string{
+		CommandIntentPRCreate:   "implement-pr",
+		CommandIntentReview:     "review-pr",
+		CommandIntentRun:        "generic-run",
+		CommandIntentPRContinue: "continue-pr",
+	} {
 		got, err := submitter.workflowForCommand(intent)
 		if err != nil || got != want {
 			t.Fatalf("%q workflow = %q, %v; want %q", intent, got, err, want)
@@ -367,9 +380,48 @@ func TestWorkflowRoutingIsExactAndFailClosed(t *testing.T) {
 	if _, err := submitter.workflowForCommand(CommandIntentReview); err == nil {
 		t.Fatal("unmapped review selected a workflow")
 	}
+	delete(submitter.config.Submission.CommandWorkflows, CommandIntentPRContinue)
+	if _, err := submitter.workflowForCommand(CommandIntentPRContinue); err == nil {
+		t.Fatal("unmapped pr continue selected a workflow")
+	}
 	delete(submitter.config.Submission.CommandWorkflows, CommandIntentPRCreate)
 	if got, err := submitter.workflowForCommand(CommandIntentPRCreate); err != nil || got != "legacy-pr" {
 		t.Fatalf("pr-create fallback = %q, %v", got, err)
+	}
+}
+
+func TestSubmitProfiledAdmissionSendsConfiguredWorkflowForPRContinue(t *testing.T) {
+	tokenFile := writeTestAdmissionToken(t, testAdmissionToken("Y29udGludWUtcmVxdWVzdA"))
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"scheduled":true}`))
+	}))
+	defer server.Close()
+
+	submitter := profiledAdmissionSubmitter(server.Client(), server.URL, tokenFile)
+	submitter.config.Submission.CommandWorkflows = map[CommandIntent]string{
+		CommandIntentPRContinue: "continue-pr",
+	}
+	created, _, err := submitter.Submit(
+		context.Background(),
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "Continue request", HTMLURL: "https://github.test/acme/widget/pull/7"},
+		nil,
+		GitHubIssueComment{ID: 101, User: GitHubUser{Login: "alice", ID: 424242}},
+		Command{Prefix: "/nvtagent", Intent: CommandIntentPRContinue},
+	)
+	if err != nil || !created {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	if got := payload["workflow"]; got != "continue-pr" {
+		t.Fatalf("workflow payload = %#v", got)
+	}
+	if _, ok := payload["agentRun"]; ok {
+		t.Fatalf("pr continue unexpectedly sent legacy payload: %#v", payload)
 	}
 }
 
@@ -772,6 +824,51 @@ func TestBuildAgentRunSetsGitHubPRLifecycle(t *testing.T) {
 	wantCompleteOn := []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}
 	if !stringSlicesEqual(run.Spec.Lifecycle.CompleteOn, wantCompleteOn) {
 		t.Fatalf("completeOn = %#v, want %#v", run.Spec.Lifecycle.CompleteOn, wantCompleteOn)
+	}
+	if len(run.Spec.Lifecycle.FailOn) != 0 {
+		t.Fatalf("failOn = %#v, want empty", run.Spec.Lifecycle.FailOn)
+	}
+}
+
+func buildTestAgentRunWithIntent(t *testing.T, cfg Config, intent CommandIntent) *nvtv1alpha1.AgentRun {
+	t.Helper()
+	submitter := NewAgentRunSubmitter(nil, cfg)
+	run, err := submitter.buildAgentRun(
+		Repository{Owner: "acme", Name: "widget"},
+		GitHubIssue{Number: 7, Title: "broken"},
+		nil,
+		GitHubIssueComment{ID: 101, Body: "/nvtagent pr continue", User: GitHubUser{Login: "alice"}},
+		Command{Prefix: "/nvtagent", Intent: intent},
+		submitter.agentRunIdentityForCommand(
+			Repository{Owner: "acme", Name: "widget"},
+			GitHubIssue{Number: 7, Title: "broken"},
+			GitHubIssueComment{ID: 101},
+			Command{Intent: intent},
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func TestBuildAgentRunSetsPRContinueLifecycle(t *testing.T) {
+	run := buildTestAgentRunWithIntent(t, Config{
+		OperatorCallbackBaseURL: "http://operator.test",
+		AgentRun: AgentRunConfig{
+			Namespace:       "nvt",
+			RuntimeImage:    "runtime:latest",
+			RuntimeType:     "codex",
+			RuntimeAutonomy: "trusted-local",
+			WorkspaceMode:   "Ephemeral",
+		},
+	}, CommandIntentPRContinue)
+	if run.Spec.Lifecycle == nil {
+		t.Fatal("expected lifecycle")
+	}
+	want := []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}
+	if !stringSlicesEqual(run.Spec.Lifecycle.CompleteOn, want) {
+		t.Fatalf("completeOn = %#v, want %#v", run.Spec.Lifecycle.CompleteOn, want)
 	}
 	if len(run.Spec.Lifecycle.FailOn) != 0 {
 		t.Fatalf("failOn = %#v, want empty", run.Spec.Lifecycle.FailOn)

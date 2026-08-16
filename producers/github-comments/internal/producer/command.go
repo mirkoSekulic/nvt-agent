@@ -5,9 +5,11 @@ import "strings"
 type CommandIntent string
 
 const (
-	CommandIntentPRCreate CommandIntent = "pr-create"
-	CommandIntentReview   CommandIntent = "review"
-	CommandIntentRun      CommandIntent = "run"
+	CommandIntentPRCreate   CommandIntent = "pr-create"
+	CommandIntentPRContinue CommandIntent = "pr-continue"
+	CommandIntentReview     CommandIntent = "review"
+	CommandIntentRun        CommandIntent = "run"
+	CommandIntentHelp       CommandIntent = "help"
 )
 
 type Command struct {
@@ -33,6 +35,9 @@ func ParseCommand(body string, prefixes []string) (Command, bool) {
 			if command.Intent == CommandIntentRun && command.AdditionalInstructions == "" {
 				return Command{}, false
 			}
+			if command.Intent == CommandIntentHelp && command.AdditionalInstructions != "" {
+				return Command{}, false
+			}
 			return command, true
 		}
 		return Command{}, false
@@ -45,16 +50,27 @@ func parseCommandLine(line, prefix string) (Command, bool) {
 		return Command{}, false
 	}
 	remainder := strings.TrimPrefix(line, prefix+" ")
-	commands := []struct {
-		text   string
-		intent CommandIntent
-	}{{"pr create", CommandIntentPRCreate}, {"review", CommandIntentReview}, {"run", CommandIntentRun}}
+	type candidate struct {
+		text        string
+		intent      CommandIntent
+		allowInline bool
+	}
+	commands := []candidate{
+		{text: "pr create", intent: CommandIntentPRCreate},
+		{text: "pr continue", intent: CommandIntentPRContinue, allowInline: true},
+		{text: "review", intent: CommandIntentReview, allowInline: true},
+		{text: "run", intent: CommandIntentRun, allowInline: true},
+		{text: "--help", intent: CommandIntentHelp},
+	}
 	for _, candidate := range commands {
 		if remainder == candidate.text {
 			return Command{Prefix: prefix, Intent: candidate.intent}, true
 		}
 		separator := candidate.text + " -- "
 		if strings.HasPrefix(remainder, separator) {
+			if !candidate.allowInline {
+				return Command{}, false
+			}
 			inline := strings.TrimSpace(strings.TrimPrefix(remainder, separator))
 			if inline == "" || strings.HasPrefix(inline, "--") {
 				return Command{}, false

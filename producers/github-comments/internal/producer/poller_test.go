@@ -627,11 +627,45 @@ func TestCommandPlacementByIntent(t *testing.T) {
 		{CommandIntentPRCreate, false, true}, {CommandIntentPRCreate, true, false},
 		{CommandIntentReview, false, false}, {CommandIntentReview, true, true},
 		{CommandIntentRun, false, true}, {CommandIntentRun, true, true},
+		{CommandIntentPRContinue, false, false}, {CommandIntentPRContinue, true, true},
 	}
 	for _, test := range tests {
 		if got := validCommandPlacement(test.intent, test.pr); got != test.want {
 			t.Fatalf("intent=%q pr=%v got=%v", test.intent, test.pr, got)
 		}
+	}
+}
+
+func TestPollerHelpCommandPostsHelpAndReturnsWithoutSubmitting(t *testing.T) {
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID:       101,
+			Body:     "/nvtagent --help",
+			IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+			User:     GitHubUser{Login: "octo"},
+		}},
+		issue: GitHubIssue{Number: 42, Title: "Any", HTMLURL: "https://github.com/acme/widget/issues/42"},
+	}
+	k8sClient := newFakeAgentRunClient(t)
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(k8sClient, cfg), nil, slog.Default())
+
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if github.createIssueCommentCalls != 1 {
+		t.Fatalf("help command expected one response comment, got %d", github.createIssueCommentCalls)
+	}
+	if github.listIssueCommentsCalls != 0 {
+		t.Fatalf("help command fetched issue comments: %d", github.listIssueCommentsCalls)
+	}
+	var runs nvtv1alpha1.AgentRunList
+	if err := k8sClient.List(context.Background(), &runs, ctrlclient.InNamespace(cfg.AgentRun.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs.Items) != 0 {
+		t.Fatalf("help command unexpectedly created AgentRuns: %d", len(runs.Items))
 	}
 }
 
@@ -811,15 +845,16 @@ func newFakeAgentRunClient(t *testing.T) ctrlclient.Client {
 }
 
 type fakeGitHubClient struct {
-	updatedComments        []GitHubIssueComment
-	issue                  GitHubIssue
-	issues                 map[int]GitHubIssue
-	issueComments          []GitHubIssueComment
-	listUpdatedSince       []*time.Time
-	listIssueCommentsCalls int
-	filterUpdatedBySince   bool
-	reactions              []fakeSchedulingReaction
-	reactionErr            error
+	updatedComments         []GitHubIssueComment
+	issue                   GitHubIssue
+	issues                  map[int]GitHubIssue
+	issueComments           []GitHubIssueComment
+	createIssueCommentCalls int
+	listUpdatedSince        []*time.Time
+	listIssueCommentsCalls  int
+	filterUpdatedBySince    bool
+	reactions               []fakeSchedulingReaction
+	reactionErr             error
 }
 
 type fakeSchedulingReaction struct {
@@ -860,6 +895,16 @@ func (f *fakeGitHubClient) ListIssueComments(
 ) ([]GitHubIssueComment, error) {
 	f.listIssueCommentsCalls++
 	return f.issueComments, nil
+}
+
+func (f *fakeGitHubClient) CreateIssueComment(
+	_ context.Context,
+	_ Repository,
+	_ int,
+	_ string,
+) error {
+	f.createIssueCommentCalls++
+	return nil
 }
 
 func (f *fakeGitHubClient) CreateIssueCommentReaction(
