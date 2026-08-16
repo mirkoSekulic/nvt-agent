@@ -1,0 +1,47 @@
+apiVersion: nvt.dev/local/v1
+secrets:
+  github-key:
+    file: ./.nvt-local/secrets/github/main-app.pem
+accounts:
+  github:
+    preset: github-app
+    appId: "3912708"
+    privateKeySecret: github-key
+    installations:
+      example: "123"
+  codex:
+    preset: codex-oauth
+profiles:
+  development:
+    runtime:
+      preset: codex
+      autonomy: trusted-local
+    accounts: [github, codex]
+    tools:
+      packages: [jq, git]
+      mise: [go@latest]
+    capabilities: [SYS_PTRACE]
+    instructions:
+      file: ./.nvt-local/instructions/development.md
+workstations:
+  - name: nvt
+    profile: development
+    repositories: [mirkoSekulic/nvt-agent]
+workflows:
+  nvt-development:
+    profile: development
+    repository: mirkoSekulic/nvt-agent
+    retention: disposable
+producers:
+  - name: nvt-comments
+    preset: github-comments
+    account: github
+    repository: mirkoSekulic/nvt-agent
+    prefix: /nvtagent
+    allowedAuthors: [mirkoSekulic]
+    workflow: nvt-development
+  - name: external-chat
+    image: ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    workflow: nvt-development
+    config:
+      commandPrefix: /agent
