@@ -149,6 +149,42 @@ func TestGitHubAPIClientCreatesIdempotentIssueCommentReaction(t *testing.T) {
 	}
 }
 
+func TestGitHubAPIClientCreatesIssueComment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/repos/acme/widget/issues/42/comments" {
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer installation-token" ||
+			request.Header.Get("Accept") != "application/vnd.github+json" {
+			t.Fatalf("unexpected headers: %#v", request.Header)
+		}
+		var payload struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || payload.Body != "hello" {
+			t.Fatalf("unexpected issue comment payload %#v: %v", payload, err)
+		}
+		response.WriteHeader(http.StatusCreated)
+		_, _ = response.Write([]byte(`{"id":99}`))
+	}))
+	defer server.Close()
+
+	client := NewGitHubAPIClient(
+		server.URL, "test-agent", staticTokenSource("installation-token"), server.Client(),
+	)
+	if err := client.CreateIssueComment(context.Background(), Repository{Owner: reactionTestRepoOwner, Name: reactionTestRepoName}, 42, "hello"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGitHubAPIClientCreateIssueCommentRejectsInvalidInput(t *testing.T) {
+	client := NewGitHubAPIClient("http://localhost", "test-agent", staticTokenSource("token"), http.DefaultClient)
+	err := client.CreateIssueComment(context.Background(), Repository{Owner: reactionTestRepoOwner, Name: reactionTestRepoName}, 0, "")
+	if err == nil {
+		t.Fatal("expected invalid input")
+	}
+}
+
 func TestGitHubAPIClientReactionFailuresAreBoundedAndSanitized(t *testing.T) {
 	const responseCanary = "REACTION-RESPONSE-SECRET-NEEDLE"
 	for _, test := range []struct {

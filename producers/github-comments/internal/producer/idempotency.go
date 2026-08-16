@@ -18,6 +18,16 @@ func CommentIntentAgentRunName(owner, repo string, issue int, commentID int64, i
 	return agentRunNameFromBaseAndKey(base, CommentIntentIdempotencyKey(owner, repo, issue, commentID, intent))
 }
 
+func IssueIntentIdempotencyKey(owner, repo string, issue int, intent CommandIntent) string {
+	return fmt.Sprintf("github:%s/%s:issue:%d:intent:%s", owner, repo, issue, intent)
+}
+
+func IssueIntentAgentRunName(owner, repo string, issue int, intent CommandIntent) string {
+	base := strings.ToLower(fmt.Sprintf("gh-%d-%s-%s-%s", issue, owner, repo, intent))
+	base = strings.Trim(dnsLabelInvalid.ReplaceAllString(base, "-"), "-")
+	return agentRunNameFromBaseAndKey(base, IssueIntentIdempotencyKey(owner, repo, issue, intent))
+}
+
 const (
 	IdempotencyAnnotation = "nvt.dev/idempotency-key"
 	AccessKeyAnnotation   = "nvt.dev/access-key"

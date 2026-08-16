@@ -627,11 +627,214 @@ func TestCommandPlacementByIntent(t *testing.T) {
 		{CommandIntentPRCreate, false, true}, {CommandIntentPRCreate, true, false},
 		{CommandIntentReview, false, false}, {CommandIntentReview, true, true},
 		{CommandIntentRun, false, true}, {CommandIntentRun, true, true},
+		{CommandIntentPRContinue, false, false}, {CommandIntentPRContinue, true, true},
 	}
 	for _, test := range tests {
 		if got := validCommandPlacement(test.intent, test.pr); got != test.want {
 			t.Fatalf("intent=%q pr=%v got=%v", test.intent, test.pr, got)
 		}
+	}
+}
+
+func TestPollerHelpCommandPostsHelpAndReturnsWithoutSubmitting(t *testing.T) {
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID:       101,
+			Body:     "/nvtagent --help",
+			IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+			User:     GitHubUser{Login: "octo"},
+		}},
+		issue: GitHubIssue{Number: 42, Title: "Any", HTMLURL: "https://github.com/acme/widget/issues/42"},
+	}
+	k8sClient := newFakeAgentRunClient(t)
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(k8sClient, cfg), nil, slog.Default())
+
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if github.createIssueCommentCalls != 1 {
+		t.Fatalf("help command expected one response comment, got %d", github.createIssueCommentCalls)
+	}
+	if !strings.HasPrefix(github.createdIssueCommentBody, helpResponse("/nvtagent")+"\n<!-- nvt-github-help-response:") {
+		t.Fatalf("help response mismatch:\n%s", github.createdIssueCommentBody)
+	}
+	if github.listIssueCommentsCalls != 0 {
+		t.Fatalf("help command fetched issue comments: %d", github.listIssueCommentsCalls)
+	}
+	var runs nvtv1alpha1.AgentRunList
+	if err := k8sClient.List(context.Background(), &runs, ctrlclient.InNamespace(cfg.AgentRun.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs.Items) != 0 {
+		t.Fatalf("help command unexpectedly created AgentRuns: %d", len(runs.Items))
+	}
+}
+
+func TestHelpResponseIsFormalCompleteCommandReference(t *testing.T) {
+	want := "```text\n" + `NVT GitHub Producer
+
+USAGE
+  /nvtagent --help
+  /nvtagent pr create [-- <instructions>]
+  /nvtagent review [-- <instructions>]
+  /nvtagent run -- <instructions>
+  /nvtagent pr continue [-- <instructions>]
+
+COMMANDS
+  --help
+      Show this command reference. Valid on issues and pull requests.
+
+  pr create
+      Create and deliver a pull request. Valid only on ordinary issues.
+      Additional instructions are optional.
+
+  review
+      Review the current pull request and post findings without approving,
+      requesting changes, or modifying product code. Valid only on pull requests.
+      Additional focus instructions are optional.
+
+  run
+      Perform one bounded task, post the result to the originating thread,
+      and exit. Valid on issues and pull requests. Instructions are required.
+
+  pr continue
+      Start a durable pull-request maintenance session. The agent checks out
+      the PR branch, reads reviews, comments, and checks, addresses actionable
+      issues, watches for later activity, and remains active until merge or close.
+      Valid only on pull requests. Additional instructions are optional.
+
+INSTRUCTIONS
+  Put the command on the first non-empty line. Add instructions either after
+  a standalone -- on that line, or on the following lines. If both forms are
+  used, the inline text is followed by a newline and then the multiline text.
+  Bare trailing text without -- is invalid.` + "\n```"
+	if got := helpResponse("/nvtagent"); got != want {
+		t.Fatalf("help output:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestHelpResponseMarkerRequiresLaterThreadComment(t *testing.T) {
+	const marker = "<!-- nvt-github-help-response:marker -->"
+	comments := []GitHubIssueComment{
+		{ID: 100, Body: marker},
+		{ID: 101, Body: "/nvtagent --help\n" + marker},
+	}
+	if helpResponseMarkerExists(comments, 101, marker) {
+		t.Fatal("command or earlier comment forged delivered marker")
+	}
+	comments = append(comments, GitHubIssueComment{ID: 102, Body: helpResponse("/nvtagent") + "\n" + marker})
+	if !helpResponseMarkerExists(comments, 101, marker) {
+		t.Fatal("later response marker was not found")
+	}
+}
+
+func TestPollerHelpCommandResponseIsIdempotentEvenWhenCommentReplays(t *testing.T) {
+	ctx := context.Background()
+	state := &failCursorOnceStateStore{StateStore: newMemoryStateStore(), remainingFailures: 1}
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID:       101,
+			Body:     "/nvtagent --help",
+			IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+			User:     GitHubUser{Login: "octo"},
+		}},
+		issue: GitHubIssue{Number: 42, Title: "Any", HTMLURL: "https://github.com/acme/widget/issues/42"},
+	}
+	k8sClient := newFakeAgentRunClient(t)
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(k8sClient, cfg), state, slog.Default())
+	poller.startedAt = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+
+	if err := poller.PollOnce(ctx); err == nil {
+		t.Fatal("expected injected cursor failure")
+	}
+	if github.createIssueCommentCalls != 1 {
+		t.Fatalf("help command expected one response comment, got %d", github.createIssueCommentCalls)
+	}
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if github.createIssueCommentCalls != 1 {
+		t.Fatalf("help command replay produced duplicate response: got %d", github.createIssueCommentCalls)
+	}
+}
+
+func TestPollerHelpCommandReconcilesAmbiguousPostWithoutDuplicate(t *testing.T) {
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID: 101, Body: "/nvtagent --help",
+			IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+			User:     GitHubUser{Login: "octo"},
+		}},
+		createIssueCommentErr: errors.New("injected post failure"),
+	}
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(newFakeAgentRunClient(t), cfg), newMemoryStateStore(), slog.Default())
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.issueComments = []GitHubIssueComment{{ID: 202, Body: github.createdIssueCommentBody}}
+	github.createIssueCommentErr = nil
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if github.createIssueCommentCalls != 1 {
+		t.Fatalf("ambiguous accepted post was duplicated: attempts=%d", github.createIssueCommentCalls)
+	}
+}
+
+func TestPollerHelpCommandRecoversPendingClaimCreatedBeforePost(t *testing.T) {
+	ctx := context.Background()
+	state := newMemoryStateStore()
+	const marker = "<!-- nvt-github-help-response:00112233445566778899aabbccddeeff -->"
+	record, created, err := state.GetOrCreateHelpResponse(ctx, "acme/widget", 101, marker, time.Now())
+	if err != nil || !created || record.Marker != marker {
+		t.Fatalf("seed pending response = %#v created=%v err=%v", record, created, err)
+	}
+	github := &fakeGitHubClient{updatedComments: []GitHubIssueComment{{
+		ID: 101, Body: "/nvtagent --help",
+		IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+		User:     GitHubUser{Login: "octo"},
+	}}}
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(newFakeAgentRunClient(t), cfg), state, slog.Default())
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if github.createIssueCommentCalls != 1 || !strings.Contains(github.createdIssueCommentBody, marker) {
+		t.Fatalf("pending response was not recovered: calls=%d body=%q", github.createIssueCommentCalls, github.createdIssueCommentBody)
+	}
+}
+
+func TestPollerHelpCommandRetriesUnobservedPendingPostAfterLease(t *testing.T) {
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID: 101, Body: "/nvtagent --help",
+			IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+			User:     GitHubUser{Login: "octo"},
+		}},
+		createIssueCommentErr: errors.New("injected post failure"),
+	}
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(newFakeAgentRunClient(t), cfg), newMemoryStateStore(), slog.Default())
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	poller.now = func() time.Time { return now }
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.createIssueCommentErr = nil
+	now = now.Add(helpResponseRetryDelay + time.Second)
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if github.createIssueCommentCalls != 2 {
+		t.Fatalf("unobserved pending post attempts = %d, want retry", github.createIssueCommentCalls)
 	}
 }
 
@@ -811,15 +1014,31 @@ func newFakeAgentRunClient(t *testing.T) ctrlclient.Client {
 }
 
 type fakeGitHubClient struct {
-	updatedComments        []GitHubIssueComment
-	issue                  GitHubIssue
-	issues                 map[int]GitHubIssue
-	issueComments          []GitHubIssueComment
-	listUpdatedSince       []*time.Time
-	listIssueCommentsCalls int
-	filterUpdatedBySince   bool
-	reactions              []fakeSchedulingReaction
-	reactionErr            error
+	updatedComments         []GitHubIssueComment
+	issue                   GitHubIssue
+	issues                  map[int]GitHubIssue
+	issueComments           []GitHubIssueComment
+	createIssueCommentCalls int
+	createdIssueCommentBody string
+	createIssueCommentErr   error
+	listUpdatedSince        []*time.Time
+	listIssueCommentsCalls  int
+	filterUpdatedBySince    bool
+	reactions               []fakeSchedulingReaction
+	reactionErr             error
+}
+
+type failCursorOnceStateStore struct {
+	StateStore
+	remainingFailures int
+}
+
+func (s *failCursorOnceStateStore) SetRepoCursor(ctx context.Context, repoKey string, cursor time.Time) error {
+	if s.remainingFailures > 0 {
+		s.remainingFailures--
+		return errors.New("injected cursor failure")
+	}
+	return s.StateStore.SetRepoCursor(ctx, repoKey, cursor)
 }
 
 type fakeSchedulingReaction struct {
@@ -860,6 +1079,17 @@ func (f *fakeGitHubClient) ListIssueComments(
 ) ([]GitHubIssueComment, error) {
 	f.listIssueCommentsCalls++
 	return f.issueComments, nil
+}
+
+func (f *fakeGitHubClient) CreateIssueComment(
+	_ context.Context,
+	_ Repository,
+	_ int,
+	body string,
+) error {
+	f.createIssueCommentCalls++
+	f.createdIssueCommentBody = body
+	return f.createIssueCommentErr
 }
 
 func (f *fakeGitHubClient) CreateIssueCommentReaction(

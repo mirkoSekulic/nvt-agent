@@ -429,10 +429,12 @@ func TestWorkflowProfilesAreAuthorizedIndependentlyFromExecutionProfiles(t *test
 		wantWorkflow string
 		wantText     string
 		wantComplete []string
+		wantFail     []string
 	}{
-		{workID: "workflow-default", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n", wantComplete: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}},
-		{workID: "workflow-review", workflow: "review-pr", wantWorkflow: "review-pr", wantText: "Review and report findings first.\n", wantComplete: []string{"plugin.work.completed"}},
-		{workID: "workflow-implement", workflow: "implement-pr", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n", wantComplete: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}},
+		{workID: "workflow-default", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n", wantComplete: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}, wantFail: []string{"plugin.work.failed"}},
+		{workID: "workflow-review", workflow: "review-pr", wantWorkflow: "review-pr", wantText: "Review and report findings first.\n", wantComplete: []string{"plugin.work.completed"}, wantFail: []string{"plugin.work.failed"}},
+		{workID: "workflow-implement", workflow: "implement-pr", wantWorkflow: "implement-pr", wantText: "Implement and create a pull request.\n", wantComplete: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}, wantFail: []string{"plugin.work.failed"}},
+		{workID: "workflow-continue", workflow: "continue-pr", wantWorkflow: "continue-pr", wantText: "Maintain the pull request until merge or close.\n", wantComplete: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}, wantFail: nil},
 	}
 	var runs []nvtv1alpha1.AgentRun
 	for _, request := range requests {
@@ -449,7 +451,7 @@ func TestWorkflowProfilesAreAuthorizedIndependentlyFromExecutionProfiles(t *test
 			run.Spec.Agent.WorkspaceInstructions != "Execution profile guidance.\n" ||
 			run.Spec.Agent.WorkflowInstructions != request.wantText ||
 			!reflect.DeepEqual(run.Spec.Lifecycle.CompleteOn, request.wantComplete) ||
-			!reflect.DeepEqual(run.Spec.Lifecycle.FailOn, []string{"plugin.work.failed"}) {
+			!reflect.DeepEqual(run.Spec.Lifecycle.FailOn, request.wantFail) {
 			t.Fatalf("independent workflow resolution failed: %#v", run.Spec)
 		}
 		runs = append(runs, run)
@@ -464,6 +466,11 @@ func TestWorkflowProfilesAreAuthorizedIndependentlyFromExecutionProfiles(t *test
 	}
 	if phase, _, matched := AgentRunLifecycleTransition(runs[1].Spec.Lifecycle, "plugin.work.completed"); !matched || phase != nvtv1alpha1.AgentRunPhaseCompleted {
 		t.Fatalf("review workflow completion did not match: phase=%q matched=%t", phase, matched)
+	}
+	for _, event := range []string{"plugin.work.completed", "plugin.work.failed"} {
+		if phase, _, matched := AgentRunLifecycleTransition(runs[3].Spec.Lifecycle, event); matched || phase != "" {
+			t.Fatalf("continue workflow matched bounded work event %q: phase=%q matched=%t", event, phase, matched)
+		}
 	}
 	if phase, _, matched := AgentRunLifecycleTransition(runs[0].Spec.Lifecycle, "plugin.work.failed"); !matched || phase != nvtv1alpha1.AgentRunPhaseFailed {
 		t.Fatalf("workflow failure policy did not match: phase=%q matched=%t", phase, matched)
@@ -1243,10 +1250,13 @@ func testWorkflowProfiledAgentSchedule() *nvtv1alpha1.AgentSchedule {
 		{Name: "review-pr", WorkspaceInstructions: "Review and report findings first.\n", Lifecycle: &nvtv1alpha1.AgentRunLifecycle{
 			CompleteOn: []string{"plugin.work.completed"}, FailOn: []string{"plugin.work.failed"},
 		}},
+		{Name: "continue-pr", WorkspaceInstructions: "Maintain the pull request until merge or close.\n", Lifecycle: &nvtv1alpha1.AgentRunLifecycle{
+			CompleteOn: []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}, FailOn: []string{},
+		}},
 	}
 	schedule.Spec.ProducerPolicies = []nvtv1alpha1.AgentScheduleProducerPolicy{
 		{
-			Identity: "system:serviceaccount:nvt:nvt-github-comments-producer", Workflows: []string{"implement-pr", "review-pr"},
+			Identity: "system:serviceaccount:nvt:nvt-github-comments-producer", Workflows: []string{"implement-pr", "review-pr", "continue-pr"},
 			DefaultWorkflow: "implement-pr",
 		},
 		{
@@ -1339,6 +1349,42 @@ func assertResolvedProfile(t *testing.T, run *nvtv1alpha1.AgentRun, profileName,
 func profiledAdmissionBody(t *testing.T, workID string, principal *scheduleAdmissionPrincipal, input map[string]any) string {
 	t.Helper()
 	return mustJSON(t, profiledAdmissionPayload(workID, principal, input))
+}
+
+func TestProfiledAdmissionActiveWorkGroupPrecedesCapacityAndTerminalAllowsReplacement(t *testing.T) {
+	schedule := testProfiledAgentSchedule()
+	schedule.Spec.MaxParallelism = 1
+	fixture := newProfileAdmissionFixture(t, schedule)
+	const group = "github:acme/widget:issue:7:intent:pr-continue"
+	// A pre-group pr-continue run used the stable group value as its work ID.
+	// Keep that active session mutually exclusive across the rolling upgrade.
+	active := scheduledRun("continue-active", schedule, group, nvtv1alpha1.AgentRunPhaseRunning)
+	if err := fixture.client.Create(context.Background(), active); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := profiledAdmissionPayload("continue-comment-202", nil, map[string]any{"prompt": "continue"})
+	payload["work"].(map[string]any)["group"] = group
+	response := fixture.serve(t, mustJSON(t, payload), "Bearer projected-token")
+	var decoded scheduleAdmissionResponse
+	decodeAdmissionResponse(t, response, http.StatusAccepted, &decoded)
+	if decoded.Scheduled || decoded.Reason != "duplicate-work" {
+		t.Fatalf("active group at capacity = %#v", decoded)
+	}
+
+	active.Status.Phase = nvtv1alpha1.AgentRunPhaseCompleted
+	if err := fixture.client.Status().Update(context.Background(), active); err != nil {
+		t.Fatal(err)
+	}
+	response = fixture.serve(t, mustJSON(t, payload), "Bearer projected-token")
+	decodeAdmissionResponse(t, response, http.StatusCreated, &decoded)
+	if !decoded.Scheduled || decoded.AgentRun == nil {
+		t.Fatalf("terminal group blocked replacement = %#v", decoded)
+	}
+	replacement := fixture.run(t, decoded.AgentRun.Name)
+	if replacement.Annotations[workGroupAnnotation] != group || replacement.Annotations[workIDAnnotation] != "continue-comment-202" {
+		t.Fatalf("replacement work metadata = %#v", replacement.Annotations)
+	}
 }
 
 func profiledAdmissionPayload(workID string, principal *scheduleAdmissionPrincipal, input map[string]any) map[string]any {

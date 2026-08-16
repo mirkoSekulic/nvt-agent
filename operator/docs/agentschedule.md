@@ -292,6 +292,7 @@ prompt input:
   "workflow": "review-pr",
   "work": {
     "id": "github:example/repo:issue:123",
+    "group": "github:example/repo:issue:123:intent:pr-continue",
     "title": "Fix the failing test",
     "url": "https://github.com/example/repo/issues/123",
     "repository": "example/repo",
@@ -304,6 +305,12 @@ prompt input:
   "input": {"prompt": "Investigate and open a PR"}
 }
 ```
+
+`work.group` is optional bounded, non-secret concurrency metadata. When it is
+present, an admission is an accepted duplicate while another member of that
+group is active; terminal members release the group. Exact `work.id` retries
+remain deduplicated across retained terminal runs. The local-controller
+schedule admission backend applies the same contract.
 
 The principal may be absent when `onNoMatch: useDefault` names a valid default.
 Unknown and missing principals follow `onNoMatch` exactly. Any top-level field
@@ -398,8 +405,10 @@ Kubernetes producer workload identity, not an end-user identity.
 
 ## Generic admission controls
 
-Both modes enforce suspend, global max parallelism, and retained work-ID
-deduplication. The global parallelism default is `1`. Profiled schedules may
+Both modes enforce suspend, global max parallelism, retained work-ID
+deduplication, and optional active work-group exclusion. Exact work and active
+group duplicate checks occur before capacity. The global parallelism default is
+`1`. Profiled schedules may
 also set `principalParallelism.defaultMaxParallelism` to limit active runs
 independently for every exact immutable `issuer` + `subject` pair. Up to 256
 administrator-owned `overrides` may replace that default for exact principals:

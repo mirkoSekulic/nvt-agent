@@ -449,7 +449,7 @@ func TestLegacyScheduleRejectsPerPrincipalParallelism(t *testing.T) {
 
 func TestScheduleAdmissionDuplicateActiveWorkCreatesNoRun(t *testing.T) {
 	schedule := testAgentSchedule()
-	schedule.Spec.MaxParallelism = 2
+	schedule.Spec.MaxParallelism = 1
 	fixture := scheduleAdmissionFixture(t, schedule, scheduledRun("active", schedule, "same-work", nvtv1alpha1.AgentRunPhasePending))
 
 	response, k8sClient := serveScheduleAdmission(t, fixture, scheduleAdmissionBody(t, "same-work", "", nil))

@@ -108,7 +108,7 @@ func (s AgentRunSubmitter) submitWithOutcome(
 	commandComment GitHubIssueComment,
 	command Command,
 ) (submissionResult, error) {
-	if command.Intent == CommandIntentReview || command.Intent == CommandIntentRun {
+	if command.Intent == CommandIntentReview || command.Intent == CommandIntentRun || command.Intent == CommandIntentPRContinue {
 		if s.submissionMode() != SubmissionModeScheduleAdmission || s.admissionMode() != AdmissionModeProfiled {
 			return submissionResult{Outcome: schedulingOutcomeRejected}, fmt.Errorf(
 				"%w: command %q requires profiled schedule admission", errCommandDisabled, command.Intent,
@@ -198,6 +198,7 @@ type profiledScheduleAdmissionRequest struct {
 
 type profiledScheduleAdmissionWork struct {
 	ID         string                     `json:"id"`
+	Group      string                     `json:"group,omitempty"`
 	Title      string                     `json:"title"`
 	URL        string                     `json:"url"`
 	Repository string                     `json:"repository"`
@@ -434,6 +435,7 @@ func (s AgentRunSubmitter) scheduleAdmissionPayload(
 			Workflow: workflow,
 			Work: profiledScheduleAdmissionWork{
 				ID:         identity.Key,
+				Group:      workGroupForCommand(repo, issue, command),
 				Title:      issue.Title,
 				URL:        sourceURLForCommand(issue, commandComment),
 				Repository: repo.Owner + "/" + repo.Name,
@@ -621,9 +623,10 @@ func buildPrompt(
 		})
 	}
 	return BuildPrompt(PromptInput{
-		Intent: command.Intent,
-		Owner:  repo.Owner,
-		Repo:   repo.Name,
+		Intent:        command.Intent,
+		CommandPrefix: command.Prefix,
+		Owner:         repo.Owner,
+		Repo:          repo.Name,
 		Issue: Issue{
 			Number:  issue.Number,
 			URL:     issue.URL,
@@ -709,8 +712,14 @@ func cloneInt64(value *int64) *int64 {
 	return &cloned
 }
 
-func (s AgentRunSubmitter) agentRunIdentityForCommand(repo Repository, issue GitHubIssue, commandComment GitHubIssueComment, command Command) agentRunIdentity {
-	if command.Intent == CommandIntentReview || command.Intent == CommandIntentRun {
+func (s AgentRunSubmitter) agentRunIdentityForCommand(
+	repo Repository,
+	issue GitHubIssue,
+	commandComment GitHubIssueComment,
+	command Command,
+) agentRunIdentity {
+	switch command.Intent {
+	case CommandIntentReview, CommandIntentRun, CommandIntentPRContinue:
 		return agentRunIdentity{
 			Key:  CommentIntentIdempotencyKey(repo.Owner, repo.Name, issue.Number, commandComment.ID, command.Intent),
 			Name: CommentIntentAgentRunName(repo.Owner, repo.Name, issue.Number, commandComment.ID, command.Intent),
@@ -747,15 +756,22 @@ func (s AgentRunSubmitter) workflowForCommand(intent CommandIntent) (string, err
 	return "", fmt.Errorf("no authorized workflow configured for command %q", intent)
 }
 
+func workGroupForCommand(repo Repository, issue GitHubIssue, command Command) string {
+	if command.Intent != CommandIntentPRContinue {
+		return ""
+	}
+	return IssueIntentIdempotencyKey(repo.Owner, repo.Name, issue.Number, command.Intent)
+}
+
 func lifecycleForCommand(intent CommandIntent, isPullRequest bool) *nvtv1alpha1.AgentRunLifecycle {
 	completeOn := []string{"plugin.work.completed"}
-	if intent == "" || intent == CommandIntentPRCreate {
+	if intent == "" || intent == CommandIntentPRCreate || intent == CommandIntentPRContinue {
 		completeOn = []string{"plugin.github.pr.merged", "plugin.github.pr.closed"}
 	} else if isPullRequest {
 		completeOn = append(completeOn, "plugin.github.pr.merged", "plugin.github.pr.closed")
 	}
 	failOn := []string{"plugin.work.failed"}
-	if intent == "" || intent == CommandIntentPRCreate {
+	if intent == "" || intent == CommandIntentPRCreate || intent == CommandIntentPRContinue {
 		failOn = []string{}
 	}
 	return &nvtv1alpha1.AgentRunLifecycle{CompleteOn: completeOn, FailOn: failOn}
