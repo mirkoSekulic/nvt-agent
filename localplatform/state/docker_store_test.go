@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"strings"
 	"testing"
 )
@@ -15,10 +16,11 @@ type dockerCommand struct {
 	stdin     []byte
 }
 type fakeDocker struct {
-	volumes   map[string]map[string]string
-	commands  []dockerCommand
-	runOutput []byte
-	runErr    error
+	volumes                map[string]map[string]string
+	commands               []dockerCommand
+	runOutput              []byte
+	runErr                 error
+	deleteBeforeAttachment bool
 }
 
 func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -54,16 +56,48 @@ func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...s
 			return []byte(name), nil
 		}
 	}
-	if len(arguments) > 0 && arguments[0] == "run" {
+	if len(arguments) > 0 && arguments[0] == "create" {
+		for index, argument := range arguments {
+			if argument != "--mount" || index+1 >= len(arguments) {
+				continue
+			}
+			var source string
+			for _, option := range strings.Split(arguments[index+1], ",") {
+				if strings.HasPrefix(option, "src=") {
+					source = strings.TrimPrefix(option, "src=")
+				}
+			}
+			if docker.deleteBeforeAttachment {
+				delete(docker.volumes, source)
+			}
+			if _, exists := docker.volumes[source]; !exists {
+				docker.volumes[source] = map[string]string{}
+			}
+		}
+		docker.deleteBeforeAttachment = false
+		return []byte(strings.Repeat("d", 64) + "\n"), nil
+	}
+	if len(arguments) > 0 && arguments[0] == "start" {
 		return docker.runOutput, docker.runErr
 	}
+	if len(arguments) > 0 && arguments[0] == "rm" {
+		return nil, nil
+	}
 	return nil, errors.New("unexpected command")
+}
+
+func dockerTestVolume(name, role string) Volume {
+	return Volume{Name: name, Role: role, Owner: "local-platform-state", Labels: map[string]string{
+		ownerLabel: "local-test", custodianLabel: "local-platform-state", roleLabel: role, volumeLabel: name, versionLabel: stateVersion,
+	}}
 }
 
 func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
 	docker := &fakeDocker{volumes: map[string]map[string]string{}}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("c", 64)}
-	if err := store.EnsureDirectory(context.Background(), "local-test-seeds", 1000, 1000, 0o700); err != nil {
+	seeds := dockerTestVolume("local-test-seeds", "credential-seeds")
+	docker.volumes[seeds.Name] = maps.Clone(seeds.Labels)
+	if err := store.EnsureDirectory(context.Background(), seeds, 1000, 1000, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	directoryCommand := docker.commands[0]
@@ -72,23 +106,26 @@ func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
 			t.Fatalf("directory init omitted %q: %v", expected, directoryCommand.arguments)
 		}
 	}
+	source := dockerTestVolume("local-test-source", "generated-private-source")
+	docker.volumes[source.Name] = maps.Clone(source.Labels)
 	for output, expected := range map[string]PrivateSourceState{"empty": PrivateSourceEmpty, "ready": PrivateSourceReady, "corrupt": PrivateSourceCorrupt} {
 		docker.runOutput = []byte(output)
-		state, err := store.InspectPrivateSource(context.Background(), "local-test-source")
+		state, err := store.InspectPrivateSource(context.Background(), source)
 		if err != nil || state != expected {
 			t.Fatalf("inspect %q = %v, %v", output, state, err)
 		}
 	}
 	secret := []byte("INITIAL-GENERATED-PRIVATE")
 	docker.runOutput = nil
-	if err := store.InitializePrivateSource(context.Background(), "local-test-source", []StateFile{{Name: ".initialized", Mode: 0o400, Data: bytes.NewBufferString(privateSourceMarker)}, {Name: "value", Mode: 0o400, Data: bytes.NewReader(secret)}}); err != nil {
+	if err := store.InitializePrivateSource(context.Background(), source, []StateFile{{Name: ".initialized", Mode: 0o400, Data: bytes.NewReader(privateSourceMarker(secret))}, {Name: "value", Mode: 0o400, Data: bytes.NewReader(secret)}}); err != nil {
 		t.Fatal(err)
 	}
-	command := docker.commands[len(docker.commands)-1]
-	if bytes.Contains([]byte(strings.Join(command.arguments, "\x00")), secret) || !bytes.Contains(command.stdin, secret) {
+	createCommand := lastDockerCommand(t, docker.commands, "create")
+	startCommand := lastDockerCommand(t, docker.commands, "start")
+	if bytes.Contains([]byte(strings.Join(createCommand.arguments, "\x00")), secret) || !bytes.Contains(startCommand.stdin, secret) {
 		t.Fatal("source initialization did not keep private bytes on stdin")
 	}
-	if !strings.Contains(strings.Join(command.arguments, "\n"), "test ! -e /state/current") {
+	if script := strings.Join(createCommand.arguments, "\n"); !strings.Contains(script, "test ! -e /state/current") || !strings.Contains(script, "test ! -e /state/.initialized") {
 		t.Fatal("source initialization is not create-only")
 	}
 }
@@ -122,31 +159,62 @@ func TestDockerStoreKeepsPrivateBytesOnlyOnStdin(t *testing.T) {
 	docker := &fakeDocker{volumes: map[string]map[string]string{}}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("b", 64)}
 	secret := []byte("NEVER-IN-DOCKER-INSPECT")
-	if err := store.ReplaceFiles(context.Background(), "local-test-secret", []StateFile{{Name: "value", Mode: 0o400, UID: 65532, GID: 65532, Data: bytes.NewReader(secret)}}); err != nil {
+	secretVolume := dockerTestVolume("local-test-secret", "static-private-input")
+	sourceVolume := dockerTestVolume("local-test-source", "generated-private-source")
+	destinationVolume := dockerTestVolume("local-test-destination", "generated-private-input")
+	for _, volume := range []Volume{secretVolume, sourceVolume, destinationVolume} {
+		docker.volumes[volume.Name] = maps.Clone(volume.Labels)
+	}
+	if err := store.ReplaceFiles(context.Background(), secretVolume, []StateFile{{Name: "value", Mode: 0o400, UID: 65532, GID: 65532, Data: bytes.NewReader(secret)}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(docker.commands) != 1 {
-		t.Fatalf("commands = %d", len(docker.commands))
+	createCommand := lastDockerCommand(t, docker.commands, "create")
+	startCommand := lastDockerCommand(t, docker.commands, "start")
+	for _, command := range docker.commands {
+		if bytes.Contains([]byte(strings.Join(command.arguments, "\x00")), secret) {
+			t.Fatal("secret entered Docker arguments")
+		}
 	}
-	command := docker.commands[0]
-	if bytes.Contains([]byte(strings.Join(command.arguments, "\x00")), secret) {
-		t.Fatal("secret entered Docker arguments")
-	}
-	if !bytes.Contains(command.stdin, secret) {
+	if !bytes.Contains(startCommand.stdin, secret) {
 		t.Fatal("secret was not transported through stdin")
 	}
 	for _, expected := range []string{"--network", "none", "--read-only", "--cap-drop", "ALL", "no-new-privileges"} {
-		if !containsArgument(command.arguments, expected) {
-			t.Fatalf("helper omitted %q: %v", expected, command.arguments)
+		if !containsArgument(createCommand.arguments, expected) {
+			t.Fatalf("helper omitted %q: %v", expected, createCommand.arguments)
 		}
 	}
-	if err := store.CopyPrivateFile(context.Background(), "local-test-source", "local-test-destination", 65532, 65532); err != nil {
+	if err := store.CopyPrivateFile(context.Background(), sourceVolume, destinationVolume, 65532, 65532); err != nil {
 		t.Fatal(err)
 	}
-	copyCommand := docker.commands[1]
+	copyCommand := lastDockerCommand(t, docker.commands, "start")
 	if len(copyCommand.stdin) != 0 || bytes.Contains([]byte(strings.Join(copyCommand.arguments, "\x00")), secret) {
 		t.Fatal("copy exposed private bytes")
 	}
+}
+
+func TestDockerStoreRejectsVolumeRecreatedDuringHelperAttachment(t *testing.T) {
+	volume := dockerTestVolume("local-test-raced", "generated-config")
+	docker := &fakeDocker{volumes: map[string]map[string]string{volume.Name: maps.Clone(volume.Labels)}, deleteBeforeAttachment: true}
+	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("e", 64)}
+	if err := store.ReplaceFiles(context.Background(), volume, []StateFile{{Name: "config", Mode: 0o444, Data: bytes.NewReader([]byte("safe"))}}); err == nil {
+		t.Fatal("implicitly recreated unlabeled volume accepted")
+	}
+	for _, command := range docker.commands {
+		if len(command.arguments) > 0 && command.arguments[0] == "start" {
+			t.Fatal("helper started before attached volume labels were verified")
+		}
+	}
+}
+
+func lastDockerCommand(t *testing.T, commands []dockerCommand, operation string) dockerCommand {
+	t.Helper()
+	for index := len(commands) - 1; index >= 0; index-- {
+		if len(commands[index].arguments) > 0 && commands[index].arguments[0] == operation {
+			return commands[index]
+		}
+	}
+	t.Fatalf("missing docker %s command", operation)
+	return dockerCommand{}
 }
 
 func containsArgument(values []string, target string) bool {

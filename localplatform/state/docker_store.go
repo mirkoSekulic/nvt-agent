@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/distribution/reference"
 )
@@ -92,16 +93,16 @@ func (store DockerStore) verifyVolume(ctx context.Context, volume Volume) error 
 	return nil
 }
 
-func (store DockerStore) ReplaceFiles(ctx context.Context, volume string, files []StateFile) error {
+func (store DockerStore) ReplaceFiles(ctx context.Context, volume Volume, files []StateFile) error {
 	return store.writeFiles(ctx, volume, files, false)
 }
 
-func (store DockerStore) InitializePrivateSource(ctx context.Context, volume string, files []StateFile) error {
+func (store DockerStore) InitializePrivateSource(ctx context.Context, volume Volume, files []StateFile) error {
 	return store.writeFiles(ctx, volume, files, true)
 }
 
-func (store DockerStore) writeFiles(ctx context.Context, volume string, files []StateFile, initialize bool) error {
-	if !safeVolumeName(volume) || len(files) == 0 || len(files) > 512 {
+func (store DockerStore) writeFiles(ctx context.Context, volume Volume, files []StateFile, initialize bool) error {
+	if !validVolume(volume) || len(files) == 0 || len(files) > 512 {
 		return errors.New("invalid state update")
 	}
 	var archive bytes.Buffer
@@ -158,47 +159,50 @@ rm -rf /state/current.old`
 	if initialize {
 		script = `set -eu
 umask 077
+test ! -e /state/.initialized
 test ! -e /state/current
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 tar -xpf - -C /state/.next
-mv /state/.next /state/current`
+test_private_source /state/.next/.initialized /state/.next/value
+mv /state/.next /state/current
+mv /state/current/.initialized /state/.initialized`
 	}
-	_, err := store.runHelper(ctx, bytes.NewReader(payload), []string{"--mount", "type=volume,src=" + volume + ",dst=/state"}, script)
+	_, err := store.runHelper(ctx, bytes.NewReader(payload), []helperMount{{volume: volume, target: "/state"}}, script)
 	if err != nil {
 		return errors.New("state volume update failed")
 	}
 	return nil
 }
 
-func (store DockerStore) EnsureDirectory(ctx context.Context, volume string, uid, gid int, mode int64) error {
-	if !safeVolumeName(volume) || uid < 0 || gid < 0 || mode < 0 || mode > 0o777 {
+func (store DockerStore) EnsureDirectory(ctx context.Context, volume Volume, uid, gid int, mode int64) error {
+	if !validVolume(volume) || uid < 0 || gid < 0 || mode < 0 || mode > 0o777 {
 		return errors.New("invalid state directory")
 	}
 	script := `set -eu
 test -d /state
 chown "$1:$2" /state
 chmod "$3" /state`
-	_, err := store.runHelper(ctx, nil, []string{"--mount", "type=volume,src=" + volume + ",dst=/state"}, script, strconv.Itoa(uid), strconv.Itoa(gid), strconv.FormatInt(mode, 8))
+	_, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/state"}}, script, strconv.Itoa(uid), strconv.Itoa(gid), strconv.FormatInt(mode, 8))
 	if err != nil {
 		return errors.New("state directory initialization failed")
 	}
 	return nil
 }
 
-func (store DockerStore) InspectPrivateSource(ctx context.Context, volume string) (PrivateSourceState, error) {
-	if !safeVolumeName(volume) {
+func (store DockerStore) InspectPrivateSource(ctx context.Context, volume Volume) (PrivateSourceState, error) {
+	if !validVolume(volume) {
 		return PrivateSourceInvalid, errors.New("invalid private source")
 	}
 	script := `set -eu
-if [ ! -e /source/current ]; then
+if [ ! -e /source/.initialized ] && [ ! -e /source/current ]; then
   printf 'empty'
-elif [ -d /source/current ] && [ ! -L /source/current/.initialized ] && [ ! -L /source/current/value ] && [ -f /source/current/.initialized ] && [ -s /source/current/value ] && [ "$(cat /source/current/.initialized)" = 'nvt.local-platform.private-source/v1' ] && [ "$(stat -c '%u:%g:%a' /source/current/.initialized)" = '0:0:400' ] && [ "$(stat -c '%u:%g:%a' /source/current/value)" = '0:0:400' ]; then
+elif [ ! -L /source/.initialized ] && [ -f /source/.initialized ] && [ ! -L /source/current ] && [ -d /source/current ] && [ ! -L /source/current/value ] && [ -s /source/current/value ] && [ "$(stat -c '%u:%g:%a' /source/.initialized)" = '0:0:400' ] && [ "$(stat -c '%u:%g:%a' /source/current)" = '0:0:700' ] && [ "$(stat -c '%u:%g:%a' /source/current/value)" = '0:0:400' ] && test_private_source /source/.initialized /source/current/value; then
   printf 'ready'
 else
   printf 'corrupt'
 fi`
-	output, err := store.runHelper(ctx, nil, []string{"--mount", "type=volume,src=" + volume + ",dst=/source,readonly"}, script)
+	output, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/source", readOnly: true}}, script)
 	if err != nil {
 		return PrivateSourceInvalid, errors.New("private source inspection failed")
 	}
@@ -214,20 +218,22 @@ fi`
 	}
 }
 
-func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destination string, uid, gid int) error {
-	if !safeVolumeName(source) || !safeVolumeName(destination) || uid < 0 || gid < 0 {
+func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destination Volume, uid, gid int) error {
+	if !validVolume(source) || !validVolume(destination) || uid < 0 || gid < 0 {
 		return errors.New("invalid private copy")
 	}
 	script := `set -eu
 umask 077
 test -d /source/current
-test ! -L /source/current/.initialized
+test ! -L /source/.initialized
+test ! -L /source/current
 test ! -L /source/current/value
-test -f /source/current/.initialized
+test -f /source/.initialized
 test -s /source/current/value
-test "$(cat /source/current/.initialized)" = 'nvt.local-platform.private-source/v1'
-test "$(stat -c '%u:%g:%a' /source/current/.initialized)" = '0:0:400'
+test "$(stat -c '%u:%g:%a' /source/.initialized)" = '0:0:400'
+test "$(stat -c '%u:%g:%a' /source/current)" = '0:0:700'
 test "$(stat -c '%u:%g:%a' /source/current/value)" = '0:0:400'
+test_private_source /source/.initialized /source/current/value
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 cp /source/current/value /state/.next/value
@@ -236,7 +242,7 @@ chmod 0400 /state/.next/value
 if [ -e /state/current ]; then mv /state/current /state/current.old; fi
 mv /state/.next /state/current
 rm -rf /state/current.old`
-	_, err := store.runHelper(ctx, nil, []string{"--mount", "type=volume,src=" + source + ",dst=/source,readonly", "--mount", "type=volume,src=" + destination + ",dst=/state"}, script, strconv.Itoa(uid), strconv.Itoa(gid))
+	_, err := store.runHelper(ctx, nil, []helperMount{{volume: source, target: "/source", readOnly: true}, {volume: destination, target: "/state"}}, script, strconv.Itoa(uid), strconv.Itoa(gid))
 	if err != nil {
 		return errors.New("private state copy failed")
 	}
@@ -245,12 +251,69 @@ rm -rf /state/current.old`
 
 const maxStateFileBytes = (1 << 20) + MaxInstructionBytes
 
-func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts []string, script string, values ...string) ([]byte, error) {
-	arguments := []string{"run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges"}
-	arguments = append(arguments, mounts...)
-	arguments = append(arguments, "--entrypoint", "/bin/sh", store.HelperImage, "-euc", script, "state-helper")
+type helperMount struct {
+	volume   Volume
+	target   string
+	readOnly bool
+}
+
+const privateSourceValidation = `test_private_source() {
+  marker=$1
+  value=$2
+  marker_version=
+  marker_digest=
+  marker_size=
+  marker_extra=
+  IFS=' ' read -r marker_version marker_digest marker_size marker_extra < "$marker"
+  [ -z "$marker_extra" ]
+  [ "$(wc -l < "$marker")" -eq 1 ]
+  [ "$marker_version" = '` + privateSourceMarkerVersion + `' ]
+  actual_digest=$(sha256sum "$value")
+  actual_digest=${actual_digest%% *}
+  [ "$marker_digest" = "sha256:$actual_digest" ]
+  [ "$marker_size" = "$(stat -c '%s' "$value")" ]
+}
+`
+
+func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts []helperMount, script string, values ...string) ([]byte, error) {
+	if len(mounts) == 0 {
+		return nil, errors.New("state helper has no managed volumes")
+	}
+	arguments := []string{"create", "-i", "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges"}
+	seenTargets := map[string]struct{}{}
+	for _, mount := range mounts {
+		if !validVolume(mount.volume) || !safeContainerPath(mount.target) {
+			return nil, errors.New("invalid state helper mount")
+		}
+		if _, duplicate := seenTargets[mount.target]; duplicate {
+			return nil, errors.New("duplicate state helper mount")
+		}
+		seenTargets[mount.target] = struct{}{}
+		option := "type=volume,src=" + mount.volume.Name + ",dst=" + mount.target
+		if mount.readOnly {
+			option += ",readonly"
+		}
+		arguments = append(arguments, "--mount", option)
+	}
+	arguments = append(arguments, "--entrypoint", "/bin/sh", store.HelperImage, "-euc", privateSourceValidation+script, "state-helper")
 	arguments = append(arguments, values...)
-	return store.Docker.Run(ctx, stdin, arguments...)
+	created, err := store.Docker.Run(ctx, nil, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	container := string(bytes.TrimSpace(created))
+	if !safeContainerID(container) {
+		return nil, errors.New("state helper returned invalid container ID")
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	defer func() { _, _ = store.Docker.Run(cleanupCtx, nil, "rm", "--force", container) }()
+	for _, mount := range mounts {
+		if err := store.verifyVolume(ctx, mount.volume); err != nil {
+			return nil, err
+		}
+	}
+	return store.Docker.Run(ctx, stdin, "start", "--attach", "--interactive", container)
 }
 
 func validVolume(volume Volume) bool {
@@ -263,6 +326,22 @@ func safeVolumeName(value string) bool {
 	}
 	for _, character := range value {
 		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func safeContainerPath(value string) bool {
+	return strings.HasPrefix(value, "/") && value == path.Clean(value) && !strings.ContainsAny(value, "\x00\r\n,=")
+}
+
+func safeContainerID(value string) bool {
+	if len(value) < 12 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
 			return false
 		}
 	}

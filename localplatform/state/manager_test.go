@@ -42,12 +42,12 @@ func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (ma
 	}
 	return created, nil
 }
-func (store *memoryStore) ReplaceFiles(_ context.Context, volume string, files []StateFile) error {
-	if store.failVolume == volume {
+func (store *memoryStore) ReplaceFiles(_ context.Context, volume Volume, files []StateFile) error {
+	if store.failVolume == volume.Name {
 		store.failVolume = ""
 		return errors.New("injected write failure")
 	}
-	if _, ok := store.volumes[volume]; !ok {
+	if _, ok := store.volumes[volume.Name]; !ok {
 		return errors.New("missing volume")
 	}
 	next := map[string][]byte{}
@@ -58,45 +58,45 @@ func (store *memoryStore) ReplaceFiles(_ context.Context, volume string, files [
 		}
 		next[file.Name] = value
 	}
-	store.files[volume] = next
+	store.files[volume.Name] = next
 	store.writes++
 	return nil
 }
 
-func (store *memoryStore) EnsureDirectory(_ context.Context, volume string, uid, gid int, mode int64) error {
-	if _, ok := store.volumes[volume]; !ok {
+func (store *memoryStore) EnsureDirectory(_ context.Context, volume Volume, uid, gid int, mode int64) error {
+	if _, ok := store.volumes[volume.Name]; !ok {
 		return errors.New("missing volume")
 	}
-	store.directories[volume] = directoryPlan{volume: volume, uid: uid, gid: gid, mode: mode}
+	store.directories[volume.Name] = directoryPlan{volume: volume.Name, uid: uid, gid: gid, mode: mode}
 	return nil
 }
 
-func (store *memoryStore) InspectPrivateSource(_ context.Context, volume string) (PrivateSourceState, error) {
-	files := store.files[volume]
+func (store *memoryStore) InspectPrivateSource(_ context.Context, volume Volume) (PrivateSourceState, error) {
+	files := store.files[volume.Name]
 	if len(files) == 0 {
 		return PrivateSourceEmpty, nil
 	}
-	if string(files[".initialized"]) == privateSourceMarker && len(files["value"]) > 0 {
+	if bytes.Equal(files[".initialized"], privateSourceMarker(files["value"])) && len(files["value"]) > 0 {
 		return PrivateSourceReady, nil
 	}
 	return PrivateSourceCorrupt, nil
 }
 
-func (store *memoryStore) InitializePrivateSource(ctx context.Context, volume string, files []StateFile) error {
-	if len(store.files[volume]) != 0 {
+func (store *memoryStore) InitializePrivateSource(ctx context.Context, volume Volume, files []StateFile) error {
+	if len(store.files[volume.Name]) != 0 {
 		return errors.New("source already initialized")
 	}
 	return store.ReplaceFiles(ctx, volume, files)
 }
-func (store *memoryStore) CopyPrivateFile(_ context.Context, source, destination string, _, _ int) error {
+func (store *memoryStore) CopyPrivateFile(_ context.Context, source, destination Volume, _, _ int) error {
 	if state, _ := store.InspectPrivateSource(context.Background(), source); state != PrivateSourceReady {
 		return errors.New("corrupt source")
 	}
-	value := store.files[source]["value"]
+	value := store.files[source.Name]["value"]
 	if len(value) == 0 {
 		return errors.New("missing source")
 	}
-	store.files[destination] = map[string][]byte{"value": append([]byte(nil), value...)}
+	store.files[destination.Name] = map[string][]byte{"value": append([]byte(nil), value...)}
 	store.writes++
 	return nil
 }
@@ -249,7 +249,7 @@ func TestManagerRecoversEmptySourceAfterPartialWriteFailure(t *testing.T) {
 	}
 	for name, volume := range store.volumes {
 		if volume.Role == "generated-private-source" {
-			if state, _ := store.InspectPrivateSource(context.Background(), name); state != PrivateSourceReady {
+			if state, _ := store.InspectPrivateSource(context.Background(), volume); state != PrivateSourceReady {
 				t.Fatalf("source %s state=%v", name, state)
 			}
 		}
@@ -268,12 +268,48 @@ func TestManagerRejectsMarkedSourceWithoutValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := plan.generated[0].sourceVolume
-	store.files[source] = map[string][]byte{".initialized": []byte(privateSourceMarker)}
+	store.files[source] = map[string][]byte{".initialized": privateSourceMarker([]byte("missing-value"))}
 	if _, err := (Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x61}, 1024))}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
 		t.Fatal("corrupt initialized source was rotated")
 	}
 	if _, exists := store.files[source]["value"]; exists {
 		t.Fatal("corrupt source was silently regenerated")
+	}
+}
+
+func TestManagerRejectsGeneratedSourceValueThatDoesNotMatchJournal(t *testing.T) {
+	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	for name, replacement := range map[string][]byte{
+		"same-sized replacement": []byte("FEDCBA9876543210"),
+		"truncated replacement":  []byte("A"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newMemoryStore()
+			plan, err := preparePlan("local-test", compiled, inputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.EnsureVolumes(context.Background(), plan.Volumes); err != nil {
+				t.Fatal(err)
+			}
+			sourceName := plan.generated[0].sourceVolume
+			original := []byte("0123456789ABCDEF")
+			store.files[sourceName] = map[string][]byte{
+				".initialized": privateSourceMarker(original),
+				"value":        append([]byte(nil), replacement...),
+			}
+			manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x71}, 1024))}
+			if _, err := manager.Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+				t.Fatal("generated source with mismatched journal was accepted")
+			}
+			if !bytes.Equal(store.files[sourceName]["value"], replacement) {
+				t.Fatal("corrupt generated source was silently rotated")
+			}
+			if store.writes != 0 {
+				t.Fatal("state was written before generated source validation completed")
+			}
+		})
 	}
 }
 
