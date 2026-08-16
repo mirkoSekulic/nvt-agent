@@ -90,11 +90,14 @@ type BrokerProfileIntent struct {
 }
 type BrokerGrantIntent struct {
 	Account      string   `json:"account"`
+	Preset       string   `json:"preset"`
+	Purpose      string   `json:"purpose"`
 	Repositories []string `json:"repositories"`
 }
 type ControllerProfileIntent struct {
 	Name                      string                               `json:"name"`
 	Profile                   Profile                              `json:"profile"`
+	RuntimeProvider           *ControllerCredentialProviderIntent  `json:"runtimeProvider,omitempty"`
 	CredentialProviders       []ControllerCredentialProviderIntent `json:"credentialProviders,omitempty"`
 	DefaultCredentialProvider string                               `json:"defaultCredentialProvider,omitempty"`
 	EgressProxyProvider       string                               `json:"egressProxyProvider,omitempty"`
@@ -105,10 +108,11 @@ type ControllerCredentialProviderIntent struct {
 	Preset string `json:"preset"`
 }
 type ProducerAdmissionIntent struct {
-	Producer   string `json:"producer"`
-	Identity   string `json:"identity"`
-	Workflow   string `json:"workflow"`
-	Credential string `json:"credential"`
+	Producer                string   `json:"producer"`
+	Identity                string   `json:"identity"`
+	Workflow                string   `json:"workflow"`
+	Credential              string   `json:"credential"`
+	AllowedPrincipalIssuers []string `json:"allowedPrincipalIssuers"`
 }
 type BrokerRepositoryIntent struct {
 	Name             string `json:"name"`
@@ -155,8 +159,11 @@ func Compile(m Manifest) (Compiled, error) {
 		sort.Strings(profile.Plugins)
 		grants := compileBrokerGrants(m, name)
 		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{Name: name, Accounts: append([]string(nil), profile.Accounts...), Grants: grants})
-		controllerProfile := ControllerProfileIntent{Name: name, Profile: profile, DefaultCredentialProvider: profile.Runtime.Account, EgressProxyProvider: profile.Runtime.Account, BrokerGrants: cloneBrokerGrants(grants)}
-		for _, accountName := range profile.Accounts {
+		controllerProfile := ControllerProfileIntent{Name: name, Profile: profile, DefaultCredentialProvider: defaultRepositoryAccount(m, name), EgressProxyProvider: profile.Runtime.Account, BrokerGrants: cloneBrokerGrants(grants)}
+		if profile.Runtime.Account != "" {
+			controllerProfile.RuntimeProvider = &ControllerCredentialProviderIntent{profile.Runtime.Account, m.Accounts[profile.Runtime.Account].Preset}
+		}
+		for _, accountName := range profileRepositoryAccounts(m, name) {
 			controllerProfile.CredentialProviders = append(controllerProfile.CredentialProviders, ControllerCredentialProviderIntent{accountName, m.Accounts[accountName].Preset})
 		}
 		result.Controller.Profiles = append(result.Controller.Profiles, controllerProfile)
@@ -204,7 +211,12 @@ func Compile(m Manifest) (Compiled, error) {
 			intent.Kind = "oci"
 		}
 		result.Producers = append(result.Producers, intent)
-		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{producer.Name, "producer:" + producer.Name, producer.Workflow, credential})
+		issuers := append([]string(nil), producer.AllowedPrincipalIssuers...)
+		if producer.Preset == "github-comments" {
+			issuers = []string{"https://github.com"}
+		}
+		sort.Strings(issuers)
+		result.Controller.ProducerAdmissions = append(result.Controller.ProducerAdmissions, ProducerAdmissionIntent{producer.Name, "producer:" + producer.Name, producer.Workflow, credential, issuers})
 		result.GeneratedPrivateInputs = append(result.GeneratedPrivateInputs, GeneratedPrivateInputIntent{"local-platform-state", credential, "schedule-admission-token", []string{"local-controller", "producer:" + producer.Name}})
 	}
 	for _, name := range SortedNames(m.Accounts) {
@@ -246,7 +258,7 @@ func Compile(m Manifest) (Compiled, error) {
 func cloneBrokerGrants(input []BrokerGrantIntent) []BrokerGrantIntent {
 	result := make([]BrokerGrantIntent, len(input))
 	for index, grant := range input {
-		result[index] = BrokerGrantIntent{grant.Account, append([]string(nil), grant.Repositories...)}
+		result[index] = BrokerGrantIntent{grant.Account, grant.Preset, grant.Purpose, append([]string(nil), grant.Repositories...)}
 	}
 	return result
 }
@@ -275,11 +287,25 @@ func compileBrokerGrants(m Manifest, profileName string) []BrokerGrantIntent {
 			}
 		}
 	}
-	result := make([]BrokerGrantIntent, 0, len(byAccount))
+	result := make([]BrokerGrantIntent, 0, len(byAccount)+1)
+	if runtimeAccount := m.Profiles[profileName].Runtime.Account; runtimeAccount != "" {
+		result = append(result, BrokerGrantIntent{runtimeAccount, m.Accounts[runtimeAccount].Preset, "runtime-injection", nil})
+	}
 	for _, account := range SortedNames(byAccount) {
-		result = append(result, BrokerGrantIntent{account, SortedNames(byAccount[account])})
+		result = append(result, BrokerGrantIntent{account, m.Accounts[account].Preset, "repository", SortedNames(byAccount[account])})
 	}
 	return result
+}
+
+func defaultRepositoryAccount(m Manifest, profileName string) string {
+	if configured := m.Profiles[profileName].DefaultRepositoryAccount; configured != "" {
+		return configured
+	}
+	accounts := profileRepositoryAccounts(m, profileName)
+	if len(accounts) == 1 {
+		return accounts[0]
+	}
+	return ""
 }
 
 func compileRepository(name string, repository Repository) ControllerRepositoryIntent {
