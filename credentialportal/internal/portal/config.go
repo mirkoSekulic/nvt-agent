@@ -19,6 +19,7 @@ const (
 	AdapterClaudeOAuthFile = "claude-oauth-file"
 	authModeOIDC           = "oidc"
 	authModeOAuth2         = "oauth2"
+	authModeLocal          = "local"
 	jsonContentType        = "application/json"
 	httpsScheme            = "https"
 	csrfHeader             = "X-Csrf-Token"
@@ -49,6 +50,7 @@ const httpScheme = "http"
 type Config struct {
 	Auth           AuthConfig `json:"auth"`
 	PublicURL      string     `json:"publicURL"`
+	ReturnURL      string     `json:"returnURL"`
 	ListenAddr     string     `json:"listenAddr"`
 	Namespace      string     `json:"namespace"`
 	basePath       string
@@ -58,6 +60,16 @@ type Config struct {
 	MaxUploadBytes int64                `json:"maxUploadBytes"`
 	RecoveryUpload RecoveryUploadConfig `json:"recoveryUpload"`
 	Dynamic        DynamicConfig        `json:"dynamic"`
+	Persistence    PersistenceConfig    `json:"persistence"`
+}
+
+type PersistenceConfig struct {
+	Mode  string                 `json:"mode"`
+	Local LocalPersistenceConfig `json:"local"`
+}
+
+type LocalPersistenceConfig struct {
+	Directory string `json:"directory"`
 }
 
 //nolint:govet // JSON contract fields stay grouped for reviewability.
@@ -111,6 +123,11 @@ type AuthConfig struct {
 	Session         SessionConfig                `json:"session"`
 	Eligibility     *eligibility.Policy          `json:"eligibility"`
 	ClaimEnrichment eligibility.EnrichmentConfig `json:"claimEnrichment"`
+	Local           LocalAuthConfig              `json:"local"`
+}
+
+type LocalAuthConfig struct {
+	Principal Principal `json:"principal"`
 }
 
 type SessionConfig struct {
@@ -166,8 +183,8 @@ func (p Principal) Owns(slot Slot) bool {
 //nolint:cyclop,funlen,gocognit,gocyclo,maintidx,nestif // Validation keeps policy in one fail-closed pass.
 func (c *Config) Validate() error {
 	u, err := url.Parse(c.PublicURL)
-	if err != nil || u.Scheme != httpsScheme || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("%w: publicURL must be one absolute HTTPS URL", errInvalidConfig)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%w: publicURL must be one absolute URL", errInvalidConfig)
 	}
 	cleanPath := strings.TrimSuffix(u.EscapedPath(), "/")
 	if cleanPath == "." || cleanPath == "/" {
@@ -180,6 +197,10 @@ func (c *Config) Validate() error {
 	}
 	c.basePath = cleanPath
 	c.publicOrigin = u.Scheme + "://" + u.Host
+	if c.ReturnURL != "" && (!strings.HasPrefix(c.ReturnURL, "/") || path.Clean(c.ReturnURL) != c.ReturnURL ||
+		strings.ContainsAny(c.ReturnURL, "%?#\\")) {
+		return fmt.Errorf("%w: returnURL must be one canonical root-relative path", errInvalidConfig)
+	}
 	if c.ListenAddr == "" {
 		c.ListenAddr = ":8080"
 	}
@@ -216,8 +237,17 @@ func (c *Config) Validate() error {
 	if c.Enrollment.MaxOutputBytes < 4096 || c.Enrollment.MaxOutputBytes > 1024*1024 {
 		return fmt.Errorf("%w: enrollment maxOutputBytes must be between 4096 and 1048576", errInvalidConfig)
 	}
-	if c.Auth.Mode != authModeOIDC && c.Auth.Mode != authModeOAuth2 {
-		return fmt.Errorf("%w: auth.mode must be oidc or oauth2", errInvalidConfig)
+	if c.Auth.Mode != authModeOIDC && c.Auth.Mode != authModeOAuth2 && c.Auth.Mode != authModeLocal {
+		return fmt.Errorf("%w: auth.mode must be oidc, oauth2, or local", errInvalidConfig)
+	}
+	if c.Auth.Mode == authModeLocal {
+		if u.Scheme != httpScheme || !strings.EqualFold(u.Hostname(), "localhost") ||
+			c.Auth.Session.Secure || !validPrincipalIdentity(c.Auth.Local.Principal.Issuer, c.Auth.Local.Principal.Subject) ||
+			c.Auth.Eligibility != nil || !emptyEnrichment(c.Auth.ClaimEnrichment) {
+			return fmt.Errorf("%w: local auth requires an HTTP localhost URL, insecure localhost-only cookie, one principal, and no OAuth eligibility", errInvalidConfig)
+		}
+	} else if u.Scheme != httpsScheme || c.Auth.Local != (LocalAuthConfig{}) {
+		return fmt.Errorf("%w: OAuth authentication requires HTTPS and no local principal", errInvalidConfig)
 	}
 	if c.Auth.Eligibility != nil {
 		if err := c.Auth.Eligibility.Validate("auth.eligibility"); err != nil {
@@ -230,7 +260,8 @@ func (c *Config) Validate() error {
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(c.Auth.Session.CookieName) {
 		return fmt.Errorf("%w: auth.session.cookieName is invalid", errInvalidConfig)
 	}
-	if !c.Auth.Session.Secure || c.Auth.Session.MaxAgeSeconds < 300 || c.Auth.Session.MaxAgeSeconds > 86400 {
+	if (c.Auth.Mode != authModeLocal && !c.Auth.Session.Secure) ||
+		c.Auth.Session.MaxAgeSeconds < 300 || c.Auth.Session.MaxAgeSeconds > 86400 {
 		return fmt.Errorf(
 			"%w: auth.session must use a secure cookie with a 300..86400 second lifetime",
 			errInvalidConfig,
@@ -240,8 +271,8 @@ func (c *Config) Validate() error {
 	if c.Auth.Mode == authModeOAuth2 {
 		callback = c.Auth.OAuth2.CallbackPath
 	}
-	if callback == "" || !strings.HasPrefix(callback, "/oauth2/") || path.Clean(callback) != callback ||
-		strings.ContainsAny(callback, "%?#\\") {
+	if c.Auth.Mode != authModeLocal && (callback == "" || !strings.HasPrefix(callback, "/oauth2/") || path.Clean(callback) != callback ||
+		strings.ContainsAny(callback, "%?#\\")) {
 		return fmt.Errorf("%w: authentication callbackPath must be an unambiguous /oauth2/ path", errInvalidConfig)
 	}
 	if c.Auth.Mode == authModeOIDC {
@@ -262,7 +293,7 @@ func (c *Config) Validate() error {
 			strings.ContainsAny(c.Auth.OIDC.AccessTokenAudience, "\x00\r\n") {
 			return fmt.Errorf("%w: OIDC accessTokenAudience must be a bounded string", errInvalidConfig)
 		}
-	} else {
+	} else if c.Auth.Mode == authModeOAuth2 {
 		if c.Auth.OAuth2.Issuer == "" || !absoluteHTTPS(c.Auth.OAuth2.AuthorizationURL) ||
 			!absoluteHTTPS(c.Auth.OAuth2.TokenURL) ||
 			!absoluteHTTPS(c.Auth.OAuth2.IdentityEndpoint) ||
@@ -282,6 +313,19 @@ func (c *Config) Validate() error {
 		if !allowed {
 			return fmt.Errorf("%w: OAuth2 identity endpoint host must be explicitly allowed", errInvalidConfig)
 		}
+	}
+	if c.Persistence.Mode == "" {
+		c.Persistence.Mode = "kubernetes"
+	}
+	if c.Persistence.Mode == "local" {
+		if c.Auth.Mode != authModeLocal || !path.IsAbs(c.Persistence.Local.Directory) ||
+			path.Clean(c.Persistence.Local.Directory) != c.Persistence.Local.Directory || containsASCIIControl(c.Persistence.Local.Directory) ||
+			c.basePath != "/agents/credentials" || c.Enrollment.MaxOutputBytes > maxBrokerCredential ||
+			c.MaxUploadBytes > maxBrokerCredential {
+			return fmt.Errorf("%w: local persistence requires local auth and one canonical absolute directory", errInvalidConfig)
+		}
+	} else if c.Persistence.Mode != "kubernetes" || c.Persistence.Local != (LocalPersistenceConfig{}) {
+		return fmt.Errorf("%w: persistence.mode must be kubernetes or local", errInvalidConfig)
 	}
 	for _, method := range []string{c.Auth.OIDC.ClientAuthMethod, c.Auth.OAuth2.ClientAuthMethod} {
 		if method != "" && method != "client_secret_basic" && method != "client_secret_post" {
@@ -520,6 +564,11 @@ func containsASCIIControl(value string) bool {
 		}
 	}
 	return false
+}
+
+func emptyEnrichment(config eligibility.EnrichmentConfig) bool {
+	return len(config.AllowedHosts) == 0 && config.TimeoutSeconds == 0 &&
+		config.Limits == (eligibility.ResponseLimits{}) && len(config.Sources) == 0
 }
 
 func (c *Config) Path(suffix string) string { return c.basePath + suffix }

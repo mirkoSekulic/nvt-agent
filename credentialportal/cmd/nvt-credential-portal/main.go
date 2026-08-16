@@ -69,6 +69,12 @@ func runPortal() error {
 	if decodeErr != nil {
 		return fmt.Errorf("validate config: %w", decodeErr)
 	}
+	if publicURL := os.Getenv("NVT_CREDENTIAL_PORTAL_PUBLIC_URL"); publicURL != "" {
+		cfg.PublicURL = publicURL
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("validate public URL override: %w", err)
+		}
+	}
 	patcher, broker, err := configureCustody(cfg)
 	if err != nil {
 		return err
@@ -141,9 +147,18 @@ func configureAuthenticator(
 	if broker != nil {
 		eligibility = append(eligibility, broker)
 	}
+	sessionSecret := os.Getenv("NVT_CREDENTIAL_PORTAL_SESSION_SECRET")
+	if path := os.Getenv("NVT_CREDENTIAL_PORTAL_SESSION_SECRET_FILE"); path != "" {
+		secret, err := portal.ReadRunnerKey(path)
+		if err != nil {
+			return nil, fmt.Errorf("read session secret: %w", err)
+		}
+		defer clearSensitive(secret)
+		sessionSecret = string(secret)
+	}
 	auth, err := portal.NewAuthenticator(
 		context.Background(), cfg,
-		os.Getenv("NVT_CREDENTIAL_PORTAL_SESSION_SECRET"),
+		sessionSecret,
 		os.Getenv("NVT_CREDENTIAL_PORTAL_CLIENT_ID"),
 		os.Getenv("NVT_CREDENTIAL_PORTAL_CLIENT_SECRET"),
 		nil, eligibility...,
@@ -163,6 +178,13 @@ func configureCustody(
 			return nil, nil, fmt.Errorf("configure principal account broker: %w", err)
 		}
 		return nil, broker, nil
+	}
+	if cfg.Persistence.Mode == "local" {
+		patcher, err := portal.NewLocalFilePatcher(cfg.Persistence.Local.Directory, cfg.Namespace, cfg.Slots)
+		if err != nil {
+			return nil, nil, fmt.Errorf("configure local credential persistence: %w", err)
+		}
+		return patcher, nil, nil
 	}
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {

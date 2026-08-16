@@ -79,7 +79,7 @@ func NewAuthenticator(
 	client *http.Client,
 	leaseBrokers ...EligibilityLeaseBroker,
 ) (*Authenticator, error) {
-	if len(sessionSecret) < 32 || clientSecret == "" {
+	if len(sessionSecret) < 32 || (cfg.Auth.Mode != authModeLocal && clientSecret == "") {
 		return nil, fmt.Errorf(
 			"%w: session secret must contain at least 32 bytes and client secret is required",
 			errAuthConfiguration,
@@ -101,6 +101,9 @@ func NewAuthenticator(
 		return nil, err
 	}
 	a.cookies.MaxAge(cfg.Auth.Session.MaxAgeSeconds)
+	if cfg.Auth.Mode == authModeLocal {
+		return a, nil
+	}
 	redirect := cfg.PublicURL + callbackPath(cfg)
 	if cfg.Auth.Mode == authModeOIDC {
 		provider, err := oidc.NewProvider(oidc.ClientContext(ctx, client), cfg.Auth.OIDC.IssuerURL)
@@ -194,6 +197,10 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	if a.cfg.Auth.Mode == authModeLocal {
+		a.localLogin(w, r)
+		return
+	}
 	state, stateErr := randomToken(32)
 	verifier, verifierErr := randomToken(48)
 	nonce, nonceErr := randomToken(32)
@@ -228,6 +235,35 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, oauth2.SetAuthURLParam("nonce", nonce))
 	}
 	http.Redirect(w, r, a.oauth.AuthCodeURL(state, opts...), http.StatusFound)
+}
+
+func (a *Authenticator) localLogin(w http.ResponseWriter, r *http.Request) {
+	sessionID, sessionErr := randomToken(32)
+	csrf, csrfErr := randomToken(32)
+	if sessionErr != nil || csrfErr != nil {
+		http.Error(w, "authentication unavailable", http.StatusInternalServerError)
+		return
+	}
+	expiresAt := a.now().Add(time.Duration(a.cfg.Auth.Session.MaxAgeSeconds) * time.Second)
+	a.mu.Lock()
+	a.pruneLocked()
+	if len(a.sessions) >= 4096 {
+		a.mu.Unlock()
+		http.Error(w, "authentication temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	a.sessions[sessionID] = session{Principal: a.cfg.Auth.Local.Principal, CSRF: csrf, ExpiresAt: expiresAt, EligibilityExpiresAt: expiresAt}
+	a.mu.Unlock()
+	encoded, err := a.cookies.Encode(a.cfg.Auth.Session.CookieName, sessionID)
+	if err != nil {
+		http.Error(w, "authentication unavailable", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: a.cfg.Auth.Session.CookieName, Value: encoded, Path: a.cfg.Path("/"), HttpOnly: true,
+		Secure: a.cfg.Auth.Session.Secure, SameSite: http.SameSiteStrictMode, MaxAge: a.cfg.Auth.Session.MaxAgeSeconds,
+	})
+	http.Redirect(w, r, a.cfg.Path("/"), http.StatusFound)
 }
 
 //nolint:funlen,gocyclo,cyclop // Callback validation is intentionally linear and fail-closed before session creation.
@@ -328,7 +364,7 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 			Value:    encoded,
 			Path:     a.cfg.Path("/"),
 			HttpOnly: true,
-			Secure:   true,
+			Secure:   a.cfg.Auth.Session.Secure,
 			SameSite: http.SameSiteLaxMode,
 			MaxAge:   a.cfg.Auth.Session.MaxAgeSeconds,
 		},

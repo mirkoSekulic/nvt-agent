@@ -120,7 +120,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case s.cfg.Path("/login"):
 		s.auth.Login(w, r)
 		return
-	case s.cfg.Path(callbackPath(s.cfg)):
+	}
+	if s.cfg.Auth.Mode != authModeLocal && r.URL.Path == s.cfg.Path(callbackPath(s.cfg)) {
 		s.auth.Callback(w, r)
 		return
 	}
@@ -238,10 +239,11 @@ func (s *Server) dashboard(ctx context.Context, w http.ResponseWriter, principal
 		CSRF           string
 		BasePath       string
 		PrincipalName  string
+		ReturnURL      string
 		Slots          []Slot
 		RecoveryUpload bool
 	}{
-		CSRF: csrf, BasePath: s.cfg.basePath, PrincipalName: principal.DisplayName,
+		CSRF: csrf, BasePath: s.cfg.basePath, PrincipalName: principal.DisplayName, ReturnURL: s.cfg.ReturnURL,
 		Slots: slots, RecoveryUpload: s.cfg.RecoveryUpload.Enabled,
 	}); err != nil {
 		return
@@ -736,6 +738,7 @@ var portalTemplate = template.Must(template.New("portal").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Credential enrollment</title><style>body{font:16px system-ui;margin:2rem;max-width:48rem;color:#17202a}fieldset{margin:1rem 0;padding:1rem}button,select,input{font:inherit;margin:.4rem 0}.status{min-height:1.5rem}.action{padding:1rem;background:#f4f6f7}.hidden{display:none}</style></head>
 <body><header><h1>Manage credentials</h1>{{if .PrincipalName}}<p>Signed in as {{.PrincipalName}}</p>{{end}}</header>
+{{if .ReturnURL}}<p><a href="{{.ReturnURL}}">Back to agents</a></p>{{end}}
 <p>Connect or reconnect a configured provider account. The portal never reads or displays the current value and does not report provider health.</p>
 {{if gt (len .Slots) 1}}<label for="slot">Enrollment slot</label><select id="slot"><option value="">Select a slot</option>{{range .Slots}}<option value="{{.Name}}">{{.Label}}{{if eq .Adapter "codex-oauth-file"}} (experimental device login){{end}}</option>{{end}}</select>{{else if eq (len .Slots) 1}}<input id="slot" type="hidden" value="{{(index .Slots 0).Name}}"><h2>{{(index .Slots 0).Label}}{{if eq (index .Slots 0).Adapter "codex-oauth-file"}} (experimental device login){{end}}</h2>{{end}}
 <fieldset><legend>Option 1: Sign in with provider</legend><button id="connect" type="button">Connect / reconnect</button><div id="action" class="action hidden"><a id="provider" href="#" target="_blank" rel="noopener noreferrer">Continue with provider</a><p id="device"></p><div id="paste" class="hidden"><label for="code">Authorization code</label><br><input id="code" type="password" autocomplete="off"><button id="submit-code" type="button">Submit code</button></div><button id="cancel" type="button">Cancel</button></div><p class="status" id="status" role="status"></p></fieldset>

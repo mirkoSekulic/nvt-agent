@@ -104,6 +104,59 @@ print("OK")
 	}
 }
 
+func TestBrokerIgnoresOnlySafeLocalPortalStaging(t *testing.T) {
+	out, err := runBrokerPython(t, `
+import os
+import tempfile
+from pathlib import Path
+
+from broker.seed_supervisor import SeedError, SeedReconciler
+
+with tempfile.TemporaryDirectory() as seed_name, tempfile.TemporaryDirectory() as state_name:
+    seed = Path(seed_name)
+    state = Path(state_name)
+    staging = seed / ".nvt-portal-staging"
+    staging.mkdir(mode=0o700)
+    in_progress = staging / ".credential-next-probe"
+    in_progress.write_bytes(b"partial-secret-generation")
+    (seed / "codex").write_bytes(b"stable-generation")
+    reconciler = SeedReconciler(seed, state, "portal")
+
+    actions, fingerprint = reconciler.plan()
+    assert [item["name"] for item in actions] == ["codex"]
+    assert fingerprint == (("codex", actions[0]["digest"]),)
+    recovery = reconciler.apply(actions)
+    reconciler.accept(recovery)
+    assert (state / "portal" / "codex").read_bytes() == b"stable-generation"
+    assert not (state / "portal" / in_progress.name).exists()
+
+    # A portal rename is the only visible generation transition.
+    replacement = staging / ".credential-next-replacement"
+    replacement.write_bytes(b"replacement-generation")
+    os.replace(replacement, seed / "codex")
+    actions, _ = reconciler.plan()
+    assert [item["name"] for item in actions] == ["codex"]
+    recovery = reconciler.apply(actions)
+    reconciler.accept(recovery)
+    assert (state / "portal" / "codex").read_bytes() == b"replacement-generation"
+
+    in_progress.unlink()
+    staging.rmdir()
+    (seed / ".nvt-portal-staging").symlink_to(seed / "codex")
+    try:
+        reconciler.plan()
+    except SeedError as error:
+        assert str(error) == "seed-staging-invalid"
+    else:
+        raise AssertionError("unsafe staging entry was accepted")
+
+print("OK")
+`)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("local portal staging contract failed: %v\n%s", err, out)
+	}
+}
+
 func TestBrokerIdenticalPortalSeedMigrationPreservesRotatedCanonicalThenImportsUpdate(t *testing.T) {
 	out, err := runBrokerPython(t, `
 import tempfile

@@ -61,6 +61,11 @@ http://localhost:4090/agents/nvt/
 http://nvt.agent.localhost:4090/
 ```
 
+Optional local credential management is described in
+[`local-credential-portal.md`](local-credential-portal.md). It adds the existing
+credential portal to the gateway without giving credentials to the gateway,
+controller, producer, or agent containers.
+
 Every workstation uses `/workspace` inside the agent, matching the Kubernetes
 runtime contract.
 

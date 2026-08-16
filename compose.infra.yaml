@@ -8,8 +8,20 @@ services:
       NVT_BROKER_AGENTS_CONFIG: /state/agents.yaml
       NVT_BROKER_AUDIT_LOG: /state/audit.jsonl
       NVT_BROKER_BIND: 0.0.0.0:7347
+      NVT_BROKER_SEED_DIR: ${NVT_BROKER_CREDENTIAL_SEED_DIR:-}
+      NVT_BROKER_STATE_DIR: /private
+      NVT_BROKER_SEED_TARGET_DIR: portal
+    entrypoint: [/bin/sh, -euc]
+    command:
+      - |
+        if [ -n "$${NVT_BROKER_SEED_DIR:-}" ]; then
+          exec /opt/nvt-broker/broker/seed_supervisor.py -- /opt/nvt-broker/broker/brokerd.py
+        fi
+        exec /opt/nvt-broker/broker/brokerd.py
     volumes:
       - ./.broker:/state
+      - local-credential-seeds:/portal-seed:ro
+      - local-broker-private:/private
     networks:
       - agents-proxy
       - local-control-plane
@@ -83,6 +95,7 @@ services:
       NVT_GATEWAY_LOCAL_RUNS_TOKEN_FILE: /run/secrets/local-controller-route-token
       NVT_GATEWAY_LOCAL_RUNS_BASE_DOMAIN: agent.localhost
       NVT_GATEWAY_LOCAL_RUNS_PATH_PREFIX: /agents
+      NVT_GATEWAY_CREDENTIAL_PORTAL_URL: ${NVT_GATEWAY_CREDENTIAL_PORTAL_URL:-}
     networks:
       - agents-proxy
       - local-control-plane
@@ -110,6 +123,67 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    restart: unless-stopped
+
+  credential-private-init:
+    profiles: [credentials]
+    image: nvt-credential-portal:latest
+    user: "0:0"
+    network_mode: none
+    entrypoint: [/bin/sh, -euc]
+    command:
+      - |
+        umask 077
+        mkdir -p /private /seed
+        if [ ! -s /private/runner.key ]; then /nvt-credential-portal runner-keygen /private/runner.key; fi
+        if [ ! -s /private/session.key ]; then /nvt-credential-portal runner-keygen /private/session.key; fi
+        chown -R 1000:1000 /private /seed
+        chmod 0700 /private /seed
+        chmod 0600 /private/runner.key /private/session.key
+    volumes:
+      - local-credential-private:/private
+      - local-credential-seeds:/seed
+    restart: "no"
+
+  credential-runner:
+    profiles: [credentials]
+    image: nvt-credential-portal:latest
+    command: [runner, --listen, 0.0.0.0:8081, --auth-key-file, /private/runner.key]
+    volumes:
+      - local-credential-private:/private:ro
+    networks: [local-control-plane]
+    depends_on:
+      credential-private-init: {condition: service_completed_successfully}
+    read_only: true
+    tmpfs: [/tmp]
+    restart: unless-stopped
+
+  credential-portal:
+    profiles: [credentials]
+    image: nvt-credential-portal:latest
+    environment:
+      NVT_CREDENTIAL_PORTAL_CONFIG: /config/config.json
+      NVT_CREDENTIAL_PORTAL_PUBLIC_URL: http://localhost:${NVT_PROXY_PORT:-4090}/agents/credentials
+      NVT_CREDENTIAL_PORTAL_SESSION_SECRET_FILE: /private/session.key
+      NVT_CREDENTIAL_RUNNER_AUTH_KEY_FILE: /private/runner.key
+      NVT_CREDENTIAL_RUNNER_URL: http://credential-runner:8081
+    volumes:
+      - ./.broker/credential-portal-local.json:/config/config.json:ro
+      - local-credential-private:/private:ro
+      - local-credential-seeds:/seed
+    networks: [agents-proxy, local-control-plane]
+    depends_on:
+      credential-private-init: {condition: service_completed_successfully}
+      credential-runner: {condition: service_started}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=agents-proxy
+      - traefik.http.routers.nvt-local-credentials.rule=Host(`localhost`) && PathPrefix(`/agents/credentials`)
+      - traefik.http.routers.nvt-local-credentials.entrypoints=web
+      - traefik.http.routers.nvt-local-credentials.priority=100
+      - traefik.http.services.nvt-local-credentials.loadbalancer.server.port=8080
+    read_only: true
+    tmpfs: [/tmp]
     restart: unless-stopped
 
   local-controller:
@@ -166,3 +240,6 @@ volumes:
   local-controller-state:
   local-controller-private:
   local-gateway-private:
+  local-credential-private:
+  local-credential-seeds:
+  local-broker-private:
