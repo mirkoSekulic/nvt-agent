@@ -204,7 +204,7 @@ func TestDockerStoreReadsBoundedInventoryThroughReadOnlyHelper(t *testing.T) {
 	}
 	command := lastDockerCommand(t, docker.commands, "create")
 	joined := strings.Join(command.arguments, "\n")
-	if !strings.Contains(joined, "readonly") || !strings.Contains(joined, "test ! -L") || !strings.Contains(joined, "stat -c '%s'") {
+	if !strings.Contains(joined, "readonly") || !strings.Contains(joined, "root=/state/current") || !strings.Contains(joined, "root=/state/current.old") || !strings.Contains(joined, "test ! -L") || !strings.Contains(joined, "stat -c '%s'") {
 		t.Fatalf("inventory reader is not bounded and read-only: %v", command.arguments)
 	}
 }
@@ -236,6 +236,9 @@ func TestDockerStoreKeepsPrivateBytesOnlyOnStdin(t *testing.T) {
 		if !containsArgument(createCommand.arguments, expected) {
 			t.Fatalf("helper omitted %q: %v", expected, createCommand.arguments)
 		}
+	}
+	if script := strings.Join(createCommand.arguments, "\n"); !strings.Contains(script, "mv /state/current.old /state/current") || strings.Index(script, "mv /state/current.old /state/current") > strings.Index(script, "rm -rf /state/.next /state/current.old") {
+		t.Fatal("config publication does not recover an interrupted current.old snapshot before cleanup")
 	}
 	if err := store.CopyPrivateFile(context.Background(), sourceVolume, destinationVolume, 65532, 65532, 32); err != nil {
 		t.Fatal(err)

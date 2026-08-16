@@ -21,6 +21,7 @@ var _ producerrender.ImageInspectRunner = DockerCLI{}
 type memoryStore struct {
 	volumes     map[string]Volume
 	files       map[string]map[string][]byte
+	oldFiles    map[string]map[string][]byte
 	directories map[string]directoryPlan
 	publishing  map[string]bool
 	conflict    bool
@@ -29,7 +30,7 @@ type memoryStore struct {
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}, directories: map[string]directoryPlan{}, publishing: map[string]bool{}}
+	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}, oldFiles: map[string]map[string][]byte{}, directories: map[string]directoryPlan{}, publishing: map[string]bool{}}
 }
 func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (map[string]bool, error) {
 	if store.conflict {
@@ -65,6 +66,7 @@ func (store *memoryStore) ReplaceFiles(_ context.Context, volume Volume, files [
 		next[file.Name] = value
 	}
 	store.files[volume.Name] = next
+	delete(store.oldFiles, volume.Name)
 	store.writes++
 	return nil
 }
@@ -73,7 +75,10 @@ func (store *memoryStore) ReadVolumeInventory(_ context.Context, volume Volume) 
 	if _, ok := store.volumes[volume.Name]; !ok {
 		return nil, errors.New("missing volume")
 	}
-	return append([]byte(nil), store.files[volume.Name]["volume-inventory.json"]...), nil
+	if current := store.files[volume.Name]["volume-inventory.json"]; len(current) != 0 {
+		return append([]byte(nil), current...), nil
+	}
+	return append([]byte(nil), store.oldFiles[volume.Name]["volume-inventory.json"]...), nil
 }
 
 func (store *memoryStore) EnsureDirectory(_ context.Context, volume Volume, uid, gid int, mode int64) error {
@@ -279,7 +284,13 @@ func TestManagerPreservesRetiredVolumeLabelInventory(t *testing.T) {
 	if _, err := manager.Ensure(context.Background(), "local-test", withoutPortal, inputs); err != nil {
 		t.Fatal(err)
 	}
-	configFiles := store.files["local-test-generated-config"]
+	configName := "local-test-generated-config"
+	store.oldFiles[configName] = store.files[configName]
+	delete(store.files, configName)
+	if _, err := manager.Ensure(context.Background(), "local-test", withoutPortal, inputs); err != nil {
+		t.Fatalf("interrupted config publication recovery failed: %v", err)
+	}
+	configFiles := store.files[configName]
 	var current Plan
 	if json.Unmarshal(configFiles["state-plan.json"], &current) != nil {
 		t.Fatal("current state plan is invalid")

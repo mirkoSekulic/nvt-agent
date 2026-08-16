@@ -105,13 +105,15 @@ func (store DockerStore) ReadVolumeInventory(ctx context.Context, volume Volume)
 		return nil, errors.New("invalid state read")
 	}
 	script := `set -eu
-if [ ! -e /state/current ]; then
-  test ! -L /state/current
-  exit 0
-fi
 test ! -L /state/current
-test -d /state/current
-target="/state/current/volume-inventory.json"
+test ! -L /state/current.old
+root=/state/current
+if [ ! -e "$root" ]; then
+  if [ ! -e /state/current.old ]; then exit 0; fi
+  root=/state/current.old
+fi
+test -d "$root"
+target="$root/volume-inventory.json"
 test ! -L "$target"
 if [ ! -e "$target" ]; then exit 0; fi
 test -f "$target"
@@ -176,6 +178,14 @@ func (store DockerStore) writeFiles(ctx context.Context, volume Volume, files []
 	defer clear(payload)
 	script := `set -eu
 umask 077
+test ! -L /state/current
+test ! -L /state/current.old
+test ! -L /state/.next
+if [ ! -e /state/current ] && [ -e /state/current.old ]; then
+  test -d /state/current.old
+  mv /state/current.old /state/current
+  sync
+fi
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 tar -xpf - -C /state/.next

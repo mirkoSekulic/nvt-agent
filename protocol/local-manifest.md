@@ -157,6 +157,9 @@ of complete managed-volume label maps. Each successful reconciliation merges
 the current plan into that inventory instead of dropping retired entries, so
 `local-reset` can verify and remove exact-owned volumes left by manifest
 shrinkage. Missing, incomplete, conflicting, or extra labels still fail closed.
+If atomic configuration publication is interrupted after rotating `current`,
+the next reconciliation validates and recovers the inventory from
+`current.old` before publishing or cleaning that transaction snapshot.
 
 Credential-portal account projection is bounded to the portal contract's 128
 slots before volume creation. Slot and local destination names use a
