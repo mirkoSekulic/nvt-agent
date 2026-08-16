@@ -543,7 +543,8 @@ func TestLocalSchedulingDeniesUntrustedSelectionBeforeBackendAndBoundsCapacity(t
 }
 
 func TestLocalSchedulingAcceptsValidatedSourceURLFragment(t *testing.T) {
-	store, _ := openTestStore(t, &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}, 1)
+	clock := &fakeClock{value: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	store, path := openTestStore(t, clock, 1)
 	handler := NewHTTPHandlerWithServices(store, nil, nil, nil, testScheduler(t, store, schedulingTestToken))
 	body := testAdmissionBody(t, "https://identity.example.test", "subject-1", "development", "work")
 	var admission map[string]any
@@ -555,6 +556,31 @@ func TestLocalSchedulingAcceptsValidatedSourceURLFragment(t *testing.T) {
 	response := scheduleRequest(t, handler, http.MethodPost, "/v1/schedules/github/admissions", mustJSON(t, admission), schedulingTestToken)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("fragment source URL admission = %d %s", response.Code, response.Body.String())
+	}
+	listed, err := store.List(context.Background(), 1, "")
+	if err != nil || len(listed.Runs) != 1 || listed.Runs[0].SourceURL != sourceURL {
+		t.Fatalf("admitted source metadata = %#v, %v", listed, err)
+	}
+	snapshot, _, err := store.ResolvedSnapshot(context.Background(), listed.Runs[0].RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolvedrun.DecodeResolvedAgentRun(snapshot)
+	clear(snapshot)
+	if err != nil || resolved.SourceURL != sourceURL {
+		t.Fatalf("resolved source metadata = %#v, %v", resolved, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := OpenStore(context.Background(), path, StoreOptions{MaxActiveRuns: 1, MaxClaimLease: time.Minute, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	durable, err := restarted.Get(context.Background(), listed.Runs[0].RunID)
+	if err != nil || durable.SourceURL != sourceURL {
+		t.Fatalf("source metadata after restart = %#v, %v", durable, err)
 	}
 }
 

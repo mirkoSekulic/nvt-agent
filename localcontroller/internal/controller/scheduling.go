@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
@@ -500,7 +499,7 @@ func (scheduler *Scheduler) admit(server *HTTPServer, response http.ResponseWrit
 	key, runID := localWorkIdentity(configured.name, policy.identity, input.Work.ID)
 	resolved, err := configured.resolver.Resolve(authorization, resolvedrun.LocalRunRequest{
 		RunID: runID, Profile: selection.Profile, Workflow: selection.Workflow, Retention: policy.retention,
-		Backend: policy.backend, Prompt: input.Input.Prompt,
+		Backend: policy.backend, Prompt: input.Input.Prompt, SourceURL: input.Work.URL,
 	})
 	if err != nil {
 		reason := "invalid-execution-profile-configuration"
@@ -605,8 +604,5 @@ func validScheduleText(value string, maximum int, allowEmpty bool) bool {
 }
 
 func validScheduleURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && len(raw) <= 2048 &&
-		!strings.ContainsAny(raw, "\x00\r\n") && utf8.ValidString(parsed.Fragment) &&
-		strings.IndexFunc(parsed.Fragment, unicode.IsControl) == -1
+	return resolvedrun.ValidateSourceURL(raw) == nil
 }

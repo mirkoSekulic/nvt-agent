@@ -849,7 +849,7 @@ func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request, principa
 			}
 			items = append(items, dashboardItem{
 				DisplayName: run.RunID, Phase: run.State, RequestedBy: run.Principal.DisplayName, CreatedAt: run.CreatedAt,
-				OpenURL: localRunOpenURL(r, run.Session.Path, run.Ready), Routable: run.Ready,
+				SourceURL: run.SourceURL, OpenURL: localRunOpenURL(r, run.Session.Path, run.Ready), Routable: run.Ready,
 			})
 		}
 	}

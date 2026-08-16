@@ -65,7 +65,7 @@ func (server *HTTPServer) routeForRun(ctx context.Context, run Run) (localroutes
 	result := localroutes.Run{
 		APIVersion: localroutes.APIVersion, RunID: run.RunID, State: string(run.State), Ready: run.State == StateRunning,
 		Principal: localroutes.Principal{Issuer: resolved.Principal.Issuer, Subject: resolved.Principal.Subject, DisplayName: resolved.Principal.DisplayName},
-		Profile:   resolved.Profile, Workflow: resolved.Workflow, CreatedAt: run.CreatedAt.UTC(),
+		SourceURL: resolved.SourceURL, Profile: resolved.Profile, Workflow: resolved.Workflow, CreatedAt: run.CreatedAt.UTC(),
 		Session: routes.Session, Exposures: append([]localroutes.Exposure(nil), routes.Exposures...),
 	}
 	if localroutes.ValidateRun(result) != nil {

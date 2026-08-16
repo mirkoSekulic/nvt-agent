@@ -103,6 +103,7 @@ type Run struct {
 	SnapshotDigest    string     `json:"snapshot_digest"`
 	Issuer            string     `json:"issuer"`
 	Subject           string     `json:"subject"`
+	SourceURL         string     `json:"source_url,omitempty"`
 	Profile           string     `json:"profile"`
 	Workflow          string     `json:"workflow"`
 	Retention         string     `json:"retention"`

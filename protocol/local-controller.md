@@ -216,7 +216,8 @@ available while the controller is full.
 
 ### Inspect and request termination
 
-- `GET /v1/runs/{run_id}` returns non-secret lifecycle metadata.
+- `GET /v1/runs/{run_id}` returns non-secret lifecycle metadata, including the
+  immutable optional source URL.
 - `GET /v1/runs?limit=100&after={run_id}` lists visible runs in stable run-ID
   order. `limit` is 1 through 500; `next_after` continues a bounded page.
 - `POST /v1/runs/{run_id}/cancel` requests `stopping`. It is idempotent for an
@@ -488,7 +489,8 @@ created mode 0600 before SQLite opens it. WAL mode with `synchronous=FULL` is us
 and creates, capacity checks, state changes, ownership changes, expiry, and
 deletion are transactions.
 
-The canonical validated resolved-run snapshot and its SHA-256 digest are stored
+The canonical validated resolved-run snapshot, including optional source
+provenance, and its SHA-256 digest are stored
 for deterministic in-process backend recovery. HTTP get/list/status responses
 expose only the digest and bounded non-secret metadata, never the snapshot,
 prompt, agent configuration, idempotency key, or backend diagnostic. The trusted

@@ -34,6 +34,8 @@ func TestHTTPRunLifecycleHealthAndGenericResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	runObject["prompt"] = "HTTP-PROMPT-NEEDLE"
+	const sourceURL = "https://github.com/acme/widget/issues/7#issuecomment-5307105878"
+	runObject["source_url"] = sourceURL
 	createBody := mustJSON(t, map[string]any{
 		"api_version": APIVersion, "idempotency_key": "HTTP-IDEMPOTENCY-NEEDLE", "resolved_run": runObject,
 	})
@@ -56,7 +58,8 @@ func TestHTTPRunLifecycleHealthAndGenericResponses(t *testing.T) {
 		t.Fatalf("created run = %#v", createResponse.Run)
 	}
 	got := serveRequest(t, handler, http.MethodGet, "/v1/runs/http-run", nil, "")
-	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"snapshot_digest":"`) {
+	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"snapshot_digest":"`) ||
+		!strings.Contains(got.Body.String(), `"source_url":"`+sourceURL+`"`) {
 		t.Fatalf("get = %d %s", got.Code, got.Body.String())
 	}
 	replay := serveRequest(t, handler, http.MethodPost, "/v1/runs", createBody, "application/json")
