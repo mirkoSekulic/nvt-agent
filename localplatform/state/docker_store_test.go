@@ -7,6 +7,9 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -212,6 +215,31 @@ func TestDockerStoreRejectsVolumeRecreatedDuringHelperAttachment(t *testing.T) {
 		if len(command.arguments) > 0 && command.arguments[0] == "start" {
 			t.Fatal("helper started before attached volume labels were verified")
 		}
+	}
+}
+
+func TestPrivateSourceValidationRejectsTrailingJournalBytes(t *testing.T) {
+	directory := t.TempDir()
+	markerPath := filepath.Join(directory, "marker")
+	valuePath := filepath.Join(directory, "value")
+	value := []byte("generated-private-value")
+	if err := os.WriteFile(valuePath, value, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runValidation := func(marker []byte) error {
+		if err := os.WriteFile(markerPath, marker, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("/bin/sh", "-euc", privateSourceValidation+`test_private_source "$1" "$2"`, "state-helper", markerPath, valuePath)
+		return command.Run()
+	}
+	marker := privateSourceMarker(value)
+	if err := runValidation(marker); err != nil {
+		t.Fatalf("canonical journal rejected: %v", err)
+	}
+	malformed := append(append([]byte(nil), marker...), []byte("trailing-corruption")...)
+	if err := runValidation(malformed); err == nil {
+		t.Fatal("unterminated bytes after canonical journal were accepted")
 	}
 }
 

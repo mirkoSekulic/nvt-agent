@@ -164,8 +164,7 @@ func readStableAfterFirst(root *os.Root, name string, maximum int64, rejectSymli
 		return nil, errors.New("input is not a bounded regular file")
 	}
 	if privateMode {
-		stat, ok := before.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != uint32(os.Geteuid()) || before.Mode().Perm()&0o077 != 0 {
+		if !safePrivateMetadata(before) {
 			return nil, errors.New("private input ownership or mode is unsafe")
 		}
 	}
@@ -185,7 +184,7 @@ func readStableAfterFirst(root *os.Root, name string, maximum int64, rejectSymli
 		afterRead()
 	}
 	afterFirst, err := file.Stat()
-	if err != nil || !os.SameFile(before, afterFirst) || before.Size() != afterFirst.Size() || !before.ModTime().Equal(afterFirst.ModTime()) {
+	if err != nil || !os.SameFile(before, afterFirst) || before.Size() != afterFirst.Size() || !before.ModTime().Equal(afterFirst.ModTime()) || privateMode && !safePrivateMetadata(afterFirst) {
 		clear(first)
 		return nil, errors.New("input changed while being read")
 	}
@@ -199,7 +198,7 @@ func readStableAfterFirst(root *os.Root, name string, maximum int64, rejectSymli
 		return nil, err
 	}
 	afterSecond, err := file.Stat()
-	stable := err == nil && os.SameFile(before, afterSecond) && before.Size() == afterSecond.Size() && before.ModTime().Equal(afterSecond.ModTime()) && bytes.Equal(first, second)
+	stable := err == nil && os.SameFile(before, afterSecond) && before.Size() == afterSecond.Size() && before.ModTime().Equal(afterSecond.ModTime()) && (!privateMode || safePrivateMetadata(afterSecond)) && bytes.Equal(first, second)
 	clear(second)
 	if !stable {
 		clear(first)
@@ -220,6 +219,11 @@ func readStableAfterFirst(root *os.Root, name string, maximum int64, rejectSymli
 		}
 	}
 	return first, nil
+}
+
+func safePrivateMetadata(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && info.Mode().IsRegular() && stat.Uid == uint32(os.Geteuid()) && info.Mode().Perm()&0o077 == 0
 }
 
 // Close clears all resolved content. Inputs must not be reused afterward.

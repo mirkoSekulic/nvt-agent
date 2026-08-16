@@ -283,12 +283,17 @@ const privateSourceValidation = `test_private_source() {
   marker_extra=
   IFS=' ' read -r marker_version marker_digest marker_size marker_extra < "$marker" || return 1
   [ -z "$marker_extra" ] || return 1
-  [ "$(wc -l < "$marker")" -eq 1 ] || return 1
   [ "$marker_version" = '` + privateSourceMarkerVersion + `' ] || return 1
   actual_digest=$(sha256sum "$value") || return 1
   actual_digest=${actual_digest%% *}
   [ "$marker_digest" = "sha256:$actual_digest" ] || return 1
-  [ "$marker_size" = "$(stat -c '%s' "$value")" ] || return 1
+  actual_size=$(stat -c '%s' "$value") || return 1
+  [ "$marker_size" = "$actual_size" ] || return 1
+  canonical_digest=$(printf '%s sha256:%s %s\n' '` + privateSourceMarkerVersion + `' "$actual_digest" "$actual_size" | sha256sum) || return 1
+  canonical_digest=${canonical_digest%% *}
+  stored_digest=$(sha256sum "$marker") || return 1
+  stored_digest=${stored_digest%% *}
+  [ "$stored_digest" = "$canonical_digest" ] || return 1
 }
 test_ready_private_source() {
   root=$1

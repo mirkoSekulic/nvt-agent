@@ -209,6 +209,37 @@ func TestStableReadRejectsPathAndContentRaces(t *testing.T) {
 	}
 }
 
+func TestStableReadRejectsPrivateMetadataRaces(t *testing.T) {
+	for name, change := range map[string]func(*testing.T, string){
+		"mode becomes permissive": func(t *testing.T, path string) {
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"owner changes": func(t *testing.T, path string) {
+			wrongOwner := os.Geteuid() + 1
+			if err := os.Chown(path, wrongOwner, wrongOwner); err != nil {
+				t.Skip(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rootPath := t.TempDir()
+			name := ".nvt-local/secrets/value"
+			full := filepath.Join(rootPath, filepath.FromSlash(name))
+			mustWrite(t, full, 0o600, []byte("stable-private-value"))
+			root, err := os.OpenRoot(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			if _, err := readStableAfterFirst(root, name, MaxSecretBytes, true, true, func() { change(t, full) }); err == nil {
+				t.Fatal("private metadata race accepted")
+			}
+		})
+	}
+}
+
 func mustWrite(t *testing.T, name string, mode os.FileMode, content []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
