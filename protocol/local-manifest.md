@@ -18,6 +18,13 @@ references are syntax-checked only in this slice. No file is opened and no
 referenced private value is accepted or emitted. The explicitly named
 `publicConfig` boundary described below is administrator-asserted public data.
 
+Every Codex or Claude profile explicitly selects one compatible runtime account
+from its account list. Shell profiles select none. The controller projection
+duplicates the selected accounts' preset identities and that profile's exact
+broker grants, allowing local preset packaging to render credential providers,
+the default provider, broker policy, and egress proxy choice without consulting
+the broker-owned section.
+
 Each repository supplies an HTTPS URL, exact checkout target, optional checkout
 path and upstream, broker repository identity, and optional credential account.
 `github: owner/repository` is shorthand expanded into those exact fields. A
@@ -40,6 +47,7 @@ network protocol. Its sections establish these exclusive rendering boundaries:
 | `gateway` | gateway generator | routes and typed Codex/Claude credential-portal slots |
 | `producers[]` | the named producer generator | existing bounded schedule-admission client configuration |
 | `privateInputs[]` | named trusted service | later file resolution/mount intent; never file contents |
+| `generatedPrivateInputs[]` | local-platform state generator | generated admission credentials and their exact consumers |
 
 Owner projections intentionally duplicate logical names where two renderers
 need them. Each projection contains all non-secret fields needed by its renderer
@@ -47,6 +55,12 @@ and no renderer reads another owner's section. A built-in GitHub producer, for
 example, receives resolved numeric App and installation IDs, repository
 coordinates, and its own private-key input reference; the broker independently
 owns its copy of that same logical key.
+
+The controller projection also contains one producer admission binding per
+producer: stable producer identity, exactly one workflow, and a logical
+generated credential name. The corresponding generated-private-input entry is
+owned by local-platform state and lists only the controller and that producer as
+consumers.
 
 Generated configuration belongs in administrator-owned Docker volumes. It is
 never written into `.broker`, the workspace, or another user-authored host

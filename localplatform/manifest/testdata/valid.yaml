@@ -21,6 +21,7 @@ profiles:
     runtime:
       preset: codex
       autonomy: trusted-local
+      account: codex
     accounts: [github, codex, azure]
     tools:
       packages: [jq, git]
