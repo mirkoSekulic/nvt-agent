@@ -21,6 +21,12 @@ pull request. Its usage section is:
 /nvtagent run -- <instructions>
 ```
 
+Help delivery is restart-safe and idempotent. The producer persists a pending
+response with an unguessable stable marker before posting, reconciles that
+marker from later thread comments after an ambiguous POST or restart, records
+delivery, and removes delivered state only after the repository cursor advances.
+The marker is an invisible HTML comment and does not change the displayed help.
+
 `pr create` keeps multiline instructions and also supports inline syntax via
 `/nvtagent pr create -- <instructions>`.
 
@@ -441,6 +447,11 @@ agentSchedule:
       workspaceInstructions: Perform the requested task and report the result.
     - name: continue-pr
       workspaceInstructions: Inspect PR maintenance state and address actionable items.
+      lifecycle:
+        completeOn:
+          - plugin.github.pr.merged
+          - plugin.github.pr.closed
+        failOn: []
   producerPolicies:
     - identity: system:serviceaccount:nvt:nvt-github-comments-producer
       workflows: [implement-pr, review-pr, generic-run, continue-pr]

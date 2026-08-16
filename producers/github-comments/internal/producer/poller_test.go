@@ -657,7 +657,7 @@ func TestPollerHelpCommandPostsHelpAndReturnsWithoutSubmitting(t *testing.T) {
 	if github.createIssueCommentCalls != 1 {
 		t.Fatalf("help command expected one response comment, got %d", github.createIssueCommentCalls)
 	}
-	if github.createdIssueCommentBody != helpResponse("/nvtagent") {
+	if !strings.HasPrefix(github.createdIssueCommentBody, helpResponse("/nvtagent")+"\n<!-- nvt-github-help-response:") {
 		t.Fatalf("help response mismatch:\n%s", github.createdIssueCommentBody)
 	}
 	if github.listIssueCommentsCalls != 0 {
@@ -715,12 +715,24 @@ INSTRUCTIONS
 	}
 }
 
+func TestHelpResponseMarkerRequiresLaterThreadComment(t *testing.T) {
+	const marker = "<!-- nvt-github-help-response:marker -->"
+	comments := []GitHubIssueComment{
+		{ID: 100, Body: marker},
+		{ID: 101, Body: "/nvtagent --help\n" + marker},
+	}
+	if helpResponseMarkerExists(comments, 101, marker) {
+		t.Fatal("command or earlier comment forged delivered marker")
+	}
+	comments = append(comments, GitHubIssueComment{ID: 102, Body: helpResponse("/nvtagent") + "\n" + marker})
+	if !helpResponseMarkerExists(comments, 101, marker) {
+		t.Fatal("later response marker was not found")
+	}
+}
+
 func TestPollerHelpCommandResponseIsIdempotentEvenWhenCommentReplays(t *testing.T) {
 	ctx := context.Background()
-	state := newMemoryStateStore()
-	if err := state.SetRepoCursor(ctx, "acme/widget", time.Time{}); err != nil {
-		t.Fatal(err)
-	}
+	state := &failCursorOnceStateStore{StateStore: newMemoryStateStore(), remainingFailures: 1}
 	github := &fakeGitHubClient{
 		updatedComments: []GitHubIssueComment{{
 			ID:       101,
@@ -736,16 +748,12 @@ func TestPollerHelpCommandResponseIsIdempotentEvenWhenCommentReplays(t *testing.
 	poller := NewPoller(cfg, github, NewAgentRunSubmitter(k8sClient, cfg), state, slog.Default())
 	poller.startedAt = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 
-	if err := poller.PollOnce(ctx); err != nil {
-		t.Fatal(err)
+	if err := poller.PollOnce(ctx); err == nil {
+		t.Fatal("expected injected cursor failure")
 	}
 	if github.createIssueCommentCalls != 1 {
 		t.Fatalf("help command expected one response comment, got %d", github.createIssueCommentCalls)
 	}
-	if err := state.SetRepoCursor(ctx, "acme/widget", time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-
 	if err := poller.PollOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -754,7 +762,7 @@ func TestPollerHelpCommandResponseIsIdempotentEvenWhenCommentReplays(t *testing.
 	}
 }
 
-func TestPollerHelpCommandReleasesClaimWhenGitHubPostFails(t *testing.T) {
+func TestPollerHelpCommandReconcilesAmbiguousPostWithoutDuplicate(t *testing.T) {
 	github := &fakeGitHubClient{
 		updatedComments: []GitHubIssueComment{{
 			ID: 101, Body: "/nvtagent --help",
@@ -766,15 +774,67 @@ func TestPollerHelpCommandReleasesClaimWhenGitHubPostFails(t *testing.T) {
 	cfg := testPollerConfig("")
 	cfg.AllowedAuthors = []string{"*"}
 	poller := NewPoller(cfg, github, NewAgentRunSubmitter(newFakeAgentRunClient(t), cfg), newMemoryStateStore(), slog.Default())
-	if err := poller.PollOnce(context.Background()); err == nil {
-		t.Fatal("expected failed GitHub post")
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
 	}
+	github.issueComments = []GitHubIssueComment{{ID: 202, Body: github.createdIssueCommentBody}}
 	github.createIssueCommentErr = nil
 	if err := poller.PollOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if github.createIssueCommentCalls != 1 {
+		t.Fatalf("ambiguous accepted post was duplicated: attempts=%d", github.createIssueCommentCalls)
+	}
+}
+
+func TestPollerHelpCommandRecoversPendingClaimCreatedBeforePost(t *testing.T) {
+	ctx := context.Background()
+	state := newMemoryStateStore()
+	const marker = "<!-- nvt-github-help-response:00112233445566778899aabbccddeeff -->"
+	record, created, err := state.GetOrCreateHelpResponse(ctx, "acme/widget", 101, marker, time.Now())
+	if err != nil || !created || record.Marker != marker {
+		t.Fatalf("seed pending response = %#v created=%v err=%v", record, created, err)
+	}
+	github := &fakeGitHubClient{updatedComments: []GitHubIssueComment{{
+		ID: 101, Body: "/nvtagent --help",
+		IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+		User:     GitHubUser{Login: "octo"},
+	}}}
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(newFakeAgentRunClient(t), cfg), state, slog.Default())
+	if err := poller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if github.createIssueCommentCalls != 1 || !strings.Contains(github.createdIssueCommentBody, marker) {
+		t.Fatalf("pending response was not recovered: calls=%d body=%q", github.createIssueCommentCalls, github.createdIssueCommentBody)
+	}
+}
+
+func TestPollerHelpCommandRetriesUnobservedPendingPostAfterLease(t *testing.T) {
+	github := &fakeGitHubClient{
+		updatedComments: []GitHubIssueComment{{
+			ID: 101, Body: "/nvtagent --help",
+			IssueURL: "https://api.github.com/repos/acme/widget/issues/42",
+			User:     GitHubUser{Login: "octo"},
+		}},
+		createIssueCommentErr: errors.New("injected post failure"),
+	}
+	cfg := testPollerConfig("")
+	cfg.AllowedAuthors = []string{"*"}
+	poller := NewPoller(cfg, github, NewAgentRunSubmitter(newFakeAgentRunClient(t), cfg), newMemoryStateStore(), slog.Default())
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	poller.now = func() time.Time { return now }
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.createIssueCommentErr = nil
+	now = now.Add(helpResponseRetryDelay + time.Second)
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if github.createIssueCommentCalls != 2 {
-		t.Fatalf("help post attempts = %d, want retry after released claim", github.createIssueCommentCalls)
+		t.Fatalf("unobserved pending post attempts = %d, want retry", github.createIssueCommentCalls)
 	}
 }
 
@@ -966,6 +1026,19 @@ type fakeGitHubClient struct {
 	filterUpdatedBySince    bool
 	reactions               []fakeSchedulingReaction
 	reactionErr             error
+}
+
+type failCursorOnceStateStore struct {
+	StateStore
+	remainingFailures int
+}
+
+func (s *failCursorOnceStateStore) SetRepoCursor(ctx context.Context, repoKey string, cursor time.Time) error {
+	if s.remainingFailures > 0 {
+		s.remainingFailures--
+		return errors.New("injected cursor failure")
+	}
+	return s.StateStore.SetRepoCursor(ctx, repoKey, cursor)
 }
 
 type fakeSchedulingReaction struct {

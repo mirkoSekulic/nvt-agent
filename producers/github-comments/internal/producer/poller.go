@@ -3,6 +3,8 @@ package producer
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +13,8 @@ import (
 )
 
 const schedulingReactionTimeout = 5 * time.Second
+const helpResponseRetryDelay = time.Minute
+const helpResponseMarkerPrefix = "<!-- nvt-github-help-response:"
 
 type pendingSchedulingReaction struct {
 	commentID int64
@@ -134,19 +138,50 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 				p.Logger.Warn("help request missing parseable issue URL", "repo", key, "commentID", comment.ID)
 				continue
 			}
-			claimed, err := p.State.ClaimHelpResponse(ctx, key, comment.ID, p.now())
+			marker, err := newHelpResponseMarker()
 			if err != nil {
-				return fmt.Errorf("claim help response: %w", err)
+				return fmt.Errorf("create help response marker: %w", err)
 			}
-			if !claimed {
+			now := p.now().UTC()
+			record, created, err := p.State.GetOrCreateHelpResponse(ctx, key, comment.ID, marker, now)
+			if err != nil {
+				return fmt.Errorf("get or create help response: %w", err)
+			}
+			if !validHelpResponseMarker(record.Marker) {
+				return errors.New("invalid persisted help response marker")
+			}
+			if record.Status == HelpResponseDelivered {
 				p.Logger.Info("skipping duplicate help request already answered", "repo", key, "commentID", comment.ID, "issue", issueNumber)
 				continue
 			}
-			if err := p.GitHub.CreateIssueComment(ctx, repo, issueNumber, helpResponse(command.Prefix)); err != nil {
-				if releaseErr := p.State.ReleaseHelpResponse(ctx, key, comment.ID); releaseErr != nil {
-					return errors.Join(err, fmt.Errorf("release failed help response claim: %w", releaseErr))
+			if !created {
+				threadComments, listErr := p.GitHub.ListIssueComments(ctx, repo, issueNumber)
+				if listErr != nil {
+					return fmt.Errorf("reconcile pending help response: %w", listErr)
 				}
-				return err
+				if helpResponseMarkerExists(threadComments, comment.ID, record.Marker) {
+					if err := p.State.SetHelpResponseDelivered(ctx, key, comment.ID, now); err != nil {
+						return fmt.Errorf("record reconciled help response: %w", err)
+					}
+					continue
+				}
+			}
+			attempt, err := p.State.TryBeginHelpResponseAttempt(ctx, key, comment.ID, now, now.Add(-helpResponseRetryDelay))
+			if err != nil {
+				return fmt.Errorf("begin help response attempt: %w", err)
+			}
+			if !attempt {
+				deferredSubmission = true
+				p.Logger.Info("pending help response attempt is still within its retry window", "repo", key, "commentID", comment.ID)
+				continue
+			}
+			if err := p.GitHub.CreateIssueComment(ctx, repo, issueNumber, helpResponseComment(command.Prefix, record.Marker)); err != nil {
+				deferredSubmission = true
+				p.Logger.Warn("help response delivery outcome is uncertain; retaining pending state", "repo", key, "commentID", comment.ID, "error", err)
+				continue
+			}
+			if err := p.State.SetHelpResponseDelivered(ctx, key, comment.ID, now); err != nil {
+				return fmt.Errorf("record delivered help response: %w", err)
 			}
 			continue
 		}
@@ -238,6 +273,9 @@ func (p *Poller) pollRepo(ctx context.Context, repo Repository) error {
 	if err := p.State.SetRepoCursor(ctx, key, nextCursor); err != nil {
 		return fmt.Errorf("set poll cursor for %s: %w", key, err)
 	}
+	if err := p.State.DeleteDeliveredHelpResponses(ctx, key); err != nil {
+		return fmt.Errorf("clean delivered help responses for %s: %w", key, err)
+	}
 	return nil
 }
 
@@ -296,6 +334,43 @@ func helpResponse(prefix string) string {
 		"  used, the inline text is followed by a newline and then the multiline text.",
 		"  Bare trailing text without -- is invalid.",
 	}, "\n") + "\n```"
+}
+
+func newHelpResponseMarker() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return helpResponseMarkerPrefix + hex.EncodeToString(raw) + " -->", nil
+}
+
+func helpResponseComment(prefix, marker string) string {
+	return helpResponse(prefix) + "\n" + marker
+}
+
+func helpResponseMarkerExists(comments []GitHubIssueComment, commandCommentID int64, marker string) bool {
+	if marker == "" {
+		return false
+	}
+	for _, comment := range comments {
+		if comment.ID > commandCommentID && strings.Contains(comment.Body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func validHelpResponseMarker(marker string) bool {
+	raw, ok := strings.CutPrefix(marker, helpResponseMarkerPrefix)
+	if !ok || !strings.HasSuffix(raw, " -->") {
+		return false
+	}
+	raw = strings.TrimSuffix(raw, " -->")
+	if len(raw) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(raw)
+	return err == nil
 }
 
 func (p *Poller) reactionForOutcome(outcome schedulingOutcome) string {
