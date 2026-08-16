@@ -129,6 +129,15 @@ func (docker *resetDocker) Run(_ context.Context, _ io.Reader, arguments ...stri
 		if strings.Contains(strings.Join(arguments, " "), "local-platform-owner") {
 			return []byte(strings.Join(docker.platformVolumes, "\n") + "\n"), nil
 		}
+		for _, argument := range arguments {
+			if !strings.HasPrefix(argument, "name=^") {
+				continue
+			}
+			name := strings.TrimSuffix(strings.TrimPrefix(argument, "name=^"), "$")
+			if _, exists := docker.labels[name]; exists {
+				return []byte(name + "\n"), nil
+			}
+		}
 		return nil, nil
 	}
 	if len(arguments) >= 2 && arguments[0] == "volume" && arguments[1] == "inspect" {

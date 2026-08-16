@@ -203,8 +203,17 @@ func TestDockerStoreReadsBoundedInventoryThroughReadOnlyHelper(t *testing.T) {
 	docker := &fakeDocker{volumes: map[string]map[string]string{}, imagePresent: true, runOutput: bytes.Repeat([]byte{'i'}, 70<<10)}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("a", 64)}
 	volume := dockerTestVolume("local-test-generated-config", "generated-config")
-	docker.volumes[volume.Name] = maps.Clone(volume.Labels)
 	output, err := store.ReadVolumeInventory(context.Background(), volume)
+	if err != nil || len(output) != 0 {
+		t.Fatalf("missing inventory read = %q, %v", output, err)
+	}
+	for _, command := range docker.commands {
+		if len(command.arguments) > 0 && command.arguments[0] == "create" {
+			t.Fatal("inventory preflight created the missing generated-config volume")
+		}
+	}
+	docker.volumes[volume.Name] = maps.Clone(volume.Labels)
+	output, err = store.ReadVolumeInventory(context.Background(), volume)
 	if err != nil || !bytes.Equal(output, docker.runOutput) {
 		t.Fatalf("inventory read = %q, %v", output, err)
 	}

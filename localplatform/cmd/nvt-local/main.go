@@ -373,7 +373,7 @@ func (application app) expectedPlatformVolumes(ctx context.Context) (map[string]
 		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
 	}
 	var inventory plancontract.VolumeInventory
-	if json.Unmarshal(output, &inventory) != nil || inventory.Project != application.project || inventory.Version != "1" || len(inventory.Volumes) == 0 || len(inventory.Volumes) > 1024 {
+	if json.Unmarshal(output, &inventory) != nil || inventory.Project != application.project || inventory.Version != "1" || len(inventory.Volumes) == 0 || len(inventory.Volumes) > state.MaxVolumeInventoryRecords {
 		return nil, errors.New("refusing invalid local volume state inventory")
 	}
 	expected := make(map[string]map[string]string, len(inventory.Volumes))

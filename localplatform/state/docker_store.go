@@ -47,17 +47,9 @@ func (store DockerStore) EnsureVolumes(ctx context.Context, volumes []Volume) (m
 		if !validVolume(volume) {
 			return nil, errors.New("invalid managed volume")
 		}
-		output, err := store.Docker.Run(ctx, nil, "volume", "ls", "--filter", "name=^"+volume.Name+"$", "--format", "{{.Name}}")
+		found, err := store.volumeExists(ctx, volume)
 		if err != nil {
-			return nil, errors.New("cannot list managed volumes")
-		}
-		found := false
-		for _, line := range strings.Fields(string(output)) {
-			if line == volume.Name {
-				found = true
-			} else {
-				return nil, errors.New("ambiguous managed volume lookup")
-			}
+			return nil, err
 		}
 		if !found {
 			missing = append(missing, volume)
@@ -90,6 +82,21 @@ func (store DockerStore) EnsureVolumes(ctx context.Context, volumes []Volume) (m
 	return created, nil
 }
 
+func (store DockerStore) volumeExists(ctx context.Context, volume Volume) (bool, error) {
+	output, err := store.Docker.Run(ctx, nil, "volume", "ls", "--filter", "name=^"+volume.Name+"$", "--format", "{{.Name}}")
+	if err != nil {
+		return false, errors.New("cannot list managed volumes")
+	}
+	found := false
+	for _, line := range strings.Fields(string(output)) {
+		if line != volume.Name {
+			return false, errors.New("ambiguous managed volume lookup")
+		}
+		found = true
+	}
+	return found, nil
+}
+
 func (store DockerStore) verifyVolume(ctx context.Context, volume Volume) error {
 	output, err := store.Docker.Run(ctx, nil, "volume", "inspect", "--format", "{{json .Labels}}", volume.Name)
 	if err != nil {
@@ -107,8 +114,18 @@ func (store DockerStore) ReplaceFiles(ctx context.Context, volume Volume, files 
 }
 
 func (store DockerStore) ReadVolumeInventory(ctx context.Context, volume Volume) ([]byte, error) {
-	if !validVolume(volume) {
+	if store.Docker == nil || !validHelperImage(store.HelperImage) || !validVolume(volume) {
 		return nil, errors.New("invalid state read")
+	}
+	found, err := store.volumeExists(ctx, volume)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	if err := store.verifyVolume(ctx, volume); err != nil {
+		return nil, err
 	}
 	script := `set -eu
 test ! -L /state/current

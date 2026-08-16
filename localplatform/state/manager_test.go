@@ -88,8 +88,12 @@ func (store *memoryStore) ReplaceFiles(_ context.Context, volume Volume, files [
 }
 
 func (store *memoryStore) ReadVolumeInventory(_ context.Context, volume Volume) ([]byte, error) {
-	if _, ok := store.volumes[volume.Name]; !ok {
-		return nil, errors.New("missing volume")
+	existing, ok := store.volumes[volume.Name]
+	if !ok {
+		return nil, nil
+	}
+	if !maps.Equal(existing.Labels, volume.Labels) {
+		return nil, errors.New("ownership conflict")
 	}
 	if current := store.files[volume.Name]["volume-inventory.json"]; len(current) != 0 {
 		return append([]byte(nil), current...), nil
@@ -365,6 +369,31 @@ func TestManagerRejectsInvalidNativeProjectionBeforeVolumeCreation(t *testing.T)
 	}
 	if len(store.volumes) != 0 || store.writes != 0 {
 		t.Fatal("invalid native controller projection changed managed state")
+	}
+}
+
+func TestManagerRejectsOversizedCurrentVolumeInventoryBeforeCreation(t *testing.T) {
+	compiled := validStateCompiled()
+	inputs := &Inputs{private: map[inputKey][]byte{}}
+	for index := 0; index < MaxVolumeInventoryRecords; index++ {
+		name := fmt.Sprintf("secret-%04d", index)
+		compiled.PrivateInputs = append(compiled.PrivateInputs, manifest.PrivateInputIntent{Owner: "broker", Name: name, File: ".nvt-local/secrets/" + name, Purpose: "secret"})
+		inputs.private[inputKey{owner: "broker", name: name}] = []byte("secret")
+	}
+	defer inputs.Close()
+	plan, err := BuildPlan("local-test", compiled, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Volumes) <= MaxVolumeInventoryRecords {
+		t.Fatalf("test plan did not exceed the inventory bound: %d", len(plan.Volumes))
+	}
+	store := newMemoryStore()
+	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+		t.Fatal("oversized current volume inventory was accepted")
+	}
+	if len(store.volumes) != 0 || store.writes != 0 {
+		t.Fatal("oversized current volume inventory changed managed state")
 	}
 }
 

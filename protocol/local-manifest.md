@@ -67,6 +67,12 @@ managed state. This includes provider names derived for individual GitHub App
 installations: a derived name may not collide with another derived provider or
 with any user-authored account name.
 
+Reconciliation preflights the bounded union of the current volume plan and the
+validated historical ownership inventory before creating any missing volume.
+The generated-config inventory reader treats an absent volume as first
+initialization without creating it; an invalid, oversized, or over-capacity
+union therefore cannot leave exact-owned volumes outside the reset inventory.
+
 The controller projection also contains one producer admission binding per
 producer: stable producer identity, exactly one workflow, and a logical
 generated credential name. Each binding contains a non-empty bounded principal

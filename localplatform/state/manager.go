@@ -28,6 +28,9 @@ type StateFile struct {
 // never copy Data into commands, environment values, labels, output, or logs.
 type Store interface {
 	EnsureVolumes(context.Context, []Volume) (map[string]bool, error)
+	// ReadVolumeInventory verifies and reads an existing generated-config
+	// volume, or returns an empty result without creating the volume when it
+	// does not exist yet.
 	ReadVolumeInventory(context.Context, Volume) ([]byte, error)
 	EnsureDirectory(context.Context, Volume, int, int, int64) error
 	InspectPrivateSource(context.Context, Volume, int) (PrivateSourceState, error)
@@ -74,10 +77,6 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	if err != nil {
 		return Plan{}, errors.New("generated configuration is invalid")
 	}
-	_, err = manager.Store.EnsureVolumes(ctx, prepared.Volumes)
-	if err != nil {
-		return Plan{}, errors.New("trusted state volume ownership conflict or storage failure")
-	}
 	volumes := make(map[string]Volume, len(prepared.Volumes))
 	for _, volume := range prepared.Volumes {
 		volumes[volume.Name] = volume
@@ -93,6 +92,10 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	configuration, err = configurationFiles(compiled, inputs, prepared.Plan, inventory)
 	if err != nil {
 		return Plan{}, errors.New("generated configuration is invalid")
+	}
+	_, err = manager.Store.EnsureVolumes(ctx, prepared.Volumes)
+	if err != nil {
+		return Plan{}, errors.New("trusted state volume ownership conflict or storage failure")
 	}
 	sourceStates := map[string]PrivateSourceState{}
 	for _, input := range prepared.generated {
@@ -219,15 +222,18 @@ func configurationFiles(compiled manifest.Compiled, inputs *Inputs, plan Plan, i
 	return result, nil
 }
 
+// MaxVolumeInventoryRecords is the shared finite ownership-record bound used
+// before publication and by destructive reset validation.
+const MaxVolumeInventoryRecords = 1024
+
 func mergeVolumeInventory(project string, historical []byte, current []Volume) ([]Volume, error) {
-	const maxInventoryVolumes = 1024
 	merged := map[string]Volume{}
 	if len(historical) != 0 {
 		if len(historical) > maxStateFileBytes {
 			return nil, errors.New("managed volume inventory is oversized")
 		}
 		var inventory plancontract.VolumeInventory
-		if json.Unmarshal(historical, &inventory) != nil || inventory.Version != stateVersion || inventory.Project != project || len(inventory.Volumes) == 0 || len(inventory.Volumes) > maxInventoryVolumes {
+		if json.Unmarshal(historical, &inventory) != nil || inventory.Version != stateVersion || inventory.Project != project || len(inventory.Volumes) == 0 || len(inventory.Volumes) > MaxVolumeInventoryRecords {
 			return nil, errors.New("managed volume inventory is malformed")
 		}
 		for _, volume := range inventory.Volumes {
@@ -250,7 +256,7 @@ func mergeVolumeInventory(project string, historical []byte, current []Volume) (
 		volume.Consumers = nil
 		merged[volume.Name] = volume
 	}
-	if len(merged) == 0 || len(merged) > maxInventoryVolumes {
+	if len(merged) == 0 || len(merged) > MaxVolumeInventoryRecords {
 		return nil, errors.New("managed volume inventory exceeded its bound")
 	}
 	names := make([]string, 0, len(merged))
