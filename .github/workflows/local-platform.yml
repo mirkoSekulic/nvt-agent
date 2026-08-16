@@ -1,0 +1,32 @@
+name: local-platform
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/local-platform.yml"
+      - "localplatform/**"
+      - "protocol/local-manifest.md"
+  push:
+    branches: [main, feat/local-manifest]
+    paths:
+      - ".github/workflows/local-platform.yml"
+      - "localplatform/**"
+      - "protocol/local-manifest.md"
+
+permissions:
+  contents: read
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: localplatform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: localplatform/go.mod
+          cache-dependency-path: localplatform/go.sum
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
