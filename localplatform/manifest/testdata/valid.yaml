@@ -65,5 +65,5 @@ producers:
   - name: external-chat
     image: ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     workflow: nvt-development
-    config:
+    publicConfig:
       commandPrefix: /agent
