@@ -304,7 +304,7 @@ func generatedBytes(random io.Reader, encoding string) ([]byte, error) {
 	if random == nil {
 		random = rand.Reader
 	}
-	raw := make([]byte, 32)
+	raw := make([]byte, generatedValueSize("raw"))
 	if _, err := io.ReadFull(random, raw); err != nil {
 		clear(raw)
 		return nil, errors.New("generated private state is unavailable")
@@ -319,6 +319,17 @@ func generatedBytes(random io.Reader, encoding string) ([]byte, error) {
 	encoded := []byte(base64.RawURLEncoding.EncodeToString(raw))
 	clear(raw)
 	return encoded, nil
+}
+
+func generatedValueSize(encoding string) int {
+	switch encoding {
+	case "raw":
+		return 32
+	case "base64url":
+		return 43
+	default:
+		return 0
+	}
 }
 
 func portalConfiguration(accounts []manifest.PortalAccountIntent) ([]byte, error) {

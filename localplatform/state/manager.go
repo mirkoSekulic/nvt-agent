@@ -26,11 +26,11 @@ type StateFile struct {
 type Store interface {
 	EnsureVolumes(context.Context, []Volume) (map[string]bool, error)
 	EnsureDirectory(context.Context, Volume, int, int, int64) error
-	InspectPrivateSource(context.Context, Volume) (PrivateSourceState, error)
-	FinalizePrivateSource(context.Context, Volume) error
-	InitializePrivateSource(context.Context, Volume, []StateFile) error
+	InspectPrivateSource(context.Context, Volume, int) (PrivateSourceState, error)
+	FinalizePrivateSource(context.Context, Volume, int) error
+	InitializePrivateSource(context.Context, Volume, int, []StateFile) error
 	ReplaceFiles(context.Context, Volume, []StateFile) error
-	CopyPrivateFile(context.Context, Volume, Volume, int, int) error
+	CopyPrivateFile(context.Context, Volume, Volume, int, int, int) error
 }
 
 type PrivateSourceState uint8
@@ -80,7 +80,8 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	}
 	sourceStates := map[string]PrivateSourceState{}
 	for _, input := range prepared.generated {
-		state, err := manager.Store.InspectPrivateSource(ctx, volumes[input.sourceVolume])
+		expectedSize := generatedValueSize(input.encoding)
+		state, err := manager.Store.InspectPrivateSource(ctx, volumes[input.sourceVolume], expectedSize)
 		if err != nil || state == PrivateSourceInvalid || state == PrivateSourceCorrupt {
 			return Plan{}, errors.New("generated private state is missing or corrupt")
 		}
@@ -88,7 +89,7 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 	}
 	for _, input := range prepared.generated {
 		if sourceStates[input.sourceVolume] == PrivateSourcePublishing {
-			if err := manager.Store.FinalizePrivateSource(ctx, volumes[input.sourceVolume]); err != nil {
+			if err := manager.Store.FinalizePrivateSource(ctx, volumes[input.sourceVolume], generatedValueSize(input.encoding)); err != nil {
 				return Plan{}, errors.New("generated private state publication recovery failed")
 			}
 			sourceStates[input.sourceVolume] = PrivateSourceReady
@@ -118,7 +119,7 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 				return Plan{}, err
 			}
 			marker := privateSourceMarker(value)
-			writeErr := manager.Store.InitializePrivateSource(ctx, volumes[input.sourceVolume], []StateFile{
+			writeErr := manager.Store.InitializePrivateSource(ctx, volumes[input.sourceVolume], generatedValueSize(input.encoding), []StateFile{
 				{Name: ".initialized", Mode: 0o400, UID: 0, GID: 0, Data: bytes.NewReader(marker)},
 				{Name: "value", Mode: 0o400, UID: 0, GID: 0, Data: bytes.NewReader(value)},
 			})
@@ -129,7 +130,7 @@ func (manager Manager) Ensure(ctx context.Context, project string, compiled mani
 			}
 		}
 		for _, consumer := range input.consumer {
-			if err := manager.Store.CopyPrivateFile(ctx, volumes[input.sourceVolume], volumes[consumer.volume], consumer.uid, consumer.gid); err != nil {
+			if err := manager.Store.CopyPrivateFile(ctx, volumes[input.sourceVolume], volumes[consumer.volume], consumer.uid, consumer.gid, generatedValueSize(input.encoding)); err != nil {
 				return Plan{}, errors.New("generated private state is missing or corrupt")
 			}
 		}

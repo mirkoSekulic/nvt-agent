@@ -113,14 +113,14 @@ func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
 	docker.volumes[source.Name] = maps.Clone(source.Labels)
 	for output, expected := range map[string]PrivateSourceState{"empty": PrivateSourceEmpty, "publishing": PrivateSourcePublishing, "ready": PrivateSourceReady, "corrupt": PrivateSourceCorrupt} {
 		docker.runOutput = []byte(output)
-		state, err := store.InspectPrivateSource(context.Background(), source)
+		state, err := store.InspectPrivateSource(context.Background(), source, 32)
 		if err != nil || state != expected {
 			t.Fatalf("inspect %q = %v, %v", output, state, err)
 		}
 	}
-	secret := []byte("INITIAL-GENERATED-PRIVATE")
+	secret := bytes.Repeat([]byte{'s'}, 32)
 	docker.runOutput = nil
-	if err := store.InitializePrivateSource(context.Background(), source, []StateFile{{Name: ".initialized", Mode: 0o400, Data: bytes.NewReader(privateSourceMarker(secret))}, {Name: "value", Mode: 0o400, Data: bytes.NewReader(secret)}}); err != nil {
+	if err := store.InitializePrivateSource(context.Background(), source, 32, []StateFile{{Name: ".initialized", Mode: 0o400, Data: bytes.NewReader(privateSourceMarker(secret))}, {Name: "value", Mode: 0o400, Data: bytes.NewReader(secret)}}); err != nil {
 		t.Fatal(err)
 	}
 	createCommand := lastDockerCommand(t, docker.commands, "create")
@@ -130,8 +130,10 @@ func TestDockerStoreInitializesDirectoryAndClassifiesSources(t *testing.T) {
 	}
 	if script := strings.Join(createCommand.arguments, "\n"); !strings.Contains(script, "test ! -e /state/current") || !strings.Contains(script, "test ! -e /state/.initialized") || !strings.Contains(script, "test ! -L /state/current") || !strings.Contains(script, "test ! -L /state/.initialized") {
 		t.Fatal("source initialization is not create-only")
+	} else if strings.Count(script, "\nsync\n") < 4 {
+		t.Fatal("source publication does not durably flush each transition")
 	}
-	if err := store.FinalizePrivateSource(context.Background(), source); err != nil {
+	if err := store.FinalizePrivateSource(context.Background(), source, 32); err != nil {
 		t.Fatal(err)
 	}
 	finalizeScript := strings.Join(lastDockerCommand(t, docker.commands, "create").arguments, "\n")
@@ -195,12 +197,18 @@ func TestDockerStoreKeepsPrivateBytesOnlyOnStdin(t *testing.T) {
 			t.Fatalf("helper omitted %q: %v", expected, createCommand.arguments)
 		}
 	}
-	if err := store.CopyPrivateFile(context.Background(), sourceVolume, destinationVolume, 65532, 65532); err != nil {
+	if err := store.CopyPrivateFile(context.Background(), sourceVolume, destinationVolume, 65532, 65532, 32); err != nil {
 		t.Fatal(err)
 	}
 	copyCommand := lastDockerCommand(t, docker.commands, "start")
 	if len(copyCommand.stdin) != 0 || bytes.Contains([]byte(strings.Join(copyCommand.arguments, "\x00")), secret) {
 		t.Fatal("copy exposed private bytes")
+	}
+	copyScript := strings.Join(lastDockerCommand(t, docker.commands, "create").arguments, "\n")
+	for _, expected := range []string{"cp /source/.initialized /state/.next/.initialized", "test_private_source /state/.next/.initialized /state/.next/value", "test_ready_private_source /source", `test "$staged_marker_digest" = "$source_marker_digest"`} {
+		if !strings.Contains(copyScript, expected) {
+			t.Fatalf("private copy omitted %q", expected)
+		}
 	}
 }
 
@@ -222,24 +230,44 @@ func TestPrivateSourceValidationRejectsTrailingJournalBytes(t *testing.T) {
 	directory := t.TempDir()
 	markerPath := filepath.Join(directory, "marker")
 	valuePath := filepath.Join(directory, "value")
-	value := []byte("generated-private-value")
+	value := bytes.Repeat([]byte{'v'}, 32)
 	if err := os.WriteFile(valuePath, value, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runValidation := func(marker []byte) error {
+	runValidation := func(marker []byte, expectedSize string) error {
 		if err := os.WriteFile(markerPath, marker, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		command := exec.Command("/bin/sh", "-euc", privateSourceValidation+`test_private_source "$1" "$2"`, "state-helper", markerPath, valuePath)
+		command := exec.Command("/bin/sh", "-euc", privateSourceValidation+`test_private_source "$1" "$2" "$3"`, "state-helper", markerPath, valuePath, expectedSize)
 		return command.Run()
 	}
 	marker := privateSourceMarker(value)
-	if err := runValidation(marker); err != nil {
+	if err := runValidation(marker, "32"); err != nil {
 		t.Fatalf("canonical journal rejected: %v", err)
 	}
+	if err := runValidation(marker, "43"); err == nil {
+		t.Fatal("source value with the wrong expected encoding length was accepted")
+	}
 	malformed := append(append([]byte(nil), marker...), []byte("trailing-corruption")...)
-	if err := runValidation(malformed); err == nil {
+	if err := runValidation(malformed, "32"); err == nil {
 		t.Fatal("unterminated bytes after canonical journal were accepted")
+	}
+	oversizedJournal := append(append([]byte(nil), marker...), bytes.Repeat([]byte{'x'}, 193)...)
+	if err := runValidation(oversizedJournal, "32"); err == nil {
+		t.Fatal("oversized journal was accepted")
+	}
+	if err := os.Truncate(valuePath, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if err := runValidation(marker, "32"); err == nil {
+		t.Fatal("oversized sparse value was accepted")
+	}
+	valueBound := strings.Index(privateSourceValidation, `value_bytes=$(stat -c '%s' "$value")`)
+	valueHash := strings.Index(privateSourceValidation, `actual_digest=$(sha256sum "$value")`)
+	journalBound := strings.Index(privateSourceValidation, `[ "$journal_bytes" -le 192 ]`)
+	journalHash := strings.Index(privateSourceValidation, `stored_digest=$(sha256sum "$marker")`)
+	if valueBound < 0 || valueHash < 0 || valueBound > valueHash || journalBound < 0 || journalHash < 0 || journalBound > journalHash {
+		t.Fatal("managed source bounds are not checked before hashing")
 	}
 }
 

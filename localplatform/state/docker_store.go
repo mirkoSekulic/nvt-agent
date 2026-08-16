@@ -94,14 +94,17 @@ func (store DockerStore) verifyVolume(ctx context.Context, volume Volume) error 
 }
 
 func (store DockerStore) ReplaceFiles(ctx context.Context, volume Volume, files []StateFile) error {
-	return store.writeFiles(ctx, volume, files, false)
+	return store.writeFiles(ctx, volume, files, 0)
 }
 
-func (store DockerStore) InitializePrivateSource(ctx context.Context, volume Volume, files []StateFile) error {
-	return store.writeFiles(ctx, volume, files, true)
+func (store DockerStore) InitializePrivateSource(ctx context.Context, volume Volume, expectedSize int, files []StateFile) error {
+	if !validGeneratedValueSize(expectedSize) {
+		return errors.New("invalid private source size")
+	}
+	return store.writeFiles(ctx, volume, files, expectedSize)
 }
 
-func (store DockerStore) writeFiles(ctx context.Context, volume Volume, files []StateFile, initialize bool) error {
+func (store DockerStore) writeFiles(ctx context.Context, volume Volume, files []StateFile, expectedSize int) error {
 	if !validVolume(volume) || len(files) == 0 || len(files) > 512 {
 		return errors.New("invalid state update")
 	}
@@ -153,10 +156,13 @@ umask 077
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 tar -xpf - -C /state/.next
+sync
 if [ -e /state/current ]; then mv /state/current /state/current.old; fi
 mv /state/.next /state/current
-rm -rf /state/current.old`
-	if initialize {
+sync
+rm -rf /state/current.old
+sync`
+	if expectedSize != 0 {
 		script = `set -eu
 umask 077
 test ! -e /state/.initialized
@@ -166,12 +172,20 @@ test ! -L /state/current
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
 tar -xpf - -C /state/.next
-test_private_source /state/.next/.initialized /state/.next/value
+test_private_source /state/.next/.initialized /state/.next/value "$1"
+sync
 mv /state/.next /state/current
+sync
 ln /state/current/.initialized /state/.initialized
-rm /state/current/.initialized`
+sync
+rm /state/current/.initialized
+sync`
 	}
-	_, err := store.runHelper(ctx, bytes.NewReader(payload), []helperMount{{volume: volume, target: "/state"}}, script)
+	values := []string{}
+	if expectedSize != 0 {
+		values = append(values, strconv.Itoa(expectedSize))
+	}
+	_, err := store.runHelper(ctx, bytes.NewReader(payload), []helperMount{{volume: volume, target: "/state"}}, script, values...)
 	if err != nil {
 		return errors.New("state volume update failed")
 	}
@@ -185,7 +199,8 @@ func (store DockerStore) EnsureDirectory(ctx context.Context, volume Volume, uid
 	script := `set -eu
 test -d /state
 chown "$1:$2" /state
-chmod "$3" /state`
+chmod "$3" /state
+sync`
 	_, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/state"}}, script, strconv.Itoa(uid), strconv.Itoa(gid), strconv.FormatInt(mode, 8))
 	if err != nil {
 		return errors.New("state directory initialization failed")
@@ -193,21 +208,23 @@ chmod "$3" /state`
 	return nil
 }
 
-func (store DockerStore) InspectPrivateSource(ctx context.Context, volume Volume) (PrivateSourceState, error) {
-	if !validVolume(volume) {
+func (store DockerStore) InspectPrivateSource(ctx context.Context, volume Volume, expectedSize int) (PrivateSourceState, error) {
+	if !validVolume(volume) || !validGeneratedValueSize(expectedSize) {
 		return PrivateSourceInvalid, errors.New("invalid private source")
 	}
 	script := `set -eu
 if [ ! -e /source/.initialized ] && [ ! -L /source/.initialized ] && [ ! -e /source/current ] && [ ! -L /source/current ]; then
   printf 'empty'
-elif test_ready_private_source /source; then
-  printf 'ready'
-elif test_publishing_private_source /source; then
-  printf 'publishing'
+elif test_ready_private_source /source "$1"; then
+  sync
+  if test_ready_private_source /source "$1"; then printf 'ready'; else printf 'corrupt'; fi
+elif test_publishing_private_source /source "$1"; then
+  sync
+  if test_publishing_private_source /source "$1"; then printf 'publishing'; else printf 'corrupt'; fi
 else
   printf 'corrupt'
 fi`
-	output, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/source", readOnly: true}}, script)
+	output, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/source", readOnly: true}}, script, strconv.Itoa(expectedSize))
 	if err != nil {
 		return PrivateSourceInvalid, errors.New("private source inspection failed")
 	}
@@ -225,41 +242,60 @@ fi`
 	}
 }
 
-func (store DockerStore) FinalizePrivateSource(ctx context.Context, volume Volume) error {
-	if !validVolume(volume) {
+func (store DockerStore) FinalizePrivateSource(ctx context.Context, volume Volume, expectedSize int) error {
+	if !validVolume(volume) || !validGeneratedValueSize(expectedSize) {
 		return errors.New("invalid private source")
 	}
 	script := `set -eu
-test_publishing_private_source /source
+test_publishing_private_source /source "$1"
 if [ ! -e /source/.initialized ] && [ ! -L /source/.initialized ]; then
   ln /source/current/.initialized /source/.initialized
 fi
-test_publishing_private_source /source
+sync
+test_publishing_private_source /source "$1"
 rm /source/current/.initialized
-test_ready_private_source /source`
-	_, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/source"}}, script)
+sync
+test_ready_private_source /source "$1"`
+	_, err := store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/source"}}, script, strconv.Itoa(expectedSize))
 	if err != nil {
 		return errors.New("private source publication recovery failed")
 	}
 	return nil
 }
 
-func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destination Volume, uid, gid int) error {
-	if !validVolume(source) || !validVolume(destination) || uid < 0 || gid < 0 {
+func (store DockerStore) CopyPrivateFile(ctx context.Context, source, destination Volume, uid, gid, expectedSize int) error {
+	if !validVolume(source) || !validVolume(destination) || uid < 0 || gid < 0 || !validGeneratedValueSize(expectedSize) {
 		return errors.New("invalid private copy")
 	}
 	script := `set -eu
 umask 077
-test_ready_private_source /source
+test_ready_private_source /source "$3"
 rm -rf /state/.next /state/current.old
 mkdir /state/.next
+cp /source/.initialized /state/.next/.initialized
 cp /source/current/value /state/.next/value
+test "$(stat -c '%u:%g:%a' /state/.next/.initialized)" = '0:0:400'
+test "$(stat -c '%u:%g:%a' /state/.next/value)" = '0:0:400'
+test_private_source /state/.next/.initialized /state/.next/value "$3"
+test_ready_private_source /source "$3"
+source_marker_digest=$(sha256sum /source/.initialized)
+source_marker_digest=${source_marker_digest%% *}
+staged_marker_digest=$(sha256sum /state/.next/.initialized)
+staged_marker_digest=${staged_marker_digest%% *}
+test "$staged_marker_digest" = "$source_marker_digest"
+test_private_source /state/.next/.initialized /state/.next/value "$3"
+test "$(stat -c '%u:%g:%a' /state/.next/.initialized)" = '0:0:400'
+test "$(stat -c '%u:%g:%a' /state/.next/value)" = '0:0:400'
 chown "$1:$2" /state/.next/value
 chmod 0400 /state/.next/value
+test "$(stat -c '%u:%g:%a' /state/.next/value)" = "$1:$2:400"
+sync
 if [ -e /state/current ]; then mv /state/current /state/current.old; fi
 mv /state/.next /state/current
-rm -rf /state/current.old`
-	_, err := store.runHelper(ctx, nil, []helperMount{{volume: source, target: "/source", readOnly: true}, {volume: destination, target: "/state"}}, script, strconv.Itoa(uid), strconv.Itoa(gid))
+sync
+rm -rf /state/current.old
+sync`
+	_, err := store.runHelper(ctx, nil, []helperMount{{volume: source, target: "/source", readOnly: true}, {volume: destination, target: "/state"}}, script, strconv.Itoa(uid), strconv.Itoa(gid), strconv.Itoa(expectedSize))
 	if err != nil {
 		return errors.New("private state copy failed")
 	}
@@ -277,6 +313,16 @@ type helperMount struct {
 const privateSourceValidation = `test_private_source() {
   marker=$1
   value=$2
+  expected_bytes=$3
+  case "$expected_bytes" in
+    32|43) ;;
+    *) return 1 ;;
+  esac
+  journal_bytes=$(stat -c '%s' "$marker") || return 1
+  [ "$journal_bytes" -ge 1 ] || return 1
+  [ "$journal_bytes" -le 192 ] || return 1
+  value_bytes=$(stat -c '%s' "$value") || return 1
+  [ "$value_bytes" = "$expected_bytes" ] || return 1
   marker_version=
   marker_digest=
   marker_size=
@@ -297,6 +343,7 @@ const privateSourceValidation = `test_private_source() {
 }
 test_ready_private_source() {
   root=$1
+  expected_bytes=$2
   [ ! -L "$root/.initialized" ] || return 1
   [ -f "$root/.initialized" ] || return 1
   [ ! -L "$root/current" ] || return 1
@@ -309,10 +356,11 @@ test_ready_private_source() {
   [ "$(stat -c '%u:%g:%a' "$root/.initialized")" = '0:0:400' ] || return 1
   [ "$(stat -c '%u:%g:%a' "$root/current")" = '0:0:700' ] || return 1
   [ "$(stat -c '%u:%g:%a' "$root/current/value")" = '0:0:400' ] || return 1
-  test_private_source "$root/.initialized" "$root/current/value" || return 1
+  test_private_source "$root/.initialized" "$root/current/value" "$expected_bytes" || return 1
 }
 test_publishing_private_source() {
   root=$1
+  expected_bytes=$2
   [ ! -L "$root/current" ] || return 1
   [ -d "$root/current" ] || return 1
   [ ! -L "$root/current/.initialized" ] || return 1
@@ -323,14 +371,14 @@ test_publishing_private_source() {
   [ "$(stat -c '%u:%g:%a' "$root/current")" = '0:0:700' ] || return 1
   [ "$(stat -c '%u:%g:%a' "$root/current/.initialized")" = '0:0:400' ] || return 1
   [ "$(stat -c '%u:%g:%a' "$root/current/value")" = '0:0:400' ] || return 1
-  test_private_source "$root/current/.initialized" "$root/current/value" || return 1
+  test_private_source "$root/current/.initialized" "$root/current/value" "$expected_bytes" || return 1
   if [ ! -e "$root/.initialized" ] && [ ! -L "$root/.initialized" ]; then
     return 0
   fi
   [ ! -L "$root/.initialized" ] || return 1
   [ -f "$root/.initialized" ] || return 1
   [ "$(stat -c '%u:%g:%a' "$root/.initialized")" = '0:0:400' ] || return 1
-  test_private_source "$root/.initialized" "$root/current/value" || return 1
+  test_private_source "$root/.initialized" "$root/current/value" "$expected_bytes" || return 1
 }
 `
 
@@ -406,6 +454,8 @@ func safeContainerID(value string) bool {
 	}
 	return true
 }
+
+func validGeneratedValueSize(value int) bool { return value == 32 || value == 43 }
 
 func validHelperImage(value string) bool {
 	parsed, err := reference.ParseNamed(value)

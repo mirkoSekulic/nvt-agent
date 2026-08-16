@@ -72,12 +72,12 @@ func (store *memoryStore) EnsureDirectory(_ context.Context, volume Volume, uid,
 	return nil
 }
 
-func (store *memoryStore) InspectPrivateSource(_ context.Context, volume Volume) (PrivateSourceState, error) {
+func (store *memoryStore) InspectPrivateSource(_ context.Context, volume Volume, expectedSize int) (PrivateSourceState, error) {
 	files := store.files[volume.Name]
 	if len(files) == 0 {
 		return PrivateSourceEmpty, nil
 	}
-	if bytes.Equal(files[".initialized"], privateSourceMarker(files["value"])) && len(files["value"]) > 0 {
+	if bytes.Equal(files[".initialized"], privateSourceMarker(files["value"])) && len(files["value"]) == expectedSize {
 		if store.publishing[volume.Name] {
 			return PrivateSourcePublishing, nil
 		}
@@ -86,22 +86,22 @@ func (store *memoryStore) InspectPrivateSource(_ context.Context, volume Volume)
 	return PrivateSourceCorrupt, nil
 }
 
-func (store *memoryStore) FinalizePrivateSource(_ context.Context, volume Volume) error {
-	if state, _ := store.InspectPrivateSource(context.Background(), volume); state != PrivateSourcePublishing {
+func (store *memoryStore) FinalizePrivateSource(_ context.Context, volume Volume, expectedSize int) error {
+	if state, _ := store.InspectPrivateSource(context.Background(), volume, expectedSize); state != PrivateSourcePublishing {
 		return errors.New("source is not publishing")
 	}
 	store.publishing[volume.Name] = false
 	return nil
 }
 
-func (store *memoryStore) InitializePrivateSource(ctx context.Context, volume Volume, files []StateFile) error {
+func (store *memoryStore) InitializePrivateSource(ctx context.Context, volume Volume, _ int, files []StateFile) error {
 	if len(store.files[volume.Name]) != 0 {
 		return errors.New("source already initialized")
 	}
 	return store.ReplaceFiles(ctx, volume, files)
 }
-func (store *memoryStore) CopyPrivateFile(_ context.Context, source, destination Volume, _, _ int) error {
-	if state, _ := store.InspectPrivateSource(context.Background(), source); state != PrivateSourceReady {
+func (store *memoryStore) CopyPrivateFile(_ context.Context, source, destination Volume, _, _, expectedSize int) error {
+	if state, _ := store.InspectPrivateSource(context.Background(), source, expectedSize); state != PrivateSourceReady {
 		return errors.New("corrupt source")
 	}
 	value := store.files[source.Name]["value"]
@@ -261,7 +261,7 @@ func TestManagerRecoversEmptySourceAfterPartialWriteFailure(t *testing.T) {
 	}
 	for name, volume := range store.volumes {
 		if volume.Role == "generated-private-source" {
-			if state, _ := store.InspectPrivateSource(context.Background(), volume); state != PrivateSourceReady {
+			if state, _ := store.InspectPrivateSource(context.Background(), volume, len(store.files[name]["value"])); state != PrivateSourceReady {
 				t.Fatalf("source %s state=%v", name, state)
 			}
 		}
@@ -280,7 +280,7 @@ func TestManagerFinalizesInterruptedGeneratedSourcePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := plan.generated[0].sourceVolume
-	value := []byte("interrupted-but-complete-generated-value")
+	value := bytes.Repeat([]byte{'p'}, generatedValueSize(plan.generated[0].encoding))
 	store.files[source] = map[string][]byte{
 		".initialized": privateSourceMarker(value),
 		"value":        append([]byte(nil), value...),
@@ -323,7 +323,7 @@ func TestManagerRejectsGeneratedSourceValueThatDoesNotMatchJournal(t *testing.T)
 	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	for name, replacement := range map[string][]byte{
-		"same-sized replacement": []byte("FEDCBA9876543210"),
+		"same-sized replacement": bytes.Repeat([]byte{'b'}, 43),
 		"truncated replacement":  []byte("A"),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -336,7 +336,7 @@ func TestManagerRejectsGeneratedSourceValueThatDoesNotMatchJournal(t *testing.T)
 				t.Fatal(err)
 			}
 			sourceName := plan.generated[0].sourceVolume
-			original := []byte("0123456789ABCDEF")
+			original := bytes.Repeat([]byte{'a'}, 43)
 			store.files[sourceName] = map[string][]byte{
 				".initialized": privateSourceMarker(original),
 				"value":        append([]byte(nil), replacement...),
