@@ -66,6 +66,9 @@ producers:
     workflow: nvt-development
   - name: external-chat
     image: ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    runtimeIdentity:
+      uid: 1000
+      gid: 1000
     workflow: nvt-development
     allowedPrincipalIssuers: [https://chat.example]
     publicConfig:

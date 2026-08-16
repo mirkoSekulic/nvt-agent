@@ -4,7 +4,8 @@ Status: design contract; behavior-inactive until the local-platform integration
 series is complete.
 
 `nvt.dev/local/v1` is the single human-authored, non-secret local-platform
-manifest. The implementation lives in `localplatform/manifest`. It accepts one
+manifest. The implementation lives in `localplatform/manifest`, with private
+input and trusted-volume preparation in `localplatform/state`. It accepts one
 bounded YAML document, rejects aliases, duplicate or unknown fields, unsupported
 scalar tags, excessive depth/node/byte counts, invalid names and enums, unsafe
 paths, unresolved references, mutable OCI image tags, and undeclared
@@ -13,10 +14,9 @@ secret-bearing fields.
 The document defines logical secrets by file reference, provider accounts,
 reusable profiles, named provider-neutral repositories, persistent
 workstations, disposable or retained workflows, the built-in
-`github-comments` producer, and external digest-pinned OCI producers. File
-references are syntax-checked only in this slice. No file is opened and no
-referenced private value is accepted or emitted. The explicitly named
-`publicConfig` boundary described below is administrator-asserted public data.
+`github-comments` producer, and external digest-pinned OCI producers. The
+explicitly named `publicConfig` boundary described below is
+administrator-asserted public data.
 
 Every Codex or Claude profile explicitly selects one compatible runtime account
 from its account list. Shell profiles select none. The controller projection
@@ -72,6 +72,90 @@ never written into `.broker`, the workspace, or another user-authored host
 directory. Preset expansion belongs to local-platform packaging; core,
 `agentd`, broker, gateway, controller, producer, Kubernetes, and Helm protocols
 are unchanged by this contract.
+
+## Private input resolution
+
+Resolution starts only after the whole manifest has decoded, validated, and
+compiled. Every path is relative to the directory containing
+`nvt.local.yaml`; absolute paths, backslashes, empty components, and `..` are
+rejected independently of the compiler's syntax checks.
+
+Instruction files may be organized anywhere below that root. A confined
+symlink is accepted, but `os.Root` prevents a link or concurrent rename from
+escaping the manifest root. The final object must be a stable regular UTF-8
+file no larger than 256 KiB. The resolver reads and compares two snapshots so
+an in-place write cannot produce a mixed generated instruction.
+
+Secret files must be below `.nvt-local/secrets/`. Every path component and the
+final file must be non-symlinks. The opened file must remain the same regular
+file through two equal reads, be owned by the invoking effective user, expose
+no group or other permission bits, contain at least one byte, and be no larger
+than 64 KiB. A rename or content change during resolution fails closed. Errors
+identify the unsafe input class without including its contents.
+
+Resolved secret bytes remain in an opaque in-memory input set until they are
+cleared. They are absent from the compiled document, redacted state plan,
+generated JSON, environment values, helper arguments, Docker labels, and
+command output. They reach persistent storage only as a bounded tar stream on
+the trusted state helper's standard input.
+
+## Managed trusted-service state
+
+The redacted state plan creates a distinct labeled Docker volume for generated
+configuration, broker database/audit data, broker private and canonical
+credential state, local-controller database/audit data, and—when an OAuth
+account enables the portal—the portal seed handoff. Portal seed storage is
+writable only by the credential portal and read-only to the broker seed
+supervisor; broker canonical credentials remain in the broker-private volume.
+Before startup, the seed volume root is fixed to the packaged portal identity
+`1000:1000` with mode `0700`, so the non-root portal can create its private
+staging directory without broadening access.
+
+Static inputs are snapshotted into exact per-consumer volumes. Generated inputs
+use a persistent private source plus an exact journal-validated copy for each
+consumer. Each service receives only `current/value` as a read-only subpath,
+owned by its declared runtime UID with mode `0400`; generated-copy journals are
+not mounted into the service. Shared
+credentials, such as the controller route token or a producer admission token,
+are copied into separate service volumes so granting one consumer never exposes
+another consumer's directory. No agent service is a valid consumer.
+
+Packaged producers have the packaged runtime identity `65532:65532`. An
+external digest-pinned producer must declare `runtimeIdentity.uid` and
+`runtimeIdentity.gid` as positive non-root IDs. That identity is carried into
+the compiled producer contract and owns both its static secret snapshots and
+generated admission-token copy; state planning fails if a producer consumer has
+no exact compiled identity.
+
+All volumes carry exactly these labels:
+
+- `nvt.dev/local-platform-owner`: the bounded local project identity;
+- `nvt.dev/local-platform-custodian`: the sole service or state generator that
+  owns the volume;
+- `nvt.dev/local-platform-role`: the fixed storage role;
+- `nvt.dev/local-platform-volume`: the exact expected volume name; and
+- `nvt.dev/local-platform-version`: `1`.
+
+Existing same-name volumes are adopted only when the complete label map is
+byte-for-byte equal. All existing volumes are checked before any state is
+written. An empty, unmarked generated source left by an interrupted first
+initialization can retry safely. A durable marker plus the exact source file is
+required thereafter, so loss or corruption of an initialized value fails
+closed rather than silently rotating it. Ordinary restarts preserve generated
+material, a missing consumer copy is reconstructed from its source, and source
+volume replacement rotates all consumer copies together before any later
+service startup. The helper image itself must be pinned by SHA-256, runs
+without networking or a writable root filesystem, and receives no private
+value through Docker inspection surfaces.
+
+Credential-portal account projection is bounded to the portal contract's 128
+slots before volume creation. Slot and local destination names use a
+domain-separated full SHA-256 mapping of the logical account name; any duplicate
+mapping is rejected before state is written.
+
+This slice prepares state and mount intent only. It does not render or start a
+producer, workstation, workflow, or replacement Compose project; those remain
+behavior-inactive until the later integration slices consume the plan.
 
 ## Example
 

@@ -47,11 +47,16 @@ type ProducerIntent struct {
 	Name                string                `json:"name"`
 	Kind                string                `json:"kind"`
 	Image               string                `json:"image,omitempty"`
+	RuntimeIdentity     RuntimeIdentityIntent `json:"runtimeIdentity"`
 	Workflow            string                `json:"workflow"`
 	PublicConfig        map[string]any        `json:"publicConfig,omitempty"`
 	Secrets             map[string]string     `json:"secrets,omitempty"`
 	GitHub              *GitHubProducerIntent `json:"github,omitempty"`
 	AdmissionCredential string                `json:"admissionCredential"`
+}
+type RuntimeIdentityIntent struct {
+	UID int `json:"uid"`
+	GID int `json:"gid"`
 }
 type GitHubProducerIntent struct {
 	AppID            int64    `json:"appID"`
@@ -197,7 +202,11 @@ func Compile(m Manifest) (Compiled, error) {
 	sort.Slice(producers, func(i, j int) bool { return producers[i].Name < producers[j].Name })
 	for _, producer := range producers {
 		credential := "producer-admission:" + producer.Name
-		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, Workflow: producer.Workflow, PublicConfig: producer.PublicConfig, Secrets: sortedMap(producer.Secrets), AdmissionCredential: credential}
+		identity := RuntimeIdentityIntent{UID: 65532, GID: 65532}
+		if producer.RuntimeIdentity != nil {
+			identity = RuntimeIdentityIntent{UID: producer.RuntimeIdentity.UID, GID: producer.RuntimeIdentity.GID}
+		}
+		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, RuntimeIdentity: identity, Workflow: producer.Workflow, PublicConfig: producer.PublicConfig, Secrets: sortedMap(producer.Secrets), AdmissionCredential: credential}
 		if producer.Preset == "github-comments" {
 			account := m.Accounts[producer.Account]
 			owner, repository, _ := githubCoordinates(m.Repositories[producer.Repository])

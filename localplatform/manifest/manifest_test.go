@@ -55,28 +55,31 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"unknown field":                            strings.Replace(string(valid), "apiVersion:", "unexpected: true\napiVersion:", 1),
-		"duplicate key":                            strings.Replace(string(valid), "apiVersion: nvt.dev/local/v1", "apiVersion: nvt.dev/local/v1\napiVersion: nvt.dev/local/v1", 1),
-		"second document":                          string(valid) + "\n---\n{}\n",
-		"unsafe secret":                            strings.Replace(string(valid), "./.nvt-local/secrets/github/main-app.pem", "../private-key", 1),
-		"unresolved reference":                     strings.Replace(string(valid), "privateKeySecret: github-key", "privateKeySecret: absent", 1),
-		"mutable image":                            strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ghcr.io/example/chat-producer:latest", 1),
-		"invalid OCI image":                        strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "https://host/repo?x@sha256:"+strings.Repeat("a", 64), 1),
-		"secret config":                            strings.Replace(string(valid), "commandPrefix: /agent", "apiToken: embedded", 1),
-		"unsupported scalar":                       strings.Replace(string(valid), "appId: \"3912708\"", "appId: 2026-01-01", 1),
-		"incompatible producer account":            strings.Replace(string(valid), "preset: github-comments\n    account: github", "preset: github-comments\n    account: codex", 1),
-		"missing installation":                     strings.Replace(string(valid), "mirkoSekulic: \"123\"", "another-owner: \"123\"", 1),
-		"unknown repository":                       strings.Replace(string(valid), "repository: nvt-agent", "repository: absent", 1),
-		"undeclared external config":               strings.Replace(string(valid), "publicConfig:", "config:", 1),
-		"GitHub repository Azure account":          strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent\n    account: github", "github: mirkoSekulic/nvt-agent\n    account: azure", 1),
-		"Azure repository GitHub account":          strings.Replace(string(valid), "path: infrastructure\n    account: azure", "path: infrastructure\n    account: github", 1),
-		"built-in public config":                   strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    publicConfig: {mode: public}", 1),
-		"built-in manual secret":                   strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    secrets: {key: github-key}", 1),
-		"missing runtime account":                  strings.Replace(string(valid), "      account: codex", "      account: github", 1),
-		"GitHub App missing checkout installation": strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent", "github: Altinn/nvt-agent", 1),
-		"external producer missing issuer":         strings.Replace(string(valid), "    allowedPrincipalIssuers: [https://chat.example]\n", "", 1),
-		"external producer unsafe issuer":          strings.Replace(string(valid), "https://chat.example", "http://chat.example", 1),
-		"built-in producer issuer override":        strings.Replace(string(valid), "    prefix: /nvtagent\n", "    prefix: /nvtagent\n    allowedPrincipalIssuers: [https://github.com]\n", 1),
+		"unknown field":                              strings.Replace(string(valid), "apiVersion:", "unexpected: true\napiVersion:", 1),
+		"duplicate key":                              strings.Replace(string(valid), "apiVersion: nvt.dev/local/v1", "apiVersion: nvt.dev/local/v1\napiVersion: nvt.dev/local/v1", 1),
+		"second document":                            string(valid) + "\n---\n{}\n",
+		"unsafe secret":                              strings.Replace(string(valid), "./.nvt-local/secrets/github/main-app.pem", "../private-key", 1),
+		"unresolved reference":                       strings.Replace(string(valid), "privateKeySecret: github-key", "privateKeySecret: absent", 1),
+		"mutable image":                              strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ghcr.io/example/chat-producer:latest", 1),
+		"invalid OCI image":                          strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "https://host/repo?x@sha256:"+strings.Repeat("a", 64), 1),
+		"secret config":                              strings.Replace(string(valid), "commandPrefix: /agent", "apiToken: embedded", 1),
+		"unsupported scalar":                         strings.Replace(string(valid), "appId: \"3912708\"", "appId: 2026-01-01", 1),
+		"incompatible producer account":              strings.Replace(string(valid), "preset: github-comments\n    account: github", "preset: github-comments\n    account: codex", 1),
+		"missing installation":                       strings.Replace(string(valid), "mirkoSekulic: \"123\"", "another-owner: \"123\"", 1),
+		"unknown repository":                         strings.Replace(string(valid), "repository: nvt-agent", "repository: absent", 1),
+		"undeclared external config":                 strings.Replace(string(valid), "publicConfig:", "config:", 1),
+		"GitHub repository Azure account":            strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent\n    account: github", "github: mirkoSekulic/nvt-agent\n    account: azure", 1),
+		"Azure repository GitHub account":            strings.Replace(string(valid), "path: infrastructure\n    account: azure", "path: infrastructure\n    account: github", 1),
+		"built-in public config":                     strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    publicConfig: {mode: public}", 1),
+		"built-in manual secret":                     strings.Replace(string(valid), "prefix: /nvtagent", "prefix: /nvtagent\n    secrets: {key: github-key}", 1),
+		"missing runtime account":                    strings.Replace(string(valid), "      account: codex", "      account: github", 1),
+		"GitHub App missing checkout installation":   strings.Replace(string(valid), "github: mirkoSekulic/nvt-agent", "github: Altinn/nvt-agent", 1),
+		"external producer missing issuer":           strings.Replace(string(valid), "    allowedPrincipalIssuers: [https://chat.example]\n", "", 1),
+		"external producer unsafe issuer":            strings.Replace(string(valid), "https://chat.example", "http://chat.example", 1),
+		"external producer missing runtime identity": strings.Replace(string(valid), "    runtimeIdentity:\n      uid: 1000\n      gid: 1000\n", "", 1),
+		"external producer root runtime identity":    strings.Replace(string(valid), "      uid: 1000\n      gid: 1000", "      uid: 0\n      gid: 0", 1),
+		"built-in producer issuer override":          strings.Replace(string(valid), "    prefix: /nvtagent\n", "    prefix: /nvtagent\n    allowedPrincipalIssuers: [https://github.com]\n", 1),
+		"built-in producer runtime override":         strings.Replace(string(valid), "    prefix: /nvtagent\n", "    prefix: /nvtagent\n    runtimeIdentity: {uid: 1000, gid: 1000}\n", 1),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -110,14 +113,19 @@ func TestCompiledSectionsAreOwnerSufficient(t *testing.T) {
 	if len(compiled.Broker.Profiles) != 1 || len(compiled.Broker.Profiles[0].Accounts) != 3 || len(compiled.Broker.Repositories) != 2 {
 		t.Fatalf("broker projection is incomplete: %#v", compiled.Broker)
 	}
-	var github *ProducerIntent
+	var github, external *ProducerIntent
 	for index := range compiled.Producers {
 		if compiled.Producers[index].Kind == "github-comments" {
 			github = &compiled.Producers[index]
+		} else if compiled.Producers[index].Kind == "oci" {
+			external = &compiled.Producers[index]
 		}
 	}
 	if github == nil || github.GitHub == nil || github.GitHub.AppID != 3912708 || github.GitHub.InstallationID != 123 || github.GitHub.RepositoryOwner != "mirkoSekulic" || github.GitHub.PrivateKeySecret != "github-key" {
 		t.Fatalf("GitHub producer projection is incomplete: %#v", github)
+	}
+	if github.RuntimeIdentity != (RuntimeIdentityIntent{UID: 65532, GID: 65532}) || external == nil || external.RuntimeIdentity != (RuntimeIdentityIntent{UID: 1000, GID: 1000}) {
+		t.Fatalf("producer runtime identities are incomplete: github=%#v external=%#v", github, external)
 	}
 	ownedKey := false
 	for _, input := range compiled.PrivateInputs {
