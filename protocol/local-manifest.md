@@ -107,6 +107,8 @@ Before any managed volume is created, the generated local-controller document
 is validated against the unchanged resolved-run resolver plus the native limits
 of 128 workstations, 128 profiles, 128 workflows, and 64 schedules. Every
 rendered workstation and producer selection must resolve through that policy.
+The generated controller service sets its active-run capacity to the same 128
+workstation ceiling.
 
 ## Managed trusted-service state
 
@@ -168,7 +170,8 @@ the next reconciliation validates and recovers the inventory from
 `current.old` before publishing or cleaning that transaction snapshot.
 Reconciliation and reset use the same read-only fallback helper and the same
 finite inventory-sized Docker output bound; unrelated Docker commands retain
-the smaller generic output limit.
+the smaller generic output limit. Reset uses that aligned bound for both the
+historical inventory payload and exact-owned volume-name enumeration.
 
 Credential-portal account projection is bounded to the portal contract's 128
 slots before volume creation. Slot and local destination names use a

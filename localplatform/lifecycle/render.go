@@ -145,7 +145,8 @@ func Render(ctx context.Context, compiled manifest.Compiled, statePlan plancontr
 	services["local-controller"] = map[string]any{
 		"image": options.ControllerImage, "environment": map[string]string{
 			"NVT_LOCAL_CONTROLLER_BIND": "0.0.0.0:7480", "NVT_LOCAL_CONTROLLER_STATE": "/var/lib/nvt/local-controller/local-controller.sqlite3", "NVT_LOCAL_CONTROLLER_DOCKER_HOST": "unix:///var/run/docker.sock",
-			"NVT_LOCAL_CONTROLLER_RUNS_DIR": "/var/lib/nvt/local-controller/runs", "NVT_LOCAL_CONTROLLER_BROKER_URL": "http://broker:7347", "NVT_LOCAL_CONTROLLER_BROKER_AGENTS": "/registry/agents.yaml",
+			"NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS": "128",
+			"NVT_LOCAL_CONTROLLER_RUNS_DIR":        "/var/lib/nvt/local-controller/runs", "NVT_LOCAL_CONTROLLER_BROKER_URL": "http://broker:7347", "NVT_LOCAL_CONTROLLER_BROKER_AGENTS": "/registry/agents.yaml",
 			"NVT_LOCAL_CONTROLLER_IDENTITY_KEY_FILE": plancontract.PrivateTarget("local-controller-identity"), "NVT_LOCAL_CONTROLLER_OWNER": project,
 			"NVT_LOCAL_CONTROLLER_EXTERNAL_NETWORK": proxyNetwork, "NVT_LOCAL_CONTROLLER_ROUTE_BASE_DOMAIN": "agent.localhost", "NVT_LOCAL_CONTROLLER_ROUTE_PATH_PREFIX": "/agents",
 			"NVT_LOCAL_CONTROLLER_GATEWAY_CONTAINER": project + "-gateway", "NVT_LOCAL_CONTROLLER_CONFIG": "/etc/nvt-local/local-controller.json",

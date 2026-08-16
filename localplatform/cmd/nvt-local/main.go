@@ -295,7 +295,17 @@ func (application app) ownedObjects(ctx context.Context, kind string) ([]string,
 	seen := map[string]struct{}{}
 	expectedVolumes := map[string]map[string]string(nil)
 	for queryIndex, query := range queries {
-		output, err := application.docker.Run(ctx, nil, query...)
+		var output []byte
+		var err error
+		if kind == "volume" {
+			if bounded, ok := application.docker.(state.OutputLimitedCommandBoundary); ok {
+				output, err = bounded.RunWithOutputLimit(ctx, nil, state.MaxVolumeInventoryBytes, query...)
+			} else {
+				output, err = application.docker.Run(ctx, nil, query...)
+			}
+		} else {
+			output, err = application.docker.Run(ctx, nil, query...)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot inventory exact-owned local %ss", kind)
 		}

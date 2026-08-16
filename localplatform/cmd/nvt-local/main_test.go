@@ -88,6 +88,9 @@ func TestOwnedVolumesRequireCompletePersistedLabelMap(t *testing.T) {
 	if docker.outputLimit <= 64<<10 {
 		t.Fatalf("reset inventory retained the generic Docker output limit: %d", docker.outputLimit)
 	}
+	if docker.volumeListLimit != docker.outputLimit {
+		t.Fatalf("reset volume enumeration limit = %d, inventory limit = %d", docker.volumeListLimit, docker.outputLimit)
+	}
 	if !strings.Contains(docker.helperScript, "root=/state/current.old") {
 		t.Fatal("reset did not use the interrupted-publication inventory fallback")
 	}
@@ -109,11 +112,15 @@ type resetDocker struct {
 	platformVolumes []string
 	labels          map[string]map[string]string
 	outputLimit     int
+	volumeListLimit int
 	helperScript    string
 }
 
 func (docker *resetDocker) RunWithOutputLimit(ctx context.Context, input io.Reader, maximum int, arguments ...string) ([]byte, error) {
 	docker.outputLimit = maximum
+	if len(arguments) >= 2 && arguments[0] == "volume" && arguments[1] == "ls" {
+		docker.volumeListLimit = maximum
+	}
 	return docker.Run(ctx, input, arguments...)
 }
 

@@ -25,7 +25,9 @@ type CommandBoundary interface {
 	Run(context.Context, io.Reader, ...string) ([]byte, error)
 }
 
-type outputLimitedCommandBoundary interface {
+// OutputLimitedCommandBoundary is implemented by Docker command boundaries
+// that support a caller-selected finite output cap.
+type OutputLimitedCommandBoundary interface {
 	RunWithOutputLimit(context.Context, io.Reader, int, ...string) ([]byte, error)
 }
 
@@ -493,7 +495,7 @@ func (store DockerStore) runHelperWithOutputLimit(ctx context.Context, stdin io.
 		}
 	}
 	if outputLimit != 0 {
-		if bounded, ok := store.Docker.(outputLimitedCommandBoundary); ok {
+		if bounded, ok := store.Docker.(OutputLimitedCommandBoundary); ok {
 			return bounded.RunWithOutputLimit(ctx, stdin, outputLimit, "start", "--attach", "--interactive", container)
 		}
 	}

@@ -54,8 +54,9 @@ func TestRenderCompleteComposeWithoutHostAuthoredState(t *testing.T) {
 	}
 	var document struct {
 		Services map[string]struct {
-			Command  []string `yaml:"command"`
-			Networks []string `yaml:"networks"`
+			Command     []string          `yaml:"command"`
+			Networks    []string          `yaml:"networks"`
+			Environment map[string]string `yaml:"environment"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal(encoded, &document); err != nil {
@@ -68,6 +69,9 @@ func TestRenderCompleteComposeWithoutHostAuthoredState(t *testing.T) {
 	brokerNetworks := document.Services["broker"].Networks
 	if len(brokerNetworks) != 2 || brokerNetworks[0] != "agents-proxy" || brokerNetworks[1] != "local-control-plane" {
 		t.Fatalf("broker must join trusted egress and control networks: %#v", brokerNetworks)
+	}
+	if capacity := document.Services["local-controller"].Environment["NVT_LOCAL_CONTROLLER_MAX_ACTIVE_RUNS"]; capacity != "128" {
+		t.Fatalf("controller capacity does not match the validated workstation bound: %q", capacity)
 	}
 }
 

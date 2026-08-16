@@ -65,4 +65,4 @@ func (output *boundedOutput) Write(value []byte) (int, error) {
 }
 
 var _ CommandBoundary = DockerCLI{}
-var _ outputLimitedCommandBoundary = DockerCLI{}
+var _ OutputLimitedCommandBoundary = DockerCLI{}
