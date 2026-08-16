@@ -51,6 +51,8 @@ plugins:
       provider: github-main-app
     config:
       poll-seconds: 60
+      ignored-comment-prefixes:
+        - /nvtagent
 
       prs:
         - repo: my-user/my-repo
@@ -106,6 +108,19 @@ comments, reviews, and checks.
 
 `labels` are metadata carried into published events and prompt text. They do not
 filter GitHub labels in v1.
+
+`ignored-comment-prefixes` is a global comment-input filter inherited by both
+static and dynamically registered watches. For each comment, the watcher finds
+the first non-empty line and ignores it when that line starts with a configured
+prefix followed by a space. The boundary means `/nvtagent review` matches a
+configured `/nvtagent` prefix while ordinary text such as `/nvtagent-review`
+does not. Ignored comments still advance the persisted comment watermark, and
+later ordinary comments from the same poll are processed normally.
+
+This setting is intentionally generic: the watcher does not parse or know any
+producer commands. When a separate comment producer uses command namespaces,
+set this list to the same values as that producer's `commandPrefixes` setting.
+The default is an empty list, which preserves delivery of all accepted comments.
 
 For local direct use, omit `egress` and configure `default-provider` or a
 per-watch `provider`; the watcher then asks `git-host-credential` for that

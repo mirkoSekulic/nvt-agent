@@ -120,6 +120,10 @@ agentConfig:
         provider: github-main-app
       config:
         poll-seconds: 60
+        # Keep aligned with this producer's commandPrefixes so control-plane
+        # comments are not also delivered to an existing watched session.
+        ignored-comment-prefixes:
+          - /nvtagent
 ```
 
 The producer uses this idempotency key as the schedule admission `work.id`:

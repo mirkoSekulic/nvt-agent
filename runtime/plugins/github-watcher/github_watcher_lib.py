@@ -160,6 +160,25 @@ def list_value(value, field):
     return value
 
 
+def normalize_ignored_comment_prefixes(config):
+    prefixes = list_value(config.get("ignored-comment-prefixes"), "ignored-comment-prefixes")
+    for index, prefix in enumerate(prefixes):
+        field = f"ignored-comment-prefixes[{index}]"
+        string_value(prefix, field, required=True)
+        if prefix != prefix.strip():
+            fail(f"{field} must not have surrounding whitespace")
+    return prefixes
+
+
+def should_ignore_comment(body, prefixes):
+    for line in body.split("\n"):
+        first_line = line.strip()
+        if not first_line:
+            continue
+        return any(first_line.startswith(f"{prefix} ") for prefix in prefixes)
+    return False
+
+
 def validate_repo(value, field="repo"):
     repo = string_value(value, field, required=True).strip().removesuffix(".git")
     if repo.startswith("https://github.com/"):
@@ -200,6 +219,7 @@ def normalize_watch(raw, defaults, source):
         "number": number,
         "provider": string_value(raw.get("provider"), f"{source}.provider") or defaults.get("default-provider"),
         "labels": labels,
+        "ignored-comment-prefixes": defaults.get("ignored-comment-prefixes", []),
         "publish": {"enabled": bool_value(publish.get("enabled"), f"{source}.publish.enabled", True)},
         "comments": normalize_discussion_config(comments, f"{source}.comments", True),
         "reviews": normalize_discussion_config(reviews, f"{source}.reviews", True),
@@ -285,6 +305,7 @@ def static_watches(config):
         "default-provider": string_value(config.get("default-provider"), "default-provider"),
         "broker": config.get("broker"),
         "closed": {"enabled": True, "remove": False, "publish": True, "prompt": False},
+        "ignored-comment-prefixes": normalize_ignored_comment_prefixes(config),
     }
     watches = []
     for index, raw in enumerate(list_value(config.get("prs"), "prs")):
@@ -299,6 +320,7 @@ def dynamic_watches(config):
         "default-provider": string_value(config.get("default-provider"), "default-provider"),
         "broker": config.get("broker"),
         "closed": {"enabled": True, "remove": True, "publish": True, "prompt": False},
+        "ignored-comment-prefixes": normalize_ignored_comment_prefixes(config),
     }
     data = read_json(registry_path(), {"prs": []})
     watches = []

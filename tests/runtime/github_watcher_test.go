@@ -99,6 +99,145 @@ for field in ("comments", "reviews"):
 	f.runCommand("python3", true, "-c", script)
 }
 
+func TestGithubWatcherIgnoredCommentPrefixesAreGenericAndValidated(t *testing.T) {
+	f := newFixture(t)
+	writeGithubWatcherRegistry(t, f, `[{"repo":"my-user/dynamic","number":456}]`)
+	script := fmt.Sprintf(`
+import importlib.util
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "github_watcher_lib.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_lib", module_path)
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
+
+prefixes = ["/custom"]
+cases = [
+    ("/custom review", True),
+    ("\n  \n  /custom pr create\nnotes", True),
+    ("/custom run\ndo work", True),
+    ("/custom future-command", True),
+    ("/custom-review", False),
+    ("/custom\treview", False),
+    ("ordinary /custom review", False),
+    ("ordinary\n/custom review", False),
+    ("/custom", False),
+]
+for body, expected in cases:
+    actual = lib.should_ignore_comment(body, prefixes)
+    if actual != expected:
+        raise SystemExit(f"match for {body!r} was {actual}, want {expected}")
+
+if lib.normalize_ignored_comment_prefixes({}) != []:
+    raise SystemExit("default ignored-comment-prefixes must be empty")
+if lib.should_ignore_comment("/custom review", []):
+    raise SystemExit("empty configuration changed comment delivery")
+
+config = {
+    "ignored-comment-prefixes": prefixes,
+    "prs": [{"repo": "my-user/static", "number": 123}],
+}
+static = lib.static_watches(config)
+dynamic = lib.dynamic_watches(config)
+if static[0]["ignored-comment-prefixes"] != prefixes:
+    raise SystemExit(f"static watch did not inherit prefixes: {static}")
+if dynamic[0]["ignored-comment-prefixes"] != prefixes:
+    raise SystemExit(f"dynamic watch did not inherit prefixes: {dynamic}")
+
+for value in ("/custom", [""], [" /custom"], [1]):
+    try:
+        lib.normalize_ignored_comment_prefixes({"ignored-comment-prefixes": value})
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit(f"invalid configuration was accepted: {value!r}")
+`, quoteYAML(f.root))
+
+	f.runCommand("python3", true, "-c", script)
+}
+
+func TestGithubWatcherIgnoredCommentAdvancesWatermarkAndContinuesPoll(t *testing.T) {
+	f := newFixture(t)
+	config := f.writePluginConfig("github-watcher.yaml", `
+ignored-comment-prefixes:
+  - /custom
+prs:
+  - repo: my-user/my-repo
+    number: 123
+    comments:
+      prompt:
+        enabled: true
+    reviews:
+      enabled: false
+    checks:
+      enabled: false
+    closed:
+      enabled: false
+`)
+	script := fmt.Sprintf(`
+import importlib.util
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(%s)
+module_path = root / "runtime" / "plugins" / "github-watcher" / "run.py"
+sys.path.insert(0, str(module_path.parent))
+spec = importlib.util.spec_from_file_location("github_watcher_run", module_path)
+watcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(watcher)
+
+comments = [
+    {
+        "id": 1,
+        "updated_at": "2026-08-16T10:01:00Z",
+        "author_association": "COLLABORATOR",
+        "user": {"login": "owner"},
+        "body": "\n\n/custom review",
+    },
+    {
+        "id": 2,
+        "updated_at": "2026-08-16T10:02:00Z",
+        "author_association": "COLLABORATOR",
+        "user": {"login": "owner"},
+        "body": "/custom-review is ordinary text",
+    },
+    {
+        "id": 3,
+        "updated_at": "2026-08-16T10:03:00Z",
+        "author_association": "COLLABORATOR",
+        "user": {"login": "owner"},
+        "body": "ordinary follow-up",
+    },
+]
+published = []
+prompted = []
+watcher.fetch_comments = lambda _watch: comments
+watcher.publish_event = lambda event, payload: published.append((event, payload["id"]))
+watcher.prompt_agent = lambda message: prompted.append(message)
+key = "my-user/my-repo#123:comments"
+watcher.write_json(watcher.seen_path(), {key: watcher.parse_time("2026-08-16T10:00:00Z")})
+watcher.run_once(watcher.load_config())
+
+if published != [
+    ("plugin.github.pr.comment", "comment:2"),
+    ("plugin.github.pr.comment", "comment:3"),
+]:
+    raise SystemExit(f"unexpected published comments: {published}")
+if len(prompted) != 2:
+    raise SystemExit(f"unexpected prompts: {prompted}")
+seen = watcher.read_json(watcher.seen_path(), {})
+expected = watcher.parse_time("2026-08-16T10:03:00Z")
+if seen.get(key) != expected:
+    raise SystemExit(f"watermark was not persisted: {json.dumps(seen)}")
+`, quoteYAML(f.root))
+
+	f.runWithEnv("python3", true, []string{"NVT_PLUGIN_CONFIG=" + config}, "-c", script)
+}
+
 func TestGithubWatchRegisterPersistsCloseDefaultsAndFlags(t *testing.T) {
 	f := newFixture(t)
 	config := f.writePluginConfig("github-watcher.yaml", "default-provider: fork-app\n")
