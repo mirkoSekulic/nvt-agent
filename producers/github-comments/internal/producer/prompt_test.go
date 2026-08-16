@@ -70,7 +70,7 @@ func TestBuildIntentPromptsAreDelimitedAndCooperative(t *testing.T) {
 			}
 		}
 		if intent == CommandIntentReview {
-			for _, text := range []string{"report findings first", "Make no product-code changes", "Do not approve", "comment on this pull request"} {
+			for _, text := range []string{"report blocking findings first", "Make no product-code changes", "Do not approve", "comment on this pull request"} {
 				if !strings.Contains(prompt, text) {
 					t.Fatalf("review prompt missing %q:\n%s", text, prompt)
 				}
@@ -96,6 +96,49 @@ func TestBuildIntentPromptsAreDelimitedAndCooperative(t *testing.T) {
 		}
 		if !strings.Contains(prompt, "same source thread") || !strings.Contains(prompt, "exact user instructions") {
 			t.Fatalf("run prompt lacks source/result contract:\n%s", prompt)
+		}
+	}
+}
+
+func TestBuildReviewPromptCalibratesActionableFindings(t *testing.T) {
+	prompt := BuildPrompt(PromptInput{
+		Intent: CommandIntentReview,
+		Owner:  "acme",
+		Repo:   "widget",
+		Issue:  Issue{Number: 9},
+	})
+	for _, text := range []string{
+		"`No findings` is a valid result",
+		"only actionable correctness, security, or regression defects",
+		"documented contract, requirement, or stated threat-model boundary",
+		"identify the violated invariant or requirement and provide concrete evidence",
+		"do not promote speculative hardening to P1 or P2",
+		"Treat host root, the Docker daemon, and Docker administrators as trusted",
+		"Separate blocking findings from optional hardening or follow-up suggestions",
+	} {
+		if !strings.Contains(prompt, text) {
+			t.Fatalf("review prompt missing calibration rule %q:\n%s", text, prompt)
+		}
+	}
+}
+
+func TestBuildReviewPromptPinsReReviewAndReviewedHead(t *testing.T) {
+	prompt := BuildPrompt(PromptInput{
+		Intent: CommandIntentReview,
+		Owner:  "acme",
+		Repo:   "widget",
+		Issue:  Issue{Number: 9},
+	})
+	for _, text := range []string{
+		"On re-review, verify prior fixes first",
+		"only remaining defects or regressions introduced by those fixes",
+		"do not manufacture a new concern merely because another review was requested",
+		"resolve the current pull request head SHA and review that exact revision",
+		"`Reviewed head: <full SHA>`",
+		"clearly stale after a push",
+	} {
+		if !strings.Contains(prompt, text) {
+			t.Fatalf("review prompt missing re-review rule %q:\n%s", text, prompt)
 		}
 	}
 }

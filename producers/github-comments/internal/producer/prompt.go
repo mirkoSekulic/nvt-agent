@@ -42,7 +42,14 @@ func BuildPrompt(input PromptInput) string {
 	switch input.Intent {
 	case CommandIntentReview:
 		fmt.Fprint(&b, strings.Join([]string{
-			"Inspect the current pull request and report findings first, ordered by severity and with file and line references where possible.",
+			"Inspect the current pull request and report blocking findings first, ordered by severity and with file and line references where possible.",
+			"`No findings` is a valid result.",
+			"Report as findings only actionable correctness, security, or regression defects against a documented contract, requirement, or stated threat-model boundary.",
+			"For every finding, identify the violated invariant or requirement and provide concrete evidence; do not promote speculative hardening to P1 or P2.",
+			"Treat host root, the Docker daemon, and Docker administrators as trusted unless the reviewed contract explicitly states otherwise.",
+			"Separate blocking findings from optional hardening or follow-up suggestions.",
+			"On re-review, verify prior fixes first and report only remaining defects or regressions introduced by those fixes; do not manufacture a new concern merely because another review was requested.",
+			"Before reviewing, resolve the current pull request head SHA and review that exact revision; include `Reviewed head: <full SHA>` in the posted result so the review is clearly stale after a push.",
 			"Make no product-code changes. Do not approve the pull request or request changes.",
 			"Post the review findings as a comment on this pull request using the existing mediated GitHub tooling.",
 			"Only after that comment succeeds, invoke `nvt-work complete`.",
