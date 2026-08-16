@@ -40,7 +40,6 @@ if [ -f "$broker_dir/local-controller.yaml" ] && [ -z "${NVT_LOCAL_CONTROLLER_CO
   export NVT_LOCAL_CONTROLLER_CONFIG=/broker-state/local-controller.yaml
 fi
 
-compose_profiles=()
 if [ "${NVT_CREDENTIAL_PORTAL_ENABLED:-false}" = "true" ]; then
   if [ ! -f "$broker_dir/credential-portal-local.json" ]; then
     cp "$templates_dir/credential-portal-local.json" "$broker_dir/credential-portal-local.json"
@@ -48,12 +47,11 @@ if [ "${NVT_CREDENTIAL_PORTAL_ENABLED:-false}" = "true" ]; then
   chmod 644 "$broker_dir/credential-portal-local.json"
   export NVT_GATEWAY_CREDENTIAL_PORTAL_URL=/agents/credentials
   export NVT_BROKER_CREDENTIAL_SEED_DIR=/portal-seed
-  compose_profiles=(--profile credentials)
+  docker compose -f "$repo_root/compose.infra.yaml" --profile credentials up -d
 else
   # Compose does not stop services from an omitted profile during `up`.
   # Remove only the optional containers; named credential volumes remain.
   docker compose -f "$repo_root/compose.infra.yaml" --profile credentials rm -sf \
     credential-portal credential-runner credential-private-init
+  docker compose -f "$repo_root/compose.infra.yaml" up -d
 fi
-
-docker compose -f "$repo_root/compose.infra.yaml" "${compose_profiles[@]}" up -d

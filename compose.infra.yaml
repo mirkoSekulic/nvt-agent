@@ -151,11 +151,19 @@ services:
     command: [runner, --listen, 0.0.0.0:8081, --auth-key-file, /private/runner.key]
     volumes:
       - local-credential-private:/private:ro
-    networks: [local-control-plane]
+    networks: [agents-proxy, local-control-plane]
     depends_on:
       credential-private-init: {condition: service_completed_successfully}
     read_only: true
     tmpfs: [/tmp]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=agents-proxy
+      - traefik.http.routers.nvt-local-credentials.rule=Host(`localhost`) && PathPrefix(`/agents/credentials`)
+      - traefik.http.routers.nvt-local-credentials.entrypoints=web
+      - traefik.http.routers.nvt-local-credentials.priority=200
+      - traefik.http.routers.nvt-local-credentials.service=nvt-local-credentials
+      - traefik.http.services.nvt-local-credentials.loadbalancer.server.port=8080
     restart: unless-stopped
 
   credential-portal:
@@ -166,22 +174,15 @@ services:
       NVT_CREDENTIAL_PORTAL_PUBLIC_URL: http://localhost:${NVT_PROXY_PORT:-4090}/agents/credentials
       NVT_CREDENTIAL_PORTAL_SESSION_SECRET_FILE: /private/session.key
       NVT_CREDENTIAL_RUNNER_AUTH_KEY_FILE: /private/runner.key
-      NVT_CREDENTIAL_RUNNER_URL: http://credential-runner:8081
+      NVT_CREDENTIAL_RUNNER_URL: http://127.0.0.1:8081
     volumes:
       - ./.broker/credential-portal-local.json:/config/config.json:ro
       - local-credential-private:/private:ro
       - local-credential-seeds:/seed
-    networks: [agents-proxy, local-control-plane]
+    network_mode: service:credential-runner
     depends_on:
       credential-private-init: {condition: service_completed_successfully}
       credential-runner: {condition: service_started}
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=agents-proxy
-      - traefik.http.routers.nvt-local-credentials.rule=Host(`localhost`) && PathPrefix(`/agents/credentials`)
-      - traefik.http.routers.nvt-local-credentials.entrypoints=web
-      - traefik.http.routers.nvt-local-credentials.priority=100
-      - traefik.http.services.nvt-local-credentials.loadbalancer.server.port=8080
     read_only: true
     tmpfs: [/tmp]
     restart: unless-stopped
