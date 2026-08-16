@@ -3,8 +3,10 @@ package config_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	serviceconfig "github.com/mirkoSekulic/nvt-agent/localplatform/config"
@@ -93,6 +95,17 @@ func TestRenderValidManifestUsesContainerPrivateFilesAndNativePolicy(t *testing.
 	}
 	if got := agentConfig.Runtime.Resume.Args; len(got) != 2 || got[0] != "--continue" || got[1] != "--dangerously-skip-permissions" {
 		t.Fatalf("Claude resume command is incomplete: %#v", got)
+	}
+	if _, err := serviceconfig.Controller(compiled, serviceconfig.Instructions{"development": strings.Repeat("x", resolvedrun.MaxWorkspaceInstructionsBytes+1)}); err == nil {
+		t.Fatal("controller projection accepted oversized native workspace instructions")
+	}
+	overpopulated := compiled
+	overpopulated.Controller.Workstations = make([]manifest.Workstation, 129)
+	for index := range overpopulated.Controller.Workstations {
+		overpopulated.Controller.Workstations[index] = manifest.Workstation{Name: fmt.Sprintf("workstation-%03d", index), Profile: "development"}
+	}
+	if _, err := serviceconfig.Controller(overpopulated, serviceconfig.Instructions{"development": "bounded instructions"}); err == nil {
+		t.Fatal("controller projection accepted too many native workstations")
 	}
 	github := decoded.Accounts["github"]
 	github.Installations["other"] = "456"

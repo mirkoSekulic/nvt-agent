@@ -86,7 +86,8 @@ rejected independently of the compiler's syntax checks.
 Instruction files may be organized anywhere below that root. A confined
 symlink is accepted, but `os.Root` prevents a link or concurrent rename from
 escaping the manifest root. The final object must be a stable regular UTF-8
-file no larger than 256 KiB. The resolver reads and compares two snapshots so
+file no larger than 64 KiB, matching the unchanged resolved-run instruction
+bound. The resolver reads and compares two snapshots so
 an in-place write cannot produce a mixed generated instruction.
 
 Secret files must be below `.nvt-local/secrets/`. Every path component and the
@@ -101,6 +102,11 @@ cleared. They are absent from the compiled document, redacted state plan,
 generated JSON, environment values, helper arguments, Docker labels, and
 command output. They reach persistent storage only as a bounded tar stream on
 the trusted state helper's standard input.
+
+Before any managed volume is created, the generated local-controller document
+is validated against the unchanged resolved-run resolver plus the native limits
+of 128 workstations, 128 profiles, 128 workflows, and 64 schedules. Every
+rendered workstation and producer selection must resolve through that policy.
 
 ## Managed trusted-service state
 
@@ -160,6 +166,9 @@ shrinkage. Missing, incomplete, conflicting, or extra labels still fail closed.
 If atomic configuration publication is interrupted after rotating `current`,
 the next reconciliation validates and recovers the inventory from
 `current.old` before publishing or cleaning that transaction snapshot.
+Reconciliation and reset use the same read-only fallback helper and the same
+finite inventory-sized Docker output bound; unrelated Docker commands retain
+the smaller generic output limit.
 
 Credential-portal account projection is bounded to the portal contract's 128
 slots before volume creation. Slot and local destination names use a

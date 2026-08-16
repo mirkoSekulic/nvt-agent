@@ -15,10 +15,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 const (
-	MaxInstructionBytes = 256 << 10
+	MaxInstructionBytes = resolvedrun.MaxWorkspaceInstructionsBytes
 	MaxSecretBytes      = 64 << 10
 )
 

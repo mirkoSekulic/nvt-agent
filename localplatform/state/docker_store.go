@@ -25,6 +25,10 @@ type CommandBoundary interface {
 	Run(context.Context, io.Reader, ...string) ([]byte, error)
 }
 
+type outputLimitedCommandBoundary interface {
+	RunWithOutputLimit(context.Context, io.Reader, int, ...string) ([]byte, error)
+}
+
 type DockerStore struct {
 	Docker      CommandBoundary
 	HelperImage string
@@ -119,7 +123,7 @@ if [ ! -e "$target" ]; then exit 0; fi
 test -f "$target"
 test "$(stat -c '%s' "$target")" -le "$1"
 cat "$target"`
-	return store.runHelper(ctx, nil, []helperMount{{volume: volume, target: "/state", readOnly: true}}, script, strconv.Itoa(maxStateFileBytes))
+	return store.runHelperWithOutputLimit(ctx, nil, []helperMount{{volume: volume, target: "/state", readOnly: true}}, script, maxStateFileBytes, strconv.Itoa(maxStateFileBytes))
 }
 
 func (store DockerStore) InitializePrivateSource(ctx context.Context, volume Volume, expectedSize int, files []StateFile) error {
@@ -336,7 +340,10 @@ sync`
 }
 
 const (
-	maxStateFileBytes = (1 << 20) + MaxInstructionBytes
+	// MaxVolumeInventoryBytes is the shared validated file and Docker transport
+	// bound for the redacted historical ownership inventory.
+	MaxVolumeInventoryBytes = (1 << 20) + MaxInstructionBytes
+	maxStateFileBytes       = MaxVolumeInventoryBytes
 	// One legal manifest may project MaxItems instruction files and MaxItems
 	// producer configurations plus the fixed owner documents.
 	maxStateFiles = 2*manifest.MaxItems + 16
@@ -437,6 +444,10 @@ test_publishing_private_source() {
 `
 
 func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts []helperMount, script string, values ...string) ([]byte, error) {
+	return store.runHelperWithOutputLimit(ctx, stdin, mounts, script, 0, values...)
+}
+
+func (store DockerStore) runHelperWithOutputLimit(ctx context.Context, stdin io.Reader, mounts []helperMount, script string, outputLimit int, values ...string) ([]byte, error) {
 	if len(mounts) == 0 {
 		return nil, errors.New("state helper has no managed volumes")
 	}
@@ -479,6 +490,11 @@ func (store DockerStore) runHelper(ctx context.Context, stdin io.Reader, mounts 
 	for _, mount := range mounts {
 		if err := store.verifyVolume(ctx, mount.volume); err != nil {
 			return nil, err
+		}
+	}
+	if outputLimit != 0 {
+		if bounded, ok := store.Docker.(outputLimitedCommandBoundary); ok {
+			return bounded.RunWithOutputLimit(ctx, stdin, outputLimit, "start", "--attach", "--interactive", container)
 		}
 	}
 	return store.Docker.Run(ctx, stdin, "start", "--attach", "--interactive", container)

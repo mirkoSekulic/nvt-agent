@@ -27,6 +27,12 @@ type fakeDocker struct {
 	imagePresent           bool
 	pullOutput             []byte
 	createOutput           []byte
+	outputLimit            int
+}
+
+func (docker *fakeDocker) RunWithOutputLimit(ctx context.Context, input io.Reader, maximum int, arguments ...string) ([]byte, error) {
+	docker.outputLimit = maximum
+	return docker.Run(ctx, input, arguments...)
 }
 
 func (docker *fakeDocker) Run(_ context.Context, input io.Reader, arguments ...string) ([]byte, error) {
@@ -194,13 +200,16 @@ func TestDockerStoreCreatesAndAdoptsOnlyExactlyLabeledVolumes(t *testing.T) {
 }
 
 func TestDockerStoreReadsBoundedInventoryThroughReadOnlyHelper(t *testing.T) {
-	docker := &fakeDocker{volumes: map[string]map[string]string{}, imagePresent: true, runOutput: []byte(`{"version":"1"}`)}
+	docker := &fakeDocker{volumes: map[string]map[string]string{}, imagePresent: true, runOutput: bytes.Repeat([]byte{'i'}, 70<<10)}
 	store := DockerStore{Docker: docker, HelperImage: "ghcr.io/nvt/state-helper@sha256:" + strings.Repeat("a", 64)}
 	volume := dockerTestVolume("local-test-generated-config", "generated-config")
 	docker.volumes[volume.Name] = maps.Clone(volume.Labels)
 	output, err := store.ReadVolumeInventory(context.Background(), volume)
 	if err != nil || !bytes.Equal(output, docker.runOutput) {
 		t.Fatalf("inventory read = %q, %v", output, err)
+	}
+	if docker.outputLimit != maxStateFileBytes {
+		t.Fatalf("inventory transport limit = %d", docker.outputLimit)
 	}
 	command := lastDockerCommand(t, docker.commands, "create")
 	joined := strings.Join(command.arguments, "\n")

@@ -146,11 +146,60 @@ func Controller(compiled manifest.Compiled, instructions Instructions) ([]byte, 
 		}}})
 	}
 	sort.Slice(result.Workflows, func(i, j int) bool { return result.Workflows[i].Name < result.Workflows[j].Name })
+	if validateNativeProjection(result) != nil {
+		return nil, errors.New("controller configuration is invalid")
+	}
 	encoded, err := json.Marshal(result)
 	if err != nil || len(encoded) > manifest.MaxDocumentBytes {
 		return nil, errors.New("controller configuration is unavailable")
 	}
 	return encoded, nil
+}
+
+func validateNativeProjection(configuration nativeConfiguration) error {
+	if (len(configuration.Workstations) == 0 && len(configuration.Schedules) == 0) || len(configuration.Workstations) > 128 || len(configuration.Schedules) > 64 {
+		return errors.New("local scheduling projection exceeds native bounds")
+	}
+	resolver, err := resolvedrun.NewResolver(resolvedrun.TrustedConfiguration{
+		Defaults: configuration.Defaults, Profiles: configuration.Profiles, Workflows: configuration.Workflows,
+		ExecutionBackends: configuration.ExecutionBackends, RetentionPolicies: configuration.RetentionPolicies,
+	})
+	if err != nil {
+		return err
+	}
+	for _, item := range configuration.Workstations {
+		authorization := resolvedrun.AuthorizationContext{
+			Principal: item.Principal, Selections: []resolvedrun.AuthorizedSelection{{Profile: item.Profile, Workflows: []string{item.Workflow}}},
+		}
+		resolved, err := resolver.Resolve(authorization, resolvedrun.LocalRunRequest{
+			RunID: item.Name, Profile: item.Profile, Workflow: item.Workflow, Retention: item.Retention, Backend: item.Backend,
+		})
+		if err != nil || !resolved.Persistence.Workspace || !resolved.Persistence.RuntimeState || !resolved.Persistence.DockerData || resolved.TTL != (resolvedrun.TTL{}) {
+			return errors.New("workstation projection is invalid")
+		}
+	}
+	for _, item := range configuration.Schedules {
+		if len(item.Producers) == 0 || len(item.Producers) > 32 {
+			return errors.New("schedule projection is invalid")
+		}
+		for _, producer := range item.Producers {
+			if producer.Identity == "" || producer.TokenFile == "" || len(producer.AllowedPrincipalIssuers) == 0 || len(producer.Selections) == 0 || len(producer.Selections) > 32 || producer.DefaultWorkflow == "" || producer.Retention == "" || producer.Backend == "" {
+				return errors.New("schedule producer projection is invalid")
+			}
+			for _, selection := range producer.Selections {
+				authorization := resolvedrun.AuthorizationContext{
+					Principal:  resolvedrun.Principal{Issuer: producer.AllowedPrincipalIssuers[0], Subject: "projection-validation"},
+					Selections: []resolvedrun.AuthorizedSelection{{Profile: selection.Profile, Workflows: []string{selection.Workflow}}},
+				}
+				if _, err := resolver.Resolve(authorization, resolvedrun.LocalRunRequest{
+					RunID: "projection-validation", Profile: selection.Profile, Workflow: selection.Workflow, Retention: producer.Retention, Backend: producer.Backend,
+				}); err != nil {
+					return errors.New("schedule selection projection is invalid")
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func renderProfile(intent manifest.ControllerProfileIntent, accounts map[string]manifest.Account, repositories map[string]manifest.ControllerRepositoryIntent, instructions string) (resolvedrun.Profile, error) {

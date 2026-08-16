@@ -85,6 +85,12 @@ func TestOwnedVolumesRequireCompletePersistedLabelMap(t *testing.T) {
 	if names, err := application.ownedObjects(context.Background(), "volume"); err != nil || len(names) != 3 {
 		t.Fatalf("exact volume inventory = %#v, %v", names, err)
 	}
+	if docker.outputLimit <= 64<<10 {
+		t.Fatalf("reset inventory retained the generic Docker output limit: %d", docker.outputLimit)
+	}
+	if !strings.Contains(docker.helperScript, "root=/state/current.old") {
+		t.Fatal("reset did not use the interrupted-publication inventory fallback")
+	}
 	docker.labels[brokerName] = cloneTestLabels(brokerLabels)
 	docker.labels[brokerName]["unexpected"] = "label"
 	if _, err := application.ownedObjects(context.Background(), "volume"); err == nil || !strings.Contains(err.Error(), "mislabeled") {
@@ -102,6 +108,13 @@ type resetDocker struct {
 	plan            []byte
 	platformVolumes []string
 	labels          map[string]map[string]string
+	outputLimit     int
+	helperScript    string
+}
+
+func (docker *resetDocker) RunWithOutputLimit(ctx context.Context, input io.Reader, maximum int, arguments ...string) ([]byte, error) {
+	docker.outputLimit = maximum
+	return docker.Run(ctx, input, arguments...)
 }
 
 func (docker *resetDocker) Run(_ context.Context, _ io.Reader, arguments ...string) ([]byte, error) {
@@ -118,8 +131,18 @@ func (docker *resetDocker) Run(_ context.Context, _ io.Reader, arguments ...stri
 		}
 		return json.Marshal(labels)
 	}
-	if len(arguments) > 0 && arguments[0] == "run" {
+	if len(arguments) >= 2 && arguments[0] == "image" && arguments[1] == "inspect" {
+		return []byte("sha256:" + strings.Repeat("a", 64) + "\n"), nil
+	}
+	if len(arguments) > 0 && arguments[0] == "create" {
+		docker.helperScript = strings.Join(arguments, "\n")
+		return nil, nil
+	}
+	if len(arguments) > 0 && arguments[0] == "start" {
 		return append([]byte(nil), docker.plan...), nil
+	}
+	if len(arguments) > 0 && arguments[0] == "rm" {
+		return nil, nil
 	}
 	return nil, errors.New("unexpected Docker command")
 }

@@ -17,6 +17,16 @@ type DockerCLI struct {
 }
 
 func (cli DockerCLI) Run(ctx context.Context, stdin io.Reader, arguments ...string) ([]byte, error) {
+	return cli.RunWithOutputLimit(ctx, stdin, maxDockerOutputBytes, arguments...)
+}
+
+// RunWithOutputLimit preserves the ordinary bounded Docker boundary while
+// allowing callers with a separately validated payload contract to request a
+// larger finite transport bound.
+func (cli DockerCLI) RunWithOutputLimit(ctx context.Context, stdin io.Reader, maximum int, arguments ...string) ([]byte, error) {
+	if maximum < 1 || maximum > maxStateFileBytes {
+		return nil, errors.New("invalid Docker output limit")
+	}
 	if len(cli.Host) > 4096 || strings.ContainsAny(cli.Host, "\x00\r\n") {
 		return nil, errors.New("invalid Docker host")
 	}
@@ -25,7 +35,7 @@ func (cli DockerCLI) Run(ctx context.Context, stdin io.Reader, arguments ...stri
 	}
 	command := exec.CommandContext(ctx, "docker", arguments...)
 	command.Stdin = stdin
-	output := &boundedOutput{maximum: maxDockerOutputBytes}
+	output := &boundedOutput{maximum: maximum}
 	command.Stdout = output
 	command.Stderr = output
 	err := command.Run()
@@ -55,3 +65,4 @@ func (output *boundedOutput) Write(value []byte) (int, error) {
 }
 
 var _ CommandBoundary = DockerCLI{}
+var _ outputLimitedCommandBoundary = DockerCLI{}

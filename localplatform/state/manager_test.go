@@ -14,6 +14,7 @@ import (
 	"github.com/mirkoSekulic/nvt-agent/localplatform/manifest"
 	plancontract "github.com/mirkoSekulic/nvt-agent/localplatform/plan"
 	producerrender "github.com/mirkoSekulic/nvt-agent/localplatform/producer"
+	"github.com/mirkoSekulic/nvt-agent/protocol/resolvedrun"
 )
 
 var _ producerrender.ImageInspectRunner = DockerCLI{}
@@ -31,6 +32,21 @@ type memoryStore struct {
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{volumes: map[string]Volume{}, files: map[string]map[string][]byte{}, oldFiles: map[string]map[string][]byte{}, directories: map[string]directoryPlan{}, publishing: map[string]bool{}}
+}
+
+func validStateCompiled() manifest.Compiled {
+	return manifest.Compiled{
+		Version: manifest.APIVersion,
+		Broker:  manifest.BrokerIntent{Owner: "broker"},
+		Controller: manifest.ControllerIntent{
+			Owner:        "local-controller",
+			Profiles:     []manifest.ControllerProfileIntent{{Name: "profile", Profile: manifest.Profile{Runtime: manifest.Runtime{Preset: "shell", Autonomy: "read-only"}}}},
+			Repositories: []manifest.ControllerRepositoryIntent{{Name: "repository", URL: "https://github.com/example/repository.git", CheckoutTarget: "github.com/example/repository"}},
+			Workflows:    []manifest.NamedWorkflow{{Name: "workflow", Workflow: manifest.Workflow{Profile: "profile", Repository: "repository", Retention: "disposable"}}},
+			Workstations: []manifest.Workstation{{Name: "workstation", Profile: "profile"}},
+		},
+		Gateway: manifest.GatewayIntent{Owner: "gateway"},
+	}
 }
 func (store *memoryStore) EnsureVolumes(_ context.Context, volumes []Volume) (map[string]bool, error) {
 	if store.conflict {
@@ -134,19 +150,18 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 	secret := []byte("STATIC-PRIVATE-VALUE")
 	inputs := &Inputs{private: map[inputKey][]byte{{owner: "broker", name: "github-key"}: append([]byte(nil), secret...)}, Instructions: []Instruction{{Owner: "local-controller", Name: "development", Content: []byte("instructions")}}}
 	defer inputs.Close()
-	compiled := manifest.Compiled{
-		Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}},
-		Producers: []manifest.ProducerIntent{{
-			Owner: "producer:test", Name: "test", Kind: "oci",
-			Image:           "ghcr.io/example/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}, Workflow: "workflow", AdmissionCredential: "producer-admission:test",
-		}},
-		PrivateInputs: []manifest.PrivateInputIntent{
-			{Owner: "local-controller", Name: "development", File: "instructions.md", Purpose: "instructions"},
-			{Owner: "broker", Name: "github-key", File: ".nvt-local/secrets/key", Purpose: "secret"},
-		},
-		GeneratedPrivateInputs: []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "producer-admission:test", Purpose: "schedule-admission-token", Consumers: []string{"local-controller", "producer:test"}}},
+	compiled := validStateCompiled()
+	compiled.Gateway.CredentialPortalAccounts = []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}
+	compiled.Producers = []manifest.ProducerIntent{{
+		Owner: "producer:test", Name: "test", Kind: "oci",
+		Image:           "ghcr.io/example/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1000, GID: 1000}, Workflow: "workflow", AdmissionCredential: "producer-admission:test",
+	}}
+	compiled.PrivateInputs = []manifest.PrivateInputIntent{
+		{Owner: "local-controller", Name: "development", File: "instructions.md", Purpose: "instructions"},
+		{Owner: "broker", Name: "github-key", File: ".nvt-local/secrets/key", Purpose: "secret"},
 	}
+	compiled.GeneratedPrivateInputs = []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "producer-admission:test", Purpose: "schedule-admission-token", Consumers: []string{"local-controller", "producer:test"}}}
 	store := newMemoryStore()
 	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x11}, 4096))}
 	plan, err := manager.Ensure(context.Background(), "local-test", compiled, inputs)
@@ -264,10 +279,8 @@ func TestManagerPreservesGeneratedStateAndRefreshesExactCopies(t *testing.T) {
 }
 
 func TestManagerPreservesRetiredVolumeLabelInventory(t *testing.T) {
-	withPortal := manifest.Compiled{
-		Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"},
-		Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}},
-	}
+	withPortal := validStateCompiled()
+	withPortal.Gateway.CredentialPortalAccounts = []manifest.PortalAccountIntent{{Name: "codex", Preset: "codex-oauth"}}
 	store := newMemoryStore()
 	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x31}, 4096))}
 	inputs := &Inputs{private: map[inputKey][]byte{}}
@@ -331,13 +344,27 @@ func TestManagerPreservesRetiredVolumeLabelInventory(t *testing.T) {
 func TestManagerFailsBeforeWritesOnOwnershipConflict(t *testing.T) {
 	store := newMemoryStore()
 	store.conflict = true
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	compiled := validStateCompiled()
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
 		t.Fatal("ownership conflict accepted")
 	}
 	if store.writes != 0 {
 		t.Fatal("state changed before ownership validation")
+	}
+}
+
+func TestManagerRejectsInvalidNativeProjectionBeforeVolumeCreation(t *testing.T) {
+	compiled := validStateCompiled()
+	compiled.PrivateInputs = []manifest.PrivateInputIntent{{Owner: "local-controller", Name: "profile", File: "instructions.md", Purpose: "instructions"}}
+	inputs := &Inputs{private: map[inputKey][]byte{}, Instructions: []Instruction{{Owner: "local-controller", Name: "profile", Content: bytes.Repeat([]byte{'x'}, resolvedrun.MaxWorkspaceInstructionsBytes+1)}}}
+	defer inputs.Close()
+	store := newMemoryStore()
+	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, inputs); err == nil {
+		t.Fatal("invalid native controller projection was published")
+	}
+	if len(store.volumes) != 0 || store.writes != 0 {
+		t.Fatal("invalid native controller projection changed managed state")
 	}
 }
 
@@ -393,7 +420,7 @@ func TestManagerRejectsExpandedGeneratedFileBeforeVolumeCreation(t *testing.T) {
 }
 
 func TestManagerRecoversEmptySourceAfterPartialWriteFailure(t *testing.T) {
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	compiled := validStateCompiled()
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	store := newMemoryStore()
 	store.failVolume = "local-test-generated-config"
@@ -419,7 +446,7 @@ func TestManagerRecoversEmptySourceAfterPartialWriteFailure(t *testing.T) {
 }
 
 func TestManagerFinalizesInterruptedGeneratedSourcePublication(t *testing.T) {
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	compiled := validStateCompiled()
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	store := newMemoryStore()
 	plan, err := preparePlan("local-test", compiled, inputs)
@@ -449,7 +476,7 @@ func TestManagerFinalizesInterruptedGeneratedSourcePublication(t *testing.T) {
 }
 
 func TestManagerRejectsMarkedSourceWithoutValue(t *testing.T) {
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	compiled := validStateCompiled()
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	store := newMemoryStore()
 	plan, err := preparePlan("local-test", compiled, inputs)
@@ -470,7 +497,7 @@ func TestManagerRejectsMarkedSourceWithoutValue(t *testing.T) {
 }
 
 func TestManagerRejectsGeneratedSourceValueThatDoesNotMatchJournal(t *testing.T) {
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	compiled := validStateCompiled()
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	for name, replacement := range map[string][]byte{
 		"same-sized replacement": bytes.Repeat([]byte{'b'}, 43),
@@ -506,7 +533,7 @@ func TestManagerRejectsGeneratedSourceValueThatDoesNotMatchJournal(t *testing.T)
 }
 
 func TestPlanOmitsCredentialPortalStateWithoutOAuthAccounts(t *testing.T) {
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}}
+	compiled := validStateCompiled()
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	plan, err := BuildPlan("local-test", compiled, inputs)
 	if err != nil {
@@ -534,13 +561,10 @@ func TestPlanOmitsCredentialPortalStateWithoutOAuthAccounts(t *testing.T) {
 }
 
 func TestPlanUsesDeclaredExternalProducerRuntimeIdentity(t *testing.T) {
-	compiled := manifest.Compiled{
-		Version: manifest.APIVersion,
-		Broker:  manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"},
-		Producers:              []manifest.ProducerIntent{{Owner: "producer:external", Name: "external", Kind: "oci", RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1001, GID: 1002}}},
-		PrivateInputs:          []manifest.PrivateInputIntent{{Owner: "producer:external", Name: "api-key", File: ".nvt-local/secrets/api-key", Purpose: "secret"}},
-		GeneratedPrivateInputs: []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "producer-admission:external", Purpose: "schedule-admission-token", Consumers: []string{"local-controller", "producer:external"}}},
-	}
+	compiled := validStateCompiled()
+	compiled.Producers = []manifest.ProducerIntent{{Owner: "producer:external", Name: "external", Kind: "oci", RuntimeIdentity: manifest.RuntimeIdentityIntent{UID: 1001, GID: 1002}}}
+	compiled.PrivateInputs = []manifest.PrivateInputIntent{{Owner: "producer:external", Name: "api-key", File: ".nvt-local/secrets/api-key", Purpose: "secret"}}
+	compiled.GeneratedPrivateInputs = []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "producer-admission:external", Purpose: "schedule-admission-token", Consumers: []string{"local-controller", "producer:external"}}}
 	inputs := &Inputs{private: map[inputKey][]byte{{owner: "producer:external", name: "api-key"}: []byte("private")}}
 	defer inputs.Close()
 	plan, err := preparePlan("local-test", compiled, inputs)
@@ -605,7 +629,8 @@ func TestPortalAccountLimitFailsBeforeVolumeWrites(t *testing.T) {
 	if _, err := portalConfiguration(accounts[:128]); err != nil {
 		t.Fatalf("portal rejected its exact slot limit: %v", err)
 	}
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway", CredentialPortalAccounts: accounts}}
+	compiled := validStateCompiled()
+	compiled.Gateway.CredentialPortalAccounts = accounts
 	store := newMemoryStore()
 	if _, err := (Manager{Store: store}).Ensure(context.Background(), "local-test", compiled, &Inputs{private: map[inputKey][]byte{}}); err == nil {
 		t.Fatal("oversized portal slot set accepted")
@@ -616,7 +641,8 @@ func TestPortalAccountLimitFailsBeforeVolumeWrites(t *testing.T) {
 }
 
 func TestGeneratedSourceReplacementRotatesAllConsumersTogether(t *testing.T) {
-	compiled := manifest.Compiled{Version: manifest.APIVersion, Broker: manifest.BrokerIntent{Owner: "broker"}, Controller: manifest.ControllerIntent{Owner: "local-controller"}, Gateway: manifest.GatewayIntent{Owner: "gateway"}, GeneratedPrivateInputs: []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "shared", Purpose: "test", Consumers: []string{"gateway", "local-controller"}}}}
+	compiled := validStateCompiled()
+	compiled.GeneratedPrivateInputs = []manifest.GeneratedPrivateInputIntent{{Owner: "local-platform-state", Name: "shared", Purpose: "test", Consumers: []string{"gateway", "local-controller"}}}
 	inputs := &Inputs{private: map[inputKey][]byte{}}
 	store := newMemoryStore()
 	manager := Manager{Store: store, Random: bytes.NewReader(bytes.Repeat([]byte{0x31}, 4096))}

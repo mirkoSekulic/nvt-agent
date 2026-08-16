@@ -341,13 +341,14 @@ func (application app) expectedPlatformVolumes(ctx context.Context) (map[string]
 	if err != nil || !equalLabels(labels, expectedConfigLabels) {
 		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
 	}
-	output, err := application.docker.Run(ctx, nil,
-		"run", "--rm", "--pull=never", "--network=none", "--read-only",
-		"--mount", "type=volume,source="+configVolume+",target=/state,readonly",
-		"--entrypoint", "/bin/cat", environment("NVT_LOCAL_CONTROLLER_IMAGE", "nvt-local-controller:latest"),
-		"/state/current/volume-inventory.json",
-	)
-	if err != nil || len(output) == 0 || len(output) > manifest.MaxDocumentBytes {
+	helperID, err := application.docker.Run(ctx, nil, "image", "inspect", "--format", "{{.Id}}", environment("NVT_LOCAL_CONTROLLER_IMAGE", "nvt-local-controller:latest"))
+	helperImage := strings.TrimSpace(string(helperID))
+	if err != nil || !digestPattern.MatchString(strings.TrimPrefix(helperImage, "sha256:")) || !strings.HasPrefix(helperImage, "sha256:") {
+		return nil, errors.New("refusing local volume reset without a trusted state reader")
+	}
+	config := plancontract.Volume{Name: configVolume, Owner: "local-platform-state", Role: "generated-config", Labels: expectedConfigLabels}
+	output, err := (state.DockerStore{Docker: application.docker, HelperImage: helperImage}).ReadVolumeInventory(ctx, config)
+	if err != nil || len(output) == 0 || len(output) > state.MaxVolumeInventoryBytes {
 		return nil, errors.New("refusing local volume reset without an exact-owned state inventory")
 	}
 	var inventory plancontract.VolumeInventory
