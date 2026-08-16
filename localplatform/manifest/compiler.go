@@ -18,22 +18,40 @@ type Compiled struct {
 }
 
 type BrokerIntent struct {
-	Owner    string         `json:"owner"`
-	Accounts []NamedAccount `json:"accounts,omitempty"`
-	Profiles []NamedProfile `json:"profiles"`
+	Owner        string                   `json:"owner"`
+	Accounts     []NamedAccount           `json:"accounts,omitempty"`
+	Profiles     []BrokerProfileIntent    `json:"profiles"`
+	Repositories []BrokerRepositoryIntent `json:"repositories"`
 }
 type ControllerIntent struct {
-	Owner        string          `json:"owner"`
-	Workstations []Workstation   `json:"workstations,omitempty"`
-	Workflows    []NamedWorkflow `json:"workflows"`
+	Owner        string                       `json:"owner"`
+	Profiles     []ControllerProfileIntent    `json:"profiles"`
+	Repositories []ControllerRepositoryIntent `json:"repositories"`
+	Workstations []Workstation                `json:"workstations,omitempty"`
+	Workflows    []NamedWorkflow              `json:"workflows"`
 }
 type GatewayIntent struct {
 	Owner        string   `json:"owner"`
 	Workstations []string `json:"workstations,omitempty"`
 }
 type ProducerIntent struct {
-	Owner    string   `json:"owner"`
-	Producer Producer `json:"producer"`
+	Owner    string                `json:"owner"`
+	Name     string                `json:"name"`
+	Kind     string                `json:"kind"`
+	Image    string                `json:"image,omitempty"`
+	Workflow string                `json:"workflow"`
+	Config   map[string]any        `json:"config,omitempty"`
+	Secrets  map[string]string     `json:"secrets,omitempty"`
+	GitHub   *GitHubProducerIntent `json:"github,omitempty"`
+}
+type GitHubProducerIntent struct {
+	AppID            int64    `json:"appID"`
+	InstallationID   int64    `json:"installationID"`
+	PrivateKeySecret string   `json:"privateKeySecret"`
+	RepositoryOwner  string   `json:"repositoryOwner"`
+	RepositoryName   string   `json:"repositoryName"`
+	Prefix           string   `json:"prefix"`
+	AllowedAuthors   []string `json:"allowedAuthors"`
 }
 type PrivateInputIntent struct{ Owner, Name, File, Purpose string }
 
@@ -50,9 +68,27 @@ type NamedAccount struct {
 	Name    string  `json:"name"`
 	Account Account `json:"account"`
 }
-type NamedProfile struct {
+type BrokerProfileIntent struct {
+	Name     string   `json:"name"`
+	Accounts []string `json:"accounts,omitempty"`
+}
+type ControllerProfileIntent struct {
 	Name    string  `json:"name"`
 	Profile Profile `json:"profile"`
+}
+type BrokerRepositoryIntent struct {
+	Name             string `json:"name"`
+	BrokerRepository string `json:"brokerRepository,omitempty"`
+	Account          string `json:"account,omitempty"`
+}
+type ControllerRepositoryIntent struct {
+	Name             string `json:"name"`
+	URL              string `json:"url"`
+	CheckoutTarget   string `json:"checkoutTarget"`
+	BrokerRepository string `json:"brokerRepository,omitempty"`
+	Path             string `json:"path,omitempty"`
+	Upstream         string `json:"upstream,omitempty"`
+	Account          string `json:"account,omitempty"`
 }
 type NamedWorkflow struct {
 	Name     string   `json:"name"`
@@ -65,7 +101,7 @@ func Compile(m Manifest) (Compiled, error) {
 	if err := m.Validate(); err != nil {
 		return Compiled{}, err
 	}
-	result := Compiled{Version: APIVersion, Broker: BrokerIntent{Owner: "broker", Profiles: []NamedProfile{}}, Controller: ControllerIntent{Owner: "local-controller", Workflows: []NamedWorkflow{}}, Gateway: GatewayIntent{Owner: "gateway"}}
+	result := Compiled{Version: APIVersion, Broker: BrokerIntent{Owner: "broker", Profiles: []BrokerProfileIntent{}, Repositories: []BrokerRepositoryIntent{}}, Controller: ControllerIntent{Owner: "local-controller", Profiles: []ControllerProfileIntent{}, Repositories: []ControllerRepositoryIntent{}, Workflows: []NamedWorkflow{}}, Gateway: GatewayIntent{Owner: "gateway"}}
 	for _, name := range SortedNames(m.Accounts) {
 		account := m.Accounts[name]
 		account.Installations = sortedMap(account.Installations)
@@ -83,7 +119,13 @@ func Compile(m Manifest) (Compiled, error) {
 		sort.Strings(profile.Tools.Mise)
 		sort.Strings(profile.Capabilities)
 		sort.Strings(profile.Plugins)
-		result.Broker.Profiles = append(result.Broker.Profiles, NamedProfile{name, profile})
+		result.Broker.Profiles = append(result.Broker.Profiles, BrokerProfileIntent{name, append([]string(nil), profile.Accounts...)})
+		result.Controller.Profiles = append(result.Controller.Profiles, ControllerProfileIntent{name, profile})
+	}
+	for _, name := range SortedNames(m.Repositories) {
+		repository := compileRepository(name, m.Repositories[name])
+		result.Controller.Repositories = append(result.Controller.Repositories, repository)
+		result.Broker.Repositories = append(result.Broker.Repositories, BrokerRepositoryIntent{name, repository.BrokerRepository, repository.Account})
 	}
 	result.Controller.Workstations = append([]Workstation(nil), m.Workstations...)
 	for i := range result.Controller.Workstations {
@@ -102,10 +144,20 @@ func Compile(m Manifest) (Compiled, error) {
 	producers := append([]Producer(nil), m.Producers...)
 	sort.Slice(producers, func(i, j int) bool { return producers[i].Name < producers[j].Name })
 	for _, producer := range producers {
-		producer.AllowedAuthors = append([]string(nil), producer.AllowedAuthors...)
-		sort.Strings(producer.AllowedAuthors)
-		producer.Secrets = sortedMap(producer.Secrets)
-		result.Producers = append(result.Producers, ProducerIntent{"producer:" + producer.Name, producer})
+		intent := ProducerIntent{Owner: "producer:" + producer.Name, Name: producer.Name, Kind: producer.Preset, Image: producer.Image, Workflow: producer.Workflow, Config: producer.Config, Secrets: sortedMap(producer.Secrets)}
+		if producer.Preset == "github-comments" {
+			account := m.Accounts[producer.Account]
+			owner, repository, _ := githubCoordinates(m.Repositories[producer.Repository])
+			appID, _ := positiveID(account.AppID)
+			installationID, _ := githubInstallationID(account, owner)
+			authors := append([]string(nil), producer.AllowedAuthors...)
+			sort.Strings(authors)
+			intent.GitHub = &GitHubProducerIntent{appID, installationID, account.PrivateKeySecret, owner, repository, producer.Prefix, authors}
+		}
+		if intent.Kind == "" {
+			intent.Kind = "oci"
+		}
+		result.Producers = append(result.Producers, intent)
 	}
 	for _, name := range SortedNames(m.Accounts) {
 		account := m.Accounts[name]
@@ -121,6 +173,10 @@ func Compile(m Manifest) (Compiled, error) {
 		}
 	}
 	for _, producer := range producers {
+		if producer.Preset == "github-comments" {
+			account := m.Accounts[producer.Account]
+			result.PrivateInputs = append(result.PrivateInputs, PrivateInputIntent{"producer:" + producer.Name, account.PrivateKeySecret, m.Secrets[account.PrivateKeySecret].File, "github-app-private-key"})
+		}
 		for _, mountName := range SortedNames(producer.Secrets) {
 			secretName := producer.Secrets[mountName]
 			result.PrivateInputs = append(result.PrivateInputs, PrivateInputIntent{"producer:" + producer.Name, secretName, m.Secrets[secretName].File, "secret:" + mountName})
@@ -137,6 +193,18 @@ func Compile(m Manifest) (Compiled, error) {
 		return a.Name < b.Name
 	})
 	return result, nil
+}
+
+func compileRepository(name string, repository Repository) ControllerRepositoryIntent {
+	result := ControllerRepositoryIntent{Name: name, URL: repository.URL, CheckoutTarget: repository.CheckoutTarget, BrokerRepository: repository.BrokerRepository, Path: repository.Path, Upstream: repository.Upstream, Account: repository.Account}
+	if repository.GitHub != "" {
+		result.URL = "https://github.com/" + repository.GitHub + ".git"
+		result.CheckoutTarget = "github.com/" + repository.GitHub
+		if repository.Account != "" {
+			result.BrokerRepository = repository.GitHub
+		}
+	}
+	return result
 }
 
 func sortedMap[T any](input map[string]T) map[string]T {

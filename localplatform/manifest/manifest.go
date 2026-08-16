@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -36,13 +38,14 @@ var (
 )
 
 type Manifest struct {
-	APIVersion   string              `json:"apiVersion"`
-	Secrets      map[string]Secret   `json:"secrets,omitempty"`
-	Accounts     map[string]Account  `json:"accounts,omitempty"`
-	Profiles     map[string]Profile  `json:"profiles"`
-	Workstations []Workstation       `json:"workstations,omitempty"`
-	Workflows    map[string]Workflow `json:"workflows"`
-	Producers    []Producer          `json:"producers,omitempty"`
+	APIVersion   string                `json:"apiVersion"`
+	Secrets      map[string]Secret     `json:"secrets,omitempty"`
+	Accounts     map[string]Account    `json:"accounts,omitempty"`
+	Profiles     map[string]Profile    `json:"profiles"`
+	Repositories map[string]Repository `json:"repositories"`
+	Workstations []Workstation         `json:"workstations,omitempty"`
+	Workflows    map[string]Workflow   `json:"workflows"`
+	Producers    []Producer            `json:"producers,omitempty"`
 }
 
 type Secret struct {
@@ -87,6 +90,18 @@ type Workstation struct {
 	Name         string   `json:"name"`
 	Profile      string   `json:"profile"`
 	Repositories []string `json:"repositories,omitempty"`
+}
+
+// Repository is provider-neutral checkout intent. GitHub is an optional
+// shorthand expanded by Compile; otherwise URL and CheckoutTarget are exact.
+type Repository struct {
+	GitHub           string `json:"github,omitempty"`
+	URL              string `json:"url,omitempty"`
+	CheckoutTarget   string `json:"checkoutTarget,omitempty"`
+	BrokerRepository string `json:"brokerRepository,omitempty"`
+	Path             string `json:"path,omitempty"`
+	Upstream         string `json:"upstream,omitempty"`
+	Account          string `json:"account,omitempty"`
 }
 
 type Workflow struct {
@@ -213,7 +228,7 @@ func (m Manifest) Validate() error {
 	if len(m.Profiles) == 0 || len(m.Workflows) == 0 {
 		return errors.New("profiles and workflows are required")
 	}
-	for label, count := range map[string]int{"secrets": len(m.Secrets), "accounts": len(m.Accounts), "profiles": len(m.Profiles), "workstations": len(m.Workstations), "workflows": len(m.Workflows), "producers": len(m.Producers)} {
+	for label, count := range map[string]int{"secrets": len(m.Secrets), "accounts": len(m.Accounts), "profiles": len(m.Profiles), "repositories": len(m.Repositories), "workstations": len(m.Workstations), "workflows": len(m.Workflows), "producers": len(m.Producers)} {
 		if count > MaxItems {
 			return fmt.Errorf("too many %s", label)
 		}
@@ -233,15 +248,29 @@ func (m Manifest) Validate() error {
 		if account.Preset == "github-app" && (account.AppID == "" || account.PrivateKeySecret == "" || len(account.Installations) == 0) {
 			return fmt.Errorf("github-app account %q is incomplete", name)
 		}
+		if account.Preset == "github-app" {
+			if _, err := positiveID(account.AppID); err != nil {
+				return fmt.Errorf("github-app account %q has an invalid appId", name)
+			}
+		}
 		if account.Preset != "github-app" && (account.AppID != "" || account.PrivateKeySecret != "" || len(account.Installations) != 0) {
 			return fmt.Errorf("account %q has fields not valid for its preset", name)
 		}
 		if (account.Preset == "github-pat" || account.Preset == "azure-devops-pat") != (account.TokenSecret != "") {
 			return fmt.Errorf("account %q has invalid tokenSecret", name)
 		}
+		seenOwners := map[string]struct{}{}
 		for owner, installation := range account.Installations {
-			if !validName(strings.ToLower(owner)) || installation == "" {
+			if !validName(strings.ToLower(owner)) {
 				return fmt.Errorf("account %q has an invalid installation", name)
+			}
+			canonicalOwner := strings.ToLower(owner)
+			if _, duplicate := seenOwners[canonicalOwner]; duplicate {
+				return fmt.Errorf("account %q has duplicate installation owners", name)
+			}
+			seenOwners[canonicalOwner] = struct{}{}
+			if _, err := positiveID(installation); err != nil {
+				return fmt.Errorf("account %q has an invalid installation ID", name)
 			}
 		}
 	}
@@ -276,6 +305,14 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("profile %q has invalid editor preset", name)
 		}
 	}
+	if len(m.Repositories) == 0 {
+		return errors.New("repositories are required")
+	}
+	for name, repository := range m.Repositories {
+		if !validName(name) || validateRepository(repository, m.Accounts) != nil {
+			return fmt.Errorf("invalid repository %q", name)
+		}
+	}
 	seenWorkstations := map[string]struct{}{}
 	for _, workstation := range m.Workstations {
 		if !validName(workstation.Name) || !has(m.Profiles, workstation.Profile) {
@@ -285,13 +322,21 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("duplicate workstation %q", workstation.Name)
 		}
 		seenWorkstations[workstation.Name] = struct{}{}
-		if err := repositories(workstation.Repositories); err != nil {
+		if err := uniqueRefs(workstation.Repositories, m.Repositories, "repository"); err != nil {
 			return fmt.Errorf("workstation %q: %w", workstation.Name, err)
+		}
+		for _, repositoryName := range workstation.Repositories {
+			if !profileAllowsRepository(m.Profiles[workstation.Profile], m.Repositories[repositoryName]) {
+				return fmt.Errorf("workstation %q profile does not allow repository account", workstation.Name)
+			}
 		}
 	}
 	for name, workflow := range m.Workflows {
-		if !validName(name) || !has(m.Profiles, workflow.Profile) || !repositoryPattern.MatchString(workflow.Repository) || !oneOf(workflow.Retention, "disposable", "retained") {
+		if !validName(name) || !has(m.Profiles, workflow.Profile) || !has(m.Repositories, workflow.Repository) || !oneOf(workflow.Retention, "disposable", "retained") {
 			return fmt.Errorf("invalid workflow %q", name)
+		}
+		if !profileAllowsRepository(m.Profiles[workflow.Profile], m.Repositories[workflow.Repository]) {
+			return fmt.Errorf("workflow %q profile does not allow repository account", name)
 		}
 	}
 	seenProducers := map[string]struct{}{}
@@ -312,7 +357,7 @@ func (m Manifest) Validate() error {
 		if producer.Image != "" && !validDigestImage(producer.Image) {
 			return fmt.Errorf("producer %q image must use an immutable sha256 digest", producer.Name)
 		}
-		if producer.Preset == "github-comments" && (!has(m.Accounts, producer.Account) || !repositoryPattern.MatchString(producer.Repository) || producer.Prefix == "" || len(producer.AllowedAuthors) == 0) {
+		if producer.Preset == "github-comments" && !validGitHubProducer(producer, m.Accounts, m.Repositories) {
 			return fmt.Errorf("built-in producer %q is incomplete", producer.Name)
 		}
 		if producer.Image != "" && (producer.Account != "" || producer.Repository != "" || producer.Prefix != "" || len(producer.AllowedAuthors) != 0) {
@@ -339,6 +384,109 @@ func (m Manifest) Validate() error {
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }
+func profileAllowsRepository(profile Profile, repository Repository) bool {
+	if repository.Account == "" {
+		return true
+	}
+	for _, account := range profile.Accounts {
+		if account == repository.Account {
+			return true
+		}
+	}
+	return false
+}
+func validateRepository(value Repository, accounts map[string]Account) error {
+	if value.Account != "" && !has(accounts, value.Account) || value.Path != "" && !safeRelativePath(value.Path, "") {
+		return errors.New("invalid repository account or path")
+	}
+	if value.GitHub != "" {
+		if !repositoryPattern.MatchString(value.GitHub) || value.URL != "" || value.CheckoutTarget != "" || value.BrokerRepository != "" {
+			return errors.New("invalid GitHub shorthand")
+		}
+		if value.Upstream != "" && !validHTTPSRepositoryURL(value.Upstream) {
+			return errors.New("invalid upstream")
+		}
+		return nil
+	}
+	if !validHTTPSRepositoryURL(value.URL) || repositoryTarget(value.URL) != value.CheckoutTarget || value.CheckoutTarget == "" {
+		return errors.New("invalid repository URL or checkout target")
+	}
+	if value.Account == "" && value.BrokerRepository != "" || value.Account != "" && value.BrokerRepository == "" {
+		return errors.New("broker repository requires an account")
+	}
+	if value.BrokerRepository != "" && !validRepositoryID(value.BrokerRepository) || value.Upstream != "" && !validHTTPSRepositoryURL(value.Upstream) {
+		return errors.New("invalid broker repository or upstream")
+	}
+	return nil
+}
+
+func validGitHubProducer(producer Producer, accounts map[string]Account, repositories map[string]Repository) bool {
+	account, ok := accounts[producer.Account]
+	if !ok || account.Preset != "github-app" || producer.Prefix == "" || len(producer.AllowedAuthors) == 0 {
+		return false
+	}
+	repository, ok := repositories[producer.Repository]
+	if !ok {
+		return false
+	}
+	owner, _, ok := githubCoordinates(repository)
+	if !ok {
+		return false
+	}
+	_, appErr := positiveID(account.AppID)
+	_, installationErr := githubInstallationID(account, owner)
+	return appErr == nil && installationErr == nil
+}
+
+func githubInstallationID(account Account, owner string) (int64, error) {
+	for configuredOwner, value := range account.Installations {
+		if strings.EqualFold(configuredOwner, owner) {
+			return positiveID(value)
+		}
+	}
+	return 0, errors.New("GitHub owner has no configured installation")
+}
+
+func positiveID(value string) (int64, error) {
+	result, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || result < 1 || strconv.FormatInt(result, 10) != value {
+		return 0, errors.New("ID must be a positive canonical decimal integer")
+	}
+	return result, nil
+}
+
+func githubCoordinates(repository Repository) (string, string, bool) {
+	value := repository.GitHub
+	if value == "" {
+		parsed, err := url.Parse(repository.URL)
+		if err != nil || parsed.Host != "github.com" {
+			return "", "", false
+		}
+		value = strings.TrimSuffix(strings.TrimPrefix(parsed.Path, "/"), ".git")
+	}
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 || !repositoryPattern.MatchString(value) {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func validHTTPSRepositoryURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.Host == strings.ToLower(parsed.Host) && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.Path != "" && parsed.Path != "/" && !strings.HasSuffix(parsed.Path, "/") && !strings.Contains(parsed.Path, "//") && !strings.Contains(parsed.Path, "/../") && !strings.Contains(parsed.Path, "/./")
+}
+
+func repositoryTarget(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || !validHTTPSRepositoryURL(value) {
+		return ""
+	}
+	return parsed.Host + strings.TrimSuffix(parsed.Path, ".git")
+}
+
+func validRepositoryID(value string) bool {
+	return value != "" && len(value) <= 1024 && value == strings.Trim(value, "/") && !strings.Contains(value, "//") && !strings.ContainsAny(value, "?#@\\\x00\r\n")
+}
 func validDigestImage(value string) bool {
 	parsed, err := reference.ParseNamed(value)
 	if err != nil || parsed.String() != value {
