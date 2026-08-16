@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/distribution/reference"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,10 +29,10 @@ const (
 )
 
 var (
-	namePattern        = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
-	repositoryPattern  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
-	digestImagePattern = regexp.MustCompile(`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`)
-	secretKeyPattern   = regexp.MustCompile(`(?i)(secret|token|password|passwd|private.?key|credential|api.?key)`)
+	namePattern       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
+	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	integerPattern    = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)$`)
+	secretKeyPattern  = regexp.MustCompile(`(?i)(secret|token|password|passwd|private.?key|credential|api.?key)`)
 )
 
 type Manifest struct {
@@ -148,6 +149,7 @@ func Decode(reader io.Reader) (Manifest, error) {
 func strictJSON(data []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
@@ -307,7 +309,7 @@ func (m Manifest) Validate() error {
 		if producer.Preset != "" && producer.Preset != "github-comments" {
 			return fmt.Errorf("producer %q has unknown preset", producer.Name)
 		}
-		if producer.Image != "" && !digestImagePattern.MatchString(producer.Image) {
+		if producer.Image != "" && !validDigestImage(producer.Image) {
 			return fmt.Errorf("producer %q image must use an immutable sha256 digest", producer.Name)
 		}
 		if producer.Preset == "github-comments" && (!has(m.Accounts, producer.Account) || !repositoryPattern.MatchString(producer.Repository) || producer.Prefix == "" || len(producer.AllowedAuthors) == 0) {
@@ -337,6 +339,14 @@ func (m Manifest) Validate() error {
 }
 
 func validName(v string) bool { return len(v) <= MaxNameBytes && namePattern.MatchString(v) }
+func validDigestImage(value string) bool {
+	parsed, err := reference.ParseNamed(value)
+	if err != nil || parsed.String() != value {
+		return false
+	}
+	digested, ok := parsed.(reference.Digested)
+	return ok && digested.Digest().Algorithm() == "sha256" && len(digested.Digest().Encoded()) == 64
+}
 func oneOf(v string, values ...string) bool {
 	for _, candidate := range values {
 		if v == candidate {
@@ -396,9 +406,14 @@ func validateConfig(value any, depth int) error {
 		return errors.New("config is too deep")
 	}
 	switch typed := value.(type) {
-	case nil, bool, string, json.Number, float64:
+	case nil, bool, string:
 		if s, ok := typed.(string); ok && len(s) > MaxStringBytes {
 			return errors.New("value too large")
+		}
+		return nil
+	case json.Number:
+		if !integerPattern.MatchString(typed.String()) {
+			return errors.New("config numbers must be canonical integers")
 		}
 		return nil
 	case []any:

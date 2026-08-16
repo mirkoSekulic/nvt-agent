@@ -59,6 +59,7 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 		"unsafe secret":        strings.Replace(string(valid), "./.nvt-local/secrets/github/main-app.pem", "../private-key", 1),
 		"unresolved reference": strings.Replace(string(valid), "privateKeySecret: github-key", "privateKeySecret: absent", 1),
 		"mutable image":        strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ghcr.io/example/chat-producer:latest", 1),
+		"invalid OCI image":    strings.Replace(string(valid), "ghcr.io/example/chat-producer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "https://host/repo?x@sha256:"+strings.Repeat("a", 64), 1),
 		"secret config":        strings.Replace(string(valid), "commandPrefix: /agent", "apiToken: embedded", 1),
 		"unsupported scalar":   strings.Replace(string(valid), "appId: \"3912708\"", "appId: 2026-01-01", 1),
 	}
@@ -71,6 +72,38 @@ func TestDecodeRejectsUnsafeInput(t *testing.T) {
 	}
 	if _, err := Decode(bytes.NewReader(bytes.Repeat([]byte{'x'}, MaxDocumentBytes+1))); err == nil {
 		t.Fatal("oversized input accepted")
+	}
+}
+
+func TestProducerConfigPreservesLargeIntegers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/valid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compileValue := func(value string) []byte {
+		t.Helper()
+		input := strings.Replace(string(raw), "commandPrefix: /agent", "value: "+value, 1)
+		decoded, decodeErr := Decode(strings.NewReader(input))
+		if decodeErr != nil {
+			t.Fatalf("decode %s: %v", value, decodeErr)
+		}
+		compiled, compileErr := Compile(decoded)
+		if compileErr != nil {
+			t.Fatal(compileErr)
+		}
+		result, encodeErr := compiled.CanonicalJSON()
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		return result
+	}
+	first := compileValue("9007199254740992")
+	second := compileValue("9007199254740993")
+	if bytes.Equal(first, second) {
+		t.Fatal("distinct integer configurations compiled identically")
+	}
+	if !bytes.Contains(second, []byte(`"value":9007199254740993`)) {
+		t.Fatalf("large integer was not preserved: %s", second)
 	}
 }
 
